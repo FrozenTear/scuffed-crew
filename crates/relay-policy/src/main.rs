@@ -10,10 +10,12 @@
 //! ## Environment Variables
 //!
 //! - `SURREALDB_URL` SurrealDB connection URL (default outside production: `ws://127.0.0.1:8000`)
-//! - `SURREALDB_USER` SurrealDB username (default: `root`)
-//! - `SURREALDB_PASSWORD` SurrealDB password. `SURREALDB_PASS` is a fallback alias.
-//!   When `PRODUCTION` is set, a missing password, root/root, or a loopback URL
-//!   refuses startup. There is no root/root fallback in production.
+//! - `SURREALDB_RELAY_USER` Relay record user (default: `scuffed_relay`)
+//! - `SURREALDB_RELAY_PASSWORD` Password for that user. Outside production, a
+//!   missing value falls back to `SURREALDB_USER` / `SURREALDB_PASSWORD`
+//!   (`SURREALDB_PASS` is an alias) and logs a warning. When `PRODUCTION` is
+//!   set, the relay requires a non-blank `SURREALDB_RELAY_PASSWORD` and does
+//!   not sign in with `SURREALDB_USER`. Site bootstrap still uses root.
 //! - `SURREALDB_NS` / `SURREALDB_DB` namespace and database (default `scuffed_crew` / `main`)
 //! - `RELAY_POLICY_RATE_LIMIT` Max events per pubkey per window (default: 30)
 //! - `RELAY_POLICY_RATE_WINDOW` Rate limit window in seconds (default: 60)
@@ -131,7 +133,7 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 
 /// Load the set of active member hex pubkeys from SurrealDB.
 async fn load_pubkey_allowlist(db: &scuffed_db::Database) -> HashSet<String> {
-    match db.list_nostr_identities().await {
+    match db.list_relay_member_keys().await {
         Ok(members) => {
             let pubkeys: HashSet<String> = members
                 .into_iter()
@@ -183,54 +185,41 @@ fn main() {
         .build()
         .expect("failed to build tokio runtime");
 
-    // Refuse production boot on missing password, root/root, or a loopback URL
-    // before any default credential is applied.
+    // Refuse production boot on a missing relay password, username root, or a
+    // loopback URL before any default credential is applied.
     let db_cfg = creds::enforce_or_exit();
-    let surreal_cfg = creds::namespace_from_env();
 
     let db: Option<Arc<scuffed_db::Database>> = rt.block_on(async {
-        match scuffed_db::Database::connect_plaintext(
-            &db_cfg.url,
-            &db_cfg.username,
-            &db_cfg.password,
-            surreal_cfg,
-        )
-        .await
-        {
-            Ok(database) => {
-                let db = Arc::new(database);
-                let allowlist = load_pubkey_allowlist(&db).await;
-                let groups = match relay_policy::directory::load_group_writers(&db).await {
-                    Ok(groups) => {
-                        tracing::info!(
-                            groups = groups.len(),
-                            "loaded group writers from team channels"
-                        );
-                        groups
-                    }
-                    Err(err) => {
-                        tracing::error!(
-                            error = %err,
-                            "failed to load group writers; rejecting every h-tagged event"
-                        );
-                        std::collections::HashMap::new()
-                    }
-                };
-                let mut eng = engine.lock().unwrap();
-                eng.update_allowlist(allowlist);
-                eng.update_group_members(groups);
-                drop(eng);
-                tracing::info!(url = %db_cfg.url, "connected to SurrealDB");
-                Some(db)
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "failed to connect to SurrealDB; running without allowlist (rejecting all)"
+        let database = creds::connect_or_retry(&db_cfg).await;
+        let db = Arc::new(database);
+        let allowlist = load_pubkey_allowlist(&db).await;
+        let groups = match relay_policy::directory::load_group_writers(&db).await {
+            Ok(groups) => {
+                tracing::info!(
+                    groups = groups.len(),
+                    "loaded group writers from team channels"
                 );
-                None
+                groups
             }
-        }
+            Err(err) => {
+                tracing::error!(
+                    error = %err,
+                    "failed to load group writers; rejecting every h-tagged event"
+                );
+                std::collections::HashMap::new()
+            }
+        };
+        let mut eng = engine.lock().unwrap();
+        eng.update_allowlist(allowlist);
+        eng.update_group_members(groups);
+        drop(eng);
+        tracing::info!(
+            url = %db_cfg.url,
+            user = %db_cfg.username,
+            auth = ?db_cfg.auth,
+            "connected to SurrealDB"
+        );
+        Some(db)
     });
 
     // Reload writers when roster edges, team channels, or member rows change.
@@ -312,59 +301,20 @@ fn main() {
             }
         };
 
-        // Skip lookback events. Only evaluate new incoming events.
-        if input.msg_type == "lookback" {
-            let output = StrfryOutput {
-                id: input.event.id,
-                action: "accept".into(),
-                msg: String::new(),
-            };
-            let json = serde_json::to_string(&output).expect("serialize output");
-            let _ = writeln!(out, "{json}");
-            let _ = out.flush();
-            continue;
-        }
-
-        let event_info = EventInfo {
-            id: input.event.id.clone(),
-            pubkey: input.event.pubkey.to_lowercase(),
-            kind: input.event.kind,
-            tags: input.event.tags,
-            authed: input.authed.clone(),
-        };
-
-        let decision = engine.lock().unwrap().evaluate(&event_info);
-        if let Decision::Reject(reason) = &decision {
-            if policy::reload_on_write_miss(reason) {
-                if let Some(tx) = &reload_tx {
-                    let _ = tx.send(());
-                }
+        // strfry labels an event lookback when the write plugin is shown an
+        // event already stored (plugin startup replay and import). Accept or
+        // reject uses the same allow-list, kind check, officer writer map, and
+        // gift-wrap recipient check as a new event. `negentropy.enabled` is
+        // false in relay/strfry.conf, and the read gate rejects NEG frames.
+        // That is a different path.
+        let step = policy_step(&engine, &input);
+        if step.reload {
+            if let Some(tx) = &reload_tx {
+                let _ = tx.send(());
             }
         }
 
-        let output = match decision {
-            Decision::Accept => StrfryOutput {
-                id: input.event.id,
-                action: "accept".into(),
-                msg: String::new(),
-            },
-            Decision::Reject(reason) => {
-                tracing::debug!(
-                    event_id = %input.event.id,
-                    pubkey = %event_info.pubkey,
-                    kind = event_info.kind,
-                    reason = %reason,
-                    "rejected event"
-                );
-                StrfryOutput {
-                    id: input.event.id,
-                    action: "reject".into(),
-                    msg: reason,
-                }
-            }
-        };
-
-        let json = serde_json::to_string(&output).expect("serialize output");
+        let json = serde_json::to_string(&step.output).expect("serialize output");
         if writeln!(out, "{json}").is_err() {
             break;
         }
@@ -379,6 +329,53 @@ fn main() {
     }
 
     tracing::info!(events_processed, "relay-policy shutting down");
+}
+
+struct PolicyStep {
+    output: StrfryOutput,
+    reload: bool,
+}
+
+/// Write-policy decision for one strfry line. `lookback` is not a bypass.
+fn policy_step(engine: &Mutex<PolicyEngine>, input: &StrfryInput) -> PolicyStep {
+    let pubkey = input.event.pubkey.to_lowercase();
+    let kind = input.event.kind;
+    let event_info = EventInfo {
+        id: input.event.id.clone(),
+        pubkey: pubkey.clone(),
+        kind,
+        tags: input.event.tags.clone(),
+        authed: input.authed.clone(),
+    };
+    let decision = engine
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .evaluate(&event_info);
+    let reload =
+        matches!(&decision, Decision::Reject(reason) if policy::reload_on_write_miss(reason));
+    let output = match decision {
+        Decision::Accept => StrfryOutput {
+            id: input.event.id.clone(),
+            action: "accept".into(),
+            msg: String::new(),
+        },
+        Decision::Reject(reason) => {
+            tracing::debug!(
+                event_id = %input.event.id,
+                msg_type = %input.msg_type,
+                pubkey = %pubkey,
+                kind,
+                reason = %reason,
+                "rejected event"
+            );
+            StrfryOutput {
+                id: input.event.id.clone(),
+                action: "reject".into(),
+                msg: reason,
+            }
+        }
+    };
+    PolicyStep { output, reload }
 }
 
 #[cfg(test)]
@@ -416,6 +413,52 @@ mod tests {
         let input = r#"{"type":"lookback","event":{"id":"aa","pubkey":"bb","kind":1,"tags":[],"content":"","sig":"cc","created_at":0}}"#;
         let parsed: StrfryInput = serde_json::from_str(input).unwrap();
         assert_eq!(parsed.msg_type, "lookback");
+    }
+
+    fn lookback(kind: u64, pubkey: &str, tags: &str) -> StrfryInput {
+        let input = format!(
+            r#"{{"type":"lookback","event":{{"id":"aa","pubkey":"{pubkey}","kind":{kind},"tags":{tags},"content":"","sig":"cc","created_at":0}}}}"#
+        );
+        serde_json::from_str(&input).unwrap()
+    }
+
+    #[test]
+    fn lookback_unknown_pubkey_is_rejected() {
+        let engine = Mutex::new(PolicyEngine::new(PolicyConfig::default()));
+        let pubkey = "ff".repeat(32);
+        let step = policy_step(&engine, &lookback(1, &pubkey, "[]"));
+        assert_eq!(step.output.action, "reject");
+        assert!(
+            step.output.msg.contains("allowlist"),
+            "lookback skipped the write policy: {}",
+            step.output.msg
+        );
+        assert!(step.reload);
+    }
+
+    #[test]
+    fn lookback_kind_4_is_rejected() {
+        let mut engine = PolicyEngine::new(PolicyConfig::default());
+        let pubkey = "aa".repeat(32);
+        engine.update_allowlist(HashSet::from([pubkey.clone()]));
+        let step = policy_step(&Mutex::new(engine), &lookback(4, &pubkey, "[]"));
+        assert_eq!(step.output.action, "reject");
+        assert!(
+            step.output.msg.contains("kind 4"),
+            "lookback accepted a plain DM: {}",
+            step.output.msg
+        );
+    }
+
+    #[test]
+    fn lookback_allowlisted_event_is_accepted() {
+        let mut engine = PolicyEngine::new(PolicyConfig::default());
+        let pubkey = "aa".repeat(32);
+        engine.update_allowlist(HashSet::from([pubkey.clone()]));
+        let step = policy_step(&Mutex::new(engine), &lookback(1, &pubkey, "[]"));
+        assert_eq!(step.output.action, "accept");
+        assert!(step.output.msg.is_empty());
+        assert!(!step.reload);
     }
 
     #[test]

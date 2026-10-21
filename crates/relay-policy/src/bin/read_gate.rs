@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, RwLock};
 
-use relay_policy::creds::{self, namespace_from_env};
+use relay_policy::creds;
 use relay_policy::directory::load_read_directory;
 use relay_policy::limits::GateLimits;
 use relay_policy::nip42::NostrAuthVerifier;
@@ -26,7 +26,6 @@ fn main() {
 
     tracing::info!("relay-read-gate starting");
     let db_cfg = creds::enforce_or_exit();
-    let surreal = namespace_from_env();
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -34,26 +33,9 @@ fn main() {
         .expect("failed to build tokio runtime");
 
     rt.block_on(async move {
-        let db = match scuffed_db::Database::connect_plaintext(
-            &db_cfg.url,
-            &db_cfg.username,
-            &db_cfg.password,
-            surreal,
-        )
-        .await
-        {
-            Ok(db) => {
-                tracing::info!(url = %db_cfg.url, "read gate connected to SurrealDB");
-                Some(Arc::new(db))
-            }
-            Err(err) => {
-                tracing::error!(
-                    error = %err,
-                    "read gate could not connect to SurrealDB; denying every read"
-                );
-                None
-            }
-        };
+        let connected = creds::connect_or_retry(&db_cfg).await;
+        tracing::info!(url = %db_cfg.url, "read gate connected to SurrealDB");
+        let db = Some(Arc::new(connected));
 
         let directory = Arc::new(RwLock::new(ReadDirectory::default()));
         if let Some(db) = db.clone() {

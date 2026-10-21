@@ -144,10 +144,14 @@ impl Database {
     /// Every team channel, including deactivated rows.
     ///
     /// The relay read gate uses this so a channel that was turned off stays
-    /// classified (officer history does not become world-readable).
+    /// classified (officer history does not become world-readable). The copy
+    /// lives on `relay_team_channel`. Site queries still read `team_channel`.
     pub async fn list_all_team_channels(&self) -> DbResult<Vec<TeamChannel>> {
         with_timeout(async {
-            let mut result = self.client.query("SELECT * FROM team_channel").await?;
+            let mut result = self
+                .client
+                .query("SELECT * FROM relay_team_channel")
+                .await?;
             let channels: Vec<DbTeamChannel> = result.take(0)?;
             Ok(channels.into_iter().map(db_to_team_channel).collect())
         })

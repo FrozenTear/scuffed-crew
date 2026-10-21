@@ -26,3 +26,6 @@ hex = "0.4"
 zeroize = "1"
 unicode-normalization = "0.1.25"
 icu_casemap = "2"
+
+[dev-dependencies]
+futures-util = "0.3"

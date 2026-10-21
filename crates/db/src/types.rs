@@ -88,6 +88,19 @@ pub struct Member {
     pub twitter: Option<String>,
 }
 
+/// Columns the relay is allowed to read from `member`.
+///
+/// `id`, `org_role`, `nostr_pubkey`, and `is_active` are the fields the
+/// directory and the ban-aware roster filter use. Other member columns are
+/// not granted to that login.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayMemberKey {
+    pub id: String,
+    pub org_role: OrgRole,
+    pub nostr_pubkey: Option<String>,
+    pub is_active: bool,
+}
+
 /// A game/title that teams can play.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Game {

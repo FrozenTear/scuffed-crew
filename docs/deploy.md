@@ -14,7 +14,8 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 | Env | Purpose |
 |-----|---------|
 | `SURREALDB_PASSWORD` | Strong **root** password for bootstrap only (install generates) |
-| `SURREALDB_APP_USER` / `SURREALDB_APP_PASSWORD` | Runtime DB user (default `scuffed_app`) — **EDITOR**, not root. **Must differ from root password** when `PRODUCTION=1` |
+| `SURREALDB_APP_USER` / `SURREALDB_APP_PASSWORD` | Runtime DB user (default `scuffed_app`). **EDITOR**, not root. **Must differ from root password** when `PRODUCTION=1` |
+| `SURREALDB_RELAY_USER` / `SURREALDB_RELAY_PASSWORD` | Relay record login (default `scuffed_relay`). **SELECT** where `$access = 'relay'` on `relay_member`, `relay_roster`, `relay_moderation`, and `relay_team_channel` only. `member`, `plays_on`, `team_channel`, and `moderation_action` are `PERMISSIONS NONE` for this login. No writes. `audit_log` is not readable. **Must differ** from the root and app passwords when `PRODUCTION=1`. Created when site-server boots. |
 | `SURREALDB_AUTH_MODE` | `scoped` (default in prod) — root bootstrap (migrate + ensure user), then app reconnects as EDITOR |
 | `SURREALDB_BOOTSTRAP` | Default: bootstrap on start (single-container). Set `SURREALDB_BOOTSTRAP=0` for **app-only** containers that must never use root |
 | `SURREALDB_MIGRATE_ONLY=1` | Server runs root bootstrap (`Database::bootstrap_from_env`) then **exits** — for init/migrate jobs |
@@ -25,12 +26,48 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 | `NOSTR_CHALLENGE_SECRET` | **Required** outside dev — MAC key for Nostr login challenge tokens; boot **refuses** without it (no public dev-key fallback) |
 | `PRODUCTION=1` | **Required** for remote SurrealDB; secure cookies; no plaintext DMs |
 
-`scripts/install.sh` writes `PRODUCTION=1`, `SURREALDB_AUTH_MODE=scoped`, a random `NOSTR_CHALLENGE_SECRET`, and **distinct** root + app passwords.  
+`scripts/install.sh` writes `PRODUCTION=1`, `SURREALDB_AUTH_MODE=scoped`, a random `NOSTR_CHALLENGE_SECRET`, and **distinct** root, app, and relay passwords.  
 Remote boot **refuses** if `PRODUCTION` or `ENCRYPTION_KEY` is missing; the server also **refuses to boot** outside dev if `NOSTR_CHALLENGE_SECRET` is missing/empty.  
 When `PRODUCTION` is set, an unset or blank `SURREALDB_URL` is a hard error (exit 1, clear message). The process does not start an in-memory database, does not seed a dev admin, and does not serve `/api/dev/login`. Local dev leaves both `PRODUCTION` and `SURREALDB_URL` unset.  
-In production scoped mode, missing or root-equal `SURREALDB_APP_PASSWORD` is a hard error (no silent fallback).
+In production scoped mode, missing or root-equal `SURREALDB_APP_PASSWORD` is a hard error (no silent fallback). A relay password equal to the root or app password is also a hard error. A missing relay password does not stop the site: bootstrap logs a warning and skips creating the relay login.
 
-Never ship with `root`/`root`. Migrations run as root during bootstrap only; the long-lived app uses a database-scoped **EDITOR** user.
+Never ship with `root`/`root`. Migrations run as root during bootstrap only; the long-lived app uses a database-scoped **EDITOR** user. The relay uses the record login above. When `PRODUCTION=1`, the relay requires a non-blank `SURREALDB_RELAY_PASSWORD` and does not sign in with `SURREALDB_USER`. A relay username of `root` is refused. Site bootstrap still uses root.
+
+### Relay database user (optional follow-up)
+
+`git pull` and `./scripts/update.sh` keep the running relay as it is. `update.sh` appends `SURREALDB_RELAY_PASSWORD` when the key is missing, replaces the key when it is present but blank, recreates site-server, and waits until `GET /api/ready` returns 200. If that route returns 404, the image is older than the readiness check (a rollback, or the new image is not published yet) and `update.sh` logs a warning and waits on `GET /api/health` instead. Any other status keeps waiting. The new process creates the login during bootstrap. The relay container is not rebuilt by `update.sh`, so an existing relay keeps its current environment and keeps serving.
+
+Switch the relay only after that:
+
+```bash
+./scripts/update.sh
+./scripts/relay-up.sh
+```
+
+`update.sh` waits for `/api/ready`, and falls back to `/api/health` when `/api/ready` returns 404. `relay-up.sh` checks `/api/ready` again and signs in as the relay user. It rebuilds strfry only after that sign-in returns 200. A 200 from `/api/ready` means a cached `RETURN true` succeeded. It does not mean the relay login exists, that migrations finished, or that `SURREALDB_RELAY_PASSWORD` is correct. The sign-in inside `relay-up.sh` is what proves the login. The result is cached for 2 seconds, and concurrent misses share one probe.
+
+Compose passes `SURREALDB_RELAY_PASSWORD` into the relay container and does not copy `SURREALDB_PASSWORD` into it. When `PRODUCTION=1`, the relay requires a non-blank relay password and does not fall back to `SURREALDB_USER`.
+
+Password rotation is `FORCE_RELAY_PASSWORD_SYNC=1` on one site-server boot, then unset it. Compose passes that variable into site-server. A normal restart does not rewrite the stored password. The record access omits `DURATION`, so the server default applies: token 1 hour, session NONE. An open websocket does not expire. The surrealdb client replays the sign-in after every reconnect, so the relay does not sign in on a timer. A new password is used after `relay-up.sh` recreates the relay, once site-server has stored it.
+
+### Rolling the site image back
+
+The relay reads four projection tables (`relay_member`, `relay_roster`, `relay_moderation`, `relay_team_channel`) that hold only the columns it needs. Database events on `member`, `plays_on`, `moderation_action`, and `team_channel` keep those copies updated, and startup backfills them. `relay_roster.member_active` is the copy of `member.is_active`. The relay login's table permission on `member`, `plays_on`, `team_channel`, and `moderation_action` is NONE.
+
+An image from before this login runs `DEFINE FIELD OVERWRITE` on `nostr_secret_key_encrypted`, `moderation_action.reason`, and `moderation_action.issued_by` without field permissions, reopens `audit_log`, and grants the relay `SELECT` on the base tables. Those statements make the hidden columns readable to a record user again. The access, the principal row, the projection tables, and the events stay in the database, because the old image does not know about them. If the events are still installed and the projection tables are gone, the next member or roster write fails. Remove the events, then the projection tables, then the login, before that image boots. Root and the EDITOR app user bypass table permissions, so the site keeps its current access after the grants widen.
+
+Do this while this checkout is still present, and before `update.sh` recreates site-server on the old image:
+
+1. Stop the relay so it is not using the login: `podman compose --env-file data/secrets.env --profile relay stop strfry` (or `podman-compose`).
+2. Remove the events, the projection tables, the access, and the principal table, in that order. The script runs `/surreal sql` inside the Up Surreal container. The CLI reads `SURREAL_USER` and `SURREAL_PASS` from that container. The password is not an argument and is not printed.
+
+   ```bash
+   ./scripts/relay-access-down.sh --yes
+   ```
+
+3. Pin the older site image in `data/secrets.env`, then `./scripts/update.sh`. That image returns 404 for `/api/ready`. `update.sh` logs a warning and waits on `/api/health`.
+
+Starting the current site-server again recreates the projection tables, the events, the backfill, and the login during bootstrap. Run `./scripts/relay-up.sh` only after that, when you want the relay on the new image.
 
 ## Stats upload limits
 
@@ -77,18 +114,28 @@ cd /path/to/scuffed-crew
 # = git pull --ff-only + harden secrets.env (if needed) + podman pull + recreate site-server
 ```
 
-`update.sh` **appends** missing production keys to an existing `data/secrets.env` (same as re-running `install.sh`): `PRODUCTION`, `SURREALDB_AUTH_MODE`, `SURREALDB_APP_USER`, `SURREALDB_APP_PASSWORD`. It never overwrites existing values and never regenerates `ENCRYPTION_KEY`. If the update script itself changes on pull, it re-execs once so the new logic runs immediately.
+`update.sh` **appends** missing production keys to an existing `data/secrets.env` (same as re-running `install.sh`): `PRODUCTION`, `SURREALDB_AUTH_MODE`, `SURREALDB_APP_USER`, `SURREALDB_APP_PASSWORD`, `SURREALDB_RELAY_USER`, `SURREALDB_RELAY_PASSWORD`. It never overwrites existing values and never regenerates `ENCRYPTION_KEY`. If the update script itself changes on pull, it re-execs once so the new logic runs immediately.
 
 Before compose runs, `scripts/lib/compose-env.sh` fills a blank `ALLOWED_ORIGINS` from `REDIRECT_BASE_URL` and a blank `SURREALDB_APP_PASSWORD` from `SURREALDB_PASSWORD`. `compose.yml` uses one substitution level for those. podman-compose 1.5 turns a nested default into the outer value plus a stray `}`, or into literal text when the outer name is unset. A missing app-password key is still generated distinct from the root password. Production still refuses to boot when the two passwords match.
 
 On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` recreates site-server with `up -d --no-deps` so `/bin/podman-compose` does not spawn an underscore-named DB twin on the same volume (see Troubleshooting: duplicate Surreal `_` vs `-`).
 
-Override image pin in `data/secrets.env` if needed:
+### Pinning the site image
+
+Dev hosts leave the image on `:main`. That is the default in `compose.yml`, and it is what `install.sh` / `update.sh` record when `SITE_SERVER_IMAGE` is missing. CI still publishes `main`, `latest`, and `sha-<short>` on every main publish. This repo does not change those tags.
+
+On a production host, set one of these in `data/secrets.env` before `./scripts/update.sh`. `update.sh` does not move a pin forward on its own.
 
 ```bash
+# Tag pin. The tag must already exist. CI writes sha-<short>.
+SITE_SERVER_IMAGE=ghcr.io/frozentear/scuffed-crew:sha-<short>
+
+# Digest pin. Wins over the tag. 64 hex characters. The sha256: prefix is optional.
 SITE_SERVER_IMAGE=ghcr.io/frozentear/scuffed-crew:main
-# or a specific sha:  .../scuffed-crew:sha-abc1234
+SITE_SERVER_IMAGE_DIGEST=sha256:<64 hex>
 ```
+
+`scripts/lib/compose-env.sh` turns a digest into `ghcr.io/frozentear/scuffed-crew@sha256:<hex>` and leaves a tag unchanged when the digest is unset. A dev host that sets neither value still pulls `:main`.
 
 ### Build from source (fallback only)
 
@@ -112,9 +159,18 @@ podman compose --env-file data/secrets.env down
 podman compose --env-file data/secrets.env up -d
 ```
 
-### SurrealDB: `is unhealthy` but logs show “Started web server”
+### SurrealDB shows unhealthy
 
-DB is fine; an old healthcheck probe was wrong. Current `compose.yml` does **not** healthcheck Surreal and uses `depends_on: service_started`. Pull latest and `up -d` again.
+`compose.yml` probes Surreal with `/surreal is-ready` against `http://127.0.0.1:8000`. The check timeout is 20s. The surreal CLI waits about 5s after it has already answered, so a 5s timeout used to mark a healthy database unhealthy. That probe is gone. An unhealthy status now means `is-ready` failed (the database is not serving), not that the probe is a lie.
+
+`site-server` still uses a plain `depends_on` list (start order, not `service_healthy`). On day-2 hosts, a health condition makes podman-compose start Surreal and can create the underscore twin on the same volume. A fresh `up` can therefore start site-server before RocksDB is serving.
+
+`GET /api/health` is liveness only. It does not touch the database, and it is not rate limited. `GET /api/ready` returns 200 when a cached `RETURN true` against Surreal succeeded, and 503 when that probe failed. The process caches either result for 2 seconds. Concurrent cache misses share one probe, so a burst runs the query once. A 200 does not mean the relay login exists, that migrations finished, or that `SURREALDB_RELAY_PASSWORD` is correct. It is unauthenticated and not on the request governor. The body is empty either way.
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:${HOST_PORT}/api/health"
+curl -sS -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:${HOST_PORT}/api/ready"
+```
 
 ### SurrealDB: duplicate container (`_` vs `-`) and site-server stuck Created / public 502
 
@@ -431,9 +487,15 @@ static musl binaries. The runtime base is
 (Alpine 3.18, musl). A short name (`dockurr/strfry@sha256:...`) makes
 `podman build` wait for a registry prompt, so the Containerfiles and
 `compose.yml` use a registry host on every image (`docker.io/library/...`
-for official images, `docker.io/surrealdb/surrealdb:v3.0` for SurrealDB,
-`ghcr.io/...` for the site image). A glibc build of those plugins does not
-load there. CI builds this image, seeds team channel rows the same way
+for official images, `ghcr.io/...` for the site image). SurrealDB is pinned
+to the v3.0 index digest
+`sha256:f703abfda71faa20572c9b0e99a1e2cb89494525ecc7a88345306c0fd3333845`.
+The relay builder is `rust:1.92-alpine` pinned to
+`sha256:f6c22e0a256c05d44fca23bf530120b5d4a6249a393734884281ca80782329bc`.
+`update.sh` does not bump either pin. A glibc build of those plugins does not
+load there. CI starts Surreal from that same digest, signs in as the relay
+record user, and checks that the secret column and `audit_log` stay hidden.
+It then builds this image, seeds team channel rows the same way
 `ensure_team_channel_rows` does, and walks the site chat path: NIP-42 AUTH
 on the gate, `get_team_channels` (the query behind
 `GET /api/teams/:id/channels`), a kind 9 `#h` subscription, a kind 9 publish
@@ -556,15 +618,26 @@ bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
    NOSTR_RELAY_URL=ws://strfry:7777
    ```
 
-   `PRODUCTION=1` must already be set (install.sh writes it). The relay refuses
-   to start when that flag is set and the SurrealDB password is missing,
-   the credentials are root/root, or `SURREALDB_URL` would fall back to localhost.
+   `PRODUCTION=1` must already be set (install.sh writes it). When that flag
+   is set, the relay requires a non-blank `SURREALDB_RELAY_PASSWORD` and does
+   not sign in with `SURREALDB_USER`. A loopback `SURREALDB_URL` is refused.
+   Site bootstrap still uses root. See "Relay database user" above.
 
-2. Rebuild and start strfry (the image also starts the read gate). The main
+2. Recreate site-server so it picks up `NOSTR_RELAY_URL` and creates the
+   relay login. `update.sh` waits until `/api/ready` returns 200. If that
+   route returns 404, it logs a warning and waits on `/api/health` instead.
+   A 200 from `/api/ready` means a cached `RETURN true` succeeded. It does
+   not by itself prove the relay password.
+
+   ```bash
+   ./scripts/update.sh
+   ```
+
+3. Rebuild and start strfry (the image also starts the read gate). The main
    stack must already be up, so Surreal is the existing container and not a
-   new one. Pull this change first. `relay-up.sh` rebuilds the image and
-   recreates the container. A restart of the previous container does not
-   load the new write plugin:
+   new one. `relay-up.sh` checks `/api/ready` and a real relay-user sign-in,
+   and only then rebuilds the image and recreates the container. A restart
+   of the previous container does not load the new write plugin:
 
    ```bash
    ./scripts/relay-up.sh
@@ -572,6 +645,7 @@ bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
 
    That runs `podman compose --env-file data/secrets.env --profile relay up --build -d --no-deps strfry`
    (or `podman-compose` when that is the provider) with `COMPOSE_PROJECT_NAME` set.
+   If ready is not 200, or the sign-in fails, the script exits before that up.
    If that up fails, the script prints the project name and exits 1.
    `--no-deps` is required.
    Without it, podman-compose also starts Surreal and can create
@@ -580,12 +654,6 @@ bucket. Set `TRUSTED_PROXIES`. A `RELAY_GATE_TRUSTED_PROXIES` line in
    `up --profile relay` with no service name on a day-2 host: that starts
    the default services, including Surreal, and can create the twin. See
    Troubleshooting: duplicate Surreal `_` vs `-`.
-
-3. Recreate site-server so it picks up `NOSTR_RELAY_URL`:
-
-   ```bash
-   ./scripts/update.sh
-   ```
 
 4. Caddy: copy the `handle /relay*` block from `deploy/Caddyfile` into the live
    site block, before the catch-all. It is `uri strip_prefix /relay` and

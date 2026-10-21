@@ -47,14 +47,30 @@ if [[ "${RELAY_SKIP_BUILD:-}" != "1" ]]; then
     "${DOCKER[@]}" build -f relay/Containerfile -t "$IMAGE" "$ROOT"
 fi
 
-echo "starting surreal"
+# Same digest as compose.yml. A floating v3.0 tag can move.
+surreal_image_from_compose() {
+    local image
+    image="$(awk '
+        $0 ~ /^  surrealdb:/ { in_svc = 1; next }
+        in_svc && $0 ~ /^  [^[:space:]]/ { in_svc = 0 }
+        in_svc && $1 == "image:" { print $2; exit }
+    ' "$ROOT/compose.yml")"
+    if [[ ! "$image" =~ ^docker.io/surrealdb/surrealdb@sha256:[0-9a-f]{64}$ ]]; then
+        echo "error: compose.yml surrealdb image is not pinned by digest (${image:-missing})" >&2
+        exit 1
+    fi
+    printf '%s\n' "$image"
+}
+
+SURREAL_IMAGE="$(surreal_image_from_compose)"
+echo "starting surreal ${SURREAL_IMAGE}"
 "${DOCKER[@]}" run -d --name "$SURREAL_NAME" --network "$NET" \
     -p "127.0.0.1:${SURREAL_PORT}:8000" \
     -u 0:0 \
     -e SURREAL_USER=root \
     -e SURREAL_PASS=root \
     -e SURREAL_BIND=0.0.0.0:8000 \
-    docker.io/surrealdb/surrealdb:v3.0 \
+    "$SURREAL_IMAGE" \
     start rocksdb:/data/scuffed.db
 
 export SURREALDB_URL="ws://127.0.0.1:${SURREAL_PORT}"
@@ -68,6 +84,14 @@ export RELAY_STRFRY_URL="ws://127.0.0.1:${STRFRY_PORT}"
 
 echo "seeding team channel"
 cargo run -p relay-policy --features chat-flow --bin relay-chat-flow -- seed
+
+echo "record login against surreal"
+export SURREALDB_RELAY_USER=scuffed_relay
+export SURREALDB_RELAY_PASSWORD="${SURREALDB_RELAY_PASSWORD:-relay-ci-record-login}"
+cargo run -p relay-policy --features chat-flow --bin relay-chat-flow -- relay-login
+
+echo "indexed selects against surreal"
+cargo run -p relay-policy --features chat-flow --bin relay-chat-flow -- index-perms
 
 echo "starting relay"
 # strfry calls setrlimit(NOFILE, 1000000) and exits when the hard limit is lower.

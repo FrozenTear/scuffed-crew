@@ -10,7 +10,9 @@ services:
     # x-podman.name_separator_compat would match container names and also
     # rename networks (hyphen vs the existing underscore networks).
     # Fully qualified so podman does not stop on a short-name registry prompt.
-    image: docker.io/surrealdb/surrealdb:v3.0
+    # v3.0 index, resolved 2026-10-19. Digest pin so a moved tag does not
+    # change the server. update.sh does not bump this pin.
+    image: docker.io/surrealdb/surrealdb@sha256:f703abfda71faa20572c9b0e99a1e2cb89494525ecc7a88345306c0fd3333845
     # Image runs as non-root by default; Podman named volumes are root-owned,
     # which causes: Failed to create RocksDB directory: Permission denied.
     # Run as root in the container for single-tenant VPS deploys.
@@ -53,13 +55,23 @@ services:
     # --no-deps. Start Surreal from the main stack (scripts/update.sh).
     environment:
       SURREALDB_URL: ws://surrealdb:8000
-      SURREALDB_USER: ${SURREALDB_USER:-root}
-      SURREALDB_PASSWORD: ${SURREALDB_PASSWORD:?Set SURREALDB_PASSWORD (run scripts/install.sh)}
       SURREALDB_NS: ${SURREALDB_NS:-scuffed_crew}
       SURREALDB_DB: ${SURREALDB_DB:-main}
+      # Record login created by site-server bootstrap. SELECT on
+      # relay_member, relay_roster, relay_moderation, and
+      # relay_team_channel only. The base tables are not readable.
+      SURREALDB_RELAY_USER: ${SURREALDB_RELAY_USER:-scuffed_relay}
+      SURREALDB_RELAY_PASSWORD: ${SURREALDB_RELAY_PASSWORD:-}
+      # Always empty. scripts/lib/compose-env.sh does not copy
+      # SURREALDB_PASSWORD into this container. Outside production the
+      # process still has a compiled root/root default when both of these
+      # and the relay password are unset. PRODUCTION=1 requires the relay
+      # password and does not use that default.
+      SURREALDB_USER: ${SURREALDB_RELAY_FALLBACK_USER:-}
+      SURREALDB_PASSWORD: ${SURREALDB_RELAY_FALLBACK_PASSWORD:-}
       # Same flag as site-server. When it is set, relay-policy and the read
-      # gate refuse to start on a missing password, root/root, or a loopback
-      # SURREALDB_URL. They do not fall back to root/root.
+      # gate require a non-blank SURREALDB_RELAY_PASSWORD and refuse a
+      # loopback SURREALDB_URL. They do not sign in with SURREALDB_USER.
       PRODUCTION: ${PRODUCTION:-}
       # Gate listens here and dials strfry on 127.0.0.1:7777 inside this
       # container. Host 127.0.0.1:7777 is the gate, not raw strfry.
@@ -122,6 +134,14 @@ services:
       # password into secrets.env when the key is missing. Production rejects
       # an app password equal to the root password.
       SURREALDB_APP_PASSWORD: ${SURREALDB_APP_PASSWORD:-}
+      # Relay record user. Bootstrap creates it when the password is set.
+      # The strfry service reads the same keys. A missing password skips
+      # creation and logs a warning. The site still boots.
+      SURREALDB_RELAY_USER: ${SURREALDB_RELAY_USER:-scuffed_relay}
+      SURREALDB_RELAY_PASSWORD: ${SURREALDB_RELAY_PASSWORD:-}
+      # One boot with this set to 1 rewrites the stored relay password.
+      # A normal restart leaves it unset, so the hash stays.
+      FORCE_RELAY_PASSWORD_SYNC: ${FORCE_RELAY_PASSWORD_SYNC:-}
       DISCORD_CLIENT_ID: ${DISCORD_CLIENT_ID:-}
       DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}

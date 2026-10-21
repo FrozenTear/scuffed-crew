@@ -98,6 +98,22 @@ if [[ -z "${canonical}" ]]; then
     exit 1
 fi
 
+# shellcheck source=lib/relay-preflight.sh
+source "$ROOT/scripts/lib/relay-preflight.sh"
+relay_password="$(trim_secret "${SURREALDB_RELAY_PASSWORD:-}")"
+ready_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 5 \
+    "http://127.0.0.1:${HOST_PORT:-3000}/api/ready" || true)"
+[[ -n "$ready_code" ]] || ready_code="000"
+signin_code="000"
+if [[ "$ready_code" == "200" ]]; then
+    signin_code="$(relay_signin_status "$relay_password")"
+fi
+if ! decision="$(relay_preflight_decision "$relay_password" "$ready_code" "$signin_code")"; then
+    echo "error: not switching the relay: ${decision}" >&2
+    echo "  Run ./scripts/update.sh first. It waits for /api/ready and creates the login." >&2
+    exit 1
+fi
+
 echo "Building strfry with --no-deps (leaving ${canonical} running; not creating Surreal)..."
 # Exit on failure. A second up without COMPOSE_PROJECT_NAME only builds again,
 # under whatever project name the shell already has.

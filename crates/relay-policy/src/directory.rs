@@ -20,7 +20,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::read_policy::{GroupAcl, MemberAcl, ReadDirectory};
 
 pub async fn load_read_directory(db: &Database) -> scuffed_db::DbResult<ReadDirectory> {
-    let members = db.list_nostr_identities().await?;
+    let members = db.list_relay_member_keys().await?;
     let pairs = db.list_active_roster_pairs().await?;
     let channels = db.list_all_team_channels().await?;
 
@@ -70,7 +70,7 @@ struct TeamWriters {
 pub async fn load_group_writers(
     db: &Database,
 ) -> scuffed_db::DbResult<HashMap<String, HashSet<String>>> {
-    let members = db.list_nostr_identities().await?;
+    let members = db.list_relay_member_keys().await?;
     let pairs = db.list_active_roster_pairs().await?;
     let channels = db.list_all_team_channels().await?;
 
@@ -124,34 +124,34 @@ pub async fn load_group_writers(
     Ok(groups)
 }
 
-/// Watch roster edges, team channels, and member rows. Each change sends on
-/// `tx` so the caller can reload the writer list. Member rows are included
-/// because officer permission and the Nostr pubkey live on `member`, not on
-/// the roster edge.
+/// Watch the relay projection tables. Each change sends on `tx` so the
+/// caller can reload the writer list. `relay_member` covers pubkey and role
+/// changes. `relay_roster` covers roster edges and `member_active`.
+/// `relay_moderation` covers bans. `relay_team_channel` covers channel rows.
 ///
 /// If LIVE queries are unavailable the loop logs once and retries. The
 /// caller still has the timed refresh and the debounced miss reload.
 pub async fn watch_writer_tables(db: Arc<Database>, tx: UnboundedSender<()>) {
     tokio::join!(
-        watch_one(Arc::clone(&db), "plays_on", tx.clone()),
-        watch_one(Arc::clone(&db), "team_channel", tx.clone()),
-        watch_one(db, "member", tx),
+        watch_one(Arc::clone(&db), "relay_roster", tx.clone()),
+        watch_one(Arc::clone(&db), "relay_team_channel", tx.clone()),
+        watch_one(Arc::clone(&db), "relay_member", tx.clone()),
+        watch_one(db, "relay_moderation", tx),
     );
 }
 
 /// Reload trigger only. The caller discards the notification body.
 ///
 /// SurrealDB 3 accepts a field projection on `LIVE SELECT`. `id` is enough
-/// to notice a change. `SELECT *` on `member` would stream
-/// `nostr_secret_key_encrypted` into this process. `plays_on` (role and
-/// timestamps) and `team_channel` (group id, type, relay URL) have no secret
-/// columns. They use the same projection so a later column cannot ride along.
+/// to notice a change. The projection tables do not store secret columns.
+/// Selecting `id` still keeps a later column off this stream.
 fn live_sql(table: &'static str) -> &'static str {
     match table {
-        "plays_on" => "LIVE SELECT id FROM plays_on",
-        "team_channel" => "LIVE SELECT id FROM team_channel",
-        "member" => "LIVE SELECT id FROM member",
-        _ => "LIVE SELECT id FROM member WHERE false",
+        "relay_roster" => "LIVE SELECT id FROM relay_roster",
+        "relay_team_channel" => "LIVE SELECT id FROM relay_team_channel",
+        "relay_member" => "LIVE SELECT id FROM relay_member",
+        "relay_moderation" => "LIVE SELECT id FROM relay_moderation",
+        _ => "LIVE SELECT id FROM relay_member WHERE false",
     }
 }
 
@@ -307,15 +307,17 @@ mod tests {
     #[tokio::test]
     async fn live_query_signals_when_a_member_row_is_created() {
         let db = Arc::new(mem("relay-policy-live").await);
-        db.client
-            .query("DEFINE TABLE member SCHEMALESS")
+        scuffed_db::migrations::run_migrations(&db.client)
             .await
-            .expect("define member");
+            .expect("migrations");
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(watch_writer_tables(Arc::clone(&db), tx));
         tokio::time::sleep(Duration::from_millis(500)).await;
         db.client
-            .query("CREATE member:liveprobe SET org_role = 'member', is_active = true")
+            .query(
+                "CREATE member:liveprobe SET user_id = 'user:liveprobe', org_role = 'member', \
+                 display_name = 'Live', is_active = true",
+            )
             .await
             .expect("create");
         let notice = tokio::time::timeout(Duration::from_secs(5), rx.recv()).await;
@@ -324,7 +326,12 @@ mod tests {
 
     #[test]
     fn live_queries_project_the_record_id() {
-        for table in ["member", "plays_on", "team_channel"] {
+        for table in [
+            "relay_member",
+            "relay_roster",
+            "relay_team_channel",
+            "relay_moderation",
+        ] {
             let sql = live_sql(table);
             assert!(
                 sql.starts_with("LIVE SELECT id FROM "),
@@ -339,7 +346,12 @@ mod tests {
         use futures_util::StreamExt;
 
         let secret = "sekrit-nostr-blob-do-not-leak";
-        for table in ["member", "plays_on", "team_channel"] {
+        for table in [
+            "relay_member",
+            "relay_roster",
+            "relay_team_channel",
+            "relay_moderation",
+        ] {
             let db = mem(&format!("relay-policy-live-{table}")).await;
             db.client
                 .query(format!("DEFINE TABLE {table} SCHEMALESS"))

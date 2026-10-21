@@ -4,7 +4,8 @@
 # there because ld-linux-x86-64.so.2 is absent. Build on musl and link
 # statically (crt-static) so both plugins exec on that image.
 # Fully qualified so podman build does not prompt for a short-name registry.
-FROM docker.io/library/rust:1.92-alpine AS relay-policy-builder
+# rust:1.92-alpine index, resolved 2026-10-19.
+FROM docker.io/library/rust:1.92-alpine@sha256:f6c22e0a256c05d44fca23bf530120b5d4a6249a393734884281ca80782329bc AS relay-policy-builder
 
 RUN apk add --no-cache build-base cmake perl pkgconfig git
 

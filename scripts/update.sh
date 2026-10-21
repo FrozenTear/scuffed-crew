@@ -32,37 +32,39 @@ if [[ -d .git ]]; then
     fi
 fi
 
-# Idempotent appends — same contract as scripts/install.sh for existing secrets.
-# Never overwrites keys; never regenerates ENCRYPTION_KEY (would brick sealed data).
+# Generated keys that are missing or blank are replaced. A non-blank value
+# stays. Never regenerates ENCRYPTION_KEY (would brick sealed data) or
+# SURREALDB_PASSWORD (would desync the live root user).
+# shellcheck source=lib/secrets-file.sh
+source "$ROOT/scripts/lib/secrets-file.sh"
 ensure_secret_key() {
     local key="$1" val="$2"
     if ! grep -q "^${key}=" "$SECRETS" 2>/dev/null; then
         echo "${key}=${val}" >> "$SECRETS"
+        chmod 600 "$SECRETS"
         echo "Appended ${key} to secrets.env"
     fi
 }
 
-ensure_secret_key PRODUCTION 1
-ensure_secret_key SURREALDB_AUTH_MODE scoped
-ensure_secret_key SURREALDB_APP_USER scuffed_app
-if ! grep -q '^SURREALDB_APP_PASSWORD=' "$SECRETS" 2>/dev/null; then
-    # Must be distinct from root password in production (do not reuse SURREALDB_PASSWORD).
-    if ! command -v openssl >/dev/null 2>&1; then
-        echo "error: openssl required to generate SURREALDB_APP_PASSWORD" >&2
-        exit 1
-    fi
-    ensure_secret_key SURREALDB_APP_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "error: openssl required to generate secrets" >&2
+    exit 1
 fi
-# MAC key for Nostr login challenge tokens. Server refuses to boot without it
-# (no public dev-key fallback in production). Safe to generate on older installs:
-# a fresh value only invalidates in-flight, short-TTL challenge tokens.
-if ! grep -q '^NOSTR_CHALLENGE_SECRET=' "$SECRETS" 2>/dev/null; then
-    if ! command -v openssl >/dev/null 2>&1; then
-        echo "error: openssl required to generate NOSTR_CHALLENGE_SECRET" >&2
-        exit 1
-    fi
-    ensure_secret_key NOSTR_CHALLENGE_SECRET "$(openssl rand -base64 32 | tr -d '\n')"
+upsert_generated_secret "$SECRETS" PRODUCTION 1
+upsert_generated_secret "$SECRETS" SURREALDB_AUTH_MODE scoped
+upsert_generated_secret "$SECRETS" SURREALDB_APP_USER scuffed_app
+if secret_needs_value "$SECRETS" SURREALDB_APP_PASSWORD; then
+    upsert_generated_secret "$SECRETS" SURREALDB_APP_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
 fi
+upsert_generated_secret "$SECRETS" SURREALDB_RELAY_USER scuffed_relay
+if secret_needs_value "$SECRETS" SURREALDB_RELAY_PASSWORD; then
+    upsert_generated_secret "$SECRETS" SURREALDB_RELAY_PASSWORD "$(openssl rand -base64 32 | tr -d '\n')"
+fi
+# A fresh challenge secret only invalidates in-flight, short-TTL tokens.
+if secret_needs_value "$SECRETS" NOSTR_CHALLENGE_SECRET; then
+    upsert_generated_secret "$SECRETS" NOSTR_CHALLENGE_SECRET "$(openssl rand -base64 32 | tr -d '\n')"
+fi
+chmod 600 "$SECRETS"
 
 # shellcheck disable=SC1090
 set -a
@@ -77,6 +79,7 @@ HOST_PORT="${HOST_PORT:-3000}"
 # alone in the file. compose-env.sh fills a blank from REDIRECT_BASE_URL
 # in the shell before compose runs (podman-compose 1.5 cannot nest defaults).
 ensure_secret_key ALLOWED_ORIGINS "${REDIRECT_BASE_URL:-http://127.0.0.1:${HOST_PORT}}"
+chmod 600 "$SECRETS"
 # shellcheck source=lib/compose-env.sh
 source "$ROOT/scripts/lib/compose-env.sh"
 export_compose_fallbacks
@@ -416,19 +419,40 @@ if [[ "${used_no_deps}" == "1" ]]; then
     fi
 fi
 
-echo "Waiting for site-server health on 127.0.0.1:${HOST_PORT} (up to 60s)..."
+# shellcheck source=lib/deploy-probe.sh
+source "$ROOT/scripts/lib/deploy-probe.sh"
+echo "Waiting for site-server on 127.0.0.1:${HOST_PORT} (up to 60s)..."
 healthy=0
+used_health_fallback=0
+warned_ready_404=0
 for _ in $(seq 1 30); do
-    if curl -sf --max-time 2 "http://127.0.0.1:${HOST_PORT}/api/health" >/dev/null 2>&1; then
+    ready_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 2 \
+        "http://127.0.0.1:${HOST_PORT}/api/ready" || true)"
+    [[ -n "${ready_code}" ]] || ready_code="000"
+    choice="$(deploy_probe_choice "${ready_code}")"
+    if [[ "${choice}" == "ready" ]]; then
         healthy=1
         break
+    fi
+    if [[ "${choice}" == "health" ]]; then
+        if [[ "${warned_ready_404}" != "1" ]]; then
+            echo "warning: /api/ready returned 404. Falling back to /api/health. This image does not have the readiness route yet." >&2
+            warned_ready_404=1
+        fi
+        health_code="$(curl -sS -o /dev/null -w '%{http_code}' --connect-timeout 2 --max-time 2 \
+            "http://127.0.0.1:${HOST_PORT}/api/health" || true)"
+        if [[ "${health_code}" == "200" ]]; then
+            healthy=1
+            used_health_fallback=1
+            break
+        fi
     fi
     sleep 2
 done
 
 if [[ "${healthy}" != "1" ]]; then
     cname="$(our_container_name)"
-    echo "error: site-server is not healthy after 60s — deploy FAILED." >&2
+    echo "error: site-server was not ready after 60s. Deploy failed." >&2
     echo "Container status:" >&2
     podman ps -a --filter "name=${PROJECT_NAME}" --format 'table {{.Names}}\t{{.Status}}' >&2 || true
     echo "Project Surreal containers (name-skew: hyphen vs underscore twins share one volume):" >&2
@@ -454,4 +478,8 @@ if [[ -n "${CANONICAL_SURREAL_NAME}" ]]; then
 fi
 
 echo
-echo "Updated & healthy: http://127.0.0.1:${HOST_PORT}/api/health OK"
+if [[ "${used_health_fallback}" == "1" ]]; then
+    echo "Updated and ready: http://127.0.0.1:${HOST_PORT}/api/health OK (/api/ready was 404)"
+else
+    echo "Updated and ready: http://127.0.0.1:${HOST_PORT}/api/ready OK"
+fi
