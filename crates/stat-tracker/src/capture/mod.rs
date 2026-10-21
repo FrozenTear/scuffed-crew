@@ -72,6 +72,58 @@ pub fn tab_attempt_press(
     if attempt == 0 { original } else { now }
 }
 
+/// How long the first Tab keeps waiting while the share dialog is still up.
+/// The frame budget stays 1200 ms. This bound only covers the open.
+pub const FIRST_TAB_OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// What the first Tab does while the share is still opening.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpeningTab {
+    /// The open bound has not passed.
+    Wait,
+    /// The open bound passed. The attempt is a stream miss, so retries run.
+    Miss,
+}
+
+pub fn first_tab_while_opening(
+    elapsed: std::time::Duration,
+    bound: std::time::Duration,
+) -> OpeningTab {
+    if elapsed < bound {
+        OpeningTab::Wait
+    } else {
+        OpeningTab::Miss
+    }
+}
+
+/// After a late open, the original frame budget may already be gone. The
+/// grab then starts again from `now`, while this Tab is still held.
+pub fn tab_press_after_late_open(
+    original: std::time::Instant,
+    now: std::time::Instant,
+    frame_budget: std::time::Duration,
+    waited_for_open: bool,
+) -> std::time::Instant {
+    if waited_for_open && now >= original + frame_budget {
+        now
+    } else {
+        original
+    }
+}
+
+/// `share_open` from a status file counts only when that file's pid is the
+/// live daemon. A stale pid file, or a status left by a daemon that has
+/// exited, is a closed share.
+pub fn live_share_open(share_open: bool, status_pid: u32, live_pid: Option<u32>) -> bool {
+    share_open && live_pid == Some(status_pid)
+}
+
+fn live_daemon_pid(data_dir: &std::path::Path) -> Option<u32> {
+    let text = std::fs::read_to_string(data_dir.join("daemon.pid")).ok()?;
+    let rec = crate::proc_id::parse_pid_record(&text)?;
+    crate::proc_id::pid_is_live_tracker_started(rec.pid, rec.start_ticks).then_some(rec.pid)
+}
+
 pub fn set_prefs(prefs: CapturePrefs) {
     *PREFS.lock().unwrap_or_else(|err| err.into_inner()) = Some(prefs);
 }
@@ -104,8 +156,8 @@ pub fn stream_was_forced() -> bool {
 }
 
 pub use screencast::{
-    close_if_open, is_share_opening, is_stream_miss, note_game_running, note_game_seen,
-    session_is_open, share_close_due, should_close_share,
+    STREAM_MISS, close_if_open, is_share_opening, is_stream_miss, note_game_running,
+    note_game_seen, session_is_open, share_close_due, should_close_share,
 };
 
 pub use framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS;
@@ -115,23 +167,44 @@ pub use framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS;
 pub struct CapturedFrame {
     pub image: image::DynamicImage,
     pub seq: Option<u64>,
+    /// Which stream produced `seq`. A new stream starts its numbers again.
+    pub stream: Option<u64>,
     pub is_new: bool,
+}
+
+/// The last stream frame a poll accepted. Sequence numbers restart at 0
+/// on every new stream, so the id has to travel with the sequence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SeenStream {
+    pub id: u64,
+    pub seq: u64,
 }
 
 /// A poll may update streaks only for a frame it has not already used.
 /// A reused frame is no read. A new frame whose sequence was already seen
-/// is no read. A screenshot (`seq` none, `is_new`) is a read.
-pub fn poll_uses_frame(is_new: bool, seq: Option<u64>, seen: Option<u64>) -> bool {
+/// on the same stream is no read. A different stream is a read. A
+/// screenshot (`seq` none, `is_new`) is a read.
+pub fn poll_uses_frame(
+    is_new: bool,
+    seq: Option<u64>,
+    stream: Option<u64>,
+    seen: Option<SeenStream>,
+) -> bool {
     if !is_new {
         return false;
     }
-    !matches!((seq, seen), (Some(seq), Some(seen)) if seq <= seen)
+    match (seq, stream, seen) {
+        (Some(seq), Some(id), Some(seen)) if id == seen.id && seq <= seen.seq => false,
+        (Some(seq), None, Some(seen)) if seq <= seen.seq => false,
+        _ => true,
+    }
 }
 
 fn as_new_capture(image: image::DynamicImage) -> CapturedFrame {
     CapturedFrame {
         image,
         seq: None,
+        stream: None,
         is_new: true,
     }
 }
@@ -415,8 +488,9 @@ pub async fn capture_screen_oneshot(
     match backend {
         CaptureBackend::Portal => {
             let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-            let share_open =
-                crate::ocr_switch::read_status(data_dir).is_some_and(|status| status.share_open);
+            let live_pid = live_daemon_pid(data_dir);
+            let share_open = crate::ocr_switch::read_status(data_dir)
+                .is_some_and(|status| live_share_open(status.share_open, status.pid, live_pid));
             if screencast::capture_now_blocked_by_daemon_share(&desktop, share_open) {
                 tracing::warn!(
                     "Capture now skipped: the tracker is sharing the screen, and a screenshot beside it can crash KWin"
@@ -508,6 +582,41 @@ mod tests {
         assert_eq!(tab_attempt_press(key, 0, later), key);
         assert_eq!(tab_attempt_press(key, 1, later), later);
         assert_eq!(tab_attempt_press(key, 2, later), later);
+        assert_eq!(
+            first_tab_while_opening(std::time::Duration::from_millis(1200), FIRST_TAB_OPEN_WAIT),
+            OpeningTab::Wait
+        );
+        assert_eq!(
+            first_tab_while_opening(std::time::Duration::from_millis(1500), FIRST_TAB_OPEN_WAIT),
+            OpeningTab::Wait
+        );
+        assert_eq!(
+            first_tab_while_opening(FIRST_TAB_OPEN_WAIT, FIRST_TAB_OPEN_WAIT),
+            OpeningTab::Miss
+        );
+        let budget = std::time::Duration::from_millis(TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
+        let late = key + std::time::Duration::from_millis(2000);
+        assert_eq!(tab_press_after_late_open(key, later, budget, true), key);
+        assert_eq!(tab_press_after_late_open(key, late, budget, true), late);
+        assert_eq!(tab_press_after_late_open(key, late, budget, false), key);
+        assert!(!live_share_open(true, 41, None));
+        assert!(!live_share_open(true, 41, Some(42)));
+        assert!(live_share_open(true, 41, Some(41)));
+        assert!(!live_share_open(false, 41, Some(41)));
+        let dir = tempfile::tempdir().unwrap();
+        let status = crate::ocr_switch::Status {
+            pid: 999_999,
+            share_open: true,
+            ..crate::ocr_switch::Status::default()
+        };
+        crate::ocr_switch::write_status(dir.path(), &status).unwrap();
+        std::fs::write(dir.path().join("daemon.pid"), "999999\n").unwrap();
+        assert_eq!(live_daemon_pid(dir.path()), None);
+        assert!(!live_share_open(
+            status.share_open,
+            status.pid,
+            live_daemon_pid(dir.path())
+        ));
     }
 
     // Pure selection-policy tests (R1-6). No `std::env::set_var`, process-global

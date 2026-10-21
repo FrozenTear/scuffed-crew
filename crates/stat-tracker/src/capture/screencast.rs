@@ -466,6 +466,7 @@ fn fresh_capture(image: DynamicImage) -> super::CapturedFrame {
     super::CapturedFrame {
         image,
         seq: None,
+        stream: None,
         is_new: true,
     }
 }
@@ -515,7 +516,7 @@ pub async fn capture(
         if capture_while_declined(safe) {
             return screenshot(output_name, notice).await.map(fresh_capture);
         }
-        // No screenshot_if_safe: that logs "screenshot skipped" on every poll.
+        // The decline notice is the one log line. Do not add a skip line.
         return Err(notice.into());
     }
     if !may_open_share(
@@ -666,6 +667,7 @@ pub async fn capture(
     let grabbed = stream.grab(timeout, tab_press).await;
     let timing = stream.timing();
     let alive = stream.alive();
+    let stream_id = stream.stream_id();
     match grabbed {
         Ok(pw::GrabOutcome::TabMiss { delay_ms }) => {
             drop(state);
@@ -710,6 +712,7 @@ pub async fn capture(
             Ok(super::CapturedFrame {
                 image: img,
                 seq: Some(seq),
+                stream: Some(stream_id),
                 is_new,
             })
         }
@@ -839,8 +842,39 @@ async fn screenshot_if_safe(
     if fallback_is_safe() {
         screenshot(output_name, why).await
     } else {
-        tracing::info!(why, "screencast screenshot skipped");
+        log_screenshot_skipped(why);
         Err(why.into())
+    }
+}
+
+/// Info once per backoff window, then debug, the same window as the
+/// portal-unavailable warning.
+fn screenshot_skip_log_is_info(last: Option<Instant>, now: Instant) -> bool {
+    portal_warn_due(last, now, START_BACKOFF)
+}
+
+fn screenshot_skip_step(last: Option<Instant>, now: Instant) -> (bool, Option<Instant>) {
+    if screenshot_skip_log_is_info(last, now) {
+        (true, Some(now))
+    } else {
+        (false, last)
+    }
+}
+
+static SKIP_LOG_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+
+fn log_screenshot_skipped(why: &str) {
+    let info = {
+        let mut last = SKIP_LOG_AT.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let (info, next) = screenshot_skip_step(*last, now);
+        *last = next;
+        info
+    };
+    if info {
+        tracing::info!(why, "screencast screenshot skipped");
+    } else {
+        tracing::debug!(why, "screencast screenshot skipped");
     }
 }
 
@@ -1000,12 +1034,12 @@ async fn open_once(
             let block =
                 cursor_modes_block(false, modes.is_empty(), modes.contains(CursorMode::Hidden));
             if block == CursorModesBlock::PortalUnavailable {
-                tracing::warn!("{PORTAL_UNAVAILABLE}");
+                let _ = portal_unavailable(&PORTAL_UNAVAILABLE);
             }
             block
         }
         Err(err) => {
-            tracing::warn!(error = %err, "{PORTAL_UNAVAILABLE}");
+            let _ = portal_unavailable(&err);
             cursor_modes_block(true, true, false)
         }
     };
@@ -1567,15 +1601,74 @@ mod tests {
         }
     }
 
-    fn with_log(f: impl FnOnce()) -> String {
+    fn with_log_level(level: tracing::Level, f: impl FnOnce()) -> String {
         let buf = LogBuf::default();
         let sub = tracing_subscriber::fmt()
             .with_writer(buf.clone())
             .with_ansi(false)
-            .with_max_level(tracing::Level::WARN)
+            .with_max_level(level)
             .finish();
         tracing::subscriber::with_default(sub, f);
         String::from_utf8(buf.0.lock().unwrap().clone()).unwrap()
+    }
+
+    fn with_log(f: impl FnOnce()) -> String {
+        with_log_level(tracing::Level::WARN, f)
+    }
+
+    #[test]
+    fn a_skipped_screenshot_is_info_once_per_backoff_window() {
+        let now = Instant::now();
+        for last in [None, Some(now), Some(now - START_BACKOFF)] {
+            assert_eq!(
+                screenshot_skip_log_is_info(last, now),
+                portal_warn_due(last, now, START_BACKOFF)
+            );
+        }
+        let (info, next) = screenshot_skip_step(None, now);
+        assert!(info);
+        assert_eq!(next, Some(now));
+        let (info, next) = screenshot_skip_step(Some(now), now);
+        assert!(!info);
+        assert_eq!(next, Some(now));
+        let (info, next) = screenshot_skip_step(Some(now - START_BACKOFF), now);
+        assert!(info);
+        assert_eq!(next, Some(now));
+
+        *SKIP_LOG_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let first = with_log_level(tracing::Level::INFO, || {
+            log_screenshot_skipped("screencast backoff");
+        });
+        let second = with_log_level(tracing::Level::INFO, || {
+            log_screenshot_skipped("screencast backoff");
+        });
+        assert_eq!(first.matches("screencast screenshot skipped").count(), 1);
+        assert!(first.contains("INFO"));
+        assert!(first.contains("screencast backoff"));
+        assert!(
+            !second.contains("screencast screenshot skipped"),
+            "a second skip inside the window is debug, and this subscriber stops at info: {second}"
+        );
+        *SKIP_LOG_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
+    #[test]
+    fn an_unavailable_portal_warns_once_per_backoff_window() {
+        *PORTAL_WARN_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let first = with_log_level(tracing::Level::WARN, || {
+            let _ = portal_unavailable(&"portal down");
+            let _ = portal_unavailable(&PORTAL_UNAVAILABLE);
+        });
+        let second = with_log_level(tracing::Level::WARN, || {
+            let _ = portal_unavailable(&"still down");
+        });
+        assert_eq!(first.matches(PORTAL_UNAVAILABLE).count(), 1);
+        assert!(first.contains("WARN"));
+        assert!(
+            !second.contains(PORTAL_UNAVAILABLE),
+            "a second warning inside the window is debug: {second}"
+        );
+        *PORTAL_WARN_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
     }
 
     #[test]

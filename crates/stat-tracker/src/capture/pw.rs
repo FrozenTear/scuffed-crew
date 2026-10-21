@@ -162,6 +162,9 @@ struct State {
     height: AtomicU32,
     format: AtomicU32,
     max_fps: u32,
+    /// Stable for this stream object. The next open gets a new id, because
+    /// `dequeue_seq` starts at 0 again.
+    id: u64,
     dequeue_seq: AtomicU64,
     max_pts: AtomicI64,
     last_copy_ms: AtomicU64,
@@ -238,6 +241,10 @@ impl Handle {
     /// reaches STREAMING is closed after a bound on this clock.
     pub fn running_for(&self) -> Duration {
         self.state.started.elapsed()
+    }
+
+    pub fn stream_id(&self) -> u64 {
+        self.state.id
     }
 
     pub fn open_marker(&self) -> framebuf::OpenMarker {
@@ -583,6 +590,11 @@ pub fn plane_window(
     Some((offset, need))
 }
 
+fn next_stream_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 /// One process-wide PipeWire library. Unloading it while a stream still
 /// holds function pointers is a use-after-free, so a successful load stays.
 fn pipewire_library() -> Result<&'static libloading::Library, String> {
@@ -629,6 +641,7 @@ pub fn open_stream(fd: std::os::fd::RawFd, node_id: u32, max_fps: u32) -> Result
         height: AtomicU32::new(0),
         format: AtomicU32::new(0),
         max_fps: max_fps.max(1),
+        id: next_stream_id(),
         dequeue_seq: AtomicU64::new(0),
         max_pts: AtomicI64::new(0),
         last_copy_ms: AtomicU64::new(0),
@@ -667,9 +680,7 @@ struct Symbols {
     init: unsafe extern "C" fn(*mut i32, *mut *mut *mut c_char),
     main_loop_new: unsafe extern "C" fn(*const c_void) -> *mut c_void,
     main_loop_get_loop: unsafe extern "C" fn(*mut c_void) -> *mut c_void,
-    loop_enter: unsafe extern "C" fn(*mut c_void),
-    loop_iterate: unsafe extern "C" fn(*mut c_void, i32) -> i32,
-    loop_leave: unsafe extern "C" fn(*mut c_void),
+    drive: LoopDrive,
     quit: QuitFn,
     main_loop_destroy: unsafe extern "C" fn(*mut c_void),
     context_new: unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void,
@@ -688,15 +699,88 @@ struct Symbols {
     stream_destroy: unsafe extern "C" fn(*mut c_void),
 }
 
+type LoopEnterFn = unsafe extern "C" fn(*mut c_void);
+type LoopIterateFn = unsafe extern "C" fn(*mut c_void, i32) -> i32;
+type LoopLeaveFn = unsafe extern "C" fn(*mut c_void);
+type MainLoopRunFn = unsafe extern "C" fn(*mut c_void) -> i32;
+
+/// How the thread runs the PipeWire loop. `pw_loop_enter`, `pw_loop_iterate`,
+/// and `pw_loop_leave` are exported from 1.4. On 1.0 and 1.2 they are macros,
+/// so the thread uses `pw_main_loop_run` instead.
+enum LoopDrive {
+    Iterate {
+        enter: LoopEnterFn,
+        iterate: LoopIterateFn,
+        leave: LoopLeaveFn,
+    },
+    MainLoopRun(MainLoopRunFn),
+}
+
+/// Which loop path the loaded symbols can drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LoopPath {
+    Iterate,
+    MainLoopRun,
+}
+
+fn loop_path(
+    has_enter: bool,
+    has_iterate: bool,
+    has_leave: bool,
+    has_run: bool,
+) -> Result<LoopPath, &'static str> {
+    if has_enter && has_iterate && has_leave {
+        Ok(LoopPath::Iterate)
+    } else if has_run {
+        Ok(LoopPath::MainLoopRun)
+    } else {
+        Err("pipewire is missing pw_main_loop_run")
+    }
+}
+
+fn loop_path_line(path: LoopPath) -> &'static str {
+    match path {
+        LoopPath::Iterate => "pipewire loop path: pw_loop_iterate",
+        LoopPath::MainLoopRun => "pipewire loop path: pw_main_loop_run",
+    }
+}
+
+fn log_loop_path(path: LoopPath) {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    tracing::info!("{}", loop_path_line(path));
+}
+
 fn load_symbols(lib: &libloading::Library) -> Result<Symbols, String> {
     unsafe {
+        let enter = load_optional::<LoopEnterFn>(lib, b"pw_loop_enter\0");
+        let iterate = load_optional::<LoopIterateFn>(lib, b"pw_loop_iterate\0");
+        let leave = load_optional::<LoopLeaveFn>(lib, b"pw_loop_leave\0");
+        let run = load_optional::<MainLoopRunFn>(lib, b"pw_main_loop_run\0");
+        let path = loop_path(
+            enter.is_some(),
+            iterate.is_some(),
+            leave.is_some(),
+            run.is_some(),
+        )
+        .map_err(str::to_string)?;
+        let drive = match (path, enter, iterate, leave, run) {
+            (LoopPath::Iterate, Some(enter), Some(iterate), Some(leave), _) => LoopDrive::Iterate {
+                enter,
+                iterate,
+                leave,
+            },
+            (LoopPath::MainLoopRun, _, _, _, Some(run)) => LoopDrive::MainLoopRun(run),
+            _ => return Err("pipewire is missing pw_main_loop_run".into()),
+        };
+        log_loop_path(path);
         Ok(Symbols {
             init: load(lib, b"pw_init\0")?,
             main_loop_new: load(lib, b"pw_main_loop_new\0")?,
             main_loop_get_loop: load(lib, b"pw_main_loop_get_loop\0")?,
-            loop_enter: load(lib, b"pw_loop_enter\0")?,
-            loop_iterate: load(lib, b"pw_loop_iterate\0")?,
-            loop_leave: load(lib, b"pw_loop_leave\0")?,
+            drive,
             quit: load(lib, b"pw_main_loop_quit\0")?,
             main_loop_destroy: load(lib, b"pw_main_loop_destroy\0")?,
             context_new: load(lib, b"pw_context_new\0")?,
@@ -722,6 +806,14 @@ where
     let sym: libloading::Symbol<T> = unsafe { lib.get(name) }
         .map_err(|_| format!("pipewire is missing {}", String::from_utf8_lossy(name)))?;
     Ok(*sym)
+}
+
+unsafe fn load_optional<T>(lib: &libloading::Library, name: &[u8]) -> Option<T>
+where
+    T: Copy,
+{
+    let sym: libloading::Symbol<T> = unsafe { lib.get(name) }.ok()?;
+    Some(*sym)
 }
 
 fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
@@ -797,19 +889,38 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
             if rc < 0 {
                 state.alive.store(false, Ordering::Release);
                 state.notify.notify_waiters();
-            } else if !pw_loop.is_null() {
-                // Enter before the pointer is published. A quit that lands
-                // in that gap sees `quit_requested` and iterate is never
-                // called, so an early `pw_main_loop_quit` cannot be missed
-                // by a later `pw_main_loop_run`. The short timeout covers a
-                // quit whose wake already ran.
-                (symbols.loop_enter)(pw_loop);
-                if begin_loop(&state, main) {
-                    while !state.quit_requested.load(Ordering::Acquire) {
-                        (symbols.loop_iterate)(pw_loop, 200);
+            } else {
+                match symbols.drive {
+                    LoopDrive::Iterate {
+                        enter,
+                        iterate,
+                        leave,
+                    } => {
+                        if !pw_loop.is_null() {
+                            // Enter before the pointer is published. A quit
+                            // that lands in that gap sees `quit_requested`
+                            // and iterate is never called, so an early
+                            // `pw_main_loop_quit` cannot be missed by a later
+                            // iterate. The short timeout covers a quit whose
+                            // wake already ran.
+                            enter(pw_loop);
+                            if begin_loop(&state, main) {
+                                while !state.quit_requested.load(Ordering::Acquire) {
+                                    iterate(pw_loop, 200);
+                                }
+                            }
+                            leave(pw_loop);
+                        }
+                    }
+                    LoopDrive::MainLoopRun(run) => {
+                        // PipeWire 1.0 and 1.2. `pw_main_loop_quit` returns
+                        // this call. `begin_loop` still refuses a quit that
+                        // landed before the pointer was published.
+                        if begin_loop(&state, main) {
+                            run(main);
+                        }
                     }
                 }
-                (symbols.loop_leave)(pw_loop);
             }
             (symbols.stream_destroy)(stream);
         }
@@ -1462,6 +1573,16 @@ mod tests {
         last_good: Option<PackedFrame>,
         fresh_done: bool,
     ) -> Handle {
+        test_handle_for(next_stream_id(), 0, latest, last_good, fresh_done)
+    }
+
+    fn test_handle_for(
+        id: u64,
+        dequeue_seq: u64,
+        latest: Option<PackedFrame>,
+        last_good: Option<PackedFrame>,
+        fresh_done: bool,
+    ) -> Handle {
         Handle {
             state: Arc::new(State {
                 stream: AtomicPtr::new(std::ptr::null_mut()),
@@ -1485,7 +1606,8 @@ mod tests {
                 height: AtomicU32::new(1),
                 format: AtomicU32::new(framebuf::FMT_BGRX),
                 max_fps: 2,
-                dequeue_seq: AtomicU64::new(0),
+                id,
+                dequeue_seq: AtomicU64::new(dequeue_seq),
                 max_pts: AtomicI64::new(0),
                 last_copy_ms: AtomicU64::new(0),
                 need_arrived_ms: AtomicU64::new(NO_TAB_NEED),
@@ -1552,6 +1674,67 @@ mod tests {
             }
             GrabOutcome::TabMiss { .. } => panic!("poll grab returned a tab miss"),
         }
+    }
+
+    #[test]
+    fn a_reopened_stream_starts_at_zero_and_its_first_frame_is_new() {
+        let n = 40;
+        let a = test_handle_for(11, n, Some(red_frame(n)), None, true);
+        assert_eq!(a.state.dequeue_seq.load(Ordering::Acquire), n);
+        let seen = crate::capture::SeenStream {
+            id: a.stream_id(),
+            seq: n,
+        };
+        let b = test_handle_for(22, 0, Some(red_frame(1)), None, true);
+        assert_eq!(b.state.dequeue_seq.load(Ordering::Acquire), 0);
+        let id_b = b.stream_id();
+        match grab_now(b).expect("first frame of the new stream") {
+            GrabOutcome::Frame { frame, is_new } => {
+                assert!(is_new, "the first frame of a new stream is a new read");
+                assert!(frame.clock.seq < n);
+                assert!(
+                    !crate::capture::poll_uses_frame(
+                        true,
+                        Some(frame.clock.seq),
+                        Some(seen.id),
+                        Some(seen)
+                    ),
+                    "the same stream would still treat a restarted sequence as already seen"
+                );
+                assert!(crate::capture::poll_uses_frame(
+                    is_new,
+                    Some(frame.clock.seq),
+                    Some(id_b),
+                    Some(seen),
+                ));
+            }
+            GrabOutcome::TabMiss { .. } => panic!("the first frame was a tab miss"),
+        }
+    }
+
+    #[test]
+    fn pipewire_before_1_4_uses_main_loop_run() {
+        assert_eq!(loop_path(true, true, true, true), Ok(LoopPath::Iterate));
+        assert_eq!(
+            loop_path(false, false, false, true),
+            Ok(LoopPath::MainLoopRun)
+        );
+        assert_eq!(
+            loop_path(true, false, true, true),
+            Ok(LoopPath::MainLoopRun)
+        );
+        assert_eq!(
+            loop_path(false, false, false, false),
+            Err("pipewire is missing pw_main_loop_run")
+        );
+        assert_eq!(
+            loop_path_line(LoopPath::Iterate),
+            "pipewire loop path: pw_loop_iterate"
+        );
+        assert_eq!(
+            loop_path_line(LoopPath::MainLoopRun),
+            "pipewire loop path: pw_main_loop_run"
+        );
     }
 
     #[test]

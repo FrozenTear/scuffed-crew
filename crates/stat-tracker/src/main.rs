@@ -4174,7 +4174,12 @@ fn reused_frame_is_not_a_confirm_and_a_new_pair_is() {
         seen_at: std::time::Instant::now(),
         map: None,
     });
-    assert!(!capture::poll_uses_frame(false, Some(4), Some(4)));
+    assert!(!capture::poll_uses_frame(
+        false,
+        Some(4),
+        Some(1),
+        Some(capture::SeenStream { id: 1, seq: 4 })
+    ));
     let skipped = resolve_word_tick(&mut streak, None, std::time::Instant::now(), None);
     assert!(skipped.signal.is_none());
     assert!(!skipped.signal_confirmed);
@@ -4186,8 +4191,24 @@ fn reused_frame_is_not_a_confirm_and_a_new_pair_is() {
     assert!(timed_out.signal.is_none());
     assert!(!timed_out.signal_confirmed);
 
-    assert!(capture::poll_uses_frame(true, Some(5), Some(4)));
-    assert!(!capture::poll_uses_frame(true, Some(5), Some(5)));
+    assert!(capture::poll_uses_frame(
+        true,
+        Some(5),
+        Some(1),
+        Some(capture::SeenStream { id: 1, seq: 4 })
+    ));
+    assert!(!capture::poll_uses_frame(
+        true,
+        Some(5),
+        Some(1),
+        Some(capture::SeenStream { id: 1, seq: 5 })
+    ));
+    assert!(capture::poll_uses_frame(
+        true,
+        Some(1),
+        Some(2),
+        Some(capture::SeenStream { id: 1, seq: 40 })
+    ));
     let mut streak = None;
     let now = std::time::Instant::now();
     let first = resolve_word_tick(
@@ -4522,10 +4543,44 @@ async fn run_loop(
     let mut binary_checked = tokio::time::Instant::now();
     let mut logged_binary_wait = false;
     let mut exec_failed_at: Option<std::time::Instant> = None;
-    let mut seen_stream_seq: Option<u64> = None;
+    let mut seen_stream: Option<capture::SeenStream> = None;
 
     loop {
+        // `biased` polls in source order. Shutdown is first, so a signal
+        // that is already waiting beats a poll tick that is also ready.
+        // Work already inside an arm is raced with `stop_for_shutdown`.
         tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => {
+                stat_tracker::replace::note_shutdown_signal();
+                tracing::info!("shutting down");
+                shutdown_from_signal(
+                    &mut st,
+                    &mut capture_task,
+                    &mut sync_task,
+                    sync_client,
+                    &sync_backoff,
+                    store,
+                    data_dir,
+                )
+                .await;
+                return Ok(());
+            }
+            _ = sigterm.recv() => {
+                stat_tracker::replace::note_shutdown_signal();
+                tracing::info!("SIGTERM received, shutting down");
+                shutdown_from_signal(
+                    &mut st,
+                    &mut capture_task,
+                    &mut sync_task,
+                    sync_client,
+                    &sync_backoff,
+                    store,
+                    data_dir,
+                )
+                .await;
+                return Ok(());
+            }
             result = kbd.wait_tab() => {
                 match result {
                     Ok(()) => {
@@ -4704,24 +4759,41 @@ async fn run_loop(
                 }
                 st.poll_ticks_skipped = 0;
 
-                match capture::capture_screen_output_for(
-                    backend,
-                    capture_output,
-                    capture::CaptureKind::Poll,
+                match stop_for_shutdown(
+                    capture::capture_screen_output_for(
+                        backend,
+                        capture_output,
+                        capture::CaptureKind::Poll,
+                    ),
+                    stat_tracker::replace::shutdown_notified(),
                 )
                 .await
                 {
-                    Ok(captured) => {
+                    Err(()) => {
+                        shutdown_from_signal(
+                            &mut st,
+                            &mut capture_task,
+                            &mut sync_task,
+                            sync_client,
+                            &sync_backoff,
+                            store,
+                            data_dir,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                    Ok(Ok(captured)) => {
                         if !capture::poll_uses_frame(
                             captured.is_new,
                             captured.seq,
-                            seen_stream_seq,
+                            captured.stream,
+                            seen_stream,
                         ) {
                             tracing::trace!("poll skipped: stream frame already seen");
                             continue;
                         }
-                        if let Some(seq) = captured.seq {
-                            seen_stream_seq = Some(seq);
+                        if let (Some(id), Some(seq)) = (captured.stream, captured.seq) {
+                            seen_stream = Some(capture::SeenStream { id, seq });
                         }
                         let img = captured.image;
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
@@ -4733,7 +4805,11 @@ async fn run_loop(
                             .as_ref()
                             .map(|streak| (streak.outcome, streak.seen_at.elapsed()));
                         let mut stability = std::mem::take(&mut st.ocr_stability);
-                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = tokio::task::spawn_blocking(move || {
+                        // Dropping this join detaches the blocking OCR. That
+                        // task does not write a match row. The row is written
+                        // below, and only when shutdown has not begun.
+                        let analyzed = stop_for_shutdown(
+                            tokio::task::spawn_blocking(move || {
                             let analyze_started = Instant::now();
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
@@ -4839,9 +4915,41 @@ async fn run_loop(
                                 analyze_started.elapsed(),
                             );
                             (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png)
-                        }).await.unwrap_or_else(|_| {
-                            (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None)
-                        });
+                        }),
+                            stat_tracker::replace::shutdown_notified(),
+                        )
+                        .await;
+                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = match analyzed {
+                            Err(()) => {
+                                shutdown_from_signal(
+                                    &mut st,
+                                    &mut capture_task,
+                                    &mut sync_task,
+                                    sync_client,
+                                    &sync_backoff,
+                                    store,
+                                    data_dir,
+                                )
+                                .await;
+                                return Ok(());
+                            }
+                            Ok(joined) => joined.unwrap_or_else(|_| {
+                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None)
+                            }),
+                        };
+                        if stat_tracker::replace::shutdown_requested() {
+                            shutdown_from_signal(
+                                &mut st,
+                                &mut capture_task,
+                                &mut sync_task,
+                                sync_client,
+                                &sync_backoff,
+                                store,
+                                data_dir,
+                            )
+                            .await;
+                            return Ok(());
+                        }
                         if let Some(png) = rank_outcome_png
                             && let Some(game) = st.active_game.as_ref()
                             // the rank screen follows the game it belongs
@@ -4909,19 +5017,41 @@ async fn run_loop(
                             detect::GamePhase::HeroBan => Some(boundary::StartScreen::HeroBan),
                             _ => None,
                         };
-                        apply_poll_tick(
-                            &mut st,
-                            store,
-                            data_dir,
-                            &tick,
-                            start_screen,
-                            now,
-                            new_game_debounce,
-                            use_new_reader,
+                        // A store write this call already started can finish.
+                        // Dropping the rest does not start another row.
+                        if stop_for_shutdown(
+                            async {
+                                apply_poll_tick(
+                                    &mut st,
+                                    store,
+                                    data_dir,
+                                    &tick,
+                                    start_screen,
+                                    now,
+                                    new_game_debounce,
+                                    use_new_reader,
+                                )
+                                .await;
+                            },
+                            stat_tracker::replace::shutdown_notified(),
                         )
-                        .await;
+                        .await
+                        .is_err()
+                        {
+                            shutdown_from_signal(
+                                &mut st,
+                                &mut capture_task,
+                                &mut sync_task,
+                                sync_client,
+                                &sync_backoff,
+                                store,
+                                data_dir,
+                            )
+                            .await;
+                            return Ok(());
+                        }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::trace!(error = %e, "poll capture failed (game may not be running)");
                     }
                 }
@@ -5076,36 +5206,6 @@ async fn run_loop(
                     sync_client,
                 )
                 .await;
-            }
-            _ = tokio::signal::ctrl_c() => {
-                stat_tracker::replace::note_shutdown_signal();
-                tracing::info!("shutting down");
-                shutdown_from_signal(
-                    &mut st,
-                    &mut capture_task,
-                    &mut sync_task,
-                    sync_client,
-                    &sync_backoff,
-                    store,
-                    data_dir,
-                )
-                .await;
-                return Ok(());
-            }
-            _ = sigterm.recv() => {
-                stat_tracker::replace::note_shutdown_signal();
-                tracing::info!("SIGTERM received, shutting down");
-                shutdown_from_signal(
-                    &mut st,
-                    &mut capture_task,
-                    &mut sync_task,
-                    sync_client,
-                    &sync_backoff,
-                    store,
-                    data_dir,
-                )
-                .await;
-                return Ok(());
             }
         }
     }
@@ -6798,19 +6898,40 @@ async fn grab_tab_attempt(
         let grab = capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab);
         return capture::with_tab_press(capture::tab_attempt_press(now, attempt, now), grab).await;
     }
-    // The first attempt keeps the original key. If the share is still
-    // opening, wait until it is streaming or the original press is 1200 ms
-    // old, then grab under that same press.
+    // The first attempt keeps the original key. While the share is still
+    // opening it waits up to 3 seconds, not the 1200 ms frame budget. If
+    // that open uses up the frame budget, the grab runs again from now.
     let press = capture::tab_press().unwrap_or_else(std::time::Instant::now);
-    let deadline =
-        press + std::time::Duration::from_millis(capture::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
+    let mut waited_for_open = false;
     loop {
         match capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab).await {
+            Err(err) if capture::is_share_opening(&err.to_string()) => {
+                waited_for_open = true;
+                match capture::first_tab_while_opening(
+                    press.elapsed(),
+                    capture::FIRST_TAB_OPEN_WAIT,
+                ) {
+                    capture::OpeningTab::Wait => {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                    capture::OpeningTab::Miss => return Err(capture::STREAM_MISS.into()),
+                }
+            }
             Err(err)
-                if capture::is_share_opening(&err.to_string())
-                    && std::time::Instant::now() < deadline =>
+                if capture::is_stream_miss(&err.to_string())
+                    && capture::tab_press_after_late_open(
+                        press,
+                        std::time::Instant::now(),
+                        std::time::Duration::from_millis(capture::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS),
+                        waited_for_open,
+                    ) != press =>
             {
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let now = std::time::Instant::now();
+                return capture::with_tab_press(
+                    now,
+                    capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab),
+                )
+                .await;
             }
             other => return other,
         }
@@ -8886,6 +9007,29 @@ async fn close_session_on_shutdown(
         persist_active_game(data_dir, st.active_game.as_ref());
     } else {
         persist_active_game(data_dir, None);
+    }
+}
+
+/// Race `work` against shutdown. Shutdown is polled first, so a signal that
+/// is already waiting wins even when `work` is also ready.
+///
+/// Dropping `work` detaches a `spawn_blocking` task. That OCR keeps running
+/// and its result is discarded. It does not write a match row. The caller
+/// writes the row only after `Ok`, and skips that write once shutdown has
+/// begun. A store write already started inside `work` can finish.
+async fn stop_for_shutdown<T, S>(
+    work: impl std::future::Future<Output = T>,
+    shutdown: S,
+) -> Result<T, ()>
+where
+    S: std::future::Future<Output = ()>,
+{
+    tokio::pin!(work);
+    tokio::pin!(shutdown);
+    tokio::select! {
+        biased;
+        _ = &mut shutdown => Err(()),
+        value = &mut work => Ok(value),
     }
 }
 
@@ -16224,6 +16368,72 @@ mod tests {
         assert!(
             commands_body[set_at..].contains("schedule_store_sync("),
             "a SetOutcome on the open session must schedule the next sync"
+        );
+        let biased = run_loop.find("biased;").expect("biased select");
+        assert!(
+            biased < ctrl_c,
+            "shutdown is the first arm, so a ready signal beats a ready poll"
+        );
+        let poll_tick = run_loop.find("poll_timer.tick()").expect("poll arm");
+        assert!(sigterm < poll_tick, "the signal arms stay above the poll");
+        assert_eq!(
+            run_loop.matches("tokio::task::spawn_blocking(").count(),
+            1,
+            "the poll analysis is the only blocking task in the loop"
+        );
+        let blocking = run_loop
+            .find("tokio::task::spawn_blocking(")
+            .expect("poll analysis");
+        let wrap = run_loop[..blocking]
+            .rfind("stop_for_shutdown(")
+            .expect("analysis is raced against shutdown");
+        assert!(
+            run_loop[wrap + "stop_for_shutdown(".len()..blocking]
+                .trim()
+                .is_empty(),
+            "spawn_blocking OCR is the future passed to stop_for_shutdown"
+        );
+        assert!(
+            run_loop.matches("stop_for_shutdown(").count() >= 3,
+            "capture, analysis, and the row write are each raced against shutdown"
+        );
+    }
+
+    /// A poll analysis that would run for half a minute must lose to shutdown
+    /// well inside the shared 5 second deadline. The shutdown future is
+    /// injected so this test does not set the process-wide shutdown clock.
+    #[tokio::test]
+    async fn a_slow_poll_analysis_yields_to_shutdown_within_the_deadline() {
+        let waiter = std::sync::Arc::new(tokio::sync::Notify::new());
+        let flag = std::sync::Arc::clone(&waiter);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            flag.notify_one();
+        });
+        let started = std::time::Instant::now();
+        let raced = stop_for_shutdown(
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                "row"
+            },
+            waiter.notified(),
+        )
+        .await;
+        assert!(raced.is_err(), "shutdown must discard the slow analysis");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "shutdown took {elapsed:?}, inside the 5s deadline"
+        );
+        assert_eq!(
+            stop_for_shutdown(async { "row" }, std::future::pending::<()>())
+                .await
+                .expect("work finishes when shutdown never arrives"),
+            "row"
+        );
+        assert!(
+            stop_for_shutdown(async { "row" }, async {}).await.is_err(),
+            "when both are ready, shutdown is polled first"
         );
     }
 
