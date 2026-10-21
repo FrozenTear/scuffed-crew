@@ -75,6 +75,15 @@ pub const REOPEN_GAP_MAX: Duration = Duration::from_secs(5 * 60);
 /// fallback. It is not a reopen: niri and KWin send buffers only on damage.
 pub const QUIET_STALL: Duration = Duration::from_secs(8);
 
+/// At most one screenshot per this long for a poll on a quiet stream, on
+/// every desktop. A still screen stays quiet, and a poll runs every 1.5 s.
+/// Tab grabs and a dead or reopen-waiting stream are not limited.
+pub const QUIET_SHOT_GAP: Duration = Duration::from_secs(10);
+
+/// The stall-fallback warning is once per this window, then debug, so a
+/// mostly still screen does not warn on every quiet spell.
+pub const STALL_WARN_WINDOW: Duration = Duration::from_secs(10 * 60);
+
 const REOPEN_DEAD: &str = "screencast stream ended; reopening";
 const REOPEN_TABS: &str = "screencast stream had no fresh frame on two Tabs; reopening";
 const REOPEN_NO_TOKEN: &str =
@@ -357,6 +366,8 @@ struct CastState {
     watch: ReopenWatch,
     /// Data dir for the status file. Set on each capture.
     data_dir: Option<PathBuf>,
+    /// The last screenshot a poll took for a quiet stream.
+    last_quiet_shot: Option<Instant>,
 }
 
 impl Default for CastState {
@@ -374,6 +385,7 @@ impl Default for CastState {
             fresh_misses: 0,
             watch: ReopenWatch::default(),
             data_dir: None,
+            last_quiet_shot: None,
         }
     }
 }
@@ -729,19 +741,53 @@ fn desktop_has(desktop: &str, names: &[&str]) -> bool {
     })
 }
 
+/// Compositors with wlr-screencopy, niri included. libwayshot works there.
+const SCREENCOPY_DESKTOPS: &[&str] = &[
+    "niri", "sway", "hyprland", "wayfire", "river", "labwc", "wlroots",
+];
+
+fn is_kde(desktop: &str) -> bool {
+    desktop_has(desktop, &["kde", "plasma", "kwin"])
+}
+
 pub fn screenshot_fallback_is_safe(desktop: &str, stream_forced: bool) -> bool {
-    if desktop_has(desktop, &["kde", "plasma", "kwin"]) {
+    if is_kde(desktop) {
         return false;
     }
-    if desktop_has(
-        desktop,
-        &[
-            "niri", "sway", "hyprland", "wayfire", "river", "labwc", "wlroots",
-        ],
-    ) {
+    if desktop_has(desktop, SCREENCOPY_DESKTOPS) {
         return true;
     }
     desktop_has(desktop, &["gnome"]) && stream_forced
+}
+
+/// How a fallback screenshot is taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShotMethod {
+    /// wlr-screencopy through libwayshot: one output, no file, tens of ms.
+    Wayshot,
+    /// The xdg-desktop-portal Screenshot ("Older screenshot"). On niri that
+    /// renders every output and writes a PNG, about a second per shot.
+    Portal,
+}
+
+impl ShotMethod {
+    fn label(self) -> &'static str {
+        match self {
+            ShotMethod::Wayshot => "a wayshot screenshot",
+            ShotMethod::Portal => "Older screenshot",
+        }
+    }
+}
+
+/// The method a fallback screenshot tries first. Where the compositor has
+/// screencopy and a Wayland socket is set, that is wayshot, and the portal
+/// is used only when wayshot fails. Everywhere else it is the portal.
+pub fn first_shot_method(desktop: &str, wayland: bool) -> ShotMethod {
+    if wayland && !is_kde(desktop) && desktop_has(desktop, SCREENCOPY_DESKTOPS) {
+        ShotMethod::Wayshot
+    } else {
+        ShotMethod::Portal
+    }
 }
 
 /// True when a session that has never reached STREAMING should be closed.
@@ -793,12 +839,96 @@ pub fn classify_stall(dead: bool, reopen_waiting: bool, quiet_for: Duration) -> 
     }
 }
 
-/// True when a stalled grab takes one Older screenshot instead of returning
-/// no picture. That is niri, wlroots, and GNOME when the stream was forced,
-/// for Tab and poll grabs alike. KDE never does: a screenshot beside a live
-/// share is the KWin crash. A grab with no stall uses the stream.
-pub fn stall_screenshot(desktop: &str, stream_forced: bool, stall: Option<Stall>) -> bool {
-    stall.is_some() && screenshot_fallback_is_safe(desktop, stream_forced)
+/// True when a stalled grab takes one screenshot instead of returning no
+/// picture. That is niri, wlroots, and GNOME when the stream was forced, for
+/// Tab and poll grabs. KDE never does: a screenshot beside a live share is
+/// the KWin crash. GNOME does not for a poll on a quiet stream: its portal
+/// screenshot flashes the screen, and mutter sends no buffers while the
+/// screen is still. A grab with no stall uses the stream.
+pub fn stall_screenshot(
+    desktop: &str,
+    stream_forced: bool,
+    stall: Option<Stall>,
+    kind: CaptureKind,
+) -> bool {
+    let Some(stall) = stall else {
+        return false;
+    };
+    if !screenshot_fallback_is_safe(desktop, stream_forced) {
+        return false;
+    }
+    let quiet_poll = stall == Stall::Quiet && kind == CaptureKind::Poll;
+    !(quiet_poll && desktop_has(desktop, &["gnome"]))
+}
+
+/// True when a poll on a quiet stream may take its screenshot now.
+pub fn quiet_poll_shot_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= QUIET_SHOT_GAP)
+}
+
+/// Where in [`capture`] a stalled stream can be noticed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StallSite {
+    /// The stream had streamed and is no longer alive. No grab runs.
+    DeadBeforeGrab,
+    /// The grab handed back the previous frame, which a poll ignores.
+    ReusedFrame,
+    /// The grab ended with an error (a fault, or a poll wait with nothing).
+    GrabError { shutting_down: bool },
+}
+
+/// The fallback decision [`capture`] makes at each [`StallSite`]: the stall
+/// to take a screenshot for, or `None` to keep the stream's answer. A
+/// reused frame only matters to a poll. Nothing is taken while shutting
+/// down. A poll on a quiet stream also waits out [`QUIET_SHOT_GAP`]
+/// (`quiet_due`).
+fn stall_fallback_at(
+    site: StallSite,
+    kind: CaptureKind,
+    stall: Option<Stall>,
+    desktop: &str,
+    stream_forced: bool,
+    quiet_due: bool,
+) -> Option<Stall> {
+    let stall = match site {
+        StallSite::DeadBeforeGrab => Some(Stall::Dead),
+        StallSite::ReusedFrame if kind == CaptureKind::Poll => stall,
+        StallSite::ReusedFrame => None,
+        StallSite::GrabError { shutting_down } if !shutting_down => stall,
+        StallSite::GrabError { .. } => None,
+    }?;
+    if !stall_screenshot(desktop, stream_forced, Some(stall), kind) {
+        return None;
+    }
+    if stall == Stall::Quiet && kind == CaptureKind::Poll && !quiet_due {
+        return None;
+    }
+    Some(stall)
+}
+
+/// [`stall_fallback_at`] for this desktop and route. A quiet poll that is
+/// let through stamps the rate-limit clock.
+fn decide_stall(
+    state: &mut CastState,
+    site: StallSite,
+    kind: CaptureKind,
+    stall: Option<Stall>,
+) -> Option<Stall> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let now = Instant::now();
+    let quiet_due = quiet_poll_shot_due(state.last_quiet_shot, now);
+    let take = stall_fallback_at(
+        site,
+        kind,
+        stall,
+        &desktop,
+        super::stream_was_forced(),
+        quiet_due,
+    );
+    if take == Some(Stall::Quiet) && kind == CaptureKind::Poll {
+        state.last_quiet_shot = Some(now);
+    }
+    take
 }
 
 static TAB_MISS_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -1074,10 +1204,11 @@ pub async fn capture(
         // the share dialog again. Where a screenshot is safe, this grab is
         // one, so a dead stream waiting for its reopen still reads.
         drop(stream);
-        if stall_fallback_here(Some(Stall::Dead)) {
-            return stall_fallback(state, output_name, Stall::Dead).await;
-        }
+        let take = decide_stall(&mut state, StallSite::DeadBeforeGrab, kind, None);
         drop(state);
+        if let Some(stall) = take {
+            return stall_fallback(output_name, stall).await;
+        }
         return Err("screencast stream ended".into());
     }
     if !stream.alive() {
@@ -1161,19 +1292,19 @@ pub async fn capture(
         state.watch.pending.is_some(),
         quiet_for,
     );
+    // A poll that only got the previous frame back from a stalled stream
+    // would read nothing. Where a screenshot is safe, take one instead.
+    if matches!(grabbed, Ok(pw::GrabOutcome::Frame { is_new: false, .. }))
+        && let Some(stall) = decide_stall(&mut state, StallSite::ReusedFrame, kind, stall)
+    {
+        drop(stream);
+        drop(state);
+        return stall_fallback(output_name, stall).await;
+    }
     match grabbed {
         Ok(pw::GrabOutcome::TabMiss { delay_ms }) => {
             drop(state);
             tab_timeout(output_name, delay_ms).await.map(fresh_capture)
-        }
-        // A poll that only got the previous frame back from a stalled stream
-        // would read nothing. Where a screenshot is safe, take one instead.
-        Ok(pw::GrabOutcome::Frame { is_new: false, .. })
-            if kind == CaptureKind::Poll && stall_fallback_here(stall) =>
-        {
-            drop(stream);
-            let stall = stall.unwrap_or(Stall::Quiet);
-            stall_fallback(state, output_name, stall).await
         }
         Ok(pw::GrabOutcome::Frame { frame, is_new }) => {
             state.last_fail = None;
@@ -1263,38 +1394,48 @@ pub async fn capture(
                     .map(fresh_capture);
             }
             // A core fault, or a poll wait with nothing, on a stalled stream.
-            if !crate::replace::shutdown_requested()
-                && stall_fallback_here(stall)
-                && let Some(stall) = stall
-            {
-                return stall_fallback(state, output_name, stall).await;
-            }
+            let site = StallSite::GrabError {
+                shutting_down: crate::replace::shutdown_requested(),
+            };
+            let take = decide_stall(&mut state, site, kind, stall);
             drop(state);
+            if let Some(stall) = take {
+                return stall_fallback(output_name, stall).await;
+            }
             Err(err.into())
         }
     }
 }
 
-/// [`stall_screenshot`] for this desktop and route.
-fn stall_fallback_here(stall: Option<Stall>) -> bool {
-    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    stall_screenshot(&desktop, super::stream_was_forced(), stall)
-}
-
-/// One Older screenshot for a stalled stream. The session stays as it is:
-/// the reopen, if one is due, still runs on a poll. The warn is once per
-/// stall, until the stream hands over a new frame.
+/// One screenshot for a stalled stream, taken without the session lock.
+/// The session stays as it is: the reopen, if one is due, still runs on a
+/// poll. The line names the method that took the picture, and is a warn
+/// once per [`STALL_WARN_WINDOW`], then debug.
 async fn stall_fallback(
-    mut state: tokio::sync::MutexGuard<'_, CastState>,
     output_name: Option<&str>,
     stall: Stall,
 ) -> Result<super::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
     let why = stall.reason();
-    let line = fallback_line_for(why, true);
-    note_fallback(&mut state, &line);
-    drop(state);
-    screenshot(output_name, why).await.map(fresh_capture)
+    let (image, method) = screenshot_with(output_name, why).await?;
+    let line = fallback_line_for(why, Some(method));
+    let warn = {
+        let mut last = STALL_WARN_AT.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let due = portal_warn_due(*last, now, STALL_WARN_WINDOW);
+        if due {
+            *last = Some(now);
+        }
+        due
+    };
+    if warn {
+        tracing::warn!("{line}");
+    } else {
+        tracing::debug!("{line}");
+    }
+    Ok(fresh_capture(image))
 }
+
+static STALL_WARN_AT: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
 
 async fn tab_timeout(
     output_name: Option<&str>,
@@ -1309,7 +1450,7 @@ async fn tab_timeout(
                 count,
                 "Tab grab: stream timeout, screenshot fallback"
             );
-            portal::capture(output_name).await
+            screenshot(output_name, "Tab stream timeout").await
         }
         TabTimeoutAction::Skip => {
             // A press the open already pushed past the frame budget is
@@ -1358,24 +1499,58 @@ fn fallback_is_safe() -> bool {
     screenshot_fallback_is_safe(&desktop, super::stream_was_forced())
 }
 
-fn fallback_line_for(why: &str, safe: bool) -> String {
-    if safe {
-        format!("{why}; falling back to Older screenshot")
-    } else {
-        format!("{why}; screenshot skipped")
+/// `method` is the screenshot that is (or was) used, `None` when skipped.
+fn fallback_line_for(why: &str, method: Option<ShotMethod>) -> String {
+    match method {
+        Some(method) => format!("{why}; falling back to {}", method.label()),
+        None => format!("{why}; screenshot skipped"),
     }
 }
 
+/// The method [`screenshot`] tries first on this desktop.
+fn planned_shot_method() -> ShotMethod {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    first_shot_method(&desktop, super::wayshot::is_available())
+}
+
+/// Logged before the screenshot, so it names the method tried first. A
+/// wayshot failure that falls through to the portal logs that separately.
 fn fallback_line(why: &str) -> String {
-    fallback_line_for(why, fallback_is_safe())
+    fallback_line_for(why, fallback_is_safe().then(planned_shot_method))
 }
 
 async fn screenshot(
     output_name: Option<&str>,
     why: &str,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    screenshot_with(output_name, why)
+        .await
+        .map(|(image, _)| image)
+}
+
+/// wayshot first where the compositor has screencopy, then the portal.
+/// Returns which one produced the image.
+async fn screenshot_with(
+    output_name: Option<&str>,
+    why: &str,
+) -> Result<(DynamicImage, ShotMethod), Box<dyn std::error::Error + Send + Sync>> {
+    if planned_shot_method() == ShotMethod::Wayshot {
+        match super::wayshot::capture_with_output(output_name).await {
+            Ok(image) => {
+                tracing::debug!(why, "screencast skipped; using wayshot");
+                return Ok((image, ShotMethod::Wayshot));
+            }
+            Err(err) => {
+                tracing::info!(why, error = %err, "wayshot screenshot failed; using Older screenshot");
+            }
+        }
+    }
     tracing::debug!(why, "screencast skipped; using Older screenshot");
-    portal::capture(output_name).await
+    // `portal::capture` runs the request on its own task, so a dropped grab
+    // does not leave the portal's file behind.
+    portal::capture(output_name)
+        .await
+        .map(|image| (image, ShotMethod::Portal))
 }
 
 /// Screenshot only on niri, wlroots, and forced GNOME. KDE skips and logs,
@@ -2069,11 +2244,15 @@ mod tests {
         assert!(!capture_now_blocked_by_daemon_share("KDE", false));
         assert!(!capture_now_blocked_by_daemon_share("niri", true));
         assert_eq!(
-            fallback_line_for("screencast backoff", true),
+            fallback_line_for("screencast backoff", Some(ShotMethod::Portal)),
             "screencast backoff; falling back to Older screenshot"
         );
         assert_eq!(
-            fallback_line_for("screencast backoff", false),
+            fallback_line_for("screencast backoff", Some(ShotMethod::Wayshot)),
+            "screencast backoff; falling back to a wayshot screenshot"
+        );
+        assert_eq!(
+            fallback_line_for("screencast backoff", None),
             "screencast backoff; screenshot skipped"
         );
         match select_error("org.freedesktop.portal.Error.Cancelled".into(), true) {
@@ -2343,7 +2522,7 @@ mod tests {
     }
 
     #[test]
-    fn a_quiet_stream_never_reopens_and_a_dead_one_reopens_once() {
+    fn a_quiet_stream_never_reopens_and_a_dead_one_is_reopened_but_not_twice_in_a_row() {
         let now = Instant::now();
         let mut watch = ReopenWatch::default();
         quiet_polls(&mut watch, now + Duration::from_secs(60), 8);
@@ -2801,34 +2980,226 @@ mod tests {
         assert_eq!(classify_stall(false, false, short), None);
     }
 
+    const KINDS: [CaptureKind; 2] = [CaptureKind::Tab, CaptureKind::Poll];
+    const STALLS: [Stall; 3] = [Stall::Dead, Stall::ReopenWaiting, Stall::Quiet];
+
     #[test]
     fn a_stalled_stream_screenshots_on_niri_wlroots_and_forced_gnome_never_on_kde() {
-        let stalls = [Stall::Dead, Stall::ReopenWaiting, Stall::Quiet];
-        for stall in stalls {
-            for forced in [false, true] {
-                for kde in ["KDE", "plasma", "KDE:plasma", "kwin"] {
-                    assert!(
-                        !stall_screenshot(kde, forced, Some(stall)),
-                        "{kde} forced={forced} {stall:?} must not screenshot"
-                    );
+        for stall in STALLS {
+            for kind in KINDS {
+                for forced in [false, true] {
+                    for kde in ["KDE", "plasma", "KDE:plasma", "kwin"] {
+                        assert!(
+                            !stall_screenshot(kde, forced, Some(stall), kind),
+                            "{kde} forced={forced} {stall:?} {kind:?} must not screenshot"
+                        );
+                    }
+                    for safe in ["niri", "sway", "Hyprland", "wlroots", "river"] {
+                        assert!(
+                            stall_screenshot(safe, forced, Some(stall), kind),
+                            "{safe} forced={forced} {stall:?} {kind:?} must fall back"
+                        );
+                    }
                 }
-                for safe in ["niri", "sway", "Hyprland", "wlroots", "river"] {
+                assert!(!stall_screenshot("GNOME", false, Some(stall), kind));
+            }
+        }
+        for desktop in ["niri", "sway", "GNOME", "KDE"] {
+            for kind in KINDS {
+                assert!(
+                    !stall_screenshot(desktop, true, None, kind),
+                    "{desktop}: a healthy stream is not replaced by a screenshot"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn forced_gnome_never_screenshots_a_quiet_poll() {
+        for gnome in ["GNOME", "ubuntu:GNOME"] {
+            assert!(
+                !stall_screenshot(gnome, true, Some(Stall::Quiet), CaptureKind::Poll),
+                "{gnome}: the portal flashes the screen on every quiet poll"
+            );
+            assert!(stall_screenshot(
+                gnome,
+                true,
+                Some(Stall::Quiet),
+                CaptureKind::Tab
+            ));
+            for stall in [Stall::Dead, Stall::ReopenWaiting] {
+                for kind in KINDS {
                     assert!(
-                        stall_screenshot(safe, forced, Some(stall)),
-                        "{safe} forced={forced} {stall:?} must fall back"
+                        stall_screenshot(gnome, true, Some(stall), kind),
+                        "{gnome} {stall:?} {kind:?} keeps its fallback"
                     );
                 }
             }
-            assert!(stall_screenshot("GNOME", true, Some(stall)));
-            assert!(stall_screenshot("ubuntu:GNOME", true, Some(stall)));
-            assert!(!stall_screenshot("GNOME", false, Some(stall)));
         }
-        for desktop in ["niri", "sway", "GNOME", "KDE"] {
-            assert!(
-                !stall_screenshot(desktop, true, None),
-                "{desktop}: a healthy stream is not replaced by a screenshot"
+    }
+
+    #[test]
+    fn wayshot_is_tried_first_on_screencopy_desktops_only() {
+        for desktop in ["niri", "sway", "Hyprland", "wayfire", "river", "labwc"] {
+            assert_eq!(first_shot_method(desktop, true), ShotMethod::Wayshot);
+            assert_eq!(
+                first_shot_method(desktop, false),
+                ShotMethod::Portal,
+                "{desktop}: no Wayland socket, no wayshot"
             );
         }
+        for desktop in ["GNOME", "ubuntu:GNOME", "KDE", "plasma", ""] {
+            assert_eq!(first_shot_method(desktop, true), ShotMethod::Portal);
+        }
+    }
+
+    #[test]
+    fn quiet_poll_screenshots_are_at_most_one_per_gap() {
+        let now = Instant::now();
+        assert!(quiet_poll_shot_due(None, now));
+        assert!(!quiet_poll_shot_due(Some(now), now));
+        assert!(!quiet_poll_shot_due(
+            Some(now),
+            now + QUIET_SHOT_GAP - Duration::from_millis(1)
+        ));
+        assert!(quiet_poll_shot_due(Some(now), now + QUIET_SHOT_GAP));
+
+        // 1.5 s polls on a still niri screen for one minute: about six shots.
+        let mut last = None;
+        let mut shots = 0;
+        let mut at = now;
+        while at < now + Duration::from_secs(60) {
+            let due = quiet_poll_shot_due(last, at);
+            if stall_fallback_at(
+                StallSite::ReusedFrame,
+                CaptureKind::Poll,
+                Some(Stall::Quiet),
+                "niri",
+                true,
+                due,
+            )
+            .is_some()
+            {
+                shots += 1;
+                last = Some(at);
+            }
+            at += Duration::from_millis(1500);
+        }
+        assert!((5..=6).contains(&shots), "{shots} quiet shots in a minute");
+    }
+
+    #[test]
+    fn each_capture_site_decides_its_own_stall_fallback() {
+        use StallSite::*;
+        let running = GrabError {
+            shutting_down: false,
+        };
+        let stopping = GrabError {
+            shutting_down: true,
+        };
+        // A dead stream before the grab is a Dead stall for Tab and poll.
+        for kind in KINDS {
+            assert_eq!(
+                stall_fallback_at(DeadBeforeGrab, kind, None, "niri", true, false),
+                Some(Stall::Dead)
+            );
+            assert_eq!(
+                stall_fallback_at(DeadBeforeGrab, kind, None, "KDE", true, true),
+                None
+            );
+        }
+        // A reused frame only matters to a poll.
+        for stall in STALLS {
+            assert_eq!(
+                stall_fallback_at(
+                    ReusedFrame,
+                    CaptureKind::Tab,
+                    Some(stall),
+                    "niri",
+                    true,
+                    true
+                ),
+                None
+            );
+            assert_eq!(
+                stall_fallback_at(
+                    ReusedFrame,
+                    CaptureKind::Poll,
+                    Some(stall),
+                    "niri",
+                    true,
+                    true
+                ),
+                Some(stall)
+            );
+        }
+        // The quiet rate limit holds back a poll; dead and waiting ones are not limited.
+        assert_eq!(
+            stall_fallback_at(
+                ReusedFrame,
+                CaptureKind::Poll,
+                Some(Stall::Quiet),
+                "niri",
+                true,
+                false
+            ),
+            None
+        );
+        for stall in [Stall::Dead, Stall::ReopenWaiting] {
+            for site in [ReusedFrame, running] {
+                assert_eq!(
+                    stall_fallback_at(site, CaptureKind::Poll, Some(stall), "sway", false, false),
+                    Some(stall)
+                );
+            }
+        }
+        // A Tab grab error on a quiet stream is not rate limited.
+        assert_eq!(
+            stall_fallback_at(
+                running,
+                CaptureKind::Tab,
+                Some(Stall::Quiet),
+                "niri",
+                true,
+                false
+            ),
+            Some(Stall::Quiet)
+        );
+        // Nothing during shutdown, nothing without a stall, nothing on KDE.
+        for kind in KINDS {
+            assert_eq!(
+                stall_fallback_at(stopping, kind, Some(Stall::Dead), "niri", true, true),
+                None
+            );
+            assert_eq!(
+                stall_fallback_at(running, kind, None, "niri", true, true),
+                None
+            );
+            for stall in STALLS {
+                for site in [ReusedFrame, running] {
+                    assert_eq!(
+                        stall_fallback_at(site, kind, Some(stall), "KDE", true, true),
+                        None
+                    );
+                }
+            }
+        }
+        // Forced GNOME: no quiet poll, but a dead stream still falls back.
+        assert_eq!(
+            stall_fallback_at(
+                ReusedFrame,
+                CaptureKind::Poll,
+                Some(Stall::Quiet),
+                "GNOME",
+                true,
+                true
+            ),
+            None
+        );
+        assert_eq!(
+            stall_fallback_at(DeadBeforeGrab, CaptureKind::Poll, None, "GNOME", true, true),
+            Some(Stall::Dead)
+        );
     }
 
     #[test]

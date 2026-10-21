@@ -13,7 +13,22 @@ pub async fn is_available() -> bool {
 /// Output geometry is read from Wayland (xdg-output), which KDE exposes even
 /// though it has no screencopy. With one output, or when the geometry can't
 /// be read, the full image is kept.
+///
+/// The request runs on its own task. A caller that drops this future (a Tab
+/// cancelling a poll, a shutdown race) only detaches that task: it still
+/// receives the file URI from the portal and removes the file, so no
+/// screenshot is left in the user's Pictures folder. A runtime that is
+/// shutting down can still cut the task short.
 pub async fn capture(
+    output_name: Option<&str>,
+) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    let output = output_name.map(str::to_owned);
+    tokio::spawn(async move { capture_request(output.as_deref()).await })
+        .await
+        .map_err(|err| format!("portal screenshot task failed: {err}"))?
+}
+
+async fn capture_request(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let response = ashpd::desktop::screenshot::ScreenshotRequest::default()

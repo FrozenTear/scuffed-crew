@@ -233,11 +233,14 @@ status say why. The saved permission is kept. Other desktops (niri, Sway,
 Hyprland, X11) keep their direct capture unless you force the stream.
 
 If the share cannot start, the tracker logs a warning. On niri, wlroots,
-and GNOME when the stream was forced, that grab uses Older screenshot, and
-so does a Tab or poll grab while the stream is dead, waiting for its
-reopen, or has sent no new frame for 8 seconds. On KDE, and GNOME on the
-automatic stream, it skips the screenshot, including while backing off or
-after the stream dies. A failed start is not retried
+and GNOME when the stream was forced, that grab takes a screenshot, and so
+does a Tab or poll grab while the stream is dead or waiting for its
+reopen. A poll on a stream that has sent no new frame for 8 seconds does
+the same at most once every 10 seconds, except on GNOME, where the portal
+screenshot flashes the screen. On niri and wlroots the screenshot is
+wayshot (one monitor, no file), and Older screenshot only when wayshot
+fails. On KDE, and GNOME on the automatic stream, it skips the screenshot,
+including while backing off or after the stream dies. A failed start is not retried
 for 30 seconds. If the portal is down, or its cursor-mode property cannot
 be read, the log says the portal is unavailable and the saved permission
 is kept. The next try after that backoff opens the share again. A share
