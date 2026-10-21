@@ -91,8 +91,9 @@ pub const FIRST_TAB_OPEN_WAIT: std::time::Duration = std::time::Duration::from_s
 pub enum OpeningTab {
     /// The wait for a fresh frame has not passed.
     Wait,
-    /// The wait passed. The attempt stays open-in-progress, so a later
-    /// retry can try again. It is not a missed frame.
+    /// [`FIRST_TAB_OPEN_WAIT`] has passed. The attempt returns
+    /// open-in-progress so a later retry can try again. It is not a
+    /// stream miss, and it does not log one.
     Miss,
 }
 
@@ -275,6 +276,17 @@ pub fn poll_uses_frame(
         (Some(seq), None, Some(seen)) if seq <= seen.seq => false,
         _ => true,
     }
+}
+
+/// True when the poll loop must skip the read. The daemon `continue`s on
+/// this, so a reused frame never confirms Victory or Defeat.
+pub fn reused_frame_skips_the_read(
+    is_new: bool,
+    seq: Option<u64>,
+    stream: Option<u64>,
+    seen: Option<SeenStream>,
+) -> bool {
+    !poll_uses_frame(is_new, seq, stream, seen)
 }
 
 fn as_new_capture(image: image::DynamicImage) -> CapturedFrame {
@@ -572,10 +584,8 @@ pub async fn capture_screen_oneshot(
                 tracing::warn!(
                     "Capture now skipped: the tracker is sharing the screen, and a screenshot beside it can crash KWin"
                 );
-                return Err(
-                    "The tracker is sharing the screen, so this screenshot was skipped. Quit Overwatch, or stop the tracker, so the share closes, then try again."
-                        .into(),
-                );
+                let token_saved = screencast::restore_token_saved(data_dir);
+                return Err(screencast::capture_now_blocked_message(token_saved).into());
             }
             portal::capture(output_name).await
         }
@@ -730,6 +740,10 @@ mod tests {
         assert!(opened.started.elapsed() < std::time::Duration::from_secs(1));
         assert!(opened.frame.is_new);
         assert!(opened.fresh_press);
+        assert!(
+            opened.miss_suppressed,
+            "the stale miss from a press the open pushed past the frame budget is not logged"
+        );
         assert_eq!(opened.elapsed, std::time::Duration::from_secs(4));
 
         let still = script_opening_share(std::time::Duration::from_secs(6)).await;
@@ -747,6 +761,7 @@ mod tests {
         started: std::time::Instant,
         elapsed: std::time::Duration,
         fresh_press: bool,
+        miss_suppressed: bool,
         frame: CapturedFrame,
         miss: String,
     }
@@ -757,6 +772,7 @@ mod tests {
         let at = std::sync::atomic::AtomicU64::new(0);
         let after_open = std::sync::atomic::AtomicU8::new(0);
         let fresh_press = std::sync::atomic::AtomicBool::new(false);
+        let miss_suppressed = std::sync::atomic::AtomicBool::new(false);
         let step_ms = 50u64;
         let open_ms = u64::try_from(open_for.as_millis()).unwrap_or(u64::MAX);
         let result = first_tab_grab(
@@ -775,6 +791,10 @@ mod tests {
                 }
                 let n = after_open.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n == 0 {
+                    miss_suppressed.store(
+                        stream_miss_log_suppressed(),
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     return Err(STREAM_MISS.into());
                 }
                 fresh_press.store(
@@ -796,11 +816,13 @@ mod tests {
         let elapsed =
             std::time::Duration::from_millis(at.load(std::sync::atomic::Ordering::Relaxed));
         let fresh_press = fresh_press.load(std::sync::atomic::Ordering::Relaxed);
+        let miss_suppressed = miss_suppressed.load(std::sync::atomic::Ordering::Relaxed);
         match result {
             Ok(frame) => ScriptedOpen {
                 started,
                 elapsed,
                 fresh_press,
+                miss_suppressed,
                 frame,
                 miss: String::new(),
             },
@@ -808,6 +830,7 @@ mod tests {
                 started,
                 elapsed,
                 fresh_press,
+                miss_suppressed,
                 frame: CapturedFrame {
                     image: image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1)),
                     seq: None,

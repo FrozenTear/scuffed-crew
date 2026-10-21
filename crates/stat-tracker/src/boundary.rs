@@ -1388,10 +1388,19 @@ pub fn note_accepted_capture(
     if plan.refresh_baseline || plan.count_progress || plan.clear_hint {
         state.deferred = None;
     }
-    state.gate = Some(accepted);
+    // A discarded suspect row does not move the monotonic gate. Its raw
+    // counters can still anchor the reset baseline, which is what a later
+    // fresh board is compared with.
+    let mut monotonic = accepted;
+    let anchor = monotonic.boundary_anchor.take();
+    state.gate = Some(monotonic);
     state.reset_streak = plan.reset_streak;
     state.reset_baseline = if plan.refresh_baseline {
-        Some(accepted)
+        Some(anchor.map_or(monotonic, |raw| capture_gate::GateState {
+            accepted: raw,
+            last_raw: raw,
+            ..capture_gate::GateState::default()
+        }))
     } else {
         plan.reset_baseline
     };

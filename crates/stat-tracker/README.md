@@ -225,27 +225,40 @@ Victory or Defeat by itself. The share closes when Overwatch quits, once
 the permission has been saved, and the next game opens it again with that
 permission. If the permission was not saved, the share stays up so quitting
 the game does not ask again. If you cancel or close the share prompt, the
-tracker does not ask again until Overwatch is started again. On KDE it
-takes no captures and does not fall back to screenshots. Where a screenshot
-is already safe, including GNOME when the stream was forced, screenshots
-continue. One log line and the app status say why. The saved permission is
-kept. Other desktops (niri, Sway, Hyprland, X11) keep their direct capture
-unless you force the stream.
+tracker does not ask again until Overwatch is started again. On KDE, and
+GNOME on the automatic stream, it takes no captures and does not fall back
+to screenshots. Where a screenshot is already safe, including GNOME when
+the stream was forced, screenshots continue. One log line and the app
+status say why. The saved permission is kept. Other desktops (niri, Sway,
+Hyprland, X11) keep their direct capture unless you force the stream.
 
 If the share cannot start, the tracker logs a warning. On niri, wlroots,
-and GNOME when the stream was forced, that grab uses the older screenshot
-portal. On KDE it skips the screenshot, including while backing off or
-after the stream dies. A failed start is not retried for 30 seconds. If
-the portal is down, or its cursor-mode property cannot be read, the log
-says the portal is unavailable and the saved permission is kept. The next
-try after that backoff opens the share again. A share that never starts
-streaming is closed and then waits out that same backoff. If the permission
-dialog times out, that is a No until the next Overwatch launch, and stopping
-the tracker cancels the dialog. On KDE a Tab that sees no frame from
-after the key press does not fall back to that portal. A Tab on a direct capture or the screenshot portal
-still waits 400 ms for the overlay. On the stream it waits for a buffer at
-least 300 ms after the key, and gives up 1200 ms after the key. A buffer
-from those first 300 ms does not finish the wait.
+and GNOME when the stream was forced, that grab uses Older screenshot. On
+KDE, and GNOME on the automatic stream, it skips the screenshot, including
+while backing off or after the stream dies. A failed start is not retried
+for 30 seconds. If the portal is down, or its cursor-mode property cannot
+be read, the log says the portal is unavailable and the saved permission
+is kept. The next try after that backoff opens the share again. A share
+that never starts streaming is closed and then waits out that same
+backoff. Silence while the stream is still running does not reopen it,
+and a poll that sees no new buffer does not count. The stream is reopened
+when PipeWire reports an error, when it stays unconnected after it had
+been streaming, when a pause lasts 2 seconds, when the portal session
+closes, or when the connection faults. Two Tab waits that get no PipeWire
+buffer do the same. The reopen runs on the next poll, once per game, and
+at least 5 minutes after the last reopen. A new game clears the miss
+streak and the once-per-game cap. It does not clear the 5 minute clock.
+Without a saved permission the stream stays up and one warning is logged.
+A permission dialog that times out is a No until the next Overwatch
+launch only when no restore token was sent. A timeout after a token was
+sent waits 30 seconds and asks again. Stopping the tracker cancels the
+dialog. On KDE, and GNOME on the automatic stream, a Tab that sees no
+frame after the key press does not fall back to Older screenshot. A Tab
+on a direct capture or the screenshot portal still waits 400 ms for the
+overlay. On the stream it waits for a buffer at least 300 ms after the
+key, and gives up 1200 ms after the key. A buffer from those first 300 ms
+does not finish the wait. A poll waits one frame period plus 100 ms before
+it reuses the previous frame (600 ms at 2 fps).
 
 `STAT_TRACKER_CAPTURE`, when set and not empty, wins over `capture_route`.
 For the systemd service, put it in `~/.config/environment.d/` (for example

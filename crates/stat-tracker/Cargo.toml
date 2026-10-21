@@ -31,6 +31,7 @@ libwayshot = "0.7"
 # No shm. Closure evidence: no new native libs vs baseline.
 x11rb = { version = "0.14", features = ["randr", "image"] }
 ashpd = { version = "0.13", features = ["screenshot", "screencast"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 # PipeWire is dlopen'd (libpipewire-0.3.so.0). Do not link it: the stat
 # tracker CI image has no libpipewire-dev.
 libloading = "0.8"

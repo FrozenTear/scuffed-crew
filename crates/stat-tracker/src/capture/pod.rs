@@ -537,6 +537,15 @@ mod tests {
             !ours.contains(&(1, 1)),
             "a range that starts at 1/1 does not meet KWin's fixed 0/1: {ours:?}"
         );
+        assert!(framerate_within_cap(&enum_format_pod(2), 2));
+        assert!(
+            !framerate_within_cap(&enum_format_pod(2), 1),
+            "2/1 is over a 1 fps cap"
+        );
+        assert!(
+            negotiated_rate_line(&fractions(&enum_format_pod(4)), 4).contains("max-framerate 4/1"),
+            "the negotiated line must name the cap"
+        );
     }
 
     #[test]

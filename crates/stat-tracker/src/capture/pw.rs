@@ -7,7 +7,9 @@
 //! and only the newest buffer in that callback is copied.
 
 use std::ffi::{c_char, c_void};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{
+    AtomicBool, AtomicI32, AtomicI64, AtomicPtr, AtomicU32, AtomicU64, Ordering,
+};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -145,6 +147,17 @@ struct State {
     /// after `pw_loop_enter` and before it publishes the loop, so a quit
     /// that landed early never calls `pw_loop_iterate`.
     quit_requested: AtomicBool,
+    /// Wall clock of the last buffer dequeued in `on_process`. This is the
+    /// PipeWire delivery time, not the time a grab copied the buffer.
+    last_buffer: Mutex<Option<std::time::Instant>>,
+    /// Last `pw_stream` state. 0 until the first state callback.
+    pw_state: AtomicI32,
+    /// When this stream entered Paused after it had reached Streaming.
+    /// Cleared on any other state. A short pause is not a dead stream.
+    paused_since: Mutex<Option<std::time::Instant>>,
+    /// The fd or core dropped the connection. Not set when Drop asked the
+    /// thread to quit.
+    core_fault: AtomicBool,
     dequeue: DequeueFn,
     queue: QueueFn,
     update_params: UpdateFn,
@@ -211,6 +224,37 @@ pub enum GrabOutcome {
 /// No Tab threshold. Poll grabs leave this in `need_arrived_ms`.
 pub const NO_TAB_NEED: u64 = u64::MAX;
 
+/// The PipeWire stream state the capture loop can act on. Numbers stay in
+/// this module.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportedPhase {
+    Streaming,
+    Error,
+    Unconnected,
+    Paused,
+    Connecting,
+    Other,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct StreamReport {
+    pub phase: ReportedPhase,
+    pub paused_for: Option<Duration>,
+    pub core_fault: bool,
+    pub has_streamed: bool,
+}
+
+fn reported_phase(state: i32) -> ReportedPhase {
+    match state {
+        PW_STREAM_STATE_STREAMING => ReportedPhase::Streaming,
+        PW_STREAM_STATE_ERROR => ReportedPhase::Error,
+        PW_STREAM_STATE_UNCONNECTED => ReportedPhase::Unconnected,
+        PW_STREAM_STATE_PAUSED => ReportedPhase::Paused,
+        PW_STREAM_STATE_CONNECTING => ReportedPhase::Connecting,
+        _ => ReportedPhase::Other,
+    }
+}
+
 impl Handle {
     pub fn alive(&self) -> bool {
         self.state.alive.load(Ordering::Acquire)
@@ -241,6 +285,31 @@ impl Handle {
     /// reaches STREAMING is closed after a bound on this clock.
     pub fn running_for(&self) -> Duration {
         self.state.started.elapsed()
+    }
+
+    /// When PipeWire last dequeued a buffer on this stream. `None` until
+    /// the first one. A grab that reused an older frame does not move it.
+    pub fn last_buffer_at(&self) -> Option<std::time::Instant> {
+        *self
+            .state
+            .last_buffer
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    pub fn stream_report(&self) -> StreamReport {
+        let paused_for = self
+            .state
+            .paused_since
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+            .map(|at| at.elapsed());
+        StreamReport {
+            phase: reported_phase(self.state.pw_state.load(Ordering::Acquire)),
+            paused_for,
+            core_fault: self.state.core_fault.load(Ordering::Acquire),
+            has_streamed: self.has_streamed(),
+        }
     }
 
     pub fn stream_id(&self) -> u64 {
@@ -320,7 +389,13 @@ impl Handle {
             } else if let Some(frame) = take_frame(&self.state, fresh, marker) {
                 return Ok(self.finish_frame(frame, fresh, started, true));
             }
-            if !self.alive() || stream_died(&self.state) || crate::replace::shutdown_requested() {
+            // A pause is not fatal: niri and KWin leave a stream Streaming
+            // with no buffers, and a short Paused is negotiation. Error,
+            // unconnected, and a dropped fd clear `alive` or `core_fault`.
+            if !self.alive()
+                || self.state.core_fault.load(Ordering::Acquire)
+                || crate::replace::shutdown_requested()
+            {
                 self.state.want.store(false, Ordering::Release);
                 return Err("screencast stream ended".into());
             }
@@ -452,8 +527,8 @@ fn remember_good(state: &State, frame: &Arc<PackedFrame>) {
         .unwrap_or_else(|err| err.into_inner()) = Some(Arc::clone(frame));
 }
 
-fn stream_died(state: &State) -> bool {
-    state.seen_streaming.load(Ordering::Acquire) && !state.streaming.load(Ordering::Acquire)
+fn record_dequeued_buffer(slot: &Mutex<Option<std::time::Instant>>, now: std::time::Instant) {
+    *slot.lock().unwrap_or_else(|err| err.into_inner()) = Some(now);
 }
 
 /// How long Drop waits for the stream thread. Quit is repeated on this
@@ -679,6 +754,10 @@ pub fn open_stream(fd: std::os::fd::RawFd, node_id: u32, max_fps: u32) -> Result
         }),
         loop_lock: Mutex::new(()),
         quit_requested: AtomicBool::new(false),
+        last_buffer: Mutex::new(None),
+        pw_state: AtomicI32::new(PW_STREAM_STATE_UNCONNECTED),
+        paused_since: Mutex::new(None),
+        core_fault: AtomicBool::new(false),
     });
     let thread_state = Arc::clone(&state);
     let join = std::thread::Builder::new()
@@ -944,6 +1023,11 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
         }
         (symbols.context_destroy)(context);
         destroy_loop(&state, symbols.main_loop_destroy, main);
+        // Drop sets `quit_requested` before the thread leaves. Any other
+        // exit is the fd or core going away.
+        if !state.quit_requested.load(Ordering::Acquire) {
+            state.core_fault.store(true, Ordering::Release);
+        }
         state.alive.store(false, Ordering::Release);
         state.notify.notify_waiters();
     }
@@ -984,19 +1068,40 @@ extern "C" fn on_state(data: *mut c_void, _old: i32, state: i32, _error: *const 
         return;
     }
     let state_ref = unsafe { &*(data as *const State) };
+    state_ref.pw_state.store(state, Ordering::Release);
     if state == PW_STREAM_STATE_STREAMING {
         state_ref.seen_streaming.store(true, Ordering::Release);
         state_ref.streaming.store(true, Ordering::Release);
+        *state_ref
+            .paused_since
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = None;
         tracing::info!("screencast pipewire state streaming");
     } else {
         state_ref.streaming.store(false, Ordering::Release);
+        if state == PW_STREAM_STATE_PAUSED && state_ref.seen_streaming.load(Ordering::Acquire) {
+            let mut since = state_ref
+                .paused_since
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
+            if since.is_none() {
+                *since = Some(std::time::Instant::now());
+            }
+        } else {
+            *state_ref
+                .paused_since
+                .lock()
+                .unwrap_or_else(|err| err.into_inner()) = None;
+        }
         tracing::debug!(state = pw_state_name(state), "screencast pipewire state");
     }
+    // Error and unconnected end the stream. A pause is recorded above and
+    // only counts once it persists. Connecting is negotiation.
     if stream_state_is_dead(state, state_ref.seen_streaming.load(Ordering::Acquire)) {
         state_ref.alive.store(false, Ordering::Release);
         tracing::info!(
             state = pw_state_name(state),
-            "screencast stream ended; the next open waits out the backoff"
+            "screencast pipewire stream left streaming"
         );
     }
     state_ref.notify.notify_waiters();
@@ -1077,6 +1182,10 @@ extern "C" fn on_process(data: *mut c_void) {
         }
         let seq = state.dequeue_seq.fetch_add(1, Ordering::AcqRel) + 1;
         state.received.fetch_add(1, Ordering::Relaxed);
+        // Every dequeued buffer, including one the throttle drops. This is
+        // the PipeWire clock. There is no way to ask a consumer stream for
+        // a frame, so a poll does not move this.
+        record_dequeued_buffer(&state.last_buffer, std::time::Instant::now());
         let pts = header_pts(buf);
         if let Some(pts) = pts.filter(|pts| *pts > 0) {
             update_max_pts(&state.max_pts, pts);
@@ -1370,14 +1479,14 @@ pub fn copy_ends_request(need_arrived_ms: u64, arrived_ms: u64) -> bool {
     need_arrived_ms == NO_TAB_NEED || arrived_ms >= need_arrived_ms
 }
 
-/// ERROR is always dead. UNCONNECTED, PAUSED, and CONNECTING count only
-/// after the stream has reached STREAMING, so negotiation is not a user stop.
+/// ERROR is always dead. UNCONNECTED counts only after the stream has
+/// reached STREAMING, so the state before the first callback is not a
+/// stop. PAUSED is not dead here: a pause has to persist, and that clock
+/// lives with `paused_since`. CONNECTING is negotiation.
 pub fn stream_state_is_dead(state: i32, seen_streaming: bool) -> bool {
     match state {
         PW_STREAM_STATE_ERROR => true,
-        PW_STREAM_STATE_UNCONNECTED | PW_STREAM_STATE_PAUSED | PW_STREAM_STATE_CONNECTING => {
-            seen_streaming
-        }
+        PW_STREAM_STATE_UNCONNECTED => seen_streaming,
         _ => false,
     }
 }
@@ -1479,14 +1588,27 @@ mod tests {
     }
 
     #[test]
+    fn a_dequeued_buffer_stamps_the_pipewire_clock() {
+        let now = std::time::Instant::now();
+        let held = Mutex::new(None);
+        record_dequeued_buffer(&held, now);
+        assert_eq!(*held.lock().unwrap(), Some(now));
+        let later = now + Duration::from_secs(60);
+        record_dequeued_buffer(&held, later);
+        assert_eq!(*held.lock().unwrap(), Some(later));
+    }
+
+    #[test]
     fn unconnected_after_streaming_ends_the_session() {
         assert!(!stream_state_is_dead(PW_STREAM_STATE_UNCONNECTED, false));
         assert!(!stream_state_is_dead(PW_STREAM_STATE_PAUSED, false));
         assert!(stream_state_is_dead(PW_STREAM_STATE_ERROR, false));
         assert!(stream_state_is_dead(PW_STREAM_STATE_UNCONNECTED, true));
-        assert!(stream_state_is_dead(PW_STREAM_STATE_PAUSED, true));
+        // A pause is not an immediate end. The capture loop reopens only
+        // once that pause has persisted.
+        assert!(!stream_state_is_dead(PW_STREAM_STATE_PAUSED, true));
         assert!(!stream_state_is_dead(PW_STREAM_STATE_CONNECTING, false));
-        assert!(stream_state_is_dead(PW_STREAM_STATE_CONNECTING, true));
+        assert!(!stream_state_is_dead(PW_STREAM_STATE_CONNECTING, true));
         assert!(!stream_state_is_dead(PW_STREAM_STATE_STREAMING, true));
         assert_eq!(pw_state_name(PW_STREAM_STATE_STREAMING), "streaming");
         assert_eq!(pw_state_name(PW_STREAM_STATE_CONNECTING), "connecting");
@@ -1612,6 +1734,10 @@ mod tests {
                 loop_: AtomicPtr::new(std::ptr::null_mut()),
                 loop_lock: Mutex::new(()),
                 quit_requested: AtomicBool::new(false),
+                last_buffer: Mutex::new(None),
+                pw_state: AtomicI32::new(PW_STREAM_STATE_STREAMING),
+                paused_since: Mutex::new(None),
+                core_fault: AtomicBool::new(false),
                 dequeue: noop_dequeue,
                 queue: noop_queue,
                 update_params: noop_update,

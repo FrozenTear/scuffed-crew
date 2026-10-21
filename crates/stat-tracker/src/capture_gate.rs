@@ -31,15 +31,15 @@
 //! `h`, `mit`). Three OCR reads of 1 must not replace a held 11.
 //!
 //! Two cases may still store a lower number. An unconfirmed latch (a
-//! fallback or an implausible first read that never got a matching second
-//! read) comes down only when two later reads name the same lower number.
-//! One low read keeps the high value and flags that field. A high stored
-//! while another column was held down is a row shift, and a later read of
-//! the real row can replace it even after the shifted number repeated. A
-//! value confirmed by two matching reads, and not a row shift, cannot go
-//! down. A real new game is the whole-board reset in `boundary`, and the
-//! caller passes `split = true` so this gate stores the new counters
-//! instead of holding them.
+//! fallback, or a value stored while the capture was low-trust) yields to
+//! one later clean read, even when that read is lower. A high stored while
+//! another column was held down is a row shift, and a later read of the
+//! real row can replace it when that read repeats. A value confirmed by a
+//! clean read, and not a row shift, cannot go down. A read whose every cell
+//! is suspect, including a suspect own row, does not seed or raise the
+//! baseline and stores none of its numbers. A real new game is the
+//! whole-board reset in `boundary`, and the caller passes `split = true` so
+//! this gate stores the new counters instead of holding them.
 //!
 //! ## Single-field jump
 //!
@@ -71,9 +71,10 @@
 //!
 //! A raw-text fallback, or a first capture whose kill columns are past the
 //! parser ceilings, is stored but marked `low_trust`. Those columns are
-//! `unconfirmed`. Two later clean reads of the same lower number may replace
-//! an unconfirmed column. One low read keeps the high value and flags the
-//! field. A confirmed column never decreases.
+//! `unconfirmed`. One later clean read, with no suspect cell, replaces an
+//! unconfirmed column even when the read is lower. A confirmed column never
+//! decreases. A read with every cell suspect does not seed that latch and
+//! does not raise it.
 //!
 //! That replacement still goes through the same holds as any other capture:
 //! a decrease of a *confirmed* column is the monotonic hold (B), a kill-column
@@ -189,13 +190,13 @@ pub struct GateState {
     /// Set when they came from the raw-text fallback, or when a kill column
     /// is above the same ceilings the parser uses (elims/assists above 99,
     /// deaths above 50), including the first capture of a game, which
-    /// otherwise accepts the raw read verbatim. Two later clean reads of the
-    /// same lower number replace the latch. One low read does not. Missing
-    /// on a pre-0.4.21 `active_game.json` means already trusted.
+    /// otherwise accepts the raw read verbatim. One later clean read of a
+    /// lower number replaces the latch. A read that is itself suspect does
+    /// not. Missing on a pre-0.4.21 `active_game.json` means already trusted.
     #[serde(default)]
     pub low_trust: bool,
     /// Which accepted columns came from a fallback or an implausible latch.
-    /// Two clean reads of the same lower number may replace these. One low
+    /// One clean read of a lower number replaces these. A suspect or held
     /// read keeps the accepted value. A column left false was already
     /// confirmed, so a decrease of it keeps that value. Missing on an older
     /// save means none.
@@ -260,6 +261,14 @@ pub struct GateState {
     /// Which columns have [`Self::unsure_shown`] set.
     #[serde(default)]
     pub has_unsure_shown: [bool; GATE_COLS],
+    /// Raw counters from a read the gate discarded (every cell suspect).
+    ///
+    /// Not a monotonic value: `accepted` stays where it was. The boundary
+    /// plan may anchor its reset baseline on this, so a later fresh board
+    /// still splits, and then it is cleared off the gate that is carried
+    /// forward. Missing means the accepted counters are the anchor.
+    #[serde(default)]
+    pub boundary_anchor: Option<Counters>,
 }
 
 impl GateState {
@@ -343,7 +352,7 @@ pub struct Unlatch {
     pub raw: u32,
     /// The (suspected-corrupt) value that had been latched.
     pub revised_from: u32,
-    /// True when two matching reads replaced an unconfirmed cell. A confirmed
+    /// True when one clean read replaced an unconfirmed cell. A confirmed
     /// column is never revised down.
     pub replaced_unconfirmed: bool,
 }
@@ -546,11 +555,9 @@ pub fn held_fields(holds: &[Hold]) -> Vec<&'static str> {
 
 /// Flat names of the cells an un-latch revised down on this capture.
 ///
-/// The gate lets two matching clean reads replace an unconfirmed column
-/// with a lower number, and that is not a hold. Under `reader = "new"` a
-/// suspect own row leaves every column it moved unconfirmed, so the next
-/// reads can lower several stats at once (R3-1): the row that stores the
-/// lower number names those fields.
+/// The gate lets one clean read replace an unconfirmed column with a lower
+/// number, and that is not a hold. The row that stores the lower number
+/// names those fields.
 pub fn revised_fields(unlatches: &[Unlatch]) -> Vec<&'static str> {
     let mut names = Vec::new();
     for unlatch in unlatches {
@@ -588,9 +595,13 @@ pub fn lowered_fields(before: Counters, after: Counters) -> Vec<&'static str> {
 ///
 /// On a split or a first capture the raw read is accepted verbatim (a new game
 /// legitimately resets every counter) and marked low-trust when the read is
-/// untrusted or a kill column is past the ceilings. Otherwise each cell is
-/// checked independently: a decrease keeps the previous accepted value and is
-/// unsure; a trailing-digit inject is held (CG-4 B2); a single-field rise past
+/// untrusted or a kill column is past the ceilings. A read whose every cell
+/// is suspect is the exception: none of its numbers are accepted, on a first
+/// capture or later. Otherwise each cell is
+/// checked independently: a decrease of a confirmed column keeps the previous
+/// accepted value and is unsure; an unconfirmed column yields to one clean
+/// read even when that read is lower; a trailing-digit inject is held (CG-4 B2);
+/// a single-field rise past
 /// [`JUMP_MAX`] waits for a matching second read; an increase beyond the
 /// plausible rate is held unless a clean previous raw read corroborates it
 /// (C / CG-4 B1 for suspect wide cols); an advance within those limits passes
@@ -660,18 +671,19 @@ fn fresh_state(raw: Counters, suspect: [bool; GATE_COLS], trusted: bool) -> Gate
 /// used to be stored as the baseline with no check, which is how a shifted
 /// assists/deaths pair locked for the rest of the match.
 ///
-/// A later read that is trusted and has no edge-ink suspect column may
-/// replace an *unconfirmed* column with a lower number only when this raw
-/// read equals the previous raw read. One low read keeps the high value.
-/// The replacement still applies the monotonic hold (B) to a confirmed
-/// column, the rate cap (C), and the trailing-digit inject hold (B2). It
-/// also holds a replacement below the confirmed value a fallback moved off,
-/// and a wide column whose clean read is the latched number with its last
-/// digit cut off. `low_trust` stays set while any column is held or still
+/// A later read that is trusted and has no suspect cell replaces an
+/// *unconfirmed* column on that one read, even when the number is lower.
+/// A confirmed column still takes the monotonic hold (B). The rate cap (C)
+/// and the trailing-digit inject hold (B2) still apply, including to a
+/// low-trust column whose clean read jumps past them. A replacement below
+/// the confirmed value a fallback moved off, and a wide column whose clean
+/// read is the latched number with its last digit cut off, also fall
+/// through to B. A row-shift high still waits for the same lower number to
+/// repeat. `low_trust` stays set while any column is held or still
 /// unconfirmed. A second fallback, or a read with edge-ink, does not clear
-/// an unconfirmed column. A trusted decrease of a confirmed latch keeps the
-/// old value. An untrusted read is recorded as suspect on every column, so
-/// it does not corroborate the next jump or the next lower read.
+/// an unconfirmed column. An untrusted read is recorded as suspect on every
+/// column, so it does not corroborate the next jump. A read with every cell
+/// suspect does not seed or raise the baseline.
 pub fn apply_gate_with_trust(
     prev: Option<(GateState, Duration)>,
     raw: Counters,
@@ -744,14 +756,25 @@ pub fn apply_gate_seeded(
     prev: Option<(GateState, Duration)>,
     raw: Counters,
     mut suspect: [bool; GATE_COLS],
-    held: [bool; GATE_COLS],
+    mut held: [bool; GATE_COLS],
     split: bool,
     trusted: bool,
     seed: Option<(Counters, Duration)>,
 ) -> GateOutcome {
+    let already_unread = held.iter().all(|&cell| cell);
     for col in 0..GATE_COLS {
         suspect[col] |= held[col];
     }
+    // Every cell is suspect: another player's row, or ink on every cell.
+    // None of these numbers may seed or raise the monotonic baseline, and
+    // none are stored. An unread cell keeps the last accepted value, or
+    // stays a placeholder when the game has no row yet. The raw counters
+    // stay on `boundary_anchor` so the reset baseline can still move.
+    let discard_row = suspect.iter().all(|&cell| cell);
+    if discard_row {
+        held = [true; GATE_COLS];
+    }
+    let boundary_anchor = (discard_row && !already_unread).then_some(raw);
     let restart = trusted && prev.is_some_and(|(state, _)| state.only_low_trust_reads());
     let Some((state, elapsed)) = prev.filter(|_| !split && !restart) else {
         let read = raw.to_array();
@@ -788,6 +811,7 @@ pub fn apply_gate_seeded(
                 }
             }
         }
+        state.boundary_anchor = boundary_anchor;
         return GateOutcome {
             accepted,
             state,
@@ -863,15 +887,13 @@ pub fn apply_gate_seeded(
             down_last[col] = 0;
             continue;
         }
-        // A confirmed value stays. An unconfirmed high, and a row-shift high,
-        // come down only when this raw read equals the previous raw read, so
-        // one low read cannot replace either of them.
-        let clean_match = trusted
-            && !suspect.iter().any(|&flag| flag)
-            && !prev_raw_suspect[col]
-            && prev_raw[col] == cur[col];
-        let matched_low = replacing && unconfirmed[col] && clean_match;
-        let revise_down = matched_low || (row_shift[col] && clean_match);
+        // A confirmed value stays. A low-trust column yields to one clean
+        // read even when that read is lower. A row-shift high still waits
+        // for the same lower number to repeat.
+        let clean_board = trusted && !suspect.iter().any(|&flag| flag);
+        let clean_match = clean_board && !prev_raw_suspect[col] && prev_raw[col] == cur[col];
+        let replace_low = clean_board && unconfirmed[col] && cur[col] < prev_acc[col];
+        let revise_down = replace_low || (row_shift[col] && clean_match);
         if cur[col] < prev_acc[col] && revise_down {
             // Below the value a fallback moved off a confirmed column, or a
             // wide column that is just the latched number with its last
@@ -1061,12 +1083,15 @@ pub fn apply_gate_seeded(
             }
             // A ghost under an implausible kill latch is stored, but the
             // column stays unconfirmed until a non-suspect read already
-            // agreed with it. Otherwise B would lock the ghost in.
-            // Plausible columns, including a fallback assists of 40, still
-            // confirm on this read.
+            // agreed with it, or this clean read replaced the latch.
+            // Otherwise B would lock the ghost in. Plausible columns,
+            // including a fallback assists of 40, still confirm on this read.
             let over = kill_col_over_ceiling(col, prev_acc[col]);
             let agrees = !prev_raw_suspect[col] && cur[col] == prev_raw[col];
-            if over && !agrees {
+            let replaced = unlatches
+                .iter()
+                .any(|unlatch| unlatch.col == col && unlatch.replaced_unconfirmed);
+            if over && !agrees && !replaced {
                 continue;
             }
             unconfirmed[col] = false;
@@ -1117,6 +1142,7 @@ pub fn apply_gate_seeded(
             // Set by the capture path after the gate, not here.
             unsure_shown: [0; GATE_COLS],
             has_unsure_shown: [false; GATE_COLS],
+            boundary_anchor,
         },
         holds,
         unlatches,
@@ -1170,34 +1196,25 @@ mod tests {
     }
 
     #[test]
-    fn fallback_latch_yields_to_two_matching_lower_reads() {
+    fn fallback_latch_yields_lower_columns_to_one_clean_read() {
         // In-range but wrong assists/deaths from the text fallback. One
-        // clean lower read keeps them and flags the fields. The same lower
-        // read again replaces them.
+        // clean read replaces the latch, including the lower columns.
         let first = apply_gate_with_trust(None, c(2, 40, 18, 450, 0, 2), CLEAN, false, false);
         assert!(first.state.low_trust);
         assert_eq!(first.accepted.assists, 40);
         let lower = c(2, 0, 0, 1105, 259, 450);
         let second =
             apply_gate_with_trust(Some((first.state, secs(20))), lower, CLEAN, false, true);
-        assert_eq!(second.accepted.assists, 40);
-        assert_eq!(second.accepted.deaths, 18);
-        assert_eq!(second.accepted.damage, 1105);
-        assert!(unsure_fields(&second.holds).contains(&"a"));
-        assert!(unsure_fields(&second.holds).contains(&"d"));
-        assert!(second.state.low_trust);
-        let third =
-            apply_gate_with_trust(Some((second.state, secs(20))), lower, CLEAN, false, true);
-        assert_eq!(third.accepted, lower);
-        assert!(!third.state.low_trust);
+        assert_eq!(second.accepted, lower);
+        assert!(!second.state.low_trust);
         assert!(
-            third
+            second
                 .unlatches
                 .iter()
                 .any(|u| u.col == 1 && u.raw == 0 && u.revised_from == 40)
         );
         assert!(
-            third
+            second
                 .unlatches
                 .iter()
                 .any(|u| u.col == 2 && u.raw == 0 && u.revised_from == 18)
@@ -1207,9 +1224,7 @@ mod tests {
     #[test]
     fn implausible_first_capture_does_not_lock() {
         // Shifted timer digits: A 1105, D 259 on the first capture of the
-        // game. That used to become the baseline. One clean lower read keeps
-        // them. The next read of the same numbers replaces them, trusted
-        // source or not.
+        // game. One clean read replaces them, trusted source or not.
         let shifted = c(0, 1105, 259, 450, 0, 2);
         let clean = c(8, 1, 2, 3993, 989, 1583);
         for trusted in [false, true] {
@@ -1224,24 +1239,117 @@ mod tests {
             }
             let second =
                 apply_gate_with_trust(Some((first.state, secs(30))), clean, CLEAN, false, true);
-            assert_eq!(second.accepted.elims, 8, "trusted={trusted}");
-            assert_eq!(second.accepted.assists, 1105, "trusted={trusted}");
-            assert_eq!(second.accepted.deaths, 259, "trusted={trusted}");
-            assert!(
-                unsure_fields(&second.holds).contains(&"a"),
-                "trusted={trusted}"
-            );
-            assert!(
-                unsure_fields(&second.holds).contains(&"d"),
-                "trusted={trusted}"
-            );
-            assert!(second.state.low_trust, "trusted={trusted}");
-            assert!(second.state.unconfirmed[1] && second.state.unconfirmed[2]);
-            let third =
-                apply_gate_with_trust(Some((second.state, secs(20))), clean, CLEAN, false, true);
-            assert_eq!(third.accepted, clean, "trusted={trusted}");
-            assert!(!third.state.low_trust, "trusted={trusted}");
+            assert_eq!(second.accepted, clean, "trusted={trusted}");
+            assert!(!second.state.low_trust, "trusted={trusted}");
         }
+    }
+
+    /// Soot 15:37:06. The Tab read another player's row. Every cell was
+    /// suspect. Raw elims 21, assists 1, healing 338 and mitigation 369 were
+    /// held; deaths 15 and damage 9441 used to latch as low-trust, and the
+    /// real board twelve seconds later (deaths 9, damage 4172) was then held
+    /// against those bad totals. The saved game was deaths 15, damage 9.4k,
+    /// marked unsure. The true board is 8 / 16 / 9 / 4172 / 8717 / 1152.
+    #[test]
+    fn an_all_suspect_wrong_row_does_not_seed_and_one_clean_read_is_the_board() {
+        let bad = c(21, 1, 15, 9441, 338, 369);
+        let clean = c(8, 16, 9, 4172, 8717, 1152);
+        let all = [true; GATE_COLS];
+        for trusted in [false, true] {
+            let seeded = apply_gate_with_trust(None, bad, all, false, trusted);
+            assert_eq!(seeded.state.boundary_anchor, Some(bad), "trusted={trusted}");
+            assert_ne!(seeded.accepted.deaths, 15, "trusted={trusted}");
+            assert_ne!(seeded.accepted.damage, 9441, "trusted={trusted}");
+            assert_eq!(seeded.accepted, c(0, 0, 0, 0, 0, 0), "trusted={trusted}");
+            assert_eq!(
+                seeded.state.unread_cols().len(),
+                GATE_COLS,
+                "trusted={trusted}"
+            );
+            let after = apply_gate(Some((seeded.state, secs(12))), clean, CLEAN, false);
+            assert_eq!(after.accepted, clean, "trusted={trusted}");
+            assert_eq!(after.accepted.deaths, 9, "trusted={trusted}");
+            assert_eq!(after.accepted.damage, 4172, "trusted={trusted}");
+            assert!(!after.state.low_trust, "trusted={trusted}");
+            assert!(
+                after
+                    .holds
+                    .iter()
+                    .all(|hold| hold.kind != HoldKind::Monotonic),
+                "trusted={trusted}: {:?}",
+                after.holds
+            );
+        }
+
+        // A confirmed row already exists. The bad read must not raise it.
+        let prior = apply_gate(None, c(8, 16, 8, 3000, 8000, 1000), CLEAN, false);
+        let raised = apply_gate(Some((prior.state, secs(12))), bad, all, false);
+        assert_eq!(raised.accepted.deaths, 8);
+        assert_eq!(raised.accepted.damage, 3000);
+        assert!(!raised.state.low_trust);
+        let fixed = apply_gate(Some((raised.state, secs(12))), clean, CLEAN, false);
+        assert_eq!(fixed.accepted.deaths, 9);
+        assert_eq!(fixed.accepted.damage, 4172);
+        assert_eq!(fixed.accepted, clean);
+        assert!(!fixed.state.low_trust);
+    }
+
+    /// The same bad totals, stored as a low-trust latch (a text fallback, or
+    /// a row that latched before this discard). One clean read replaces
+    /// deaths and damage even though both are lower. Assists 1 to 16 in 12
+    /// seconds is still past the kill-rate cap.
+    #[test]
+    fn a_low_trust_latch_yields_to_one_clean_lower_read() {
+        let bad = c(21, 1, 15, 9441, 338, 369);
+        let clean = c(8, 16, 9, 4172, 8717, 1152);
+        let latched = apply_gate_with_trust(None, bad, CLEAN, false, false);
+        assert!(latched.state.low_trust);
+        assert_eq!(latched.accepted.deaths, 15);
+        assert_eq!(latched.accepted.damage, 9441);
+        let fixed = apply_gate(Some((latched.state, secs(12))), clean, CLEAN, false);
+        assert_eq!(fixed.accepted.deaths, 9);
+        assert_eq!(fixed.accepted.damage, 4172);
+        assert!(
+            fixed
+                .holds
+                .iter()
+                .all(|hold| hold.col != 2 && hold.col != 3),
+            "deaths and damage are not held: {:?}",
+            fixed.holds
+        );
+        assert!(
+            fixed
+                .holds
+                .iter()
+                .any(|hold| hold.col == 1 && hold.kind == HoldKind::RateCap)
+        );
+    }
+
+    /// A clean read that confirmed a higher total still holds a later lower
+    /// read. Low-trust is what yields; a confirmed column does not.
+    #[test]
+    fn a_clean_higher_then_lower_stays_held() {
+        let board = c(8, 16, 9, 4172, 8717, 1152);
+        let first = apply_gate(None, board, CLEAN, false);
+        let higher = c(10, 16, 12, 5000, 8717, 1152);
+        let up = apply_gate(Some((first.state, secs(30))), higher, CLEAN, false);
+        assert_eq!(up.accepted, higher);
+        assert!(!up.state.low_trust);
+        let down = apply_gate(Some((up.state, secs(12))), board, CLEAN, false);
+        assert_eq!(down.accepted.deaths, 12);
+        assert_eq!(down.accepted.damage, 5000);
+        assert_eq!(down.accepted.elims, 10);
+        assert!(
+            down.holds
+                .iter()
+                .any(|h| h.col == 2 && h.kind == HoldKind::Monotonic && h.raw == 9)
+        );
+        assert!(
+            down.holds
+                .iter()
+                .any(|h| h.col == 3 && h.kind == HoldKind::Monotonic && h.raw == 4172)
+        );
+        assert!(!down.state.low_trust);
     }
 
     #[test]
@@ -1508,10 +1616,9 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_high_fallback_above_the_floor_corrects_on_the_second_read() {
+    fn a_wrong_high_fallback_above_the_floor_corrects_on_one_clean_read() {
         // The fallback is in range and above the confirmed value. One clean
-        // read below that latch, and still above the floor, keeps the high
-        // value. The same read again replaces it.
+        // read below that latch, and still above the floor, replaces it.
         let first = apply_gate(None, c(13, 5, 4, 5000, 0, 900), CLEAN, false);
         let adopted = apply_gate_with_trust(
             Some((first.state, secs(120))),
@@ -1527,14 +1634,9 @@ mod tests {
         let lower = c(19, 8, 4, 5900, 0, 900);
         let once =
             apply_gate_with_trust(Some((adopted.state, secs(20))), lower, CLEAN, false, true);
-        assert_eq!(once.accepted.elims, 40);
-        assert_eq!(once.accepted.damage, 8000);
-        assert!(unsure_fields(&once.holds).contains(&"e"));
-        assert!(once.state.low_trust);
-        let clean = apply_gate_with_trust(Some((once.state, secs(20))), lower, CLEAN, false, true);
-        assert_eq!(clean.accepted, lower);
-        assert!(!clean.state.low_trust);
-        assert!(!clean.state.has_confirmed_floor.iter().any(|&set| set));
+        assert_eq!(once.accepted, lower);
+        assert!(!once.state.low_trust);
+        assert!(!once.state.has_confirmed_floor.iter().any(|&set| set));
     }
 
     #[test]
@@ -1617,9 +1719,9 @@ mod tests {
     }
 
     #[test]
-    fn a_held_unconfirmed_column_stays_unconfirmed_until_two_lower_reads_match() {
+    fn a_rate_capped_ghost_stays_unconfirmed_and_one_clean_lower_read_replaces_it() {
         // A clean ghost is held, and that column stays unconfirmed. One
-        // lower read keeps the latch. The same lower read again replaces it.
+        // later clean read of a lower number replaces the latch.
         let first = apply_gate_with_trust(None, c(9, 0, 0, 0, 0, 0), CLEAN, false, false);
         let held = apply_gate_with_trust(
             Some((first.state, secs(20))),
@@ -1638,32 +1740,22 @@ mod tests {
             false,
             true,
         );
-        assert_eq!(once.accepted.elims, 9);
-        assert!(unsure_fields(&once.holds).contains(&"e"));
-        assert!(once.state.unconfirmed[0]);
-        let replaced = apply_gate_with_trust(
-            Some((once.state, secs(20))),
-            c(2, 0, 0, 0, 0, 0),
-            CLEAN,
-            false,
-            true,
-        );
-        assert_eq!(replaced.accepted.elims, 2);
+        assert_eq!(once.accepted.elims, 2);
         assert!(
-            replaced
-                .unlatches
+            once.unlatches
                 .iter()
                 .any(|u| u.col == 0 && u.raw == 2 && u.replaced_unconfirmed)
         );
-        assert!(!replaced.state.unconfirmed[0]);
-        assert!(!replaced.state.low_trust);
+        assert!(!once.state.unconfirmed[0]);
+        assert!(!once.state.low_trust);
     }
 
     #[test]
-    fn an_implausible_ghost_does_not_replace_an_unconfirmed_high_in_one_read() {
-        // C3. A single 91 under an unconfirmed 1105 stays at 1105. Two
-        // matching reads of 1 replace it. There is no confirmed floor on a
-        // first implausible capture.
+    fn an_unconfirmed_high_yields_to_one_clean_lower_read_even_when_that_read_is_91() {
+        // A single clean 91 under an unconfirmed 1105 replaces it. 91 is
+        // under the assist ceiling, so that read confirms the column. A
+        // later 1 is then a confirmed drop and stays held. There is no
+        // confirmed floor on a first implausible capture.
         let first = apply_gate(None, c(0, 1105, 2, 450, 0, 2), CLEAN, false);
         assert!(first.state.unconfirmed[1]);
         assert!(!first.state.has_confirmed_floor[1]);
@@ -1674,10 +1766,15 @@ mod tests {
             false,
             true,
         );
-        assert_eq!(ghost.accepted.assists, 1105);
-        assert!(unsure_fields(&ghost.holds).contains(&"a"));
-        assert!(ghost.state.unconfirmed[1]);
-        assert!(ghost.state.low_trust);
+        assert_eq!(ghost.accepted.assists, 91);
+        assert!(
+            ghost
+                .unlatches
+                .iter()
+                .any(|u| u.col == 1 && u.raw == 91 && u.replaced_unconfirmed)
+        );
+        assert!(!ghost.state.unconfirmed[1]);
+        assert!(!ghost.state.low_trust);
         let once = apply_gate_with_trust(
             Some((ghost.state, secs(20))),
             c(0, 1, 2, 450, 0, 2),
@@ -1685,21 +1782,8 @@ mod tests {
             false,
             true,
         );
-        assert_eq!(once.accepted.assists, 1105);
+        assert_eq!(once.accepted.assists, 91, "the clean 91 is confirmed");
         assert!(unsure_fields(&once.holds).contains(&"a"));
-        let real = apply_gate_with_trust(
-            Some((once.state, secs(20))),
-            c(0, 1, 2, 450, 0, 2),
-            CLEAN,
-            false,
-            true,
-        );
-        assert_eq!(real.accepted.assists, 1);
-        assert!(
-            real.unlatches
-                .iter()
-                .any(|u| u.col == 1 && u.raw == 1 && u.replaced_unconfirmed)
-        );
     }
 
     #[test]
@@ -2444,9 +2528,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unconfirmed_high_stays_on_one_low_read_and_falls_on_two_matching_reads() {
-        // Fallback elims 11 never got a second read. One read of 1 keeps 11
-        // and flags elims. Two reads of 9 then store 9.
+    fn an_unconfirmed_high_yields_to_one_clean_lower_read() {
+        // Fallback elims 11. One clean read of 1 replaces it and confirms
+        // the column. A later 9 is ordinary growth. A drop back to 1 holds.
         let latched = apply_gate_with_trust(None, c(11, 4, 2, 3000, 800, 400), CLEAN, false, false);
         assert!(latched.state.unconfirmed[0]);
         assert_eq!(latched.accepted.elims, 11);
@@ -2457,39 +2541,32 @@ mod tests {
             false,
             true,
         );
-        assert_eq!(one.accepted.elims, 11);
-        assert!(unsure_fields(&one.holds).contains(&"e"));
+        assert_eq!(one.accepted.elims, 1);
+        assert!(
+            one.unlatches
+                .iter()
+                .any(|u| u.col == 0 && u.raw == 1 && u.replaced_unconfirmed)
+        );
+        assert!(!one.state.low_trust);
         let nine = apply_gate_with_trust(
             Some((one.state, secs(20))),
-            c(9, 4, 2, 3200, 800, 400),
+            c(9, 6, 3, 3200, 900, 500),
             CLEAN,
             false,
             true,
         );
-        assert_eq!(nine.accepted.elims, 11, "one read of 9 is not a pair");
-        assert!(unsure_fields(&nine.holds).contains(&"e"));
-        let lowered = apply_gate_with_trust(
-            Some((nine.state, secs(20))),
-            c(9, 4, 2, 3300, 800, 400),
-            CLEAN,
-            false,
-            true,
-        );
-        assert_eq!(lowered.accepted.elims, 9);
-        assert!(
-            lowered
-                .unlatches
-                .iter()
-                .any(|u| u.col == 0 && u.raw == 9 && u.replaced_unconfirmed)
-        );
+        assert_eq!(nine.accepted.elims, 9);
         let after = apply_gate_with_trust(
-            Some((lowered.state, secs(20))),
-            c(1, 4, 2, 3400, 800, 400),
+            Some((nine.state, secs(20))),
+            c(1, 6, 3, 3400, 900, 500),
             CLEAN,
             false,
             true,
         );
-        assert_eq!(after.accepted.elims, 9, "the matched 9 is confirmed");
+        assert_eq!(
+            after.accepted.elims, 9,
+            "the clean 1 confirmed, so a later drop holds"
+        );
         assert!(unsure_fields(&after.holds).contains(&"e"));
     }
 
@@ -2975,19 +3052,12 @@ mod tests {
 
     #[test]
     fn a_held_column_is_not_a_clean_read_for_an_unconfirmed_latch() {
-        // a fallback latched assists 40; one clean 0 keeps it, a second
-        // clean 0 replaces it
+        // a fallback latched assists 40. A board with a held cell is not a
+        // clean read, so it does not replace the latch. The same numbers
+        // with every cell read do.
         let first = apply_gate_with_trust(None, c(2, 40, 1, 450, 0, 2), CLEAN, false, false);
-        let once = apply_gate(
-            Some((first.state, secs(20))),
-            c(2, 0, 1, 500, 0, 2),
-            CLEAN,
-            false,
-        );
-        assert_eq!(once.accepted.assists, 40);
-        // ...but not on a capture with a held cell: that board is not clean
         let held = apply_gate_held(
-            Some((once.state, secs(20))),
+            Some((first.state, secs(20))),
             c(2, 0, 1, 500, 0, 2),
             CLEAN,
             HELD_H,
@@ -2999,7 +3069,7 @@ mod tests {
             "a board with a held cell replaces nothing"
         );
         let clean = apply_gate(
-            Some((once.state, secs(20))),
+            Some((first.state, secs(20))),
             c(2, 0, 1, 500, 0, 2),
             CLEAN,
             false,
@@ -3435,9 +3505,10 @@ mod tests {
         assert_eq!(held.state.unread_cols(), vec!["h"]);
         assert!(!held.state.only_low_trust_reads(), "e..mit are confirmed");
 
-        // a game that has a row is never restarted: a suspect row in the
-        // middle of it leaves low-trust columns, and a lower trusted read
-        // is still held
+        // a game that has a row is never restarted. An untrusted read in
+        // the middle of it leaves low-trust columns. One later clean read
+        // replaces them, even when it is lower. It does not start the game
+        // over: the columns that were already confirmed keep their floors.
         let game = apply_gate(None, c(12, 5, 3, 3500, 700, 300), CLEAN, false);
         let suspect = apply_gate_with_trust(
             Some((game.state, secs(20))),
@@ -3453,7 +3524,8 @@ mod tests {
             CLEAN,
             false,
         );
-        assert_eq!(lower.accepted, c(20, 9, 5, 8000, 2000, 900));
+        assert_eq!(lower.accepted, c(13, 5, 3, 3700, 720, 300));
+        assert!(!lower.state.low_trust);
         // and a pending game a trusted board opened is not restarted either
         let trusted_first = apply_gate_held(
             None,
@@ -3484,22 +3556,22 @@ mod tests {
             CLEAN,
             false,
         );
-        assert!(once.unlatches.is_empty());
-        assert_eq!(held_fields(&once.holds).len(), 6, "all six held, flagged");
-        // the second matching read replaces all six with lower numbers:
-        // that is no hold, so `held_fields` alone would flag nothing
+        // one clean read replaces all six. That is no hold, so
+        // `held_fields` alone would flag nothing.
+        assert_eq!(once.accepted, c(13, 5, 3, 3700, 720, 300));
+        assert!(once.holds.is_empty());
+        let all = vec!["e", "a", "d", "dmg", "h", "mit"];
+        assert_eq!(revised_fields(&once.unlatches), all);
+        assert_eq!(lowered_fields(suspect.accepted, once.accepted), all);
         let twice = apply_gate(
             Some((once.state, secs(20))),
             c(13, 5, 3, 3700, 720, 300),
             CLEAN,
             false,
         );
-        assert_eq!(twice.accepted, c(13, 5, 3, 3700, 720, 300));
+        assert!(twice.unlatches.is_empty());
         assert!(twice.holds.is_empty());
-        let all = vec!["e", "a", "d", "dmg", "h", "mit"];
-        assert_eq!(revised_fields(&twice.unlatches), all);
-        assert_eq!(lowered_fields(once.accepted, twice.accepted), all);
-        assert!(lowered_fields(twice.accepted, twice.accepted).is_empty());
+        assert!(lowered_fields(once.accepted, twice.accepted).is_empty());
         assert_eq!(
             lowered_fields(c(9, 3, 9, 100, 5, 900), c(9, 4, 0, 100, 5, 150)),
             vec!["d", "mit"]

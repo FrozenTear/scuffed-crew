@@ -12,8 +12,9 @@
 //! not retried for [`START_BACKOFF`]. Cancelling or closing the permission
 //! dialog is a decline: asking stops until the next Overwatch launch, KDE
 //! takes no captures, and the restore token stays. A permission dialog that
-//! times out is the same No until the next Overwatch launch. Shutdown aborts
-//! the dialog.
+//! times out is that same No only when no restore token was sent. A timeout
+//! after a token was sent waits out the backoff and is not a No. Shutdown
+//! aborts the dialog.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -24,6 +25,7 @@ use ashpd::desktop::screencast::{
     CursorMode, Screencast, SelectSourcesOptions, SourceType, Stream,
 };
 use ashpd::desktop::{PersistMode, Session};
+use futures_util::StreamExt;
 use image::DynamicImage;
 
 use super::CaptureKind;
@@ -49,29 +51,248 @@ pub const NEVER_STREAMING_WAIT: Duration = Duration::from_secs(6);
 /// sooner, and dropping that task closes the portal session.
 pub const PERMISSION_DIALOG_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// A stream that has delivered a frame and then gone this long without
-/// another is closed and opened again, while Overwatch is running.
-pub const STREAM_STALL: Duration = Duration::from_secs(8);
+/// A pause this long, after the stream has reached Streaming, is a dead
+/// stream. A shorter pause is negotiation. Silence while the state stays
+/// Streaming is not a pause: niri and KWin send buffers only on damage.
+pub const PAUSED_PERSIST: Duration = Duration::from_secs(2);
 
-/// True when a stream that already produced a frame has gone `limit`
-/// without another, and the game is running. A stream that has not yet
-/// produced a frame is the never-streaming path, not this one.
-pub fn stream_stall_reopen(
-    last_new_frame: Option<Instant>,
-    now: Instant,
-    game_running: bool,
-    limit: Duration,
-) -> bool {
-    game_running && last_new_frame.is_some_and(|at| now.saturating_duration_since(at) >= limit)
+/// Two Tab waits with no PipeWire buffer reopen the stream. One does not.
+pub const SOFT_MISS_LIMIT: u32 = 2;
+
+/// At least this long between stream reopens. A new game does not clear it.
+pub const SOFT_REOPEN_GAP: Duration = Duration::from_secs(5 * 60);
+
+const REOPEN_DEAD: &str = "screencast stream ended; reopening";
+const REOPEN_TABS: &str = "screencast stream had no fresh frame on two Tabs; reopening";
+const REOPEN_NO_TOKEN: &str =
+    "screencast stream needs a reopen but no restore token is saved; keeping the stream";
+
+/// What the capture loop can see without holding the PipeWire thread.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamHealth {
+    Streaming,
+    Error,
+    Unconnected,
+    Paused { paused_for: Duration },
+    Connecting,
+    CoreFault,
+    PortalClosed,
 }
 
-static STALL_WARNED: AtomicBool = AtomicBool::new(false);
+/// One look at the stream. A poll never counts as a soft miss. A Tab does
+/// only when that grab waited for a fresh frame, PipeWire delivered no
+/// buffer during the wait, and the stream was still Streaming.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Observe {
+    Poll {
+        health: StreamHealth,
+    },
+    Tab {
+        health: StreamHealth,
+        waited: bool,
+        got_fresh: bool,
+        buffer_during_wait: bool,
+    },
+}
 
-fn warn_stream_stall() {
-    if STALL_WARNED.swap(true, Ordering::AcqRel) {
-        tracing::debug!("screencast stream stalled with no new frame; reopening");
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    Dead,
+    Tabs,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ReopenWatch {
+    soft_misses: u32,
+    last_reopen: Option<Instant>,
+    pending: Option<Pending>,
+    death_latched: bool,
+    token_warned: bool,
+    /// This game has already reopened the stream. A new game clears it.
+    /// [`SOFT_REOPEN_GAP`] does not.
+    reopened_this_game: bool,
+}
+
+/// A new game clears the miss streak and the once-per-game cap. The gap
+/// clock stays, so a second game inside [`SOFT_REOPEN_GAP`] cannot reopen.
+fn reset_stall_on_game_start(watch: &mut ReopenWatch) {
+    let last_reopen = watch.last_reopen;
+    *watch = ReopenWatch {
+        last_reopen,
+        ..ReopenWatch::default()
+    };
+}
+
+/// A deliberate close keeps the gap clock and drops the rest.
+fn watch_after_close(watch: ReopenWatch) -> ReopenWatch {
+    ReopenWatch {
+        last_reopen: watch.last_reopen,
+        ..ReopenWatch::default()
+    }
+}
+
+/// What to do with the live session. A Tab never gets [`ReopenStep::Reopen`]:
+/// the grab's result is returned, and the next poll performs the reopen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReopenStep {
+    Keep,
+    HoldForPoll,
+    Reopen(&'static str),
+    KeepNoToken,
+}
+
+fn health_is_dead(health: StreamHealth) -> bool {
+    match health {
+        StreamHealth::Error
+        | StreamHealth::Unconnected
+        | StreamHealth::CoreFault
+        | StreamHealth::PortalClosed => true,
+        StreamHealth::Paused { paused_for } => paused_for >= PAUSED_PERSIST,
+        StreamHealth::Streaming | StreamHealth::Connecting => false,
+    }
+}
+
+fn reopen_rate_ok(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= SOFT_REOPEN_GAP)
+}
+
+fn keep_without_token(watch: &mut ReopenWatch, dead: bool) -> ReopenStep {
+    watch.pending = None;
+    if dead {
+        watch.death_latched = true;
+    }
+    if watch.token_warned {
+        ReopenStep::Keep
     } else {
-        tracing::warn!("screencast stream stalled with no new frame; reopening");
+        watch.token_warned = true;
+        ReopenStep::KeepNoToken
+    }
+}
+
+/// Open the stream again, or refuse because this game already did or the
+/// gap has not elapsed. A refusal that is only the gap leaves `pending`
+/// for the caller to put back.
+fn try_reopen(watch: &mut ReopenWatch, now: Instant, why: &'static str, dead: bool) -> ReopenStep {
+    if watch.reopened_this_game {
+        watch.pending = None;
+        if dead {
+            watch.death_latched = true;
+        }
+        return ReopenStep::Keep;
+    }
+    if !reopen_rate_ok(watch.last_reopen, now) {
+        return ReopenStep::Keep;
+    }
+    watch.reopened_this_game = true;
+    watch.last_reopen = Some(now);
+    watch.soft_misses = 0;
+    watch.pending = None;
+    if dead {
+        watch.death_latched = true;
+    }
+    ReopenStep::Reopen(why)
+}
+
+/// Silence while Streaming is [`ReopenStep::Keep`]. Polls never count as a
+/// soft miss. A dead stream, or two Tab waits with no PipeWire buffer,
+/// reopens on a poll: once per game, and at least [`SOFT_REOPEN_GAP`] after
+/// the previous reopen. A Tab never returns [`ReopenStep::Reopen`]. A new
+/// game clears the miss streak and the once-per-game cap, and leaves the
+/// gap clock. Without a saved restore token the stream stays up.
+fn reopen_step(obs: Observe, has_token: bool, now: Instant, watch: &mut ReopenWatch) -> ReopenStep {
+    let health = match obs {
+        Observe::Poll { health } | Observe::Tab { health, .. } => health,
+    };
+    let tab = matches!(obs, Observe::Tab { .. });
+    if matches!(health, StreamHealth::Streaming) {
+        watch.death_latched = false;
+    }
+    if !tab {
+        if let Some(cause) = watch.pending.take() {
+            if !has_token {
+                return keep_without_token(
+                    watch,
+                    matches!(cause, Pending::Dead) || health_is_dead(health),
+                );
+            }
+            let (why, dead) = match cause {
+                Pending::Dead => (REOPEN_DEAD, true),
+                Pending::Tabs => (REOPEN_TABS, false),
+            };
+            let step = try_reopen(watch, now, why, dead);
+            if matches!(step, ReopenStep::Keep) && !watch.reopened_this_game {
+                watch.pending = Some(cause);
+            }
+            return step;
+        }
+        if health_is_dead(health) && !watch.death_latched {
+            if !has_token {
+                return keep_without_token(watch, true);
+            }
+            return try_reopen(watch, now, REOPEN_DEAD, true);
+        }
+        return ReopenStep::Keep;
+    }
+    if watch.pending.is_some() {
+        return ReopenStep::HoldForPoll;
+    }
+    if health_is_dead(health) && !watch.death_latched {
+        if !has_token {
+            return keep_without_token(watch, true);
+        }
+        if watch.reopened_this_game {
+            watch.death_latched = true;
+            return ReopenStep::Keep;
+        }
+        watch.pending = Some(Pending::Dead);
+        return ReopenStep::HoldForPoll;
+    }
+    if let Observe::Tab {
+        waited,
+        got_fresh,
+        buffer_during_wait,
+        health,
+    } = obs
+    {
+        if matches!(health, StreamHealth::Streaming) && got_fresh {
+            watch.soft_misses = 0;
+        }
+        let soft = matches!(health, StreamHealth::Streaming)
+            && waited
+            && !got_fresh
+            && !buffer_during_wait;
+        if soft {
+            watch.soft_misses = watch.soft_misses.saturating_add(1);
+            if watch.soft_misses >= SOFT_MISS_LIMIT {
+                if !has_token {
+                    return keep_without_token(watch, false);
+                }
+                if watch.reopened_this_game {
+                    return ReopenStep::Keep;
+                }
+                watch.pending = Some(Pending::Tabs);
+                return ReopenStep::HoldForPoll;
+            }
+        }
+    }
+    ReopenStep::Keep
+}
+
+fn health_of(report: pw::StreamReport) -> StreamHealth {
+    if portal_session_closed() && report.has_streamed {
+        return StreamHealth::PortalClosed;
+    }
+    if report.core_fault && report.has_streamed {
+        return StreamHealth::CoreFault;
+    }
+    match report.phase {
+        pw::ReportedPhase::Error => StreamHealth::Error,
+        pw::ReportedPhase::Unconnected if report.has_streamed => StreamHealth::Unconnected,
+        pw::ReportedPhase::Paused if report.has_streamed => StreamHealth::Paused {
+            paused_for: report.paused_for.unwrap_or(Duration::ZERO),
+        },
+        pw::ReportedPhase::Streaming => StreamHealth::Streaming,
+        _ => StreamHealth::Connecting,
     }
 }
 
@@ -120,9 +341,8 @@ struct CastState {
     open_task: Option<tokio::task::JoinHandle<()>>,
     /// Consecutive grabs that found no usable buffer while the session was up.
     fresh_misses: u32,
-    /// When the live stream last handed out a new frame. `None` until the
-    /// first one, and after the session is dropped.
-    last_new_frame: Option<Instant>,
+    /// Dead-stream and Tab soft-miss reopen state. Silence does not move it.
+    watch: ReopenWatch,
     /// Data dir for the status file. Set on each capture.
     data_dir: Option<PathBuf>,
 }
@@ -140,7 +360,7 @@ impl Default for CastState {
             last_timing_log: Instant::now(),
             open_task: None,
             fresh_misses: 0,
-            last_new_frame: None,
+            watch: ReopenWatch::default(),
             data_dir: None,
         }
     }
@@ -177,7 +397,6 @@ pub fn restore_token_saved(data_dir: &Path) -> bool {
     read_token(data_dir).is_some()
 }
 
-/// A deliberate close is not a failed start. The failure clock is left as
 /// How many grabs with no usable buffer close a session that is streaming.
 pub const FRESH_MISS_LIMIT: u32 = 3;
 
@@ -210,17 +429,30 @@ static SHARE_DECLINED: AtomicBool = AtomicBool::new(false);
 /// The one decline warning has been written. Cleared with [`SHARE_DECLINED`].
 static DECLINE_LOGGED: AtomicBool = AtomicBool::new(false);
 
-static GAME_RUNNING: AtomicBool = AtomicBool::new(false);
-
 pub fn note_game_running(running: bool) {
-    GAME_RUNNING.store(running, Ordering::Release);
     if running {
         REOPEN_BLOCKED.store(false, Ordering::Release);
     }
 }
 
-fn game_is_running() -> bool {
-    GAME_RUNNING.load(Ordering::Acquire)
+/// Generation of the portal session whose Closed signal we are watching.
+static PORTAL_GEN: AtomicU64 = AtomicU64::new(0);
+/// Set to [`PORTAL_GEN`] when that session's Closed signal arrives.
+static PORTAL_CLOSED_GEN: AtomicU64 = AtomicU64::new(0);
+
+fn arm_portal_watch() -> u64 {
+    let watch = PORTAL_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+    PORTAL_CLOSED_GEN.store(0, Ordering::Release);
+    watch
+}
+
+fn mark_portal_closed(watch: u64) {
+    PORTAL_CLOSED_GEN.store(watch, Ordering::Release);
+}
+
+fn portal_session_closed() -> bool {
+    let watch = PORTAL_GEN.load(Ordering::Acquire);
+    watch != 0 && PORTAL_CLOSED_GEN.load(Ordering::Acquire) == watch
 }
 
 /// The sentence for a declined share. A desktop where a screenshot is not
@@ -229,7 +461,7 @@ pub const NO_CAPTURE_DECLINE_NOTICE: &str =
     "Screen share was declined: no captures until Overwatch is restarted";
 
 pub const SAFE_DECLINE_NOTICE: &str =
-    "Screen share was declined: screenshots continue until Overwatch is restarted";
+    "Screen share was declined: Older screenshot continues until Overwatch is restarted";
 
 pub fn decline_notice(fallback_safe: bool) -> &'static str {
     if fallback_safe {
@@ -239,8 +471,9 @@ pub fn decline_notice(fallback_safe: bool) -> &'static str {
     }
 }
 
-/// A timed-out permission dialog is a No for this launch. Flip this if a
-/// timeout should ask again after the backoff instead.
+/// A timed-out permission dialog is a No for this launch when no restore
+/// token was sent. A timeout after a token was sent is not a No. Flip this
+/// if a token-less timeout should ask again after the backoff instead.
 const PERMISSION_TIMEOUT_IS_NO: bool = true;
 
 pub fn is_permission_timeout(err: &str) -> bool {
@@ -250,7 +483,7 @@ pub fn is_permission_timeout(err: &str) -> bool {
 
 pub fn timeout_notice(fallback_safe: bool) -> &'static str {
     if fallback_safe {
-        "Screen share permission timed out: screenshots continue until Overwatch is restarted"
+        "Screen share permission timed out: Older screenshot continues until Overwatch is restarted"
     } else {
         "Screen share permission timed out: no captures until Overwatch is restarted"
     }
@@ -283,8 +516,8 @@ pub fn clears_share_decline(was_running: bool, running: bool) -> bool {
 /// The user cancelled or closed the permission dialog. Closing the dialog
 /// is the portal Cancelled or Dismissed response, or a line that says the
 /// dialog was closed. A session close is not this. A timeout is a No only
-/// when [`PERMISSION_TIMEOUT_IS_NO`] is set, and that check lives in
-/// [`open_error_action`].
+/// when [`PERMISSION_TIMEOUT_IS_NO`] is set and no restore token was sent.
+/// That check lives in [`open_error_action`].
 pub fn is_share_declined(err: &str) -> bool {
     if is_user_cancel(err) {
         return true;
@@ -313,8 +546,8 @@ pub struct OpenErrorAction {
     pub notice: Option<&'static str>,
 }
 
-pub fn open_error_action(err: &str, fallback_safe: bool) -> OpenErrorAction {
-    if PERMISSION_TIMEOUT_IS_NO && is_permission_timeout(err) {
+pub fn open_error_action(err: &str, fallback_safe: bool, had_token: bool) -> OpenErrorAction {
+    if PERMISSION_TIMEOUT_IS_NO && is_permission_timeout(err) && !had_token {
         OpenErrorAction {
             declined: true,
             arm_backoff: false,
@@ -347,8 +580,9 @@ fn apply_share_decline(
     fallback_safe: bool,
     data_dir: &Path,
     last_fail: &mut Option<Instant>,
+    had_token: bool,
 ) -> OpenErrorAction {
-    let action = open_error_action(err, fallback_safe);
+    let action = open_error_action(err, fallback_safe, had_token);
     if !action.declined {
         return action;
     }
@@ -363,9 +597,27 @@ fn apply_share_decline(
 }
 
 /// `note_game_running`, and clear a decline on a new Overwatch launch.
-pub fn note_game_seen(was_running: bool, running: bool, data_dir: &Path) {
+/// Set on the not-running to running edge. The next [`capture`] applies it
+/// while it holds the session lock, so this function does not take that lock.
+static STALL_RESET: AtomicBool = AtomicBool::new(false);
+
+fn apply_stall_reset(watch: &mut ReopenWatch) {
+    if STALL_RESET.swap(false, Ordering::AcqRel) {
+        reset_stall_on_game_start(watch);
+    }
+}
+
+fn note_game_edge(was_running: bool, running: bool) -> bool {
     note_game_running(running);
     if !clears_share_decline(was_running, running) {
+        return false;
+    }
+    STALL_RESET.store(true, Ordering::Release);
+    true
+}
+
+pub fn note_game_seen(was_running: bool, running: bool, data_dir: &Path) {
+    if !note_game_edge(was_running, running) {
         return;
     }
     if !SHARE_DECLINED.swap(false, Ordering::AcqRel) {
@@ -400,6 +652,16 @@ pub fn capture_now_blocked_by_daemon_share(desktop: &str, daemon_share_open: boo
     daemon_share_open && desktop_has(desktop, &["kde", "plasma", "kwin"])
 }
 
+/// Capture now's error when the daemon share is already open. Quitting
+/// Overwatch closes that share only after a permission token was saved.
+pub fn capture_now_blocked_message(token_saved: bool) -> &'static str {
+    if token_saved {
+        "The tracker is sharing the screen, so this screenshot was skipped. Quit Overwatch, or stop the tracker, so the share closes, then try again."
+    } else {
+        "The tracker is sharing the screen, so this screenshot was skipped. Stop the tracker so the share closes, then try again."
+    }
+}
+
 /// What a second caller may do while a session open is in progress.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenPermit {
@@ -425,10 +687,11 @@ pub fn must_close_session(created: bool, succeeded: bool) -> bool {
 }
 
 /// How long a later grab waits for a new buffer before reusing the last
-/// converted frame. One poll converts at most one frame. The new-reader
-/// poll is 1.5 s, so this stays well under that.
+/// converted frame. One frame period plus 100 ms, so a 2 fps stream
+/// (frames 500 ms apart) waits 600 ms and does not reuse the one before
+/// it. The new-reader poll is 1.5 s, and this stays under that.
 pub fn reuse_wait(max_fps: u32) -> Duration {
-    Duration::from_millis(pw::throttle_gap_ms(max_fps).min(400))
+    Duration::from_millis(pw::throttle_gap_ms(max_fps).saturating_add(100))
 }
 
 /// What a Tab stream timeout does. KDE/KWin must not open the screenshot
@@ -526,6 +789,14 @@ fn fresh_capture(image: DynamicImage) -> super::CapturedFrame {
     }
 }
 
+/// Drop a PipeWire session off the async worker. Joining that thread can
+/// take the quit timeout, and the session mutex must not be held across it.
+async fn release_live(live: Option<Live>) {
+    if let Some(live) = live {
+        let _ = tokio::task::spawn_blocking(move || drop(live)).await;
+    }
+}
+
 /// Close the live session when one exists and this process is on the stream
 /// route. A no-op otherwise. Does not start the failure backoff. The PipeWire
 /// join runs on a blocking thread so a shutdown timer can still fire.
@@ -541,7 +812,7 @@ pub async fn close_if_open() {
         task.abort();
     }
     let live = state.live.take();
-    state.last_new_frame = None;
+    state.watch = watch_after_close(std::mem::take(&mut state.watch));
     // A deliberate close does not start the failure backoff. `last_fail`
     // stays whatever it was, which is unset while a session was up, so the
     // next capture opens immediately.
@@ -549,9 +820,7 @@ pub async fn close_if_open() {
     let data_dir = state.data_dir.clone();
     REOPEN_BLOCKED.store(true, Ordering::Release);
     drop(state);
-    if let Some(live) = live {
-        let _ = tokio::task::spawn_blocking(move || drop(live)).await;
-    }
+    release_live(live).await;
     mark_share(false, data_dir.as_deref());
     if had {
         tracing::info!("screencast session closed");
@@ -566,6 +835,7 @@ pub async fn capture(
 ) -> Result<super::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
     let max_fps = super::prefs().max_fps.max(1);
     let mut state = CAST.lock().await;
+    apply_stall_reset(&mut state.watch);
     state.data_dir = Some(data_dir.to_path_buf());
     if !share_prompt_allowed(share_is_declined()) {
         let safe = fallback_is_safe();
@@ -609,14 +879,16 @@ pub async fn capture(
         // Drop a dead session before asking for another, so the portal is
         // not holding two screen shares. The dialog runs in its own task.
         // This grab does not wait on it, and a second grab sees `opening`.
-        state.live.take();
-        state.last_new_frame = None;
+        let retired = state.live.take();
         mark_share(false, Some(data_dir));
         state.open_gen = state.open_gen.wrapping_add(1);
         let generation = state.open_gen;
         state.opening = true;
         let data_dir = data_dir.to_path_buf();
         let output = output_name.map(str::to_string);
+        // Whether a token is sent, read before the dialog can time out.
+        // A token written during the open does not count.
+        let had_token = read_token(&data_dir).is_some();
         if let Some(task) = state.open_task.take() {
             task.abort();
         }
@@ -631,43 +903,56 @@ pub async fn capture(
                 Ok(inner) => inner,
                 Err(_elapsed) => {
                     // One warn, from `apply_share_decline`, not a second line
-                    // here. `PERMISSION_TIMEOUT_IS_NO` decides what it does.
+                    // here. A token-less timeout is a No. A timeout after a
+                    // token was sent is the backoff.
                     Err("screencast permission dialog timed out".into())
                 }
             };
             let mut state = CAST.lock().await;
             if state.open_gen != generation {
-                drop(result);
+                drop(state);
+                release_live(result.ok()).await;
                 return;
             }
             state.opening = false;
             match result {
                 Ok(live) => {
-                    if state.live.is_some() {
-                        drop(live);
+                    let extra = if state.live.is_some() {
+                        Some(live)
                     } else {
                         state.live = Some(live);
                         state.last_fail = None;
+                        clear_portal_warn();
                         mark_share(true, Some(data_dir.as_path()));
-                    }
+                        None
+                    };
+                    drop(state);
+                    release_live(extra).await;
                 }
                 Err(err) => {
                     let safe = fallback_is_safe();
-                    let action =
-                        apply_share_decline(&err, safe, data_dir.as_path(), &mut state.last_fail);
-                    state.live = None;
-                    state.last_new_frame = None;
+                    let action = apply_share_decline(
+                        &err,
+                        safe,
+                        data_dir.as_path(),
+                        &mut state.last_fail,
+                        had_token,
+                    );
+                    let retired = state.live.take();
                     mark_share(false, Some(data_dir.as_path()));
                     if action.arm_backoff {
                         state.last_fail = Some(Instant::now());
                         let line = fallback_line(&format!("screencast session failed ({err})"));
                         note_fallback(&mut state, &line);
                     }
+                    drop(state);
+                    release_live(retired).await;
                 }
             }
         });
         state.open_task = Some(task);
         drop(state);
+        release_live(retired).await;
         return while_opening(output_name).await.map(fresh_capture);
     }
     let Some(stream) = state
@@ -683,48 +968,83 @@ pub async fn capture(
             .await
             .map(fresh_capture);
     };
+    let streamed = stream.has_streamed();
+    let health = health_of(stream.stream_report());
+    let token_saved = restore_token_saved(data_dir);
+    // A poll is where a deferred reopen runs. A Tab never reopens here, so
+    // the scoreboard it just read is not thrown away while the share opens.
+    if kind == CaptureKind::Poll && (streamed || state.watch.pending.is_some()) {
+        let step = reopen_step(
+            Observe::Poll { health },
+            token_saved,
+            Instant::now(),
+            &mut state.watch,
+        );
+        match step {
+            ReopenStep::Reopen(why) => {
+                tracing::warn!("{why}");
+                drop(stream);
+                let retired = state.live.take();
+                state.fresh_misses = 0;
+                mark_share(false, Some(data_dir));
+                drop(state);
+                release_live(retired).await;
+                return Box::pin(capture(output_name, kind, data_dir, debug_frames)).await;
+            }
+            ReopenStep::KeepNoToken => {
+                tracing::warn!("{REOPEN_NO_TOKEN}");
+            }
+            ReopenStep::Keep | ReopenStep::HoldForPoll => {}
+        }
+    }
+    if !stream.alive() && streamed {
+        if kind == CaptureKind::Tab {
+            let step = reopen_step(
+                Observe::Tab {
+                    health,
+                    waited: false,
+                    got_fresh: false,
+                    buffer_during_wait: false,
+                },
+                token_saved,
+                Instant::now(),
+                &mut state.watch,
+            );
+            if matches!(step, ReopenStep::KeepNoToken) {
+                tracing::warn!("{REOPEN_NO_TOKEN}");
+            }
+        }
+        // The session stays. Dropping it with no restore token would open
+        // the share dialog again.
+        drop(stream);
+        drop(state);
+        return Err("screencast stream ended".into());
+    }
     if !stream.alive() {
         state.last_fail = Some(Instant::now());
-        state.live = None;
-        state.last_new_frame = None;
+        let retired = state.live.take();
         mark_share(false, Some(data_dir));
         let line = fallback_line("screencast stream is not running");
         note_fallback(&mut state, &line);
+        drop(stream);
         drop(state);
+        release_live(retired).await;
         return screenshot_if_safe(output_name, "screencast stream is not running")
             .await
             .map(fresh_capture);
     }
-    if drop_unstarted_stream(
-        stream.has_streamed(),
-        stream.running_for(),
-        NEVER_STREAMING_WAIT,
-    ) {
+    if drop_unstarted_stream(streamed, stream.running_for(), NEVER_STREAMING_WAIT) {
         state.last_fail = Some(Instant::now());
-        state.live = None;
-        state.last_new_frame = None;
+        let retired = state.live.take();
         mark_share(false, Some(data_dir));
         let line = fallback_line("screencast never reached streaming");
         note_fallback(&mut state, &line);
+        drop(stream);
         drop(state);
+        release_live(retired).await;
         return screenshot_if_safe(output_name, "screencast never reached streaming")
             .await
             .map(fresh_capture);
-    }
-    if stream_stall_reopen(
-        state.last_new_frame,
-        Instant::now(),
-        game_is_running(),
-        STREAM_STALL,
-    ) {
-        warn_stream_stall();
-        drop(stream);
-        state.last_new_frame = None;
-        state.fresh_misses = 0;
-        state.live = None;
-        mark_share(false, Some(data_dir));
-        drop(state);
-        return Box::pin(capture(output_name, kind, data_dir, debug_frames)).await;
     }
     let tab_press = match kind {
         CaptureKind::Tab => Some(super::tab_press().unwrap_or_else(Instant::now)),
@@ -739,10 +1059,38 @@ pub async fn capture(
         reuse_wait(max_fps)
     };
     // The mutex stays held so a second caller cannot open another share.
+    let grab_started = Instant::now();
     let grabbed = stream.grab(timeout, tab_press).await;
     let timing = stream.timing();
     let alive = stream.alive();
     let stream_id = stream.stream_id();
+    let mut keep_session = false;
+    if kind == CaptureKind::Tab {
+        let health = health_of(stream.stream_report());
+        let buffer_during_wait = stream.last_buffer_at().is_some_and(|at| at >= grab_started);
+        let (waited, got_fresh) = match &grabbed {
+            Ok(pw::GrabOutcome::TabMiss { .. }) => (true, false),
+            Ok(pw::GrabOutcome::Frame { is_new, .. }) => (true, *is_new),
+            Err(_) => (false, false),
+        };
+        let step = reopen_step(
+            Observe::Tab {
+                health,
+                waited,
+                got_fresh,
+                buffer_during_wait,
+            },
+            restore_token_saved(data_dir),
+            Instant::now(),
+            &mut state.watch,
+        );
+        // HoldForPoll and KeepNoToken both leave the session up so this
+        // grab's frame or miss is what the caller sees.
+        keep_session = matches!(step, ReopenStep::HoldForPoll | ReopenStep::KeepNoToken);
+        if matches!(step, ReopenStep::KeepNoToken) {
+            tracing::warn!("{REOPEN_NO_TOKEN}");
+        }
+    }
     match grabbed {
         Ok(pw::GrabOutcome::TabMiss { delay_ms }) => {
             drop(state);
@@ -752,10 +1100,6 @@ pub async fn capture(
             state.last_fail = None;
             state.fresh_misses = 0;
             state.warned = false;
-            if is_new {
-                state.last_new_frame = Some(Instant::now());
-                STALL_WARNED.store(false, Ordering::Release);
-            }
             let grab_ms = timing.avg_grab_ms;
             let log_summary = state.last_timing_log.elapsed() >= Duration::from_secs(60);
             if log_summary {
@@ -796,46 +1140,45 @@ pub async fn capture(
             })
         }
         Err(err) => {
+            let streamed_now = stream.has_streamed();
+            let uptime = stream.running_for();
+            drop(stream);
             if err == pw::NO_STREAM_FRAME {
                 state.fresh_misses = state.fresh_misses.saturating_add(1);
                 if fresh_miss_should_restart(state.fresh_misses, FRESH_MISS_LIMIT) {
                     state.fresh_misses = 0;
                     state.last_fail = Some(Instant::now());
-                    state.live = None;
-                    state.last_new_frame = None;
+                    let retired = state.live.take();
                     mark_share(false, Some(data_dir));
                     let line = fallback_line("screencast had no usable frame");
                     note_fallback(&mut state, &line);
                     drop(state);
+                    release_live(retired).await;
                     return screenshot_if_safe(output_name, "screencast had no usable frame")
                         .await
                         .map(fresh_capture);
                 }
             }
-            if !alive {
+            if !alive && !keep_session {
                 state.last_fail = Some(Instant::now());
-                state.live = None;
-                state.last_new_frame = None;
+                let retired = state.live.take();
                 mark_share(false, Some(data_dir));
                 let line = fallback_line(&format!("screencast stream ended ({err})"));
                 note_fallback(&mut state, &line);
                 drop(state);
+                release_live(retired).await;
                 return screenshot_if_safe(output_name, "screencast stream ended")
                     .await
                     .map(fresh_capture);
             }
-            if drop_unstarted_stream(
-                stream.has_streamed(),
-                stream.running_for(),
-                NEVER_STREAMING_WAIT,
-            ) {
+            if !keep_session && drop_unstarted_stream(streamed_now, uptime, NEVER_STREAMING_WAIT) {
                 state.last_fail = Some(Instant::now());
-                state.live = None;
-                state.last_new_frame = None;
+                let retired = state.live.take();
                 mark_share(false, Some(data_dir));
                 let line = fallback_line("screencast never reached streaming");
                 note_fallback(&mut state, &line);
                 drop(state);
+                release_live(retired).await;
                 return screenshot_if_safe(output_name, "screencast never reached streaming")
                     .await
                     .map(fresh_capture);
@@ -864,13 +1207,22 @@ async fn tab_timeout(
         TabTimeoutAction::Skip => {
             // A press the open already pushed past the frame budget is
             // discarded and grabbed again. That miss is not a log line.
-            if !super::stream_miss_log_suppressed() {
-                let count = TAB_MISS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                tracing::info!(delay_ms, count, "Tab grab: no fresh stream frame (timeout)");
-            }
+            note_tab_stream_miss(delay_ms, super::stream_miss_log_suppressed());
             Err(STREAM_MISS.into())
         }
     }
+}
+
+/// Log a Tab stream miss unless this is the first Tab discarding a press
+/// the share open already pushed past the frame budget. Returns whether
+/// the line was written.
+fn note_tab_stream_miss(delay_ms: u64, suppressed: bool) -> bool {
+    if suppressed {
+        return false;
+    }
+    let count = TAB_MISS_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::info!(delay_ms, count, "Tab grab: no fresh stream frame (timeout)");
+    true
 }
 
 fn note_fallback(state: &mut CastState, message: &str) {
@@ -901,7 +1253,7 @@ fn fallback_is_safe() -> bool {
 
 fn fallback_line_for(why: &str, safe: bool) -> String {
     if safe {
-        format!("{why}; falling back to the screenshot portal")
+        format!("{why}; falling back to Older screenshot")
     } else {
         format!("{why}; screenshot skipped")
     }
@@ -915,7 +1267,7 @@ async fn screenshot(
     output_name: Option<&str>,
     why: &str,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
-    tracing::debug!(why, "screencast skipped; using the screenshot portal");
+    tracing::debug!(why, "screencast skipped; using Older screenshot");
     portal::capture(output_name).await
 }
 
@@ -1016,38 +1368,63 @@ fn portal_warn_due(last: Option<Instant>, now: Instant, window: Duration) -> boo
 /// than that gap or every retry warns again.
 const PORTAL_WARN_WINDOW: Duration = Duration::from_secs(10 * 60);
 
-/// Warn on the first failure, again when the failure text changes, and
-/// again after [`PORTAL_WARN_WINDOW`]. A retry of the same failure inside
+/// Which portal check failed. The warning episode is this kind, not the
+/// error text, so a proxy that alternates messages does not warn on every
+/// retry. A different kind does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PortalFail {
+    Proxy,
+    CursorRead,
+    CursorEmpty,
+}
+
+/// Warn on the first failure, again when the failure kind changes, and
+/// again after [`PORTAL_WARN_WINDOW`]. A retry of the same kind inside
 /// the window does not warn.
-fn portal_should_warn(last: Option<(Instant, &str)>, now: Instant, err: &str) -> bool {
+fn portal_should_warn(last: Option<(Instant, PortalFail)>, now: Instant, kind: PortalFail) -> bool {
     match last {
         None => true,
-        Some((at, prev)) => prev != err || now.saturating_duration_since(at) >= PORTAL_WARN_WINDOW,
+        Some((at, prev)) => prev != kind || now.saturating_duration_since(at) >= PORTAL_WARN_WINDOW,
     }
 }
 
 struct PortalWarn {
     at: Instant,
-    err: String,
+    kind: PortalFail,
 }
 
 static PORTAL_WARN_AT: std::sync::Mutex<Option<PortalWarn>> = std::sync::Mutex::new(None);
 
-fn portal_unavailable(err: &impl std::fmt::Display) -> OpenFail {
-    let text = err.to_string();
-    let mut last = PORTAL_WARN_AT.lock().unwrap_or_else(|e| e.into_inner());
+fn portal_unavailable_in(
+    slot: &std::sync::Mutex<Option<PortalWarn>>,
+    kind: PortalFail,
+    err: &impl std::fmt::Display,
+) -> OpenFail {
+    let mut last = slot.lock().unwrap_or_else(|e| e.into_inner());
     let now = Instant::now();
     let warn = {
-        let prev = last.as_ref().map(|warn| (warn.at, warn.err.as_str()));
-        portal_should_warn(prev, now, &text)
+        let prev = last.as_ref().map(|warn| (warn.at, warn.kind));
+        portal_should_warn(prev, now, kind)
     };
     if warn {
-        *last = Some(PortalWarn { at: now, err: text });
+        *last = Some(PortalWarn { at: now, kind });
         tracing::warn!(error = %err, "{PORTAL_UNAVAILABLE}");
     } else {
         tracing::debug!(error = %err, "{PORTAL_UNAVAILABLE}");
     }
     OpenFail::Other(PORTAL_UNAVAILABLE.into())
+}
+
+fn portal_unavailable(kind: PortalFail, err: &impl std::fmt::Display) -> OpenFail {
+    portal_unavailable_in(&PORTAL_WARN_AT, kind, err)
+}
+
+fn clear_portal_warn_in(slot: &std::sync::Mutex<Option<PortalWarn>>) {
+    *slot.lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+fn clear_portal_warn() {
+    clear_portal_warn_in(&PORTAL_WARN_AT);
 }
 
 async fn open_session(
@@ -1138,19 +1515,19 @@ async fn open_once(
 ) -> Result<Live, OpenFail> {
     let proxy = match Screencast::new().await {
         Ok(proxy) => proxy,
-        Err(err) => return Err(portal_unavailable(&err)),
+        Err(err) => return Err(portal_unavailable(PortalFail::Proxy, &err)),
     };
     let modes = match proxy.available_cursor_modes().await {
         Ok(modes) => {
             let block =
                 cursor_modes_block(false, modes.is_empty(), modes.contains(CursorMode::Hidden));
             if block == CursorModesBlock::PortalUnavailable {
-                let _ = portal_unavailable(&PORTAL_UNAVAILABLE);
+                let _ = portal_unavailable(PortalFail::CursorEmpty, &PORTAL_UNAVAILABLE);
             }
             block
         }
         Err(err) => {
-            let _ = portal_unavailable(&err);
+            let _ = portal_unavailable(PortalFail::CursorRead, &err);
             cursor_modes_block(true, true, false)
         }
     };
@@ -1226,10 +1603,26 @@ async fn open_once(
     };
     let session = guard.disarm();
     let (hold, rx) = tokio::sync::oneshot::channel();
+    let portal_gen = arm_portal_watch();
     tokio::spawn(async move {
         let _proxy = proxy;
-        let _ = rx.await;
-        let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+        let closed = session.receive_closed().await;
+        let Ok(closed) = closed else {
+            // No closed signal. Our own close is the only way this session ends.
+            let _ = rx.await;
+            let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+            return;
+        };
+        let mut closed = std::pin::pin!(closed);
+        tokio::select! {
+            biased;
+            _ = rx => {
+                let _ = tokio::time::timeout(Duration::from_secs(2), session.close()).await;
+            }
+            _ = closed.next() => {
+                mark_portal_closed(portal_gen);
+            }
+        }
     });
     Ok(Live {
         _fd: fd,
@@ -1570,7 +1963,7 @@ mod tests {
         assert!(!capture_now_blocked_by_daemon_share("niri", true));
         assert_eq!(
             fallback_line_for("screencast backoff", true),
-            "screencast backoff; falling back to the screenshot portal"
+            "screencast backoff; falling back to Older screenshot"
         );
         assert_eq!(
             fallback_line_for("screencast backoff", false),
@@ -1760,80 +2153,435 @@ mod tests {
     #[test]
     fn an_unavailable_portal_warns_once_per_backoff_episode() {
         let now = Instant::now();
-        assert!(portal_should_warn(None, now, "portal down"));
+        assert!(portal_should_warn(None, now, PortalFail::Proxy));
         let again = now + START_BACKOFF;
         assert!(
-            !portal_should_warn(Some((now, "portal down")), again, "portal down"),
+            !portal_should_warn(Some((now, PortalFail::Proxy)), again, PortalFail::Proxy),
             "a retry one backoff later does not warn again"
         );
         assert!(
-            portal_should_warn(Some((now, "portal down")), again, "cursor modes empty"),
-            "a different failure warns"
+            portal_should_warn(
+                Some((now, PortalFail::Proxy)),
+                again,
+                PortalFail::CursorEmpty
+            ),
+            "a different failure kind warns"
         );
         assert!(portal_should_warn(
-            Some((now, "portal down")),
+            Some((now, PortalFail::Proxy)),
             now + PORTAL_WARN_WINDOW,
-            "portal down"
+            PortalFail::Proxy
         ));
         assert!(!portal_should_warn(
-            Some((now, "portal down")),
+            Some((now, PortalFail::Proxy)),
             now + PORTAL_WARN_WINDOW - Duration::from_secs(1),
-            "portal down"
+            PortalFail::Proxy
         ));
 
-        *PORTAL_WARN_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        // A local slot, the same way match-end OCR fallback takes an
+        // AtomicBool. The process-wide slot is what a full-suite run shares.
+        let slot = std::sync::Mutex::new(None);
         let first = with_log_level(tracing::Level::WARN, || {
-            let _ = portal_unavailable(&"portal down");
-            let _ = portal_unavailable(&"portal down");
-        });
-        let second = with_log_level(tracing::Level::WARN, || {
-            let _ = portal_unavailable(&"portal down");
+            let _ = portal_unavailable_in(&slot, PortalFail::Proxy, &"portal down");
+            let _ = portal_unavailable_in(&slot, PortalFail::Proxy, &"portal is gone");
         });
         assert_eq!(first.matches(PORTAL_UNAVAILABLE).count(), 1);
         assert!(first.contains("WARN"));
+        assert!(first.contains("portal down"));
+        let second = with_log_level(tracing::Level::WARN, || {
+            let _ = portal_unavailable_in(&slot, PortalFail::Proxy, &"portal down");
+        });
         assert!(
             !second.contains(PORTAL_UNAVAILABLE),
-            "consecutive retries do not warn again: {second}"
+            "the same kind inside the window does not warn again: {second}"
         );
-        *PORTAL_WARN_AT.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let other = with_log_level(tracing::Level::WARN, || {
+            let _ = portal_unavailable_in(&slot, PortalFail::CursorRead, &"cursor read failed");
+        });
+        assert_eq!(other.matches(PORTAL_UNAVAILABLE).count(), 1);
+        clear_portal_warn_in(&slot);
+        let after_clear = with_log_level(tracing::Level::WARN, || {
+            let _ = portal_unavailable_in(&slot, PortalFail::Proxy, &"portal down");
+        });
+        assert_eq!(
+            after_clear.matches(PORTAL_UNAVAILABLE).count(),
+            1,
+            "a successful open clears the episode, so the next outage warns"
+        );
+    }
+
+    fn tab_obs(waited: bool, got_fresh: bool, buffer_during_wait: bool) -> Observe {
+        Observe::Tab {
+            health: StreamHealth::Streaming,
+            waited,
+            got_fresh,
+            buffer_during_wait,
+        }
+    }
+
+    fn quiet_polls(watch: &mut ReopenWatch, now: Instant, n: u32) {
+        for _ in 0..n {
+            assert_eq!(
+                reopen_step(
+                    Observe::Poll {
+                        health: StreamHealth::Streaming
+                    },
+                    true,
+                    now,
+                    watch
+                ),
+                ReopenStep::Keep
+            );
+        }
     }
 
     #[test]
-    fn a_stalled_stream_reopens_while_the_game_is_running() {
+    fn a_quiet_stream_never_reopens_and_a_dead_one_reopens_once() {
         let now = Instant::now();
-        assert!(!stream_stall_reopen(None, now, true, STREAM_STALL));
-        assert!(!stream_stall_reopen(Some(now), now, true, STREAM_STALL));
-        assert!(!stream_stall_reopen(
-            Some(now - STREAM_STALL + Duration::from_millis(1)),
-            now,
-            true,
-            STREAM_STALL
-        ));
-        assert!(!stream_stall_reopen(
-            Some(now - STREAM_STALL),
-            now,
-            false,
-            STREAM_STALL
-        ));
-        assert!(stream_stall_reopen(
-            Some(now - STREAM_STALL),
-            now,
-            true,
-            STREAM_STALL
-        ));
-        STALL_WARNED.store(false, Ordering::Release);
-        let first = with_log(warn_stream_stall);
-        let second = with_log(warn_stream_stall);
-        assert_eq!(first.matches("screencast stream stalled").count(), 1);
-        assert!(first.contains("WARN"));
-        assert!(
-            !second.contains("screencast stream stalled"),
-            "the same stall episode does not warn again: {second}"
+        let mut watch = ReopenWatch::default();
+        quiet_polls(&mut watch, now + Duration::from_secs(60), 8);
+        assert!(watch.pending.is_none());
+        assert!(!watch.reopened_this_game);
+        assert_eq!(watch.soft_misses, 0);
+
+        let mut dead = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Error
+                },
+                true,
+                now,
+                &mut dead
+            ),
+            ReopenStep::Reopen(REOPEN_DEAD)
         );
-        STALL_WARNED.store(false, Ordering::Release);
-        let third = with_log(warn_stream_stall);
-        assert_eq!(third.matches("screencast stream stalled").count(), 1);
-        STALL_WARNED.store(false, Ordering::Release);
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Error
+                },
+                true,
+                now,
+                &mut dead
+            ),
+            ReopenStep::Keep,
+            "a second error in the same game does not reopen"
+        );
+        let mut unconnected = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Unconnected
+                },
+                true,
+                now,
+                &mut unconnected
+            ),
+            ReopenStep::Reopen(REOPEN_DEAD)
+        );
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Unconnected
+                },
+                true,
+                now,
+                &mut unconnected
+            ),
+            ReopenStep::Keep
+        );
+        let mut paused = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Paused {
+                        paused_for: Duration::from_secs(1)
+                    }
+                },
+                true,
+                now,
+                &mut paused
+            ),
+            ReopenStep::Keep
+        );
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Paused {
+                        paused_for: PAUSED_PERSIST
+                    }
+                },
+                true,
+                now,
+                &mut paused
+            ),
+            ReopenStep::Reopen(REOPEN_DEAD)
+        );
+    }
+
+    #[test]
+    fn two_tab_soft_misses_reopen_on_the_next_poll_once_per_game() {
+        let now = Instant::now();
+        let mut watch = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), true, now, &mut watch),
+            ReopenStep::Keep,
+            "one soft miss does not reopen"
+        );
+        assert_eq!(watch.soft_misses, 1);
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), true, now, &mut watch),
+            ReopenStep::HoldForPoll,
+            "the Tab that trips the stall keeps its result"
+        );
+        assert!(matches!(watch.pending, Some(Pending::Tabs)));
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Streaming
+                },
+                true,
+                now,
+                &mut watch
+            ),
+            ReopenStep::Reopen(REOPEN_TABS)
+        );
+        assert!(watch.reopened_this_game);
+        assert_eq!(watch.soft_misses, 0);
+
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), true, now, &mut watch),
+            ReopenStep::Keep
+        );
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), true, now, &mut watch),
+            ReopenStep::Keep,
+            "a second pair in the same game does not ask for another reopen"
+        );
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Streaming
+                },
+                true,
+                now,
+                &mut watch
+            ),
+            ReopenStep::Keep
+        );
+
+        let mut buffered = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(tab_obs(true, false, true), true, now, &mut buffered),
+            ReopenStep::Keep
+        );
+        assert_eq!(
+            reopen_step(tab_obs(true, false, true), true, now, &mut buffered),
+            ReopenStep::Keep,
+            "a PipeWire buffer during the wait is not a soft miss"
+        );
+        assert_eq!(buffered.soft_misses, 0);
+
+        let mut fresh = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), true, now, &mut fresh),
+            ReopenStep::Keep
+        );
+        assert_eq!(fresh.soft_misses, 1);
+        assert_eq!(
+            reopen_step(tab_obs(true, true, false), true, now, &mut fresh),
+            ReopenStep::Keep
+        );
+        assert_eq!(fresh.soft_misses, 0, "a fresh Tab frame clears the streak");
+    }
+
+    #[test]
+    fn a_reopen_waits_five_minutes_and_a_new_game_keeps_that_clock() {
+        let now = Instant::now();
+        let mut watch = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), true, now, &mut watch),
+            ReopenStep::Keep
+        );
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), true, now, &mut watch),
+            ReopenStep::HoldForPoll
+        );
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Streaming
+                },
+                true,
+                now,
+                &mut watch
+            ),
+            ReopenStep::Reopen(REOPEN_TABS)
+        );
+        let opened_at = watch.last_reopen.expect("the reopen stamps the clock");
+
+        reset_stall_on_game_start(&mut watch);
+        assert!(!watch.reopened_this_game);
+        assert_eq!(watch.soft_misses, 0);
+        assert_eq!(watch.last_reopen, Some(opened_at));
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), true, now, &mut watch),
+            ReopenStep::Keep
+        );
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), true, now, &mut watch),
+            ReopenStep::HoldForPoll
+        );
+        let too_soon = now + SOFT_REOPEN_GAP - Duration::from_secs(1);
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Streaming
+                },
+                true,
+                too_soon,
+                &mut watch
+            ),
+            ReopenStep::Keep,
+            "five minutes have not elapsed"
+        );
+        assert!(matches!(watch.pending, Some(Pending::Tabs)));
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Streaming
+                },
+                true,
+                now + SOFT_REOPEN_GAP,
+                &mut watch
+            ),
+            ReopenStep::Reopen(REOPEN_TABS)
+        );
+
+        let closed = watch_after_close(watch);
+        assert_eq!(closed.last_reopen, Some(now + SOFT_REOPEN_GAP));
+        assert!(!closed.reopened_this_game);
+    }
+
+    #[test]
+    fn a_relaunch_without_a_token_never_reopens() {
+        let now = Instant::now();
+        let mut watch = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Error
+                },
+                false,
+                now,
+                &mut watch
+            ),
+            ReopenStep::KeepNoToken
+        );
+        for _ in 0..4 {
+            assert_eq!(
+                reopen_step(
+                    Observe::Poll {
+                        health: StreamHealth::Error
+                    },
+                    false,
+                    now,
+                    &mut watch
+                ),
+                ReopenStep::Keep
+            );
+        }
+        let mut tabs = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), false, now, &mut tabs),
+            ReopenStep::Keep
+        );
+        assert_eq!(
+            reopen_step(tab_obs(true, false, false), false, now, &mut tabs),
+            ReopenStep::KeepNoToken
+        );
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Streaming
+                },
+                false,
+                now,
+                &mut tabs
+            ),
+            ReopenStep::Keep
+        );
+        assert!(tabs.pending.is_none());
+        assert!(!tabs.reopened_this_game);
+    }
+
+    #[test]
+    fn a_new_game_resets_the_stall_watch_except_the_gap_clock() {
+        let now = Instant::now();
+        let mut watch = ReopenWatch {
+            soft_misses: 2,
+            last_reopen: Some(now),
+            pending: Some(Pending::Tabs),
+            death_latched: true,
+            token_warned: true,
+            reopened_this_game: true,
+        };
+        STALL_RESET.store(false, Ordering::Release);
+        assert!(!note_game_edge(true, true));
+        apply_stall_reset(&mut watch);
+        assert!(watch.reopened_this_game, "staying in a game does not reset");
+        assert!(note_game_edge(false, true));
+        apply_stall_reset(&mut watch);
+        assert!(!watch.reopened_this_game);
+        assert_eq!(watch.soft_misses, 0);
+        assert!(watch.pending.is_none());
+        assert!(!watch.death_latched);
+        assert!(!watch.token_warned);
+        assert_eq!(watch.last_reopen, Some(now));
+        STALL_RESET.store(false, Ordering::Release);
+    }
+
+    #[test]
+    fn capture_calls_reopen_step_and_a_poll_waits_one_frame_plus_margin() {
+        assert_eq!(reuse_wait(2), Duration::from_millis(600));
+        assert_eq!(reuse_wait(4), Duration::from_millis(350));
+        assert_eq!(SOFT_REOPEN_GAP, Duration::from_secs(5 * 60));
+        let src = include_str!("screencast.rs");
+        let capture_at = src.find("pub async fn capture(").expect("capture");
+        let after = &src[capture_at..];
+        let end = after.find("\nasync fn tab_timeout(").expect("tab_timeout");
+        let body = &after[..end];
+        assert!(
+            body.contains("reopen_step("),
+            "deleting the reopen call from capture must fail"
+        );
+        assert!(
+            body.contains("apply_stall_reset("),
+            "a new game must reset the stall watch inside capture"
+        );
+        assert!(
+            body.contains("release_live("),
+            "capture must drop the PipeWire thread off the session lock"
+        );
+        assert!(body.contains("had_token"));
+        assert!(body.contains("clear_portal_warn()"));
+        let skip = src
+            .find("fn note_tab_stream_miss(")
+            .expect("note_tab_stream_miss");
+        let timeout = &src[src.find("async fn tab_timeout(").unwrap()..skip];
+        assert!(
+            timeout.contains("note_tab_stream_miss(delay_ms, super::stream_miss_log_suppressed())"),
+            "the first-Tab suppress flag must gate the miss log"
+        );
+        let before = tab_timeout_counts().0;
+        assert!(!note_tab_stream_miss(12, true));
+        assert_eq!(tab_timeout_counts().0, before);
+        assert!(note_tab_stream_miss(12, false));
+        assert_eq!(tab_timeout_counts().0, before + 1);
+        assert!(capture_now_blocked_message(true).contains("Quit Overwatch"));
+        assert!(!capture_now_blocked_message(false).contains("Quit Overwatch"));
+        assert!(capture_now_blocked_message(false).contains("Stop the tracker"));
     }
 
     #[test]
@@ -1864,19 +2612,36 @@ mod tests {
         assert!(is_declined_capture(NO_CAPTURE_DECLINE_NOTICE));
         assert!(is_declined_capture(timeout_notice(false)));
 
-        let declined = open_error_action("select_sources cancelled", false);
+        let declined = open_error_action("select_sources cancelled", false, false);
         assert!(declined.declined);
         assert!(!declined.arm_backoff);
         assert_eq!(declined.notice, Some(NO_CAPTURE_DECLINE_NOTICE));
-        let timeout = open_error_action("screencast permission dialog timed out", false);
-        assert!(timeout.declined, "a timeout is a No for this launch");
+        let timeout = open_error_action("screencast permission dialog timed out", false, false);
+        assert!(
+            timeout.declined,
+            "a timeout with no token sent is a No for this launch"
+        );
         assert!(!timeout.arm_backoff);
         assert_eq!(timeout.notice, Some(timeout_notice(false)));
+        let timeout_with_token =
+            open_error_action("screencast permission dialog timed out", false, true);
+        assert!(
+            !timeout_with_token.declined,
+            "a timeout after a token was sent is not a No"
+        );
+        assert!(timeout_with_token.arm_backoff);
+        assert!(timeout_with_token.notice.is_none());
+        let timeout_with_token_safe =
+            open_error_action("screencast permission dialog timed out", true, true);
+        assert!(!timeout_with_token_safe.declined);
+        assert!(timeout_with_token_safe.arm_backoff);
         assert!(timeout_notice(false).contains("no captures"));
         assert!(!timeout_notice(true).contains("no captures"));
-        let safe = open_error_action("Dialog was closed", true);
+        assert!(timeout_notice(true).contains("Older screenshot"));
+        let safe = open_error_action("Dialog was closed", true, false);
         assert_eq!(safe.notice, Some(SAFE_DECLINE_NOTICE));
         assert!(!SAFE_DECLINE_NOTICE.contains("no captures"));
+        assert!(SAFE_DECLINE_NOTICE.contains("Older screenshot"));
 
         match select_error("Dialog was closed".into(), true) {
             OpenFail::Other(msg) => assert_eq!(msg, "select_sources cancelled"),
@@ -1902,6 +2667,7 @@ mod tests {
                 false,
                 dir.path(),
                 &mut last_fail,
+                false,
             );
             assert!(action.declined);
             assert!(!action.arm_backoff);
@@ -1916,6 +2682,7 @@ mod tests {
                     false,
                     dir.path(),
                     &mut again,
+                    false,
                 )
                 .declined
             );
@@ -1950,13 +2717,25 @@ mod tests {
         let mut relaunch = Some(Instant::now());
         let second = with_log(|| {
             assert!(
-                apply_share_decline("select_sources cancelled", false, dir.path(), &mut relaunch,)
-                    .declined
+                apply_share_decline(
+                    "select_sources cancelled",
+                    false,
+                    dir.path(),
+                    &mut relaunch,
+                    false,
+                )
+                .declined
             );
             let mut poll = None;
             assert!(
-                apply_share_decline("select_sources cancelled", false, dir.path(), &mut poll,)
-                    .declined
+                apply_share_decline(
+                    "select_sources cancelled",
+                    false,
+                    dir.path(),
+                    &mut poll,
+                    false,
+                )
+                .declined
             );
         });
         assert_eq!(second.matches(NO_CAPTURE_DECLINE_NOTICE).count(), 1);

@@ -3112,10 +3112,15 @@ fn stage_capture(
         .carried_deferred_at
         .unwrap_or(captured_at - chrono::Duration::seconds(1));
     let gate_prev = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
+    let gate_suspect = if facts.suspect_row {
+        [true; capture_gate::GATE_COLS]
+    } else {
+        facts.suspect
+    };
     let gate = capture_gate::apply_gate_seeded(
         gate_prev,
         facts.counters,
-        facts.suspect,
+        gate_suspect,
         facts.held,
         split,
         facts.trusted_cells && !facts.suspect_row,
@@ -4225,34 +4230,70 @@ fn reused_frame_is_not_a_confirm_and_a_new_pair_is() {
     ));
     let seen = Some(capture::SeenStream { id: 1, seq: 4 });
     let held_at = std::time::Instant::now();
-    let streak = Some(WordStreak {
+    let mut streak = Some(WordStreak {
         outcome: detect::MatchOutcome::Victory,
         seen_at: held_at,
         map: None,
     });
-    // The poll loop continues before `resolve_word_tick` when the frame
-    // was already used. Applying the word would move the streak. The
-    // reused frame does not.
-    assert!(!capture::poll_uses_frame(false, Some(4), Some(1), seen));
-    let mut if_applied = Some(WordStreak {
-        outcome: detect::MatchOutcome::Victory,
-        seen_at: held_at,
-        map: None,
-    });
-    let applied = resolve_word_tick(&mut if_applied, victory, std::time::Instant::now(), None);
-    assert!(applied.signal.is_some());
-    assert_ne!(
-        if_applied.as_ref().map(|prior| prior.seen_at),
-        Some(held_at)
-    );
+    // The poll loop continues before `resolve_word_tick` when this is
+    // true. Applying the word moves `seen_at`, so an inverted predicate
+    // fails here.
+    let skips = capture::reused_frame_skips_the_read(false, Some(4), Some(1), seen);
+    assert!(skips);
+    if !skips {
+        let _ = resolve_word_tick(&mut streak, victory, std::time::Instant::now(), None);
+    }
     assert_eq!(
         streak.as_ref().map(|prior| prior.seen_at),
         Some(held_at),
         "a reused frame must not move the streak"
     );
-    assert_eq!(
-        streak.as_ref().map(|prior| prior.outcome),
-        Some(detect::MatchOutcome::Victory)
+    let mut if_applied = Some(WordStreak {
+        outcome: detect::MatchOutcome::Victory,
+        seen_at: held_at,
+        map: None,
+    });
+    let skips_fresh = capture::reused_frame_skips_the_read(
+        true,
+        Some(5),
+        Some(1),
+        Some(capture::SeenStream { id: 1, seq: 4 }),
+    );
+    assert!(!skips_fresh);
+    if !skips_fresh {
+        let applied = resolve_word_tick(&mut if_applied, victory, std::time::Instant::now(), None);
+        assert!(applied.signal.is_some());
+    }
+    assert_ne!(
+        if_applied.as_ref().map(|prior| prior.seen_at),
+        Some(held_at),
+        "a new frame must move the streak"
+    );
+    let src = include_str!("main.rs");
+    // Split so this test is not an earlier hit for the same needle.
+    let run_at = src
+        .find(concat!("async ", "fn run_loop"))
+        .expect("run_loop");
+    let after = &src[run_at..];
+    let end = after
+        .find("\nfn analyze_frame(")
+        .expect("run_loop ends before analyze_frame");
+    let run_loop = &after[..end];
+    let call = run_loop
+        .find("reused_frame_skips_the_read(")
+        .expect("the poll must call the skip helper");
+    let after_call = &run_loop[call..];
+    let kept = after_call
+        .find("seen_stream = Some")
+        .expect("a kept frame is recorded after the skip");
+    let window = &after_call[..kept];
+    assert!(
+        window.contains("continue"),
+        "deleting the continue after a reused frame must fail: {window}"
+    );
+    assert!(
+        run_loop.contains("_ = stat_tracker::replace::shutdown_notified() =>"),
+        "the daemon select must wake on shutdown_notified"
     );
 
     assert!(capture::poll_uses_frame(
@@ -4865,7 +4906,7 @@ async fn run_loop(
                         return Ok(());
                     }
                     Ok(Ok(captured)) => {
-                        if !capture::poll_uses_frame(
+                        if capture::reused_frame_skips_the_read(
                             captured.is_new,
                             captured.seq,
                             captured.stream,
@@ -6947,9 +6988,10 @@ fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)>
     None
 }
 
-/// The Tab retry predicate: retry only when the scoreboard preflight
-/// rejected the frame as not a scoreboard (a board still drawing). A team
-/// size the pitch does not settle and an analysed frame are not retried.
+/// The Tab retry predicate. A scoreboard that is still drawing, a Tab that
+/// got no fresh stream frame, and a share that is still opening are tried
+/// again. A declined share, a team size the pitch does not settle, and an
+/// analysed frame are not.
 fn tab_capture_should_retry(outcome: &FrameAnalysisOutcome) -> bool {
     matches!(
         outcome,
@@ -6959,9 +7001,22 @@ fn tab_capture_should_retry(outcome: &FrameAnalysisOutcome) -> bool {
     )
 }
 
-/// How useful a Tab outcome is, so a later rejected grab never replaces a
-/// better one: analysed over team size unsure over not a scoreboard over a
-/// stream miss.
+/// How useful a Tab outcome is, so a later grab never replaces a better
+/// one. Higher is better: analysed (4), team size unsure (3), not a
+/// scoreboard (2), stream miss (1), share still opening or declined (0).
+fn tab_retry_reason(outcome: &FrameAnalysisOutcome) -> &'static str {
+    match outcome {
+        FrameAnalysisOutcome::NotAScoreboard { .. } => {
+            "rejected by the scoreboard check (the board may still be drawing)"
+        }
+        FrameAnalysisOutcome::StreamMiss => "no fresh stream frame arrived",
+        FrameAnalysisOutcome::ShareOpening => "the share is still opening",
+        FrameAnalysisOutcome::Declined
+        | FrameAnalysisOutcome::TeamSizeUncertain { .. }
+        | FrameAnalysisOutcome::Analyzed(_) => "not retried",
+    }
+}
+
 fn tab_outcome_rank(outcome: &FrameAnalysisOutcome) -> u8 {
     match outcome {
         FrameAnalysisOutcome::ShareOpening | FrameAnalysisOutcome::Declined => 0,
@@ -7046,6 +7101,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             &stat_tracker::tab_retry::TAB_RETRY_WAITS,
             tab_capture_should_retry,
             tab_outcome_rank,
+            tab_retry_reason,
             |attempt| {
                 let matcher = Arc::clone(&ctx.portrait_matcher);
                 // Clone player_name so the blocking closure can own it.
@@ -7374,9 +7430,9 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
     // nothing else; a cell it does not vouch for is held, and a row with
     // under four sure cells is refused (never a text fallback, never an OCR
     // number). A suspect own row (alpha.7 O9: it may be another player's)
-    // is a low-trust read: the capture gate does not latch its counters,
-    // and the boundary plan lets it anchor the reset baseline but not split
-    // a game by itself (`BoardFacts::suspect_row`).
+    // stores none of its numbers and does not seed or raise the running
+    // totals. The boundary plan still lets it anchor the reset baseline,
+    // and it does not split a game by itself (`BoardFacts::suspect_row`).
     let own_row_suspect = own_row.is_some_and(|own| own.suspect());
     let scoreboard_read = match &new_board {
         Some(board) => reader_apply::read_own_row_stats(board, board_row, &outcome_label)
@@ -7416,7 +7472,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             if own_row_suspect {
                 tracing::info!(
                     ?player_row_idx,
-                    "own row is suspect: its stats are a low-trust read, every field off it is flagged"
+                    "own row is suspect: none of its stats are stored or used to raise the totals"
                 );
             }
             if !trusted_cells {
@@ -7806,10 +7862,15 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 ];
                 raw_guess = Some(std::array::from_fn(|col| guesses[col].unwrap_or(held[col])));
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
+                let gate_suspect = if own_row_suspect {
+                    [true; capture_gate::GATE_COLS]
+                } else {
+                    suspect
+                };
                 staged.gate = hold_new_reader_stats_with_guesses(
                     &mut parsed,
                     prior,
-                    suspect,
+                    gate_suspect,
                     held_cols,
                     split,
                     trusted_cells && !own_row_suspect,
@@ -7895,11 +7956,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 // The best guess waits on the active game. A later Tab with
                 // a sure read stores the real row; if none comes, the game
                 // stores this guess when it closes (alpha.8).
-                let best_guess = raw_guess.map(|guess| {
-                    let mut row = parsed.clone();
-                    apply_best_guess(&mut row, &unread, guess);
-                    row
-                });
+                // An all-suspect read, including a suspect own row, must not
+                // be saved later as the game's best guess either.
+                let best_guess = if own_row_suspect || suspect.iter().all(|&cell| cell) {
+                    None
+                } else {
+                    raw_guess.map(|guess| {
+                        let mut row = parsed.clone();
+                        apply_best_guess(&mut row, &unread, guess);
+                        row
+                    })
+                };
                 return Ok(CaptureReport {
                     recorded: false,
                     best_guess,
@@ -13210,7 +13277,7 @@ mod tests {
     }
 
     #[test]
-    fn new_reader_keeps_a_fallback_of_40_18_until_two_clean_reads_of_0_0() {
+    fn new_reader_replaces_a_fallback_of_40_18_on_one_clean_read() {
         let clean = [false; capture_gate::GATE_COLS];
         let mut parsed = test_match("s", "unknown");
         parsed.elims = 2;
@@ -13241,11 +13308,10 @@ mod tests {
         );
         assert_eq!(
             (parsed.assists, parsed.deaths),
-            (40, 18),
-            "one clean read keeps the fallback"
+            (0, 0),
+            "one clean read replaces the fallback"
         );
-        assert!(parsed.suspect_fields.iter().any(|field| field == "a"));
-        assert!(parsed.suspect_fields.iter().any(|field| field == "d"));
+        assert!(!second.state.low_trust);
 
         parsed.assists = 0;
         parsed.deaths = 0;
@@ -15198,6 +15264,9 @@ mod tests {
         );
         assert!(hc_body.contains("suspect_row: own_row_suspect,"));
         assert!(hc_body.contains("trusted_cells && !own_row_suspect,"));
+        assert!(hc_body.contains(
+            "let gate_suspect = if own_row_suspect { [true; capture_gate::GATE_COLS] } else { suspect };"
+        ));
         assert!(hc_body.contains("let own_seeds = own_name_seeds(ctx.own_name.as_ref());"));
     }
 
@@ -15239,27 +15308,27 @@ mod tests {
             assert_eq!(analysis.own_row.unwrap().row, Some(0));
             let board = Some(o8_board(Some("zenyatta")));
             let report = o9_tab(&ctx, "o9", "Busan", analysis, board).await;
-            assert!(report.recorded);
             let rows = ctx.store.get_session_snapshots("o9").await.unwrap();
-            let flags = &rows[0].suspect_fields;
-            let want: Vec<&str> = if marked {
-                reader_apply::OWN_ROW_FIELDS.to_vec()
+            let gate = report.gate_state.expect("gate");
+            if marked {
+                // A suspect own row stores none of its numbers and does not
+                // seed the totals. The gate stays low-trust until a clean row.
+                assert!(
+                    !report.recorded,
+                    "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
+                );
+                assert!(
+                    rows.is_empty(),
+                    "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
+                );
+                assert!(gate.low_trust);
+                assert_ne!(gate.accepted.damage, 3000);
             } else {
-                Vec::new()
-            };
-            assert_eq!(
-                flags, &want,
-                "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
-            );
-            // the values themselves are still the row's
-            assert_eq!((rows[0].elims, rows[0].damage), (10, 3000));
-            // F262-11: a suspect row's counters enter the capture gate as a
-            // low-trust read, so they cannot latch
-            assert_eq!(
-                report.gate_state.expect("gate").low_trust,
-                marked,
-                "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
-            );
+                assert!(report.recorded);
+                assert!(rows[0].suspect_fields.is_empty());
+                assert_eq!((rows[0].elims, rows[0].damage), (10, 3000));
+                assert!(!gate.low_trust);
+            }
         }
     }
 
@@ -15381,14 +15450,12 @@ mod tests {
                 Some(o9_candidate(i).proved(Proof::CareerHero, Some(hero)));
             let board = Some(o8_board(Some(hero)));
             let report = o9_tab(&ctx, session, map, analysis, board).await;
-            assert!(report.recorded, "tab {i}");
-            // the row is stored marked and as a low-trust read
+            // A career-hero row with no highlight is a suspect own row: its
+            // numbers are not stored. The crop is still offered to the seeds.
+            assert!(!report.recorded, "tab {i}");
             if i == 0 {
                 let rows = ctx.store.get_session_snapshots(session).await.unwrap();
-                assert_eq!(
-                    rows[0].suspect_fields,
-                    reader_apply::OWN_ROW_FIELDS.to_vec()
-                );
+                assert!(rows.is_empty(), "a suspect own row stores no stats");
             }
             assert!(report.gate_state.expect("gate").low_trust, "tab {i}");
             assert_eq!(
@@ -17302,9 +17369,13 @@ mod tests {
             )
             .await;
         let once = night.game().gate.expect("first clean read stored");
-        assert_eq!(once.accepted.assists, 40, "one low read keeps the latch");
-        assert_eq!(once.accepted.deaths, 18);
-        assert!(once.low_trust);
+        assert_eq!(
+            once.accepted.assists, 0,
+            "one clean read replaces the latch"
+        );
+        assert_eq!(once.accepted.deaths, 0);
+        assert_eq!(once.accepted.mitigation, 450);
+        assert!(!once.low_trust);
 
         night.advance(Duration::from_secs(20));
         night
@@ -25293,10 +25364,10 @@ mod tests {
 
     /// O9 and O10 on one board: O9 says which row is the member's and how
     /// sure it is, O10 reads that row's cells. A suspect own row may be
-    /// another player's, so it is a low-trust read all the way: every field
-    /// off the row is flagged, the capture gate does not latch its counters,
-    /// and the boundary plan does not take it as a reset row. A held cell on
-    /// it is held like any other.
+    /// another player's, so none of its numbers are stored and it does not
+    /// raise the totals. Every field off the row is flagged. The boundary
+    /// plan does not take it as a reset row. A held cell on it is discarded
+    /// with the rest of the row.
     #[tokio::test]
     async fn new_reader_suspect_own_row_with_held_cells_is_low_trust_and_flagged() {
         use detect::own_row::combine;
@@ -25334,24 +25405,22 @@ mod tests {
         );
         assert!(
             seen[1].recorded && seen[1].refresh_baseline,
-            "a suspect row is stored, and on the baseline's row it anchors: {:?}",
+            "a suspect row keeps the last row and does not raise the baseline: {:?}",
             seen[1]
         );
         let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
-        // the sure cells are the board's, the held one keeps the last
-        // accepted 700, and every field read off the row is flagged
-        assert_eq!(o10_stats(&rows[1]), [13, 6, 3, 3900, 700, 450]);
+        // none of the suspect row's numbers are stored: the row stays the
+        // last sure board, and every field off the suspect row is flagged
+        assert_eq!(o10_stats(&rows[1]), [12, 5, 3, 3500, 700, 300]);
         assert_eq!(
             rows[1].suspect_fields,
             reader_apply::OWN_ROW_FIELDS.to_vec()
         );
         let gate = st.active_game.as_ref().unwrap().gate.unwrap();
-        assert!(gate.low_trust, "the counters did not latch");
-        // the moved columns are unconfirmed over the values they left; the
-        // held column was not read and stays confirmed
-        assert!(gate.unconfirmed[0] && gate.unconfirmed[3]);
-        assert_eq!(gate.confirmed_floor[0], 12);
-        assert!(!gate.unconfirmed[4] && !gate.has_confirmed_floor[4]);
+        assert!(!gate.low_trust, "a suspect row does not latch");
+        assert_eq!(gate.accepted.deaths, 3);
+        assert_eq!(gate.accepted.damage, 3500);
+        assert!(!gate.unconfirmed.iter().any(|&col| col));
 
         // a game whose first board is a suspect row with healing held: no
         // row. Nothing of the game is stored and nothing in it was read off
@@ -25618,12 +25687,9 @@ mod tests {
 
     /// R3-1, claude-r3's experiment e4 through `handle_capture`: a game whose
     /// every Tab has a suspect own row, its end missed, then the next game
-    /// on the same map and hero with sure rows 40 s apart. Before, the
-    /// suspect rows set no reset baseline, so nothing split: one session,
-    /// whose last row was `30 12 1 14000 5000 150` with deaths (9, 0, 1) and
-    /// mitigation (900, 0, 150) gone down unflagged. Now the suspect rows
-    /// anchor the baseline, the first sure board of game 2 is held off game
-    /// 1, and the second splits.
+    /// on the same map and hero with sure rows 40 s apart. The suspect rows
+    /// store no numbers. They still anchor the baseline, so the first sure
+    /// board of game 2 is held off game 1 and the second splits.
     #[tokio::test]
     async fn new_reader_all_suspect_game_then_a_sure_game_splits() {
         use detect::own_row::combine;
@@ -25654,24 +25720,18 @@ mod tests {
             tabs
         };
 
-        // e4: game 2 has sure rows
+        // e4: game 2 has sure rows. Game 1's rows are all suspect, so none
+        // of those numbers are stored. They still anchor the baseline.
         let dir = tempfile::tempdir().unwrap();
         let ctx = o8_ctx(dir.path(), true).await;
         let (st, seen) = o10_run_rows(&ctx, tabs(sure_row)).await;
         for tab in &seen[..3] {
-            assert!(tab.recorded && tab.refresh_baseline, "{tab:?}");
+            assert!(!tab.recorded && tab.refresh_baseline, "{tab:?}");
         }
         assert!(seen[3].deferred && !seen[3].recorded, "{:?}", seen[3]);
         assert!(seen[4].split && seen[4].recorded, "{:?}", seen[4]);
         let one = ctx.store.get_session_snapshots("o10").await.unwrap();
-        assert_eq!(
-            one.iter().map(o10_stats).collect::<Vec<_>>(),
-            game_one.to_vec(),
-            "game 1 keeps its own three rows"
-        );
-        for row in &one {
-            assert_eq!(row.suspect_fields, reader_apply::OWN_ROW_FIELDS.to_vec());
-        }
+        assert!(one.is_empty(), "a suspect game stores no stats");
         let new_id = st.active_game.as_ref().unwrap().session_id.clone();
         assert_ne!(new_id, "o10");
         let two = ctx.store.get_session_snapshots(&new_id).await.unwrap();
@@ -25680,8 +25740,6 @@ mod tests {
             game_two.to_vec(),
             "game 2 has its own session, with all four boards"
         );
-        assert_eq!(ctx.store.get_all_sessions().await.unwrap().len(), 2);
-        assert_eq!(o10_unflagged_drops(&one), Vec::<String>::new());
         assert_eq!(o10_unflagged_drops(&two), Vec::<String>::new());
 
         // e1: game 2 has suspect rows too. A suspect row never commits the
@@ -25691,23 +25749,18 @@ mod tests {
         let ctx = o8_ctx(dir.path(), true).await;
         let (st, seen) = o10_run_rows(&ctx, tabs(suspect)).await;
         assert!(seen[3].deferred && seen[4].deferred, "{seen:?}");
-        assert!(seen[5].split && seen[5].recorded, "{:?}", seen[5]);
-        assert_eq!(
-            o10_rows(&ctx, "o10").await,
-            game_one.to_vec(),
-            "game 1 keeps its own three rows"
+        assert!(seen[5].split && !seen[5].recorded, "{:?}", seen[5]);
+        assert!(
+            o10_rows(&ctx, "o10").await.is_empty(),
+            "game 1 stores no suspect stats"
         );
         let new_id = st.active_game.as_ref().unwrap().session_id.clone();
         let two = ctx.store.get_session_snapshots(&new_id).await.unwrap();
-        assert_eq!(
-            two.iter().map(o10_stats).collect::<Vec<_>>(),
-            game_two[2..].to_vec(),
-            "a suspect fresh board is not carried: game 2 starts at the board that split"
+        assert!(
+            two.is_empty(),
+            "a suspect fresh board is not stored: {two:?}"
         );
-        for row in &two {
-            assert_eq!(row.suspect_fields, reader_apply::OWN_ROW_FIELDS.to_vec());
-        }
-        assert_eq!(ctx.store.match_count().await.unwrap(), 5);
+        assert_eq!(ctx.store.match_count().await.unwrap(), 0);
     }
 
     /// One wrong suspect row in the middle of a sure game does not split it.
@@ -25759,11 +25812,9 @@ mod tests {
     }
 
     /// A stat never goes down unflagged in a stored row, whatever the trust
-    /// bits say (R3-1). A suspect row with higher numbers is stored flagged
-    /// and leaves its columns unconfirmed; the member's real row then reads
-    /// lower. The first lower read is held (flagged), the second matching
-    /// one replaces all six numbers with lower ones. That replacement is not
-    /// a hold, and it used to store the lower numbers with no flag.
+    /// bits say (R3-1). A suspect row with higher numbers is not stored and
+    /// does not raise the baseline. The member's next clean row continues
+    /// from the last sure board, so it is not a drop and it is not unsure.
     #[tokio::test]
     async fn new_reader_flags_every_stat_that_goes_down_in_a_stored_row() {
         use detect::own_row::combine;
@@ -25788,20 +25839,25 @@ mod tests {
             "{seen:?}"
         );
         let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
-        let six: Vec<String> = capture_gate::COL_FIELD.map(String::from).to_vec();
-        // the suspect row: stored as read, every own-row field flagged
-        assert_eq!(o10_stats(&rows[1]), [20, 9, 5, 8000, 2000, 900]);
+        // the suspect row: previous numbers, every own-row field flagged
+        assert_eq!(o10_stats(&rows[1]), [12, 5, 3, 3500, 700, 300]);
         assert_eq!(
             rows[1].suspect_fields,
             reader_apply::OWN_ROW_FIELDS.to_vec()
         );
-        // the first real read: held at the suspect row's numbers, flagged
-        assert_eq!(o10_stats(&rows[2]), [20, 9, 5, 8000, 2000, 900]);
-        assert_eq!(rows[2].suspect_fields, six);
-        // the second: all six go down, and all six are flagged
+        // the next clean reads continue from that board, unflagged
+        assert_eq!(o10_stats(&rows[2]), [13, 5, 3, 3700, 720, 300]);
+        assert!(
+            rows[2].suspect_fields.is_empty(),
+            "{:?}",
+            rows[2].suspect_fields
+        );
         assert_eq!(o10_stats(&rows[3]), [13, 5, 3, 3700, 720, 300]);
-        assert_eq!(rows[3].suspect_fields, six);
-        // from there the game is the member's again, unflagged
+        assert!(
+            rows[3].suspect_fields.is_empty(),
+            "{:?}",
+            rows[3].suspect_fields
+        );
         assert_eq!(o10_stats(&rows[4]), [14, 6, 3, 4000, 800, 350]);
         assert!(
             rows[4].suspect_fields.is_empty(),
