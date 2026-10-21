@@ -4,67 +4,148 @@
 //! and RSS for that window, capture and OCR timing, the X11 grab details
 //! (size, full screen or one output, and that no shm is used), the
 //! screenshot portal's step times, the PipeWire stream's delivered and
-//! copied buffers, and the CPU% of the compositor, the desktop portal and
-//! PipeWire over the same window ([`crate::host_probe`]). The
-//! first line after start is a header with the setup: session type, kernel,
-//! CPU model and count, RAM and the Proton version seen running. Overhead is one small
-//! write a minute. The file rotates at [`MAX_BYTES`] into `perf.log.1`, so
-//! at most twice that is kept. A Performance report sends only this log.
+//! copied buffers, and the CPU% of the compositor, Xwayland (and Xorg on
+//! an X11 session), the desktop portal, PipeWire, and the tracker's own
+//! GUI and companion overlay over the same window
+//! ([`crate::host_probe`]). The first line after start is a header with
+//! the setup: session type, kernel, CPU model and count, RAM and the
+//! Proton version seen running.
+//!
+//! The lines are written, and `/proc` is scanned, on a `perf-log` thread
+//! of their own, so a capture never waits on that file work. Overhead is
+//! one `/proc` scan and one small write a minute. The file rotates at
+//! [`MAX_BYTES`] into `perf.log.1`, so at most twice that is kept. A
+//! Performance report sends only this log.
 
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::path::Path;
+use std::sync::OnceLock;
+use std::sync::mpsc;
+use std::time::Instant;
 
+use crate::host_probe::{HostCpu, ProcCpuTracker, ProcSample};
 use crate::perf::Summary;
 
 pub const FILE: &str = "perf.log";
 pub const ROTATED: &str = "perf.log.1";
-/// Rotate once `perf.log` reaches this size.
-pub const MAX_BYTES: u64 = 256 * 1024;
+/// Rotate once `perf.log` reaches this size. A sample line with the
+/// stream and desktop fields is about 800 bytes, so one file holds about
+/// 650 one-minute lines (11 hours) and the pair about 22 hours. The pair
+/// (at most about 1 MiB) stays under the Performance report's 2 MiB
+/// `log.txt` share and the 4 MiB scrub cap, so a report carries all of it.
+pub const MAX_BYTES: u64 = 512 * 1024;
 
-static DIR: OnceLock<PathBuf> = OnceLock::new();
-static LAST_CPU: Mutex<Option<(u64, std::time::Instant)>> = Mutex::new(None);
-static HOST_CPU: Mutex<crate::host_probe::ProcCpuTracker> =
-    Mutex::new(crate::host_probe::ProcCpuTracker::new());
-
-/// Start the log in `data_dir` and write the setup header. Call once.
-pub fn init(data_dir: &Path) {
-    let _ = DIR.set(data_dir.to_path_buf());
-    let header = header_line(&SetupInfo::collect());
-    append_to(data_dir, &header, MAX_BYTES);
-    *LAST_CPU.lock().unwrap_or_else(|e| e.into_inner()) =
-        proc_cpu_ticks().map(|t| (t, std::time::Instant::now()));
-    // Baseline scan, so the first window already has desktop CPU.
-    HOST_CPU
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .sample_now(clk_tck());
+enum Msg {
+    /// The first window opened: CPU before now belongs to no window.
+    Baseline,
+    Summary(Box<Summary>),
 }
 
-/// Append one line for a closed window. No-op before [`init`].
-pub fn write_summary(s: &Summary) {
-    let Some(dir) = DIR.get() else { return };
-    let now = std::time::Instant::now();
-    let ticks = proc_cpu_ticks();
-    let cpu_pct = {
-        let mut last = LAST_CPU.lock().unwrap_or_else(|e| e.into_inner());
-        let pct = match (*last, ticks) {
+static TX: OnceLock<mpsc::Sender<Msg>> = OnceLock::new();
+
+/// Start the log in `data_dir` on its own thread, which writes the setup
+/// header first. Call once.
+pub fn init(data_dir: &Path) {
+    let (tx, rx) = mpsc::channel();
+    let dir = data_dir.to_path_buf();
+    let x11 = crate::report::SessionType::from_env() == crate::report::SessionType::X11;
+    let spawned = std::thread::Builder::new()
+        .name("perf-log".into())
+        .spawn(move || run(&dir, &rx, x11));
+    if spawned.is_ok() {
+        let _ = TX.set(tx);
+    }
+}
+
+/// Take a new CPU baseline. Called when the first window opens, so its
+/// line covers only that window and not the time since start. No-op
+/// before [`init`].
+pub fn rebaseline() {
+    if let Some(tx) = TX.get() {
+        let _ = tx.send(Msg::Baseline);
+    }
+}
+
+/// Append one line for a closed window, on the log thread. No-op before
+/// [`init`].
+pub fn write_summary(s: Summary) {
+    if let Some(tx) = TX.get() {
+        let _ = tx.send(Msg::Summary(Box::new(s)));
+    }
+}
+
+fn run(dir: &Path, rx: &mpsc::Receiver<Msg>, x11: bool) {
+    append_to(dir, &header_line(&SetupInfo::collect()), MAX_BYTES);
+    let hz = clk_tck();
+    let mut state = LogState::new(x11);
+    state.baseline(proc_cpu_ticks(), state.scan(), Instant::now());
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            Msg::Baseline => state.baseline(proc_cpu_ticks(), state.scan(), Instant::now()),
+            Msg::Summary(s) => {
+                let (cpu_pct, host) =
+                    state.sample(proc_cpu_ticks(), state.scan(), Instant::now(), hz);
+                append_to(
+                    dir,
+                    &sample_line(&s, cpu_pct, proc_rss_kb(), &host),
+                    MAX_BYTES,
+                );
+            }
+        }
+    }
+}
+
+/// The CPU baselines between two lines: the daemon's own ticks and the
+/// desktop processes.
+#[derive(Debug)]
+pub struct LogState {
+    last_cpu: Option<(u64, Instant)>,
+    host: ProcCpuTracker,
+    x11: bool,
+}
+
+impl LogState {
+    /// `x11`: the session is X11, so the X server is watched too. On
+    /// Wayland an `Xorg` (a display manager's greeter) is never counted.
+    pub fn new(x11: bool) -> Self {
+        Self {
+            last_cpu: None,
+            host: ProcCpuTracker::new(x11),
+            x11,
+        }
+    }
+
+    fn scan(&self) -> Vec<ProcSample> {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        crate::host_probe::scan(Path::new("/proc"), uid, self.x11)
+    }
+
+    /// Start counting from `now`.
+    pub fn baseline(&mut self, ticks: Option<u64>, scan: Vec<ProcSample>, now: Instant) {
+        self.last_cpu = ticks.map(|t| (t, now));
+        self.host.sample(now, scan, 1);
+    }
+
+    /// The daemon's CPU% and the desktop CPU since the last call, then a
+    /// new baseline at `now`.
+    pub fn sample(
+        &mut self,
+        ticks: Option<u64>,
+        scan: Vec<ProcSample>,
+        now: Instant,
+        hz: u64,
+    ) -> (Option<f64>, HostCpu) {
+        let cpu_pct = match (self.last_cpu, ticks) {
             (Some((t0, i0)), Some(t1)) => {
                 let secs = now.saturating_duration_since(i0).as_secs_f64();
-                cpu_percent(t1.saturating_sub(t0), clk_tck(), secs)
+                cpu_percent(t1.saturating_sub(t0), hz, secs)
             }
             _ => None,
         };
-        *last = ticks.map(|t| (t, now));
-        pct
-    };
-    // One /proc scan per window.
-    let host = HOST_CPU
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .sample_now(clk_tck());
-    let line = sample_line(s, cpu_pct, proc_rss_kb(), &host);
-    append_to(dir, &line, MAX_BYTES);
+        self.last_cpu = ticks.map(|t| (t, now));
+        (cpu_pct, self.host.sample(now, scan, hz))
+    }
 }
 
 /// `perf.log.1` then `perf.log`, as text. Empty when neither exists.
@@ -213,6 +294,13 @@ pub fn sample_line(
             st.copied,
             st.copy_ratio().map_or("na".into(), |r| format!("{r:.2}")),
         ));
+        if let Some(cap) = &st.cap {
+            line.push_str(&format!(
+                " stream_cap={} stream_cap_src={}",
+                cap.label(),
+                cap.source
+            ));
+        }
         if let Some(b) = &st.buffer {
             line.push_str(&format!(
                 " stream_buf={} stream_buf_bytes={} stream_format={} stream_w={} stream_h={}",
@@ -352,7 +440,7 @@ fn proton_from_path(arg: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::host_probe::{GroupCpu, HostCpu};
-    use crate::perf::{PortalStats, StageStats, StreamBuffer, StreamStats, X11Stats};
+    use crate::perf::{PortalStats, StageStats, StreamBuffer, StreamCap, StreamStats, X11Stats};
 
     fn summary(x11: Option<X11Stats>) -> Summary {
         Summary {
@@ -451,7 +539,8 @@ mod tests {
         // The desktop process fields are always there, at the end.
         assert!(
             bare.ends_with(
-                " compositor=none compositor_cpu_pct=none portal_cpu_pct=none pipewire_cpu_pct=none"
+                " compositor=none compositor_cpu_pct=none xwayland_cpu_pct=none portal_cpu_pct=none \
+             pipewire_cpu_pct=none gui_cpu_pct=none companion=none companion_cpu_pct=none"
             ),
             "{bare}"
         );
@@ -481,13 +570,21 @@ mod tests {
                 width: 2560,
                 height: 1440,
             }),
+            cap: Some(StreamCap {
+                num: 4,
+                den: 1,
+                source: "negotiated",
+            }),
         });
         let host = HostCpu {
             compositor: Some("kwin_wayland".into()),
             compositor_cpu: GroupCpu::Pct(38.25),
             xorg_cpu: None,
+            xwayland_cpu: GroupCpu::Pct(9.0),
             portal_cpu: GroupCpu::Pct(0.4),
             pipewire_cpu: GroupCpu::NoBaseline,
+            gui_cpu: GroupCpu::Pct(0.3),
+            companion_cpu: GroupCpu::Pct(4.5),
         };
         let line = sample_line(&s, Some(6.0), Some(90_000), &host);
         let tail = line.split_once(" sample ").unwrap().1;
@@ -503,18 +600,64 @@ mod tests {
              portal_geom_p50_ms=2 portal_geom_max_ms=4 \
              portal_crop_p50_ms=0 portal_crop_max_ms=1 \
              stream_delivered=7200 stream_fps=120.0 stream_copied=240 stream_copy_ratio=0.03 \
+             stream_cap=4 stream_cap_src=negotiated \
              stream_buf=memfd stream_buf_bytes=14745600 stream_format=BGRx stream_w=2560 stream_h=1440 \
-             compositor=kwin_wayland compositor_cpu_pct=38.2 portal_cpu_pct=0.4 pipewire_cpu_pct=na"
+             compositor=kwin_wayland compositor_cpu_pct=38.2 xwayland_cpu_pct=9.0 portal_cpu_pct=0.4 \
+             pipewire_cpu_pct=na gui_cpu_pct=0.3 companion=running companion_cpu_pct=4.5"
         );
+        // MAX_BYTES assumes about 800 bytes a line.
+        assert!(line.len() < 1_000, "{} bytes", line.len());
         // A stream with nothing delivered has no ratio, and no buffer line.
         s.portal = None;
         s.stream = Some(StreamStats {
             delivered: 0,
             copied: 2,
             buffer: None,
+            cap: None,
         });
         let line = sample_line(&s, None, None, &host);
         assert!(line.contains(" stream_copy_ratio=na compositor="), "{line}");
+    }
+
+    /// The first window opens long after start. Without the new baseline
+    /// its line would average the daemon's and KWin's CPU over the whole
+    /// idle time before it; with it, the line covers its own minute.
+    #[test]
+    fn a_rebaseline_makes_the_first_line_cover_only_its_window() {
+        use crate::host_probe::{ProcSample, Role};
+        let kwin = |ticks| {
+            vec![ProcSample {
+                pid: 7,
+                start: 1,
+                ticks,
+                role: Role::Compositor,
+                comm: "kwin_wayland".into(),
+            }]
+        };
+        let t0 = Instant::now();
+        let hour = t0 + std::time::Duration::from_secs(3_600);
+        let minute = hour + std::time::Duration::from_secs(60);
+
+        let mut stale = LogState::new(false);
+        stale.baseline(Some(0), kwin(0), t0);
+        let (pct, host) = stale.sample(Some(1_060), kwin(1_060), minute, 100);
+        assert!(pct.unwrap() < 1.0, "averaged over the idle hour: {pct:?}");
+        assert!(matches!(host.compositor_cpu, GroupCpu::Pct(p) if p < 1.0));
+
+        let mut fresh = LogState::new(false);
+        fresh.baseline(Some(0), kwin(0), t0);
+        fresh.baseline(Some(1_000), kwin(1_000), hour); // first window opens
+        let (pct, host) = fresh.sample(Some(1_060), kwin(1_060), minute, 100);
+        assert_eq!(pct, Some(1.0)); // 60 ticks / 100 Hz / 60 s
+        assert_eq!(host.compositor_cpu, GroupCpu::Pct(1.0));
+        // The next line starts where this one ended.
+        let (pct, _) = fresh.sample(
+            Some(1_180),
+            kwin(1_180),
+            minute + std::time::Duration::from_secs(60),
+            100,
+        );
+        assert_eq!(pct, Some(2.0));
     }
 
     #[test]
@@ -632,6 +775,8 @@ mod tests {
             cpu_percent(300, 100, 60.0).map(|p| (p * 10.0).round()),
             Some(50.0)
         );
+        assert_eq!(cpu_percent(300, 100, 0.0), None);
+        assert_eq!(cpu_percent(300, 0, 60.0), None);
         assert_eq!(mem_total_mb("MemTotal:       16271360 kB\n"), Some(15890));
         assert_eq!(
             proton_from_cmdline(

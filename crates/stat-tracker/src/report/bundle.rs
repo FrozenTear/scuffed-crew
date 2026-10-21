@@ -592,8 +592,10 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
     })
 }
 
-/// `log.txt` of a Performance report: the scrubbed `perf.log`, newest
-/// lines kept within the log size cap, the latest setup header kept first.
+/// The body of a Performance report's `log.txt`: the scrubbed `perf.log`,
+/// newest lines kept within half the log size cap, the latest setup header
+/// kept first. The report's `host` line goes before this body
+/// ([`with_host_line`]).
 pub fn performance_log_text(ctx: &ScrubContext, raw: &str) -> String {
     let raw = raw.replace('\0', "");
     if raw.trim().is_empty() {

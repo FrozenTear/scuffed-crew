@@ -715,6 +715,8 @@ pub fn open_stream(fd: std::os::fd::RawFd, node_id: u32, max_fps: u32) -> Result
     }
     let lib = pipewire_library()?;
     let symbols = load_symbols(lib)?;
+    // Until PipeWire negotiates, the cap is the configured one.
+    crate::perf::set_stream_cap(configured_cap(max_fps));
     let state = Arc::new(State {
         stream: AtomicPtr::new(std::ptr::null_mut()),
         loop_: AtomicPtr::new(std::ptr::null_mut()),
@@ -1129,8 +1131,9 @@ extern "C" fn on_param(data: *mut c_void, id: u32, param: *const SpaPod) {
             state.height.store(info.height, Ordering::Release);
         }
     }
+    let rates = pod::fractions(bytes);
+    crate::perf::set_stream_cap(stream_cap(&rates, state.max_fps));
     if !state.rate_logged.swap(true, Ordering::AcqRel) {
-        let rates = pod::fractions(bytes);
         tracing::info!("{}", pod::negotiated_rate_line(&rates, state.max_fps));
     }
     let stream = state.stream.load(Ordering::Acquire);
@@ -1350,6 +1353,27 @@ fn buffer_info(state: &State, buf: *mut PwBuffer) -> Option<crate::perf::StreamB
         width: state.width.load(Ordering::Acquire),
         height: state.height.load(Ordering::Acquire),
     })
+}
+
+fn configured_cap(max_fps: u32) -> crate::perf::StreamCap {
+    crate::perf::StreamCap {
+        num: max_fps,
+        den: 1,
+        source: "configured",
+    }
+}
+
+/// The negotiated max-framerate from a Format's fractions, else the
+/// configured `max_fps`.
+pub fn stream_cap(rates: &[(u32, u32)], max_fps: u32) -> crate::perf::StreamCap {
+    match pod::negotiated_cap(rates) {
+        Some((num, den)) => crate::perf::StreamCap {
+            num,
+            den,
+            source: "negotiated",
+        },
+        None => configured_cap(max_fps),
+    }
 }
 
 /// `spa_data_type` as the performance log names it.
@@ -1615,6 +1639,27 @@ mod tests {
         assert!(plane_window(0, 0, 16, 16, 1).is_none());
         assert!(plane_window(0, 8, 4, 16, 1).is_none());
         assert!(plane_window(8, 16, 16, 16, 1).is_none());
+    }
+
+    #[test]
+    fn the_stream_cap_is_the_negotiated_max_framerate() {
+        // KWin's negotiated Format: framerate 0/1, maxFramerate 4/1 in a
+        // 0/1..60/1 range.
+        let pod = pod::kwin_negotiated_format_pod(framebuf::FMT_BGRX, 2560, 1440, 4);
+        let cap = stream_cap(&pod::fractions(&pod), 2);
+        assert_eq!((cap.num, cap.den, cap.source), (4, 1, "negotiated"));
+        assert_eq!(cap.label(), "4");
+        // A fixed rate alone is the cap.
+        let fixed = stream_cap(&[(60_000, 1_001)], 4);
+        assert_eq!(
+            (fixed.label(), fixed.source),
+            ("59.94".into(), "negotiated")
+        );
+        // Variable rate and no max: the configured cap.
+        for rates in [&[][..], &[(0, 1)][..], &[(0, 1), (0, 1)][..]] {
+            let c = stream_cap(rates, 3);
+            assert_eq!((c.num, c.den, c.source), (3, 1, "configured"), "{rates:?}");
+        }
     }
 
     #[test]

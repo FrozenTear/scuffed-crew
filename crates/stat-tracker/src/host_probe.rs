@@ -2,9 +2,11 @@
 //! log and problem reports. Files under `/proc` and `/sys` only: no
 //! subprocess, no new crate.
 //!
-//! - [`ProcCpuTracker`]: CPU used by the compositor, the desktop portal and
-//!   PipeWire between two `perf.log` samples, from `utime + stime` in
-//!   `/proc/<pid>/stat`. `/proc` is scanned once per sample window.
+//! - [`ProcCpuTracker`]: CPU used by the compositor, Xwayland (and Xorg on
+//!   an X11 session), the desktop portal, PipeWire, and the tracker's own
+//!   GUI and companion overlay between two `perf.log` samples, from
+//!   `utime + stime` in `/proc/<pid>/stat`. `/proc` is scanned once per
+//!   sample window.
 //! - [`host_line`]: the desktop, the session type and the GPU topology from
 //!   `/sys/class/drm` (each card's kernel driver, its connectors and which
 //!   card drives a connected output), as one line for `log.txt`.
@@ -26,6 +28,13 @@ const COMPOSITORS: &[&str] = &[
     "river",
 ];
 
+/// `stat-tracker-gui` as `comm` shows it, cut to 15 bytes. The same
+/// binary runs the main window and, with `--companion`, the overlay.
+const GUI_COMM: &str = "stat-tracker-gu";
+
+/// The argument that makes a GUI process the companion overlay.
+const COMPANION_ARG: &[u8] = b"--companion";
+
 /// `xdg-desktop-portal` and every backend (`-kde`, `-gnome`, `-wlr`,
 /// `-hyprland`, `-gtk`) cut to 15 bytes by the kernel.
 const PORTAL_COMM_PREFIX: &str = "xdg-desktop-por";
@@ -35,10 +44,18 @@ const PORTAL_COMM_PREFIX: &str = "xdg-desktop-por";
 pub enum Role {
     Compositor,
     /// The X server. Counted whoever owns it, because it usually runs as
-    /// root.
+    /// root, and only on an X11 session: on Wayland an `Xorg` is a display
+    /// manager's greeter, not the game's server.
     Xorg,
+    /// Our own uid's Xwayland, which a Proton game usually draws through.
+    Xwayland,
     Portal,
     Pipewire,
+    /// The tracker's main window (`stat-tracker-gui`).
+    Gui,
+    /// The tracker's overlay (`stat-tracker-gui --companion`). [`classify`]
+    /// returns [`Role::Gui`]; [`scan`] tells the two apart by `cmdline`.
+    Companion,
 }
 
 /// The role of a process from its `comm`, or `None` when it is not watched.
@@ -48,6 +65,10 @@ pub fn classify(comm: &str) -> Option<Role> {
         Some(Role::Compositor)
     } else if comm == "Xorg" {
         Some(Role::Xorg)
+    } else if comm == "Xwayland" {
+        Some(Role::Xwayland)
+    } else if comm == GUI_COMM {
+        Some(Role::Gui)
     } else if comm.starts_with(PORTAL_COMM_PREFIX) {
         Some(Role::Portal)
     } else if comm == "pipewire" {
@@ -97,9 +118,15 @@ pub fn parse_status_uid(status: &str) -> Option<u32> {
         .ok()
 }
 
-/// Every watched process under `proc_root` that `uid` owns, plus the X
-/// server whoever owns it. Unreadable entries are skipped.
-pub fn scan(proc_root: &Path, uid: u32) -> Vec<ProcSample> {
+/// True when a NUL-separated `cmdline` has the `--companion` argument.
+pub fn is_companion_cmdline(cmdline: &[u8]) -> bool {
+    cmdline.split(|b| *b == 0).any(|arg| arg == COMPANION_ARG)
+}
+
+/// Every watched process under `proc_root` that `uid` owns, plus, when
+/// `include_xorg` (an X11 session), the X server whoever owns it.
+/// Unreadable entries are skipped.
+pub fn scan(proc_root: &Path, uid: u32, include_xorg: bool) -> Vec<ProcSample> {
     let Ok(entries) = std::fs::read_dir(proc_root) else {
         return Vec::new();
     };
@@ -114,9 +141,12 @@ pub fn scan(proc_root: &Path, uid: u32) -> Vec<ProcSample> {
             continue;
         };
         let comm = comm.trim_end().to_string();
-        let Some(role) = classify(&comm) else {
+        let Some(mut role) = classify(&comm) else {
             continue;
         };
+        if role == Role::Xorg && !include_xorg {
+            continue;
+        }
         if role != Role::Xorg {
             let owner = std::fs::read_to_string(dir.join("status"))
                 .ok()
@@ -124,6 +154,11 @@ pub fn scan(proc_root: &Path, uid: u32) -> Vec<ProcSample> {
             if owner != Some(uid) {
                 continue;
             }
+        }
+        if role == Role::Gui
+            && std::fs::read(dir.join("cmdline")).is_ok_and(|c| is_companion_cmdline(&c))
+        {
+            role = Role::Companion;
         }
         let Some((ticks, start)) = std::fs::read_to_string(dir.join("stat"))
             .ok()
@@ -173,10 +208,18 @@ pub struct HostCpu {
     /// found. `None` when no compositor runs under this uid.
     pub compositor: Option<String>,
     pub compositor_cpu: GroupCpu,
-    /// The X server. `None` when there is none (Wayland without Xorg).
+    /// The X server. `None` on a session that is not X11: the field is
+    /// left out of the line. On X11 it is always there (`none` without an
+    /// X server).
     pub xorg_cpu: Option<GroupCpu>,
+    pub xwayland_cpu: GroupCpu,
     pub portal_cpu: GroupCpu,
     pub pipewire_cpu: GroupCpu,
+    /// The tracker's main window.
+    pub gui_cpu: GroupCpu,
+    /// The tracker's companion overlay. The line says `companion=none`
+    /// when this is [`GroupCpu::NotRunning`], else `companion=running`.
+    pub companion_cpu: GroupCpu,
 }
 
 impl Default for HostCpu {
@@ -185,16 +228,20 @@ impl Default for HostCpu {
             compositor: None,
             compositor_cpu: GroupCpu::NotRunning,
             xorg_cpu: None,
+            xwayland_cpu: GroupCpu::NotRunning,
             portal_cpu: GroupCpu::NotRunning,
             pipewire_cpu: GroupCpu::NotRunning,
+            gui_cpu: GroupCpu::NotRunning,
+            companion_cpu: GroupCpu::NotRunning,
         }
     }
 }
 
 impl HostCpu {
-    /// The sample-line fields: `compositor=` `compositor_cpu_pct=`, then
-    /// `xorg_cpu_pct=` when an X server runs, `portal_cpu_pct=` and
-    /// `pipewire_cpu_pct=`.
+    /// The sample-line fields: `compositor=` `compositor_cpu_pct=`,
+    /// `xorg_cpu_pct=` (X11 sessions only), `xwayland_cpu_pct=`,
+    /// `portal_cpu_pct=`, `pipewire_cpu_pct=`, `gui_cpu_pct=`,
+    /// `companion=running|none` and `companion_cpu_pct=`.
     pub fn fields(&self) -> String {
         let mut out = format!(
             "compositor={} compositor_cpu_pct={}",
@@ -205,9 +252,18 @@ impl HostCpu {
             out.push_str(&format!(" xorg_cpu_pct={}", x.label()));
         }
         out.push_str(&format!(
-            " portal_cpu_pct={} pipewire_cpu_pct={}",
+            " xwayland_cpu_pct={} portal_cpu_pct={} pipewire_cpu_pct={} \
+             gui_cpu_pct={} companion={} companion_cpu_pct={}",
+            self.xwayland_cpu.label(),
             self.portal_cpu.label(),
-            self.pipewire_cpu.label()
+            self.pipewire_cpu.label(),
+            self.gui_cpu.label(),
+            if self.companion_cpu == GroupCpu::NotRunning {
+                "none"
+            } else {
+                "running"
+            },
+            self.companion_cpu.label(),
         ));
         out
     }
@@ -215,8 +271,14 @@ impl HostCpu {
 
 /// Per-group CPU between two scans `secs` apart, at `hz` ticks a second.
 /// A process counts only when the same pid with the same start time is in
-/// both scans.
-pub fn host_cpu_delta(prev: &[ProcSample], cur: &[ProcSample], secs: f64, hz: u64) -> HostCpu {
+/// both scans. `x11`: the session is X11, so `xorg_cpu` is reported.
+pub fn host_cpu_delta(
+    prev: &[ProcSample],
+    cur: &[ProcSample],
+    secs: f64,
+    hz: u64,
+    x11: bool,
+) -> HostCpu {
     let usable = secs > 0.0 && hz > 0;
     let delta = |p: &ProcSample| -> Option<u64> {
         if !usable {
@@ -264,13 +326,15 @@ pub fn host_cpu_delta(prev: &[ProcSample], cur: &[ProcSample], secs: f64, hz: u6
         }
         None => GroupCpu::NotRunning,
     };
-    let xorg = group(Role::Xorg);
     HostCpu {
         compositor,
         compositor_cpu,
-        xorg_cpu: (xorg != GroupCpu::NotRunning).then_some(xorg),
+        xorg_cpu: x11.then(|| group(Role::Xorg)),
+        xwayland_cpu: group(Role::Xwayland),
         portal_cpu: group(Role::Portal),
         pipewire_cpu: group(Role::Pipewire),
+        gui_cpu: group(Role::Gui),
+        companion_cpu: group(Role::Companion),
     }
 }
 
@@ -279,11 +343,13 @@ pub fn host_cpu_delta(prev: &[ProcSample], cur: &[ProcSample], secs: f64, hz: u6
 #[derive(Debug, Default)]
 pub struct ProcCpuTracker {
     last: Option<(Instant, Vec<ProcSample>)>,
+    x11: bool,
 }
 
 impl ProcCpuTracker {
-    pub const fn new() -> Self {
-        Self { last: None }
+    /// `x11`: the session is X11 (see [`host_cpu_delta`]).
+    pub const fn new(x11: bool) -> Self {
+        Self { last: None, x11 }
     }
 
     /// Record `cur` (one scan taken at `now`) and return the CPU since the
@@ -292,20 +358,12 @@ impl ProcCpuTracker {
         let out = match &self.last {
             Some((at, prev)) => {
                 let secs = now.saturating_duration_since(*at).as_secs_f64();
-                host_cpu_delta(prev, &cur, secs, hz)
+                host_cpu_delta(prev, &cur, secs, hz, self.x11)
             }
-            None => host_cpu_delta(&[], &cur, 0.0, hz),
+            None => host_cpu_delta(&[], &cur, 0.0, hz, self.x11),
         };
         self.last = Some((now, cur));
         out
-    }
-
-    /// Scan `/proc` for this user's desktop processes and sample them.
-    pub fn sample_now(&mut self, hz: u64) -> HostCpu {
-        // SAFETY: getuid has no preconditions and cannot fail.
-        let uid = unsafe { libc::getuid() };
-        let cur = scan(Path::new("/proc"), uid);
-        self.sample(Instant::now(), cur, hz)
     }
 }
 
@@ -393,7 +451,7 @@ fn clean_token(s: &str, max: usize) -> String {
 pub const HOST_LINE_MAX: usize = 2048;
 
 /// The `host` line for `log.txt`:
-/// `host desktop=KDE session=wayland drm=card0:nvidia[DP-1:connected,HDMI-A-1:disconnected];card1:amdgpu[eDP-1:disconnected] drm_output_cards=card0 nvidia_drm_modeset=Y`.
+/// `host desktop=KDE session=wayland drm_output_cards=card0 nvidia_drm_modeset=Y drm=card0:nvidia[DP-1:connected,HDMI-A-1:disconnected];card1:amdgpu[eDP-1:disconnected]`.
 /// A card whose driver cannot be read shows `?`. `drm=none` and
 /// `drm_output_cards=none` when there is nothing; `nvidia_drm_modeset=na`
 /// when the parameter cannot be read.
@@ -433,21 +491,27 @@ pub fn host_line(
         .filter(|c| c.has_connected_output())
         .map(|c| c.name.as_str())
         .collect();
+    // `drm` goes last: it is the only field that can be long, so a cut at
+    // the size cap never drops the output cards or the modeset flag.
     let mut line = format!(
-        "host desktop={} session={} drm={} drm_output_cards={} nvidia_drm_modeset={}",
+        "host desktop={} session={} drm_output_cards={} nvidia_drm_modeset={} drm={}",
         if desktop.is_empty() {
             "unknown"
         } else {
             &desktop
         },
         clean_token(session, 16),
-        drm,
         if outputs.is_empty() {
             "none".to_string()
         } else {
-            outputs.join(",")
+            outputs
+                .iter()
+                .map(|o| clean_token(o, 16))
+                .collect::<Vec<_>>()
+                .join(",")
         },
         nvidia_modeset.map_or("na".to_string(), |m| clean_token(m, 8)),
+        drm,
     );
     if line.len() > HOST_LINE_MAX {
         let mut cut = HOST_LINE_MAX;
@@ -510,6 +574,9 @@ mod tests {
     fn status_uid_is_the_real_uid() {
         let status = "Name:\tkwin_wayland\nUmask:\t0022\nState:\tS (sleeping)\nUid:\t1000\t1000\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n";
         assert_eq!(parse_status_uid(status), Some(1000));
+        // real, effective, saved, fs: the real uid is the first column
+        assert_eq!(parse_status_uid("Uid:\t1000\t0\t0\t0\n"), Some(1000));
+        assert_eq!(parse_status_uid("Uid:\t0\t1000\t1000\t1000\n"), Some(0));
         assert_eq!(parse_status_uid("Name:\tx\n"), None);
     }
 
@@ -519,6 +586,10 @@ mod tests {
         assert_eq!(classify("Hyprland"), Some(Role::Compositor));
         assert_eq!(classify("gnome-shell"), Some(Role::Compositor));
         assert_eq!(classify("Xorg"), Some(Role::Xorg));
+        assert_eq!(classify("Xwayland"), Some(Role::Xwayland));
+        // stat-tracker-gui, cut to 15 bytes; the overlay is told apart by
+        // its cmdline in `scan`
+        assert_eq!(classify("stat-tracker-gu"), Some(Role::Gui));
         // the kernel cuts every portal name to the same 15 bytes
         assert_eq!(classify("xdg-desktop-por"), Some(Role::Portal));
         assert_eq!(classify("pipewire"), Some(Role::Pipewire));
@@ -528,6 +599,8 @@ mod tests {
             "kwin_wayland_wr",
             "xdg-document-po",
             "hyprland",
+            "scuffed-stat-tr",
+            "xwayland-satell",
             "bash",
         ] {
             assert_eq!(classify(other), None, "{other}");
@@ -550,7 +623,7 @@ mod tests {
             // pid 300 was reused: new start time, no baseline
             sample(300, "pipewire", 600, 99),
         ];
-        let h = host_cpu_delta(&prev, &cur, 60.0, 100);
+        let h = host_cpu_delta(&prev, &cur, 60.0, 100, false);
         assert_eq!(h.compositor.as_deref(), Some("kwin_wayland"));
         assert_eq!(h.compositor_cpu, GroupCpu::Pct(20.0));
         assert_eq!(h.portal_cpu, GroupCpu::Pct(1.0));
@@ -558,20 +631,96 @@ mod tests {
         assert_eq!(h.xorg_cpu, None);
         assert_eq!(
             h.fields(),
-            "compositor=kwin_wayland compositor_cpu_pct=20.0 portal_cpu_pct=1.0 pipewire_cpu_pct=na"
+            "compositor=kwin_wayland compositor_cpu_pct=20.0 xwayland_cpu_pct=none \
+             portal_cpu_pct=1.0 pipewire_cpu_pct=na gui_cpu_pct=none companion=none companion_cpu_pct=none"
+        );
+    }
+
+    /// The tracker's own windows and Xwayland: the main GUI, the overlay
+    /// (same binary with `--companion`) and Xwayland each get a field.
+    #[test]
+    fn gui_companion_and_xwayland_are_reported() {
+        let mut overlay = sample(41, "stat-tracker-gu", 100, 9);
+        overlay.role = Role::Companion;
+        let mut overlay_now = overlay.clone();
+        overlay_now.ticks = 1_300; // 1200 ticks / 60 s / 100 Hz = 20%
+        let prev = vec![
+            sample(40, "stat-tracker-gu", 10, 8),
+            overlay,
+            sample(50, "Xwayland", 0, 3),
+        ];
+        let cur = vec![
+            sample(40, "stat-tracker-gu", 70, 8),
+            overlay_now,
+            sample(50, "Xwayland", 3_000, 3),
+        ];
+        let h = host_cpu_delta(&prev, &cur, 60.0, 100, false);
+        assert_eq!(h.gui_cpu, GroupCpu::Pct(1.0));
+        assert_eq!(h.companion_cpu, GroupCpu::Pct(20.0));
+        assert_eq!(h.xwayland_cpu, GroupCpu::Pct(50.0));
+        let f = h.fields();
+        for want in [
+            " xwayland_cpu_pct=50.0 ",
+            " gui_cpu_pct=1.0 ",
+            " companion=running companion_cpu_pct=20.0",
+        ] {
+            assert!(f.contains(want), "{want} missing from {f}");
+        }
+        // An overlay that just started has no baseline but is running.
+        let fresh = host_cpu_delta(&[], &cur, 60.0, 100, false);
+        assert!(
+            fresh
+                .fields()
+                .ends_with(" gui_cpu_pct=na companion=running companion_cpu_pct=na"),
+            "{}",
+            fresh.fields()
+        );
+    }
+
+    /// A zero-length or zero-Hz window never divides: every group with a
+    /// process is `na`, not inf or NaN.
+    #[test]
+    fn a_zero_window_has_no_percent() {
+        let prev = vec![sample(1, "niri", 0, 1), sample(2, "pipewire", 0, 1)];
+        let cur = vec![sample(1, "niri", 50, 1), sample(2, "pipewire", 5, 1)];
+        for (secs, hz) in [(0.0, 100), (60.0, 0), (-1.0, 100)] {
+            let h = host_cpu_delta(&prev, &cur, secs, hz, false);
+            assert_eq!(h.compositor_cpu, GroupCpu::NoBaseline, "{secs} {hz}");
+            assert_eq!(h.pipewire_cpu, GroupCpu::NoBaseline, "{secs} {hz}");
+        }
+    }
+
+    #[test]
+    fn xorg_is_reported_only_on_an_x11_session() {
+        let prev = vec![sample(5, "Xorg", 10, 1)];
+        let cur = vec![sample(5, "Xorg", 70, 1)];
+        // Wayland: the field is left out even with an Xorg in the scan.
+        let wayland = host_cpu_delta(&prev, &cur, 60.0, 100, false);
+        assert_eq!(wayland.xorg_cpu, None);
+        assert!(!wayland.fields().contains("xorg"), "{}", wayland.fields());
+        // X11: there, and `none` when no X server was found.
+        let x11 = host_cpu_delta(&prev, &cur, 60.0, 100, true);
+        assert_eq!(x11.xorg_cpu, Some(GroupCpu::Pct(1.0)));
+        assert!(x11.fields().contains(" xorg_cpu_pct=1.0 "));
+        let gone = host_cpu_delta(&prev, &[], 60.0, 100, true);
+        assert!(
+            gone.fields().contains(" xorg_cpu_pct=none "),
+            "{}",
+            gone.fields()
         );
     }
 
     #[test]
     fn first_scan_has_no_baseline_and_missing_groups_say_none() {
-        let mut t = ProcCpuTracker::new();
+        let mut t = ProcCpuTracker::new(true);
         let t0 = Instant::now();
         let first = t.sample(t0, vec![sample(5, "Xorg", 10, 1)], 100);
         assert_eq!(first.compositor, None);
         assert_eq!(first.xorg_cpu, Some(GroupCpu::NoBaseline));
         assert_eq!(
             first.fields(),
-            "compositor=none compositor_cpu_pct=none xorg_cpu_pct=na portal_cpu_pct=none pipewire_cpu_pct=none"
+            "compositor=none compositor_cpu_pct=none xorg_cpu_pct=na xwayland_cpu_pct=none \
+             portal_cpu_pct=none pipewire_cpu_pct=none gui_cpu_pct=none companion=none companion_cpu_pct=none"
         );
         // 250 ticks over 50 s at 100 Hz: 5%, above 100 would mean several cores
         let next = t.sample(
@@ -586,7 +735,7 @@ mod tests {
     fn the_busiest_compositor_is_named() {
         let prev = vec![sample(10, "sway", 0, 1), sample(11, "niri", 0, 1)];
         let cur = vec![sample(10, "sway", 30, 1), sample(11, "niri", 600, 1)];
-        let h = host_cpu_delta(&prev, &cur, 60.0, 100);
+        let h = host_cpu_delta(&prev, &cur, 60.0, 100, false);
         assert_eq!(h.compositor.as_deref(), Some("niri"));
         assert_eq!(h.compositor_cpu, GroupCpu::Pct(10.0));
     }
@@ -599,6 +748,7 @@ mod tests {
             let p = root.join(pid.to_string());
             std::fs::create_dir_all(&p).unwrap();
             std::fs::write(p.join("comm"), format!("{comm}\n")).unwrap();
+            std::fs::write(p.join("cmdline"), format!("/usr/bin/{comm}\0")).unwrap();
             std::fs::write(
                 p.join("status"),
                 format!("Name:\t{comm}\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n"),
@@ -611,14 +761,49 @@ mod tests {
         mk(12, "Xorg", 0, 50); // root X server counts
         mk(13, "pipewire", 1000, 20);
         mk(14, "firefox", 1000, 5000);
+        mk(16, "Xwayland", 1000, 30);
+        mk(17, "stat-tracker-gu", 1000, 11);
+        mk(18, "stat-tracker-gu", 1000, 12);
+        std::fs::write(
+            root.join("18/cmdline"),
+            b"/usr/bin/stat-tracker-gui\0--companion\0".as_slice(),
+        )
+        .unwrap();
+        mk(19, "stat-tracker-gu", 1001, 13); // another user's tracker
         std::fs::create_dir_all(root.join("self")).unwrap();
         std::fs::create_dir_all(root.join("15")).unwrap(); // no files: skipped
-        let got = scan(root, 1000);
-        let pids: Vec<u32> = got.iter().map(|p| p.pid).collect();
-        assert_eq!(pids, vec![10, 12, 13]);
+        let got = scan(root, 1000, true);
+        let pids: Vec<(u32, Role)> = got.iter().map(|p| (p.pid, p.role)).collect();
+        assert_eq!(
+            pids,
+            vec![
+                (10, Role::Compositor),
+                (12, Role::Xorg),
+                (13, Role::Pipewire),
+                (16, Role::Xwayland),
+                (17, Role::Gui),
+                (18, Role::Companion),
+            ]
+        );
         assert_eq!(got[0].ticks, 400);
         assert_eq!(got[0].start, 7);
-        assert!(scan(&root.join("missing"), 1000).is_empty());
+        // A Wayland session never scans Xorg (a greeter's X server).
+        let wayland: Vec<u32> = scan(root, 1000, false).iter().map(|p| p.pid).collect();
+        assert_eq!(wayland, vec![10, 13, 16, 17, 18]);
+        assert!(scan(&root.join("missing"), 1000, true).is_empty());
+    }
+
+    #[test]
+    fn the_companion_flag_is_a_whole_argument() {
+        assert!(is_companion_cmdline(
+            b"/usr/bin/stat-tracker-gui\0--companion\0"
+        ));
+        assert!(is_companion_cmdline(b"stat-tracker-gui\0--companion"));
+        assert!(!is_companion_cmdline(b"/usr/bin/stat-tracker-gui\0"));
+        assert!(!is_companion_cmdline(b"stat-tracker-gui\0--companion-x\0"));
+        assert!(!is_companion_cmdline(
+            b"/home/a/--companion/stat-tracker-gui\0"
+        ));
     }
 
     #[test]
@@ -686,9 +871,8 @@ mod tests {
         let line = host_line("KDE", "wayland", &cards, modeset.as_deref());
         assert_eq!(
             line,
-            "host desktop=KDE session=wayland \
-             drm=card0:amdgpu[eDP-1:disconnected];card1:nvidia[DP-1:connected,HDMI-A-1:disconnected];card2:?[] \
-             drm_output_cards=card1 nvidia_drm_modeset=Y"
+            "host desktop=KDE session=wayland drm_output_cards=card1 nvidia_drm_modeset=Y \
+             drm=card0:amdgpu[eDP-1:disconnected];card1:nvidia[DP-1:connected,HDMI-A-1:disconnected];card2:?[]"
         );
         assert!(drm_cards(&dir.path().join("nope")).is_empty());
     }
@@ -698,7 +882,7 @@ mod tests {
         let line = host_line("ubuntu:GNOME", "x11", &[], None);
         assert_eq!(
             line,
-            "host desktop=ubuntu:GNOME session=x11 drm=none drm_output_cards=none nvidia_drm_modeset=na"
+            "host desktop=ubuntu:GNOME session=x11 drm_output_cards=none nvidia_drm_modeset=na drm=none"
         );
         // spaces and `=` in the desktop cannot add a field
         let odd = host_line("  KDE x=1 ", "wayland", &[], None);
@@ -707,5 +891,35 @@ mod tests {
             "{odd}"
         );
         assert!(host_line("", "unknown", &[], None).contains("desktop=unknown"));
+    }
+
+    /// A machine with many cards and connectors hits the size cap. The cut
+    /// lands inside `drm=`, so the output cards and the modeset flag stay.
+    #[test]
+    fn truncation_keeps_the_output_cards_and_modeset() {
+        let cards: Vec<DrmCard> = (0..40)
+            .map(|i| DrmCard {
+                name: format!("card{i}"),
+                driver: Some("nvidia".into()),
+                connectors: (1..=6)
+                    .map(|c| {
+                        let status = if i == 39 && c == 6 {
+                            "connected"
+                        } else {
+                            "disconnected"
+                        };
+                        (format!("HDMI-A-{c}"), status.to_string())
+                    })
+                    .collect(),
+            })
+            .collect();
+        let line = host_line("KDE", "wayland", &cards, Some("Y"));
+        assert_eq!(line.len(), HOST_LINE_MAX, "the line is cut");
+        assert!(
+            line.starts_with(
+                "host desktop=KDE session=wayland drm_output_cards=card39 nvidia_drm_modeset=Y drm=card0:nvidia["
+            ),
+            "{line}"
+        );
     }
 }

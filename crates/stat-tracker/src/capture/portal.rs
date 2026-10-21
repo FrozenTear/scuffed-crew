@@ -141,12 +141,15 @@ pub async fn list_outputs() -> Vec<String> {
 }
 
 /// Output rectangles for a stream that may be one monitor or the whole
-/// desktop. Called once per stream grab, so the CPU of the read counts as
-/// capture CPU.
+/// desktop. Stream open uses this; its CPU is not capture CPU.
 pub(crate) async fn output_geometry() -> Vec<OutputRect> {
-    let (outputs, cpu) = output_rects_timed().await;
-    crate::perf::record_cpu(crate::perf::Stage::Capture, cpu);
-    outputs
+    output_rects().await
+}
+
+/// [`output_geometry`] and the thread CPU of the read, for a stream grab,
+/// which counts that CPU as capture CPU.
+pub(crate) async fn output_geometry_timed() -> (Vec<OutputRect>, std::time::Duration) {
+    output_rects_timed().await
 }
 
 async fn output_rects() -> Vec<OutputRect> {

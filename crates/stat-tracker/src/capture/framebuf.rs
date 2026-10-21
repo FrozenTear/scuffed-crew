@@ -386,9 +386,22 @@ mod tests {
 
     #[test]
     fn format_names_follow_spa() {
-        assert_eq!(format_name(FMT_BGRX), "BGRx");
-        assert_eq!(format_name(FMT_RGBA), "RGBA");
+        for (format, name) in [
+            (FMT_RGBX, "RGBx"),
+            (FMT_BGRX, "BGRx"),
+            (FMT_XRGB, "xRGB"),
+            (FMT_XBGR, "xBGR"),
+            (FMT_RGBA, "RGBA"),
+            (FMT_BGRA, "BGRA"),
+            (FMT_ARGB, "ARGB"),
+            (FMT_ABGR, "ABGR"),
+            (FMT_RGB, "RGB"),
+            (FMT_BGR, "BGR"),
+        ] {
+            assert_eq!(format_name(format), name, "{format}");
+        }
         assert_eq!(format_name(0), "other");
+        assert_eq!(format_name(17), "other");
     }
 
     #[test]

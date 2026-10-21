@@ -1340,11 +1340,10 @@ pub async fn capture(
             // Synchronous, no await inside: thread CPU measures it.
             let convert_cpu_started = crate::perf::thread_cpu();
             let img = framebuf::to_dynamic(&frame).ok_or("screencast frame format is not RGB")?;
-            crate::perf::record_cpu(
-                crate::perf::Stage::Capture,
-                crate::perf::thread_cpu().saturating_sub(convert_cpu_started),
-            );
+            let convert_cpu = crate::perf::thread_cpu().saturating_sub(convert_cpu_started);
             let img = fit_stream(img, output_name).await?;
+            // Only a grab that produced an image counts, as on every route.
+            crate::perf::record_cpu(crate::perf::Stage::Capture, convert_cpu);
             if compare {
                 save_compare(data_dir, index, &img, output_name).await;
             }
@@ -2042,14 +2041,16 @@ async fn fit_stream(
     img: DynamicImage,
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
-    // The geometry read records its own CPU on its blocking thread.
-    let outputs = portal::output_geometry().await;
+    // The geometry read's CPU is measured on its blocking thread.
+    let (outputs, geometry_cpu) = portal::output_geometry_timed().await;
     let cpu_started = crate::perf::thread_cpu();
     let fitted = fit_stream_image(img, &outputs, output_name);
-    crate::perf::record_cpu(
-        crate::perf::Stage::Capture,
-        crate::perf::thread_cpu().saturating_sub(cpu_started),
-    );
+    if fitted.is_ok() {
+        crate::perf::record_cpu(
+            crate::perf::Stage::Capture,
+            geometry_cpu.saturating_add(crate::perf::thread_cpu().saturating_sub(cpu_started)),
+        );
+    }
     fitted
 }
 
