@@ -54,7 +54,7 @@ echo "starting surreal"
     -e SURREAL_USER=root \
     -e SURREAL_PASS=root \
     -e SURREAL_BIND=0.0.0.0:8000 \
-    docker.io/surrealdb/surrealdb:v3.0 \
+    docker.io/surrealdb/surrealdb:v3.2.3 \
     start rocksdb:/data/scuffed.db
 
 export SURREALDB_URL="ws://127.0.0.1:${SURREAL_PORT}"
