@@ -1376,8 +1376,8 @@ pub fn pw_state_name(state: i32) -> &'static str {
 }
 
 pub fn fps_line(frames: u64, secs: u64, configured: u32) -> String {
-    let per = frames / secs.max(1);
-    format!("screencast frames received per second: {per} (configured {configured} fps)")
+    let per = frames as f64 / f64::from(u32::try_from(secs.max(1)).unwrap_or(u32::MAX));
+    format!("screencast frames received per second: {per:.1} (configured {configured} fps)")
 }
 
 /// Counts only. No paths and no frame bytes.
@@ -1492,7 +1492,12 @@ mod tests {
         let line = fps_line(8, 4, 4);
         assert_eq!(
             line,
-            "screencast frames received per second: 2 (configured 4 fps)"
+            "screencast frames received per second: 2.0 (configured 4 fps)"
+        );
+        // One frame across two seconds. Integer division printed 0.
+        assert_eq!(
+            fps_line(1, 2, 2),
+            "screencast frames received per second: 0.5 (configured 2 fps)"
         );
     }
 

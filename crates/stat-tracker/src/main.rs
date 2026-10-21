@@ -4789,7 +4789,7 @@ async fn run_loop(
                             captured.stream,
                             seen_stream,
                         ) {
-                            tracing::trace!("poll skipped: stream frame already seen");
+                            log_reused_frame_skip();
                             continue;
                         }
                         if let (Some(id), Some(seq)) = (captured.stream, captured.seq) {
@@ -6888,6 +6888,25 @@ fn tab_outcome_rank(outcome: &FrameAnalysisOutcome) -> u8 {
     }
 }
 
+fn log_reused_frame_skip() {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let debug = {
+        let mut last = LAST.lock().unwrap_or_else(|err| err.into_inner());
+        let now = Instant::now();
+        let debug =
+            capture::reused_frame_skip_is_debug(*last, now, capture::REUSED_FRAME_LOG_WINDOW);
+        if debug {
+            *last = Some(now);
+        }
+        debug
+    };
+    if debug {
+        tracing::debug!("poll skipped: stream frame already seen");
+    } else {
+        tracing::trace!("poll skipped: stream frame already seen");
+    }
+}
+
 async fn grab_tab_attempt(
     backend: &capture::CaptureBackend,
     output: Option<&str>,
@@ -6899,8 +6918,9 @@ async fn grab_tab_attempt(
         return capture::with_tab_press(capture::tab_attempt_press(now, attempt, now), grab).await;
     }
     // The first attempt keeps the original key. While the share is still
-    // opening it waits up to 3 seconds, not the 1200 ms frame budget. If
-    // that open uses up the frame budget, the grab runs again from now.
+    // opening it waits for the open to finish, up to the 5 second portal
+    // bound, not the 1200 ms frame budget. If that open uses up the frame
+    // budget, the grab runs again from now.
     let press = capture::tab_press().unwrap_or_else(std::time::Instant::now);
     let mut waited_for_open = false;
     loop {

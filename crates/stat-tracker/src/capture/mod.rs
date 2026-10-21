@@ -72,9 +72,9 @@ pub fn tab_attempt_press(
     if attempt == 0 { original } else { now }
 }
 
-/// How long the first Tab keeps waiting while the share dialog is still up.
-/// The frame budget stays 1200 ms. This bound only covers the open.
-pub const FIRST_TAB_OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long the first Tab keeps waiting while the share is still opening.
+/// This is the portal open bound. The frame budget stays 1200 ms.
+pub const FIRST_TAB_OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What the first Tab does while the share is still opening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,6 +93,54 @@ pub fn first_tab_while_opening(
         OpeningTab::Wait
     } else {
         OpeningTab::Miss
+    }
+}
+
+/// Result of walking a share open one step at a time, the same decisions
+/// the first Tab makes. No sleep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SimulatedFirstTab {
+    /// The share finished opening. `fresh_press` means the 1200 ms frame
+    /// budget was already used, so the grab runs again from that moment.
+    Ready { fresh_press: bool },
+    /// The portal open bound passed while the share was still opening.
+    Miss,
+}
+
+/// `open_after` is when the share stops reporting that it is opening.
+/// `step` is the gap between those looks (the live loop sleeps 50 ms).
+pub fn simulate_first_tab_open(
+    open_after: std::time::Duration,
+    bound: std::time::Duration,
+    frame_budget: std::time::Duration,
+    step: std::time::Duration,
+) -> SimulatedFirstTab {
+    if step.is_zero() {
+        return SimulatedFirstTab::Miss;
+    }
+    let origin = std::time::Instant::now();
+    let mut elapsed = std::time::Duration::ZERO;
+    let mut waited_for_open = false;
+    loop {
+        if elapsed < open_after {
+            waited_for_open = true;
+            match first_tab_while_opening(elapsed, bound) {
+                OpeningTab::Wait => {
+                    let next = elapsed.saturating_add(step);
+                    if next == elapsed {
+                        return SimulatedFirstTab::Miss;
+                    }
+                    elapsed = next;
+                }
+                OpeningTab::Miss => return SimulatedFirstTab::Miss,
+            }
+        } else {
+            let press =
+                tab_press_after_late_open(origin, origin + elapsed, frame_budget, waited_for_open);
+            return SimulatedFirstTab::Ready {
+                fresh_press: press != origin,
+            };
+        }
     }
 }
 
@@ -178,6 +226,22 @@ pub struct CapturedFrame {
 pub struct SeenStream {
     pub id: u64,
     pub seq: u64,
+}
+
+/// A still screen reuses one frame on every poll. The skip is debug once
+/// per this window, then trace.
+pub const REUSED_FRAME_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// True when the reused-frame skip should be logged at debug.
+pub fn reused_frame_skip_is_debug(
+    last: Option<std::time::Instant>,
+    now: std::time::Instant,
+    window: std::time::Duration,
+) -> bool {
+    match last {
+        None => true,
+        Some(at) => now.saturating_duration_since(at) >= window,
+    }
 }
 
 /// A poll may update streaks only for a frame it has not already used.
@@ -594,6 +658,26 @@ mod tests {
             first_tab_while_opening(FIRST_TAB_OPEN_WAIT, FIRST_TAB_OPEN_WAIT),
             OpeningTab::Miss
         );
+        assert_eq!(
+            first_tab_while_opening(std::time::Duration::from_secs(4), FIRST_TAB_OPEN_WAIT),
+            OpeningTab::Wait
+        );
+        let t0 = std::time::Instant::now();
+        assert!(reused_frame_skip_is_debug(
+            None,
+            t0,
+            REUSED_FRAME_LOG_WINDOW
+        ));
+        assert!(!reused_frame_skip_is_debug(
+            Some(t0),
+            t0 + std::time::Duration::from_secs(1),
+            REUSED_FRAME_LOG_WINDOW
+        ));
+        assert!(reused_frame_skip_is_debug(
+            Some(t0),
+            t0 + REUSED_FRAME_LOG_WINDOW,
+            REUSED_FRAME_LOG_WINDOW
+        ));
         let budget = std::time::Duration::from_millis(TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
         let late = key + std::time::Duration::from_millis(2000);
         assert_eq!(tab_press_after_late_open(key, later, budget, true), key);
@@ -617,6 +701,35 @@ mod tests {
             status.pid,
             live_daemon_pid(dir.path())
         ));
+    }
+
+    /// QA measured the share taking 3.4 to 3.9 seconds. A 4 second open
+    /// stays inside the 5 second portal bound, then the grab runs again
+    /// because the 1200 ms frame budget is already gone. An open that is
+    /// still going at that bound is a miss.
+    #[test]
+    fn a_four_second_share_open_keeps_the_first_tab() {
+        assert_eq!(FIRST_TAB_OPEN_WAIT, std::time::Duration::from_secs(5));
+        let step = std::time::Duration::from_millis(50);
+        let budget = std::time::Duration::from_millis(TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
+        assert_eq!(
+            simulate_first_tab_open(
+                std::time::Duration::from_secs(4),
+                FIRST_TAB_OPEN_WAIT,
+                budget,
+                step
+            ),
+            SimulatedFirstTab::Ready { fresh_press: true }
+        );
+        assert_eq!(
+            simulate_first_tab_open(
+                std::time::Duration::from_secs(6),
+                FIRST_TAB_OPEN_WAIT,
+                budget,
+                step
+            ),
+            SimulatedFirstTab::Miss
+        );
     }
 
     // Pure selection-policy tests (R1-6). No `std::env::set_var`, process-global
