@@ -112,6 +112,16 @@ async fn get(app: axum::Router, uri: &str) -> (StatusCode, axum::http::HeaderMap
     exchange(app, Method::GET, uri).await
 }
 
+/// A distinct peer per request. Anonymous reads such as `/api/settings` and
+/// `/sitemap.xml` sit behind the per-IP public governor, which needs a peer
+/// address (`ConnectInfo`); a fresh one keeps these tests off each other's
+/// budget. Rate-limit tests pick their peer with [`exchange_from`].
+fn fresh_peer() -> SocketAddr {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    SocketAddr::from(([198, 18, (n >> 8) as u8, n as u8], 46000))
+}
+
 async fn exchange_bytes(
     app: axum::Router,
     method: Method,
@@ -122,6 +132,7 @@ async fn exchange_bytes(
             Request::builder()
                 .method(method)
                 .uri(uri)
+                .extension(ConnectInfo(fresh_peer()))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -316,16 +327,18 @@ async fn robots_and_sitemap_are_not_the_spa_shell() {
 #[tokio::test]
 async fn sitemap_strategy_routes_follow_strategies_enabled() {
     let tree = TempTree::new("strategy-flag");
-    let state = test_state(tree.uploads()).await;
-    let db = state.db.clone();
     let dist = tree.dist();
 
     // Default matches the API gate: missing settings are created with the flag on.
-    let app = create_router_with_dist(state.clone(), dist.clone());
+    let state = test_state(tree.uploads()).await;
+    let app = create_router_with_dist(state, dist.clone());
     let (status, _, body) = get(app, "/sitemap.xml").await;
     assert_eq!(status, StatusCode::OK);
     assert_strategy_locs(&body, true);
 
+    // A separate database: the sitemap is cached per database (API-9).
+    let state = test_state(tree.uploads()).await;
+    let db = state.db.clone();
     db.get_settings().await.unwrap();
     db.client
         .query("UPDATE site_settings SET strategies_enabled = false")
@@ -342,8 +355,38 @@ async fn sitemap_strategy_routes_follow_strategies_enabled() {
     assert_strategy_locs(&body, false);
 }
 
+/// API-9: the sitemap runs about nine queries plus one per forum board, so
+/// it is built once and served from memory for ten minutes. A change inside
+/// that window does not show until the entry expires.
+#[tokio::test]
+async fn sitemap_is_served_from_cache_within_ttl() {
+    let tree = TempTree::new("sitemap-cache");
+    let state = test_state(tree.uploads()).await;
+    let db = state.db.clone();
+    let app = create_router_with_dist(state, tree.dist());
+
+    let (status, _, first) = get(app.clone(), "/sitemap.xml").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_strategy_locs(&first, true);
+
+    db.client
+        .query("UPDATE site_settings SET strategies_enabled = false")
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+    db.create_team("Cache Team", "game-1", None, None, None)
+        .await
+        .unwrap();
+
+    let (status, _, second) = get(app, "/sitemap.xml").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(second, first, "second hit must come from the cache");
+    assert!(!second.contains("/teams/"), "{second}");
+}
+
 fn assert_strategy_locs(body: &str, enabled: bool) {
-    for path in ["/strategy", "/strategy/heroes", "/strategy/meta"] {
+    for path in ["/strategy", "/strategy/heroes"] {
         let needle = format!("{PUBLIC_BASE}{path}</loc>");
         if enabled {
             assert!(body.contains(&needle), "missing {needle}\n{body}");
@@ -351,6 +394,10 @@ fn assert_strategy_locs(body: &str, enabled: bool) {
             assert!(!body.contains(&needle), "unexpected {needle}\n{body}");
         }
     }
+    assert!(
+        !body.contains("/strategy/meta"),
+        "/strategy/meta has no hero data and must not be listed (API-20):\n{body}"
+    );
     assert!(
         !body.contains("/strategy/patch-notes"),
         "duplicate of /patch-notes must never be listed:\n{body}"

@@ -40,7 +40,11 @@ flate2 = "1"
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+# Fake Nostr relay for the feed / health cache tests. Same versions as
+# scuffed-chat, so nothing new enters the lockfile.
+futures-util = "0.3"
 http-body-util = "0.1"
+tokio-tungstenite = "0.26"
 tower = { version = "0.5", features = ["util"] }
 # `pause` / `advance` for the shell-cache tests. Not a normal dependency:
 # production builds must not include tokio's test clock.

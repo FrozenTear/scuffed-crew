@@ -208,11 +208,28 @@ async fn seed_all_roles(db: &Database) {
     .await;
 }
 
+/// A distinct untrusted peer per request.
+///
+/// Anonymous reads (`/api/teams`, `/api/events`, …) sit behind the per-IP
+/// public governor (API-9), which keys on `ConnectInfo`; `oneshot` injects
+/// none. Members spend the same bucket, so authenticated helpers carry a
+/// peer too. A fresh address per call keeps unrelated tests off one budget;
+/// rate-limit tests choose their peer explicitly.
+fn fresh_peer() -> axum::extract::ConnectInfo<std::net::SocketAddr> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    axum::extract::ConnectInfo(std::net::SocketAddr::from((
+        [198, 19, (n >> 8) as u8, n as u8],
+        47000,
+    )))
+}
+
 /// Build a request with Bearer token authentication.
 fn authed_request(method: Method, uri: &str, token: &str) -> Request<Body> {
     Request::builder()
         .method(method)
         .uri(uri)
+        .extension(fresh_peer())
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::empty())
@@ -224,6 +241,7 @@ fn authed_json_request(method: Method, uri: &str, token: &str, body: Value) -> R
     Request::builder()
         .method(method)
         .uri(uri)
+        .extension(fresh_peer())
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
