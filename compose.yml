@@ -10,7 +10,14 @@ services:
     # x-podman.name_separator_compat would match container names and also
     # rename networks (hyphen vs the existing underscore networks).
     # Fully qualified so podman does not stop on a short-name registry prompt.
-    image: docker.io/surrealdb/surrealdb:v3.0
+    # Exact version, equal to the surrealdb crate in Cargo.lock
+    # (scripts/check-surrealdb-version.sh fails CI otherwise). A floating
+    # tag such as v3.0 hid that production stayed on 3.0.5 after the crate
+    # moved past the 3.1.0 / 3.1.5 security fixes. scripts/update.sh never
+    # recreates this container, so a new tag here takes effect only when the
+    # owner follows "Upgrading the SurrealDB server" in docs/deploy.md
+    # (backup first).
+    image: docker.io/surrealdb/surrealdb:v3.2.3
     # Image runs as non-root by default; Podman named volumes are root-owned,
     # which causes: Failed to create RocksDB directory: Permission denied.
     # Run as root in the container for single-tenant VPS deploys.
@@ -28,8 +35,9 @@ services:
     # Minimal image: no curl or shell. `is-ready` asks the running server, so
     # this checks the database and not only the binary. The surreal CLI waits
     # about 5s on exit after it has answered (measured on 3.0.5, with `version`
-    # too). An older 5s timeout therefore failed every check and the container
-    # sat at "unhealthy" while the database was fine. That is also why
+    # too; the exit wait is not re-measured on 3.2.3, where `is-ready` still
+    # exists). An older 5s timeout therefore failed every check and the
+    # container sat at "unhealthy" while the database was fine. That is also why
     # `is-ready` once looked unreliable. Keep the timeout well above 5s.
     healthcheck:
       test: ["CMD", "/surreal", "is-ready", "--endpoint", "http://127.0.0.1:8000"]
@@ -138,6 +146,27 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://127.0.0.1:3000}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       ENCRYPTION_KEY_VERSION: ${ENCRYPTION_KEY_VERSION:-1}
+      # Key rotation: older keys as `ver:base64,ver:base64`. Without this a
+      # rotated ENCRYPTION_KEY cannot read rows sealed with the old key
+      # (Nostr secret keys, OAuth ids, DMs). Empty entries are skipped, so a
+      # blank value is the same as unset.
+      ENCRYPTION_KEY_PREVIOUS: ${ENCRYPTION_KEY_PREVIOUS:-}
+      # Exactly "1" turns off the empty-AAD legacy decrypt. It is already off
+      # when PRODUCTION is truthy. Anything else, blank included, is unset.
+      CRYPTO_STRICT_AAD: ${CRYPTO_STRICT_AAD:-}
+      # Exactly "1" allows cleartext OAuth provider ids against a remote DB,
+      # non-production only. Anything else, blank included, is unset.
+      ALLOW_PLAINTEXT_PROVIDER_IDS: ${ALLOW_PLAINTEXT_PROVIDER_IDS:-}
+      # Root bootstrap on start. Off only for 0/false/no/off; blank or unset
+      # bootstraps (today's behaviour). SURREALDB_MIGRATE_ONLY is left out on
+      # purpose: it makes the server exit after migrating, which would loop
+      # under `restart: unless-stopped`. Use
+      #   compose run --rm -e SURREALDB_MIGRATE_ONLY=1 site-server
+      SURREALDB_BOOTSTRAP: ${SURREALDB_BOOTSTRAP:-}
+      # Exactly "1" re-DEFINEs the app DB user's password on every boot (to
+      # push a changed SURREALDB_APP_PASSWORD). Blank or unset: define only
+      # when the user is missing.
+      FORCE_APP_PASSWORD_SYNC: ${FORCE_APP_PASSWORD_SYNC:-}
       NOSTR_RELAY_URL: ${NOSTR_RELAY_URL:-}
       # Public domain serving /.well-known/nostr.json — the right-hand side of
       # members' NIP-05 identifiers. Unset (or loopback/IP/private) means kind-0
@@ -169,6 +198,28 @@ services:
       WS_MAX_PER_IP: ${WS_MAX_PER_IP:-32}
       PRODUCTION: ${PRODUCTION:-}
       SECURE_COOKIES: ${SECURE_COOKIES:-}
+      # Content-Security-Policy. CSP_ENFORCE=0 (or false/no/off) sends the
+      # policy as Report-Only; blank or unset enforces. The two source lists
+      # are split on spaces and commas and empty items are dropped, so blank
+      # adds nothing. See docs/deploy.md and .env.example.
+      CSP_ENFORCE: ${CSP_ENFORCE:-}
+      CSP_EXTRA_CONNECT_SRC: ${CSP_EXTRA_CONNECT_SRC:-}
+      CSP_IMG_SRC: ${CSP_IMG_SRC:-}
+      # Public leaderboard cache. Blank or non-numeric uses the defaults
+      # (30 s, 2 scans), the same as unset.
+      LEADERBOARD_CACHE_TTL_SECS: ${LEADERBOARD_CACHE_TTL_SECS:-}
+      LEADERBOARD_CACHE_MAX_SCANS: ${LEADERBOARD_CACHE_MAX_SCANS:-}
+      # Discord notifications. A blank URL skips that channel; with both
+      # blank the notifier is off. DISCORD_WEBHOOKS_ENABLED is a kill switch:
+      # 0/false/off/no disables, blank or unset leaves it on when a URL is set.
+      DISCORD_WEBHOOK_OFFICERS: ${DISCORD_WEBHOOK_OFFICERS:-}
+      DISCORD_WEBHOOK_GENERAL: ${DISCORD_WEBHOOK_GENERAL:-}
+      DISCORD_WEBHOOKS_ENABLED: ${DISCORD_WEBHOOKS_ENABLED:-}
+      # Matrix notifications. Off unless all four are non-empty.
+      MATRIX_HOMESERVER_URL: ${MATRIX_HOMESERVER_URL:-}
+      MATRIX_BOT_ACCESS_TOKEN: ${MATRIX_BOT_ACCESS_TOKEN:-}
+      MATRIX_OFFICER_ROOM_ID: ${MATRIX_OFFICER_ROOM_ID:-}
+      MATRIX_GENERAL_ROOM_ID: ${MATRIX_GENERAL_ROOM_ID:-}
       # Off when unset, empty, 0, false, no, or off. Any other value makes
       # POST /api/stats/upload reject more than 200 matches or 500 deleted
       # sessions with 413. Leave this blank until tracker builds that send

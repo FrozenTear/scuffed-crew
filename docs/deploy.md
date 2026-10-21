@@ -17,7 +17,7 @@ This is the supported path for a **single VPS** with Podman Compose. You do **no
 | `SURREALDB_APP_USER` / `SURREALDB_APP_PASSWORD` | Runtime DB user (default `scuffed_app`) — **EDITOR**, not root. **Must differ from root password** when `PRODUCTION=1` |
 | `SURREALDB_AUTH_MODE` | `scoped` (default in prod) — root bootstrap (migrate + ensure user), then app reconnects as EDITOR |
 | `SURREALDB_BOOTSTRAP` | Default: bootstrap on start (single-container). Set `SURREALDB_BOOTSTRAP=0` for **app-only** containers that must never use root |
-| `SURREALDB_MIGRATE_ONLY=1` | Server runs root bootstrap (`Database::bootstrap_from_env`) then **exits** — for init/migrate jobs |
+| `SURREALDB_MIGRATE_ONLY=1` | Server runs root bootstrap (`Database::bootstrap_from_env`) then **exits** — for init/migrate jobs. `compose.yml` does not forward it (the service would exit and restart in a loop); run it as `podman compose --env-file data/secrets.env run --rm -e SURREALDB_MIGRATE_ONLY=1 site-server` |
 | `ENCRYPTION_KEY` | **Required** for remote DB — OAuth IDs, Nostr keys, DM at rest (AES-256-GCM + AAD) |
 | `ENCRYPTION_KEY_VERSION` | Current key version (default `1`) |
 | `ENCRYPTION_KEY_PREVIOUS` | Optional `ver:base64,ver:base64` for rotation reads |
@@ -82,6 +82,28 @@ cd /path/to/scuffed-crew
 Before compose runs, `scripts/lib/compose-env.sh` fills a blank `ALLOWED_ORIGINS` from `REDIRECT_BASE_URL` and a blank `SURREALDB_APP_PASSWORD` from `SURREALDB_PASSWORD`. `compose.yml` uses one substitution level for those. podman-compose 1.5 turns a nested default into the outer value plus a stray `}`, or into literal text when the outer name is unset. A missing app-password key is still generated distinct from the root password. Production still refuses to boot when the two passwords match.
 
 On Contabo-style day-2 hosts, if a project Surreal is already Up, `update.sh` recreates site-server with `up -d --no-deps` so `/bin/podman-compose` does not spawn an underscore-named DB twin on the same volume (see Troubleshooting: duplicate Surreal `_` vs `-`).
+
+`update.sh` never recreates the `surrealdb` container, so a new SurrealDB image tag in `compose.yml` does nothing until you follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server).
+
+### Which variables reach the server
+
+`compose.yml` has no `env_file:`. `data/secrets.env` only fills in the `${...}` values, so a variable reaches the server only when it is listed under `site-server` → `environment:`. Setting an unlisted name in `secrets.env` does nothing. `scripts/check-compose-env.sh` (CI) fails when the server reads a name that compose does not pass, apart from a short allow-list (`PORT`, `SURREALDB_MIGRATE_ONLY`, and the test-only `SCUFFED_EXTRA_INDEX`).
+
+Optional names passed through as blank when unset. For each one the server treats blank the same as unset:
+
+| Name | Effect when set |
+|---|---|
+| `ENCRYPTION_KEY_PREVIOUS` | Older keys (`ver:base64,ver:base64`) for reading rows sealed before a key rotation. A malformed entry or a version equal to `ENCRYPTION_KEY_VERSION` stops the server at boot |
+| `CRYPTO_STRICT_AAD` | `1` disables the empty-AAD legacy decrypt (already off when `PRODUCTION` is truthy) |
+| `ALLOW_PLAINTEXT_PROVIDER_IDS` | `1` allows cleartext OAuth ids on a remote DB, non-production only. No effect with `PRODUCTION=1` |
+| `SURREALDB_BOOTSTRAP` | `0`/`false`/`no`/`off` skips root bootstrap, so migrations do **not** run on start. Use only with a separate migrate job |
+| `FORCE_APP_PASSWORD_SYNC` | `1` re-defines the app DB user's password on every boot |
+| `CSP_ENFORCE`, `CSP_EXTRA_CONNECT_SRC`, `CSP_IMG_SRC` | See [Public settings in the HTML shell](#public-settings-in-the-html-shell) |
+| `LEADERBOARD_CACHE_TTL_SECS`, `LEADERBOARD_CACHE_MAX_SCANS` | See [Public leaderboard cache](#public-leaderboard-cache) |
+| `DISCORD_WEBHOOK_OFFICERS`, `DISCORD_WEBHOOK_GENERAL`, `DISCORD_WEBHOOKS_ENABLED` | Discord notifications. A blank URL skips that channel. `DISCORD_WEBHOOKS_ENABLED=0` turns both off |
+| `MATRIX_HOMESERVER_URL`, `MATRIX_BOT_ACCESS_TOKEN`, `MATRIX_OFFICER_ROOM_ID`, `MATRIX_GENERAL_ROOM_ID` | Matrix notifications. Off unless all four are non-empty |
+
+Before these names were forwarded (up to rc.5), they were ignored even when present in `secrets.env`. If one of them is already in your `secrets.env`, it takes effect on the next `update.sh`.
 
 Override image pin in `data/secrets.env` if needed:
 
@@ -431,7 +453,7 @@ static musl binaries. The runtime base is
 (Alpine 3.18, musl). A short name (`dockurr/strfry@sha256:...`) makes
 `podman build` wait for a registry prompt, so the Containerfiles and
 `compose.yml` use a registry host on every image (`docker.io/library/...`
-for official images, `docker.io/surrealdb/surrealdb:v3.0` for SurrealDB,
+for official images, `docker.io/surrealdb/surrealdb:v3.2.3` for SurrealDB,
 `ghcr.io/...` for the site image). A glibc build of those plugins does not
 load there. CI builds this image, seeds team channel rows the same way
 `ensure_team_channel_rows` does, and walks the site chat path: NIP-42 AUTH
@@ -742,6 +764,153 @@ If `PACKS_DIR` is unset, the directory cannot be read, or it has no valid
 `GET /api/tracker/packs/{name}` return 503 `{"error":"packs_disabled"}`.
 `packs-data` is not in `scripts/backup.sh`. The copy of record is the build
 folder on the operator's machine.
+
+## Upgrading the SurrealDB server
+
+`compose.yml` pins the server image to an exact tag equal to the `surrealdb`
+crate in `Cargo.lock` (CI runs `scripts/check-surrealdb-version.sh`).
+`update.sh` does not touch the database container, so a new tag is applied
+only by the steps below. They take the site down for a few minutes.
+
+**There is no tag-only rollback.** Measured on a scratch datastore: 3.0.5
+data opens in place on 3.2.3, but once 3.2.3 has opened it, 3.0.5 no longer
+starts on it (its log repeats ``A deserialization error occured: Invalid
+revision `2` for type `Node` `` and `is-ready` never succeeds). Rolling back means restoring the
+copy of the volume taken in step 4. Do not skip it.
+
+SurrealDB's notes say 3.0.x → 3.1.0 and 3.1.x → 3.2.x upgrade in place with
+unchanged catalog and on-disk layouts. 3.2.5 and later write data an earlier
+3.2 binary cannot read, so do not jump past the crate version.
+
+The names below are examples. Find yours first:
+
+```bash
+cd /path/to/scuffed-crew
+podman ps -a --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep -E 'surrealdb|site-server'
+podman volume ls | grep surrealdb-data
+DB=scuffed-crew-surrealdb-1          # the one Up container (see Troubleshooting if there are two)
+APP=scuffed-crew-site-server-1
+VOL=scuffed-crew_surrealdb-data
+set -a; . data/secrets.env; set +a
+```
+
+### 1. Record what runs now
+
+```bash
+git pull --ff-only                    # compose.yml now names the new tag
+podman exec "$DB" /surreal version    # e.g. 3.0.5 for linux on x86_64
+podman inspect "$DB" --format '{{.ImageName}} {{.Image}}'
+```
+
+Write down the version and image ID. That image is the rollback target. Do
+not run `podman image prune` until the upgrade has held for a week.
+
+### 2. Back up
+
+```bash
+set -a; . /etc/scuffed-crew/backup.env; set +a
+./scripts/backup.sh                   # or: systemctl start scuffed-backup.service
+restic snapshots --tag scuffed-crew | tail -3   # a snapshot from just now
+```
+
+Also keep a logical export on the host, outside restic:
+
+```bash
+podman exec -e SURREAL_PASS="$SURREALDB_PASSWORD" "$DB" /surreal export \
+  --endpoint http://127.0.0.1:8000 --username "${SURREALDB_USER:-root}" \
+  --namespace "${SURREALDB_NS:-scuffed_crew}" --database "${SURREALDB_DB:-main}" \
+  /tmp/pre-upgrade.surql
+podman cp "$DB":/tmp/pre-upgrade.surql /root/scuffed-pre-upgrade-$(date +%F).surql
+ls -lh /root/scuffed-pre-upgrade-*.surql
+```
+
+### 3. Pull the new image before the downtime
+
+```bash
+podman pull docker.io/surrealdb/surrealdb:v3.2.3
+```
+
+### 4. Stop, copy the volume cold, remove only the DB container
+
+```bash
+podman stop "$APP"
+podman stop "$DB"
+podman volume export "$VOL" -o /root/scuffed-surrealdb-pre-upgrade-$(date +%F).tar
+tar tf /root/scuffed-surrealdb-pre-upgrade-*.tar | head    # scuffed.db/...
+podman rm "$DB"                       # the container only; never `podman volume rm`
+podman ps -a | grep surrealdb         # must print nothing
+```
+
+The copy is taken with the database stopped, so it is consistent. The
+restic snapshot's volume copy is taken while it runs; the logical export is
+the consistent part of that snapshot.
+
+### 5. Start the new server
+
+```bash
+podman compose --env-file data/secrets.env up -d --no-deps surrealdb
+podman ps --format '{{.Names}}\t{{.Image}}\t{{.Status}}' | grep surrealdb   # exactly one, v3.2.3
+DB=<the name printed above>
+podman exec "$DB" /surreal version    # 3.2.3...
+podman exec "$DB" /surreal is-ready --endpoint http://127.0.0.1:8000 && echo ready
+podman logs "$DB" 2>&1 | grep -iE 'error|panic' | head
+```
+
+If there are two surreal containers, stop the new one and see Troubleshooting
+(duplicate `_` vs `-`) before going on.
+
+### 6. Start the app and check it
+
+```bash
+./scripts/update.sh                   # sees Surreal Up, recreates site-server with --no-deps
+curl -fsS "http://127.0.0.1:${HOST_PORT:-3000}/api/health"; echo
+podman logs "$APP" 2>&1 | grep -iE 'error|panic|migrat' | head
+```
+
+In a browser: log in as an admin (checks the app DB user and sessions), open
+`/stats` and one member's stats page, the public leaderboard, and the admin
+audit log. Send one chat message if the relay is on. Wait for the surrealdb
+container to show `healthy` in `podman ps`.
+
+Keep the `.tar`, the `.surql` export, and the old image for at least a week.
+
+### Optional later: rebuild compound unique indexes
+
+3.1.0 changed how unique indexes store rows whose indexed columns are `NONE`
+or `NULL`, and says existing compound unique indexes need `REBUILD INDEX`.
+Measured on scratch data: a 3.0.5-written index `COLUMNS m, e, d UNIQUE`
+does not find a row with `d = NONE` through `WHERE m = .. AND e = ..`, on
+3.0.5 and on 3.2.3 alike (today's behaviour). After `REBUILD INDEX` on 3.2.3
+it does. Duplicate `NONE` tuples are allowed before and after on both
+versions. A rebuild therefore changes query results (rows that were missed
+start showing up), so it is a separate decision, not part of this upgrade.
+Do not run `REBUILD INDEX` across a version change.
+
+### Roll back
+
+Do this if step 5 or 6 fails and the cause is not obvious in a few minutes.
+
+```bash
+podman stop "$APP"; podman stop "$DB"; podman rm "$DB"
+# Keep the failed state for later diagnosis:
+podman volume export "$VOL" -o /root/scuffed-surrealdb-failed-$(date +%F).tar
+# Replace the datastore with the cold copy from step 4:
+rm -rf "$(podman volume inspect "$VOL" --format '{{.Mountpoint}}')/scuffed.db"
+podman volume import "$VOL" /root/scuffed-surrealdb-pre-upgrade-<date>.tar
+# Point compose at the old version (a local edit; undo it before the next upgrade):
+sed -i 's#surrealdb:v3.2.3#surrealdb:v3.0.5#' compose.yml
+podman compose --env-file data/secrets.env up -d --no-deps surrealdb
+podman exec <new surreal name> /surreal version   # 3.0.5
+./scripts/update.sh
+```
+
+Use the version you wrote down in step 1 if it was not 3.0.5. `update.sh`
+runs `git pull --ff-only`, which keeps the local `compose.yml` edit unless
+`main` changed that file. If the `.tar` is unusable, restore the restic
+snapshot (`./scripts/restore.sh`, see [Restore](#restore)) and load the
+logical export into an empty volume on the old version with
+`podman exec ... /surreal import --endpoint http://127.0.0.1:8000 --username root --namespace scuffed_crew --database main /tmp/pre-upgrade.surql`
+(after `podman cp` of the `.surql` into the container).
 
 ## Backups
 

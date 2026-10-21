@@ -68,7 +68,7 @@ the queries are copy-paste safe.
 ### 1. Open a root SQL shell against the running DB
 
 The Compose stack runs SurrealDB v3 as service `surrealdb` (image
-`docker.io/surrealdb/surrealdb:v3.0`, binary `/surreal`, bound `0.0.0.0:8000`, namespace
+`docker.io/surrealdb/surrealdb:v3.2.3`, binary `/surreal`, bound `0.0.0.0:8000`, namespace
 `scuffed_crew`, database `main` — see `compose.yml`). Root credentials are
 `SURREALDB_USER` / `SURREALDB_PASSWORD` in `data/secrets.env`. From the deploy
 directory:
