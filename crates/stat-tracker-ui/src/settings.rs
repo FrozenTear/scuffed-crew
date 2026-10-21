@@ -551,6 +551,7 @@ impl SettingsForm {
             capture_route: self.capture_route,
             debug_portal_frames: base.debug_portal_frames,
             screencast_max_fps: base.screencast_max_fps,
+            screencast_pause_between_grabs: base.screencast_pause_between_grabs,
             player_name: nonempty(&self.player_name),
             sync: sync_from_fields(&self.sync_url, &self.sync_token),
             auto_detect: AutoDetectConfig {

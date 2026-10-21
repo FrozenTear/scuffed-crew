@@ -309,6 +309,10 @@ fn health_of(report: pw::StreamReport) -> StreamHealth {
     match report.phase {
         pw::ReportedPhase::Error => StreamHealth::Error,
         pw::ReportedPhase::Unconnected if report.has_streamed => StreamHealth::Unconnected,
+        // The tracker's own pause between grabs is a healthy stream.
+        pw::ReportedPhase::Paused if report.has_streamed && report.self_paused => {
+            StreamHealth::Streaming
+        }
         pw::ReportedPhase::Paused if report.has_streamed => StreamHealth::Paused {
             paused_for: report.paused_for.unwrap_or(Duration::ZERO),
         },
@@ -718,6 +722,22 @@ pub fn reuse_wait(max_fps: u32) -> Duration {
     Duration::from_millis(pw::throttle_gap_ms(max_fps).saturating_add(100))
 }
 
+/// Extra wait for a poll that had to resume a paused stream: the
+/// compositor has to start producing again before the first buffer.
+pub const RESUME_POLL_ALLOWANCE: Duration = Duration::from_millis(400);
+
+/// A poll's wait. A poll that resumes a paused stream waits
+/// [`RESUME_POLL_ALLOWANCE`] longer, 750 ms at 4 fps and 1 s at 2 fps, still
+/// under the 1.5 s poll. A buffer ends the wait as soon as it arrives.
+pub fn poll_wait(max_fps: u32, resuming: bool) -> Duration {
+    let wait = reuse_wait(max_fps);
+    if resuming {
+        wait + RESUME_POLL_ALLOWANCE
+    } else {
+        wait
+    }
+}
+
 /// What a Tab stream timeout does. KDE/KWin must not open the screenshot
 /// portal while a share is up. niri and other wlroots compositors can, and
 /// so can GNOME when the stream was forced rather than chosen automatically.
@@ -1106,6 +1126,9 @@ pub async fn capture(
                     let extra = if state.live.is_some() {
                         Some(live)
                     } else {
+                        if let Some(stream) = live.stream.as_ref() {
+                            super::stream_pause::register(stream);
+                        }
                         state.live = Some(live);
                         state.last_fail = None;
                         clear_portal_warn();
@@ -1242,16 +1265,31 @@ pub async fn capture(
         CaptureKind::Poll => None,
     };
     let fresh = stream.needs_fresh_frame();
+    // Resume the stream for this grab. It pauses again when the hold is
+    // dropped below, after the post-grab health read, or on any early
+    // return. A Tab grab takes over the key hold from the press.
+    let mut resuming = !stream.wants_active();
+    if resuming && let Some(press) = tab_press {
+        // Same start as the key hold: a frame period before the overlay
+        // delay ends ([`super::stream_pause::tab_resume_at`]).
+        let at = super::stream_pause::tab_resume_at(press, max_fps);
+        if at > Instant::now() {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+            resuming = !stream.wants_active();
+        }
+    }
+    let grab_hold = super::stream_pause::grab_hold(kind == CaptureKind::Tab);
     let timeout = if tab_press.is_some() {
         Duration::from_millis(framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS)
     } else if fresh {
         SCREENCAST_FRAME_WAIT
     } else {
-        reuse_wait(max_fps)
+        poll_wait(max_fps, resuming)
     };
     // The mutex stays held so a second caller cannot open another share.
     let grab_started = Instant::now();
     let grabbed = stream.grab(timeout, tab_press).await;
+    stream.note_grab_end(matches!(grabbed, Ok(pw::GrabOutcome::TabMiss { .. })));
     let timing = stream.timing();
     let alive = stream.alive();
     let stream_id = stream.stream_id();
@@ -1284,14 +1322,14 @@ pub async fn capture(
     }
     // Only read when the grab got no new picture. A Tab miss has its own
     // fallback in `tab_timeout`.
-    let quiet_for = stream
-        .last_buffer_at()
-        .map_or_else(|| stream.running_for(), |at| at.elapsed());
+    // Active time only: the tracker's own pauses are not quiet time.
+    let quiet_for = stream.quiet_for();
     let stall = classify_stall(
         !alive || health_is_dead(health),
         state.watch.pending.is_some(),
         quiet_for,
     );
+    drop(grab_hold);
     // A poll that only got the previous frame back from a stalled stream
     // would read nothing. Where a screenshot is safe, take one instead.
     if matches!(grabbed, Ok(pw::GrabOutcome::Frame { is_new: false, .. }))
@@ -2963,6 +3001,77 @@ mod tests {
             start + Duration::from_secs(2 * 60 * 60) - last <= REOPEN_GAP_MAX + step,
             "the stream was left dead at the end of the game"
         );
+    }
+
+    fn report(
+        phase: pw::ReportedPhase,
+        paused_for: Option<Duration>,
+        self_paused: bool,
+    ) -> pw::StreamReport {
+        pw::StreamReport {
+            phase,
+            paused_for,
+            self_paused,
+            core_fault: false,
+            has_streamed: true,
+        }
+    }
+
+    #[test]
+    fn our_own_pause_is_a_healthy_stream_and_a_foreign_pause_still_dies() {
+        let ours = health_of(report(
+            pw::ReportedPhase::Paused,
+            Some(Duration::ZERO),
+            true,
+        ));
+        assert_eq!(ours, StreamHealth::Streaming);
+        assert!(!health_is_dead(ours));
+        let foreign = health_of(report(
+            pw::ReportedPhase::Paused,
+            Some(PAUSED_PERSIST),
+            false,
+        ));
+        assert_eq!(
+            foreign,
+            StreamHealth::Paused {
+                paused_for: PAUSED_PERSIST
+            }
+        );
+        assert!(health_is_dead(foreign));
+        // A dead foreign pause reopens on the next poll, as before.
+        let now = Instant::now();
+        let mut watch = ReopenWatch::default();
+        assert_eq!(
+            reopen_step(Observe::Poll { health: foreign }, true, now, &mut watch),
+            ReopenStep::Reopen(REOPEN_DEAD)
+        );
+        // Our pause keeps a latched death from blocking the next one: it
+        // reads as Streaming and clears the latch.
+        assert!(watch.death_latched);
+        assert_eq!(
+            reopen_step(Observe::Poll { health: ours }, true, now, &mut watch),
+            ReopenStep::Keep
+        );
+        assert!(!watch.death_latched);
+        // Tab soft misses still count while our pause reads as Streaming.
+        let tab = Observe::Tab {
+            health: ours,
+            waited: true,
+            got_fresh: false,
+            buffer_during_wait: false,
+        };
+        reopen_step(tab, true, now, &mut watch);
+        assert_eq!(watch.soft_misses, 1);
+    }
+
+    #[test]
+    fn a_poll_that_resumes_waits_longer_but_under_the_poll() {
+        assert_eq!(poll_wait(4, false), Duration::from_millis(350));
+        assert_eq!(poll_wait(4, true), Duration::from_millis(750));
+        assert_eq!(poll_wait(2, true), Duration::from_millis(1_000));
+        for fps in 1..=5 {
+            assert!(poll_wait(fps, true) <= crate::config::NEW_READER_POLL_INTERVAL);
+        }
     }
 
     #[test]

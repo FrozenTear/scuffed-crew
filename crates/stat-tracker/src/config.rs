@@ -28,6 +28,13 @@ pub struct Config {
     /// max-framerate and the tracker's own throttle. Not written unless set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screencast_max_fps: Option<u32>,
+    /// Pause the screen stream between grabs, so the compositor does not
+    /// render frames the tracker throws away. Missing means on. `false`
+    /// keeps the stream running the whole time, as before 0.5.0-rc.7.
+    /// `STAT_TRACKER_SCREENCAST_PAUSE=0` or `=1` wins over this key and is
+    /// not written back. Not written unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screencast_pause_between_grabs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -502,6 +509,30 @@ impl Config {
     /// Screen-stream cap in frames per second, after clamping.
     pub fn screencast_max_fps(&self) -> u32 {
         clamp_screencast_max_fps(self.screencast_max_fps)
+    }
+
+    /// Whether the screen stream pauses between grabs, with
+    /// [`SCREENCAST_PAUSE_ENV`] applied.
+    pub fn screencast_pause_between_grabs(&self) -> bool {
+        resolve_screencast_pause(
+            self.screencast_pause_between_grabs,
+            std::env::var(SCREENCAST_PAUSE_ENV).ok().as_deref(),
+        )
+    }
+}
+
+/// `0`, `false`, `off`, or `no` keeps the screen stream running between
+/// grabs for this run. `1`, `true`, `on`, or `yes` pauses it. Any other
+/// value, or unset, leaves the config key in charge.
+pub const SCREENCAST_PAUSE_ENV: &str = "STAT_TRACKER_SCREENCAST_PAUSE";
+
+/// The file key, then the env override. Missing key means on.
+pub fn resolve_screencast_pause(file: Option<bool>, env: Option<&str>) -> bool {
+    let from_env = env.map(|v| v.trim().to_ascii_lowercase());
+    match from_env.as_deref() {
+        Some("0" | "false" | "off" | "no") => false,
+        Some("1" | "true" | "on" | "yes") => true,
+        _ => file.unwrap_or(true),
     }
 }
 
@@ -1421,6 +1452,7 @@ impl Default for Config {
             capture_route: CaptureRoute::Auto,
             debug_portal_frames: false,
             screencast_max_fps: None,
+            screencast_pause_between_grabs: None,
             player_name: None,
             sync: None,
             auto_detect: AutoDetectConfig::default(),
@@ -2033,6 +2065,7 @@ capture_output = \"DP-1\"
             },
             debug_portal_frames: full,
             screencast_max_fps: full.then_some(4),
+            screencast_pause_between_grabs: full.then_some(false),
             player_name: full.then(|| "Ada".to_string()),
             sync: full.then(|| SyncConfig {
                 server_url: "https://crew.example".to_string(),
@@ -2874,6 +2907,41 @@ cooldown_secs = 120
         let raw = format!("screencast_max_fps = 4\n{raw}");
         let parsed: Config = toml::from_str(&raw).unwrap();
         assert_eq!(parsed.screencast_max_fps(), 4);
+    }
+
+    #[test]
+    fn screencast_pause_defaults_on_and_the_env_wins_both_ways() {
+        let cfg = Config::default();
+        assert_eq!(cfg.screencast_pause_between_grabs, None);
+        assert!(resolve_screencast_pause(None, None), "missing key: on");
+        assert!(
+            !toml::to_string(&cfg)
+                .unwrap()
+                .contains("screencast_pause_between_grabs"),
+            "not written unless set"
+        );
+        assert!(!resolve_screencast_pause(Some(false), None));
+        assert!(resolve_screencast_pause(Some(true), None));
+        for off in ["0", "false", "OFF", " no "] {
+            assert!(!resolve_screencast_pause(None, Some(off)), "{off}");
+            assert!(!resolve_screencast_pause(Some(true), Some(off)), "{off}");
+        }
+        for on in ["1", "true", "On", "YES"] {
+            assert!(resolve_screencast_pause(Some(false), Some(on)), "{on}");
+        }
+        // Empty or unknown leaves the file in charge.
+        assert!(!resolve_screencast_pause(Some(false), Some("")));
+        assert!(!resolve_screencast_pause(Some(false), Some("maybe")));
+        assert!(resolve_screencast_pause(None, Some("")));
+        let raw = toml::to_string(&Config::default()).unwrap();
+        let raw = format!("screencast_pause_between_grabs = false\n{raw}");
+        let parsed: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(parsed.screencast_pause_between_grabs, Some(false));
+        assert!(
+            toml::to_string(&parsed)
+                .unwrap()
+                .contains("screencast_pause_between_grabs = false")
+        );
     }
 
     #[test]

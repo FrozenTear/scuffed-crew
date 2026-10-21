@@ -478,6 +478,11 @@ impl TabKeys {
         self.flight = Some(flight);
     }
 
+    /// A press is waiting for the running capture to report.
+    pub fn has_queued(&self) -> bool {
+        self.queued.is_some()
+    }
+
     /// The running capture reported. Returns a queued press to start now
     /// ([`next_press_after_report`]); an accepted board sets `last_accepted`.
     pub fn on_report(&mut self, last_accepted: &mut Option<Instant>) -> Option<Instant> {

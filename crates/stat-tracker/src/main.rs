@@ -665,7 +665,12 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         route: config.capture_route,
         debug_frames: config.debug_portal_frames_enabled(),
         max_fps: config.screencast_max_fps(),
+        pause_between_grabs: config.screencast_pause_between_grabs(),
     });
+    tracing::info!(
+        pause_between_grabs = config.screencast_pause_between_grabs(),
+        "screencast stream pause between grabs (screencast_pause_between_grabs / STAT_TRACKER_SCREENCAST_PAUSE)"
+    );
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
 
@@ -4550,6 +4555,7 @@ async fn start_tab_capture(
     sync_backoff: &Arc<std::sync::Mutex<sync::SyncBackoff>>,
     capture_tx: &tokio::sync::mpsc::UnboundedSender<(String, Result<CaptureReport, String>)>,
     press: Instant,
+    stream_hold: capture::KeyHold,
 ) -> (
     tokio::task::JoinHandle<()>,
     Arc<stat_tracker::tab_retry::TabFlight>,
@@ -4578,6 +4584,9 @@ async fn start_tab_capture(
     let task = tokio::spawn(stat_tracker::tab_retry::with_flight(
         Arc::clone(&flight),
         capture::with_tab_press(press, async move {
+            // Keeps a paused screen stream running from the key event until
+            // the Tab grab takes over (or this task ends without one).
+            let _stream_hold = stream_hold;
             // Direct capture and the screenshot portal wait for the overlay
             // to finish drawing, counted from the key event. The screen
             // stream waits for a buffer instead.
@@ -4729,6 +4738,9 @@ async fn run_loop(
     // A Tab press that preempted a poll, handled by the keyboard arm on the
     // next turn of the loop.
     let mut pending_key: Option<Result<detect::TabKey, Box<dyn std::error::Error>>> = None;
+    // The stream hold of a press queued behind a running capture. Dropped
+    // when that capture reports and the press does not run.
+    let mut queued_stream_hold: Option<capture::KeyHold> = None;
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4834,6 +4846,10 @@ async fn run_loop(
                         let capture_gone = capture_task.as_ref().is_none_or(|t| t.is_finished())
                             && capture_rx.is_empty();
                         if let Some(press) = tabs.on_press(press, st.last_tab_capture, capture_gone) {
+                            // Resume a paused screen stream from the key
+                            // event, before the session choice below.
+                            let hold = capture::stream_key_hold(press);
+                            queued_stream_hold = None;
                             let (task, flight) = start_tab_capture(
                                 &mut st,
                                 &ctx,
@@ -4841,10 +4857,13 @@ async fn run_loop(
                                 &sync_backoff,
                                 &capture_tx,
                                 press,
+                                hold,
                             )
                             .await;
                             tabs.started(flight);
                             capture_task = Some(task);
+                        } else if tabs.has_queued() {
+                            queued_stream_hold = Some(capture::stream_key_hold(press));
                         }
                     }
                     Err(e) => {
@@ -4892,7 +4911,9 @@ async fn run_loop(
                 // A Tab pressed while that capture looked for a board runs
                 // now, unless the capture accepted one (it would read the
                 // same board). An accepted board starts the debounce.
+                let queued_hold = queued_stream_hold.take();
                 if let Some(press) = tabs.on_report(&mut st.last_tab_capture) {
+                    let hold = queued_hold.unwrap_or_else(|| capture::stream_key_hold(press));
                     let (task, flight) = start_tab_capture(
                         &mut st,
                         &ctx,
@@ -4900,6 +4921,7 @@ async fn run_loop(
                         &sync_backoff,
                         &capture_tx,
                         press,
+                        hold,
                     )
                     .await;
                     tabs.started(flight);
