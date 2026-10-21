@@ -326,6 +326,12 @@ pub struct LocalStore {
     /// `db` so the handle drops first; the lock releases on the last clone
     /// unless [`LocalStore::hold_writer_lock_until_exit`] leaked a dup.
     writer_lock: Arc<StoreDirLock>,
+    /// Sessions [`LocalStore::delete_session`] removed in this process. A
+    /// Tab capture still in flight for one of them must not bring it back.
+    /// Not the `deleted_session` table: a pending tombstone there can also
+    /// name a game that stays local. A capture cannot outlive its process,
+    /// so this does not need to survive a restart.
+    deleted_here: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 /// Advisory exclusive lock on the store directory inode.
@@ -490,6 +496,7 @@ impl LocalStore {
             db,
             data_dir: data_dir.to_path_buf(),
             writer_lock,
+            deleted_here: Arc::default(),
         };
         store.migrate_pack_key_heroes().await?;
         Ok(store)
@@ -611,6 +618,39 @@ impl LocalStore {
         &self,
         mut match_data: PersonalMatch,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if !match_data.session_id.is_empty() {
+            // A capture that was in flight when its game was deleted must not
+            // bring the game back. The caller already logged the row to
+            // `matches.jsonl`; drop the session from there too.
+            if self.deleted_here(&match_data.session_id) {
+                tracing::info!(
+                    session_id = %match_data.session_id,
+                    "row for a deleted game not stored"
+                );
+                rewrite_match_log_session(&self.data_dir, &match_data.session_id, None);
+                return Ok(());
+            }
+            // A capture requested before the result was known carries
+            // `unknown`. When the session was decided meanwhile (a poll, a
+            // GUI edit), the new row takes that result, or it would be the
+            // one row of the game held back from upload (MAIN-1).
+            if !outcome_is_decided(&match_data.outcome)
+                && let Some(outcome) = self.session_decided_outcome(&match_data.session_id).await?
+            {
+                match_data.outcome = outcome.clone();
+                // The caller logged this row as unknown. Keep the fallback
+                // log in step with the store.
+                rewrite_match_log_session(
+                    &self.data_dir,
+                    &match_data.session_id,
+                    Some(&|m| {
+                        if !outcome_is_decided(&m.outcome) {
+                            m.outcome = outcome.clone();
+                        }
+                    }),
+                );
+            }
+        }
         // A later snapshot that did not read a name must keep the recognizer
         // already stored for this match. A resend that omits it clears the
         // server's copy.
@@ -623,6 +663,31 @@ impl LocalStore {
         let _: Option<PersonalMatch> = self.db.create("personal_match").content(match_data).await?;
         tracing::debug!("match inserted into local store");
         Ok(())
+    }
+
+    /// [`Self::delete_session`] removed this session in this process.
+    fn deleted_here(&self, session_id: &str) -> bool {
+        self.deleted_here
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(session_id)
+    }
+
+    /// The session row's outcome, when it is a decided one.
+    async fn session_decided_outcome(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut result = self
+            .db
+            .query("SELECT final_outcome FROM match_session WHERE session_id = $sid")
+            .bind(("sid", session_id.to_string()))
+            .await?;
+        let rows: Vec<SessionOutcome> = result.take(0)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.final_outcome)
+            .find(|outcome| outcome_is_decided(outcome)))
     }
 
     /// The recognizer already stored for this match, newest snapshot first.
@@ -843,6 +908,15 @@ impl LocalStore {
         &self,
         session: &MatchSession,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // A capture that was in flight when its game was deleted must not
+        // bring the session row back.
+        if self.deleted_here(&session.session_id) {
+            tracing::info!(
+                session_id = %session.session_id,
+                "session row for a deleted game not created"
+            );
+            return Ok(());
+        }
         self.db
             .query(
                 "UPSERT match_session SET hero = $hero, map_name = $map, role = $role, \
@@ -863,6 +937,10 @@ impl LocalStore {
 
     /// Append a capture to an existing session: bump the capture count and time,
     /// and refresh the final outcome (the active game owns the authoritative value).
+    ///
+    /// An `unknown` outcome never replaces a decided one. The capture's outcome
+    /// was taken when the Tab was pressed; a result decided while it ran (an
+    /// end-reel poll, a GUI edit) stays (MAIN-1).
     pub async fn append_capture(
         &self,
         session_id: &str,
@@ -890,8 +968,14 @@ impl LocalStore {
             }
             None => capture_time,
         };
+        // Fixed fragments only; the outcome is a bind parameter either way.
+        let query = if outcome_is_decided(outcome) {
+            "UPDATE match_session SET last_capture_at = $time, capture_count += 1, final_outcome = $outcome WHERE session_id = $sid"
+        } else {
+            "UPDATE match_session SET last_capture_at = $time, capture_count += 1 WHERE session_id = $sid"
+        };
         self.db
-            .query("UPDATE match_session SET last_capture_at = $time, capture_count += 1, final_outcome = $outcome WHERE session_id = $sid")
+            .query(query)
             .bind(("time", time))
             .bind(("outcome", outcome.to_string()))
             .bind(("sid", session_id.to_string()))
@@ -907,10 +991,27 @@ impl LocalStore {
         &self,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        self.db
+        // Marked before the delete, so a capture insert cannot land between
+        // the delete and the mark. A failed delete unmarks it.
+        let newly_marked = self
+            .deleted_here
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(session_id.to_string());
+        let deleted = self
+            .db
             .query("DELETE match_session WHERE session_id = $sid; DELETE personal_match WHERE session_id = $sid; CREATE deleted_session SET session_id = $sid, deleted_at = time::now()")
             .bind(("sid", session_id.to_string()))
-            .await?;
+            .await;
+        if let Err(e) = deleted {
+            if newly_marked {
+                self.deleted_here
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(session_id);
+            }
+            return Err(e.into());
+        }
         rewrite_match_log_session(&self.data_dir, session_id, None);
         Ok(())
     }
@@ -1624,6 +1725,18 @@ struct DeletedSession {
 #[derive(Debug, Deserialize, SurrealValue)]
 struct SessionStamp {
     last_capture_at: SurrealDatetime,
+}
+
+#[derive(Debug, Deserialize, SurrealValue)]
+struct SessionOutcome {
+    final_outcome: String,
+}
+
+/// A stored outcome label that names a result (`victory`, `defeat`, `draw`).
+fn outcome_is_decided(label: &str) -> bool {
+    label
+        .parse::<crate::detect::MatchOutcome>()
+        .is_ok_and(crate::detect::MatchOutcome::is_decided)
 }
 
 /// Game-list line for a row the server refused. The desktop list shows this
@@ -3619,6 +3732,168 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert!(rows[0].synced);
         assert!(store.get_unsynced().await.unwrap().is_empty());
+    }
+
+    fn session_row(session_id: &str, outcome: &str) -> MatchSession {
+        MatchSession {
+            session_id: session_id.into(),
+            hero: "Test".into(),
+            map_name: String::new(),
+            role: "Tank".into(),
+            started_at: SurrealDatetime::from(Utc::now()),
+            last_capture_at: SurrealDatetime::from(Utc::now()),
+            capture_count: 1,
+            final_outcome: outcome.into(),
+        }
+    }
+
+    async fn final_outcome(store: &LocalStore, session_id: &str) -> Option<String> {
+        store
+            .get_all_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.session_id == session_id)
+            .map(|s| s.final_outcome)
+    }
+
+    /// MAIN-1: a capture requested before the result was known writes
+    /// `unknown`. A result decided while it ran stays on the session, and
+    /// the capture's row takes it.
+    #[tokio::test]
+    async fn an_in_flight_unknown_capture_keeps_a_decided_outcome() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store
+            .create_session(&session_row("s1", "unknown"))
+            .await
+            .unwrap();
+        let mut early = snap("s1", 3);
+        early.outcome = "unknown".into();
+        store.insert_match(early).await.unwrap();
+        // The end-reel poll decides the game while the Tab capture runs.
+        store.set_session_outcome("s1", "victory").await.unwrap();
+        let now = SurrealDatetime::from(Utc::now());
+        store.append_capture("s1", now, "unknown").await.unwrap();
+        assert_eq!(
+            final_outcome(&store, "s1").await.as_deref(),
+            Some("victory")
+        );
+        let mut late = snap("s1", 9);
+        late.outcome = "unknown".into();
+        store.insert_match(late).await.unwrap();
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter().all(|row| row.outcome == "victory"),
+            "{:?}",
+            rows.iter()
+                .map(|r| (r.elims, &r.outcome))
+                .collect::<Vec<_>>()
+        );
+        // A decided capture still writes its result.
+        store.append_capture("s1", now, "defeat").await.unwrap();
+        assert_eq!(final_outcome(&store, "s1").await.as_deref(), Some("defeat"));
+        // An undecided session leaves an unknown row unknown.
+        store
+            .create_session(&session_row("s2", "unknown"))
+            .await
+            .unwrap();
+        let mut open = snap("s2", 1);
+        open.outcome = "unknown".into();
+        store.insert_match(open).await.unwrap();
+        store.append_capture("s2", now, "unknown").await.unwrap();
+        assert_eq!(
+            final_outcome(&store, "s2").await.as_deref(),
+            Some("unknown")
+        );
+        let rows = store.get_session_snapshots("s2").await.unwrap();
+        assert_eq!(rows[0].outcome, "unknown");
+    }
+
+    /// MAIN-1 (3): a capture that was in flight when its game was deleted
+    /// does not bring the game back, neither the session row nor the
+    /// snapshot nor the `matches.jsonl` line.
+    #[tokio::test]
+    async fn a_capture_landing_after_a_delete_does_not_resurrect_the_game() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store
+            .create_session(&session_row("gone", "unknown"))
+            .await
+            .unwrap();
+        store.insert_match(snap("gone", 1)).await.unwrap();
+        store.delete_session("gone").await.unwrap();
+        // The in-flight capture's writes, in the order the capture runs them.
+        store
+            .create_session(&session_row("gone", "unknown"))
+            .await
+            .unwrap();
+        store
+            .append_capture("gone", SurrealDatetime::from(Utc::now()), "victory")
+            .await
+            .unwrap();
+        append_match_log(dir.path(), &snap("gone", 2));
+        store.insert_match(snap("gone", 2)).await.unwrap();
+        assert_eq!(store.match_count().await.unwrap(), 0);
+        assert_eq!(final_outcome(&store, "gone").await, None);
+        assert!(read_match_log(dir.path()).is_empty());
+        assert_eq!(
+            store.get_pending_tombstones().await.unwrap(),
+            vec!["gone".to_string()],
+            "the tombstone still goes to the server"
+        );
+        // Other games are stored as before.
+        store.insert_match(snap("kept", 1)).await.unwrap();
+        assert_eq!(store.match_count().await.unwrap(), 1);
+    }
+
+    /// A pending tombstone is not a delete. A game whose server copy goes
+    /// (re-read as an untracked map or mode) keeps its local rows and can be
+    /// the open game: its new rows are stored and its `matches.jsonl` lines
+    /// stay. Only a delete in this process blocks a late capture.
+    #[tokio::test]
+    async fn a_pending_tombstone_without_a_delete_does_not_block_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store
+            .create_session(&session_row("dm", "unknown"))
+            .await
+            .unwrap();
+        append_match_log(dir.path(), &snap("dm", 1));
+        store.insert_match(snap("dm", 1)).await.unwrap();
+        // Stands in for a server-side removal queued for a game kept here.
+        store.insert_tombstone("dm").await.unwrap();
+        append_match_log(dir.path(), &snap("dm", 2));
+        store.insert_match(snap("dm", 2)).await.unwrap();
+        store
+            .create_session(&session_row("dm", "victory"))
+            .await
+            .unwrap();
+        assert_eq!(store.get_session_snapshots("dm").await.unwrap().len(), 2);
+        assert_eq!(
+            final_outcome(&store, "dm").await.as_deref(),
+            Some("victory")
+        );
+        assert_eq!(read_match_log(dir.path()).len(), 2);
+    }
+
+    /// The fallback log follows a row that took the session's result.
+    #[tokio::test]
+    async fn an_adopted_outcome_is_written_to_the_match_log_too() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store
+            .create_session(&session_row("s1", "defeat"))
+            .await
+            .unwrap();
+        let mut late = snap("s1", 4);
+        late.outcome = "unknown".into();
+        append_match_log(dir.path(), &late);
+        store.insert_match(late).await.unwrap();
+        let log = read_match_log(dir.path());
+        assert_eq!(log.len(), 1);
+        assert_eq!(log[0].outcome, "defeat");
     }
 
     /// F252-5: a map change re-queues the session's rows for upload.
