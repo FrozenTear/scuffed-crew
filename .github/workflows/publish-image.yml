@@ -17,7 +17,9 @@ name: Publish image
 # from changed since the commit :main was built from (workflow_run has no
 # path filter, so the path check is a step below).
 #
-# workflow_dispatch publishes the dispatched ref as is, without the CI gate.
+# workflow_dispatch publishes the dispatched ref as is, without the CI gate
+# or the path check. On main it still skips when :main already has that
+# commit or a newer one, so re-running an old manual run cannot roll back.
 on:
   workflow_run:
     workflows: [CI]
@@ -108,19 +110,33 @@ jobs:
           out sha "${target}"
           out short "${target::7}"
 
-          if [ "${EVENT}" = "workflow_dispatch" ]; then
-            echo "manual run: publish without the CI and :main checks"
-            out publish true
-            out main "${IS_MAIN}"
-            exit 0
-          fi
-          out main true
-
           live="$(docker buildx imagetools inspect "${IMAGE_NAME}:main" --format '{{json .Image}}' 2>/dev/null \
             | jq -r 'first(.. | objects | select(has("Labels")) | .Labels["org.opencontainers.image.revision"] // empty) // empty' \
             || true)"
           echo ":main was built from ${live:-<unknown>}"
-          if [ -z "${live}" ] || ! git cat-file -e "${live}^{commit}" 2>/dev/null; then
+          placed=false
+          if [ -n "${live}" ] && git cat-file -e "${live}^{commit}" 2>/dev/null; then
+            placed=true
+          fi
+
+          if [ "${EVENT}" = "workflow_dispatch" ]; then
+            out main "${IS_MAIN}"
+            # No CI or path check, but a manual run on main (for example a
+            # re-run of an old one) must not move :main back to an older
+            # commit. A run on another ref only pushes its sha- tag.
+            if [ "${IS_MAIN}" = "true" ] && [ "${placed}" = "true" ] \
+              && git merge-base --is-ancestor "${target}" "${live}"; then
+              echo "skip: manual run on main, :main already has ${target} or a newer commit"
+              out publish false
+            else
+              echo "manual run: publish without the CI and path checks"
+              out publish true
+            fi
+            exit 0
+          fi
+          out main true
+
+          if [ "${placed}" != "true" ]; then
             echo "cannot place :main in history; publishing"
             out publish true
           elif git merge-base --is-ancestor "${target}" "${live}"; then

@@ -54,8 +54,9 @@ jobs:
   build-and-test:
     name: Build & Test (stat-tracker)
     runs-on: ubuntu-latest
-    # Warm runs take about 20 minutes (Oct 2026).
-    timeout-minutes: 60
+    # Warm runs take about 20 minutes, but a passing main push took 61
+    # (job 118130839766: build 16m, test 41m) and cancelled runs 54 and 67.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
