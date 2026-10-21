@@ -9718,6 +9718,28 @@ where
     if !review_held.is_empty() {
         tracing::info!(games = review_held.len(), "held games for review, not sent");
     }
+    // A pending tombstone for a session this pass uploads again is out of
+    // date: the newer snapshot is what the game is now. Sent together, the
+    // server would store the game and then delete it, and with the rows
+    // marked synced and the tombstone cleared nothing would bring it back.
+    // The upsert already replaces the server row, so drop the tombstone.
+    let (superseded, tombstones) = split_superseded_tombstones(tombstones, &to_upload);
+    if !superseded.is_empty() {
+        if let Err(e) = store
+            .clear_tombstones(superseded.clone())
+            .await
+            .map_err(|e| e.to_string())
+        {
+            // Sending the rows now would let the stale tombstone delete them
+            // on a later pass. Retry the whole pass next time.
+            tracing::error!(error = %e, "failed to drop a superseded tombstone");
+            return sync::SyncAttempt::NoServerCall;
+        }
+        tracing::info!(
+            sessions = superseded.len(),
+            "dropped server deletes for games uploaded again"
+        );
+    }
     if to_upload.is_empty() && tombstones.is_empty() {
         return sync::SyncAttempt::NoServerCall;
     }
@@ -9740,6 +9762,22 @@ where
         &mut upload,
     )
     .await
+}
+
+/// Split pending tombstones into those whose session is in `to_upload`
+/// (superseded by the newer upload) and the rest, in input order.
+fn split_superseded_tombstones(
+    tombstones: Vec<String>,
+    to_upload: &[storage::PersonalMatch],
+) -> (Vec<String>, Vec<String>) {
+    let uploading: std::collections::HashSet<&str> = to_upload
+        .iter()
+        .filter(|row| !row.session_id.is_empty())
+        .map(|row| row.session_id.as_str())
+        .collect();
+    tombstones
+        .into_iter()
+        .partition(|sid| uploading.contains(sid.as_str()))
 }
 
 /// A row the site does not store: an untracked map or mode (Deathmatch,
@@ -24568,6 +24606,74 @@ mod tests {
         );
         assert!(store.get_unsynced().await.unwrap().is_empty());
         assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    /// N1: a DATA-4 tombstone whose upload failed, then a tracked snapshot
+    /// of the same game (the map corrected back). The next request must carry
+    /// the game and not its stale tombstone, or the server stores the game
+    /// and deletes it in the same request and nothing re-sends it.
+    #[tokio::test]
+    async fn a_reupload_drops_the_stale_tombstone_of_its_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store.insert_match(tracked_row("flip", 0)).await.unwrap();
+        try_sync_with(
+            &store,
+            dir.path(),
+            None,
+            |_m, _t| async move { Ok(upload_ok()) },
+        )
+        .await;
+        store
+            .insert_match(deathmatch_row("flip", 60))
+            .await
+            .unwrap();
+        let failed = try_sync_with(&store, dir.path(), None, |_m, tombstones| async move {
+            assert_eq!(tombstones, vec!["flip".to_string()]);
+            Err(sync::SyncUploadError {
+                status: Some(503),
+                ..sync::SyncUploadError::plain("site down")
+            })
+        })
+        .await;
+        assert!(!matches!(failed, sync::SyncAttempt::Uploaded));
+        assert_eq!(
+            store.get_pending_tombstones().await.unwrap(),
+            vec!["flip".to_string()]
+        );
+
+        store.insert_match(tracked_row("flip", 120)).await.unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let seen_upload = std::sync::Arc::clone(&seen);
+        try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
+            let seen_upload = std::sync::Arc::clone(&seen_upload);
+            async move {
+                let ids: Vec<String> = matches.into_iter().map(|m| m.session_id).collect();
+                *seen_upload.lock().unwrap() = Some((ids, tombstones));
+                Ok(upload_ok())
+            }
+        })
+        .await;
+        assert_eq!(
+            seen.lock().unwrap().clone(),
+            Some((vec!["flip".to_string()], Vec::<String>::new())),
+            "the game goes up without its stale tombstone"
+        );
+        assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn split_superseded_tombstones_keeps_unrelated_deletes() {
+        let rows = vec![tracked_row("up", 0), tracked_row("", 0)];
+        let (superseded, rest) = split_superseded_tombstones(
+            vec!["gone".into(), "up".into(), String::new(), "other".into()],
+            &rows,
+        );
+        assert_eq!(superseded, vec!["up".to_string()]);
+        assert_eq!(
+            rest,
+            vec!["gone".to_string(), String::new(), "other".to_string()]
+        );
     }
 
     /// A game that was never a tracked read sends no delete, so a
