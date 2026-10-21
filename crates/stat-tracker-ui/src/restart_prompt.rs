@@ -373,6 +373,10 @@ pub async fn probe_build_id(path: PathBuf) -> Result<String, String> {
     probe_build_id_within(path, PROBE_TIMEOUT).await
 }
 
+/// Spawn attempts when exec fails with ETXTBSY ("Text file busy").
+const PROBE_BUSY_ATTEMPTS: u32 = 10;
+const PROBE_BUSY_PAUSE: Duration = Duration::from_millis(50);
+
 async fn probe_build_id_within(path: PathBuf, limit: Duration) -> Result<String, String> {
     let mut cmd = tokio::process::Command::new(&path);
     cmd.args(PROBE_ARGS)
@@ -380,10 +384,23 @@ async fn probe_build_id_within(path: PathBuf, limit: Duration) -> Result<String,
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .kill_on_drop(true);
-    let out = match tokio::time::timeout(limit, cmd.output()).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(e)) => return Err(format!("could not run {}: {e}", path.display())),
-        Err(_) => return Err(format!("{} --build-id timed out", path.display())),
+    // exec fails with ETXTBSY while any process still holds the file open
+    // for writing. A binary that was just written (a rollback copy, or a
+    // child forked in this process before it closed the descriptor on
+    // exec) is busy for a moment; that is not a broken binary. Try again.
+    let mut attempt = 1;
+    let out = loop {
+        match tokio::time::timeout(limit, cmd.output()).await {
+            Ok(Ok(out)) => break out,
+            Ok(Err(e))
+                if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < PROBE_BUSY_ATTEMPTS =>
+            {
+                attempt += 1;
+                tokio::time::sleep(PROBE_BUSY_PAUSE).await;
+            }
+            Ok(Err(e)) => return Err(format!("could not run {}: {e}", path.display())),
+            Err(_) => return Err(format!("{} --build-id timed out", path.display())),
+        }
     };
     if !out.status.success() {
         return Err(format!(
@@ -844,6 +861,24 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = script(dir.path(), "gui", "echo \"$@\"");
         let out = probe_build_id(bin).await.expect("probe");
+        assert_eq!(out, "--build-id --help\n");
+    }
+
+    /// CI flake on #422: "Text file busy" when a parallel test's fork still
+    /// held the just-written script open. Here this process holds it open
+    /// for writing on purpose and lets go shortly after the probe starts.
+    #[tokio::test]
+    async fn probe_retries_while_the_binary_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = script(dir.path(), "gui", "echo \"$@\"");
+        let writer = std::fs::OpenOptions::new().write(true).open(&bin).unwrap();
+        let probe = tokio::spawn(probe_build_id(bin));
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        drop(writer);
+        let out = probe
+            .await
+            .unwrap()
+            .expect("probe ran once the file was closed");
         assert_eq!(out, "--build-id --help\n");
     }
 
