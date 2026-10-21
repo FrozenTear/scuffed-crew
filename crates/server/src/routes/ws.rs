@@ -11,7 +11,7 @@ use futures::{SinkExt, StreamExt};
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
 use dashmap::DashMap;
 use scuffed_site_server::rate_limit::TrustedProxyIpKeyExtractor;
@@ -19,8 +19,10 @@ use scuffed_site_server::rate_limit::TrustedProxyIpKeyExtractor;
 use crate::collab::{JoinError, RoomManager};
 use scuffed_site_server::state::AppState;
 use scuffed_types::strategy::{
-    ClientMessage, CollabUserInfo, ServerMessage, StrategyId, WsRequest, WsResponse,
+    ClientMessage, CollabUserInfo, ServerMessage, Strategy, StrategyId, WsRequest, WsResponse,
 };
+
+use super::strategy::{MAX_STRATEGY_ELEMENTS, MAX_STRATEGY_PHASES};
 
 /// Maximum WebSocket frame/message sizes
 pub(crate) const MAX_WS_FRAME_SIZE: usize = 64 * 1024; // 64KB
@@ -235,6 +237,10 @@ async fn handle_socket(
 
     // Create channel for sending messages to this client
     let (tx, mut rx) = mpsc::channel::<WsResponse>(32);
+    // Signalled when a room broadcast drops this connection because the
+    // channel above was full or closed. The socket is then closed so the
+    // client reconnects and resyncs instead of silently missing updates.
+    let evicted = Arc::new(Notify::new());
 
     // Spawn task to forward messages to WebSocket
     let send_task = tokio::spawn(async move {
@@ -282,7 +288,17 @@ async fn handle_socket(
             );
             break;
         }
-        let msg = tokio::time::timeout(wait, ws_receiver.next()).await;
+        let msg = tokio::select! {
+            biased;
+            () = evicted.notified() => {
+                tracing::info!(
+                    connection_id = %connection_id,
+                    "strategy WS closed: client fell behind and was dropped from its room"
+                );
+                break;
+            }
+            msg = tokio::time::timeout(wait, ws_receiver.next()) => msg,
+        };
         match msg {
             Ok(Some(Ok(msg))) => match msg {
                 Message::Text(text) => {
@@ -294,6 +310,7 @@ async fn handle_socket(
                             &connection_id,
                             &mut current_room,
                             tx.clone(),
+                            &evicted,
                         )
                         .await;
                         if current_room.is_some() {
@@ -350,6 +367,48 @@ fn busy_error() -> ServerMessage {
     }
 }
 
+/// Gate for WebSocket edits. The caller must be signed in, an active org
+/// member who is not suspended, and the strategy owner. Viewing and joining
+/// stay open to whoever `can_access_strategy` allows.
+///
+/// Membership is checked on every edit, not once at connect, so a member who
+/// is deactivated, suspended or banned mid-session loses edit rights at once.
+/// Returns the stored strategy so callers can check content caps.
+async fn ws_edit_guard<'a>(
+    state: &WsState,
+    room_id: &StrategyId,
+    user: &'a Option<CollabUserInfo>,
+) -> Result<(&'a CollabUserInfo, Strategy), ServerMessage> {
+    let denied = || ServerMessage::Error {
+        message: "Permission denied".into(),
+    };
+    let Some(u) = user.as_ref() else {
+        return Err(ServerMessage::Error {
+            message: "Authentication required".into(),
+        });
+    };
+    match state.app.db.get_member_auth_by_user(&u.id).await {
+        Ok(Some((member, suspended))) if member.is_active && !suspended => {}
+        Ok(_) => {
+            return Err(ServerMessage::Error {
+                message: "Org membership required".into(),
+            });
+        }
+        Err(e) => {
+            tracing::error!("strategy WS member check failed: {e}");
+            return Err(denied());
+        }
+    }
+    match state.app.db.get_strategy(room_id).await {
+        Ok(Some(strategy)) if strategy.owner_id == u.id => Ok((u, strategy)),
+        Ok(_) => Err(denied()),
+        Err(e) => {
+            tracing::error!("strategy WS edit check failed for {room_id}: {e}");
+            Err(denied())
+        }
+    }
+}
+
 /// Handle a single client message
 async fn handle_message(
     state: &WsState,
@@ -358,6 +417,7 @@ async fn handle_message(
     connection_id: &str,
     current_room: &mut Option<StrategyId>,
     tx: mpsc::Sender<WsResponse>,
+    evicted: &Arc<Notify>,
 ) -> Option<ServerMessage> {
     match message {
         ClientMessage::JoinRoom { strategy_id } => {
@@ -404,6 +464,7 @@ async fn handle_message(
                     connection_id.to_string(),
                     u.clone(),
                     tx.clone(),
+                    evicted.clone(),
                 )
             {
                 let message = match err {
@@ -435,21 +496,16 @@ async fn handle_message(
                 });
             };
 
-            let Some(u) = user.as_ref() else {
-                return Some(ServerMessage::Error {
-                    message: "Authentication required".into(),
-                });
+            let (u, strategy) = match ws_edit_guard(state, room_id, user).await {
+                Ok(ok) => ok,
+                Err(msg) => return Some(msg),
             };
 
-            if !state
-                .app
-                .db
-                .can_edit_strategy(room_id, &u.id)
-                .await
-                .unwrap_or(false)
-            {
+            if strategy.elements.len() >= MAX_STRATEGY_ELEMENTS {
                 return Some(ServerMessage::Error {
-                    message: "Permission denied".into(),
+                    message: format!(
+                        "A strategy can hold at most {MAX_STRATEGY_ELEMENTS} elements"
+                    ),
                 });
             }
 
@@ -482,23 +538,10 @@ async fn handle_message(
                 });
             };
 
-            let Some(u) = user.as_ref() else {
-                return Some(ServerMessage::Error {
-                    message: "Authentication required".into(),
-                });
+            let (u, _strategy) = match ws_edit_guard(state, room_id, user).await {
+                Ok(ok) => ok,
+                Err(msg) => return Some(msg),
             };
-
-            if !state
-                .app
-                .db
-                .can_edit_strategy(room_id, &u.id)
-                .await
-                .unwrap_or(false)
-            {
-                return Some(ServerMessage::Error {
-                    message: "Permission denied".into(),
-                });
-            }
 
             // Load → patch → save under per-strategy lock (via try_spawn_persist)
             let db = state.app.db.clone();
@@ -536,23 +579,10 @@ async fn handle_message(
                 });
             };
 
-            let Some(u) = user.as_ref() else {
-                return Some(ServerMessage::Error {
-                    message: "Authentication required".into(),
-                });
+            let (u, _strategy) = match ws_edit_guard(state, room_id, user).await {
+                Ok(ok) => ok,
+                Err(msg) => return Some(msg),
             };
-
-            if !state
-                .app
-                .db
-                .can_edit_strategy(room_id, &u.id)
-                .await
-                .unwrap_or(false)
-            {
-                return Some(ServerMessage::Error {
-                    message: "Permission denied".into(),
-                });
-            }
 
             let db = state.app.db.clone();
             let rid = room_id.clone();
@@ -582,21 +612,14 @@ async fn handle_message(
                 });
             };
 
-            let Some(u) = user.as_ref() else {
-                return Some(ServerMessage::Error {
-                    message: "Authentication required".into(),
-                });
+            let (u, strategy) = match ws_edit_guard(state, room_id, user).await {
+                Ok(ok) => ok,
+                Err(msg) => return Some(msg),
             };
 
-            if !state
-                .app
-                .db
-                .can_edit_strategy(room_id, &u.id)
-                .await
-                .unwrap_or(false)
-            {
+            if strategy.phases.len() >= MAX_STRATEGY_PHASES {
                 return Some(ServerMessage::Error {
-                    message: "Permission denied".into(),
+                    message: format!("A strategy can hold at most {MAX_STRATEGY_PHASES} phases"),
                 });
             }
 
@@ -629,23 +652,10 @@ async fn handle_message(
                 });
             };
 
-            let Some(u) = user.as_ref() else {
-                return Some(ServerMessage::Error {
-                    message: "Authentication required".into(),
-                });
+            let (u, _strategy) = match ws_edit_guard(state, room_id, user).await {
+                Ok(ok) => ok,
+                Err(msg) => return Some(msg),
             };
-
-            if !state
-                .app
-                .db
-                .can_edit_strategy(room_id, &u.id)
-                .await
-                .unwrap_or(false)
-            {
-                return Some(ServerMessage::Error {
-                    message: "Permission denied".into(),
-                });
-            }
 
             let db = state.app.db.clone();
             let rid = room_id.clone();
@@ -682,23 +692,10 @@ async fn handle_message(
                 });
             };
 
-            let Some(u) = user.as_ref() else {
-                return Some(ServerMessage::Error {
-                    message: "Authentication required".into(),
-                });
+            let (u, _strategy) = match ws_edit_guard(state, room_id, user).await {
+                Ok(ok) => ok,
+                Err(msg) => return Some(msg),
             };
-
-            if !state
-                .app
-                .db
-                .can_edit_strategy(room_id, &u.id)
-                .await
-                .unwrap_or(false)
-            {
-                return Some(ServerMessage::Error {
-                    message: "Permission denied".into(),
-                });
-            }
 
             let db = state.app.db.clone();
             let rid = room_id.clone();
@@ -1250,6 +1247,10 @@ mod strategies_gate_tests {
             .id
     }
 
+    type ClientSocket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+
     /// Join a strategy room. `bearer` and `cookie` are raw session tokens.
     async fn join_room(
         state: &AppState,
@@ -1258,6 +1259,31 @@ mod strategies_gate_tests {
         bearer: Option<&str>,
         cookie: Option<&str>,
     ) -> serde_json::Value {
+        connect_and_join(state, addr, strategy_id, bearer, cookie)
+            .await
+            .1
+    }
+
+    async fn next_json(socket: &mut ClientSocket) -> serde_json::Value {
+        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("reply timed out")
+            .expect("socket closed")
+            .expect("ws frame");
+        let tokio_tungstenite::tungstenite::Message::Text(text) = frame else {
+            panic!("expected text frame, got {frame:?}");
+        };
+        serde_json::from_str(&text).expect("json reply")
+    }
+
+    /// Like [`join_room`], but keeps the socket open for further messages.
+    async fn connect_and_join(
+        state: &AppState,
+        addr: SocketAddr,
+        strategy_id: &str,
+        bearer: Option<&str>,
+        cookie: Option<&str>,
+    ) -> (ClientSocket, serde_json::Value) {
         use tokio_tungstenite::connect_async;
         use tokio_tungstenite::tungstenite::Message;
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -1293,15 +1319,91 @@ mod strategies_gate_tests {
             .await
             .expect("send join");
 
-        let frame = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        let reply = next_json(&mut socket).await;
+        (socket, reply)
+    }
+
+    async fn send_element_add(socket: &mut ClientSocket) -> serde_json::Value {
+        use tokio_tungstenite::tungstenite::Message;
+        let element = scuffed_types::strategy::StrategyElement::new(
+            scuffed_types::strategy::ElementType::PlayerMarker,
+            scuffed_types::strategy::Position::new(1.0, 2.0),
+        );
+        let payload = serde_json::json!({
+            "request_id": "add-1",
+            "type": "element_add",
+            "element": element,
+        })
+        .to_string();
+        socket
+            .send(Message::Text(payload.into()))
             .await
-            .expect("join reply timed out")
-            .expect("socket closed")
-            .expect("ws frame");
-        let tokio_tungstenite::tungstenite::Message::Text(text) = frame else {
-            panic!("expected text frame, got {frame:?}");
-        };
-        serde_json::from_str(&text).expect("json reply")
+            .expect("send element_add");
+        // Owner edits are broadcast to others and get no reply, so ask for a
+        // Pong to know the add was processed.
+        let ping = serde_json::json!({ "request_id": "ping-1", "type": "ping" }).to_string();
+        socket
+            .send(Message::Text(ping.into()))
+            .await
+            .expect("send ping");
+        next_json(socket).await
+    }
+
+    async fn element_count(state: &AppState, id: &str) -> usize {
+        // Persists run on a spawned task; give it a moment.
+        for _ in 0..20 {
+            let n = state
+                .db
+                .get_strategy(id)
+                .await
+                .expect("read")
+                .expect("strategy")
+                .elements
+                .len();
+            if n > 0 {
+                return n;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        0
+    }
+
+    /// SEC-4: a signed-in account that is not an org member may still join
+    /// a strategy it can see, but WebSocket edits are refused, even on a
+    /// strategy it owns from before membership was required.
+    #[tokio::test]
+    async fn non_member_owner_can_view_but_not_edit_over_ws() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "outsider", "outsider-token", false).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let (mut socket, joined) =
+            connect_and_join(&state, addr, &id, Some("outsider-token"), None).await;
+        assert_eq!(joined["type"], "room_joined", "{joined}");
+
+        let reply = send_element_add(&mut socket).await;
+        assert_eq!(reply["type"], "error", "{reply}");
+        assert_eq!(reply["message"], "Org membership required");
+        assert_eq!(element_count(&state, &id).await, 0);
+    }
+
+    #[tokio::test]
+    async fn member_owner_can_edit_over_ws() {
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        let id = insert_private(&state, &owner_id).await;
+        let addr = serve_ws(state.clone(), 8, 32, WS_JOIN_TIMEOUT).await;
+
+        let (mut socket, joined) =
+            connect_and_join(&state, addr, &id, Some("owner-token"), None).await;
+        assert_eq!(joined["type"], "room_joined", "{joined}");
+
+        let reply = send_element_add(&mut socket).await;
+        assert_eq!(reply["type"], "pong", "{reply}");
+        assert_eq!(element_count(&state, &id).await, 1);
     }
 
     #[tokio::test]

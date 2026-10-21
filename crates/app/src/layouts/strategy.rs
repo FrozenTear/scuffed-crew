@@ -219,7 +219,8 @@ pub fn StrategyLayout() -> Element {
                     Link { to: Route::StrategyBrowse {}, "Browse" }
                     Link { to: Route::StrategyMy {}, "My Strategies" }
                     Link { to: Route::StrategyHeroes {}, "Heroes" }
-                    Link { to: Route::StrategyMeta {}, "Meta" }
+                    // Meta is hidden until /api/strategy/meta has global hero data
+                    // (it returns an empty list today, so the page is always empty).
                     Link { to: Route::StrategyPatchNotes {}, "Patch Notes" }
                     Link { to: Route::StrategyEditorNew {}, "New Strategy" }
                 }

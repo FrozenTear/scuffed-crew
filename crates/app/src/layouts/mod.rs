@@ -20,6 +20,22 @@ use dioxus::prelude::*;
 /// listener entirely; they do not build a closure and then look for a window.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn use_document_keydown(on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {
+    use_keydown_listener(false, on_key);
+}
+
+/// Like [`use_document_keydown`], but listens on `document` in the capture
+/// phase, so the handler sees Tab before the browser moves focus. The strategy
+/// editor uses this. It is removed on unmount like the bubbling version; a
+/// leaked capture listener outlives the editor's signals and panics the app
+/// on the next Space, Tab or Backspace.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn use_document_keydown_capture(on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {
+    use_keydown_listener(true, on_key);
+}
+
+/// `capture == false`: `window`, bubbling. `capture == true`: `document`, capture.
+#[cfg(target_arch = "wasm32")]
+fn use_keydown_listener(capture: bool, on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {
     use std::rc::Rc;
 
     use wasm_bindgen::JsCast;
@@ -50,17 +66,36 @@ pub(crate) fn use_document_keydown(on_key: impl FnMut(web_sys::KeyboardEvent) + 
                 on_key(evt);
             })
                 as Box<dyn FnMut(web_sys::KeyboardEvent)>));
-        if let Some(window) = web_sys::window() {
-            let _ = window.add_event_listener_with_callback("keydown", listener_fn(&closure));
+        if let Some(target) = keydown_target(capture) {
+            let _ = target.add_event_listener_with_callback_and_bool(
+                "keydown",
+                listener_fn(&closure),
+                capture,
+            );
         }
         closure
     });
     let listener = listener.clone();
     use_drop(move || {
-        if let Some(window) = web_sys::window() {
-            let _ = window.remove_event_listener_with_callback("keydown", listener_fn(&listener));
+        if let Some(target) = keydown_target(capture) {
+            // Removal must pass the same capture flag that was used to add.
+            let _ = target.remove_event_listener_with_callback_and_bool(
+                "keydown",
+                listener_fn(&listener),
+                capture,
+            );
         }
     });
+}
+
+#[cfg(target_arch = "wasm32")]
+fn keydown_target(capture: bool) -> Option<web_sys::EventTarget> {
+    let window = web_sys::window()?;
+    if capture {
+        window.document().map(Into::into)
+    } else {
+        Some(window.into())
+    }
 }
 
 /// `Closure::wrap` aborts off wasm32, so the listener is not installed.
@@ -68,6 +103,10 @@ pub(crate) fn use_document_keydown(on_key: impl FnMut(web_sys::KeyboardEvent) + 
 /// Escape handlers in the public and admin layouts therefore do not run here.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn use_document_keydown(_on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {}
+
+/// Non-wasm stub; see [`use_document_keydown`].
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn use_document_keydown_capture(_on_key: impl FnMut(web_sys::KeyboardEvent) + 'static) {}
 
 pub(crate) fn focus_element(id: &str) {
     #[cfg(target_arch = "wasm32")]
