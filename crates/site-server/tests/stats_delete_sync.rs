@@ -277,18 +277,21 @@ async fn deleted_session_leaves_rows_stats_and_leaderboard() {
     .await;
     assert_eq!(me["total_matches"], 1, "{me}");
     assert_eq!((&me["wins"], &me["losses"]), (&json!(1), &json!(0)), "{me}");
-    let heroes = send(
-        &app,
-        request(Method::GET, "/api/stats/me/heroes", OWNER_SESSION, None),
-    )
-    .await;
-    let ana = heroes
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|h| h["hero"] == "Ana")
-        .expect("Ana row");
-    assert_eq!(ana["matches"], 1, "{heroes}");
+    // Per-hero, per-role and per-map breakdowns count only the kept game.
+    for uri in [
+        "/api/stats/me/heroes",
+        "/api/stats/me/roles",
+        "/api/stats/me/maps",
+    ] {
+        let groups = send(&app, request(Method::GET, uri, OWNER_SESSION, None)).await;
+        let total: u64 = groups
+            .as_array()
+            .unwrap_or_else(|| panic!("{uri}: {groups}"))
+            .iter()
+            .map(|g| g["matches"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total, 1, "{uri}: {groups}");
+    }
 
     // The member stats page another member sees.
     let page = send(
