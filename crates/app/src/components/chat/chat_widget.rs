@@ -618,7 +618,9 @@ pub fn ChatWidget(
                     panel_error.set(None);
                 }
             },
-            move |event| match event {
+            // Called from the WebSocket `onmessage` callback, outside any
+            // render. The gift-wrap branch `spawn`s, which needs a scope.
+            crate::layouts::in_current_scope(move |event: NostrRelayEvent| match event {
                 NostrRelayEvent::ChatMessage(msg) => {
                     push_unique(&mut messages.write(), msg);
                 }
@@ -661,7 +663,7 @@ pub fn ChatWidget(
                     panel_error.set(Some(format!("Relay rejected the message: {message}")));
                 }
                 _ => {}
-            },
+            }),
         )
     });
 

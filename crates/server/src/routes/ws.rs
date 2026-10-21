@@ -510,6 +510,21 @@ async fn handle_message(
             let rid = room_id.clone();
             let elem = element.clone();
             if !state.rooms.try_spawn_persist(room_id, move || async move {
+                // The cap check above races with persists still in flight.
+                // Re-check here: persists for one strategy run one at a time
+                // under its lock, so the stored count cannot pass the cap.
+                match db.get_strategy(&rid).await {
+                    Ok(Some(s)) if s.elements.len() < MAX_STRATEGY_ELEMENTS => {}
+                    Ok(Some(_)) => {
+                        tracing::warn!("Element cap reached for strategy {rid}; add not stored");
+                        return;
+                    }
+                    Ok(None) => return,
+                    Err(e) => {
+                        tracing::error!("Failed to load strategy {rid} before element add: {e}");
+                        return;
+                    }
+                }
                 if let Err(e) = db.add_strategy_element(&rid, &elem).await {
                     tracing::error!("Failed to persist element add for strategy {rid}: {e}");
                 }
@@ -636,6 +651,19 @@ async fn handle_message(
             let rid = room_id.clone();
             let p = phase.clone();
             if !state.rooms.try_spawn_persist(room_id, move || async move {
+                // Same re-check as element adds, under the per-strategy lock.
+                match db.get_strategy(&rid).await {
+                    Ok(Some(s)) if s.phases.len() < MAX_STRATEGY_PHASES => {}
+                    Ok(Some(_)) => {
+                        tracing::warn!("Phase cap reached for strategy {rid}; add not stored");
+                        return;
+                    }
+                    Ok(None) => return,
+                    Err(e) => {
+                        tracing::error!("Failed to load strategy {rid} before phase add: {e}");
+                        return;
+                    }
+                }
                 if let Err(e) = db.add_strategy_phase(&rid, &p).await {
                     tracing::error!("Failed to persist phase add for strategy {rid}: {e}");
                 }
@@ -1072,13 +1100,17 @@ mod strategies_gate_tests {
         per_ip: usize,
         join_timeout: Duration,
     ) -> SocketAddr {
+        serve_ws_state(test_ws_state(state, global, per_ip, join_timeout)).await
+    }
+
+    async fn serve_ws_state(ws_state: WsState) -> SocketAddr {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
         let addr = listener.local_addr().expect("addr");
         let app = Router::new()
             .route("/api/strategy/ws", get(websocket_handler))
-            .with_state(test_ws_state(state, global, per_ip, join_timeout))
+            .with_state(ws_state)
             .into_make_service_with_connect_info::<SocketAddr>();
         tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
@@ -1404,6 +1436,87 @@ mod strategies_gate_tests {
         assert_eq!(reply["type"], "error", "{reply}");
         assert_eq!(reply["message"], "Org membership required");
         assert_eq!(element_count(&state, &id).await, 0);
+    }
+
+    /// F3: the element cap in `ws_edit_guard` is check-then-act. Adds that
+    /// pass it while earlier persists are still queued must not push the
+    /// stored strategy past the cap. The test holds the per-strategy lock so
+    /// every add passes the guard before any persist runs.
+    #[tokio::test]
+    async fn ws_adds_queued_behind_the_lock_do_not_exceed_the_element_cap() {
+        use tokio_tungstenite::tungstenite::Message;
+
+        let state = test_state().await;
+        set_strategies_enabled(&state, true).await;
+        let owner_id = seed_account(&state, "owner", "owner-token", true).await;
+        let id = insert_private(&state, &owner_id).await;
+        let almost_full: Vec<_> = (1..MAX_STRATEGY_ELEMENTS)
+            .map(|_| {
+                scuffed_types::strategy::StrategyElement::new(
+                    scuffed_types::strategy::ElementType::PlayerMarker,
+                    scuffed_types::strategy::Position::new(0.0, 0.0),
+                )
+            })
+            .collect();
+        let phases = state
+            .db
+            .get_strategy(&id)
+            .await
+            .expect("read")
+            .expect("strategy")
+            .phases;
+        state
+            .db
+            .save_full_strategy(&id, &almost_full, &phases)
+            .await
+            .expect("fill");
+
+        let ws_state = test_ws_state(state.clone(), 8, 32, WS_JOIN_TIMEOUT);
+        let rooms = ws_state.rooms.clone();
+        let addr = serve_ws_state(ws_state).await;
+        let (mut socket, joined) =
+            connect_and_join(&state, addr, &id, Some("owner-token"), None).await;
+        assert_eq!(joined["type"], "room_joined", "{joined}");
+
+        let lock = rooms.strategy_lock(&id);
+        let held = lock.lock().await;
+        for _ in 0..3 {
+            let element = scuffed_types::strategy::StrategyElement::new(
+                scuffed_types::strategy::ElementType::PlayerMarker,
+                scuffed_types::strategy::Position::new(1.0, 1.0),
+            );
+            let payload =
+                serde_json::json!({ "type": "element_add", "element": element }).to_string();
+            socket
+                .send(Message::Text(payload.into()))
+                .await
+                .expect("send add");
+        }
+        // The pong proves all three adds passed the guard and were queued.
+        let ping = serde_json::json!({ "request_id": "p", "type": "ping" }).to_string();
+        socket
+            .send(Message::Text(ping.into()))
+            .await
+            .expect("send ping");
+        let reply = next_json(&mut socket).await;
+        assert_eq!(reply["type"], "pong", "{reply}");
+        drop(held);
+
+        // Let the queued persists drain. The tokio mutex is FIFO, so taking it
+        // again after a pause waits for every persist queued before us.
+        for _ in 0..5 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            drop(lock.lock().await);
+        }
+        let stored = state
+            .db
+            .get_strategy(&id)
+            .await
+            .expect("read")
+            .expect("strategy")
+            .elements
+            .len();
+        assert_eq!(stored, MAX_STRATEGY_ELEMENTS);
     }
 
     #[tokio::test]

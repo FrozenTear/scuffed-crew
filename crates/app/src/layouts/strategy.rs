@@ -161,6 +161,10 @@ fn flag_from_resolved(resolved: Option<&Result<SiteSettings, String>>) -> Option
 #[component]
 pub fn StrategyLayout() -> Element {
     let navigator = use_navigator();
+    // Saving needs an org membership. `try_` so layouts mounted without the
+    // auth context (tests) still render.
+    let can_create = try_use_context::<Signal<crate::state::auth::AuthState>>()
+        .is_some_and(|auth| auth.read().is_org_member());
     let site_settings = use_site_settings();
     // `resolved` is already memoized on the settings context. This memo reads
     // that slot once per change. Dioxus 0.7 effects re-run only when signals
@@ -222,7 +226,9 @@ pub fn StrategyLayout() -> Element {
                     // Meta is hidden until /api/strategy/meta has global hero data
                     // (it returns an empty list today, so the page is always empty).
                     Link { to: Route::StrategyPatchNotes {}, "Patch Notes" }
-                    Link { to: Route::StrategyEditorNew {}, "New Strategy" }
+                    if can_create {
+                        Link { to: Route::StrategyEditorNew {}, "New Strategy" }
+                    }
                 }
                 Link { to: Route::Home {}, class: "back-link", "← Back to Clan" }
             }
