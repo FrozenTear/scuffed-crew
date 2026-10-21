@@ -458,6 +458,19 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // holding the pack lock it left the daemon that stayed without its
     // packs. The app also sees the daemon from here on, not only once the
     // startup sync is over.
+    // A leftover tracker from an update (a different binary) is replaced
+    // first. The service also replaces a same-binary stray. A second start
+    // of this same binary, and --vacuum, do not signal the live daemon.
+    // The pid guard below still refuses a second live daemon. A replace
+    // waits out an open game so it does not cut it off.
+    let replace_same = std::env::var_os("STAT_TRACKER_REPLACE_STRAY").is_some();
+    let vacuum = std::env::args().any(|arg| arg == "--vacuum");
+    if let Some(policy) = stat_tracker::replace::policy_for_startup(vacuum, replace_same)
+        && let Err(err) = stat_tracker::replace::stop_strays(&config.data_dir, true, policy).await
+    {
+        tracing::error!(error = %err, "previous tracker was not replaced");
+        anyhow::bail!("{err}");
+    }
     let _pid_guard = acquire_pid_guard(&config.data_dir)?;
 
     // One client for the whole process. An unsafe URL logs once here and
@@ -636,6 +649,11 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // Tessdata generation is triggered manually via --generate-tessdata or the GUI button.
     // Don't run it at daemon startup, it can take minutes and blocks Tab capture.
 
+    capture::set_prefs(capture::CapturePrefs {
+        data_dir: config.data_dir.clone(),
+        route: config.capture_route,
+        debug_frames: config.debug_portal_frames_enabled(),
+    });
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
 
@@ -4428,6 +4446,8 @@ async fn run_loop(
     // its own timer so edits apply even while no game is running.
     let mut cmd_timer = tokio::time::interval(tokio::time::Duration::from_secs(3));
     cmd_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut binary_checked = tokio::time::Instant::now();
+    let mut logged_binary_wait = false;
 
     loop {
         tokio::select! {
@@ -4576,7 +4596,13 @@ async fn run_loop(
                 }
                 st.poll_ticks_skipped = 0;
 
-                match capture::capture_screen_output(backend, capture_output).await {
+                match capture::capture_screen_output_for(
+                    backend,
+                    capture_output,
+                    capture::CaptureKind::Poll,
+                )
+                .await
+                {
                     Ok(img) => {
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
                         // On-hit evidence (debug_ocr): confirm + first streak only.
@@ -4781,6 +4807,23 @@ async fn run_loop(
                 }
             }
             _ = cmd_timer.tick() => {
+                if binary_checked.elapsed() >= std::time::Duration::from_secs(60) {
+                    binary_checked = tokio::time::Instant::now();
+                    if let Some(path) = stat_tracker::replace::replaced_binary_path() {
+                        if st.active_game.is_some() {
+                            if !logged_binary_wait {
+                                tracing::info!(
+                                    "tracker binary on disk was replaced; waiting until the current game is saved"
+                                );
+                                logged_binary_wait = true;
+                            }
+                        } else {
+                            stat_tracker::replace::restart_for_replaced_binary(&path)?;
+                        }
+                    } else {
+                        logged_binary_wait = false;
+                    }
+                }
                 // Quiet-session timer. Runs on this existing tick so it does
                 // not take a screenshot or run OCR, and it does not wait for
                 // Tab. The upload is scheduled; it does not block the loop.
@@ -6599,10 +6642,14 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 let own_seeds = own_seeds.clone();
                 let names = names.clone();
                 async move {
-                    let img = capture::capture_screen_output(backend, capture_output)
-                        .await
-                        .map_err(anyhow::Error::from_boxed)
-                        .context("screen capture failed")?;
+                    let img = capture::capture_screen_output_for(
+                        backend,
+                        capture_output,
+                        capture::CaptureKind::Tab,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from_boxed)
+                    .context("screen capture failed")?;
                     let analysis = tokio::task::spawn_blocking(move || {
                         let started = Instant::now();
                         let cpu_started = stat_tracker::perf::thread_cpu();

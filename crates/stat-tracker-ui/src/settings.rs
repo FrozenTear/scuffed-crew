@@ -1,8 +1,8 @@
 //! Settings form + screen. Writes today's `Config` fields via `Config::save`.
 //!
 //! Layout: masonry in 1–4 columns by width (Maps density tokens, G4),
-//! Stored data spanning the pane, Save as a full-width footer strip. Does
-//! not invent daemon config keys.
+//! Stored data spanning the pane, Save as a full-width footer strip.
+//! `capture_route` chooses the screen stream or the older screenshot portal.
 //! `data_dir`, `ocr_threads`, and `finished_game_close_secs` are preserved
 //! from the loaded file. The extra number reader writes `shadow_recognizer`.
 //! The new reader switch writes `reader`. The classic OCR switch writes `ocr`.
@@ -14,7 +14,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Fill, Length, Padding};
 use stat_tracker::config::{
-    AutoDetectConfig, Config, OcrSetting, ShadowRecognizerControl, SyncConfig,
+    AutoDetectConfig, CaptureRoute, Config, OcrSetting, ShadowRecognizerControl, SyncConfig,
 };
 use stat_tracker::ocr_switch::{
     self, Audience, PackReadiness, Read as OcrRead, Status as OcrSwitchStatus,
@@ -373,6 +373,8 @@ pub(crate) const PRERELEASE_UPDATES_APPLIES: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsForm {
     pub capture_output: String,
+    /// `capture_route`. Automatic, the screen stream, or the older screenshot.
+    pub capture_route: CaptureRoute,
     pub player_name: String,
     pub session_window_secs: String,
     pub game_process_names: String,
@@ -419,6 +421,7 @@ impl SettingsForm {
     pub fn from_config_and_shadow(config: &Config, shadow: ShadowRecognizerControl) -> Self {
         Self {
             capture_output: config.capture_output.clone().unwrap_or_default(),
+            capture_route: config.capture_route,
             player_name: config.player_name.clone().unwrap_or_default(),
             session_window_secs: config.session_window_secs.to_string(),
             game_process_names: config.game_process_names.join(", "),
@@ -517,7 +520,8 @@ impl SettingsForm {
     }
 
     /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, the report kit caps,
-    /// `finished_game_close_secs`, `setup_completed`, `reader_pack_url`, and
+    /// `finished_game_close_secs`, `setup_completed`, `reader_pack_url`,
+    /// `debug_portal_frames`, and
     /// `name_reader` (Settings has no control for it yet).
     /// `shadow_recognizer` comes from the form's persisted reader (the file
     /// value). An env lock never writes true by itself. `update_channel`
@@ -527,6 +531,8 @@ impl SettingsForm {
         Config {
             data_dir: base.data_dir.clone(),
             capture_output: nonempty(&self.capture_output),
+            capture_route: self.capture_route,
+            debug_portal_frames: base.debug_portal_frames,
             player_name: nonempty(&self.player_name),
             sync: sync_from_fields(&self.sync_url, &self.sync_token),
             auto_detect: AutoDetectConfig {
@@ -946,6 +952,26 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 }
 
 fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let route = app.settings.capture_route;
+    let route_chips = row![
+        output_chip(
+            "Automatic",
+            route == CaptureRoute::Auto,
+            Message::SelectCaptureRoute(CaptureRoute::Auto),
+        ),
+        output_chip(
+            "Screen stream",
+            route == CaptureRoute::Screencast,
+            Message::SelectCaptureRoute(CaptureRoute::Screencast),
+        ),
+        output_chip(
+            "Older screenshot",
+            route == CaptureRoute::Screenshot,
+            Message::SelectCaptureRoute(CaptureRoute::Screenshot),
+        ),
+    ]
+    .spacing(8);
+
     let mut chips = row![output_chip(
         "Auto (first monitor)",
         app.settings.capture_output.is_empty(),
@@ -976,15 +1002,36 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         "Capture now"
     };
 
+    let env_note = Config::capture_env_note(
+        std::env::var(stat_tracker::config::CAPTURE_ENV)
+            .ok()
+            .as_deref(),
+        &stat_tracker::config::environment_d_capture_files(),
+    );
     let mut body = column![
+        field_caption("Capture method"),
+        route_chips.wrap(),
+        text("Automatic uses the screen stream on KDE and GNOME, and direct capture on other desktops. Screen stream forces that stream. Older screenshot is the previous portal.")
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(TEXT_3),
         field_caption("Monitor"),
         chips.wrap(),
-        text(format!("Capture method: {backend}"))
+        text(format!("Detected: {backend}"))
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
     ]
     .spacing(6);
+
+    if let Some(note) = env_note {
+        body = body.push(
+            text(note)
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(theme::DANGER),
+        );
+    }
 
     if !demo {
         let mut btn = button(
@@ -1679,6 +1726,7 @@ mod tests {
     fn empty_optional_fields_become_none() {
         let form = SettingsForm {
             capture_output: "  ".into(),
+            capture_route: CaptureRoute::Auto,
             player_name: String::new(),
             session_window_secs: "1800".into(),
             game_process_names: String::new(),

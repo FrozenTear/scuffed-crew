@@ -8,6 +8,21 @@ pub struct Config {
     pub data_dir: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_output: Option<String>,
+    /// Which portal image source to use. Missing or `auto` keeps the usual
+    /// probe: wlroots and X11 stay direct, and a portal desktop uses the
+    /// screen stream. `screencast` forces the stream. `screenshot` forces
+    /// the older screenshot portal. A non-empty `STAT_TRACKER_CAPTURE`
+    /// wins over this key. Edited in place when this is the only change.
+    #[serde(default, skip_serializing_if = "CaptureRoute::is_auto")]
+    pub capture_route: CaptureRoute,
+    /// Save a few Tab frames from the screen stream and the screenshot
+    /// portal side by side under `{data_dir}/debug/portal-compare/`. Off
+    /// by default. Also enabled by `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`,
+    /// which is not written back to the file. The pictures stay on this
+    /// machine. Leave this off while a voice app is sharing the screen:
+    /// the screenshot half can hit the KWin cursor crash.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug_portal_frames: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -151,6 +166,33 @@ pub struct Config {
     )]
     pub name_reader: bool,
 }
+
+/// `capture_route` in config.toml. Missing means [`Self::Auto`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CaptureRoute {
+    #[default]
+    Auto,
+    Screencast,
+    Screenshot,
+}
+
+impl CaptureRoute {
+    pub const fn is_auto(&self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Screencast => "screencast",
+            Self::Screenshot => "screenshot",
+        }
+    }
+}
+
+/// Env var that wins over [`Config::capture_route`] when it is non-empty.
+pub const CAPTURE_ENV: &str = "STAT_TRACKER_CAPTURE";
 
 fn default_name_reader() -> bool {
     true
@@ -679,6 +721,9 @@ impl Config {
         if only_ocr_differs(&loaded, next) {
             return patch_ocr(existing, next.ocr);
         }
+        if only_capture_route_differs(&loaded, next) {
+            return patch_capture_route(existing, next.capture_route);
+        }
         Ok(toml::to_string_pretty(next)?)
     }
 
@@ -713,6 +758,12 @@ impl Config {
 
     pub fn debug_ocr_enabled(&self) -> bool {
         self.debug_ocr || Self::env_truthy("STAT_TRACKER_DEBUG_OCR")
+    }
+
+    /// File flag or `STAT_TRACKER_DEBUG_PORTAL_FRAMES`. The env value is not
+    /// stored on the struct, so a Settings save cannot persist it.
+    pub fn debug_portal_frames_enabled(&self) -> bool {
+        self.debug_portal_frames || Self::env_truthy("STAT_TRACKER_DEBUG_PORTAL_FRAMES")
     }
 
     /// Whether the shadow digit recognizer runs this process (config file
@@ -802,6 +853,25 @@ impl Config {
         matches!(value, Some("1" | "true" | "TRUE" | "yes" | "YES"))
     }
 
+    /// One `STAT_TRACKER_CAPTURE=` line from an `environment.d` file.
+    /// `path` is the file name the Settings screen should name.
+    pub fn capture_env_note(process: Option<&str>, files: &[(String, String)]) -> Option<String> {
+        let from_file = winning_env_assignment(files);
+        let process = process.map(str::trim).filter(|s| !s.is_empty());
+        match (process, from_file) {
+            (Some(value), Some((path, _))) => Some(format!(
+                "STAT_TRACKER_CAPTURE={value} is overriding this choice. Edit {path}."
+            )),
+            (Some(value), None) => Some(format!(
+                "STAT_TRACKER_CAPTURE={value} is overriding this choice. For the tracker service, set it in a file under .config/environment.d (for example scuffed-capture.conf)."
+            )),
+            (None, Some((path, value))) => Some(format!(
+                "{path} sets STAT_TRACKER_CAPTURE={value}, but this session has not loaded it. Log out and back in for it to override this choice."
+            )),
+            (None, None) => None,
+        }
+    }
+
     /// Find a `--key value` pair in std::env::args().
     fn arg_value(key: &str) -> Option<String> {
         let args: Vec<String> = std::env::args().collect();
@@ -809,8 +879,91 @@ impl Config {
     }
 }
 
+/// Last `STAT_TRACKER_CAPTURE` assignment across `files` in the order given.
+/// Callers pass `environment.d` entries in alphabetical order. A later file
+/// wins, and the last assignment in a file wins.
+pub fn winning_env_assignment(files: &[(String, String)]) -> Option<(&str, &str)> {
+    let mut found: Option<(&str, &str)> = None;
+    for (path, text) in files {
+        if let Some(value) = last_capture_assignment(text) {
+            found = Some((path.as_str(), value));
+        }
+    }
+    found
+}
+
+fn last_capture_assignment(text: &str) -> Option<&str> {
+    let mut found = None;
+    for line in text.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("export").unwrap_or(line).trim();
+        if line.starts_with('#') || line.is_empty() {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("STAT_TRACKER_CAPTURE=") else {
+            continue;
+        };
+        let value = rest.trim().trim_matches('"').trim_matches('\'');
+        if !value.is_empty() {
+            found = Some(value);
+        }
+    }
+    found
+}
+
+/// `~/.config/environment.d/*.conf`, alphabetical. The value is the last
+/// assignment in that file.
+pub fn environment_d_capture_files() -> Vec<(String, String)> {
+    let Some(dir) = dirs::config_dir() else {
+        return Vec::new();
+    };
+    let dir = dir.join("environment.d");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<std::path::PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("conf"))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .filter_map(|path| {
+            let text = std::fs::read_to_string(&path).ok()?;
+            last_capture_assignment(&text)?;
+            Some((path.display().to_string(), text))
+        })
+        .collect()
+}
+
 fn unreadable_config(message: String) -> Box<dyn std::error::Error + Send + Sync> {
     message.into()
+}
+
+fn only_capture_route_differs(loaded: &Config, next: &Config) -> bool {
+    if loaded.capture_route == next.capture_route {
+        return false;
+    }
+    let mut same = loaded.clone();
+    same.capture_route = next.capture_route;
+    same == *next
+}
+
+fn patch_capture_route(
+    existing: &str,
+    route: CaptureRoute,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let word = route.as_str();
+    let doc = toml_edit::Document::parse(existing).map_err(|err| {
+        unreadable_config(format!(
+            "config.toml could not be parsed, so it was not replaced: {err}"
+        ))
+    })?;
+    if doc.get("capture_route").is_some() {
+        return splice_root_string(existing, &doc, "capture_route", word);
+    }
+    insert_root_string(existing, "capture_route", word)
 }
 
 fn only_shadow_recognizer_differs(loaded: &Config, next: &Config) -> bool {
@@ -1164,6 +1317,8 @@ impl Default for Config {
         Self {
             data_dir,
             capture_output: None,
+            capture_route: CaptureRoute::Auto,
+            debug_portal_frames: false,
             player_name: None,
             sync: None,
             auto_detect: AutoDetectConfig::default(),
@@ -1728,10 +1883,53 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
         );
     }
 
+    #[test]
+    fn capture_env_note_names_the_environment_d_file_and_not_session_env() {
+        let files = vec![
+            ("a.conf".into(), "STAT_TRACKER_CAPTURE=wayshot\n".into()),
+            (
+                "scuffed-capture.conf".into(),
+                "export STAT_TRACKER_CAPTURE=\"portal\"\n".into(),
+            ),
+        ];
+        let note = Config::capture_env_note(Some("portal"), &files).unwrap();
+        assert!(note.contains("scuffed-capture.conf"), "{note}");
+        assert!(note.contains("STAT_TRACKER_CAPTURE=portal"), "{note}");
+        assert!(!note.contains("session.env"), "{note}");
+        let unloaded = Config::capture_env_note(None, &files).unwrap();
+        assert!(unloaded.contains("has not loaded"), "{unloaded}");
+        assert!(unloaded.contains("scuffed-capture.conf"), "{unloaded}");
+        assert!(Config::capture_env_note(None, &[]).is_none());
+        assert!(Config::capture_env_note(Some("  "), &[]).is_none());
+    }
+
+    #[test]
+    fn capture_route_is_edited_in_place() {
+        let existing = "\
+# keep
+data_dir = \"/tmp/sst-route\"
+capture_output = \"DP-1\"
+";
+        let mut next: Config = toml::from_str(existing).unwrap();
+        next.capture_route = CaptureRoute::Screenshot;
+        let saved = Config::text_for_save(Some(existing), &next).unwrap();
+        assert!(saved.contains("# keep"), "{saved}");
+        assert!(saved.contains("capture_output = \"DP-1\""), "{saved}");
+        assert!(saved.contains("capture_route = \"screenshot\""), "{saved}");
+        let back: Config = toml::from_str(&saved).unwrap();
+        assert_eq!(back.capture_route, CaptureRoute::Screenshot);
+    }
+
     fn sample(full: bool) -> Config {
         Config {
             data_dir: PathBuf::from("/var/lib/scuffed-outside"),
             capture_output: full.then(|| "DP-1".to_string()),
+            capture_route: if full {
+                CaptureRoute::Screencast
+            } else {
+                CaptureRoute::Auto
+            },
+            debug_portal_frames: full,
             player_name: full.then(|| "Ada".to_string()),
             sync: full.then(|| SyncConfig {
                 server_url: "https://crew.example".to_string(),

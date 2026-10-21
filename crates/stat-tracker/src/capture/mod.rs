@@ -1,7 +1,60 @@
+mod framebuf;
+mod pod;
 pub mod portal;
+mod portal_backend;
+mod pw;
+mod route;
+mod screencast;
 pub mod wayshot;
 /// Native X11 capture (pure X11 sessions). Wired into selection by Lane C.
 pub mod x11;
+
+/// Why this grab is happening. Tab captures may save a debug pair. Poll
+/// captures, and the detectors that read them, stay on the same image type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureKind {
+    Poll,
+    Tab,
+}
+
+/// Prefs the daemon and the app set before [`detect_backend`]. The env var
+/// still wins over `route` when it is non-empty.
+#[derive(Debug, Clone)]
+pub struct CapturePrefs {
+    pub data_dir: std::path::PathBuf,
+    pub route: crate::config::CaptureRoute,
+    pub debug_frames: bool,
+}
+
+fn prefs() -> CapturePrefs {
+    PREFS
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+        .unwrap_or_else(|| CapturePrefs {
+            data_dir: dirs::data_dir()
+                .unwrap_or_else(|| std::path::PathBuf::from("."))
+                .join("scuffed-stat-tracker"),
+            route: crate::config::CaptureRoute::Auto,
+            debug_frames: false,
+        })
+}
+
+pub fn set_prefs(prefs: CapturePrefs) {
+    *PREFS.lock().unwrap_or_else(|err| err.into_inner()) = Some(prefs);
+}
+
+static PREFS: std::sync::Mutex<Option<CapturePrefs>> = std::sync::Mutex::new(None);
+
+/// Portal path chosen by the last [`detect_backend`] call.
+fn portal_path() -> route::PortalPath {
+    match PORTAL_PATH.load(std::sync::atomic::Ordering::Acquire) {
+        1 => route::PortalPath::Screenshot,
+        _ => route::PortalPath::Stream,
+    }
+}
+
+static PORTAL_PATH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureBackend {
@@ -23,11 +76,13 @@ enum ForceTarget {
 }
 
 fn force_target(raw: &str) -> ForceTarget {
-    match raw.to_ascii_lowercase().as_str() {
-        "wayshot" | "wayland" => ForceTarget::Wayshot,
-        "x11" => ForceTarget::X11,
-        "portal" => ForceTarget::Portal,
-        _ => ForceTarget::Unknown,
+    match route::classify(raw) {
+        route::ForceWord::Wayshot => ForceTarget::Wayshot,
+        route::ForceWord::X11 => ForceTarget::X11,
+        // `portal` and `screencast` are the stream. `portal-screenshot` is
+        // the older portal. Both are the portal backend; `route` picks which.
+        route::ForceWord::Stream | route::ForceWord::Screenshot => ForceTarget::Portal,
+        route::ForceWord::Unknown => ForceTarget::Unknown,
     }
 }
 
@@ -108,60 +163,38 @@ fn is_wayland_session(session_type: Option<&str>, wayland_display: bool) -> bool
 }
 
 pub async fn detect_backend() -> CaptureBackend {
-    // STAT_TRACKER_CAPTURE override (R1-3, fail-closed). Env read + live probes
-    // live here; the decision is delegated to `select_backend` so tests hit
-    // production logic. The raw value is kept (not lowercased up front) so the
-    // Unknown warn shows exactly what the operator set; `force_target` owns the
-    // keyword set + case-folding. Probing is lazy per force so a forced backend
-    // never warms an unrelated connection.
-    let force = std::env::var("STAT_TRACKER_CAPTURE").ok();
+    // STAT_TRACKER_CAPTURE override (R1-3, fail-closed). A non-empty value
+    // wins over Settings. Otherwise `capture_route` wins when it is not
+    // auto. Probing is lazy per force so a forced backend never warms an
+    // unrelated connection. The route log is `route::resolve`, which the
+    // unit tests call with the same probe results.
+    let prefs = prefs();
+    let env = std::env::var("STAT_TRACKER_CAPTURE").ok();
+    let env_set = env.as_deref().map(str::trim).is_some_and(|s| !s.is_empty());
+    let settings = match prefs.route {
+        crate::config::CaptureRoute::Screencast => Some(route::ForceWord::Stream),
+        crate::config::CaptureRoute::Screenshot => Some(route::ForceWord::Screenshot),
+        crate::config::CaptureRoute::Auto => None,
+    };
+    let session_type = std::env::var("XDG_SESSION_TYPE").ok();
+    let wayland_display = std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let wayland = is_wayland_session(session_type.as_deref(), wayland_display);
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    let chosen = route::effective(env.as_deref(), settings);
 
-    match force.as_deref() {
-        Some(raw) => match force_target(raw) {
-            ForceTarget::Wayshot => {
-                let ok = wayshot::probe().await.is_ok();
-                let backend = select_backend(Some(raw), false, ok, false, false);
-                if backend == CaptureBackend::None {
-                    tracing::warn!("STAT_TRACKER_CAPTURE=wayshot is not usable");
-                }
-                backend
-            }
-            ForceTarget::X11 => {
-                let ok = x11::probe().await.is_ok();
-                let backend = select_backend(Some(raw), false, false, ok, false);
-                if backend == CaptureBackend::None {
-                    tracing::warn!("STAT_TRACKER_CAPTURE=x11 is not usable");
-                }
-                backend
-            }
-            ForceTarget::Portal => {
-                let ok = portal::is_available().await;
-                let backend = select_backend(Some(raw), false, false, false, ok);
-                if backend == CaptureBackend::None {
-                    tracing::warn!("STAT_TRACKER_CAPTURE=portal not available");
-                }
-                backend
-            }
-            // Unknown forced value, warn with the raw value, then route the
-            // decision through `select_backend` (fail-closed → None) rather than
-            // returning inline, so the tested policy owns the outcome.
-            ForceTarget::Unknown => {
-                tracing::warn!(%raw, "unknown STAT_TRACKER_CAPTURE value");
-                select_backend(Some(raw), false, false, false, false)
-            }
-        },
-        // Automatic probe order (R1-2): a real check per candidate (Wayland takes
-        // one test screenshot, so KDE without screencopy fails here);
-        // a failed candidate falls through. Short-circuit, a winning probe
-        // skips the rest.
-        None => {
-            let session_type = std::env::var("XDG_SESSION_TYPE").ok();
-            let wayland_display = std::env::var_os("WAYLAND_DISPLAY").is_some();
-            let wayland = is_wayland_session(session_type.as_deref(), wayland_display);
+    let (wayshot_ok, x11_ok, portal_ok) = match chosen {
+        route::Effective::Forced(route::ForceWord::Wayshot) => {
+            (wayshot::probe().await.is_ok(), false, false)
+        }
+        route::Effective::Forced(route::ForceWord::X11) => {
+            (false, x11::probe().await.is_ok(), false)
+        }
+        route::Effective::Forced(route::ForceWord::Stream | route::ForceWord::Screenshot) => {
+            (false, false, portal::is_available().await)
+        }
+        route::Effective::Forced(route::ForceWord::Unknown) => (false, false, false),
+        route::Effective::Auto => {
             let wayshot_ok = wayshot::probe().await.is_ok();
-            // On Wayland the portal is asked before X11, because the X11
-            // probe passes through XWayland without seeing the screen. The
-            // portal is checked at most once.
             let mut portal_checked = false;
             let mut portal_ok = false;
             if !wayshot_ok && wayland {
@@ -172,19 +205,58 @@ pub async fn detect_backend() -> CaptureBackend {
             if !wayshot_ok && !x11_ok && !portal_checked {
                 portal_ok = portal::is_available().await;
             }
-            let backend = select_backend(None, wayland, wayshot_ok, x11_ok, portal_ok);
-            tracing::info!(
-                backend = perf_backend_label(&backend).unwrap_or("none"),
-                session_type = session_type.as_deref().unwrap_or("unset"),
-                wayland_display,
-                "capture method chosen"
-            );
-            if backend == CaptureBackend::None {
-                tracing::warn!("no capture backend available");
-            }
-            backend
+            (wayshot_ok, x11_ok, portal_ok)
         }
+    };
+
+    let decision = route::resolve(
+        env.as_deref(),
+        settings,
+        wayland,
+        wayshot_ok,
+        x11_ok,
+        portal_ok,
+        &desktop,
+    );
+    PORTAL_PATH.store(
+        match decision.portal {
+            route::PortalPath::Screenshot => 1,
+            route::PortalPath::Stream => 0,
+        },
+        std::sync::atomic::Ordering::Release,
+    );
+    tracing::info!("{}", decision.info);
+    if let Some(line) = &decision.forced_line {
+        tracing::info!("{line}");
     }
+    if let Some(line) = &decision.mismatch {
+        tracing::warn!("{line}");
+    }
+    if env_set
+        && matches!(
+            route::classify(env.as_deref().unwrap_or("")),
+            route::ForceWord::Unknown
+        )
+    {
+        tracing::warn!(
+            raw = env.as_deref().unwrap_or(""),
+            "unknown STAT_TRACKER_CAPTURE value"
+        );
+    }
+    tracing::info!(
+        backend = perf_backend_label(&decision.backend).unwrap_or("none"),
+        session_type = session_type.as_deref().unwrap_or("unset"),
+        wayland_display,
+        "capture method chosen"
+    );
+    if decision.backend == CaptureBackend::None {
+        tracing::warn!("no capture backend available");
+    } else if decision.backend == CaptureBackend::Portal
+        && decision.portal == route::PortalPath::Stream
+    {
+        portal_backend::log_configured(&desktop);
+    }
+    decision.backend
 }
 
 /// Built-in panels (laptop screens). On Auto these lose to an external
@@ -234,6 +306,17 @@ pub async fn capture_screen_output(
     backend: &CaptureBackend,
     output_name: Option<&str>,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    capture_screen_output_for(backend, output_name, CaptureKind::Poll).await
+}
+
+/// Same image as [`capture_screen_output`]. `kind` only changes whether a
+/// Tab grab may write a local debug pair. Detection still receives a
+/// [`image::DynamicImage`].
+pub async fn capture_screen_output_for(
+    backend: &CaptureBackend,
+    output_name: Option<&str>,
+    kind: CaptureKind,
+) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let started = std::time::Instant::now();
     let Some(name) = perf_backend_label(backend) else {
         return Err("no capture backend available".into());
@@ -241,7 +324,13 @@ pub async fn capture_screen_output(
     let result = match backend {
         CaptureBackend::Wayshot => wayshot::capture_with_output(output_name).await,
         CaptureBackend::X11 => x11::capture_with_output(output_name).await,
-        CaptureBackend::Portal => portal::capture(output_name).await,
+        CaptureBackend::Portal => match portal_path() {
+            route::PortalPath::Screenshot => portal::capture(output_name).await,
+            route::PortalPath::Stream => {
+                let prefs = prefs();
+                screencast::capture(output_name, kind, &prefs.data_dir, prefs.debug_frames).await
+            }
+        },
         CaptureBackend::None => return Err("no capture backend available".into()),
     };
     if result.is_ok() {
@@ -412,6 +501,8 @@ mod tests {
         assert_eq!(force_target("wayshot"), ForceTarget::Wayshot);
         assert_eq!(force_target("x11"), ForceTarget::X11);
         assert_eq!(force_target("portal"), ForceTarget::Portal);
+        assert_eq!(force_target("screencast"), ForceTarget::Portal);
+        assert_eq!(force_target("portal-screenshot"), ForceTarget::Portal);
         // Anything else is Unknown (fail-closed at the decision layer).
         assert_eq!(force_target("garbage"), ForceTarget::Unknown);
         assert_eq!(force_target(""), ForceTarget::Unknown);

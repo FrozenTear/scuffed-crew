@@ -84,7 +84,7 @@ Pin a tag by fetching that tag's bootstrap (the assignment has to be on
 `bash`, because `VAR=x curl … | bash` does not pass `VAR` to `bash`):
 
 ```sh
-TAG=stat-tracker-v0.5.0-rc.4
+TAG=stat-tracker-v0.5.0-rc.5
 curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
@@ -187,6 +187,8 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 |---|---|
 | `player_name` | Scoreboard name used to find your row (fetched from the server if unset) |
 | `capture_output` | Display/output name to capture (`--list-outputs`) |
+| `capture_route` | `auto` (default), `screencast`, or `screenshot`. See below. A non-empty `STAT_TRACKER_CAPTURE` wins over this |
+| `debug_portal_frames` | Off by default. Saves up to four Tab pairs under `{data_dir}/debug/portal-compare/` (`0001-stream.png` and `0001-screenshot.png`). Also `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`, which is not written to this file. The pictures stay on this machine and are not uploaded. Leave it off while a voice app is sharing the screen: the screenshot half can hit the KWin cursor crash |
 | `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`). Must be absolute. The systemd unit can write this path, the config dir, and the session runtime dir; a custom directory gets a drop-in at install (see below) |
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown) |
 | `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
@@ -205,6 +207,44 @@ ocr_threads = 1
 ```
 
 The daemon reads config once at startup. Restart it after changes.
+Changing `capture_route` or `capture_output` in Settings restarts a running
+tracker for you.
+
+### Screen capture route
+
+On KDE and GNOME Wayland the tracker opens one screen-share (PipeWire) and
+hides the cursor, instead of taking a new screenshot for every frame. You
+are asked to allow that share once. The permission is remembered in
+`screencast-restore-token` inside the data directory, so it is not asked
+again after a reboot. The stream runs at 1 or 2 frames per second. A frame
+is copied only when the tracker needs one. Other desktops (niri, Sway,
+Hyprland, X11) keep their direct capture unless you force the stream.
+
+If the share cannot start, or no frame arrives within 2 seconds, the
+tracker logs a warning and uses the older screenshot portal for that grab.
+A failed start is not retried for 30 seconds.
+
+`STAT_TRACKER_CAPTURE`, when set and not empty, wins over `capture_route`.
+For the systemd service, put it in `~/.config/environment.d/` (for example
+`scuffed-capture.conf`), then log out and back in. Do not put it in
+`session.env`: that file is rewritten every time the service starts.
+
+| Value | Route |
+|---|---|
+| `portal` or `screencast` | Screen stream, cursor hidden, with the automatic fallback above |
+| `portal-screenshot` | Older screenshot portal |
+| `wayshot` or `wayland` | Direct Wayland capture |
+| `x11` | X11 |
+
+Settings has the same choice: Automatic, Screen stream, Older screenshot.
+When the environment variable is set, Settings says so and names the file
+to edit. The startup log says which source won (`environment`, `settings`,
+or `automatic`), the desktop, and the portal backend that answered.
+
+`STAT_TRACKER_DEBUG_PORTAL_FRAMES=1` or `debug_portal_frames = true` saves
+up to four Tab pairs in `{data_dir}/debug/portal-compare/` so the two
+portal images can be compared. Nothing there is uploaded. Turn it off
+before playing while a voice app is sharing your screen.
 
 ### OCR CPU use (`OMP_THREAD_LIMIT`)
 

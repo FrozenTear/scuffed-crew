@@ -15,6 +15,26 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0-rc.5
+
+On KDE Plasma Wayland the tracker now shares the screen once, with the cursor hidden, instead of taking a new screenshot every time it looks. That stops KWin crashing when a voice app is also sharing your screen. If you install an update while a game is open, the tracker switches to the new version on its own after that game is saved. Start, Stop, Restart, and Start on login work for an AUR or deb install as well as the curl installer, and they stop a leftover tracker instead of leaving two running.
+
+### Highlights
+
+- KDE capture hides the cursor and keeps one screen share open. The allow prompt is once, including after a reboot.
+- Stop and Restart find the tracker that is actually running, including one left over from an update, and leave a single copy.
+- After an update, a running tracker restarts into the new version once the current game is saved.
+- Settings has Automatic, Screen stream, and Older screenshot. An existing `STAT_TRACKER_CAPTURE=portal` keeps the new stream.
+
+### Technical detail
+
+- Service detection asks `systemctl --user show` for `LoadState` and `FragmentPath`, so a unit in `~/.config/systemd/user`, `/usr/lib/systemd/user`, or `/etc/systemd/user` counts. If systemctl cannot answer, those directories are scanned. Start on login, Stop, Restart, and the updater use that answer, not a remembered flag. `reset-failed` runs before start and before enable, which clears a start-limit-hit unit.
+- Stop and Restart stop the unit when it exists, then signal every identity-checked process holding the pid file or the store lock. A process whose executable is not `scuffed-stat-tracker` is not signalled. If one is still alive, the error names its pid and another copy is not started. When the unit exists, Start only starts the unit. The unit sets `STAT_TRACKER_REPLACE_STRAY=1`, so that start replaces a same-binary stray before it takes the pid file. A start without that variable only replaces a different binary (the leftover from an update). `--vacuum` and a second start of the same binary do not signal the live daemon. A replace waits for `active_game.json` to go stale (up to an hour) so an open game is saved first. An explicit Stop does not wait.
+- About once a minute the daemon compares `/proc/self/exe` with the binary on disk. If it was replaced and no game is open, a service exits 75 so `Restart=on-failure` starts the new `ExecStart`. A process that is not a service re-execs the on-disk path. One log line says which. `STAT_TRACKER_BINARY_RESTART=1` stops a loop. Restart now in the app also restarts the tracker when that process is still the old binary.
+- Startup logs the resolved capture route, whether environment, Settings, or automatic won, and the desktop. A forced method that does not match the desktop is a warning (wayshot on KDE or GNOME, x11 on Wayland KDE or GNOME, a stream forced off Wayland). `portal-screenshot` on KDE is not a mismatch. `portal` and `screencast` are the new stream. `portal-screenshot` and Settings "Older screenshot" are the previous portal. A non-empty `STAT_TRACKER_CAPTURE` wins over `capture_route`. For the service, set the variable in `~/.config/environment.d/*.conf`. Settings names that file when it is overriding the choice.
+- The stream is one xdg-desktop-portal ScreenCast session with cursor mode Hidden. Cursor metadata is never requested. The restore token is stored mode 0600 at `{data_dir}/screencast-restore-token` and is not logged. A backend that rejects persistence is asked again without a token. If Hidden is not offered, or the session fails, or no frame arrives within 2 seconds, the screenshot portal is used and a warning is logged. A failed start waits 30 seconds before the next try. PipeWire is loaded with dlopen, not linked. The format pod caps the rate at 2 fps. Only the newest buffer is kept, and it is copied only when a grab is waiting. The image is the same `DynamicImage` the detectors already read. The log names the portal backend from the `.portal` files and `portals.conf`, and the running `xdg-desktop-portal*` executable, not `comm`.
+- `debug_portal_frames` or `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1` saves up to four Tab pairs under `{data_dir}/debug/portal-compare/`. They stay on this machine. The screenshot half can hit the KWin cursor crash while a voice app is sharing the screen, so leave it off for normal play.
+
 ## 0.5.0-rc.4
 
 Screen capture now works on KDE Plasma on Wayland without any workaround. In rc.3 the tracker still tried a capture method that KDE does not support, so "Capture now" and game recording failed with "Cannot find required wayland protocol". It now tests that method with a real screenshot and moves on to your desktop's screenshot prompt when it fails. With two monitors on KDE you can pick which one the tracker watches, instead of getting both screens in one image.

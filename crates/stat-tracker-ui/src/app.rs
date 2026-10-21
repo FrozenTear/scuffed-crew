@@ -141,8 +141,17 @@ fn capture_output_changed(before: &Config, after: &Config) -> bool {
     before.capture_output != after.capture_output
 }
 
+fn capture_route_changed(before: &Config, after: &Config) -> bool {
+    before.capture_route != after.capture_route
+}
+
 const SETTINGS_SAVED_RESTARTING: &str =
     "Settings saved. Restarting the tracker to use the new screen.";
+
+const SETTINGS_SAVED_ROUTE: &str =
+    "Settings saved. Restarting the tracker to use the new capture method.";
+
+const SETTINGS_SAVED_ROUTE_ENV: &str = "Settings saved. STAT_TRACKER_CAPTURE in the environment overrides this choice, so the tracker keeps that route. Edit the file under .config/environment.d, then log out and back in.";
 
 fn toast_after_successful_save(daemon_up: bool) -> &'static str {
     if daemon_up {
@@ -225,6 +234,7 @@ pub enum Message {
     SettingsText(SettingsField, String),
     SettingsToggle(SettingsToggle, bool),
     SelectOutput(Option<String>),
+    SelectCaptureRoute(stat_tracker::config::CaptureRoute),
     SaveSettings,
     Daemon(DaemonVerb),
     DaemonDone(Result<String, String>),
@@ -264,6 +274,8 @@ pub enum Message {
     UpdateFinished(Result<String, String>),
     /// "Restart now" after an update: start the new binary, then quit.
     RestartGui,
+    /// Tracker restart finished (or was skipped). Then start the new window.
+    RestartGuiReady(Result<String, String>),
     /// The installed GUI's `--build-id` output (G3), for the binary as
     /// stamped when the probe started.
     GuiBuildProbed {
@@ -689,6 +701,11 @@ impl TrackerApp {
         let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
         if live {
             tasks.push(check_reader_packs(app.data_dir.clone(), false));
+            stat_tracker::capture::set_prefs(stat_tracker::capture::CapturePrefs {
+                data_dir: app.data_dir.clone(),
+                route: app.saved_config.capture_route,
+                debug_frames: app.saved_config.debug_portal_frames_enabled(),
+            });
             tasks.push(Task::perform(
                 stat_tracker::capture::detect_backend(),
                 Message::BackendReady,
@@ -1061,6 +1078,10 @@ impl TrackerApp {
                 self.settings.capture_output = name.unwrap_or_default();
                 Task::none()
             }
+            Message::SelectCaptureRoute(route) => {
+                self.settings.capture_route = route;
+                Task::none()
+            }
             Message::SaveSettings => {
                 if self.fixture.is_some() {
                     return Task::none();
@@ -1142,9 +1163,14 @@ impl TrackerApp {
                         }
                         let daemon_up = daemon::is_daemon_running(&self.data_dir);
                         let gui_only = only_update_channel_changed(&self.saved_config, &config);
+                        let route_changed = capture_route_changed(&self.saved_config, &config);
                         let restart_for_screen = daemon_up
                             && !self.daemon_busy
                             && capture_output_changed(&self.saved_config, &config);
+                        let restart_for_route = daemon_up && !self.daemon_busy && route_changed;
+                        let env_overrides_route = std::env::var(stat_tracker::config::CAPTURE_ENV)
+                            .ok()
+                            .is_some_and(|value| !value.trim().is_empty());
                         let recheck = update_channel_switched(
                             &self.saved_config,
                             &config,
@@ -1161,14 +1187,18 @@ impl TrackerApp {
                             );
                         self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
                         self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
-                        self.replace_toast(if restart_for_screen {
+                        self.replace_toast(if restart_for_route && env_overrides_route {
+                            SETTINGS_SAVED_ROUTE_ENV
+                        } else if restart_for_screen {
                             SETTINGS_SAVED_RESTARTING
+                        } else if restart_for_route {
+                            SETTINGS_SAVED_ROUTE
                         } else {
                             toast_after_successful_save(daemon_up && !gui_only)
                         });
                         self.toast_shown_at = None;
                         let mut tasks = Vec::new();
-                        if restart_for_screen {
+                        if restart_for_screen || restart_for_route {
                             // Same path as the Restart button, so the unit or
                             // the spawned tracker is restarted the usual way.
                             self.daemon_busy = true;
@@ -1619,6 +1649,32 @@ impl TrackerApp {
                 Task::none()
             }
             Message::RestartGui => {
+                let data_dir = self.data_dir.clone();
+                let installed = self.daemon.service_installed;
+                let pid = self.daemon.pid;
+                self.daemon_busy = true;
+                Task::perform(
+                    async move {
+                        let stale = pid.is_some_and(|pid| {
+                            stat_tracker::replace::pid_binary_replaced(pid).unwrap_or(false)
+                        });
+                        if stale {
+                            daemon::run_verb(data_dir, DaemonVerb::Restart, installed).await
+                        } else {
+                            Ok(String::new())
+                        }
+                    },
+                    Message::RestartGuiReady,
+                )
+            }
+            Message::RestartGuiReady(result) => {
+                self.daemon_busy = false;
+                if let Err(err) = result {
+                    self.replace_toast(format!(
+                        "Could not restart the tracker ({err}). Quit Stat Tracker and start it again."
+                    ));
+                    return Task::none();
+                }
                 match crate::instance::spawn_replacement(Some(&self.restart_prefix())) {
                     Ok(()) => self.apply_tray(TrayAction::Quit),
                     Err(e) => {
