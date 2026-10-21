@@ -428,23 +428,15 @@ pub fn exec_retry_due(
     }
 }
 
-pub fn shutdown_overrun_line(capture: bool, sync: bool, screencast: bool) -> String {
-    let mut parts = Vec::new();
-    if capture {
-        parts.push("in-flight capture");
+/// The deadline log line. `running` is the shutdown step that was still
+/// running when the deadline hit, read at that moment; `not_reached` are the
+/// steps after it, which never started.
+pub fn shutdown_overrun_line(running: &str, not_reached: &[&str]) -> String {
+    let mut line = format!("shutdown deadline exceeded; exiting while still running: {running}");
+    if !not_reached.is_empty() {
+        line.push_str(&format!(" (not reached: {})", not_reached.join(", ")));
     }
-    if sync {
-        parts.push("in-flight sync");
-    }
-    if screencast {
-        parts.push("screencast session");
-    }
-    let what = if parts.is_empty() {
-        "shutdown".to_string()
-    } else {
-        parts.join(", ")
-    };
-    format!("shutdown deadline exceeded; exiting while still running: {what}")
+    line
 }
 
 /// Remove `daemon.pid` when it names this process. `process::exit` and
@@ -767,7 +759,15 @@ not a lock line
             now,
             EXEC_RETRY_BACKOFF
         ));
-        assert!(shutdown_overrun_line(true, false, true).contains("in-flight capture"));
+        assert_eq!(
+            shutdown_overrun_line("final upload", &["snapshot export"]),
+            "shutdown deadline exceeded; exiting while still running: final upload \
+             (not reached: snapshot export)"
+        );
+        assert_eq!(
+            shutdown_overrun_line("snapshot export", &[]),
+            "shutdown deadline exceeded; exiting while still running: snapshot export"
+        );
         assert!(cmdline_is_vacuum(b"scuffed-stat-tracker\0--vacuum\0"));
         assert!(!cmdline_is_vacuum(b"scuffed-stat-tracker\0"));
         assert_eq!(plan_restart_gui(true, true), RestartGuiPlan::Wait);

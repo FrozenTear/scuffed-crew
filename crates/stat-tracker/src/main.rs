@@ -4105,6 +4105,27 @@ async fn apply_capture_report(
                     {
                         tracing::warn!(error = %e, "failed to back-fill session outcome");
                     }
+                } else if recorded
+                    && g.finished()
+                    && g.session_created
+                    && report.outcome != g.outcome
+                {
+                    // MAIN-1: this capture took its outcome when Tab was
+                    // pressed. The game was decided while it ran (an end-reel
+                    // poll, a GUI edit), so its row and session write carry
+                    // the old one. Seal the decided result over them again.
+                    tracing::info!(
+                        stored = %report.outcome,
+                        outcome = %g.outcome,
+                        session_id = %g.session_id,
+                        "capture finished after the result was decided: re-sealing the session"
+                    );
+                    if let Err(e) = store
+                        .set_session_outcome(&g.session_id, &g.outcome.to_string())
+                        .await
+                    {
+                        tracing::warn!(error = %e, "failed to re-seal session outcome");
+                    }
                 }
                 persist_active_game(data_dir, Some(g));
             }
@@ -4664,6 +4685,7 @@ async fn run_loop(
                 shutdown_from_signal(
                     &mut st,
                     &mut capture_task,
+                    &mut capture_rx,
                     &mut sync_task,
                     sync_client,
                     &sync_backoff,
@@ -4679,6 +4701,7 @@ async fn run_loop(
                 shutdown_from_signal(
                     &mut st,
                     &mut capture_task,
+                    &mut capture_rx,
                     &mut sync_task,
                     sync_client,
                     &sync_backoff,
@@ -4695,6 +4718,7 @@ async fn run_loop(
                 shutdown_from_signal(
                     &mut st,
                     &mut capture_task,
+                    &mut capture_rx,
                     &mut sync_task,
                     sync_client,
                     &sync_backoff,
@@ -4896,6 +4920,7 @@ async fn run_loop(
                         shutdown_from_signal(
                             &mut st,
                             &mut capture_task,
+                            &mut capture_rx,
                             &mut sync_task,
                             sync_client,
                             &sync_backoff,
@@ -5047,6 +5072,7 @@ async fn run_loop(
                                 shutdown_from_signal(
                                     &mut st,
                                     &mut capture_task,
+                                    &mut capture_rx,
                                     &mut sync_task,
                                     sync_client,
                                     &sync_backoff,
@@ -5064,6 +5090,7 @@ async fn run_loop(
                             shutdown_from_signal(
                                 &mut st,
                                 &mut capture_task,
+                                &mut capture_rx,
                                 &mut sync_task,
                                 sync_client,
                                 &sync_backoff,
@@ -5169,6 +5196,7 @@ async fn run_loop(
                             shutdown_from_signal(
                                 &mut st,
                                 &mut capture_task,
+                                &mut capture_rx,
                                 &mut sync_task,
                                 sync_client,
                                 &sync_backoff,
@@ -5221,6 +5249,7 @@ async fn run_loop(
                             shutdown_from_signal(
                                 &mut st,
                                 &mut capture_task,
+                                &mut capture_rx,
                                 &mut sync_task,
                                 sync_client,
                                 &sync_backoff,
@@ -9218,37 +9247,137 @@ where
     }
 }
 
+/// What the Tab capture task sends back to the run loop.
+type CaptureReports = tokio::sync::mpsc::UnboundedReceiver<(String, Result<CaptureReport, String>)>;
+
+/// One step of [`shutdown_from_signal`]. The steps run in
+/// [`SHUTDOWN_STAGES`] order, and the deadline log names the one running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownStage {
+    /// Wait for the in-flight Tab capture and apply its report.
+    CaptureDrain,
+    /// Close or keep the game, and write the skeleton.
+    SessionSave,
+    /// Close the screen share, bounded by [`SCREENCAST_CLOSE_TIMEOUT`].
+    ScreencastClose,
+    /// Join the in-flight sync, then the last upload.
+    FinalUpload,
+    /// Write the GUI snapshot.
+    SnapshotExport,
+}
+
+impl ShutdownStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CaptureDrain => "in-flight capture",
+            Self::SessionSave => "session save",
+            Self::ScreencastClose => "screencast session",
+            Self::FinalUpload => "final upload",
+            Self::SnapshotExport => "snapshot export",
+        }
+    }
+}
+
+/// Shutdown order. The game is saved right after the in-flight capture is
+/// applied, before the portal close and the upload: those wait on other
+/// processes and the network, and must not cost the save its share of the
+/// deadline (MAIN-3). The snapshot export reads the store after the upload.
+const SHUTDOWN_STAGES: [ShutdownStage; 5] = [
+    ShutdownStage::CaptureDrain,
+    ShutdownStage::SessionSave,
+    ShutdownStage::ScreencastClose,
+    ShutdownStage::FinalUpload,
+    ShutdownStage::SnapshotExport,
+];
+
+/// A portal that does not answer gets this long. The upload keeps the rest.
+const SCREENCAST_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The deadline log for a shutdown stopped at `SHUTDOWN_STAGES[at]`.
+fn shutdown_overrun_at(at: usize) -> String {
+    let at = at.min(SHUTDOWN_STAGES.len() - 1);
+    let not_reached: Vec<&str> = SHUTDOWN_STAGES[at + 1..]
+        .iter()
+        .map(|stage| stage.label())
+        .collect();
+    stat_tracker::replace::shutdown_overrun_line(SHUTDOWN_STAGES[at].label(), &not_reached)
+}
+
+/// Apply every capture report already sent. [`drain_capture`] waits for the
+/// task; its report is in the channel, and would be lost with it: session
+/// splits, the previous game's seal, the gate, a held board, the map and the
+/// hero authority (MAIN-2).
+async fn apply_landed_capture_reports(
+    st: &mut SessionState,
+    capture_rx: &mut CaptureReports,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) {
+    while let Ok((sid, result)) = capture_rx.try_recv() {
+        apply_capture_report(st, store, data_dir, &sid, result, Instant::now()).await;
+    }
+}
+
+async fn close_screencast_on_shutdown() {
+    if tokio::time::timeout(SCREENCAST_CLOSE_TIMEOUT, capture::close_if_open())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_ms = SCREENCAST_CLOSE_TIMEOUT.as_millis() as u64,
+            "screencast session did not close in time; shutdown goes on"
+        );
+    }
+}
+
+/// Save the game and exit within the shared deadline. Returns the step the
+/// deadline stopped, or `None` when every step finished.
+#[allow(clippy::too_many_arguments)]
 async fn shutdown_from_signal(
     st: &mut SessionState,
     capture_task: &mut Option<tokio::task::JoinHandle<()>>,
+    capture_rx: &mut CaptureReports,
     sync_task: &mut Option<tokio::task::JoinHandle<()>>,
     sync_client: Option<&sync::SyncClient>,
     sync_backoff: &std::sync::Mutex<sync::SyncBackoff>,
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
-) {
-    let capture_busy = capture_task
-        .as_ref()
-        .is_some_and(|task| !task.is_finished());
-    let sync_busy = sync_task.as_ref().is_some_and(|task| !task.is_finished());
-    let cast_open = capture::session_is_open();
+) -> Option<ShutdownStage> {
+    let at = std::sync::atomic::AtomicUsize::new(0);
     tokio::select! {
         _ = async {
-            capture::close_if_open().await;
-            drain_capture(capture_task.take()).await;
-            close_session_on_shutdown(st, store, data_dir).await;
-            let task = sync_task.take();
-            finish_sync_on_shutdown(sync_client, sync_backoff, task, store, data_dir).await;
-            flush_snapshot_if_dirty(store, data_dir).await;
-        } => {}
+            for (i, stage) in SHUTDOWN_STAGES.iter().enumerate() {
+                at.store(i, std::sync::atomic::Ordering::Relaxed);
+                match stage {
+                    ShutdownStage::CaptureDrain => {
+                        drain_capture(capture_task.take()).await;
+                        apply_landed_capture_reports(st, capture_rx, store, data_dir).await;
+                    }
+                    ShutdownStage::SessionSave => {
+                        close_session_on_shutdown(st, store, data_dir).await;
+                    }
+                    ShutdownStage::ScreencastClose => close_screencast_on_shutdown().await,
+                    ShutdownStage::FinalUpload => {
+                        let task = sync_task.take();
+                        finish_sync_on_shutdown(sync_client, sync_backoff, task, store, data_dir)
+                            .await;
+                    }
+                    ShutdownStage::SnapshotExport => {
+                        flush_snapshot_if_dirty(store, data_dir).await;
+                    }
+                }
+            }
+        } => None,
         _ = tokio::time::sleep(stat_tracker::replace::shutdown_time_left()) => {
             // Returning here used to leave the runtime drop waiting on
             // blocking tasks. `main` calls `Runtime::shutdown_timeout` with
             // this same deadline, so those tasks cannot hold the exit.
-            tracing::error!(
-                "{}",
-                stat_tracker::replace::shutdown_overrun_line(capture_busy, sync_busy, cast_open)
-            );
+            // The step is read now, not when shutdown began.
+            let stopped = at
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .min(SHUTDOWN_STAGES.len() - 1);
+            tracing::error!("{}", shutdown_overrun_at(stopped));
+            Some(SHUTDOWN_STAGES[stopped])
         }
     }
 }
@@ -17102,12 +17231,36 @@ mod tests {
             suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
             frame: detect::MatchOutcome,
         ) {
-            let (panel, text_map) = maps;
+            let req = self.tab_request().await;
+            self.tab_land(req, cur, hero, row, maps, suspect, frame)
+                .await;
+        }
+
+        /// The Tab press: the session choice and the request the capture
+        /// task gets. State changes after this (a poll, a GUI edit) happen
+        /// while the capture runs; [`Self::tab_land`] is its result.
+        async fn tab_request(&mut self) -> CaptureRequest {
             let opened =
                 open_fresh_if_tab_starts_one(&mut self.st, &self.store, self.dir.path(), self.now)
                     .await;
             let mut req = build_capture_request(self.game(), opened, self.now);
             req.member_map_edit = session_has_member_map_edit(&self.store, &req).await;
+            req
+        }
+
+        /// The capture task for `req`: plan, store writes and report.
+        #[allow(clippy::too_many_arguments)]
+        async fn tab_land(
+            &mut self,
+            req: CaptureRequest,
+            cur: Counters,
+            hero: &str,
+            row: Option<u32>,
+            maps: (Option<&str>, &str),
+            suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
+            frame: detect::MatchOutcome,
+        ) {
+            let (panel, text_map) = maps;
             let (hero_resolved, source, hero_auth) = hero_auth::resolve_hero(
                 Some(hero),
                 None,
@@ -19338,6 +19491,116 @@ mod tests {
         );
     }
 
+    /// MAIN-1: the end-reel poll decides the game while a Tab capture that
+    /// was requested before the result is still running. The capture's
+    /// writes do not reset the session to unknown, and its row, the newest
+    /// and most complete one, carries the result and is queued for upload.
+    #[tokio::test]
+    async fn a_result_decided_while_a_tab_capture_runs_survives_the_capture() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Ana");
+        night
+            .tab_once(
+                night_counters(5, 2, 1, 2000, 300, 500),
+                "Ana",
+                Some(0),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let busan = night.id();
+        night.advance(Duration::from_secs(30));
+        let req = night.tab_request().await;
+        assert_eq!(req.game_outcome, detect::MatchOutcome::Unknown);
+        night.banner(detect::MatchOutcome::Victory).await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        night
+            .tab_land(
+                req,
+                night_counters(9, 3, 2, 3500, 400, 800),
+                "Ana",
+                Some(0),
+                (Some("Busan"), "Busan"),
+                NIGHT_CLEAN,
+                detect::MatchOutcome::Unknown,
+            )
+            .await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.iter().any(|row| row.elims == 9),
+            "the late row is stored"
+        );
+        assert!(
+            snaps.iter().all(|row| row.outcome == "victory"),
+            "{:?}",
+            snaps
+                .iter()
+                .map(|row| (row.elims, row.outcome.clone()))
+                .collect::<Vec<_>>()
+        );
+        let sessions = night.store.get_all_sessions().await.unwrap();
+        let stored = sessions
+            .iter()
+            .find(|s| s.session_id == busan)
+            .expect("session row");
+        assert_eq!(stored.final_outcome, "victory");
+        let unsynced = night.store.get_unsynced().await.unwrap();
+        assert!(
+            unsynced
+                .iter()
+                .any(|row| row.session_id == busan && row.elims == 9),
+            "the late row is not held back from upload"
+        );
+    }
+
+    /// MAIN-1: the first Tab of a game is still running when the result is
+    /// decided. The session row does not exist yet, so the store has no
+    /// result to keep; the report re-seals the decided one.
+    #[tokio::test]
+    async fn a_first_capture_that_lands_after_the_result_is_re_sealed() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Ana");
+        let busan = night.id();
+        let req = night.tab_request().await;
+        assert!(req.create_session);
+        night.banner(detect::MatchOutcome::Victory).await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        night
+            .tab_land(
+                req,
+                night_counters(9, 3, 2, 3500, 400, 800),
+                "Ana",
+                Some(0),
+                (Some("Busan"), "Busan"),
+                NIGHT_CLEAN,
+                detect::MatchOutcome::Unknown,
+            )
+            .await;
+        assert_eq!(night.id(), busan);
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(!snaps.is_empty());
+        assert!(
+            snaps.iter().all(|row| row.outcome == "victory"),
+            "{:?}",
+            snaps
+                .iter()
+                .map(|row| (row.elims, row.outcome.clone()))
+                .collect::<Vec<_>>()
+        );
+        let sessions = night.store.get_all_sessions().await.unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|s| s.session_id == busan)
+                .map(|s| s.final_outcome.as_str()),
+            Some("victory")
+        );
+    }
+
     /// Move the injected clock to an absolute UTC stamp, measured from `origin`.
     fn jump_to(
         night: &mut Night,
@@ -21430,6 +21693,7 @@ mod tests {
         shutdown_from_signal(
             &mut st,
             &mut None,
+            &mut tokio::sync::mpsc::unbounded_channel().1,
             &mut None,
             None,
             &std::sync::Mutex::new(sync::SyncBackoff::default()),
@@ -21455,6 +21719,121 @@ mod tests {
             rows.iter()
                 .any(|row| row.session_id == "quit-after-match" && !row.synced),
             "the resumed row stays unsynced so a late result can attach"
+        );
+    }
+
+    /// MAIN-2: the report of the capture shutdown waited for is applied
+    /// before the game is saved. It sat in the channel the run loop no
+    /// longer reads, and its map, gate and hero authority were lost.
+    #[tokio::test]
+    async fn shutdown_applies_the_report_of_the_capture_it_drained() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Unknown, None, now);
+        g.session_id = "drained".into();
+        let mut st = session(Some(g), now);
+        let mut report = rejected_report("drained");
+        report.recorded = true;
+        report.map = Some("Busan".into());
+        report.map_source = Some(boundary::MapSource::TopBar);
+        let board = Counters {
+            elims: 7,
+            assists: 2,
+            deaths: 3,
+            damage: 2400,
+            healing: 0,
+            mitigation: 900,
+        };
+        report.gate_state = Some(GateState {
+            accepted: board,
+            last_raw: board,
+            ..GateState::default()
+        });
+        report.hero_auth.accepted_hero = Some("Ana".into());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = tx.send(("drained".to_string(), Ok(report)));
+        });
+        let stopped = shutdown_from_signal(
+            &mut st,
+            &mut Some(task),
+            &mut rx,
+            &mut None,
+            None,
+            &std::sync::Mutex::new(sync::SyncBackoff::default()),
+            &store,
+            dir.path(),
+        )
+        .await;
+        assert_eq!(stopped, None);
+        let restored = startup_session(dir.path());
+        let g = restored.active_game.expect("the unfinished game is kept");
+        assert_eq!(g.session_id, "drained");
+        assert_eq!(g.map.as_deref(), Some("Busan"), "the report's map is saved");
+        assert_eq!(g.gate.map(|gate| gate.accepted.elims), Some(7));
+        assert_eq!(g.hero_auth.accepted_hero.as_deref(), Some("Ana"));
+    }
+
+    /// MAIN-3: the game is saved before the portal close and the upload,
+    /// and the deadline log names the step that was running.
+    #[test]
+    fn shutdown_saves_the_game_before_the_portal_and_the_upload() {
+        let pos = |stage| {
+            SHUTDOWN_STAGES
+                .iter()
+                .position(|s| *s == stage)
+                .expect("every stage runs")
+        };
+        assert_eq!(SHUTDOWN_STAGES[0], ShutdownStage::CaptureDrain);
+        assert_eq!(SHUTDOWN_STAGES[1], ShutdownStage::SessionSave);
+        assert!(pos(ShutdownStage::SessionSave) < pos(ShutdownStage::ScreencastClose));
+        assert!(pos(ShutdownStage::SessionSave) < pos(ShutdownStage::FinalUpload));
+        assert!(pos(ShutdownStage::FinalUpload) < pos(ShutdownStage::SnapshotExport));
+        assert!(SCREENCAST_CLOSE_TIMEOUT <= Duration::from_secs(1));
+        let line = shutdown_overrun_at(pos(ShutdownStage::FinalUpload));
+        assert!(
+            line.ends_with("still running: final upload (not reached: snapshot export)"),
+            "{line}"
+        );
+        assert!(!line.contains("screencast"), "{line}");
+    }
+
+    /// MAIN-3: an upload that does not finish does not cost the save, and
+    /// the deadline is reported against the upload.
+    #[tokio::test]
+    async fn a_hung_upload_at_shutdown_still_saves_the_game_and_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(unfinished_row("slow-network"))
+            .await
+            .unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Unknown, None, now);
+        g.session_id = "slow-network".into();
+        g.map = Some("Busan".into());
+        let mut st = session(Some(g), now);
+        // An upload already in flight that never returns.
+        let mut sync_task = Some(tokio::spawn(std::future::pending::<()>()));
+        let stopped = shutdown_from_signal(
+            &mut st,
+            &mut None,
+            &mut tokio::sync::mpsc::unbounded_channel().1,
+            &mut sync_task,
+            None,
+            &std::sync::Mutex::new(sync::SyncBackoff::default()),
+            &store,
+            dir.path(),
+        )
+        .await;
+        assert_eq!(stopped, Some(ShutdownStage::FinalUpload));
+        let restored = startup_session(dir.path());
+        assert_eq!(
+            restored.active_game.map(|g| g.session_id),
+            Some("slow-network".to_string()),
+            "the game was saved before the upload"
         );
     }
 
@@ -21923,6 +22302,7 @@ mod tests {
         shutdown_from_signal(
             &mut st,
             &mut None,
+            &mut tokio::sync::mpsc::unbounded_channel().1,
             &mut None,
             None,
             &std::sync::Mutex::new(sync::SyncBackoff::default()),
@@ -22023,6 +22403,7 @@ mod tests {
         shutdown_from_signal(
             &mut st,
             &mut None,
+            &mut tokio::sync::mpsc::unbounded_channel().1,
             &mut None,
             None,
             &std::sync::Mutex::new(sync::SyncBackoff::default()),
