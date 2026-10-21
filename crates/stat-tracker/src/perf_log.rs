@@ -1,8 +1,11 @@
 //! Always-on performance log (`perf.log` in the data directory).
 //!
 //! Each closed [`crate::perf`] window appends one line: the daemon's CPU%
-//! and RSS for that window, capture and OCR timing, and the X11 grab
-//! details (size, full screen or one output, and that no shm is used). The
+//! and RSS for that window, capture and OCR timing, the X11 grab details
+//! (size, full screen or one output, and that no shm is used), the
+//! screenshot portal's step times, the PipeWire stream's delivered and
+//! copied buffers, and the CPU% of the compositor, the desktop portal and
+//! PipeWire over the same window ([`crate::host_probe`]). The
 //! first line after start is a header with the setup: session type, kernel,
 //! CPU model and count, RAM and the Proton version seen running. Overhead is one small
 //! write a minute. The file rotates at [`MAX_BYTES`] into `perf.log.1`, so
@@ -21,6 +24,8 @@ pub const MAX_BYTES: u64 = 256 * 1024;
 
 static DIR: OnceLock<PathBuf> = OnceLock::new();
 static LAST_CPU: Mutex<Option<(u64, std::time::Instant)>> = Mutex::new(None);
+static HOST_CPU: Mutex<crate::host_probe::ProcCpuTracker> =
+    Mutex::new(crate::host_probe::ProcCpuTracker::new());
 
 /// Start the log in `data_dir` and write the setup header. Call once.
 pub fn init(data_dir: &Path) {
@@ -29,6 +34,11 @@ pub fn init(data_dir: &Path) {
     append_to(data_dir, &header, MAX_BYTES);
     *LAST_CPU.lock().unwrap_or_else(|e| e.into_inner()) =
         proc_cpu_ticks().map(|t| (t, std::time::Instant::now()));
+    // Baseline scan, so the first window already has desktop CPU.
+    HOST_CPU
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .sample_now(clk_tck());
 }
 
 /// Append one line for a closed window. No-op before [`init`].
@@ -48,7 +58,12 @@ pub fn write_summary(s: &Summary) {
         *last = ticks.map(|t| (t, now));
         pct
     };
-    let line = sample_line(s, cpu_pct, proc_rss_kb());
+    // One /proc scan per window.
+    let host = HOST_CPU
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .sample_now(clk_tck());
+    let line = sample_line(s, cpu_pct, proc_rss_kb(), &host);
     append_to(dir, &line, MAX_BYTES);
 }
 
@@ -135,7 +150,12 @@ pub fn header_line(s: &SetupInfo) -> String {
     )
 }
 
-pub fn sample_line(s: &Summary, cpu_pct: Option<f64>, rss_kb: Option<u64>) -> String {
+pub fn sample_line(
+    s: &Summary,
+    cpu_pct: Option<f64>,
+    rss_kb: Option<u64>,
+    host: &crate::host_probe::HostCpu,
+) -> String {
     let mut line = format!(
         "{} sample window_s={} cpu_pct={} rss_kb={} backend={} \
          captures={} capture_p50_ms={} capture_max_ms={} capture_cpu_ms={} \
@@ -165,6 +185,43 @@ pub fn sample_line(s: &Summary, cpu_pct: Option<f64>, rss_kb: Option<u64>) -> St
             x.width, x.height, x.scope, x.grabs.count, x.grabs.p50_ms, x.grabs.max_ms
         ));
     }
+    if let Some(p) = &s.portal {
+        line.push_str(&format!(
+            " portal_shots={} portal_rt_p50_ms={} portal_rt_max_ms={} \
+             portal_png_kb_p50={} portal_png_kb_max={} \
+             portal_decode_p50_ms={} portal_decode_max_ms={} \
+             portal_geom_p50_ms={} portal_geom_max_ms={} \
+             portal_crop_p50_ms={} portal_crop_max_ms={}",
+            p.round_trip.count,
+            p.round_trip.p50_ms,
+            p.round_trip.max_ms,
+            p.png_kb.p50_ms,
+            p.png_kb.max_ms,
+            p.decode.p50_ms,
+            p.decode.max_ms,
+            p.geometry.p50_ms,
+            p.geometry.max_ms,
+            p.crop.p50_ms,
+            p.crop.max_ms,
+        ));
+    }
+    if let Some(st) = &s.stream {
+        line.push_str(&format!(
+            " stream_delivered={} stream_fps={:.1} stream_copied={} stream_copy_ratio={}",
+            st.delivered,
+            st.delivered_fps(s.window_secs),
+            st.copied,
+            st.copy_ratio().map_or("na".into(), |r| format!("{r:.2}")),
+        ));
+        if let Some(b) = &st.buffer {
+            line.push_str(&format!(
+                " stream_buf={} stream_buf_bytes={} stream_format={} stream_w={} stream_h={}",
+                b.kind, b.bytes, b.format, b.width, b.height
+            ));
+        }
+    }
+    line.push(' ');
+    line.push_str(&host.fields());
     line
 }
 
@@ -294,7 +351,8 @@ fn proton_from_path(arg: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::perf::{StageStats, X11Stats};
+    use crate::host_probe::{GroupCpu, HostCpu};
+    use crate::perf::{PortalStats, StageStats, StreamBuffer, StreamStats, X11Stats};
 
     fn summary(x11: Option<X11Stats>) -> Summary {
         Summary {
@@ -316,6 +374,17 @@ mod tests {
             capture_cpu_ms: 420,
             tab_cpu_ms: 1700,
             x11,
+            portal: None,
+            stream: None,
+        }
+    }
+
+    fn stats(count: u32, p50: u64, max: u64) -> StageStats {
+        StageStats {
+            count,
+            p50_ms: p50,
+            max_ms: max,
+            total_ms: 0,
         }
     }
 
@@ -350,7 +419,12 @@ mod tests {
                 total_ms: 480,
             },
         };
-        let line = sample_line(&summary(Some(x)), Some(3.25), Some(81234));
+        let line = sample_line(
+            &summary(Some(x)),
+            Some(3.25),
+            Some(81234),
+            &HostCpu::default(),
+        );
         for f in [
             "cpu_pct=3.2",
             "rss_kb=81234",
@@ -370,7 +444,77 @@ mod tests {
         ] {
             assert!(line.contains(f), "{f} missing from {line}");
         }
-        assert!(!sample_line(&summary(None), None, None).contains("x11_"));
+        let bare = sample_line(&summary(None), None, None, &HostCpu::default());
+        for absent in ["x11_", "portal_shots", "stream_"] {
+            assert!(!bare.contains(absent), "{absent} in {bare}");
+        }
+        // The desktop process fields are always there, at the end.
+        assert!(
+            bare.ends_with(
+                " compositor=none compositor_cpu_pct=none portal_cpu_pct=none pipewire_cpu_pct=none"
+            ),
+            "{bare}"
+        );
+    }
+
+    /// The KDE stream case a report needs: our capture CPU, the portal
+    /// split, the stream's delivered rate and copy ratio, and KWin's CPU.
+    #[test]
+    fn portal_stream_and_desktop_fields_are_in_the_sample_line() {
+        let mut s = summary(None);
+        s.backend = "portal";
+        s.capture_cpu_ms = 75;
+        s.portal = Some(PortalStats {
+            round_trip: stats(3, 180, 240),
+            png_kb: stats(3, 5900, 6100),
+            decode: stats(3, 95, 120),
+            geometry: stats(3, 2, 4),
+            crop: stats(3, 0, 1),
+        });
+        s.stream = Some(StreamStats {
+            delivered: 7_200,
+            copied: 240,
+            buffer: Some(StreamBuffer {
+                kind: "memfd",
+                bytes: 14_745_600,
+                format: "BGRx",
+                width: 2560,
+                height: 1440,
+            }),
+        });
+        let host = HostCpu {
+            compositor: Some("kwin_wayland".into()),
+            compositor_cpu: GroupCpu::Pct(38.25),
+            xorg_cpu: None,
+            portal_cpu: GroupCpu::Pct(0.4),
+            pipewire_cpu: GroupCpu::NoBaseline,
+        };
+        let line = sample_line(&s, Some(6.0), Some(90_000), &host);
+        let tail = line.split_once(" sample ").unwrap().1;
+        assert_eq!(
+            tail,
+            "window_s=60 cpu_pct=6.0 rss_kb=90000 backend=portal \
+             captures=15 capture_p50_ms=38 capture_max_ms=61 capture_cpu_ms=75 \
+             polls=0 poll_p50_ms=0 poll_max_ms=0 \
+             ocr_runs=2 ocr_p50_ms=900 ocr_max_ms=950 ocr_cpu_ms=1700 \
+             portal_shots=3 portal_rt_p50_ms=180 portal_rt_max_ms=240 \
+             portal_png_kb_p50=5900 portal_png_kb_max=6100 \
+             portal_decode_p50_ms=95 portal_decode_max_ms=120 \
+             portal_geom_p50_ms=2 portal_geom_max_ms=4 \
+             portal_crop_p50_ms=0 portal_crop_max_ms=1 \
+             stream_delivered=7200 stream_fps=120.0 stream_copied=240 stream_copy_ratio=0.03 \
+             stream_buf=memfd stream_buf_bytes=14745600 stream_format=BGRx stream_w=2560 stream_h=1440 \
+             compositor=kwin_wayland compositor_cpu_pct=38.2 portal_cpu_pct=0.4 pipewire_cpu_pct=na"
+        );
+        // A stream with nothing delivered has no ratio, and no buffer line.
+        s.portal = None;
+        s.stream = Some(StreamStats {
+            delivered: 0,
+            copied: 2,
+            buffer: None,
+        });
+        let line = sample_line(&s, None, None, &host);
+        assert!(line.contains(" stream_copy_ratio=na compositor="), "{line}");
     }
 
     #[test]

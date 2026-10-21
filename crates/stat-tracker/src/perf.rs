@@ -10,6 +10,7 @@
 //! often each one ran.
 
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long one window covers before its summary is logged.
@@ -76,6 +77,71 @@ pub struct Summary {
     pub tab_cpu_ms: u64,
     /// X11 grab details, when X11 grabbed in the window.
     pub x11: Option<X11Stats>,
+    /// Screenshot portal steps, when the portal took a screenshot.
+    pub portal: Option<PortalStats>,
+    /// PipeWire stream buffers, when the stream delivered or copied any.
+    pub stream: Option<StreamStats>,
+}
+
+/// One screenshot through the desktop portal, split by step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PortalShot {
+    /// From sending the request to the portal's answer: the compositor
+    /// renders the desktop, encodes the PNG and writes the file.
+    pub round_trip: Duration,
+    /// Size of the PNG file the portal wrote.
+    pub png_bytes: u64,
+    /// Reading and decoding the PNG in the tracker.
+    pub decode: Duration,
+    /// Reading the output layout (a Wayland round trip).
+    pub geometry: Duration,
+    /// Cropping to one output and any resize. Zero with one output.
+    pub crop: Duration,
+}
+
+/// Screenshot portal steps in one window. Times in ms, sizes in KiB.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalStats {
+    pub round_trip: StageStats,
+    pub png_kb: StageStats,
+    pub decode: StageStats,
+    pub geometry: StageStats,
+    pub crop: StageStats,
+}
+
+/// The buffer PipeWire handed the stream consumer, as last copied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamBuffer {
+    /// `memfd`, `memptr`, `dmabuf` or `other`.
+    pub kind: &'static str,
+    /// Bytes of the chunk (`chunk.size`).
+    pub bytes: u32,
+    /// SPA video format name (`BGRx`, ...).
+    pub format: &'static str,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// PipeWire stream buffers in one window. `delivered` counts every buffer
+/// the stream dequeued; `copied` the ones the tracker copied out (only
+/// while a grab waits).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamStats {
+    pub delivered: u64,
+    pub copied: u64,
+    pub buffer: Option<StreamBuffer>,
+}
+
+impl StreamStats {
+    /// Buffers delivered per second over `window_secs`.
+    pub fn delivered_fps(&self, window_secs: u64) -> f64 {
+        self.delivered as f64 / window_secs.max(1) as f64
+    }
+
+    /// Copied over delivered, `None` with nothing delivered.
+    pub fn copy_ratio(&self) -> Option<f64> {
+        (self.delivered > 0).then(|| self.copied as f64 / self.delivered as f64)
+    }
 }
 
 /// X11 GetImage grabs in one window. X11 capture never uses shm: every
@@ -98,6 +164,10 @@ pub struct Window {
     cpu_us: [u64; STAGES],
     x11_size: Option<(u16, u16, &'static str)>,
     x11_grabs: Vec<u64>,
+    portal_shots: Vec<PortalShot>,
+    stream_delivered: u64,
+    stream_copied: u64,
+    stream_buffer: Option<StreamBuffer>,
 }
 
 impl Window {
@@ -109,6 +179,10 @@ impl Window {
             cpu_us: [0; STAGES],
             x11_size: None,
             x11_grabs: Vec::new(),
+            portal_shots: Vec::new(),
+            stream_delivered: 0,
+            stream_copied: 0,
+            stream_buffer: None,
         }
     }
 
@@ -149,6 +223,22 @@ impl Window {
             .push(u64::try_from(took.as_millis()).unwrap_or(u64::MAX));
     }
 
+    /// One portal screenshot.
+    pub fn add_portal_shot(&mut self, shot: PortalShot) {
+        self.portal_shots.push(shot);
+    }
+
+    /// Stream buffers delivered and copied since the last call.
+    pub fn add_stream_counts(&mut self, delivered: u64, copied: u64) {
+        self.stream_delivered = self.stream_delivered.saturating_add(delivered);
+        self.stream_copied = self.stream_copied.saturating_add(copied);
+    }
+
+    /// The buffer a stream copy read.
+    pub fn set_stream_buffer(&mut self, buffer: StreamBuffer) {
+        self.stream_buffer = Some(buffer);
+    }
+
     fn summarize(&mut self, elapsed: Duration) -> Option<Summary> {
         if self.samples.iter().all(Vec::is_empty) {
             return None;
@@ -172,6 +262,30 @@ impl Window {
                     scope,
                     grabs: StageStats::from_samples(&mut grabs),
                 });
+        let shots = std::mem::take(&mut self.portal_shots);
+        let portal = (!shots.is_empty()).then(|| {
+            let ms = |d: Duration| u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+            let col = |f: &dyn Fn(&PortalShot) -> u64| {
+                let mut v: Vec<u64> = shots.iter().map(f).collect();
+                StageStats::from_samples(&mut v)
+            };
+            PortalStats {
+                round_trip: col(&|s| ms(s.round_trip)),
+                png_kb: col(&|s| s.png_bytes / 1024),
+                decode: col(&|s| ms(s.decode)),
+                geometry: col(&|s| ms(s.geometry)),
+                crop: col(&|s| ms(s.crop)),
+            }
+        });
+        let delivered = std::mem::take(&mut self.stream_delivered);
+        let copied = std::mem::take(&mut self.stream_copied);
+        // The buffer description is kept: it holds until the stream
+        // renegotiates, and a window with no copy still shows it.
+        let stream = (delivered > 0 || copied > 0).then_some(StreamStats {
+            delivered,
+            copied,
+            buffer: self.stream_buffer,
+        });
         Some(Summary {
             window_secs: elapsed.as_secs(),
             backend: self.backend,
@@ -181,6 +295,8 @@ impl Window {
             capture_cpu_ms: cpu[Stage::Capture.index()] / 1000,
             tab_cpu_ms: cpu[Stage::TabAnalyze.index()] / 1000,
             x11,
+            portal,
+            stream,
         })
     }
 }
@@ -193,11 +309,22 @@ impl Default for Window {
 
 static WINDOW_STATE: Mutex<Window> = Mutex::new(Window::new());
 
+/// Stream buffers dequeued and copied since the last [`record`]. Atomics,
+/// because the PipeWire thread bumps the first one for every buffer.
+static STREAM_DELIVERED: AtomicU64 = AtomicU64::new(0);
+static STREAM_COPIED: AtomicU64 = AtomicU64::new(0);
+
 /// Record one sample in the daemon-wide window and log a summary when one
 /// closes.
 pub fn record(stage: Stage, took: Duration) {
     let closed = match WINDOW_STATE.lock() {
-        Ok(mut window) => window.record(stage, took, Instant::now()),
+        Ok(mut window) => {
+            window.add_stream_counts(
+                STREAM_DELIVERED.swap(0, Ordering::Relaxed),
+                STREAM_COPIED.swap(0, Ordering::Relaxed),
+            );
+            window.record(stage, took, Instant::now())
+        }
         Err(_) => return,
     };
     if let Some(summary) = closed {
@@ -217,6 +344,34 @@ pub fn record_cpu(stage: Stage, cpu: Duration) {
 pub fn record_x11_grab(width: u16, height: u16, full: bool, took: Duration) {
     if let Ok(mut window) = WINDOW_STATE.lock() {
         window.add_x11_grab(width, height, full, took);
+    }
+}
+
+/// Note one portal screenshot's step times.
+pub fn record_portal_shot(shot: PortalShot) {
+    if let Ok(mut window) = WINDOW_STATE.lock() {
+        window.add_portal_shot(shot);
+    }
+}
+
+/// One buffer the PipeWire stream dequeued. Lock-free: called from the
+/// PipeWire thread for every buffer.
+pub fn note_stream_delivered() {
+    STREAM_DELIVERED.fetch_add(1, Ordering::Relaxed);
+}
+
+/// One stream buffer the tracker tried to copy: what the buffer was,
+/// whether its bytes were copied (a DmaBuf or corrupt chunk is not), and
+/// the thread CPU the attempt took.
+pub fn record_stream_copy(buffer: Option<StreamBuffer>, copied: bool, cpu: Duration) {
+    if copied {
+        STREAM_COPIED.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Ok(mut window) = WINDOW_STATE.lock() {
+        if let Some(buffer) = buffer {
+            window.set_stream_buffer(buffer);
+        }
+        window.add_cpu(Stage::Capture, cpu);
     }
 }
 
@@ -358,5 +513,66 @@ mod tests {
         let next = w.record(Stage::Capture, ms(1), t0 + WINDOW * 2).unwrap();
         assert!(next.x11.is_none());
         assert_eq!(next.capture_cpu_ms, 0);
+    }
+
+    #[test]
+    fn portal_shots_are_split_by_step() {
+        let t0 = Instant::now();
+        let mut w = Window::new();
+        w.set_backend("portal");
+        w.record(Stage::Capture, ms(300), t0);
+        for (rt, kb, decode, crop) in [
+            (180, 5_000, 90, 0),
+            (240, 6_000, 120, 1),
+            (200, 5_500, 95, 0),
+        ] {
+            w.add_portal_shot(PortalShot {
+                round_trip: ms(rt),
+                png_bytes: kb * 1024 + 512,
+                decode: ms(decode),
+                geometry: ms(2),
+                crop: ms(crop),
+            });
+        }
+        let s = w.record(Stage::Capture, ms(1), t0 + WINDOW).unwrap();
+        let p = s.portal.expect("portal stats");
+        assert_eq!(p.round_trip.count, 3);
+        assert_eq!((p.round_trip.p50_ms, p.round_trip.max_ms), (200, 240));
+        assert_eq!((p.png_kb.p50_ms, p.png_kb.max_ms), (5_500, 6_000));
+        assert_eq!((p.decode.p50_ms, p.decode.max_ms), (95, 120));
+        assert_eq!(p.geometry.max_ms, 2);
+        assert_eq!(p.crop.max_ms, 1);
+        assert!(s.stream.is_none());
+        let next = w.record(Stage::Capture, ms(1), t0 + WINDOW * 2).unwrap();
+        assert!(next.portal.is_none());
+    }
+
+    #[test]
+    fn stream_counts_reset_per_window_and_the_buffer_is_kept() {
+        let t0 = Instant::now();
+        let mut w = Window::new();
+        w.record(Stage::Capture, ms(5), t0);
+        let buf = StreamBuffer {
+            kind: "memfd",
+            bytes: 8_294_400,
+            format: "BGRx",
+            width: 1920,
+            height: 1080,
+        };
+        w.set_stream_buffer(buf);
+        w.add_stream_counts(3_000, 100);
+        w.add_stream_counts(600, 20);
+        let s = w.record(Stage::Capture, ms(5), t0 + WINDOW).unwrap();
+        let st = s.stream.expect("stream stats");
+        assert_eq!((st.delivered, st.copied), (3_600, 120));
+        assert_eq!(st.buffer, Some(buf));
+        assert_eq!(st.delivered_fps(s.window_secs), 60.0);
+        assert_eq!(st.copy_ratio().map(|r| (r * 300.0).round()), Some(10.0));
+        // Nothing delivered or copied: no stream fields.
+        let quiet = w.record(Stage::Capture, ms(5), t0 + WINDOW * 2).unwrap();
+        assert!(quiet.stream.is_none());
+        w.add_stream_counts(4, 0);
+        let again = w.record(Stage::Capture, ms(5), t0 + WINDOW * 3).unwrap();
+        assert_eq!(again.stream.unwrap().buffer, Some(buf));
     }
 }

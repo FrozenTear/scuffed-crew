@@ -140,6 +140,11 @@ pub struct SystemInfo {
     pub prerelease: bool,
     pub daemon_running: bool,
     pub last_exit: LastExit,
+    /// The `host` line ([`crate::host_probe::host_line`]): desktop,
+    /// session type and GPU topology. It goes first in `log.txt`, not in
+    /// the manifest, because the site rejects unknown `system` keys.
+    /// `None` writes no line.
+    pub host: Option<String>,
 }
 
 impl SystemInfo {
@@ -165,8 +170,9 @@ impl SystemInfo {
             running_pid,
         );
         let ocr = switch.as_ref().map_or(OcrSetting::On, |s| s.effective);
+        let session_type = SessionType::from_env();
         Self {
-            session_type: SessionType::from_env(),
+            session_type,
             capture_backend,
             cpu_threads: u32::try_from(cpu_threads).unwrap_or(u32::MAX).max(1),
             ocr_threads: u32::try_from(config.ocr_threads_resolved())
@@ -179,7 +185,19 @@ impl SystemInfo {
             prerelease: config.wants_prerelease_updates(),
             daemon_running,
             last_exit: marker::last_exit(&config.data_dir),
+            host: Some(crate::host_probe::host_line_now(session_type.as_str())),
         }
+    }
+}
+
+/// `log.txt` with the scrubbed `host` line first, when there is one.
+fn with_host_line(ctx: &ScrubContext, host: Option<&str>, log_text: String) -> String {
+    match host.map(str::trim).filter(|h| !h.is_empty()) {
+        Some(host) => {
+            let host = scrub::scrub_text(ctx, &host.replace(['\n', '\r', '\0'], " "));
+            format!("{host}\n{log_text}")
+        }
+        None => log_text,
     }
 }
 
@@ -520,6 +538,7 @@ pub fn build_log_report(input: &LogReportInput) -> Result<ReportZip, ReportError
         let raw_log = scrub::read_daemon_logs(&input.log_dir);
         scrub::scrub_log(&input.scrub, &input.window, &raw_log)
     };
+    let log_text = with_host_line(&input.scrub, input.system.host.as_deref(), log_text);
     let reason_text = scrub_reason_text(&input.scrub, &input.text);
 
     let files = vec![ReportFile {
@@ -894,6 +913,7 @@ pub fn build_game_report(input: &GameReportInput) -> Result<ReportZip, ReportErr
     let raw_log =
         scrub::read_daemon_logs_since(&input.log_dir, input.window.start(), input.window.end());
     let log_text = scrub::scrub_log(&input.scrub, &input.window, &raw_log);
+    let log_text = with_host_line(&input.scrub, input.system.host.as_deref(), log_text);
     let reason_text = scrub_reason_text(&input.scrub, &input.text);
 
     let mut images = Vec::new();

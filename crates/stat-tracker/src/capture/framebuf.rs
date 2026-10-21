@@ -355,6 +355,23 @@ fn copy_rows(
     }
 }
 
+/// SPA video format name for the performance log, `other` when unknown.
+pub fn format_name(format: u32) -> &'static str {
+    match format {
+        FMT_RGBX => "RGBx",
+        FMT_BGRX => "BGRx",
+        FMT_XRGB => "xRGB",
+        FMT_XBGR => "xBGR",
+        FMT_RGBA => "RGBA",
+        FMT_BGRA => "BGRA",
+        FMT_ARGB => "ARGB",
+        FMT_ABGR => "ABGR",
+        FMT_RGB => "RGB",
+        FMT_BGR => "BGR",
+        _ => "other",
+    }
+}
+
 pub fn to_dynamic(frame: &PackedFrame) -> Option<DynamicImage> {
     to_rgb(frame).map(DynamicImage::ImageRgb8)
 }
@@ -365,6 +382,13 @@ mod tests {
 
     fn clock() -> FrameClock {
         FrameClock { seq: 1, pts: 1 }
+    }
+
+    #[test]
+    fn format_names_follow_spa() {
+        assert_eq!(format_name(FMT_BGRX), "BGRx");
+        assert_eq!(format_name(FMT_RGBA), "RGBA");
+        assert_eq!(format_name(0), "other");
     }
 
     #[test]

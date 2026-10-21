@@ -1337,7 +1337,13 @@ pub async fn capture(
                 tracing::info!("{}", pw::timing_line(&timing));
             }
             let seq = frame.clock.seq;
+            // Synchronous, no await inside: thread CPU measures it.
+            let convert_cpu_started = crate::perf::thread_cpu();
             let img = framebuf::to_dynamic(&frame).ok_or("screencast frame format is not RGB")?;
+            crate::perf::record_cpu(
+                crate::perf::Stage::Capture,
+                crate::perf::thread_cpu().saturating_sub(convert_cpu_started),
+            );
             let img = fit_stream(img, output_name).await?;
             if compare {
                 save_compare(data_dir, index, &img, output_name).await;
@@ -2036,8 +2042,15 @@ async fn fit_stream(
     img: DynamicImage,
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    // The geometry read records its own CPU on its blocking thread.
     let outputs = portal::output_geometry().await;
-    fit_stream_image(img, &outputs, output_name)
+    let cpu_started = crate::perf::thread_cpu();
+    let fitted = fit_stream_image(img, &outputs, output_name);
+    crate::perf::record_cpu(
+        crate::perf::Stage::Capture,
+        crate::perf::thread_cpu().saturating_sub(cpu_started),
+    );
+    fitted
 }
 
 pub fn fit_stream_image(

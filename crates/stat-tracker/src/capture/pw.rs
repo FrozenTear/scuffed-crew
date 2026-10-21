@@ -1183,6 +1183,7 @@ extern "C" fn on_process(data: *mut c_void) {
         }
         let seq = state.dequeue_seq.fetch_add(1, Ordering::AcqRel) + 1;
         state.received.fetch_add(1, Ordering::Relaxed);
+        crate::perf::note_stream_delivered();
         // Every dequeued buffer, including one the throttle drops. This is
         // the PipeWire clock. There is no way to ask a consumer stream for
         // a frame, so a poll does not move this.
@@ -1218,8 +1219,15 @@ extern "C" fn on_process(data: *mut c_void) {
     // A black buffer does not end the grab. An early Tab buffer does not
     // either: the request stays up until a frame at or after the overlay
     // delay is stored, so the stream keeps delivering the next one.
+    // This callback runs on the PipeWire thread, start to end, so thread
+    // CPU time around the copy is the copy's CPU.
+    let cpu_started = crate::perf::thread_cpu();
+    let info = buffer_info(state, newest);
     let copied = copy_buffer(state, newest, newest_seq, newest_pts, now_ms);
+    let copy_cpu = crate::perf::thread_cpu().saturating_sub(cpu_started);
     unsafe { (state.queue)(stream, newest) };
+    // After the requeue, so the log never holds the buffer back.
+    crate::perf::record_stream_copy(info, copied.is_some(), copy_cpu);
     match copied {
         Some(frame) if !framebuf::frame_is_blank(&frame) => {
             let frame = Arc::new(frame);
@@ -1316,6 +1324,41 @@ fn note_fps(state: &State) {
         if info {
             tracing::info!("{info_line}");
         }
+    }
+}
+
+/// What `buf` is, for the performance log: the first data plane's memory
+/// type and chunk size, and the negotiated format and size.
+fn buffer_info(state: &State, buf: *mut PwBuffer) -> Option<crate::perf::StreamBuffer> {
+    if buf.is_null() {
+        return None;
+    }
+    let pw = unsafe { &*buf };
+    if pw.buffer.is_null() {
+        return None;
+    }
+    let spa = unsafe { &*pw.buffer };
+    if spa.n_datas == 0 || spa.datas.is_null() {
+        return None;
+    }
+    let data = unsafe { &*spa.datas };
+    let bytes = unsafe { data.chunk.as_ref() }.map_or(0, |c| c.size);
+    Some(crate::perf::StreamBuffer {
+        kind: data_type_name(data.type_),
+        bytes,
+        format: framebuf::format_name(state.format.load(Ordering::Acquire)),
+        width: state.width.load(Ordering::Acquire),
+        height: state.height.load(Ordering::Acquire),
+    })
+}
+
+/// `spa_data_type` as the performance log names it.
+pub fn data_type_name(type_: u32) -> &'static str {
+    match type_ {
+        SPA_DATA_MEM_PTR => "memptr",
+        SPA_DATA_MEM_FD => "memfd",
+        SPA_DATA_DMA_BUF => "dmabuf",
+        _ => "other",
     }
 }
 
@@ -1572,6 +1615,14 @@ mod tests {
         assert!(plane_window(0, 0, 16, 16, 1).is_none());
         assert!(plane_window(0, 8, 4, 16, 1).is_none());
         assert!(plane_window(8, 16, 16, 16, 1).is_none());
+    }
+
+    #[test]
+    fn data_types_are_named() {
+        assert_eq!(data_type_name(SPA_DATA_MEM_PTR), "memptr");
+        assert_eq!(data_type_name(SPA_DATA_MEM_FD), "memfd");
+        assert_eq!(data_type_name(SPA_DATA_DMA_BUF), "dmabuf");
+        assert_eq!(data_type_name(0), "other");
     }
 
     #[test]

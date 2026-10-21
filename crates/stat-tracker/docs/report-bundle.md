@@ -424,7 +424,13 @@ Token-shaped scrub does not apply to `sha256` fields in the manifest. The config
 
 The config file is not attached. The sync token file is not attached. The shadow digit log is not attached. After scrubbing, the raw token, any Bearer credential, any token-shaped run, the raw URL, the raw home path, the account name, the hostname, the raw BattleTag, and the raw player names do not appear in the zip, including in `reason.text` and in file names.
 
-If the window has no lines, `log.txt` still exists and contains the single line `[no log lines in window]`.
+If the window has no lines, `log.txt` still exists and contains the single line `[no log lines in window]`, after the host line below.
+
+Host line (tracker 0.5.0-rc.7 and later): the app puts one line before the log lines, in every report kind. It is read when the report is built, from files only, and scrubbed like the log:
+
+`host desktop=KDE session=wayland drm=card0:amdgpu[eDP-1:disconnected];card1:nvidia[DP-1:connected,HDMI-A-1:disconnected] drm_output_cards=card1 nvidia_drm_modeset=Y`
+
+`desktop` is `XDG_CURRENT_DESKTOP` (letters, digits and `:_.-` only), `session` is `system.session_type`. `drm` lists each card under `/sys/class/drm` with its kernel driver (the `device/driver` link name, `?` when unreadable) and each connector with its `status`. `drm_output_cards` names the cards with a connected output (`none` when no card has one). `nvidia_drm_modeset` is `/sys/module/nvidia_drm/parameters/modeset`, or `na` when it cannot be read. The line is at most 2048 bytes. It is in `log.txt` and not in `system`, because `system` rejects unknown keys and a site from before this revision would refuse the report. It holds no serial, no path, and no display name.
 
 ## 7. Flow
 

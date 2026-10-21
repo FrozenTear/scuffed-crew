@@ -61,6 +61,7 @@ fn system() -> SystemInfo {
         prerelease: true,
         daemon_running: true,
         last_exit: LastExit::Crashed,
+        host: None,
     }
 }
 
@@ -910,6 +911,49 @@ fn server_validator_accepts_log_only_manifest() {
     }
 }
 
+const HOST_LINE: &str = "host desktop=KDE session=wayland drm=card0:amdgpu[eDP-1:disconnected];card1:nvidia[DP-1:connected] drm_output_cards=card1 nvidia_drm_modeset=Y";
+
+/// The host line (desktop, GPU topology) is the first line of `log.txt` in
+/// every log-only report, and the manifest's `system` keys do not change,
+/// so the site's validator (unknown `system` keys are invalid) still takes
+/// it.
+#[test]
+fn the_host_line_leads_log_txt_and_leaves_the_manifest_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_logs(dir.path());
+    crate::perf_log::append_to(
+        dir.path(),
+        "2026-10-16T17:00:00Z setup app=x session=wayland kernel=6.8.0 cpus=8 ram_mb=15890 proton=none cpu_model=\"x\"",
+        crate::perf_log::MAX_BYTES,
+    );
+    for category in [
+        LogOnlyCategory::Crash,
+        LogOnlyCategory::Performance,
+        LogOnlyCategory::Other,
+    ] {
+        let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
+        inp.category = category;
+        let without = bundle::build_log_report(&inp).unwrap();
+        // The host name is scrubbed here too.
+        inp.system.host = Some(format!("{HOST_LINE} {HOSTNAME}"));
+        let with = bundle::build_log_report(&inp).unwrap();
+        let expected = format!("{HOST_LINE} [host]\n{}", without.log_text);
+        assert_eq!(with.log_text, expected, "{}", category.as_str());
+        let m: Value = serde_json::from_str(&with.manifest_json).unwrap();
+        assert_eq!(keys(&m["system"]), sorted(SYSTEM_KEYS));
+        assert_eq!(m["files"][0]["bytes"], with.log_text.len());
+        scuffed_types::stat_report::parse_bundle_manifest(with.manifest_json.as_bytes())
+            .unwrap_or_else(|e| panic!("{}: {e}", category.as_str()));
+    }
+    // A blank host line adds nothing.
+    let mut inp = input(dir.path(), LogWindow::log_only(t("2030-01-01T00:00:00Z")));
+    inp.system.host = Some("  ".into());
+    assert_eq!(
+        bundle::build_log_report(&inp).unwrap().log_text,
+        "[no log lines in window]\n"
+    );
+}
+
 /// The daemon's own OCR log lines carry other players' names in fields that
 /// are not called `name`. A log-only report has no name list, so the fields
 /// themselves must go. Shapes copied from main.rs:4435 and match_end.rs.
@@ -1061,6 +1105,21 @@ mod game {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_game_report_log_starts_with_the_host_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_logs(tmp.path());
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &reads(Some(6))).unwrap();
+        let without = build_game_report(&input(tmp.path(), GameCategory::WrongHero)).unwrap();
+        let mut inp = input(tmp.path(), GameCategory::WrongHero);
+        inp.system.host = Some(HOST_LINE.into());
+        let with = build_game_report(&inp).unwrap();
+        assert_eq!(with.log_text, format!("{HOST_LINE}\n{}", without.log_text));
+        assert_eq!(unzip(&with.bytes)["log.txt"], with.log_text.as_bytes());
+        scuffed_types::stat_report::parse_bundle_manifest(with.manifest_json.as_bytes())
+            .expect("the site's validator takes the manifest");
     }
 
     /// The card preview shows the same pictures the report would carry,
