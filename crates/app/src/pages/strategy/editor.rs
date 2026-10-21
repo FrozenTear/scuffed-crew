@@ -1472,7 +1472,7 @@ struct SaveContext {
     show_map_picker: Signal<bool>,
     map_picker_error: Signal<Option<String>>,
     toast: crate::components::ToastState,
-    navigator: Navigator,
+    navigator: dioxus::router::Navigator,
     /// Mounted at `/strategy/editor` (no strategy yet). After the first save
     /// the editor moves to the saved strategy's own route.
     opened_as_new: bool,

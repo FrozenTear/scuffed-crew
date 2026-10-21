@@ -373,38 +373,31 @@ fn busy_error() -> ServerMessage {
 ///
 /// Membership is checked on every edit, not once at connect, so a member who
 /// is deactivated, suspended or banned mid-session loses edit rights at once.
-/// Returns the stored strategy so callers can check content caps.
+/// Returns the stored strategy so callers can check content caps. The error
+/// is the message for `ServerMessage::Error`.
 async fn ws_edit_guard<'a>(
     state: &WsState,
     room_id: &StrategyId,
     user: &'a Option<CollabUserInfo>,
-) -> Result<(&'a CollabUserInfo, Strategy), ServerMessage> {
-    let denied = || ServerMessage::Error {
-        message: "Permission denied".into(),
-    };
+) -> Result<(&'a CollabUserInfo, Strategy), &'static str> {
+    const DENIED: &str = "Permission denied";
     let Some(u) = user.as_ref() else {
-        return Err(ServerMessage::Error {
-            message: "Authentication required".into(),
-        });
+        return Err("Authentication required");
     };
     match state.app.db.get_member_auth_by_user(&u.id).await {
         Ok(Some((member, suspended))) if member.is_active && !suspended => {}
-        Ok(_) => {
-            return Err(ServerMessage::Error {
-                message: "Org membership required".into(),
-            });
-        }
+        Ok(_) => return Err("Org membership required"),
         Err(e) => {
             tracing::error!("strategy WS member check failed: {e}");
-            return Err(denied());
+            return Err(DENIED);
         }
     }
     match state.app.db.get_strategy(room_id).await {
         Ok(Some(strategy)) if strategy.owner_id == u.id => Ok((u, strategy)),
-        Ok(_) => Err(denied()),
+        Ok(_) => Err(DENIED),
         Err(e) => {
             tracing::error!("strategy WS edit check failed for {room_id}: {e}");
-            Err(denied())
+            Err(DENIED)
         }
     }
 }
@@ -498,7 +491,11 @@ async fn handle_message(
 
             let (u, strategy) = match ws_edit_guard(state, room_id, user).await {
                 Ok(ok) => ok,
-                Err(msg) => return Some(msg),
+                Err(message) => {
+                    return Some(ServerMessage::Error {
+                        message: message.into(),
+                    });
+                }
             };
 
             if strategy.elements.len() >= MAX_STRATEGY_ELEMENTS {
@@ -540,7 +537,11 @@ async fn handle_message(
 
             let (u, _strategy) = match ws_edit_guard(state, room_id, user).await {
                 Ok(ok) => ok,
-                Err(msg) => return Some(msg),
+                Err(message) => {
+                    return Some(ServerMessage::Error {
+                        message: message.into(),
+                    });
+                }
             };
 
             // Load → patch → save under per-strategy lock (via try_spawn_persist)
@@ -581,7 +582,11 @@ async fn handle_message(
 
             let (u, _strategy) = match ws_edit_guard(state, room_id, user).await {
                 Ok(ok) => ok,
-                Err(msg) => return Some(msg),
+                Err(message) => {
+                    return Some(ServerMessage::Error {
+                        message: message.into(),
+                    });
+                }
             };
 
             let db = state.app.db.clone();
@@ -614,7 +619,11 @@ async fn handle_message(
 
             let (u, strategy) = match ws_edit_guard(state, room_id, user).await {
                 Ok(ok) => ok,
-                Err(msg) => return Some(msg),
+                Err(message) => {
+                    return Some(ServerMessage::Error {
+                        message: message.into(),
+                    });
+                }
             };
 
             if strategy.phases.len() >= MAX_STRATEGY_PHASES {
@@ -654,7 +663,11 @@ async fn handle_message(
 
             let (u, _strategy) = match ws_edit_guard(state, room_id, user).await {
                 Ok(ok) => ok,
-                Err(msg) => return Some(msg),
+                Err(message) => {
+                    return Some(ServerMessage::Error {
+                        message: message.into(),
+                    });
+                }
             };
 
             let db = state.app.db.clone();
@@ -694,7 +707,11 @@ async fn handle_message(
 
             let (u, _strategy) = match ws_edit_guard(state, room_id, user).await {
                 Ok(ok) => ok,
-                Err(msg) => return Some(msg),
+                Err(message) => {
+                    return Some(ServerMessage::Error {
+                        message: message.into(),
+                    });
+                }
             };
 
             let db = state.app.db.clone();
