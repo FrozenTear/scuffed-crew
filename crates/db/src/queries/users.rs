@@ -228,7 +228,8 @@ impl Database {
                 .bind(("avatar", user.avatar_url.clone()))
                 .bind(("hash", id_hash))
                 .bind(("enc", enc))
-                .await?;
+                .await?
+                .check()?;
         } else {
             self.client
                 .query(
@@ -239,7 +240,8 @@ impl Database {
                 .bind(("username", user.username.clone()))
                 .bind(("avatar", user.avatar_url.clone()))
                 .bind(("pid", user.provider_id.clone()))
-                .await?;
+                .await?
+                .check()?;
         }
 
         Ok(user.clone())
@@ -357,11 +359,20 @@ impl Database {
     ) -> DbResult<()> {
         with_timeout(async {
             let rid = RecordId::new("user", user_id);
-            self.client
-                .query("UPDATE $rid SET password_hash = $hash")
+            // UPDATE on a missing record id writes nothing and reports no
+            // error, so read the touched ids back: a reset that changed no
+            // row must not look like success.
+            let updated: Vec<RecordId> = self
+                .client
+                .query("UPDATE $rid SET password_hash = $hash RETURN VALUE id")
                 .bind(("rid", rid))
                 .bind(("hash", password_hash.to_string()))
-                .await?;
+                .await?
+                .check()?
+                .take(0)?;
+            if updated.is_empty() {
+                return Err(DbError::NotFound(format!("User {user_id} not found")));
+            }
             Ok(())
         })
         .await
@@ -377,7 +388,11 @@ impl Database {
         }
         with_timeout(async {
             let rid = RecordId::new("user", user_id);
-            self.client.query("DELETE $rid").bind(("rid", rid)).await?;
+            self.client
+                .query("DELETE $rid")
+                .bind(("rid", rid))
+                .await?
+                .check()?;
             Ok(true)
         })
         .await

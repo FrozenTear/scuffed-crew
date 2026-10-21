@@ -2347,6 +2347,7 @@ mod tests {
             wins,
             elims: wins,
             deaths: 1,
+            kd_games: games,
         }
     }
 }

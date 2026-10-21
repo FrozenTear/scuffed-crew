@@ -626,6 +626,10 @@ pub struct LeaderboardHeroAgg {
     pub wins: u32,
     pub elims: u32,
     pub deaths: u32,
+    /// Games whose elims and deaths both passed the plausibility check, i.e.
+    /// the games that feed `elims` and `deaths`. The K/D board gates on this,
+    /// not on `games`, so one clean game cannot rank a member on K/D.
+    pub kd_games: u32,
 }
 
 /// Every hero's totals from one pass over `personal_match`.
@@ -685,6 +689,12 @@ impl LeaderboardSnapshot {
             if rate_metric && agg.games < LEADERBOARD_MIN_GAMES {
                 continue;
             }
+            // K/D is elims / deaths over the plausible games only, so the floor
+            // counts those games. Without this, four suspect games plus one
+            // clean 30-0 game ranked a member at 30.00 (DB3).
+            if metric == "kd" && agg.kd_games < LEADERBOARD_MIN_GAMES {
+                continue;
+            }
             out.push(MemberLeaderboardRow {
                 member_id: agg.member_id.clone(),
                 display_name: agg.display_name.clone(),
@@ -738,6 +748,7 @@ mod snapshot_project_tests {
             wins,
             elims: wins,
             deaths: 1,
+            kd_games: games,
         }
     }
 
@@ -781,6 +792,7 @@ mod snapshot_project_tests {
             wins: 4,
             elims: 10,
             deaths: 2,
+            kd_games: 8,
         }
     }
 
@@ -829,6 +841,7 @@ fn merge_agg_one(
             existing.wins = existing.wins.saturating_add(agg.wins);
             existing.elims = existing.elims.saturating_add(agg.elims);
             existing.deaths = existing.deaths.saturating_add(agg.deaths);
+            existing.kd_games = existing.kd_games.saturating_add(agg.kd_games);
         })
         .or_insert(agg);
 }

@@ -870,7 +870,8 @@ impl Database {
                 .query("UPDATE $rid SET env_fingerprint = $fp")
                 .bind(("rid", rid))
                 .bind(("fp", fingerprint.to_string()))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await

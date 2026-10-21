@@ -186,7 +186,8 @@ impl Database {
             self.client
                 .query("UPDATE $rid SET is_active = false")
                 .bind(("rid", RecordId::new("event", id)))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
