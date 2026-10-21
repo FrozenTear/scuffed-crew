@@ -8,7 +8,9 @@
 //! cannot be read, the open is logged as unavailable and the token is kept.
 //! If the session cannot start, or a grab sees no frame within
 //! [`SCREENCAST_FRAME_WAIT`], a screenshot is used only where that is safe
-//! (niri, wlroots, forced GNOME). KDE skips it and logs. A failed start is
+//! (niri, wlroots, forced GNOME). KDE skips it and logs. A stream that is
+//! dead, waiting for a reopen, or quiet for [`QUIET_STALL`] while Overwatch
+//! runs follows the same rule for Tab and poll grabs. A failed start is
 //! not retried for [`START_BACKOFF`]. Cancelling or closing the permission
 //! dialog is a decline: asking stops until the next Overwatch launch, KDE
 //! takes no captures, and the restore token stays. A permission dialog that
@@ -59,8 +61,19 @@ pub const PAUSED_PERSIST: Duration = Duration::from_secs(2);
 /// Two Tab waits with no PipeWire buffer reopen the stream. One does not.
 pub const SOFT_MISS_LIMIT: u32 = 2;
 
-/// At least this long between stream reopens. A new game does not clear it.
-pub const SOFT_REOPEN_GAP: Duration = Duration::from_secs(5 * 60);
+/// The shortest gap between two stream reopens. A new game does not clear
+/// the clock, so a reopen is never closer than this to the one before it.
+pub const REOPEN_GAP_MIN: Duration = Duration::from_secs(60);
+
+/// The longest gap between two stream reopens. Each reopen in the same game
+/// doubles the gap up to this, and a stream that keeps stalling is still
+/// reopened at this spacing for as long as the tracker runs.
+pub const REOPEN_GAP_MAX: Duration = Duration::from_secs(5 * 60);
+
+/// A stream that is still Streaming but has handed over no PipeWire buffer
+/// for this long, while a poll runs, counts as stalled for the screenshot
+/// fallback. It is not a reopen: niri and KWin send buffers only on damage.
+pub const QUIET_STALL: Duration = Duration::from_secs(8);
 
 const REOPEN_DEAD: &str = "screencast stream ended; reopening";
 const REOPEN_TABS: &str = "screencast stream had no fresh frame on two Tabs; reopening";
@@ -108,13 +121,14 @@ struct ReopenWatch {
     pending: Option<Pending>,
     death_latched: bool,
     token_warned: bool,
-    /// This game has already reopened the stream. A new game clears it.
-    /// [`SOFT_REOPEN_GAP`] does not.
-    reopened_this_game: bool,
+    /// Reopens in this game. Each one doubles the gap before the next, from
+    /// [`REOPEN_GAP_MIN`] up to [`REOPEN_GAP_MAX`]. A new game clears it.
+    reopens_this_game: u32,
 }
 
-/// A new game clears the miss streak and the once-per-game cap. The gap
-/// clock stays, so a second game inside [`SOFT_REOPEN_GAP`] cannot reopen.
+/// A new game clears the miss streak and the gap escalation. The gap clock
+/// stays, so a new game cannot reopen inside [`REOPEN_GAP_MIN`] of the last
+/// reopen.
 fn reset_stall_on_game_start(watch: &mut ReopenWatch) {
     let last_reopen = watch.last_reopen;
     *watch = ReopenWatch {
@@ -152,8 +166,18 @@ fn health_is_dead(health: StreamHealth) -> bool {
     }
 }
 
-fn reopen_rate_ok(last: Option<Instant>, now: Instant) -> bool {
-    last.is_none_or(|at| now.saturating_duration_since(at) >= SOFT_REOPEN_GAP)
+/// The gap a reopen must keep after the previous one, given how many
+/// reopens this game has already done: [`REOPEN_GAP_MIN`] for the first two,
+/// then doubling, capped at [`REOPEN_GAP_MAX`]. It never stops allowing one.
+pub fn reopen_gap(reopens_this_game: u32) -> Duration {
+    let doublings = reopens_this_game.saturating_sub(1).min(16);
+    REOPEN_GAP_MIN
+        .saturating_mul(1u32 << doublings)
+        .min(REOPEN_GAP_MAX)
+}
+
+fn reopen_rate_ok(last: Option<Instant>, reopens_this_game: u32, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= reopen_gap(reopens_this_game))
 }
 
 fn keep_without_token(watch: &mut ReopenWatch, dead: bool) -> ReopenStep {
@@ -169,21 +193,14 @@ fn keep_without_token(watch: &mut ReopenWatch, dead: bool) -> ReopenStep {
     }
 }
 
-/// Open the stream again, or refuse because this game already did or the
-/// gap has not elapsed. A refusal that is only the gap leaves `pending`
-/// for the caller to put back.
+/// Open the stream again, or refuse because the gap has not elapsed. A
+/// refusal leaves `pending` for the caller to put back, so the reopen runs
+/// on the first poll after the gap.
 fn try_reopen(watch: &mut ReopenWatch, now: Instant, why: &'static str, dead: bool) -> ReopenStep {
-    if watch.reopened_this_game {
-        watch.pending = None;
-        if dead {
-            watch.death_latched = true;
-        }
+    if !reopen_rate_ok(watch.last_reopen, watch.reopens_this_game, now) {
         return ReopenStep::Keep;
     }
-    if !reopen_rate_ok(watch.last_reopen, now) {
-        return ReopenStep::Keep;
-    }
-    watch.reopened_this_game = true;
+    watch.reopens_this_game = watch.reopens_this_game.saturating_add(1);
     watch.last_reopen = Some(now);
     watch.soft_misses = 0;
     watch.pending = None;
@@ -195,10 +212,12 @@ fn try_reopen(watch: &mut ReopenWatch, now: Instant, why: &'static str, dead: bo
 
 /// Silence while Streaming is [`ReopenStep::Keep`]. Polls never count as a
 /// soft miss. A dead stream, or two Tab waits with no PipeWire buffer,
-/// reopens on a poll: once per game, and at least [`SOFT_REOPEN_GAP`] after
-/// the previous reopen. A Tab never returns [`ReopenStep::Reopen`]. A new
-/// game clears the miss streak and the once-per-game cap, and leaves the
-/// gap clock. Without a saved restore token the stream stays up.
+/// reopens on a poll, at least [`reopen_gap`] after the previous reopen. A
+/// stall inside that gap waits for it and then reopens; a later stall in
+/// the same game reopens again after a longer gap. A Tab never returns
+/// [`ReopenStep::Reopen`]. A new game clears the miss streak and the gap
+/// escalation, and leaves the gap clock. Without a saved restore token the
+/// stream stays up.
 fn reopen_step(obs: Observe, has_token: bool, now: Instant, watch: &mut ReopenWatch) -> ReopenStep {
     let health = match obs {
         Observe::Poll { health } | Observe::Tab { health, .. } => health,
@@ -220,7 +239,7 @@ fn reopen_step(obs: Observe, has_token: bool, now: Instant, watch: &mut ReopenWa
                 Pending::Tabs => (REOPEN_TABS, false),
             };
             let step = try_reopen(watch, now, why, dead);
-            if matches!(step, ReopenStep::Keep) && !watch.reopened_this_game {
+            if matches!(step, ReopenStep::Keep) {
                 watch.pending = Some(cause);
             }
             return step;
@@ -239,10 +258,6 @@ fn reopen_step(obs: Observe, has_token: bool, now: Instant, watch: &mut ReopenWa
     if health_is_dead(health) && !watch.death_latched {
         if !has_token {
             return keep_without_token(watch, true);
-        }
-        if watch.reopened_this_game {
-            watch.death_latched = true;
-            return ReopenStep::Keep;
         }
         watch.pending = Some(Pending::Dead);
         return ReopenStep::HoldForPoll;
@@ -266,9 +281,6 @@ fn reopen_step(obs: Observe, has_token: bool, now: Instant, watch: &mut ReopenWa
             if watch.soft_misses >= SOFT_MISS_LIMIT {
                 if !has_token {
                     return keep_without_token(watch, false);
-                }
-                if watch.reopened_this_game {
-                    return ReopenStep::Keep;
                 }
                 watch.pending = Some(Pending::Tabs);
                 return ReopenStep::HoldForPoll;
@@ -745,6 +757,50 @@ pub fn tab_timeout_action(desktop: &str, stream_forced: bool) -> TabTimeoutActio
     }
 }
 
+/// Why a grab on the live stream got no new picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stall {
+    /// PipeWire error, unconnected after streaming, a long pause, a
+    /// connection fault, or a closed portal session.
+    Dead,
+    /// A reopen is wanted and is waiting for the next poll or its gap.
+    ReopenWaiting,
+    /// Still Streaming, with no PipeWire buffer for [`QUIET_STALL`].
+    Quiet,
+}
+
+impl Stall {
+    fn reason(self) -> &'static str {
+        match self {
+            Stall::Dead => "screencast stream ended",
+            Stall::ReopenWaiting => "screencast stream is waiting to reopen",
+            Stall::Quiet => "screencast stream stalled with no new frame",
+        }
+    }
+}
+
+/// The stall, if any, behind a grab that got no new picture. `quiet_for` is
+/// how long the stream has gone without a PipeWire buffer.
+pub fn classify_stall(dead: bool, reopen_waiting: bool, quiet_for: Duration) -> Option<Stall> {
+    if dead {
+        Some(Stall::Dead)
+    } else if reopen_waiting {
+        Some(Stall::ReopenWaiting)
+    } else if quiet_for >= QUIET_STALL {
+        Some(Stall::Quiet)
+    } else {
+        None
+    }
+}
+
+/// True when a stalled grab takes one Older screenshot instead of returning
+/// no picture. That is niri, wlroots, and GNOME when the stream was forced,
+/// for Tab and poll grabs alike. KDE never does: a screenshot beside a live
+/// share is the KWin crash. A grab with no stall uses the stream.
+pub fn stall_screenshot(desktop: &str, stream_forced: bool, stall: Option<Stall>) -> bool {
+    stall.is_some() && screenshot_fallback_is_safe(desktop, stream_forced)
+}
+
 static TAB_MISS_COUNT: AtomicU64 = AtomicU64::new(0);
 static TAB_SHOT_COUNT: AtomicU64 = AtomicU64::new(0);
 
@@ -1015,8 +1071,12 @@ pub async fn capture(
             }
         }
         // The session stays. Dropping it with no restore token would open
-        // the share dialog again.
+        // the share dialog again. Where a screenshot is safe, this grab is
+        // one, so a dead stream waiting for its reopen still reads.
         drop(stream);
+        if stall_fallback_here(Some(Stall::Dead)) {
+            return stall_fallback(state, output_name, Stall::Dead).await;
+        }
         drop(state);
         return Err("screencast stream ended".into());
     }
@@ -1065,8 +1125,8 @@ pub async fn capture(
     let alive = stream.alive();
     let stream_id = stream.stream_id();
     let mut keep_session = false;
+    let health = health_of(stream.stream_report());
     if kind == CaptureKind::Tab {
-        let health = health_of(stream.stream_report());
         let buffer_during_wait = stream.last_buffer_at().is_some_and(|at| at >= grab_started);
         let (waited, got_fresh) = match &grabbed {
             Ok(pw::GrabOutcome::TabMiss { .. }) => (true, false),
@@ -1091,10 +1151,29 @@ pub async fn capture(
             tracing::warn!("{REOPEN_NO_TOKEN}");
         }
     }
+    // Only read when the grab got no new picture. A Tab miss has its own
+    // fallback in `tab_timeout`.
+    let quiet_for = stream
+        .last_buffer_at()
+        .map_or_else(|| stream.running_for(), |at| at.elapsed());
+    let stall = classify_stall(
+        !alive || health_is_dead(health),
+        state.watch.pending.is_some(),
+        quiet_for,
+    );
     match grabbed {
         Ok(pw::GrabOutcome::TabMiss { delay_ms }) => {
             drop(state);
             tab_timeout(output_name, delay_ms).await.map(fresh_capture)
+        }
+        // A poll that only got the previous frame back from a stalled stream
+        // would read nothing. Where a screenshot is safe, take one instead.
+        Ok(pw::GrabOutcome::Frame { is_new: false, .. })
+            if kind == CaptureKind::Poll && stall_fallback_here(stall) =>
+        {
+            drop(stream);
+            let stall = stall.unwrap_or(Stall::Quiet);
+            stall_fallback(state, output_name, stall).await
         }
         Ok(pw::GrabOutcome::Frame { frame, is_new }) => {
             state.last_fail = None;
@@ -1183,10 +1262,38 @@ pub async fn capture(
                     .await
                     .map(fresh_capture);
             }
+            // A core fault, or a poll wait with nothing, on a stalled stream.
+            if !crate::replace::shutdown_requested()
+                && stall_fallback_here(stall)
+                && let Some(stall) = stall
+            {
+                return stall_fallback(state, output_name, stall).await;
+            }
             drop(state);
             Err(err.into())
         }
     }
+}
+
+/// [`stall_screenshot`] for this desktop and route.
+fn stall_fallback_here(stall: Option<Stall>) -> bool {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    stall_screenshot(&desktop, super::stream_was_forced(), stall)
+}
+
+/// One Older screenshot for a stalled stream. The session stays as it is:
+/// the reopen, if one is due, still runs on a poll. The warn is once per
+/// stall, until the stream hands over a new frame.
+async fn stall_fallback(
+    mut state: tokio::sync::MutexGuard<'_, CastState>,
+    output_name: Option<&str>,
+    stall: Stall,
+) -> Result<super::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
+    let why = stall.reason();
+    let line = fallback_line_for(why, true);
+    note_fallback(&mut state, &line);
+    drop(state);
+    screenshot(output_name, why).await.map(fresh_capture)
 }
 
 async fn tab_timeout(
@@ -2241,7 +2348,7 @@ mod tests {
         let mut watch = ReopenWatch::default();
         quiet_polls(&mut watch, now + Duration::from_secs(60), 8);
         assert!(watch.pending.is_none());
-        assert!(!watch.reopened_this_game);
+        assert_eq!(watch.reopens_this_game, 0);
         assert_eq!(watch.soft_misses, 0);
 
         let mut dead = ReopenWatch::default();
@@ -2266,7 +2373,7 @@ mod tests {
                 &mut dead
             ),
             ReopenStep::Keep,
-            "a second error in the same game does not reopen"
+            "the same dead stream is not reopened twice in a row"
         );
         let mut unconnected = ReopenWatch::default();
         assert_eq!(
@@ -2321,7 +2428,7 @@ mod tests {
     }
 
     #[test]
-    fn two_tab_soft_misses_reopen_on_the_next_poll_once_per_game() {
+    fn two_tab_soft_misses_reopen_on_the_next_poll_and_again_after_the_gap() {
         let now = Instant::now();
         let mut watch = ReopenWatch::default();
         assert_eq!(
@@ -2347,7 +2454,7 @@ mod tests {
             ),
             ReopenStep::Reopen(REOPEN_TABS)
         );
-        assert!(watch.reopened_this_game);
+        assert_eq!(watch.reopens_this_game, 1);
         assert_eq!(watch.soft_misses, 0);
 
         assert_eq!(
@@ -2356,8 +2463,8 @@ mod tests {
         );
         assert_eq!(
             reopen_step(tab_obs(true, false, false), true, now, &mut watch),
-            ReopenStep::Keep,
-            "a second pair in the same game does not ask for another reopen"
+            ReopenStep::HoldForPoll,
+            "a second pair in the same game asks for another reopen"
         );
         assert_eq!(
             reopen_step(
@@ -2368,7 +2475,21 @@ mod tests {
                 now,
                 &mut watch
             ),
-            ReopenStep::Keep
+            ReopenStep::Keep,
+            "inside the gap the reopen waits"
+        );
+        assert!(matches!(watch.pending, Some(Pending::Tabs)));
+        assert_eq!(
+            reopen_step(
+                Observe::Poll {
+                    health: StreamHealth::Streaming
+                },
+                true,
+                now + REOPEN_GAP_MIN,
+                &mut watch
+            ),
+            ReopenStep::Reopen(REOPEN_TABS),
+            "after the gap the second stall in the same game reopens"
         );
 
         let mut buffered = ReopenWatch::default();
@@ -2397,7 +2518,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reopen_waits_five_minutes_and_a_new_game_keeps_that_clock() {
+    fn a_reopen_waits_out_the_gap_and_a_new_game_keeps_that_clock() {
         let now = Instant::now();
         let mut watch = ReopenWatch::default();
         assert_eq!(
@@ -2422,7 +2543,7 @@ mod tests {
         let opened_at = watch.last_reopen.expect("the reopen stamps the clock");
 
         reset_stall_on_game_start(&mut watch);
-        assert!(!watch.reopened_this_game);
+        assert_eq!(watch.reopens_this_game, 0);
         assert_eq!(watch.soft_misses, 0);
         assert_eq!(watch.last_reopen, Some(opened_at));
         assert_eq!(
@@ -2433,7 +2554,7 @@ mod tests {
             reopen_step(tab_obs(true, false, false), true, now, &mut watch),
             ReopenStep::HoldForPoll
         );
-        let too_soon = now + SOFT_REOPEN_GAP - Duration::from_secs(1);
+        let too_soon = now + REOPEN_GAP_MIN - Duration::from_secs(1);
         assert_eq!(
             reopen_step(
                 Observe::Poll {
@@ -2444,7 +2565,7 @@ mod tests {
                 &mut watch
             ),
             ReopenStep::Keep,
-            "five minutes have not elapsed"
+            "the gap has not elapsed"
         );
         assert!(matches!(watch.pending, Some(Pending::Tabs)));
         assert_eq!(
@@ -2453,15 +2574,15 @@ mod tests {
                     health: StreamHealth::Streaming
                 },
                 true,
-                now + SOFT_REOPEN_GAP,
+                now + REOPEN_GAP_MIN,
                 &mut watch
             ),
             ReopenStep::Reopen(REOPEN_TABS)
         );
 
         let closed = watch_after_close(watch);
-        assert_eq!(closed.last_reopen, Some(now + SOFT_REOPEN_GAP));
-        assert!(!closed.reopened_this_game);
+        assert_eq!(closed.last_reopen, Some(now + REOPEN_GAP_MIN));
+        assert_eq!(closed.reopens_this_game, 0);
     }
 
     #[test]
@@ -2513,7 +2634,7 @@ mod tests {
             ReopenStep::Keep
         );
         assert!(tabs.pending.is_none());
-        assert!(!tabs.reopened_this_game);
+        assert_eq!(tabs.reopens_this_game, 0);
     }
 
     #[test]
@@ -2525,15 +2646,18 @@ mod tests {
             pending: Some(Pending::Tabs),
             death_latched: true,
             token_warned: true,
-            reopened_this_game: true,
+            reopens_this_game: 3,
         };
         STALL_RESET.store(false, Ordering::Release);
         assert!(!note_game_edge(true, true));
         apply_stall_reset(&mut watch);
-        assert!(watch.reopened_this_game, "staying in a game does not reset");
+        assert_eq!(
+            watch.reopens_this_game, 3,
+            "staying in a game does not reset"
+        );
         assert!(note_game_edge(false, true));
         apply_stall_reset(&mut watch);
-        assert!(!watch.reopened_this_game);
+        assert_eq!(watch.reopens_this_game, 0);
         assert_eq!(watch.soft_misses, 0);
         assert!(watch.pending.is_none());
         assert!(!watch.death_latched);
@@ -2542,11 +2666,177 @@ mod tests {
         STALL_RESET.store(false, Ordering::Release);
     }
 
+    fn poll(health: StreamHealth, now: Instant, watch: &mut ReopenWatch) -> ReopenStep {
+        reopen_step(Observe::Poll { health }, true, now, watch)
+    }
+
+    #[test]
+    fn the_reopen_gap_escalates_and_never_closes() {
+        assert_eq!(reopen_gap(0), REOPEN_GAP_MIN);
+        assert_eq!(reopen_gap(1), REOPEN_GAP_MIN);
+        assert_eq!(reopen_gap(2), REOPEN_GAP_MIN * 2);
+        assert_eq!(reopen_gap(3), REOPEN_GAP_MIN * 4);
+        assert_eq!(reopen_gap(4), REOPEN_GAP_MAX);
+        assert_eq!(reopen_gap(u32::MAX), REOPEN_GAP_MAX);
+        for n in 0..64 {
+            assert!(reopen_gap(n) >= REOPEN_GAP_MIN);
+            assert!(reopen_gap(n) <= REOPEN_GAP_MAX);
+        }
+    }
+
+    #[test]
+    fn a_second_dead_stream_in_the_same_game_reopens_after_the_gap() {
+        let start = Instant::now();
+        let mut watch = ReopenWatch::default();
+        assert_eq!(
+            poll(StreamHealth::Error, start, &mut watch),
+            ReopenStep::Reopen(REOPEN_DEAD)
+        );
+        // The new stream comes up, then dies again in the same game.
+        let up = start + Duration::from_secs(5);
+        assert_eq!(
+            poll(StreamHealth::Streaming, up, &mut watch),
+            ReopenStep::Keep
+        );
+        let died = start + Duration::from_secs(20);
+        for at in [died, died + Duration::from_secs(10)] {
+            assert_eq!(
+                poll(StreamHealth::Error, at, &mut watch),
+                ReopenStep::Keep,
+                "a stall inside the gap waits"
+            );
+        }
+        // A Tab that sees the dead stream inside the gap holds for a poll and
+        // keeps the reopen wanted.
+        assert_eq!(
+            reopen_step(
+                Observe::Tab {
+                    health: StreamHealth::Error,
+                    waited: false,
+                    got_fresh: false,
+                    buffer_during_wait: false,
+                },
+                true,
+                died + Duration::from_secs(15),
+                &mut watch
+            ),
+            ReopenStep::HoldForPoll
+        );
+        assert_eq!(
+            poll(
+                StreamHealth::Error,
+                start + REOPEN_GAP_MIN - Duration::from_secs(1),
+                &mut watch
+            ),
+            ReopenStep::Keep
+        );
+        assert!(matches!(watch.pending, Some(Pending::Dead)));
+        assert_eq!(
+            poll(StreamHealth::Error, start + REOPEN_GAP_MIN, &mut watch),
+            ReopenStep::Reopen(REOPEN_DEAD),
+            "the second stall in one game is not left dead"
+        );
+        assert_eq!(watch.reopens_this_game, 2);
+        assert!(watch.pending.is_none());
+    }
+
+    #[test]
+    fn a_stream_that_keeps_dying_is_reopened_without_a_storm() {
+        // Polls every 1.5 s for two hours of one game. Each reopened stream
+        // streams once and then dies again.
+        let start = Instant::now();
+        let step = Duration::from_millis(1500);
+        let mut watch = ReopenWatch::default();
+        let mut reopens: Vec<Instant> = Vec::new();
+        let mut fresh_stream = false;
+        let mut at = start;
+        while at < start + Duration::from_secs(2 * 60 * 60) {
+            let health = if fresh_stream {
+                fresh_stream = false;
+                StreamHealth::Streaming
+            } else {
+                StreamHealth::Error
+            };
+            if let ReopenStep::Reopen(_) = poll(health, at, &mut watch) {
+                reopens.push(at);
+                fresh_stream = true;
+            }
+            at += step;
+        }
+        for pair in reopens.windows(2) {
+            assert!(
+                pair[1] - pair[0] >= REOPEN_GAP_MIN,
+                "two reopens closer than the minimum gap"
+            );
+            assert!(
+                pair[1] - pair[0] <= REOPEN_GAP_MAX + step,
+                "a dead stream waited longer than the longest gap"
+            );
+        }
+        // Reopens at about 0, 1, 3 and 7 minutes, then every 5 minutes.
+        assert!(
+            reopens.len() <= 30,
+            "{} reopens in two hours is a storm",
+            reopens.len()
+        );
+        let last = *reopens.last().expect("the stream was reopened");
+        assert!(
+            start + Duration::from_secs(2 * 60 * 60) - last <= REOPEN_GAP_MAX + step,
+            "the stream was left dead at the end of the game"
+        );
+    }
+
+    #[test]
+    fn a_stall_classifies_as_dead_then_waiting_then_quiet() {
+        let short = QUIET_STALL - Duration::from_millis(1);
+        assert_eq!(classify_stall(true, true, short), Some(Stall::Dead));
+        assert_eq!(
+            classify_stall(false, true, Duration::ZERO),
+            Some(Stall::ReopenWaiting)
+        );
+        assert_eq!(
+            classify_stall(false, false, QUIET_STALL),
+            Some(Stall::Quiet)
+        );
+        assert_eq!(classify_stall(false, false, short), None);
+    }
+
+    #[test]
+    fn a_stalled_stream_screenshots_on_niri_wlroots_and_forced_gnome_never_on_kde() {
+        let stalls = [Stall::Dead, Stall::ReopenWaiting, Stall::Quiet];
+        for stall in stalls {
+            for forced in [false, true] {
+                for kde in ["KDE", "plasma", "KDE:plasma", "kwin"] {
+                    assert!(
+                        !stall_screenshot(kde, forced, Some(stall)),
+                        "{kde} forced={forced} {stall:?} must not screenshot"
+                    );
+                }
+                for safe in ["niri", "sway", "Hyprland", "wlroots", "river"] {
+                    assert!(
+                        stall_screenshot(safe, forced, Some(stall)),
+                        "{safe} forced={forced} {stall:?} must fall back"
+                    );
+                }
+            }
+            assert!(stall_screenshot("GNOME", true, Some(stall)));
+            assert!(stall_screenshot("ubuntu:GNOME", true, Some(stall)));
+            assert!(!stall_screenshot("GNOME", false, Some(stall)));
+        }
+        for desktop in ["niri", "sway", "GNOME", "KDE"] {
+            assert!(
+                !stall_screenshot(desktop, true, None),
+                "{desktop}: a healthy stream is not replaced by a screenshot"
+            );
+        }
+    }
+
     #[test]
     fn capture_calls_reopen_step_and_a_poll_waits_one_frame_plus_margin() {
         assert_eq!(reuse_wait(2), Duration::from_millis(600));
         assert_eq!(reuse_wait(4), Duration::from_millis(350));
-        assert_eq!(SOFT_REOPEN_GAP, Duration::from_secs(5 * 60));
+        assert_eq!(REOPEN_GAP_MIN, Duration::from_secs(60));
+        assert_eq!(REOPEN_GAP_MAX, Duration::from_secs(5 * 60));
         let src = include_str!("screencast.rs");
         let capture_at = src.find("pub async fn capture(").expect("capture");
         let after = &src[capture_at..];
