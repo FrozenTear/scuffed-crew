@@ -16,15 +16,18 @@ use std::time::Duration;
 pub const TAB_RETRY_WAITS: [Duration; 2] = [Duration::from_millis(300), Duration::from_millis(400)];
 
 /// Runs `attempt` once, and again after each wait in `waits` for as long as
-/// `retry` says the best result so far was rejected by the scoreboard
-/// check. A later result replaces the kept one only when `rank` scores it
-/// higher, so a rejected grab never replaces a more useful one. Returns the
-/// best result and how many retries ran. An error from `attempt` (a failed
+/// `retry` says the best result so far should be tried again. `why` names
+/// that result for the log: a scoreboard that is still drawing, a missing
+/// stream frame, and a share that is still opening are not the same line.
+/// A later result replaces the kept one only when `rank` scores it higher,
+/// so a rejected grab never replaces a more useful one. Returns the best
+/// result and how many retries ran. An error from `attempt` (a failed
 /// screen grab) ends the loop at once.
 pub async fn with_retries<T, E, A, AF, S, SF>(
     waits: &[Duration],
     retry: impl Fn(&T) -> bool,
     rank: impl Fn(&T) -> u8,
+    why: impl Fn(&T) -> &'static str,
     mut attempt: A,
     mut sleep: S,
 ) -> Result<(T, usize), E>
@@ -41,11 +44,12 @@ where
             break;
         }
         retries += 1;
+        let reason = why(&best);
         tracing::info!(
             retry = retries,
             of = waits.len(),
             wait_ms = wait.as_millis() as u64,
-            "Tab capture rejected by the scoreboard check: capturing again (the board may still be drawing)"
+            "Tab capture will try again: {reason}"
         );
         sleep(wait).await;
         let next = attempt(retries).await?;
@@ -55,10 +59,8 @@ where
     }
     if retries > 0 {
         if retry(&best) {
-            tracing::warn!(
-                retries,
-                "Tab capture still rejected after retries: giving up on this Tab press"
-            );
+            let reason = why(&best);
+            tracing::warn!(retries, "Tab capture gave up after retries: {reason}");
         } else {
             tracing::info!(retries, "Tab capture accepted on retry");
         }
@@ -169,6 +171,7 @@ mod tests {
                 ScoreboardPreflight::TeamSizeUncertain => 1,
                 ScoreboardPreflight::Ready(_) => 2,
             },
+            |_| "rejected by the scoreboard check (the board may still be drawing)",
             |_| {
                 *grabs.borrow_mut() += 1;
                 let f = frames.borrow_mut().next().expect("a frame per grab");
@@ -243,6 +246,7 @@ mod tests {
             &TAB_RETRY_WAITS,
             |v: &u8| *v == 0,
             |v: &u8| *v,
+            |_| "rejected by the scoreboard check (the board may still be drawing)",
             |i| async move { Ok::<_, ()>(if i == 0 { 0 } else { 1 }) },
             |_| async {},
         ))
@@ -255,6 +259,7 @@ mod tests {
             &TAB_RETRY_WAITS,
             |_: &u8| true,
             |v: &u8| *v,
+            |_| "no fresh stream frame arrived",
             |_| {
                 let v = seq.borrow_mut().next().unwrap();
                 async move { Ok::<_, ()>(v) }
@@ -267,5 +272,60 @@ mod tests {
             (1, 2),
             "a rejected grab never replaces the kept one"
         );
+    }
+
+    #[test]
+    fn a_retry_log_names_the_reason_it_was_given() {
+        let buf = LogWriter::default();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::with_default(sub, || {
+            let _ = block_on(with_retries(
+                &TAB_RETRY_WAITS,
+                |_: &u8| true,
+                |v: &u8| *v,
+                |_| "no fresh stream frame arrived",
+                |_| async { Ok::<_, ()>(0u8) },
+                |_| async {},
+            ));
+            let _ = block_on(with_retries(
+                &[Duration::from_millis(1)],
+                |v: &u8| *v == 0,
+                |v: &u8| *v,
+                |_| "the share is still opening",
+                |i| async move { Ok::<_, ()>(if i == 0 { 0 } else { 1 }) },
+                |_| async {},
+            ));
+        });
+        let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
+        assert!(text.contains("Tab capture will try again: no fresh stream frame arrived"));
+        assert!(text.contains("Tab capture gave up after retries: no fresh stream frame arrived"));
+        assert!(text.contains("Tab capture will try again: the share is still opening"));
+        assert!(text.contains("Tab capture accepted on retry"));
+        assert!(!text.contains("rejected by the scoreboard check: capturing again"));
+        assert!(!text.contains("still rejected"));
+    }
+
+    #[derive(Clone, Default)]
+    struct LogWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogWriter {
+        type Writer = LogWriter;
+        fn make_writer(&'a self) -> LogWriter {
+            self.clone()
+        }
     }
 }

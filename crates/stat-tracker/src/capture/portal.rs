@@ -83,6 +83,11 @@ pub async fn list_outputs() -> Vec<String> {
     output_rects().await.into_iter().map(|o| o.name).collect()
 }
 
+/// Output rectangles for a stream that may be one monitor or the whole desktop.
+pub(crate) async fn output_geometry() -> Vec<OutputRect> {
+    output_rects().await
+}
+
 async fn output_rects() -> Vec<OutputRect> {
     if !super::wayshot::is_available() {
         return Vec::new();
@@ -115,7 +120,7 @@ pub struct OutputRect {
 
 impl OutputRect {
     /// Pixel area for the Auto choice: the real size, else the logical one.
-    fn area(&self) -> u64 {
+    pub(crate) fn area(&self) -> u64 {
         if self.real_width > 0 && self.real_height > 0 {
             u64::from(self.real_width) * u64::from(self.real_height)
         } else {

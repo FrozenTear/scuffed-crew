@@ -603,6 +603,12 @@ pub struct Status {
     pub blocked: Vec<StatusSite>,
     /// Tesseract instances this daemon run created.
     pub leptess_created: u64,
+    /// The daemon's screen share is open. Capture now reads this so it does
+    /// not take a portal screenshot beside that share on KDE.
+    pub share_open: bool,
+    /// Why captures are stopped after a declined screen share. Empty when
+    /// the share was not declined. The app shows this in Tracker health.
+    pub share_notice: String,
 }
 
 /// One blocked call site in [`Status`].
@@ -657,6 +663,55 @@ pub fn status_path(data_dir: &Path) -> PathBuf {
 pub fn read_status(data_dir: &Path) -> Option<Status> {
     let bytes = std::fs::read(status_path(data_dir)).ok()?;
     serde_json::from_slice(&bytes).ok()
+}
+
+static DAEMON_SHARE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SHARE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static STATUS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+pub fn daemon_share_open() -> bool {
+    DAEMON_SHARE_OPEN.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub fn share_notice() -> String {
+    SHARE_NOTICE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+/// The in-memory notice. The status file is updated by
+/// [`publish_share_notice`].
+pub fn set_share_notice(notice: &str) {
+    *SHARE_NOTICE.lock().unwrap_or_else(|err| err.into_inner()) = notice.to_string();
+}
+
+/// Remember whether the daemon's share is open and write it into the status
+/// file now, so the app does not wait for the next OCR watch. The decline
+/// sentence is kept.
+pub fn publish_share_open(data_dir: &Path, open: bool) {
+    DAEMON_SHARE_OPEN.store(open, std::sync::atomic::Ordering::Release);
+    let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
+    let notice = share_notice();
+    let mut status = read_status(data_dir).unwrap_or_default();
+    status.share_open = daemon_share_open();
+    status.share_notice = notice;
+    let _ = write_status(data_dir, &status);
+}
+
+/// Write the decline sentence into the status file. An empty notice clears
+/// it. OCR republish reads the same memory, so it does not wipe the line.
+pub fn publish_share_notice(data_dir: &Path, notice: &str) {
+    let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
+    let notice = {
+        let mut slot = SHARE_NOTICE.lock().unwrap_or_else(|err| err.into_inner());
+        *slot = notice.to_string();
+        slot.clone()
+    };
+    let mut status = read_status(data_dir).unwrap_or_default();
+    status.share_open = daemon_share_open();
+    status.share_notice = notice;
+    let _ = write_status(data_dir, &status);
 }
 
 /// Write `status` next to the other daemon files (temp file, then rename).
@@ -829,11 +884,14 @@ impl Switch {
                 .map(|(site, count)| StatusSite { site, count })
                 .collect(),
             leptess_created: gate::leptess_created(),
+            share_open: daemon_share_open(),
+            share_notice: share_notice(),
         }
     }
 
     /// Write the status file when it changed since the last write.
     fn publish(&mut self) {
+        let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
         let status = self.status();
         if self.written.as_ref() == Some(&status) {
             return;
@@ -1313,6 +1371,8 @@ mod tests {
             blocked_total: 0,
             blocked: Vec::new(),
             leptess_created: 0,
+            share_open: false,
+            share_notice: String::new(),
         }
     }
 
@@ -1411,6 +1471,8 @@ mod tests {
             (old.refusal.clone(), old.packs, old.blocked_total),
             (None, None, 0)
         );
+        assert!(!old.share_open);
+        assert!(old.share_notice.is_empty());
         // a pack flag this version does not have, and one it has is missing
         write(
             r#"{"pid": 9, "requested": "off", "effective": "off",

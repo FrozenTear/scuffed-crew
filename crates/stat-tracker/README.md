@@ -84,7 +84,7 @@ Pin a tag by fetching that tag's bootstrap (the assignment has to be on
 `bash`, because `VAR=x curl … | bash` does not pass `VAR` to `bash`):
 
 ```sh
-TAG=stat-tracker-v0.5.0-rc.4
+TAG=stat-tracker-v0.5.0-rc.5
 curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
@@ -187,8 +187,11 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 |---|---|
 | `player_name` | Scoreboard name used to find your row (fetched from the server if unset) |
 | `capture_output` | Display/output name to capture (`--list-outputs`) |
+| `capture_route` | `auto` (default), `screencast`, or `screenshot`. See below. A non-empty `STAT_TRACKER_CAPTURE` wins over this |
+| `debug_portal_frames` | Off by default. Saves up to four Tab pairs under `{data_dir}/debug/portal-compare/` (`0001-stream.png` and `0001-screenshot.png`). Also `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`, which is not written to this file. The pictures stay on this machine and are not uploaded. Leave it off while a voice app is sharing the screen: the screenshot half can hit the KWin cursor crash |
 | `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`). Must be absolute. The systemd unit can write this path, the config dir, and the session runtime dir; a custom directory gets a drop-in at install (see below) |
-| `auto_detect.*` | Poll-based match start/end detection (interval, cooldown) |
+| `auto_detect.*` | Poll-based match start/end detection (interval, cooldown). `poll_interval_secs` is whole seconds; 4 means automatic (1.5 s with the new reader, 4 s otherwise). `poll_interval_ms`, when set, overrides that (500 to 10000). It is not written unless you set it |
+| `screencast_max_fps` | Screen-stream cap, 1 to 5 frames per second. Missing means 2. Sets the PipeWire max-framerate and the tracker's own throttle. Not written unless you set it |
 | `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
 | `debug_ocr` | Dump Tab OCR intermediates and poll Victory/Defeat evidence frames (confirm + first streak, not every tick) under `{data_dir}/debug/` (also env `STAT_TRACKER_DEBUG_OCR=1`). It also turns on `debug/accepted/` (the last 60 accepted scoreboard crops) and `debug/rejected/` (the last 30 rejected frames). Those images are not blanked and show other players' names, so they are off by default. Settings toggle: Save debug images from each capture. With it off, an existing folder is left as it is and the daemon logs once at start that it is no longer written. `debug/mapcrops/` and `debug/mapmiss/` hold only the map-name box and stay on |
 | `finished_game_close_secs` | Quiet time after the last activity before a finished game is closed and uploaded. Activity is a stored capture, a recorded outcome, an accolade map, or the session open. Never shorter than the 75-second grace. Default 180. Config-file only (no Settings control) |
@@ -205,6 +208,79 @@ ocr_threads = 1
 ```
 
 The daemon reads config once at startup. Restart it after changes.
+Changing `capture_route` or `capture_output` in Settings restarts a running
+tracker for you.
+
+### Screen capture route
+
+On KDE and GNOME Wayland the tracker opens one screen-share (PipeWire) and
+hides the cursor, instead of taking a new screenshot for every frame. You
+are asked to allow that share once. The permission is remembered in
+`screencast-restore-token` inside the data directory, so it is not asked
+again after a reboot. The compositor is offered a variable framerate with
+a cap of `screencast_max_fps` frames per second (2 when that key is unset).
+A frame is copied only when the tracker needs one. A later poll that sees
+no new buffer does not count as a read, so a reused picture cannot confirm
+Victory or Defeat by itself. The share closes when Overwatch quits, once
+the permission has been saved, and the next game opens it again with that
+permission. If the permission was not saved, the share stays up so quitting
+the game does not ask again. If you cancel or close the share prompt, the
+tracker does not ask again until Overwatch is started again. On KDE, and
+GNOME on the automatic stream, it takes no captures and does not fall back
+to screenshots. Where a screenshot is already safe, including GNOME when
+the stream was forced, screenshots continue. One log line and the app
+status say why. The saved permission is kept. Other desktops (niri, Sway,
+Hyprland, X11) keep their direct capture unless you force the stream.
+
+If the share cannot start, the tracker logs a warning. On niri, wlroots,
+and GNOME when the stream was forced, that grab uses Older screenshot. On
+KDE, and GNOME on the automatic stream, it skips the screenshot, including
+while backing off or after the stream dies. A failed start is not retried
+for 30 seconds. If the portal is down, or its cursor-mode property cannot
+be read, the log says the portal is unavailable and the saved permission
+is kept. The next try after that backoff opens the share again. A share
+that never starts streaming is closed and then waits out that same
+backoff. Silence while the stream is still running does not reopen it,
+and a poll that sees no new buffer does not count. The stream is reopened
+when PipeWire reports an error, when it stays unconnected after it had
+been streaming, when a pause lasts 2 seconds, when the portal session
+closes, or when the connection faults. Two Tab waits that get no PipeWire
+buffer do the same. The reopen runs on the next poll, once per game, and
+at least 5 minutes after the last reopen. A new game clears the miss
+streak and the once-per-game cap. It does not clear the 5 minute clock.
+Without a saved permission the stream stays up and one warning is logged.
+A permission dialog that times out is a No until the next Overwatch
+launch only when no restore token was sent. A timeout after a token was
+sent waits 30 seconds and asks again. Stopping the tracker cancels the
+dialog. On KDE, and GNOME on the automatic stream, a Tab that sees no
+frame after the key press does not fall back to Older screenshot. A Tab
+on a direct capture or the screenshot portal still waits 400 ms for the
+overlay. On the stream it waits for a buffer at least 300 ms after the
+key, and gives up 1200 ms after the key. A buffer from those first 300 ms
+does not finish the wait. A poll waits one frame period plus 100 ms before
+it reuses the previous frame (600 ms at 2 fps).
+
+`STAT_TRACKER_CAPTURE`, when set and not empty, wins over `capture_route`.
+For the systemd service, put it in `~/.config/environment.d/` (for example
+`scuffed-capture.conf`), then log out and back in. Do not put it in
+`session.env`: that file is rewritten every time the service starts.
+
+| Value | Route |
+|---|---|
+| `portal` or `screencast` | Screen stream, cursor hidden, with the automatic fallback above |
+| `portal-screenshot` | Older screenshot portal |
+| `wayshot` or `wayland` | Direct Wayland capture |
+| `x11` | X11 |
+
+Settings has the same choice: Automatic, Screen stream, Older screenshot.
+When the environment variable is set, Settings says so and names the file
+to edit. The startup log says which source won (`environment`, `settings`,
+or `automatic`), the desktop, and the portal backend that answered.
+
+`STAT_TRACKER_DEBUG_PORTAL_FRAMES=1` or `debug_portal_frames = true` saves
+up to four Tab pairs in `{data_dir}/debug/portal-compare/` so the two
+portal images can be compared. Nothing there is uploaded. Turn it off
+before playing while a voice app is sharing your screen.
 
 ### OCR CPU use (`OMP_THREAD_LIMIT`)
 

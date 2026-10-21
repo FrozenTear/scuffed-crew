@@ -35,9 +35,10 @@ pub async fn list_outputs(backend: CaptureBackend) -> Vec<String> {
 pub async fn capture_now(
     backend: CaptureBackend,
     output: Option<String>,
+    data_dir: std::path::PathBuf,
 ) -> Result<PreviewShot, String> {
     let backend = backend_ready(Some(backend))?;
-    let img = capture::capture_screen_output(&backend, output.as_deref())
+    let img = capture::capture_screen_oneshot(&backend, output.as_deref(), &data_dir)
         .await
         .map_err(|e| format!("Capture failed: {e}"))?;
     let (width, height, rgba) = tokio::task::spawn_blocking(move || thumbnail_rgba(&img))

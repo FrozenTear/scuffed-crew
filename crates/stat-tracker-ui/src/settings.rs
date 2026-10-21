@@ -1,8 +1,8 @@
 //! Settings form + screen. Writes today's `Config` fields via `Config::save`.
 //!
 //! Layout: masonry in 1–4 columns by width (Maps density tokens, G4),
-//! Stored data spanning the pane, Save as a full-width footer strip. Does
-//! not invent daemon config keys.
+//! Stored data spanning the pane, Save as a full-width footer strip.
+//! `capture_route` chooses the screen stream or the older screenshot portal.
 //! `data_dir`, `ocr_threads`, and `finished_game_close_secs` are preserved
 //! from the loaded file. The extra number reader writes `shadow_recognizer`.
 //! The new reader switch writes `reader`. The classic OCR switch writes `ocr`.
@@ -14,7 +14,7 @@ use iced::widget::{
 };
 use iced::{Alignment, Element, Fill, Length, Padding};
 use stat_tracker::config::{
-    AutoDetectConfig, Config, OcrSetting, ShadowRecognizerControl, SyncConfig,
+    AutoDetectConfig, CaptureRoute, Config, OcrSetting, ShadowRecognizerControl, SyncConfig,
 };
 use stat_tracker::ocr_switch::{
     self, Audience, PackReadiness, Read as OcrRead, Status as OcrSwitchStatus,
@@ -205,6 +205,9 @@ pub struct OcrSwitchView {
     /// ([`daemon_runs_ocr_off`]). The card hides what only classic OCR uses
     /// when this is true, not when the box is merely unticked.
     pub daemon_off: bool,
+    /// Why captures are stopped after a declined screen share. Shown in
+    /// Tracker health, not mixed into the OCR notice.
+    pub share_notice: Option<String>,
 }
 
 /// A click on the classic OCR switch. Turning it on always works. Turning
@@ -287,6 +290,20 @@ pub(crate) fn daemon_health_notice(
     daemon_pid: Option<u32>,
 ) -> Option<String> {
     live_status(status, daemon_pid)?.health_notice()
+}
+
+/// The running tracker's declined-share sentence, for Tracker health.
+/// Empty, or a status file from another run, is nothing to show.
+pub(crate) fn daemon_share_notice(
+    status: Option<&OcrSwitchStatus>,
+    daemon_pid: Option<u32>,
+) -> Option<String> {
+    let notice = live_status(status, daemon_pid)?.share_notice.trim();
+    if notice.is_empty() {
+        None
+    } else {
+        Some(notice.to_string())
+    }
 }
 
 /// The lines under the classic OCR switch that depend on the tracker
@@ -373,6 +390,8 @@ pub(crate) const PRERELEASE_UPDATES_APPLIES: &str =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsForm {
     pub capture_output: String,
+    /// `capture_route`. Automatic, the screen stream, or the older screenshot.
+    pub capture_route: CaptureRoute,
     pub player_name: String,
     pub session_window_secs: String,
     pub game_process_names: String,
@@ -419,6 +438,7 @@ impl SettingsForm {
     pub fn from_config_and_shadow(config: &Config, shadow: ShadowRecognizerControl) -> Self {
         Self {
             capture_output: config.capture_output.clone().unwrap_or_default(),
+            capture_route: config.capture_route,
             player_name: config.player_name.clone().unwrap_or_default(),
             session_window_secs: config.session_window_secs.to_string(),
             game_process_names: config.game_process_names.join(", "),
@@ -517,7 +537,8 @@ impl SettingsForm {
     }
 
     /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, the report kit caps,
-    /// `finished_game_close_secs`, `setup_completed`, `reader_pack_url`, and
+    /// `finished_game_close_secs`, `setup_completed`, `reader_pack_url`,
+    /// `debug_portal_frames`, and
     /// `name_reader` (Settings has no control for it yet).
     /// `shadow_recognizer` comes from the form's persisted reader (the file
     /// value). An env lock never writes true by itself. `update_channel`
@@ -527,6 +548,9 @@ impl SettingsForm {
         Config {
             data_dir: base.data_dir.clone(),
             capture_output: nonempty(&self.capture_output),
+            capture_route: self.capture_route,
+            debug_portal_frames: base.debug_portal_frames,
+            screencast_max_fps: base.screencast_max_fps,
             player_name: nonempty(&self.player_name),
             sync: sync_from_fields(&self.sync_url, &self.sync_token),
             auto_detect: AutoDetectConfig {
@@ -541,6 +565,7 @@ impl SettingsForm {
                         .auto_detect
                         .poll_interval_secs
                         .filter(|&s| s == stat_tracker::config::LEGACY_DEFAULT_POLL_SECS)),
+                poll_interval_ms: base.auto_detect.poll_interval_ms,
                 cooldown_secs: parse_u64(&self.cooldown_secs, 120),
             },
             session_window_secs: parse_u64(&self.session_window_secs, 1800),
@@ -946,6 +971,26 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 }
 
 fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let route = app.settings.capture_route;
+    let route_chips = row![
+        output_chip(
+            "Automatic",
+            route == CaptureRoute::Auto,
+            Message::SelectCaptureRoute(CaptureRoute::Auto),
+        ),
+        output_chip(
+            "Screen stream",
+            route == CaptureRoute::Screencast,
+            Message::SelectCaptureRoute(CaptureRoute::Screencast),
+        ),
+        output_chip(
+            "Older screenshot",
+            route == CaptureRoute::Screenshot,
+            Message::SelectCaptureRoute(CaptureRoute::Screenshot),
+        ),
+    ]
+    .spacing(8);
+
     let mut chips = row![output_chip(
         "Auto (first monitor)",
         app.settings.capture_output.is_empty(),
@@ -976,15 +1021,36 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         "Capture now"
     };
 
+    let env_note = Config::capture_env_note(
+        std::env::var(stat_tracker::config::CAPTURE_ENV)
+            .ok()
+            .as_deref(),
+        &stat_tracker::config::environment_d_capture_files(),
+    );
     let mut body = column![
+        field_caption("Capture method"),
+        route_chips.wrap(),
+        text("Automatic uses the screen stream on KDE and GNOME, and direct capture on other desktops. Screen stream forces that stream. Older screenshot is the previous portal.")
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(TEXT_3),
         field_caption("Monitor"),
         chips.wrap(),
-        text(format!("Capture method: {backend}"))
+        text(format!("Detected: {backend}"))
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
     ]
     .spacing(6);
+
+    if let Some(note) = env_note {
+        body = body.push(
+            text(note)
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(theme::DANGER),
+        );
+    }
 
     if !demo {
         let mut btn = button(
@@ -1679,6 +1745,7 @@ mod tests {
     fn empty_optional_fields_become_none() {
         let form = SettingsForm {
             capture_output: "  ".into(),
+            capture_route: CaptureRoute::Auto,
             player_name: String::new(),
             session_window_secs: "1800".into(),
             game_process_names: String::new(),
@@ -1777,8 +1844,10 @@ mod tests {
         base.auto_detect = AutoDetectConfig {
             enabled: false,
             poll_interval_secs: Some(8),
+            poll_interval_ms: Some(750),
             cooldown_secs: 60,
         };
+        base.screencast_max_fps = Some(4);
         base.session_window_secs = 900;
         base.finished_game_close_secs = 240;
         base.game_process_names = vec!["Overwatch.exe".into()];
@@ -1797,6 +1866,8 @@ mod tests {
             Some("https://crew.example")
         );
         assert_eq!(out.auto_detect.poll_interval_secs, Some(8));
+        assert_eq!(out.auto_detect.poll_interval_ms, Some(750));
+        assert_eq!(out.screencast_max_fps, Some(4));
         assert_eq!(out.session_window_secs, 900);
         assert_eq!(out.finished_game_close_secs, 240);
         assert_eq!(out.game_process_names, vec!["Overwatch.exe"]);
@@ -2989,6 +3060,8 @@ token = \"not-a-real-token\"
             blocked_total: 0,
             blocked: Vec::new(),
             leptess_created: 0,
+            share_open: false,
+            share_notice: String::new(),
         }
     }
 
@@ -3015,6 +3088,25 @@ token = \"not-a-real-token\"
         // off with every pack: nothing to show
         let fine = switch_status(41, None, ALL_PACKS);
         assert_eq!(daemon_ocr_notice(Some(&fine), Some(41)), None);
+    }
+
+    #[test]
+    fn a_declined_share_is_shown_for_the_running_tracker() {
+        let mut status = switch_status(41, None, ALL_PACKS);
+        status.share_notice =
+            "Screen share was declined: no captures until Overwatch is restarted".into();
+        assert_eq!(
+            daemon_share_notice(Some(&status), Some(41)).as_deref(),
+            Some(status.share_notice.as_str())
+        );
+        assert_eq!(daemon_share_notice(Some(&status), Some(42)), None);
+        assert_eq!(daemon_share_notice(Some(&status), None), None);
+        assert_ne!(
+            daemon_health_notice(Some(&status), Some(41)).as_deref(),
+            Some(status.share_notice.as_str())
+        );
+        status.share_notice.clear();
+        assert_eq!(daemon_share_notice(Some(&status), Some(41)), None);
     }
 
     /// Tracker health takes a hold, not a refusal: a tracker that refused

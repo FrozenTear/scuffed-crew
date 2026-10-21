@@ -398,6 +398,7 @@ dependencies = [
  "futures-util",
  "getrandom 0.4.1",
  "serde",
+ "serde_repr",
  "tokio",
  "zbus",
 ]
@@ -10974,17 +10975,20 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.5.0-rc.4"
+version = "0.5.0-rc.5"
 dependencies = [
  "ab_glyph",
  "anyhow",
  "ashpd",
  "chrono",
  "dirs",
+ "enumflags2",
  "evdev",
+ "futures-util",
  "image",
  "leptess",
  "libc",
+ "libloading 0.8.9",
  "libwayshot",
  "rayon",
  "regex",

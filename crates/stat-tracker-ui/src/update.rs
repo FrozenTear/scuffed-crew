@@ -804,9 +804,7 @@ impl UpdateIo for LiveUpdateIo {
 /// for [`GAME_FILE_STALE`] is left over (a crash or a game the tracker gave
 /// up on) and does not count.
 pub fn game_in_progress(data_dir: &Path) -> bool {
-    std::fs::metadata(data_dir.join("active_game.json"))
-        .and_then(|m| m.modified())
-        .is_ok_and(|t| t.elapsed().map_or(true, |age| age < GAME_FILE_STALE))
+    stat_tracker::replace::game_file_in_progress(data_dir)
 }
 
 /// An `active_game.json` older than this is not a game in progress.

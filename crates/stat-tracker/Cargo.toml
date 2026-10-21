@@ -1,7 +1,7 @@
 [package]
 license.workspace = true
 name = "scuffed-stat-tracker"
-version = "0.5.0-rc.4"
+version = "0.5.0-rc.5"
 edition = "2024"
 default-run = "scuffed-stat-tracker"
 
@@ -30,7 +30,12 @@ libwayshot = "0.7"
 # Task 0 decision (fleet::x11-capture): pure-Rust X11; randr + image helpers.
 # No shm. Closure evidence: no new native libs vs baseline.
 x11rb = { version = "0.14", features = ["randr", "image"] }
-ashpd = { version = "0.13", features = ["screenshot"] }
+ashpd = { version = "0.13", features = ["screenshot", "screencast"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+# PipeWire is dlopen'd (libpipewire-0.3.so.0). Do not link it: the stat
+# tracker CI image has no libpipewire-dev.
+libloading = "0.8"
+enumflags2 = "0.7"
 leptess = "0.14"
 evdev = { version = "0.13", features = ["tokio"] }
 surrealdb = { version = "3", features = ["kv-surrealkv"] }

@@ -262,7 +262,20 @@ fn measure_header(
         .filter(|&(st, en)| (en - st) as f64 >= 850.0 * s)
         .collect();
     if (clean.len() as f64) < 8.0 * s {
-        return Err(Fail::new("header strip not found"));
+        let longest = light[..first]
+            .iter()
+            .map(|row| {
+                let (start, end) = longest_run(&close_gaps(row, speck));
+                end.saturating_sub(start)
+            })
+            .max()
+            .unwrap_or(0);
+        let wide = (850.0 * s).ceil() as usize;
+        return Err(Fail::new(format!(
+            "header strip not found: {} rows at least {wide}px wide, need {:.0}, longest run {longest}px",
+            clean.len(),
+            8.0 * s
+        )));
     }
     let mut sts: Vec<usize> = clean.iter().map(|c| c.0).collect();
     let mut ens: Vec<usize> = clean.iter().map(|c| c.1).collect();

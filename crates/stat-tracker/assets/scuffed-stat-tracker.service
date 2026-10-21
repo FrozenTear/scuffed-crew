@@ -30,7 +30,20 @@ EnvironmentFile=-%h/.config/scuffed-stat-tracker/session.env
 # the binary loads, so it has to be set here and not by the daemon. To
 # use another value, set it in a drop-in (systemctl --user edit).
 Environment=OMP_THREAD_LIMIT=1
+# Exit 75 means the binary on disk was replaced. SuccessExitStatus=75
+# treats it as success, and RestartForceExitStatus=75 starts the new
+# ExecStart. A clean stop exits 0 and stays stopped.
+# A service start may replace a tracker the app started from the same
+# binary. A manual second start does not set this, so it still refuses
+# to run beside the live daemon. --vacuum never signals that daemon.
+Environment=STAT_TRACKER_REPLACE_STRAY=1
+# Set only by this unit. The app must not inherit it, or an app-started
+# tracker would exit 75 and nothing would start it again.
+Environment=STAT_TRACKER_SYSTEMD=1
 Restart=on-failure
+# 75 is the replaced-binary exit. It still restarts, and it is not a failure.
+RestartForceExitStatus=75
+SuccessExitStatus=75
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
