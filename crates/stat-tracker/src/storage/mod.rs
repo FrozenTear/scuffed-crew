@@ -660,8 +660,39 @@ impl LocalStore {
         {
             match_data.name_recognizer = Some(kept);
         }
-        let _: Option<PersonalMatch> = self.db.create("personal_match").content(match_data).await?;
+        let created: Option<PersonalMatch> =
+            self.db.create("personal_match").content(match_data).await?;
+        self.drop_if_deleted_meanwhile(created).await?;
         tracing::debug!("match inserted into local store");
+        Ok(())
+    }
+
+    /// The `deleted_here` check in [`Self::insert_match`] runs before an
+    /// await. A delete that marks and commits during that await would miss
+    /// the row created after it, and the game would come back. Re-check
+    /// after the write and remove just that row.
+    async fn drop_if_deleted_meanwhile(
+        &self,
+        created: Option<PersonalMatch>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let Some(row) = created else {
+            return Ok(());
+        };
+        if row.session_id.is_empty() || !self.deleted_here(&row.session_id) {
+            return Ok(());
+        }
+        if let Some(id) = row.id {
+            self.db
+                .query("DELETE $rid")
+                .bind(("rid", id))
+                .await?
+                .check()?;
+        }
+        rewrite_match_log_session(&self.data_dir, &row.session_id, None);
+        tracing::info!(
+            session_id = %row.session_id,
+            "row for a game deleted during the write removed"
+        );
         Ok(())
     }
 
@@ -2886,6 +2917,76 @@ mod tests {
             "the local rows stay when the tombstone could not be written"
         );
         assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    }
+
+    /// A delete whose checked transaction fails must clear its in-process
+    /// mark. Otherwise every later row of that game would be dropped for the
+    /// rest of the process.
+    #[tokio::test]
+    async fn a_failed_checked_delete_does_not_block_later_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store.insert_match(snap("s1", 1)).await.unwrap();
+        store
+            .db
+            .query("DEFINE FIELD OVERWRITE session_id ON deleted_session ASSERT $value != 's1'")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert!(store.delete_session("s1").await.is_err());
+        assert_eq!(store.match_count().await.unwrap(), 1);
+        store.insert_match(snap("s1", 2)).await.unwrap();
+        assert_eq!(
+            store.get_session_snapshots("s1").await.unwrap().len(),
+            2,
+            "a later row of the game is still stored"
+        );
+    }
+
+    /// A committed transactional delete still blocks a late capture.
+    #[tokio::test]
+    async fn a_checked_delete_still_blocks_a_late_capture() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store.insert_match(snap("s1", 1)).await.unwrap();
+        store.delete_session("s1").await.unwrap();
+        let late = snap("s1", 2);
+        append_match_log(dir.path(), &late);
+        store.insert_match(late).await.unwrap();
+        assert!(store.get_session_snapshots("s1").await.unwrap().is_empty());
+        assert!(read_match_log(dir.path()).is_empty());
+    }
+
+    /// A row written after its game was marked deleted (the delete landed
+    /// during insert_match's await) is removed again; other games' rows are
+    /// untouched.
+    #[tokio::test]
+    async fn a_row_written_while_its_game_was_deleted_is_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        store.insert_match(snap("keep", 1)).await.unwrap();
+        let created: Option<PersonalMatch> = store
+            .db
+            .create("personal_match")
+            .content(snap("raced", 1))
+            .await
+            .unwrap();
+        // The delete marked the session after insert_match's first check.
+        store
+            .deleted_here
+            .lock()
+            .unwrap()
+            .insert("raced".to_string());
+        store.drop_if_deleted_meanwhile(created).await.unwrap();
+        assert!(
+            store
+                .get_session_snapshots("raced")
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(store.get_session_snapshots("keep").await.unwrap().len(), 1);
     }
 
     /// DATA-4: tombstones queued for sessions that turn local-only are
