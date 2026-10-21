@@ -1839,12 +1839,18 @@ async fn retire_active_game(
     seal: Option<detect::MatchOutcome>,
     reason: &str,
 ) {
-    retire_after_pause(st, store, data_dir, seal, reason, std::future::ready(())).await;
+    // The game leaves memory in `begin_retire`, before these store calls
+    // return. Dropping this future cancels the best-guess and the sealed
+    // outcome, and close_session_on_shutdown then has nothing left to save.
+    let Some((g, had_outcome)) = begin_retire(st, data_dir, seal, reason) else {
+        return;
+    };
+    commit_retired_game(st, store, data_dir, g, had_outcome, reason).await;
 }
 
-/// Same close as [`retire_active_game`]. `pause` runs after the game has
-/// left memory and before the best-guess or sealed outcome is stored, so a
-/// test can signal shutdown in that window. Production passes a ready future.
+/// Test-only pause after the game has left memory and before the store
+/// writes. Release builds do not have this hook.
+#[cfg(test)]
 async fn retire_after_pause<P>(
     st: &mut SessionState,
     store: &storage::LocalStore,
@@ -1855,13 +1861,24 @@ async fn retire_after_pause<P>(
 ) where
     P: std::future::Future<Output = ()>,
 {
+    let Some((g, had_outcome)) = begin_retire(st, data_dir, seal, reason) else {
+        return;
+    };
+    pause.await;
+    commit_retired_game(st, store, data_dir, g, had_outcome, reason).await;
+}
+
+fn begin_retire(
+    st: &mut SessionState,
+    data_dir: &std::path::Path,
+    seal: Option<detect::MatchOutcome>,
+    reason: &str,
+) -> Option<(ActiveGame, bool)> {
     // The rank-screen log must not hide the next game's same result. Clear
     // it before the early return: a Tab-opened game can close while the
     // rank screen is up even when no game is active.
     stat_tracker::detect::match_end::clear_rank_result_log();
-    let Some(mut g) = st.active_game.take() else {
-        return;
-    };
+    let mut g = st.active_game.take()?;
     // The game is over: its unblanked portrait cells leave memory and a
     // below-floor column calibration must not stick into the next game.
     stat_tracker::ocr::clear_below_floor_column_cache();
@@ -1880,10 +1897,17 @@ async fn retire_after_pause<P>(
             );
         }
     }
-    // The game is already out of state. A shutdown that drops this future
-    // here cancels the best-guess and the sealed outcome, and
-    // close_session_on_shutdown then has nothing left to save.
-    pause.await;
+    Some((g, had_outcome))
+}
+
+async fn commit_retired_game(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    mut g: ActiveGame,
+    had_outcome: bool,
+    reason: &str,
+) {
     store_best_guess_on_close(store, data_dir, &mut g).await;
     if g.session_created && g.finished() && !had_outcome {
         if let Err(e) = store
@@ -6945,44 +6969,18 @@ async fn grab_tab_attempt(
         return capture::with_tab_press(capture::tab_attempt_press(now, attempt, now), grab).await;
     }
     // The first attempt keeps the original key. While the share is still
-    // opening it waits for the open to finish, up to the 5 second portal
-    // bound, not the 1200 ms frame budget. If that open uses up the frame
-    // budget, the grab runs again from now.
+    // opening it waits up to 5 seconds for a fresh frame, not the 1200 ms
+    // frame budget. If that open uses up the frame budget, the grab runs
+    // again from now.
     let press = capture::tab_press().unwrap_or_else(std::time::Instant::now);
-    let mut waited_for_open = false;
-    loop {
-        match capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab).await {
-            Err(err) if capture::is_share_opening(&err.to_string()) => {
-                waited_for_open = true;
-                match capture::first_tab_while_opening(
-                    press.elapsed(),
-                    capture::FIRST_TAB_OPEN_WAIT,
-                ) {
-                    capture::OpeningTab::Wait => {
-                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                    }
-                    capture::OpeningTab::Miss => return Err(capture::STREAM_MISS.into()),
-                }
-            }
-            Err(err)
-                if capture::is_stream_miss(&err.to_string())
-                    && capture::tab_press_after_late_open(
-                        press,
-                        std::time::Instant::now(),
-                        std::time::Duration::from_millis(capture::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS),
-                        waited_for_open,
-                    ) != press =>
-            {
-                let now = std::time::Instant::now();
-                return capture::with_tab_press(
-                    now,
-                    capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab),
-                )
-                .await;
-            }
-            other => return other,
-        }
-    }
+    capture::first_tab_grab(
+        press,
+        || press.elapsed(),
+        std::time::Instant::now,
+        || capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab),
+        || tokio::time::sleep(std::time::Duration::from_millis(50)),
+    )
+    .await
 }
 
 async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Result<CaptureReport> {

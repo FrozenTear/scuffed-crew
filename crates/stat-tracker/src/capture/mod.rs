@@ -72,16 +72,16 @@ pub fn tab_attempt_press(
     if attempt == 0 { original } else { now }
 }
 
-/// How long the first Tab keeps waiting while the share is still opening.
-/// This is the portal open bound. The frame budget stays 1200 ms.
+/// How long the first Tab waits for a fresh frame from a share that is
+/// still opening. The frame budget stays 1200 ms.
 pub const FIRST_TAB_OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// What the first Tab does while the share is still opening.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpeningTab {
-    /// The open bound has not passed.
+    /// The wait for a fresh frame has not passed.
     Wait,
-    /// The open bound passed. The attempt is a stream miss, so retries run.
+    /// The wait passed. The attempt is a stream miss, so retries run.
     Miss,
 }
 
@@ -93,54 +93,6 @@ pub fn first_tab_while_opening(
         OpeningTab::Wait
     } else {
         OpeningTab::Miss
-    }
-}
-
-/// Result of walking a share open one step at a time, the same decisions
-/// the first Tab makes. No sleep.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SimulatedFirstTab {
-    /// The share finished opening. `fresh_press` means the 1200 ms frame
-    /// budget was already used, so the grab runs again from that moment.
-    Ready { fresh_press: bool },
-    /// The portal open bound passed while the share was still opening.
-    Miss,
-}
-
-/// `open_after` is when the share stops reporting that it is opening.
-/// `step` is the gap between those looks (the live loop sleeps 50 ms).
-pub fn simulate_first_tab_open(
-    open_after: std::time::Duration,
-    bound: std::time::Duration,
-    frame_budget: std::time::Duration,
-    step: std::time::Duration,
-) -> SimulatedFirstTab {
-    if step.is_zero() {
-        return SimulatedFirstTab::Miss;
-    }
-    let origin = std::time::Instant::now();
-    let mut elapsed = std::time::Duration::ZERO;
-    let mut waited_for_open = false;
-    loop {
-        if elapsed < open_after {
-            waited_for_open = true;
-            match first_tab_while_opening(elapsed, bound) {
-                OpeningTab::Wait => {
-                    let next = elapsed.saturating_add(step);
-                    if next == elapsed {
-                        return SimulatedFirstTab::Miss;
-                    }
-                    elapsed = next;
-                }
-                OpeningTab::Miss => return SimulatedFirstTab::Miss,
-            }
-        } else {
-            let press =
-                tab_press_after_late_open(origin, origin + elapsed, frame_budget, waited_for_open);
-            return SimulatedFirstTab::Ready {
-                fresh_press: press != origin,
-            };
-        }
     }
 }
 
@@ -156,6 +108,51 @@ pub fn tab_press_after_late_open(
         now
     } else {
         original
+    }
+}
+
+/// The first Tab's wait while a share is still opening.
+///
+/// `elapsed` is how long `press` has been held. `now` is read when a grab
+/// misses, and again for the fresh press if that miss is past the frame
+/// budget. `grab` is the frame source. `pause` is the gap between looks
+/// (the daemon sleeps 50 ms). The daemon's first Tab calls this.
+pub async fn first_tab_grab<G, GF, P, PF>(
+    press: std::time::Instant,
+    mut elapsed: impl FnMut() -> std::time::Duration,
+    mut now: impl FnMut() -> std::time::Instant,
+    mut grab: G,
+    mut pause: P,
+) -> Result<CapturedFrame, Box<dyn std::error::Error + Send + Sync>>
+where
+    G: FnMut() -> GF,
+    GF: std::future::Future<
+            Output = Result<CapturedFrame, Box<dyn std::error::Error + Send + Sync>>,
+        > + Send,
+    P: FnMut() -> PF,
+    PF: std::future::Future<Output = ()> + Send,
+{
+    let frame_budget = std::time::Duration::from_millis(TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
+    let mut waited_for_open = false;
+    loop {
+        match grab().await {
+            Err(err) if is_share_opening(&err.to_string()) => {
+                waited_for_open = true;
+                match first_tab_while_opening(elapsed(), FIRST_TAB_OPEN_WAIT) {
+                    OpeningTab::Wait => pause().await,
+                    OpeningTab::Miss => return Err(STREAM_MISS.into()),
+                }
+            }
+            Err(err)
+                if is_stream_miss(&err.to_string())
+                    && tab_press_after_late_open(press, now(), frame_budget, waited_for_open)
+                        != press =>
+            {
+                let fresh = now();
+                return with_tab_press(fresh, grab()).await;
+            }
+            other => return other,
+        }
     }
 }
 
@@ -703,33 +700,102 @@ mod tests {
         ));
     }
 
-    /// QA measured the share taking 3.4 to 3.9 seconds. A 4 second open
-    /// stays inside the 5 second portal bound, then the grab runs again
-    /// because the 1200 ms frame budget is already gone. An open that is
-    /// still going at that bound is a miss.
-    #[test]
-    fn a_four_second_share_open_keeps_the_first_tab() {
+    /// QA measured the share taking 3.4 to 3.9 seconds. This drives
+    /// [`first_tab_grab`], the same loop the daemon uses. The clock and the
+    /// frame source are injected, so the 4 seconds are not a real sleep.
+    /// A 4 second open still gets a frame, and the re-grab uses a fresh
+    /// press because the 1200 ms frame budget is already gone. An open that
+    /// is still going at 5 seconds is a miss.
+    #[tokio::test]
+    async fn a_four_second_share_open_keeps_the_first_tab() {
         assert_eq!(FIRST_TAB_OPEN_WAIT, std::time::Duration::from_secs(5));
-        let step = std::time::Duration::from_millis(50);
-        let budget = std::time::Duration::from_millis(TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
-        assert_eq!(
-            simulate_first_tab_open(
-                std::time::Duration::from_secs(4),
-                FIRST_TAB_OPEN_WAIT,
-                budget,
-                step
-            ),
-            SimulatedFirstTab::Ready { fresh_press: true }
-        );
-        assert_eq!(
-            simulate_first_tab_open(
-                std::time::Duration::from_secs(6),
-                FIRST_TAB_OPEN_WAIT,
-                budget,
-                step
-            ),
-            SimulatedFirstTab::Miss
-        );
+        let opened = script_opening_share(std::time::Duration::from_secs(4)).await;
+        assert!(opened.started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(opened.frame.is_new);
+        assert!(opened.fresh_press);
+        assert_eq!(opened.elapsed, std::time::Duration::from_secs(4));
+
+        let still = script_opening_share(std::time::Duration::from_secs(6)).await;
+        assert!(still.started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(is_stream_miss(&still.miss));
+        assert!(!still.fresh_press);
+        assert_eq!(still.elapsed, FIRST_TAB_OPEN_WAIT);
+    }
+
+    struct ScriptedOpen {
+        started: std::time::Instant,
+        elapsed: std::time::Duration,
+        fresh_press: bool,
+        frame: CapturedFrame,
+        miss: String,
+    }
+
+    async fn script_opening_share(open_for: std::time::Duration) -> ScriptedOpen {
+        let started = std::time::Instant::now();
+        let origin = std::time::Instant::now();
+        let at = std::sync::atomic::AtomicU64::new(0);
+        let after_open = std::sync::atomic::AtomicU8::new(0);
+        let fresh_press = std::sync::atomic::AtomicBool::new(false);
+        let step_ms = 50u64;
+        let open_ms = u64::try_from(open_for.as_millis()).unwrap_or(u64::MAX);
+        let result = first_tab_grab(
+            origin,
+            || std::time::Duration::from_millis(at.load(std::sync::atomic::Ordering::Relaxed)),
+            || {
+                origin
+                    + std::time::Duration::from_millis(
+                        at.load(std::sync::atomic::Ordering::Relaxed),
+                    )
+            },
+            || async {
+                let elapsed_ms = at.load(std::sync::atomic::Ordering::Relaxed);
+                if elapsed_ms < open_ms {
+                    return Err(super::screencast::OPEN_IN_PROGRESS.into());
+                }
+                let n = after_open.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n == 0 {
+                    return Err(STREAM_MISS.into());
+                }
+                fresh_press.store(
+                    tab_press().is_some_and(|press| press != origin),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                Ok(CapturedFrame {
+                    image: image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1)),
+                    seq: Some(1),
+                    stream: Some(1),
+                    is_new: true,
+                })
+            },
+            || async {
+                at.fetch_add(step_ms, std::sync::atomic::Ordering::Relaxed);
+            },
+        )
+        .await;
+        let elapsed =
+            std::time::Duration::from_millis(at.load(std::sync::atomic::Ordering::Relaxed));
+        let fresh_press = fresh_press.load(std::sync::atomic::Ordering::Relaxed);
+        match result {
+            Ok(frame) => ScriptedOpen {
+                started,
+                elapsed,
+                fresh_press,
+                frame,
+                miss: String::new(),
+            },
+            Err(err) => ScriptedOpen {
+                started,
+                elapsed,
+                fresh_press,
+                frame: CapturedFrame {
+                    image: image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1)),
+                    seq: None,
+                    stream: None,
+                    is_new: false,
+                },
+                miss: err.to_string(),
+            },
+        }
     }
 
     // Pure selection-policy tests (R1-6). No `std::env::set_var`, process-global
