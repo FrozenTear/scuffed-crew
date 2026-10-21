@@ -9293,6 +9293,32 @@ const SHUTDOWN_STAGES: [ShutdownStage; 5] = [
 /// A portal that does not answer gets this long. The upload keeps the rest.
 const SCREENCAST_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
+/// Deadline time the capture drain leaves for the session save. A capture
+/// stuck in OCR or a screenshot fallback is abandoned at that point, and the
+/// game is saved without its report.
+const SESSION_SAVE_RESERVE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Wait for the in-flight capture until only [`SESSION_SAVE_RESERVE`] of
+/// `left` remains. Returns false when the capture was abandoned; its task is
+/// detached, not aborted, so a store write it has started is not torn.
+async fn drain_capture_within(
+    task: Option<tokio::task::JoinHandle<()>>,
+    left: std::time::Duration,
+) -> bool {
+    let budget = left.saturating_sub(SESSION_SAVE_RESERVE);
+    if tokio::time::timeout(budget, drain_capture(task))
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    tracing::warn!(
+        budget_ms = budget.as_millis() as u64,
+        "in-flight capture abandoned at shutdown; saving the game without it"
+    );
+    false
+}
+
 /// The deadline log for a shutdown stopped at `SHUTDOWN_STAGES[at]`.
 fn shutdown_overrun_at(at: usize) -> String {
     let at = at.min(SHUTDOWN_STAGES.len() - 1);
@@ -9350,7 +9376,11 @@ async fn shutdown_from_signal(
                 at.store(i, std::sync::atomic::Ordering::Relaxed);
                 match stage {
                     ShutdownStage::CaptureDrain => {
-                        drain_capture(capture_task.take()).await;
+                        drain_capture_within(
+                            capture_task.take(),
+                            stat_tracker::replace::shutdown_time_left(),
+                        )
+                        .await;
                         apply_landed_capture_reports(st, capture_rx, store, data_dir).await;
                     }
                     ShutdownStage::SessionSave => {
@@ -21774,6 +21804,38 @@ mod tests {
         assert_eq!(g.map.as_deref(), Some("Busan"), "the report's map is saved");
         assert_eq!(g.gate.map(|gate| gate.accepted.elims), Some(7));
         assert_eq!(g.hero_auth.accepted_hero.as_deref(), Some("Ana"));
+    }
+
+    /// A capture that does not finish is abandoned before the deadline, and
+    /// the game is still saved.
+    #[tokio::test]
+    async fn a_stuck_capture_at_shutdown_does_not_cost_the_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Unknown, None, now);
+        g.session_id = "stuck-ocr".into();
+        g.map = Some("Busan".into());
+        let mut st = session(Some(g), now);
+        let stuck = tokio::spawn(std::future::pending::<()>());
+        let stopped = shutdown_from_signal(
+            &mut st,
+            &mut Some(stuck),
+            &mut tokio::sync::mpsc::unbounded_channel().1,
+            &mut None,
+            None,
+            &std::sync::Mutex::new(sync::SyncBackoff::default()),
+            &store,
+            dir.path(),
+        )
+        .await;
+        assert_eq!(stopped, None, "every stage after the drain finished");
+        let restored = startup_session(dir.path());
+        assert_eq!(
+            restored.active_game.map(|g| g.session_id),
+            Some("stuck-ocr".to_string()),
+            "the game was saved without the capture"
+        );
     }
 
     /// MAIN-3: the game is saved before the portal close and the upload,
