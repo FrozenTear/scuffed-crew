@@ -47,6 +47,16 @@ tokio::task_local! {
     static TAB_PRESS: std::time::Instant;
 }
 
+tokio::task_local! {
+    static SUPPRESS_STREAM_MISS_LOG: ();
+}
+
+/// True while the first Tab is discarding a miss from a press that the
+/// share open already pushed past the frame budget. That miss is not logged.
+pub(crate) fn stream_miss_log_suppressed() -> bool {
+    SUPPRESS_STREAM_MISS_LOG.try_with(|_| ()).is_ok()
+}
+
 /// The Tab key instant for the current capture task, when this is a Tab grab.
 pub fn tab_press() -> Option<std::time::Instant> {
     TAB_PRESS.try_with(|press| *press).ok()
@@ -81,7 +91,8 @@ pub const FIRST_TAB_OPEN_WAIT: std::time::Duration = std::time::Duration::from_s
 pub enum OpeningTab {
     /// The wait for a fresh frame has not passed.
     Wait,
-    /// The wait passed. The attempt is a stream miss, so retries run.
+    /// The wait passed. The attempt stays open-in-progress, so a later
+    /// retry can try again. It is not a missed frame.
     Miss,
 }
 
@@ -135,19 +146,24 @@ where
     let frame_budget = std::time::Duration::from_millis(TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
     let mut waited_for_open = false;
     loop {
-        match grab().await {
+        // A press the open already pushed past the frame budget would log a
+        // miss before this loop can start a fresh grab. Suppress that log.
+        let suppress =
+            waited_for_open && tab_press_after_late_open(press, now(), frame_budget, true) != press;
+        let grabbed = if suppress {
+            SUPPRESS_STREAM_MISS_LOG.scope((), grab()).await
+        } else {
+            grab().await
+        };
+        match grabbed {
             Err(err) if is_share_opening(&err.to_string()) => {
                 waited_for_open = true;
                 match first_tab_while_opening(elapsed(), FIRST_TAB_OPEN_WAIT) {
                     OpeningTab::Wait => pause().await,
-                    OpeningTab::Miss => return Err(STREAM_MISS.into()),
+                    OpeningTab::Miss => return Err(screencast::OPEN_IN_PROGRESS.into()),
                 }
             }
-            Err(err)
-                if is_stream_miss(&err.to_string())
-                    && tab_press_after_late_open(press, now(), frame_budget, waited_for_open)
-                        != press =>
-            {
+            Err(err) if suppress && is_stream_miss(&err.to_string()) => {
                 let fresh = now();
                 return with_tab_press(fresh, grab()).await;
             }
@@ -201,8 +217,8 @@ pub fn stream_was_forced() -> bool {
 }
 
 pub use screencast::{
-    STREAM_MISS, close_if_open, is_share_opening, is_stream_miss, note_game_running,
-    note_game_seen, session_is_open, share_close_due, should_close_share,
+    STREAM_MISS, close_if_open, is_declined_capture, is_share_opening, is_stream_miss,
+    note_game_running, note_game_seen, session_is_open, share_close_due, should_close_share,
 };
 
 pub use framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS;
@@ -557,7 +573,7 @@ pub async fn capture_screen_oneshot(
                     "Capture now skipped: the tracker is sharing the screen, and a screenshot beside it can crash KWin"
                 );
                 return Err(
-                    "The tracker is sharing the screen, so this screenshot was skipped. Stop the share first."
+                    "The tracker is sharing the screen, so this screenshot was skipped. Quit Overwatch, or stop the tracker, so the share closes, then try again."
                         .into(),
                 );
             }
@@ -704,8 +720,9 @@ mod tests {
     /// [`first_tab_grab`], the same loop the daemon uses. The clock and the
     /// frame source are injected, so the 4 seconds are not a real sleep.
     /// A 4 second open still gets a frame, and the re-grab uses a fresh
-    /// press because the 1200 ms frame budget is already gone. An open that
-    /// is still going at 5 seconds is a miss.
+    /// press because the 1200 ms frame budget is already gone. That stale
+    /// miss is not logged. An open that is still going at 5 seconds stays
+    /// open-in-progress, so a later retry can try again.
     #[tokio::test]
     async fn a_four_second_share_open_keeps_the_first_tab() {
         assert_eq!(FIRST_TAB_OPEN_WAIT, std::time::Duration::from_secs(5));
@@ -717,7 +734,11 @@ mod tests {
 
         let still = script_opening_share(std::time::Duration::from_secs(6)).await;
         assert!(still.started.elapsed() < std::time::Duration::from_secs(1));
-        assert!(is_stream_miss(&still.miss));
+        assert!(
+            is_share_opening(&still.miss),
+            "an open that is still going is retried, not a missed frame: {}",
+            still.miss
+        );
         assert!(!still.fresh_press);
         assert_eq!(still.elapsed, FIRST_TAB_OPEN_WAIT);
     }

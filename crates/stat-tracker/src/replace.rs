@@ -385,12 +385,14 @@ pub fn shutdown_budget(
     limit.saturating_sub(now.saturating_duration_since(started))
 }
 
-/// Remainder of the signal deadline. Zero when no signal has arrived, so a
-/// clean exit does not add another wait, and zero once the deadline has passed.
+/// Remainder of the signal deadline. When no signal has arrived the full
+/// deadline is left, so a self-restart after an update still finishes the
+/// upload, the snapshot export, and the share close. Zero once a signal's
+/// deadline has passed.
 pub fn shutdown_time_left() -> Duration {
     match *SHUTDOWN_AT.lock().unwrap_or_else(|err| err.into_inner()) {
         Some(started) => shutdown_budget(started, std::time::Instant::now(), SHUTDOWN_DEADLINE),
-        None => Duration::ZERO,
+        None => SHUTDOWN_DEADLINE,
     }
 }
 
@@ -443,14 +445,6 @@ pub fn shutdown_overrun_line(capture: bool, sync: bool, screencast: bool) -> Str
         parts.join(", ")
     };
     format!("shutdown deadline exceeded; exiting while still running: {what}")
-}
-
-/// A failed re-exec keeps this process. The systemd exit does not.
-pub fn keeps_running_after_restart(how: RestartHow, exec_failed: bool) -> bool {
-    match how {
-        RestartHow::SystemdExit => false,
-        RestartHow::Reexec => exec_failed,
-    }
 }
 
 /// Remove `daemon.pid` when it names this process. `process::exit` and
@@ -740,10 +734,12 @@ not a lock line
         };
         assert!(!same_exec_stamp(Some(&token), &newer));
         assert!(!under_systemd_env(None));
-        assert!(!keeps_running_after_restart(RestartHow::SystemdExit, true));
-        assert!(keeps_running_after_restart(RestartHow::Reexec, true));
-        assert!(!keeps_running_after_restart(RestartHow::Reexec, false));
         assert_eq!(SHUTDOWN_DEADLINE, Duration::from_secs(5));
+        assert!(
+            !shutdown_requested(),
+            "unit tests must not note a shutdown signal"
+        );
+        assert_eq!(shutdown_time_left(), SHUTDOWN_DEADLINE);
         let start = std::time::Instant::now();
         assert_eq!(
             shutdown_budget(start, start, SHUTDOWN_DEADLINE),

@@ -3094,7 +3094,7 @@ token = \"not-a-real-token\"
     fn a_declined_share_is_shown_for_the_running_tracker() {
         let mut status = switch_status(41, None, ALL_PACKS);
         status.share_notice =
-            "KDE screen share was declined: no captures until Overwatch is restarted".into();
+            "Screen share was declined: no captures until Overwatch is restarted".into();
         assert_eq!(
             daemon_share_notice(Some(&status), Some(41)).as_deref(),
             Some(status.share_notice.as_str())

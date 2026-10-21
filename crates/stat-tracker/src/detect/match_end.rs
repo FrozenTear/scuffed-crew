@@ -397,12 +397,19 @@ fn rank_log_test_guard() -> RankLogTestGuard {
 /// held in [`read_outcome_word`]) and no such line. Returns whether this
 /// call logged (tests).
 fn warn_result_word_ocr_fallback(screen: ResultScreen) -> bool {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     if crate::ocr::gate::is_off() {
         return false;
     }
     static WARNED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
-    let first = !WARNED[screen as usize].swap(true, Ordering::Relaxed);
+    log_result_word_ocr_fallback(screen, &WARNED[screen as usize])
+}
+
+fn log_result_word_ocr_fallback(
+    screen: ResultScreen,
+    warned: &std::sync::atomic::AtomicBool,
+) -> bool {
+    let first = !warned.swap(true, std::sync::atomic::Ordering::Relaxed);
     if first {
         tracing::warn!(
             screen = screen.id(),
@@ -3716,18 +3723,62 @@ mod tests {
     }
 
     /// Under `reader = "new"`, a result word that falls back to OCR (no
-    /// templates for its screen) is logged once per screen and process.
-    /// Once this test's fallbacks have run, both log lines are spent.
+    /// templates for its screen) is logged once per screen. A second call
+    /// for that screen stays quiet.
     #[test]
     fn a_result_word_ocr_fallback_is_logged() {
+        for screen in ResultScreen::ALL {
+            let warned = std::sync::atomic::AtomicBool::new(false);
+            let first = fallback_warn_log(|| {
+                assert!(log_result_word_ocr_fallback(screen, &warned));
+            });
+            assert_eq!(
+                first.matches("its result word is read with OCR").count(),
+                1,
+                "{screen:?}: {first}"
+            );
+            assert!(first.contains("WARN"), "{first}");
+            assert!(first.contains(screen.id()), "{first}");
+            let second = fallback_warn_log(|| {
+                assert!(!log_result_word_ocr_fallback(screen, &warned));
+            });
+            assert!(
+                !second.contains("its result word is read with OCR"),
+                "the {screen:?} fallback is logged once: {second}"
+            );
+        }
         let both = result_frame(true, true, 0);
         let mut st = seen(&both);
         let _ = poll_new(&both, &mut st, &pack_words(NO_SCREENS, None));
         for screen in ResultScreen::ALL {
             assert!(
                 !warn_result_word_ocr_fallback(screen),
-                "the {screen:?} fallback logged already"
+                "the production path spends the {screen:?} warning"
             );
         }
+    }
+
+    fn fallback_warn_log(f: impl FnOnce()) -> String {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = buf.clone();
+        let sub = tracing_subscriber::fmt()
+            .with_writer(move || {
+                struct W(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+                impl std::io::Write for W {
+                    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+                        self.0.lock().unwrap().extend_from_slice(data);
+                        Ok(data.len())
+                    }
+                    fn flush(&mut self) -> std::io::Result<()> {
+                        Ok(())
+                    }
+                }
+                W(writer.clone())
+            })
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        tracing::subscriber::with_default(sub, f);
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
     }
 }

@@ -106,7 +106,9 @@ fn tab(
         FrameAnalysisOutcome::TeamSizeUncertain { outcome, .. } => {
             return json!({"status": "team_size_uncertain", "outcome": outcome.to_string()});
         }
-        FrameAnalysisOutcome::StreamMiss => {
+        FrameAnalysisOutcome::StreamMiss
+        | FrameAnalysisOutcome::ShareOpening
+        | FrameAnalysisOutcome::Declined => {
             return json!({"status": "stream_miss"});
         }
     };

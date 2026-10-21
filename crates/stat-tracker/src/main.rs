@@ -400,8 +400,9 @@ fn main() -> anyhow::Result<()> {
         .build()
         .context("failed to start the async runtime")?;
     let result = runtime.block_on(run(omp));
-    // Whatever is left of the signal's one deadline. A clean exit has no
-    // signal, so this does not add another wait.
+    // Whatever is left of the one deadline. No signal yet means the full
+    // deadline, including a self-restart after an update. Tasks that have
+    // already finished do not wait it out.
     runtime.shutdown_timeout(stat_tracker::replace::shutdown_time_left());
     result
 }
@@ -3404,6 +3405,11 @@ enum FrameAnalysisOutcome {
     /// The stream had no new frame. Retried like a drawing board, and never
     /// written into debug/rejected.
     StreamMiss,
+    /// The share dialog is still up. Retried, and not logged as a missed frame.
+    ShareOpening,
+    /// The share was declined or the permission dialog timed out. Not an
+    /// error: the one warn already happened, and a later Tab stays quiet.
+    Declined,
 }
 
 /// What a Tab capture actually did, reported back to the session state machine.
@@ -4213,27 +4219,41 @@ fn resolve_word_tick(
 #[cfg(test)]
 #[test]
 fn reused_frame_is_not_a_confirm_and_a_new_pair_is() {
-    let mut streak = Some(WordStreak {
+    let victory = Some((
+        detect::MatchOutcome::Victory,
+        detect::match_end::OutcomeSource::ResultWord,
+    ));
+    let seen = Some(capture::SeenStream { id: 1, seq: 4 });
+    let held_at = std::time::Instant::now();
+    let streak = Some(WordStreak {
         outcome: detect::MatchOutcome::Victory,
-        seen_at: std::time::Instant::now(),
+        seen_at: held_at,
         map: None,
     });
-    assert!(!capture::poll_uses_frame(
-        false,
-        Some(4),
-        Some(1),
-        Some(capture::SeenStream { id: 1, seq: 4 })
-    ));
-    let skipped = resolve_word_tick(&mut streak, None, std::time::Instant::now(), None);
-    assert!(skipped.signal.is_none());
-    assert!(!skipped.signal_confirmed);
+    // The poll loop continues before `resolve_word_tick` when the frame
+    // was already used. Applying the word would move the streak. The
+    // reused frame does not.
+    assert!(!capture::poll_uses_frame(false, Some(4), Some(1), seen));
+    let mut if_applied = Some(WordStreak {
+        outcome: detect::MatchOutcome::Victory,
+        seen_at: held_at,
+        map: None,
+    });
+    let applied = resolve_word_tick(&mut if_applied, victory, std::time::Instant::now(), None);
+    assert!(applied.signal.is_some());
+    assert_ne!(
+        if_applied.as_ref().map(|prior| prior.seen_at),
+        Some(held_at)
+    );
+    assert_eq!(
+        streak.as_ref().map(|prior| prior.seen_at),
+        Some(held_at),
+        "a reused frame must not move the streak"
+    );
     assert_eq!(
         streak.as_ref().map(|prior| prior.outcome),
         Some(detect::MatchOutcome::Victory)
     );
-    let timed_out = resolve_word_tick(&mut streak, None, std::time::Instant::now(), None);
-    assert!(timed_out.signal.is_none());
-    assert!(!timed_out.signal_confirmed);
 
     assert!(capture::poll_uses_frame(
         true,
@@ -4615,6 +4635,22 @@ async fn run_loop(
             _ = sigterm.recv() => {
                 stat_tracker::replace::note_shutdown_signal();
                 tracing::info!("SIGTERM received, shutting down");
+                shutdown_from_signal(
+                    &mut st,
+                    &mut capture_task,
+                    &mut sync_task,
+                    sync_client,
+                    &sync_backoff,
+                    store,
+                    data_dir,
+                )
+                .await;
+                return Ok(());
+            }
+            // The background listener can see Ctrl+C before this loop's
+            // own handler. `note_shutdown_signal` wakes this arm.
+            _ = stat_tracker::replace::shutdown_notified() => {
+                tracing::info!("shutting down");
                 shutdown_from_signal(
                     &mut st,
                     &mut capture_task,
@@ -5158,27 +5194,21 @@ async fn run_loop(
                             if let Err(err) =
                                 stat_tracker::replace::restart_for_replaced_binary(&path)
                             {
-                                if stat_tracker::replace::keeps_running_after_restart(
-                                    stat_tracker::replace::RestartHow::Reexec,
-                                    true,
-                                ) {
-                                    tracing::error!(
-                                        error = %err,
-                                        "could not re-exec the new tracker; keeping this process"
-                                    );
-                                    exec_failed_at = Some(std::time::Instant::now());
-                                    if released_pid {
-                                        stat_tracker::replace::restore_own_pid_file(data_dir);
-                                    }
-                                    let _ = stat_tracker::report::marker::restore_run_marker(
-                                        data_dir,
-                                        marker.as_ref(),
-                                    );
+                                // A failed re-exec keeps this process. The
+                                // systemd path exits and does not return.
+                                tracing::error!(
+                                    error = %err,
+                                    "could not re-exec the new tracker; keeping this process"
+                                );
+                                exec_failed_at = Some(std::time::Instant::now());
+                                if released_pid {
+                                    stat_tracker::replace::restore_own_pid_file(data_dir);
                                 }
-                            } else if !stat_tracker::replace::keeps_running_after_restart(
-                                stat_tracker::replace::RestartHow::Reexec,
-                                false,
-                            ) {
+                                let _ = stat_tracker::report::marker::restore_run_marker(
+                                    data_dir,
+                                    marker.as_ref(),
+                                );
+                            } else {
                                 return Ok(());
                             }
                         }
@@ -6923,7 +6953,9 @@ fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)>
 fn tab_capture_should_retry(outcome: &FrameAnalysisOutcome) -> bool {
     matches!(
         outcome,
-        FrameAnalysisOutcome::NotAScoreboard { .. } | FrameAnalysisOutcome::StreamMiss
+        FrameAnalysisOutcome::NotAScoreboard { .. }
+            | FrameAnalysisOutcome::StreamMiss
+            | FrameAnalysisOutcome::ShareOpening
     )
 }
 
@@ -6932,10 +6964,11 @@ fn tab_capture_should_retry(outcome: &FrameAnalysisOutcome) -> bool {
 /// stream miss.
 fn tab_outcome_rank(outcome: &FrameAnalysisOutcome) -> u8 {
     match outcome {
-        FrameAnalysisOutcome::StreamMiss => 0,
-        FrameAnalysisOutcome::NotAScoreboard { .. } => 1,
-        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 2,
-        FrameAnalysisOutcome::Analyzed(_) => 3,
+        FrameAnalysisOutcome::ShareOpening | FrameAnalysisOutcome::Declined => 0,
+        FrameAnalysisOutcome::StreamMiss => 1,
+        FrameAnalysisOutcome::NotAScoreboard { .. } => 2,
+        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 3,
+        FrameAnalysisOutcome::Analyzed(_) => 4,
     }
 }
 
@@ -7032,6 +7065,12 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                         Err(err) if capture::is_stream_miss(&err.to_string()) => {
                             return Ok(FrameAnalysisOutcome::StreamMiss);
                         }
+                        Err(err) if capture::is_share_opening(&err.to_string()) => {
+                            return Ok(FrameAnalysisOutcome::ShareOpening);
+                        }
+                        Err(err) if capture::is_declined_capture(&err.to_string()) => {
+                            return Ok(FrameAnalysisOutcome::Declined);
+                        }
                         Err(err) => {
                             return Err(
                                 anyhow::Error::from_boxed(err).context("screen capture failed")
@@ -7073,8 +7112,12 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         .await?;
         let analysis = match analysis {
             FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
-            FrameAnalysisOutcome::StreamMiss => {
-                tracing::info!("Tab capture missed: no fresh stream frame");
+            FrameAnalysisOutcome::StreamMiss
+            | FrameAnalysisOutcome::ShareOpening
+            | FrameAnalysisOutcome::Declined => {
+                if matches!(analysis, FrameAnalysisOutcome::StreamMiss) {
+                    tracing::info!("Tab capture missed: no fresh stream frame");
+                }
                 return Ok(CaptureReport {
                     best_guess: None,
                     recorded: false,
@@ -9640,8 +9683,16 @@ mod tests {
         };
         assert!(tab_capture_should_retry(&rejected));
         assert!(tab_capture_should_retry(&FrameAnalysisOutcome::StreamMiss));
+        assert!(tab_capture_should_retry(
+            &FrameAnalysisOutcome::ShareOpening
+        ));
+        assert!(!tab_capture_should_retry(&FrameAnalysisOutcome::Declined));
         assert!(!tab_capture_should_retry(&unsure));
         assert!(tab_outcome_rank(&rejected) > tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss));
+        assert!(
+            tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss)
+                > tab_outcome_rank(&FrameAnalysisOutcome::ShareOpening)
+        );
         assert!(tab_outcome_rank(&unsure) > tab_outcome_rank(&rejected));
     }
 
@@ -16531,22 +16582,49 @@ mod tests {
     #[tokio::test]
     async fn a_slow_capture_and_ocr_are_cut_off_promptly() {
         for label in ["capture", "ocr"] {
+            let began = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let began_run = std::sync::Arc::clone(&began);
+            let finished_run = std::sync::Arc::clone(&finished);
+            let raced = stop_for_shutdown(
+                async move {
+                    began_run.store(true, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    finished_run.store(true, std::sync::atomic::Ordering::SeqCst);
+                    label
+                },
+                async {},
+            )
+            .await;
+            assert!(raced.is_err(), "{label} must be cut off when shutdown wins");
+            assert!(
+                !began.load(std::sync::atomic::Ordering::SeqCst),
+                "{label} must not start when shutdown is already waiting"
+            );
+            assert!(
+                !finished.load(std::sync::atomic::Ordering::SeqCst),
+                "{label} must not finish"
+            );
+
+            let finished_late = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = std::sync::Arc::clone(&finished_late);
             let waiter = std::sync::Arc::new(tokio::sync::Notify::new());
-            let flag = std::sync::Arc::clone(&waiter);
+            let wake = std::sync::Arc::clone(&waiter);
             tokio::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-                flag.notify_one();
+                wake.notify_one();
             });
             let started = std::time::Instant::now();
             let raced = stop_for_shutdown(
-                async {
+                async move {
                     tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-                    label
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
                 },
                 waiter.notified(),
             )
             .await;
-            assert!(raced.is_err(), "{label} must be cut off when shutdown wins");
+            assert!(raced.is_err(), "{label} in flight must be dropped");
+            assert!(!finished_late.load(std::sync::atomic::Ordering::SeqCst));
             let elapsed = started.elapsed();
             assert!(
                 elapsed < std::time::Duration::from_secs(2),
@@ -21261,6 +21339,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_keeps_an_unfinished_game_so_a_restart_resumes_it() {
+        assert_eq!(
+            stat_tracker::replace::shutdown_time_left(),
+            stat_tracker::replace::SHUTDOWN_DEADLINE,
+            "a shutdown with no signal keeps the full deadline"
+        );
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
         store
@@ -21746,6 +21829,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_uploads_the_finished_board_not_a_fresh_hold() {
+        assert_eq!(
+            stat_tracker::replace::shutdown_time_left(),
+            stat_tracker::replace::SHUTDOWN_DEADLINE,
+            "a shutdown with no signal keeps the full deadline"
+        );
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
         let mut row = test_match("busan-win", "victory");
@@ -21829,6 +21917,58 @@ mod tests {
         );
         let all = store.get_all_matches().await.unwrap();
         assert!(all.iter().all(|row| row.elims != 2));
+    }
+
+    /// The exit-75 self-restart calls `shutdown_from_signal` without a
+    /// signal. That path gets the full deadline, and the Tab board held on
+    /// the session is written before the process is replaced.
+    #[tokio::test]
+    async fn an_update_restart_gets_the_full_shutdown_deadline_and_keeps_the_tab_row() {
+        assert!(
+            !stat_tracker::replace::shutdown_requested(),
+            "a self-restart has no signal"
+        );
+        assert_eq!(
+            stat_tracker::replace::shutdown_time_left(),
+            stat_tracker::replace::SHUTDOWN_DEADLINE
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut row = test_match("tab-on-restart", "victory");
+        row.map_name = "Busan".into();
+        row.game_mode = "Control".into();
+        row.hero = "Ana".into();
+        row.elims = 9;
+        store.insert_match(row).await.unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Victory, Some(10), now);
+        g.session_id = "tab-on-restart".into();
+        g.map = Some("Busan".into());
+        g.session_created = false;
+        g.deferred = Some(fresh_counters(4));
+        g.deferred_hero = None;
+        g.deferred_imported = true;
+        let mut st = session(Some(g), now);
+        shutdown_from_signal(
+            &mut st,
+            &mut None,
+            &mut None,
+            None,
+            &std::sync::Mutex::new(sync::SyncBackoff::default()),
+            &store,
+            dir.path(),
+        )
+        .await;
+        let rows = store.get_session_snapshots("tab-on-restart").await.unwrap();
+        assert!(
+            rows.iter().any(|row| row.elims == 4 && row.hero == "Ana"),
+            "the update restart must persist the Tab row inside the deadline: {rows:?}"
+        );
+        assert_eq!(
+            stat_tracker::replace::shutdown_time_left(),
+            stat_tracker::replace::SHUTDOWN_DEADLINE,
+            "the restart does not start the signal clock"
+        );
     }
 
     #[tokio::test]

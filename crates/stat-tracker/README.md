@@ -221,12 +221,16 @@ again after a reboot. The compositor is offered a variable framerate with
 a cap of `screencast_max_fps` frames per second (2 when that key is unset).
 A frame is copied only when the tracker needs one. A later poll that sees
 no new buffer does not count as a read, so a reused picture cannot confirm
-Victory or Defeat by itself. A wait that ends with no new buffer is no read. The share closes when Overwatch
-quits, once the permission has been saved, and the next game opens it again
-with that permission. If the permission was not saved, the share stays up
-so quitting the game does not ask again. If you cancel or close the share prompt, the tracker does not ask again and does not capture until Overwatch is started again. On KDE it does not fall back to screenshots. One log line and the app status say why. The saved permission is kept. Other
-desktops (niri, Sway, Hyprland, X11) keep their direct capture unless you
-force the stream.
+Victory or Defeat by itself. The share closes when Overwatch quits, once
+the permission has been saved, and the next game opens it again with that
+permission. If the permission was not saved, the share stays up so quitting
+the game does not ask again. If you cancel or close the share prompt, the
+tracker does not ask again until Overwatch is started again. On KDE it
+takes no captures and does not fall back to screenshots. Where a screenshot
+is already safe, including GNOME when the stream was forced, screenshots
+continue. One log line and the app status say why. The saved permission is
+kept. Other desktops (niri, Sway, Hyprland, X11) keep their direct capture
+unless you force the stream.
 
 If the share cannot start, the tracker logs a warning. On niri, wlroots,
 and GNOME when the stream was forced, that grab uses the older screenshot
@@ -235,9 +239,10 @@ after the stream dies. A failed start is not retried for 30 seconds. If
 the portal is down, or its cursor-mode property cannot be read, the log
 says the portal is unavailable and the saved permission is kept. The next
 try after that backoff opens the share again. A share that never starts
-streaming is closed and then waits out that same backoff. The permission dialog times out, and stopping the tracker cancels
-it. On KDE a Tab that sees no frame from after the key press does not fall
-back to that portal. A Tab on a direct capture or the screenshot portal
+streaming is closed and then waits out that same backoff. If the permission
+dialog times out, that is a No until the next Overwatch launch, and stopping
+the tracker cancels the dialog. On KDE a Tab that sees no frame from
+after the key press does not fall back to that portal. A Tab on a direct capture or the screenshot portal
 still waits 400 ms for the overlay. On the stream it waits for a buffer at
 least 300 ms after the key, and gives up 1200 ms after the key. A buffer
 from those first 300 ms does not finish the wait.

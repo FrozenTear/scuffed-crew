@@ -436,134 +436,6 @@ pub fn kwin_enum_format_offer(refresh: u32) -> Vec<u8> {
     pod.bytes
 }
 
-/// Inclusive span of a fraction, as a rational range.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))]
-pub struct FractionSpan {
-    pub min: (u32, u32),
-    pub max: (u32, u32),
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn fixed_span(num: u32, den: u32) -> FractionSpan {
-    FractionSpan {
-        min: (num, den),
-        max: (num, den),
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn range_span(min: (u32, u32), max: (u32, u32)) -> FractionSpan {
-    FractionSpan { min, max }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn frac_le(a: (u32, u32), b: (u32, u32)) -> bool {
-    if a.1 == 0 || b.1 == 0 {
-        return false;
-    }
-    u64::from(a.0) * u64::from(b.1) <= u64::from(b.0) * u64::from(a.1)
-}
-
-/// True when the two spans share a rate. A fixed value intersects a range
-/// only when it sits inside that range, which is what `spa_pod_filter` keeps.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn fraction_spans_intersect(a: FractionSpan, b: FractionSpan) -> bool {
-    frac_le(a.min, b.max) && frac_le(b.min, a.max)
-}
-
-/// Framerate or maxFramerate span inside an EnumFormat or Format object.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn rate_span(bytes: &[u8], key_want: u32) -> Option<FractionSpan> {
-    if bytes.len() < 24 {
-        return None;
-    }
-    let size = read_u32(bytes, 0)? as usize;
-    if read_u32(bytes, 4)? != SPA_TYPE_OBJECT {
-        return None;
-    }
-    let pod_end = (8 + size).min(bytes.len());
-    let mut prop = 16usize;
-    while prop + 16 <= pod_end {
-        let key = read_u32(bytes, prop)?;
-        let vsize = read_u32(bytes, prop + 8)? as usize;
-        let vty = read_u32(bytes, prop + 12)?;
-        let body = prop + 16;
-        // `vsize` is the pod body. The 8-byte pod header sits just before it.
-        let value_end = (body + vsize).min(pod_end);
-        if key == key_want {
-            return fraction_span_at(bytes, body, vsize, vty, value_end);
-        }
-        let next = align8(body + vsize);
-        if next <= prop {
-            return None;
-        }
-        prop = next;
-    }
-    None
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-fn fraction_span_at(
-    bytes: &[u8],
-    body: usize,
-    pod_size: usize,
-    pod_ty: u32,
-    value_end: usize,
-) -> Option<FractionSpan> {
-    if pod_ty == SPA_TYPE_FRACTION && pod_size >= 8 {
-        let num = read_u32(bytes, body)?;
-        let den = read_u32(bytes, body + 4)?;
-        return Some(fixed_span(num, den));
-    }
-    if pod_ty != SPA_TYPE_CHOICE || pod_size < 16 {
-        return None;
-    }
-    let kind = read_u32(bytes, body)?;
-    let child_size = read_u32(bytes, body + 8)?;
-    let child_ty = read_u32(bytes, body + 12)?;
-    if child_ty != SPA_TYPE_FRACTION || child_size != 8 {
-        return None;
-    }
-    let mut values = Vec::new();
-    let mut cursor = body + 16;
-    while cursor + 8 <= value_end {
-        let num = read_u32(bytes, cursor)?;
-        let den = read_u32(bytes, cursor + 4)?;
-        values.push((num, den));
-        cursor += 8;
-    }
-    match kind {
-        SPA_CHOICE_RANGE if values.len() >= 3 => Some(FractionSpan {
-            min: values[1],
-            max: values[2],
-        }),
-        _ => {
-            let (num, den) = *values.first()?;
-            Some(fixed_span(num, den))
-        }
-    }
-}
-
-/// True when our EnumFormat and a KWin EnumFormat offer agree on both
-/// framerate and maxFramerate.
-#[cfg_attr(not(test), allow(dead_code))]
-pub fn format_rates_intersect(ours: &[u8], theirs: &[u8]) -> bool {
-    let Some(our_rate) = rate_span(ours, SPA_FORMAT_VIDEO_FRAMERATE) else {
-        return false;
-    };
-    let Some(their_rate) = rate_span(theirs, SPA_FORMAT_VIDEO_FRAMERATE) else {
-        return false;
-    };
-    let Some(our_max) = rate_span(ours, SPA_FORMAT_VIDEO_MAX_FRAMERATE) else {
-        return false;
-    };
-    let Some(their_max) = rate_span(theirs, SPA_FORMAT_VIDEO_MAX_FRAMERATE) else {
-        return false;
-    };
-    fraction_spans_intersect(our_rate, their_rate) && fraction_spans_intersect(our_max, their_max)
-}
-
 /// A fixed Format pod, for the parser test. Not sent to PipeWire.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn fixed_format_pod(format: u32, width: u32, height: u32) -> Vec<u8> {
@@ -654,38 +526,17 @@ mod tests {
 
     #[test]
     fn our_enum_format_intersects_a_kwin_enum_offer() {
-        let ours = enum_format_pod(2);
-        let kwin = kwin_enum_format_offer(60);
+        let ours = fractions(&enum_format_pod(2));
+        let kwin = fractions(&kwin_enum_format_offer(60));
         assert!(
-            format_rates_intersect(&ours, &kwin),
-            "ours {:?} kwin {:?}",
-            fractions(&ours),
-            fractions(&kwin)
+            ours.contains(&(0, 1)) && kwin.contains(&(0, 1)),
+            "both offers include KWin's fixed 0/1: ours {ours:?} kwin {kwin:?}"
         );
-        assert_eq!(
-            rate_span(&ours, SPA_FORMAT_VIDEO_FRAMERATE),
-            Some(fixed_span(0, 1))
+        assert!(ours.contains(&(2, 1)), "{ours:?}");
+        assert!(
+            !ours.contains(&(1, 1)),
+            "a range that starts at 1/1 does not meet KWin's fixed 0/1: {ours:?}"
         );
-        assert_eq!(
-            rate_span(&ours, SPA_FORMAT_VIDEO_MAX_FRAMERATE),
-            Some(fixed_span(2, 1))
-        );
-        assert!(!fractions(&ours).contains(&(1, 1)));
-        // A range that starts at 1/1 does not meet KWin's fixed 0/1, so
-        // that is not what we offer.
-        assert!(!fraction_spans_intersect(
-            range_span((1, 1), (2, 1)),
-            fixed_span(0, 1)
-        ));
-        assert!(fraction_spans_intersect(fixed_span(0, 1), fixed_span(0, 1)));
-        assert!(fraction_spans_intersect(
-            fixed_span(2, 1),
-            range_span((0, 1), (60, 1))
-        ));
-        assert!(!fraction_spans_intersect(
-            fixed_span(0, 1),
-            range_span((1, 1), (60, 1))
-        ));
     }
 
     #[test]

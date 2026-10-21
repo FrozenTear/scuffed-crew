@@ -456,6 +456,12 @@ fn stream_died(state: &State) -> bool {
     state.seen_streaming.load(Ordering::Acquire) && !state.streaming.load(Ordering::Acquire)
 }
 
+/// How long Drop waits for the stream thread. Quit is repeated on this
+/// interval so a `pw_main_loop_quit` that landed before `pw_main_loop_run`
+/// (PipeWire 1.0 and 1.2) is sent again once the loop is inside run.
+const QUIT_JOIN: Duration = Duration::from_secs(2);
+const QUIT_RETRY: Duration = Duration::from_millis(50);
+
 impl Drop for Handle {
     fn drop(&mut self) {
         self.state.alive.store(false, Ordering::Release);
@@ -467,13 +473,25 @@ impl Drop for Handle {
         self.state.notify.notify_waiters();
         if let Some(join) = self.join.take() {
             // Bound the join so a stuck PipeWire loop cannot hold process
-            // exit. The thread is signaled to quit above.
+            // exit. Quit is retried until the thread leaves or the cap
+            // passes, because PipeWire 1.0 and 1.2 drop a quit that arrives
+            // before `pw_main_loop_run`.
             let (tx, rx) = std::sync::mpsc::sync_channel(1);
             std::thread::spawn(move || {
                 let _ = join.join();
                 let _ = tx.send(());
             });
-            let _ = rx.recv_timeout(Duration::from_secs(2));
+            let deadline = std::time::Instant::now() + QUIT_JOIN;
+            loop {
+                let left = deadline.saturating_duration_since(std::time::Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                match rx.recv_timeout(left.min(QUIT_RETRY)) {
+                    Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => request_quit(&self.state),
+                }
+            }
         }
     }
 }

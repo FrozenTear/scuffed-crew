@@ -3571,7 +3571,7 @@ token = \"secret-token-must-stay\"
             super::health_with_ocr_notice(paused.into(), Some(notice)),
             format!("{paused} {notice}")
         );
-        let declined = "KDE screen share was declined: no captures until Overwatch is restarted";
+        let declined = "Screen share was declined: no captures until Overwatch is restarted";
         let idle = super::health_with_ocr_notice(super::HEALTH_READY.into(), None);
         assert_eq!(
             super::health_with_ocr_notice(idle, Some(declined)),
