@@ -804,9 +804,7 @@ impl UpdateIo for LiveUpdateIo {
 /// for [`GAME_FILE_STALE`] is left over (a crash or a game the tracker gave
 /// up on) and does not count.
 pub fn game_in_progress(data_dir: &Path) -> bool {
-    std::fs::metadata(data_dir.join("active_game.json"))
-        .and_then(|m| m.modified())
-        .is_ok_and(|t| t.elapsed().map_or(true, |age| age < GAME_FILE_STALE))
+    stat_tracker::replace::game_file_in_progress(data_dir)
 }
 
 /// An `active_game.json` older than this is not a game in progress.
@@ -1452,6 +1450,54 @@ mod tests {
         assert!(v("0.5.0") > v("0.5.0-alpha.11"));
         assert!(is_newer("0.5.0-alpha.11", "0.5.0-alpha.3"));
         assert!(!is_newer("0.5.0-alpha.3", "0.5.0-alpha.11"));
+    }
+
+    #[test]
+    fn rc3_is_offered_rc4_on_the_prerelease_channel_and_stable_is_not() {
+        let releases = vec![
+            gh_release("stat-tracker-v0.5.0-rc.4", true, "rc4"),
+            gh_release("stat-tracker-v0.5.0-rc.3", true, "rc3"),
+            gh_release("stat-tracker-v0.4.24", false, "stable"),
+        ];
+        let from_rc3 = select_newer_release_on(
+            effective_update_channel("", "0.5.0-rc.3"),
+            "0.5.0-rc.3",
+            &releases,
+        )
+        .expect("an rc.3 install on the default channel is offered rc.4");
+        assert_eq!(from_rc3.latest, "0.5.0-rc.4");
+        assert!(
+            select_newer_release("0.4.24", &releases).is_none(),
+            "stable must not be offered rc.4"
+        );
+        assert!(
+            select_newer_release_on(UpdateChannel::Prerelease, "0.5.0-rc.4", &releases).is_none(),
+            "rc.4 is not offered itself or older rcs"
+        );
+    }
+
+    #[test]
+    fn rc2_is_offered_rc3_on_the_prerelease_channel_and_stable_is_not() {
+        let releases = vec![
+            gh_release("stat-tracker-v0.5.0-rc.3", true, "rc3"),
+            gh_release("stat-tracker-v0.5.0-rc.2", true, "rc2"),
+            gh_release("stat-tracker-v0.4.24", false, "stable"),
+        ];
+        let from_rc2 = select_newer_release_on(
+            effective_update_channel("", "0.5.0-rc.2"),
+            "0.5.0-rc.2",
+            &releases,
+        )
+        .expect("an rc.2 install on the default channel is offered rc.3");
+        assert_eq!(from_rc2.latest, "0.5.0-rc.3");
+        assert!(
+            select_newer_release("0.4.24", &releases).is_none(),
+            "stable must not be offered rc.3"
+        );
+        assert!(
+            select_newer_release_on(UpdateChannel::Prerelease, "0.5.0-rc.3", &releases).is_none(),
+            "rc.3 is not offered itself or older rcs"
+        );
     }
 
     #[test]

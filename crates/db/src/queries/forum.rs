@@ -448,7 +448,8 @@ async fn migrate_legacy_thread_categories(client: &Surreal<Any>) -> DbResult<()>
                 .query("UPDATE $rid SET board_id = $bid")
                 .bind(("rid", RecordId::new("forum_thread", id.as_str())))
                 .bind(("bid", bid))
-                .await?;
+                .await?
+                .check()?;
             migrated += 1;
         }
         let Some(last_id) = last_id else {
@@ -901,12 +902,17 @@ impl Database {
             };
             let created: Option<DbForumReply> =
                 self.client.create("forum_reply").content(db_reply).await?;
-            // bump thread updated_at
-            let _ = self
+            // Bump thread updated_at. Best-effort: the reply is already
+            // stored, so a failed bump is logged rather than failing the post.
+            if let Err(e) = self
                 .client
                 .query("UPDATE $rid SET updated_at = time::now()")
                 .bind(("rid", RecordId::new("forum_thread", thread_id)))
-                .await;
+                .await
+                .and_then(|r| r.check())
+            {
+                tracing::warn!(thread_id, "forum reply: thread updated_at bump failed: {e}");
+            }
             Ok(db_to_reply(created.ok_or_else(|| {
                 DbError::NotFound("Failed to create forum reply".into())
             })?))
@@ -943,7 +949,8 @@ impl Database {
                 .query("UPDATE $rid SET pinned = $pinned, updated_at = time::now()")
                 .bind(("rid", RecordId::new("forum_thread", id)))
                 .bind(("pinned", pinned))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
@@ -955,7 +962,8 @@ impl Database {
                 .query("UPDATE $rid SET locked = $locked, updated_at = time::now()")
                 .bind(("rid", RecordId::new("forum_thread", id)))
                 .bind(("locked", locked))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
@@ -971,7 +979,8 @@ impl Database {
                 .query("UPDATE $rid SET nostr_event_id = $eid, updated_at = time::now()")
                 .bind(("rid", RecordId::new("forum_thread", id)))
                 .bind(("eid", nostr_event_id.to_string()))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
@@ -982,7 +991,8 @@ impl Database {
             self.client
                 .query("UPDATE $rid SET is_active = false, updated_at = time::now()")
                 .bind(("rid", RecordId::new("forum_thread", id)))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
@@ -993,7 +1003,8 @@ impl Database {
             self.client
                 .query("UPDATE $rid SET is_active = false")
                 .bind(("rid", RecordId::new("forum_reply", id)))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await

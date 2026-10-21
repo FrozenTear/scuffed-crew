@@ -208,11 +208,28 @@ async fn seed_all_roles(db: &Database) {
     .await;
 }
 
+/// A distinct untrusted peer per request.
+///
+/// Anonymous reads (`/api/teams`, `/api/events`, …) sit behind the per-IP
+/// public governor (API-9), which keys on `ConnectInfo`; `oneshot` injects
+/// none. Members spend the same bucket, so authenticated helpers carry a
+/// peer too. A fresh address per call keeps unrelated tests off one budget;
+/// rate-limit tests choose their peer explicitly.
+fn fresh_peer() -> axum::extract::ConnectInfo<std::net::SocketAddr> {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    axum::extract::ConnectInfo(std::net::SocketAddr::from((
+        [198, 19, (n >> 8) as u8, n as u8],
+        47000,
+    )))
+}
+
 /// Build a request with Bearer token authentication.
 fn authed_request(method: Method, uri: &str, token: &str) -> Request<Body> {
     Request::builder()
         .method(method)
         .uri(uri)
+        .extension(fresh_peer())
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::empty())
@@ -224,6 +241,7 @@ fn authed_json_request(method: Method, uri: &str, token: &str, body: Value) -> R
     Request::builder()
         .method(method)
         .uri(uri)
+        .extension(fresh_peer())
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(serde_json::to_vec(&body).unwrap()))
@@ -2464,13 +2482,13 @@ async fn me_reports_nip05_when_domain_configured() {
 /// Each ICS hit runs `list_events()` plus a settings read, and the feed is
 /// unauthenticated — a poll loop from one source was free amplification before
 /// this. Normal calendar-client refresh (minutes apart) is nowhere near the
-/// 5/s sustained budget, so the first request must still succeed.
+/// 10/s sustained budget, so the first request must still succeed.
 #[tokio::test]
 async fn calendar_ics_is_rate_limited_per_ip() {
     let state = test_state().await;
     let app = create_router(state);
 
-    let seen = hammer(&app, "/api/calendar/all.ics", 80).await;
+    let seen = hammer(&app, "/api/calendar/all.ics", 200).await;
     assert_ne!(
         seen[0],
         StatusCode::TOO_MANY_REQUESTS,
@@ -2488,7 +2506,7 @@ async fn well_known_nostr_json_is_rate_limited_per_ip() {
     let state = test_state().await;
     let app = create_router(state);
 
-    let seen = hammer(&app, "/.well-known/nostr.json?name=someone", 80).await;
+    let seen = hammer(&app, "/.well-known/nostr.json?name=someone", 200).await;
     assert_ne!(seen[0], StatusCode::TOO_MANY_REQUESTS);
     assert!(
         seen.contains(&StatusCode::TOO_MANY_REQUESTS),
@@ -2502,7 +2520,7 @@ async fn setup_status_and_providers_are_rate_limited_per_ip() {
     let app = create_router(state);
 
     for uri in ["/api/auth/setup-status", "/api/auth/providers"] {
-        let seen = hammer(&app, uri, 80).await;
+        let seen = hammer(&app, uri, 200).await;
         assert!(
             seen.contains(&StatusCode::TOO_MANY_REQUESTS),
             "{uri} must not be a free unauthenticated probe"
@@ -2518,7 +2536,7 @@ async fn health_is_never_rate_limited() {
     let state = test_state().await;
     let app = create_router(state);
 
-    let seen = hammer(&app, "/api/health", 80).await;
+    let seen = hammer(&app, "/api/health", 200).await;
     assert!(
         !seen.contains(&StatusCode::TOO_MANY_REQUESTS),
         "health must stay outside every governor (liveness probes)"
@@ -3621,14 +3639,14 @@ async fn auth_ip_governor_429_sets_retry_after() {
     assert!(saw_429, "burst past the per-IP auth governor must be 429");
 }
 
-/// The public governor refills every 200 ms. tower_governor floors that wait
+/// The public governor refills every 100 ms. tower_governor floors that wait
 /// to whole seconds, which used to send Retry-After: 0.
 #[tokio::test]
 async fn public_governor_429_retry_after_is_at_least_one() {
     let state = test_state().await;
     let app = create_router(state);
     let mut saw_429 = false;
-    for _ in 0..50 {
+    for _ in 0..400 {
         let res = app
             .clone()
             .oneshot(unauthed_request(Method::GET, "/api/auth/providers"))
@@ -3637,6 +3655,7 @@ async fn public_governor_429_retry_after_is_at_least_one() {
         if res.status() == StatusCode::TOO_MANY_REQUESTS {
             assert!(assert_retry_after(&res) >= 1);
             saw_429 = true;
+            break;
         }
     }
     assert!(saw_429, "burst past the public governor must be 429");
@@ -7409,6 +7428,7 @@ async fn nostr_health_unconfigured_when_relay_url_none() {
             Request::builder()
                 .method(Method::GET)
                 .uri("/api/nostr/health")
+                .extension(fresh_peer())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7432,6 +7452,7 @@ async fn nostr_health_blank_relay_url_not_configured() {
             Request::builder()
                 .method(Method::GET)
                 .uri("/api/nostr/health")
+                .extension(fresh_peer())
                 .body(Body::empty())
                 .unwrap(),
         )

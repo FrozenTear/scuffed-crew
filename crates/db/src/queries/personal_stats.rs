@@ -710,7 +710,8 @@ impl Database {
     ///   canonical `scuffed_types::HEROES` string — validate at the HTTP layer)
     /// - inactive / missing members are omitted (banned stay off public boards)
     /// - winrate/kd require ≥ [`LEADERBOARD_MIN_GAMES`] matches (per-hero games
-    ///   when `hero` is set)
+    ///   when `hero` is set); kd also requires that many K/D-plausible games
+    ///   (`kd_games`), since only those feed the K/D sums
     /// - `games` and `wins` count every row. K/D sums a game's elims and
     ///   deaths only when both are plausible (see [`leaderboard_snapshot`])
     pub async fn member_leaderboard(
@@ -750,6 +751,7 @@ impl Database {
                 wins: u32,
                 elims: u32,
                 deaths: u32,
+                kd_games: u32,
             }
 
             let season_filter = if season_window.is_some() {
@@ -766,7 +768,8 @@ impl Database {
                         count() AS games,
                         math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
                         math::sum(IF {kd_pair} THEN elims ELSE 0 END) AS elims,
-                        math::sum(IF {kd_pair} THEN deaths ELSE 0 END) AS deaths
+                        math::sum(IF {kd_pair} THEN deaths ELSE 0 END) AS deaths,
+                        math::sum(IF {kd_pair} THEN 1 ELSE 0 END) AS kd_games
                     FROM personal_match
                     WHERE outcome IN ['victory', 'defeat', 'draw']{season_filter}
                     GROUP BY member_id, hero
@@ -824,6 +827,7 @@ impl Database {
                         wins: row.wins,
                         elims: row.elims,
                         deaths: row.deaths,
+                        kd_games: row.kd_games,
                     },
                 ));
             }
@@ -3346,13 +3350,24 @@ mod tests {
             row.winrate
         );
 
+        assert_eq!(sierra.kd_games, 4, "10/2, 30/6, 11/7 and legacy 7/1");
+        assert_eq!(edge.kd_games, 1, "only edge-in");
+        assert_eq!(all.kd_games, 5);
+
+        // Sierra has 9 games but only 4 that feed K/D: below the floor, so
+        // the Sierra K/D board leaves it out (DB3). Winrate still ranks it.
         let sierra_kd = db
             .member_leaderboard("kd", 50, None, Some("Sierra"))
             .await
             .unwrap();
-        assert_eq!(sierra_kd.len(), 1);
-        assert_eq!(sierra_kd[0].games, 9);
-        close(sierra_kd[0].kd, 58.0 / 16.0);
+        assert!(sierra_kd.is_empty(), "{sierra_kd:?}");
+        let sierra_wr = db
+            .member_leaderboard("winrate", 50, None, Some("Sierra"))
+            .await
+            .unwrap();
+        assert_eq!(sierra_wr.len(), 1);
+        assert_eq!(sierra_wr[0].games, 9);
+        close(sierra_wr[0].kd, 58.0 / 16.0);
 
         let edge_games = db
             .member_leaderboard("games", 50, None, Some("Edge"))
@@ -3382,5 +3397,81 @@ mod tests {
             .find(|m| m.session_id == "legacy-absurd-d")
             .unwrap();
         assert_eq!((legacy.elims, legacy.deaths), (6, 3179));
+    }
+
+    /// DB3: four games with suspect counters plus one clean 30-0 game used to
+    /// pass the 5-game floor (it counted every row) while K/D summed only the
+    /// clean game, ranking the member first at 30.00. The floor now counts the
+    /// games that feed K/D.
+    #[tokio::test]
+    async fn leaderboard_kd_floor_counts_only_kd_games() {
+        use crate::types::OrgRole;
+
+        let db = test_db().await;
+        let played = Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap();
+        let game = |mid: &str, sid: &str, elims: u32, deaths: u32, suspect: &[&str]| {
+            let mut m = entry(sid, "victory", elims);
+            m.member_id = mid.to_string();
+            m.hero = "Tracer".into();
+            m.role = "Damage".into();
+            m.map_name = "Oasis".into();
+            m.deaths = deaths;
+            m.played_at = played;
+            m.suspect_fields = suspect.iter().map(|s| (*s).to_string()).collect();
+            m
+        };
+
+        let gamer = db
+            .create_member("u-kd-gamer", "Gamer", OrgRole::Member)
+            .await
+            .unwrap()
+            .id;
+        db.upsert_personal_matches(
+            &gamer,
+            &[
+                game(&gamer, "g-sus-1", 5, 9, &["e"]),
+                game(&gamer, "g-sus-2", 5, 9, &["d"]),
+                game(&gamer, "g-sus-3", 5, 9, &["e", "d"]),
+                game(&gamer, "g-sus-4", 500, 9, &[]),
+                game(&gamer, "g-clean", 30, 0, &[]),
+            ],
+        )
+        .await
+        .unwrap();
+
+        let honest = db
+            .create_member("u-kd-honest", "Honest", OrgRole::Member)
+            .await
+            .unwrap()
+            .id;
+        let honest_games: Vec<_> = (0..5)
+            .map(|i| game(&honest, &format!("h-{i}"), 20, 10, &[]))
+            .collect();
+        db.upsert_personal_matches(&honest, &honest_games)
+            .await
+            .unwrap();
+
+        let snap = db.leaderboard_snapshot(None).await.unwrap();
+        let gamer_agg = snap.all.iter().find(|r| r.member_id == gamer).unwrap();
+        assert_eq!((gamer_agg.games, gamer_agg.kd_games), (5, 1));
+
+        let board = db.member_leaderboard("kd", 50, None, None).await.unwrap();
+        let ids: Vec<&str> = board.iter().map(|r| r.member_id.as_str()).collect();
+        assert_eq!(ids, vec![honest.as_str()], "{board:?}");
+        close(board[0].kd, 2.0);
+
+        let hero_board = db
+            .member_leaderboard("kd", 50, None, Some("Tracer"))
+            .await
+            .unwrap();
+        assert_eq!(hero_board.len(), 1);
+        assert_eq!(hero_board[0].member_id, honest);
+
+        // Winrate and games keep counting every decided row.
+        let winrate = db
+            .member_leaderboard("winrate", 50, None, None)
+            .await
+            .unwrap();
+        assert_eq!(winrate.len(), 2);
     }
 }

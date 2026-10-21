@@ -21,9 +21,60 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, SecondsFormat, Utc};
+
+/// Cleared while a self-restart has removed `run.marker`. The heartbeat
+/// must not write the file back. Restored if the exec fails.
+static MARKER_HELD: AtomicBool = AtomicBool::new(true);
+
+/// The heartbeat's lock. `release_run_marker` takes it before clearing
+/// [`MARKER_HELD`], so a touch that already passed that check cannot
+/// recreate the file afterwards.
+static HEARTBEAT: Mutex<Option<Arc<Mutex<Shared>>>> = Mutex::new(None);
+
+pub fn marker_is_held() -> bool {
+    MARKER_HELD.load(Ordering::Acquire)
+}
+
+/// Delete `run.marker` and stop the heartbeat from recreating it.
+/// Returns the text that was there, so a failed exec can put it back.
+pub fn release_run_marker(data_dir: &Path) -> Option<RunMarker> {
+    let shared = HEARTBEAT
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    // Hold the heartbeat lock across the flag and the delete. `touch`
+    // checks the flag under this same lock.
+    let _guard = shared
+        .as_ref()
+        .map(|shared| shared.lock().unwrap_or_else(|err| err.into_inner()));
+    MARKER_HELD.store(false, Ordering::Release);
+    let path = run_marker_path(data_dir);
+    let parsed = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| RunMarker::parse(&text));
+    let _ = std::fs::remove_file(&path);
+    parsed
+}
+
+/// Put `run.marker` back after a failed re-exec and let the heartbeat
+/// write it again.
+pub fn restore_run_marker(data_dir: &Path, marker: Option<&RunMarker>) -> io::Result<()> {
+    MARKER_HELD.store(true, Ordering::Release);
+    let path = run_marker_path(data_dir);
+    if path.exists() {
+        return Ok(());
+    }
+    let marker = marker.cloned().unwrap_or(RunMarker {
+        pid: std::process::id(),
+        started_at: Utc::now(),
+        last_seen: Utc::now(),
+    });
+    write_atomic(&path, &marker)
+}
 
 pub const RUN_MARKER: &str = "run.marker";
 pub const LAST_CRASH_MARKER: &str = "last_crash.marker";
@@ -164,6 +215,25 @@ pub struct RunMarkerGuard {
     shared: Arc<Mutex<Shared>>,
 }
 
+/// What one heartbeat tick does. A released marker is skipped, not an exit:
+/// a failed re-exec restores the marker and the loop must still be running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HeartbeatStep {
+    Stop,
+    Skip,
+    Touch,
+}
+
+fn heartbeat_step(stopped: bool, held: bool) -> HeartbeatStep {
+    if stopped {
+        HeartbeatStep::Stop
+    } else if !held {
+        HeartbeatStep::Skip
+    } else {
+        HeartbeatStep::Touch
+    }
+}
+
 /// Rewrites `last_seen` in this run's marker. Cheap to clone.
 #[derive(Debug, Clone)]
 pub struct MarkerHeartbeat {
@@ -175,7 +245,7 @@ impl MarkerHeartbeat {
     /// marker, or when the file no longer names this process.
     pub fn touch(&self, now: DateTime<Utc>) -> io::Result<()> {
         let mut s = self.shared.lock().unwrap_or_else(|p| p.into_inner());
-        if s.stopped || !file_names(&s.path, s.marker.pid) {
+        if !marker_is_held() || s.stopped || !file_names(&s.path, s.marker.pid) {
             return Ok(());
         }
         let next = RunMarker {
@@ -195,11 +265,17 @@ impl MarkerHeartbeat {
         tick.tick().await; // the first tick is immediate; the file is fresh
         loop {
             tick.tick().await;
-            if self.shared.lock().map(|s| s.stopped).unwrap_or(true) {
-                return;
-            }
-            if let Err(e) = self.touch(Utc::now()) {
-                tracing::warn!(error = %e, "could not update run.marker");
+            match heartbeat_step(
+                self.shared.lock().map(|s| s.stopped).unwrap_or(true),
+                marker_is_held(),
+            ) {
+                HeartbeatStep::Stop => return,
+                HeartbeatStep::Skip => continue,
+                HeartbeatStep::Touch => {
+                    if let Err(e) = self.touch(Utc::now()) {
+                        tracing::warn!(error = %e, "could not update run.marker");
+                    }
+                }
             }
         }
     }
@@ -255,13 +331,13 @@ impl Drop for RunMarkerGuard {
 pub fn write_run_marker(data_dir: &Path, marker: RunMarker) -> io::Result<RunMarkerGuard> {
     let path = run_marker_path(data_dir);
     write_atomic(&path, &marker)?;
-    Ok(RunMarkerGuard {
-        shared: Arc::new(Mutex::new(Shared {
-            path,
-            marker,
-            stopped: false,
-        })),
-    })
+    let shared = Arc::new(Mutex::new(Shared {
+        path,
+        marker,
+        stopped: false,
+    }));
+    *HEARTBEAT.lock().unwrap_or_else(|err| err.into_inner()) = Some(Arc::clone(&shared));
+    Ok(RunMarkerGuard { shared })
 }
 
 /// Daemon startup: recover a stale marker, then write this run's marker.
@@ -486,6 +562,14 @@ mod tests {
         tokio::time::sleep(HEARTBEAT_INTERVAL * 2).await;
         assert!(task.is_finished(), "the task stops after a clean finish");
         assert!(!run_marker_path(dir.path()).exists());
+    }
+
+    #[test]
+    fn a_released_marker_skips_a_tick_and_a_stopped_one_ends_it() {
+        assert_eq!(heartbeat_step(true, true), HeartbeatStep::Stop);
+        assert_eq!(heartbeat_step(true, false), HeartbeatStep::Stop);
+        assert_eq!(heartbeat_step(false, false), HeartbeatStep::Skip);
+        assert_eq!(heartbeat_step(false, true), HeartbeatStep::Touch);
     }
 
     #[test]

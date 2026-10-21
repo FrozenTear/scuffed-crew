@@ -524,6 +524,8 @@ fn system_collects_the_ocr_switch_from_the_daemon_status() {
             })
             .collect(),
         leptess_created: 0,
+        share_open: false,
+        share_notice: String::new(),
     };
     // The daemon refused off (a pack was missing): what ran was on.
     ocr_switch::write_status(dir.path(), &status(1, OcrSetting::On, &[])).unwrap();
@@ -592,6 +594,8 @@ fn the_call_sites_a_report_sends_always_pass_the_site_validator() {
             })
             .collect(),
         leptess_created: 0,
+        share_open: false,
+        share_notice: String::new(),
     };
     // The manifest a report with these sites carries, through the validator.
     let sent = |sites: &[(String, u64)]| -> Value {

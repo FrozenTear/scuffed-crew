@@ -150,7 +150,7 @@ const TRACKER_PLATFORM_COPY: &str =
 /// Stat-tracker build named in the install note on `/stats` when health
 /// does not send `tracker_latest`. One constant, so the banner tracks the
 /// current build instead of an older alpha.
-const TRACKER_RELEASE: &str = "rc.2";
+const TRACKER_RELEASE: &str = "rc.5";
 
 /// `true` when `core` is `MAJOR.MINOR.PATCH` with numeric components.
 fn is_release_core(core: &str) -> bool {
@@ -1325,6 +1325,21 @@ pub fn Stats() -> Element {
                         "The tracker auto-captures your Overwatch scoreboards via OCR and uploads your stats here. "
                         {TRACKER_PLATFORM_COPY}
                     }
+                    p { "On Arch or CachyOS, install it from the AUR (yay -S works too):" }
+                    code { class: "tracker-install", "paru -S scuffed-stat-tracker-bin" }
+                    p { "Then turn on the background service:" }
+                    code { class: "tracker-install", "systemctl --user enable --now scuffed-stat-tracker.service" }
+                    p {
+                        "Switching from the install script? Run "
+                        code { "scuffed-stat-tracker-uninstall" }
+                        " first. It keeps your saved games and settings; the tracker relearns your name crops over a few games."
+                    }
+                    p {
+                        "AUR installs update with "
+                        code { "paru -Syu" }
+                        ". Script installs keep updating from inside the app."
+                    }
+                    p { "On other distros, or without an AUR helper, use the install script:" }
                     code { class: "tracker-install",
                         "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash"
                     }
@@ -1765,7 +1780,7 @@ mod tracker_platform_copy_tests {
 
     #[test]
     fn release_notice_names_the_current_tracker_build() {
-        assert_eq!(TRACKER_RELEASE, "rc.2");
+        assert_eq!(TRACKER_RELEASE, "rc.5");
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
             pinned,
@@ -1781,6 +1796,9 @@ mod tracker_platform_copy_tests {
             ["alpha", "10"],
             ["alpha", "12"],
             ["rc", "1"],
+            ["rc", "2"],
+            ["rc", "3"],
+            ["rc", "4"],
         ] {
             let label = previous.join(".");
             assert!(
@@ -1790,7 +1808,7 @@ mod tracker_platform_copy_tests {
         }
         let prod = src.split("mod tracker_platform_copy_tests").next().unwrap();
         assert_eq!(
-            prod.matches("rc.2").count(),
+            prod.matches("rc.5").count(),
             1,
             "the build name lives only on TRACKER_RELEASE"
         );
@@ -1827,7 +1845,7 @@ mod tracker_platform_copy_tests {
     fn release_notice_formats_tracker_latest_like_the_pinned_fallback() {
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
-            tracker_release_notice_text(Some("0.5.0-rc.2")),
+            tracker_release_notice_text(Some("0.5.0-rc.5")),
             pinned,
             "the current bare version reads the same as the pin"
         );
@@ -1838,7 +1856,7 @@ mod tracker_platform_copy_tests {
         assert_eq!(tracker_release_notice_text(Some("")), pinned);
         assert_eq!(tracker_release_notice_text(Some("   ")), pinned);
         assert_eq!(tracker_release_notice_text(Some("\n")), pinned);
-        let shown = tracker_release_notice_text(Some("0.5.0-rc.2"));
+        let shown = tracker_release_notice_text(Some("0.5.0-rc.5"));
         assert!(!shown.contains("0.5.0-"));
         assert!(!shown.contains("stat-tracker-v"));
         assert!(!shown.contains('\u{2014}'));

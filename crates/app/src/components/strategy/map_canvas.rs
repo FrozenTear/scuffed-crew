@@ -427,6 +427,14 @@ pub fn MapCanvas(
     let current_loaded_map: Rc<RefCell<Option<String>>> = use_hook(|| Rc::new(RefCell::new(None)));
     let map_load: Rc<RefCell<MapImageLoad>> =
         use_hook(|| Rc::new(RefCell::new(MapImageLoad::default())));
+    // Tile `onload` closures are forgotten and keep a clone of `map_load`, so
+    // it is never dropped with the component. Abort on unmount: that bumps the
+    // epoch, so a tile that finishes after the editor is gone does not schedule
+    // a repaint against this component's dropped signals.
+    {
+        let map_load = map_load.clone();
+        use_drop(move || map_load.borrow_mut().abort());
+    }
 
     // Hero portrait cache
     let hero_image_cache: HeroImageCache = use_hook(create_hero_image_cache);
@@ -1617,7 +1625,7 @@ fn draw_health_packs(
 mod tests {
     use std::cell::Cell;
 
-    use super::{LoadEpoch, sync_signal};
+    use super::{LoadEpoch, MapImageLoad, sync_signal};
     use dioxus::prelude::*;
 
     #[derive(Clone, Copy)]
@@ -1687,6 +1695,19 @@ mod tests {
                 "a copied prop must stay stale so this test can fail"
             );
         });
+    }
+
+    /// F2: MapCanvas aborts its load on unmount. A tile callback created for
+    /// the old epoch must then be stale, so it cannot schedule a repaint
+    /// against the unmounted component's signals.
+    #[test]
+    fn abort_makes_in_flight_tile_callbacks_stale() {
+        let mut load = MapImageLoad::default();
+        let token = load.epoch.invalidate();
+        assert!(load.epoch.is_current(token));
+        load.abort();
+        assert!(!load.epoch.is_current(token));
+        assert!(load.raf_id.is_none() && load.raf_closure.is_none());
     }
 
     #[test]

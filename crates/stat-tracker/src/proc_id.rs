@@ -101,7 +101,9 @@ pub fn pid_is_live_tracker_started(pid: u32, expected_start: Option<u64>) -> boo
     accept_daemon_process(image_ok, expected_start, actual_start)
 }
 
-fn image_matches(pid: u32) -> bool {
+/// The process image is the tracker binary: `/proc/<pid>/exe` when it can
+/// be read, otherwise argv0, otherwise an exact `comm` match.
+pub fn image_matches(pid: u32) -> bool {
     match std::fs::read_link(format!("/proc/{pid}/exe")) {
         Ok(exe) => return exe_names_daemon(exe.as_os_str()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return false,

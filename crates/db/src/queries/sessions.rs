@@ -175,7 +175,8 @@ impl Database {
             self.client
                 .query("DELETE FROM session WHERE token = $tok")
                 .bind(("tok", token_hash))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
@@ -202,7 +203,8 @@ impl Database {
                 self.client
                     .query("DELETE FROM session WHERE user_id = $uid")
                     .bind(("uid", user_id.to_string()))
-                    .await?;
+                    .await?
+                    .check()?;
                 tracing::info!(user_id, count, "Revoked all sessions for user");
             }
 
@@ -229,7 +231,8 @@ impl Database {
             if count > 0 {
                 self.client
                     .query("DELETE FROM session WHERE expires_at <= time::now()")
-                    .await?;
+                    .await?
+                    .check()?;
                 tracing::info!("Cleaned up {count} expired sessions");
             }
 

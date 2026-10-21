@@ -106,12 +106,206 @@ pub fn refresh_view(data_dir: &Path, current: &DaemonView) -> DaemonView {
     }
 }
 
+/// Parsed `systemctl --user show` fields. Synthetic text is enough to test.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnitShow {
+    pub load_state: String,
+    pub fragment_path: String,
+    pub active_state: String,
+    pub result: String,
+}
+
+impl UnitShow {
+    pub fn installed(&self) -> bool {
+        self.load_state == "loaded" && !self.fragment_path.is_empty()
+    }
+
+    pub fn needs_reset(&self) -> bool {
+        self.active_state == "failed" || self.result == "start-limit-hit"
+    }
+}
+
+pub fn parse_systemctl_show(text: &str) -> UnitShow {
+    let mut show = UnitShow {
+        load_state: String::new(),
+        fragment_path: String::new(),
+        active_state: String::new(),
+        result: String::new(),
+    };
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key.trim() {
+            "LoadState" => show.load_state = value.trim().to_string(),
+            "FragmentPath" => show.fragment_path = value.trim().to_string(),
+            "ActiveState" => show.active_state = value.trim().to_string(),
+            "Result" => show.result = value.trim().to_string(),
+            _ => {}
+        }
+    }
+    show
+}
+
+/// Unit directories, user config first, then the packaged locations an AUR
+/// or deb install uses.
+pub fn user_unit_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(config) = dirs::config_dir() {
+        dirs.push(config.join("systemd").join("user"));
+    }
+    if let Some(data) = dirs::data_dir() {
+        dirs.push(data.join("systemd").join("user"));
+    }
+    for path in [
+        "/etc/systemd/user",
+        "/usr/local/lib/systemd/user",
+        "/usr/lib/systemd/user",
+        "/lib/systemd/user",
+        "/run/systemd/user",
+    ] {
+        dirs.push(PathBuf::from(path));
+    }
+    dirs
+}
+
+pub fn unit_in_dirs(dirs: &[PathBuf], unit: &str) -> Option<PathBuf> {
+    dirs.iter()
+        .map(|dir| dir.join(unit))
+        .find(|path| path.is_file())
+}
+
 pub fn service_unit_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|d| d.join("systemd").join("user").join(SYSTEMD_UNIT))
+    if let Some(show) = fresh_show(Duration::from_secs(10))
+        && show.installed()
+    {
+        return Some(PathBuf::from(show.fragment_path));
+    }
+    unit_in_dirs(&user_unit_dirs(), SYSTEMD_UNIT)
 }
 
 pub fn service_file_installed() -> bool {
-    service_unit_path().is_some_and(|p| p.exists())
+    if let Some(show) = fresh_show(Duration::from_secs(10)) {
+        return show.installed();
+    }
+    unit_in_dirs(&user_unit_dirs(), SYSTEMD_UNIT).is_some()
+}
+
+/// Ask systemctl off the UI thread and refresh the cache the installed check reads.
+pub async fn refresh_service_cache() -> bool {
+    tokio::task::spawn_blocking(|| {
+        if let Some(show) = systemctl_show_sync() {
+            remember_show(show.clone());
+            return show.installed();
+        }
+        unit_in_dirs(&user_unit_dirs(), SYSTEMD_UNIT).is_some()
+    })
+    .await
+    .unwrap_or(false)
+}
+
+struct ShowCache {
+    at: std::time::Instant,
+    show: UnitShow,
+}
+
+fn cache() -> &'static std::sync::Mutex<Option<ShowCache>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<ShowCache>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+fn fresh_show(max_age: Duration) -> Option<UnitShow> {
+    let guard = cache().lock().unwrap_or_else(|err| err.into_inner());
+    guard
+        .as_ref()
+        .and_then(|cached| (cached.at.elapsed() <= max_age).then(|| cached.show.clone()))
+}
+
+fn remember_show(show: UnitShow) {
+    let mut guard = cache().lock().unwrap_or_else(|err| err.into_inner());
+    *guard = Some(ShowCache {
+        at: std::time::Instant::now(),
+        show,
+    });
+}
+
+fn systemctl_show_sync() -> Option<UnitShow> {
+    let mut child = std::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            "-p",
+            "LoadState",
+            "-p",
+            "FragmentPath",
+            "-p",
+            "ActiveState",
+            "-p",
+            "Result",
+            SYSTEMD_UNIT,
+        ])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Ok(Some(status)) = child.try_wait() {
+            break status;
+        }
+        if started.elapsed() > Duration::from_millis(800) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    if !status.success() {
+        return None;
+    }
+    let mut stdout = child.stdout?;
+    let mut buf = String::new();
+    use std::io::Read;
+    stdout.read_to_string(&mut buf).ok()?;
+    Some(parse_systemctl_show(&buf))
+}
+
+async fn unit_show_now() -> Option<UnitShow> {
+    let out = tokio::process::Command::new("systemctl")
+        .args([
+            "--user",
+            "show",
+            "-p",
+            "LoadState",
+            "-p",
+            "FragmentPath",
+            "-p",
+            "ActiveState",
+            "-p",
+            "Result",
+            SYSTEMD_UNIT,
+        ])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let show = parse_systemctl_show(&text);
+    remember_show(show.clone());
+    Some(show)
+}
+
+/// Ask systemd. If that fails, scan the unit directories. The bool the
+/// caller remembered is not trusted on its own.
+async fn service_installed_now(remembered: bool) -> bool {
+    if let Some(show) = unit_show_now().await {
+        return show.installed();
+    }
+    unit_in_dirs(&user_unit_dirs(), SYSTEMD_UNIT).is_some() || remembered
 }
 
 pub(crate) fn find_daemon_binary() -> Option<PathBuf> {
@@ -158,6 +352,8 @@ fn spawn_daemon(data_dir: &Path) -> Result<std::process::Child, String> {
                 "scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn".into()
             }),
         )
+        .env_remove("INVOCATION_ID")
+        .env_remove("STAT_TRACKER_SYSTEMD")
         .spawn()
         .map_err(|e| format!("Could not start the tracker: {e}"))
 }
@@ -337,6 +533,7 @@ pub async fn systemd_enabled() -> bool {
 }
 
 pub async fn systemd_enable() -> Result<(), String> {
+    let _ = systemd_action("reset-failed").await;
     systemd_action_full(&["enable", "--now"]).await
 }
 
@@ -359,47 +556,73 @@ async fn systemd_action_full(args: &[&str]) -> Result<(), String> {
     }
 }
 
-/// Start / stop / restart through the user unit when installed; otherwise
-/// spawn or identity-checked stop. Restart without a unit is stop-then-start.
+/// Start / stop / restart through the user unit when systemd has it,
+/// otherwise spawn or identity-checked stop.
+///
+/// `service_installed` is not trusted: the unit is looked up again, so a
+/// stale flag from a 1s refresh cannot skip an AUR unit or keep using one
+/// that was removed. Stop and Restart signal the process that actually
+/// holds the pid file or the store lock, after an identity check, whether
+/// or not systemd started it. Start, when the unit exists, only starts
+/// that unit.
 pub async fn run_verb(
     data_dir: PathBuf,
     verb: DaemonVerb,
     service_installed: bool,
 ) -> Result<String, String> {
+    let installed = service_installed_now(service_installed).await;
     match verb {
         DaemonVerb::Start => {
-            if service_installed {
+            if installed {
+                let _ = systemd_action("reset-failed").await;
                 systemd_action("start").await?;
             } else {
+                // No unit: the app is the only starter, so a leftover
+                // tracker has to be stopped here. The unit path does this
+                // inside the new process instead.
+                stat_tracker::replace::stop_strays(
+                    &data_dir,
+                    false,
+                    stat_tracker::replace::StrayPolicy::Any,
+                )
+                .await?;
                 start_daemon_checked(&data_dir).await?;
             }
             Ok("Tracker started".into())
         }
         DaemonVerb::Stop => {
-            if service_installed {
-                systemd_action("stop").await?;
-            } else {
-                stop_daemon(&data_dir).await.map_err(|e| e.to_string())?;
-            }
+            stop_running(&data_dir, installed).await?;
             Ok("Tracker stopped".into())
         }
         DaemonVerb::Restart => {
-            if service_installed {
-                systemd_action("restart").await?;
+            if let Err(err) = stop_running(&data_dir, installed).await
+                && err != "Tracker is not running"
+            {
+                return Err(err);
+            }
+            if installed {
+                let _ = systemd_action("reset-failed").await;
+                systemd_action("start").await?;
             } else {
-                // stop waits until the process is gone (store flock released).
-                // A fixed sleep here used to start a second writer while Tab
-                // OCR was still draining. "Not running" / stale pid still starts.
-                if let Err(e) = stop_daemon_result(&data_dir).await
-                    && !e.allows_restart()
-                {
-                    return Err(e.to_string());
-                }
                 start_daemon_checked(&data_dir).await?;
             }
             Ok("Tracker restarted".into())
         }
     }
+}
+
+/// Stop the unit when it exists, then any identity-checked tracker that is
+/// still alive. An explicit Stop does not wait for a game to finish.
+async fn stop_running(data_dir: &Path, installed: bool) -> Result<(), String> {
+    if installed {
+        let _ = systemd_action("stop").await;
+    }
+    let before = stat_tracker::replace::live_stray_pids(data_dir);
+    if before.is_empty() && !installed {
+        return Err("Tracker is not running".into());
+    }
+    stat_tracker::replace::stop_strays(data_dir, false, stat_tracker::replace::StrayPolicy::Any)
+        .await
 }
 
 pub async fn toggle_autostart(currently_enabled: bool) -> Result<String, String> {
@@ -541,6 +764,56 @@ mod tests {
         assert!(
             msg.contains("still shutting down"),
             "timeout must refuse to start another copy: {msg}"
+        );
+    }
+
+    #[test]
+    fn systemctl_show_covers_a_packaged_unit_and_a_missing_one() {
+        let loaded = parse_systemctl_show(
+            "\
+LoadState=loaded
+FragmentPath=/usr/lib/systemd/user/scuffed-stat-tracker.service
+ActiveState=failed
+Result=start-limit-hit
+",
+        );
+        assert!(loaded.installed());
+        assert!(loaded.needs_reset());
+        assert_eq!(
+            loaded.fragment_path,
+            "/usr/lib/systemd/user/scuffed-stat-tracker.service"
+        );
+        let missing =
+            parse_systemctl_show("LoadState=not-found\nFragmentPath=\nActiveState=inactive\n");
+        assert!(!missing.installed());
+        assert!(!missing.needs_reset());
+        let config = parse_systemctl_show(
+            "LoadState=loaded\nFragmentPath=/home/player/.config/systemd/user/scuffed-stat-tracker.service\n",
+        );
+        assert!(config.installed());
+        assert!(!config.fragment_path.contains("session.env"));
+    }
+
+    #[test]
+    fn unit_scan_finds_a_packaged_file_and_ignores_other_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let unit = dir.path().join(SYSTEMD_UNIT);
+        std::fs::write(
+            &unit,
+            "[Service]\nExecStart=/usr/bin/scuffed-stat-tracker\n",
+        )
+        .unwrap();
+        let other = dir.path().join("other.service");
+        std::fs::write(&other, "").unwrap();
+        assert_eq!(
+            unit_in_dirs(&[dir.path().to_path_buf()], SYSTEMD_UNIT),
+            Some(unit)
+        );
+        assert!(unit_in_dirs(&[dir.path().join("missing")], SYSTEMD_UNIT).is_none());
+        assert!(
+            user_unit_dirs()
+                .iter()
+                .any(|path| { path.ends_with("systemd/user") || path.ends_with("systemd/user/") })
         );
     }
 

@@ -66,7 +66,7 @@
 //! | Idle | scoreboard | Append. There is no mature board to reset from. |
 //! | LiveMatch | fresh-match board, streak already primed | Split. New outcome is Unknown. LiveMatch has no hint to seal. |
 //! | LiveMatch | fresh-match board, streak clear | Defer the first. Split on the second fresh board. |
-//! | LiveMatch | other scoreboard | Append. An unidentified or implausible row leaves a held board and the streak. A plausible same-row board refreshes the baseline. A different row that is not fresh-shaped re-anchors it. |
+//! | LiveMatch | other scoreboard | Append. An unidentified or implausible row leaves a held board and the streak. A plausible same-row board refreshes the baseline, unless it is fresh-shaped against a mature baseline: that board is a reset signal arriving early, and it leaves the baseline, the streak and a held board. A different row that is not fresh-shaped re-anchors it. |
 //! | Idle | 120s gap | Not applicable. Ignore. |
 //! | LiveMatch | 120s gap | Split. The new session keeps this frame's header. The caller's guard is the same map plus the same hero. |
 //! | Idle | end screen, different map | Not applicable. Ignore. |
@@ -103,8 +103,11 @@ use std::time::{Duration, Instant};
 use crate::capture_gate::{self, Counters, GATE_COLS, GateState};
 use crate::detect::MatchOutcome;
 
-/// The first fresh-match board has to land at least this long after the last
-/// accepted board. A drop a few seconds later is still this match.
+/// The first fresh-match board has to land at least this long after the
+/// board it is compared with (the reset baseline, or the gate when there is
+/// none yet). A drop a few seconds later is still this match. A row of
+/// another kind stored in between (an unidentified row, another player's)
+/// does not restart this clock: it says nothing about the own row.
 pub const RESET_MIN_AGE: Duration = Duration::from_secs(45);
 
 /// Why a session closed. The log line is [`CloseReason::log`]; callers match
@@ -761,6 +764,17 @@ fn plan_from_effect(
     });
     let same_or_unset =
         input.baseline_row.is_none() || same_baseline_row(input.baseline_row, input.row_id);
+    // The baseline's own row fell under the fresh-match thresholds of a
+    // mature board: the shape of a new game. Taken as the baseline, the new
+    // game's low counters would leave nothing mature to reset from, and the
+    // two games would merge (CAP-8). It is stored, and the baseline, the
+    // streak and a held board stay, so the reset can still fire.
+    let reset_shaped = same_baseline_row(input.baseline_row, input.row_id)
+        && anchor.is_some_and(|gate| {
+            let known = known_cols(gate, &held);
+            mature_board(&gate.accepted, &known)
+                && under_fresh_match(&gate.accepted, &input.cur, &known)
+        });
     // A different row re-anchors only when the stats continue. A low-total
     // teammate row is fresh-shaped: it is stored, and it neither replaces
     // the baseline nor counts toward the reset streak.
@@ -769,6 +783,7 @@ fn plan_from_effect(
     let refresh = input.row_id.is_some()
         && input.row_counts
         && !implausible
+        && !reset_shaped
         && (same_or_unset || (!fresh_shaped && !doubt.suspect_row));
     // A suspect row is not progress: it may be another player's.
     let counts = input.row_counts && !doubt.suspect_row;
@@ -997,8 +1012,22 @@ fn is_fresh_reset(
         && enough
         && !implausible
         && mature_board(&prev.accepted, &known)
-        && input.age.is_some_and(|age| age >= RESET_MIN_AGE)
+        && compare_age(input).is_some_and(|age| age >= RESET_MIN_AGE)
         && under_fresh_match(&prev.accepted, &input.cur, &known)
+}
+
+/// Age of the board a reset is measured from: the baseline's own time when
+/// there is a baseline, else the gate's. Before CAP-8 this was the time since
+/// the last stored row of any kind, so an unidentified row stored between two
+/// fresh boards made the second one "too young", and it became the baseline.
+/// A baseline with no recorded time falls back to the gate's age, which is
+/// never older than the baseline.
+fn compare_age(input: &CapturePlanInput<'_>) -> Option<Duration> {
+    if input.baseline.is_some() {
+        input.baseline_age.or(input.age)
+    } else {
+        input.age
+    }
 }
 
 /// Outcome to write when a session closes, if it does not already have one.
@@ -1379,6 +1408,12 @@ pub fn note_accepted_capture(
         return;
     }
     if plan.defer {
+        // A deferral on a game with no baseline yet takes the gate as the
+        // baseline. Its time is the gate's, so the reset age is measured
+        // from that board (`compare_age`).
+        if state.reset_baseline.is_none() && plan.reset_baseline.is_some() {
+            state.baseline_at = state.last_board_at;
+        }
         state.reset_streak = plan.reset_streak;
         state.reset_baseline = plan.reset_baseline;
         state.baseline_row = plan.baseline_row;
@@ -1388,10 +1423,19 @@ pub fn note_accepted_capture(
     if plan.refresh_baseline || plan.count_progress || plan.clear_hint {
         state.deferred = None;
     }
-    state.gate = Some(accepted);
+    // A discarded suspect row does not move the monotonic gate. Its raw
+    // counters can still anchor the reset baseline, which is what a later
+    // fresh board is compared with.
+    let mut monotonic = accepted;
+    let anchor = monotonic.boundary_anchor.take();
+    state.gate = Some(monotonic);
     state.reset_streak = plan.reset_streak;
     state.reset_baseline = if plan.refresh_baseline {
-        Some(accepted)
+        Some(anchor.map_or(monotonic, |raw| capture_gate::GateState {
+            accepted: raw,
+            last_raw: raw,
+            ..capture_gate::GateState::default()
+        }))
     } else {
         plan.reset_baseline
     };
@@ -2670,6 +2714,125 @@ mod tests {
         assert!(fresh.holds.is_empty(), "a split does not hold the new game");
         assert_eq!(fresh.accepted.deaths, 2);
         assert_eq!(fresh.accepted.damage, 1600);
+    }
+
+    /// CAP-8: an unidentified row stored between two own-row fresh boards
+    /// does not make the second one "too young". The reset age is the
+    /// baseline's, so the second fresh board commits the split instead of
+    /// becoming the baseline and merging the two games.
+    #[test]
+    fn an_unidentified_row_between_fresh_boards_does_not_merge_the_games() {
+        let now = t0();
+        let mut m = Machine::new("Ilios");
+        m.capture(counters(20, 8, 8, 8000, 4000, 2000), now);
+        let first = counters(2, 1, 1, 900, 300, 100);
+        m.capture(first, now + Duration::from_secs(50));
+        assert_eq!(m.active().state.reset_streak, 1, "the first reset signal");
+        assert_eq!(m.active().state.deferred, Some(first));
+        // The own row was not found on this Tab. The row is stored.
+        m.capture_board(
+            counters(2, 1, 1, 950, 320, 110),
+            None,
+            None,
+            now + Duration::from_secs(55),
+        );
+        assert!(m.closed.is_empty());
+        assert_eq!(m.active().state.reset_streak, 1, "the streak stays");
+        assert_eq!(m.active().state.deferred, Some(first), "the hold stays");
+        // The own row again, 10 s after the unidentified row.
+        m.capture(
+            counters(3, 1, 1, 1000, 350, 120),
+            now + Duration::from_secs(65),
+        );
+        assert_eq!(m.closed.len(), 1, "the second fresh board splits");
+        assert_eq!(m.closed[0].reason, CloseReason::StatReset);
+        assert_eq!(
+            m.closed[0]
+                .sess
+                .state
+                .reset_baseline
+                .map(|g| g.accepted.elims),
+            Some(20),
+            "the old game kept its mature baseline"
+        );
+        assert_eq!(
+            m.active().opened_with,
+            Some(first),
+            "the held first board opens the new game"
+        );
+    }
+
+    /// CAP-8: a fresh-shaped board on the baseline's own row that is too
+    /// young to count as a reset is stored, but it is not the baseline. The
+    /// baseline, its time and the streak stay, and the reset still fires
+    /// once the boards are old enough.
+    #[test]
+    fn a_young_fresh_board_does_not_re_anchor_the_baseline() {
+        let now = t0();
+        let mut m = Machine::new("Ilios");
+        m.capture(counters(20, 8, 8, 8000, 4000, 2000), now);
+        assert_eq!(m.active().state.baseline_at, Some(now));
+        m.capture(counters(1, 0, 0, 200, 50, 0), now + Duration::from_secs(10));
+        assert!(m.closed.is_empty());
+        assert_eq!(
+            m.active().state.baseline_at,
+            Some(now),
+            "a fresh-shaped own-row board is not the baseline"
+        );
+        assert_eq!(
+            m.active().state.reset_baseline.map(|g| g.accepted.elims),
+            Some(20)
+        );
+        // 50 s after the baseline, 40 s after the last stored row.
+        let first = counters(2, 1, 1, 900, 300, 100);
+        m.capture(first, now + Duration::from_secs(50));
+        assert!(m.closed.is_empty());
+        assert_eq!(m.active().state.reset_streak, 1, "the first reset signal");
+        assert_eq!(m.active().state.deferred, Some(first));
+        m.capture(
+            counters(3, 1, 1, 1000, 350, 120),
+            now + Duration::from_secs(60),
+        );
+        assert_eq!(m.closed.len(), 1, "the second fresh board splits");
+        assert_eq!(m.closed[0].reason, CloseReason::StatReset);
+    }
+
+    /// CAP-8, at the plan: [`RESET_MIN_AGE`] is measured from the baseline,
+    /// not from the last stored row, and a fresh-shaped baseline-row board
+    /// never refreshes the baseline or drops the streak.
+    #[test]
+    fn the_reset_age_is_the_baselines_and_a_fresh_board_is_not_a_baseline() {
+        let mature = gate(counters(20, 8, 8, 8000, 4000, 2000));
+        let low = counters(2, 1, 1, 900, 300, 100);
+        // Last stored row 10 s ago (an unidentified row), baseline 60 s.
+        let mut input = held_input(&mature, low, CLEAN, 10);
+        input.baseline_age = Some(Duration::from_secs(60));
+        input.streak = 1;
+        let plan = plan_capture(&input);
+        assert!(plan.split, "{plan:?}");
+        input.streak = 0;
+        let plan = plan_capture(&input);
+        assert!(plan.defer && !plan.refresh_baseline, "{plan:?}");
+        // Baseline itself only 10 s old: not a reset yet, and not a baseline.
+        let mut young = held_input(&mature, low, CLEAN, 10);
+        young.streak = 1;
+        let plan = plan_capture(&young);
+        assert!(!plan.split && !plan.defer, "{plan:?}");
+        assert!(!plan.refresh_baseline, "{plan:?}");
+        assert_eq!(plan.reset_streak, 1, "the streak stays: {plan:?}");
+        assert_eq!(plan.reset_baseline, Some(mature));
+        // No baseline yet: the gate's own age is the reset age.
+        let mut no_baseline = held_input(&mature, low, CLEAN, 60);
+        no_baseline.baseline = None;
+        no_baseline.baseline_age = Some(Duration::from_secs(5));
+        assert!(plan_capture(&no_baseline).defer);
+        // A continuing board on the same row still refreshes.
+        let cont = held_input(&mature, counters(21, 8, 8, 8100, 4000, 2000), CLEAN, 10);
+        assert!(plan_capture(&cont).refresh_baseline);
+        // A fresh-shaped board against an immature baseline still refreshes.
+        let early = gate(counters(1, 0, 0, 100, 0, 0));
+        let start = held_input(&early, counters(1, 0, 0, 20, 0, 0), CLEAN, 10);
+        assert!(plan_capture(&start).refresh_baseline);
     }
 
     #[test]

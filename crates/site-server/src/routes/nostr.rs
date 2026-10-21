@@ -26,6 +26,7 @@ use scuffed_chat::nostr::relay::publish_event_oneshot;
 
 use crate::extractors::{OfficerUser, OrgMember};
 use crate::nostr_rate_limit::RateClass;
+use crate::public_cache::ScopedTtlCache;
 use crate::state::AppState;
 
 /// Handler error for the secret-touching Nostr routes.
@@ -1287,6 +1288,79 @@ pub struct FeedQuery {
     pub hashtag: Option<String>,
 }
 
+/// One relay query of the feed. Every field changes the relay result.
+#[derive(Clone, PartialEq)]
+struct FeedCacheKey {
+    relay_url: String,
+    hashtag: Option<String>,
+    limit: usize,
+    since: Option<u64>,
+}
+
+type FeedEvents = std::sync::Arc<Vec<scuffed_types::nostr::NostrEvent>>;
+
+/// Relay results by query (API-9). `since` and `hashtag` come from the query
+/// string, so the entry count is capped.
+static FEED_CACHE: ScopedTtlCache<FeedCacheKey, FeedEvents> =
+    ScopedTtlCache::new(crate::public_cache::NOSTR_FEED_TTL, 32);
+
+/// pubkey → display name for feed authors. One entry per database.
+static FEED_NAMES_CACHE: ScopedTtlCache<(), std::sync::Arc<HashMap<String, String>>> =
+    ScopedTtlCache::new(crate::public_cache::NOSTR_FEED_TTL, 4);
+
+/// At most this many feed relay queries run at once, across all callers.
+/// A cache miss waits for a permit, then checks the cache again, so a burst
+/// of identical misses opens one WebSocket instead of one each.
+static FEED_RELAY_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+async fn cached_feed_events(
+    state: &AppState,
+    relay_url: &str,
+    key: FeedCacheKey,
+    filter: scuffed_types::nostr::NostrFilter,
+) -> Result<FeedEvents, scuffed_chat::nostr::relay::RelayError> {
+    if let Some(events) = FEED_CACHE.get(&state.db, &key, std::time::Instant::now()) {
+        return Ok(events);
+    }
+    let _permit = FEED_RELAY_PERMITS
+        .acquire()
+        .await
+        .expect("feed relay semaphore is never closed");
+    if let Some(events) = FEED_CACHE.get(&state.db, &key, std::time::Instant::now()) {
+        return Ok(events);
+    }
+    let events: FeedEvents = std::sync::Arc::new(
+        scuffed_chat::nostr::relay::query_events_oneshot(relay_url, vec![filter], 5).await?,
+    );
+    // A failed query returned above and is not cached.
+    FEED_CACHE.insert(&state.db, key, events.clone(), std::time::Instant::now());
+    Ok(events)
+}
+
+/// Display names for feed authors. A failed member read yields an empty map
+/// (authors show by pubkey, as before) and is not cached.
+async fn cached_feed_names(state: &AppState) -> std::sync::Arc<HashMap<String, String>> {
+    if let Some(names) = FEED_NAMES_CACHE.get(&state.db, &(), std::time::Instant::now()) {
+        return names;
+    }
+    match state.db.list_nostr_identities().await {
+        Ok(members) => {
+            let names: std::sync::Arc<HashMap<String, String>> = std::sync::Arc::new(
+                members
+                    .into_iter()
+                    .filter_map(|m| m.nostr_pubkey.map(|pk| (pk, m.display_name)))
+                    .collect(),
+            );
+            FEED_NAMES_CACHE.insert(&state.db, (), names.clone(), std::time::Instant::now());
+            names
+        }
+        Err(e) => {
+            tracing::warn!("feed author names unavailable: {e}");
+            std::sync::Arc::default()
+        }
+    }
+}
+
 #[derive(Serialize)]
 pub struct FeedPostResponse {
     pub id: String,
@@ -1325,7 +1399,13 @@ pub async fn nostr_feed(
         filter.since = Some(since);
     }
 
-    let events = scuffed_chat::nostr::relay::query_events_oneshot(&relay_url, vec![filter], 5)
+    let key = FeedCacheKey {
+        relay_url: relay_url.clone(),
+        hashtag: query.hashtag.clone(),
+        limit,
+        since: query.since,
+    };
+    let events = cached_feed_events(&state, &relay_url, key, filter)
         .await
         .map_err(|e| {
             tracing::error!("Failed to query relay feed: {e}");
@@ -1337,15 +1417,13 @@ pub async fn nostr_feed(
             )
         })?;
 
+    // Officer visibility is decided per request, never cached: a cached
+    // relay result is filtered again for each caller.
     let is_officer = feed_caller_is_officer(&state, &jar).await;
     let officer_groups = officer_groups_from_lookup(state.db.list_officer_group_ids().await);
-    let events = visible_feed_events(events, &officer_groups, is_officer);
+    let events = visible_feed_events(events.as_ref().clone(), &officer_groups, is_officer);
 
-    let members = state.db.list_nostr_identities().await.unwrap_or_default();
-    let pubkey_names: HashMap<String, String> = members
-        .into_iter()
-        .filter_map(|m| m.nostr_pubkey.map(|pk| (pk, m.display_name)))
-        .collect();
+    let pubkey_names = cached_feed_names(&state).await;
 
     let mut posts: Vec<FeedPostResponse> = events
         .into_iter()
@@ -1557,16 +1635,7 @@ pub async fn nostr_health(State(state): State<AppState>) -> Json<RelayHealthResp
         .replace("ws://", "http://")
         .replace("wss://", "https://");
 
-    let reachable = match reqwest::Client::new()
-        .get(&http_url)
-        .header("Accept", "application/nostr+json")
-        .timeout(std::time::Duration::from_secs(3))
-        .send()
-        .await
-    {
-        Ok(resp) => resp.status().is_success(),
-        Err(_) => false,
-    };
+    let reachable = cached_relay_reachable(&state, &http_url).await;
 
     Json(RelayHealthResponse {
         configured: true,
@@ -1576,6 +1645,44 @@ pub async fn nostr_health(State(state): State<AppState>) -> Json<RelayHealthResp
         relay_info: None,
         forum_backend,
     })
+}
+
+/// Last relay probe result per database and relay URL (API-9). The public
+/// shell calls `/api/nostr/health` on every page load; without this each
+/// call made an outbound request with a freshly built HTTP client.
+static RELAY_PROBE_CACHE: ScopedTtlCache<String, bool> =
+    ScopedTtlCache::new(crate::public_cache::RELAY_PROBE_TTL, 4);
+
+/// One probe in flight at a time; a waiting caller reads the fresh result.
+static RELAY_PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+static RELAY_PROBE_CLIENT: std::sync::LazyLock<reqwest::Client> =
+    std::sync::LazyLock::new(reqwest::Client::new);
+
+/// Whether the relay's NIP-11 endpoint answers 2xx, cached for
+/// [`RELAY_PROBE_TTL`](crate::public_cache::RELAY_PROBE_TTL). A failed probe
+/// is cached too: an unreachable relay must not cost a 3 s request per hit.
+async fn cached_relay_reachable(state: &AppState, http_url: &str) -> bool {
+    let key = http_url.to_string();
+    if let Some(reachable) = RELAY_PROBE_CACHE.get(&state.db, &key, std::time::Instant::now()) {
+        return reachable;
+    }
+    let _probe = RELAY_PROBE_LOCK.lock().await;
+    if let Some(reachable) = RELAY_PROBE_CACHE.get(&state.db, &key, std::time::Instant::now()) {
+        return reachable;
+    }
+    let reachable = match RELAY_PROBE_CLIENT
+        .get(http_url)
+        .header("Accept", "application/nostr+json")
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
+        Ok(resp) => resp.status().is_success(),
+        Err(_) => false,
+    };
+    RELAY_PROBE_CACHE.insert(&state.db, key, reachable, std::time::Instant::now());
+    reachable
 }
 
 // ─── Phase 5: Encrypted Direct Messages (NIP-44 + NIP-59) ───

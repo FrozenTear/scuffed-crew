@@ -1,10 +1,10 @@
 use dashmap::DashMap;
 use scuffed_types::strategy::{CollabUserInfo, ServerMessage, StrategyId, WsResponse};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::sync::{Mutex, Notify, OwnedSemaphorePermit, Semaphore, mpsc};
 
 /// Joined-room cap. Matches the default `WS_MAX_CONNECTIONS` semaphore, which
 /// is the admission limit for every socket (joined or not). `RoomManager::with_global_limit`
@@ -31,6 +31,19 @@ pub struct Room {
 pub struct RoomUser {
     pub info: CollabUserInfo,
     pub tx: mpsc::Sender<WsResponse>,
+    /// Signalled when a broadcast drops this connection (its channel was full
+    /// or closed). The socket task then closes the socket, so the client
+    /// reconnects and gets a fresh `RoomJoined` instead of silently missing
+    /// updates.
+    pub evict: Arc<Notify>,
+}
+
+/// A connection a broadcast dropped because its channel was full or closed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pruned {
+    pub user_id: String,
+    /// No other connection of this user is left in the room.
+    pub user_gone: bool,
 }
 
 impl Room {
@@ -45,9 +58,16 @@ impl Room {
         connection_id: String,
         user: CollabUserInfo,
         tx: mpsc::Sender<WsResponse>,
+        evict: Arc<Notify>,
     ) {
-        self.connections
-            .insert(connection_id, RoomUser { info: user, tx });
+        self.connections.insert(
+            connection_id,
+            RoomUser {
+                info: user,
+                tx,
+                evict,
+            },
+        );
     }
 
     /// Remove one connection. Returns the user info and whether any other
@@ -75,37 +95,38 @@ impl Room {
         self.connections.is_empty()
     }
 
-    /// Broadcast to all connections except `sender_connection_id`.
-    pub fn broadcast(&mut self, sender_connection_id: &str, message: ServerMessage) {
+    /// Send to every connection except `skip`, dropping any whose channel is
+    /// full or closed (each dropped one is told through its `evict`).
+    ///
+    /// Returns the connections it dropped. The room manager owns the global
+    /// connection count and decrements it once per entry
+    /// (`RoomManager::deliver`).
+    #[must_use]
+    pub fn broadcast(&mut self, skip: Option<&str>, message: ServerMessage) -> Vec<Pruned> {
         let response = WsResponse::from(message);
         let mut dead = Vec::new();
 
         for (cid, user) in &self.connections {
-            if cid != sender_connection_id && user.tx.try_send(response.clone()).is_err() {
+            if Some(cid.as_str()) != skip && user.tx.try_send(response.clone()).is_err() {
                 dead.push(cid.clone());
             }
         }
 
+        let mut removed = Vec::with_capacity(dead.len());
         for id in dead {
             tracing::warn!("Removing dead connection {} from room", id);
-            self.connections.remove(&id);
-        }
-    }
-
-    pub fn broadcast_all(&mut self, message: ServerMessage) {
-        let response = WsResponse::from(message);
-        let mut dead = Vec::new();
-
-        for (cid, user) in &self.connections {
-            if user.tx.try_send(response.clone()).is_err() {
-                dead.push(cid.clone());
+            if let Some(user) = self.connections.remove(&id) {
+                user.evict.notify_one();
+                removed.push(user.info.id);
             }
         }
-
-        for id in dead {
-            tracing::warn!("Removing dead connection {} from room", id);
-            self.connections.remove(&id);
-        }
+        removed
+            .into_iter()
+            .map(|user_id| Pruned {
+                user_gone: !self.connections.values().any(|c| c.info.id == user_id),
+                user_id,
+            })
+            .collect()
     }
 }
 
@@ -159,12 +180,15 @@ impl RoomManager {
     ///
     /// Returns `Err` when global or per-room caps would be exceeded — caller
     /// must not treat the connection as joined.
+    ///
+    /// `evict` is signalled if a later broadcast drops this connection.
     pub fn join_room(
         &self,
         strategy_id: &StrategyId,
         connection_id: String,
         user: CollabUserInfo,
         tx: mpsc::Sender<WsResponse>,
+        evict: Arc<Notify>,
     ) -> Result<(), JoinError> {
         // Optimistic global reserve; roll back on room-limit reject.
         let prev = self.global_connections.fetch_add(1, Ordering::AcqRel);
@@ -184,11 +208,33 @@ impl RoomManager {
         let first_for_user = !room.connections.values().any(|c| c.info.id == user.id);
 
         if first_for_user {
-            room.broadcast_all(ServerMessage::UserJoined { user: user.clone() });
+            self.deliver(
+                &mut room,
+                None,
+                ServerMessage::UserJoined { user: user.clone() },
+            );
         }
 
-        room.add_connection(connection_id, user, tx);
+        room.add_connection(connection_id, user, tx, evict);
         Ok(())
+    }
+
+    /// Send `message` to a room and settle every connection the send drops:
+    /// one global-count decrement each, and `UserLeft` for a user with no
+    /// connection left (which may drop more connections, handled the same way).
+    fn deliver(&self, room: &mut Room, skip: Option<&str>, message: ServerMessage) {
+        let mut queue = VecDeque::from([(skip.map(str::to_owned), message)]);
+        while let Some((skip, message)) = queue.pop_front() {
+            let pruned = room.broadcast(skip.as_deref(), message);
+            if pruned.is_empty() {
+                continue;
+            }
+            self.global_connections
+                .fetch_sub(pruned.len(), Ordering::AcqRel);
+            for p in pruned.into_iter().filter(|p| p.user_gone) {
+                queue.push_back((None, ServerMessage::UserLeft { user_id: p.user_id }));
+            }
+        }
     }
 
     /// Leave a room for one connection. Broadcasts UserLeft only when the
@@ -200,7 +246,11 @@ impl RoomManager {
                 if let Some((info, still_present)) = room.remove_connection(connection_id) {
                     removed = true;
                     if !still_present {
-                        room.broadcast_all(ServerMessage::UserLeft { user_id: info.id });
+                        self.deliver(
+                            &mut room,
+                            None,
+                            ServerMessage::UserLeft { user_id: info.id },
+                        );
                     }
                 }
                 room.is_empty()
@@ -231,7 +281,7 @@ impl RoomManager {
         message: ServerMessage,
     ) {
         if let Some(mut room) = self.rooms.get_mut(strategy_id) {
-            room.broadcast(sender_connection_id, message);
+            self.deliver(&mut room, Some(sender_connection_id), message);
         }
     }
 
@@ -309,6 +359,10 @@ mod tests {
         mpsc::channel(MAX_ROOM_CONNECTIONS + 8)
     }
 
+    fn evict() -> Arc<Notify> {
+        Arc::new(Notify::new())
+    }
+
     #[test]
     fn join_rejects_at_room_limit() {
         let mgr = RoomManager::new();
@@ -317,13 +371,19 @@ mod tests {
         for i in 0..MAX_ROOM_CONNECTIONS {
             let (tx, rx) = dummy_conn();
             keep_alive.push(rx);
-            mgr.join_room(&sid, format!("c{i}"), dummy_user(&format!("u{i}")), tx)
-                .expect("join within limit");
+            mgr.join_room(
+                &sid,
+                format!("c{i}"),
+                dummy_user(&format!("u{i}")),
+                tx,
+                evict(),
+            )
+            .expect("join within limit");
         }
         let (tx, rx) = dummy_conn();
         keep_alive.push(rx);
         let err = mgr
-            .join_room(&sid, "overflow".into(), dummy_user("overflow"), tx)
+            .join_room(&sid, "overflow".into(), dummy_user("overflow"), tx, evict())
             .unwrap_err();
         assert_eq!(err, JoinError::RoomLimit);
         assert_eq!(mgr.global_connection_count(), MAX_ROOM_CONNECTIONS);
@@ -336,7 +396,7 @@ mod tests {
         let mgr = RoomManager::new();
         let sid = "strat-2".to_string();
         let (tx, _rx) = dummy_conn();
-        mgr.join_room(&sid, "c1".into(), dummy_user("u1"), tx)
+        mgr.join_room(&sid, "c1".into(), dummy_user("u1"), tx, evict())
             .unwrap();
         assert_eq!(mgr.global_connection_count(), 1);
         mgr.leave_room(&sid, "c1");
@@ -354,5 +414,103 @@ mod tests {
         assert!(mgr.try_persist_permit().is_none());
         drop(permits);
         assert!(mgr.try_persist_permit().is_some());
+    }
+
+    /// API-1: a broadcast that drops a slow client must give its slot back.
+    /// The old code removed it from the room without touching the global
+    /// count, and the later `leave_room` found nothing to remove, so every
+    /// slow client leaked one of the 512 joined slots for good.
+    #[tokio::test]
+    async fn pruned_slow_client_returns_its_global_slot() {
+        let mgr = RoomManager::new();
+        let sid = "strat-slow".to_string();
+        let (fast_tx, _fast_rx) = dummy_conn();
+        mgr.join_room(&sid, "fast".into(), dummy_user("fast"), fast_tx, evict())
+            .unwrap();
+        // One-slot channel that nobody drains: the first message fills it.
+        let (slow_tx, _slow_rx) = mpsc::channel(1);
+        let slow_evict = evict();
+        mgr.join_room(
+            &sid,
+            "slow".into(),
+            dummy_user("slow"),
+            slow_tx,
+            slow_evict.clone(),
+        )
+        .unwrap();
+        assert_eq!(mgr.global_connection_count(), 2);
+
+        mgr.broadcast(&sid, "fast", ServerMessage::Pong);
+        assert_eq!(mgr.global_connection_count(), 2, "first send fits");
+        mgr.broadcast(&sid, "fast", ServerMessage::Pong);
+        assert_eq!(
+            mgr.global_connection_count(),
+            1,
+            "the full channel is dropped and its slot returned"
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(1), slow_evict.notified())
+            .await
+            .expect("dropped client is told to close");
+
+        // The socket task still calls leave_room on disconnect; it must not
+        // decrement a second time.
+        mgr.leave_room(&sid, "slow");
+        assert_eq!(mgr.global_connection_count(), 1);
+        mgr.leave_room(&sid, "fast");
+        assert_eq!(mgr.global_connection_count(), 0);
+        assert_eq!(mgr.room_count(), 0);
+    }
+
+    /// A closed channel (socket task gone) is pruned the same way, from the
+    /// `UserJoined` broadcast inside `join_room` too.
+    #[test]
+    fn closed_client_pruned_on_join_returns_its_slot() {
+        let mgr = RoomManager::new();
+        let sid = "strat-closed".to_string();
+        let (dead_tx, dead_rx) = dummy_conn();
+        mgr.join_room(&sid, "dead".into(), dummy_user("dead"), dead_tx, evict())
+            .unwrap();
+        drop(dead_rx);
+
+        let (tx, mut rx) = dummy_conn();
+        mgr.join_room(&sid, "live".into(), dummy_user("live"), tx, evict())
+            .unwrap();
+        assert_eq!(mgr.global_connection_count(), 1);
+        assert_eq!(mgr.total_users(), 1);
+        assert!(
+            rx.try_recv().is_err(),
+            "joiner gets no stale UserLeft for itself"
+        );
+
+        mgr.leave_room(&sid, "dead");
+        mgr.leave_room(&sid, "live");
+        assert_eq!(mgr.global_connection_count(), 0);
+        assert_eq!(mgr.room_count(), 0);
+    }
+
+    /// Others are told when a pruned user has no connection left.
+    #[test]
+    fn pruned_user_is_announced_as_left() {
+        let mgr = RoomManager::new();
+        let sid = "strat-left".to_string();
+        let (watch_tx, mut watch_rx) = dummy_conn();
+        mgr.join_room(&sid, "watch".into(), dummy_user("watch"), watch_tx, evict())
+            .unwrap();
+        let (gone_tx, gone_rx) = dummy_conn();
+        mgr.join_room(&sid, "gone".into(), dummy_user("gone"), gone_tx, evict())
+            .unwrap();
+        drop(gone_rx);
+        while watch_rx.try_recv().is_ok() {}
+
+        mgr.broadcast(&sid, "nobody", ServerMessage::Pong);
+        assert_eq!(mgr.global_connection_count(), 1);
+        let mut saw_left = false;
+        while let Ok(msg) = watch_rx.try_recv() {
+            if let ServerMessage::UserLeft { user_id } = msg.message {
+                assert_eq!(user_id, "gone");
+                saw_left = true;
+            }
+        }
+        assert!(saw_left, "watcher must get UserLeft for the pruned user");
     }
 }

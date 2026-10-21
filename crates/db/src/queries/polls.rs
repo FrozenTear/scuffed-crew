@@ -186,7 +186,8 @@ impl Database {
                     .bind(("pid", poll_id.to_string()))
                     .bind(("mid", member_id.to_string()))
                     .bind(("oidx", option_index as i64))
-                    .await?;
+                    .await?
+                    .check()?;
             }
 
             // Create the chosen vote. The UNIQUE index (poll_id, member_id,
@@ -225,7 +226,8 @@ impl Database {
                 .bind(("pid", poll_id.to_string()))
                 .bind(("mid", member_id.to_string()))
                 .bind(("oidx", option_index as i64))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await
@@ -305,7 +307,8 @@ impl Database {
             self.client
                 .query("UPDATE $rid SET is_active = false")
                 .bind(("rid", RecordId::new("poll", id)))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await

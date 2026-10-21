@@ -79,6 +79,7 @@ use scuffed_db::{ForumBoard, ForumBoardNode, ForumCategoryNode, MatchType, Tourn
 use tower::Service;
 use tower_http::services::ServeDir;
 
+use crate::public_cache::ScopedTtlCache;
 use crate::state::{AppState, CachedPublicSettings, PublicSettingsCache};
 
 const SETTINGS_SCRIPT_OPEN: &str = "<script id=\"sc-settings\" type=\"application/json\">";
@@ -100,7 +101,7 @@ const FORUM_THREADS_PER_BOARD: u32 = 25;
 /// A patch row's `url` field is an external source link, not a page on this
 /// host. `/strategy/patch-notes` is the same list and is never emitted.
 /// Strategy comps have no public detail route (the editor is member-only).
-/// `/strategy`, `/strategy/heroes`, and `/strategy/meta` are added only when
+/// `/strategy` and `/strategy/heroes` are added only when
 /// `strategies_enabled` is on — see [`push_strategy_routes`].
 const PUBLIC_STATIC_PATHS: &[&str] = &[
     "/",
@@ -119,7 +120,10 @@ const PUBLIC_STATIC_PATHS: &[&str] = &[
 ];
 
 /// Strategy browser routes gated by `SiteSettings.strategies_enabled`.
-const STRATEGY_SITEMAP_PATHS: &[&str] = &["/strategy", "/strategy/heroes", "/strategy/meta"];
+///
+/// `/strategy/meta` is not listed: that page has no hero data to show, so a
+/// crawler would index an empty page (API-20).
+const STRATEGY_SITEMAP_PATHS: &[&str] = &["/strategy", "/strategy/heroes"];
 
 /// Path prefixes crawlers must not index.
 ///
@@ -1733,9 +1737,40 @@ pub async fn robots_txt(State(state): State<AppState>) -> impl IntoResponse {
     )
 }
 
+/// Built sitemap bodies, one per database and public base URL. See
+/// [`crate::public_cache`].
+static SITEMAP_CACHE: ScopedTtlCache<String, axum::body::Bytes> =
+    ScopedTtlCache::new(crate::public_cache::SITEMAP_TTL, 8);
+
+/// One sitemap build at a time. Requests that miss while a build runs wait
+/// for it and then read the cache, instead of each running the queries.
+static SITEMAP_BUILD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// The sitemap body, from the cache when it is under [`SITEMAP_TTL`] old.
+///
+/// A failed build is not cached; the next request tries again.
+///
+/// [`SITEMAP_TTL`]: crate::public_cache::SITEMAP_TTL
+async fn cached_sitemap(state: &AppState) -> Result<axum::body::Bytes, scuffed_db::DbError> {
+    let key = state.oauth_config.redirect_base_url.clone();
+    if let Some(body) = SITEMAP_CACHE.get(&state.db, &key, Instant::now()) {
+        return Ok(body);
+    }
+    let _build = SITEMAP_BUILD.lock().await;
+    if let Some(body) = SITEMAP_CACHE.get(&state.db, &key, Instant::now()) {
+        return Ok(body);
+    }
+    let body = axum::body::Bytes::from(collect_sitemap(state).await?);
+    SITEMAP_CACHE.insert(&state.db, key, body.clone(), Instant::now());
+    Ok(body)
+}
+
 /// GET /sitemap.xml — published and otherwise public URLs only.
+///
+/// Served from an in-process cache for up to ten minutes, so a new article
+/// or thread can take that long to appear.
 pub async fn sitemap_xml(State(state): State<AppState>) -> Response {
-    match collect_sitemap(&state).await {
+    match cached_sitemap(&state).await {
         Ok(body) => (
             StatusCode::OK,
             [
@@ -1806,7 +1841,7 @@ async fn collect_sitemap(state: &AppState) -> Result<String, scuffed_db::DbError
     Ok(render_xml(&map.entries))
 }
 
-/// `/strategy`, `/strategy/heroes`, `/strategy/meta` when the clan flag is on.
+/// `/strategy` and `/strategy/heroes` when the clan flag is on.
 ///
 /// Same read as the strategy API gate (`get_settings().strategies_enabled`).
 /// A missing row is created with the schema default (`true`). A settings read

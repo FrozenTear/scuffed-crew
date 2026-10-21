@@ -55,6 +55,17 @@ use crate::theme::{
 
 pub const CAPTURE_FAILED: &str =
     "Could not capture the screen. Allow screen capture for this app, then try again.";
+
+/// The capture failure line plus the real cause, so a member can send it
+/// to us instead of a guess.
+pub fn capture_failed_with(detail: &str) -> String {
+    let detail = detail.trim();
+    if detail.is_empty() {
+        CAPTURE_FAILED.to_string()
+    } else {
+        format!("{CAPTURE_FAILED} Details: {detail}")
+    }
+}
 pub const REACH_SITE: &str = "Could not reach the site. Check the address and try again.";
 pub const TOKEN_REJECTED: &str = "That token wasn't accepted. Check it and try again.";
 pub const TOKEN_UNCHECKED: &str =
@@ -224,12 +235,13 @@ pub fn memory_frame_from_image(img: &::image::DynamicImage) -> MemoryFrame {
 pub async fn capture_test_frame(
     backend: stat_tracker::capture::CaptureBackend,
     output: Option<String>,
+    data_dir: std::path::PathBuf,
 ) -> Result<MemoryFrame, String> {
     let backend =
-        crate::capture::backend_ready(Some(backend)).map_err(|_| CAPTURE_FAILED.to_string())?;
-    let img = stat_tracker::capture::capture_screen_output(&backend, output.as_deref())
+        crate::capture::backend_ready(Some(backend)).map_err(|e| capture_failed_with(&e))?;
+    let img = stat_tracker::capture::capture_screen_oneshot(&backend, output.as_deref(), &data_dir)
         .await
-        .map_err(|_| CAPTURE_FAILED.to_string())?;
+        .map_err(|e| capture_failed_with(&e.to_string()))?;
     let frame = tokio::task::spawn_blocking(move || memory_frame_from_image(&img))
         .await
         .map_err(|_| "Could not prepare the test capture.".to_string())?;
@@ -2885,6 +2897,16 @@ mod tests {
             );
             assert_eq!(guide.link.as_ref().expect("machine").interval_secs(), 5);
         }
+    }
+
+    #[test]
+    fn capture_failure_shows_the_real_cause() {
+        assert_eq!(capture_failed_with(""), CAPTURE_FAILED);
+        assert_eq!(capture_failed_with("  "), CAPTURE_FAILED);
+        let shown = capture_failed_with("portal: permission denied");
+        assert!(shown.starts_with(CAPTURE_FAILED));
+        assert!(shown.ends_with("Details: portal: permission denied"));
+        assert!(!shown.contains('\u{2014}') && !shown.contains('\u{2013}'));
     }
 
     #[test]

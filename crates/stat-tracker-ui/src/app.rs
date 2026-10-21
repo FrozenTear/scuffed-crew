@@ -134,6 +134,25 @@ fn update_channel_switched(before: &Config, after: &Config, installed: Option<&s
         != update::prerelease_updates_effective(&after.update_channel, installed)
 }
 
+/// True when the save changed which screen the tracker captures. The
+/// tracker reads `capture_output` once at start, so the app restarts a
+/// running tracker after such a save instead of asking the player to.
+fn capture_output_changed(before: &Config, after: &Config) -> bool {
+    before.capture_output != after.capture_output
+}
+
+fn capture_route_changed(before: &Config, after: &Config) -> bool {
+    before.capture_route != after.capture_route
+}
+
+const SETTINGS_SAVED_RESTARTING: &str =
+    "Settings saved. Restarting the tracker to use the new screen.";
+
+const SETTINGS_SAVED_ROUTE: &str =
+    "Settings saved. Restarting the tracker to use the new capture method.";
+
+const SETTINGS_SAVED_ROUTE_ENV: &str = "Settings saved. STAT_TRACKER_CAPTURE in the environment overrides this choice, so the tracker keeps that route. Edit the file under .config/environment.d, then log out and back in.";
+
 fn toast_after_successful_save(daemon_up: bool) -> &'static str {
     if daemon_up {
         SETTINGS_SAVED_RESTART
@@ -215,6 +234,7 @@ pub enum Message {
     SettingsText(SettingsField, String),
     SettingsToggle(SettingsToggle, bool),
     SelectOutput(Option<String>),
+    SelectCaptureRoute(stat_tracker::config::CaptureRoute),
     SaveSettings,
     Daemon(DaemonVerb),
     DaemonDone(Result<String, String>),
@@ -254,6 +274,10 @@ pub enum Message {
     UpdateFinished(Result<String, String>),
     /// "Restart now" after an update: start the new binary, then quit.
     RestartGui,
+    /// Tracker restart finished (or was skipped). Then start the new window.
+    RestartGuiReady(Result<String, String>),
+    /// `systemctl show` finished off the UI thread.
+    ServiceInstallRefreshed(bool),
     /// The installed GUI's `--build-id` output (G3), for the binary as
     /// stamped when the probe started.
     GuiBuildProbed {
@@ -679,6 +703,16 @@ impl TrackerApp {
         let mut tasks = vec![fetch, open.map(Message::WindowOpened)];
         if live {
             tasks.push(check_reader_packs(app.data_dir.clone(), false));
+            stat_tracker::capture::set_prefs(stat_tracker::capture::CapturePrefs {
+                data_dir: app.data_dir.clone(),
+                route: app.saved_config.capture_route,
+                debug_frames: app.saved_config.debug_portal_frames_enabled(),
+                max_fps: app.saved_config.screencast_max_fps(),
+            });
+            tasks.push(Task::perform(
+                daemon::refresh_service_cache(),
+                Message::ServiceInstallRefreshed,
+            ));
             tasks.push(Task::perform(
                 stat_tracker::capture::detect_backend(),
                 Message::BackendReady,
@@ -1051,6 +1085,10 @@ impl TrackerApp {
                 self.settings.capture_output = name.unwrap_or_default();
                 Task::none()
             }
+            Message::SelectCaptureRoute(route) => {
+                self.settings.capture_route = route;
+                Task::none()
+            }
             Message::SaveSettings => {
                 if self.fixture.is_some() {
                     return Task::none();
@@ -1132,6 +1170,14 @@ impl TrackerApp {
                         }
                         let daemon_up = daemon::is_daemon_running(&self.data_dir);
                         let gui_only = only_update_channel_changed(&self.saved_config, &config);
+                        let route_changed = capture_route_changed(&self.saved_config, &config);
+                        let restart_for_screen = daemon_up
+                            && !self.daemon_busy
+                            && capture_output_changed(&self.saved_config, &config);
+                        let restart_for_route = daemon_up && !self.daemon_busy && route_changed;
+                        let env_overrides_route = std::env::var(stat_tracker::config::CAPTURE_ENV)
+                            .ok()
+                            .is_some_and(|value| !value.trim().is_empty());
                         let recheck = update_channel_switched(
                             &self.saved_config,
                             &config,
@@ -1148,15 +1194,40 @@ impl TrackerApp {
                             );
                         self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
                         self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
-                        self.replace_toast(toast_after_successful_save(daemon_up && !gui_only));
+                        self.replace_toast(if restart_for_route && env_overrides_route {
+                            SETTINGS_SAVED_ROUTE_ENV
+                        } else if restart_for_screen {
+                            SETTINGS_SAVED_RESTARTING
+                        } else if restart_for_route {
+                            SETTINGS_SAVED_ROUTE
+                        } else {
+                            toast_after_successful_save(daemon_up && !gui_only)
+                        });
                         self.toast_shown_at = None;
+                        let mut tasks = Vec::new();
+                        if restart_for_screen || restart_for_route {
+                            // Same path as the Restart button, so the unit or
+                            // the spawned tracker is restarted the usual way.
+                            self.daemon_busy = true;
+                            tasks.push(Task::perform(
+                                daemon::run_verb(
+                                    self.data_dir.clone(),
+                                    DaemonVerb::Restart,
+                                    self.daemon.service_installed,
+                                ),
+                                Message::DaemonDone,
+                            ));
+                        }
                         if recheck {
                             // `check_for_update` reads the channel from config.toml,
                             // which now holds the new value.
-                            return Task::perform(
+                            tasks.push(Task::perform(
                                 update::check_for_update(),
                                 Message::UpdateChecked,
-                            );
+                            ));
+                        }
+                        if !tasks.is_empty() {
+                            return Task::batch(tasks);
                         }
                     }
                     Err(SettingsSaveError::Blocked(message)) => {
@@ -1222,7 +1293,11 @@ impl TrackerApp {
                 self.capturing = true;
                 self.preview_error = None;
                 let output = settings::nonempty(&self.settings.capture_output);
-                Task::perform(capture::capture_now(backend, output), Message::CaptureReady)
+                let data_dir = self.data_dir.clone();
+                Task::perform(
+                    capture::capture_now(backend, output, data_dir),
+                    Message::CaptureReady,
+                )
             }
             Message::CaptureReady(result) => {
                 self.capturing = false;
@@ -1585,6 +1660,56 @@ impl TrackerApp {
                 Task::none()
             }
             Message::RestartGui => {
+                let data_dir = self.data_dir.clone();
+                let installed = self.daemon.service_installed;
+                let pid = self.daemon.pid;
+                let game_open = stat_tracker::replace::game_file_in_progress(&data_dir);
+                let binary_replaced = pid.is_some_and(|pid| {
+                    stat_tracker::replace::pid_binary_replaced(pid).unwrap_or(false)
+                });
+                if stat_tracker::replace::plan_restart_gui(game_open, binary_replaced)
+                    == stat_tracker::replace::RestartGuiPlan::Wait
+                {
+                    self.replace_toast(
+                        "Waiting until this game is saved before restarting".to_string(),
+                    );
+                }
+                self.daemon_busy = true;
+                Task::perform(
+                    async move {
+                        let started = std::time::Instant::now();
+                        while stat_tracker::replace::game_file_in_progress(&data_dir)
+                            && !stat_tracker::replace::game_wait_should_stop(
+                                started.elapsed(),
+                                stat_tracker::replace::GAME_WAIT_MAX,
+                            )
+                        {
+                            tokio::time::sleep(stat_tracker::replace::GAME_WAIT_STEP).await;
+                        }
+                        let stale = pid.is_some_and(|pid| {
+                            stat_tracker::replace::pid_binary_replaced(pid).unwrap_or(false)
+                        });
+                        if stale {
+                            daemon::run_verb(data_dir, DaemonVerb::Restart, installed).await
+                        } else {
+                            Ok(String::new())
+                        }
+                    },
+                    Message::RestartGuiReady,
+                )
+            }
+            Message::ServiceInstallRefreshed(installed) => {
+                self.daemon.service_installed = installed;
+                Task::none()
+            }
+            Message::RestartGuiReady(result) => {
+                self.daemon_busy = false;
+                if let Err(err) = result {
+                    self.replace_toast(format!(
+                        "Could not restart the tracker ({err}). Quit Stat Tracker and start it again."
+                    ));
+                    return Task::none();
+                }
                 match crate::instance::spawn_replacement(Some(&self.restart_prefix())) {
                     Ok(()) => self.apply_tray(TrayAction::Quit),
                     Err(e) => {
@@ -2220,8 +2345,8 @@ impl TrackerApp {
         }
         let backend = match capture::backend_ready(self.backend) {
             Ok(backend) => backend,
-            Err(_) => {
-                let message = crate::setup_guide::CAPTURE_FAILED.to_string();
+            Err(e) => {
+                let message = crate::setup_guide::capture_failed_with(&e);
                 if tab {
                     self.setup.tab_ready(Err(message));
                 } else {
@@ -2231,8 +2356,9 @@ impl TrackerApp {
             }
         };
         let output = settings::nonempty(&self.settings.capture_output);
+        let data_dir = self.data_dir.clone();
         Task::perform(
-            crate::setup_guide::capture_test_frame(backend, output),
+            crate::setup_guide::capture_test_frame(backend, output, data_dir),
             move |result| {
                 if tab {
                     Message::Setup(crate::setup_guide::SetupMessage::TabReady(result))
@@ -2337,6 +2463,11 @@ impl TrackerApp {
                 self.ocr_switch.health_notice = health;
                 self.health_status = self.health_now();
             }
+            let share = settings::daemon_share_notice(status.as_ref(), self.daemon.pid);
+            if share != self.ocr_switch.share_notice {
+                self.ocr_switch.share_notice = share;
+                self.health_status = self.health_now();
+            }
         }
 
         tray::pump_gtk();
@@ -2388,6 +2519,10 @@ impl TrackerApp {
             tasks.push(Task::perform(
                 daemon::systemd_enabled(),
                 Message::AutostartReady,
+            ));
+            tasks.push(Task::perform(
+                daemon::refresh_service_cache(),
+                Message::ServiceInstallRefreshed,
             ));
         }
 
@@ -2635,7 +2770,7 @@ impl TrackerApp {
     }
 
     fn health_now(&self) -> String {
-        health_with_ocr_notice(
+        let base = health_with_ocr_notice(
             health_status_for(
                 &self.data_dir,
                 &self.games,
@@ -2645,7 +2780,8 @@ impl TrackerApp {
                     .map(|s| (s.server_url.as_str(), s.token.as_str())),
             ),
             self.ocr_switch.health_notice.as_deref(),
-        )
+        );
+        health_with_ocr_notice(base, self.ocr_switch.share_notice.as_deref())
     }
 
     /// A click on "Use classic OCR (Tesseract)". Turning it on is at once.
@@ -2900,6 +3036,22 @@ fn health_status_for(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_new_capture_screen_restarts_the_tracker_and_other_saves_do_not() {
+        let before = super::Config::default();
+        let mut picked = before.clone();
+        picked.capture_output = Some("DP-1".into());
+        assert!(super::capture_output_changed(&before, &picked));
+        assert!(super::capture_output_changed(&picked, &before));
+        let mut other = picked.clone();
+        other.capture_output = Some("eDP-1".into());
+        assert!(super::capture_output_changed(&picked, &other));
+        let mut same = picked.clone();
+        same.update_channel = "prerelease".into();
+        assert!(!super::capture_output_changed(&picked, &same));
+        assert!(!super::capture_output_changed(&picked, &picked));
+    }
+
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
     use stat_tracker::config::Config;
@@ -3437,6 +3589,13 @@ token = \"secret-token-must-stay\"
             super::health_with_ocr_notice(paused.into(), Some(notice)),
             format!("{paused} {notice}")
         );
+        let declined = "Screen share was declined: no captures until Overwatch is restarted";
+        let idle = super::health_with_ocr_notice(super::HEALTH_READY.into(), None);
+        assert_eq!(
+            super::health_with_ocr_notice(idle, Some(declined)),
+            declined
+        );
+        assert!(!declined.contains('\u{2014}'));
     }
 
     #[test]

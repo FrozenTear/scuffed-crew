@@ -395,11 +395,16 @@ fn main() -> anyhow::Result<()> {
     // it set.
     // Under the systemd unit the variable is already there and this returns.
     let omp = stat_tracker::omp::ensure_thread_limit();
-    tokio::runtime::Builder::new_multi_thread()
+    let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .context("failed to start the async runtime")?
-        .block_on(run(omp))
+        .context("failed to start the async runtime")?;
+    let result = runtime.block_on(run(omp));
+    // Whatever is left of the one deadline. No signal yet means the full
+    // deadline, including a self-restart after an update. Tasks that have
+    // already finished do not wait it out.
+    runtime.shutdown_timeout(stat_tracker::replace::shutdown_time_left());
+    result
 }
 
 async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
@@ -458,6 +463,21 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // holding the pack lock it left the daemon that stayed without its
     // packs. The app also sees the daemon from here on, not only once the
     // startup sync is over.
+    // A leftover tracker from an update (a different binary) is replaced
+    // first. The service also replaces a same-binary stray. A second start
+    // of this same binary, and --vacuum, do not signal the live daemon.
+    // The pid guard below still refuses a second live daemon. A replace
+    // waits out an open game so it does not cut it off.
+    let replace_same = stat_tracker::replace::flag_enabled(
+        std::env::var("STAT_TRACKER_REPLACE_STRAY").ok().as_deref(),
+    );
+    let vacuum = std::env::args().any(|arg| arg == "--vacuum");
+    if let Some(policy) = stat_tracker::replace::policy_for_startup(vacuum, replace_same)
+        && let Err(err) = stat_tracker::replace::stop_strays(&config.data_dir, true, policy).await
+    {
+        tracing::error!(error = %err, "previous tracker was not replaced");
+        anyhow::bail!("{err}");
+    }
     let _pid_guard = acquire_pid_guard(&config.data_dir)?;
 
     // One client for the whole process. An unsafe URL logs once here and
@@ -636,6 +656,12 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // Tessdata generation is triggered manually via --generate-tessdata or the GUI button.
     // Don't run it at daemon startup, it can take minutes and blocks Tab capture.
 
+    capture::set_prefs(capture::CapturePrefs {
+        data_dir: config.data_dir.clone(),
+        route: config.capture_route,
+        debug_frames: config.debug_portal_frames_enabled(),
+        max_fps: config.screencast_max_fps(),
+    });
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
 
@@ -1814,13 +1840,46 @@ async fn retire_active_game(
     seal: Option<detect::MatchOutcome>,
     reason: &str,
 ) {
+    // The game leaves memory in `begin_retire`, before these store calls
+    // return. Dropping this future cancels the best-guess and the sealed
+    // outcome, and close_session_on_shutdown then has nothing left to save.
+    let Some((g, had_outcome)) = begin_retire(st, data_dir, seal, reason) else {
+        return;
+    };
+    commit_retired_game(st, store, data_dir, g, had_outcome, reason).await;
+}
+
+/// Test-only pause after the game has left memory and before the store
+/// writes. Release builds do not have this hook.
+#[cfg(test)]
+async fn retire_after_pause<P>(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    seal: Option<detect::MatchOutcome>,
+    reason: &str,
+    pause: P,
+) where
+    P: std::future::Future<Output = ()>,
+{
+    let Some((g, had_outcome)) = begin_retire(st, data_dir, seal, reason) else {
+        return;
+    };
+    pause.await;
+    commit_retired_game(st, store, data_dir, g, had_outcome, reason).await;
+}
+
+fn begin_retire(
+    st: &mut SessionState,
+    data_dir: &std::path::Path,
+    seal: Option<detect::MatchOutcome>,
+    reason: &str,
+) -> Option<(ActiveGame, bool)> {
     // The rank-screen log must not hide the next game's same result. Clear
     // it before the early return: a Tab-opened game can close while the
     // rank screen is up even when no game is active.
     stat_tracker::detect::match_end::clear_rank_result_log();
-    let Some(mut g) = st.active_game.take() else {
-        return;
-    };
+    let mut g = st.active_game.take()?;
     // The game is over: its unblanked portrait cells leave memory and a
     // below-floor column calibration must not stick into the next game.
     stat_tracker::ocr::clear_below_floor_column_cache();
@@ -1839,6 +1898,17 @@ async fn retire_active_game(
             );
         }
     }
+    Some((g, had_outcome))
+}
+
+async fn commit_retired_game(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    mut g: ActiveGame,
+    had_outcome: bool,
+    reason: &str,
+) {
     store_best_guess_on_close(store, data_dir, &mut g).await;
     if g.session_created && g.finished() && !had_outcome {
         if let Err(e) = store
@@ -3042,10 +3112,15 @@ fn stage_capture(
         .carried_deferred_at
         .unwrap_or(captured_at - chrono::Duration::seconds(1));
     let gate_prev = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
+    let gate_suspect = if facts.suspect_row {
+        [true; capture_gate::GATE_COLS]
+    } else {
+        facts.suspect
+    };
     let gate = capture_gate::apply_gate_seeded(
         gate_prev,
         facts.counters,
-        facts.suspect,
+        gate_suspect,
         facts.held,
         split,
         facts.trusted_cells && !facts.suspect_row,
@@ -3332,6 +3407,14 @@ enum FrameAnalysisOutcome {
         frame: image::DynamicImage,
         scan: detect::hero_portrait::RowScan,
     },
+    /// The stream had no new frame. Retried like a drawing board, and never
+    /// written into debug/rejected.
+    StreamMiss,
+    /// The share dialog is still up. Retried, and not logged as a missed frame.
+    ShareOpening,
+    /// The share was declined or the permission dialog timed out. Not an
+    /// error: the one warn already happened, and a later Tab stays quiet.
+    Declined,
 }
 
 /// What a Tab capture actually did, reported back to the session state machine.
@@ -4022,6 +4105,27 @@ async fn apply_capture_report(
                     {
                         tracing::warn!(error = %e, "failed to back-fill session outcome");
                     }
+                } else if recorded
+                    && g.finished()
+                    && g.session_created
+                    && report.outcome != g.outcome
+                {
+                    // MAIN-1: this capture took its outcome when Tab was
+                    // pressed. The game was decided while it ran (an end-reel
+                    // poll, a GUI edit), so its row and session write carry
+                    // the old one. Seal the decided result over them again.
+                    tracing::info!(
+                        stored = %report.outcome,
+                        outcome = %g.outcome,
+                        session_id = %g.session_id,
+                        "capture finished after the result was decided: re-sealing the session"
+                    );
+                    if let Err(e) = store
+                        .set_session_outcome(&g.session_id, &g.outcome.to_string())
+                        .await
+                    {
+                        tracing::warn!(error = %e, "failed to re-seal session outcome");
+                    }
                 }
                 persist_active_game(data_dir, Some(g));
             }
@@ -4136,6 +4240,124 @@ fn resolve_word_tick(
             accolade_map: this_map,
         },
     }
+}
+
+#[cfg(test)]
+#[test]
+fn reused_frame_is_not_a_confirm_and_a_new_pair_is() {
+    let victory = Some((
+        detect::MatchOutcome::Victory,
+        detect::match_end::OutcomeSource::ResultWord,
+    ));
+    let seen = Some(capture::SeenStream { id: 1, seq: 4 });
+    let held_at = std::time::Instant::now();
+    let mut streak = Some(WordStreak {
+        outcome: detect::MatchOutcome::Victory,
+        seen_at: held_at,
+        map: None,
+    });
+    // The poll loop continues before `resolve_word_tick` when this is
+    // true. Applying the word moves `seen_at`, so an inverted predicate
+    // fails here.
+    let skips = capture::reused_frame_skips_the_read(false, Some(4), Some(1), seen);
+    assert!(skips);
+    if !skips {
+        let _ = resolve_word_tick(&mut streak, victory, std::time::Instant::now(), None);
+    }
+    assert_eq!(
+        streak.as_ref().map(|prior| prior.seen_at),
+        Some(held_at),
+        "a reused frame must not move the streak"
+    );
+    let mut if_applied = Some(WordStreak {
+        outcome: detect::MatchOutcome::Victory,
+        seen_at: held_at,
+        map: None,
+    });
+    let skips_fresh = capture::reused_frame_skips_the_read(
+        true,
+        Some(5),
+        Some(1),
+        Some(capture::SeenStream { id: 1, seq: 4 }),
+    );
+    assert!(!skips_fresh);
+    if !skips_fresh {
+        let applied = resolve_word_tick(&mut if_applied, victory, std::time::Instant::now(), None);
+        assert!(applied.signal.is_some());
+    }
+    assert_ne!(
+        if_applied.as_ref().map(|prior| prior.seen_at),
+        Some(held_at),
+        "a new frame must move the streak"
+    );
+    let src = include_str!("main.rs");
+    // Split so this test is not an earlier hit for the same needle.
+    let run_at = src
+        .find(concat!("async ", "fn run_loop"))
+        .expect("run_loop");
+    let after = &src[run_at..];
+    let end = after
+        .find("\nfn analyze_frame(")
+        .expect("run_loop ends before analyze_frame");
+    let run_loop = &after[..end];
+    let call = run_loop
+        .find("reused_frame_skips_the_read(")
+        .expect("the poll must call the skip helper");
+    let after_call = &run_loop[call..];
+    let kept = after_call
+        .find("seen_stream = Some")
+        .expect("a kept frame is recorded after the skip");
+    let window = &after_call[..kept];
+    assert!(
+        window.contains("continue"),
+        "deleting the continue after a reused frame must fail: {window}"
+    );
+    assert!(
+        run_loop.contains("_ = stat_tracker::replace::shutdown_notified() =>"),
+        "the daemon select must wake on shutdown_notified"
+    );
+
+    assert!(capture::poll_uses_frame(
+        true,
+        Some(5),
+        Some(1),
+        Some(capture::SeenStream { id: 1, seq: 4 })
+    ));
+    assert!(!capture::poll_uses_frame(
+        true,
+        Some(5),
+        Some(1),
+        Some(capture::SeenStream { id: 1, seq: 5 })
+    ));
+    assert!(capture::poll_uses_frame(
+        true,
+        Some(1),
+        Some(2),
+        Some(capture::SeenStream { id: 1, seq: 40 })
+    ));
+    let mut streak = None;
+    let now = std::time::Instant::now();
+    let first = resolve_word_tick(
+        &mut streak,
+        Some((
+            detect::MatchOutcome::Victory,
+            detect::match_end::OutcomeSource::ResultWord,
+        )),
+        now,
+        None,
+    );
+    assert!(!first.signal_confirmed);
+    let second = resolve_word_tick(
+        &mut streak,
+        Some((
+            detect::MatchOutcome::Victory,
+            detect::match_end::OutcomeSource::ResultWord,
+        )),
+        now,
+        None,
+    );
+    assert!(second.signal_confirmed);
+    assert_eq!(second.signal, Some(detect::MatchOutcome::Victory));
 }
 
 /// The words-pack result read one poll tick adds to the open game's result
@@ -4325,6 +4547,9 @@ async fn run_loop(
     let data_dir: &std::path::Path = &ctx.data_dir;
 
     let mut game_gate = detect::game_running::GameProcessGate::new(&ctx.game_process_names);
+    // Starts false so a boot with the game already closed does not close a
+    // share that was never opened. The close runs on the running edge only.
+    let mut game_was_running = false;
     // The GUI's Stop button (and systemd) send SIGTERM, shut down as
     // gracefully as Ctrl+C, with a final sync.
     // `early_sigterm` is the same handler, registered before startup's wait
@@ -4337,6 +4562,18 @@ async fn run_loop(
     // From here a SIGTERM is a clean shutdown (run.marker removed). Before
     // this line the default action still applies. Tests wait for it.
     tracing::info!("signal handlers ready");
+    tokio::spawn(async {
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(term) => term,
+                Err(_) => return,
+            };
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+        stat_tracker::replace::note_shutdown_signal();
+    });
     // Failed open used to wait only on Ctrl+C. SIGTERM was registered above
     // and never polled, so `systemctl stop` hit TimeoutStopSec then SIGKILL,
     // and exit 0 kept Restart=on-failure from trying again. The pid file
@@ -4350,6 +4587,7 @@ async fn run_loop(
     tracing::info!(
         poll_ms = poll_interval.as_millis() as u64,
         new_reader = ctx.use_new_reader,
+        source = auto_detect.poll_interval_source(),
         "end-screen poll interval"
     );
     let new_game_debounce = std::time::Duration::from_secs(auto_detect.cooldown_secs);
@@ -4428,13 +4666,87 @@ async fn run_loop(
     // its own timer so edits apply even while no game is running.
     let mut cmd_timer = tokio::time::interval(tokio::time::Duration::from_secs(3));
     cmd_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut binary_checked = tokio::time::Instant::now();
+    let mut logged_binary_wait = false;
+    let mut exec_failed_at: Option<std::time::Instant> = None;
+    let mut seen_stream: Option<capture::SeenStream> = None;
 
     loop {
+        // `biased` polls in source order. Shutdown is first, so a signal
+        // that is already waiting beats a poll tick that is also ready.
+        // A capture or OCR already running in this arm is raced with
+        // `stop_for_shutdown`. A poll write that has started is not: it
+        // finishes inside the shared deadline (`finish_within_shutdown`).
         tokio::select! {
+            biased;
+            _ = tokio::signal::ctrl_c() => {
+                stat_tracker::replace::note_shutdown_signal();
+                tracing::info!("shutting down");
+                shutdown_from_signal(
+                    &mut st,
+                    &mut capture_task,
+                    &mut capture_rx,
+                    &mut sync_task,
+                    sync_client,
+                    &sync_backoff,
+                    store,
+                    data_dir,
+                )
+                .await;
+                return Ok(());
+            }
+            _ = sigterm.recv() => {
+                stat_tracker::replace::note_shutdown_signal();
+                tracing::info!("SIGTERM received, shutting down");
+                shutdown_from_signal(
+                    &mut st,
+                    &mut capture_task,
+                    &mut capture_rx,
+                    &mut sync_task,
+                    sync_client,
+                    &sync_backoff,
+                    store,
+                    data_dir,
+                )
+                .await;
+                return Ok(());
+            }
+            // The background listener can see Ctrl+C before this loop's
+            // own handler. `note_shutdown_signal` wakes this arm.
+            _ = stat_tracker::replace::shutdown_notified() => {
+                tracing::info!("shutting down");
+                shutdown_from_signal(
+                    &mut st,
+                    &mut capture_task,
+                    &mut capture_rx,
+                    &mut sync_task,
+                    sync_client,
+                    &sync_backoff,
+                    store,
+                    data_dir,
+                )
+                .await;
+                return Ok(());
+            }
             result = kbd.wait_tab() => {
                 match result {
                     Ok(()) => {
-                        if !game_gate.is_running() {
+                        // The key instant, before the game-gate read and the
+                        // store await. The stream deadline is measured from
+                        // this, not from when the session row is ready.
+                        let press = Instant::now();
+                        let running = game_gate.is_running();
+                        capture::note_game_seen(game_was_running, running, data_dir);
+                        if capture::share_close_due(
+                            capture::stream_route_active(),
+                            game_was_running,
+                            running,
+                            || capture::share_restorable(data_dir),
+                        ) {
+                            capture::close_if_open().await;
+                        }
+                        game_was_running = running;
+                        if !running {
                             tracing::debug!("Tab ignored: game process not running");
                             continue;
                         }
@@ -4451,18 +4763,17 @@ async fn run_loop(
                             tracing::debug!("Tab ignored: a capture is already in progress");
                             continue;
                         }
-                        st.last_tab_capture = Some(Instant::now());
+                        st.last_tab_capture = Some(press);
 
                         // Session choice: reuse the active game (mid-game, or
                         // post-match scoreboard within the grace window), or
                         // open a fresh one, inheriting a still-fresh outcome
                         // the poller saw before any game was open.
-                        let now = Instant::now();
                         let opened_by_this_tab = open_fresh_for_tab_and_sync(
                             &mut st,
                             store,
                             data_dir,
-                            now,
+                            press,
                             || {
                                 schedule_store_sync(
                                     &mut sync_task,
@@ -4479,21 +4790,29 @@ async fn run_loop(
                         let req = build_capture_request(
                             st.active_game.as_ref().expect("active_game set above"),
                             opened_by_this_tab,
-                            now,
+                            press,
                         );
+                        let on_stream = capture::stream_route_active();
                         let sid = req.session_id.clone();
                         let tx = capture_tx.clone();
                         let ctx_task = Arc::clone(&ctx);
-                        capture_task = Some(tokio::spawn(async move {
-                            // Wait for the game to render the scoreboard
-                            // overlay after the Tab press.
-                            tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
-                            let result = handle_capture(&ctx_task, req)
-                                .await
-                                // `{:#}` keeps anyhow's context chain in the string.
-                                .map_err(|e| format!("{e:#}"));
-                            let _ = tx.send((sid, result));
-                        }));
+                        capture_task = Some(tokio::spawn(capture::with_tab_press(
+                            press,
+                            async move {
+                                // Direct capture and the screenshot portal still
+                                // wait for the overlay to finish drawing. The
+                                // screen stream waits for a buffer instead.
+                                if !on_stream {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(400))
+                                        .await;
+                                }
+                                let result = handle_capture(&ctx_task, req)
+                                    .await
+                                    // `{:#}` keeps anyhow's context chain in the string.
+                                    .map_err(|e| format!("{e:#}"));
+                                let _ = tx.send((sid, result));
+                            },
+                        )));
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "keyboard devices lost: attempting to reopen");
@@ -4557,7 +4876,18 @@ async fn run_loop(
                         "cheap outcome poll: Tab capture in flight during end-reel wake"
                     );
                 }
-                if !game_gate.is_running() {
+                let running = game_gate.is_running();
+                capture::note_game_seen(game_was_running, running, data_dir);
+                if capture::share_close_due(
+                    capture::stream_route_active(),
+                    game_was_running,
+                    running,
+                    || capture::share_restorable(data_dir),
+                ) {
+                    capture::close_if_open().await;
+                }
+                game_was_running = running;
+                if !running {
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
                     continue;
@@ -4576,8 +4906,44 @@ async fn run_loop(
                 }
                 st.poll_ticks_skipped = 0;
 
-                match capture::capture_screen_output(backend, capture_output).await {
-                    Ok(img) => {
+                match stop_for_shutdown(
+                    capture::capture_screen_output_for(
+                        backend,
+                        capture_output,
+                        capture::CaptureKind::Poll,
+                    ),
+                    stat_tracker::replace::shutdown_notified(),
+                )
+                .await
+                {
+                    Err(()) => {
+                        shutdown_from_signal(
+                            &mut st,
+                            &mut capture_task,
+                            &mut capture_rx,
+                            &mut sync_task,
+                            sync_client,
+                            &sync_backoff,
+                            store,
+                            data_dir,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                    Ok(Ok(captured)) => {
+                        if capture::reused_frame_skips_the_read(
+                            captured.is_new,
+                            captured.seq,
+                            captured.stream,
+                            seen_stream,
+                        ) {
+                            log_reused_frame_skip();
+                            continue;
+                        }
+                        if let (Some(id), Some(seq)) = (captured.stream, captured.seq) {
+                            seen_stream = Some(capture::SeenStream { id, seq });
+                        }
+                        let img = captured.image;
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
                         // On-hit evidence (debug_ocr): confirm + first streak only.
                         // `--dump-poll-frames` still writes every tick as `poll_*`.
@@ -4587,7 +4953,11 @@ async fn run_loop(
                             .as_ref()
                             .map(|streak| (streak.outcome, streak.seen_at.elapsed()));
                         let mut stability = std::mem::take(&mut st.ocr_stability);
-                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = tokio::task::spawn_blocking(move || {
+                        // Dropping this join detaches the blocking OCR. That
+                        // task does not write a match row. The row is written
+                        // below, and only when shutdown has not begun.
+                        let analyzed = stop_for_shutdown(
+                            tokio::task::spawn_blocking(move || {
                             let analyze_started = Instant::now();
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
@@ -4693,9 +5063,43 @@ async fn run_loop(
                                 analyze_started.elapsed(),
                             );
                             (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png)
-                        }).await.unwrap_or_else(|_| {
-                            (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None)
-                        });
+                        }),
+                            stat_tracker::replace::shutdown_notified(),
+                        )
+                        .await;
+                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = match analyzed {
+                            Err(()) => {
+                                shutdown_from_signal(
+                                    &mut st,
+                                    &mut capture_task,
+                                    &mut capture_rx,
+                                    &mut sync_task,
+                                    sync_client,
+                                    &sync_backoff,
+                                    store,
+                                    data_dir,
+                                )
+                                .await;
+                                return Ok(());
+                            }
+                            Ok(joined) => joined.unwrap_or_else(|_| {
+                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None)
+                            }),
+                        };
+                        if stat_tracker::replace::shutdown_requested() {
+                            shutdown_from_signal(
+                                &mut st,
+                                &mut capture_task,
+                                &mut capture_rx,
+                                &mut sync_task,
+                                sync_client,
+                                &sync_backoff,
+                                store,
+                                data_dir,
+                            )
+                            .await;
+                            return Ok(());
+                        }
                         if let Some(png) = rank_outcome_png
                             && let Some(game) = st.active_game.as_ref()
                             // the rank screen follows the game it belongs
@@ -4763,24 +5167,126 @@ async fn run_loop(
                             detect::GamePhase::HeroBan => Some(boundary::StartScreen::HeroBan),
                             _ => None,
                         };
-                        apply_poll_tick(
-                            &mut st,
-                            store,
-                            data_dir,
-                            &tick,
-                            start_screen,
-                            now,
-                            new_game_debounce,
-                            use_new_reader,
+                        // `retire_active_game` takes the game out of memory
+                        // before the store calls return. Dropping this future
+                        // on the signal would cancel the best-guess or the
+                        // sealed outcome, and shutdown would have nothing
+                        // left to save. The write runs to completion inside
+                        // whatever of the shared deadline is left, then the
+                        // loop shuts down.
+                        let wrote = finish_within_shutdown(
+                            async {
+                                apply_poll_tick(
+                                    &mut st,
+                                    store,
+                                    data_dir,
+                                    &tick,
+                                    start_screen,
+                                    now,
+                                    new_game_debounce,
+                                    use_new_reader,
+                                )
+                                .await;
+                            },
+                            stat_tracker::replace::shutdown_notified(),
+                            stat_tracker::replace::shutdown_time_left,
                         )
                         .await;
+                        if wrote.is_err() || stat_tracker::replace::shutdown_requested() {
+                            shutdown_from_signal(
+                                &mut st,
+                                &mut capture_task,
+                                &mut capture_rx,
+                                &mut sync_task,
+                                sync_client,
+                                &sync_backoff,
+                                store,
+                                data_dir,
+                            )
+                            .await;
+                            return Ok(());
+                        }
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         tracing::trace!(error = %e, "poll capture failed (game may not be running)");
                     }
                 }
             }
             _ = cmd_timer.tick() => {
+                // Auto-detect off never ticks the poll arm, so the share
+                // still closes here when the game stops. The same edge, and
+                // only when a restore token can reopen it.
+                let running = game_gate.is_running();
+                capture::note_game_seen(game_was_running, running, data_dir);
+                if capture::share_close_due(
+                    capture::stream_route_active(),
+                    game_was_running,
+                    running,
+                    || capture::share_restorable(data_dir),
+                ) {
+                    capture::close_if_open().await;
+                }
+                game_was_running = running;
+                if binary_checked.elapsed() >= std::time::Duration::from_secs(60) {
+                    binary_checked = tokio::time::Instant::now();
+                    if let Some(path) = stat_tracker::replace::replaced_binary_path() {
+                        if st.active_game.is_some() {
+                            if !logged_binary_wait {
+                                tracing::info!(
+                                    "tracker binary on disk was replaced; waiting until the current game is saved"
+                                );
+                                logged_binary_wait = true;
+                            }
+                        } else if !stat_tracker::replace::exec_retry_due(
+                            exec_failed_at,
+                            std::time::Instant::now(),
+                            stat_tracker::replace::EXEC_RETRY_BACKOFF,
+                        ) {
+                            tracing::debug!(
+                                "tracker binary on disk was replaced; waiting after a failed re-exec"
+                            );
+                        } else {
+                            shutdown_from_signal(
+                                &mut st,
+                                &mut capture_task,
+                                &mut capture_rx,
+                                &mut sync_task,
+                                sync_client,
+                                &sync_backoff,
+                                store,
+                                data_dir,
+                            )
+                            .await;
+                            let marker =
+                                stat_tracker::report::marker::release_run_marker(data_dir);
+                            let released_pid =
+                                stat_tracker::replace::release_own_pid_file(data_dir);
+                            if let Err(err) =
+                                stat_tracker::replace::restart_for_replaced_binary(&path)
+                            {
+                                // A failed re-exec keeps this process. The
+                                // systemd path exits and does not return.
+                                tracing::error!(
+                                    error = %err,
+                                    "could not re-exec the new tracker; keeping this process"
+                                );
+                                exec_failed_at = Some(std::time::Instant::now());
+                                if released_pid {
+                                    stat_tracker::replace::restore_own_pid_file(data_dir);
+                                }
+                                let _ = stat_tracker::report::marker::restore_run_marker(
+                                    data_dir,
+                                    marker.as_ref(),
+                                );
+                            } else {
+                                return Ok(());
+                            }
+                        }
+                    } else {
+                        logged_binary_wait = false;
+                        exec_failed_at = None;
+                    }
+                }
                 // Quiet-session timer. Runs on this existing tick so it does
                 // not take a screenshot or run OCR, and it does not wait for
                 // Tab. The upload is scheduled; it does not block the loop.
@@ -4851,34 +5357,6 @@ async fn run_loop(
                     sync_client,
                 )
                 .await;
-            }
-            _ = tokio::signal::ctrl_c() => {
-                tracing::info!("shutting down");
-                shutdown_from_signal(
-                    &mut st,
-                    &mut capture_task,
-                    &mut sync_task,
-                    sync_client,
-                    &sync_backoff,
-                    store,
-                    data_dir,
-                )
-                .await;
-                return Ok(());
-            }
-            _ = sigterm.recv() => {
-                tracing::info!("SIGTERM received, shutting down");
-                shutdown_from_signal(
-                    &mut st,
-                    &mut capture_task,
-                    &mut sync_task,
-                    sync_client,
-                    &sync_backoff,
-                    store,
-                    data_dir,
-                )
-                .await;
-                return Ok(());
             }
         }
     }
@@ -6539,21 +7017,87 @@ fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)>
     None
 }
 
-/// The Tab retry predicate: retry only when the scoreboard preflight
-/// rejected the frame as not a scoreboard (a board still drawing). A team
-/// size the pitch does not settle and an analysed frame are not retried.
+/// The Tab retry predicate. A scoreboard that is still drawing, a Tab that
+/// got no fresh stream frame, and a share that is still opening are tried
+/// again. A declined share, a team size the pitch does not settle, and an
+/// analysed frame are not.
 fn tab_capture_should_retry(outcome: &FrameAnalysisOutcome) -> bool {
-    matches!(outcome, FrameAnalysisOutcome::NotAScoreboard { .. })
+    matches!(
+        outcome,
+        FrameAnalysisOutcome::NotAScoreboard { .. }
+            | FrameAnalysisOutcome::StreamMiss
+            | FrameAnalysisOutcome::ShareOpening
+    )
 }
 
-/// How useful a Tab outcome is, so a later rejected grab never replaces a
-/// better one: analysed over team size unsure over not a scoreboard.
+/// How useful a Tab outcome is, so a later grab never replaces a better
+/// one. Higher is better: analysed (4), team size unsure (3), not a
+/// scoreboard (2), stream miss (1), share still opening or declined (0).
+fn tab_retry_reason(outcome: &FrameAnalysisOutcome) -> &'static str {
+    match outcome {
+        FrameAnalysisOutcome::NotAScoreboard { .. } => {
+            "rejected by the scoreboard check (the board may still be drawing)"
+        }
+        FrameAnalysisOutcome::StreamMiss => "no fresh stream frame arrived",
+        FrameAnalysisOutcome::ShareOpening => "the share is still opening",
+        FrameAnalysisOutcome::Declined
+        | FrameAnalysisOutcome::TeamSizeUncertain { .. }
+        | FrameAnalysisOutcome::Analyzed(_) => "not retried",
+    }
+}
+
 fn tab_outcome_rank(outcome: &FrameAnalysisOutcome) -> u8 {
     match outcome {
-        FrameAnalysisOutcome::NotAScoreboard { .. } => 0,
-        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 1,
-        FrameAnalysisOutcome::Analyzed(_) => 2,
+        FrameAnalysisOutcome::ShareOpening | FrameAnalysisOutcome::Declined => 0,
+        FrameAnalysisOutcome::StreamMiss => 1,
+        FrameAnalysisOutcome::NotAScoreboard { .. } => 2,
+        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 3,
+        FrameAnalysisOutcome::Analyzed(_) => 4,
     }
+}
+
+fn log_reused_frame_skip() {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let debug = {
+        let mut last = LAST.lock().unwrap_or_else(|err| err.into_inner());
+        let now = Instant::now();
+        let debug =
+            capture::reused_frame_skip_is_debug(*last, now, capture::REUSED_FRAME_LOG_WINDOW);
+        if debug {
+            *last = Some(now);
+        }
+        debug
+    };
+    if debug {
+        tracing::debug!("poll skipped: stream frame already seen");
+    } else {
+        tracing::trace!("poll skipped: stream frame already seen");
+    }
+}
+
+async fn grab_tab_attempt(
+    backend: &capture::CaptureBackend,
+    output: Option<&str>,
+    attempt: usize,
+) -> Result<capture::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
+    if attempt != 0 {
+        let now = std::time::Instant::now();
+        let grab = capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab);
+        return capture::with_tab_press(capture::tab_attempt_press(now, attempt, now), grab).await;
+    }
+    // The first attempt keeps the original key. While the share is still
+    // opening it waits up to 5 seconds for a fresh frame, not the 1200 ms
+    // frame budget. If that open uses up the frame budget, the grab runs
+    // again from now.
+    let press = capture::tab_press().unwrap_or_else(std::time::Instant::now);
+    capture::first_tab_grab(
+        press,
+        || press.elapsed(),
+        std::time::Instant::now,
+        || capture::capture_screen_output_for(backend, output, capture::CaptureKind::Tab),
+        || tokio::time::sleep(std::time::Duration::from_millis(50)),
+    )
+    .await
 }
 
 async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Result<CaptureReport> {
@@ -6586,7 +7130,8 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             &stat_tracker::tab_retry::TAB_RETRY_WAITS,
             tab_capture_should_retry,
             tab_outcome_rank,
-            |_| {
+            tab_retry_reason,
+            |attempt| {
                 let matcher = Arc::clone(&ctx.portrait_matcher);
                 // Clone player_name so the blocking closure can own it.
                 let player_name_owned = player_name.map(|s| s.to_string());
@@ -6599,10 +7144,24 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 let own_seeds = own_seeds.clone();
                 let names = names.clone();
                 async move {
-                    let img = capture::capture_screen_output(backend, capture_output)
-                        .await
-                        .map_err(anyhow::Error::from_boxed)
-                        .context("screen capture failed")?;
+                    let grabbed = grab_tab_attempt(backend, capture_output, attempt).await;
+                    let img = match grabbed {
+                        Ok(captured) => captured.image,
+                        Err(err) if capture::is_stream_miss(&err.to_string()) => {
+                            return Ok(FrameAnalysisOutcome::StreamMiss);
+                        }
+                        Err(err) if capture::is_share_opening(&err.to_string()) => {
+                            return Ok(FrameAnalysisOutcome::ShareOpening);
+                        }
+                        Err(err) if capture::is_declined_capture(&err.to_string()) => {
+                            return Ok(FrameAnalysisOutcome::Declined);
+                        }
+                        Err(err) => {
+                            return Err(
+                                anyhow::Error::from_boxed(err).context("screen capture failed")
+                            );
+                        }
+                    };
                     let analysis = tokio::task::spawn_blocking(move || {
                         let started = Instant::now();
                         let cpu_started = stat_tracker::perf::thread_cpu();
@@ -6638,6 +7197,40 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         .await?;
         let analysis = match analysis {
             FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
+            FrameAnalysisOutcome::StreamMiss
+            | FrameAnalysisOutcome::ShareOpening
+            | FrameAnalysisOutcome::Declined => {
+                if matches!(analysis, FrameAnalysisOutcome::StreamMiss) {
+                    tracing::info!("Tab capture missed: no fresh stream frame");
+                }
+                return Ok(CaptureReport {
+                    best_guess: None,
+                    recorded: false,
+                    outcome: game_outcome,
+                    map: None,
+                    map_source: None,
+                    session_id: session_id.to_string(),
+                    split: false,
+                    armed_reset: false,
+                    ignore_row: false,
+                    reset_streak: req.reset_streak,
+                    reset_baseline: req.reset_baseline,
+                    baseline_row: req.baseline_row,
+                    refresh_baseline: false,
+                    clear_hint: false,
+                    count_progress: false,
+                    career_panel: false,
+                    held_counters: None,
+                    held_hero: None,
+                    gate_state: None,
+                    hero_auth: req.hero_auth.clone(),
+                    seal: None,
+                    close_reason: None,
+                    held_at: None,
+                    map_replaces_text_fallback: false,
+                    rejoin_carry: None,
+                });
+            }
             FrameAnalysisOutcome::NotAScoreboard {
                 outcome,
                 frame,
@@ -6866,9 +7459,9 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
     // nothing else; a cell it does not vouch for is held, and a row with
     // under four sure cells is refused (never a text fallback, never an OCR
     // number). A suspect own row (alpha.7 O9: it may be another player's)
-    // is a low-trust read: the capture gate does not latch its counters,
-    // and the boundary plan lets it anchor the reset baseline but not split
-    // a game by itself (`BoardFacts::suspect_row`).
+    // stores none of its numbers and does not seed or raise the running
+    // totals. The boundary plan still lets it anchor the reset baseline,
+    // and it does not split a game by itself (`BoardFacts::suspect_row`).
     let own_row_suspect = own_row.is_some_and(|own| own.suspect());
     let scoreboard_read = match &new_board {
         Some(board) => reader_apply::read_own_row_stats(board, board_row, &outcome_label)
@@ -6908,7 +7501,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             if own_row_suspect {
                 tracing::info!(
                     ?player_row_idx,
-                    "own row is suspect: its stats are a low-trust read, every field off it is flagged"
+                    "own row is suspect: none of its stats are stored or used to raise the totals"
                 );
             }
             if !trusted_cells {
@@ -7298,10 +7891,15 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 ];
                 raw_guess = Some(std::array::from_fn(|col| guesses[col].unwrap_or(held[col])));
                 let prior = gate_prev_for_store(req.prev_gate, req.awaiting_first_board);
+                let gate_suspect = if own_row_suspect {
+                    [true; capture_gate::GATE_COLS]
+                } else {
+                    suspect
+                };
                 staged.gate = hold_new_reader_stats_with_guesses(
                     &mut parsed,
                     prior,
-                    suspect,
+                    gate_suspect,
                     held_cols,
                     split,
                     trusted_cells && !own_row_suspect,
@@ -7387,11 +7985,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 // The best guess waits on the active game. A later Tab with
                 // a sure read stores the real row; if none comes, the game
                 // stores this guess when it closes (alpha.8).
-                let best_guess = raw_guess.map(|guess| {
-                    let mut row = parsed.clone();
-                    apply_best_guess(&mut row, &unread, guess);
-                    row
-                });
+                // An all-suspect read, including a suspect own row, must not
+                // be saved later as the game's best guess either.
+                let best_guess = if own_row_suspect || suspect.iter().all(|&cell| cell) {
+                    None
+                } else {
+                    raw_guess.map(|guess| {
+                        let mut row = parsed.clone();
+                        apply_best_guess(&mut row, &unread, guess);
+                        row
+                    })
+                };
                 return Ok(CaptureReport {
                     recorded: false,
                     best_guess,
@@ -7660,7 +8264,7 @@ fn save_rejected_frame(
     img: image::DynamicImage,
     reason: &'static str,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if !debug {
+    if !debug || img.width() < 2 || img.height() < 2 {
         return None;
     }
     let dir = data_dir.join("debug").join("rejected");
@@ -8590,20 +9194,222 @@ async fn close_session_on_shutdown(
     }
 }
 
+/// Race `work` against shutdown. Shutdown is polled first, so a signal that
+/// is already waiting wins even when `work` is also ready.
+///
+/// This is for the capture grab and the OCR only. Dropping `work` detaches
+/// a `spawn_blocking` task. That OCR keeps running and its result is
+/// discarded. It does not write a match row. A future that writes game
+/// state goes through [`finish_within_shutdown`] instead: dropping it would
+/// cancel a store call that had already taken the game out of memory.
+async fn stop_for_shutdown<T, S>(
+    work: impl std::future::Future<Output = T>,
+    shutdown: S,
+) -> Result<T, ()>
+where
+    S: std::future::Future<Output = ()>,
+{
+    tokio::pin!(work);
+    tokio::pin!(shutdown);
+    tokio::select! {
+        biased;
+        _ = &mut shutdown => Err(()),
+        value = &mut work => Ok(value),
+    }
+}
+
+/// Let a game-state write finish. If `shutdown` fires first, `work` keeps
+/// running until `budget` elapses. The budget is read when the signal
+/// fires, so it is the shared deadline's remainder (`shutdown_time_left`),
+/// not a zero timeout captured before the signal.
+///
+/// `Err` means the deadline passed with the write still running. That drop
+/// is the same bound as the rest of shutdown. A signal by itself does not
+/// drop the write.
+async fn finish_within_shutdown<T, S, B>(
+    work: impl std::future::Future<Output = T>,
+    shutdown: S,
+    budget: B,
+) -> Result<T, ()>
+where
+    S: std::future::Future<Output = ()>,
+    B: FnOnce() -> std::time::Duration,
+{
+    tokio::pin!(work);
+    tokio::pin!(shutdown);
+    tokio::select! {
+        biased;
+        _ = &mut shutdown => match tokio::time::timeout(budget(), &mut work).await {
+            Ok(value) => Ok(value),
+            Err(_elapsed) => Err(()),
+        },
+        value = &mut work => Ok(value),
+    }
+}
+
+/// What the Tab capture task sends back to the run loop.
+type CaptureReports = tokio::sync::mpsc::UnboundedReceiver<(String, Result<CaptureReport, String>)>;
+
+/// One step of [`shutdown_from_signal`]. The steps run in
+/// [`SHUTDOWN_STAGES`] order, and the deadline log names the one running.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShutdownStage {
+    /// Wait for the in-flight Tab capture and apply its report.
+    CaptureDrain,
+    /// Close or keep the game, and write the skeleton.
+    SessionSave,
+    /// Close the screen share, bounded by [`SCREENCAST_CLOSE_TIMEOUT`].
+    ScreencastClose,
+    /// Join the in-flight sync, then the last upload.
+    FinalUpload,
+    /// Write the GUI snapshot.
+    SnapshotExport,
+}
+
+impl ShutdownStage {
+    fn label(self) -> &'static str {
+        match self {
+            Self::CaptureDrain => "in-flight capture",
+            Self::SessionSave => "session save",
+            Self::ScreencastClose => "screencast session",
+            Self::FinalUpload => "final upload",
+            Self::SnapshotExport => "snapshot export",
+        }
+    }
+}
+
+/// Shutdown order. The game is saved right after the in-flight capture is
+/// applied, before the portal close and the upload: those wait on other
+/// processes and the network, and must not cost the save its share of the
+/// deadline (MAIN-3). The snapshot export reads the store after the upload.
+const SHUTDOWN_STAGES: [ShutdownStage; 5] = [
+    ShutdownStage::CaptureDrain,
+    ShutdownStage::SessionSave,
+    ShutdownStage::ScreencastClose,
+    ShutdownStage::FinalUpload,
+    ShutdownStage::SnapshotExport,
+];
+
+/// A portal that does not answer gets this long. The upload keeps the rest.
+const SCREENCAST_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Deadline time the capture drain leaves for the session save. A capture
+/// stuck in OCR or a screenshot fallback is abandoned at that point, and the
+/// game is saved without its report.
+const SESSION_SAVE_RESERVE: std::time::Duration = std::time::Duration::from_millis(1500);
+
+/// Wait for the in-flight capture until only [`SESSION_SAVE_RESERVE`] of
+/// `left` remains. Returns false when the capture was abandoned; its task is
+/// detached, not aborted, so a store write it has started is not torn.
+async fn drain_capture_within(
+    task: Option<tokio::task::JoinHandle<()>>,
+    left: std::time::Duration,
+) -> bool {
+    let budget = left.saturating_sub(SESSION_SAVE_RESERVE);
+    if tokio::time::timeout(budget, drain_capture(task))
+        .await
+        .is_ok()
+    {
+        return true;
+    }
+    tracing::warn!(
+        budget_ms = budget.as_millis() as u64,
+        "in-flight capture abandoned at shutdown; saving the game without it"
+    );
+    false
+}
+
+/// The deadline log for a shutdown stopped at `SHUTDOWN_STAGES[at]`.
+fn shutdown_overrun_at(at: usize) -> String {
+    let at = at.min(SHUTDOWN_STAGES.len() - 1);
+    let not_reached: Vec<&str> = SHUTDOWN_STAGES[at + 1..]
+        .iter()
+        .map(|stage| stage.label())
+        .collect();
+    stat_tracker::replace::shutdown_overrun_line(SHUTDOWN_STAGES[at].label(), &not_reached)
+}
+
+/// Apply every capture report already sent. [`drain_capture`] waits for the
+/// task; its report is in the channel, and would be lost with it: session
+/// splits, the previous game's seal, the gate, a held board, the map and the
+/// hero authority (MAIN-2).
+async fn apply_landed_capture_reports(
+    st: &mut SessionState,
+    capture_rx: &mut CaptureReports,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) {
+    while let Ok((sid, result)) = capture_rx.try_recv() {
+        apply_capture_report(st, store, data_dir, &sid, result, Instant::now()).await;
+    }
+}
+
+async fn close_screencast_on_shutdown() {
+    if tokio::time::timeout(SCREENCAST_CLOSE_TIMEOUT, capture::close_if_open())
+        .await
+        .is_err()
+    {
+        tracing::warn!(
+            timeout_ms = SCREENCAST_CLOSE_TIMEOUT.as_millis() as u64,
+            "screencast session did not close in time; shutdown goes on"
+        );
+    }
+}
+
+/// Save the game and exit within the shared deadline. Returns the step the
+/// deadline stopped, or `None` when every step finished.
+#[allow(clippy::too_many_arguments)]
 async fn shutdown_from_signal(
     st: &mut SessionState,
     capture_task: &mut Option<tokio::task::JoinHandle<()>>,
+    capture_rx: &mut CaptureReports,
     sync_task: &mut Option<tokio::task::JoinHandle<()>>,
     sync_client: Option<&sync::SyncClient>,
     sync_backoff: &std::sync::Mutex<sync::SyncBackoff>,
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
-) {
-    drain_capture(capture_task.take()).await;
-    close_session_on_shutdown(st, store, data_dir).await;
-    let task = sync_task.take();
-    finish_sync_on_shutdown(sync_client, sync_backoff, task, store, data_dir).await;
-    flush_snapshot_if_dirty(store, data_dir).await;
+) -> Option<ShutdownStage> {
+    let at = std::sync::atomic::AtomicUsize::new(0);
+    tokio::select! {
+        _ = async {
+            for (i, stage) in SHUTDOWN_STAGES.iter().enumerate() {
+                at.store(i, std::sync::atomic::Ordering::Relaxed);
+                match stage {
+                    ShutdownStage::CaptureDrain => {
+                        drain_capture_within(
+                            capture_task.take(),
+                            stat_tracker::replace::shutdown_time_left(),
+                        )
+                        .await;
+                        apply_landed_capture_reports(st, capture_rx, store, data_dir).await;
+                    }
+                    ShutdownStage::SessionSave => {
+                        close_session_on_shutdown(st, store, data_dir).await;
+                    }
+                    ShutdownStage::ScreencastClose => close_screencast_on_shutdown().await,
+                    ShutdownStage::FinalUpload => {
+                        let task = sync_task.take();
+                        finish_sync_on_shutdown(sync_client, sync_backoff, task, store, data_dir)
+                            .await;
+                    }
+                    ShutdownStage::SnapshotExport => {
+                        flush_snapshot_if_dirty(store, data_dir).await;
+                    }
+                }
+            }
+        } => None,
+        _ = tokio::time::sleep(stat_tracker::replace::shutdown_time_left()) => {
+            // Returning here used to leave the runtime drop waiting on
+            // blocking tasks. `main` calls `Runtime::shutdown_timeout` with
+            // this same deadline, so those tasks cannot hold the exit.
+            // The step is read now, not when shutdown began.
+            let stopped = at
+                .load(std::sync::atomic::Ordering::Relaxed)
+                .min(SHUTDOWN_STAGES.len() - 1);
+            tracing::error!("{}", shutdown_overrun_at(stopped));
+            Some(SHUTDOWN_STAGES[stopped])
+        }
+    }
 }
 
 async fn finish_sync_on_shutdown(
@@ -9102,7 +9908,17 @@ mod tests {
             scan,
         };
         assert!(tab_capture_should_retry(&rejected));
+        assert!(tab_capture_should_retry(&FrameAnalysisOutcome::StreamMiss));
+        assert!(tab_capture_should_retry(
+            &FrameAnalysisOutcome::ShareOpening
+        ));
+        assert!(!tab_capture_should_retry(&FrameAnalysisOutcome::Declined));
         assert!(!tab_capture_should_retry(&unsure));
+        assert!(tab_outcome_rank(&rejected) > tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss));
+        assert!(
+            tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss)
+                > tab_outcome_rank(&FrameAnalysisOutcome::ShareOpening)
+        );
         assert!(tab_outcome_rank(&unsure) > tab_outcome_rank(&rejected));
     }
 
@@ -12620,7 +13436,7 @@ mod tests {
     }
 
     #[test]
-    fn new_reader_keeps_a_fallback_of_40_18_until_two_clean_reads_of_0_0() {
+    fn new_reader_replaces_a_fallback_of_40_18_on_one_clean_read() {
         let clean = [false; capture_gate::GATE_COLS];
         let mut parsed = test_match("s", "unknown");
         parsed.elims = 2;
@@ -12651,11 +13467,10 @@ mod tests {
         );
         assert_eq!(
             (parsed.assists, parsed.deaths),
-            (40, 18),
-            "one clean read keeps the fallback"
+            (0, 0),
+            "one clean read replaces the fallback"
         );
-        assert!(parsed.suspect_fields.iter().any(|field| field == "a"));
-        assert!(parsed.suspect_fields.iter().any(|field| field == "d"));
+        assert!(!second.state.low_trust);
 
         parsed.assists = 0;
         parsed.deaths = 0;
@@ -14608,6 +15423,9 @@ mod tests {
         );
         assert!(hc_body.contains("suspect_row: own_row_suspect,"));
         assert!(hc_body.contains("trusted_cells && !own_row_suspect,"));
+        assert!(hc_body.contains(
+            "let gate_suspect = if own_row_suspect { [true; capture_gate::GATE_COLS] } else { suspect };"
+        ));
         assert!(hc_body.contains("let own_seeds = own_name_seeds(ctx.own_name.as_ref());"));
     }
 
@@ -14649,27 +15467,27 @@ mod tests {
             assert_eq!(analysis.own_row.unwrap().row, Some(0));
             let board = Some(o8_board(Some("zenyatta")));
             let report = o9_tab(&ctx, "o9", "Busan", analysis, board).await;
-            assert!(report.recorded);
             let rows = ctx.store.get_session_snapshots("o9").await.unwrap();
-            let flags = &rows[0].suspect_fields;
-            let want: Vec<&str> = if marked {
-                reader_apply::OWN_ROW_FIELDS.to_vec()
+            let gate = report.gate_state.expect("gate");
+            if marked {
+                // A suspect own row stores none of its numbers and does not
+                // seed the totals. The gate stays low-trust until a clean row.
+                assert!(
+                    !report.recorded,
+                    "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
+                );
+                assert!(
+                    rows.is_empty(),
+                    "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
+                );
+                assert!(gate.low_trust);
+                assert_ne!(gate.accepted.damage, 3000);
             } else {
-                Vec::new()
-            };
-            assert_eq!(
-                flags, &want,
-                "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
-            );
-            // the values themselves are still the row's
-            assert_eq!((rows[0].elims, rows[0].damage), (10, 3000));
-            // F262-11: a suspect row's counters enter the capture gate as a
-            // low-trust read, so they cannot latch
-            assert_eq!(
-                report.gate_state.expect("gate").low_trust,
-                marked,
-                "seed {seed:?} highlight {lit:?} hero {hero:?} seeded {seeded}"
-            );
+                assert!(report.recorded);
+                assert!(rows[0].suspect_fields.is_empty());
+                assert_eq!((rows[0].elims, rows[0].damage), (10, 3000));
+                assert!(!gate.low_trust);
+            }
         }
     }
 
@@ -14791,14 +15609,12 @@ mod tests {
                 Some(o9_candidate(i).proved(Proof::CareerHero, Some(hero)));
             let board = Some(o8_board(Some(hero)));
             let report = o9_tab(&ctx, session, map, analysis, board).await;
-            assert!(report.recorded, "tab {i}");
-            // the row is stored marked and as a low-trust read
+            // A career-hero row with no highlight is a suspect own row: its
+            // numbers are not stored. The crop is still offered to the seeds.
+            assert!(!report.recorded, "tab {i}");
             if i == 0 {
                 let rows = ctx.store.get_session_snapshots(session).await.unwrap();
-                assert_eq!(
-                    rows[0].suspect_fields,
-                    reader_apply::OWN_ROW_FIELDS.to_vec()
-                );
+                assert!(rows.is_empty(), "a suspect own row stores no stats");
             }
             assert!(report.gate_state.expect("gate").low_trust, "tab {i}");
             assert_eq!(
@@ -15905,6 +16721,215 @@ mod tests {
             commands_body[set_at..].contains("schedule_store_sync("),
             "a SetOutcome on the open session must schedule the next sync"
         );
+        let biased = run_loop.find("biased;").expect("biased select");
+        assert!(
+            biased < ctrl_c,
+            "shutdown is the first arm, so a ready signal beats a ready poll"
+        );
+        let poll_tick = run_loop.find("poll_timer.tick()").expect("poll arm");
+        assert!(sigterm < poll_tick, "the signal arms stay above the poll");
+        assert_eq!(
+            run_loop.matches("tokio::task::spawn_blocking(").count(),
+            1,
+            "the poll analysis is the only blocking task in the loop"
+        );
+        let blocking = run_loop
+            .find("tokio::task::spawn_blocking(")
+            .expect("poll analysis");
+        let wrap = run_loop[..blocking]
+            .rfind("stop_for_shutdown(")
+            .expect("analysis is raced against shutdown");
+        assert!(
+            run_loop[wrap + "stop_for_shutdown(".len()..blocking]
+                .trim()
+                .is_empty(),
+            "spawn_blocking OCR is the future passed to stop_for_shutdown"
+        );
+        assert_eq!(
+            run_loop.matches("stop_for_shutdown(").count(),
+            2,
+            "only the capture grab and the OCR are raced against shutdown"
+        );
+        let tick_at = run_loop.find("apply_poll_tick(").expect("poll write");
+        let write_at = run_loop[..tick_at]
+            .rfind("finish_within_shutdown(")
+            .expect("the poll write keeps the shutdown deadline");
+        let bound = tick_at
+            + run_loop[tick_at..]
+                .find("shutdown_time_left")
+                .expect("the poll write is bounded by the shared deadline");
+        assert!(
+            !run_loop[write_at..bound].contains("stop_for_shutdown("),
+            "a started poll write is not dropped when the signal wins"
+        );
+    }
+
+    /// A poll analysis that would run for half a minute must lose to shutdown
+    /// well inside the shared 5 second deadline. The shutdown future is
+    /// injected so this test does not set the process-wide shutdown clock.
+    #[tokio::test]
+    async fn a_slow_poll_analysis_yields_to_shutdown_within_the_deadline() {
+        let waiter = std::sync::Arc::new(tokio::sync::Notify::new());
+        let flag = std::sync::Arc::clone(&waiter);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            flag.notify_one();
+        });
+        let started = std::time::Instant::now();
+        let raced = stop_for_shutdown(
+            async {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                "row"
+            },
+            waiter.notified(),
+        )
+        .await;
+        assert!(raced.is_err(), "shutdown must discard the slow analysis");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "shutdown took {elapsed:?}, inside the 5s deadline"
+        );
+        assert_eq!(
+            stop_for_shutdown(async { "row" }, std::future::pending::<()>())
+                .await
+                .expect("work finishes when shutdown never arrives"),
+            "row"
+        );
+        assert!(
+            stop_for_shutdown(async { "row" }, async {}).await.is_err(),
+            "when both are ready, shutdown is polled first"
+        );
+    }
+
+    /// Capture and OCR stay on the immediate race. Neither writes a row, so
+    /// dropping them when the signal wins is safe. The shutdown future is
+    /// injected so this test does not set the process-wide shutdown clock.
+    #[tokio::test]
+    async fn a_slow_capture_and_ocr_are_cut_off_promptly() {
+        for label in ["capture", "ocr"] {
+            let began = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let began_run = std::sync::Arc::clone(&began);
+            let finished_run = std::sync::Arc::clone(&finished);
+            let raced = stop_for_shutdown(
+                async move {
+                    began_run.store(true, std::sync::atomic::Ordering::SeqCst);
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    finished_run.store(true, std::sync::atomic::Ordering::SeqCst);
+                    label
+                },
+                async {},
+            )
+            .await;
+            assert!(raced.is_err(), "{label} must be cut off when shutdown wins");
+            assert!(
+                !began.load(std::sync::atomic::Ordering::SeqCst),
+                "{label} must not start when shutdown is already waiting"
+            );
+            assert!(
+                !finished.load(std::sync::atomic::Ordering::SeqCst),
+                "{label} must not finish"
+            );
+
+            let finished_late = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let flag = std::sync::Arc::clone(&finished_late);
+            let waiter = std::sync::Arc::new(tokio::sync::Notify::new());
+            let wake = std::sync::Arc::clone(&waiter);
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                wake.notify_one();
+            });
+            let started = std::time::Instant::now();
+            let raced = stop_for_shutdown(
+                async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                },
+                waiter.notified(),
+            )
+            .await;
+            assert!(raced.is_err(), "{label} in flight must be dropped");
+            assert!(!finished_late.load(std::sync::atomic::Ordering::SeqCst));
+            let elapsed = started.elapsed();
+            assert!(
+                elapsed < std::time::Duration::from_secs(2),
+                "{label} took {elapsed:?}, inside the 5s deadline"
+            );
+        }
+    }
+
+    /// The signal lands after `retire_active_game` has taken the game out of
+    /// memory and before the sealed outcome is stored. The write is not
+    /// dropped, so the outcome is still in the store. The shutdown future is
+    /// injected so this test does not set the process-wide shutdown clock.
+    #[tokio::test]
+    async fn a_shutdown_during_retire_still_persists_the_sealed_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(test_match("sess-shutdown-seal", "unknown"))
+            .await
+            .unwrap();
+        let mut sealed = game(detect::MatchOutcome::Unknown, None, Instant::now());
+        sealed.session_id = "sess-shutdown-seal".into();
+        sealed.session_created = true;
+        sealed.result_mark = Some(ResultMark {
+            outcome: detect::MatchOutcome::Defeat,
+            confirmed: false,
+            seen_at: Instant::now() - Duration::from_secs(20),
+        });
+        let mut st = session(Some(sealed), Instant::now());
+
+        let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+        let entered_w = std::sync::Arc::clone(&entered);
+        let release_w = std::sync::Arc::clone(&release);
+        let shutdown_w = std::sync::Arc::clone(&shutdown);
+        tokio::spawn(async move {
+            entered_w.notified().await;
+            shutdown_w.notify_one();
+            tokio::task::yield_now().await;
+            tokio::time::sleep(Duration::from_millis(30)).await;
+            release_w.notify_one();
+        });
+
+        let started = Instant::now();
+        let finished = finish_within_shutdown(
+            retire_after_pause(
+                &mut st,
+                &store,
+                dir.path(),
+                Some(detect::MatchOutcome::Defeat),
+                "test: shutdown mid-write",
+                async move {
+                    entered.notify_one();
+                    release.notified().await;
+                },
+            ),
+            shutdown.notified(),
+            || Duration::from_secs(2),
+        )
+        .await;
+        assert!(
+            finished.is_ok(),
+            "the seal write must finish inside the deadline"
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the seal write took {elapsed:?}"
+        );
+        assert!(
+            st.active_game.is_none(),
+            "the game left memory before the store call"
+        );
+        let snaps = store
+            .get_session_snapshots("sess-shutdown-seal")
+            .await
+            .unwrap();
+        assert_eq!(snaps[0].outcome, "defeat");
     }
 
     /// Production poll cadence. A stable screen is emitted on every tick.
@@ -16236,12 +17261,36 @@ mod tests {
             suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
             frame: detect::MatchOutcome,
         ) {
-            let (panel, text_map) = maps;
+            let req = self.tab_request().await;
+            self.tab_land(req, cur, hero, row, maps, suspect, frame)
+                .await;
+        }
+
+        /// The Tab press: the session choice and the request the capture
+        /// task gets. State changes after this (a poll, a GUI edit) happen
+        /// while the capture runs; [`Self::tab_land`] is its result.
+        async fn tab_request(&mut self) -> CaptureRequest {
             let opened =
                 open_fresh_if_tab_starts_one(&mut self.st, &self.store, self.dir.path(), self.now)
                     .await;
             let mut req = build_capture_request(self.game(), opened, self.now);
             req.member_map_edit = session_has_member_map_edit(&self.store, &req).await;
+            req
+        }
+
+        /// The capture task for `req`: plan, store writes and report.
+        #[allow(clippy::too_many_arguments)]
+        async fn tab_land(
+            &mut self,
+            req: CaptureRequest,
+            cur: Counters,
+            hero: &str,
+            row: Option<u32>,
+            maps: (Option<&str>, &str),
+            suspect: [bool; stat_tracker::capture_gate::GATE_COLS],
+            frame: detect::MatchOutcome,
+        ) {
+            let (panel, text_map) = maps;
             let (hero_resolved, source, hero_auth) = hero_auth::resolve_hero(
                 Some(hero),
                 None,
@@ -16503,9 +17552,13 @@ mod tests {
             )
             .await;
         let once = night.game().gate.expect("first clean read stored");
-        assert_eq!(once.accepted.assists, 40, "one low read keeps the latch");
-        assert_eq!(once.accepted.deaths, 18);
-        assert!(once.low_trust);
+        assert_eq!(
+            once.accepted.assists, 0,
+            "one clean read replaces the latch"
+        );
+        assert_eq!(once.accepted.deaths, 0);
+        assert_eq!(once.accepted.mitigation, 450);
+        assert!(!once.low_trust);
 
         night.advance(Duration::from_secs(20));
         night
@@ -18465,6 +19518,116 @@ mod tests {
         assert!(
             !night.game().pending_boundary,
             "adopting the rejected frame's outcome clears the armed boundary"
+        );
+    }
+
+    /// MAIN-1: the end-reel poll decides the game while a Tab capture that
+    /// was requested before the result is still running. The capture's
+    /// writes do not reset the session to unknown, and its row, the newest
+    /// and most complete one, carries the result and is queued for upload.
+    #[tokio::test]
+    async fn a_result_decided_while_a_tab_capture_runs_survives_the_capture() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Ana");
+        night
+            .tab_once(
+                night_counters(5, 2, 1, 2000, 300, 500),
+                "Ana",
+                Some(0),
+                Some("Busan"),
+                NIGHT_CLEAN,
+            )
+            .await;
+        let busan = night.id();
+        night.advance(Duration::from_secs(30));
+        let req = night.tab_request().await;
+        assert_eq!(req.game_outcome, detect::MatchOutcome::Unknown);
+        night.banner(detect::MatchOutcome::Victory).await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        night
+            .tab_land(
+                req,
+                night_counters(9, 3, 2, 3500, 400, 800),
+                "Ana",
+                Some(0),
+                (Some("Busan"), "Busan"),
+                NIGHT_CLEAN,
+                detect::MatchOutcome::Unknown,
+            )
+            .await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(
+            snaps.iter().any(|row| row.elims == 9),
+            "the late row is stored"
+        );
+        assert!(
+            snaps.iter().all(|row| row.outcome == "victory"),
+            "{:?}",
+            snaps
+                .iter()
+                .map(|row| (row.elims, row.outcome.clone()))
+                .collect::<Vec<_>>()
+        );
+        let sessions = night.store.get_all_sessions().await.unwrap();
+        let stored = sessions
+            .iter()
+            .find(|s| s.session_id == busan)
+            .expect("session row");
+        assert_eq!(stored.final_outcome, "victory");
+        let unsynced = night.store.get_unsynced().await.unwrap();
+        assert!(
+            unsynced
+                .iter()
+                .any(|row| row.session_id == busan && row.elims == 9),
+            "the late row is not held back from upload"
+        );
+    }
+
+    /// MAIN-1: the first Tab of a game is still running when the result is
+    /// decided. The session row does not exist yet, so the store has no
+    /// result to keep; the report re-seals the decided one.
+    #[tokio::test]
+    async fn a_first_capture_that_lands_after_the_result_is_re_sealed() {
+        let mut night = Night::new().await;
+        night.begin_on("Busan", "Ana");
+        let busan = night.id();
+        let req = night.tab_request().await;
+        assert!(req.create_session);
+        night.banner(detect::MatchOutcome::Victory).await;
+        assert_eq!(night.id(), busan);
+        assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
+        night
+            .tab_land(
+                req,
+                night_counters(9, 3, 2, 3500, 400, 800),
+                "Ana",
+                Some(0),
+                (Some("Busan"), "Busan"),
+                NIGHT_CLEAN,
+                detect::MatchOutcome::Unknown,
+            )
+            .await;
+        assert_eq!(night.id(), busan);
+        let snaps = night.store.get_session_snapshots(&busan).await.unwrap();
+        assert!(!snaps.is_empty());
+        assert!(
+            snaps.iter().all(|row| row.outcome == "victory"),
+            "{:?}",
+            snaps
+                .iter()
+                .map(|row| (row.elims, row.outcome.clone()))
+                .collect::<Vec<_>>()
+        );
+        let sessions = night.store.get_all_sessions().await.unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|s| s.session_id == busan)
+                .map(|s| s.final_outcome.as_str()),
+            Some("victory")
         );
     }
 
@@ -20540,6 +21703,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_keeps_an_unfinished_game_so_a_restart_resumes_it() {
+        assert_eq!(
+            stat_tracker::replace::shutdown_time_left(),
+            stat_tracker::replace::SHUTDOWN_DEADLINE,
+            "a shutdown with no signal keeps the full deadline"
+        );
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
         store
@@ -20555,6 +21723,7 @@ mod tests {
         shutdown_from_signal(
             &mut st,
             &mut None,
+            &mut tokio::sync::mpsc::unbounded_channel().1,
             &mut None,
             None,
             &std::sync::Mutex::new(sync::SyncBackoff::default()),
@@ -20580,6 +21749,153 @@ mod tests {
             rows.iter()
                 .any(|row| row.session_id == "quit-after-match" && !row.synced),
             "the resumed row stays unsynced so a late result can attach"
+        );
+    }
+
+    /// MAIN-2: the report of the capture shutdown waited for is applied
+    /// before the game is saved. It sat in the channel the run loop no
+    /// longer reads, and its map, gate and hero authority were lost.
+    #[tokio::test]
+    async fn shutdown_applies_the_report_of_the_capture_it_drained() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Unknown, None, now);
+        g.session_id = "drained".into();
+        let mut st = session(Some(g), now);
+        let mut report = rejected_report("drained");
+        report.recorded = true;
+        report.map = Some("Busan".into());
+        report.map_source = Some(boundary::MapSource::TopBar);
+        let board = Counters {
+            elims: 7,
+            assists: 2,
+            deaths: 3,
+            damage: 2400,
+            healing: 0,
+            mitigation: 900,
+        };
+        report.gate_state = Some(GateState {
+            accepted: board,
+            last_raw: board,
+            ..GateState::default()
+        });
+        report.hero_auth.accepted_hero = Some("Ana".into());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = tx.send(("drained".to_string(), Ok(report)));
+        });
+        let stopped = shutdown_from_signal(
+            &mut st,
+            &mut Some(task),
+            &mut rx,
+            &mut None,
+            None,
+            &std::sync::Mutex::new(sync::SyncBackoff::default()),
+            &store,
+            dir.path(),
+        )
+        .await;
+        assert_eq!(stopped, None);
+        let restored = startup_session(dir.path());
+        let g = restored.active_game.expect("the unfinished game is kept");
+        assert_eq!(g.session_id, "drained");
+        assert_eq!(g.map.as_deref(), Some("Busan"), "the report's map is saved");
+        assert_eq!(g.gate.map(|gate| gate.accepted.elims), Some(7));
+        assert_eq!(g.hero_auth.accepted_hero.as_deref(), Some("Ana"));
+    }
+
+    /// A capture that does not finish is abandoned before the deadline, and
+    /// the game is still saved.
+    #[tokio::test]
+    async fn a_stuck_capture_at_shutdown_does_not_cost_the_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Unknown, None, now);
+        g.session_id = "stuck-ocr".into();
+        g.map = Some("Busan".into());
+        let mut st = session(Some(g), now);
+        let stuck = tokio::spawn(std::future::pending::<()>());
+        let stopped = shutdown_from_signal(
+            &mut st,
+            &mut Some(stuck),
+            &mut tokio::sync::mpsc::unbounded_channel().1,
+            &mut None,
+            None,
+            &std::sync::Mutex::new(sync::SyncBackoff::default()),
+            &store,
+            dir.path(),
+        )
+        .await;
+        assert_eq!(stopped, None, "every stage after the drain finished");
+        let restored = startup_session(dir.path());
+        assert_eq!(
+            restored.active_game.map(|g| g.session_id),
+            Some("stuck-ocr".to_string()),
+            "the game was saved without the capture"
+        );
+    }
+
+    /// MAIN-3: the game is saved before the portal close and the upload,
+    /// and the deadline log names the step that was running.
+    #[test]
+    fn shutdown_saves_the_game_before_the_portal_and_the_upload() {
+        let pos = |stage| {
+            SHUTDOWN_STAGES
+                .iter()
+                .position(|s| *s == stage)
+                .expect("every stage runs")
+        };
+        assert_eq!(SHUTDOWN_STAGES[0], ShutdownStage::CaptureDrain);
+        assert_eq!(SHUTDOWN_STAGES[1], ShutdownStage::SessionSave);
+        assert!(pos(ShutdownStage::SessionSave) < pos(ShutdownStage::ScreencastClose));
+        assert!(pos(ShutdownStage::SessionSave) < pos(ShutdownStage::FinalUpload));
+        assert!(pos(ShutdownStage::FinalUpload) < pos(ShutdownStage::SnapshotExport));
+        assert!(SCREENCAST_CLOSE_TIMEOUT <= Duration::from_secs(1));
+        let line = shutdown_overrun_at(pos(ShutdownStage::FinalUpload));
+        assert!(
+            line.ends_with("still running: final upload (not reached: snapshot export)"),
+            "{line}"
+        );
+        assert!(!line.contains("screencast"), "{line}");
+    }
+
+    /// MAIN-3: an upload that does not finish does not cost the save, and
+    /// the deadline is reported against the upload.
+    #[tokio::test]
+    async fn a_hung_upload_at_shutdown_still_saves_the_game_and_is_named() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        store
+            .insert_match(unfinished_row("slow-network"))
+            .await
+            .unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Unknown, None, now);
+        g.session_id = "slow-network".into();
+        g.map = Some("Busan".into());
+        let mut st = session(Some(g), now);
+        // An upload already in flight that never returns.
+        let mut sync_task = Some(tokio::spawn(std::future::pending::<()>()));
+        let stopped = shutdown_from_signal(
+            &mut st,
+            &mut None,
+            &mut tokio::sync::mpsc::unbounded_channel().1,
+            &mut sync_task,
+            None,
+            &std::sync::Mutex::new(sync::SyncBackoff::default()),
+            &store,
+            dir.path(),
+        )
+        .await;
+        assert_eq!(stopped, Some(ShutdownStage::FinalUpload));
+        let restored = startup_session(dir.path());
+        assert_eq!(
+            restored.active_game.map(|g| g.session_id),
+            Some("slow-network".to_string()),
+            "the game was saved before the upload"
         );
     }
 
@@ -21025,6 +22341,11 @@ mod tests {
 
     #[tokio::test]
     async fn shutdown_uploads_the_finished_board_not_a_fresh_hold() {
+        assert_eq!(
+            stat_tracker::replace::shutdown_time_left(),
+            stat_tracker::replace::SHUTDOWN_DEADLINE,
+            "a shutdown with no signal keeps the full deadline"
+        );
         let dir = tempfile::tempdir().unwrap();
         let store = storage::LocalStore::open(dir.path()).await.unwrap();
         let mut row = test_match("busan-win", "victory");
@@ -21043,6 +22364,7 @@ mod tests {
         shutdown_from_signal(
             &mut st,
             &mut None,
+            &mut tokio::sync::mpsc::unbounded_channel().1,
             &mut None,
             None,
             &std::sync::Mutex::new(sync::SyncBackoff::default()),
@@ -21108,6 +22430,59 @@ mod tests {
         );
         let all = store.get_all_matches().await.unwrap();
         assert!(all.iter().all(|row| row.elims != 2));
+    }
+
+    /// The exit-75 self-restart calls `shutdown_from_signal` without a
+    /// signal. That path gets the full deadline, and the Tab board held on
+    /// the session is written before the process is replaced.
+    #[tokio::test]
+    async fn an_update_restart_gets_the_full_shutdown_deadline_and_keeps_the_tab_row() {
+        assert!(
+            !stat_tracker::replace::shutdown_requested(),
+            "a self-restart has no signal"
+        );
+        assert_eq!(
+            stat_tracker::replace::shutdown_time_left(),
+            stat_tracker::replace::SHUTDOWN_DEADLINE
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let mut row = test_match("tab-on-restart", "victory");
+        row.map_name = "Busan".into();
+        row.game_mode = "Control".into();
+        row.hero = "Ana".into();
+        row.elims = 9;
+        store.insert_match(row).await.unwrap();
+        let now = test_now();
+        let mut g = game(detect::MatchOutcome::Victory, Some(10), now);
+        g.session_id = "tab-on-restart".into();
+        g.map = Some("Busan".into());
+        g.session_created = false;
+        g.deferred = Some(fresh_counters(4));
+        g.deferred_hero = None;
+        g.deferred_imported = true;
+        let mut st = session(Some(g), now);
+        shutdown_from_signal(
+            &mut st,
+            &mut None,
+            &mut tokio::sync::mpsc::unbounded_channel().1,
+            &mut None,
+            None,
+            &std::sync::Mutex::new(sync::SyncBackoff::default()),
+            &store,
+            dir.path(),
+        )
+        .await;
+        let rows = store.get_session_snapshots("tab-on-restart").await.unwrap();
+        assert!(
+            rows.iter().any(|row| row.elims == 4 && row.hero == "Ana"),
+            "the update restart must persist the Tab row inside the deadline: {rows:?}"
+        );
+        assert_eq!(
+            stat_tracker::replace::shutdown_time_left(),
+            stat_tracker::replace::SHUTDOWN_DEADLINE,
+            "the restart does not start the signal clock"
+        );
     }
 
     #[tokio::test]
@@ -24432,10 +25807,10 @@ mod tests {
 
     /// O9 and O10 on one board: O9 says which row is the member's and how
     /// sure it is, O10 reads that row's cells. A suspect own row may be
-    /// another player's, so it is a low-trust read all the way: every field
-    /// off the row is flagged, the capture gate does not latch its counters,
-    /// and the boundary plan does not take it as a reset row. A held cell on
-    /// it is held like any other.
+    /// another player's, so none of its numbers are stored and it does not
+    /// raise the totals. Every field off the row is flagged. The boundary
+    /// plan does not take it as a reset row. A held cell on it is discarded
+    /// with the rest of the row.
     #[tokio::test]
     async fn new_reader_suspect_own_row_with_held_cells_is_low_trust_and_flagged() {
         use detect::own_row::combine;
@@ -24473,24 +25848,22 @@ mod tests {
         );
         assert!(
             seen[1].recorded && seen[1].refresh_baseline,
-            "a suspect row is stored, and on the baseline's row it anchors: {:?}",
+            "a suspect row keeps the last row and does not raise the baseline: {:?}",
             seen[1]
         );
         let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
-        // the sure cells are the board's, the held one keeps the last
-        // accepted 700, and every field read off the row is flagged
-        assert_eq!(o10_stats(&rows[1]), [13, 6, 3, 3900, 700, 450]);
+        // none of the suspect row's numbers are stored: the row stays the
+        // last sure board, and every field off the suspect row is flagged
+        assert_eq!(o10_stats(&rows[1]), [12, 5, 3, 3500, 700, 300]);
         assert_eq!(
             rows[1].suspect_fields,
             reader_apply::OWN_ROW_FIELDS.to_vec()
         );
         let gate = st.active_game.as_ref().unwrap().gate.unwrap();
-        assert!(gate.low_trust, "the counters did not latch");
-        // the moved columns are unconfirmed over the values they left; the
-        // held column was not read and stays confirmed
-        assert!(gate.unconfirmed[0] && gate.unconfirmed[3]);
-        assert_eq!(gate.confirmed_floor[0], 12);
-        assert!(!gate.unconfirmed[4] && !gate.has_confirmed_floor[4]);
+        assert!(!gate.low_trust, "a suspect row does not latch");
+        assert_eq!(gate.accepted.deaths, 3);
+        assert_eq!(gate.accepted.damage, 3500);
+        assert!(!gate.unconfirmed.iter().any(|&col| col));
 
         // a game whose first board is a suspect row with healing held: no
         // row. Nothing of the game is stored and nothing in it was read off
@@ -24757,12 +26130,9 @@ mod tests {
 
     /// R3-1, claude-r3's experiment e4 through `handle_capture`: a game whose
     /// every Tab has a suspect own row, its end missed, then the next game
-    /// on the same map and hero with sure rows 40 s apart. Before, the
-    /// suspect rows set no reset baseline, so nothing split: one session,
-    /// whose last row was `30 12 1 14000 5000 150` with deaths (9, 0, 1) and
-    /// mitigation (900, 0, 150) gone down unflagged. Now the suspect rows
-    /// anchor the baseline, the first sure board of game 2 is held off game
-    /// 1, and the second splits.
+    /// on the same map and hero with sure rows 40 s apart. The suspect rows
+    /// store no numbers. They still anchor the baseline, so the first sure
+    /// board of game 2 is held off game 1 and the second splits.
     #[tokio::test]
     async fn new_reader_all_suspect_game_then_a_sure_game_splits() {
         use detect::own_row::combine;
@@ -24793,24 +26163,18 @@ mod tests {
             tabs
         };
 
-        // e4: game 2 has sure rows
+        // e4: game 2 has sure rows. Game 1's rows are all suspect, so none
+        // of those numbers are stored. They still anchor the baseline.
         let dir = tempfile::tempdir().unwrap();
         let ctx = o8_ctx(dir.path(), true).await;
         let (st, seen) = o10_run_rows(&ctx, tabs(sure_row)).await;
         for tab in &seen[..3] {
-            assert!(tab.recorded && tab.refresh_baseline, "{tab:?}");
+            assert!(!tab.recorded && tab.refresh_baseline, "{tab:?}");
         }
         assert!(seen[3].deferred && !seen[3].recorded, "{:?}", seen[3]);
         assert!(seen[4].split && seen[4].recorded, "{:?}", seen[4]);
         let one = ctx.store.get_session_snapshots("o10").await.unwrap();
-        assert_eq!(
-            one.iter().map(o10_stats).collect::<Vec<_>>(),
-            game_one.to_vec(),
-            "game 1 keeps its own three rows"
-        );
-        for row in &one {
-            assert_eq!(row.suspect_fields, reader_apply::OWN_ROW_FIELDS.to_vec());
-        }
+        assert!(one.is_empty(), "a suspect game stores no stats");
         let new_id = st.active_game.as_ref().unwrap().session_id.clone();
         assert_ne!(new_id, "o10");
         let two = ctx.store.get_session_snapshots(&new_id).await.unwrap();
@@ -24819,8 +26183,6 @@ mod tests {
             game_two.to_vec(),
             "game 2 has its own session, with all four boards"
         );
-        assert_eq!(ctx.store.get_all_sessions().await.unwrap().len(), 2);
-        assert_eq!(o10_unflagged_drops(&one), Vec::<String>::new());
         assert_eq!(o10_unflagged_drops(&two), Vec::<String>::new());
 
         // e1: game 2 has suspect rows too. A suspect row never commits the
@@ -24830,23 +26192,18 @@ mod tests {
         let ctx = o8_ctx(dir.path(), true).await;
         let (st, seen) = o10_run_rows(&ctx, tabs(suspect)).await;
         assert!(seen[3].deferred && seen[4].deferred, "{seen:?}");
-        assert!(seen[5].split && seen[5].recorded, "{:?}", seen[5]);
-        assert_eq!(
-            o10_rows(&ctx, "o10").await,
-            game_one.to_vec(),
-            "game 1 keeps its own three rows"
+        assert!(seen[5].split && !seen[5].recorded, "{:?}", seen[5]);
+        assert!(
+            o10_rows(&ctx, "o10").await.is_empty(),
+            "game 1 stores no suspect stats"
         );
         let new_id = st.active_game.as_ref().unwrap().session_id.clone();
         let two = ctx.store.get_session_snapshots(&new_id).await.unwrap();
-        assert_eq!(
-            two.iter().map(o10_stats).collect::<Vec<_>>(),
-            game_two[2..].to_vec(),
-            "a suspect fresh board is not carried: game 2 starts at the board that split"
+        assert!(
+            two.is_empty(),
+            "a suspect fresh board is not stored: {two:?}"
         );
-        for row in &two {
-            assert_eq!(row.suspect_fields, reader_apply::OWN_ROW_FIELDS.to_vec());
-        }
-        assert_eq!(ctx.store.match_count().await.unwrap(), 5);
+        assert_eq!(ctx.store.match_count().await.unwrap(), 0);
     }
 
     /// One wrong suspect row in the middle of a sure game does not split it.
@@ -24898,11 +26255,9 @@ mod tests {
     }
 
     /// A stat never goes down unflagged in a stored row, whatever the trust
-    /// bits say (R3-1). A suspect row with higher numbers is stored flagged
-    /// and leaves its columns unconfirmed; the member's real row then reads
-    /// lower. The first lower read is held (flagged), the second matching
-    /// one replaces all six numbers with lower ones. That replacement is not
-    /// a hold, and it used to store the lower numbers with no flag.
+    /// bits say (R3-1). A suspect row with higher numbers is not stored and
+    /// does not raise the baseline. The member's next clean row continues
+    /// from the last sure board, so it is not a drop and it is not unsure.
     #[tokio::test]
     async fn new_reader_flags_every_stat_that_goes_down_in_a_stored_row() {
         use detect::own_row::combine;
@@ -24927,20 +26282,25 @@ mod tests {
             "{seen:?}"
         );
         let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
-        let six: Vec<String> = capture_gate::COL_FIELD.map(String::from).to_vec();
-        // the suspect row: stored as read, every own-row field flagged
-        assert_eq!(o10_stats(&rows[1]), [20, 9, 5, 8000, 2000, 900]);
+        // the suspect row: previous numbers, every own-row field flagged
+        assert_eq!(o10_stats(&rows[1]), [12, 5, 3, 3500, 700, 300]);
         assert_eq!(
             rows[1].suspect_fields,
             reader_apply::OWN_ROW_FIELDS.to_vec()
         );
-        // the first real read: held at the suspect row's numbers, flagged
-        assert_eq!(o10_stats(&rows[2]), [20, 9, 5, 8000, 2000, 900]);
-        assert_eq!(rows[2].suspect_fields, six);
-        // the second: all six go down, and all six are flagged
+        // the next clean reads continue from that board, unflagged
+        assert_eq!(o10_stats(&rows[2]), [13, 5, 3, 3700, 720, 300]);
+        assert!(
+            rows[2].suspect_fields.is_empty(),
+            "{:?}",
+            rows[2].suspect_fields
+        );
         assert_eq!(o10_stats(&rows[3]), [13, 5, 3, 3700, 720, 300]);
-        assert_eq!(rows[3].suspect_fields, six);
-        // from there the game is the member's again, unflagged
+        assert!(
+            rows[3].suspect_fields.is_empty(),
+            "{:?}",
+            rows[3].suspect_fields
+        );
         assert_eq!(o10_stats(&rows[4]), [14, 6, 3, 4000, 800, 350]);
         assert!(
             rows[4].suspect_fields.is_empty(),

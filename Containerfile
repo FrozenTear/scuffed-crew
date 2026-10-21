@@ -28,7 +28,7 @@ RUN cp -r target/dx/scuffed-app/release/web/public dist \
  && test -f dist/assets/apple-touch-icon.png
 
 # Build the unified server binary (REST + strategy WebSocket + chat)
-RUN cargo build --release -p scuffed-server
+RUN cargo build --release --locked -p scuffed-server
 
 # ── Stage 2: Runtime ───────────────────────────────────────
 FROM docker.io/library/debian:bookworm-slim
@@ -44,6 +44,13 @@ COPY --from=builder /build/target/release/scuffed-server ./scuffed-server
 COPY --from=builder /build/dist/ ./dist/
 COPY scripts/site-entrypoint.sh ./site-entrypoint.sh
 RUN chmod 0755 ./scuffed-server ./site-entrypoint.sh
+
+# Commit this image was built from. publish-image.yml passes it as a
+# build-arg and /api/health reports it (body git_sha, header
+# x-scuffed-git-sha). Declared this late so a new SHA never invalidates the
+# cached build layers above. A local build without the arg reports "unknown".
+ARG SCUFFED_GIT_SHA=unknown
+ENV SCUFFED_GIT_SHA=${SCUFFED_GIT_SHA}
 
 EXPOSE 3000
 

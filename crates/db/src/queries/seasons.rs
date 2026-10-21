@@ -54,11 +54,13 @@ impl Database {
     ) -> DbResult<Season> {
         with_timeout(async {
             if is_current {
-                // Clear other current flags (best-effort).
-                let _ = self
-                    .client
+                // Clear other current flags. A failed clear must stop the
+                // create: two current seasons would make `?season=current`
+                // ambiguous.
+                self.client
                     .query("UPDATE season SET is_current = false WHERE is_current = true")
-                    .await?;
+                    .await?
+                    .check()?;
             }
             let row = DbSeason {
                 id: None,
@@ -97,10 +99,10 @@ impl Database {
             let mut db = existing
                 .ok_or_else(|| crate::DbError::NotFound(format!("Season {id} not found")))?;
             if is_current && !db.is_current {
-                let _ = self
-                    .client
+                self.client
                     .query("UPDATE season SET is_current = false WHERE is_current = true")
-                    .await?;
+                    .await?
+                    .check()?;
             }
             db.name = name.to_string();
             db.starts_at = SurrealDatetime::from(starts_at);

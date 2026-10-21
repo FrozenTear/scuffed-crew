@@ -31,3 +31,6 @@ pub mod teams;
 pub mod tournaments;
 pub mod users;
 pub mod wiki;
+
+#[cfg(test)]
+mod write_errors_tests;

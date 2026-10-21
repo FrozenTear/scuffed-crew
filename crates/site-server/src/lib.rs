@@ -11,6 +11,7 @@ pub mod membership_policy;
 pub mod nostr_rate_limit;
 pub mod notifications;
 pub mod packs;
+mod public_cache;
 pub mod rate_limit;
 pub mod routes;
 pub mod seed;
@@ -218,22 +219,39 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                 .error_handler(rate_limit::governor_error_response),
         );
 
-    // Per-IP rate limit for public read endpoints (HS-DR P1): 40-burst, then
-    // 1 every 200ms (≈5/s sustained). Previously unthrottled; hero-filter
-    // aggregates made DoS amplification cheap.
+    // Per-IP rate limit for anonymous reads (HS-DR P1): 100-burst, then 1
+    // every 100ms (≈10/s sustained). Hero-filter aggregates made DoS
+    // amplification cheap while these were unthrottled.
     //
-    // NS2-6 widened this to every remaining unauthenticated route rather than
-    // adding a second budget. An attacker does not care *which* endpoint
-    // amplifies for them, so one shared per-IP bucket across all anonymous
-    // reads is the honest boundary; a per-group budget would just hand the same
-    // source several independent ones. 40-burst absorbs a page load that fans
-    // out across several of these, and 5/s sustained is far above any real
-    // calendar-client poll (ICS refresh is measured in minutes, not seconds).
+    // One shared per-IP bucket covers every site-server GET in `public_routes`: the
+    // `/api/public/*` aggregates, ICS feeds, NIP-05, the auth probes (NS2-6),
+    // and the anonymous reads of the main API plus `/sitemap.xml` (API-9 /
+    // SEC-5). NS2-6 claimed to cover every unauthenticated route but left
+    // the main API reads outside; API-9 moved them in. An attacker does not
+    // care *which* endpoint amplifies for them, so one bucket is the honest
+    // boundary; a per-group budget would hand the same source several
+    // independent ones.
+    //
+    // API-9 raised the budget from 40-burst / 5/s when the main API reads
+    // joined: signed-in members draw on it too, and several members behind
+    // one NAT (a LAN event) share one key. The events page alone fetches an
+    // RSVP summary per event. The bucket cannot be keyed per member because
+    // the key extractor runs before auth. The expensive reads behind it
+    // (sitemap, Nostr feed, relay probe) are cached, so a wider budget no
+    // longer buys an attacker much. 10/s sustained is still far above any
+    // real calendar-client poll (ICS refresh is measured in minutes).
+    //
+    // Still outside it: `/api/health` (liveness probes, no DB), `/robots.txt`
+    // (fixed string), the SPA shell and static files (served by the fallback),
+    // and routes with their own limiter (auth, uploads, packs, device link,
+    // stat reports). Authenticated-only routes are not here, and neither are
+    // the strategy GETs that `crates/server` adds (`/api/strategy/*`), which
+    // have no per-IP limiter yet.
     let public_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
-            .per_millisecond(200)
-            .burst_size(40)
+            .per_millisecond(100)
+            .burst_size(100)
             .finish()
             .expect("valid public governor config"),
     );
@@ -287,6 +305,81 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // before login, and the stricter budget would fight normal first loads.
         .route("/api/auth/setup-status", get(routes::auth::setup_status))
         .route("/api/auth/providers", get(routes::auth::auth_providers))
+        // ── Anonymous reads of the main API (API-9 / SEC-5) ──
+        // Each GET here answers without a session (no extractor, or
+        // `OptionalOrgMember`). Only the GET moved: the POST/PUT/DELETE on the
+        // same paths still register in the main router below and are not
+        // limited here. A signed-in member's GET spends the same per-IP
+        // bucket; the handlers and responses are unchanged.
+        .route("/api/games", get(routes::games::list_games))
+        .route("/api/games/{id}", get(routes::games::get_game))
+        .route("/api/teams", get(routes::teams::list_teams))
+        .route("/api/teams/{id}", get(routes::teams::get_team))
+        .route(
+            "/api/teams/{id}/roster",
+            get(routes::roster::get_team_roster),
+        )
+        .route(
+            "/api/teams/{id}/matches",
+            get(routes::matches::list_team_matches),
+        )
+        .route("/api/events", get(routes::events::list_events))
+        .route(
+            "/api/events/{id}/rsvps",
+            get(routes::rsvps::get_event_rsvps),
+        )
+        .route(
+            "/api/events/{id}/rsvp-summary",
+            get(routes::rsvps::get_rsvp_summary),
+        )
+        .route(
+            "/api/announcements",
+            get(routes::announcements::list_announcements),
+        )
+        .route("/api/articles", get(routes::articles::list_articles))
+        .route("/api/articles/{slug}", get(routes::articles::get_article))
+        .route(
+            "/api/tournaments",
+            get(routes::tournaments::list_tournaments),
+        )
+        .route(
+            "/api/tournaments/{id}",
+            get(routes::tournaments::get_tournament),
+        )
+        .route(
+            "/api/tournaments/{id}/bracket",
+            get(routes::tournaments::get_bracket),
+        )
+        .route(
+            "/api/tournaments/{id}/participants",
+            get(routes::tournaments::list_participants),
+        )
+        .route(
+            "/api/tournaments/{id}/matches",
+            get(routes::tournaments::list_matches),
+        )
+        .route(
+            "/api/tournaments/{id}/standings",
+            get(routes::tournaments::get_standings),
+        )
+        .route("/api/wiki", get(routes::wiki::list_wiki_pages))
+        .route("/api/wiki/{topic}", get(routes::wiki::get_wiki_page))
+        .route(
+            "/api/wiki/{topic}/revisions",
+            get(routes::wiki::list_wiki_revisions),
+        )
+        .route("/api/forum/tree", get(routes::forum::forum_tree))
+        .route("/api/forum/boards/{slug}", get(routes::forum::get_board))
+        .route("/api/forum/threads", get(routes::forum::list_threads))
+        .route("/api/forum/threads/{id}", get(routes::forum::get_thread))
+        .route("/api/settings", get(routes::settings::get_settings))
+        // Feed: relay WebSocket + member scan per miss; cached 15 s.
+        .route("/api/nostr/feed", get(routes::nostr::nostr_feed))
+        // The public shell reads `configured` on every page load. The relay
+        // probe inside is cached 30 s.
+        .route("/api/nostr/health", get(routes::nostr::nostr_health))
+        // About nine queries plus one per forum board; cached 10 minutes.
+        .route("/sitemap.xml", get(routes::seo::sitemap_xml))
         .layer(
             GovernorLayer::new(public_governor_config)
                 .error_handler(rate_limit::governor_error_response),
@@ -416,23 +509,11 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             get(routes::attendance::member_attendance_stats),
         )
         // Game routes
-        .route(
-            "/api/games",
-            get(routes::games::list_games).post(routes::games::create_game),
-        )
-        .route(
-            "/api/games/{id}",
-            get(routes::games::get_game).put(routes::games::update_game),
-        )
+        .route("/api/games", post(routes::games::create_game))
+        .route("/api/games/{id}", put(routes::games::update_game))
         // Team routes
-        .route(
-            "/api/teams",
-            get(routes::teams::list_teams).post(routes::teams::create_team),
-        )
-        .route(
-            "/api/teams/{id}",
-            get(routes::teams::get_team).put(routes::teams::update_team),
-        )
+        .route("/api/teams", post(routes::teams::create_team))
+        .route("/api/teams/{id}", put(routes::teams::update_team))
         .route(
             "/api/teams/{id}/channels",
             get(routes::teams::list_team_channels),
@@ -444,31 +525,20 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Roster routes
         .route(
             "/api/teams/{id}/roster",
-            get(routes::roster::get_team_roster).post(routes::roster::add_to_roster),
+            post(routes::roster::add_to_roster),
         )
         .route(
             "/api/teams/{id}/roster/{member_id}",
             put(routes::roster::update_roster_role).delete(routes::roster::remove_from_roster),
         )
         // Event routes
-        .route(
-            "/api/events",
-            get(routes::events::list_events).post(routes::events::create_event),
-        )
+        .route("/api/events", post(routes::events::create_event))
         .route(
             "/api/events/{id}",
             put(routes::events::update_event).delete(routes::events::delete_event),
         )
         // Event RSVPs
         .route("/api/events/{id}/rsvp", post(routes::rsvps::rsvp_event))
-        .route(
-            "/api/events/{id}/rsvps",
-            get(routes::rsvps::get_event_rsvps),
-        )
-        .route(
-            "/api/events/{id}/rsvp-summary",
-            get(routes::rsvps::get_rsvp_summary),
-        )
         // Event attendance
         .route(
             "/api/events/{id}/attendance",
@@ -498,10 +568,6 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             patch(routes::applications::update_application),
         )
         // Match routes
-        .route(
-            "/api/teams/{id}/matches",
-            get(routes::matches::list_team_matches),
-        )
         .route("/api/matches", post(routes::matches::record_match))
         .route(
             "/api/matches/{id}",
@@ -603,8 +669,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Announcement routes
         .route(
             "/api/announcements",
-            get(routes::announcements::list_announcements)
-                .post(routes::announcements::create_announcement),
+            post(routes::announcements::create_announcement),
         )
         .route(
             "/api/announcements/{id}",
@@ -626,19 +691,14 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             delete(routes::polls::unvote_poll),
         )
         // Article (blog) routes
-        .route(
-            "/api/articles",
-            get(routes::articles::list_articles).post(routes::articles::create_article),
-        )
+        .route("/api/articles", post(routes::articles::create_article))
         .route(
             "/api/articles/admin/all",
             get(routes::articles::list_all_articles),
         )
         .route(
             "/api/articles/{slug}",
-            get(routes::articles::get_article)
-                .put(routes::articles::update_article)
-                .delete(routes::articles::delete_article),
+            put(routes::articles::update_article).delete(routes::articles::delete_article),
         )
         .route(
             "/api/articles/{slug}/publish",
@@ -651,19 +711,15 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Tournament routes
         .route(
             "/api/tournaments",
-            get(routes::tournaments::list_tournaments).post(routes::tournaments::create_tournament),
+            post(routes::tournaments::create_tournament),
         )
         .route(
             "/api/tournaments/{id}",
-            get(routes::tournaments::get_tournament).put(routes::tournaments::update_tournament),
+            put(routes::tournaments::update_tournament),
         )
         .route(
             "/api/tournaments/{id}/status",
             patch(routes::tournaments::transition_status),
-        )
-        .route(
-            "/api/tournaments/{id}/bracket",
-            get(routes::tournaments::get_bracket),
         )
         .route(
             "/api/tournaments/{id}/generate-bracket",
@@ -671,7 +727,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         )
         .route(
             "/api/tournaments/{id}/participants",
-            get(routes::tournaments::list_participants).post(routes::tournaments::add_participant),
+            post(routes::tournaments::add_participant),
         )
         .route(
             "/api/tournaments/{id}/participants/{pid}",
@@ -679,16 +735,8 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
                 .delete(routes::tournaments::remove_participant),
         )
         .route(
-            "/api/tournaments/{id}/matches",
-            get(routes::tournaments::list_matches),
-        )
-        .route(
             "/api/tournaments/{id}/matches/{mid}/report",
             patch(routes::tournaments::report_match),
-        )
-        .route(
-            "/api/tournaments/{id}/standings",
-            get(routes::tournaments::get_standings),
         )
         .route(
             "/api/tournaments/{id}/next-round",
@@ -704,23 +752,12 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             patch(routes::scrims::update_scrim_status),
         )
         // Wiki routes
-        .route(
-            "/api/wiki",
-            get(routes::wiki::list_wiki_pages).post(routes::wiki::create_wiki_page),
-        )
+        .route("/api/wiki", post(routes::wiki::create_wiki_page))
         .route(
             "/api/wiki/{topic}",
-            get(routes::wiki::get_wiki_page)
-                .put(routes::wiki::update_wiki_page)
-                .delete(routes::wiki::delete_wiki_page),
+            put(routes::wiki::update_wiki_page).delete(routes::wiki::delete_wiki_page),
         )
-        .route(
-            "/api/wiki/{topic}/revisions",
-            get(routes::wiki::list_wiki_revisions),
-        )
-        // Forum routes
-        .route("/api/forum/tree", get(routes::forum::forum_tree))
-        .route("/api/forum/boards/{slug}", get(routes::forum::get_board))
+        // Forum routes (anonymous reads are in `public_routes`)
         .route(
             "/api/forum/categories",
             post(routes::forum::create_category),
@@ -734,11 +771,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             "/api/forum/boards/id/{id}",
             patch(routes::forum::update_board),
         )
-        .route(
-            "/api/forum/threads",
-            get(routes::forum::list_threads).post(routes::forum::create_thread),
-        )
-        .route("/api/forum/threads/{id}", get(routes::forum::get_thread))
+        .route("/api/forum/threads", post(routes::forum::create_thread))
         .route(
             "/api/forum/threads/{id}/replies",
             post(routes::forum::create_reply),
@@ -766,8 +799,6 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route("/api/nostr/community", post(routes::nostr::nostr_community))
         .route("/api/nostr/react", post(routes::nostr::nostr_react))
         .route("/api/nostr/post", post(routes::nostr::nostr_post))
-        .route("/api/nostr/feed", get(routes::nostr::nostr_feed))
-        .route("/api/nostr/health", get(routes::nostr::nostr_health))
         // Phase 5: Encrypted Direct Messages (NIP-44 + NIP-59)
         .route("/api/nostr/dm/send", post(routes::nostr::dm_send))
         .route("/api/nostr/dm/sync", post(routes::nostr::dm_sync))
@@ -782,10 +813,7 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         // Upload routes are registered above with a dedicated rate limiter
         // (see `upload_routes`).
         // Settings routes
-        .route(
-            "/api/settings",
-            get(routes::settings::get_settings).put(routes::settings::update_settings),
-        )
+        .route("/api/settings", put(routes::settings::update_settings))
         // Admin integrations
         .route(
             "/api/admin/integrations/discord/test",
@@ -803,8 +831,9 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         )
         // Crawler files are registered ahead of the SPA catch-all. A missing
         // route here would return `dist/index.html` as 200 text/html.
+        // `/sitemap.xml` is in `public_routes`. robots.txt stays outside
+        // the governor: it is a fixed string with no database read.
         .route("/robots.txt", get(routes::seo::robots_txt))
-        .route("/sitemap.xml", get(routes::seo::sitemap_xml))
         // Serve uploaded files. Raster images stay inline (avatars, article
         // images). Everything else — including SVG and HTML — is an attachment
         // plus a sandbox CSP. See `uploads::upload_response_headers`.

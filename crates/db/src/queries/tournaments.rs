@@ -961,11 +961,13 @@ impl Database {
             self.client
                 .query("DELETE tournament_match WHERE tournament_id = $tid")
                 .bind(("tid", tournament_id.to_string()))
-                .await?;
+                .await?
+                .check()?;
             self.client
                 .query("DELETE tournament_round WHERE tournament_id = $tid")
                 .bind(("tid", tournament_id.to_string()))
-                .await?;
+                .await?
+                .check()?;
             Ok(())
         })
         .await

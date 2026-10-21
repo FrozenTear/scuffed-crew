@@ -422,6 +422,8 @@ pub fn Toolbar(
                     r#type: "text",
                     class: "tb-name-input",
                     placeholder: "Strategy name...",
+                    // Server cap: MAX_STRATEGY_NAME_CHARS in crates/server.
+                    maxlength: "100",
                     value: "{strategy_name}",
                     oninput: move |e: Event<FormData>| {
                         on_name_change.call(e.value());
