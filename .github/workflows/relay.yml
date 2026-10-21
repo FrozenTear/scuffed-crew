@@ -28,7 +28,7 @@ on:
       - ".dockerignore"
       - ".github/workflows/relay.yml"
   pull_request:
-    branches: [main]
+    branches: [main, ci/skiptest-base]
     paths:
       - "relay/**"
       - "crates/relay-policy/**"
