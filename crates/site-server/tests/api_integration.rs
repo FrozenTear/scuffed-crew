@@ -7427,6 +7427,7 @@ async fn nostr_health_unconfigured_when_relay_url_none() {
             Request::builder()
                 .method(Method::GET)
                 .uri("/api/nostr/health")
+                .extension(fresh_peer())
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7450,6 +7451,7 @@ async fn nostr_health_blank_relay_url_not_configured() {
             Request::builder()
                 .method(Method::GET)
                 .uri("/api/nostr/health")
+                .extension(fresh_peer())
                 .body(Body::empty())
                 .unwrap(),
         )
