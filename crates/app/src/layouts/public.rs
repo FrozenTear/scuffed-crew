@@ -413,13 +413,14 @@ const NAV_CSS: &str = r#"
         position: fixed;
         inset: 0;
         z-index: 99;
-        background: color-mix(in srgb, var(--bg) 97%, transparent);
         flex-direction: column;
         align-items: stretch;
         justify-content: flex-start;
         gap: 0.15rem;
         padding: 4.5rem 1.5rem 2rem;
         overflow-y: auto;
+        /* Open phone menu. Solid page background so the page does not show through. */
+        background-color: var(--page-bg-color, var(--bg));
     }
     .nav-overlay.open { display: flex; }
     .nav-backdrop {
@@ -992,6 +993,24 @@ mod tests {
         assert!(
             !NAV_CSS.contains(".site-main > *"),
             "page roots keep their own widths"
+        );
+    }
+
+    #[test]
+    fn phone_menu_panel_background_is_opaque() {
+        let panel = css_rule(NAV_CSS, ".nav-overlay {");
+        assert!(
+            has_decl(&panel, "background-color: var(--page-bg-color, var(--bg))"),
+            "{panel}"
+        );
+        assert!(
+            !panel.contains("transparent") && !panel.contains("color-mix"),
+            "the menu panel must stay opaque: {panel}"
+        );
+        let open = css_rule(NAV_CSS, ".nav-overlay.open {");
+        assert!(
+            !open.contains("transparent") && !open.contains("color-mix"),
+            "the open menu must not paint a scrim: {open}"
         );
     }
 
