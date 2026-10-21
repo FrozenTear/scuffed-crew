@@ -303,3 +303,61 @@ manual_out="$(bash "$NOTES" --tag stat-tracker-manual-9 --changelog "$TMP/empty.
 printf '%s\n' "$manual_out" | grep -q 'Update from the terminal' \
   && fail "a manual draft tag got a terminal update"
 pass "stat-tracker-v* notes carry a pinned terminal update; manual tags do not"
+
+# Internal merge-gate markers in PR titles must not reach members. A leading
+# "HOLD-MERGE:" or "[HOLD-MERGE]" and a "(HOLD-MERGE)" anywhere are dropped;
+# the rest of the subject, and a HOLD-MERGE that is not a marker, stay.
+{
+  printf -- '- HOLD-MERGE: stat-tracker 0.5.0-rc.5 (service restart) (#415)\n'
+  printf -- '- [HOLD-MERGE] app: stats tracker notice (#366)\n'
+  printf -- '- stat-tracker: bundle Tesseract 5 in release builds (HOLD-MERGE) (#360)\n'
+  printf -- '- HOLD-MERGE:no space after the colon\n'
+  printf -- '- docs: explain the HOLD-MERGE: convention\n'
+  printf -- '- plain subject (#1)\n'
+} > "$TMP/hold-commits.txt"
+hold_out="$(bash "$NOTES" --tag stat-tracker-v7.7.7 --changelog "$TMP/commits-changelog.md" --commits-file "$TMP/hold-commits.txt")"
+hold_list="$(printf '%s\n' "$hold_out" | awk '/^## Commits$/ {p=1; next} /^## / && p {exit} p && NF')"
+want_hold="$(cat <<'WANT'
+- stat-tracker 0.5.0-rc.5 (service restart) (#415)
+- app: stats tracker notice (#366)
+- stat-tracker: bundle Tesseract 5 in release builds (#360)
+- no space after the colon
+- docs: explain the HOLD-MERGE: convention
+- plain subject (#1)
+WANT
+)"
+[[ "$hold_list" == "$want_hold" ]] \
+  || fail "HOLD-MERGE markers were not stripped from the commit list:
+$hold_list"
+pass "commit list drops HOLD-MERGE markers and keeps the subject"
+
+# The default path reads subjects from git log since the previous tag. Run
+# the script from a copy inside a scratch repo so that path is covered too.
+GITREPO="$TMP/repo"
+mkdir -p "$GITREPO/crates/stat-tracker/dist"
+cp "$NOTES" "$GITREPO/crates/stat-tracker/dist/release-notes.sh"
+cp "$TMP/commits-changelog.md" "$GITREPO/crates/stat-tracker/CHANGELOG.md"
+git_q() {
+  git -C "$GITREPO" -c user.name=test -c user.email=test@example.invalid \
+    -c commit.gpgsign=false -c tag.gpgsign=false "$@" >/dev/null
+}
+git_q init -q
+git_q add -A
+git_q commit -q -m 'stat-tracker: base'
+git_q tag stat-tracker-v7.7.6
+echo a > "$GITREPO/crates/stat-tracker/a.txt"
+git_q add -A
+git_q commit -q -m 'HOLD-MERGE: stat-tracker 7.7.7 (#2)'
+echo b > "$GITREPO/crates/stat-tracker/b.txt"
+git_q add -A
+git_q commit -q -m 'stat-tracker: fix a thing (HOLD-MERGE) (#3)'
+git_out="$(bash "$GITREPO/crates/stat-tracker/dist/release-notes.sh" --tag stat-tracker-v7.7.7)"
+printf '%s\n' "$git_out" | grep -qx '## Commits since v7.7.6' \
+  || fail "git log path did not print a commit list: $git_out"
+printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker 7.7.7 (#2)' \
+  || fail "git log path kept the HOLD-MERGE: prefix: $git_out"
+printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker: fix a thing (#3)' \
+  || fail "git log path kept the (HOLD-MERGE) marker: $git_out"
+printf '%s\n' "$git_out" | grep -q 'HOLD-MERGE' \
+  && fail "git log path still contains HOLD-MERGE: $git_out"
+pass "commits since the previous tag drop HOLD-MERGE markers"

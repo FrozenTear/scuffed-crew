@@ -2,17 +2,29 @@
 # VPS deploys should pull this image instead of compiling on the box.
 name: Publish image
 
+# Only commits that passed CI are published. This workflow used to run on
+# every push to main next to CI, so red commits went out as :main (nine on
+# 2026-10-19), and parallel publishes finished out of order and left :main
+# on an older build.
+#
+# Now it runs when the CI workflow completes for a push to main, and each run
+# publishes the NEWEST main commit whose CI push run succeeded (not just the
+# commit that triggered it). Runs share one concurrency group that never
+# cancels a running build. GitHub keeps at most one pending run per group
+# and drops older pending ones; that is safe because whichever run goes
+# last still picks the newest green commit. A run skips when :main already
+# carries that commit or a newer one, or when nothing the image is built
+# from changed since the commit :main was built from (workflow_run has no
+# path filter, so the path check is a step below).
+#
+# workflow_dispatch publishes the dispatched ref as is, without the CI gate
+# or the path check. On main it still skips when :main already has that
+# commit or a newer one, so re-running an old manual run cannot roll back.
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
     branches: [main]
-    paths:
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "Containerfile"
-      - "Dioxus.toml"
-      - "crates/**"
-      - "scripts/build.sh"
-      - ".github/workflows/publish-image.yml"
   workflow_dispatch:
 
 env:
@@ -20,15 +32,38 @@ env:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   publish:
     name: Build & push site-server
+    # Only a successful CI run for a push to main in this repository. The
+    # branches filter alone would also match a fork PR whose branch is named
+    # main.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    # Job level, so a run whose job is skipped (red CI) never takes the
+    # pending slot from a green one.
+    concurrency:
+      group: publish-image
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      # Look up the newest successful CI run on main.
+      actions: read
+      packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # History for the ancestry and path checks below.
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Image name (GHCR requires lowercase)
         run: |
@@ -36,33 +71,154 @@ jobs:
           echo "IMAGE_NAME=${{ env.REGISTRY }}/${owner}/scuffed-crew" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Docker metadata
+      - name: Pick the commit to publish
+        id: pick
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+          TRIGGER_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          IS_MAIN: ${{ github.event_name == 'workflow_run' || github.ref == 'refs/heads/main' }}
+        run: |
+          set -euo pipefail
+          # Paths the image is built from. Same intent as the old push path
+          # filter, plus the entrypoint script the Containerfile copies.
+          paths=(Cargo.toml Cargo.lock Containerfile Dioxus.toml crates
+                 scripts/build.sh scripts/site-entrypoint.sh
+                 .github/workflows/publish-image.yml)
+          out() { echo "$1=$2" >> "$GITHUB_OUTPUT"; }
+
+          target="${TRIGGER_SHA}"
+          if [ "${EVENT}" = "workflow_run" ]; then
+            newest="$(gh run list --repo "${GITHUB_REPOSITORY}" --workflow ci.yml \
+              --branch main --event push --status success --limit 1 \
+              --json headSha --jq '.[0].headSha' || true)"
+            if [ -n "${newest}" ] && git cat-file -e "${newest}^{commit}" 2>/dev/null \
+              && git merge-base --is-ancestor "${TRIGGER_SHA}" "${newest}"; then
+              target="${newest}"
+            fi
+          fi
+          echo "triggered by ${TRIGGER_SHA}, publishing candidate ${target}"
+          out sha "${target}"
+          out short "${target::7}"
+
+          live="$(docker buildx imagetools inspect "${IMAGE_NAME}:main" --format '{{json .Image}}' 2>/dev/null \
+            | jq -r 'first(.. | objects | select(has("Labels")) | .Labels["org.opencontainers.image.revision"] // empty) // empty' \
+            || true)"
+          echo ":main was built from ${live:-<unknown>}"
+          placed=false
+          if [ -n "${live}" ] && git cat-file -e "${live}^{commit}" 2>/dev/null; then
+            placed=true
+          fi
+
+          if [ "${EVENT}" = "workflow_dispatch" ]; then
+            out main "${IS_MAIN}"
+            # No CI or path check, but a manual run on main (for example a
+            # re-run of an old one) must not move :main back to an older
+            # commit. A run on another ref only pushes its sha- tag.
+            if [ "${IS_MAIN}" = "true" ] && [ "${placed}" = "true" ] \
+              && git merge-base --is-ancestor "${target}" "${live}"; then
+              echo "skip: manual run on main, :main already has ${target} or a newer commit"
+              out publish false
+            else
+              echo "manual run: publish without the CI and path checks"
+              out publish true
+            fi
+            exit 0
+          fi
+          out main true
+
+          if [ "${placed}" != "true" ]; then
+            echo "cannot place :main in history; publishing"
+            out publish true
+          elif git merge-base --is-ancestor "${target}" "${live}"; then
+            echo "skip: :main already has ${target} or a newer commit"
+            out publish false
+          elif ! git merge-base --is-ancestor "${live}" "${target}"; then
+            echo ":main is not an ancestor of ${target}; publishing"
+            out publish true
+          elif git diff --quiet "${live}" "${target}" -- "${paths[@]}"; then
+            echo "skip: nothing the image is built from changed since ${live}"
+            out publish false
+          else
+            out publish true
+          fi
+
+      - name: Check out the commit to publish
+        if: steps.pick.outputs.publish == 'true'
+        env:
+          TARGET: ${{ steps.pick.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git checkout --detach "${TARGET}"
+          git log -1 --format='%H %s'
+
+      - name: Tags and labels
+        if: steps.pick.outputs.publish == 'true'
         id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=main,enable=${{ github.ref == 'refs/heads/main' }}
-            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
-            type=sha,prefix=sha-,format=short
+        env:
+          SHA: ${{ steps.pick.outputs.sha }}
+          SHORT: ${{ steps.pick.outputs.short }}
+          IS_MAIN: ${{ steps.pick.outputs.main }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          REPO_DESCRIPTION: ${{ github.event.repository.description }}
+          REPO_LICENSE: ${{ github.event.repository.license.spdx_id }}
+        run: |
+          set -euo pipefail
+          version="sha-${SHORT}"
+          {
+            echo "tags<<EOF_TAGS"
+            if [ "${IS_MAIN}" = "true" ]; then
+              version=main
+              echo "${IMAGE_NAME}:main"
+              echo "${IMAGE_NAME}:latest"
+            fi
+            echo "${IMAGE_NAME}:sha-${SHORT}"
+            echo "EOF_TAGS"
+            echo "labels<<EOF_LABELS"
+            echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "org.opencontainers.image.description=${REPO_DESCRIPTION//$'\n'/ }"
+            echo "org.opencontainers.image.licenses=${REPO_LICENSE}"
+            echo "org.opencontainers.image.revision=${SHA}"
+            echo "org.opencontainers.image.source=${REPO_URL}"
+            echo "org.opencontainers.image.title=${REPO_NAME}"
+            echo "org.opencontainers.image.url=${REPO_URL}"
+            echo "org.opencontainers.image.version=${version}"
+            echo "EOF_LABELS"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
-        uses: docker/build-push-action@v6
+        if: steps.pick.outputs.publish == 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           context: .
           file: Containerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # /api/health returns this SHA (body git_sha, header x-scuffed-git-sha).
+          build-args: |
+            SCUFFED_GIT_SHA=${{ steps.pick.outputs.sha }}
           # GHA cache: subsequent publishes reuse cargo/dx layers when possible
           cache-from: type=gha,scope=site-server
           cache-to: type=gha,mode=max,scope=site-server
+
+      - name: Summary
+        if: always()
+        env:
+          PUBLISH: ${{ steps.pick.outputs.publish }}
+          SHA: ${{ steps.pick.outputs.sha }}
+        run: |
+          {
+            echo "### Publish image"
+            echo "candidate: \`${SHA:-?}\`, published: ${PUBLISH:-no}"
+          } >> "$GITHUB_STEP_SUMMARY"

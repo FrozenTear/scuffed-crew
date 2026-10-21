@@ -92,6 +92,16 @@ flatten_subject_dashes() {
   printf '%s' "$text"
 }
 
+# "HOLD-MERGE:", "[HOLD-MERGE]" and "(HOLD-MERGE)" are internal merge-gate
+# markers in PR titles. Members read the commit list, so drop a leading
+# "HOLD-MERGE:" or "[HOLD-MERGE]" from each "- subject" line (or bare
+# subject line), and a "(HOLD-MERGE)" anywhere in it. The rest is kept.
+strip_hold_merge() {
+  printf '%s' "$1" | sed -E \
+    -e 's/^(-[[:space:]]+)?(HOLD-MERGE:|\[HOLD-MERGE\])[[:space:]]*/\1/' \
+    -e 's/[[:space:]]*\(HOLD-MERGE\)//g'
+}
+
 # Rewrite bootstrap one-liners onto this tag. Manual draft tags
 # (stat-tracker-manual-*) are not git refs that host bootstrap.sh, so
 # those bodies are left as written in the changelog.
@@ -171,7 +181,7 @@ COMMITS_BLOCK=""
 if [[ "$SKIP_COMMITS" -eq 0 ]]; then
   if [[ -n "$COMMITS_FILE" ]]; then
     if [[ -s "$COMMITS_FILE" ]]; then
-      subjects="$(flatten_subject_dashes "$(cat "$COMMITS_FILE")")"
+      subjects="$(strip_hold_merge "$(flatten_subject_dashes "$(cat "$COMMITS_FILE")")")"
       COMMITS_BLOCK="$(printf '## Commits\n\n%s' "$subjects")"
     fi
   else
@@ -179,9 +189,9 @@ if [[ "$SKIP_COMMITS" -eq 0 ]]; then
     PREV="$(git -C "$REPO" tag --list 'stat-tracker-v*' --sort=-creatordate \
       | grep -vx "${TAG}" | head -1 || true)"
     if [[ -n "${PREV}" ]]; then
-      subjects="$(flatten_subject_dashes "$(git -C "$REPO" log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
+      subjects="$(strip_hold_merge "$(flatten_subject_dashes "$(git -C "$REPO" log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
         crates/stat-tracker crates/stat-tracker-ui \
-        .github/workflows/stat-tracker-release.yml)")"
+        .github/workflows/stat-tracker-release.yml)")")"
       COMMITS_BLOCK="$(printf '## Commits since %s\n\n%s' "${PREV#stat-tracker-}" "$subjects")"
     fi
   fi
