@@ -19,14 +19,48 @@ pub async fn is_available() -> bool {
 /// receives the file URI from the portal and removes the file, so no
 /// screenshot is left in the user's Pictures folder. A runtime that is
 /// shutting down can still cut the task short.
+///
+/// One request at a time ([`SHOT_FLIGHT`]). xdg-desktop-portal-kde names
+/// the file `Screenshot_yyyyMMdd_hhmmss.png` and overwrites it, so two
+/// requests in one second shared one file and one request's cleanup could
+/// delete the other's picture. A detached request keeps the lock until its
+/// file is gone. A Tab that finds a poll's request still running waits for
+/// it (up to [`SHOT_LOCK_WAIT`]) and then takes its own screenshot: that
+/// poll was asked for before the key press, so its picture cannot show the
+/// board. The wait mostly overlaps the 400 ms the Tab already sleeps for the
+/// overlay to draw.
 pub async fn capture(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let output = output_name.map(str::to_owned);
-    tokio::spawn(async move { capture_request(output.as_deref()).await })
+    SHOT_FLIGHT
+        .run(SHOT_LOCK_WAIT, async move {
+            match tokio::time::timeout(SHOT_REQUEST_CAP, capture_request(output.as_deref())).await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    tracing::warn!(
+                        cap_secs = SHOT_REQUEST_CAP.as_secs(),
+                        "portal screenshot request did not answer in time; a file it writes later may stay in Pictures"
+                    );
+                    Err("portal screenshot request timed out".into())
+                }
+            }
+        })
         .await
-        .map_err(|err| format!("portal screenshot task failed: {err}"))?
+        .map_err(|err| format!("portal screenshot: {err}"))?
 }
+
+/// One screenshot portal request in flight at a time.
+static SHOT_FLIGHT: super::flight::SingleFlight = super::flight::SingleFlight::new();
+
+/// How long a grab waits for the request before it. A KDE screenshot takes
+/// about 450 ms, so this is several of them.
+pub const SHOT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A request that has not answered by then gives the lock back, so one
+/// stuck portal call cannot stop every later grab.
+pub const SHOT_REQUEST_CAP: std::time::Duration = std::time::Duration::from_secs(20);
 
 async fn capture_request(
     output_name: Option<&str>,
@@ -46,8 +80,15 @@ async fn capture_request(
     // a decode error included, so no screenshot is left behind.
     let file = RemoveOnDrop(path);
 
-    let img = image::open(&file.0).map_err(|e| format!("failed to open portal screenshot: {e}"))?;
+    // Read, remove, then decode on the blocking pool: a 1440p PNG takes
+    // tens of milliseconds to decode, which must not hold a runtime worker.
+    let bytes =
+        std::fs::read(&file.0).map_err(|e| format!("failed to open portal screenshot: {e}"))?;
     drop(file);
+    let img = tokio::task::spawn_blocking(move || image::load_from_memory(&bytes))
+        .await
+        .map_err(|e| format!("portal screenshot decode task failed: {e}"))?
+        .map_err(|e| format!("failed to open portal screenshot: {e}"))?;
 
     tracing::debug!(
         width = img.width(),
@@ -55,7 +96,7 @@ async fn capture_request(
         "screen captured via XDG Desktop Portal"
     );
 
-    let outputs = output_rects().await;
+    let outputs = output_geometry_for(img.width(), img.height(), output_name).await;
     let Some((index, rect)) = crop_rect(&outputs, output_name, img.width(), img.height())? else {
         return Ok(img);
     };
@@ -93,17 +134,144 @@ pub fn native_size(cut: PixelRect, real_width: u32, real_height: u32) -> Option<
 }
 
 /// Output names for the monitor picker. Empty when the geometry can't be
-/// read, which leaves the picker on Auto and the full image in use.
+/// read, which leaves the picker on Auto and the full image in use. Always
+/// read fresh, and the cache takes the answer.
 pub async fn list_outputs() -> Vec<String> {
+    invalidate_output_geometry();
     output_rects().await.into_iter().map(|o| o.name).collect()
 }
 
-/// Output rectangles for a stream that may be one monitor or the whole desktop.
+/// Output rectangles, from the cache while it is fresh.
 pub(crate) async fn output_geometry() -> Vec<OutputRect> {
     output_rects().await
 }
 
+/// Output rectangles for an image of `img_width` x `img_height` that is one
+/// output or the whole desktop. When the cached layout cannot explain that
+/// image, or does not have `output_name`, the outputs changed: the cache is
+/// dropped and read again once.
+pub(crate) async fn output_geometry_for(
+    img_width: u32,
+    img_height: u32,
+    output_name: Option<&str>,
+) -> Vec<OutputRect> {
+    let outputs = output_rects().await;
+    if !geometry_looks_stale(&outputs, output_name, img_width, img_height) {
+        return outputs;
+    }
+    tracing::debug!(
+        img_width,
+        img_height,
+        "output geometry does not match the captured image; reading it again"
+    );
+    invalidate_output_geometry();
+    output_rects().await
+}
+
+/// How long read output geometry is reused. `output_rects` opens a Wayland
+/// connection, which used to happen on every grab. A change of outputs
+/// inside this window is caught by [`geometry_looks_stale`] or an error.
+pub const GEOMETRY_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// An empty answer (no Wayland, or the read failed) is kept this long only.
+pub const GEOMETRY_EMPTY_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+struct GeometryCache {
+    outputs: Vec<OutputRect>,
+    read_at: Option<std::time::Instant>,
+}
+
+static GEOMETRY: std::sync::Mutex<GeometryCache> = std::sync::Mutex::new(GeometryCache {
+    outputs: Vec::new(),
+    read_at: None,
+});
+
+/// True when outputs read at `read_at` may still be used at `now`.
+pub fn geometry_fresh(
+    read_at: Option<std::time::Instant>,
+    empty: bool,
+    now: std::time::Instant,
+) -> bool {
+    let ttl = if empty {
+        GEOMETRY_EMPTY_TTL
+    } else {
+        GEOMETRY_TTL
+    };
+    read_at.is_some_and(|at| now.saturating_duration_since(at) < ttl)
+}
+
+/// Drop the cached geometry. A grab that failed in a way an output change
+/// explains calls this, and so does the monitor picker.
+pub(crate) fn invalidate_output_geometry() {
+    GEOMETRY
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .read_at = None;
+}
+
+/// True when `outputs` cannot be the layout this image came from: a named
+/// output is missing, or the image is neither one output's real size nor
+/// the whole logical desktop at one scale (2% slack, as compositors round).
+/// No outputs is nothing to check.
+pub fn geometry_looks_stale(
+    outputs: &[OutputRect],
+    output_name: Option<&str>,
+    img_width: u32,
+    img_height: u32,
+) -> bool {
+    if outputs.is_empty() || img_width == 0 || img_height == 0 {
+        return false;
+    }
+    if let Some(name) = output_name
+        && !outputs.iter().any(|o| o.name == name)
+    {
+        return true;
+    }
+    let near = |a: u32, b: u32| a.abs_diff(b) <= 2;
+    let one_output = outputs.iter().any(|o| {
+        (near(img_width, o.real_width) && near(img_height, o.real_height))
+            || (near(img_width, o.width) && near(img_height, o.height))
+    });
+    if one_output {
+        return false;
+    }
+    let min_x = outputs.iter().map(|o| i64::from(o.x)).min().unwrap_or(0);
+    let min_y = outputs.iter().map(|o| i64::from(o.y)).min().unwrap_or(0);
+    let max_x = outputs
+        .iter()
+        .map(|o| i64::from(o.x) + i64::from(o.width))
+        .max()
+        .unwrap_or(0);
+    let max_y = outputs
+        .iter()
+        .map(|o| i64::from(o.y) + i64::from(o.height))
+        .max()
+        .unwrap_or(0);
+    let (w, h) = (max_x - min_x, max_y - min_y);
+    if w <= 0 || h <= 0 {
+        return false;
+    }
+    let sx = f64::from(img_width) / w as f64;
+    let sy = f64::from(img_height) / h as f64;
+    (sx - sy).abs() / sx.max(sy) > 0.02
+}
+
 async fn output_rects() -> Vec<OutputRect> {
+    let now = std::time::Instant::now();
+    {
+        let cache = GEOMETRY.lock().unwrap_or_else(|err| err.into_inner());
+        if geometry_fresh(cache.read_at, cache.outputs.is_empty(), now) {
+            return cache.outputs.clone();
+        }
+    }
+    let outputs = read_output_rects().await;
+    let mut cache = GEOMETRY.lock().unwrap_or_else(|err| err.into_inner());
+    cache.outputs = outputs.clone();
+    cache.read_at = Some(std::time::Instant::now());
+    outputs
+}
+
+async fn read_output_rects() -> Vec<OutputRect> {
     if !super::wayshot::is_available() {
         return Vec::new();
     }
@@ -589,6 +757,53 @@ mod tests {
         let o = &outputs[index];
         assert_eq!((cut.width, cut.height), (1920, 1200));
         assert_eq!(native_size(cut, o.real_width, o.real_height), None);
+    }
+
+    #[test]
+    fn cached_geometry_expires_and_an_empty_read_expires_sooner() {
+        let t0 = std::time::Instant::now();
+        assert!(!geometry_fresh(None, false, t0));
+        assert!(geometry_fresh(Some(t0), false, t0 + GEOMETRY_TTL / 2));
+        assert!(!geometry_fresh(Some(t0), false, t0 + GEOMETRY_TTL));
+        assert!(geometry_fresh(Some(t0), true, t0 + GEOMETRY_EMPTY_TTL / 2));
+        assert!(!geometry_fresh(Some(t0), true, t0 + GEOMETRY_EMPTY_TTL));
+        assert!(GEOMETRY_EMPTY_TTL < GEOMETRY_TTL);
+    }
+
+    #[test]
+    fn geometry_that_explains_the_image_is_kept() {
+        let two = [
+            rect("eDP-1", 0, 0, 1920, 1080),
+            rect("DP-1", 1920, 0, 2560, 1440),
+        ];
+        // One output's real size (a stream or KWin grab of that monitor).
+        assert!(!geometry_looks_stale(&two, Some("DP-1"), 2560, 1440));
+        assert!(!geometry_looks_stale(&two, None, 1920, 1080));
+        // The whole desktop at scale 1 and at scale 2.
+        assert!(!geometry_looks_stale(&two, None, 4480, 1440));
+        assert!(!geometry_looks_stale(&two, None, 8960, 2880));
+        // A scaled panel: the real size, not the logical one.
+        let scaled_panel = [scaled("eDP-1", 0, 0, (2560, 1600), 1.25)];
+        assert!(!geometry_looks_stale(&scaled_panel, None, 2560, 1600));
+        // Nothing to compare against.
+        assert!(!geometry_looks_stale(&[], Some("DP-1"), 1920, 1080));
+    }
+
+    #[test]
+    fn geometry_from_before_an_output_change_is_stale() {
+        let two = [
+            rect("eDP-1", 0, 0, 1920, 1080),
+            rect("DP-1", 1920, 0, 1920, 1080),
+        ];
+        // The named monitor is gone from the cached list.
+        assert!(geometry_looks_stale(&two, Some("HDMI-A-1"), 1920, 1080));
+        // A monitor was added below: the image is taller than the cached
+        // desktop at any one scale.
+        assert!(geometry_looks_stale(&two, None, 3840, 2160));
+        // The mode changed from 16:9 to 16:10. (A change that keeps the
+        // aspect reads as a scale change; the TTL bounds that case.)
+        let one = [rect("DP-1", 0, 0, 1920, 1080)];
+        assert!(geometry_looks_stale(&one, None, 2560, 1600));
     }
 
     #[test]

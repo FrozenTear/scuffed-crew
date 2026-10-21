@@ -272,6 +272,8 @@ pub enum Message {
     ToggleAutostart,
     AutostartReady(bool),
     BackendReady(CaptureBackend),
+    /// KDE direct's probe, `None` off KDE.
+    KdeDirectReady(Option<stat_tracker::capture::KwinProbe>),
     OutputsReady(Vec<String>),
     CaptureNow,
     CaptureReady(Result<PreviewShot, String>),
@@ -459,6 +461,10 @@ pub struct TrackerApp {
     pub daemon_busy: bool,
     pub outputs: Vec<String>,
     pub backend: Option<CaptureBackend>,
+    /// `XDG_CURRENT_DESKTOP`, read once.
+    pub desktop: String,
+    /// KDE direct on this desktop: `None` off KDE or until it is known.
+    pub kde_direct: Option<stat_tracker::capture::KwinProbe>,
     pub capturing: bool,
     pub preview: Option<(Handle, String)>,
     pub preview_error: Option<String>,
@@ -676,6 +682,8 @@ impl TrackerApp {
             daemon_busy: false,
             outputs: Vec::new(),
             backend: None,
+            desktop: std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
+            kde_direct: None,
             capturing: false,
             preview: None,
             preview_error: None,
@@ -759,6 +767,10 @@ impl TrackerApp {
             tasks.push(Task::perform(
                 stat_tracker::capture::detect_backend(),
                 Message::BackendReady,
+            ));
+            tasks.push(Task::perform(
+                stat_tracker::capture::kwin_direct_status(app.data_dir.clone()),
+                Message::KdeDirectReady,
             ));
             tasks.push(Task::perform(
                 update::check_for_update(),
@@ -1322,6 +1334,10 @@ impl TrackerApp {
             Message::BackendReady(backend) => {
                 self.backend = Some(backend);
                 Task::perform(capture::list_outputs(backend), Message::OutputsReady)
+            }
+            Message::KdeDirectReady(probe) => {
+                self.kde_direct = probe;
+                Task::none()
             }
             Message::OutputsReady(outputs) => {
                 self.outputs = outputs;
@@ -2526,6 +2542,8 @@ impl TrackerApp {
                 self.ocr_switch.health_notice = health;
                 self.health_status = self.health_now();
             }
+            self.ocr_switch.capture_notice =
+                settings::daemon_capture_notice(status.as_ref(), self.daemon.pid);
             let share = settings::daemon_share_notice(status.as_ref(), self.daemon.pid);
             if share != self.ocr_switch.share_notice {
                 self.ocr_switch.share_notice = share;

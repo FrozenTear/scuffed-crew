@@ -2036,7 +2036,7 @@ async fn fit_stream(
     img: DynamicImage,
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
-    let outputs = portal::output_geometry().await;
+    let outputs = portal::output_geometry_for(img.width(), img.height(), output_name).await;
     fit_stream_image(img, &outputs, output_name)
 }
 
@@ -2099,6 +2099,9 @@ async fn save_compare(
         return;
     }
     crate::fs_mode::tighten_private_file(&stream_path);
+    // KDE direct first: it is tens of milliseconds, so it is nearer the
+    // stream frame's moment than the portal screenshot after it.
+    super::kwin::save_compare_half(&dir, n, output_name).await;
     match portal::capture(output_name).await {
         Ok(shot) => {
             if shot.save(&shot_path).is_ok() {

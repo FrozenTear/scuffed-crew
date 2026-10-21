@@ -1,9 +1,12 @@
+mod flight;
 mod framebuf;
+pub mod kwin;
 mod pod;
 pub mod portal;
 mod portal_backend;
 mod pw;
 mod route;
+pub use route::{KWIN_DIRECT_DEFAULT_ON_KDE, KwinProbe, is_gnome, is_kde};
 mod screencast;
 pub mod wayshot;
 /// Native X11 capture (pure X11 sessions). Wired into selection by Lane C.
@@ -206,9 +209,45 @@ static STREAM_ROUTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 static STREAM_FORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// This process is capturing through the long-lived screen stream.
-/// Wayshot, X11, and the screenshot portal are not.
+/// Wayshot, X11, KDE direct and the screenshot portal are not.
 pub fn stream_route_active() -> bool {
     STREAM_ROUTE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+static SHOT_ROUTE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// A route that takes one fresh screenshot per grab, as [`detect_backend`]
+/// chose it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShotRoute {
+    /// The stream, wayshot or X11.
+    None,
+    /// The screenshot portal ("Older screenshot"): on KDE about 450 ms of
+    /// compositor and portal work per grab, plus a PNG.
+    Portal,
+    /// KDE direct: KWin renders the output into a pipe.
+    Kwin,
+}
+
+/// Which per-grab screenshot route this process uses, if any.
+pub fn shot_route() -> ShotRoute {
+    match SHOT_ROUTE.load(std::sync::atomic::Ordering::Acquire) {
+        1 => ShotRoute::Portal,
+        2 => ShotRoute::Kwin,
+        _ => ShotRoute::None,
+    }
+}
+
+static ROUTE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+/// The warning from the last [`detect_backend`] the app should show: KDE
+/// direct was asked for and could not be used. `None` when there is none.
+pub fn route_notice() -> Option<String> {
+    let notice = ROUTE_NOTICE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone();
+    (!notice.is_empty()).then_some(notice)
 }
 
 /// The stream was asked for by the environment or by Settings, not chosen
@@ -308,6 +347,8 @@ pub enum CaptureBackend {
     Wayshot,
     X11,
     Portal,
+    /// KDE direct: KWin's ScreenShot2 interface, no portal and no file.
+    Kwin,
     None,
 }
 
@@ -329,7 +370,9 @@ fn force_target(raw: &str) -> ForceTarget {
         // `portal` and `screencast` are the stream. `portal-screenshot` is
         // the older portal. Both are the portal backend; `route` picks which.
         route::ForceWord::Stream | route::ForceWord::Screenshot => ForceTarget::Portal,
-        route::ForceWord::Unknown => ForceTarget::Unknown,
+        // KDE direct is decided in `route::resolve` from its probe and
+        // never reaches `select_backend`.
+        route::ForceWord::Kwin | route::ForceWord::Unknown => ForceTarget::Unknown,
     }
 }
 
@@ -421,6 +464,7 @@ pub async fn detect_backend() -> CaptureBackend {
     let settings = match prefs.route {
         crate::config::CaptureRoute::Screencast => Some(route::ForceWord::Stream),
         crate::config::CaptureRoute::Screenshot => Some(route::ForceWord::Screenshot),
+        crate::config::CaptureRoute::Kwin => Some(route::ForceWord::Kwin),
         crate::config::CaptureRoute::Auto => None,
     };
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
@@ -429,31 +473,72 @@ pub async fn detect_backend() -> CaptureBackend {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     let chosen = route::effective(env.as_deref(), settings);
 
-    let (wayshot_ok, x11_ok, portal_ok) = match chosen {
-        route::Effective::Forced(route::ForceWord::Wayshot) => {
-            (wayshot::probe().await.is_ok(), false, false)
-        }
-        route::Effective::Forced(route::ForceWord::X11) => {
-            (false, x11::probe().await.is_ok(), false)
-        }
-        route::Effective::Forced(route::ForceWord::Stream | route::ForceWord::Screenshot) => {
-            (false, false, portal::is_available().await)
-        }
-        route::Effective::Forced(route::ForceWord::Unknown) => (false, false, false),
+    // KDE direct is probed when asked for, or on automatic on KDE once
+    // `KWIN_DIRECT_DEFAULT_ON_KDE` is flipped. No screen stream is open
+    // yet at this point, so the probe's 1x1 render cannot meet it.
+    let wants_kwin = match chosen {
+        route::Effective::Forced(route::ForceWord::Kwin) => true,
         route::Effective::Auto => {
-            let wayshot_ok = wayshot::probe().await.is_ok();
-            let mut portal_checked = false;
-            let mut portal_ok = false;
-            if !wayshot_ok && wayland {
-                portal_ok = portal::is_available().await;
-                portal_checked = true;
-            }
-            let x11_ok = !wayshot_ok && !portal_ok && x11::probe().await.is_ok();
-            if !wayshot_ok && !x11_ok && !portal_checked {
-                portal_ok = portal::is_available().await;
-            }
-            (wayshot_ok, x11_ok, portal_ok)
+            route::KWIN_DIRECT_DEFAULT_ON_KDE && wayland && route::is_kde(&desktop)
         }
+        route::Effective::Forced(_) => false,
+    };
+    let kwin_probe = if wants_kwin {
+        // The app runs this too, perhaps beside a tracker whose stream is
+        // open (a different STAT_TRACKER_CAPTURE): no render there before
+        // Plasma 6.8.1.
+        kwin::probe_beside_share(daemon_share_is_open(&prefs.data_dir)).await
+    } else {
+        route::KwinProbe::NotProbed
+    };
+    if chosen == route::Effective::Auto
+        && let route::KwinProbe::Unavailable(reason) = &kwin_probe
+    {
+        tracing::info!("automatic keeps the screen stream: KDE direct is not available ({reason})");
+    }
+    // A KDE direct that is there needs no other probe. One that is not
+    // falls back to what automatic would choose, so probe for that.
+    let probe_as = match chosen {
+        route::Effective::Forced(route::ForceWord::Kwin)
+            if kwin_probe == route::KwinProbe::Available =>
+        {
+            None
+        }
+        route::Effective::Forced(route::ForceWord::Kwin) => Some(route::Effective::Auto),
+        other => Some(other),
+    };
+
+    let (wayshot_ok, x11_ok, portal_ok) = match probe_as {
+        None => (false, false, false),
+        Some(chosen) => match chosen {
+            route::Effective::Forced(route::ForceWord::Wayshot) => {
+                (wayshot::probe().await.is_ok(), false, false)
+            }
+            route::Effective::Forced(route::ForceWord::X11) => {
+                (false, x11::probe().await.is_ok(), false)
+            }
+            route::Effective::Forced(route::ForceWord::Stream | route::ForceWord::Screenshot) => {
+                (false, false, portal::is_available().await)
+            }
+            // KDE direct never gets here: `probe_as` maps it to none or auto.
+            route::Effective::Forced(route::ForceWord::Unknown | route::ForceWord::Kwin) => {
+                (false, false, false)
+            }
+            route::Effective::Auto => {
+                let wayshot_ok = wayshot::probe().await.is_ok();
+                let mut portal_checked = false;
+                let mut portal_ok = false;
+                if !wayshot_ok && wayland {
+                    portal_ok = portal::is_available().await;
+                    portal_checked = true;
+                }
+                let x11_ok = !wayshot_ok && !portal_ok && x11::probe().await.is_ok();
+                if !wayshot_ok && !x11_ok && !portal_checked {
+                    portal_ok = portal::is_available().await;
+                }
+                (wayshot_ok, x11_ok, portal_ok)
+            }
+        },
     };
 
     let decision = route::resolve(
@@ -464,6 +549,8 @@ pub async fn detect_backend() -> CaptureBackend {
         x11_ok,
         portal_ok,
         &desktop,
+        &kwin_probe,
+        route::KWIN_DIRECT_DEFAULT_ON_KDE,
     );
     PORTAL_PATH.store(
         match decision.portal {
@@ -472,18 +559,27 @@ pub async fn detect_backend() -> CaptureBackend {
         },
         std::sync::atomic::Ordering::Release,
     );
-    let on_stream =
-        decision.backend == CaptureBackend::Portal && decision.portal == route::PortalPath::Stream;
-    STREAM_ROUTE.store(on_stream, std::sync::atomic::Ordering::Release);
-    STREAM_FORCED.store(
-        on_stream && decision.forced,
+    let flags = route_flags(decision.backend, decision.portal, decision.forced);
+    STREAM_ROUTE.store(flags.on_stream, std::sync::atomic::Ordering::Release);
+    STREAM_FORCED.store(flags.stream_forced, std::sync::atomic::Ordering::Release);
+    SHOT_ROUTE.store(
+        match flags.shot {
+            ShotRoute::None => 0,
+            ShotRoute::Portal => 1,
+            ShotRoute::Kwin => 2,
+        },
         std::sync::atomic::Ordering::Release,
     );
+    *ROUTE_NOTICE.lock().unwrap_or_else(|err| err.into_inner()) =
+        decision.fallback.clone().unwrap_or_default();
     tracing::info!("{}", decision.info);
     if let Some(line) = &decision.forced_line {
         tracing::info!("{line}");
     }
     if let Some(line) = &decision.mismatch {
+        tracing::warn!("{line}");
+    }
+    if let Some(line) = &decision.fallback {
         tracing::warn!("{line}");
     }
     if env_set
@@ -511,6 +607,29 @@ pub async fn detect_backend() -> CaptureBackend {
         portal_backend::log_configured(&desktop);
     }
     decision.backend
+}
+
+/// The process-wide route flags for one decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RouteFlags {
+    /// The screen stream is this process's route.
+    on_stream: bool,
+    /// ... and it was asked for, not chosen because of the desktop.
+    stream_forced: bool,
+    shot: ShotRoute,
+}
+
+fn route_flags(backend: CaptureBackend, portal: route::PortalPath, forced: bool) -> RouteFlags {
+    let on_stream = backend == CaptureBackend::Portal && portal == route::PortalPath::Stream;
+    RouteFlags {
+        on_stream,
+        stream_forced: on_stream && forced,
+        shot: match (backend, portal) {
+            (CaptureBackend::Portal, route::PortalPath::Screenshot) => ShotRoute::Portal,
+            (CaptureBackend::Kwin, _) => ShotRoute::Kwin,
+            _ => ShotRoute::None,
+        },
+    }
 }
 
 /// Built-in panels (laptop screens). On Auto these lose to an external
@@ -552,6 +671,7 @@ pub fn perf_backend_label(backend: &CaptureBackend) -> Option<&'static str> {
         CaptureBackend::Wayshot => Some("wayshot"),
         CaptureBackend::X11 => Some("x11"),
         CaptureBackend::Portal => Some("portal"),
+        CaptureBackend::Kwin => Some("kwin"),
         CaptureBackend::None => None,
     }
 }
@@ -568,29 +688,52 @@ pub async fn capture_screen_output(
 /// One frame for the app's Capture now and the setup guide. A portal
 /// backend uses the screenshot portal and does not open the long-lived
 /// stream or write the restore token. On KDE it reads the daemon status
-/// file and skips the screenshot while that share is open.
+/// file and skips the screenshot while that share is open. KDE direct
+/// goes through KWin's same screenshot code, so it skips there too.
 pub async fn capture_screen_oneshot(
     backend: &CaptureBackend,
     output_name: Option<&str>,
     data_dir: &std::path::Path,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     match backend {
-        CaptureBackend::Portal => {
+        CaptureBackend::Portal | CaptureBackend::Kwin => {
             let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-            let live_pid = live_daemon_pid(data_dir);
-            let share_open = crate::ocr_switch::read_status(data_dir)
-                .is_some_and(|status| live_share_open(status.share_open, status.pid, live_pid));
-            if screencast::capture_now_blocked_by_daemon_share(&desktop, share_open) {
+            if screencast::capture_now_blocked_by_daemon_share(
+                &desktop,
+                daemon_share_is_open(data_dir),
+            ) {
                 tracing::warn!(
                     "Capture now skipped: the tracker is sharing the screen, and a screenshot beside it can crash KWin"
                 );
                 let token_saved = screencast::restore_token_saved(data_dir);
                 return Err(screencast::capture_now_blocked_message(token_saved).into());
             }
-            portal::capture(output_name).await
+            if *backend == CaptureBackend::Kwin {
+                kwin::capture(output_name).await
+            } else {
+                portal::capture(output_name).await
+            }
         }
         _ => capture_screen_output(backend, output_name).await,
     }
+}
+
+/// The running tracker's screen share is open, from its status file.
+pub fn daemon_share_is_open(data_dir: &std::path::Path) -> bool {
+    let live_pid = live_daemon_pid(data_dir);
+    crate::ocr_switch::read_status(data_dir)
+        .is_some_and(|status| live_share_open(status.share_open, status.pid, live_pid))
+}
+
+/// KDE direct for the app's Settings: `None` off KDE, else the probe. It
+/// does not render beside the tracker's open share on a Plasma without the
+/// full KWin crash fix ([`kwin::probe_beside_share`]).
+pub async fn kwin_direct_status(data_dir: std::path::PathBuf) -> Option<KwinProbe> {
+    let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+    if !route::is_kde(&desktop) {
+        return None;
+    }
+    Some(kwin::probe_beside_share(daemon_share_is_open(&data_dir)).await)
 }
 
 /// Same image as [`capture_screen_output`]. `kind` only changes whether a
@@ -619,6 +762,9 @@ pub async fn capture_screen_output_for(
                 screencast::capture(output_name, kind, &prefs.data_dir, prefs.debug_frames).await
             }
         },
+        // Never the stream: this route and the tracker's own screen share
+        // are not run together (KDE bug 524840).
+        CaptureBackend::Kwin => kwin::capture(output_name).await.map(as_new_capture),
         CaptureBackend::None => return Err("no capture backend available".into()),
     };
     if result.is_ok() {
@@ -644,7 +790,8 @@ pub async fn list_outputs(
         CaptureBackend::X11 => x11::list_outputs().await,
         // The portal shoots the whole desktop and is cropped to one output
         // afterwards, so the picker lists the Wayland outputs it can crop to.
-        CaptureBackend::Portal => Ok(portal::list_outputs().await),
+        // KWin names its outputs as Wayland does, for KDE direct.
+        CaptureBackend::Portal | CaptureBackend::Kwin => Ok(portal::list_outputs().await),
         CaptureBackend::None => Ok(Vec::new()),
     }
 }
@@ -663,6 +810,7 @@ mod tests {
             Some("wayshot")
         );
         assert_eq!(perf_backend_label(&CaptureBackend::Portal), Some("portal"));
+        assert_eq!(perf_backend_label(&CaptureBackend::Kwin), Some("kwin"));
         assert_eq!(perf_backend_label(&CaptureBackend::None), None);
         let key = std::time::Instant::now();
         let later = key + std::time::Duration::from_millis(800);
@@ -846,6 +994,42 @@ mod tests {
     // env mutation races parallel test threads; we feed `select_backend` explicit
     // normalized inputs, which is exactly what `detect_backend` routes through.
 
+    /// KDE direct is never the stream: the screen share is not opened, not
+    /// closed on game exit, and no stall fallback runs beside it (KDE bug
+    /// 524840). The `PortalPath` a KDE direct decision carries is ignored.
+    #[test]
+    fn kde_direct_never_counts_as_the_stream() {
+        for portal in [route::PortalPath::Stream, route::PortalPath::Screenshot] {
+            for forced in [false, true] {
+                let flags = route_flags(CaptureBackend::Kwin, portal, forced);
+                assert!(!flags.on_stream);
+                assert!(!flags.stream_forced);
+                assert_eq!(flags.shot, ShotRoute::Kwin);
+            }
+        }
+        let stream = route_flags(CaptureBackend::Portal, route::PortalPath::Stream, true);
+        assert_eq!(
+            stream,
+            RouteFlags {
+                on_stream: true,
+                stream_forced: true,
+                shot: ShotRoute::None
+            }
+        );
+        let shot = route_flags(CaptureBackend::Portal, route::PortalPath::Screenshot, true);
+        assert!(!shot.on_stream);
+        assert_eq!(shot.shot, ShotRoute::Portal);
+        assert_eq!(
+            route_flags(CaptureBackend::Wayshot, route::PortalPath::Stream, true).shot,
+            ShotRoute::None
+        );
+        // Reports keep a word the site's validator accepts.
+        assert_eq!(
+            crate::report::bundle::capture_backend_label(CaptureBackend::Kwin),
+            "portal"
+        );
+    }
+
     #[test]
     fn auto_priority_wayshot_first() {
         // Wayshot wins whenever usable, regardless of the others.
@@ -967,6 +1151,8 @@ mod tests {
         assert_eq!(force_target("portal"), ForceTarget::Portal);
         assert_eq!(force_target("screencast"), ForceTarget::Portal);
         assert_eq!(force_target("portal-screenshot"), ForceTarget::Portal);
+        // KDE direct is never a `select_backend` force.
+        assert_eq!(force_target("kwin"), ForceTarget::Unknown);
         // Anything else is Unknown (fail-closed at the decision layer).
         assert_eq!(force_target("garbage"), ForceTarget::Unknown);
         assert_eq!(force_target(""), ForceTarget::Unknown);
