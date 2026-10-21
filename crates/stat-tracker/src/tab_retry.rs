@@ -14,6 +14,11 @@
 //! running capture's retries and runs as soon as that capture reports
 //! ([`tab_press_action`], [`next_press_after_report`]). The 3 s debounce
 //! applies only after a board was accepted.
+//!
+//! Retries run only while Tab is held: a frame taken after the key was
+//! released shows the game, not the board. A tap released before any frame
+//! passed the check logs a hint to hold Tab for about a second
+//! ([`short_tap_hint`]).
 
 use std::future::Future;
 use std::sync::Arc;
@@ -27,6 +32,23 @@ pub const TAB_RETRY_WAITS: [Duration; 2] = [Duration::from_millis(300), Duration
 /// After an accepted board, Tab presses this soon after its press are
 /// ignored. A rejected capture sets no debounce.
 pub const TAB_DEBOUNCE_AFTER_ACCEPT: Duration = Duration::from_secs(3);
+
+/// A capture with no accepted board whose Tab was released sooner than this
+/// after the press logs the hold-Tab hint.
+pub const TAB_HOLD_HINT_BELOW: Duration = Duration::from_secs(1);
+
+/// The hint for a tap that ended before the board could be captured.
+pub const TAB_HOLD_HINT: &str =
+    "Tab was released before the scoreboard could be captured: hold Tab for about a second";
+
+/// Why a capture's retries stopped early.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetryStop {
+    /// A newer Tab press takes over.
+    NewPress,
+    /// The key was released: a later frame shows the game, not the board.
+    Released,
+}
 
 /// Where one Tab capture is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,6 +82,7 @@ pub struct TabFlight {
     pub press: Instant,
     phase: AtomicU8,
     cancel: AtomicBool,
+    released_at: std::sync::Mutex<Option<Instant>>,
     wake: tokio::sync::Notify,
 }
 
@@ -69,6 +92,7 @@ impl TabFlight {
             press,
             phase: AtomicU8::new(TabFlightPhase::Grabbing as u8),
             cancel: AtomicBool::new(false),
+            released_at: std::sync::Mutex::new(None),
             wake: tokio::sync::Notify::new(),
         })
     }
@@ -82,8 +106,12 @@ impl TabFlight {
     }
 
     /// Record how the capture ended: `accepted` when a frame passed the
-    /// scoreboard check.
+    /// scoreboard check. A short tap with no accepted frame logs the
+    /// hold-Tab hint.
     pub fn finish(&self, accepted: bool) {
+        if short_tap_hint(accepted, self.press, self.released_at()) {
+            tracing::warn!("{TAB_HOLD_HINT}");
+        }
         self.set_phase(if accepted {
             TabFlightPhase::Accepted
         } else {
@@ -103,11 +131,55 @@ impl TabFlight {
         self.cancel.load(Ordering::Acquire)
     }
 
-    async fn cancelled(&self) {
-        while !self.retries_cancelled() {
+    /// The Tab key went up at `at`. A release from before this press (an
+    /// earlier tap) is ignored. No retry starts after it.
+    pub fn note_release(&self, at: Instant) {
+        if at < self.press {
+            return;
+        }
+        let mut released = self
+            .released_at
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if released.is_none() {
+            *released = Some(at);
+        }
+        drop(released);
+        self.wake.notify_one();
+    }
+
+    /// When the key was released, if it was.
+    pub fn released_at(&self) -> Option<Instant> {
+        *self
+            .released_at
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    /// Whether retries must stop, and why. A newer press wins over a release.
+    pub fn retry_stop(&self) -> Option<RetryStop> {
+        if self.retries_cancelled() {
+            Some(RetryStop::NewPress)
+        } else if self.released_at().is_some() {
+            Some(RetryStop::Released)
+        } else {
+            None
+        }
+    }
+
+    async fn stopped(&self) {
+        while self.retry_stop().is_none() {
             self.wake.notified().await;
         }
     }
+}
+
+/// Whether a finished capture should log [`TAB_HOLD_HINT`]: no frame passed
+/// the scoreboard check, and the key was released under
+/// [`TAB_HOLD_HINT_BELOW`] after the press.
+pub fn short_tap_hint(accepted: bool, press: Instant, released_at: Option<Instant>) -> bool {
+    !accepted
+        && released_at.is_some_and(|at| at.saturating_duration_since(press) < TAB_HOLD_HINT_BELOW)
 }
 
 tokio::task_local! {
@@ -185,8 +257,10 @@ pub fn next_press_after_report(
 /// screen grab) ends the loop at once.
 ///
 /// `flight` moves to [`TabFlightPhase::Retrying`] before the first retry.
-/// Once [`TabFlight::cancel_retries`] is called, no further retry starts
-/// and a wait that is running ends, and the best result so far is returned.
+/// Once [`TabFlight::cancel_retries`] or [`TabFlight::note_release`] is
+/// called, no further retry starts and a wait that is running ends, and
+/// the best result so far is returned. Retries therefore run only while
+/// Tab is held, at most `waits.len()` of them.
 pub async fn with_retries<T, E, A, AF, S, SF>(
     flight: &TabFlight,
     waits: &[Duration],
@@ -204,13 +278,13 @@ where
 {
     let mut best = attempt(0).await?;
     let mut retries = 0;
-    let mut stopped = false;
+    let mut stopped = None;
     for &wait in waits {
         if !retry(&best) {
             break;
         }
-        if flight.retries_cancelled() {
-            stopped = true;
+        if let Some(why) = flight.retry_stop() {
+            stopped = Some(why);
             break;
         }
         flight.set_phase(TabFlightPhase::Retrying);
@@ -224,11 +298,11 @@ where
         );
         tokio::select! {
             biased;
-            _ = flight.cancelled() => {}
+            _ = flight.stopped() => {}
             _ = sleep(wait) => {}
         }
-        if flight.retries_cancelled() {
-            stopped = true;
+        if let Some(why) = flight.retry_stop() {
+            stopped = Some(why);
             break;
         }
         let next = attempt(retries).await?;
@@ -236,11 +310,12 @@ where
             best = next;
         }
     }
-    if stopped {
-        tracing::info!(
-            retries,
-            "Tab capture retries stopped: a newer Tab press takes over"
-        );
+    if let Some(why) = stopped {
+        let line = match why {
+            RetryStop::NewPress => "a newer Tab press takes over",
+            RetryStop::Released => "Tab was released (a later frame shows the game, not the board)",
+        };
+        tracing::info!(retries, "Tab capture retries stopped: {line}");
     } else if retries > 0 {
         if retry(&best) {
             let reason = why(&best);
@@ -488,20 +563,8 @@ mod tests {
                 |i| async move { Ok::<_, ()>(if i == 0 { 0 } else { 1 }) },
                 |_| async {},
             ));
-            let flight = TabFlight::new(Instant::now());
-            flight.cancel_retries();
-            let _ = block_on(with_retries(
-                &flight,
-                &TAB_RETRY_WAITS,
-                |_: &u8| true,
-                |v: &u8| *v,
-                |_| "rejected by the scoreboard check",
-                |_| async { Ok::<_, ()>(0u8) },
-                |_| async {},
-            ));
         });
         let text = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();
-        assert!(text.contains("Tab capture retries stopped: a newer Tab press takes over"));
         assert!(text.contains("Tab capture will try again: no fresh stream frame arrived"));
         assert!(text.contains("Tab capture gave up after retries: no fresh stream frame arrived"));
         assert!(text.contains("Tab capture will try again: the share is still opening"));
@@ -665,6 +728,83 @@ mod tests {
             None
         );
         assert_eq!(last_accepted, Some(t0));
+    }
+
+    /// A frame after the key went up shows the game, not the board: once
+    /// Tab is released no retry starts, and a running retry wait ends.
+    #[test]
+    fn no_retry_after_tab_is_released() {
+        let press = Instant::now();
+        let flight = TabFlight::new(press);
+        let grabs = RefCell::new(0usize);
+        let (_, retries) = block_on(with_retries(
+            &flight,
+            &TAB_RETRY_WAITS,
+            |v: &u8| *v == 0,
+            |v: &u8| *v,
+            |_| "rejected by the scoreboard check",
+            |_| {
+                *grabs.borrow_mut() += 1;
+                flight.note_release(press + Duration::from_millis(200));
+                async { Ok::<_, ()>(0u8) }
+            },
+            |_| async {},
+        ))
+        .unwrap();
+        assert_eq!((retries, grabs.into_inner()), (0, 1));
+        assert_eq!(flight.retry_stop(), Some(RetryStop::Released));
+
+        // Released during the first retry wait: the wait ends, no grab.
+        let flight = TabFlight::new(press);
+        let grabs = RefCell::new(0usize);
+        let (_, retries) = block_on(with_retries(
+            &flight,
+            &TAB_RETRY_WAITS,
+            |v: &u8| *v == 0,
+            |v: &u8| *v,
+            |_| "rejected by the scoreboard check",
+            |_| {
+                *grabs.borrow_mut() += 1;
+                async { Ok::<_, ()>(0u8) }
+            },
+            |_| {
+                flight.note_release(press + Duration::from_millis(500));
+                std::future::pending::<()>()
+            },
+        ))
+        .unwrap();
+        assert_eq!((retries, grabs.into_inner()), (1, 1));
+    }
+
+    #[test]
+    fn a_release_from_an_earlier_tap_does_not_stop_this_capture() {
+        let press = Instant::now() + Duration::from_secs(5);
+        let flight = TabFlight::new(press);
+        flight.note_release(press - Duration::from_millis(100));
+        assert_eq!(flight.retry_stop(), None);
+        assert_eq!(flight.released_at(), None);
+        // While held, retries still run up to the cap.
+        let (best, retries) = block_on(with_retries(
+            &flight,
+            &TAB_RETRY_WAITS,
+            |v: &u8| *v == 0,
+            |v: &u8| *v,
+            |_| "rejected by the scoreboard check",
+            |_| async { Ok::<_, ()>(0u8) },
+            |_| async {},
+        ))
+        .unwrap();
+        assert_eq!((best, retries), (0, TAB_RETRY_WAITS.len()));
+    }
+
+    #[test]
+    fn a_short_tap_without_a_board_gets_the_hold_hint() {
+        let press = Instant::now();
+        let at = |ms: u64| Some(press + Duration::from_millis(ms));
+        assert!(short_tap_hint(false, press, at(400)));
+        assert!(!short_tap_hint(false, press, at(1_000)), "held a second");
+        assert!(!short_tap_hint(true, press, at(400)), "board accepted");
+        assert!(!short_tap_hint(false, press, None), "still held");
     }
 
     #[derive(Clone, Default)]

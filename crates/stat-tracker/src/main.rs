@@ -4723,6 +4723,12 @@ async fn run_loop(
     // and a newer press waiting for that report.
     let mut tab_flight: Option<Arc<stat_tracker::tab_retry::TabFlight>> = None;
     let mut queued_tab: Option<Instant> = None;
+    // The last Tab release. `TabFlight::note_release` ignores one from
+    // before a capture's own press.
+    let mut last_tab_release: Option<Instant> = None;
+    // A key event that preempted a poll, handled by the keyboard arm on the
+    // next turn of the loop.
+    let mut pending_key: Option<Result<detect::TabKey, Box<dyn std::error::Error>>> = None;
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4793,10 +4799,17 @@ async fn run_loop(
                 .await;
                 return Ok(());
             }
-            result = kbd.wait_tab() => {
+            result = pending_or_next(&mut pending_key, kbd.wait_tab()) => {
                 match result {
-                    // Releases are carried for later use. Nothing acts on them yet.
-                    Ok(key) if !key.down => {}
+                    // A release stops the running capture's retries: a
+                    // frame after it shows the game, not the board. It is
+                    // kept for a press queued behind that capture.
+                    Ok(key) if !key.down => {
+                        last_tab_release = Some(key.at);
+                        if let Some(flight) = &tab_flight {
+                            flight.note_release(key.at);
+                        }
+                    }
                     Ok(key) => {
                         // The kernel's key-event time, not when this loop got
                         // round to it (a poll can hold the loop for most of a
@@ -4861,6 +4874,9 @@ async fn run_loop(
                                     press,
                                 )
                                 .await;
+                                if let Some(at) = last_tab_release {
+                                    flight.note_release(at);
+                                }
                                 capture_task = Some(task);
                                 tab_flight = Some(flight);
                             }
@@ -4927,6 +4943,9 @@ async fn run_loop(
                             press,
                         )
                         .await;
+                        if let Some(at) = last_tab_release {
+                            flight.note_release(at);
+                        }
                         capture_task = Some(task);
                         tab_flight = Some(flight);
                     }
@@ -4981,16 +5000,29 @@ async fn run_loop(
                 }
                 st.poll_ticks_skipped = 0;
 
-                match stop_for_shutdown(
+                // A Tab key event preempts the poll's grab and analysis: the
+                // poll is dropped (the next tick polls again) and the key is
+                // handled at once by the keyboard arm, never lost.
+                let grabbed = match stop_for_shutdown_or_key(
                     capture::capture_screen_output_for(
                         backend,
                         capture_output,
                         capture::CaptureKind::Poll,
                     ),
                     stat_tracker::replace::shutdown_notified(),
+                    kbd.wait_tab(),
                 )
                 .await
                 {
+                    PollRace::Done(grabbed) => Ok(grabbed),
+                    PollRace::Shutdown => Err(()),
+                    PollRace::Key(key) => {
+                        tracing::debug!("poll dropped during its grab: a Tab key event comes first");
+                        pending_key = Some(key);
+                        continue;
+                    }
+                };
+                match grabbed {
                     Err(()) => {
                         shutdown_from_signal(
                             &mut st,
@@ -5015,9 +5047,12 @@ async fn run_loop(
                             log_reused_frame_skip();
                             continue;
                         }
-                        if let (Some(id), Some(seq)) = (captured.stream, captured.seq) {
-                            seen_stream = Some(capture::SeenStream { id, seq });
-                        }
+                        // Recorded only once this frame is read: a poll that
+                        // a Tab drops leaves the frame unread.
+                        let kept_frame = match (captured.stream, captured.seq) {
+                            (Some(id), Some(seq)) => Some(capture::SeenStream { id, seq }),
+                            _ => None,
+                        };
                         let img = captured.image;
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
                         // On-hit evidence (debug_ocr): confirm + first streak only.
@@ -5027,11 +5062,14 @@ async fn run_loop(
                             .word_outcome_streak
                             .as_ref()
                             .map(|streak| (streak.outcome, streak.seen_at.elapsed()));
-                        let mut stability = std::mem::take(&mut st.ocr_stability);
+                        // A copy: a poll that a Tab drops leaves the
+                        // session's stability history as it was.
+                        let mut stability = st.ocr_stability.clone();
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
-                        // below, and only when shutdown has not begun.
-                        let analyzed = stop_for_shutdown(
+                        // below, and only when shutdown has not begun and no
+                        // Tab key event preempted it.
+                        let analyzed = stop_for_shutdown_or_key(
                             tokio::task::spawn_blocking(move || {
                             let analyze_started = Instant::now();
                             if let Some(dir) = &dump_dir {
@@ -5140,8 +5178,21 @@ async fn run_loop(
                             (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png)
                         }),
                             stat_tracker::replace::shutdown_notified(),
+                            kbd.wait_tab(),
                         )
                         .await;
+                        let analyzed = match analyzed {
+                            PollRace::Done(joined) => Ok(joined),
+                            PollRace::Shutdown => Err(()),
+                            PollRace::Key(key) => {
+                                tracing::debug!("poll dropped during its read: a Tab key event comes first");
+                                pending_key = Some(key);
+                                continue;
+                            }
+                        };
+                        if let Some(seen) = kept_frame {
+                            seen_stream = Some(seen);
+                        }
                         let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
@@ -9274,14 +9325,61 @@ async fn close_session_on_shutdown(
     }
 }
 
-/// Race `work` against shutdown. Shutdown is polled first, so a signal that
-/// is already waiting wins even when `work` is also ready.
+/// How a poll's grab or read ended when raced against shutdown and the
+/// keyboard.
+enum PollRace<T, K> {
+    Done(T),
+    Shutdown,
+    /// A key event arrived first. The work was dropped; the event is the
+    /// caller's to handle.
+    Key(K),
+}
+
+/// Race `work` against shutdown and the next Tab key event. Shutdown is
+/// polled first, so a signal that is already waiting wins even when `work`
+/// is also ready. Finished work beats a ready key (its result is applied
+/// and the key waits in the channel). Otherwise the key wins and `work` is
+/// dropped, so a Tab never waits behind a poll.
 ///
-/// This is for the capture grab and the OCR only. Dropping `work` detaches
-/// a `spawn_blocking` task. That OCR keeps running and its result is
-/// discarded. It does not write a match row. A future that writes game
+/// This is for the poll's capture grab and OCR only. Dropping `work`
+/// detaches a `spawn_blocking` task. That OCR keeps running and its result
+/// is discarded. It does not write a match row. A future that writes game
 /// state goes through [`finish_within_shutdown`] instead: dropping it would
 /// cancel a store call that had already taken the game out of memory.
+async fn stop_for_shutdown_or_key<T, K, S, KF>(
+    work: impl std::future::Future<Output = T>,
+    shutdown: S,
+    key: KF,
+) -> PollRace<T, K>
+where
+    S: std::future::Future<Output = ()>,
+    KF: std::future::Future<Output = K>,
+{
+    tokio::pin!(work);
+    tokio::pin!(shutdown);
+    tokio::pin!(key);
+    tokio::select! {
+        biased;
+        _ = &mut shutdown => PollRace::Shutdown,
+        value = &mut work => PollRace::Done(value),
+        key = &mut key => PollRace::Key(key),
+    }
+}
+
+/// The key event a dropped poll kept, else the next one from `next`. A kept
+/// event returns on the first poll, so the keyboard arm takes it at once.
+async fn pending_or_next<K>(
+    pending: &mut Option<K>,
+    next: impl std::future::Future<Output = K>,
+) -> K {
+    match pending.take() {
+        Some(key) => key,
+        None => next.await,
+    }
+}
+
+/// [`stop_for_shutdown_or_key`] with no key: the shutdown race alone.
+#[cfg(test)]
 async fn stop_for_shutdown<T, S>(
     work: impl std::future::Future<Output = T>,
     shutdown: S,
@@ -9289,12 +9387,10 @@ async fn stop_for_shutdown<T, S>(
 where
     S: std::future::Future<Output = ()>,
 {
-    tokio::pin!(work);
-    tokio::pin!(shutdown);
-    tokio::select! {
-        biased;
-        _ = &mut shutdown => Err(()),
-        value = &mut work => Ok(value),
+    match stop_for_shutdown_or_key(work, shutdown, std::future::pending::<()>()).await {
+        PollRace::Done(value) => Ok(value),
+        PollRace::Shutdown => Err(()),
+        PollRace::Key(()) => unreachable!("a pending key never arrives"),
     }
 }
 
@@ -16821,17 +16917,19 @@ mod tests {
         let blocking = run_loop
             .find("tokio::task::spawn_blocking(")
             .expect("poll analysis");
+        // rc.6: the poll's grab and read are also raced against the next
+        // Tab key event (`stop_for_shutdown_or_key`).
         let wrap = run_loop[..blocking]
-            .rfind("stop_for_shutdown(")
+            .rfind("stop_for_shutdown_or_key(")
             .expect("analysis is raced against shutdown");
         assert!(
-            run_loop[wrap + "stop_for_shutdown(".len()..blocking]
+            run_loop[wrap + "stop_for_shutdown_or_key(".len()..blocking]
                 .trim()
                 .is_empty(),
-            "spawn_blocking OCR is the future passed to stop_for_shutdown"
+            "spawn_blocking OCR is the future passed to stop_for_shutdown_or_key"
         );
         assert_eq!(
-            run_loop.matches("stop_for_shutdown(").count(),
+            run_loop.matches("stop_for_shutdown_or_key(").count(),
             2,
             "only the capture grab and the OCR are raced against shutdown"
         );
@@ -16844,9 +16942,60 @@ mod tests {
                 .find("shutdown_time_left")
                 .expect("the poll write is bounded by the shared deadline");
         assert!(
-            !run_loop[write_at..bound].contains("stop_for_shutdown("),
+            !run_loop[write_at..bound].contains("stop_for_shutdown"),
             "a started poll write is not dropped when the signal wins"
         );
+    }
+
+    /// rc.6: a Tab used to wait behind the poll's grab and OCR (the poll ran
+    /// up to ~0.8 s inside the loop), so it was stamped and served late. A
+    /// key event now drops the running poll and is handed back intact.
+    #[tokio::test]
+    async fn a_tab_key_preempts_a_running_poll_and_is_not_lost() {
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = std::sync::Arc::clone(&finished);
+        let started = std::time::Instant::now();
+        let raced = stop_for_shutdown_or_key(
+            async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            },
+            std::future::pending::<()>(),
+            async {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                "tab"
+            },
+        )
+        .await;
+        assert!(matches!(raced, PollRace::Key("tab")));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!finished.load(std::sync::atomic::Ordering::SeqCst));
+
+        // The key the poll kept is what the keyboard arm takes next, before
+        // any new event.
+        let mut pending = match raced {
+            PollRace::Key(key) => Some(key),
+            _ => None,
+        };
+        let next = pending_or_next(&mut pending, async { panic!("not read") }).await;
+        assert_eq!(next, "tab");
+        assert!(pending.is_none());
+        assert_eq!(
+            pending_or_next(&mut pending, async { "next" }).await,
+            "next"
+        );
+    }
+
+    #[tokio::test]
+    async fn finished_poll_work_beats_a_ready_key_and_shutdown_beats_both() {
+        let raced =
+            stop_for_shutdown_or_key(async { "read" }, std::future::pending::<()>(), async {
+                "tab"
+            })
+            .await;
+        assert!(matches!(raced, PollRace::Done("read")));
+        let raced = stop_for_shutdown_or_key(async { "read" }, async {}, async { "tab" }).await;
+        assert!(matches!(raced, PollRace::Shutdown));
     }
 
     /// A poll analysis that would run for half a minute must lose to shutdown
