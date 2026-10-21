@@ -27,7 +27,6 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
-use wasm_bindgen::prelude::*;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::strategy::{
