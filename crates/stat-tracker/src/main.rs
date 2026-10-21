@@ -463,7 +463,9 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // of this same binary, and --vacuum, do not signal the live daemon.
     // The pid guard below still refuses a second live daemon. A replace
     // waits out an open game so it does not cut it off.
-    let replace_same = std::env::var_os("STAT_TRACKER_REPLACE_STRAY").is_some();
+    let replace_same = stat_tracker::replace::flag_enabled(
+        std::env::var("STAT_TRACKER_REPLACE_STRAY").ok().as_deref(),
+    );
     let vacuum = std::env::args().any(|arg| arg == "--vacuum");
     if let Some(policy) = stat_tracker::replace::policy_for_startup(vacuum, replace_same)
         && let Err(err) = stat_tracker::replace::stop_strays(&config.data_dir, true, policy).await
@@ -653,6 +655,7 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         data_dir: config.data_dir.clone(),
         route: config.capture_route,
         debug_frames: config.debug_portal_frames_enabled(),
+        max_fps: config.screencast_max_fps(),
     });
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
@@ -4343,6 +4346,9 @@ async fn run_loop(
     let data_dir: &std::path::Path = &ctx.data_dir;
 
     let mut game_gate = detect::game_running::GameProcessGate::new(&ctx.game_process_names);
+    // Starts false so a boot with the game already closed does not close a
+    // share that was never opened. The close runs on the running edge only.
+    let mut game_was_running = false;
     // The GUI's Stop button (and systemd) send SIGTERM, shut down as
     // gracefully as Ctrl+C, with a final sync.
     // `early_sigterm` is the same handler, registered before startup's wait
@@ -4368,6 +4374,7 @@ async fn run_loop(
     tracing::info!(
         poll_ms = poll_interval.as_millis() as u64,
         new_reader = ctx.use_new_reader,
+        source = auto_detect.poll_interval_source(),
         "end-screen poll interval"
     );
     let new_game_debounce = std::time::Duration::from_secs(auto_detect.cooldown_secs);
@@ -4454,7 +4461,17 @@ async fn run_loop(
             result = kbd.wait_tab() => {
                 match result {
                     Ok(()) => {
-                        if !game_gate.is_running() {
+                        let running = game_gate.is_running();
+                        if capture::should_close_share(
+                            capture::stream_route_active(),
+                            game_was_running,
+                            running,
+                            capture::share_restorable(data_dir),
+                        ) {
+                            capture::close_if_open().await;
+                        }
+                        game_was_running = running;
+                        if !running {
                             tracing::debug!("Tab ignored: game process not running");
                             continue;
                         }
@@ -4501,19 +4518,28 @@ async fn run_loop(
                             opened_by_this_tab,
                             now,
                         );
+                        let press = now;
+                        let on_stream = capture::stream_route_active();
                         let sid = req.session_id.clone();
                         let tx = capture_tx.clone();
                         let ctx_task = Arc::clone(&ctx);
-                        capture_task = Some(tokio::spawn(async move {
-                            // Wait for the game to render the scoreboard
-                            // overlay after the Tab press.
-                            tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
-                            let result = handle_capture(&ctx_task, req)
-                                .await
-                                // `{:#}` keeps anyhow's context chain in the string.
-                                .map_err(|e| format!("{e:#}"));
-                            let _ = tx.send((sid, result));
-                        }));
+                        capture_task = Some(tokio::spawn(capture::with_tab_press(
+                            press,
+                            async move {
+                                // Direct capture and the screenshot portal still
+                                // wait for the overlay to finish drawing. The
+                                // screen stream waits for a buffer instead.
+                                if !on_stream {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(400))
+                                        .await;
+                                }
+                                let result = handle_capture(&ctx_task, req)
+                                    .await
+                                    // `{:#}` keeps anyhow's context chain in the string.
+                                    .map_err(|e| format!("{e:#}"));
+                                let _ = tx.send((sid, result));
+                            },
+                        )));
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "keyboard devices lost: attempting to reopen");
@@ -4577,7 +4603,17 @@ async fn run_loop(
                         "cheap outcome poll: Tab capture in flight during end-reel wake"
                     );
                 }
-                if !game_gate.is_running() {
+                let running = game_gate.is_running();
+                if capture::should_close_share(
+                    capture::stream_route_active(),
+                    game_was_running,
+                    running,
+                    capture::share_restorable(data_dir),
+                ) {
+                    capture::close_if_open().await;
+                }
+                game_was_running = running;
+                if !running {
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
                     continue;
@@ -4818,7 +4854,37 @@ async fn run_loop(
                                 logged_binary_wait = true;
                             }
                         } else {
-                            stat_tracker::replace::restart_for_replaced_binary(&path)?;
+                            shutdown_from_signal(
+                                &mut st,
+                                &mut capture_task,
+                                &mut sync_task,
+                                sync_client,
+                                &sync_backoff,
+                                store,
+                                data_dir,
+                            )
+                            .await;
+                            let marker =
+                                stat_tracker::report::marker::release_run_marker(data_dir);
+                            let released_pid =
+                                stat_tracker::replace::release_own_pid_file(data_dir);
+                            if let Err(err) =
+                                stat_tracker::replace::restart_for_replaced_binary(&path)
+                            {
+                                tracing::error!(
+                                    error = %err,
+                                    "could not re-exec the new tracker; keeping this process"
+                                );
+                                if released_pid {
+                                    stat_tracker::replace::restore_own_pid_file(data_dir);
+                                }
+                                let _ = stat_tracker::report::marker::restore_run_marker(
+                                    data_dir,
+                                    marker.as_ref(),
+                                );
+                            } else {
+                                return Ok(());
+                            }
                         }
                     } else {
                         logged_binary_wait = false;
@@ -6642,14 +6708,31 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 let own_seeds = own_seeds.clone();
                 let names = names.clone();
                 async move {
-                    let img = capture::capture_screen_output_for(
+                    let img = match capture::capture_screen_output_for(
                         backend,
                         capture_output,
                         capture::CaptureKind::Tab,
                     )
                     .await
-                    .map_err(anyhow::Error::from_boxed)
-                    .context("screen capture failed")?;
+                    {
+                        Ok(img) => img,
+                        Err(err) if err.to_string().contains("no fresh stream frame") => {
+                            return Ok(FrameAnalysisOutcome::NotAScoreboard {
+                                outcome: game_outcome,
+                                frame: image::DynamicImage::ImageRgb8(image::RgbImage::new(1, 1)),
+                                scan: detect::hero_portrait::RowScan {
+                                    dip_count: 0,
+                                    median_pitch: None,
+                                    spectral_pitch: None,
+                                },
+                            });
+                        }
+                        Err(err) => {
+                            return Err(
+                                anyhow::Error::from_boxed(err).context("screen capture failed")
+                            );
+                        }
+                    };
                     let analysis = tokio::task::spawn_blocking(move || {
                         let started = Instant::now();
                         let cpu_started = stat_tracker::perf::thread_cpu();
@@ -8646,11 +8729,27 @@ async fn shutdown_from_signal(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
 ) {
-    drain_capture(capture_task.take()).await;
-    close_session_on_shutdown(st, store, data_dir).await;
-    let task = sync_task.take();
-    finish_sync_on_shutdown(sync_client, sync_backoff, task, store, data_dir).await;
-    flush_snapshot_if_dirty(store, data_dir).await;
+    let capture_busy = capture_task
+        .as_ref()
+        .is_some_and(|task| !task.is_finished());
+    let sync_busy = sync_task.as_ref().is_some_and(|task| !task.is_finished());
+    let cast_open = capture::session_is_open();
+    tokio::select! {
+        _ = async {
+            capture::close_if_open().await;
+            drain_capture(capture_task.take()).await;
+            close_session_on_shutdown(st, store, data_dir).await;
+            let task = sync_task.take();
+            finish_sync_on_shutdown(sync_client, sync_backoff, task, store, data_dir).await;
+            flush_snapshot_if_dirty(store, data_dir).await;
+        } => {}
+        _ = tokio::time::sleep(stat_tracker::replace::SHUTDOWN_DEADLINE) => {
+            tracing::error!(
+                "{}",
+                stat_tracker::replace::shutdown_overrun_line(capture_busy, sync_busy, cast_open)
+            );
+        }
+    }
 }
 
 async fn finish_sync_on_shutdown(

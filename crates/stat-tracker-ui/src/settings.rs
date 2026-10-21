@@ -533,6 +533,7 @@ impl SettingsForm {
             capture_output: nonempty(&self.capture_output),
             capture_route: self.capture_route,
             debug_portal_frames: base.debug_portal_frames,
+            screencast_max_fps: base.screencast_max_fps,
             player_name: nonempty(&self.player_name),
             sync: sync_from_fields(&self.sync_url, &self.sync_token),
             auto_detect: AutoDetectConfig {
@@ -547,6 +548,7 @@ impl SettingsForm {
                         .auto_detect
                         .poll_interval_secs
                         .filter(|&s| s == stat_tracker::config::LEGACY_DEFAULT_POLL_SECS)),
+                poll_interval_ms: base.auto_detect.poll_interval_ms,
                 cooldown_secs: parse_u64(&self.cooldown_secs, 120),
             },
             session_window_secs: parse_u64(&self.session_window_secs, 1800),
@@ -1825,8 +1827,10 @@ mod tests {
         base.auto_detect = AutoDetectConfig {
             enabled: false,
             poll_interval_secs: Some(8),
+            poll_interval_ms: Some(750),
             cooldown_secs: 60,
         };
+        base.screencast_max_fps = Some(4);
         base.session_window_secs = 900;
         base.finished_game_close_secs = 240;
         base.game_process_names = vec!["Overwatch.exe".into()];
@@ -1845,6 +1849,8 @@ mod tests {
             Some("https://crew.example")
         );
         assert_eq!(out.auto_detect.poll_interval_secs, Some(8));
+        assert_eq!(out.auto_detect.poll_interval_ms, Some(750));
+        assert_eq!(out.screencast_max_fps, Some(4));
         assert_eq!(out.session_window_secs, 900);
         assert_eq!(out.finished_game_close_secs, 240);
         assert_eq!(out.game_process_names, vec!["Overwatch.exe"]);

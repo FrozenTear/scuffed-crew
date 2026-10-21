@@ -21,9 +21,46 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, SecondsFormat, Utc};
+
+/// Cleared while a self-restart has removed `run.marker`. The heartbeat
+/// must not write the file back. Restored if the exec fails.
+static MARKER_HELD: AtomicBool = AtomicBool::new(true);
+
+pub fn marker_is_held() -> bool {
+    MARKER_HELD.load(Ordering::Acquire)
+}
+
+/// Delete `run.marker` and stop the heartbeat from recreating it.
+/// Returns the text that was there, so a failed exec can put it back.
+pub fn release_run_marker(data_dir: &Path) -> Option<RunMarker> {
+    MARKER_HELD.store(false, Ordering::Release);
+    let path = run_marker_path(data_dir);
+    let parsed = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|text| RunMarker::parse(&text));
+    let _ = std::fs::remove_file(&path);
+    parsed
+}
+
+/// Put `run.marker` back after a failed re-exec and let the heartbeat
+/// write it again.
+pub fn restore_run_marker(data_dir: &Path, marker: Option<&RunMarker>) -> io::Result<()> {
+    MARKER_HELD.store(true, Ordering::Release);
+    let path = run_marker_path(data_dir);
+    if path.exists() {
+        return Ok(());
+    }
+    let marker = marker.cloned().unwrap_or(RunMarker {
+        pid: std::process::id(),
+        started_at: Utc::now(),
+        last_seen: Utc::now(),
+    });
+    write_atomic(&path, &marker)
+}
 
 pub const RUN_MARKER: &str = "run.marker";
 pub const LAST_CRASH_MARKER: &str = "last_crash.marker";
@@ -175,7 +212,7 @@ impl MarkerHeartbeat {
     /// marker, or when the file no longer names this process.
     pub fn touch(&self, now: DateTime<Utc>) -> io::Result<()> {
         let mut s = self.shared.lock().unwrap_or_else(|p| p.into_inner());
-        if s.stopped || !file_names(&s.path, s.marker.pid) {
+        if !marker_is_held() || s.stopped || !file_names(&s.path, s.marker.pid) {
             return Ok(());
         }
         let next = RunMarker {
@@ -195,7 +232,7 @@ impl MarkerHeartbeat {
         tick.tick().await; // the first tick is immediate; the file is fresh
         loop {
             tick.tick().await;
-            if self.shared.lock().map(|s| s.stopped).unwrap_or(true) {
+            if !marker_is_held() || self.shared.lock().map(|s| s.stopped).unwrap_or(true) {
                 return;
             }
             if let Err(e) = self.touch(Utc::now()) {

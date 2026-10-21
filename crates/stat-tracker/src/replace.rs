@@ -171,11 +171,22 @@ fn candidate_for_pid(pid: u32, record: Option<PidRecord>) -> StrayCandidate {
 fn pids_to_stop(data_dir: &Path, policy: StrayPolicy) -> Vec<u32> {
     live_stray_pids(data_dir)
         .into_iter()
+        .filter(|&pid| !cmdline_is_vacuum(&read_cmdline(pid)))
         .filter(|&pid| match policy {
             StrayPolicy::Any => true,
             StrayPolicy::ReplacedBinary => binary_differs_from_self(pid),
         })
         .collect()
+}
+
+fn read_cmdline(pid: u32) -> Vec<u8> {
+    std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default()
+}
+
+/// True when one argument of a NUL-separated `/proc/<pid>/cmdline` is
+/// `--vacuum`. Compacting holds the store lock and must not be signalled.
+pub fn cmdline_is_vacuum(bytes: &[u8]) -> bool {
+    bytes.split(|byte| *byte == 0).any(|arg| arg == b"--vacuum")
 }
 
 /// True when `pid`'s executable inode, mtime, or length differs from this
@@ -329,24 +340,125 @@ pub fn restart_how(under_systemd: bool) -> RestartHow {
     }
 }
 
+/// The unit sets `STAT_TRACKER_SYSTEMD=1`. `INVOCATION_ID` is inherited by
+/// an app that itself was started under systemd, and must not count.
+pub fn under_systemd_env(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
 pub fn under_systemd() -> bool {
-    std::env::var_os("INVOCATION_ID").is_some()
+    under_systemd_env(std::env::var("STAT_TRACKER_SYSTEMD").ok().as_deref())
+}
+
+/// How long SIGINT and SIGTERM wait before the process continues the exit
+/// anyway. The log names what was still in flight.
+pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(5);
+
+pub fn shutdown_overrun_line(capture: bool, sync: bool, screencast: bool) -> String {
+    let mut parts = Vec::new();
+    if capture {
+        parts.push("in-flight capture");
+    }
+    if sync {
+        parts.push("in-flight sync");
+    }
+    if screencast {
+        parts.push("screencast session");
+    }
+    let what = if parts.is_empty() {
+        "shutdown".to_string()
+    } else {
+        parts.join(", ")
+    };
+    format!("shutdown deadline exceeded; exiting while still running: {what}")
+}
+
+/// A failed re-exec keeps this process. The systemd exit does not.
+pub fn keeps_running_after_restart(how: RestartHow, exec_failed: bool) -> bool {
+    match how {
+        RestartHow::SystemdExit => false,
+        RestartHow::Reexec => exec_failed,
+    }
+}
+
+/// Remove `daemon.pid` when it names this process. `process::exit` and
+/// `exec` skip the guard's destructor.
+pub fn release_own_pid_file(data_dir: &Path) -> bool {
+    let path = data_dir.join("daemon.pid");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Some(rec) = proc_id::parse_pid_record(&text) else {
+        return false;
+    };
+    if rec.pid != std::process::id() {
+        return false;
+    }
+    std::fs::remove_file(&path).is_ok()
+}
+
+pub fn restore_own_pid_file(data_dir: &Path) {
+    let path = data_dir.join("daemon.pid");
+    let pid = std::process::id();
+    let body = proc_id::format_pid_record(pid, proc_id::proc_start_ticks(pid));
+    if std::fs::write(&path, body).is_ok() {
+        crate::fs_mode::tighten_private_file(&path);
+    }
+}
+
+/// What Restart now in the app should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartGuiPlan {
+    Wait,
+    RestartTracker,
+    RelaunchGui,
+}
+
+pub fn plan_restart_gui(game_open: bool, binary_replaced: bool) -> RestartGuiPlan {
+    if game_open {
+        RestartGuiPlan::Wait
+    } else if binary_replaced {
+        RestartGuiPlan::RestartTracker
+    } else {
+        RestartGuiPlan::RelaunchGui
+    }
+}
+
+/// `1`, `true`, or `yes`. `0`, empty, and unset are off.
+pub fn flag_enabled(value: Option<&str>) -> bool {
+    matches!(
+        value.map(str::trim),
+        Some("1" | "true" | "TRUE" | "yes" | "YES")
+    )
 }
 
 /// `Some(path)` when `/proc/self/exe` and the file at that path differ.
 /// The path is the on-disk binary to exec, with a kernel ` (deleted)`
-/// suffix removed. Already-restarted processes return `None`.
+/// suffix removed. A process that already exec'd this exact on-disk stamp
+/// returns `None`. A later stamp is picked up.
 pub fn replaced_binary_path() -> Option<PathBuf> {
-    if std::env::var_os(RESTART_ENV).is_some() {
-        return None;
-    }
     let link = std::fs::read_link("/proc/self/exe").ok()?;
     let running = stamp_of_meta(&std::fs::metadata("/proc/self/exe").ok()?)?;
     let path = on_disk_path(&link);
     let disk = std::fs::metadata(&path)
         .ok()
-        .and_then(|meta| stamp_of_meta(&meta));
-    binary_replaced(running, disk).then_some(path)
+        .and_then(|meta| stamp_of_meta(&meta))?;
+    if !binary_replaced(running, Some(disk)) {
+        return None;
+    }
+    let remembered = std::env::var(RESTART_ENV).ok();
+    if same_exec_stamp(remembered.as_deref(), &disk) {
+        return None;
+    }
+    Some(path)
+}
+
+pub fn exe_stamp_token(stamp: &ExeStamp) -> String {
+    format!("{}:{}:{}", stamp.inode, stamp.mtime_secs, stamp.len)
+}
+
+pub fn same_exec_stamp(remembered: Option<&str>, disk: &ExeStamp) -> bool {
+    remembered.is_some_and(|raw| raw == exe_stamp_token(disk))
 }
 
 fn on_disk_path(link: &Path) -> PathBuf {
@@ -407,10 +519,15 @@ pub fn restart_for_replaced_binary(path: &Path) -> anyhow::Result<()> {
             #[cfg(unix)]
             {
                 use std::os::unix::process::CommandExt;
-                let err = std::process::Command::new(path)
-                    .args(std::env::args_os().skip(1))
-                    .env(RESTART_ENV, "1")
-                    .exec();
+                let mut cmd = std::process::Command::new(path);
+                cmd.args(std::env::args_os().skip(1));
+                if let Some(stamp) = std::fs::metadata(path)
+                    .ok()
+                    .and_then(|meta| stamp_of_meta(&meta))
+                {
+                    cmd.env(RESTART_ENV, exe_stamp_token(&stamp));
+                }
+                let err = cmd.exec();
                 anyhow::bail!("could not re-exec the new tracker: {err}");
             }
             #[cfg(not(unix))]
@@ -530,6 +647,40 @@ not a lock line
         assert_eq!(restart_how(true), RestartHow::SystemdExit);
         assert_eq!(restart_how(false), RestartHow::Reexec);
         assert_eq!(RESTART_EXIT_CODE, 75);
+        assert!(under_systemd_env(Some("1")));
+        assert!(!under_systemd_env(Some("0")));
+        assert!(flag_enabled(Some("1")));
+        assert!(flag_enabled(Some("true")));
+        assert!(!flag_enabled(Some("0")));
+        assert!(!flag_enabled(Some("")));
+        assert!(!flag_enabled(None));
+        let stamp = ExeStamp {
+            inode: 7,
+            mtime_secs: 8,
+            len: 9,
+        };
+        let token = exe_stamp_token(&stamp);
+        assert!(same_exec_stamp(Some(&token), &stamp));
+        assert!(!same_exec_stamp(Some("1"), &stamp));
+        let newer = ExeStamp {
+            mtime_secs: 10,
+            ..stamp
+        };
+        assert!(!same_exec_stamp(Some(&token), &newer));
+        assert!(!under_systemd_env(None));
+        assert!(!keeps_running_after_restart(RestartHow::SystemdExit, true));
+        assert!(keeps_running_after_restart(RestartHow::Reexec, true));
+        assert!(!keeps_running_after_restart(RestartHow::Reexec, false));
+        assert_eq!(SHUTDOWN_DEADLINE, Duration::from_secs(5));
+        assert!(shutdown_overrun_line(true, false, true).contains("in-flight capture"));
+        assert!(cmdline_is_vacuum(b"scuffed-stat-tracker\0--vacuum\0"));
+        assert!(!cmdline_is_vacuum(b"scuffed-stat-tracker\0"));
+        assert_eq!(plan_restart_gui(true, true), RestartGuiPlan::Wait);
+        assert_eq!(
+            plan_restart_gui(false, true),
+            RestartGuiPlan::RestartTracker
+        );
+        assert_eq!(plan_restart_gui(false, false), RestartGuiPlan::RelaunchGui);
     }
 
     #[test]

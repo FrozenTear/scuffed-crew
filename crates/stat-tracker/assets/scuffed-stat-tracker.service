@@ -36,6 +36,9 @@ Environment=OMP_THREAD_LIMIT=1
 # binary. A manual second start does not set this, so it still refuses
 # to run beside the live daemon. --vacuum never signals that daemon.
 Environment=STAT_TRACKER_REPLACE_STRAY=1
+# Set only by this unit. The app must not inherit it, or an app-started
+# tracker would exit 75 and nothing would start it again.
+Environment=STAT_TRACKER_SYSTEMD=1
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

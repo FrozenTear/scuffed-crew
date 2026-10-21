@@ -276,6 +276,8 @@ pub enum Message {
     RestartGui,
     /// Tracker restart finished (or was skipped). Then start the new window.
     RestartGuiReady(Result<String, String>),
+    /// `systemctl show` finished off the UI thread.
+    ServiceInstallRefreshed(bool),
     /// The installed GUI's `--build-id` output (G3), for the binary as
     /// stamped when the probe started.
     GuiBuildProbed {
@@ -705,7 +707,12 @@ impl TrackerApp {
                 data_dir: app.data_dir.clone(),
                 route: app.saved_config.capture_route,
                 debug_frames: app.saved_config.debug_portal_frames_enabled(),
+                max_fps: app.saved_config.screencast_max_fps(),
             });
+            tasks.push(Task::perform(
+                daemon::refresh_service_cache(),
+                Message::ServiceInstallRefreshed,
+            ));
             tasks.push(Task::perform(
                 stat_tracker::capture::detect_backend(),
                 Message::BackendReady,
@@ -1652,9 +1659,23 @@ impl TrackerApp {
                 let data_dir = self.data_dir.clone();
                 let installed = self.daemon.service_installed;
                 let pid = self.daemon.pid;
+                let game_open = stat_tracker::replace::game_file_in_progress(&data_dir);
+                let binary_replaced = pid.is_some_and(|pid| {
+                    stat_tracker::replace::pid_binary_replaced(pid).unwrap_or(false)
+                });
+                if stat_tracker::replace::plan_restart_gui(game_open, binary_replaced)
+                    == stat_tracker::replace::RestartGuiPlan::Wait
+                {
+                    self.replace_toast(
+                        "Waiting until this game is saved before restarting".to_string(),
+                    );
+                }
                 self.daemon_busy = true;
                 Task::perform(
                     async move {
+                        while stat_tracker::replace::game_file_in_progress(&data_dir) {
+                            tokio::time::sleep(stat_tracker::replace::GAME_WAIT_STEP).await;
+                        }
                         let stale = pid.is_some_and(|pid| {
                             stat_tracker::replace::pid_binary_replaced(pid).unwrap_or(false)
                         });
@@ -1666,6 +1687,10 @@ impl TrackerApp {
                     },
                     Message::RestartGuiReady,
                 )
+            }
+            Message::ServiceInstallRefreshed(installed) => {
+                self.daemon.service_installed = installed;
+                Task::none()
             }
             Message::RestartGuiReady(result) => {
                 self.daemon_busy = false;
@@ -2460,6 +2485,10 @@ impl TrackerApp {
             tasks.push(Task::perform(
                 daemon::systemd_enabled(),
                 Message::AutostartReady,
+            ));
+            tasks.push(Task::perform(
+                daemon::refresh_service_cache(),
+                Message::ServiceInstallRefreshed,
             ));
         }
 

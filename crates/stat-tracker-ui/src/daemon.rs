@@ -185,11 +185,20 @@ pub fn service_file_installed() -> bool {
     if let Some(show) = fresh_show(Duration::from_secs(10)) {
         return show.installed();
     }
-    if let Some(show) = systemctl_show_sync() {
-        remember_show(show.clone());
-        return show.installed();
-    }
     unit_in_dirs(&user_unit_dirs(), SYSTEMD_UNIT).is_some()
+}
+
+/// Ask systemctl off the UI thread and refresh the cache the installed check reads.
+pub async fn refresh_service_cache() -> bool {
+    tokio::task::spawn_blocking(|| {
+        if let Some(show) = systemctl_show_sync() {
+            remember_show(show.clone());
+            return show.installed();
+        }
+        unit_in_dirs(&user_unit_dirs(), SYSTEMD_UNIT).is_some()
+    })
+    .await
+    .unwrap_or(false)
 }
 
 struct ShowCache {
@@ -340,6 +349,8 @@ fn spawn_daemon(data_dir: &Path) -> Result<std::process::Child, String> {
                 "scuffed_stat_tracker=info,stat_tracker=info,surrealdb=warn".into()
             }),
         )
+        .env_remove("INVOCATION_ID")
+        .env_remove("STAT_TRACKER_SYSTEMD")
         .spawn()
         .map_err(|e| format!("Could not start the tracker: {e}"))
 }
@@ -581,7 +592,11 @@ pub async fn run_verb(
             Ok("Tracker stopped".into())
         }
         DaemonVerb::Restart => {
-            stop_running(&data_dir, installed).await?;
+            if let Err(err) = stop_running(&data_dir, installed).await
+                && err != "Tracker is not running"
+            {
+                return Err(err);
+            }
             if installed {
                 let _ = systemd_action("reset-failed").await;
                 systemd_action("start").await?;

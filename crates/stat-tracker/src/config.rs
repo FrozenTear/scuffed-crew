@@ -23,6 +23,11 @@ pub struct Config {
     /// the screenshot half can hit the KWin cursor crash.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub debug_portal_frames: bool,
+    /// Cap on the screen-stream rate, in frames per second. Missing means
+    /// 2. Values outside 1..=5 are clamped. This is the PipeWire
+    /// max-framerate and the tracker's own throttle. Not written unless set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screencast_max_fps: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -365,6 +370,12 @@ pub struct AutoDetectConfig {
         deserialize_with = "read_legacy_poll_as_auto"
     )]
     pub poll_interval_secs: Option<u64>,
+    /// Milliseconds between end-screen polls. When set, this wins over
+    /// `poll_interval_secs` and over the automatic 1.5 s / 4 s interval.
+    /// Clamped to 500..=10000. Missing leaves the seconds key in charge.
+    /// Not written unless it was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll_interval_ms: Option<u64>,
     pub cooldown_secs: u64,
 }
 
@@ -376,6 +387,7 @@ impl Default for AutoDetectConfig {
             // detection, at ~25-35ms of CPU per tick. Enabled by default.
             enabled: true,
             poll_interval_secs: None,
+            poll_interval_ms: None,
             // Debounce between opening new games: long enough that a map-vote
             // screen lingering across several ticks only opens one game, far
             // shorter than a real match so back-to-back games are still caught.
@@ -391,6 +403,21 @@ pub const CLASSIC_POLL_INTERVAL: std::time::Duration = std::time::Duration::from
 pub const NEW_READER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 /// The value older Settings wrote on every save; treated as automatic.
 pub const LEGACY_DEFAULT_POLL_SECS: u64 = 4;
+/// Lower and upper bounds for [`AutoDetectConfig::poll_interval_ms`].
+pub const POLL_INTERVAL_MS_MIN: u64 = 500;
+pub const POLL_INTERVAL_MS_MAX: u64 = 10_000;
+/// Default screen-stream cap. QA can set `screencast_max_fps` to compare.
+pub const SCREENCAST_MAX_FPS_DEFAULT: u32 = 2;
+pub const SCREENCAST_MAX_FPS_MIN: u32 = 1;
+pub const SCREENCAST_MAX_FPS_MAX: u32 = 5;
+
+/// Clamp a configured stream cap. Missing means [`SCREENCAST_MAX_FPS_DEFAULT`].
+pub fn clamp_screencast_max_fps(raw: Option<u32>) -> u32 {
+    match raw {
+        None => SCREENCAST_MAX_FPS_DEFAULT,
+        Some(n) => n.clamp(SCREENCAST_MAX_FPS_MIN, SCREENCAST_MAX_FPS_MAX),
+    }
+}
 
 fn read_legacy_poll_as_auto<'de, D: serde::Deserializer<'de>>(
     de: D,
@@ -407,10 +434,17 @@ fn write_auto_poll_as_legacy<S: serde::Serializer>(
 }
 
 impl AutoDetectConfig {
-    /// The poll interval in effect: an explicit `poll_interval_secs` (at
-    /// least 1 s) other than [`LEGACY_DEFAULT_POLL_SECS`], else the
-    /// automatic rate for the reader in use.
+    /// The poll interval in effect. `poll_interval_ms`, when set, wins over
+    /// `poll_interval_secs` and over the automatic rate. Otherwise an
+    /// explicit `poll_interval_secs` (at least 1 s) other than
+    /// [`LEGACY_DEFAULT_POLL_SECS`] wins, else the automatic rate for the
+    /// reader in use.
     pub fn poll_interval(&self, new_reader: bool) -> std::time::Duration {
+        if let Some(ms) = self.poll_interval_ms {
+            return std::time::Duration::from_millis(
+                ms.clamp(POLL_INTERVAL_MS_MIN, POLL_INTERVAL_MS_MAX),
+            );
+        }
         match self.poll_interval_secs {
             Some(secs) if secs != LEGACY_DEFAULT_POLL_SECS => {
                 std::time::Duration::from_secs(secs.max(1))
@@ -418,6 +452,27 @@ impl AutoDetectConfig {
             _ if new_reader => NEW_READER_POLL_INTERVAL,
             _ => CLASSIC_POLL_INTERVAL,
         }
+    }
+
+    /// Where [`Self::poll_interval`] came from, for the startup log.
+    pub fn poll_interval_source(&self) -> &'static str {
+        if self.poll_interval_ms.is_some() {
+            "poll_interval_ms"
+        } else if matches!(
+            self.poll_interval_secs,
+            Some(secs) if secs != LEGACY_DEFAULT_POLL_SECS
+        ) {
+            "poll_interval_secs"
+        } else {
+            "automatic"
+        }
+    }
+}
+
+impl Config {
+    /// Screen-stream cap in frames per second, after clamping.
+    pub fn screencast_max_fps(&self) -> u32 {
+        clamp_screencast_max_fps(self.screencast_max_fps)
     }
 }
 
@@ -1319,6 +1374,7 @@ impl Default for Config {
             capture_output: None,
             capture_route: CaptureRoute::Auto,
             debug_portal_frames: false,
+            screencast_max_fps: None,
             player_name: None,
             sync: None,
             auto_detect: AutoDetectConfig::default(),
@@ -1930,6 +1986,7 @@ capture_output = \"DP-1\"
                 CaptureRoute::Auto
             },
             debug_portal_frames: full,
+            screencast_max_fps: full.then_some(4),
             player_name: full.then(|| "Ada".to_string()),
             sync: full.then(|| SyncConfig {
                 server_url: "https://crew.example".to_string(),
@@ -1938,6 +1995,7 @@ capture_output = \"DP-1\"
             auto_detect: AutoDetectConfig {
                 enabled: false,
                 poll_interval_secs: Some(8),
+                poll_interval_ms: full.then_some(750),
                 cooldown_secs: 30,
             },
             session_window_secs: 900,
@@ -2690,5 +2748,79 @@ cooldown_secs = 120
                 .unwrap()
                 .contains("poll_interval_secs = 5")
         );
+    }
+
+    #[test]
+    fn poll_interval_ms_overrides_seconds_and_automatic_and_clamps() {
+        use std::time::Duration;
+        let auto = AutoDetectConfig::default();
+        let ms = AutoDetectConfig {
+            poll_interval_ms: Some(750),
+            ..auto
+        };
+        assert_eq!(ms.poll_interval(true), Duration::from_millis(750));
+        assert_eq!(ms.poll_interval(false), Duration::from_millis(750));
+        assert_eq!(ms.poll_interval_source(), "poll_interval_ms");
+        let with_secs = AutoDetectConfig {
+            poll_interval_secs: Some(2),
+            poll_interval_ms: Some(800),
+            ..auto
+        };
+        assert_eq!(with_secs.poll_interval(true), Duration::from_millis(800));
+        assert_eq!(with_secs.poll_interval(false), Duration::from_millis(800));
+        let low = AutoDetectConfig {
+            poll_interval_ms: Some(1),
+            ..auto
+        };
+        assert_eq!(low.poll_interval(true), Duration::from_millis(500));
+        let high = AutoDetectConfig {
+            poll_interval_ms: Some(99_000),
+            ..auto
+        };
+        assert_eq!(high.poll_interval(false), Duration::from_millis(10_000));
+        let raw = toml::to_string(&auto).unwrap();
+        assert!(raw.contains("poll_interval_secs = 4"), "{raw}");
+        assert!(!raw.contains("poll_interval_ms"), "{raw}");
+        let set_raw = toml::to_string(&ms).unwrap();
+        assert!(set_raw.contains("poll_interval_ms = 750"), "{set_raw}");
+        assert!(set_raw.contains("poll_interval_secs = 4"), "{set_raw}");
+        let back: AutoDetectConfig = toml::from_str(&set_raw).unwrap();
+        assert_eq!(back.poll_interval_ms, Some(750));
+        assert_eq!(back.poll_interval(true), Duration::from_millis(750));
+        assert_eq!(auto.poll_interval_source(), "automatic");
+        let secs = AutoDetectConfig {
+            poll_interval_secs: Some(2),
+            ..auto
+        };
+        assert_eq!(secs.poll_interval_source(), "poll_interval_secs");
+    }
+
+    #[test]
+    fn screencast_max_fps_defaults_to_two_and_clamps() {
+        let cfg = Config::default();
+        assert_eq!(cfg.screencast_max_fps(), 2);
+        assert!(
+            !toml::to_string(&cfg)
+                .unwrap()
+                .contains("screencast_max_fps")
+        );
+        let mut four = cfg.clone();
+        four.screencast_max_fps = Some(4);
+        assert_eq!(four.screencast_max_fps(), 4);
+        assert!(
+            toml::to_string(&four)
+                .unwrap()
+                .contains("screencast_max_fps = 4")
+        );
+        four.screencast_max_fps = Some(0);
+        assert_eq!(four.screencast_max_fps(), 1);
+        four.screencast_max_fps = Some(9);
+        assert_eq!(four.screencast_max_fps(), 5);
+        let raw = toml::to_string(&Config::default()).unwrap();
+        // The key has to sit before any table. A line appended after
+        // `[auto_detect]` would belong to that table and be ignored.
+        let raw = format!("screencast_max_fps = 4\n{raw}");
+        let parsed: Config = toml::from_str(&raw).unwrap();
+        assert_eq!(parsed.screencast_max_fps(), 4);
     }
 }

@@ -1,12 +1,16 @@
 //! SPA pods for the screen-cast stream, built without linking PipeWire.
 //!
-//! The format pod offers BGRx, RGBx, BGRA, RGBA, BGR, and RGB. Framerate is
-//! a 1/1 to 2/1 range and maxFramerate is 2/1, so the compositor is not
-//! asked for the display rate. The buffers pod asks for one or two buffers
-//! and shared memory, not DMA-BUF. If that negotiation fails the caller
-//! retries with the format pod only.
+//! The format pod offers BGRx, RGBx, xBGR, xRGB, BGRA, RGBA, BGR, and RGB.
+//! Framerate is the fixed 0/1 KWin and GNOME offer (frames only when the
+//! screen changes). maxFramerate is `N/1`, where N is the configured cap
+//! (default 2), so the compositor itself stays near that rate. The caller
+//! also throttles, in case a backend ignores the cap. The buffers pod asks
+//! for one or two buffers and shared memory, not DMA-BUF. A rejected buffer
+//! param is logged; the producer keeps the buffers it already chose.
 
-/// Highest frame rate offered to PipeWire, numerator over a denominator of 1.
+/// Highest frame rate offered to PipeWire when the config does not say.
+/// The live cap is [`enum_format_pod`]'s argument.
+#[cfg_attr(not(test), allow(dead_code))]
 pub const MAX_FPS: u32 = 2;
 
 const SPA_TYPE_ID: u32 = 3;
@@ -16,6 +20,7 @@ const SPA_TYPE_FRACTION: u32 = 11;
 const SPA_TYPE_OBJECT: u32 = 15;
 const SPA_TYPE_CHOICE: u32 = 19;
 
+const SPA_CHOICE_NONE: u32 = 0;
 const SPA_CHOICE_RANGE: u32 = 1;
 const SPA_CHOICE_ENUM: u32 = 3;
 const SPA_CHOICE_FLAGS: u32 = 4;
@@ -45,6 +50,8 @@ const MEM_PTR_OR_FD: i32 = (1 << 1) | (1 << 2);
 
 const FMT_RGBX: u32 = 7;
 const FMT_BGRX: u32 = 8;
+const FMT_XRGB: u32 = 9;
+const FMT_XBGR: u32 = 10;
 const FMT_RGBA: u32 = 11;
 const FMT_BGRA: u32 = 12;
 const FMT_RGB: u32 = 15;
@@ -125,8 +132,9 @@ impl PodBuf {
     }
 }
 
-/// EnumFormat pod offered at connect time.
-pub fn enum_format_pod() -> Vec<u8> {
+/// EnumFormat pod offered at connect time. `max_fps` is the max-framerate
+/// numerator (denominator 1). Framerate itself is the fixed fraction 0/1.
+pub fn enum_format_pod(max_fps: u32) -> Vec<u8> {
     let mut pod = PodBuf::new();
     let at = pod.begin(SPA_TYPE_OBJECT);
     pod.u32(SPA_TYPE_OBJECT_FORMAT);
@@ -139,20 +147,17 @@ pub fn enum_format_pod() -> Vec<u8> {
             SPA_TYPE_ID,
             4,
             &[
-                FMT_BGRX, FMT_BGRX, FMT_RGBX, FMT_BGRA, FMT_RGBA, FMT_BGR, FMT_RGB,
+                FMT_BGRX, FMT_BGRX, FMT_RGBX, FMT_XBGR, FMT_XRGB, FMT_BGRA, FMT_RGBA, FMT_BGR,
+                FMT_RGB,
             ],
         );
     });
-    // default 1/1, min 1/1, max 2/1. Never the display rate.
-    pod.prop_pod(SPA_FORMAT_VIDEO_FRAMERATE, |p| {
-        p.choice(
-            SPA_CHOICE_RANGE,
-            SPA_TYPE_FRACTION,
-            8,
-            &[1, 1, 1, 1, MAX_FPS, 1],
-        );
+    // Fixed 0/1 matches the variable rate KWin and GNOME offer. A range
+    // that starts at 1/1 does not intersect that offer, so negotiation fails.
+    pod.prop_pod(SPA_FORMAT_VIDEO_FRAMERATE, |p| p.fraction(0, 1));
+    pod.prop_pod(SPA_FORMAT_VIDEO_MAX_FRAMERATE, |p| {
+        p.fraction(max_fps.max(1), 1)
     });
-    pod.prop_pod(SPA_FORMAT_VIDEO_MAX_FRAMERATE, |p| p.fraction(MAX_FPS, 1));
     pod.end(at);
     pod.bytes
 }
@@ -181,7 +186,11 @@ pub struct VideoInfo {
     pub height: u32,
 }
 
-/// Read a negotiated Format pod (fixed values, not a choice).
+/// Read a negotiated Format pod.
+///
+/// PipeWire wraps every property both sides offered in a Choice of type
+/// None. The first child value is the fixated one. A plain Id or Rectangle
+/// is accepted too, so a hand-built pod still parses.
 pub fn parse_format_pod(bytes: &[u8]) -> Option<VideoInfo> {
     if bytes.len() < 16 {
         return None;
@@ -214,12 +223,14 @@ pub fn parse_format_pod(bytes: &[u8]) -> Option<VideoInfo> {
         if next > bytes.len() {
             break;
         }
-        if pod_ty == SPA_TYPE_ID && key == SPA_FORMAT_VIDEO_FORMAT && pod_size >= 4 {
-            format = read_u32(bytes, body);
-        }
-        if pod_ty == SPA_TYPE_RECTANGLE && key == SPA_FORMAT_VIDEO_SIZE && pod_size >= 8 {
-            width = read_u32(bytes, body);
-            height = read_u32(bytes, body + 4);
+        if let Some((value_ty, value_at)) = prop_value(bytes, body, pod_size, pod_ty) {
+            if value_ty == SPA_TYPE_ID && key == SPA_FORMAT_VIDEO_FORMAT {
+                format = read_u32(bytes, value_at);
+            }
+            if value_ty == SPA_TYPE_RECTANGLE && key == SPA_FORMAT_VIDEO_SIZE {
+                width = read_u32(bytes, value_at);
+                height = read_u32(bytes, value_at + 4);
+            }
         }
         off = next;
     }
@@ -228,6 +239,23 @@ pub fn parse_format_pod(bytes: &[u8]) -> Option<VideoInfo> {
         width: width.unwrap_or(0),
         height: height.unwrap_or(0),
     })
+}
+
+/// First child of a Choice, or the pod itself when it is already a value.
+fn prop_value(bytes: &[u8], body: usize, pod_size: usize, pod_ty: u32) -> Option<(u32, usize)> {
+    if pod_ty != SPA_TYPE_CHOICE {
+        return Some((pod_ty, body));
+    }
+    if pod_size < 16 {
+        return None;
+    }
+    let child_size = read_u32(bytes, body + 8)? as usize;
+    let child_ty = read_u32(bytes, body + 12)?;
+    let value_at = body + 16;
+    if child_size == 0 || value_at + child_size > bytes.len() {
+        return None;
+    }
+    Some((child_ty, value_at))
 }
 
 fn align8(n: usize) -> usize {
@@ -320,14 +348,60 @@ fn push_choice_fractions(bytes: &[u8], body: usize, pod_end: usize, out: &mut Ve
     }
 }
 
-/// True when every fraction is at most [`MAX_FPS`] frames per second.
+/// True when every fraction is at most `max_fps` frames per second.
+/// 0/1 is the variable rate and is always inside the cap.
 #[cfg_attr(not(test), allow(dead_code))]
-pub fn framerate_within_cap(bytes: &[u8]) -> bool {
+pub fn framerate_within_cap(bytes: &[u8], max_fps: u32) -> bool {
     let found = fractions(bytes);
     !found.is_empty()
-        && found
-            .iter()
-            .all(|(num, den)| *den > 0 && u64::from(*num) <= u64::from(MAX_FPS) * u64::from(*den))
+        && found.iter().all(|(num, den)| {
+            *den > 0 && u64::from(*num) <= u64::from(max_fps.max(1)) * u64::from(*den)
+        })
+}
+
+/// One line for the session-start log. `configured` is the cap from config.
+pub fn negotiated_rate_line(rates: &[(u32, u32)], configured: u32) -> String {
+    match rates {
+        [rate, max, ..] => format!(
+            "screencast negotiated framerate {}/{} max-framerate {}/{} (configured {configured} fps)",
+            rate.0, rate.1, max.0, max.1
+        ),
+        [rate] => format!(
+            "screencast negotiated framerate {}/{} (configured {configured} fps)",
+            rate.0, rate.1
+        ),
+        _ => format!("screencast negotiated framerate unknown (configured {configured} fps)"),
+    }
+}
+
+/// Negotiated Format the way KWin leaves it: every property is a Choice.
+/// Format and size are Choice None. Framerate is the fixed 0/1. maxFramerate
+/// is a range whose default is `max_fps`/1, inside a 0/1..60/1 offer.
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn kwin_negotiated_format_pod(format: u32, width: u32, height: u32, max_fps: u32) -> Vec<u8> {
+    let mut pod = PodBuf::new();
+    let at = pod.begin(SPA_TYPE_OBJECT);
+    pod.u32(SPA_TYPE_OBJECT_FORMAT);
+    pod.u32(SPA_PARAM_FORMAT);
+    pod.prop_pod(SPA_FORMAT_VIDEO_FORMAT, |p| {
+        p.choice(SPA_CHOICE_NONE, SPA_TYPE_ID, 4, &[format]);
+    });
+    pod.prop_pod(SPA_FORMAT_VIDEO_SIZE, |p| {
+        p.choice(SPA_CHOICE_NONE, SPA_TYPE_RECTANGLE, 8, &[width, height]);
+    });
+    pod.prop_pod(SPA_FORMAT_VIDEO_FRAMERATE, |p| {
+        p.choice(SPA_CHOICE_NONE, SPA_TYPE_FRACTION, 8, &[0, 1]);
+    });
+    pod.prop_pod(SPA_FORMAT_VIDEO_MAX_FRAMERATE, |p| {
+        p.choice(
+            SPA_CHOICE_RANGE,
+            SPA_TYPE_FRACTION,
+            8,
+            &[max_fps, 1, 0, 1, 60, 1],
+        );
+    });
+    pod.end(at);
+    pod.bytes
 }
 
 /// A fixed Format pod, for the parser test. Not sent to PipeWire.
@@ -353,17 +427,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn offered_framerate_never_exceeds_two() {
-        let pod = enum_format_pod();
+    fn offered_framerate_is_fixed_zero_and_capped() {
+        let pod = enum_format_pod(MAX_FPS);
         assert!(
-            framerate_within_cap(&pod),
+            framerate_within_cap(&pod, MAX_FPS),
             "fractions: {:?}",
             fractions(&pod)
         );
         let rates = fractions(&pod);
-        assert!(rates.contains(&(1, 1)));
-        assert!(rates.contains(&(MAX_FPS, 1)));
+        assert!(
+            rates.contains(&(0, 1)),
+            "KWin's fixed 0/1 must be in the offer: {rates:?}"
+        );
+        assert!(rates.contains(&(2, 1)), "{rates:?}");
+        assert!(!rates.contains(&(1, 1)), "{rates:?}");
         assert!(!rates.iter().any(|(n, _)| *n >= 30));
+        let four = enum_format_pod(4);
+        let four_rates = fractions(&four);
+        assert!(four_rates.contains(&(0, 1)));
+        assert!(four_rates.contains(&(4, 1)), "{four_rates:?}");
+        assert!(framerate_within_cap(&four, 4));
+        assert_eq!(
+            negotiated_rate_line(&[(0, 1), (4, 1)], 4),
+            "screencast negotiated framerate 0/1 max-framerate 4/1 (configured 4 fps)"
+        );
     }
 
     #[test]
@@ -382,6 +469,27 @@ mod tests {
         }
         assert!(found, "shared-memory mask missing");
         assert_ne!(mask & (1 << 3), mask);
+    }
+
+    #[test]
+    fn a_kwin_choice_pod_unwraps_format_and_size() {
+        let pod = kwin_negotiated_format_pod(FMT_BGRX, 2560, 1440, 2);
+        let info = parse_format_pod(&pod).expect("choice-wrapped format");
+        assert_eq!(
+            info,
+            VideoInfo {
+                format: FMT_BGRX,
+                width: 2560,
+                height: 1440
+            }
+        );
+        let rates = fractions(&pod);
+        assert!(rates.contains(&(0, 1)), "{rates:?}");
+        assert!(rates.contains(&(2, 1)), "{rates:?}");
+        let rgbx = kwin_negotiated_format_pod(FMT_RGBX, 1920, 1080, 4);
+        assert_eq!(parse_format_pod(&rgbx).unwrap().format, FMT_RGBX);
+        let xbgr = kwin_negotiated_format_pod(FMT_XBGR, 1920, 1080, 2);
+        assert_eq!(parse_format_pod(&xbgr).unwrap().format, FMT_XBGR);
     }
 
     #[test]

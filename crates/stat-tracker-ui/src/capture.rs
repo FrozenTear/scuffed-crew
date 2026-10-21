@@ -37,7 +37,7 @@ pub async fn capture_now(
     output: Option<String>,
 ) -> Result<PreviewShot, String> {
     let backend = backend_ready(Some(backend))?;
-    let img = capture::capture_screen_output(&backend, output.as_deref())
+    let img = capture::capture_screen_oneshot(&backend, output.as_deref())
         .await
         .map_err(|e| format!("Capture failed: {e}"))?;
     let (width, height, rgba) = tokio::task::spawn_blocking(move || thumbnail_rgba(&img))

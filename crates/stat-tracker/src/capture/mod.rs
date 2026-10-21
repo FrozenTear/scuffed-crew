@@ -24,6 +24,8 @@ pub struct CapturePrefs {
     pub data_dir: std::path::PathBuf,
     pub route: crate::config::CaptureRoute,
     pub debug_frames: bool,
+    /// Screen-stream cap in frames per second. Already clamped.
+    pub max_fps: u32,
 }
 
 fn prefs() -> CapturePrefs {
@@ -37,7 +39,26 @@ fn prefs() -> CapturePrefs {
                 .join("scuffed-stat-tracker"),
             route: crate::config::CaptureRoute::Auto,
             debug_frames: false,
+            max_fps: crate::config::SCREENCAST_MAX_FPS_DEFAULT,
         })
+}
+
+tokio::task_local! {
+    static TAB_PRESS: std::time::Instant;
+}
+
+/// The Tab key instant for the current capture task, when this is a Tab grab.
+pub fn tab_press() -> Option<std::time::Instant> {
+    TAB_PRESS.try_with(|press| *press).ok()
+}
+
+/// Run `fut` as a Tab grab whose press time is `press`. Direct capture still
+/// sleeps before calling this. The stream path reads the press and does not.
+pub async fn with_tab_press<T>(
+    press: std::time::Instant,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    TAB_PRESS.scope(press, fut).await
 }
 
 pub fn set_prefs(prefs: CapturePrefs) {
@@ -55,6 +76,28 @@ fn portal_path() -> route::PortalPath {
 }
 
 static PORTAL_PATH: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+static STREAM_ROUTE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static STREAM_FORCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This process is capturing through the long-lived screen stream.
+/// Wayshot, X11, and the screenshot portal are not.
+pub fn stream_route_active() -> bool {
+    STREAM_ROUTE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// The stream was asked for by the environment or by Settings, not chosen
+/// because the desktop is KDE or GNOME.
+pub fn stream_was_forced() -> bool {
+    STREAM_FORCED.load(std::sync::atomic::Ordering::Acquire)
+}
+
+pub use screencast::{close_if_open, session_is_open, should_close_share};
+
+/// A saved restore token can reopen the share without a prompt.
+pub fn share_restorable(data_dir: &std::path::Path) -> bool {
+    screencast::restore_token_saved(data_dir)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureBackend {
@@ -225,6 +268,13 @@ pub async fn detect_backend() -> CaptureBackend {
         },
         std::sync::atomic::Ordering::Release,
     );
+    let on_stream =
+        decision.backend == CaptureBackend::Portal && decision.portal == route::PortalPath::Stream;
+    STREAM_ROUTE.store(on_stream, std::sync::atomic::Ordering::Release);
+    STREAM_FORCED.store(
+        on_stream && decision.forced,
+        std::sync::atomic::Ordering::Release,
+    );
     tracing::info!("{}", decision.info);
     if let Some(line) = &decision.forced_line {
         tracing::info!("{line}");
@@ -307,6 +357,19 @@ pub async fn capture_screen_output(
     output_name: Option<&str>,
 ) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     capture_screen_output_for(backend, output_name, CaptureKind::Poll).await
+}
+
+/// One frame for the app's Capture now and the setup guide. A portal
+/// backend uses the screenshot portal and does not open the long-lived
+/// stream or write the restore token.
+pub async fn capture_screen_oneshot(
+    backend: &CaptureBackend,
+    output_name: Option<&str>,
+) -> Result<image::DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    match backend {
+        CaptureBackend::Portal => portal::capture(output_name).await,
+        _ => capture_screen_output(backend, output_name).await,
+    }
 }
 
 /// Same image as [`capture_screen_output`]. `kind` only changes whether a
