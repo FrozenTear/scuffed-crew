@@ -186,14 +186,15 @@ struct QuitGate {
 }
 
 impl QuitGate {
-    /// True: exit now. False: the quit runs when the update finishes.
-    fn request(&mut self, progress: &UpdateProgress) -> bool {
-        if matches!(progress, UpdateProgress::Running) {
-            self.deferred = true;
-            false
-        } else {
-            true
+    /// True: exit now. False: the quit runs when the update finishes. An
+    /// update that is still waiting for the open game has stopped nothing
+    /// yet, so it is cancelled and the app exits at once (F4 on #425).
+    fn request(&mut self, progress: &UpdateProgress, update: &update::UpdateGate) -> bool {
+        if !matches!(progress, UpdateProgress::Running) || update.cancel_waiting() {
+            return true;
         }
+        self.deferred = true;
+        false
     }
 
     /// The player showed the window again: they no longer want to quit.
@@ -493,6 +494,8 @@ pub struct TrackerApp {
     /// Last update check started (GUI-7). `None` in fixture mode.
     last_update_check: Option<std::time::Instant>,
     quit_gate: QuitGate,
+    /// The running update's gate: `update::LIVE_GATE`, or a test's own.
+    update_gate: &'static update::UpdateGate,
     window_id: Option<window::Id>,
     tick_count: u64,
     tray: Option<TrayHandle>,
@@ -704,6 +707,7 @@ impl TrackerApp {
             last_seasons_attempt,
             last_update_check: None,
             quit_gate: QuitGate::default(),
+            update_gate: &update::LIVE_GATE,
             window_id: Some(window_id),
             tick_count: 0,
             // Unit tests build several apps on parallel threads, and GTK's
@@ -1673,12 +1677,15 @@ impl TrackerApp {
                 self.update_progress = UpdateProgress::Running;
                 self.restart_watch.on_update_started();
                 Task::perform(
-                    update::run_in_app_update(update::UpdateRunRequest {
-                        latest: info.latest,
-                        data_dir: self.data_dir.clone(),
-                        stop_daemon: self.daemon.running(),
-                        service_installed: self.daemon.service_installed,
-                    }),
+                    update::run_in_app_update(
+                        update::UpdateRunRequest {
+                            latest: info.latest,
+                            data_dir: self.data_dir.clone(),
+                            stop_daemon: self.daemon.running(),
+                            service_installed: self.daemon.service_installed,
+                        },
+                        self.update_gate,
+                    ),
                     Message::UpdateFinished,
                 )
             }
@@ -1783,7 +1790,9 @@ impl TrackerApp {
                 // an update the exit waits for it (GUI-2).
                 if self.window_id.is_none()
                     && self.tray.is_none()
-                    && self.quit_gate.request(&self.update_progress)
+                    && self
+                        .quit_gate
+                        .request(&self.update_progress, self.update_gate)
                 {
                     self.exit_now()
                 } else {
@@ -2520,7 +2529,7 @@ impl TrackerApp {
             return self.apply_tray(TrayAction::Quit);
         }
         if crate::instance::consume_show(&self.data_dir) {
-            return self.show_window();
+            return self.on_show_request();
         }
 
         if hotkey::consume_toggle(&self.data_dir, &mut self.companion_toggle_mtime) {
@@ -2603,20 +2612,27 @@ impl TrackerApp {
     fn apply_tray(&mut self, action: TrayAction) -> Task<Message> {
         match action {
             TrayAction::Quit => {
-                if self.quit_gate.request(&self.update_progress) {
+                if self
+                    .quit_gate
+                    .request(&self.update_progress, self.update_gate)
+                {
                     self.exit_now()
                 } else {
                     tracing::info!("quit waits for the update in progress");
                     self.hide_window()
                 }
             }
-            TrayAction::Show => {
-                self.quit_gate.cancel();
-                self.show_window()
-            }
+            TrayAction::Show => self.on_show_request(),
             TrayAction::Hide => self.hide_window(),
             TrayAction::ToggleOverlay => self.toggle_overlay(),
         }
+    }
+
+    /// Tray Show, or a relaunch asking this app to show. The player wants
+    /// the app, so a quit waiting for the update is dropped (F3 on #425).
+    fn on_show_request(&mut self) -> Task<Message> {
+        self.quit_gate.cancel();
+        self.show_window()
     }
 
     fn exit_now(&mut self) -> Task<Message> {
@@ -3499,9 +3515,10 @@ token = \"secret-token-must-stay\"
     #[test]
     fn quit_gate_defers_a_quit_until_the_update_ends() {
         use crate::update::UpdateProgress;
+        let update = crate::update::UpdateGate::new();
         let mut gate = super::QuitGate::default();
         assert!(
-            !gate.request(&UpdateProgress::Running),
+            !gate.request(&UpdateProgress::Running, &update),
             "no exit mid-update"
         );
         assert!(gate.update_finished(), "the waiting quit runs");
@@ -3513,14 +3530,49 @@ token = \"secret-token-must-stay\"
             UpdateProgress::Failed("no".into()),
         ] {
             let mut gate = super::QuitGate::default();
-            assert!(gate.request(&done), "{done:?} exits at once");
+            assert!(gate.request(&done, &update), "{done:?} exits at once");
             assert!(!gate.update_finished(), "{done:?} leaves nothing pending");
         }
 
         let mut gate = super::QuitGate::default();
-        assert!(!gate.request(&UpdateProgress::Running));
+        assert!(!gate.request(&UpdateProgress::Running, &update));
         gate.cancel();
         assert!(!gate.update_finished(), "Show cancelled the quit");
+    }
+
+    /// F3 on #425: a relaunch that shows the window again must drop a
+    /// quit that waits for the update, as tray Show does.
+    #[test]
+    fn showing_the_window_again_drops_a_waiting_quit() {
+        use crate::update::UpdateProgress;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(tmp.path());
+        app.update_gate = Box::leak(Box::new(crate::update::UpdateGate::new()));
+        app.update_progress = UpdateProgress::Running;
+        let _ = app.update(super::Message::Tray(crate::tray::TrayAction::Quit));
+        assert!(app.quit_gate.deferred);
+        let _ = app.on_show_request();
+        assert!(!app.quit_gate.deferred, "the relaunch cancelled the quit");
+        let _ = app.update(super::Message::UpdateFinished(Ok("Installed.".into())));
+        assert!(!app.quit_gate.deferred);
+    }
+
+    /// F4 on #425: Quit while the update waits for the game exits at once
+    /// and cancels the update; nothing was stopped yet.
+    #[test]
+    fn quit_while_the_update_waits_for_the_game_exits_and_cancels_it() {
+        use crate::update::UpdateProgress;
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(tmp.path());
+        let gate: &'static crate::update::UpdateGate =
+            Box::leak(Box::new(crate::update::UpdateGate::new()));
+        app.update_gate = gate;
+        crate::update::test_set_waiting(gate);
+        app.update_progress = UpdateProgress::Running;
+        let _ = app.update(super::Message::Tray(crate::tray::TrayAction::Quit));
+        assert!(!app.quit_gate.deferred, "the quit did not wait");
+        assert!(!gate.waiting(), "the waiting update was cancelled");
+        assert!(!gate.cancel_waiting(), "it is cancelled, not waiting");
     }
 
     fn fixture_app(tmp: &std::path::Path) -> super::TrackerApp {
@@ -3543,6 +3595,7 @@ token = \"secret-token-must-stay\"
         use crate::update::UpdateProgress;
         let tmp = tempfile::tempdir().unwrap();
         let mut app = fixture_app(tmp.path());
+        app.update_gate = Box::leak(Box::new(crate::update::UpdateGate::new()));
         app.update_progress = UpdateProgress::Running;
         let _ = app.update(super::Message::Tray(crate::tray::TrayAction::Quit));
         assert!(app.quit_gate.deferred, "the quit waits for the update");
@@ -3564,6 +3617,7 @@ token = \"secret-token-must-stay\"
         let tmp = tempfile::tempdir().unwrap();
         let mut app = fixture_app(tmp.path());
         app.tray = None;
+        app.update_gate = Box::leak(Box::new(crate::update::UpdateGate::new()));
         let id = app.window_id.expect("window open");
         app.update_progress = UpdateProgress::Running;
         let _ = app.update(super::Message::WindowClosed(id));

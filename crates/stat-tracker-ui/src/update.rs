@@ -389,11 +389,27 @@ impl InstallerEnv for tokio::process::Command {
     }
 }
 
-fn apply_installer_env(cmd: &mut impl InstallerEnv, latest: &str, prefix: &Path) {
+fn apply_installer_env(
+    cmd: &mut impl InstallerEnv,
+    latest: &str,
+    prefix: &Path,
+    download_dir: &Path,
+) {
     cmd.remove_env(BOOTSTRAP_FETCH_HOOK_ENV);
     for (key, value) in bootstrap_env(latest, prefix) {
         cmd.set_env(key, &value);
     }
+    // bootstrap.sh downloads and extracts into STAT_TRACKER_DIR. Its own
+    // `mktemp -d` is removed only by its EXIT trap, which a SIGKILL on
+    // timeout skips, leaving ~90 MB in tmpfs. This folder is inside the
+    // update's work dir, which the app always removes.
+    cmd.set_env("STAT_TRACKER_DIR", &download_dir.display().to_string());
+}
+
+/// Where bootstrap.sh downloads to: `dl` next to the downloaded script, in
+/// the update's work dir.
+fn installer_download_dir(script: &Path) -> PathBuf {
+    script.parent().unwrap_or_else(|| Path::new(".")).join("dl")
 }
 
 pub fn bootstrap_env(latest: &str, prefix: &Path) -> Vec<(&'static str, String)> {
@@ -790,9 +806,12 @@ fn tail_useful(output: &str) -> String {
 }
 
 /// The longest an in-app install may run. The tracker is stopped while it
-/// runs, so an installer that hangs (a stalled download) is stopped here,
-/// the previous binaries are put back and the tracker is started again.
-pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+/// runs, so an installer that hangs is stopped here, the previous binaries
+/// are put back and the tracker is started again. curl already gives up on
+/// a stalled download (bootstrap.sh `curl_https`), so this is a backstop for
+/// other hangs. It must stay well above a slow but working download: the
+/// rc.5 tarball is about 91 MB, 12 minutes at 1 Mbit/s.
+pub const INSTALL_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
 /// The installer's stdout and stderr go to this file in the data dir, not to
 /// pipes. A pipe closes when this app exits and the next line the installer
@@ -866,12 +885,79 @@ pub const GAME_FILE_STALE: std::time::Duration = std::time::Duration::from_secs(
 /// Shown on the update button while the update waits for the open game.
 pub const WAITING_FOR_GAME: &str = "Waiting for your game to finish before updating";
 
-static WAITING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Where an in-app update is, as far as quitting the app goes. While it
+/// waits for the open game nothing has been stopped yet, so a quit may
+/// cancel it and exit at once. Once it goes ahead (stop, install, start)
+/// a quit has to wait for it. The switch from waiting to going ahead and a
+/// quit's cancel are one atomic step each, so exactly one of them wins.
+#[derive(Debug, Default)]
+pub struct UpdateGate(std::sync::atomic::AtomicU8);
+
+const GATE_IDLE: u8 = 0;
+const GATE_WAITING: u8 = 1;
+const GATE_CANCELLED: u8 = 2;
+const GATE_PROCEEDING: u8 = 3;
+
+impl UpdateGate {
+    pub const fn new() -> Self {
+        Self(std::sync::atomic::AtomicU8::new(GATE_IDLE))
+    }
+
+    /// True while the update waits for the open game to be saved.
+    pub fn waiting(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) == GATE_WAITING
+    }
+
+    /// Cancel an update that is still waiting for the game. True when it
+    /// was cancelled before it stopped or changed anything.
+    pub fn cancel_waiting(&self) -> bool {
+        self.0
+            .compare_exchange(
+                GATE_WAITING,
+                GATE_CANCELLED,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_ok()
+    }
+
+    /// Move to `to` from idle or waiting. False when a quit cancelled it.
+    fn advance(&self, to: u8) -> bool {
+        use std::sync::atomic::Ordering::SeqCst;
+        let mut now = self.0.load(SeqCst);
+        loop {
+            if now == GATE_CANCELLED {
+                return false;
+            }
+            match self.0.compare_exchange(now, to, SeqCst, SeqCst) {
+                Ok(_) => return true,
+                Err(seen) => now = seen,
+            }
+        }
+    }
+
+    fn reset(&self) {
+        self.0.store(GATE_IDLE, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Put `gate` in the waiting state, as an update waiting for the game does.
+#[cfg(test)]
+pub(crate) fn test_set_waiting(gate: &UpdateGate) {
+    assert!(gate.advance(GATE_WAITING));
+}
+
+/// The app's update gate. Tests give each run its own.
+pub static LIVE_GATE: UpdateGate = UpdateGate::new();
 
 /// True while an update is waiting for the open game to be saved.
 pub fn waiting_for_game() -> bool {
-    WAITING.load(std::sync::atomic::Ordering::Relaxed)
+    LIVE_GATE.waiting()
 }
+
+/// Returned when a quit cancelled the update while it waited for the game.
+pub const UPDATE_CANCELLED: &str =
+    "Update cancelled while it waited for your game. Nothing was changed.";
 
 /// How often the update checks whether the open game was saved.
 pub const GAME_WAIT_STEP: std::time::Duration = std::time::Duration::from_secs(10);
@@ -880,30 +966,54 @@ pub const GAME_WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(60
 
 /// Wait (up to [`GAME_WAIT_MAX`]) until no game is open, so stopping the
 /// tracker for the install never cuts a game that is not saved yet.
-/// Returns whether it had to wait.
-async fn wait_for_game_saved(data_dir: &Path, io: &impl UpdateIo) -> bool {
+/// Returns whether it had to wait, or `Err` when a quit cancelled the
+/// update meanwhile.
+async fn wait_for_game_saved(
+    data_dir: &Path,
+    io: &impl UpdateIo,
+    gate: &UpdateGate,
+) -> Result<bool, ()> {
     let mut waited = std::time::Duration::ZERO;
     let mut any = false;
     while game_in_progress(data_dir) && waited < GAME_WAIT_MAX {
         any = true;
-        WAITING.store(true, std::sync::atomic::Ordering::Relaxed);
+        if !gate.advance(GATE_WAITING) {
+            return Err(());
+        }
         io.pause(GAME_WAIT_STEP).await;
         waited += GAME_WAIT_STEP;
     }
-    WAITING.store(false, std::sync::atomic::Ordering::Relaxed);
-    any
+    if !gate.advance(GATE_PROCEEDING) {
+        return Err(());
+    }
+    Ok(any)
 }
 
-pub async fn run_in_app_update(req: UpdateRunRequest) -> Result<String, String> {
+pub async fn run_in_app_update(
+    req: UpdateRunRequest,
+    gate: &'static UpdateGate,
+) -> Result<String, String> {
     let plan = evaluate_plan(&req.latest);
-    run_planned_update(&req, plan, &LiveUpdateIo).await
+    run_planned_update(&req, plan, &LiveUpdateIo, gate).await
+}
+
+/// Puts the gate back to idle however the update ends.
+struct GateReset<'a>(&'a UpdateGate);
+
+impl Drop for GateReset<'_> {
+    fn drop(&mut self) {
+        self.0.reset();
+    }
 }
 
 async fn run_planned_update(
     req: &UpdateRunRequest,
     plan: UpdatePlan,
     io: &impl UpdateIo,
+    gate: &UpdateGate,
 ) -> Result<String, String> {
+    gate.reset();
+    let _reset = GateReset(gate);
     let UpdatePlan::Ready { prefix, tag } = plan else {
         let UpdatePlan::Blocked { reason, hint } = plan else {
             unreachable!("evaluate_plan is Ready or Blocked");
@@ -913,8 +1023,13 @@ async fn run_planned_update(
 
     if req.stop_daemon {
         // alpha.8: the restart waits until the open game is saved.
-        if wait_for_game_saved(&req.data_dir, io).await {
-            tracing::info!("update waited for the game in progress to be saved");
+        match wait_for_game_saved(&req.data_dir, io, gate).await {
+            Ok(true) => tracing::info!("update waited for the game in progress to be saved"),
+            Ok(false) => {}
+            Err(()) => {
+                tracing::info!("update cancelled by a quit while it waited for the game");
+                return Err(UPDATE_CANCELLED.into());
+            }
         }
         if let Err(e) = io
             .control_daemon(&req.data_dir, DaemonVerb::Stop, req.service_installed)
@@ -1101,7 +1216,7 @@ async fn download_and_run_bootstrap(
 
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg(script);
-    apply_installer_env(&mut cmd, latest, prefix);
+    apply_installer_env(&mut cmd, latest, prefix, &installer_download_dir(script));
     let status = run_logged(cmd, log).await?;
     let combined = std::fs::read_to_string(log).unwrap_or_default();
     if !status.success() {
@@ -2230,7 +2345,12 @@ mod tests {
             BOOTSTRAP_FETCH_HOOK_ENV
         ));
         cmd.env(BOOTSTRAP_FETCH_HOOK_ENV, "/tmp/not-a-real-fetch");
-        apply_installer_env(&mut cmd, "0.4.15", Path::new("/tmp/prefix"));
+        apply_installer_env(
+            &mut cmd,
+            "0.4.15",
+            Path::new("/tmp/prefix"),
+            Path::new("/tmp/work/dl"),
+        );
         let out = cmd.output().expect("bash");
         assert!(
             out.status.success(),
@@ -2263,6 +2383,10 @@ mod tests {
         install_hangs: bool,
         start_result: Result<String, String>,
         timeout: Duration,
+        /// A quit arrives during the first wait for the game.
+        quit_gate: Option<std::sync::Arc<UpdateGate>>,
+        /// The script path the installer was given.
+        script: std::sync::Mutex<Option<PathBuf>>,
     }
 
     impl FakeIo {
@@ -2276,6 +2400,8 @@ mod tests {
                 install_hangs: false,
                 start_result: Ok("Tracker started".into()),
                 timeout: INSTALL_TIMEOUT,
+                quit_gate: None,
+                script: std::sync::Mutex::new(None),
             }
         }
     }
@@ -2295,6 +2421,10 @@ mod tests {
         }
 
         async fn pause(&self, _d: std::time::Duration) {
+            if let Some(gate) = &self.quit_gate {
+                assert!(gate.waiting(), "the gate shows the wait");
+                assert!(gate.cancel_waiting(), "a waiting update can be cancelled");
+            }
             // The game "closes" after three checks.
             let mut n = self.pauses.lock().expect("pauses");
             *n += 1;
@@ -2308,13 +2438,18 @@ mod tests {
         async fn install(
             &self,
             url: &str,
-            _script: &Path,
+            script: &Path,
             _latest: &str,
             prefix: &Path,
             _tag: &str,
             _log: &Path,
         ) -> Result<String, String> {
             self.urls.lock().expect("urls").push(url.to_string());
+            *self.script.lock().expect("script") = Some(script.to_path_buf());
+            // bootstrap.sh's download, in the folder the app gives it.
+            let dl = installer_download_dir(script);
+            std::fs::create_dir_all(&dl).unwrap();
+            std::fs::write(dl.join("partial.tar.gz"), b"half").unwrap();
             // The installer got as far as replacing the binaries.
             for name in ROLLBACK_BINARIES {
                 let live = prefix.join("bin").join(name);
@@ -2377,7 +2512,7 @@ mod tests {
         };
         let mut req = run_request(true);
         req.data_dir = data.path().to_path_buf();
-        run_planned_update(&req, ready_plan(prefix.path()), &io)
+        run_planned_update(&req, ready_plan(prefix.path()), &io, &UpdateGate::new())
             .await
             .expect("installed");
         // Three checks while the game was open, then stop, install, start.
@@ -2393,9 +2528,14 @@ mod tests {
     async fn failed_install_stops_and_does_not_start() {
         let dir = tempfile::tempdir().expect("tempdir");
         let io = FakeIo::new(Err("disk full".into()));
-        let err = run_planned_update(&run_request(true), ready_plan(dir.path()), &io)
-            .await
-            .expect_err("install failed");
+        let err = run_planned_update(
+            &run_request(true),
+            ready_plan(dir.path()),
+            &io,
+            &UpdateGate::new(),
+        )
+        .await
+        .expect_err("install failed");
         assert!(err.contains("disk full"), "{err}");
         assert!(
             err.contains("left stopped"),
@@ -2414,9 +2554,14 @@ mod tests {
     async fn successful_install_restarts_from_the_tag_url() {
         let dir = tempfile::tempdir().expect("tempdir");
         let io = FakeIo::new(Ok("installed".into()));
-        let msg = run_planned_update(&run_request(true), ready_plan(dir.path()), &io)
-            .await
-            .expect("install ok");
+        let msg = run_planned_update(
+            &run_request(true),
+            ready_plan(dir.path()),
+            &io,
+            &UpdateGate::new(),
+        )
+        .await
+        .expect("install ok");
         assert_eq!(msg, "installed");
         assert_eq!(
             io.verbs.lock().expect("verbs").as_slice(),
@@ -2428,9 +2573,14 @@ mod tests {
     async fn install_without_a_running_daemon_does_not_start_one() {
         let dir = tempfile::tempdir().expect("tempdir");
         let io = FakeIo::new(Err("nope".into()));
-        let err = run_planned_update(&run_request(false), ready_plan(dir.path()), &io)
-            .await
-            .expect_err("install failed");
+        let err = run_planned_update(
+            &run_request(false),
+            ready_plan(dir.path()),
+            &io,
+            &UpdateGate::new(),
+        )
+        .await
+        .expect_err("install failed");
         assert!(!err.contains("left stopped"), "{err}");
         assert!(io.verbs.lock().expect("verbs").is_empty());
     }
@@ -2448,9 +2598,14 @@ mod tests {
     async fn a_failed_update_puts_the_previous_version_back_and_restarts() {
         let prefix = prefix_with_binaries();
         let io = FakeIo::new(Err("tessdata download failed".into()));
-        let err = run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
-            .await
-            .expect_err("install failed");
+        let err = run_planned_update(
+            &run_request(true),
+            ready_plan(prefix.path()),
+            &io,
+            &UpdateGate::new(),
+        )
+        .await
+        .expect_err("install failed");
         assert!(err.contains("tessdata download failed"), "{err}");
         assert!(err.contains("previous version was put back"), "{err}");
         assert!(err.contains("tracker was started again"), "{err}");
@@ -2478,9 +2633,14 @@ mod tests {
     async fn a_successful_update_keeps_the_new_binaries() {
         let prefix = prefix_with_binaries();
         let io = FakeIo::new(Ok("installed".into()));
-        run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
-            .await
-            .expect("install ok");
+        run_planned_update(
+            &run_request(true),
+            ready_plan(prefix.path()),
+            &io,
+            &UpdateGate::new(),
+        )
+        .await
+        .expect("install ok");
         for name in ROLLBACK_BINARIES {
             assert_eq!(
                 std::fs::read(prefix.path().join("bin").join(name)).unwrap(),
@@ -2502,7 +2662,12 @@ mod tests {
         };
         let err = tokio::time::timeout(
             Duration::from_secs(10),
-            run_planned_update(&run_request(true), ready_plan(prefix.path()), &io),
+            run_planned_update(
+                &run_request(true),
+                ready_plan(prefix.path()),
+                &io,
+                &UpdateGate::new(),
+            ),
         )
         .await
         .expect("the update must not hang with the installer")
@@ -2524,11 +2689,115 @@ mod tests {
         );
     }
 
+    /// F1 on #425: the limit is a backstop, not a download budget. A 91 MB
+    /// tarball at 1 Mbit/s takes about 12 minutes and must not be killed.
+    #[test]
+    fn the_install_limit_leaves_room_for_a_slow_download() {
+        let tarball_bits = 90_903_588_u64 * 8;
+        let at_1_mbit = Duration::from_secs(tarball_bits / 1_000_000);
+        assert!(INSTALL_TIMEOUT >= at_1_mbit * 4, "{INSTALL_TIMEOUT:?}");
+    }
+
+    /// F2 on #425: a SIGKILL skips bootstrap.sh's EXIT trap, so its
+    /// download must sit in the work dir the app removes.
+    #[tokio::test]
+    async fn a_timed_out_install_leaves_no_download_behind() {
+        let prefix = prefix_with_binaries();
+        let io = FakeIo {
+            install_hangs: true,
+            timeout: Duration::from_millis(50),
+            ..FakeIo::new(Ok("never".into()))
+        };
+        run_planned_update(
+            &run_request(true),
+            ready_plan(prefix.path()),
+            &io,
+            &UpdateGate::new(),
+        )
+        .await
+        .expect_err("timed out");
+        let script = io.script.lock().unwrap().clone().expect("installer ran");
+        let work = script.parent().unwrap().to_path_buf();
+        assert!(
+            installer_download_dir(&script).starts_with(&work),
+            "the download dir is inside the work dir"
+        );
+        assert!(!work.exists(), "{} was left behind", work.display());
+    }
+
+    #[test]
+    fn the_installer_downloads_into_the_dir_it_is_given() {
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg("printf '%s' \"${STAT_TRACKER_DIR-unset}\"");
+        apply_installer_env(
+            &mut cmd,
+            "0.4.15",
+            Path::new("/tmp/prefix"),
+            Path::new("/tmp/work/dl"),
+        );
+        let out = cmd.output().expect("bash");
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "/tmp/work/dl");
+        assert_eq!(
+            installer_download_dir(Path::new("/tmp/sst-gui-update-1/bootstrap.sh")),
+            PathBuf::from("/tmp/sst-gui-update-1/dl")
+        );
+    }
+
+    /// F4 on #425: a quit while the update waits for the game cancels it
+    /// before anything is stopped or installed.
+    #[tokio::test]
+    async fn a_quit_while_waiting_for_the_game_cancels_cleanly() {
+        let data = tempfile::tempdir().expect("tempdir");
+        std::fs::write(data.path().join("active_game.json"), "{}").unwrap();
+        let prefix = prefix_with_binaries();
+        let gate = std::sync::Arc::new(UpdateGate::new());
+        let io = FakeIo {
+            game_dir: Some(data.path().to_path_buf()),
+            quit_gate: Some(gate.clone()),
+            ..FakeIo::new(Ok("installed".into()))
+        };
+        let mut req = run_request(true);
+        req.data_dir = data.path().to_path_buf();
+        let err = run_planned_update(&req, ready_plan(prefix.path()), &io, &gate)
+            .await
+            .expect_err("cancelled");
+        assert_eq!(err, UPDATE_CANCELLED);
+        assert!(
+            io.verbs.lock().unwrap().is_empty(),
+            "the tracker was not touched"
+        );
+        assert!(io.urls.lock().unwrap().is_empty(), "nothing was installed");
+        for name in ROLLBACK_BINARIES {
+            assert_eq!(
+                std::fs::read(prefix.path().join("bin").join(name)).unwrap(),
+                b"old"
+            );
+        }
+        assert!(!gate.waiting(), "the gate is idle again");
+    }
+
+    #[test]
+    fn a_quit_cannot_cancel_an_update_that_went_ahead() {
+        let gate = UpdateGate::new();
+        assert!(!gate.cancel_waiting(), "idle: nothing to cancel");
+        assert!(gate.advance(GATE_WAITING));
+        assert!(gate.advance(GATE_PROCEEDING));
+        assert!(!gate.cancel_waiting(), "stop and install are under way");
+        gate.reset();
+        assert!(gate.advance(GATE_WAITING));
+        assert!(gate.cancel_waiting());
+        assert!(
+            !gate.advance(GATE_PROCEEDING),
+            "a cancelled update never goes ahead"
+        );
+    }
+
     #[test]
     fn install_timeout_message_names_the_limit() {
         assert_eq!(
             install_timeout_message(INSTALL_TIMEOUT),
-            "The installer did not finish within 10 minutes, so it was stopped."
+            "The installer did not finish within 60 minutes, so it was stopped."
         );
         assert_eq!(
             install_timeout_message(Duration::from_secs(45)),
@@ -2545,9 +2814,14 @@ mod tests {
             start_result: Err("unit failed".into()),
             ..FakeIo::new(Ok("Installed stat-tracker-v0.4.15.".into()))
         };
-        let msg = run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
-            .await
-            .expect("the install itself worked");
+        let msg = run_planned_update(
+            &run_request(true),
+            ready_plan(prefix.path()),
+            &io,
+            &UpdateGate::new(),
+        )
+        .await
+        .expect("the install itself worked");
         assert!(msg.starts_with("Installed stat-tracker-v0.4.15."), "{msg}");
         assert!(
             msg.contains("Starting the tracker again failed (unit failed)"),
@@ -2562,9 +2836,14 @@ mod tests {
             start_result: Err("unit failed".into()),
             ..FakeIo::new(Err("Installer failed".into()))
         };
-        let err = run_planned_update(&run_request(true), ready_plan(prefix.path()), &io)
-            .await
-            .expect_err("install failed");
+        let err = run_planned_update(
+            &run_request(true),
+            ready_plan(prefix.path()),
+            &io,
+            &UpdateGate::new(),
+        )
+        .await
+        .expect_err("install failed");
         assert!(err.contains("previous version was put back"), "{err}");
         assert!(!err.contains("tracker was started again"), "{err}");
         assert!(
