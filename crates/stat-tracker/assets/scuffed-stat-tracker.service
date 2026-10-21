@@ -40,6 +40,9 @@ Environment=STAT_TRACKER_REPLACE_STRAY=1
 # tracker would exit 75 and nothing would start it again.
 Environment=STAT_TRACKER_SYSTEMD=1
 Restart=on-failure
+# 75 is the replaced-binary exit. It still restarts, and it is not a failure.
+RestartForceExitStatus=75
+SuccessExitStatus=75
 RestartSec=10
 StandardOutput=journal
 StandardError=journal

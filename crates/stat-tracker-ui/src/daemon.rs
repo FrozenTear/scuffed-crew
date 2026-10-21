@@ -154,6 +154,9 @@ pub fn user_unit_dirs() -> Vec<PathBuf> {
     if let Some(config) = dirs::config_dir() {
         dirs.push(config.join("systemd").join("user"));
     }
+    if let Some(data) = dirs::data_dir() {
+        dirs.push(data.join("systemd").join("user"));
+    }
     for path in [
         "/etc/systemd/user",
         "/usr/local/lib/systemd/user",

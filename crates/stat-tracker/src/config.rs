@@ -173,7 +173,7 @@ pub struct Config {
 }
 
 /// `capture_route` in config.toml. Missing means [`Self::Auto`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CaptureRoute {
     #[default]
@@ -183,6 +183,18 @@ pub enum CaptureRoute {
 }
 
 impl CaptureRoute {
+    /// `auto`, `screencast`, `screenshot`, and the env names `portal` and
+    /// `portal-screenshot`. Case does not matter. An unknown word is refused
+    /// so a typo does not silently change the route.
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "auto" => Some(Self::Auto),
+            "screencast" | "portal" => Some(Self::Screencast),
+            "screenshot" | "portal-screenshot" => Some(Self::Screenshot),
+            _ => None,
+        }
+    }
+
     pub const fn is_auto(&self) -> bool {
         matches!(self, Self::Auto)
     }
@@ -193,6 +205,20 @@ impl CaptureRoute {
             Self::Screencast => "screencast",
             Self::Screenshot => "screenshot",
         }
+    }
+}
+
+impl<'de> Deserialize<'de> for CaptureRoute {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Self::parse(&raw).ok_or_else(|| {
+            D::Error::custom(format!(
+                "capture_route must be auto, screencast, or screenshot (got {raw})"
+            ))
+        })
     }
 }
 
@@ -969,6 +995,23 @@ fn last_capture_assignment(text: &str) -> Option<&str> {
 /// `~/.config/environment.d/*.conf`, alphabetical. The value is the last
 /// assignment in that file.
 pub fn environment_d_capture_files() -> Vec<(String, String)> {
+    // Settings draws this on every frame. The directory does not change
+    // that often, so a short cache keeps the read off the hot path.
+    const TTL: std::time::Duration = std::time::Duration::from_secs(2);
+    type EnvCache = Option<(std::time::Instant, Vec<(String, String)>)>;
+    static CACHE: std::sync::Mutex<EnvCache> = std::sync::Mutex::new(None);
+    let mut guard = CACHE.lock().unwrap_or_else(|err| err.into_inner());
+    if let Some((at, files)) = guard.as_ref()
+        && at.elapsed() < TTL
+    {
+        return files.clone();
+    }
+    let files = read_environment_d_capture_files();
+    *guard = Some((std::time::Instant::now(), files.clone()));
+    files
+}
+
+fn read_environment_d_capture_files() -> Vec<(String, String)> {
     let Some(dir) = dirs::config_dir() else {
         return Vec::new();
     };
@@ -2822,5 +2865,28 @@ cooldown_secs = 120
         let raw = format!("screencast_max_fps = 4\n{raw}");
         let parsed: Config = toml::from_str(&raw).unwrap();
         assert_eq!(parsed.screencast_max_fps(), 4);
+    }
+
+    #[test]
+    fn capture_route_accepts_case_and_the_env_names() {
+        assert_eq!(
+            CaptureRoute::parse("Screencast"),
+            Some(CaptureRoute::Screencast)
+        );
+        assert_eq!(
+            CaptureRoute::parse("portal"),
+            Some(CaptureRoute::Screencast)
+        );
+        assert_eq!(
+            CaptureRoute::parse("portal-screenshot"),
+            Some(CaptureRoute::Screenshot)
+        );
+        assert_eq!(CaptureRoute::parse("nope"), None);
+        #[derive(Deserialize)]
+        struct Wrap {
+            capture_route: CaptureRoute,
+        }
+        let parsed: Wrap = toml::from_str("capture_route = \"Screencast\"\n").unwrap();
+        assert_eq!(parsed.capture_route, CaptureRoute::Screencast);
     }
 }
