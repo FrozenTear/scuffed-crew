@@ -38,10 +38,22 @@ on:
         type: boolean
         default: false
 
+# Read-only by default. The build jobs compile every crates.io build script
+# and run third-party actions, so they get no write token. Only
+# package-release, which runs `gh release create`, gets contents: write.
+# actions/cache, rust-cache and upload/download-artifact use the runner's
+# cache/artifact token, not GITHUB_TOKEN, so they need no `actions` scope
+# (publish-image.yml has written its GHA build cache under contents: read
+# plus packages: write all along).
 permissions:
-  contents: write
-  # actions/cache on the daemon job. contents: write stays for gh release.
-  actions: write
+  contents: read
+
+# One run per ref. A tag pushed again (rc.5 was pushed twice, and the second
+# run failed on "release already exists") cancels the older run before it
+# can publish, so the newest push of a tag is the one that builds.
+concurrency:
+  group: stat-tracker-release-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   STAGE: scuffed-stat-tracker-linux-x86_64
@@ -57,7 +69,9 @@ jobs:
       # run of the build script (default $HOME/.local/...) is unaffected.
       TESSERACT_PREFIX: /home/runner/.local/tesseract-5.5.3
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Tag matches Cargo.toml versions
         if: startsWith(github.ref, 'refs/tags/stat-tracker-v')
@@ -82,7 +96,7 @@ jobs:
           # training can keep using the 4.1.1 tools.
 
       - name: Cache pinned Tesseract 5.5.3
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ${{ env.TESSERACT_PREFIX }}
           key: tesseract-5.5.3-lept182-ubuntu2204-openmp-soname5-${{ hashFiles('crates/stat-tracker/dist/build-tesseract.sh') }}
@@ -94,9 +108,11 @@ jobs:
           TESSERACT_BUILD_JOBS="$(nproc)" bash crates/stat-tracker/dist/build-tesseract.sh
           echo "PKG_CONFIG_PATH=${TESSERACT_PREFIX}/lib/pkgconfig" >> "$GITHUB_ENV"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: daemon-2204-tesseract-5.5.3
 
@@ -116,7 +132,7 @@ jobs:
         run: |
           set -euo pipefail
           pkg-config --modversion tesseract | grep -qx '5.5.3'
-          cargo build --release --bin scuffed-stat-tracker
+          cargo build --release --locked --bin scuffed-stat-tracker
 
       - name: Bundle OCR library closure + set RPATH
         run: |
@@ -234,7 +250,7 @@ jobs:
               ;;
           esac
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: daemon
           path: out/
@@ -245,7 +261,9 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Tag matches Cargo.toml versions
         if: startsWith(github.ref, 'refs/tags/stat-tracker-v')
@@ -267,9 +285,11 @@ jobs:
             libxdo-dev \
             pkg-config patchelf
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
+        with:
+          toolchain: stable
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: gui-iced-2204
 
@@ -285,7 +305,7 @@ jobs:
           echo "SST_RELEASE_VERSION=${V}" >> "$GITHUB_ENV"
 
       - name: Build GUI (release)
-        run: cargo build --release -p scuffed-stat-tracker-ui --bin stat-tracker-gui
+        run: cargo build --release --locked -p scuffed-stat-tracker-ui --bin stat-tracker-gui
 
       - name: Bundle libxdo + set RPATH
         run: |
@@ -350,7 +370,7 @@ jobs:
           ./out/bin/stat-tracker-gui --build-id | grep -Eqx '[0-9a-f]{64}' \
             || { echo "stat-tracker-gui --build-id did not print a build id" >&2; exit 1; }
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: gui
           path: out/
@@ -361,9 +381,15 @@ jobs:
     needs: [build-daemon, build-gui]
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    # The only job with a write token: gh release create (and, for a manual
+    # publish, the tag gh mints with --target).
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          # gh uses GH_TOKEN below; git itself never pushes.
+          persist-credentials: false
           # Full history: release notes diff against the previous
           # stat-tracker-v* tag, which a depth-1 clone doesn't have.
           fetch-depth: 0
@@ -372,12 +398,12 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/stat-tracker-v')
         run: bash crates/stat-tracker/dist/check-tag-version.sh
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: daemon
           path: daemon
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: gui
           path: gui
@@ -455,7 +481,7 @@ jobs:
         # Manual runs default to no release and no tag. The tarball is still
         # built above. Tag pushes and publish=true skip this and use gh release.
         if: ${{ !(startsWith(github.ref, 'refs/tags/stat-tracker-v') || inputs.publish == true) }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: stat-tracker-linux-x86_64-test
           path: |
