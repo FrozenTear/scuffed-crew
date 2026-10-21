@@ -4,11 +4,13 @@
 //! KWin crash when a screenshot and a voice-app share run together. The
 //! restore token is stored in the data dir so the prompt is once per
 //! machine, not once per boot. A backend that rejects the token is asked
-//! again without it. If the session cannot start, or a grab sees no frame
-//! within [`SCREENCAST_FRAME_WAIT`], a screenshot is used only where that
-//! is safe (niri, wlroots, forced GNOME). KDE skips it and logs. A failed
-//! start is not retried for [`START_BACKOFF`]. The permission dialog times
-//! out, and shutdown aborts it.
+//! again without it. If the portal is down, or its cursor-mode property
+//! cannot be read, the open is logged as unavailable and the token is kept.
+//! If the session cannot start, or a grab sees no frame within
+//! [`SCREENCAST_FRAME_WAIT`], a screenshot is used only where that is safe
+//! (niri, wlroots, forced GNOME). KDE skips it and logs. A failed start is
+//! not retried for [`START_BACKOFF`]. The permission dialog times out, and
+//! shutdown aborts it.
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -277,6 +279,8 @@ pub async fn capture(
     let age = state.last_fail.map(|at| at.elapsed());
     if !should_try_stream(age, START_BACKOFF) {
         drop(state);
+        // KDE, Plasma, and KWin stop inside screenshot_if_safe. That path
+        // does not call portal::capture.
         return screenshot_if_safe(output_name, "screencast backoff").await;
     }
     let restart = match open_permit(state.opening, state.live.is_some()) {
@@ -560,6 +564,38 @@ impl std::fmt::Display for OpenFail {
     }
 }
 
+const PORTAL_UNAVAILABLE: &str = "screencast portal is unavailable";
+
+/// How an `AvailableCursorModes` read decides the open.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CursorModesBlock {
+    /// Hidden is offered. Continue into select and start.
+    Ok,
+    /// The portal is down, or the property could not be read, or the bit
+    /// set was empty. Retry later. Do not drop the restore token.
+    PortalUnavailable,
+    /// A compositor answered with modes and Hidden was not one of them.
+    NoHiddenCursor,
+}
+
+/// Empty flags are a dead backend, not a compositor that lacks Hidden.
+/// A failed read is the same. Only a non-empty set without Hidden is
+/// [`CursorModesBlock::NoHiddenCursor`].
+fn cursor_modes_block(read_failed: bool, modes_empty: bool, has_hidden: bool) -> CursorModesBlock {
+    if read_failed || modes_empty {
+        CursorModesBlock::PortalUnavailable
+    } else if has_hidden {
+        CursorModesBlock::Ok
+    } else {
+        CursorModesBlock::NoHiddenCursor
+    }
+}
+
+fn portal_unavailable(err: &impl std::fmt::Display) -> OpenFail {
+    tracing::warn!(error = %err, "{PORTAL_UNAVAILABLE}");
+    OpenFail::Other(PORTAL_UNAVAILABLE.into())
+}
+
 async fn open_session(
     data_dir: &Path,
     output_name: Option<&str>,
@@ -646,19 +682,34 @@ async fn open_once(
     persist: PersistMode,
     max_fps: u32,
 ) -> Result<Live, OpenFail> {
-    let proxy = Screencast::new()
-        .await
-        .map_err(|err| OpenFail::Other(err.to_string()))?;
-    match proxy.available_cursor_modes().await {
-        Ok(modes) if !modes.contains(CursorMode::Hidden) => {
+    let proxy = match Screencast::new().await {
+        Ok(proxy) => proxy,
+        Err(err) => return Err(portal_unavailable(&err)),
+    };
+    let modes = match proxy.available_cursor_modes().await {
+        Ok(modes) => {
+            let block =
+                cursor_modes_block(false, modes.is_empty(), modes.contains(CursorMode::Hidden));
+            if block == CursorModesBlock::PortalUnavailable {
+                tracing::warn!("{PORTAL_UNAVAILABLE}");
+            }
+            block
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "{PORTAL_UNAVAILABLE}");
+            cursor_modes_block(true, true, false)
+        }
+    };
+    match modes {
+        CursorModesBlock::Ok => {}
+        CursorModesBlock::PortalUnavailable => {
+            return Err(OpenFail::Other(PORTAL_UNAVAILABLE.into()));
+        }
+        CursorModesBlock::NoHiddenCursor => {
             return Err(OpenFail::Other(
                 "portal does not offer a hidden cursor, so cursor metadata was not requested"
                     .into(),
             ));
-        }
-        Ok(_) => {}
-        Err(err) => {
-            tracing::debug!(error = %err, "portal did not report cursor modes; asking for hidden");
         }
     }
     let session = match proxy.create_session(Default::default()).await {
@@ -1072,6 +1123,35 @@ mod tests {
                 "screencast backoff; screenshot skipped".to_string()
             }
         );
+    }
+
+    #[test]
+    fn an_unavailable_portal_is_not_a_missing_hidden_cursor() {
+        assert_eq!(
+            cursor_modes_block(true, false, false),
+            CursorModesBlock::PortalUnavailable
+        );
+        assert_eq!(
+            cursor_modes_block(false, true, false),
+            CursorModesBlock::PortalUnavailable
+        );
+        assert_eq!(
+            cursor_modes_block(true, true, true),
+            CursorModesBlock::PortalUnavailable
+        );
+        assert_eq!(
+            cursor_modes_block(false, false, false),
+            CursorModesBlock::NoHiddenCursor
+        );
+        assert_eq!(cursor_modes_block(false, false, true), CursorModesBlock::Ok);
+        assert_eq!(PORTAL_UNAVAILABLE, "screencast portal is unavailable");
+        // Backoff on KDE calls screenshot_if_safe, which uses this predicate
+        // and does not call portal::capture.
+        assert!(!screenshot_fallback_is_safe("KDE", true));
+        assert!(!screenshot_fallback_is_safe("KDE", false));
+        assert!(!screenshot_fallback_is_safe("plasma", true));
+        assert!(!screenshot_fallback_is_safe("kwin", false));
+        assert!(!screenshot_fallback_is_safe("KDE:plasma", true));
     }
 
     #[test]

@@ -86,6 +86,24 @@ struct SpaPod {
     type_: u32,
 }
 
+/// `spa_dict` from libspa. `pw_properties_new_dict` reads `n_items` at
+/// offset 4, so a null pointer segfaults. `n_items == 0` is an empty dict
+/// and the items pointer is not followed.
+#[repr(C)]
+struct SpaDict {
+    flags: u32,
+    n_items: u32,
+    items: *const c_void,
+}
+
+fn empty_spa_dict() -> SpaDict {
+    SpaDict {
+        flags: 0,
+        n_items: 0,
+        items: std::ptr::null(),
+    }
+}
+
 #[repr(C)]
 struct PwStreamEvents {
     version: u32,
@@ -323,15 +341,22 @@ impl Handle {
         if let Some(frame) = take_frame(&self.state, fresh, marker) {
             return Ok(self.finish_frame(frame, fresh, started));
         }
-        if !fresh
-            && self.state.streaming.load(Ordering::Acquire)
-            && let Some(frame) = self
-                .state
+        // Clone into a local before `finish_frame`. An `if let` on the
+        // lock guard would keep that guard alive through the then-block
+        // (edition 2024), and `remember_good` locks `last_good` again.
+        // Other capture locks are statement-scoped, or they live inside a
+        // helper that returns an owned value before the caller locks again.
+        // `take_frame` above is that helper: it locks `latest`, not this mutex.
+        let reused = if !fresh && self.state.streaming.load(Ordering::Acquire) {
+            self.state
                 .last_good
                 .lock()
                 .unwrap_or_else(|err| err.into_inner())
                 .clone()
-        {
+        } else {
+            None
+        };
+        if let Some(frame) = reused {
             return Ok(self.finish_frame(frame, fresh, started));
         }
         Err("no screencast frame".into())
@@ -678,7 +703,10 @@ where
 fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
     let format = pod::enum_format_pod(state.max_fps);
     unsafe {
+        // PipeWire 1.6 `pw_init` does not read argc or argv. NULL is the
+        // no-argv init.
         (symbols.init)(std::ptr::null_mut(), std::ptr::null_mut());
+        // `pw_loop_new` only looks at this dict when the pointer is set.
         let main = (symbols.main_loop_new)(std::ptr::null());
         if main.is_null() {
             state.alive.store(false, Ordering::Release);
@@ -686,10 +714,12 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
             return;
         }
         let pw_loop = (symbols.main_loop_get_loop)(main);
+        // `pw_context_new` replaces a null properties pointer with an empty set.
         let context = (symbols.context_new)(pw_loop, std::ptr::null_mut(), 0);
         let core = if context.is_null() {
             std::ptr::null_mut()
         } else {
+            // `core_new` does the same for a null properties pointer.
             (symbols.connect_fd)(context, fd, std::ptr::null_mut(), 0)
         };
         if core.is_null() {
@@ -702,7 +732,12 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
             return;
         }
         let link = stream_link_plan(node_id, None);
-        let props = (symbols.properties_new_dict)(std::ptr::null());
+        // A null dict is dereferenced (`dict->n_items`). An empty spa_dict
+        // is the same bytes QA ran on PipeWire 1.6.9. `pw_stream_new` takes
+        // ownership of the result. `set_prop` skips a null result from an
+        // allocation failure, and `pw_stream_new` accepts null props.
+        let empty = empty_spa_dict();
+        let props = (symbols.properties_new_dict)(&empty as *const SpaDict as *const c_void);
         set_prop(&symbols, props, "media.type", "Video");
         set_prop(&symbols, props, "media.category", "Capture");
         set_prop(&symbols, props, "media.role", "Screen");
@@ -1368,5 +1403,121 @@ mod tests {
             ),
             framebuf::TabFrameChoice::Miss
         );
+    }
+
+    #[test]
+    fn empty_spa_dict_is_the_pipewire_zero_dict() {
+        let dict = empty_spa_dict();
+        assert_eq!(std::mem::offset_of!(SpaDict, n_items), 4);
+        assert_eq!(dict.flags, 0);
+        assert_eq!(dict.n_items, 0);
+        assert!(dict.items.is_null());
+        let size = std::mem::size_of::<SpaDict>();
+        assert_eq!(size, 8 + std::mem::size_of::<*const c_void>());
+        let bytes = unsafe { std::slice::from_raw_parts(&raw const dict as *const u8, size) };
+        assert!(bytes.iter().all(|byte| *byte == 0));
+    }
+
+    unsafe extern "C" fn noop_dequeue(_: *mut c_void) -> *mut PwBuffer {
+        std::ptr::null_mut()
+    }
+
+    unsafe extern "C" fn noop_queue(_: *mut c_void, _: *mut PwBuffer) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn noop_update(_: *mut c_void, _: *const *const SpaPod, _: u32) -> i32 {
+        0
+    }
+
+    unsafe extern "C" fn noop_quit(_: *mut c_void) -> i32 {
+        0
+    }
+
+    fn reuse_handle(frame: PackedFrame) -> Handle {
+        Handle {
+            state: Arc::new(State {
+                stream: AtomicPtr::new(std::ptr::null_mut()),
+                loop_: AtomicPtr::new(std::ptr::null_mut()),
+                loop_lock: Mutex::new(()),
+                quit_requested: AtomicBool::new(false),
+                dequeue: noop_dequeue,
+                queue: noop_queue,
+                update_params: noop_update,
+                quit: noop_quit,
+                want: AtomicBool::new(false),
+                alive: AtomicBool::new(true),
+                streaming: AtomicBool::new(true),
+                seen_streaming: AtomicBool::new(true),
+                fresh_done: AtomicBool::new(true),
+                dropped: AtomicU64::new(0),
+                received: AtomicU64::new(0),
+                grabs: AtomicU64::new(0),
+                grab_ns: AtomicU64::new(0),
+                width: AtomicU32::new(frame.width),
+                height: AtomicU32::new(frame.height),
+                format: AtomicU32::new(frame.format),
+                max_fps: 2,
+                dequeue_seq: AtomicU64::new(0),
+                max_pts: AtomicI64::new(0),
+                last_copy_ms: AtomicU64::new(0),
+                need_arrived_ms: AtomicU64::new(NO_TAB_NEED),
+                started: std::time::Instant::now(),
+                latest: Mutex::new(None),
+                last_good: Mutex::new(Some(frame)),
+                notify: tokio::sync::Notify::new(),
+                buffers_pod: pod::buffers_pod(),
+                rate_logged: AtomicBool::new(false),
+                fps_window: Mutex::new(FpsWindow {
+                    at: std::time::Instant::now(),
+                    info_at: std::time::Instant::now(),
+                    count: 0,
+                    info_frames: 0,
+                    info_secs: 0,
+                }),
+            }),
+            join: None,
+        }
+    }
+
+    #[test]
+    fn poll_grab_reuses_last_good_without_relocking() {
+        let frame = framebuf::pack(
+            framebuf::FMT_BGRX,
+            1,
+            1,
+            4,
+            &[0, 0, 255, 0],
+            framebuf::FrameClock { seq: 3, pts: 1 },
+        )
+        .unwrap();
+        let handle = reuse_handle(frame);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let outcome = runtime.block_on(handle.grab(Duration::ZERO, None));
+            let _ = tx.send(outcome);
+        });
+        let outcome = match rx.recv_timeout(Duration::from_secs(2)) {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                // The worker is stuck on the mutex. Joining it would hang
+                // the test. Process exit ends the thread.
+                panic!("poll grab deadlocked while reusing last_good");
+            }
+        };
+        let _ = worker.join();
+        match outcome.expect("poll grab") {
+            GrabOutcome::Frame(got) => {
+                assert_eq!(
+                    framebuf::to_rgb(&got).unwrap().get_pixel(0, 0).0,
+                    [255, 0, 0]
+                );
+            }
+            GrabOutcome::TabMiss { .. } => panic!("poll grab returned a tab miss"),
+        }
     }
 }

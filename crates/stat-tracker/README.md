@@ -230,9 +230,11 @@ force the stream.
 If the share cannot start, the tracker logs a warning. On niri, wlroots,
 and GNOME when the stream was forced, that grab uses the older screenshot
 portal. On KDE it skips the screenshot, including while backing off or
-after the stream dies. A failed start is not retried for 30 seconds. A
-share that never starts streaming is closed and then waits out that same
-backoff. The permission dialog times out, and stopping the tracker cancels
+after the stream dies. A failed start is not retried for 30 seconds. If
+the portal is down, or its cursor-mode property cannot be read, the log
+says the portal is unavailable and the saved permission is kept. The next
+try after that backoff opens the share again. A share that never starts
+streaming is closed and then waits out that same backoff. The permission dialog times out, and stopping the tracker cancels
 it. On KDE a Tab that sees no frame from after the key press does not fall
 back to that portal. A Tab on a direct capture or the screenshot portal
 still waits 400 ms for the overlay. On the stream it waits for a buffer at
