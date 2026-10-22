@@ -33,8 +33,8 @@ pub const TAB_RETRY_WAITS: [Duration; 2] = [Duration::from_millis(300), Duration
 /// retry: each of its grabs is a full KDE capture of about 450 ms plus a
 /// PNG, so a second retry lands well after the board and costs the game a
 /// third full capture. The stream, wayshot, X11 and KDE direct keep both.
-pub fn tab_retry_waits(portal_screenshot: bool) -> &'static [Duration] {
-    if portal_screenshot {
+pub fn tab_retry_waits(route: crate::capture::ShotRoute) -> &'static [Duration] {
+    if route.one_tab_retry() {
         &TAB_RETRY_WAITS[..1]
     } else {
         &TAB_RETRY_WAITS
@@ -685,13 +685,19 @@ mod tests {
 
     #[test]
     fn the_screenshot_portal_retries_a_rejected_tab_once() {
-        assert_eq!(tab_retry_waits(true), &TAB_RETRY_WAITS[..1]);
-        assert_eq!(tab_retry_waits(false), &TAB_RETRY_WAITS[..]);
-        for (portal_screenshot, want) in [(true, 1usize), (false, 2)] {
+        use crate::capture::ShotRoute;
+        assert_eq!(tab_retry_waits(ShotRoute::Portal), &TAB_RETRY_WAITS[..1]);
+        assert_eq!(tab_retry_waits(ShotRoute::None), &TAB_RETRY_WAITS[..]);
+        assert_eq!(tab_retry_waits(ShotRoute::Kwin), &TAB_RETRY_WAITS[..]);
+        for (route, want) in [
+            (ShotRoute::Portal, 1usize),
+            (ShotRoute::None, 2),
+            (ShotRoute::Kwin, 2),
+        ] {
             let grabs = RefCell::new(0usize);
             let (_, retries) = block_on(with_retries(
                 &TabFlight::new(Instant::now()),
-                tab_retry_waits(portal_screenshot),
+                tab_retry_waits(route),
                 |_: &u8| TabResult::NotAScoreboard,
                 |v: &u8| *v,
                 |_| "rejected by the scoreboard check",
@@ -702,7 +708,7 @@ mod tests {
                 |_| async {},
             ))
             .unwrap();
-            assert_eq!(retries, want, "portal screenshot = {portal_screenshot}");
+            assert_eq!(retries, want, "{route:?}");
             assert_eq!(*grabs.borrow(), want + 1, "grabs including the first");
         }
     }

@@ -13,6 +13,16 @@
 //! request and its cleanup have finished, so the next request cannot start
 //! beside it. A caller that is dropped while it still waits for the lock
 //! starts nothing.
+//!
+//! This is one lock per process. The app and the daemon are two processes,
+//! so a "Capture now" in the app can overlap a daemon grab; KWin runs such
+//! calls one after the other on its own thread.
+//!
+//! Polls never wait for the lock ([`lock_wait`]): a poll that finds a
+//! request running is skipped, and the next tick polls again. That keeps
+//! the poll arm of the daemon loop, including the outcome-only poll that
+//! runs beside a Tab capture in the ~3 s VICTORY window, from sitting
+//! behind a Tab's screenshot. A Tab waits, up to its route's Tab wait.
 
 use std::future::Future;
 use std::time::Duration;
@@ -29,13 +39,51 @@ pub enum FlightError {
 impl std::fmt::Display for FlightError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            FlightError::Busy => f.write_str("a previous capture request is still running"),
+            FlightError::Busy => f.write_str(BUSY),
             FlightError::Task(err) => write!(f, "capture task failed: {err}"),
         }
     }
 }
 
 impl std::error::Error for FlightError {}
+
+/// The words every "lock still held" error carries, whichever route
+/// produced it ([`is_busy`]).
+pub const BUSY: &str = "a previous capture request is still running";
+
+/// True for an error text from a grab that found the lock held.
+pub fn is_busy(err: &str) -> bool {
+    err.contains(BUSY)
+}
+
+/// How long the current grab waits for the lock: `tab_wait` inside a Tab
+/// capture task, nothing for a poll or anything else.
+pub fn lock_wait(is_tab: bool, tab_wait: Duration) -> Duration {
+    if is_tab { tab_wait } else { Duration::ZERO }
+}
+
+/// Runs `request` to the end, calling `overdue` with the time waited so
+/// far once at `first` and then every `every`. It never gives up: a
+/// request that cannot be cancelled keeps whatever it holds until it ends.
+pub async fn with_overdue_warnings<F: Future>(
+    request: F,
+    first: Duration,
+    every: Duration,
+    mut overdue: impl FnMut(Duration),
+) -> F::Output {
+    tokio::pin!(request);
+    let started = tokio::time::Instant::now();
+    let mut next = started + first;
+    loop {
+        tokio::select! {
+            out = &mut request => return out,
+            () = tokio::time::sleep_until(next) => {
+                overdue(next - started);
+                next += every;
+            }
+        }
+    }
+}
 
 /// A lock that one capture request holds from its start until its cleanup.
 pub struct SingleFlight {
@@ -87,6 +135,76 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[test]
+    fn polls_never_wait_and_tabs_wait_their_route_wait() {
+        let tab = Duration::from_secs(4);
+        assert_eq!(lock_wait(false, tab), Duration::ZERO);
+        assert_eq!(lock_wait(true, tab), tab);
+        assert!(is_busy(&FlightError::Busy.to_string()));
+        assert!(is_busy(&format!(
+            "portal screenshot: {}",
+            FlightError::Busy
+        )));
+        assert!(!is_busy("capture task failed: boom"));
+    }
+
+    /// A poll arriving while a request runs is turned away at once; a Tab
+    /// waits for it. Paused time: nothing really sleeps.
+    #[tokio::test(start_paused = true)]
+    async fn a_poll_is_turned_away_at_once_and_a_tab_waits() {
+        static FLIGHT: SingleFlight = SingleFlight::new();
+        let running = tokio::spawn(FLIGHT.run(Duration::ZERO, async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }));
+        tokio::task::yield_now().await;
+        assert!(FLIGHT.in_flight());
+        let started = tokio::time::Instant::now();
+        let poll = FLIGHT
+            .run(lock_wait(false, Duration::from_secs(4)), async {})
+            .await;
+        assert_eq!(poll, Err(FlightError::Busy));
+        assert_eq!(started.elapsed(), Duration::ZERO, "the poll did not wait");
+        let tab = FLIGHT
+            .run(lock_wait(true, Duration::from_secs(4)), async {})
+            .await;
+        assert_eq!(tab, Ok(()));
+        assert_eq!(started.elapsed(), Duration::from_secs(1), "the Tab waited");
+        running.await.unwrap().unwrap();
+    }
+
+    /// A request that cannot be cancelled keeps the lock until it ends:
+    /// it is warned about at 20 s and every 60 s after, and never given up.
+    #[tokio::test(start_paused = true)]
+    async fn an_overdue_request_is_warned_about_and_keeps_the_lock() {
+        static FLIGHT: SingleFlight = SingleFlight::new();
+        let (answer_tx, answer_rx) = tokio::sync::oneshot::channel::<u8>();
+        let warned = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let warned_in_task = Arc::clone(&warned);
+        let request = tokio::spawn(FLIGHT.run(Duration::ZERO, async move {
+            with_overdue_warnings(
+                answer_rx,
+                Duration::from_secs(20),
+                Duration::from_secs(60),
+                |waited| warned_in_task.lock().unwrap().push(waited.as_secs()),
+            )
+            .await
+        }));
+        tokio::time::sleep(Duration::from_secs(25)).await;
+        assert!(FLIGHT.in_flight(), "still held after the first warning");
+        assert_eq!(*warned.lock().unwrap(), vec![20]);
+        assert_eq!(
+            FLIGHT.run(Duration::from_secs(1), async {}).await,
+            Err(FlightError::Busy),
+            "nothing runs beside it"
+        );
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        assert!(FLIGHT.in_flight());
+        assert_eq!(*warned.lock().unwrap(), vec![20, 80, 140]);
+        answer_tx.send(7).unwrap();
+        assert_eq!(request.await.unwrap().unwrap(), Ok(7));
+        assert!(!FLIGHT.in_flight());
+    }
 
     #[tokio::test]
     async fn requests_never_overlap() {

@@ -318,8 +318,29 @@ pub(crate) fn daemon_capture_notice(
     (!notice.is_empty()).then(|| notice.to_string())
 }
 
+/// The running tracker's screen share is open ([`live_status`]).
+pub(crate) fn daemon_share_open(status: Option<&OcrSwitchStatus>, daemon_pid: Option<u32>) -> bool {
+    live_status(status, daemon_pid).is_some_and(|status| status.share_open)
+}
+
+/// KDE direct is checked again when the tracker restarted (a new pid,
+/// after a capture route change) or its screen share just closed. `seen`
+/// is (tracker pid, share open) at the last tick and at this one.
+pub(crate) fn kde_direct_recheck_due(
+    before: (Option<u32>, bool),
+    now: (Option<u32>, bool),
+) -> bool {
+    let restarted = now.0.is_some() && now.0 != before.0;
+    let share_closed = before.1 && !now.1;
+    restarted || share_closed
+}
+
 /// Shown under the capture method when KDE direct can be chosen.
-pub(crate) const KDE_DIRECT_HELP: &str = "KDE direct asks KWin directly; Plasma shows no prompt or indicator; images stay in memory and are never saved. Needs Plasma 6.8 or later.";
+pub(crate) const KDE_DIRECT_HELP: &str = "KDE direct asks KWin directly; Plasma shows no prompt or indicator; images stay in memory and are never saved unless a debug option is on. Needs Plasma 6.8 or later.";
+
+/// KDE direct has not been tried on this desktop yet.
+pub(crate) const KDE_DIRECT_NOT_CHECKED: &str =
+    "KDE direct has not been checked here yet. Choosing it runs a short check.";
 
 /// Shown on GNOME next to the Older screenshot choice.
 pub(crate) const GNOME_SCREENSHOT_NOTE: &str =
@@ -360,11 +381,20 @@ pub(crate) fn capture_route_notes(
             tone(route == CaptureRoute::Screenshot),
         ));
     }
-    if let Some(stat_tracker::capture::KwinProbe::Unavailable(reason)) = kde_direct {
-        notes.push((
+    match kde_direct {
+        Some(stat_tracker::capture::KwinProbe::Unavailable(reason)) => notes.push((
             format!("KDE direct is not available here: {reason}."),
             tone(route == CaptureRoute::Kwin),
-        ));
+        )),
+        // Not a verdict: said plainly, never as a warning.
+        Some(stat_tracker::capture::KwinProbe::NotChecked(reason)) => notes.push((
+            format!("KDE direct was not checked: {reason}."),
+            NoteTone::Info,
+        )),
+        Some(stat_tracker::capture::KwinProbe::NotProbed) => {
+            notes.push((KDE_DIRECT_NOT_CHECKED.to_string(), NoteTone::Info));
+        }
+        Some(stat_tracker::capture::KwinProbe::Available) | None => {}
     }
     if let Some(notice) = daemon_notice {
         notes.push((format!("Tracker: {notice}."), NoteTone::Warn));
@@ -3229,7 +3259,40 @@ token = \"not-a-real-token\"
         assert!(notes.iter().all(|(_, tone)| *tone == NoteTone::Warn));
         assert!(notes[1].0.starts_with("Tracker: KDE direct"));
         assert!(KDE_DIRECT_HELP.contains("no prompt or indicator"));
-        assert!(KDE_DIRECT_HELP.contains("never saved"));
+        assert!(KDE_DIRECT_HELP.contains("never saved unless a debug option is on"));
+        // Not checked is said plainly, never as a warning, even when chosen.
+        let not_checked = KwinProbe::NotChecked("needs 6.8.1".into());
+        let notes = capture_route_notes("KDE", CaptureRoute::Kwin, Some(&not_checked), None);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].0.starts_with("KDE direct was not checked"));
+        assert!(!notes[0].0.contains("not available"));
+        assert_eq!(notes[0].1, NoteTone::Info);
+        let notes =
+            capture_route_notes("KDE", CaptureRoute::Kwin, Some(&KwinProbe::NotProbed), None);
+        assert_eq!(
+            notes,
+            vec![(KDE_DIRECT_NOT_CHECKED.to_string(), NoteTone::Info)]
+        );
+    }
+
+    #[test]
+    fn kde_direct_is_checked_again_after_a_restart_or_a_closed_share() {
+        // First sight of a running tracker, and a restart (new pid).
+        assert!(kde_direct_recheck_due((None, false), (Some(41), false)));
+        assert!(kde_direct_recheck_due((Some(41), false), (Some(42), false)));
+        // The share closed.
+        assert!(kde_direct_recheck_due((Some(41), true), (Some(41), false)));
+        // Nothing changed, the share opened, or the tracker stopped.
+        assert!(!kde_direct_recheck_due(
+            (Some(41), false),
+            (Some(41), false)
+        ));
+        assert!(!kde_direct_recheck_due((Some(41), false), (Some(41), true)));
+        assert!(!kde_direct_recheck_due((Some(41), false), (None, false)));
+        let mut status = switch_status(41, None, NO_MAPS);
+        status.share_open = true;
+        assert!(daemon_share_open(Some(&status), Some(41)));
+        assert!(!daemon_share_open(Some(&status), Some(42)));
     }
 
     #[test]

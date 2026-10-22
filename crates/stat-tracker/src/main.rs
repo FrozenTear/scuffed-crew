@@ -3445,6 +3445,10 @@ enum FrameAnalysisOutcome {
     StreamMiss,
     /// The share dialog is still up. Retried, and not logged as a missed frame.
     ShareOpening,
+    /// The screenshot before this one (a poll's) was still running after
+    /// the Tab's lock wait. Retried while Tab is held, and ranked lowest so
+    /// it never replaces a frame already grabbed.
+    CaptureBusy,
     /// The share was declined or the permission dialog timed out. Not an
     /// error: the one warn already happened, and a later Tab stays quiet.
     Declined,
@@ -4206,13 +4210,13 @@ fn no_match_in_progress(st: &SessionState, now: Instant) -> bool {
 fn poll_divisor(
     st: &SessionState,
     now: Instant,
-    shot_route: bool,
+    route: capture::ShotRoute,
     interval: std::time::Duration,
 ) -> u32 {
     if poll_slow_mode(st, now) {
         return SLOW_POLL_DIVISOR;
     }
-    if shot_route && no_match_in_progress(st, now) {
+    if route.polls_less_out_of_a_match() && no_match_in_progress(st, now) {
         return idle_shot_divisor(interval);
     }
     1
@@ -5015,12 +5019,7 @@ async fn run_loop(
                 // moment any end/start evidence lands in session state.
                 // On Older screenshot and KDE direct the same skip runs out
                 // of a match too, down to IDLE_SHOT_POLL_FLOOR.
-                let divisor = poll_divisor(
-                    &st,
-                    Instant::now(),
-                    capture::shot_route() != capture::ShotRoute::None,
-                    poll_interval,
-                );
+                let divisor = poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval);
                 if divisor > 1 {
                     st.poll_ticks_skipped += 1;
                     if st.poll_ticks_skipped < divisor {
@@ -7197,9 +7196,9 @@ fn tab_result(outcome: &FrameAnalysisOutcome) -> stat_tracker::tab_retry::TabRes
     match outcome {
         FrameAnalysisOutcome::Analyzed(_) => TabResult::Accepted,
         FrameAnalysisOutcome::NotAScoreboard { .. } => TabResult::NotAScoreboard,
-        FrameAnalysisOutcome::StreamMiss | FrameAnalysisOutcome::ShareOpening => {
-            TabResult::NoFrameYet
-        }
+        FrameAnalysisOutcome::StreamMiss
+        | FrameAnalysisOutcome::ShareOpening
+        | FrameAnalysisOutcome::CaptureBusy => TabResult::NoFrameYet,
         FrameAnalysisOutcome::Declined | FrameAnalysisOutcome::TeamSizeUncertain { .. } => {
             TabResult::Final
         }
@@ -7216,6 +7215,7 @@ fn tab_retry_reason(outcome: &FrameAnalysisOutcome) -> &'static str {
         }
         FrameAnalysisOutcome::StreamMiss => "no fresh stream frame arrived",
         FrameAnalysisOutcome::ShareOpening => "the share is still opening",
+        FrameAnalysisOutcome::CaptureBusy => "the previous screenshot was still running",
         FrameAnalysisOutcome::Declined
         | FrameAnalysisOutcome::TeamSizeUncertain { .. }
         | FrameAnalysisOutcome::Analyzed(_) => "not retried",
@@ -7224,7 +7224,9 @@ fn tab_retry_reason(outcome: &FrameAnalysisOutcome) -> &'static str {
 
 fn tab_outcome_rank(outcome: &FrameAnalysisOutcome) -> u8 {
     match outcome {
-        FrameAnalysisOutcome::ShareOpening | FrameAnalysisOutcome::Declined => 0,
+        FrameAnalysisOutcome::ShareOpening
+        | FrameAnalysisOutcome::Declined
+        | FrameAnalysisOutcome::CaptureBusy => 0,
         FrameAnalysisOutcome::StreamMiss => 1,
         FrameAnalysisOutcome::NotAScoreboard { .. } => 2,
         FrameAnalysisOutcome::TeamSizeUncertain { .. } => 3,
@@ -7313,9 +7315,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         let flight = stat_tracker::tab_retry::current_flight();
         let (analysis, _retries) = stat_tracker::tab_retry::with_retries(
             &flight,
-            stat_tracker::tab_retry::tab_retry_waits(
-                capture::shot_route() == capture::ShotRoute::Portal,
-            ),
+            stat_tracker::tab_retry::tab_retry_waits(capture::shot_route()),
             tab_result,
             tab_outcome_rank,
             tab_retry_reason,
@@ -7343,6 +7343,9 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                         }
                         Err(err) if capture::is_declined_capture(&err.to_string()) => {
                             return Ok(FrameAnalysisOutcome::Declined);
+                        }
+                        Err(err) if capture::is_capture_busy(&err.to_string()) => {
+                            return Ok(FrameAnalysisOutcome::CaptureBusy);
                         }
                         Err(err) => {
                             return Err(
@@ -7387,9 +7390,13 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
             FrameAnalysisOutcome::StreamMiss
             | FrameAnalysisOutcome::ShareOpening
-            | FrameAnalysisOutcome::Declined => {
+            | FrameAnalysisOutcome::Declined
+            | FrameAnalysisOutcome::CaptureBusy => {
                 if matches!(analysis, FrameAnalysisOutcome::StreamMiss) {
                     tracing::info!("Tab capture missed: no fresh stream frame");
+                }
+                if matches!(analysis, FrameAnalysisOutcome::CaptureBusy) {
+                    tracing::info!("Tab capture missed: the previous screenshot was still running");
                 }
                 return Ok(CaptureReport {
                     best_guess: None,
@@ -10356,6 +10363,13 @@ mod tests {
                 > tab_outcome_rank(&FrameAnalysisOutcome::ShareOpening)
         );
         assert!(tab_outcome_rank(&unsure) > tab_outcome_rank(&rejected));
+        // A busy lock is retried and never outranks a frame already grabbed.
+        assert!(tab_result(&FrameAnalysisOutcome::CaptureBusy).retries());
+        assert!(
+            tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss)
+                > tab_outcome_rank(&FrameAnalysisOutcome::CaptureBusy)
+        );
+        assert!(tab_retry_reason(&FrameAnalysisOutcome::CaptureBusy).contains("still running"));
         // The saved rejected frames showed gameplay, killcams, VICTORY, chat
         // or the desktop, never a half-drawn board: the log says so.
         let why = tab_retry_reason(&rejected);
@@ -10729,40 +10743,90 @@ mod tests {
         }
     }
 
+    /// A retry that finds the screenshot lock busy keeps the frame the Tab
+    /// already has; it is never lost to "busy".
+    #[tokio::test]
+    async fn a_busy_retry_keeps_the_best_tab_frame() {
+        let scan = detect::hero_portrait::RowScan {
+            dip_count: 2,
+            median_pitch: None,
+            spectral_pitch: None,
+        };
+        // Popped from the end: a rejected frame first, then busy grabs.
+        let attempts = std::sync::Mutex::new(vec![
+            FrameAnalysisOutcome::CaptureBusy,
+            FrameAnalysisOutcome::NotAScoreboard {
+                outcome: detect::MatchOutcome::Unknown,
+                frame: image::DynamicImage::new_rgb8(4, 4),
+                scan,
+            },
+        ]);
+        let flight = stat_tracker::tab_retry::TabFlight::new(Instant::now());
+        let (best, retries) = stat_tracker::tab_retry::with_retries(
+            &flight,
+            &stat_tracker::tab_retry::TAB_RETRY_WAITS,
+            tab_result,
+            tab_outcome_rank,
+            tab_retry_reason,
+            |_| {
+                let next = attempts.lock().unwrap().pop();
+                async move { Ok::<_, ()>(next.unwrap_or(FrameAnalysisOutcome::CaptureBusy)) }
+            },
+            |_| async {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(retries, 2, "busy is retried while Tab is held");
+        assert!(
+            matches!(best, FrameAnalysisOutcome::NotAScoreboard { .. }),
+            "the grabbed frame survives the busy retries"
+        );
+        // Both routes' busy errors are recognised.
+        assert!(capture::is_capture_busy(
+            "portal screenshot: a previous capture request is still running"
+        ));
+        assert!(capture::is_capture_busy(
+            &capture::kwin::KwinError::Busy.to_string()
+        ));
+        assert!(!capture::is_capture_busy("screencast stream ended"));
+    }
+
     #[test]
     fn shot_routes_poll_less_only_out_of_a_match() {
+        use capture::ShotRoute::{Kwin, None as Stream, Portal};
         let now = test_now();
         let interval = stat_tracker::config::NEW_READER_POLL_INTERVAL;
         // No game open: the shot routes slow down, the others do not.
         let idle = session(None, now);
-        assert_eq!(poll_divisor(&idle, now, true, interval), 2);
-        assert_eq!(poll_divisor(&idle, now, false, interval), 1);
+        assert_eq!(poll_divisor(&idle, now, Portal, interval), 2);
+        assert_eq!(poll_divisor(&idle, now, Kwin, interval), 2);
+        assert_eq!(poll_divisor(&idle, now, Stream, interval), 1);
         // A finished game (result in): between games, same.
         let finished = session(Some(game(detect::MatchOutcome::Victory, Some(5), now)), now);
-        assert_eq!(poll_divisor(&finished, now, true, interval), 2);
-        assert_eq!(poll_divisor(&finished, now, false, interval), 1);
+        assert_eq!(poll_divisor(&finished, now, Portal, interval), 2);
+        assert_eq!(poll_divisor(&finished, now, Stream, interval), 1);
         // A fresh game, start screens still live: full cadence everywhere.
         let mut fresh = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
         fresh.last_game_open = Some(now - Duration::from_secs(30));
-        assert_eq!(poll_divisor(&fresh, now, true, interval), 1);
+        assert_eq!(poll_divisor(&fresh, now, Portal, interval), 1);
         // Mid-match slow mode is unchanged on every route.
         let mid = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
-        assert_eq!(poll_divisor(&mid, now, true, interval), SLOW_POLL_DIVISOR);
-        assert_eq!(poll_divisor(&mid, now, false, interval), SLOW_POLL_DIVISOR);
+        assert_eq!(poll_divisor(&mid, now, Portal, interval), SLOW_POLL_DIVISOR);
+        assert_eq!(poll_divisor(&mid, now, Stream, interval), SLOW_POLL_DIVISOR);
         // A wake (POTG / end reel, or a fresh result word) is full cadence.
         let mut woke = session(None, now);
         woke.end_reel_wake_until = Some(now + END_REEL_WAKE);
-        assert_eq!(poll_divisor(&woke, now, true, interval), 1);
+        assert_eq!(poll_divisor(&woke, now, Portal, interval), 1);
         let mut word = session(None, now);
         word.word_outcome_streak = Some(word_streak(
             detect::MatchOutcome::Defeat,
             now - Duration::from_secs(2),
         ));
-        assert_eq!(poll_divisor(&word, now, true, interval), 1);
+        assert_eq!(poll_divisor(&word, now, Portal, interval), 1);
         // A boundary waiting on the next start screen: full cadence.
         let mut pending = session(Some(game(detect::MatchOutcome::Victory, Some(5), now)), now);
         pending.active_game.as_mut().unwrap().pending_boundary = true;
-        assert_eq!(poll_divisor(&pending, now, true, interval), 1);
+        assert_eq!(poll_divisor(&pending, now, Portal, interval), 1);
     }
 
     #[test]

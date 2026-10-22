@@ -20,32 +20,61 @@ pub async fn is_available() -> bool {
 /// screenshot is left in the user's Pictures folder. A runtime that is
 /// shutting down can still cut the task short.
 ///
-/// One request at a time ([`SHOT_FLIGHT`]). xdg-desktop-portal-kde names
-/// the file `Screenshot_yyyyMMdd_hhmmss.png` and overwrites it, so two
-/// requests in one second shared one file and one request's cleanup could
-/// delete the other's picture. A detached request keeps the lock until its
-/// file is gone. A Tab that finds a poll's request still running waits for
-/// it (up to [`SHOT_LOCK_WAIT`]) and then takes its own screenshot: that
-/// poll was asked for before the key press, so its picture cannot show the
-/// board. The wait mostly overlaps the 400 ms the Tab already sleeps for the
-/// overlay to draw.
+/// One request at a time in this process ([`SHOT_FLIGHT`]).
+/// xdg-desktop-portal-kde names the file `Screenshot_yyyyMMdd_hhmmss.png`
+/// and overwrites it, so two requests in one second shared one file and one
+/// request's cleanup could delete the other's picture. A detached request
+/// keeps the lock until its file is gone, and so does a request the portal
+/// has not answered: ashpd cannot cancel it, and giving the lock back would
+/// let a second request run beside it. Such a request is warned about at
+/// [`SHOT_OVERDUE_FIRST`] and every [`SHOT_OVERDUE_EVERY`] after, and grabs
+/// meanwhile get "busy".
+///
+/// A poll that finds a request running is skipped. A Tab waits for it (up
+/// to [`SHOT_LOCK_WAIT_TAB`]) and then takes its own screenshot: a poll's
+/// request was made before the key press, so its picture cannot show the
+/// board. The wait mostly overlaps the 400 ms the Tab already sleeps for
+/// the overlay to draw.
 pub async fn capture(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let output = output_name.map(str::to_owned);
-    SHOT_FLIGHT
-        .run(SHOT_LOCK_WAIT, async move {
-            match tokio::time::timeout(SHOT_REQUEST_CAP, capture_request(output.as_deref())).await
-            {
-                Ok(result) => result,
-                Err(_) => {
+    let wait = super::flight::lock_wait(super::tab_press().is_some(), SHOT_LOCK_WAIT_TAB);
+    run_shot(
+        &SHOT_FLIGHT,
+        wait,
+        Box::pin(async move { capture_request(output.as_deref()).await }),
+    )
+    .await
+}
+
+type ShotResult = Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>>;
+
+/// A portal request, boxed: its future is several KB, and every future
+/// that awaits a screenshot would otherwise carry copies of it inline.
+type ShotRequest = std::pin::Pin<Box<dyn std::future::Future<Output = ShotResult> + Send>>;
+
+/// Runs one portal request under `flight` until the portal answers, however
+/// long that takes: it is never given up, only warned about.
+async fn run_shot(
+    flight: &'static super::flight::SingleFlight,
+    wait: std::time::Duration,
+    request: ShotRequest,
+) -> ShotResult {
+    flight
+        .run(wait, async move {
+            super::flight::with_overdue_warnings(
+                request,
+                SHOT_OVERDUE_FIRST,
+                SHOT_OVERDUE_EVERY,
+                |waited| {
                     tracing::warn!(
-                        cap_secs = SHOT_REQUEST_CAP.as_secs(),
-                        "portal screenshot request did not answer in time; a file it writes later may stay in Pictures"
+                        waited_secs = waited.as_secs(),
+                        "portal screenshot request has not answered; screenshots wait for it"
                     );
-                    Err("portal screenshot request timed out".into())
-                }
-            }
+                },
+            )
+            .await
         })
         .await
         .map_err(|err| format!("portal screenshot: {err}"))?
@@ -54,13 +83,16 @@ pub async fn capture(
 /// One screenshot portal request in flight at a time.
 static SHOT_FLIGHT: super::flight::SingleFlight = super::flight::SingleFlight::new();
 
-/// How long a grab waits for the request before it. A KDE screenshot takes
-/// about 450 ms, so this is several of them.
-pub const SHOT_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a Tab grab waits for the request before it (a poll does not
+/// wait). A KDE screenshot takes about 450 ms, so this covers a poll's
+/// request and a slow one after it, while Tab is held.
+pub const SHOT_LOCK_WAIT_TAB: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// A request that has not answered by then gives the lock back, so one
-/// stuck portal call cannot stop every later grab.
-pub const SHOT_REQUEST_CAP: std::time::Duration = std::time::Duration::from_secs(20);
+/// When an unanswered request is first warned about.
+pub const SHOT_OVERDUE_FIRST: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// And how often after that.
+pub const SHOT_OVERDUE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 async fn capture_request(
     output_name: Option<&str>,
@@ -80,15 +112,22 @@ async fn capture_request(
     // a decode error included, so no screenshot is left behind.
     let file = RemoveOnDrop(path);
 
-    // Read, remove, then decode on the blocking pool: a 1440p PNG takes
-    // tens of milliseconds to decode, which must not hold a runtime worker.
-    let bytes =
-        std::fs::read(&file.0).map_err(|e| format!("failed to open portal screenshot: {e}"))?;
-    drop(file);
-    let img = tokio::task::spawn_blocking(move || image::load_from_memory(&bytes))
-        .await
-        .map_err(|e| format!("portal screenshot decode task failed: {e}"))?
-        .map_err(|e| format!("failed to open portal screenshot: {e}"))?;
+    // Read, remove and decode on the blocking pool: the read is file I/O
+    // and a 1440p PNG takes tens of milliseconds to decode, neither of
+    // which may hold a runtime worker. The guard moves into the closure, so
+    // the file goes even if the closure never runs.
+    let img = tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(&file.0);
+        drop(file);
+        bytes
+            .map_err(|e| format!("failed to open portal screenshot: {e}"))
+            .and_then(|bytes| {
+                image::load_from_memory(&bytes)
+                    .map_err(|e| format!("failed to open portal screenshot: {e}"))
+            })
+    })
+    .await
+    .map_err(|e| format!("portal screenshot decode task failed: {e}"))??;
 
     tracing::debug!(
         width = img.width(),
@@ -757,6 +796,76 @@ mod tests {
         let o = &outputs[index];
         assert_eq!((cut.width, cut.height), (1920, 1200));
         assert_eq!(native_size(cut, o.real_width, o.real_height), None);
+    }
+
+    /// Pins [`SHOT_LOCK_WAIT_TAB`]: a Tab gets the lock behind a slow
+    /// request of 3.5 s and gives up behind one of 4.5 s; a poll never waits.
+    #[tokio::test(start_paused = true)]
+    async fn a_tab_waits_up_to_four_seconds_for_the_portal_and_a_poll_not_at_all() {
+        use super::super::flight::{FlightError, SingleFlight, lock_wait};
+        use std::time::Duration;
+        static FLIGHT: SingleFlight = SingleFlight::new();
+        for (held_ms, tab_gets_it) in [(3500u64, true), (4500, false)] {
+            let held = tokio::spawn(FLIGHT.run(Duration::ZERO, async move {
+                tokio::time::sleep(Duration::from_millis(held_ms)).await;
+            }));
+            tokio::task::yield_now().await;
+            let poll = FLIGHT
+                .run(lock_wait(false, SHOT_LOCK_WAIT_TAB), async {})
+                .await;
+            assert_eq!(poll, Err(FlightError::Busy));
+            let tab = FLIGHT
+                .run(lock_wait(true, SHOT_LOCK_WAIT_TAB), async {})
+                .await;
+            assert_eq!(tab.is_ok(), tab_gets_it, "request held {held_ms} ms");
+            held.await.unwrap().unwrap();
+        }
+        assert_eq!(SHOT_OVERDUE_FIRST, Duration::from_secs(20));
+        assert_eq!(SHOT_OVERDUE_EVERY, Duration::from_secs(60));
+    }
+
+    /// The portal cannot cancel a request, so one that has not answered
+    /// keeps the lock: no second request runs beside it, at 25 s or at
+    /// 5 minutes, and the next one runs once it answers.
+    #[tokio::test(start_paused = true)]
+    async fn an_unanswered_portal_request_keeps_the_lock_until_it_answers() {
+        use super::super::flight::SingleFlight;
+        use std::time::Duration;
+        static FLIGHT: SingleFlight = SingleFlight::new();
+        let (answer_tx, answer_rx) = tokio::sync::oneshot::channel::<()>();
+        let first = tokio::spawn(run_shot(
+            &FLIGHT,
+            Duration::ZERO,
+            Box::pin(async move {
+                let _ = answer_rx.await;
+                Ok(DynamicImage::new_rgb8(1, 1))
+            }),
+        ));
+        for at in [25u64, 300] {
+            tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_secs(at)).await;
+            assert!(FLIGHT.in_flight(), "held at {at} s");
+            let beside = run_shot(
+                &FLIGHT,
+                Duration::ZERO,
+                Box::pin(async { Ok(DynamicImage::new_rgb8(2, 2)) }),
+            )
+            .await;
+            assert!(
+                beside.is_err_and(|e| super::super::flight::is_busy(&e.to_string())),
+                "nothing runs beside it at {at} s"
+            );
+        }
+        answer_tx.send(()).unwrap();
+        let answered = first.await.unwrap().unwrap();
+        assert_eq!(answered.width(), 1);
+        let next = run_shot(
+            &FLIGHT,
+            Duration::ZERO,
+            Box::pin(async { Ok(DynamicImage::new_rgb8(2, 2)) }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(next.width(), 2);
     }
 
     #[test]

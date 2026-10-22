@@ -6,6 +6,7 @@ pub mod portal;
 mod portal_backend;
 mod pw;
 mod route;
+pub use flight::is_busy as is_capture_busy;
 pub use route::{KWIN_DIRECT_DEFAULT_ON_KDE, KwinProbe, is_gnome, is_kde};
 mod screencast;
 pub mod wayshot;
@@ -227,6 +228,20 @@ pub enum ShotRoute {
     Portal,
     /// KDE direct: KWin renders the output into a pipe.
     Kwin,
+}
+
+impl ShotRoute {
+    /// Out of a match this route polls less (each grab is a compositor
+    /// render, and for the portal a dialog and a PNG).
+    pub fn polls_less_out_of_a_match(self) -> bool {
+        self != ShotRoute::None
+    }
+
+    /// A rejected Tab is retried once here instead of twice: each portal
+    /// grab is a full KDE capture of about 450 ms.
+    pub fn one_tab_retry(self) -> bool {
+        self == ShotRoute::Portal
+    }
 }
 
 /// Which per-grab screenshot route this process uses, if any.
@@ -486,13 +501,19 @@ pub async fn detect_backend() -> CaptureBackend {
     let kwin_probe = if wants_kwin {
         // The app runs this too, perhaps beside a tracker whose stream is
         // open (a different STAT_TRACKER_CAPTURE): no render there before
-        // Plasma 6.8.1.
-        kwin::probe_beside_share(daemon_share_is_open(&prefs.data_dir)).await
+        // Plasma 6.8.1. On KDE a probe that can pass (KWin not on the bus
+        // yet at login) is tried again for up to 15 s.
+        kwin::probe_at_startup(
+            daemon_share_is_open(&prefs.data_dir),
+            route::is_kde(&desktop),
+        )
+        .await
     } else {
         route::KwinProbe::NotProbed
     };
     if chosen == route::Effective::Auto
-        && let route::KwinProbe::Unavailable(reason) = &kwin_probe
+        && let route::KwinProbe::Unavailable(reason) | route::KwinProbe::NotChecked(reason) =
+            &kwin_probe
     {
         tracing::info!("automatic keeps the screen stream: KDE direct is not available ({reason})");
     }
@@ -698,10 +719,7 @@ pub async fn capture_screen_oneshot(
     match backend {
         CaptureBackend::Portal | CaptureBackend::Kwin => {
             let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-            if screencast::capture_now_blocked_by_daemon_share(
-                &desktop,
-                daemon_share_is_open(data_dir),
-            ) {
+            if oneshot_blocked(*backend, &desktop, daemon_share_is_open(data_dir)) {
                 tracing::warn!(
                     "Capture now skipped: the tracker is sharing the screen, and a screenshot beside it can crash KWin"
                 );
@@ -718,6 +736,14 @@ pub async fn capture_screen_oneshot(
     }
 }
 
+/// Whether Capture now must skip its screenshot: the portal and KDE direct
+/// both reach KWin's screenshot code, which must not run beside the
+/// tracker's open share on KDE. Wayshot and X11 never do.
+pub fn oneshot_blocked(backend: CaptureBackend, desktop: &str, share_open: bool) -> bool {
+    matches!(backend, CaptureBackend::Portal | CaptureBackend::Kwin)
+        && screencast::capture_now_blocked_by_daemon_share(desktop, share_open)
+}
+
 /// The running tracker's screen share is open, from its status file.
 pub fn daemon_share_is_open(data_dir: &std::path::Path) -> bool {
     let live_pid = live_daemon_pid(data_dir);
@@ -725,15 +751,21 @@ pub fn daemon_share_is_open(data_dir: &std::path::Path) -> bool {
         .is_some_and(|status| live_share_open(status.share_open, status.pid, live_pid))
 }
 
-/// KDE direct for the app's Settings: `None` off KDE, else the probe. It
-/// does not render beside the tracker's open share on a Plasma without the
-/// full KWin crash fix ([`kwin::probe_beside_share`]).
-pub async fn kwin_direct_status(data_dir: std::path::PathBuf) -> Option<KwinProbe> {
+/// KDE direct for the app's Settings: `None` off KDE. With `render` (the
+/// saved route is KDE direct, or its chip was just chosen) it runs the 1x1
+/// probe, never beside the tracker's open share on a Plasma without the
+/// full KWin crash fix ([`kwin::render_gate`]). Without, it renders
+/// nothing: the last probe result, or what the version read says.
+pub async fn kwin_direct_status(data_dir: std::path::PathBuf, render: bool) -> Option<KwinProbe> {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     if !route::is_kde(&desktop) {
         return None;
     }
-    Some(kwin::probe_beside_share(daemon_share_is_open(&data_dir)).await)
+    Some(if render {
+        kwin::probe_beside_share(daemon_share_is_open(&data_dir)).await
+    } else {
+        kwin::status_without_render().await
+    })
 }
 
 /// Same image as [`capture_screen_output`]. `kind` only changes whether a
@@ -756,7 +788,11 @@ pub async fn capture_screen_output_for(
             .await
             .map(as_new_capture),
         CaptureBackend::Portal => match portal_path() {
-            route::PortalPath::Screenshot => portal::capture(output_name).await.map(as_new_capture),
+            // Boxed: these leaf futures are large, and the Tab capture
+            // future that awaits this one would carry them inline.
+            route::PortalPath::Screenshot => Box::pin(portal::capture(output_name))
+                .await
+                .map(as_new_capture),
             route::PortalPath::Stream => {
                 let prefs = prefs();
                 screencast::capture(output_name, kind, &prefs.data_dir, prefs.debug_frames).await
@@ -764,7 +800,9 @@ pub async fn capture_screen_output_for(
         },
         // Never the stream: this route and the tracker's own screen share
         // are not run together (KDE bug 524840).
-        CaptureBackend::Kwin => kwin::capture(output_name).await.map(as_new_capture),
+        CaptureBackend::Kwin => Box::pin(kwin::capture(output_name))
+            .await
+            .map(as_new_capture),
         CaptureBackend::None => return Err("no capture backend available".into()),
     };
     if result.is_ok() {
@@ -1027,6 +1065,39 @@ mod tests {
         assert_eq!(
             crate::report::bundle::capture_backend_label(CaptureBackend::Kwin),
             "portal"
+        );
+    }
+
+    /// Capture now on KDE: the portal and KDE direct are both blocked beside
+    /// the tracker's open share; wayshot and X11 are not; nothing is
+    /// blocked off KDE or with the share closed.
+    #[test]
+    fn capture_now_keeps_kwin_calls_away_from_the_share() {
+        for backend in [CaptureBackend::Portal, CaptureBackend::Kwin] {
+            assert!(oneshot_blocked(backend, "KDE", true), "{backend:?}");
+            assert!(!oneshot_blocked(backend, "KDE", false), "{backend:?}");
+            assert!(!oneshot_blocked(backend, "niri", true), "{backend:?}");
+        }
+        assert!(oneshot_blocked(CaptureBackend::Kwin, "KWin", true));
+        for backend in [
+            CaptureBackend::Wayshot,
+            CaptureBackend::X11,
+            CaptureBackend::None,
+        ] {
+            assert!(!oneshot_blocked(backend, "KDE", true), "{backend:?}");
+        }
+    }
+
+    #[test]
+    fn route_gating_by_shot_route() {
+        assert!(!ShotRoute::None.polls_less_out_of_a_match());
+        assert!(ShotRoute::Portal.polls_less_out_of_a_match());
+        assert!(ShotRoute::Kwin.polls_less_out_of_a_match());
+        assert!(!ShotRoute::None.one_tab_retry());
+        assert!(ShotRoute::Portal.one_tab_retry());
+        assert!(
+            !ShotRoute::Kwin.one_tab_retry(),
+            "KDE direct grabs are cheap"
         );
     }
 

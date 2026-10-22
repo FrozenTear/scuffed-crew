@@ -14,14 +14,20 @@
 //! tracker closes its own write end after the call and reads to EOF.
 //!
 //! Plasma 6.0 to 6.7 refuse callers that no `.desktop` file grants the
-//! interface (`Error.NoAuthorized`). Plasma 6.8.0 dropped that check. rc.7
-//! uses this route only when a 1x1 probe succeeds without a grant.
+//! interface: `Error.NoAuthorized`, or an empty answer when KWin cannot
+//! tell who called. Plasma 6.8.0 dropped that check. rc.7 uses this route
+//! only when a 1x1 probe succeeds without a grant.
 //!
 //! KDE bug 524840: KWin could crash on NVIDIA when a screenshot met an
-//! active screencast. Fixed in 6.6.7, 6.7.6 and 6.8.0, with a further fix
-//! in 6.8.1. The portal and this route share that code path. This route
-//! never runs beside the tracker's own screen stream, and every call goes
-//! through one lock ([`FLIGHT`]) so two of ours never overlap.
+//! active screencast. The fix is verified in 6.6.7 and 6.8.0 (a 6.7.6
+//! backport could not be verified), with a further fix in 6.8.1. The portal
+//! and this route share that code path. This route never runs beside the
+//! tracker's own screen stream; the one exception, the debug compare pair,
+//! and the app's probe while the tracker shares the screen, need Plasma
+//! 6.8.1 ([`render_gate`]). Every call in this process goes through one
+//! lock ([`FLIGHT`]), so two of ours never overlap here. The app and the
+//! daemon are two processes and can call at the same moment; KWin runs
+//! those one after the other on its own thread.
 
 use std::collections::HashMap;
 use std::os::fd::{AsRawFd, OwnedFd};
@@ -40,8 +46,9 @@ pub const INTERFACE: &str = "org.kde.KWin.ScreenShot2";
 
 /// The whole grab, call and pipe read, ends within this.
 pub const GRAB_TIMEOUT: Duration = Duration::from_secs(2);
-/// How long a grab waits for the call before it.
-pub const LOCK_WAIT: Duration = Duration::from_secs(2);
+/// How long a Tab grab (or the probe) waits for the call before it, at
+/// most one [`GRAB_TIMEOUT`]. A poll does not wait.
+pub const LOCK_WAIT_TAB: Duration = Duration::from_secs(2);
 
 /// Plasma version with the full fix for KDE bug 524840.
 pub const CRASH_FIX_FULL: (u32, u32, u32) = (6, 8, 1);
@@ -60,7 +67,7 @@ pub enum KwinError {
     NotKwin,
     /// KWin refused the caller: Plasma before 6.8 without a `.desktop` grant.
     NotAuthorized,
-    /// KWin answered with no picture. Plasma 6.6 and 6.7 do that when they
+    /// KWin answered with no picture. Plasma 6.0 to 6.7 do that when they
     /// cannot tell who called, which is a refusal too.
     EmptyReply,
     /// KWin could not render the picture (`Error.Cancelled`).
@@ -73,7 +80,7 @@ pub enum KwinError {
     BadReply(String),
     /// No answer within [`GRAB_TIMEOUT`].
     Timeout,
-    /// The call before this one was still running after [`LOCK_WAIT`].
+    /// The call before this one was still running after the lock wait.
     Busy,
     /// Anything else, with the D-Bus error.
     Other(String),
@@ -96,9 +103,15 @@ impl KwinError {
             KwinError::Rejected(err) => format!("KWin rejected the request ({err})"),
             KwinError::BadReply(err) => format!("KWin's answer did not make sense ({err})"),
             KwinError::Timeout => format!("KWin did not answer in {} s", GRAB_TIMEOUT.as_secs()),
-            KwinError::Busy => "the previous KWin screenshot was still running".into(),
+            KwinError::Busy => super::flight::BUSY.into(),
             KwinError::Other(err) => err.clone(),
         }
+    }
+
+    /// A refusal that will not change while this Plasma runs. Every other
+    /// failure may pass (KWin not on the bus yet at login, a timeout).
+    pub fn is_definitive(&self) -> bool {
+        matches!(self, KwinError::NotAuthorized | KwinError::EmptyReply)
     }
 
     /// An error an output change can explain: the cached geometry is
@@ -212,7 +225,7 @@ fn value_str(value: &Value<'_>) -> Option<String> {
 }
 
 /// Reads the reply map. An empty map is [`KwinError::EmptyReply`] (Plasma
-/// 6.6 and 6.7 answer a caller they cannot identify that way). A type
+/// 6.0 to 6.7 answer a caller they cannot identify that way). A type
 /// other than `raw`, or a size that does not add up, is a bad reply.
 pub fn parse_meta(map: &HashMap<String, OwnedValue>) -> Result<RawMeta, KwinError> {
     if map.is_empty() {
@@ -282,7 +295,8 @@ pub enum PixelOrder {
 
 /// The byte order of a `QImage::Format`, or `None` for one not handled.
 /// Plasma 6.8 sends 16 (`RGBX8888`) for area and screen captures; 6.5 to
-/// 6.7 send 6 (`ARGB32_Premultiplied`); older ones 5 (`ARGB32`).
+/// 6.7 send 6 (`ARGB32_Premultiplied`); 6.0 to 6.4 send 6 for an area and
+/// 5 (`ARGB32`) for a screen.
 pub fn pixel_order(format: u32) -> Option<PixelOrder> {
     match format {
         // RGB32, ARGB32, ARGB32_Premultiplied: 32-bit 0xAARRGGBB words.
@@ -333,55 +347,84 @@ pub fn to_rgb_image(meta: &RawMeta, data: &[u8]) -> Result<RgbImage, KwinError> 
         .ok_or_else(|| KwinError::BadReply("pixel buffer size".into()))
 }
 
-/// The size to resample a KWin picture of the chosen output to, or `None`
-/// to keep it. Detectors are tuned on the output's real mode size, which
-/// is what the screen stream delivers. `CaptureScreen` with
-/// `native-resolution` renders at that output's own scale, which is the
-/// mode size up to rounding. A fractional scale or a stale mode can still
-/// be off by more than a pixel; then the picture goes back to the real
-/// size, either way. An unknown real size (0) keeps the picture.
-pub fn fit_size(width: u32, height: u32, real_width: u32, real_height: u32) -> Option<(u32, u32)> {
-    if real_width == 0 || real_height == 0 {
-        return None;
+/// Whether a picture of `size` is off the output's real mode size by more
+/// than a pixel in either direction. An unknown real size is not off.
+pub fn size_off(size: (u32, u32), real: Option<(u32, u32)>) -> bool {
+    match real {
+        Some((w, h)) if w > 0 && h > 0 => size.0.abs_diff(w) > 1 || size.1.abs_diff(h) > 1,
+        _ => false,
     }
-    let off = |a: u32, b: u32| a.abs_diff(b) > 1;
-    (off(width, real_width) || off(height, real_height)).then_some((real_width, real_height))
 }
 
-/// Converts and, when [`fit_size`] says so, resamples with the same
-/// Lanczos3 filter the portal path uses for its cut-outs.
-pub fn picture(
-    meta: &RawMeta,
-    data: &[u8],
+/// What [`check_native_size`] found. The picture is never changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SizeCheck {
+    /// The cached real size matches, or none is known.
+    Matches,
+    /// Off against the cached geometry, right after reading it again.
+    MatchesAfterReread,
+    /// Still off after reading the geometry again: used as KWin sent it.
+    StillDiffers,
+}
+
+/// Checks a KDE direct picture against the output's cached real size.
+/// `CaptureScreen` renders at that output's own scale, which is the
+/// (rotated) mode size on Plasma 6.5 and later, so a difference means the
+/// cached geometry is stale: `reread` drops and reads it again, once. If it
+/// still differs, the picture is kept as KWin rendered it. It is never
+/// resampled: any resample changes what the readers see.
+pub async fn check_native_size<F, Fut>(
+    size: (u32, u32),
     real: Option<(u32, u32)>,
-) -> Result<DynamicImage, KwinError> {
-    let rgb = to_rgb_image(meta, data)?;
-    let (real_w, real_h) = real.unwrap_or((0, 0));
-    match fit_size(rgb.width(), rgb.height(), real_w, real_h) {
-        Some((w, h)) => {
-            tracing::debug!(
-                from_width = rgb.width(),
-                from_height = rgb.height(),
-                width = w,
-                height = h,
-                "KDE direct picture resized to the output's real size"
-            );
-            Ok(DynamicImage::ImageRgb8(rgb).resize_exact(
-                w,
-                h,
-                image::imageops::FilterType::Lanczos3,
-            ))
-        }
-        None => Ok(DynamicImage::ImageRgb8(rgb)),
+    reread: F,
+) -> SizeCheck
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = Option<(u32, u32)>>,
+{
+    if !size_off(size, real) {
+        return SizeCheck::Matches;
     }
+    if size_off(size, reread().await) {
+        SizeCheck::StillDiffers
+    } else {
+        SizeCheck::MatchesAfterReread
+    }
+}
+
+/// The raw pixels as the picture the detectors get: RGB, at the size KWin
+/// rendered. Never resampled ([`check_native_size`]).
+pub fn picture(meta: &RawMeta, data: &[u8]) -> Result<DynamicImage, KwinError> {
+    to_rgb_image(meta, data).map(DynamicImage::ImageRgb8)
 }
 
 // -------------------------------------------------------------------- pipe
 
-/// Reads exactly `len` bytes from `fd` and then expects EOF, all before
-/// `deadline`. More bytes than that is an error. When all `len` bytes are
-/// in but KWin has not closed its end yet, a short wait for EOF follows and
-/// the picture is kept either way.
+/// Asks the kernel for a 1 MiB pipe buffer, so KWin's writer needs fewer
+/// rounds for a 10 to 30 MB picture. A refusal keeps the default.
+fn widen_pipe(fd: &OwnedFd) {
+    // SAFETY: fcntl on a live fd; the result is only a hint.
+    unsafe {
+        libc::fcntl(fd.as_raw_fd(), libc::F_SETPIPE_SZ, 1 << 20);
+    }
+}
+
+/// Closes our copy of the write end, then reads the pixels. KWin holds its
+/// own copy and closes it after the last byte; ours must be gone first, or
+/// EOF never comes and the read ends at the deadline with an error.
+pub fn finish_pipe(
+    reader: OwnedFd,
+    our_writer: OwnedFd,
+    len: usize,
+    deadline: Instant,
+) -> Result<Vec<u8>, KwinError> {
+    drop(our_writer);
+    read_exactly(reader, len, deadline)
+}
+
+/// Reads exactly `len` bytes from `fd`, then EOF, all before `deadline`.
+/// Fewer bytes before EOF, more bytes than `len`, or no EOF by the deadline
+/// is an error: KWin writes `stride * height` bytes and closes its end.
 pub fn read_exactly(fd: OwnedFd, len: usize, deadline: Instant) -> Result<Vec<u8>, KwinError> {
     let raw = fd.as_raw_fd();
     // SAFETY: fcntl on an fd this function owns.
@@ -398,15 +441,7 @@ pub fn read_exactly(fd: OwnedFd, len: usize, deadline: Instant) -> Result<Vec<u8
     let mut filled = 0usize;
     let mut extra = [0u8; 1];
     loop {
-        let now = Instant::now();
         let full = filled == len;
-        let wait = if full {
-            deadline
-                .saturating_duration_since(now)
-                .min(Duration::from_millis(50))
-        } else {
-            deadline.saturating_duration_since(now)
-        };
         let target: &mut [u8] = if full { &mut extra } else { &mut buf[filled..] };
         // SAFETY: `target` is a live, writable buffer of the given length.
         let n = unsafe { libc::read(raw, target.as_mut_ptr().cast(), target.len()) };
@@ -434,12 +469,13 @@ pub fn read_exactly(fd: OwnedFd, len: usize, deadline: Instant) -> Result<Vec<u8
             std::io::ErrorKind::WouldBlock => {}
             _ => return Err(KwinError::Other(format!("pipe read: {err}"))),
         }
+        let wait = deadline.saturating_duration_since(Instant::now());
         if wait.is_zero() {
-            return if full {
-                Ok(buf)
+            return Err(if full {
+                KwinError::BadReply("the pipe stayed open after the picture".into())
             } else {
-                Err(KwinError::Timeout)
-            };
+                KwinError::Timeout
+            });
         }
         let mut pfd = libc::pollfd {
             fd: raw,
@@ -449,9 +485,6 @@ pub fn read_exactly(fd: OwnedFd, len: usize, deadline: Instant) -> Result<Vec<u8
         let ms = i32::try_from(wait.as_millis().max(1)).unwrap_or(i32::MAX);
         // SAFETY: one pollfd for an fd this function owns.
         let ready = unsafe { libc::poll(&mut pfd, 1, ms) };
-        if ready == 0 && full {
-            return Ok(buf);
-        }
         if ready < 0 {
             let err = std::io::Error::last_os_error();
             if err.kind() != std::io::ErrorKind::Interrupted {
@@ -501,14 +534,43 @@ pub fn pick_target(
     }
 }
 
-static CONNECTION: tokio::sync::OnceCell<zbus::Connection> = tokio::sync::OnceCell::const_new();
+/// The probe's 1x1 area: the top-left pixel of the output Auto would
+/// capture, so it lies on a real output. With no geometry, KWin's active
+/// screen at scale 1.
+pub fn probe_target(outputs: &[OutputRect]) -> Target {
+    match super::auto_output_index(outputs.iter().map(|o| (o.name.as_str(), o.area()))) {
+        Some(index) => Target::Area {
+            x: outputs[index].x,
+            y: outputs[index].y,
+            width: 1,
+            height: 1,
+        },
+        None => Target::ActiveScreen,
+    }
+}
 
+static CONNECTION: tokio::sync::Mutex<Option<zbus::Connection>> =
+    tokio::sync::Mutex::const_new(None);
+
+/// The session bus connection, made on first use and made again after a
+/// call found it gone ([`forget_connection`]).
 async fn connection() -> Result<zbus::Connection, KwinError> {
-    CONNECTION
-        .get_or_try_init(zbus::Connection::session)
+    let mut slot = CONNECTION.lock().await;
+    if let Some(conn) = slot.as_ref() {
+        return Ok(conn.clone());
+    }
+    let conn = zbus::Connection::session()
         .await
-        .cloned()
-        .map_err(|err| KwinError::NoBus(err.to_string()))
+        .map_err(|err| KwinError::NoBus(err.to_string()))?;
+    *slot = Some(conn.clone());
+    Ok(conn)
+}
+
+/// Drops the cached connection after an error that says it is broken.
+async fn forget_connection(err: &KwinError) {
+    if matches!(err, KwinError::NoBus(_)) {
+        *CONNECTION.lock().await = None;
+    }
 }
 
 /// One call with a fresh pipe, then the pixels. `native` is
@@ -521,51 +583,53 @@ async fn grab_raw(
 ) -> Result<(RawMeta, Vec<u8>), KwinError> {
     let (reader, writer) =
         std::io::pipe().map_err(|err| KwinError::Other(format!("pipe: {err}")))?;
+    let reader = OwnedFd::from(reader);
     let writer = OwnedFd::from(writer);
+    widen_pipe(&reader);
     let mut options: HashMap<&str, Value<'_>> = HashMap::new();
     options.insert("include-cursor", Value::Bool(false));
     options.insert("native-resolution", Value::Bool(native));
-    let fd = zvariant::Fd::from(&writer);
-    let reply = match target {
-        Target::Area {
-            x,
-            y,
-            width,
-            height,
-        } => {
-            conn.call_method(
-                Some(SERVICE),
-                PATH,
-                Some(INTERFACE),
-                "CaptureArea",
-                &(*x, *y, *width, *height, options, fd),
-            )
-            .await
-        }
-        Target::Screen(name) => {
-            conn.call_method(
-                Some(SERVICE),
-                PATH,
-                Some(INTERFACE),
-                "CaptureScreen",
-                &(name.as_str(), options, fd),
-            )
-            .await
-        }
-        Target::ActiveScreen => {
-            conn.call_method(
-                Some(SERVICE),
-                PATH,
-                Some(INTERFACE),
-                "CaptureActiveScreen",
-                &(options, fd),
-            )
-            .await
+    let reply = {
+        let fd = zvariant::Fd::from(&writer);
+        match target {
+            Target::Area {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                conn.call_method(
+                    Some(SERVICE),
+                    PATH,
+                    Some(INTERFACE),
+                    "CaptureArea",
+                    &(*x, *y, *width, *height, options, fd),
+                )
+                .await
+            }
+            Target::Screen(name) => {
+                conn.call_method(
+                    Some(SERVICE),
+                    PATH,
+                    Some(INTERFACE),
+                    "CaptureScreen",
+                    &(name.as_str(), options, fd),
+                )
+                .await
+            }
+            Target::ActiveScreen => {
+                conn.call_method(
+                    Some(SERVICE),
+                    PATH,
+                    Some(INTERFACE),
+                    "CaptureActiveScreen",
+                    &(options, fd),
+                )
+                .await
+            }
         }
     }
     .map_err(from_zbus)?;
-    // KWin holds its own copy. Ours must go, or the read never sees EOF.
-    drop(writer);
     let map: HashMap<String, OwnedValue> = reply
         .body()
         .deserialize()
@@ -574,41 +638,62 @@ async fn grab_raw(
     let len = meta
         .byte_len()
         .ok_or_else(|| KwinError::BadReply("size overflows".into()))?;
-    let reader = OwnedFd::from(reader);
-    let bytes = tokio::task::spawn_blocking(move || read_exactly(reader, len, deadline))
+    let bytes = tokio::task::spawn_blocking(move || finish_pipe(reader, writer, len, deadline))
         .await
         .map_err(|err| KwinError::Other(format!("pipe read task: {err}")))??;
     Ok((meta, bytes))
 }
 
-/// One grab under [`FLIGHT`], ended by [`GRAB_TIMEOUT`].
-async fn grab_in_flight(target: Target, native: bool) -> Result<(RawMeta, Vec<u8>), KwinError> {
-    FLIGHT
-        .run(LOCK_WAIT, async move {
+/// `request`, or [`KwinError::Timeout`] once [`GRAB_TIMEOUT`] has passed.
+pub async fn bounded<T>(
+    request: impl std::future::Future<Output = Result<T, KwinError>>,
+) -> Result<T, KwinError> {
+    tokio::time::timeout(GRAB_TIMEOUT, request)
+        .await
+        .unwrap_or(Err(KwinError::Timeout))
+}
+
+/// One grab under [`FLIGHT`], ended by [`GRAB_TIMEOUT`]. `wait` is how long
+/// to wait for the lock ([`super::flight::lock_wait`]).
+async fn grab_in_flight(
+    target: Target,
+    native: bool,
+    wait: Duration,
+) -> Result<(RawMeta, Vec<u8>), KwinError> {
+    let result = FLIGHT
+        .run(wait, async move {
             let deadline = Instant::now() + GRAB_TIMEOUT;
-            let grab = async {
+            bounded(async {
                 let conn = connection().await?;
                 grab_raw(&conn, &target, native, deadline).await
-            };
-            tokio::time::timeout(GRAB_TIMEOUT, grab)
-                .await
-                .unwrap_or(Err(KwinError::Timeout))
+            })
+            .await
         })
         .await
         .map_err(|err| match err {
             super::flight::FlightError::Busy => KwinError::Busy,
             super::flight::FlightError::Task(err) => KwinError::Other(err),
-        })?
+        })
+        .and_then(|result| result);
+    if let Err(err) = &result {
+        forget_connection(err).await;
+    }
+    result
 }
 
-/// The game's monitor, full output, cursor hidden, at the output's real
-/// size. The pixels never touch the disk.
+/// The game's monitor, full output, cursor hidden, at the size KWin
+/// renders it (the output's mode size). The pixels never touch the disk.
 pub async fn capture(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let outputs = super::portal::output_geometry().await;
     let (target, real) = pick_target(&outputs, output_name);
-    let (meta, bytes) = match grab_in_flight(target, true).await {
+    let screen = match &target {
+        Target::Screen(name) => Some(name.clone()),
+        _ => None,
+    };
+    let wait = super::flight::lock_wait(super::tab_press().is_some(), LOCK_WAIT_TAB);
+    let (meta, bytes) = match grab_in_flight(target, true, wait).await {
         Ok(grabbed) => grabbed,
         Err(err) => {
             if err.invalidates_geometry() {
@@ -622,12 +707,32 @@ pub async fn capture(
             });
         }
     };
-    let img = tokio::task::spawn_blocking(move || picture(&meta, &bytes, real))
+    let img = tokio::task::spawn_blocking(move || picture(&meta, &bytes))
         .await
         .map_err(|err| format!("KDE direct convert task failed: {err}"))??;
+    let size = (img.width(), img.height());
+    let checked = check_native_size(size, real, || async {
+        super::portal::invalidate_output_geometry();
+        let outputs = super::portal::output_geometry().await;
+        screen.and_then(|name| {
+            outputs
+                .iter()
+                .find(|o| o.name == name)
+                .map(|o| (o.real_width, o.real_height))
+        })
+    })
+    .await;
+    if checked == SizeCheck::StillDiffers {
+        tracing::debug!(
+            width = size.0,
+            height = size.1,
+            ?real,
+            "KDE direct picture differs from the output's mode size; kept as KWin rendered it"
+        );
+    }
     tracing::trace!(
-        width = img.width(),
-        height = img.height(),
+        width = size.0,
+        height = size.1,
         "screen captured via KWin ScreenShot2"
     );
     Ok(img)
@@ -652,7 +757,8 @@ pub fn parse_kwin_version(text: &str) -> Option<(u32, u32, u32)> {
 pub enum CrashFix {
     /// Before 6.6.7, 6.7.0 to 6.7.5.
     Missing,
-    /// 6.6.7+, 6.7.6+, 6.8.0: the main fix, not the 6.8.1 follow-up.
+    /// 6.6.7+, 6.7.6+ (not verified), 6.8.0: the main fix, not the 6.8.1
+    /// follow-up.
     Partial,
     /// 6.8.1 and later.
     Full,
@@ -681,9 +787,230 @@ pub struct Versions {
     pub plasma: Option<(u32, u32, u32)>,
 }
 
-static VERSIONS: tokio::sync::OnceCell<Versions> = tokio::sync::OnceCell::const_new();
-static RENDER_PROBE: tokio::sync::OnceCell<Result<(), KwinError>> =
-    tokio::sync::OnceCell::const_new();
+fn version_label(v: Option<(u32, u32, u32)>) -> String {
+    v.map_or_else(|| "unknown".to_string(), |(a, b, c)| format!("{a}.{b}.{c}"))
+}
+
+/// What a render probe may do now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenderGate {
+    /// A probe result is cached: use it, render nothing.
+    Cached,
+    /// The interface did not answer: unavailable, render nothing.
+    Refused(String),
+    /// A screen share may be open and this Plasma lacks the full KDE bug
+    /// 524840 fix: not checked, render nothing.
+    NotChecked(String),
+    /// Render the 1x1 probe.
+    Render,
+}
+
+/// The one rule for a render probe. `share_open` is whether the tracker's
+/// screen share may be open beside this call. Rendering beside it needs
+/// Plasma 6.8.1 or later, known for sure.
+pub fn render_gate(
+    share_open: bool,
+    interface: &Result<u32, KwinError>,
+    plasma: Option<(u32, u32, u32)>,
+    probe_done: bool,
+) -> RenderGate {
+    if probe_done {
+        return RenderGate::Cached;
+    }
+    if let Err(err) = interface {
+        return RenderGate::Refused(err.reason());
+    }
+    if share_open && plasma.is_none_or(|v| crash_fix(v) != CrashFix::Full) {
+        return RenderGate::NotChecked(format!(
+            "it is not tested while the tracker shares the screen on Plasma {} (needs 6.8.1, KDE bug 524840)",
+            version_label(plasma)
+        ));
+    }
+    RenderGate::Render
+}
+
+/// A probe failure that holds for the life of the process: KWin refused
+/// the caller. It is kept for [`FAILURE_TTL`] only, all the same. Other
+/// failures (a timeout, no bus, KWin not on the bus yet at login) are not
+/// kept at all.
+const FAILURE_TTL: Duration = Duration::from_secs(60);
+
+/// Whether a probe result may be reused at `now`.
+pub fn reusable(
+    result: &Result<(), KwinError>,
+    at: tokio::time::Instant,
+    now: tokio::time::Instant,
+) -> bool {
+    match result {
+        Ok(()) => true,
+        Err(err) => err.is_definitive() && now.saturating_duration_since(at) < FAILURE_TTL,
+    }
+}
+
+/// What a probe needs from KWin; a fake in tests.
+pub trait ProbeBus {
+    fn versions(&self) -> impl std::future::Future<Output = Versions> + Send;
+    fn render(&self) -> impl std::future::Future<Output = Result<(), KwinError>> + Send;
+}
+
+/// A probe's answer and whether trying again soon may change it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeAnswer {
+    pub probe: KwinProbe,
+    pub transient: bool,
+}
+
+/// One probe at a time, with its last result.
+pub struct Prober {
+    last: tokio::sync::Mutex<Option<(Result<(), KwinError>, tokio::time::Instant)>>,
+}
+
+impl Prober {
+    pub const fn new() -> Self {
+        Self {
+            last: tokio::sync::Mutex::const_new(None),
+        }
+    }
+
+    /// The probe through [`render_gate`]: renders only when allowed, and
+    /// keeps the result as [`reusable`] says.
+    pub async fn probe<B: ProbeBus>(&self, bus: &B, share_open: bool) -> ProbeAnswer {
+        let mut last = self.last.lock().await;
+        let now = tokio::time::Instant::now();
+        let cached = last
+            .as_ref()
+            .filter(|(result, at)| reusable(result, *at, now))
+            .map(|(result, _)| result.clone());
+        let found = bus.versions().await;
+        match render_gate(share_open, &found.interface, found.plasma, cached.is_some()) {
+            RenderGate::Cached => ProbeAnswer {
+                probe: match &cached {
+                    Some(result) => probe_outcome(result),
+                    None => KwinProbe::NotProbed,
+                },
+                transient: false,
+            },
+            RenderGate::Refused(reason) => ProbeAnswer {
+                probe: KwinProbe::Unavailable(reason),
+                transient: found.interface.as_ref().is_err_and(|e| !e.is_definitive()),
+            },
+            RenderGate::NotChecked(reason) => ProbeAnswer {
+                probe: KwinProbe::NotChecked(reason),
+                transient: false,
+            },
+            RenderGate::Render => {
+                let result = bus.render().await;
+                log_probe(&result, &found);
+                let transient = result.as_ref().is_err_and(|e| !e.is_definitive());
+                let probe = probe_outcome(&result);
+                *last = Some((result, now));
+                ProbeAnswer { probe, transient }
+            }
+        }
+    }
+
+    /// The last result while it may be reused, without asking KWin.
+    pub async fn last(&self) -> Option<KwinProbe> {
+        let last = self.last.lock().await;
+        let now = tokio::time::Instant::now();
+        last.as_ref()
+            .filter(|(result, at)| reusable(result, *at, now))
+            .map(|(result, _)| probe_outcome(result))
+    }
+}
+
+impl Default for Prober {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn log_probe(result: &Result<(), KwinError>, found: &Versions) {
+    let plasma = version_label(found.plasma);
+    match result {
+        Ok(()) => {
+            tracing::info!(
+                interface_version = found.interface.as_ref().ok().copied().unwrap_or(0),
+                plasma = %plasma,
+                "KDE direct capture available (KWin ScreenShot2)"
+            );
+            if let Some(v) = found.plasma
+                && crash_fix(v) != CrashFix::Full
+            {
+                tracing::warn!(
+                    plasma = %plasma,
+                    "KWin before 6.8.1 can crash on NVIDIA when a screenshot meets another app's screen share (KDE bug 524840)"
+                );
+            }
+        }
+        // The route logs the one warning a user sees (`resolve`'s
+        // fallback line); this is for a debug log.
+        Err(err) => {
+            tracing::debug!(plasma = %plasma, "KDE direct probe failed: {}", err.reason());
+        }
+    }
+}
+
+/// Waits before each startup retry of a probe that failed in a way that
+/// can pass (KWin not on the bus yet at login, a timeout): 15 s in all.
+pub const STARTUP_RETRY_WAITS: [Duration; 4] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+];
+
+/// [`Prober::probe`], tried again after each of `waits` while the answer
+/// is transient.
+pub async fn probe_with_retries<B: ProbeBus>(
+    prober: &Prober,
+    bus: &B,
+    share_open: bool,
+    waits: &[Duration],
+) -> KwinProbe {
+    let mut answer = prober.probe(bus, share_open).await;
+    for wait in waits {
+        if !answer.transient {
+            break;
+        }
+        tracing::debug!(
+            wait_ms = wait.as_millis() as u64,
+            "KDE direct probe will try again"
+        );
+        tokio::time::sleep(*wait).await;
+        answer = prober.probe(bus, share_open).await;
+    }
+    answer.probe
+}
+
+/// The real bus. Versions are kept once the interface answered.
+struct RealBus;
+
+static VERSIONS: tokio::sync::Mutex<Option<Versions>> = tokio::sync::Mutex::const_new(None);
+
+impl ProbeBus for RealBus {
+    async fn versions(&self) -> Versions {
+        let mut slot = VERSIONS.lock().await;
+        if let Some(found) = slot.as_ref() {
+            return found.clone();
+        }
+        let found = read_versions().await;
+        if let Err(err) = &found.interface {
+            forget_connection(err).await;
+        } else {
+            *slot = Some(found.clone());
+        }
+        found
+    }
+
+    async fn render(&self) -> Result<(), KwinError> {
+        let target = probe_target(&super::portal::output_geometry().await);
+        let (meta, bytes) = grab_in_flight(target, false, LOCK_WAIT_TAB).await?;
+        to_rgb_image(&meta, &bytes).map(|_| ())
+    }
+}
+
+static PROBER: Prober = Prober::new();
 
 async fn read_versions() -> Versions {
     let conn = match connection().await {
@@ -695,7 +1022,7 @@ async fn read_versions() -> Versions {
             };
         }
     };
-    let interface = async {
+    let interface = bounded(async {
         let reply = conn
             .call_method(
                 Some(SERVICE),
@@ -711,13 +1038,11 @@ async fn read_versions() -> Versions {
             .deserialize()
             .map_err(|err| KwinError::BadReply(err.to_string()))?;
         value_u32(&value).ok_or_else(|| KwinError::BadReply("Version is not a number".into()))
-    };
-    let interface = tokio::time::timeout(GRAB_TIMEOUT, interface)
-        .await
-        .unwrap_or(Err(KwinError::Timeout));
+    })
+    .await;
     // KWin has no version property. Its support information (the text
     // `qdbus org.kde.KWin /KWin supportInformation` prints) starts with
-    // `KWin version: X.Y.Z`. Read once, at startup, best effort.
+    // `KWin version: X.Y.Z`. Best effort.
     let plasma = if interface.is_ok() {
         let info = async {
             let reply = conn
@@ -743,100 +1068,57 @@ async fn read_versions() -> Versions {
     Versions { interface, plasma }
 }
 
-/// [`Versions`], read once per process.
+/// What KWin says about itself, without rendering anything.
 pub async fn versions() -> Versions {
-    VERSIONS.get_or_init(read_versions).await.clone()
+    RealBus.versions().await
 }
 
-fn version_label(v: Option<(u32, u32, u32)>) -> String {
-    v.map_or_else(|| "unknown".to_string(), |(a, b, c)| format!("{a}.{b}.{c}"))
-}
-
-async fn render_probe() -> Result<(), KwinError> {
-    versions().await.interface?;
-    let (meta, bytes) = grab_in_flight(
-        Target::Area {
-            x: 0,
-            y: 0,
-            width: 1,
-            height: 1,
-        },
-        false,
-    )
-    .await?;
-    to_rgb_image(&meta, &bytes).map(|_| ())
-}
-
-/// The startup probe: the `Version` property, then a 1x1 `CaptureArea`.
-/// Run once per process and logged once. Must not run beside the
-/// tracker's own screen stream on a Plasma without the full crash fix;
-/// [`probe_beside_share`] checks that.
-pub async fn probe() -> KwinProbe {
-    let result = RENDER_PROBE
-        .get_or_init(|| async {
-            let result = render_probe().await;
-            let found = versions().await;
-            let plasma = version_label(found.plasma);
-            match &result {
-                Ok(()) => {
-                    tracing::info!(
-                        interface_version = found.interface.as_ref().ok().copied().unwrap_or(0),
-                        plasma = %plasma,
-                        "KDE direct capture available (KWin ScreenShot2)"
-                    );
-                    if let Some(v) = found.plasma
-                        && crash_fix(v) != CrashFix::Full
-                    {
-                        tracing::warn!(
-                            plasma = %plasma,
-                            "KWin before 6.8.1 can crash on NVIDIA when a screenshot meets another app's screen share (KDE bug 524840)"
-                        );
-                    }
-                }
-                // The route logs the one warning a user sees (`resolve`'s
-                // fallback line); this is for a debug log.
-                Err(err) => {
-                    tracing::debug!(plasma = %plasma, "KDE direct probe failed: {}", err.reason());
-                }
-            }
-            result
-        })
-        .await;
-    probe_outcome(result)
-}
-
-/// [`probe`] for a process that may run beside the tracker's screen
-/// stream (the app's Settings, the debug compare pair). With
-/// `share_open`, the 1x1 render runs only on Plasma 6.8.1 or later: the
-/// version is read first, which renders nothing.
+/// The probe for a process that may run beside the tracker's screen
+/// stream: with `share_open`, the 1x1 render runs only on Plasma 6.8.1 or
+/// later ([`render_gate`]).
 pub async fn probe_beside_share(share_open: bool) -> KwinProbe {
-    if share_open && RENDER_PROBE.get().is_none() {
-        let found = versions().await;
-        if let Err(err) = &found.interface {
-            return KwinProbe::Unavailable(err.reason());
-        }
-        if found.plasma.is_none_or(|v| crash_fix(v) != CrashFix::Full) {
-            return KwinProbe::Unavailable(format!(
-                "not checked while the screen stream is open on Plasma {} (needs 6.8.1, KDE bug 524840)",
-                version_label(found.plasma)
-            ));
-        }
+    PROBER.probe(&RealBus, share_open).await.probe
+}
+
+/// The probe at daemon or app startup. On KDE, a failure that can pass
+/// (KWin not on the bus yet at login, a timeout, no bus) is tried again
+/// for up to 15 s ([`STARTUP_RETRY_WAITS`]).
+pub async fn probe_at_startup(share_open: bool, on_kde: bool) -> KwinProbe {
+    let waits: &[Duration] = if on_kde { &STARTUP_RETRY_WAITS } else { &[] };
+    probe_with_retries(&PROBER, &RealBus, share_open, waits).await
+}
+
+/// KDE direct for Settings without rendering anything: the last probe
+/// result while it holds, else what the version read says (not available,
+/// or not checked yet).
+pub async fn status_without_render() -> KwinProbe {
+    if let Some(last) = PROBER.last().await {
+        return last;
     }
-    probe().await
+    status_from_versions(&versions().await.interface)
+}
+
+/// [`status_without_render`] when no probe result is kept.
+pub fn status_from_versions(interface: &Result<u32, KwinError>) -> KwinProbe {
+    match interface {
+        Ok(_) => KwinProbe::NotProbed,
+        Err(err) => KwinProbe::Unavailable(err.reason()),
+    }
 }
 
 /// The KDE direct half of a debug compare pair: the same Tab moment as the
 /// stream frame, saved as `NNNN-kwin.png`. KDE only. It runs beside the
-/// open stream, so it needs Plasma 6.8.1 (see [`probe_beside_share`]).
+/// open stream, so it needs Plasma 6.8.1 ([`render_gate`]).
 pub(crate) async fn save_compare_half(dir: &std::path::Path, n: u32, output_name: Option<&str>) {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
     if !super::route::is_kde(&desktop) {
         return;
     }
-    if let KwinProbe::Unavailable(reason) = probe_beside_share(true).await {
+    let probe = probe_beside_share(true).await;
+    if probe != KwinProbe::Available {
         static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            tracing::info!("KDE direct half of the compare pair skipped: {reason}");
+            tracing::info!(?probe, "KDE direct half of the compare pair skipped");
         }
         return;
     }
@@ -1009,35 +1291,52 @@ mod tests {
     }
 
     #[test]
-    fn a_picture_off_the_real_mode_is_resampled_to_it() {
-        // Same size, or within a pixel: kept.
-        assert_eq!(fit_size(2560, 1440, 2560, 1440), None);
-        assert_eq!(fit_size(2561, 1440, 2560, 1440), None);
-        // Unknown real size: kept.
-        assert_eq!(fit_size(3200, 1800, 0, 0), None);
-        // 1440p panel next to a 2x 4K monitor, CaptureArea-style max scale:
-        // too large, back to the mode.
-        assert_eq!(fit_size(5120, 2880, 2560, 1440), Some((2560, 1440)));
-        // Fractional rounding the other way: up to the mode.
-        assert_eq!(fit_size(2558, 1438, 2560, 1440), Some((2560, 1440)));
-    }
-
-    #[test]
-    fn a_synthetic_mixed_scale_reply_reaches_the_detectors_at_the_mode_size() {
-        // A 4x2 reply for an output whose real mode is 2x1.
+    fn a_picture_keeps_the_size_kwin_rendered() {
+        // A 4x2 reply stays 4x2 whatever the cached mode says: no resample.
         let m = meta(4, 2, 16, 16);
         let data: Vec<u8> = (0..8).flat_map(|_| [200u8, 10, 20, 255]).collect();
-        let img = picture(&m, &data, Some((2, 1))).unwrap();
-        assert_eq!((img.width(), img.height()), (2, 1));
-        let px = img.to_rgb8().get_pixel(0, 0).0;
-        assert_eq!(px, [200, 10, 20], "a flat colour survives the resample");
-        // At the right size: not touched, same pixels.
-        let img = picture(&m, &data, Some((4, 2))).unwrap();
+        let img = picture(&m, &data).unwrap();
+        assert_eq!((img.width(), img.height()), (4, 2));
         assert_eq!(img.to_rgb8().into_raw(), [200, 10, 20].repeat(8));
         assert!(
             matches!(img, DynamicImage::ImageRgb8(_)),
             "RGB, as the stream"
         );
+        assert!(!size_off((2560, 1440), Some((2560, 1440))));
+        assert!(
+            !size_off((2561, 1439), Some((2560, 1440))),
+            "a pixel of rounding"
+        );
+        assert!(size_off((2558, 1440), Some((2560, 1440))));
+        assert!(size_off((5120, 2880), Some((2560, 1440))));
+        assert!(!size_off((5120, 2880), None));
+        assert!(!size_off((5120, 2880), Some((0, 0))));
+    }
+
+    #[tokio::test]
+    async fn a_size_mismatch_rereads_the_geometry_once_and_never_resizes() {
+        let calls = std::cell::Cell::new(0);
+        let reread = |answer: Option<(u32, u32)>| {
+            let calls = &calls;
+            move || {
+                calls.set(calls.get() + 1);
+                async move { answer }
+            }
+        };
+        // Matches: the geometry is not read again.
+        let got = check_native_size((2560, 1440), Some((2560, 1440)), reread(None)).await;
+        assert_eq!((got, calls.get()), (SizeCheck::Matches, 0));
+        // Unknown real size: nothing to compare.
+        let got = check_native_size((2560, 1440), None, reread(None)).await;
+        assert_eq!((got, calls.get()), (SizeCheck::Matches, 0));
+        // Stale cache (the monitor changed mode): one re-read fixes it.
+        let got =
+            check_native_size((2560, 1440), Some((1920, 1080)), reread(Some((2560, 1440)))).await;
+        assert_eq!((got, calls.get()), (SizeCheck::MatchesAfterReread, 1));
+        // Still off after the re-read: kept as KWin rendered it.
+        let got =
+            check_native_size((3200, 1800), Some((2560, 1440)), reread(Some((2560, 1440)))).await;
+        assert_eq!((got, calls.get()), (SizeCheck::StillDiffers, 2));
     }
 
     #[test]
@@ -1180,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn a_pipe_that_stays_silent_times_out_and_a_full_one_is_kept() {
+    fn a_silent_pipe_times_out_and_a_full_one_needs_its_eof() {
         // Nothing written, writer still open: the deadline ends the read.
         let (reader, writer) = std::io::pipe().unwrap();
         let started = Instant::now();
@@ -1192,10 +1491,295 @@ mod tests {
         assert_eq!(got, Err(KwinError::Timeout));
         assert!(started.elapsed() < Duration::from_secs(1));
         drop(writer);
-        // All bytes in, EOF late: the picture is kept after a short wait.
+        // All bytes in, EOF 300 ms later: kept.
         let (fd, writer) = pipe_with(vec![3; 10], false);
         let got = read_exactly(fd, 10, Instant::now() + Duration::from_secs(2)).unwrap();
         assert_eq!(got, vec![3; 10]);
         writer.join().unwrap();
+        // All bytes in, the pipe never closed: an error at the deadline.
+        let (reader, mut writer) = std::io::pipe().unwrap();
+        std::io::Write::write_all(&mut writer, &[5; 10]).unwrap();
+        let got = read_exactly(
+            OwnedFd::from(reader),
+            10,
+            Instant::now() + Duration::from_millis(100),
+        );
+        assert!(matches!(got, Err(KwinError::BadReply(e)) if e.contains("stayed open")));
+        drop(writer);
+    }
+
+    /// KWin keeps its own copy of the write end and closes it after the
+    /// picture. Ours is closed before the read, so EOF comes at once.
+    #[test]
+    fn our_write_end_is_closed_before_the_read_so_eof_comes() {
+        let (reader, writer) = std::io::pipe().unwrap();
+        let ours = OwnedFd::from(writer);
+        let kwin_copy = ours.try_clone().unwrap();
+        let kwin = std::thread::spawn(move || {
+            let mut file = std::fs::File::from(kwin_copy);
+            std::io::Write::write_all(&mut file, &[9; 64]).unwrap();
+            // KWin's FileDescriptor closes here.
+        });
+        let started = Instant::now();
+        let got = finish_pipe(
+            OwnedFd::from(reader),
+            ours,
+            64,
+            Instant::now() + Duration::from_secs(2),
+        );
+        kwin.join().unwrap();
+        assert_eq!(got, Ok(vec![9; 64]));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "EOF came without waiting for the deadline"
+        );
+    }
+
+    /// Pins [`GRAB_TIMEOUT`] at 2 s: a call that never answers ends then.
+    #[tokio::test(start_paused = true)]
+    async fn a_call_that_never_answers_ends_at_the_grab_timeout() {
+        let started = tokio::time::Instant::now();
+        let got = bounded(std::future::pending::<Result<(), KwinError>>()).await;
+        assert_eq!(got, Err(KwinError::Timeout));
+        assert_eq!(started.elapsed(), Duration::from_secs(2));
+        let quick = bounded(async { Ok::<_, KwinError>(3) }).await;
+        assert_eq!(quick, Ok(3));
+        assert_eq!(LOCK_WAIT_TAB, GRAB_TIMEOUT, "a Tab waits at most one grab");
+    }
+
+    #[test]
+    fn the_probe_pixel_lies_on_the_auto_output() {
+        let outputs = [
+            OutputRect {
+                name: "eDP-1".into(),
+                x: -1920,
+                y: 200,
+                width: 1920,
+                height: 1080,
+                real_width: 1920,
+                real_height: 1080,
+            },
+            OutputRect {
+                name: "DP-1".into(),
+                x: 0,
+                y: 0,
+                width: 2560,
+                height: 1440,
+                real_width: 2560,
+                real_height: 1440,
+            },
+        ];
+        assert_eq!(
+            probe_target(&outputs),
+            Target::Area {
+                x: 0,
+                y: 0,
+                width: 1,
+                height: 1
+            }
+        );
+        assert_eq!(
+            probe_target(&outputs[..1]),
+            Target::Area {
+                x: -1920,
+                y: 200,
+                width: 1,
+                height: 1
+            },
+            "(0,0) is on no output here"
+        );
+        assert_eq!(probe_target(&[]), Target::ActiveScreen);
+    }
+
+    #[test]
+    fn the_render_gate_has_one_answer_per_case() {
+        let up: Result<u32, KwinError> = Ok(5);
+        let down: Result<u32, KwinError> = Err(KwinError::NotKwin);
+        let full = Some((6, 8, 1));
+        let partial = Some((6, 8, 0));
+        // A kept result wins over everything, and renders nothing.
+        assert_eq!(render_gate(true, &down, None, true), RenderGate::Cached);
+        assert_eq!(render_gate(true, &up, partial, true), RenderGate::Cached);
+        // The interface did not answer.
+        assert!(
+            matches!(render_gate(false, &down, full, false), RenderGate::Refused(r) if r.contains("not KDE"))
+        );
+        assert!(matches!(
+            render_gate(true, &down, full, false),
+            RenderGate::Refused(_)
+        ));
+        // A share may be open: only a known 6.8.1 renders.
+        assert_eq!(render_gate(true, &up, full, false), RenderGate::Render);
+        assert_eq!(
+            render_gate(true, &up, Some((6, 9, 0)), false),
+            RenderGate::Render
+        );
+        assert!(
+            matches!(render_gate(true, &up, partial, false), RenderGate::NotChecked(r) if r.contains("6.8.0"))
+        );
+        assert!(matches!(
+            render_gate(true, &up, Some((6, 7, 6)), false),
+            RenderGate::NotChecked(_)
+        ));
+        assert!(
+            matches!(render_gate(true, &up, None, false), RenderGate::NotChecked(r) if r.contains("unknown"))
+        );
+        // No share: any Plasma renders.
+        assert_eq!(render_gate(false, &up, partial, false), RenderGate::Render);
+        assert_eq!(render_gate(false, &up, None, false), RenderGate::Render);
+    }
+
+    /// A fake KWin for the prober: fixed versions, scripted render results.
+    struct FakeBus {
+        versions: Versions,
+        renders: std::sync::Mutex<std::collections::VecDeque<Result<(), KwinError>>>,
+        rendered: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FakeBus {
+        fn new(
+            interface: Result<u32, KwinError>,
+            plasma: Option<(u32, u32, u32)>,
+            renders: Vec<Result<(), KwinError>>,
+        ) -> Self {
+            Self {
+                versions: Versions { interface, plasma },
+                renders: std::sync::Mutex::new(renders.into()),
+                rendered: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn rendered(&self) -> usize {
+            self.rendered.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl ProbeBus for FakeBus {
+        fn versions(&self) -> impl std::future::Future<Output = Versions> + Send {
+            let found = self.versions.clone();
+            async move { found }
+        }
+
+        fn render(&self) -> impl std::future::Future<Output = Result<(), KwinError>> + Send {
+            self.rendered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let next = self.renders.lock().unwrap().pop_front().unwrap_or(Ok(()));
+            async move { next }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_prober_never_renders_beside_a_share_without_the_full_fix() {
+        let prober = Prober::new();
+        let bus = FakeBus::new(Ok(5), Some((6, 8, 0)), vec![]);
+        let answer = prober.probe(&bus, true).await;
+        assert!(
+            matches!(answer.probe, KwinProbe::NotChecked(_)),
+            "{answer:?}"
+        );
+        assert_eq!(bus.rendered(), 0, "no render beside the share on 6.8.0");
+        assert_eq!(prober.last().await, None, "nothing kept");
+        // With the share closed it renders, and the answer is kept.
+        assert_eq!(prober.probe(&bus, false).await.probe, KwinProbe::Available);
+        assert_eq!(bus.rendered(), 1);
+        assert_eq!(prober.probe(&bus, true).await.probe, KwinProbe::Available);
+        assert_eq!(bus.rendered(), 1, "the kept answer renders nothing");
+        // 6.8.1 renders beside the share.
+        let prober = Prober::new();
+        let bus = FakeBus::new(Ok(5), Some((6, 8, 1)), vec![]);
+        assert_eq!(prober.probe(&bus, true).await.probe, KwinProbe::Available);
+        assert_eq!(bus.rendered(), 1);
+        // No interface: unavailable, no render, may pass.
+        let prober = Prober::new();
+        let bus = FakeBus::new(Err(KwinError::NotKwin), None, vec![]);
+        let answer = prober.probe(&bus, false).await;
+        assert!(matches!(answer.probe, KwinProbe::Unavailable(_)));
+        assert!(answer.transient);
+        assert_eq!(bus.rendered(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failures_that_can_pass_are_not_kept_and_refusals_expire() {
+        // A timeout is not kept: the next probe renders again.
+        let prober = Prober::new();
+        let bus = FakeBus::new(
+            Ok(5),
+            Some((6, 8, 1)),
+            vec![Err(KwinError::Timeout), Ok(())],
+        );
+        let first = prober.probe(&bus, false).await;
+        assert!(first.transient);
+        assert_eq!(prober.last().await, None);
+        assert_eq!(prober.probe(&bus, false).await.probe, KwinProbe::Available);
+        assert_eq!(bus.rendered(), 2);
+        // A refusal is kept for a minute, then asked again.
+        let prober = Prober::new();
+        let bus = FakeBus::new(
+            Ok(4),
+            Some((6, 7, 5)),
+            vec![Err(KwinError::NotAuthorized), Err(KwinError::NotAuthorized)],
+        );
+        let refused = prober.probe(&bus, false).await;
+        assert!(!refused.transient);
+        assert!(matches!(refused.probe, KwinProbe::Unavailable(_)));
+        tokio::time::advance(Duration::from_secs(59)).await;
+        prober.probe(&bus, false).await;
+        assert_eq!(bus.rendered(), 1, "kept inside the minute");
+        tokio::time::advance(Duration::from_secs(2)).await;
+        prober.probe(&bus, false).await;
+        assert_eq!(bus.rendered(), 2, "asked again after it");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_startup_probe_tries_again_while_kwin_is_not_up_yet() {
+        let prober = Prober::new();
+        let bus = FakeBus::new(
+            Ok(5),
+            Some((6, 8, 1)),
+            vec![
+                Err(KwinError::Timeout),
+                Err(KwinError::NoBus("x".into())),
+                Ok(()),
+            ],
+        );
+        let started = tokio::time::Instant::now();
+        let got = probe_with_retries(&prober, &bus, false, &STARTUP_RETRY_WAITS).await;
+        assert_eq!(got, KwinProbe::Available);
+        assert_eq!(bus.rendered(), 3);
+        assert_eq!(
+            started.elapsed(),
+            Duration::from_secs(3),
+            "after the 1 s and 2 s waits"
+        );
+        // A refusal is final: no retry.
+        let prober = Prober::new();
+        let bus = FakeBus::new(Ok(4), None, vec![Err(KwinError::NotAuthorized)]);
+        let started = tokio::time::Instant::now();
+        let got = probe_with_retries(&prober, &bus, false, &STARTUP_RETRY_WAITS).await;
+        assert!(matches!(got, KwinProbe::Unavailable(_)));
+        assert_eq!(started.elapsed(), Duration::ZERO);
+        // Off KDE there are no waits.
+        let prober = Prober::new();
+        let bus = FakeBus::new(Err(KwinError::NotKwin), None, vec![]);
+        let started = tokio::time::Instant::now();
+        probe_with_retries(&prober, &bus, false, &[]).await;
+        assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[test]
+    fn settings_status_without_a_render() {
+        assert_eq!(status_from_versions(&Ok(5)), KwinProbe::NotProbed);
+        assert!(matches!(
+            status_from_versions(&Err(KwinError::NotKwin)),
+            KwinProbe::Unavailable(r) if r.contains("not KDE")
+        ));
+        assert!(KwinError::NotAuthorized.is_definitive());
+        assert!(KwinError::EmptyReply.is_definitive());
+        assert!(
+            !KwinError::NotKwin.is_definitive(),
+            "KWin may not be up yet"
+        );
+        assert!(!KwinError::Timeout.is_definitive());
+        assert!(super::super::flight::is_busy(&KwinError::Busy.to_string()));
     }
 }

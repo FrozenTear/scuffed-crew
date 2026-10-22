@@ -284,26 +284,41 @@ Settings has the same choice: Automatic, Screen stream, Older screenshot,
 and on KDE, KDE direct.
 
 **KDE direct** (`capture_route = "kwin"`) asks KWin directly; Plasma shows
-no prompt or indicator; images stay in memory and are never saved. It
-calls KWin's own screenshot interface (`org.kde.KWin.ScreenShot2`) for the
-game's monitor, with the cursor left out, and reads the pixels from a pipe.
-There is no dialog, no PNG and no file in Pictures. It needs Plasma 6.8 or
-later: older Plasma refuses apps it does not list. At startup the tracker
-reads the interface version and takes a 1x1 test picture. If that fails,
-it uses the route Automatic would have chosen (the screen stream on KDE),
-logs `KDE direct capture is not available (...); using ... instead`, and
-Settings shows the reason. It never runs beside the tracker's own screen
-stream. A grab waits 400 ms after Tab, as direct capture does, and retries
-as usual. The picture is the monitor's real size; if KWin returns another
-size (fractional or mixed scaling), it is resized to the real size with
-the same filter the portal path uses. Automatic does not choose KDE direct
-yet.
+no prompt or indicator; images stay in memory and are never saved unless a
+debug option is on. It calls KWin's own screenshot interface
+(`org.kde.KWin.ScreenShot2`) for the game's monitor, with the cursor left
+out, and reads the pixels from a pipe. There is no dialog, no PNG and no
+file in Pictures. It needs Plasma 6.8 or later: older Plasma refuses apps
+it does not list. At startup the tracker reads the interface version and
+takes a 1x1 test picture on one of your monitors; on KDE a failure that can
+pass (KWin not up yet at login) is tried again for up to 15 seconds. If it
+still fails, the tracker uses the route Automatic would have chosen (the
+screen stream on KDE), logs `KDE direct capture is not available (...);
+using ... instead`, and Settings shows the reason; restart the tracker to
+try again. Unlike the other forced values, which fail closed, `kwin` falls
+back this way from the environment variable and from Settings alike. The
+app's Settings runs that test picture only when KDE direct is the saved
+choice or you pick it, and never while the tracker shares the screen on a
+Plasma before 6.8.1; otherwise it reads the version only and says KDE
+direct was not checked.
+
+KDE direct never runs beside the tracker's own screen stream. The one
+exception is the debug compare pair below, which needs Plasma 6.8.1 or
+later (the full fix for KDE bug 524840). A grab waits 400 ms after Tab, as
+direct capture does, and retries as usual. The picture is the size KWin
+renders the monitor at, its real mode size; it is never resized. If it
+differs from the size the tracker last read for that monitor, the tracker
+reads the monitor layout again. Automatic does not choose KDE direct yet:
+route selection is unchanged.
 
 Older screenshot on KDE takes about half a second of KWin and portal work
-per grab. One request runs at a time (a Tab waits for a poll's request to
-finish, then takes its own), a rejected Tab is retried once instead of
-twice, and out of a match the poll grabs about every 3 seconds instead of
-every tick. KDE direct polls at that rate out of a match too. On GNOME,
+per grab. The tracker runs one request at a time (a Tab waits for a poll's
+request to finish, then takes its own; a poll that finds one running is
+skipped), a rejected Tab is retried once instead of twice, and out of a
+match the poll grabs about every 3 seconds instead of every tick. KDE
+direct polls at that rate out of a match too. The app's Capture now is a
+separate process and can run at the same moment; KWin handles such calls
+one after the other. On GNOME,
 Older screenshot flashes the screen and plays a sound on every capture;
 the startup log warns when it is forced there, and Settings says so.
 When the environment variable is set, Settings says so and names the file

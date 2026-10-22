@@ -673,7 +673,7 @@ pub fn share_close_due(
 /// Capture now on KDE must not open the screenshot portal while the daemon
 /// says its share is open.
 pub fn capture_now_blocked_by_daemon_share(desktop: &str, daemon_share_open: bool) -> bool {
-    daemon_share_open && desktop_has(desktop, &["kde", "plasma", "kwin"])
+    daemon_share_open && is_kde(desktop)
 }
 
 /// Capture now's error when the daemon share is already open. Quitting
@@ -747,7 +747,7 @@ const SCREENCOPY_DESKTOPS: &[&str] = &[
 ];
 
 fn is_kde(desktop: &str) -> bool {
-    desktop_has(desktop, &["kde", "plasma", "kwin"])
+    super::route::is_kde(desktop)
 }
 
 pub fn screenshot_fallback_is_safe(desktop: &str, stream_forced: bool) -> bool {
@@ -2101,7 +2101,9 @@ async fn save_compare(
     crate::fs_mode::tighten_private_file(&stream_path);
     // KDE direct first: it is tens of milliseconds, so it is nearer the
     // stream frame's moment than the portal screenshot after it.
-    super::kwin::save_compare_half(&dir, n, output_name).await;
+    // Boxed so the probe and KWin grab do not sit inline in every stream
+    // grab's future (debug-only path, large state).
+    Box::pin(super::kwin::save_compare_half(&dir, n, output_name)).await;
     match portal::capture(output_name).await {
         Ok(shot) => {
             if shot.save(&shot_path).is_ok() {

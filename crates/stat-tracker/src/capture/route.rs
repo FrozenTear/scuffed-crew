@@ -13,7 +13,10 @@
 //! KDE direct is used only when its startup probe answered
 //! ([`KwinProbe::Available`]). When it was asked for and the probe failed,
 //! the route the user would have had on automatic is used instead, with
-//! one warning naming the reason ([`Decision::fallback`]).
+//! one warning naming the reason ([`Decision::fallback`]). This is the one
+//! forced value that falls back: every other forced value fails closed
+//! (R1-3). `kwin` falls back the same way whether it came from
+//! `STAT_TRACKER_CAPTURE` or from Settings.
 
 use super::{CaptureBackend, select_backend};
 
@@ -65,6 +68,10 @@ pub enum KwinProbe {
     Available,
     /// The reason it cannot be used, for the log and the app.
     Unavailable(String),
+    /// Not tested, and why: the 1x1 render would have run beside the
+    /// tracker's screen share on a Plasma without the full KDE bug 524840
+    /// fix. Not a verdict on KDE direct.
+    NotChecked(String),
 }
 
 /// Env, else Settings, else automatic.
@@ -161,9 +168,10 @@ fn desktop_has(desktop: &str, names: &[&str]) -> bool {
     })
 }
 
-/// KDE Plasma, from `XDG_CURRENT_DESKTOP`.
+/// KDE Plasma, from `XDG_CURRENT_DESKTOP`. The one KDE test: the screen
+/// stream's KWin guards use it too.
 pub fn is_kde(desktop: &str) -> bool {
-    desktop_has(desktop, &["kde", "plasma"])
+    desktop_has(desktop, &["kde", "plasma", "kwin"])
 }
 
 /// GNOME, from `XDG_CURRENT_DESKTOP`.
@@ -262,7 +270,7 @@ pub fn resolve(
             false,
         );
         let reason = match kwin {
-            KwinProbe::Unavailable(reason) => reason.as_str(),
+            KwinProbe::Unavailable(reason) | KwinProbe::NotChecked(reason) => reason.as_str(),
             _ => "it was not probed",
         };
         decision.fallback = Some(format!(
@@ -536,6 +544,11 @@ mod tests {
         assert_eq!(classify(" KWin "), ForceWord::Kwin);
         assert_eq!(classify("kde-direct"), ForceWord::Kwin);
         assert_eq!(classify("kde"), ForceWord::Unknown);
+        for kde in ["KDE", "plasma", "KWin", "ubuntu:KDE"] {
+            assert!(is_kde(kde), "{kde}");
+        }
+        assert!(!is_kde("GNOME"));
+        assert!(!is_kde("niri"));
     }
 
     #[test]
@@ -606,6 +619,16 @@ mod tests {
             false,
         );
         assert!(unprobed.fallback.unwrap().contains("not probed"));
+        let skipped = decide_kwin(
+            None,
+            Some(ForceWord::Kwin),
+            false,
+            "KDE",
+            KwinProbe::NotChecked("needs 6.8.1".into()),
+            false,
+        );
+        assert_eq!(skipped.backend, CaptureBackend::Portal);
+        assert!(skipped.fallback.unwrap().contains("needs 6.8.1"));
     }
 
     #[test]
