@@ -708,8 +708,7 @@ pub fn pause_trips() -> u32 {
     PAUSE_TRIPS.load(Ordering::Acquire)
 }
 
-pub const TRIP_SLOW_RESUMES: &str =
-    "two resumes in a row did not reach Streaming or bring a frame within 1.5 s";
+pub const TRIP_SLOW_RESUMES: &str = "resumes stayed unanswered (no Streaming, no frame) for 1.5 s of active time twice, with no answer in between";
 pub const TRIP_TAB_MISS: &str =
     "a Tab missed its frame and the resumed stream had not reached Streaming";
 pub const TRIP_STUCK: &str =

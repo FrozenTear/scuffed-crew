@@ -76,8 +76,9 @@ pub fn lock_wait(is_tab: bool, tab_wait: Duration, poll_wait: Duration) -> Durat
 }
 
 /// Runs `request` to the end, calling `overdue` with the time waited so
-/// far once at `first` and then every `every`. It never gives up: a
-/// request that cannot be cancelled keeps whatever it holds until it ends.
+/// far once at `first` and then every `every`. It never gives up by
+/// itself: the screenshot portal's caller bounds it and closes the request
+/// (`portal::run_shot`, S5-CAP-1).
 pub async fn with_overdue_warnings<F: Future>(
     request: F,
     first: Duration,
