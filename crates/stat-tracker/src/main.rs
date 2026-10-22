@@ -690,8 +690,13 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         max_fps: config.screencast_max_fps(),
     });
     // Pause the screen stream between grabs where the compositor handles it.
-    capture::decide_stream_pause(config.screencast_pause_override()).await;
-    let backend = capture::detect_backend().await;
+    // Decided next to the backend probe: on KDE the KWin version read can
+    // take a few seconds (D-Bus, a 3 s retry, the binary). No stream is
+    // opened before both are done.
+    let (_, backend) = tokio::join!(
+        capture::decide_stream_pause(config.screencast_pause_override()),
+        capture::detect_backend(),
+    );
     tracing::info!(?backend, "capture backend selected");
     // KDE direct asked for and not there: the app says why under the
     // capture method. Written every start, so an old reason is cleared.
@@ -17448,6 +17453,56 @@ mod tests {
         let next = pending_or_next(&mut pending, async { panic!("not read") }).await;
         assert_eq!(next.unwrap(), press);
         assert!(pending.is_none());
+    }
+
+    /// The run loop's two halves of the bridge: the poll arm keeps the
+    /// bridge a preempting press took (not dropped at once), and the
+    /// keyboard arm takes it at its top, before the match, so a keyboard
+    /// error drops it too and a press holds it until its own hold exists.
+    #[test]
+    fn the_run_loop_keeps_the_preempt_bridge_until_the_keyboard_arm() {
+        let src = include_str!("main.rs");
+        let run_at = src
+            .find(concat!("async ", "fn run_loop"))
+            .expect("run_loop");
+        let after = &src[run_at..];
+        let end = after.find("\nfn analyze_frame(").expect("run_loop end");
+        let run_loop = &after[..end];
+        // Keyboard arm.
+        let arm = run_loop
+            .find(concat!("result = pending_or_next(", "&mut pending_key"))
+            .expect("keyboard arm");
+        let arm_text = &run_loop[arm..];
+        let take = arm_text
+            .find(concat!("let bridge = ", "preempt_stream_hold.take();"))
+            .expect("the keyboard arm takes the bridge");
+        let matched = arm_text.find(concat!("match ", "result {")).expect("match");
+        assert!(
+            take < matched,
+            "taken before the match, so Err drops it too"
+        );
+        let ok_arm = &arm_text[matched..];
+        let start = ok_arm
+            .find(concat!("capture::", "stream_key_hold(press)"))
+            .expect("the press's own hold");
+        let dropped = ok_arm
+            .find(concat!("drop(", "bridge);"))
+            .expect("bridge dropped");
+        assert!(
+            start < dropped,
+            "the bridge outlives the press's own hold start"
+        );
+        // Poll arm: the bridge a preempting press took is kept.
+        let preempted = run_loop
+            .find(concat!("PollRace::", "Preempted => {"))
+            .expect("preempted branch");
+        let branch = &run_loop[preempted..];
+        let branch = &branch[..branch.find(concat!("conti", "nue;")).expect("continue")];
+        assert!(
+            branch.contains(concat!("preempt_stream_hold = ", "bridge.take();")),
+            "the preempted poll hands its bridge to the keyboard arm"
+        );
+        assert!(run_loop.contains(concat!("with_bridge_hold", "(")));
     }
 
     /// The bridge hold exists before the preempted poll's grab is dropped,

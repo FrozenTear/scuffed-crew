@@ -149,9 +149,9 @@ fn hold_in(slot: &'static Mutex<Ctl>) -> StreamHold {
 
 /// The startup decision. Read when a stream is registered and by holds.
 /// `streaming_answers`: the compositor is niri.
-pub fn set_enabled(enabled: bool, streaming_answers: bool) {
+fn set_enabled_in(slot: &Mutex<Ctl>, enabled: bool, streaming_answers: bool) {
     let handle = {
-        let mut ctl = ctl(&CTL);
+        let mut ctl = ctl(slot);
         ctl.enabled = enabled;
         ctl.streaming_answers = streaming_answers;
         ctl.apply()
@@ -584,22 +584,46 @@ const KWIN_DBUS_RETRY: Duration = Duration::from_secs(3);
 /// Decide once at startup, log one line, and apply it. Returns the
 /// decision.
 pub async fn decide_and_apply(over: PauseOverride) -> bool {
-    // Read the session even when the env var or config decides, so a
-    // forced-on niri still counts Streaming as an answer. KWin's version
-    // is read only for Auto.
+    decide_and_apply_in(&CTL, over, detect_facts, detect_facts_without_kwin).await
+}
+
+/// What the startup decision applies: pausing on or off, and whether
+/// Streaming answers a resume (niri, whether pausing is automatic or
+/// forced on).
+pub fn applied_decision(over: PauseOverride, facts: &DesktopFacts) -> (bool, bool, &'static str) {
+    let (on, why) = decide(over, facts);
+    (on, compositor(facts) == Compositor::Niri, why)
+}
+
+/// [`decide_and_apply`] with the control slot and the two session readers
+/// passed in. The session is read even when the env var or config decides,
+/// so a forced-on niri still counts Streaming as an answer; KWin's version
+/// (`full`) is read only for Auto.
+async fn decide_and_apply_in<F, FF, B, BF>(
+    slot: &Mutex<Ctl>,
+    over: PauseOverride,
+    full: F,
+    basic: B,
+) -> bool
+where
+    F: FnOnce() -> FF,
+    FF: std::future::Future<Output = DesktopFacts>,
+    B: FnOnce() -> BF,
+    BF: std::future::Future<Output = DesktopFacts>,
+{
     let facts = if over == PauseOverride::Auto {
-        detect_facts().await
+        full().await
     } else {
-        detect_facts_without_kwin().await
+        basic().await
     };
-    let (on, why) = decide(over, &facts);
+    let (on, streaming_answers, why) = applied_decision(over, &facts);
     tracing::info!(
         pause_between_grabs = on,
         compositor = ?compositor(&facts),
         kwin_version = ?facts.kwin_version,
         "screencast stream pause between grabs: {why}"
     );
-    set_enabled(on, compositor(&facts) == Compositor::Niri);
+    set_enabled_in(slot, on, streaming_answers);
     on
 }
 
@@ -1066,5 +1090,90 @@ mod tests {
             let stream = live(slot);
             assert_eq!(stream.streaming_answers_for_test(), niri);
         }
+    }
+
+    fn niri_facts() -> DesktopFacts {
+        DesktopFacts {
+            desktop: "niri".into(),
+            niri_socket: true,
+            ..DesktopFacts::default()
+        }
+    }
+
+    #[test]
+    fn the_applied_decision_keeps_the_niri_flag_when_forced_on() {
+        let niri = niri_facts();
+        assert_eq!(applied_decision(PauseOverride::Auto, &niri).0, true);
+        assert_eq!(applied_decision(PauseOverride::Auto, &niri).1, true);
+        assert_eq!(
+            applied_decision(PauseOverride::EnvOn, &niri),
+            (true, true, "forced on by STAT_TRACKER_SCREENCAST_PAUSE")
+        );
+        let kde = DesktopFacts {
+            kwin_version: Some((6, 8)),
+            ..facts("KDE")
+        };
+        assert_eq!(applied_decision(PauseOverride::Auto, &kde).1, false);
+        assert_eq!(
+            applied_decision(PauseOverride::EnvOn, &facts("sway")).1,
+            false
+        );
+    }
+
+    /// The startup path itself: what lands in the control slot, and which
+    /// session reader runs.
+    #[test]
+    fn decide_and_apply_sets_the_niri_flag_and_reads_the_session_when_forced() {
+        use std::cell::Cell;
+        let run = |over: PauseOverride, facts: DesktopFacts| {
+            let slot = leak_ctl(false);
+            let full_ran = Cell::new(false);
+            let basic_ran = Cell::new(false);
+            let on = rt().block_on(decide_and_apply_in(
+                slot,
+                over,
+                || {
+                    full_ran.set(true);
+                    std::future::ready(facts.clone())
+                },
+                || {
+                    basic_ran.set(true);
+                    std::future::ready(facts.clone())
+                },
+            ));
+            let ctl = ctl(slot);
+            (
+                on,
+                ctl.enabled,
+                ctl.streaming_answers,
+                full_ran.get(),
+                basic_ran.get(),
+            )
+        };
+        // Forced on, on niri: the session is still read (basic, no KWin
+        // version), and Streaming answers.
+        assert_eq!(
+            run(PauseOverride::EnvOn, niri_facts()),
+            (true, true, true, false, true)
+        );
+        // Automatic on niri: the full read.
+        assert_eq!(
+            run(PauseOverride::Auto, niri_facts()),
+            (true, true, true, true, false)
+        );
+        // Automatic on KWin 6.8: on, only buffers answer.
+        let kde = DesktopFacts {
+            kwin_version: Some((6, 8)),
+            ..facts("KDE")
+        };
+        assert_eq!(
+            run(PauseOverride::Auto, kde),
+            (true, true, false, true, false)
+        );
+        // Off by config: off, the session still read for the log.
+        assert_eq!(
+            run(PauseOverride::ConfigOff, niri_facts()),
+            (false, false, true, false, true)
+        );
     }
 }

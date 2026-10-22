@@ -303,6 +303,9 @@ fn reopen_step(obs: Observe, has_token: bool, now: Instant, watch: &mut ReopenWa
 /// resume the compositor never answered trips there first, so a stream the
 /// tracker paused is not reopened with pausing still on.
 fn health_now(stream: &pw::Handle) -> StreamHealth {
+    if portal_session_closed() {
+        stream.mark_external_end();
+    }
     stream.check_stuck_resume();
     health_of(stream.stream_report())
 }
@@ -343,8 +346,14 @@ struct Live {
 impl Drop for Live {
     fn drop(&mut self) {
         // Quit and join the PipeWire thread before Session.Close, so the
-        // consumer is gone before the portal session ends.
-        drop(self.stream.take());
+        // consumer is gone before the portal session ends. A session the
+        // portal already closed is not a failed pause.
+        if let Some(stream) = self.stream.take() {
+            if portal_session_closed() {
+                stream.mark_external_end();
+            }
+            drop(stream);
+        }
         if let Some(tx) = self.close_session.take() {
             let _ = tx.send(());
         }
