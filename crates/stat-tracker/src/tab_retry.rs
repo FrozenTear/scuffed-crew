@@ -29,6 +29,18 @@ use std::time::{Duration, Instant};
 /// land about 300 ms and about 700 ms after the first rejection.
 pub const TAB_RETRY_WAITS: [Duration; 2] = [Duration::from_millis(300), Duration::from_millis(400)];
 
+/// The retry waits for a capture route. The screenshot portal gets one
+/// retry: each of its grabs is a full KDE capture of about 450 ms plus a
+/// PNG, so a second retry lands well after the board and costs the game a
+/// third full capture. The stream, wayshot, X11 and KDE direct keep both.
+pub fn tab_retry_waits(route: crate::capture::ShotRoute) -> &'static [Duration] {
+    if route.one_tab_retry() {
+        &TAB_RETRY_WAITS[..1]
+    } else {
+        &TAB_RETRY_WAITS
+    }
+}
+
 /// After an accepted board, Tab presses this soon after its press are
 /// ignored. A rejected capture sets no debounce.
 pub const TAB_DEBOUNCE_AFTER_ACCEPT: Duration = Duration::from_secs(3);
@@ -669,6 +681,36 @@ mod tests {
     #[test]
     fn half_drawn_5v5_board_is_rejected_then_accepted_on_retry() {
         check(full_5v5(), 90, 5);
+    }
+
+    #[test]
+    fn the_screenshot_portal_retries_a_rejected_tab_once() {
+        use crate::capture::ShotRoute;
+        assert_eq!(tab_retry_waits(ShotRoute::Portal), &TAB_RETRY_WAITS[..1]);
+        assert_eq!(tab_retry_waits(ShotRoute::None), &TAB_RETRY_WAITS[..]);
+        assert_eq!(tab_retry_waits(ShotRoute::Kwin), &TAB_RETRY_WAITS[..]);
+        for (route, want) in [
+            (ShotRoute::Portal, 1usize),
+            (ShotRoute::None, 2),
+            (ShotRoute::Kwin, 2),
+        ] {
+            let grabs = RefCell::new(0usize);
+            let (_, retries) = block_on(with_retries(
+                &TabFlight::new(Instant::now()),
+                tab_retry_waits(route),
+                |_: &u8| TabResult::NotAScoreboard,
+                |v: &u8| *v,
+                |_| "rejected by the scoreboard check",
+                |_| {
+                    *grabs.borrow_mut() += 1;
+                    async { Ok::<_, ()>(0u8) }
+                },
+                |_| async {},
+            ))
+            .unwrap();
+            assert_eq!(retries, want, "{route:?}");
+            assert_eq!(*grabs.borrow(), want + 1, "grabs including the first");
+        }
     }
 
     #[test]

@@ -109,7 +109,10 @@ pub const fn capture_backend_label(backend: CaptureBackend) -> &'static str {
     match backend {
         CaptureBackend::X11 => "x11",
         CaptureBackend::Wayshot => "wayshot",
-        CaptureBackend::Portal => "portal",
+        // KDE direct goes out as `portal`: the site's validator
+        // (`scuffed_types::stat_report`) knows no other word yet, and a
+        // report it refuses is lost. The log in the bundle names the route.
+        CaptureBackend::Portal | CaptureBackend::Kwin => "portal",
         CaptureBackend::None => "none",
     }
 }

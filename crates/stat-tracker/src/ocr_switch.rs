@@ -609,6 +609,10 @@ pub struct Status {
     /// Why captures are stopped after a declined screen share. Empty when
     /// the share was not declined. The app shows this in Tracker health.
     pub share_notice: String,
+    /// Why the capture route asked for is not the one in use (KDE direct
+    /// asked for, KWin did not answer). Empty otherwise. The app shows it
+    /// under the capture method in Settings.
+    pub capture_notice: String,
 }
 
 /// One blocked call site in [`Status`].
@@ -667,6 +671,7 @@ pub fn read_status(data_dir: &Path) -> Option<Status> {
 
 static DAEMON_SHARE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SHARE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static CAPTURE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static STATUS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn daemon_share_open() -> bool {
@@ -678,6 +683,26 @@ pub fn share_notice() -> String {
         .lock()
         .unwrap_or_else(|err| err.into_inner())
         .clone()
+}
+
+pub fn capture_notice() -> String {
+    CAPTURE_NOTICE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+/// Write the capture-route sentence into the status file (empty clears
+/// it), keeping everything else there. Later status writes keep it too.
+pub fn publish_capture_notice(data_dir: &Path, notice: &str) {
+    let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
+    *CAPTURE_NOTICE.lock().unwrap_or_else(|err| err.into_inner()) = notice.to_string();
+    let mut status = read_status(data_dir).unwrap_or_default();
+    if status.capture_notice == notice {
+        return;
+    }
+    status.capture_notice = notice.to_string();
+    let _ = write_status(data_dir, &status);
 }
 
 /// The in-memory notice. The status file is updated by
@@ -886,6 +911,7 @@ impl Switch {
             leptess_created: gate::leptess_created(),
             share_open: daemon_share_open(),
             share_notice: share_notice(),
+            capture_notice: capture_notice(),
         }
     }
 
@@ -1373,6 +1399,7 @@ mod tests {
             leptess_created: 0,
             share_open: false,
             share_notice: String::new(),
+            capture_notice: String::new(),
         }
     }
 

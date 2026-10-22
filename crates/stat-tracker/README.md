@@ -187,7 +187,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 |---|---|
 | `player_name` | Scoreboard name used to find your row (fetched from the server if unset) |
 | `capture_output` | Display/output name to capture (`--list-outputs`) |
-| `capture_route` | `auto` (default), `screencast`, or `screenshot`. See below. A non-empty `STAT_TRACKER_CAPTURE` wins over this |
+| `capture_route` | `auto` (default), `screencast`, `screenshot`, or `kwin` (KDE direct). See below. A non-empty `STAT_TRACKER_CAPTURE` wins over this |
 | `debug_portal_frames` | Off by default. Saves up to four Tab pairs under `{data_dir}/debug/portal-compare/` (`0001-stream.png` and `0001-screenshot.png`). Also `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`, which is not written to this file. The pictures stay on this machine and are not uploaded. Leave it off while a voice app is sharing the screen: the screenshot half can hit the KWin cursor crash |
 | `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`). Must be absolute. The systemd unit can write this path, the config dir, and the session runtime dir; a custom directory gets a drop-in at install (see below) |
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown). `poll_interval_secs` is whole seconds; 4 means automatic (1.5 s with the new reader, 4 s otherwise). `poll_interval_ms`, when set, overrides that (500 to 10000). It is not written unless you set it |
@@ -276,18 +276,62 @@ For the systemd service, put it in `~/.config/environment.d/` (for example
 |---|---|
 | `portal` or `screencast` | Screen stream, cursor hidden, with the automatic fallback above |
 | `portal-screenshot` | Older screenshot portal |
+| `kwin` or `kde-direct` | KDE direct (below) |
 | `wayshot` or `wayland` | Direct Wayland capture |
 | `x11` | X11 |
 
-Settings has the same choice: Automatic, Screen stream, Older screenshot.
+Settings has the same choice: Automatic, Screen stream, Older screenshot,
+and on KDE, KDE direct.
+
+**KDE direct** (`capture_route = "kwin"`) asks KWin directly; Plasma shows
+no prompt or indicator; images stay in memory and are never saved unless a
+debug option is on. It calls KWin's own screenshot interface
+(`org.kde.KWin.ScreenShot2`) for the game's monitor, with the cursor left
+out, and reads the pixels from a pipe. There is no dialog, no PNG and no
+file in Pictures. It needs Plasma 6.8 or later: older Plasma refuses apps
+it does not list. At startup the tracker reads the interface version and
+takes a 1x1 test picture on one of your monitors; on KDE a failure that can
+pass (KWin not up yet at login) is tried again for up to 15 seconds. If it
+still fails, the tracker uses the route Automatic would have chosen (the
+screen stream on KDE), logs `KDE direct capture is not available (...);
+using ... instead`, and Settings shows the reason; restart the tracker to
+try again. Unlike the other forced values, which fail closed, `kwin` falls
+back this way from the environment variable and from Settings alike. The
+app's Settings runs that test picture only when KDE direct is the saved
+choice or you pick it, and never while the tracker shares the screen on a
+Plasma before 6.8.1; otherwise it reads the version only and says KDE
+direct was not checked.
+
+KDE direct never runs beside the tracker's own screen stream. The one
+exception is the debug compare pair below, which needs Plasma 6.8.1 or
+later (the full fix for KDE bug 524840). A grab waits 400 ms after Tab, as
+direct capture does, and retries as usual. The picture is the size KWin
+renders the monitor at, its real mode size; it is never resized. If it
+differs from the size the tracker last read for that monitor, the tracker
+reads the monitor layout again. Automatic does not choose KDE direct yet:
+route selection is unchanged.
+
+Older screenshot on KDE takes about half a second of KWin and portal work
+per grab. The tracker runs one request at a time (a Tab waits for a poll's
+request to finish, then takes its own; a poll that finds one running is
+skipped), a rejected Tab is retried once instead of twice, and out of a
+match the poll grabs about every 3 seconds instead of every tick. KDE
+direct polls at that rate out of a match too. The app's Capture now is a
+separate process and can run at the same moment; KWin handles such calls
+one after the other. On GNOME,
+Older screenshot flashes the screen and plays a sound on every capture;
+the startup log warns when it is forced there, and Settings says so.
 When the environment variable is set, Settings says so and names the file
 to edit. The startup log says which source won (`environment`, `settings`,
 or `automatic`), the desktop, and the portal backend that answered.
 
 `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1` or `debug_portal_frames = true` saves
 up to four Tab pairs in `{data_dir}/debug/portal-compare/` so the two
-portal images can be compared. Nothing there is uploaded. Turn it off
-before playing while a voice app is sharing your screen.
+portal images can be compared. On KDE with Plasma 6.8.1 or later, each
+pair also gets the same Tab moment from KDE direct (`NNNN-kwin.png`), to
+compare with the stream frame before switching routes. Nothing there is
+uploaded. Turn it off before playing while a voice app is sharing your
+screen.
 
 ### OCR CPU use (`OMP_THREAD_LIMIT`)
 

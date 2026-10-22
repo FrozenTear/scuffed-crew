@@ -208,6 +208,9 @@ pub struct OcrSwitchView {
     /// Why captures are stopped after a declined screen share. Shown in
     /// Tracker health, not mixed into the OCR notice.
     pub share_notice: Option<String>,
+    /// Why the running tracker is not on the capture method asked for
+    /// (KDE direct did not answer). Shown under the capture method.
+    pub capture_notice: Option<String>,
 }
 
 /// A click on the classic OCR switch. Turning it on always works. Turning
@@ -304,6 +307,99 @@ pub(crate) fn daemon_share_notice(
     } else {
         Some(notice.to_string())
     }
+}
+
+/// The running tracker's capture-route sentence ([`OcrSwitchStatus::capture_notice`]).
+pub(crate) fn daemon_capture_notice(
+    status: Option<&OcrSwitchStatus>,
+    daemon_pid: Option<u32>,
+) -> Option<String> {
+    let notice = live_status(status, daemon_pid)?.capture_notice.trim();
+    (!notice.is_empty()).then(|| notice.to_string())
+}
+
+/// The running tracker's screen share is open ([`live_status`]).
+pub(crate) fn daemon_share_open(status: Option<&OcrSwitchStatus>, daemon_pid: Option<u32>) -> bool {
+    live_status(status, daemon_pid).is_some_and(|status| status.share_open)
+}
+
+/// KDE direct is checked again when the tracker restarted (a new pid,
+/// after a capture route change) or its screen share just closed. `seen`
+/// is (tracker pid, share open) at the last tick and at this one.
+pub(crate) fn kde_direct_recheck_due(
+    before: (Option<u32>, bool),
+    now: (Option<u32>, bool),
+) -> bool {
+    let restarted = now.0.is_some() && now.0 != before.0;
+    let share_closed = before.1 && !now.1;
+    restarted || share_closed
+}
+
+/// Shown under the capture method when KDE direct can be chosen.
+pub(crate) const KDE_DIRECT_HELP: &str = "KDE direct asks KWin directly; Plasma shows no prompt or indicator; images stay in memory and are never saved unless a debug option is on. Needs Plasma 6.8 or later.";
+
+/// KDE direct has not been tried on this desktop yet.
+pub(crate) const KDE_DIRECT_NOT_CHECKED: &str =
+    "KDE direct has not been checked here yet. Choosing it runs a short check.";
+
+/// Shown on GNOME next to the Older screenshot choice.
+pub(crate) const GNOME_SCREENSHOT_NOTE: &str =
+    "Older screenshot: GNOME flashes the screen and plays a sound on every capture.";
+
+/// How a line under the capture method is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NoteTone {
+    Info,
+    Warn,
+}
+
+/// The KDE direct chip is shown on KDE, or when it is the saved choice.
+pub(crate) fn show_kde_direct(desktop: &str, route: CaptureRoute) -> bool {
+    stat_tracker::capture::is_kde(desktop) || route == CaptureRoute::Kwin
+}
+
+/// Lines under the capture method: the GNOME flash for Older screenshot,
+/// KDE direct that is not there, and what the running tracker said. A line
+/// about the selected choice is a warning.
+pub(crate) fn capture_route_notes(
+    desktop: &str,
+    route: CaptureRoute,
+    kde_direct: Option<&stat_tracker::capture::KwinProbe>,
+    daemon_notice: Option<&str>,
+) -> Vec<(String, NoteTone)> {
+    let tone = |selected: bool| {
+        if selected {
+            NoteTone::Warn
+        } else {
+            NoteTone::Info
+        }
+    };
+    let mut notes = Vec::new();
+    if stat_tracker::capture::is_gnome(desktop) {
+        notes.push((
+            GNOME_SCREENSHOT_NOTE.to_string(),
+            tone(route == CaptureRoute::Screenshot),
+        ));
+    }
+    match kde_direct {
+        Some(stat_tracker::capture::KwinProbe::Unavailable(reason)) => notes.push((
+            format!("KDE direct is not available here: {reason}."),
+            tone(route == CaptureRoute::Kwin),
+        )),
+        // Not a verdict: said plainly, never as a warning.
+        Some(stat_tracker::capture::KwinProbe::NotChecked(reason)) => notes.push((
+            format!("KDE direct was not checked: {reason}."),
+            NoteTone::Info,
+        )),
+        Some(stat_tracker::capture::KwinProbe::NotProbed) => {
+            notes.push((KDE_DIRECT_NOT_CHECKED.to_string(), NoteTone::Info));
+        }
+        Some(stat_tracker::capture::KwinProbe::Available) | None => {}
+    }
+    if let Some(notice) = daemon_notice {
+        notes.push((format!("Tracker: {notice}."), NoteTone::Warn));
+    }
+    notes
 }
 
 /// The lines under the classic OCR switch that depend on the tracker
@@ -990,6 +1086,16 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         ),
     ]
     .spacing(8);
+    let kde_direct = show_kde_direct(&app.desktop, route);
+    let route_chips = if kde_direct {
+        route_chips.push(output_chip(
+            "KDE direct",
+            route == CaptureRoute::Kwin,
+            Message::SelectCaptureRoute(CaptureRoute::Kwin),
+        ))
+    } else {
+        route_chips
+    };
 
     let mut chips = row![output_chip(
         "Auto (first monitor)",
@@ -1010,6 +1116,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         Some(stat_tracker::capture::CaptureBackend::Wayshot) => "Wayland",
         Some(stat_tracker::capture::CaptureBackend::X11) => "X11",
         Some(stat_tracker::capture::CaptureBackend::Portal) => "Desktop portal",
+        Some(stat_tracker::capture::CaptureBackend::Kwin) => "KDE direct (KWin)",
         Some(stat_tracker::capture::CaptureBackend::None) => "None available",
     };
 
@@ -1034,14 +1141,38 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
-        field_caption("Monitor"),
-        chips.wrap(),
+    ]
+    .spacing(6);
+    if kde_direct {
+        body = body.push(
+            text(KDE_DIRECT_HELP)
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+    }
+    for (note, tone) in capture_route_notes(
+        &app.desktop,
+        route,
+        app.kde_direct.as_ref(),
+        app.ocr_switch.capture_notice.as_deref(),
+    ) {
+        body = body.push(
+            text(note)
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(match tone {
+                    NoteTone::Info => TEXT_3,
+                    NoteTone::Warn => theme::WARN,
+                }),
+        );
+    }
+    body = body.push(field_caption("Monitor")).push(chips.wrap()).push(
         text(format!("Detected: {backend}"))
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
-    ]
-    .spacing(6);
+    );
 
     if let Some(note) = env_note {
         body = body.push(
@@ -3080,7 +3211,100 @@ token = \"not-a-real-token\"
             leptess_created: 0,
             share_open: false,
             share_notice: String::new(),
+            capture_notice: String::new(),
         }
+    }
+
+    #[test]
+    fn kde_direct_chip_shows_on_kde_or_when_saved() {
+        assert!(show_kde_direct("KDE", CaptureRoute::Auto));
+        assert!(show_kde_direct("plasma:KDE", CaptureRoute::Screencast));
+        assert!(!show_kde_direct("GNOME", CaptureRoute::Auto));
+        assert!(!show_kde_direct("niri", CaptureRoute::Screenshot));
+        assert!(show_kde_direct("niri", CaptureRoute::Kwin));
+    }
+
+    #[test]
+    fn capture_notes_warn_about_the_gnome_flash_and_a_missing_kde_direct() {
+        use stat_tracker::capture::KwinProbe;
+        // GNOME: the flash is always said, as a warning once chosen.
+        let notes = capture_route_notes("ubuntu:GNOME", CaptureRoute::Auto, None, None);
+        assert_eq!(
+            notes,
+            vec![(GNOME_SCREENSHOT_NOTE.to_string(), NoteTone::Info)]
+        );
+        assert!(GNOME_SCREENSHOT_NOTE.contains("flashes the screen"));
+        assert!(GNOME_SCREENSHOT_NOTE.contains("sound"));
+        let chosen = capture_route_notes("GNOME", CaptureRoute::Screenshot, None, None);
+        assert_eq!(chosen[0].1, NoteTone::Warn);
+        // Not on KDE.
+        assert!(capture_route_notes("KDE", CaptureRoute::Screenshot, None, None).is_empty());
+        // KDE direct there: nothing to say. Not there: the reason.
+        assert!(
+            capture_route_notes("KDE", CaptureRoute::Kwin, Some(&KwinProbe::Available), None)
+                .is_empty()
+        );
+        let missing = KwinProbe::Unavailable("KWin refused the call".into());
+        let notes = capture_route_notes("KDE", CaptureRoute::Auto, Some(&missing), None);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].0.contains("KWin refused the call"));
+        assert_eq!(notes[0].1, NoteTone::Info);
+        let notes = capture_route_notes(
+            "KDE",
+            CaptureRoute::Kwin,
+            Some(&missing),
+            Some("KDE direct capture is not available (x); using screen stream instead"),
+        );
+        assert_eq!(notes.len(), 2);
+        assert!(notes.iter().all(|(_, tone)| *tone == NoteTone::Warn));
+        assert!(notes[1].0.starts_with("Tracker: KDE direct"));
+        assert!(KDE_DIRECT_HELP.contains("no prompt or indicator"));
+        assert!(KDE_DIRECT_HELP.contains("never saved unless a debug option is on"));
+        // Not checked is said plainly, never as a warning, even when chosen.
+        let not_checked = KwinProbe::NotChecked("needs 6.8.1".into());
+        let notes = capture_route_notes("KDE", CaptureRoute::Kwin, Some(&not_checked), None);
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].0.starts_with("KDE direct was not checked"));
+        assert!(!notes[0].0.contains("not available"));
+        assert_eq!(notes[0].1, NoteTone::Info);
+        let notes =
+            capture_route_notes("KDE", CaptureRoute::Kwin, Some(&KwinProbe::NotProbed), None);
+        assert_eq!(
+            notes,
+            vec![(KDE_DIRECT_NOT_CHECKED.to_string(), NoteTone::Info)]
+        );
+    }
+
+    #[test]
+    fn kde_direct_is_checked_again_after_a_restart_or_a_closed_share() {
+        // First sight of a running tracker, and a restart (new pid).
+        assert!(kde_direct_recheck_due((None, false), (Some(41), false)));
+        assert!(kde_direct_recheck_due((Some(41), false), (Some(42), false)));
+        // The share closed.
+        assert!(kde_direct_recheck_due((Some(41), true), (Some(41), false)));
+        // Nothing changed, the share opened, or the tracker stopped.
+        assert!(!kde_direct_recheck_due(
+            (Some(41), false),
+            (Some(41), false)
+        ));
+        assert!(!kde_direct_recheck_due((Some(41), false), (Some(41), true)));
+        assert!(!kde_direct_recheck_due((Some(41), false), (None, false)));
+        let mut status = switch_status(41, None, NO_MAPS);
+        status.share_open = true;
+        assert!(daemon_share_open(Some(&status), Some(41)));
+        assert!(!daemon_share_open(Some(&status), Some(42)));
+    }
+
+    #[test]
+    fn the_capture_notice_is_the_running_trackers_only() {
+        let mut status = switch_status(41, None, NO_MAPS);
+        assert_eq!(daemon_capture_notice(Some(&status), Some(41)), None);
+        status.capture_notice = "KDE direct capture is not available".into();
+        assert_eq!(
+            daemon_capture_notice(Some(&status), Some(41)).as_deref(),
+            Some("KDE direct capture is not available")
+        );
+        assert_eq!(daemon_capture_notice(Some(&status), Some(42)), None);
     }
 
     #[test]

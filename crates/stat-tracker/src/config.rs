@@ -11,8 +11,10 @@ pub struct Config {
     /// Which portal image source to use. Missing or `auto` keeps the usual
     /// probe: wlroots and X11 stay direct, and a portal desktop uses the
     /// screen stream. `screencast` forces the stream. `screenshot` forces
-    /// the older screenshot portal. A non-empty `STAT_TRACKER_CAPTURE`
-    /// wins over this key. Edited in place when this is the only change.
+    /// the older screenshot portal. `kwin` asks KWin directly (KDE direct,
+    /// Plasma 6.8 or later), and falls back to automatic when KWin does not
+    /// answer. A non-empty `STAT_TRACKER_CAPTURE` wins over this key.
+    /// Edited in place when this is the only change.
     #[serde(default, skip_serializing_if = "CaptureRoute::is_auto")]
     pub capture_route: CaptureRoute,
     /// Save a few Tab frames from the screen stream and the screenshot
@@ -180,11 +182,13 @@ pub enum CaptureRoute {
     Auto,
     Screencast,
     Screenshot,
+    /// KDE direct: KWin's ScreenShot2 interface.
+    Kwin,
 }
 
 impl CaptureRoute {
-    /// `auto`, `screencast`, `screenshot`, and the env names `portal` and
-    /// `portal-screenshot`. Case does not matter. [`Self::parse`] returns
+    /// `auto`, `screencast`, `screenshot`, `kwin`, and the env names
+    /// `portal`, `portal-screenshot` and `kde-direct`. Case does not matter. [`Self::parse`] returns
     /// `None` for an unknown word. Config load does not: an unknown
     /// `capture_route` falls back to automatic so the daemon still starts.
     pub fn parse(raw: &str) -> Option<Self> {
@@ -192,6 +196,7 @@ impl CaptureRoute {
             "auto" => Some(Self::Auto),
             "screencast" | "portal" => Some(Self::Screencast),
             "screenshot" | "portal-screenshot" => Some(Self::Screenshot),
+            "kwin" | "kde-direct" => Some(Self::Kwin),
             _ => None,
         }
     }
@@ -205,6 +210,7 @@ impl CaptureRoute {
             Self::Auto => "auto",
             Self::Screencast => "screencast",
             Self::Screenshot => "screenshot",
+            Self::Kwin => "kwin",
         }
     }
 }
@@ -2890,6 +2896,9 @@ cooldown_secs = 120
             CaptureRoute::parse("portal-screenshot"),
             Some(CaptureRoute::Screenshot)
         );
+        assert_eq!(CaptureRoute::parse("KWin"), Some(CaptureRoute::Kwin));
+        assert_eq!(CaptureRoute::parse("kde-direct"), Some(CaptureRoute::Kwin));
+        assert_eq!(CaptureRoute::Kwin.as_str(), "kwin");
         assert_eq!(CaptureRoute::parse("nope"), None);
         #[derive(Deserialize)]
         struct Wrap {
@@ -2899,5 +2908,7 @@ cooldown_secs = 120
         assert_eq!(parsed.capture_route, CaptureRoute::Screencast);
         let unknown: Wrap = toml::from_str("capture_route = \"nope\"\n").unwrap();
         assert_eq!(unknown.capture_route, CaptureRoute::Auto);
+        let kwin: Wrap = toml::from_str("capture_route = \"kwin\"\n").unwrap();
+        assert_eq!(kwin.capture_route, CaptureRoute::Kwin);
     }
 }
