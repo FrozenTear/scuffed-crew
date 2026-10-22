@@ -384,20 +384,26 @@ pub(crate) struct InstallRow {
 
 /// A package install is told to update with its package manager, with no
 /// command to copy: the curl installer would add a second install in
-/// `~/.local` that shadows the package (S5-UP-2). Any other install gets
-/// the pinned install command, as before.
+/// `~/.local` that shadows the package (S5-UP-2). Until the package probe
+/// answers there is no command yet. Any other install gets the pinned
+/// install command, as before.
 pub(crate) fn install_row(
-    package: Option<&crate::uninstall::PackageOwner>,
+    package: update::PackageProbe<'_>,
     advertised: Option<&str>,
     current: Option<&str>,
 ) -> InstallRow {
     match package {
-        Some(owner) => InstallRow {
+        update::PackageProbe::Done(Some(owner)) => InstallRow {
             caption: "Updates",
             line: update::package_update_line(owner),
             copy: false,
         },
-        None => InstallRow {
+        update::PackageProbe::Pending => InstallRow {
+            caption: "Install / update command",
+            line: update::PACKAGE_PROBE_PENDING.to_string(),
+            copy: false,
+        },
+        update::PackageProbe::Done(None) => InstallRow {
             caption: "Install / update command",
             line: update::install_command_for(advertised, current),
             copy: true,
@@ -518,8 +524,12 @@ pub(crate) fn capture_route_notes(
                 tone(route == CaptureRoute::Screenshot),
             ));
         }
+        // The tracker's notice about the same saved method is the warning
+        // above, unless it adds that nothing else works here.
         if let Some(notice) = daemon_notice
-            && !(warned && notice.contains("needs a Wayland session"))
+            && !(warned
+                && notice.contains("needs a Wayland session")
+                && !notice.contains("no other capture method works here"))
         {
             notes.push((format!("Tracker: {notice}."), NoteTone::Warn));
         }
@@ -1025,7 +1035,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             app.update_notes_ui(),
             app.update_notes_expanded,
             app.restart_need(),
-            app.package_owner.as_ref(),
+            app.package_probe(),
         ));
     }
 
@@ -1195,7 +1205,7 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     body = body.push(actions);
 
     let install = install_row(
-        app.package_owner.as_ref(),
+        app.package_probe(),
         app.update.as_ref().map(|i| i.latest.as_str()),
         app.installed_version.as_deref(),
     );
@@ -3534,7 +3544,7 @@ token = \"not-a-real-token\"
         }
         // The tracker's notice about the same thing is not said twice; any
         // other notice is.
-        let same = "the saved capture method, screencast, needs a Wayland session and this one is X11; automatic is used: x11";
+        let same = "the saved capture method, the screen stream, needs a Wayland session and this one is X11; automatic is used: using X11 instead";
         let notes = capture_route_notes("i3", x11, CaptureRoute::Screencast, None, Some(same));
         assert!(!notes.iter().any(|(n, _)| n.starts_with("Tracker:")));
         let other = "X11 capture failed: no display";
@@ -3542,6 +3552,10 @@ token = \"not-a-real-token\"
         assert_eq!(notes.last().unwrap().0, format!("Tracker: {other}."));
         let notes = capture_route_notes("i3", x11, CaptureRoute::Auto, None, Some(same));
         assert!(notes.last().unwrap().0.starts_with("Tracker: the saved"));
+        // Kept when it says nothing else works: that is news.
+        let nothing = "the saved capture method, the screen stream, needs a Wayland session and this one is X11; automatic is used: no other capture method works here";
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Screencast, None, Some(nothing));
+        assert_eq!(notes.last().unwrap().0, format!("Tracker: {nothing}."));
     }
 
     #[test]
@@ -3551,12 +3565,27 @@ token = \"not-a-real-token\"
             manager: PackageManager::Pacman,
             package: "scuffed-stat-tracker-bin".into(),
         };
-        let row = install_row(Some(&aur), Some("0.5.0"), Some("0.5.0-rc.7"));
+        let row = install_row(
+            update::PackageProbe::Done(Some(&aur)),
+            Some("0.5.0"),
+            Some("0.5.0-rc.7"),
+        );
         assert!(!row.copy);
         assert!(!row.line.contains("curl"));
         assert!(row.line.contains("paru -Syu"));
         // A script install keeps the pinned command and its Copy button.
-        let row = install_row(None, Some("0.5.0"), Some("0.5.0-rc.7"));
+        let row = install_row(
+            update::PackageProbe::Pending,
+            Some("0.5.0"),
+            Some("0.5.0-rc.7"),
+        );
+        assert!(!row.copy);
+        assert_eq!(row.line, update::PACKAGE_PROBE_PENDING);
+        let row = install_row(
+            update::PackageProbe::Done(None),
+            Some("0.5.0"),
+            Some("0.5.0-rc.7"),
+        );
         assert!(row.copy);
         assert_eq!(row.caption, "Install / update command");
         assert_eq!(row.line, update::install_command_for(Some("0.5.0"), None));

@@ -536,6 +536,9 @@ pub struct TrackerApp {
     own_exe: PathBuf,
     /// Watches the installed GUI binary for a changed build (G3).
     restart_watch: RestartWatch,
+    /// Puts text on the system clipboard ([`crate::clipboard::copy_text`]).
+    /// Tests swap it so they never reach the real clipboard.
+    copy_text: fn(&str) -> Result<crate::clipboard::ClipboardBackend, String>,
 }
 
 impl TrackerApp {
@@ -754,6 +757,7 @@ impl TrackerApp {
             setup,
             own_exe,
             restart_watch,
+            copy_text: crate::clipboard::copy_text,
         };
         app.refresh_kit_sessions();
 
@@ -1689,7 +1693,7 @@ impl TrackerApp {
                     }) => command.clone(),
                     _ => return Task::none(),
                 };
-                match crate::clipboard::copy_text(&command) {
+                match (self.copy_text)(&command) {
                     Ok(backend) => {
                         self.replace_toast(format!(
                             "Copied the uninstall command via {}.",
@@ -1722,15 +1726,16 @@ impl TrackerApp {
                 Task::none()
             }
             Message::CopyUpdateCmd => {
-                // Package installs show no command (S5-UP-2).
-                if self.package_owner.is_some() {
+                // Package installs show no command (S5-UP-2), and none is
+                // shown before the package probe answers.
+                if self.package_probe() != update::PackageProbe::Done(None) {
                     return Task::none();
                 }
                 let cmd = update::install_command_for(
                     self.update.as_ref().map(|i| i.latest.as_str()),
                     self.installed_version.as_deref(),
                 );
-                match crate::clipboard::copy_text(&cmd) {
+                match (self.copy_text)(&cmd) {
                     Ok(backend) => {
                         self.replace_toast(format!(
                             "Copied install command via {}",
@@ -2438,7 +2443,7 @@ impl TrackerApp {
                 let Some(code) = self.setup.code_to_copy() else {
                     return Task::none();
                 };
-                match crate::clipboard::copy_text(&code) {
+                match (self.copy_text)(&code) {
                     Ok(_) => {
                         self.setup
                             .code_copied("Copied. Paste it on the site.".to_string());
@@ -3699,10 +3704,46 @@ token = \"secret-token-must-stay\"
         app.package_owner = Some(aur_owner());
         app.update = Some(offered_update());
         app.toast = None;
+        app.copy_text = |_| panic!("the test reached the clipboard");
         let _ = app.update(super::Message::CopyUpdateCmd);
         assert!(
             app.toast.is_none(),
             "no clipboard, no toast: {:?}",
+            app.toast
+        );
+    }
+
+    #[test]
+    fn copy_update_command_does_nothing_before_the_probe_answers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(tmp.path());
+        app.package_probed = false;
+        app.package_owner = None;
+        app.update = Some(offered_update());
+        app.toast = None;
+        app.copy_text = |_| panic!("the test reached the clipboard");
+        let _ = app.update(super::Message::CopyUpdateCmd);
+        assert!(
+            app.toast.is_none(),
+            "no clipboard, no toast: {:?}",
+            app.toast
+        );
+        // Once the probe says "no package", the command is copied, through
+        // the swapped copy function only.
+        app.package_probed = true;
+        app.copy_text = |cmd| {
+            assert!(
+                cmd.contains("STAT_TRACKER_TAG=stat-tracker-v0.5.0"),
+                "{cmd}"
+            );
+            Ok(crate::clipboard::ClipboardBackend::WlCopy)
+        };
+        let _ = app.update(super::Message::CopyUpdateCmd);
+        assert!(
+            app.toast
+                .as_deref()
+                .is_some_and(|t| t.starts_with("Copied install command")),
+            "{:?}",
             app.toast
         );
     }

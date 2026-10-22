@@ -1465,20 +1465,33 @@ pub struct BannerModel {
 
 /// [`BannerModel`] for the banner's inputs. A package install gets only its
 /// package-manager line: no warning, no command or Copy, no Update now.
+/// Until the package probe answers there is no command or Copy either, and
+/// Update now is disabled.
 pub fn banner_model(
     info: &UpdateInfo,
     progress: &UpdateProgress,
     plan: &UpdatePlan,
     restart: RestartNeed,
-    package: Option<&crate::uninstall::PackageOwner>,
+    package: PackageProbe<'_>,
 ) -> BannerModel {
-    if let Some(owner) = package {
-        return BannerModel {
-            warning: None,
-            package_line: Some(package_update_line(owner)),
-            command: None,
-            primary: None,
-        };
+    match package {
+        PackageProbe::Done(Some(owner)) => {
+            return BannerModel {
+                warning: None,
+                package_line: Some(package_update_line(owner)),
+                command: None,
+                primary: None,
+            };
+        }
+        PackageProbe::Pending => {
+            return BannerModel {
+                warning: Some(PACKAGE_PROBE_PENDING.into()),
+                package_line: None,
+                command: None,
+                primary: Some(("Update now", None)),
+            };
+        }
+        PackageProbe::Done(None) => {}
     }
     let running = matches!(progress, UpdateProgress::Running);
     let succeeded = matches!(progress, UpdateProgress::Succeeded(_));
@@ -1497,8 +1510,8 @@ pub fn banner_model(
     }
 }
 
-/// The update prompt. `package` is the package that owns the running
-/// binary: see [`banner_model`].
+/// The update prompt. `package` is what the app knows about the package
+/// that owns the running binary: see [`banner_model`].
 #[allow(clippy::too_many_arguments)]
 pub fn banner<'a>(
     info: &UpdateInfo,
@@ -1508,7 +1521,7 @@ pub fn banner<'a>(
     notes_ui: crate::notes::NotesUi<'a>,
     notes_expanded: bool,
     restart: RestartNeed,
-    package: Option<&crate::uninstall::PackageOwner>,
+    package: PackageProbe<'_>,
 ) -> Element<'a, Message> {
     let url = info.url.clone();
     let model = banner_model(info, progress, plan, restart, package);
@@ -2274,10 +2287,12 @@ mod tests {
             &UpdateProgress::Idle,
             &plan,
             RestartNeed::Unknown,
-            None,
+            PackageProbe::Pending,
         );
         assert!(matches!(model.primary, Some(("Update now", None))));
         assert_eq!(model.warning.as_deref(), Some(PACKAGE_PROBE_PENDING));
+        // No curl command to copy before the app knows it is not a package.
+        assert!(model.command.is_none());
     }
 
     #[test]
@@ -2298,7 +2313,7 @@ mod tests {
                 &progress,
                 &plan,
                 RestartNeed::Unknown,
-                Some(&aur),
+                PackageProbe::Done(Some(&aur)),
             );
             assert!(model.command.is_none(), "no curl command or Copy");
             assert!(model.primary.is_none(), "no Update now");
@@ -2318,7 +2333,7 @@ mod tests {
             &UpdateProgress::Idle,
             &ready,
             RestartNeed::Unknown,
-            None,
+            PackageProbe::Done(None),
         );
         assert_eq!(model.command, Some(pinned_install_command("0.5.0")));
         assert!(matches!(
@@ -2335,7 +2350,7 @@ mod tests {
             &UpdateProgress::Idle,
             &blocked,
             RestartNeed::Unknown,
-            None,
+            PackageProbe::Done(None),
         );
         assert_eq!(
             model.warning.as_deref(),

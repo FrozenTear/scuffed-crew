@@ -374,9 +374,11 @@ pub struct GuiProcess {
     pub has_lock_open: Option<bool>,
     /// Start time in clock ticks after boot (`/proc/<pid>/stat` field 22).
     pub start_ticks: Option<u64>,
-    /// Has a live child other than its `--companion` overlay or the tracker
-    /// daemon: a 0.4.x GUI runs its in-app update's `bash bootstrap.sh` as a
-    /// child, and stopping the GUI would kill that install half way.
+    /// Has a live installer child of a 0.4.x in-app update: a command line
+    /// naming the update work dir (`bash <work dir>/bootstrap.sh`), or
+    /// systemctl. Stopping the GUI would kill that install half way.
+    /// Zombies, unreadable children and other children (its companion, a
+    /// tracker it started, `xdg-open` and a browser) do not count.
     pub busy_child: bool,
     /// A 0.4.x in-app update work dir (`$TMPDIR/sst-gui-update-<pid>-*`)
     /// of this pid exists: an update is in progress.
@@ -442,8 +444,6 @@ impl ScanRoots<'static> {
 /// running GUI or read `--build-id`, with no lock file open yet.
 pub const MIN_STALE_AGE: Duration = Duration::from_secs(5);
 
-const DAEMON_BIN: &str = "scuffed-stat-tracker";
-
 fn strip_deleted(path: &str) -> &str {
     path.strip_suffix(" (deleted)").unwrap_or(path)
 }
@@ -460,20 +460,54 @@ pub fn is_gui_exe(exe: &str) -> bool {
     exe_named(exe, GUI_BIN)
 }
 
-/// Real uid and parent pid from `/proc/<pid>/status`.
-fn read_status(dir: &Path) -> Option<(u32, u32)> {
+/// Real uid, parent pid and whether the process is a zombie or dead
+/// (`State:` Z or X), from `/proc/<pid>/status`.
+fn read_status(dir: &Path) -> Option<(u32, u32, bool)> {
     let status = std::fs::read_to_string(dir.join("status")).ok()?;
     let mut uid = None;
     let mut ppid = None;
+    let mut gone = false;
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("Uid:") {
             uid = rest.split_whitespace().next()?.parse().ok();
         } else if let Some(rest) = line.strip_prefix("PPid:") {
             ppid = rest.trim().parse().ok();
+        } else if let Some(rest) = line.strip_prefix("State:") {
+            gone = matches!(rest.trim_start().chars().next(), Some('Z' | 'X'));
         }
     }
-    Some((uid?, ppid?))
+    Some((uid?, ppid?, gone))
 }
+
+/// True when a child of a GUI is the installer of a 0.4.x in-app update:
+/// alive, with a readable exe, and either its command line names the update
+/// work dir (`bash <dir>/sst-gui-update-<pid>-<ms>/bootstrap.sh`) or it is
+/// `systemctl` (0.4.x stops and starts the tracker around the install).
+///
+/// Nothing else counts: not a zombie (an unreaped tracker or `xdg-open`),
+/// not a live `xdg-open` (a shell script, which stays in the foreground on
+/// some desktops while the browser runs), not a browser, and not a child
+/// whose exe cannot be read. The work-dir check ([`GuiProcess::update_dir`])
+/// covers the download before the installer starts.
+fn is_update_child(child: &ProcEntry, proc_root: &Path) -> bool {
+    let Some(exe) = child.exe.as_deref() else {
+        return false;
+    };
+    if child.gone {
+        return false;
+    }
+    if exe_named(exe, "systemctl") {
+        return true;
+    }
+    std::fs::read(proc_root.join(child.pid.to_string()).join("cmdline")).is_ok_and(|cmdline| {
+        cmdline
+            .windows(UPDATE_DIR_PREFIX.len())
+            .any(|w| w == UPDATE_DIR_PREFIX.as_bytes())
+    })
+}
+
+/// The work dir name a 0.4.x in-app update uses, `sst-gui-update-<pid>-<ms>`.
+const UPDATE_DIR_PREFIX: &str = "sst-gui-update-";
 
 /// Field 22 (`starttime`) of a `/proc/<pid>/stat` line. The command name in
 /// field 2 may hold spaces and parentheses, so fields are counted after the
@@ -513,7 +547,7 @@ fn process_tmp(dir: &Path, default_tmp: &Path) -> PathBuf {
 }
 
 fn has_update_dir(tmp: &Path, pid: u32) -> bool {
-    let prefix = format!("sst-gui-update-{pid}-");
+    let prefix = format!("{UPDATE_DIR_PREFIX}{pid}-");
     std::fs::read_dir(tmp).is_ok_and(|entries| {
         entries
             .flatten()
@@ -526,6 +560,8 @@ struct ProcEntry {
     pid: u32,
     ppid: u32,
     uid: u32,
+    /// A zombie or dead process (`State:` Z or X).
+    gone: bool,
     exe: Option<String>,
     args: Vec<Vec<u8>>,
 }
@@ -539,8 +575,7 @@ impl ProcEntry {
 /// The processes of user `uid` that run the GUI binary, read from
 /// `roots.proc_root` (`/proc` in the app; a temp dir in tests). Processes
 /// of other users, and entries that vanish mid-scan, are left out. Children
-/// of every user count for [`GuiProcess::busy_child`]: an installer may run
-/// `sudo`.
+/// of every user are read for [`GuiProcess::busy_child`].
 pub fn scan_gui_processes(roots: ScanRoots<'_>, uid: u32) -> Vec<GuiProcess> {
     let Ok(entries) = std::fs::read_dir(roots.proc_root) else {
         return Vec::new();
@@ -555,7 +590,7 @@ pub fn scan_gui_processes(roots: ScanRoots<'_>, uid: u32) -> Vec<GuiProcess> {
             continue;
         };
         let dir = entry.path();
-        let Some((owner, ppid)) = read_status(&dir) else {
+        let Some((owner, ppid, gone)) = read_status(&dir) else {
             continue;
         };
         let exe = read_exe(&dir);
@@ -572,6 +607,7 @@ pub fn scan_gui_processes(roots: ScanRoots<'_>, uid: u32) -> Vec<GuiProcess> {
             pid,
             ppid,
             uid: owner,
+            gone,
             exe,
             args,
         });
@@ -585,14 +621,9 @@ pub fn scan_gui_processes(roots: ScanRoots<'_>, uid: u32) -> Vec<GuiProcess> {
             continue;
         }
         let dir = roots.proc_root.join(p.pid.to_string());
-        let busy_child = all.iter().any(|child| {
-            child.ppid == p.pid
-                && !match child.exe.as_deref() {
-                    Some(exe) if is_gui_exe(exe) => child.has_arg(b"--companion"),
-                    Some(exe) => exe_named(exe, DAEMON_BIN),
-                    None => false,
-                }
-        });
+        let busy_child = all
+            .iter()
+            .any(|child| child.ppid == p.pid && is_update_child(child, roots.proc_root));
         found.push(GuiProcess {
             pid: p.pid,
             ppid: p.ppid,
@@ -627,8 +658,8 @@ pub fn scan_gui_processes(roots: ScanRoots<'_>, uid: u32) -> Vec<GuiProcess> {
 ///   or its open files could not be read;
 /// - started less than [`MIN_STALE_AGE`] before this one, or its start
 ///   could not be read (a launch on its way into the claim flow);
-/// - has a live child other than its companion or the tracker daemon, or
-///   an update work dir: a 0.4.x GUI in the middle of its in-app update.
+/// - has a live update child ([`GuiProcess::busy_child`]) or an update
+///   work dir: a 0.4.x GUI in the middle of its in-app update.
 ///   Stopping it would kill the installer half way with the tracker
 ///   stopped.
 ///
@@ -1115,6 +1146,8 @@ mod tests {
         start: Option<u64>,
         /// `TMPDIR` in its environment.
         tmpdir: Option<&'a Path>,
+        /// An unreaped child: `State: Z`, no `exe`, empty `cmdline`.
+        zombie: bool,
     }
 
     const UID: u32 = 1000;
@@ -1143,17 +1176,25 @@ mod tests {
             fds: Some(&[]),
             start: OLD,
             tmpdir: None,
+            zombie: false,
         }
     }
 
     fn fake_proc(root: &Path, p: FakeProc<'_>) {
         let dir = root.join(p.pid.to_string());
         std::fs::create_dir_all(&dir).unwrap();
-        std::os::unix::fs::symlink(p.exe, dir.join("exe")).unwrap();
+        if !p.zombie {
+            std::os::unix::fs::symlink(p.exe, dir.join("exe")).unwrap();
+        }
+        let state = if p.zombie {
+            "Z (zombie)"
+        } else {
+            "S (sleeping)"
+        };
         std::fs::write(
             dir.join("status"),
             format!(
-                "Name:\tstat-tracker-gu\nState:\tS (sleeping)\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\n",
+                "Name:\tstat-tracker-gu\nState:\t{state}\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\n",
                 p.ppid, p.uid, p.uid, p.uid, p.uid
             ),
         )
@@ -1170,9 +1211,11 @@ mod tests {
             .unwrap();
         }
         let mut cmdline = Vec::new();
-        for arg in std::iter::once(p.exe).chain(p.args.iter().copied()) {
-            cmdline.extend_from_slice(arg.as_bytes());
-            cmdline.push(0);
+        if !p.zombie {
+            for arg in std::iter::once(p.exe).chain(p.args.iter().copied()) {
+                cmdline.extend_from_slice(arg.as_bytes());
+                cmdline.push(0);
+            }
         }
         std::fs::write(dir.join("cmdline"), cmdline).unwrap();
         let mut environ = b"HOME=/home/u\0".to_vec();
@@ -1350,21 +1393,31 @@ mod tests {
 
     #[test]
     fn a_gui_mid_update_is_left_alone() {
-        // 0.4.24 runs `bash bootstrap.sh` as a child; the installer may run
-        // sudo (another user, exe unreadable).
+        // 0.4.24 runs `bash <work dir>/bootstrap.sh` as its child, then
+        // `systemctl --user start`.
         let t = Tree::new();
         t.add(base(300, GUI_DELETED));
         t.add(FakeProc {
             ppid: 300,
+            args: &["/tmp/sst-gui-update-300-1729600000000/bootstrap.sh"],
             ..base(303, "/usr/bin/bash")
         });
         t.add(base(310, GUI_DELETED));
         t.add(FakeProc {
             ppid: 310,
-            uid: 0,
-            ..base(311, "/usr/bin/sudo")
+            args: &["--user", "start", "scuffed-stat-tracker.service"],
+            ..base(311, "/usr/bin/systemctl")
         });
-        std::fs::remove_file(t.proc.path().join("311").join("exe")).unwrap();
+        // A child whose exe cannot be read does not count, even naming the
+        // work dir: the installer is this user's own bash.
+        t.add(base(315, GUI_DELETED));
+        t.add(FakeProc {
+            ppid: 315,
+            uid: 0,
+            args: &["/tmp/sst-gui-update-315-1/payload"],
+            ..base(316, "/usr/bin/install")
+        });
+        std::fs::remove_file(t.proc.path().join("316").join("exe")).unwrap();
         // Between download and install: only the work dir, in its TMPDIR.
         let its_tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir(its_tmp.path().join("sst-gui-update-320-1729600000000")).unwrap();
@@ -1379,10 +1432,66 @@ mod tests {
         std::fs::create_dir(t.tmp.path().join("sst-gui-update-3400-1")).unwrap();
         t.add(base(340, GUI_DELETED));
         let procs = scan_gui_processes(t.roots(), UID);
+        let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![300, 310, 315, 320, 330, 340]);
         assert!(procs[0].busy_child && procs[1].busy_child);
-        assert!(procs[2].update_dir && procs[3].update_dir);
-        assert!(!procs[4].busy_child && !procs[4].update_dir);
-        assert_eq!(stale_gui_targets(&procs, ME), vec![340]);
+        assert!(!procs[2].busy_child);
+        assert!(procs[3].update_dir && procs[4].update_dir);
+        assert!(!procs[5].busy_child && !procs[5].update_dir);
+        assert_eq!(stale_gui_targets(&procs, ME), vec![315, 340]);
+    }
+
+    #[test]
+    fn zombies_and_other_children_do_not_shield_a_stale_gui() {
+        // 0.4.24 forgets a tracker it started itself (a zombie once it
+        // stops) and never waits on xdg-open; a browser may outlive it.
+        let t = Tree::new();
+        t.add(base(300, GUI_DELETED));
+        t.add(FakeProc {
+            ppid: 300,
+            zombie: true,
+            ..base(301, "/home/u/.local/bin/scuffed-stat-tracker")
+        });
+        t.add(FakeProc {
+            ppid: 300,
+            zombie: true,
+            ..base(302, "/usr/bin/xdg-open")
+        });
+        t.add(FakeProc {
+            ppid: 300,
+            args: &["https://github.com/FrozenTear/scuffed-crew/releases"],
+            ..base(303, "/usr/lib/firefox/firefox")
+        });
+        t.add(FakeProc {
+            ppid: 300,
+            ..base(304, "/home/u/.local/bin/scuffed-stat-tracker (deleted)")
+        });
+        // A zombie shell is finished, not an update in progress.
+        t.add(FakeProc {
+            ppid: 300,
+            zombie: true,
+            ..base(305, "/usr/bin/bash")
+        });
+        // A live xdg-open: a shell script that stays in the foreground
+        // while the browser runs on niri, sway or Hyprland.
+        t.add(FakeProc {
+            ppid: 300,
+            args: &[
+                "/usr/bin/xdg-open",
+                "https://github.com/FrozenTear/scuffed-crew/releases",
+            ],
+            ..base(306, "/usr/bin/bash")
+        });
+        // A live shell running something else.
+        t.add(FakeProc {
+            ppid: 300,
+            args: &["-c", "notify-send done"],
+            ..base(307, "/usr/bin/sh")
+        });
+        let procs = scan_gui_processes(t.roots(), UID);
+        assert_eq!(procs.len(), 1);
+        assert!(!procs[0].busy_child);
+        assert_eq!(stale_gui_targets(&procs, ME), vec![300]);
     }
 
     #[test]
@@ -1480,6 +1589,71 @@ mod tests {
         });
         let stopped = stop_stale_guis(t.roots(), ME, &mut |_, _| panic!("no signal"));
         assert!(stopped.is_empty());
+    }
+
+    /// L1: a launch waiting in `claim_replacing` keeps the lock file open
+    /// the whole time, so the stale scan of a new primary never takes it
+    /// for a lockless GUI. The holder is a child process; this test reads
+    /// only its own `/proc/self/fd`.
+    #[test]
+    fn claim_replacing_keeps_the_lock_file_open_while_it_waits() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        let mut child = spawn_holder(&path, "sleep");
+        let lock = path.canonicalize().unwrap();
+        let data_dir = dir.path().to_path_buf();
+        let waiter_path = path.clone();
+        let done = Arc::new(AtomicBool::new(false));
+        let waiter_done = Arc::clone(&done);
+        let waiter = std::thread::spawn(move || {
+            let got = claim_replacing(&waiter_path, &data_dir, "1.0.0", Duration::from_secs(3));
+            waiter_done.store(true, Ordering::SeqCst);
+            got
+        });
+        let open_on_lock = || {
+            std::fs::read_dir("/proc/self/fd")
+                .map(|fds| {
+                    fds.flatten()
+                        .filter(|fd| std::fs::read_link(fd.path()).is_ok_and(|t| t == lock))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        // Until the waiter has the file open the first time.
+        let start = Instant::now();
+        while open_on_lock() == 0 {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "the waiter never had the lock file open: it closes it between tries"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Then it must stay open on every sample until the wait ends. A
+        // sample taken as the wait ended is not counted.
+        let mut samples = 0;
+        let mut closed = 0;
+        while samples < 60 {
+            let open = open_on_lock();
+            if done.load(Ordering::SeqCst) {
+                break;
+            }
+            samples += 1;
+            if open == 0 {
+                closed += 1;
+            }
+            std::thread::sleep(Duration::from_millis(13));
+        }
+        let got = waiter.join().unwrap().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(matches!(got, Claim::Secondary), "the holder never let go");
+        assert!(samples >= 10, "too few samples ({samples}) to tell");
+        assert_eq!(
+            closed, 0,
+            "the waiting launch closed the lock file between tries ({closed} of {samples})"
+        );
     }
 
     #[test]
