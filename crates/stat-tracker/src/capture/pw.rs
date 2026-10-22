@@ -361,11 +361,15 @@ impl Handle {
 
     /// Let the tracker pause this stream between grabs. Returns false when
     /// this libpipewire cannot do it safely (older than 1.4).
-    pub fn enable_pausing(&self) -> bool {
+    /// `streaming_answers`: the compositor draws casts only on damage
+    /// (niri), so Streaming again answers a resume without a buffer.
+    pub fn enable_pausing(&self, streaming_answers: bool) -> bool {
         if self.state.set_active.is_none() || self.state.loop_invoke.is_none() {
             return false;
         }
-        lock(&self.state.pause).managed = true;
+        let mut pause = lock(&self.state.pause);
+        pause.managed = true;
+        pause.streaming_answers = streaming_answers;
         true
     }
 
@@ -408,6 +412,11 @@ impl Handle {
     /// [`Self::note_grab_end`] for what [`Self::grab`] returned.
     pub fn note_grab_result(&self, grabbed: &Result<GrabOutcome, String>) {
         self.note_grab_end(matches!(grabbed, Ok(GrabOutcome::TabMiss { .. })));
+    }
+
+    #[cfg(test)]
+    pub(super) fn streaming_answers_for_test(&self) -> bool {
+        lock(&self.state.pause).streaming_answers
     }
 
     #[cfg(test)]
@@ -696,6 +705,7 @@ pub const TRIP_TAB_MISS: &str =
 pub const TRIP_STUCK: &str =
     "the stream stayed paused (or failed) 1.5 s after the tracker resumed it";
 pub const TRIP_RETIRED: &str = "the stream was closed while a resume was still unanswered";
+pub const TRIP_FAILED_PAUSED: &str = "the stream failed while the tracker held it paused";
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
@@ -769,9 +779,11 @@ fn pw_phase(state: i32, seen_streaming: bool) -> PwPhase {
 /// Pause bookkeeping for one stream. Plain data so it can be tested
 /// without PipeWire. All `Duration` stamps are active-clock readings.
 ///
-/// A resume is *answered* when the stream reaches Streaming again or a
-/// buffer arrives. A still screen on niri sends no buffer, but it does
-/// reach Streaming, so it is answered.
+/// A resume is *answered* when a buffer arrives. On niri, which draws a
+/// cast only on damage (a still screen sends nothing after a resume),
+/// reaching Streaming again answers it too. Everywhere else a resume that
+/// reaches Streaming and sends no buffer is a broken resume: KWin 6.1+
+/// emits a frame on resume and Mutter queues a redraw.
 #[derive(Debug)]
 struct PauseState {
     /// The tracker wants the stream running. Always true unless pausing is
@@ -785,9 +797,18 @@ struct PauseState {
     clock: ActiveClock,
     /// When the stream entered Paused, after it had streamed.
     paused_at: Option<Duration>,
-    /// That Paused began while the tracker did not want the stream running:
-    /// it started as the tracker's own pause.
+    /// That Paused began while the tracker did not want the stream running,
+    /// or answered a pause the tracker had asked for: it started as the
+    /// tracker's own pause.
     paused_by_us: bool,
+    /// A pause was requested and its Paused has not been seen yet. A
+    /// resume that arrives first still leaves that Paused marked ours.
+    self_pause_pending: bool,
+    /// Reaching Streaming answers a resume (niri only).
+    streaming_answers: bool,
+    /// The stream failed (Error, or Unconnected after streaming) while the
+    /// tracker held it paused, with no resume outstanding.
+    failed_while_paused: bool,
     /// When the last PipeWire buffer was dequeued.
     last_buffer_at: Option<Duration>,
     /// Start of the oldest resume not answered yet. It survives a pause, so
@@ -813,6 +834,9 @@ impl PauseState {
             clock: ActiveClock::running(now),
             paused_at: None,
             paused_by_us: false,
+            self_pause_pending: false,
+            streaming_answers: false,
+            failed_while_paused: false,
             last_buffer_at: None,
             unanswered_since: None,
             episode_from: None,
@@ -845,7 +869,10 @@ impl PauseState {
         if want {
             self.clock.start(now);
             self.resume_requested = Some(now);
-            if !streaming_now {
+            if streaming_now {
+                // The pause was never applied: no Paused will come.
+                self.self_pause_pending = false;
+            } else {
                 let reading = self.clock.reading(now);
                 self.unanswered_since.get_or_insert(reading);
                 self.episode_from.get_or_insert(reading);
@@ -855,6 +882,7 @@ impl PauseState {
                 self.latency.unanswered = self.latency.unanswered.saturating_add(1);
             }
             self.clock.stop(now);
+            self.self_pause_pending = true;
         }
         self.want = want;
         true
@@ -904,6 +932,9 @@ impl PauseState {
         if !self.pausing() {
             return None;
         }
+        if phase == PwPhase::Failed && self.failed_while_paused {
+            return Some(TRIP_FAILED_PAUSED);
+        }
         let since = self.unanswered_since?;
         match phase {
             PwPhase::Failed => Some(TRIP_STUCK),
@@ -919,7 +950,13 @@ impl PauseState {
 
     /// The stream is being closed. An unanswered resume counts as a trip.
     fn retire(&self) -> Option<&'static str> {
-        (self.pausing() && self.unanswered_since.is_some()).then_some(TRIP_RETIRED)
+        if !self.pausing() {
+            return None;
+        }
+        if self.failed_while_paused {
+            return Some(TRIP_FAILED_PAUSED);
+        }
+        self.unanswered_since.is_some().then_some(TRIP_RETIRED)
     }
 
     /// Turn pausing off for this stream. Returns true the first time.
@@ -957,13 +994,24 @@ impl PauseState {
     fn on_streaming(&mut self) {
         self.paused_at = None;
         self.paused_by_us = false;
-        self.answered();
+        self.self_pause_pending = false;
+        if self.streaming_answers {
+            self.answered();
+        }
     }
 
     fn on_paused(&mut self, now: std::time::Instant) {
         if self.paused_at.is_none() {
             self.paused_at = Some(self.clock.reading(now));
-            self.paused_by_us = !self.want;
+            self.paused_by_us = !self.want || self.self_pause_pending;
+        }
+        self.self_pause_pending = false;
+    }
+
+    /// Error, or Unconnected after streaming.
+    fn on_failed(&mut self) {
+        if self.pausing() && !self.want && self.unanswered_since.is_none() {
+            self.failed_while_paused = true;
         }
     }
 
@@ -1208,6 +1256,17 @@ fn begin_loop(state: &State, main: *mut c_void, pw_loop: *mut c_void) -> bool {
 fn unpublish_pw_loop(state: &State) {
     let _guard = lock(&state.loop_lock);
     state.pw_loop.store(std::ptr::null_mut(), Ordering::Release);
+}
+
+/// `pw_loop_leave`, after [`unpublish_pw_loop`]: once the loop is left,
+/// an invoke from another thread runs inline on that thread, where
+/// `pw_stream_set_active` must not run.
+///
+/// # Safety
+/// `pw_loop` is the loop this thread entered.
+unsafe fn leave_loop(state: &State, leave: LoopLeaveFn, pw_loop: *mut c_void) {
+    unpublish_pw_loop(state);
+    unsafe { leave(pw_loop) };
 }
 
 /// Null the published pointer and destroy `main` while holding `loop_lock`.
@@ -1652,11 +1711,7 @@ fn run_loop(symbols: Symbols, state: Arc<State>, fd: i32, node_id: u32) {
                                     iterate(pw_loop, 200);
                                 }
                             }
-                            // After `leave` an invoke from another thread
-                            // runs inline on that thread. Stop publishing
-                            // the loop to `invoke_apply_active` first.
-                            unpublish_pw_loop(&state);
-                            leave(pw_loop);
+                            leave_loop(&state, leave, pw_loop);
                         }
                     }
                     LoopDrive::MainLoopRun(run) => {
@@ -1744,6 +1799,7 @@ extern "C" fn on_state(data: *mut c_void, _old: i32, state: i32, _error: *const 
     // Error and unconnected end the stream. A pause is recorded above and
     // only counts once it persists. Connecting is negotiation.
     if stream_state_is_dead(state, state_ref.seen_streaming.load(Ordering::Acquire)) {
+        lock(&state_ref.pause).on_failed();
         state_ref.alive.store(false, Ordering::Release);
         tracing::info!(
             state = pw_state_name(state),
@@ -2246,6 +2302,29 @@ pub(super) fn test_stream(streamed: bool) -> Handle {
     handle
 }
 
+/// A KWin stream the tracker paused, resumed 10 s of active time ago, and
+/// still Paused: [`Handle::check_stuck_resume`] trips it.
+#[cfg(test)]
+pub(super) fn test_stream_stuck_after_our_pause() -> Handle {
+    let handle = test_stream(true);
+    assert!(handle.enable_pausing(false));
+    handle
+        .state
+        .pw_state
+        .store(PW_STREAM_STATE_PAUSED, Ordering::Release);
+    handle.state.streaming.store(false, Ordering::Release);
+    {
+        let mut pause = lock(&handle.state.pause);
+        let now = std::time::Instant::now();
+        let ago = now.checked_sub(Duration::from_secs(10)).unwrap_or(now);
+        pause.clock = ActiveClock::running(ago);
+        pause.unanswered_since = Some(Duration::ZERO);
+        pause.paused_at = Some(Duration::ZERO);
+        pause.paused_by_us = true;
+    }
+    handle
+}
+
 /// [`test_stream`] on a libpipewire without `pw_loop_invoke` (before 1.4).
 #[cfg(test)]
 pub(super) fn test_stream_without_invoke(streamed: bool) -> Handle {
@@ -2712,6 +2791,14 @@ mod tests {
         Duration::from_millis(n)
     }
 
+    /// niri: Streaming again answers a resume.
+    fn niri_state(at: std::time::Instant) -> PauseState {
+        let mut pause = managed_state(at);
+        pause.streaming_answers = true;
+        pause
+    }
+
+    /// KWin and everything but niri: only a buffer answers a resume.
     fn managed_state(at: std::time::Instant) -> PauseState {
         let mut pause = PauseState::new(at);
         pause.managed = true;
@@ -2943,20 +3030,22 @@ mod tests {
             failed.stuck(PwPhase::Failed, t0 + ms(1_010)),
             Some(TRIP_STUCK)
         );
-        // A pause that began while the tracker wanted the stream is not
-        // the tracker's: the 2 s paused rule handles it, as in rc.6.
+        // A pause that began after the resumed stream was Streaming again
+        // is not the tracker's: the 2 s paused rule handles it, as in rc.6.
         let mut foreign = managed_state(t0);
         foreign.request(false, true, false, t0);
+        foreign.on_paused(t0 + ms(1));
         foreign.request(true, true, false, t0 + ms(1_000));
-        foreign.on_paused(t0 + ms(1_001));
+        foreign.on_streaming();
+        foreign.on_paused(t0 + ms(1_100));
         assert!(!foreign.paused_by_us);
         assert_eq!(foreign.stuck(PwPhase::Paused, t0 + ms(5_000)), None);
-        // An answered resume is never stuck.
+        // An answered resume (a buffer) is never stuck.
         let mut ok = managed_state(t0);
         ok.request(false, true, false, t0);
         ok.on_paused(t0);
         ok.request(true, true, false, t0 + ms(1_000));
-        ok.on_streaming();
+        ok.on_buffer(t0 + ms(1_010));
         assert_eq!(ok.stuck(PwPhase::Failed, t0 + ms(5_000)), None);
         // Pausing off: never.
         let mut off = PauseState::new(t0);
@@ -2967,7 +3056,7 @@ mod tests {
     #[test]
     fn a_still_niri_screen_reaches_streaming_and_never_counts() {
         let t0 = std::time::Instant::now();
-        let mut pause = managed_state(t0);
+        let mut pause = niri_state(t0);
         let mut at = t0;
         for _ in 0..20 {
             pause.request(false, true, false, at);
@@ -2983,9 +3072,131 @@ mod tests {
             );
             assert_eq!(pause.grab_end(false, at + ms(1_150)), None);
             assert_eq!(pause.stuck(PwPhase::Streaming, at + ms(1_150)), None);
+            // The grab held it running for 1.15 s of active time.
+            at += ms(1_150);
         }
+        assert!(
+            pause.clock.reading(at) >= ms(20 * 1_150),
+            "active time accrued"
+        );
         assert_eq!(pause.resume_fails, 0);
         assert!(pause.tripped.is_none());
+        assert_eq!(pause.retire(), None);
+    }
+
+    /// Review round 2, V4: on KWin a resume always sends a frame, so one that
+    /// reaches Streaming and sends none is broken. Polls (750 ms) and Tabs
+    /// (1.15 s) must trip it, count it, and a close must count it too.
+    #[test]
+    fn kwin_streaming_without_a_buffer_trips_and_counts() {
+        let t0 = std::time::Instant::now();
+        let broken = |grab: Duration, tab: bool| {
+            let mut pause = managed_state(t0);
+            let mut at = t0;
+            for n in 1..=20u32 {
+                pause.request(false, true, false, at);
+                pause.on_paused(at + ms(2));
+                at += ms(1_500);
+                pause.request(true, true, false, at);
+                pause.on_streaming();
+                assert_eq!(pause.stuck(PwPhase::Streaming, at + grab), None);
+                if let Some(why) = pause.grab_end(tab, at + grab) {
+                    return (why, n);
+                }
+                // The grab is over: the next pause starts when it ended.
+                at += grab;
+            }
+            panic!("never tripped");
+        };
+        // Polls: two resumes of 1.5 s active time each, in a row.
+        assert_eq!(broken(ms(750), false), (TRIP_SLOW_RESUMES, 4));
+        // A Tab that misses on the first broken resume.
+        assert_eq!(broken(ms(1_150), true), (TRIP_TAB_MISS, 1));
+        // Closed after a resume that reached Streaming with no buffer.
+        let mut closed = managed_state(t0);
+        closed.request(false, true, false, t0);
+        closed.request(true, true, false, t0 + ms(1_000));
+        closed.on_streaming();
+        assert_eq!(closed.retire(), Some(TRIP_RETIRED));
+        // Through the handle: the trip is counted.
+        let handle = test_stream(true);
+        assert!(handle.enable_pausing(false));
+        handle
+            .state
+            .pw_state
+            .store(PW_STREAM_STATE_PAUSED, Ordering::Release);
+        handle.set_active(false);
+        handle.set_active(true);
+        lock(&handle.state.pause).on_streaming();
+        handle.note_grab_result(&Ok(GrabOutcome::TabMiss { delay_ms: 1_200 }));
+        assert!(handle.pause_tripped());
+        assert_eq!(handle.state.trips.load(Ordering::Acquire), 1);
+        // The same on niri never trips.
+        let niri = test_stream(true);
+        assert!(niri.enable_pausing(true));
+        niri.state
+            .pw_state
+            .store(PW_STREAM_STATE_PAUSED, Ordering::Release);
+        niri.set_active(false);
+        niri.set_active(true);
+        lock(&niri.state.pause).on_streaming();
+        niri.note_grab_result(&Ok(GrabOutcome::TabMiss { delay_ms: 1_200 }));
+        assert!(!niri.pause_tripped());
+        let trips = niri.state.trips;
+        drop(niri);
+        assert_eq!(trips.load(Ordering::Acquire), 0, "retired answered");
+    }
+
+    #[test]
+    fn a_stream_that_fails_while_we_hold_it_paused_counts() {
+        let t0 = std::time::Instant::now();
+        let mut pause = managed_state(t0);
+        pause.request(false, true, false, t0);
+        pause.on_paused(t0 + ms(1));
+        pause.on_failed();
+        assert!(pause.failed_while_paused);
+        assert_eq!(
+            pause.stuck(PwPhase::Failed, t0 + ms(5)),
+            Some(TRIP_FAILED_PAUSED)
+        );
+        assert_eq!(pause.retire(), Some(TRIP_FAILED_PAUSED));
+        // Failing while the tracker wants it running is not this.
+        let mut running = managed_state(t0);
+        running.on_failed();
+        assert!(!running.failed_while_paused);
+        assert_eq!(running.retire(), None);
+        // Nor with pausing off.
+        let mut off = PauseState::new(t0);
+        off.want = false;
+        off.on_failed();
+        assert_eq!(off.retire(), None);
+        // A failure with a resume outstanding is the stuck rule's.
+        let mut resumed = managed_state(t0);
+        resumed.request(false, true, false, t0);
+        resumed.request(true, true, false, t0 + ms(10));
+        resumed.request(false, true, false, t0 + ms(20));
+        resumed.on_failed();
+        assert!(!resumed.failed_while_paused);
+        assert_eq!(
+            resumed.stuck(PwPhase::Failed, t0 + ms(30)),
+            Some(TRIP_STUCK)
+        );
+    }
+
+    #[test]
+    fn a_resume_before_our_pauses_paused_still_marks_it_ours() {
+        let t0 = std::time::Instant::now();
+        let mut race = managed_state(t0);
+        race.request(false, true, false, t0);
+        race.request(true, true, false, t0 + ms(5));
+        race.on_paused(t0 + ms(6));
+        assert!(race.paused_by_us, "the Paused answers our pause request");
+        // A pause that was never applied leaves nothing pending.
+        let mut flap = managed_state(t0);
+        flap.request(false, true, false, t0);
+        flap.request(true, true, true, t0 + ms(5));
+        flap.on_paused(t0 + ms(500));
+        assert!(!flap.paused_by_us);
     }
 
     #[test]
@@ -3006,7 +3217,7 @@ mod tests {
         assert_eq!(pause.resume_fails, 1);
         // The next resume is answered: the count starts again.
         pause.request(true, true, false, t0 + ms(4_000));
-        pause.on_streaming();
+        pause.on_buffer(t0 + ms(4_050));
         pause.request(false, true, false, t0 + ms(4_100));
         assert_eq!(pause.resume_fails, 0);
         let mut at = t0 + ms(5_000);
@@ -3045,7 +3256,7 @@ mod tests {
         early.on_buffer(t0 + ms(1_050));
         assert_eq!(early.grab_end(true, t0 + ms(2_200)), None);
         // Streaming again with no buffer (a still window on niri).
-        let mut still = managed_state(t0);
+        let mut still = niri_state(t0);
         still.request(false, true, false, t0);
         still.request(true, true, false, t0 + ms(1_000));
         still.on_streaming();
@@ -3071,11 +3282,11 @@ mod tests {
         pause.request(false, true, false, t0);
         pause.request(true, true, false, t0 + ms(1_000));
         assert_eq!(pause.retire(), Some(TRIP_RETIRED));
-        pause.on_streaming();
+        pause.on_buffer(t0 + ms(1_050));
         assert_eq!(pause.retire(), None);
 
         let handle = test_stream(true);
-        assert!(handle.enable_pausing());
+        assert!(handle.enable_pausing(false));
         handle
             .state
             .pw_state
@@ -3086,7 +3297,7 @@ mod tests {
         drop(handle);
         assert_eq!(trips.load(Ordering::Acquire), 1, "retired unanswered");
         let calm = test_stream(true);
-        assert!(calm.enable_pausing());
+        assert!(calm.enable_pausing(false));
         let trips = calm.state.trips;
         drop(calm);
         assert_eq!(trips.load(Ordering::Acquire), 0);
@@ -3095,7 +3306,7 @@ mod tests {
     #[test]
     fn a_tripped_stream_runs_and_counts_once() {
         let handle = test_stream(true);
-        assert!(handle.enable_pausing());
+        assert!(handle.enable_pausing(false));
         assert!(handle.pausing());
         handle
             .state
@@ -3125,7 +3336,7 @@ mod tests {
     fn a_grab_result_tells_the_fail_safe_whether_a_tab_missed() {
         let resumed = || {
             let handle = test_stream(true);
-            assert!(handle.enable_pausing());
+            assert!(handle.enable_pausing(false));
             handle
                 .state
                 .pw_state
@@ -3157,7 +3368,7 @@ mod tests {
     #[test]
     fn a_stuck_resume_trips_through_the_handle_before_health_is_read() {
         let handle = test_stream(true);
-        assert!(handle.enable_pausing());
+        assert!(handle.enable_pausing(false));
         handle
             .state
             .pw_state
@@ -3173,6 +3384,62 @@ mod tests {
         handle.check_stuck_resume();
         assert!(handle.pause_tripped());
         assert_eq!(handle.state.trips.load(Ordering::Acquire), 1);
+    }
+
+    static LEAVE_STATE: AtomicPtr<State> = AtomicPtr::new(std::ptr::null_mut());
+    static LEAVE_SAW_PUBLISHED: AtomicBool = AtomicBool::new(false);
+    static LEAVE_INVOKES: AtomicU32 = AtomicU32::new(0);
+
+    unsafe extern "C" fn fake_leave(_: *mut c_void) {
+        let state = unsafe { &*LEAVE_STATE.load(Ordering::Acquire) };
+        LEAVE_SAW_PUBLISHED.store(
+            !state.pw_loop.load(Ordering::Acquire).is_null(),
+            Ordering::Release,
+        );
+    }
+
+    unsafe extern "C" fn counting_invoke(
+        _: *mut c_void,
+        _: SpaInvokeFn,
+        _: u32,
+        _: *const c_void,
+        _: usize,
+        _: bool,
+        _: *mut c_void,
+    ) -> i32 {
+        LEAVE_INVOKES.fetch_add(1, Ordering::AcqRel);
+        0
+    }
+
+    /// After `pw_loop_leave` an invoke from another thread runs inline on
+    /// that thread. `leave_loop` stops publishing the loop first, so a pause
+    /// change after it queues nothing at all.
+    #[test]
+    fn no_invoke_reaches_the_loop_once_it_is_left() {
+        let mut handle = test_stream(true);
+        Arc::get_mut(&mut handle.state).unwrap().loop_invoke = Some(counting_invoke);
+        let fake = std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut c_void;
+        handle.state.loop_.store(fake, Ordering::Release);
+        handle.state.pw_loop.store(fake, Ordering::Release);
+        // Published: a change is queued on the loop.
+        invoke_apply_active(&handle.state);
+        assert_eq!(LEAVE_INVOKES.load(Ordering::Acquire), 1);
+        LEAVE_STATE.store(Arc::as_ptr(&handle.state) as *mut State, Ordering::Release);
+        unsafe { leave_loop(&handle.state, fake_leave, fake) };
+        assert!(
+            !LEAVE_SAW_PUBLISHED.load(Ordering::Acquire),
+            "unpublished before pw_loop_leave"
+        );
+        invoke_apply_active(&handle.state);
+        assert_eq!(
+            LEAVE_INVOKES.load(Ordering::Acquire),
+            1,
+            "nothing invoked after leave"
+        );
+        handle
+            .state
+            .loop_
+            .store(std::ptr::null_mut(), Ordering::Release);
     }
 
     static SET_ACTIVE_CALLS: Mutex<Vec<bool>> = Mutex::new(Vec::new());
@@ -3191,7 +3458,7 @@ mod tests {
         let fake = std::ptr::NonNull::<u8>::dangling().as_ptr() as *mut c_void;
         handle.state.stream.store(fake, Ordering::Release);
         let calls = || SET_ACTIVE_CALLS.lock().unwrap().clone();
-        assert!(handle.enable_pausing());
+        assert!(handle.enable_pausing(false));
         // Running and applied running: nothing to do.
         apply_active_now(&handle.state);
         assert_eq!(calls(), Vec::<bool>::new());
@@ -3248,10 +3515,10 @@ mod tests {
             assert!(got.0.is_none() && got.1.is_none());
         }
         let handle = test_stream(true);
-        assert!(handle.enable_pausing());
+        assert!(handle.enable_pausing(false));
         let mut old = test_stream(true);
         Arc::get_mut(&mut old.state).unwrap().loop_invoke = None;
-        assert!(!old.enable_pausing(), "PipeWire before 1.4");
+        assert!(!old.enable_pausing(false), "PipeWire before 1.4");
         old.set_active(false);
         assert!(old.wants_active());
     }
@@ -3270,7 +3537,7 @@ mod tests {
             .pw_state
             .store(PW_STREAM_STATE_PAUSED, Ordering::Release);
         unmanaged.state.streaming.store(false, Ordering::Release);
-        assert!(resuming.enable_pausing());
+        assert!(resuming.enable_pausing(false));
         match grab_now(resuming).expect("reused frame") {
             GrabOutcome::Frame { is_new, .. } => assert!(!is_new),
             GrabOutcome::TabMiss { .. } => panic!("poll returned a tab miss"),

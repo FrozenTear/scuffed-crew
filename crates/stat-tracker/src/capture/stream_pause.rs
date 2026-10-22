@@ -49,6 +49,8 @@ use super::pw;
 struct Ctl {
     /// The startup decision ([`decide`]).
     enabled: bool,
+    /// The compositor is niri: Streaming again answers a resume.
+    streaming_answers: bool,
     holds: usize,
     current: Option<Weak<pw::Handle>>,
     limit_logged: bool,
@@ -60,15 +62,16 @@ impl Ctl {
         !self.enabled || self.holds > 0
     }
 
-    /// A live stream that is paused between grabs. Holds on anything else
-    /// do nothing.
-    fn pausing(&self) -> bool {
-        self.enabled
-            && self
-                .current
-                .as_ref()
-                .and_then(Weak::upgrade)
-                .is_some_and(|handle| handle.pausing())
+    /// The live stream, when it is paused between grabs. Holds on
+    /// anything else do nothing. The caller drops the reference after
+    /// unlocking (see [`Self::apply`]).
+    #[must_use]
+    fn pausing_stream(&self) -> Option<Arc<pw::Handle>> {
+        if !self.enabled {
+            return None;
+        }
+        let handle = self.current.as_ref().and_then(Weak::upgrade)?;
+        handle.pausing().then_some(handle)
     }
 
     /// Pass the wanted state to the live stream. Returns the strong
@@ -86,7 +89,7 @@ impl Ctl {
     fn register(&mut self, handle: &Arc<pw::Handle>, trips: u32) {
         if self.enabled {
             if trips < pw::PAUSE_TRIPS_LIMIT {
-                if !handle.enable_pausing() && !self.limit_logged {
+                if !handle.enable_pausing(self.streaming_answers) && !self.limit_logged {
                     self.limit_logged = true;
                     tracing::info!(
                         "screencast pause between grabs is off: it needs PipeWire 1.4 or newer"
@@ -107,6 +110,7 @@ impl Ctl {
 
 static CTL: Mutex<Ctl> = Mutex::new(Ctl {
     enabled: false,
+    streaming_answers: false,
     holds: 0,
     current: None,
     limit_logged: false,
@@ -144,10 +148,12 @@ fn hold_in(slot: &'static Mutex<Ctl>) -> StreamHold {
 }
 
 /// The startup decision. Read when a stream is registered and by holds.
-pub fn set_enabled(enabled: bool) {
+/// `streaming_answers`: the compositor is niri.
+pub fn set_enabled(enabled: bool, streaming_answers: bool) {
     let handle = {
         let mut ctl = ctl(&CTL);
         ctl.enabled = enabled;
+        ctl.streaming_answers = streaming_answers;
         ctl.apply()
     };
     drop(handle);
@@ -207,10 +213,13 @@ impl Drop for KeyHold {
 }
 
 fn key_hold_in(slot: &'static Mutex<Ctl>, at: Instant, now: Instant) -> KeyHold {
-    let (pausing, running) = {
+    let (stream, running) = {
         let ctl = ctl(slot);
-        (ctl.pausing(), ctl.holds > 0)
+        (ctl.pausing_stream(), ctl.holds > 0)
     };
+    // Dropped here, outside the lock.
+    let pausing = stream.is_some();
+    drop(stream);
     if !pausing {
         return KeyHold::inert();
     }
@@ -492,14 +501,23 @@ async fn kwin_version_from_binary() -> Option<(u32, u32)> {
 }
 
 /// Read the session once. KWin's version is asked only when the compositor
-/// is KWin: over D-Bus, then `kwin_wayland --version`, 2 s each at most.
+/// is KWin ([`kwin_version`]).
 pub async fn detect_facts() -> DesktopFacts {
+    let mut facts = detect_facts_without_kwin().await;
+    if compositor(&facts) == Compositor::KWin {
+        facts.kwin_version = kwin_version(facts.kde_session_version.as_deref()).await;
+    }
+    facts
+}
+
+/// The env vars and the compositor process scan.
+async fn detect_facts_without_kwin() -> DesktopFacts {
     let var = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
     let (niri_running, kwin_running, gnome_shell_running) =
         tokio::task::spawn_blocking(|| scan_processes(std::path::Path::new("/proc"), 100_000))
             .await
             .unwrap_or_default();
-    let mut facts = DesktopFacts {
+    DesktopFacts {
         desktop: var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
         kde_session_version: var("KDE_SESSION_VERSION"),
         niri_socket: var("NIRI_SOCKET").is_some(),
@@ -507,27 +525,72 @@ pub async fn detect_facts() -> DesktopFacts {
         kwin_running,
         gnome_shell_running,
         kwin_version: None,
-    };
-    if compositor(&facts) == Compositor::KWin {
-        let limit = Duration::from_secs(2);
-        facts.kwin_version = match tokio::time::timeout(limit, kwin_version_over_dbus()).await {
-            Ok(Some(version)) => Some(version),
-            _ => tokio::time::timeout(limit, kwin_version_from_binary())
+    }
+}
+
+/// The running KWin's version. D-Bus first; on Plasma 6, where KWin may
+/// still be starting, D-Bus once more after [`KWIN_DBUS_RETRY`]. Only then
+/// `kwin_wayland --version`, which reads the installed binary: after an
+/// upgrade without a new login that can be newer than the running KWin.
+async fn kwin_version(kde_session_version: Option<&str>) -> Option<(u32, u32)> {
+    let limit = Duration::from_secs(2);
+    kwin_version_with(
+        kde_session_version,
+        KWIN_DBUS_RETRY,
+        || async {
+            tokio::time::timeout(limit, kwin_version_over_dbus())
                 .await
                 .ok()
-                .flatten(),
-        };
-    }
-    facts
+                .flatten()
+        },
+        || async {
+            tokio::time::timeout(limit, kwin_version_from_binary())
+                .await
+                .ok()
+                .flatten()
+        },
+    )
+    .await
 }
+
+/// [`kwin_version`] with its two sources passed in.
+async fn kwin_version_with<D, DF, B, BF>(
+    kde_session_version: Option<&str>,
+    retry: Duration,
+    mut dbus: D,
+    binary: B,
+) -> Option<(u32, u32)>
+where
+    D: FnMut() -> DF,
+    DF: std::future::Future<Output = Option<(u32, u32)>>,
+    B: FnOnce() -> BF,
+    BF: std::future::Future<Output = Option<(u32, u32)>>,
+{
+    if let Some(version) = dbus().await {
+        return Some(version);
+    }
+    if kde_session_version.map(str::trim) == Some("6") {
+        tokio::time::sleep(retry).await;
+        if let Some(version) = dbus().await {
+            return Some(version);
+        }
+    }
+    binary().await
+}
+
+/// Wait before the second D-Bus read of KWin's version.
+const KWIN_DBUS_RETRY: Duration = Duration::from_secs(3);
 
 /// Decide once at startup, log one line, and apply it. Returns the
 /// decision.
 pub async fn decide_and_apply(over: PauseOverride) -> bool {
+    // Read the session even when the env var or config decides, so a
+    // forced-on niri still counts Streaming as an answer. KWin's version
+    // is read only for Auto.
     let facts = if over == PauseOverride::Auto {
         detect_facts().await
     } else {
-        DesktopFacts::default()
+        detect_facts_without_kwin().await
     };
     let (on, why) = decide(over, &facts);
     tracing::info!(
@@ -536,7 +599,7 @@ pub async fn decide_and_apply(over: PauseOverride) -> bool {
         kwin_version = ?facts.kwin_version,
         "screencast stream pause between grabs: {why}"
     );
-    set_enabled(on);
+    set_enabled(on, compositor(&facts) == Compositor::Niri);
     on
 }
 
@@ -946,5 +1009,62 @@ mod tests {
             (false, false, false)
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn kwin_version_retries_dbus_once_on_plasma_6_before_the_binary() {
+        use std::cell::Cell;
+        let run =
+            |session: Option<&str>, dbus: Vec<Option<(u32, u32)>>, bin: Option<(u32, u32)>| {
+                let calls = Cell::new(0usize);
+                let bin_calls = Cell::new(0usize);
+                let got = rt().block_on(kwin_version_with(
+                    session,
+                    Duration::from_millis(1),
+                    || {
+                        let n = calls.get();
+                        calls.set(n + 1);
+                        let answer = dbus.get(n).copied().flatten();
+                        async move { answer }
+                    },
+                    || {
+                        bin_calls.set(bin_calls.get() + 1);
+                        async move { bin }
+                    },
+                ));
+                (got, calls.get(), bin_calls.get())
+            };
+        assert_eq!(
+            run(Some("6"), vec![Some((6, 8))], Some((6, 9))),
+            (Some((6, 8)), 1, 0)
+        );
+        assert_eq!(
+            run(Some("6"), vec![None, Some((6, 8))], Some((6, 9))),
+            (Some((6, 8)), 2, 0),
+            "KWin was still starting: the second D-Bus read wins"
+        );
+        assert_eq!(
+            run(Some("6"), vec![None, None], Some((6, 9))),
+            (Some((6, 9)), 2, 1)
+        );
+        assert_eq!(
+            run(None, vec![None], Some((6, 9))),
+            (Some((6, 9)), 1, 1),
+            "no Plasma 6 session: no retry"
+        );
+        assert_eq!(run(Some("5"), vec![None], None), (None, 1, 1));
+    }
+
+    #[test]
+    fn on_niri_streaming_answers_a_resume_elsewhere_only_a_buffer_does() {
+        for niri in [true, false] {
+            let slot = Box::leak(Box::new(Mutex::new(Ctl {
+                enabled: true,
+                streaming_answers: niri,
+                ..Ctl::default()
+            })));
+            let stream = live(slot);
+            assert_eq!(stream.streaming_answers_for_test(), niri);
+        }
     }
 }

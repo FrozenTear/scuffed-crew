@@ -230,18 +230,22 @@ stays paused while Overwatch is not running. GNOME, Plasma 5, KWin 6.0,
 wlroots portals and desktops the tracker does not recognise keep the
 stream running: Mutter and older KWin leak a signal connection on every
 resume. The tracker reads the desktop name, `KDE_SESSION_VERSION`, the
-running compositor and, on KDE, KWin's version once at start, and logs one
+running compositor processes and, on KDE, KWin's version (over D-Bus,
+once more after 3 seconds on Plasma 6, then from `kwin_wayland --version`)
+once at start, and logs one
 line saying whether it pauses and why. Pausing also needs PipeWire 1.4 or
 newer; older PipeWire keeps the stream running.
 
-A fail-safe watches each resume. A resume is answered when PipeWire
-reports the stream Streaming again or a frame arrives (on niri a still
-screen sends no frame, but it does reach Streaming). The tracker stops
-pausing a stream, keeps it running and logs one warning when two resumes
-in a row are not answered within 1.5 s of active time, when a Tab misses
-while its resume is not answered, when the stream stays paused (or fails)
-1.5 s of active time after a resume, or when the stream is closed while a
-resume is not answered. The next share or reopen tries pausing again once;
+A fail-safe watches each resume. A resume is answered when a frame
+arrives. On niri, which draws a shared screen only when it changes, the
+stream reaching Streaming again also answers it, so a still screen does
+not count. KWin always sends a frame on resume, so there a resume that
+reaches Streaming with no frame is a broken one. The tracker stops pausing
+a stream, keeps it running and logs one warning when two resumes in a row
+are not answered within 1.5 s of active time, when a Tab misses while its
+resume is not answered, when the stream stays paused (or fails) 1.5 s of
+active time after a resume, when the stream fails while the tracker holds
+it paused, or when the stream is closed while a resume is not answered. The next share or reopen tries pausing again once;
 after a second such stream it stays off until the tracker restarts. To
 turn pausing off yourself, set `screencast_pause_between_grabs = false`,
 or put `STAT_TRACKER_SCREENCAST_PAUSE=0` in `~/.config/environment.d/` for
@@ -537,8 +541,9 @@ Install does three things:
 
 1. `ExecStart` becomes the absolute `$PREFIX/bin/scuffed-stat-tracker`.
    A custom prefix used to keep launching `~/.local/bin`.
-2. It imports `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`, and
-   `XDG_SESSION_TYPE` into the user manager when `systemctl --user` works.
+2. It imports `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`,
+   `XDG_SESSION_TYPE`, and `KDE_SESSION_VERSION` (Plasma only) into the
+   user manager when `systemctl --user` works.
 3. It installs `scuffed-stat-tracker-session.service`, a oneshot that runs
    before every daemon start. The oneshot reads those variables from the
    compositor's `/proc/<pid>/environ` (sway and Hyprland first, then other
@@ -562,7 +567,8 @@ Caveats:
   each time the daemon starts.
 - A compositor not in the helper's list is invisible. From a terminal in
   that session run `systemctl --user import-environment WAYLAND_DISPLAY
-  DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE` and restart the daemon.
+  DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE KDE_SESSION_VERSION` and
+  restart the daemon.
 - Do not install with `sudo`. The helper only reads processes of the
   installing user. `session.env` is always `~/.config/scuffed-stat-tracker/`
   (the unit's `%h`), not `$XDG_CONFIG_HOME`.

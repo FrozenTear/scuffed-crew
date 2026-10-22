@@ -3077,6 +3077,20 @@ mod tests {
         assert_eq!(watch.soft_misses, 1);
     }
 
+    /// The round-1 fix's wiring: `health_now` runs the stuck-resume check
+    /// before it reads health, so a stream stuck after the tracker's own
+    /// pause trips (and is counted) before the 2 s paused rule reopens it.
+    #[test]
+    fn health_now_trips_a_stuck_resume_before_reading_health() {
+        let stream = pw::test_stream_stuck_after_our_pause();
+        assert!(!stream.pause_tripped());
+        let health = health_now(&stream);
+        assert!(stream.pause_tripped(), "tripped by the health read");
+        assert!(stream.wants_active(), "running as rc.6 from here");
+        // The pause is still real, so health still reports it.
+        assert!(matches!(health, StreamHealth::Paused { .. }));
+    }
+
     #[test]
     fn a_poll_that_resumes_waits_longer_but_under_the_poll() {
         assert_eq!(poll_wait(4, false), Duration::from_millis(350));
