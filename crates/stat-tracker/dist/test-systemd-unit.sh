@@ -175,6 +175,26 @@ grep -qx 'XDG_SESSION_TYPE=wayland' "$ENV_FILE" \
 grep -q 'wayland-9\|wayland-7\|:99\|XDG_SESSION_TYPE=tty\|not a desktop\|;rm' "$ENV_FILE" \
     && fail "stale or invalid value landed in session.env: $(cat "$ENV_FILE")"
 grep -q 'import-environment' "$LOG" || fail "systemctl import-environment was not called: $(cat "$LOG")"
+
+# The installers ignore SIGPIPE, and the helper inherits that. Its log
+# lines must not stop it when stderr is closed (the app that ran the
+# update quit): session.env is still written and the exit is 0.
+rm -f "$ENV_FILE" "$TMP/helper-closed.code"
+set +e
+# shellcheck disable=SC2016 # $1 and $2 are expanded by the inner bash
+env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
+    HOME="$TMP/home" \
+    SCUFFED_PROC_ROOT="$PROC" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    SCUFFED_SESSION_ENV_FILE="$ENV_FILE" \
+    bash -c 'trap "" PIPE; sleep 0.3; bash "$1"; echo "$?" > "$2"' \
+    _ "$HELPER" "$TMP/helper-closed.code" 2>&1 | true
+set -e
+[[ "$(cat "$TMP/helper-closed.code" 2>/dev/null)" == 0 ]] \
+    || fail "session helper failed on a closed stderr (exit $(cat "$TMP/helper-closed.code" 2>/dev/null))"
+grep -qx 'WAYLAND_DISPLAY=wayland-1' "$ENV_FILE" \
+    || fail "session helper on a closed stderr did not write session.env"
+pass "session helper survives a closed stderr"
 grep -qx 'ENV WAYLAND_DISPLAY=wayland-1' "$LOG" \
     || fail "import did not export compositor WAYLAND_DISPLAY: $(cat "$LOG")"
 grep -qx 'ENV DISPLAY=:0' "$LOG" || fail "import did not export DISPLAY: $(cat "$LOG")"
@@ -446,7 +466,20 @@ case "\$*" in
     *is-active*) echo "\${FAKE_STATE-inactive}"
         [ "\${FAKE_STATE-}" = active ] || exit 3 ;;
     *"show --timestamp=unix -p InactiveEnterTimestamp --value"*)
+        # systemd before 251 has no unix form.
+        if [ -n "\${FAKE_NO_UNIX-}" ]; then
+            echo "Unknown timestamp style: unix" >&2
+            exit 1
+        fi
         echo "\${FAKE_STOPPED_AT-}" ;;
+    *"show --timestamp=utc -p InactiveEnterTimestamp --value"*)
+        if [ -n "\${FAKE_NO_UTC-}" ]; then
+            echo "Unknown timestamp style: utc" >&2
+            exit 1
+        fi
+        echo "\${FAKE_STOPPED_UTC-}" ;;
+    *"show -p InactiveEnterTimestamp --value"*)
+        echo "\${FAKE_STOPPED_PLAIN-}" ;;
     *" start --no-block "*)
         [ -f "$PREFIX/share/scuffed-stat-tracker/install-manifest.txt" ] \
             && echo "MANIFEST PRESENT AT START" >> "$LOG"
@@ -482,6 +515,23 @@ FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="@$((NOW - 100))" run_s
 started || fail "unit stopped 100 s before the install was not started: $(cat "$LOG")"
 pass "install starts a unit the update stopped, without waiting on the job"
 
+# systemd 247-250 (Ubuntu 22.04, Debian 11) has no --timestamp=unix: the
+# utc form is read instead, and failing that the default form. systemd
+# prints English day names whatever the locale, so the fake does too.
+UPDATE_STOP_UTC="$(LC_ALL=C date -ud "@$((NOW - 5))" '+%a %Y-%m-%d %H:%M:%S UTC')"
+FAKE_NO_UNIX=1 FAKE_STOPPED_UTC="$UPDATE_STOP_UTC" \
+    FAKE_ENABLED=enabled FAKE_STATE=inactive run_start_install
+started || fail "no unix timestamp form: the utc form was not used: $(cat "$LOG")"
+UPDATE_STOP_PLAIN="$(LC_ALL=C date -d "@$((NOW - 5))" '+%a %Y-%m-%d %H:%M:%S %Z')"
+FAKE_NO_UNIX=1 FAKE_NO_UTC=1 FAKE_STOPPED_PLAIN="$UPDATE_STOP_PLAIN" \
+    FAKE_ENABLED=enabled FAKE_STATE=inactive run_start_install
+started || fail "no unix or utc form: the default form was not used: $(cat "$LOG")"
+OLD_STOP_UTC="$(LC_ALL=C date -ud "@$((NOW - 3600))" '+%a %Y-%m-%d %H:%M:%S UTC')"
+FAKE_NO_UNIX=1 FAKE_STOPPED_UTC="$OLD_STOP_UTC" \
+    FAKE_ENABLED=enabled FAKE_STATE=inactive run_start_install
+started && fail "utc form: a stop an hour ago still started the unit: $(cat "$LOG")"
+pass "older systemd: the stop time is read from the utc or default form"
+
 FAKE_ENABLED=enabled FAKE_STATE=active FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
 started && fail "running unit was started again: $(cat "$LOG")"
 FAKE_ENABLED=disabled FAKE_STATE=inactive FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
@@ -505,6 +555,11 @@ started && fail "unit with a stop time in the future was started: $(cat "$LOG")"
 FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="$UPDATE_STOP" FAKE_SESSION=inactive \
     run_start_install
 started && fail "unit was started with no graphical session: $(cat "$LOG")"
+# A start time with a leading zero is not read as octal (08 is invalid).
+STAT_TRACKER_BOOTSTRAP_STARTED=08 FAKE_ENABLED=enabled FAKE_STATE=inactive \
+    FAKE_STOPPED_AT="@8" run_start_install
+started && fail "start time 08 started the unit: $(cat "$LOG")"
+grep -q 'value too great' "$ERR" && fail "start time 08 was read as octal: $(cat "$ERR")"
 # A plain ./install.sh (no bootstrap start time) never starts the unit.
 STAT_TRACKER_BOOTSTRAP_STARTED='' FAKE_ENABLED=enabled FAKE_STATE=inactive \
     FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install

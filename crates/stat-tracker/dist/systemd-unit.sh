@@ -111,11 +111,37 @@ restart_running_daemon() {
 #     unit is left for the player to see);
 #   - the daemon just installed runs ($3 = 1 after the --version check);
 #   - the unit stopped no more than 2 minutes before bootstrap.sh began
-#     ($2, epoch seconds), and not after now;
+#     ($2, epoch seconds), and not after now (see unit_stop_epoch);
 #   - a graphical session is up (graphical-session.target is active).
 # Prints one word: "started", "failed", or "skip-<reason>". Prints nothing
 # when the unit is not an enabled, stopped one. --no-block: the 0.4.24
 # updater waits on this install with no timeout. Never fails the install.
+# Epoch seconds when the unit last stopped (InactiveEnterTimestamp), or
+# return 1. --timestamp=unix needs systemd 251; Ubuntu 22.04 and Debian 11
+# ship older ones, so fall back to --timestamp=utc (247+), then the default
+# form, read with date -d. Not the ...Monotonic value: compared with
+# /proc/uptime it drifts after a suspend.
+unit_stop_epoch() {
+    local systemctl_bin="$1" unit="$2" value fmt
+    value="$("$systemctl_bin" --user show --timestamp=unix \
+        -p InactiveEnterTimestamp --value "$unit" 2>/dev/null)" || value=""
+    if [[ "$value" =~ ^@[0-9]+$ ]]; then
+        printf '%s\n' "${value#@}"
+        return 0
+    fi
+    for fmt in --timestamp=utc ""; do
+        value="$("$systemctl_bin" --user show ${fmt:+"$fmt"} \
+            -p InactiveEnterTimestamp --value "$unit" 2>/dev/null)" || value=""
+        [[ -n "$value" ]] || continue
+        value="$(date -d "$value" +%s 2>/dev/null)" || value=""
+        if [[ "$value" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done
+    return 1
+}
+
 start_enabled_daemon() {
     local systemctl_bin="$1" since="${2:-}" smoke_ok="${3:-0}"
     local unit="scuffed-stat-tracker.service"
@@ -131,15 +157,14 @@ start_enabled_daemon() {
         echo skip-smoke
         return 0
     fi
-    if [[ ! "$since" =~ ^[0-9]+$ ]]; then
+    # No leading zero: bash would read 08 as a bad octal number.
+    if [[ ! "$since" =~ ^[1-9][0-9]*$ ]]; then
         echo skip-no-bootstrap
         return 0
     fi
-    stopped_at="$("$systemctl_bin" --user show --timestamp=unix \
-        -p InactiveEnterTimestamp --value "$unit" 2>/dev/null)" || true
-    stopped_at="${stopped_at#@}"
+    stopped_at="$(unit_stop_epoch "$systemctl_bin" "$unit")" || stopped_at=""
     now="$(date +%s)"
-    if [[ ! "$stopped_at" =~ ^[0-9]+$ ]] \
+    if [[ ! "$stopped_at" =~ ^[1-9][0-9]*$ ]] \
         || (( stopped_at < since - 120 || stopped_at > now )); then
         echo skip-stopped-earlier
         return 0

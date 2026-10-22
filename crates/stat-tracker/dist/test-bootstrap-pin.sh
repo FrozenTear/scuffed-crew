@@ -544,12 +544,16 @@ pass "a release repeated across pages is kept once"
 reset_pages
 mapfile -t specs < <(fill 99 site-a- site; echo stat-tracker-v0.5.0-rc.9:pre)
 make_page "$PAGES/page-1.json" "${specs[@]}"
-listing="$(fetch_release_listing 2>"$TMP/page2.err")" \
-    || fail "a failed page 2 read threw away page 1: $(cat "$TMP/page2.err")"
+cut_rc=0
+listing="$(fetch_release_listing 2>"$TMP/page2.err")" || cut_rc=$?
+[[ "$cut_rc" -eq 3 ]] || fail "a failed page 2 read did not report a cut list (rc $cut_rc): $(cat "$TMP/page2.err")"
 [[ "$(release_page_len <<<"$listing")" -eq 100 ]] || fail "page 1 was not kept after a failed page 2"
-grep -q 'Could not read page 2' "$TMP/page2.err" || fail "failed page 2 was not reported: $(cat "$TMP/page2.err")"
+grep -q 'Could not read page 2 of the release list; using page 1.' "$TMP/page2.err" \
+    || fail "failed page 2 was not reported: $(cat "$TMP/page2.err")"
 printf '{"message":"API rate limit exceeded"}' > "$PAGES/page-2.json"
-listing="$(fetch_release_listing 2>/dev/null)" || fail "an API error on page 2 threw away page 1"
+cut_rc=0
+listing="$(fetch_release_listing 2>/dev/null)" || cut_rc=$?
+[[ "$cut_rc" -eq 3 ]] || fail "an API error on page 2 did not report a cut list (rc $cut_rc)"
 [[ "$(release_page_len <<<"$listing")" -eq 100 ]] || fail "page 1 was not kept after an API error on page 2"
 mapfile -t picked < <(choose_release_tags "$ASSET" <<<"$listing")
 [[ "${picked[1]}" == "stat-tracker-v0.5.0-rc.9" ]] || fail "prerelease from page 1 was ${picked[1]}"
@@ -565,6 +569,32 @@ set -e
 [[ "$not_list_code" -ne 0 ]] || fail "an API error object was taken as a release list"
 [[ "$not_list" == *"rate limit"* ]] || fail "API error was not reported: $not_list"
 pass "a failed later page keeps the pages read; a failed first page fails"
+
+# Pages 1 and 2 hold only prereleases and page 3 fails: the stable may be
+# further down, so the default and stable channels refuse instead of
+# installing the rc. The prerelease channel may use what was read.
+reset_pages
+mapfile -t specs < <(fill 100 stat-tracker-v0.5.0-rc. pre)
+make_page "$PAGES/page-1.json" "${specs[@]}"
+mapfile -t specs < <(fill 100 site-b- site)
+make_page "$PAGES/page-2.json" "${specs[@]}"
+grep -q 'using pages 1 to 2' <(fetch_release_listing 2>&1 >/dev/null) \
+    || fail "a failed page 3 did not name the pages used"
+for channel in "" stable; do
+    set +e
+    cut_out="$(STAT_TRACKER_TAG='' STAT_TRACKER_CHANNEL="$channel" resolve_release 2>&1)"
+    cut_code=$?
+    set -e
+    [[ "$cut_code" -ne 0 ]] || fail "channel '$channel' installed from a cut list: $cut_out"
+    [[ "$cut_out" != *"stat-tracker-v0.5.0-rc.100"$'\n'"https"* ]] \
+        || fail "channel '$channel' resolved the rc from a cut list: $cut_out"
+done
+[[ "$cut_out" == *"cut short before a stable release was found"* ]] \
+    || fail "cut list error did not say why: $cut_out"
+mapfile -t resolved < <(STAT_TRACKER_TAG='' STAT_TRACKER_CHANNEL=prerelease resolve_release 2>/dev/null)
+[[ "${resolved[0]:-}" == "stat-tracker-v0.5.0-rc.100" ]] \
+    || fail "prerelease channel on a cut list resolved '${resolved[0]:-}'"
+pass "a cut list with no stable fails closed unless the prerelease channel is asked for"
 
 # No release list at all: say so, not "refusing unsafe release tag ''".
 reset_pages

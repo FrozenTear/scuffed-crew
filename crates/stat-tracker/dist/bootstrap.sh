@@ -312,9 +312,10 @@ json.dump(merged, sys.stdout)
 # The release list as one JSON array. Reads pages until one holds a stable
 # release that ships the asset (as choose_release_tags sees it), a page
 # comes back short, or RELEASE_MAX_PAGES pages were read. A failed page
-# after the first ends the list there.
+# after the first ends the list there: the pages read are printed and the
+# return is 3, so the caller knows the list was cut short.
 fetch_release_listing() {
-    local page=1 body count all="" stable_tag pre_tag
+    local page=1 body count all="" stable_tag pre_tag cut=0
     while :; do
         if ! body="$(fetch_release_page "$page")" \
             || ! count="$(release_page_len <<<"$body")"; then
@@ -323,7 +324,12 @@ fetch_release_listing() {
             if (( page == 1 )); then
                 return 1
             fi
-            warn "Could not read page ${page} of the release list; using the first $((page - 1))."
+            if (( page == 2 )); then
+                warn "Could not read page 2 of the release list; using page 1."
+            else
+                warn "Could not read page ${page} of the release list; using pages 1 to $((page - 1))."
+            fi
+            cut=1
             break
         fi
         all="$(printf '%s\n%s\n' "$all" "$body" | merge_release_pages)" || return 1
@@ -340,6 +346,9 @@ fetch_release_listing() {
         page=$((page + 1))
     done
     printf '%s\n' "$all"
+    if (( cut )); then
+        return 3
+    fi
 }
 
 # Resolve asset download URL plus optional sha256 and minisign companions.
@@ -350,12 +359,25 @@ resolve_release() {
         json="$(curl_https "${GH_HEADERS[@]}" "${API}/tags/${STAT_TRACKER_TAG}")"
     else
         info "Fetching latest GitHub releases for ${REPO}…"
-        json="$(fetch_release_listing)" || exit 1
+        local listing_cut=0 listing_rc=0
+        json="$(fetch_release_listing)" || listing_rc=$?
+        case "$listing_rc" in
+            0) ;;
+            3) listing_cut=1 ;;
+            *) exit 1 ;;
+        esac
         # Newest stable that ships our asset, and a prerelease only when it
         # is newer than that stable. Drafts are skipped. No prompt.
         local stable_tag pre_tag chosen
         { read -r stable_tag; read -r pre_tag; } < <(choose_release_tags "$ASSET_NAME" <<<"$json")
         if [[ -z "$stable_tag" && -z "$pre_tag" ]]; then
+            exit 1
+        fi
+        # A list cut short by an error may hide the stable release. Do not
+        # fall back to a prerelease for that: only an asked-for prerelease
+        # channel may use what was read.
+        if (( listing_cut )) && [[ -z "$stable_tag" && "${STAT_TRACKER_CHANNEL:-}" != prerelease ]]; then
+            error "GitHub's release list was cut short before a stable release was found. Try again later, or set STAT_TRACKER_CHANNEL=prerelease, or pin STAT_TRACKER_TAG."
             exit 1
         fi
         chosen="$(pick_release_tag "$stable_tag" "$pre_tag" "${STAT_TRACKER_CHANNEL:-}")"
@@ -721,7 +743,7 @@ esac
 # again only when the tracker stopped right before this (the in-app
 # updater's stop), never a stop from long before. A re-exec keeps the
 # first copy's time.
-if [[ ! "${STAT_TRACKER_BOOTSTRAP_STARTED:-}" =~ ^[0-9]+$ ]]; then
+if [[ ! "${STAT_TRACKER_BOOTSTRAP_STARTED:-}" =~ ^[1-9][0-9]*$ ]]; then
     STAT_TRACKER_BOOTSTRAP_STARTED="$(date +%s)"
 fi
 export STAT_TRACKER_BOOTSTRAP_STARTED
