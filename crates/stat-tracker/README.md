@@ -14,7 +14,12 @@ install paths and the `.desktop` entry stay the same).
     with XDG Desktop Portal fallback.
   - X11: native capture when a usable X server is detected and
     Wayland capture is unavailable.
-  - Portal remains last-resort on either stack (slower; not ideal for the poller).
+  - The portal is the fallback on Wayland (slower; not ideal for the poller).
+    On a session that is X11 for sure (`XDG_SESSION_TYPE=x11` and no
+    `WAYLAND_DISPLAY`), Automatic never falls back to it: there is no screen
+    stream there, so if X11 capture fails nothing captures and the app says
+    so. A session that is neither known Wayland nor known X11 may still fall
+    back to the portal.
 - **Keyboard access via evdev.** Tab detection (daemon) and the companion
   overlay show/hide shortcut (GUI, default Super+Shift+C) read `/dev/input`.
   The user must be in the `input` group, or have seat `uaccess` on those
@@ -251,7 +256,9 @@ tracker asked for, or when the stream is closed while a resume is not
 answered. During a game the stream pauses about every 1.5 seconds, so that
 2-second window is nearly always open; it only leaves out ends on an idle
 share. What keeps outside causes from counting: a lost PipeWire connection
-(a PipeWire restart) and a portal session that closed are never counted.
+(a PipeWire restart) is never counted, and neither is a portal session
+the tracker has already seen close. A stream that fails just before the
+tracker sees its portal session close can still count.
 On KDE a share stopped from the tray or an output change ends the KWin
 stream, and xdg-desktop-portal-kde then closes the session. The warning for
 a stream that ended just after a pause says it can also be an output or
@@ -344,7 +351,10 @@ debug option is on. It calls KWin's own screenshot interface
 (`org.kde.KWin.ScreenShot2`) for the game's monitor, with the cursor left
 out, and reads the pixels from a pipe. There is no dialog, no PNG and no
 file in Pictures. It needs Plasma 6.8 or later: older Plasma refuses apps
-it does not list. At startup the tracker reads the interface version and
+it does not list. With the NVIDIA driver loaded it needs Plasma 6.8.1 or
+later: KWin before that can crash when a screenshot meets any app's screen
+share (KDE bug 524840), so on NVIDIA a known older Plasma counts as
+unavailable and no test picture is taken. At startup the tracker reads the interface version and
 takes a 1x1 test picture on one of your monitors; on KDE a failure that can
 pass (KWin not up yet at login) is tried again for up to 15 seconds. If it
 still fails, the tracker uses the route Automatic would have chosen (the
@@ -368,9 +378,10 @@ differing. Automatic does not choose KDE direct yet: route selection is
 unchanged.
 
 Older screenshot on KDE takes about half a second of KWin and portal work
-per grab. The tracker runs one request at a time (a Tab waits for a poll's
-request to finish, then takes its own; a poll that finds one running is
-skipped; in the end-reel window the outcome poll waits up to a second, so
+per grab. The tracker runs one request at a time (a Tab waits up to 4
+seconds for a poll's request to finish, then takes its own; if the request
+is still running, that grab counts as busy and is retried while Tab is
+held; a poll that finds one running is skipped; in the end-reel window the outcome poll waits up to a second, so
 holding Tab over VICTORY does not cost it), a rejected Tab is retried once
 instead of twice, and out of a match the poll grabs about every 3 seconds
 instead of every tick. KDE direct polls at that rate out of a match too.
@@ -382,6 +393,14 @@ fail (the one whose file the other already removed; a file that was only
 replaced still gives a picture); press Capture now again. On GNOME,
 Older screenshot flashes the screen and plays a sound on every capture;
 the startup log warns when it is forced there, and Settings says so.
+A request the portal does not answer is looked at every 60 seconds. If
+the portal went away (a crash or restart), it is given up. If screenshot
+permission is already granted (or there is no permission entry and
+screenshots have worked before), it is closed and given up, ordinary polls
+make no request for 30 seconds (then 2, 5 and 10 minutes after later
+stalls), and Settings says the portal stopped answering. Otherwise a
+permission prompt may be waiting, possibly behind the game: the request
+keeps waiting and Settings says so.
 When the environment variable is set, Settings says so and names the file
 to edit. The startup log says which source won (`environment`, `settings`,
 or `automatic`), the desktop, and the portal backend that answered.
