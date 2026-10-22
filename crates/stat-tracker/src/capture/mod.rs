@@ -27,8 +27,6 @@ pub struct CapturePrefs {
     pub debug_frames: bool,
     /// Screen-stream cap in frames per second. Already clamped.
     pub max_fps: u32,
-    /// Pause the screen stream between grabs. Config and env already applied.
-    pub pause_between_grabs: bool,
 }
 
 fn prefs() -> CapturePrefs {
@@ -43,7 +41,6 @@ fn prefs() -> CapturePrefs {
             route: crate::config::CaptureRoute::Auto,
             debug_frames: false,
             max_fps: crate::config::SCREENCAST_MAX_FPS_DEFAULT,
-            pause_between_grabs: true,
         })
 }
 
@@ -191,7 +188,6 @@ fn live_daemon_pid(data_dir: &std::path::Path) -> Option<u32> {
 }
 
 pub fn set_prefs(prefs: CapturePrefs) {
-    stream_pause::set_enabled(prefs.pause_between_grabs);
     *PREFS.lock().unwrap_or_else(|err| err.into_inner()) = Some(prefs);
 }
 
@@ -228,7 +224,10 @@ pub use screencast::{
 };
 
 pub use framebuf::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, first_grab_press, tab_retry_press};
-pub use stream_pause::{KeyHold, key_hold as stream_key_hold};
+pub use stream_pause::{
+    KeyHold, bridge_hold as stream_bridge_hold, decide_and_apply as decide_stream_pause,
+    end_tab_stream_hold, key_hold as stream_key_hold, with_tab_stream_hold,
+};
 
 /// One captured image plus whether the stream had not already handed it out.
 /// Screenshots are always new and have no sequence.

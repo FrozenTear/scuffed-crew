@@ -29,10 +29,12 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screencast_max_fps: Option<u32>,
     /// Pause the screen stream between grabs, so the compositor does not
-    /// render frames the tracker throws away. Missing means on. `false`
-    /// keeps the stream running the whole time, as before 0.5.0-rc.7.
-    /// `STAT_TRACKER_SCREENCAST_PAUSE=0` or `=1` wins over this key and is
-    /// not written back. Not written unless set.
+    /// render frames the tracker throws away. Missing or `true` means on
+    /// where the compositor handles it (KWin 6.1 or newer, niri) and off
+    /// elsewhere. `false` keeps the stream running the whole time, as before
+    /// 0.5.0-rc.7, on every desktop. `STAT_TRACKER_SCREENCAST_PAUSE=1` forces
+    /// it on anywhere and `=0` off; the env var wins over this key and is not
+    /// written back. Not written unless set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screencast_pause_between_grabs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -511,28 +513,43 @@ impl Config {
         clamp_screencast_max_fps(self.screencast_max_fps)
     }
 
-    /// Whether the screen stream pauses between grabs, with
-    /// [`SCREENCAST_PAUSE_ENV`] applied.
-    pub fn screencast_pause_between_grabs(&self) -> bool {
-        resolve_screencast_pause(
+    /// The pause-between-grabs setting with [`SCREENCAST_PAUSE_ENV`]
+    /// applied. The capture module decides `Auto` for the compositor.
+    pub fn screencast_pause_override(&self) -> PauseOverride {
+        screencast_pause_override(
             self.screencast_pause_between_grabs,
             std::env::var(SCREENCAST_PAUSE_ENV).ok().as_deref(),
         )
     }
 }
 
-/// `0`, `false`, `off`, or `no` keeps the screen stream running between
-/// grabs for this run. `1`, `true`, `on`, or `yes` pauses it. Any other
-/// value, or unset, leaves the config key in charge.
+/// `1`, `true`, `on`, or `yes` pauses the screen stream between grabs on
+/// any compositor (for testing). `0`, `false`, `off`, or `no` keeps it
+/// running. Any other value, or unset, leaves the config key in charge.
 pub const SCREENCAST_PAUSE_ENV: &str = "STAT_TRACKER_SCREENCAST_PAUSE";
 
-/// The file key, then the env override. Missing key means on.
-pub fn resolve_screencast_pause(file: Option<bool>, env: Option<&str>) -> bool {
+/// Where pausing the screen stream between grabs was decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PauseOverride {
+    /// The env var forces it on, on any compositor.
+    EnvOn,
+    /// The env var turns it off.
+    EnvOff,
+    /// `screencast_pause_between_grabs = false`: off everywhere.
+    ConfigOff,
+    /// Missing or `true`: on where the compositor is known to handle it
+    /// (KWin 6.1 or newer, niri).
+    Auto,
+}
+
+/// The env override first, then the file key.
+pub fn screencast_pause_override(file: Option<bool>, env: Option<&str>) -> PauseOverride {
     let from_env = env.map(|v| v.trim().to_ascii_lowercase());
     match from_env.as_deref() {
-        Some("0" | "false" | "off" | "no") => false,
-        Some("1" | "true" | "on" | "yes") => true,
-        _ => file.unwrap_or(true),
+        Some("0" | "false" | "off" | "no") => PauseOverride::EnvOff,
+        Some("1" | "true" | "on" | "yes") => PauseOverride::EnvOn,
+        _ if file == Some(false) => PauseOverride::ConfigOff,
+        _ => PauseOverride::Auto,
     }
 }
 
@@ -2910,29 +2927,38 @@ cooldown_secs = 120
     }
 
     #[test]
-    fn screencast_pause_defaults_on_and_the_env_wins_both_ways() {
+    fn screencast_pause_is_auto_unless_config_or_env_says_otherwise() {
+        use PauseOverride::*;
         let cfg = Config::default();
         assert_eq!(cfg.screencast_pause_between_grabs, None);
-        assert!(resolve_screencast_pause(None, None), "missing key: on");
+        assert_eq!(screencast_pause_override(None, None), Auto);
+        assert_eq!(screencast_pause_override(Some(true), None), Auto);
+        assert_eq!(screencast_pause_override(Some(false), None), ConfigOff);
         assert!(
             !toml::to_string(&cfg)
                 .unwrap()
                 .contains("screencast_pause_between_grabs"),
             "not written unless set"
         );
-        assert!(!resolve_screencast_pause(Some(false), None));
-        assert!(resolve_screencast_pause(Some(true), None));
         for off in ["0", "false", "OFF", " no "] {
-            assert!(!resolve_screencast_pause(None, Some(off)), "{off}");
-            assert!(!resolve_screencast_pause(Some(true), Some(off)), "{off}");
+            assert_eq!(screencast_pause_override(None, Some(off)), EnvOff, "{off}");
+            assert_eq!(screencast_pause_override(Some(true), Some(off)), EnvOff);
         }
         for on in ["1", "true", "On", "YES"] {
-            assert!(resolve_screencast_pause(Some(false), Some(on)), "{on}");
+            assert_eq!(
+                screencast_pause_override(Some(false), Some(on)),
+                EnvOn,
+                "{on}"
+            );
+            assert_eq!(screencast_pause_override(None, Some(on)), EnvOn);
         }
         // Empty or unknown leaves the file in charge.
-        assert!(!resolve_screencast_pause(Some(false), Some("")));
-        assert!(!resolve_screencast_pause(Some(false), Some("maybe")));
-        assert!(resolve_screencast_pause(None, Some("")));
+        assert_eq!(screencast_pause_override(Some(false), Some("")), ConfigOff);
+        assert_eq!(
+            screencast_pause_override(Some(false), Some("maybe")),
+            ConfigOff
+        );
+        assert_eq!(screencast_pause_override(None, Some("")), Auto);
         let raw = toml::to_string(&Config::default()).unwrap();
         let raw = format!("screencast_pause_between_grabs = false\n{raw}");
         let parsed: Config = toml::from_str(&raw).unwrap();

@@ -299,6 +299,14 @@ fn reopen_step(obs: Observe, has_token: bool, now: Instant, watch: &mut ReopenWa
     ReopenStep::Keep
 }
 
+/// Health for a decision, after the pause fail-safe has had its look: a
+/// resume the compositor never answered trips there first, so a stream the
+/// tracker paused is not reopened with pausing still on.
+fn health_now(stream: &pw::Handle) -> StreamHealth {
+    stream.check_stuck_resume();
+    health_of(stream.stream_report())
+}
+
 fn health_of(report: pw::StreamReport) -> StreamHealth {
     if portal_session_closed() && report.has_streamed {
         return StreamHealth::PortalClosed;
@@ -1178,7 +1186,7 @@ pub async fn capture(
             .map(fresh_capture);
     };
     let streamed = stream.has_streamed();
-    let health = health_of(stream.stream_report());
+    let health = health_now(&stream);
     let token_saved = restore_token_saved(data_dir);
     // A poll is where a deferred reopen runs. A Tab never reopens here, so
     // the scoreboard it just read is not thrown away while the share opens.
@@ -1268,17 +1276,8 @@ pub async fn capture(
     // Resume the stream for this grab. It pauses again when the hold is
     // dropped below, after the post-grab health read, or on any early
     // return. A Tab grab takes over the key hold from the press.
-    let mut resuming = !stream.wants_active();
-    if resuming && let Some(press) = tab_press {
-        // Same start as the key hold: a frame period before the overlay
-        // delay ends ([`super::stream_pause::tab_resume_at`]).
-        let at = super::stream_pause::tab_resume_at(press, max_fps);
-        if at > Instant::now() {
-            tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
-            resuming = !stream.wants_active();
-        }
-    }
-    let grab_hold = super::stream_pause::grab_hold(kind == CaptureKind::Tab);
+    let (resuming, grab_hold) =
+        super::stream_pause::prepare_grab(&stream, tab_press, max_fps).await;
     let timeout = if tab_press.is_some() {
         Duration::from_millis(framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS)
     } else if fresh {
@@ -1289,12 +1288,12 @@ pub async fn capture(
     // The mutex stays held so a second caller cannot open another share.
     let grab_started = Instant::now();
     let grabbed = stream.grab(timeout, tab_press).await;
-    stream.note_grab_end(matches!(grabbed, Ok(pw::GrabOutcome::TabMiss { .. })));
+    stream.note_grab_result(&grabbed);
     let timing = stream.timing();
     let alive = stream.alive();
     let stream_id = stream.stream_id();
     let mut keep_session = false;
-    let health = health_of(stream.stream_report());
+    let health = health_now(&stream);
     if kind == CaptureKind::Tab {
         let buffer_during_wait = stream.last_buffer_at().is_some_and(|at| at >= grab_started);
         let (waited, got_fresh) = match &grabbed {

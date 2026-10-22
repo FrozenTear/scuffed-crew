@@ -665,12 +665,9 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         route: config.capture_route,
         debug_frames: config.debug_portal_frames_enabled(),
         max_fps: config.screencast_max_fps(),
-        pause_between_grabs: config.screencast_pause_between_grabs(),
     });
-    tracing::info!(
-        pause_between_grabs = config.screencast_pause_between_grabs(),
-        "screencast stream pause between grabs (screencast_pause_between_grabs / STAT_TRACKER_SCREENCAST_PAUSE)"
-    );
+    // Pause the screen stream between grabs where the compositor handles it.
+    capture::decide_stream_pause(config.screencast_pause_override()).await;
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
 
@@ -4584,9 +4581,6 @@ async fn start_tab_capture(
     let task = tokio::spawn(stat_tracker::tab_retry::with_flight(
         Arc::clone(&flight),
         capture::with_tab_press(press, async move {
-            // Keeps a paused screen stream running from the key event until
-            // the Tab grab takes over (or this task ends without one).
-            let _stream_hold = stream_hold;
             // Direct capture and the screenshot portal wait for the overlay
             // to finish drawing, counted from the key event. The screen
             // stream waits for a buffer instead.
@@ -4596,7 +4590,9 @@ async fn start_tab_capture(
                 ))
                 .await;
             }
-            let result = handle_capture(&ctx_task, req)
+            // Keeps a paused screen stream running from the key event until
+            // the Tab retry sequence ends (`capture::end_tab_stream_hold`).
+            let result = capture::with_tab_stream_hold(stream_hold, handle_capture(&ctx_task, req))
                 .await
                 // `{:#}` keeps anyhow's context chain in the string.
                 .map_err(|e| format!("{e:#}"));
@@ -4741,6 +4737,9 @@ async fn run_loop(
     // The stream hold of a press queued behind a running capture. Dropped
     // when that capture reports and the press does not run.
     let mut queued_stream_hold: Option<capture::KeyHold> = None;
+    // Taken as a Tab press preempts a poll, before the poll's grab is
+    // dropped, so the stream does not pause and resume in between.
+    let mut preempt_stream_hold: Option<capture::KeyHold> = None;
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4819,6 +4818,10 @@ async fn run_loop(
                     // kept for a press queued behind that capture.
                     Ok(key) if !key.down => tabs.on_release(key.at),
                     Ok(key) => {
+                        // Held from a poll this press preempted; dropped at
+                        // the end of this arm, once the press has its own
+                        // hold (or turned out not to need one).
+                        let bridge = preempt_stream_hold.take();
                         // The kernel's key-event time, not when this loop got
                         // round to it (a poll can hold the loop for most of a
                         // second). The stream deadline is measured from it.
@@ -4862,9 +4865,12 @@ async fn run_loop(
                             .await;
                             tabs.started(flight);
                             capture_task = Some(task);
-                        } else if tabs.has_queued() {
+                        } else if tabs.queued_press() == Some(press) {
+                            // Queued by this press. An ignored or debounced
+                            // press leaves an earlier queued hold alone.
                             queued_stream_hold = Some(capture::stream_key_hold(press));
                         }
+                        drop(bridge);
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "keyboard devices lost: attempting to reopen");
@@ -4981,6 +4987,7 @@ async fn run_loop(
                 // kept for the keyboard arm, never lost. A release does not
                 // preempt (`next_press` records it), so the outcome-only
                 // poll in the ~3 s end-reel window survives letting go of Tab.
+                let mut bridge = None;
                 let grabbed = match stop_for_shutdown_or_key(
                     capture::capture_screen_output_for(
                         backend,
@@ -4988,7 +4995,14 @@ async fn run_loop(
                         capture::CaptureKind::Poll,
                     ),
                     stat_tracker::replace::shutdown_notified(),
-                    stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
+                    async {
+                        let key = stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs).await;
+                        // Before the poll's grab is dropped with its hold.
+                        if key.is_ok() {
+                            bridge = Some(capture::stream_bridge_hold());
+                        }
+                        key
+                    },
                     &mut pending_key,
                 )
                 .await
@@ -4996,6 +5010,7 @@ async fn run_loop(
                     PollRace::Done(grabbed) => Ok(grabbed),
                     PollRace::Shutdown => Err(()),
                     PollRace::Preempted => {
+                        preempt_stream_hold = bridge.take();
                         tracing::debug!("poll dropped during its grab: a Tab press comes first");
                         continue;
                     }
@@ -7328,6 +7343,8 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             tokio::time::sleep,
         )
         .await?;
+        // No more grabs for this press: the screen stream may pause.
+        capture::end_tab_stream_hold();
         let analysis = match analysis {
             FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
             FrameAnalysisOutcome::StreamMiss

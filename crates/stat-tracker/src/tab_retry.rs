@@ -478,9 +478,9 @@ impl TabKeys {
         self.flight = Some(flight);
     }
 
-    /// A press is waiting for the running capture to report.
-    pub fn has_queued(&self) -> bool {
-        self.queued.is_some()
+    /// The press waiting for the running capture to report.
+    pub fn queued_press(&self) -> Option<Instant> {
+        self.queued
     }
 
     /// The running capture reported. Returns a queued press to start now

@@ -751,7 +751,6 @@ impl TrackerApp {
                 route: app.saved_config.capture_route,
                 debug_frames: app.saved_config.debug_portal_frames_enabled(),
                 max_fps: app.saved_config.screencast_max_fps(),
-                pause_between_grabs: app.saved_config.screencast_pause_between_grabs(),
             });
             tasks.push(Task::perform(
                 daemon::refresh_service_cache(),

@@ -1,85 +1,74 @@
 //! Pause the screen stream between grabs.
 //!
 //! The portal stream runs only while something holds it: a grab in
-//! [`super::screencast`], or a Tab key press waiting for its grab. With no
-//! hold it is set inactive, so the compositor stops rendering frames the
-//! tracker would only throw away. Polls and Tabs do not grab while
-//! Overwatch is not running, so a share that stays open then stays paused.
+//! [`super::screencast`], or a Tab press from its key event until its retry
+//! sequence ends. With no hold it is set inactive, so the compositor stops
+//! rendering frames the tracker would only throw away. Polls and Tabs do not
+//! grab while Overwatch is not running, so an open share then stays paused.
 //!
-//! A Tab press takes a key hold at the key event, before the session
-//! choice and the 300 ms overlay delay, so the compositor has that time to
-//! resume. The Tab grab takes over: its grab hold releases every key hold,
-//! and the stream pauses again once that grab has its frame or gives up.
-//! A poll grab does not release key holds, so a Tab pressed during a poll
-//! keeps the stream running after the poll is dropped.
+//! A Tab press takes a key hold before the session choice and the 300 ms
+//! overlay delay, so the compositor has that time to resume. The Tab task
+//! keeps it through its retries ([`with_tab_stream_hold`],
+//! [`end_tab_stream_hold`]): each resume costs the compositor a rebuild (on
+//! KWin 6.8 the layer and the filtered scene view), so a retry 300 ms later
+//! does not pause and resume in between. A Tab that preempts a poll takes a
+//! bridge hold before the poll's grab is dropped ([`bridge_hold`]).
 //!
-//! The resume itself starts [`tab_resume_at`]: `300 ms - one frame period`
-//! after the press (50 ms at 4 fps, at once at 3 fps or less). Mutter, niri
-//! and KWin before 6.8 send a frame right after a resume and the next one a
-//! frame period later. Resumed at the press, that second frame would land
-//! at about 260 ms, inside the overlay delay, and the Tab would wait for the
-//! third (about 510 ms). Resumed 50 ms later the second frame lands just
-//! after 300 ms. KWin 6.8 paces on a fixed clock grid, so the start does
-//! not move its frames.
+//! The resume itself starts at [`tab_resume_at`]: `300 ms - one frame
+//! period` after the press (50 ms at 4 fps, at once at 3 fps or less).
+//! niri and KWin before 6.8 send a frame right after a resume and the next
+//! one a frame period later. Resumed at the press, that second frame would
+//! land at about 260 ms, inside the overlay delay, and the Tab would wait for
+//! the third (about 510 ms). Resumed 50 ms later the second frame lands just
+//! after 300 ms. KWin 6.8 paces on a fixed clock grid, so the start does not
+//! move its frames. A stream that is already running resumes nothing, and
+//! the hold starts at once.
 //!
-//! `screencast_pause_between_grabs = false` in config.toml, or
-//! `STAT_TRACKER_SCREENCAST_PAUSE=0`, turns this off: the stream then runs
-//! the whole time, as in rc.6. The per-stream fail-safe in [`super::pw`]
-//! does the same for one stream when a resume brings no frame, and after
-//! [`pw::PAUSE_TRIPS_LIMIT`] tripped streams for the rest of the process.
+//! Where pausing is on by default: KWin 6.1 or newer, and niri
+//! ([`decide`]). Not on GNOME (Mutter connects a `monitors-changed-internal`
+//! handler on every resume and never disconnects it), Plasma 5 or KWin 6.0
+//! (KWin connects `outputChange` on every Streaming transition), wlroots
+//! portals, or anything not recognised. `screencast_pause_between_grabs =
+//! false` turns it off everywhere; `STAT_TRACKER_SCREENCAST_PAUSE=1` forces
+//! it on (for testing) and `=0` off. The per-stream fail-safe in
+//! [`super::pw`] turns it off for one stream when a resume is not answered,
+//! and after [`pw::PAUSE_TRIPS_LIMIT`] tripped streams for the rest of the
+//! process. With pausing off for a stream, no hold starts a timer or calls
+//! PipeWire.
 
+use std::cell::RefCell;
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
+
+use crate::config::PauseOverride;
 
 use super::framebuf::TAB_OVERLAY_AFTER_PRESS_MS;
 use super::pw;
 
 #[derive(Debug, Default)]
 struct Ctl {
+    /// The startup decision ([`decide`]).
     enabled: bool,
-    grab_holds: usize,
-    key_holds: usize,
-    /// Bumped when a Tab grab takes over the key holds. A key hold from an
-    /// older epoch has already been released.
-    key_epoch: u64,
+    holds: usize,
     current: Option<Weak<pw::Handle>>,
     limit_logged: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
-    Key,
-    Grab,
 }
 
 impl Ctl {
     /// The stream should run.
     fn wanted(&self) -> bool {
-        !self.enabled || self.grab_holds > 0 || self.key_holds > 0
+        !self.enabled || self.holds > 0
     }
 
-    fn acquire(&mut self, kind: Kind, takes_over_keys: bool) -> u64 {
-        match kind {
-            Kind::Key => self.key_holds += 1,
-            Kind::Grab => {
-                self.grab_holds += 1;
-                if takes_over_keys {
-                    self.key_holds = 0;
-                    self.key_epoch = self.key_epoch.wrapping_add(1);
-                }
-            }
-        }
-        self.key_epoch
-    }
-
-    fn release(&mut self, kind: Kind, epoch: u64) {
-        match kind {
-            Kind::Grab => self.grab_holds = self.grab_holds.saturating_sub(1),
-            Kind::Key if epoch == self.key_epoch => {
-                self.key_holds = self.key_holds.saturating_sub(1);
-            }
-            Kind::Key => {}
-        }
+    /// A live stream that is paused between grabs. Holds on anything else
+    /// do nothing.
+    fn pausing(&self) -> bool {
+        self.enabled
+            && self
+                .current
+                .as_ref()
+                .and_then(Weak::upgrade)
+                .is_some_and(|handle| handle.pausing())
     }
 
     /// Pass the wanted state to the live stream. Returns the strong
@@ -117,10 +106,8 @@ impl Ctl {
 }
 
 static CTL: Mutex<Ctl> = Mutex::new(Ctl {
-    enabled: true,
-    grab_holds: 0,
-    key_holds: 0,
-    key_epoch: 0,
+    enabled: false,
+    holds: 0,
     current: None,
     limit_logged: false,
 });
@@ -133,32 +120,30 @@ fn ctl(slot: &Mutex<Ctl>) -> std::sync::MutexGuard<'_, Ctl> {
 #[must_use = "the stream pauses again when the hold is dropped"]
 pub struct StreamHold {
     slot: &'static Mutex<Ctl>,
-    kind: Kind,
-    epoch: u64,
 }
 
 impl Drop for StreamHold {
     fn drop(&mut self) {
         let handle = {
             let mut ctl = ctl(self.slot);
-            ctl.release(self.kind, self.epoch);
+            ctl.holds = ctl.holds.saturating_sub(1);
             ctl.apply()
         };
         drop(handle);
     }
 }
 
-fn hold_in(slot: &'static Mutex<Ctl>, kind: Kind, takes_over_keys: bool) -> StreamHold {
-    let (epoch, handle) = {
+fn hold_in(slot: &'static Mutex<Ctl>) -> StreamHold {
+    let handle = {
         let mut ctl = ctl(slot);
-        let epoch = ctl.acquire(kind, takes_over_keys);
-        (epoch, ctl.apply())
+        ctl.holds += 1;
+        ctl.apply()
     };
     drop(handle);
-    StreamHold { slot, kind, epoch }
+    StreamHold { slot }
 }
 
-/// Config and env switch. Read when a stream is registered.
+/// The startup decision. Read when a stream is registered and by holds.
 pub fn set_enabled(enabled: bool) {
     let handle = {
         let mut ctl = ctl(&CTL);
@@ -175,12 +160,12 @@ pub fn tab_resume_at(press: Instant, max_fps: u32) -> Instant {
     press + Duration::from_millis(lead)
 }
 
-/// A key hold that starts at [`tab_resume_at`]. Dropping it before then
-/// cancels it. A Tab grab that has already taken over the key holds also
-/// cancels it.
+/// A hold for a Tab press. It starts at [`tab_resume_at`], or at once when
+/// the stream is already running. Dropping it before then cancels it. On a
+/// route or stream that does not pause it is inert: no timer, no PipeWire.
 #[must_use = "the stream pauses again when the hold is dropped"]
 pub struct KeyHold {
-    slot: Arc<Mutex<KeySlot>>,
+    slot: Option<Arc<Mutex<KeySlot>>>,
     timer: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -190,13 +175,30 @@ struct KeySlot {
     hold: Option<StreamHold>,
 }
 
+impl KeyHold {
+    fn inert() -> Self {
+        Self {
+            slot: None,
+            timer: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn is_inert(&self) -> bool {
+        self.slot.is_none()
+    }
+}
+
 impl Drop for KeyHold {
     fn drop(&mut self) {
         if let Some(timer) = self.timer.take() {
             timer.abort();
         }
+        let Some(slot) = self.slot.take() else {
+            return;
+        };
         let hold = {
-            let mut slot = self.slot.lock().unwrap_or_else(|err| err.into_inner());
+            let mut slot = slot.lock().unwrap_or_else(|err| err.into_inner());
             slot.dropped = true;
             slot.hold.take()
         };
@@ -204,31 +206,19 @@ impl Drop for KeyHold {
     }
 }
 
-/// Take a key hold in `epoch`, unless a Tab grab has taken over since.
-fn acquire_key(slot: &'static Mutex<Ctl>, epoch: u64) -> Option<StreamHold> {
-    let handle = {
-        let mut ctl = ctl(slot);
-        if ctl.key_epoch != epoch {
-            return None;
-        }
-        ctl.key_holds += 1;
-        ctl.apply()
-    };
-    drop(handle);
-    Some(StreamHold {
-        slot,
-        kind: Kind::Key,
-        epoch,
-    })
-}
-
 fn key_hold_in(slot: &'static Mutex<Ctl>, at: Instant, now: Instant) -> KeyHold {
-    let epoch = ctl(slot).key_epoch;
+    let (pausing, running) = {
+        let ctl = ctl(slot);
+        (ctl.pausing(), ctl.holds > 0)
+    };
+    if !pausing {
+        return KeyHold::inert();
+    }
     let key = Arc::new(Mutex::new(KeySlot::default()));
-    if at <= now {
-        key.lock().unwrap_or_else(|err| err.into_inner()).hold = acquire_key(slot, epoch);
+    if at <= now || running {
+        key.lock().unwrap_or_else(|err| err.into_inner()).hold = Some(hold_in(slot));
         return KeyHold {
-            slot: key,
+            slot: Some(key),
             timer: None,
         };
     }
@@ -237,33 +227,317 @@ fn key_hold_in(slot: &'static Mutex<Ctl>, at: Instant, now: Instant) -> KeyHold 
         tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
         let mut key = later.lock().unwrap_or_else(|err| err.into_inner());
         if !key.dropped {
-            key.hold = acquire_key(slot, epoch);
+            key.hold = Some(hold_in(slot));
         }
     });
     KeyHold {
-        slot: key,
+        slot: Some(key),
         timer: Some(timer),
     }
 }
 
 /// A Tab key went down while Overwatch runs: resume the stream at
-/// [`tab_resume_at`]. The Tab grab takes this hold over; dropping it
-/// earlier is also fine. Needs a Tokio runtime.
+/// [`tab_resume_at`]. The Tab task keeps it until its retries end. Needs a
+/// Tokio runtime when the stream pauses.
 pub fn key_hold(press: Instant) -> KeyHold {
     let at = tab_resume_at(press, super::prefs().max_fps);
     key_hold_in(&CTL, at, Instant::now())
 }
 
-/// A grab is about to wait for a frame. A Tab grab also releases the key
-/// holds, so the stream pauses when this grab is done.
-pub(super) fn grab_hold(tab: bool) -> StreamHold {
-    hold_in(&CTL, Kind::Grab, tab)
+/// Taken as a key event preempts a poll, before the poll's grab (and its
+/// hold) is dropped, so the stream does not pause and resume in between.
+/// Drop it once the press has its own [`KeyHold`].
+pub fn bridge_hold() -> KeyHold {
+    key_hold_in(&CTL, Instant::now(), Instant::now())
+}
+
+tokio::task_local! {
+    static TAB_STREAM_HOLD: RefCell<Option<KeyHold>>;
+}
+
+/// Run a Tab capture task with its press's hold. The hold ends at
+/// [`end_tab_stream_hold`], or when `fut` ends.
+pub async fn with_tab_stream_hold<T>(
+    hold: KeyHold,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    TAB_STREAM_HOLD.scope(RefCell::new(Some(hold)), fut).await
+}
+
+/// The Tab retry sequence is over: let the stream pause. Returns whether a
+/// hold was released (none outside a Tab task, or the second time).
+pub fn end_tab_stream_hold() -> bool {
+    let hold = TAB_STREAM_HOLD
+        .try_with(|cell| cell.borrow_mut().take())
+        .ok()
+        .flatten();
+    let released = hold.is_some();
+    drop(hold);
+    released
+}
+
+/// Resume the stream for one grab. A Tab grab whose stream is paused waits
+/// for [`tab_resume_at`] first (at most one frame period short of 300 ms,
+/// inside the wait the grab does anyway). Returns whether the grab resumed a
+/// paused stream, and the hold, which the caller drops after its post-grab
+/// health read.
+pub(super) async fn prepare_grab(
+    stream: &pw::Handle,
+    tab_press: Option<Instant>,
+    max_fps: u32,
+) -> (bool, StreamHold) {
+    prepare_grab_in(&CTL, stream, tab_press, max_fps).await
+}
+
+/// The instant a grab has to wait for before it resumes the stream, if any.
+fn grab_resume_wait(
+    resuming: bool,
+    tab_press: Option<Instant>,
+    max_fps: u32,
+    now: Instant,
+) -> Option<Instant> {
+    let at = tab_resume_at(tab_press?, max_fps);
+    (resuming && at > now).then_some(at)
+}
+
+async fn prepare_grab_in(
+    slot: &'static Mutex<Ctl>,
+    stream: &pw::Handle,
+    tab_press: Option<Instant>,
+    max_fps: u32,
+) -> (bool, StreamHold) {
+    let mut resuming = !stream.wants_active();
+    if let Some(at) = grab_resume_wait(resuming, tab_press, max_fps, Instant::now()) {
+        tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await;
+        resuming = !stream.wants_active();
+    }
+    (resuming, hold_in(slot))
 }
 
 /// The live stream changed. It starts running, and pauses at once unless
 /// something holds it.
 pub(super) fn register(handle: &Arc<pw::Handle>) {
     ctl(&CTL).register(handle, pw::pause_trips());
+}
+
+// ---------------------------------------------------------------- decision
+
+/// The compositor behind the portal, as far as the session tells.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compositor {
+    KWin,
+    Niri,
+    Gnome,
+    Other,
+}
+
+/// What [`decide`] reads. Gathered once at startup ([`detect_facts`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DesktopFacts {
+    /// `XDG_CURRENT_DESKTOP`.
+    pub desktop: String,
+    /// `KDE_SESSION_VERSION`.
+    pub kde_session_version: Option<String>,
+    /// `NIRI_SOCKET` is set.
+    pub niri_socket: bool,
+    /// Compositor processes this user runs.
+    pub niri_running: bool,
+    pub kwin_running: bool,
+    pub gnome_shell_running: bool,
+    /// KWin's own version, when it could be read.
+    pub kwin_version: Option<(u32, u32)>,
+}
+
+fn desktop_has(desktop: &str, names: &[&str]) -> bool {
+    desktop.split(':').any(|token| {
+        let token = token.trim().to_ascii_lowercase();
+        names.iter().any(|name| token.contains(name))
+    })
+}
+
+/// The desktop name first; the running compositor only when the name says
+/// nothing this module knows.
+pub fn compositor(facts: &DesktopFacts) -> Compositor {
+    let desktop = facts.desktop.as_str();
+    if desktop_has(desktop, &["kde", "plasma", "kwin"]) {
+        return Compositor::KWin;
+    }
+    if desktop_has(desktop, &["niri"]) {
+        return Compositor::Niri;
+    }
+    if desktop_has(desktop, &["gnome"]) {
+        return Compositor::Gnome;
+    }
+    if desktop_has(
+        desktop,
+        &[
+            "sway", "hyprland", "wayfire", "river", "labwc", "wlroots", "cosmic",
+        ],
+    ) {
+        return Compositor::Other;
+    }
+    if facts.niri_socket || facts.niri_running {
+        Compositor::Niri
+    } else if facts.kwin_running {
+        Compositor::KWin
+    } else if facts.gnome_shell_running {
+        Compositor::Gnome
+    } else {
+        Compositor::Other
+    }
+}
+
+/// KWin older than this connects `outputChange` again on every Streaming
+/// transition (5.27 and 6.0), or does not stop rendering on Paused.
+pub const KWIN_MIN: (u32, u32) = (6, 1);
+
+/// Whether the stream pauses between grabs, and why, for the one startup
+/// line.
+pub fn decide(over: PauseOverride, facts: &DesktopFacts) -> (bool, &'static str) {
+    match over {
+        PauseOverride::EnvOn => return (true, "forced on by STAT_TRACKER_SCREENCAST_PAUSE"),
+        PauseOverride::EnvOff => return (false, "turned off by STAT_TRACKER_SCREENCAST_PAUSE"),
+        PauseOverride::ConfigOff => {
+            return (
+                false,
+                "turned off by screencast_pause_between_grabs = false",
+            );
+        }
+        PauseOverride::Auto => {}
+    }
+    match compositor(facts) {
+        Compositor::KWin => {
+            if facts.kde_session_version.as_deref().map(str::trim) == Some("5") {
+                return (
+                    false,
+                    "off on Plasma 5: KWin 5 leaks a connection per resume",
+                );
+            }
+            match facts.kwin_version {
+                Some(version) if version >= KWIN_MIN => (true, "on: KWin 6.1 or newer"),
+                Some(_) => (false, "off: KWin is older than 6.1"),
+                None => (false, "off: the KWin version could not be read"),
+            }
+        }
+        Compositor::Niri => (true, "on: niri"),
+        Compositor::Gnome => (false, "off on GNOME: Mutter leaks a handler per resume"),
+        Compositor::Other => (false, "off: compositor not recognised"),
+    }
+}
+
+/// `KWin version: 6.8.1` from KWin's support information, or `kwin 6.8.1`
+/// from `kwin_wayland --version`.
+pub fn parse_kwin_version(text: &str) -> Option<(u32, u32)> {
+    let rest = text.lines().find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("KWin version:")
+            .or_else(|| line.strip_prefix("kwin_wayland "))
+            .or_else(|| line.strip_prefix("kwin "))
+    })?;
+    let mut parts = rest.trim().split(['.', ' ', '-']);
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
+/// Compositor processes in `proc_root` (comm names), at most `limit`
+/// entries looked at.
+fn scan_processes(proc_root: &std::path::Path, limit: usize) -> (bool, bool, bool) {
+    let (mut niri, mut kwin, mut gnome) = (false, false, false);
+    let Ok(dir) = std::fs::read_dir(proc_root) else {
+        return (niri, kwin, gnome);
+    };
+    for entry in dir.flatten().take(limit) {
+        let name = entry.file_name();
+        if !name.to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(comm) = std::fs::read_to_string(entry.path().join("comm")) else {
+            continue;
+        };
+        match comm.trim() {
+            "niri" => niri = true,
+            "kwin_wayland" | "kwin_wayland_wr" | "kwin_x11" => kwin = true,
+            "gnome-shell" => gnome = true,
+            _ => {}
+        }
+    }
+    (niri, kwin, gnome)
+}
+
+async fn kwin_version_over_dbus() -> Option<(u32, u32)> {
+    let conn = ashpd::zbus::Connection::session().await.ok()?;
+    let reply = conn
+        .call_method(
+            Some("org.kde.KWin"),
+            "/KWin",
+            Some("org.kde.KWin"),
+            "supportInformation",
+            &(),
+        )
+        .await
+        .ok()?;
+    let text: String = reply.body().deserialize().ok()?;
+    parse_kwin_version(&text)
+}
+
+async fn kwin_version_from_binary() -> Option<(u32, u32)> {
+    let out = tokio::process::Command::new("kwin_wayland")
+        .arg("--version")
+        .kill_on_drop(true)
+        .output()
+        .await
+        .ok()?;
+    parse_kwin_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Read the session once. KWin's version is asked only when the compositor
+/// is KWin: over D-Bus, then `kwin_wayland --version`, 2 s each at most.
+pub async fn detect_facts() -> DesktopFacts {
+    let var = |key: &str| std::env::var(key).ok().filter(|v| !v.trim().is_empty());
+    let (niri_running, kwin_running, gnome_shell_running) =
+        tokio::task::spawn_blocking(|| scan_processes(std::path::Path::new("/proc"), 100_000))
+            .await
+            .unwrap_or_default();
+    let mut facts = DesktopFacts {
+        desktop: var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
+        kde_session_version: var("KDE_SESSION_VERSION"),
+        niri_socket: var("NIRI_SOCKET").is_some(),
+        niri_running,
+        kwin_running,
+        gnome_shell_running,
+        kwin_version: None,
+    };
+    if compositor(&facts) == Compositor::KWin {
+        let limit = Duration::from_secs(2);
+        facts.kwin_version = match tokio::time::timeout(limit, kwin_version_over_dbus()).await {
+            Ok(Some(version)) => Some(version),
+            _ => tokio::time::timeout(limit, kwin_version_from_binary())
+                .await
+                .ok()
+                .flatten(),
+        };
+    }
+    facts
+}
+
+/// Decide once at startup, log one line, and apply it. Returns the
+/// decision.
+pub async fn decide_and_apply(over: PauseOverride) -> bool {
+    let facts = if over == PauseOverride::Auto {
+        detect_facts().await
+    } else {
+        DesktopFacts::default()
+    };
+    let (on, why) = decide(over, &facts);
+    tracing::info!(
+        pause_between_grabs = on,
+        compositor = ?compositor(&facts),
+        kwin_version = ?facts.kwin_version,
+        "screencast stream pause between grabs: {why}"
+    );
+    set_enabled(on);
+    on
 }
 
 #[cfg(test)]
@@ -283,76 +557,93 @@ mod tests {
         handle
     }
 
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
     #[test]
     fn a_registered_stream_pauses_with_no_hold_and_runs_while_held() {
         let slot = leak_ctl(true);
         let stream = live(slot);
         assert!(!stream.wants_active(), "nothing holds it: paused");
-        let poll = hold_in(slot, Kind::Grab, false);
+        let poll = hold_in(slot);
         assert!(stream.wants_active());
         drop(poll);
         assert!(!stream.wants_active(), "the grab is done: paused again");
     }
 
     #[test]
-    fn a_tab_pressed_during_a_poll_grab_keeps_the_stream_running() {
+    fn a_tab_that_preempts_a_poll_never_pauses_in_between() {
         let slot = leak_ctl(true);
         let stream = live(slot);
-        let poll = hold_in(slot, Kind::Grab, false);
-        let key = hold_in(slot, Kind::Key, false);
-        // The Tab preempts the poll: its grab future is dropped.
+        let poll = hold_in(slot);
+        // The key future takes the bridge before the poll's grab is dropped.
+        let bridge = key_hold_in(slot, Instant::now(), Instant::now());
         drop(poll);
-        assert!(stream.wants_active(), "the key hold still runs it");
-        // The Tab grab takes the key hold over.
-        let tab = hold_in(slot, Kind::Grab, true);
+        assert!(stream.wants_active(), "the bridge still runs it");
+        // The keyboard arm then takes the press's hold. The stream is running,
+        // so it starts at once instead of at tab_resume_at.
+        let press = Instant::now();
+        let key = key_hold_in(slot, press + Duration::from_secs(60), press);
+        assert!(!key.is_inert() && key.timer.is_none());
+        drop(bridge);
         assert!(stream.wants_active());
-        // The Tab task still owns the key hold, which is already released.
         drop(key);
-        assert!(stream.wants_active(), "the grab still holds it");
-        drop(tab);
-        assert!(
-            !stream.wants_active(),
-            "after the Tab grab's copy the stream pauses, even though the Tab task runs on"
-        );
+        assert!(!stream.wants_active());
     }
 
     #[test]
-    fn a_poll_grab_does_not_take_over_a_key_hold() {
+    fn a_tab_keeps_the_stream_running_through_its_retries() {
         let slot = leak_ctl(true);
         let stream = live(slot);
-        let key = hold_in(slot, Kind::Key, false);
-        // The end-reel outcome poll can run while a Tab task waits.
-        let poll = hold_in(slot, Kind::Grab, false);
-        drop(poll);
-        assert!(stream.wants_active(), "the Tab grab has not run yet");
+        let key = key_hold_in(slot, Instant::now(), Instant::now());
+        // First attempt, then a retry 300 ms later: two grabs.
+        for _ in 0..2 {
+            let grab = hold_in(slot);
+            drop(grab);
+            assert!(stream.wants_active(), "no pause between Tab attempts");
+        }
         drop(key);
-        assert!(!stream.wants_active());
+        assert!(!stream.wants_active(), "the retry sequence is over");
+    }
+
+    #[test]
+    fn the_tab_hold_ends_with_the_retry_sequence_not_the_task() {
+        let slot = leak_ctl(true);
+        let stream = live(slot);
+        rt().block_on(async {
+            let key = key_hold_in(slot, Instant::now(), Instant::now());
+            assert!(!end_tab_stream_hold(), "outside a Tab task: nothing");
+            with_tab_stream_hold(key, async {
+                assert!(stream.wants_active());
+                assert!(end_tab_stream_hold());
+                assert!(!stream.wants_active(), "paused while OCR goes on");
+                assert!(!end_tab_stream_hold(), "only once");
+            })
+            .await;
+            // A task that ends without the call still releases it.
+            let key = key_hold_in(slot, Instant::now(), Instant::now());
+            with_tab_stream_hold(key, async {
+                assert!(stream.wants_active());
+            })
+            .await;
+            assert!(!stream.wants_active());
+        });
     }
 
     #[test]
     fn a_grab_that_gives_up_releases_its_hold() {
         let slot = leak_ctl(true);
         let stream = live(slot);
-        let key = hold_in(slot, Kind::Key, false);
         let outcome: Result<(), &str> = {
-            let _tab = hold_in(slot, Kind::Grab, true);
+            let _grab = hold_in(slot);
             Err("Tab grab: no fresh stream frame")
         };
         assert!(outcome.is_err());
         assert!(!stream.wants_active(), "a miss pauses like a frame does");
-        drop(key);
-        assert!(!stream.wants_active());
-    }
-
-    #[test]
-    fn a_tab_task_that_never_grabs_releases_its_key_hold_when_it_ends() {
-        let slot = leak_ctl(true);
-        let stream = live(slot);
-        let key = hold_in(slot, Kind::Key, false);
-        assert!(stream.wants_active());
-        // Share still opening, or the game stopped: no grab ran.
-        drop(key);
-        assert!(!stream.wants_active());
     }
 
     #[test]
@@ -360,22 +651,49 @@ mod tests {
         let slot = leak_ctl(true);
         let stream = live(slot);
         {
-            let _poll = hold_in(slot, Kind::Grab, false);
+            let _poll = hold_in(slot);
         }
         // Polls and Tabs do not grab while Overwatch is not running, so no
         // hold is taken and the open share stays paused.
         assert!(!stream.wants_active());
-        assert_eq!(ctl(slot).grab_holds, 0);
-        assert_eq!(ctl(slot).key_holds, 0);
+        assert_eq!(ctl(slot).holds, 0);
     }
 
     #[test]
-    fn switched_off_the_stream_always_runs() {
+    fn switched_off_the_stream_always_runs_and_key_holds_are_inert() {
         let slot = leak_ctl(false);
         let stream = live(slot);
         assert!(stream.wants_active());
-        drop(hold_in(slot, Kind::Grab, true));
+        drop(hold_in(slot));
         assert!(stream.wants_active(), "pausing off: rc.6 behaviour");
+        let now = Instant::now();
+        let key = key_hold_in(slot, now + Duration::from_secs(1), now);
+        assert!(key.is_inert() && key.timer.is_none(), "no timer task");
+    }
+
+    #[test]
+    fn key_holds_are_inert_without_a_pausing_stream() {
+        let now = Instant::now();
+        // No stream registered (another route, or the share is opening).
+        let empty = leak_ctl(true);
+        assert!(key_hold_in(empty, now + Duration::from_secs(1), now).is_inert());
+        // A stream whose fail-safe tripped.
+        let slot = leak_ctl(true);
+        let stream = live(slot);
+        let trip = test_trip(&stream);
+        assert!(trip);
+        assert!(key_hold_in(slot, now + Duration::from_secs(1), now).is_inert());
+        // A stream on PipeWire older than 1.4 is never managed.
+        let old = leak_ctl(true);
+        let handle = Arc::new(pw::test_stream_without_invoke(true));
+        ctl(old).register(&handle, 0);
+        assert!(key_hold_in(old, now + Duration::from_secs(1), now).is_inert());
+        assert!(handle.wants_active());
+    }
+
+    fn test_trip(stream: &pw::Handle) -> bool {
+        stream.trip_for_test();
+        stream.pause_tripped()
     }
 
     #[test]
@@ -391,7 +709,7 @@ mod tests {
         let slot = leak_ctl(true);
         let old = live(slot);
         let new = live(slot);
-        let poll = hold_in(slot, Kind::Grab, false);
+        let poll = hold_in(slot);
         assert!(new.wants_active());
         assert!(!old.wants_active(), "the retired stream is not touched");
         drop(poll);
@@ -410,7 +728,7 @@ mod tests {
         let twice = Arc::new(pw::test_stream(true));
         ctl(slot).register(&twice, pw::PAUSE_TRIPS_LIMIT);
         assert!(twice.wants_active(), "two trips: pausing stays off");
-        drop(hold_in(slot, Kind::Grab, false));
+        drop(hold_in(slot));
         assert!(twice.wants_active());
     }
 
@@ -441,11 +759,50 @@ mod tests {
         assert_eq!(at_press, 505, "4 fps resumed at the press: the third frame");
     }
 
-    fn rt() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap()
+    #[test]
+    fn a_grab_waits_for_tab_resume_at_only_when_it_resumes_a_tab() {
+        let press = Instant::now();
+        let at = press + Duration::from_millis(50);
+        assert_eq!(grab_resume_wait(true, Some(press), 4, press), Some(at));
+        assert_eq!(
+            grab_resume_wait(false, Some(press), 4, press),
+            None,
+            "running"
+        );
+        assert_eq!(grab_resume_wait(true, None, 4, press), None, "a poll");
+        assert_eq!(
+            grab_resume_wait(true, Some(press), 4, at),
+            None,
+            "already due"
+        );
+        assert_eq!(grab_resume_wait(true, Some(press), 2, press), None, "2 fps");
+    }
+
+    #[test]
+    fn a_tab_grab_on_a_paused_stream_resumes_at_tab_resume_at() {
+        let slot = leak_ctl(true);
+        let stream = live(slot);
+        rt().block_on(async {
+            let press = Instant::now();
+            let (resuming, hold) = prepare_grab_in(slot, &stream, Some(press), 4).await;
+            assert!(resuming);
+            assert!(
+                press.elapsed() >= Duration::from_millis(50),
+                "waited for tab_resume_at"
+            );
+            assert!(stream.wants_active());
+            drop(hold);
+            assert!(!stream.wants_active());
+            // A poll resumes at once.
+            let started = Instant::now();
+            let (resuming, hold) = prepare_grab_in(slot, &stream, None, 4).await;
+            assert!(resuming && started.elapsed() < Duration::from_millis(40));
+            // A Tab on a stream already running does not wait.
+            let started = Instant::now();
+            let (resuming, again) = prepare_grab_in(slot, &stream, Some(started), 4).await;
+            assert!(!resuming && started.elapsed() < Duration::from_millis(40));
+            drop((hold, again));
+        });
     }
 
     #[test]
@@ -461,16 +818,11 @@ mod tests {
             assert!(stream.wants_active(), "resumed at its time");
             drop(key);
             assert!(!stream.wants_active());
-            // Already due: at once.
-            let key = key_hold_in(slot, now, Instant::now());
-            assert!(stream.wants_active());
-            drop(key);
-            assert!(!stream.wants_active());
         });
     }
 
     #[test]
-    fn a_key_hold_dropped_or_taken_over_before_its_time_never_starts() {
+    fn a_key_hold_dropped_before_its_time_never_starts() {
         let slot = leak_ctl(true);
         let stream = live(slot);
         rt().block_on(async {
@@ -482,19 +834,117 @@ mod tests {
                 !stream.wants_active(),
                 "a dropped hold does not start later"
             );
-
-            let now = Instant::now();
-            let key = key_hold_in(slot, now + Duration::from_millis(40), now);
-            // The Tab grab took over and finished before the key hold's time.
-            drop(hold_in(slot, Kind::Grab, true));
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            assert!(
-                !stream.wants_active(),
-                "a key hold the Tab grab already took over does not start later"
-            );
-            assert_eq!(ctl(slot).key_holds, 0);
-            drop(key);
-            assert!(!stream.wants_active());
+            assert_eq!(ctl(slot).holds, 0);
         });
+    }
+
+    fn facts(desktop: &str) -> DesktopFacts {
+        DesktopFacts {
+            desktop: desktop.into(),
+            ..DesktopFacts::default()
+        }
+    }
+
+    #[test]
+    fn the_auto_decision_table() {
+        let kde = |session: Option<&str>, version: Option<(u32, u32)>| DesktopFacts {
+            kde_session_version: session.map(str::to_string),
+            kwin_version: version,
+            ..facts("KDE")
+        };
+        let auto = |f: &DesktopFacts| decide(PauseOverride::Auto, f).0;
+        // KWin: 6.1 and newer only, Plasma 5 never, unknown off.
+        assert!(auto(&kde(Some("6"), Some((6, 1)))));
+        assert!(auto(&kde(Some("6"), Some((6, 8)))));
+        assert!(auto(&kde(None, Some((7, 0)))));
+        assert!(!auto(&kde(Some("6"), Some((6, 0)))));
+        assert!(!auto(&kde(Some("5"), Some((5, 27)))));
+        assert!(
+            !auto(&kde(Some("5"), Some((6, 4)))),
+            "Plasma 5 session wins"
+        );
+        assert!(!auto(&kde(Some("6"), None)), "version unknown");
+        // niri on; GNOME, wlroots and anything else off.
+        assert!(auto(&facts("niri")));
+        assert!(!auto(&facts("GNOME")));
+        assert!(!auto(&facts("ubuntu:GNOME")));
+        for other in ["sway", "Hyprland", "wlroots", "COSMIC", "X-Cinnamon", ""] {
+            assert!(!auto(&facts(other)), "{other}");
+        }
+        // Overrides.
+        for f in [
+            kde(Some("5"), None),
+            facts("GNOME"),
+            facts("sway"),
+            facts(""),
+        ] {
+            assert!(decide(PauseOverride::EnvOn, &f).0, "env 1 forces on");
+        }
+        for f in [kde(Some("6"), Some((6, 8))), facts("niri")] {
+            assert!(!decide(PauseOverride::EnvOff, &f).0);
+            assert!(
+                !decide(PauseOverride::ConfigOff, &f).0,
+                "config false: off everywhere"
+            );
+        }
+        assert_eq!(KWIN_MIN, (6, 1));
+    }
+
+    #[test]
+    fn the_compositor_comes_from_the_desktop_name_then_the_processes() {
+        assert_eq!(compositor(&facts("KDE")), Compositor::KWin);
+        assert_eq!(compositor(&facts("plasma")), Compositor::KWin);
+        assert_eq!(compositor(&facts("niri")), Compositor::Niri);
+        assert_eq!(compositor(&facts("GNOME-Classic:GNOME")), Compositor::Gnome);
+        assert_eq!(compositor(&facts("sway")), Compositor::Other);
+        // The name says nothing: the running compositor.
+        let unknown = |f: fn(&mut DesktopFacts)| {
+            let mut d = facts("");
+            f(&mut d);
+            compositor(&d)
+        };
+        assert_eq!(unknown(|d| d.niri_socket = true), Compositor::Niri);
+        assert_eq!(unknown(|d| d.niri_running = true), Compositor::Niri);
+        assert_eq!(unknown(|d| d.kwin_running = true), Compositor::KWin);
+        assert_eq!(unknown(|d| d.gnome_shell_running = true), Compositor::Gnome);
+        assert_eq!(unknown(|_| {}), Compositor::Other);
+        // A name it knows wins over a stray process.
+        let mut sway = facts("sway");
+        sway.niri_running = true;
+        assert_eq!(compositor(&sway), Compositor::Other);
+        let mut niri_kwin = facts("niri");
+        niri_kwin.kwin_running = true;
+        assert_eq!(compositor(&niri_kwin), Compositor::Niri);
+    }
+
+    #[test]
+    fn kwin_versions_parse_from_support_information_and_the_binary() {
+        let info = "KWin Support Information:\n...\nVersion\n=======\nKWin version: 6.8.1\nQt Version: 6.10.0\n";
+        assert_eq!(parse_kwin_version(info), Some((6, 8)));
+        assert_eq!(parse_kwin_version("KWin version: 6.0.90\n"), Some((6, 0)));
+        assert_eq!(parse_kwin_version("kwin 6.4.5\n"), Some((6, 4)));
+        assert_eq!(parse_kwin_version("kwin_wayland 6.1.0\n"), Some((6, 1)));
+        assert_eq!(parse_kwin_version("kwin 5.27.11\n"), Some((5, 27)));
+        assert_eq!(parse_kwin_version("Qt Version: 6.10.0\n"), None);
+        assert_eq!(parse_kwin_version(""), None);
+    }
+
+    #[test]
+    fn the_process_scan_finds_compositors_by_comm() {
+        let dir = std::env::temp_dir().join(format!("pause-scan-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (pid, comm) in [("10", "niri\n"), ("20", "bash\n"), ("30", "kwin_wayland\n")] {
+            std::fs::create_dir_all(dir.join(pid)).unwrap();
+            std::fs::write(dir.join(pid).join("comm"), comm).unwrap();
+        }
+        std::fs::create_dir_all(dir.join("self")).unwrap();
+        assert_eq!(scan_processes(&dir, 100), (true, true, false));
+        std::fs::write(dir.join("30").join("comm"), "gnome-shell\n").unwrap();
+        assert_eq!(scan_processes(&dir, 100), (true, false, true));
+        assert_eq!(
+            scan_processes(&dir.join("missing"), 100),
+            (false, false, false)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
