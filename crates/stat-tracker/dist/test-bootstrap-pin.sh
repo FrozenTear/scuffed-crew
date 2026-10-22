@@ -92,15 +92,12 @@ got="$(cat "$TMP/url")"
 [[ "$got" != *"/main/"* ]] || fail "re-exec fetched main"
 pass "unpinned run re-execs the tag bootstrap"
 
-# This shell sourced bootstrap.sh, so SIGPIPE is ignored here. The tag's
-# script (an older one has no trap) must get the default back, the way it
-# ran before main set the trap. Compared with a child started after an
-# explicit reset, so a shell that began with SIGPIPE ignored (which bash
-# cannot undo) does not fail the check.
+# The tag's script (an older one has no trap) must get the default SIGPIPE
+# back, the way it ran before main set the trap. A shell that began with
+# SIGPIPE ignored (the CI runner's does) cannot undo that, so the check
+# runs in a bash that python starts with the default disposition. SIGPIPE
+# is signal 13: bit 12 of SigIgn.
 if [[ -r /proc/self/status ]]; then
-    sigign() { bash -c 'sed -n "s/^SigIgn:[[:space:]]*//p" /proc/self/status'; }
-    ignored_here="$(sigign)"
-    default_here="$( (trap - PIPE; sigign) )"
     cat > "$TMP/fetch-sig-state" << EOF
 #!/bin/bash
 cat > "\$2" << 'SCRIPT'
@@ -109,19 +106,30 @@ sed -n 's/^SigIgn:[[:space:]]*//p' /proc/self/status
 SCRIPT
 EOF
     chmod +x "$TMP/fetch-sig-state"
-    child_ign="$(
-        STAT_TRACKER_TAG=stat-tracker-v0.4.7 \
-        STAT_TRACKER_BOOTSTRAP_PINNED='' \
-        STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig-state" \
-        maybe_reexec_tag_bootstrap
-    )"
-    [[ "$child_ign" == "$default_here" ]] \
-        || fail "re-exec kept SIGPIPE ignored (SigIgn $child_ign, default $default_here)"
-    if [[ "$ignored_here" == "$default_here" ]]; then
-        pass "re-exec SIGPIPE check is vacuous: this shell started with SIGPIPE ignored"
-    else
-        pass "re-exec hands the tag script the default SIGPIPE"
-    fi
+    # shellcheck disable=SC2016 # $1, $2 and $$ are expanded by the inner bash
+    mapfile -t masks < <(
+        python3 -c '
+import os, signal, sys
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+os.execvp("bash", ["bash"] + sys.argv[1:])
+' -c '
+            set -euo pipefail
+            sed -n "s/^SigIgn:[[:space:]]*//p" /proc/$$/status
+            STAT_TRACKER_BOOTSTRAP_LIB_ONLY=1 source "$1"
+            sed -n "s/^SigIgn:[[:space:]]*//p" /proc/$$/status
+            STAT_TRACKER_TAG=stat-tracker-v0.4.7 \
+            STAT_TRACKER_BOOTSTRAP_PINNED="" \
+            STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$2" \
+            maybe_reexec_tag_bootstrap
+        ' _ "$BOOTSTRAP" "$TMP/fetch-sig-state"
+    )
+    [[ "${#masks[@]}" -eq 3 ]] || fail "SIGPIPE probe printed: ${masks[*]}"
+    pipe_bit() { echo $(( (16#$1 >> 12) & 1 )); }
+    [[ "$(pipe_bit "${masks[0]}")" -eq 0 ]] || fail "probe bash did not start with the default SIGPIPE"
+    [[ "$(pipe_bit "${masks[1]}")" -eq 1 ]] || fail "sourcing bootstrap.sh did not ignore SIGPIPE"
+    [[ "$(pipe_bit "${masks[2]}")" -eq 0 ]] \
+        || fail "re-exec kept SIGPIPE ignored (SigIgn ${masks[2]})"
+    pass "re-exec hands the tag script the default SIGPIPE"
 fi
 
 set +e
