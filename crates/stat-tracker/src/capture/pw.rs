@@ -420,6 +420,11 @@ impl Handle {
     }
 
     #[cfg(test)]
+    pub(super) fn external_end_for_test(&self) -> bool {
+        lock(&self.state.pause).external_end
+    }
+
+    #[cfg(test)]
     pub(super) fn trip_for_test(&self) {
         self.trip(TRIP_STUCK);
     }
@@ -432,10 +437,17 @@ impl Handle {
             self.state.pw_state.load(Ordering::Acquire),
             self.has_streamed(),
         );
-        let fail = lock(&self.state.pause).stuck(phase, std::time::Instant::now());
+        let external = self.state.core_fault.load(Ordering::Acquire);
+        let fail = lock(&self.state.pause).stuck(phase, external, std::time::Instant::now());
         if let Some(why) = fail {
             self.trip(why);
         }
+    }
+
+    /// The portal session closed: whatever ends this stream now is not the
+    /// pause failing. Not counted toward [`PAUSE_TRIPS_LIMIT`].
+    pub fn mark_external_end(&self) {
+        lock(&self.state.pause).external_end = true;
     }
 
     /// Pausing is on for this stream and has not tripped.
@@ -449,11 +461,7 @@ impl Handle {
         let first = lock(&self.state.pause).trip(why, std::time::Instant::now());
         if first {
             let trips = self.state.trips.fetch_add(1, Ordering::AcqRel) + 1;
-            tracing::warn!(
-                reason = why,
-                trips,
-                "screencast pause between grabs turned off for this stream; it stays running"
-            );
+            tracing::warn!(reason = why, trips, "{}", trip_warning(why));
         }
         invoke_apply_active(&self.state);
     }
@@ -705,7 +713,28 @@ pub const TRIP_TAB_MISS: &str =
 pub const TRIP_STUCK: &str =
     "the stream stayed paused (or failed) 1.5 s after the tracker resumed it";
 pub const TRIP_RETIRED: &str = "the stream was closed while a resume was still unanswered";
-pub const TRIP_FAILED_PAUSED: &str = "the stream failed while the tracker held it paused";
+pub const TRIP_FAILED_PAUSED: &str = "the stream ended within 2 s of a pause the tracker asked for";
+
+/// A stream that ends this soon after the Paused the tracker asked for is
+/// counted as a failed pause ([`TRIP_FAILED_PAUSED`]). While a game is
+/// played the stream pauses again about every 1.5 s, so this window is
+/// nearly always open then; it only filters ends on a share that sits
+/// idle (slow poll mode, or Overwatch not running). What keeps external
+/// ends from counting are the exemptions: a lost PipeWire connection
+/// ([`state_is_core_fault`], so a PipeWire restart) and a closed portal
+/// session (on KDE a stopped share or an output change ends the KWin
+/// stream and xdg-desktop-portal-kde closes the session).
+pub const FAILED_AFTER_PAUSE_WINDOW: Duration = Duration::from_secs(2);
+
+/// The one warning a trip logs. A stream that ended right after a pause
+/// may have ended for another reason, so that line does not blame pausing.
+pub fn trip_warning(why: &str) -> &'static str {
+    if why == TRIP_FAILED_PAUSED {
+        "screencast stream ended right after the tracker paused it; it can also be an output or monitor change, or the compositor ending the share, but pause between grabs is now off for this stream"
+    } else {
+        "screencast pause between grabs turned off for this stream; it stays running"
+    }
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
@@ -806,9 +835,16 @@ struct PauseState {
     self_pause_pending: bool,
     /// Reaching Streaming answers a resume (niri only).
     streaming_answers: bool,
-    /// The stream failed (Error, or Unconnected after streaming) while the
-    /// tracker held it paused, with no resume outstanding.
+    /// The stream failed (Error, or Unconnected after streaming) within
+    /// [`FAILED_AFTER_PAUSE_WINDOW`] of the Paused the tracker asked for,
+    /// with no resume outstanding.
     failed_while_paused: bool,
+    /// Wall time of the Paused that answered the tracker's own pause
+    /// request. Cleared when the stream streams again.
+    our_paused_wall: Option<std::time::Instant>,
+    /// The stream ended for a reason outside the pause: the portal session
+    /// closed. A core fault is passed in separately.
+    external_end: bool,
     /// When the last PipeWire buffer was dequeued.
     last_buffer_at: Option<Duration>,
     /// Start of the oldest resume not answered yet. It survives a pause, so
@@ -837,6 +873,8 @@ impl PauseState {
             self_pause_pending: false,
             streaming_answers: false,
             failed_while_paused: false,
+            our_paused_wall: None,
+            external_end: false,
             last_buffer_at: None,
             unanswered_since: None,
             episode_from: None,
@@ -914,7 +952,8 @@ impl PauseState {
     /// A grab ended while the stream was still held. A Tab miss while the
     /// resume is unanswered trips at once.
     fn grab_end(&mut self, tab_missed: bool, now: std::time::Instant) -> Option<&'static str> {
-        if !self.pausing() {
+        // A closed portal session ended the grab, not the resume.
+        if !self.pausing() || self.external_end {
             return None;
         }
         if tab_missed && self.unanswered_since.is_some() {
@@ -928,8 +967,18 @@ impl PauseState {
     /// resume, or a stream that failed while a resume was unanswered, trips
     /// here, before the 2 s paused rule can call it dead and reopen it with
     /// pausing still on.
-    fn stuck(&self, phase: PwPhase, now: std::time::Instant) -> Option<&'static str> {
+    fn stuck(
+        &self,
+        phase: PwPhase,
+        external: bool,
+        now: std::time::Instant,
+    ) -> Option<&'static str> {
         if !self.pausing() {
+            return None;
+        }
+        // A closed portal session or a lost PipeWire connection is not the
+        // pause failing.
+        if phase == PwPhase::Failed && (external || self.external_end) {
             return None;
         }
         if phase == PwPhase::Failed && self.failed_while_paused {
@@ -949,8 +998,8 @@ impl PauseState {
     }
 
     /// The stream is being closed. An unanswered resume counts as a trip.
-    fn retire(&self) -> Option<&'static str> {
-        if !self.pausing() {
+    fn retire(&self, external: bool) -> Option<&'static str> {
+        if !self.pausing() || external || self.external_end {
             return None;
         }
         if self.failed_while_paused {
@@ -995,6 +1044,7 @@ impl PauseState {
         self.paused_at = None;
         self.paused_by_us = false;
         self.self_pause_pending = false;
+        self.our_paused_wall = None;
         if self.streaming_answers {
             self.answered();
         }
@@ -1004,13 +1054,22 @@ impl PauseState {
         if self.paused_at.is_none() {
             self.paused_at = Some(self.clock.reading(now));
             self.paused_by_us = !self.want || self.self_pause_pending;
+            if self.paused_by_us {
+                self.our_paused_wall = Some(now);
+            }
         }
         self.self_pause_pending = false;
     }
 
     /// Error, or Unconnected after streaming.
-    fn on_failed(&mut self) {
-        if self.pausing() && !self.want && self.unanswered_since.is_none() {
+    /// `now` is a monotonic `Instant` (suspend is not counted). Counted
+    /// only within [`FAILED_AFTER_PAUSE_WINDOW`] of the Paused that
+    /// answered the tracker's own pause.
+    fn on_failed(&mut self, now: std::time::Instant) {
+        let soon_after_our_pause = self
+            .our_paused_wall
+            .is_some_and(|at| now.saturating_duration_since(at) <= FAILED_AFTER_PAUSE_WINDOW);
+        if self.pausing() && !self.want && self.unanswered_since.is_none() && soon_after_our_pause {
             self.failed_while_paused = true;
         }
     }
@@ -1184,7 +1243,8 @@ impl Drop for Handle {
         // failed resume (a reopen for a stall, a dead stream, or a close).
         // Bound first: an `if let` on the guard would hold the lock through
         // `trip`, which takes it again.
-        let retired = lock(&self.state.pause).retire();
+        let external = self.state.core_fault.load(Ordering::Acquire);
+        let retired = lock(&self.state.pause).retire(external);
         if let Some(why) = retired {
             self.trip(why);
         }
@@ -1771,11 +1831,25 @@ fn events() -> PwStreamEvents {
     }
 }
 
-extern "C" fn on_state(data: *mut c_void, _old: i32, state: i32, _error: *const c_char) {
+/// libpipewire reports a lost connection to the PipeWire daemon as
+/// Unconnected *with* an error message: `on_core_error` (`id == 0`,
+/// `-EPIPE`) passes the core's "connection error" (0.3.48 to 1.6.9). Its
+/// other Unconnected (`proxy_removed`, the node destroyed) has no message,
+/// and an Error state is the node failing, not the connection.
+pub fn state_is_core_fault(state: i32, has_error: bool) -> bool {
+    state == PW_STREAM_STATE_UNCONNECTED && has_error
+}
+
+extern "C" fn on_state(data: *mut c_void, _old: i32, state: i32, error: *const c_char) {
     if data.is_null() {
         return;
     }
     let state_ref = unsafe { &*(data as *const State) };
+    // The iterate loop keeps running after a core error, so the thread's
+    // own exit (which also sets this) never comes while the stream is up.
+    if state_is_core_fault(state, !error.is_null()) {
+        state_ref.core_fault.store(true, Ordering::Release);
+    }
     state_ref.pw_state.store(state, Ordering::Release);
     if state == PW_STREAM_STATE_STREAMING {
         state_ref.seen_streaming.store(true, Ordering::Release);
@@ -1799,7 +1873,7 @@ extern "C" fn on_state(data: *mut c_void, _old: i32, state: i32, _error: *const 
     // Error and unconnected end the stream. A pause is recorded above and
     // only counts once it persists. Connecting is negotiation.
     if stream_state_is_dead(state, state_ref.seen_streaming.load(Ordering::Acquire)) {
-        lock(&state_ref.pause).on_failed();
+        lock(&state_ref.pause).on_failed(std::time::Instant::now());
         state_ref.alive.store(false, Ordering::Release);
         tracing::info!(
             state = pw_state_name(state),
@@ -2959,7 +3033,7 @@ mod tests {
         // pause has reached PAUSED_PERSIST (dead, reopen) must trip first.
         let read = |pause: &mut PauseState, now| {
             let seen = pause.paused_for(now).unwrap_or_default();
-            let why = pause.stuck(PwPhase::Paused, now);
+            let why = pause.stuck(PwPhase::Paused, false, now);
             assert!(
                 why.is_some() || seen < crate::capture::screencast::PAUSED_PERSIST,
                 "a dead read at {seen:?} without the trip"
@@ -3027,7 +3101,7 @@ mod tests {
         failed.request(false, true, false, t0);
         failed.request(true, true, false, t0 + ms(1_000));
         assert_eq!(
-            failed.stuck(PwPhase::Failed, t0 + ms(1_010)),
+            failed.stuck(PwPhase::Failed, false, t0 + ms(1_010)),
             Some(TRIP_STUCK)
         );
         // A pause that began after the resumed stream was Streaming again
@@ -3039,18 +3113,18 @@ mod tests {
         foreign.on_streaming();
         foreign.on_paused(t0 + ms(1_100));
         assert!(!foreign.paused_by_us);
-        assert_eq!(foreign.stuck(PwPhase::Paused, t0 + ms(5_000)), None);
+        assert_eq!(foreign.stuck(PwPhase::Paused, false, t0 + ms(5_000)), None);
         // An answered resume (a buffer) is never stuck.
         let mut ok = managed_state(t0);
         ok.request(false, true, false, t0);
         ok.on_paused(t0);
         ok.request(true, true, false, t0 + ms(1_000));
         ok.on_buffer(t0 + ms(1_010));
-        assert_eq!(ok.stuck(PwPhase::Failed, t0 + ms(5_000)), None);
+        assert_eq!(ok.stuck(PwPhase::Failed, false, t0 + ms(5_000)), None);
         // Pausing off: never.
         let mut off = PauseState::new(t0);
         off.unanswered_since = Some(Duration::ZERO);
-        assert_eq!(off.stuck(PwPhase::Failed, t0 + ms(5_000)), None);
+        assert_eq!(off.stuck(PwPhase::Failed, false, t0 + ms(5_000)), None);
     }
 
     #[test]
@@ -3071,7 +3145,7 @@ mod tests {
                 "a Tab over a still window"
             );
             assert_eq!(pause.grab_end(false, at + ms(1_150)), None);
-            assert_eq!(pause.stuck(PwPhase::Streaming, at + ms(1_150)), None);
+            assert_eq!(pause.stuck(PwPhase::Streaming, false, at + ms(1_150)), None);
             // The grab held it running for 1.15 s of active time.
             at += ms(1_150);
         }
@@ -3081,7 +3155,7 @@ mod tests {
         );
         assert_eq!(pause.resume_fails, 0);
         assert!(pause.tripped.is_none());
-        assert_eq!(pause.retire(), None);
+        assert_eq!(pause.retire(false), None);
     }
 
     /// Review round 2, V4: on KWin a resume always sends a frame, so one that
@@ -3099,7 +3173,7 @@ mod tests {
                 at += ms(1_500);
                 pause.request(true, true, false, at);
                 pause.on_streaming();
-                assert_eq!(pause.stuck(PwPhase::Streaming, at + grab), None);
+                assert_eq!(pause.stuck(PwPhase::Streaming, false, at + grab), None);
                 if let Some(why) = pause.grab_end(tab, at + grab) {
                     return (why, n);
                 }
@@ -3117,7 +3191,7 @@ mod tests {
         closed.request(false, true, false, t0);
         closed.request(true, true, false, t0 + ms(1_000));
         closed.on_streaming();
-        assert_eq!(closed.retire(), Some(TRIP_RETIRED));
+        assert_eq!(closed.retire(false), Some(TRIP_RETIRED));
         // Through the handle: the trip is counted.
         let handle = test_stream(true);
         assert!(handle.enable_pausing(false));
@@ -3148,39 +3222,273 @@ mod tests {
     }
 
     #[test]
-    fn a_stream_that_fails_while_we_hold_it_paused_counts() {
+    fn a_stream_that_fails_right_after_our_pause_counts() {
+        let t0 = std::time::Instant::now();
+        let our_pause = |pause: &mut PauseState| {
+            pause.request(false, true, false, t0);
+            pause.on_paused(t0 + ms(1));
+        };
+        let mut pause = managed_state(t0);
+        our_pause(&mut pause);
+        pause.on_failed(t0 + ms(500));
+        assert!(pause.failed_while_paused);
+        assert_eq!(
+            pause.stuck(PwPhase::Failed, false, t0 + ms(600)),
+            Some(TRIP_FAILED_PAUSED)
+        );
+        assert_eq!(pause.retire(false), Some(TRIP_FAILED_PAUSED));
+        // At the edge of the window it still counts; past it, it does not.
+        let mut edge = managed_state(t0);
+        our_pause(&mut edge);
+        edge.on_failed(t0 + ms(1) + FAILED_AFTER_PAUSE_WINDOW);
+        assert!(edge.failed_while_paused);
+        assert_eq!(FAILED_AFTER_PAUSE_WINDOW, Duration::from_secs(2));
+        // Failing while the tracker wants it running is not this.
+        let mut running = managed_state(t0);
+        running.on_failed(t0);
+        assert!(!running.failed_while_paused);
+        assert_eq!(running.retire(false), None);
+        // Nor with pausing off.
+        let mut off = PauseState::new(t0);
+        off.want = false;
+        off.our_paused_wall = Some(t0);
+        off.on_failed(t0);
+        assert_eq!(off.retire(false), None);
+        // A failure with a resume outstanding is the stuck rule's.
+        let mut resumed = managed_state(t0);
+        resumed.request(false, true, false, t0);
+        resumed.on_paused(t0 + ms(1));
+        resumed.request(true, true, false, t0 + ms(10));
+        resumed.request(false, true, false, t0 + ms(20));
+        resumed.on_failed(t0 + ms(25));
+        assert!(!resumed.failed_while_paused);
+        assert_eq!(
+            resumed.stuck(PwPhase::Failed, false, t0 + ms(30)),
+            Some(TRIP_STUCK)
+        );
+    }
+
+    /// The user stops the share from the tray, a monitor sleeps, PipeWire
+    /// or KWin restarts: the paused stream dies minutes after our pause.
+    /// That is not the pause failing.
+    #[test]
+    fn an_external_end_minutes_after_our_pause_does_not_count() {
         let t0 = std::time::Instant::now();
         let mut pause = managed_state(t0);
         pause.request(false, true, false, t0);
         pause.on_paused(t0 + ms(1));
-        pause.on_failed();
-        assert!(pause.failed_while_paused);
+        pause.on_failed(t0 + Duration::from_secs(180));
+        assert!(!pause.failed_while_paused);
         assert_eq!(
-            pause.stuck(PwPhase::Failed, t0 + ms(5)),
-            Some(TRIP_FAILED_PAUSED)
+            pause.stuck(PwPhase::Failed, false, t0 + Duration::from_secs(181)),
+            None
         );
-        assert_eq!(pause.retire(), Some(TRIP_FAILED_PAUSED));
-        // Failing while the tracker wants it running is not this.
-        let mut running = managed_state(t0);
-        running.on_failed();
-        assert!(!running.failed_while_paused);
-        assert_eq!(running.retire(), None);
-        // Nor with pausing off.
-        let mut off = PauseState::new(t0);
-        off.want = false;
-        off.on_failed();
-        assert_eq!(off.retire(), None);
-        // A failure with a resume outstanding is the stuck rule's.
+        assert_eq!(pause.retire(false), None);
+        // A Paused nobody asked for gives no window at all.
+        let mut foreign = managed_state(t0);
+        foreign.on_paused(t0);
+        foreign.request(false, true, false, t0 + ms(5));
+        foreign.on_failed(t0 + ms(10));
+        assert!(!foreign.failed_while_paused);
+        // Streaming again closes the window.
         let mut resumed = managed_state(t0);
         resumed.request(false, true, false, t0);
-        resumed.request(true, true, false, t0 + ms(10));
-        resumed.request(false, true, false, t0 + ms(20));
-        resumed.on_failed();
+        resumed.on_paused(t0 + ms(1));
+        resumed.request(true, true, false, t0 + ms(100));
+        resumed.on_buffer(t0 + ms(110));
+        resumed.on_streaming();
+        resumed.request(false, true, true, t0 + ms(200));
+        resumed.on_failed(t0 + ms(300));
         assert!(!resumed.failed_while_paused);
-        assert_eq!(
-            resumed.stuck(PwPhase::Failed, t0 + ms(30)),
-            Some(TRIP_STUCK)
+    }
+
+    /// A core fault (the PipeWire connection went away) or a closed portal
+    /// session is never a failed pause, even right after one.
+    #[test]
+    fn a_core_fault_or_closed_session_does_not_count() {
+        let t0 = std::time::Instant::now();
+        let failed = || {
+            let mut pause = managed_state(t0);
+            pause.request(false, true, false, t0);
+            pause.on_paused(t0 + ms(1));
+            pause.on_failed(t0 + ms(100));
+            assert!(pause.failed_while_paused);
+            pause
+        };
+        let fault = failed();
+        assert_eq!(fault.stuck(PwPhase::Failed, true, t0 + ms(200)), None);
+        assert_eq!(fault.retire(true), None);
+        let mut closed = failed();
+        closed.external_end = true;
+        assert_eq!(closed.stuck(PwPhase::Failed, false, t0 + ms(200)), None);
+        assert_eq!(closed.retire(false), None);
+        // An unanswered resume ended by a closed session is not one either.
+        let mut resume = managed_state(t0);
+        resume.request(false, true, false, t0);
+        resume.request(true, true, false, t0 + ms(10));
+        assert_eq!(resume.stuck(PwPhase::Failed, true, t0 + ms(20)), None);
+        assert_eq!(resume.retire(true), None);
+        // Through the handle: a core fault, then the drop, counts nothing.
+        let handle = test_stream(true);
+        assert!(handle.enable_pausing(false));
+        handle
+            .state
+            .pw_state
+            .store(PW_STREAM_STATE_PAUSED, Ordering::Release);
+        handle.set_active(false);
+        handle.set_active(true);
+        handle.state.core_fault.store(true, Ordering::Release);
+        handle
+            .state
+            .pw_state
+            .store(PW_STREAM_STATE_ERROR, Ordering::Release);
+        handle.check_stuck_resume();
+        assert!(!handle.pause_tripped());
+        let trips = handle.state.trips;
+        drop(handle);
+        assert_eq!(trips.load(Ordering::Acquire), 0);
+        let closed = test_stream(true);
+        assert!(closed.enable_pausing(false));
+        closed
+            .state
+            .pw_state
+            .store(PW_STREAM_STATE_PAUSED, Ordering::Release);
+        closed.set_active(false);
+        closed.set_active(true);
+        closed.mark_external_end();
+        let trips = closed.state.trips;
+        drop(closed);
+        assert_eq!(trips.load(Ordering::Acquire), 0, "closed session: no trip");
+    }
+
+    /// A stream the tracker paused (Paused for its request), as `on_state`
+    /// sees it, then `end`: the new state and its error message.
+    fn paused_then(end: i32, error: Option<&std::ffi::CStr>) -> Handle {
+        let handle = test_stream(true);
+        assert!(handle.enable_pausing(false));
+        handle.set_active(false);
+        let data = Arc::as_ptr(&handle.state) as *mut c_void;
+        on_state(
+            data,
+            PW_STREAM_STATE_STREAMING,
+            PW_STREAM_STATE_PAUSED,
+            std::ptr::null(),
         );
+        on_state(
+            data,
+            PW_STREAM_STATE_PAUSED,
+            end,
+            error.map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
+        );
+        handle
+    }
+
+    /// libpipewire's lost connection (a PipeWire restart) is Unconnected
+    /// with "connection error". Right after our pause it must not count.
+    /// The node being destroyed (Unconnected, no message) and an Error
+    /// ("defined target not found") are not core faults and still count.
+    #[test]
+    fn a_lost_pipewire_connection_after_our_pause_is_not_a_failed_pause() {
+        let lost = paused_then(PW_STREAM_STATE_UNCONNECTED, Some(c"connection error"));
+        assert!(lost.state.core_fault.load(Ordering::Acquire));
+        assert!(lost.stream_report().core_fault);
+        lost.check_stuck_resume();
+        assert!(!lost.pause_tripped());
+        let trips = lost.state.trips;
+        drop(lost);
+        assert_eq!(trips.load(Ordering::Acquire), 0, "no trip on close either");
+
+        let removed = paused_then(PW_STREAM_STATE_UNCONNECTED, None);
+        assert!(!removed.state.core_fault.load(Ordering::Acquire));
+        removed.check_stuck_resume();
+        assert!(
+            removed.pause_tripped(),
+            "a node end right after our pause counts"
+        );
+
+        let target = paused_then(PW_STREAM_STATE_ERROR, Some(c"defined target not found"));
+        assert!(!target.state.core_fault.load(Ordering::Acquire));
+        target.check_stuck_resume();
+        assert!(target.pause_tripped());
+
+        assert!(state_is_core_fault(PW_STREAM_STATE_UNCONNECTED, true));
+        assert!(!state_is_core_fault(PW_STREAM_STATE_UNCONNECTED, false));
+        assert!(!state_is_core_fault(PW_STREAM_STATE_ERROR, true));
+        assert!(!state_is_core_fault(PW_STREAM_STATE_PAUSED, true));
+    }
+
+    /// Once `on_state` can set the core fault, a grab on that stream ends
+    /// at once instead of waiting out its timeout for frames that cannot
+    /// come.
+    #[test]
+    fn a_grab_on_a_lost_connection_ends_at_once() {
+        // Not streamed yet: Unconnected is not a dead state there, so only
+        // the core fault ends the wait (before, it ran its full timeout).
+        let handle = test_handle(None, Some(red_frame(3)), true);
+        handle.state.seen_streaming.store(false, Ordering::Release);
+        handle.state.streaming.store(false, Ordering::Release);
+        let data = Arc::as_ptr(&handle.state) as *mut c_void;
+        on_state(
+            data,
+            PW_STREAM_STATE_STREAMING,
+            PW_STREAM_STATE_UNCONNECTED,
+            c"connection error".as_ptr(),
+        );
+        let started = std::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let out = runtime.block_on(handle.grab(Duration::from_secs(5), None));
+            let _ = tx.send(out.map(|_| ()));
+        });
+        let out = rx.recv_timeout(Duration::from_secs(3)).expect("no hang");
+        let _ = worker.join();
+        assert_eq!(out, Err("screencast stream ended".to_string()));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A portal close marked before the grab's verdict: no Tab-miss or
+    /// slow-resume trip for a resume the closed session left unanswered.
+    #[test]
+    fn a_grab_ended_by_a_closed_session_does_not_trip() {
+        let t0 = std::time::Instant::now();
+        let mut pause = managed_state(t0);
+        pause.request(false, true, false, t0);
+        pause.request(true, true, false, t0 + ms(1_000));
+        pause.external_end = true;
+        assert_eq!(pause.grab_end(true, t0 + ms(2_200)), None);
+        assert_eq!(pause.grab_end(false, t0 + ms(9_000)), None);
+        assert!(pause.tripped.is_none());
+    }
+
+    /// `on_state` itself flags a death right after our pause (the R2c
+    /// wiring): Paused for our request, then Error.
+    #[test]
+    fn on_state_flags_a_death_right_after_our_pause() {
+        let handle = test_stream(true);
+        assert!(handle.enable_pausing(false));
+        handle.set_active(false);
+        let data = Arc::as_ptr(&handle.state) as *mut c_void;
+        on_state(
+            data,
+            PW_STREAM_STATE_STREAMING,
+            PW_STREAM_STATE_PAUSED,
+            std::ptr::null(),
+        );
+        on_state(
+            data,
+            PW_STREAM_STATE_PAUSED,
+            PW_STREAM_STATE_ERROR,
+            std::ptr::null(),
+        );
+        assert!(lock(&handle.state.pause).failed_while_paused);
+        handle.check_stuck_resume();
+        assert!(handle.pause_tripped());
+        assert!(trip_warning(TRIP_FAILED_PAUSED).contains("can also be"));
+        assert!(!trip_warning(TRIP_STUCK).contains("can also be"));
     }
 
     #[test]
@@ -3278,12 +3586,12 @@ mod tests {
     fn closing_a_stream_with_an_unanswered_resume_is_a_trip() {
         let t0 = std::time::Instant::now();
         let mut pause = managed_state(t0);
-        assert_eq!(pause.retire(), None);
+        assert_eq!(pause.retire(false), None);
         pause.request(false, true, false, t0);
         pause.request(true, true, false, t0 + ms(1_000));
-        assert_eq!(pause.retire(), Some(TRIP_RETIRED));
+        assert_eq!(pause.retire(false), Some(TRIP_RETIRED));
         pause.on_buffer(t0 + ms(1_050));
-        assert_eq!(pause.retire(), None);
+        assert_eq!(pause.retire(false), None);
 
         let handle = test_stream(true);
         assert!(handle.enable_pausing(false));
@@ -3409,6 +3717,20 @@ mod tests {
     ) -> i32 {
         LEAVE_INVOKES.fetch_add(1, Ordering::AcqRel);
         0
+    }
+
+    /// `run_loop` leaves the loop only through `leave_loop`, never with a
+    /// raw `pw_loop_leave` that would skip the unpublish.
+    #[test]
+    fn run_loop_leaves_through_leave_loop() {
+        let src = include_str!("pw.rs");
+        let at = src
+            .find(concat!("fn run_loop(", "symbols: Symbols"))
+            .expect("run_loop");
+        let body = &src[at..];
+        let body = &body[..body.find("\nfn set_prop(").expect("run_loop end")];
+        assert!(body.contains(concat!("leave_loop(", "&state, leave, pw_loop)")));
+        assert_eq!(body.matches(concat!("leave(", "pw_loop)")).count(), 0);
     }
 
     /// After `pw_loop_leave` an invoke from another thread runs inline on

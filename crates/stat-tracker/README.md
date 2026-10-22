@@ -192,7 +192,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`). Must be absolute. The systemd unit can write this path, the config dir, and the session runtime dir; a custom directory gets a drop-in at install (see below) |
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown). `poll_interval_secs` is whole seconds; 4 means automatic (1.5 s with the new reader, 4 s otherwise). `poll_interval_ms`, when set, overrides that (500 to 10000). It is not written unless you set it |
 | `screencast_max_fps` | Screen-stream cap, 1 to 5 frames per second. Missing means 4 (2 before 0.5.0-rc.6; set 2 to go back). Sets the PipeWire max-framerate and the tracker's own throttle. Not written unless you set it |
-| `screencast_pause_between_grabs` | Missing or `true`: the screen stream is paused between grabs on KWin 6.1 or newer and on niri, so the compositor does not draw frames the tracker would throw away (see Screen capture route). Other desktops keep it running. `false` keeps it running everywhere, as before 0.5.0-rc.7. Put it near the top of the file, above any `[section]` line. Env `STAT_TRACKER_SCREENCAST_PAUSE=1` forces pausing on any desktop (for testing) and `=0` turns it off; the env var wins over this key and is not written to this file. Not written unless you set it |
+| `screencast_pause_between_grabs` | Missing or `true`: the screen stream is paused between grabs on KWin 6.1 or newer and on niri, so the compositor does not draw frames the tracker would throw away (see Screen capture route). Other desktops keep it running. `false` keeps it running everywhere, as before 0.5.0-rc.7. Put it near the top of the file, above any `[section]` line. Env `STAT_TRACKER_SCREENCAST_PAUSE=1` forces pausing on any desktop (for testing) and `=0` turns it off; the env var wins over this key and is not written to this file. Forced on, damage-driven portals (xdg-desktop-portal-wlr, -hyprland, possibly COSMIC) send no frame for a still screen and may trip the fail-safe, and Plasma 5 / KWin 6.0 (and GNOME) get their per-resume signal leak back. Not written unless you set it |
 | `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
 | `debug_ocr` | Dump Tab OCR intermediates and poll Victory/Defeat evidence frames (confirm + first streak, not every tick) under `{data_dir}/debug/` (also env `STAT_TRACKER_DEBUG_OCR=1`). It also turns on `debug/accepted/` (the last 60 accepted scoreboard crops) and `debug/rejected/` (the last 30 rejected frames). Those images are not blanked and show other players' names, so they are off by default. Settings toggle: Save debug images from each capture. With it off, an existing folder is left as it is and the daemon logs once at start that it is no longer written. `debug/mapcrops/` and `debug/mapmiss/` hold only the map-name box and stay on |
 | `finished_game_close_secs` | Quiet time after the last activity before a finished game is closed and uploaded. Activity is a stored capture, a recorded outcome, an accolade map, or the session open. Never shorter than the 75-second grace. Default 180. Config-file only (no Settings control) |
@@ -243,9 +243,19 @@ not count. KWin always sends a frame on resume, so there a resume that
 reaches Streaming with no frame is a broken one. The tracker stops pausing
 a stream, keeps it running and logs one warning when two resumes in a row
 are not answered within 1.5 s of active time, when a Tab misses while its
-resume is not answered, when the stream stays paused (or fails) 1.5 s of
-active time after a resume, when the stream fails while the tracker holds
-it paused, or when the stream is closed while a resume is not answered. The next share or reopen tries pausing again once;
+resume is not answered, when the stream stays paused 1.5 s of active time
+after a resume, at once when the stream fails while a resume is not
+answered, at once when the stream fails within 2 seconds of a pause the
+tracker asked for, or when the stream is closed while a resume is not
+answered. During a game the stream pauses about every 1.5 seconds, so that
+2-second window is nearly always open; it only leaves out ends on an idle
+share. What keeps outside causes from counting: a lost PipeWire connection
+(a PipeWire restart) and a portal session that closed are never counted.
+On KDE a share stopped from the tray or an output change ends the KWin
+stream, and xdg-desktop-portal-kde then closes the session. The warning for
+a stream that ended just after a pause says it can also be an output or
+monitor change or the compositor ending the share. The next share or
+reopen tries pausing again once;
 after a second such stream it stays off until the tracker restarts. To
 turn pausing off yourself, set `screencast_pause_between_grabs = false`,
 or put `STAT_TRACKER_SCREENCAST_PAUSE=0` in `~/.config/environment.d/` for
