@@ -63,6 +63,10 @@ pub enum TabResult {
     Accepted,
     /// The frame did not show a full scoreboard. Retried while Tab is held.
     NotAScoreboard,
+    /// A board was on the frame and the new reader refused it. Retried
+    /// while Tab is held like [`TabResult::NotAScoreboard`], with no
+    /// hold-Tab hint: the board was up, so the tap was long enough.
+    BoardRefused,
     /// No frame yet (no fresh stream buffer, share still opening). Retried
     /// while Tab is held.
     NoFrameYet,
@@ -73,7 +77,10 @@ pub enum TabResult {
 impl TabResult {
     /// Whether this result is worth another grab.
     pub fn retries(self) -> bool {
-        matches!(self, Self::NotAScoreboard | Self::NoFrameYet)
+        matches!(
+            self,
+            Self::NotAScoreboard | Self::BoardRefused | Self::NoFrameYet
+        )
     }
 }
 
@@ -238,7 +245,8 @@ impl TabFlight {
 /// Whether a finished capture should log [`TAB_HOLD_HINT`]: the frame it
 /// kept showed no scoreboard, and the key was released under
 /// [`TAB_HOLD_HINT_BELOW`] after the press. A missing stream frame, a share
-/// still opening or declined, and an accepted board get no hint.
+/// still opening or declined, a board the reader refused, and an accepted
+/// board get no hint.
 pub fn short_tap_hint(result: TabResult, press: Instant, released_at: Option<Instant>) -> bool {
     result == TabResult::NotAScoreboard
         && released_at.is_some_and(|at| at.saturating_duration_since(press) < TAB_HOLD_HINT_BELOW)
@@ -1053,6 +1061,9 @@ mod tests {
         // Only a frame with no scoreboard: a missing stream frame or a
         // share that is opening or declined is not the player's tap.
         assert!(!short_tap_hint(TabResult::NoFrameYet, press, at(400)));
+        // A board was up and the reader refused it: the tap was not short.
+        assert!(!short_tap_hint(TabResult::BoardRefused, press, at(400)));
+        assert!(TabResult::BoardRefused.retries());
         assert!(!short_tap_hint(TabResult::Final, press, at(400)));
     }
 

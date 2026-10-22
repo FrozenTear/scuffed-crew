@@ -118,6 +118,10 @@ pub(crate) enum Permission {
 pub(crate) trait ShotChecks: Sync {
     fn portal_owner(&self) -> impl std::future::Future<Output = OwnerLookup> + Send;
     fn screenshot_permission(&self) -> impl std::future::Future<Output = Permission> + Send;
+    /// Publish what the portal is up to for the app's notice.
+    fn note(&self, state: super::PortalState) {
+        super::note_portal_state(state);
+    }
 }
 
 /// Why an unanswered request was given up, or that it keeps waiting.
@@ -197,7 +201,7 @@ where
     // Leaving without an answer: a prompt notice of this request goes.
     let clear_prompt = |prompt_said: bool| {
         if prompt_said {
-            super::note_portal_state(super::PortalState::Answering);
+            checks.note(super::PortalState::Answering);
         }
     };
     loop {
@@ -223,7 +227,7 @@ where
                 let mut state = lock(backoff);
                 state.answered(answer.is_ok());
                 drop(state);
-                super::note_portal_state(super::PortalState::Answering);
+                checks.note(super::PortalState::Answering);
                 return Ok(answer?);
             }
             Err(Err(not_taken)) => {
@@ -241,7 +245,7 @@ where
                         "the screenshot portal has not answered and screenshot permission is not granted: a permission prompt may be waiting, possibly behind the game"
                     );
                 }
-                super::note_portal_state(super::PortalState::MayBePrompt);
+                checks.note(super::PortalState::MayBePrompt);
             }
             Unanswered::PortalGone => {
                 tracing::warn!(
@@ -256,9 +260,9 @@ where
                 tracing::warn!(
                     waited_secs = SHOT_GIVE_UP.as_secs(),
                     pause_secs = pause.as_secs(),
-                    "{SHOT_UNANSWERED}: the request was closed, counts as a failed grab, and polls make no portal request during the pause"
+                    "{SHOT_UNANSWERED}: the request was closed, counts as a failed grab, and ordinary polls make no portal request during the pause"
                 );
-                super::note_portal_state(super::PortalState::Stalled);
+                checks.note(super::PortalState::Stalled);
                 return Err(format!(
                     "{SHOT_UNANSWERED} (no answer in {} s)",
                     SHOT_GIVE_UP.as_secs()
@@ -273,8 +277,12 @@ fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
 }
 
-/// Polls' pauses after successive stalled requests; the last repeats.
-pub const SHOT_BACKOFF_STEPS: [std::time::Duration; 3] = [
+/// Polls' pauses after successive stalled requests; the last repeats. The
+/// first is short: ordinary polls are what wake the end-reel outcome poll,
+/// so while they pause the match result screens go unread, and a stall
+/// that passes should cost at most half a minute of them.
+pub const SHOT_BACKOFF_STEPS: [std::time::Duration; 4] = [
+    std::time::Duration::from_secs(30),
     std::time::Duration::from_secs(2 * 60),
     std::time::Duration::from_secs(5 * 60),
     std::time::Duration::from_secs(10 * 60),
@@ -285,12 +293,14 @@ pub const SHOT_BACKOFF: &str =
     "the screenshot portal stopped answering: no new request until its pause ends";
 
 /// After a stalled request ([`Unanswered::Stalled`]) ordinary polls make no
-/// portal request for a growing pause ([`SHOT_BACKOFF_STEPS`]). A Tab and
-/// the end-reel outcome poll (the urgent grabs) may still try, so a portal
-/// that recovered does not miss a board or the match result, unless the
-/// request given up may still be open at the portal (its Close has not
-/// been answered): never two of ours outstanding. An answered request
-/// ends it.
+/// portal request for a growing pause ([`SHOT_BACKOFF_STEPS`]: 30 s, then
+/// 2, 5 and 10 minutes). Ordinary polls also wake the end-reel outcome
+/// poll, so during a pause the match result screens are not read either;
+/// only an outcome poll whose wake was already set before the pause can
+/// still run. A Tab (and such an outcome poll, the urgent grabs) may try
+/// during a pause, unless the request given up may still be open at the
+/// portal (its Close has not been answered): never two of ours
+/// outstanding. An answered request ends the pause.
 #[derive(Debug, Default)]
 pub(crate) struct ShotBackoff {
     until: Option<tokio::time::Instant>,
@@ -1452,6 +1462,8 @@ mod tests {
         permission: std::sync::Mutex<Permission>,
         /// Checks made, to time a Response against them.
         checks: std::sync::atomic::AtomicUsize,
+        /// The notice states published, in order.
+        notes: std::sync::Mutex<Vec<crate::capture::PortalState>>,
     }
 
     impl FakeChecks {
@@ -1460,6 +1472,7 @@ mod tests {
                 owner: std::sync::Mutex::new(OwnerLookup::Unknown),
                 permission: std::sync::Mutex::new(permission),
                 checks: std::sync::atomic::AtomicUsize::new(0),
+                notes: std::sync::Mutex::new(Vec::new()),
             }
         }
 
@@ -1481,6 +1494,10 @@ mod tests {
 
         async fn screenshot_permission(&self) -> Permission {
             *self.permission.lock().unwrap()
+        }
+
+        fn note(&self, state: crate::capture::PortalState) {
+            self.notes.lock().unwrap().push(state);
         }
     }
 
@@ -1555,7 +1572,7 @@ mod tests {
             answer_tx.send(()).is_err(),
             "the request was dropped: a late answer reaches nothing"
         );
-        // Polls pause 2 minutes; a Tab waits until the Close is answered.
+        // Polls pause 30 s first; a Tab waits until the Close is answered.
         let now = tokio::time::Instant::now();
         {
             let mut state = STATE.lock().unwrap();
@@ -1572,19 +1589,24 @@ mod tests {
                 "a Tab or the reel poll may try"
             );
             assert_eq!(
-                state.refuses(false, now + Duration::from_secs(119)),
+                state.refuses(false, now + Duration::from_secs(29)),
                 Some(SHOT_BACKOFF)
             );
-            assert_eq!(state.refuses(false, now + Duration::from_secs(120)), None);
-            // The next stalls pause longer, up to 10 minutes.
+            assert_eq!(state.refuses(false, now + Duration::from_secs(30)), None);
+            // The next stalls pause longer: 2, 5, then 10 minutes.
+            assert_eq!(state.gave_up(now), Duration::from_secs(120));
             assert_eq!(state.gave_up(now), Duration::from_secs(300));
             assert_eq!(state.gave_up(now), Duration::from_secs(600));
             assert_eq!(state.gave_up(now), Duration::from_secs(600));
             // An answered request ends the pause.
             state.answered(true);
             assert_eq!(state.refuses(false, now), None);
-            assert_eq!(state.gave_up(now), Duration::from_secs(120));
+            assert_eq!(state.gave_up(now), Duration::from_secs(30));
         }
+        assert_eq!(
+            CHECKS.notes.lock().unwrap().last(),
+            Some(&crate::capture::PortalState::Stalled)
+        );
         assert!(SHOT_GIVE_UP >= Duration::from_secs(60));
         assert!(SHOT_OVERDUE_FIRST < SHOT_GIVE_UP);
     }
@@ -1661,6 +1683,63 @@ mod tests {
             judge_unanswered(&checks, None, false).await,
             Unanswered::Stalled
         );
+    }
+
+    /// Review L1 (N4): a request that showed the prompt notice and then
+    /// ends without an answer (the portal went away, or the request turned
+    /// out never taken) leaves no prompt notice behind.
+    #[tokio::test(start_paused = true)]
+    async fn a_prompt_notice_goes_when_its_request_ends_unanswered() {
+        use crate::capture::PortalState::{Answering, MayBePrompt};
+        use std::time::Duration;
+        // The portal went away after the prompt notice.
+        let checks = FakeChecks::new(Permission::Other);
+        checks.set_owner(owner(":1.5"));
+        let state = std::sync::Mutex::new(ShotBackoff::default());
+        let taker = TakerSlot::new(None);
+        let (_answer_tx, answer_rx) = tokio::sync::oneshot::channel::<()>();
+        let request = await_answer(pending_request(answer_rx, &taker), &checks, &state, &taker);
+        tokio::pin!(request);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(61), &mut request)
+                .await
+                .is_err()
+        );
+        assert_eq!(*checks.notes.lock().unwrap(), vec![MayBePrompt]);
+        checks.set_owner(OwnerLookup::NoOwner);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(600), request)
+                .await
+                .expect("given up")
+                .is_err()
+        );
+        assert_eq!(*checks.notes.lock().unwrap(), vec![MayBePrompt, Answering]);
+
+        // The request fails after the prompt notice (the outer Err).
+        let checks = FakeChecks::new(Permission::Other);
+        checks.set_owner(owner(":1.5"));
+        let failing = async {
+            tokio::time::sleep(Duration::from_secs(90)).await;
+            Err::<Result<String, String>, _>("portal screenshot response failed: x".into())
+        };
+        assert!(
+            await_answer(failing, &checks, &state, &taker)
+                .await
+                .is_err()
+        );
+        assert_eq!(*checks.notes.lock().unwrap(), vec![MayBePrompt, Answering]);
+
+        // No prompt notice, nothing to clear.
+        let checks = FakeChecks::new(Permission::Other);
+        let failing = async {
+            Err::<Result<String, String>, _>("portal screenshot request failed: x".into())
+        };
+        assert!(
+            await_answer(failing, &checks, &state, &taker)
+                .await
+                .is_err()
+        );
+        assert!(checks.notes.lock().unwrap().is_empty());
     }
 
     /// No permission entry: a prompt may be up, unless a request of this
