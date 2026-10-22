@@ -66,6 +66,47 @@ pub fn tab_press() -> Option<std::time::Instant> {
     TAB_PRESS.try_with(|press| *press).ok()
 }
 
+tokio::task_local! {
+    static POLL_LOCK_WAIT: std::time::Duration;
+}
+
+/// How long the end-reel outcome-only poll waits for the screenshot lock
+/// while a Tab grab holds it. The VICTORY banner lasts about 3 s and polls
+/// come every 1.5 s, so a poll turned away at once lost the banner while
+/// the player held Tab over it. One second keeps the poll arm short.
+pub const OUTCOME_POLL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The lock wait for a poll: [`OUTCOME_POLL_LOCK_WAIT`] for the end-reel
+/// outcome-only poll, nothing for an ordinary one.
+pub fn poll_lock_wait(outcome_only: bool) -> std::time::Duration {
+    if outcome_only {
+        OUTCOME_POLL_LOCK_WAIT
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
+/// Run a poll grab that may wait `wait` for the screenshot lock.
+pub async fn with_poll_lock_wait<T>(
+    wait: std::time::Duration,
+    fut: impl std::future::Future<Output = T>,
+) -> T {
+    POLL_LOCK_WAIT.scope(wait, fut).await
+}
+
+/// The lock wait for the grab running in this task: `tab_wait` in a Tab
+/// capture, the poll's wait ([`with_poll_lock_wait`]) otherwise, zero by
+/// default.
+pub(crate) fn grab_lock_wait(tab_wait: std::time::Duration) -> std::time::Duration {
+    flight::lock_wait(
+        tab_press().is_some(),
+        tab_wait,
+        POLL_LOCK_WAIT
+            .try_with(|wait| *wait)
+            .unwrap_or(std::time::Duration::ZERO),
+    )
+}
+
 /// Run `fut` as a Tab grab whose press time is `press`. Direct capture still
 /// sleeps before calling this. The stream path reads the press and does not.
 pub async fn with_tab_press<T>(
@@ -504,7 +545,7 @@ pub async fn detect_backend() -> CaptureBackend {
         // Plasma 6.8.1. On KDE a probe that can pass (KWin not on the bus
         // yet at login) is tried again for up to 15 s.
         kwin::probe_at_startup(
-            daemon_share_is_open(&prefs.data_dir),
+            || daemon_share_is_open(&prefs.data_dir),
             route::is_kde(&desktop),
         )
         .await
@@ -1086,6 +1127,23 @@ mod tests {
         ] {
             assert!(!oneshot_blocked(backend, "KDE", true), "{backend:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_grab_takes_its_lock_wait_from_its_task() {
+        let tab = std::time::Duration::from_secs(4);
+        assert_eq!(
+            grab_lock_wait(tab),
+            std::time::Duration::ZERO,
+            "a plain poll"
+        );
+        let reel = with_poll_lock_wait(poll_lock_wait(true), async { grab_lock_wait(tab) }).await;
+        assert_eq!(reel, OUTCOME_POLL_LOCK_WAIT);
+        let plain = with_poll_lock_wait(poll_lock_wait(false), async { grab_lock_wait(tab) }).await;
+        assert_eq!(plain, std::time::Duration::ZERO);
+        let in_tab = with_tab_press(std::time::Instant::now(), async { grab_lock_wait(tab) }).await;
+        assert_eq!(in_tab, tab);
+        assert_eq!(OUTCOME_POLL_LOCK_WAIT, std::time::Duration::from_secs(1));
     }
 
     #[test]

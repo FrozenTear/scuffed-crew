@@ -779,7 +779,7 @@ impl TrackerApp {
             tasks.push(Task::perform(
                 stat_tracker::capture::kwin_direct_status(
                     app.data_dir.clone(),
-                    app.saved_config.capture_route == stat_tracker::config::CaptureRoute::Kwin,
+                    settings::render_wanted(app.saved_config.capture_route, false),
                 ),
                 Message::KdeDirectReady,
             ));
@@ -1156,9 +1156,13 @@ impl TrackerApp {
                 self.settings.capture_route = route;
                 // Choosing KDE direct checks it (a 1x1 KWin render, not
                 // beside the tracker's share before Plasma 6.8.1).
-                if route == stat_tracker::config::CaptureRoute::Kwin && self.fixture.is_none() {
+                let chip_clicked = route == stat_tracker::config::CaptureRoute::Kwin;
+                if chip_clicked && self.fixture.is_none() {
                     return Task::perform(
-                        stat_tracker::capture::kwin_direct_status(self.data_dir.clone(), true),
+                        stat_tracker::capture::kwin_direct_status(
+                            self.data_dir.clone(),
+                            settings::render_wanted(self.saved_config.capture_route, chip_clicked),
+                        ),
                         Message::KdeDirectReady,
                     );
                 }
@@ -2619,7 +2623,7 @@ impl TrackerApp {
             tasks.push(Task::perform(
                 stat_tracker::capture::kwin_direct_status(
                     self.data_dir.clone(),
-                    self.saved_config.capture_route == stat_tracker::config::CaptureRoute::Kwin,
+                    settings::render_wanted(self.saved_config.capture_route, false),
                 ),
                 Message::KdeDirectReady,
             ));

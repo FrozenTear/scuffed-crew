@@ -42,6 +42,8 @@ enum Msg {
     /// The first window opened: CPU before now belongs to no window.
     Baseline,
     Summary(Box<Summary>),
+    /// Everything sent before this is written: answer on the channel.
+    Flush(mpsc::SyncSender<()>),
 }
 
 static TX: OnceLock<mpsc::Sender<Msg>> = OnceLock::new();
@@ -77,6 +79,24 @@ pub fn write_summary(s: Summary) {
     }
 }
 
+/// Wait up to `wait` until every line queued so far is written. The daemon
+/// calls this at shutdown, so the last window's line is not lost with the
+/// thread. `true` when the log thread answered (or there is none).
+pub fn flush(wait: std::time::Duration) -> bool {
+    match TX.get() {
+        Some(tx) => flush_through(tx, wait),
+        None => true,
+    }
+}
+
+fn flush_through(tx: &mpsc::Sender<Msg>, wait: std::time::Duration) -> bool {
+    let (ack_tx, ack_rx) = mpsc::sync_channel(1);
+    if tx.send(Msg::Flush(ack_tx)).is_err() {
+        return false;
+    }
+    ack_rx.recv_timeout(wait).is_ok()
+}
+
 fn run(dir: &Path, rx: &mpsc::Receiver<Msg>, x11: bool) {
     append_to(dir, &header_line(&SetupInfo::collect()), MAX_BYTES);
     let hz = clk_tck();
@@ -93,6 +113,11 @@ fn run(dir: &Path, rx: &mpsc::Receiver<Msg>, x11: bool) {
                     &sample_line(&s, cpu_pct, proc_rss_kb(), &host),
                     MAX_BYTES,
                 );
+            }
+            // Messages are handled in order, so every line sent before
+            // this one is on disk now.
+            Msg::Flush(ack) => {
+                let _ = ack.send(());
             }
         }
     }
@@ -787,5 +812,27 @@ mod tests {
             ),
             Some("GE-Proton9-20".into())
         );
+    }
+
+    /// A flush answers only after the summary queued before it is on disk.
+    #[test]
+    fn a_flush_answers_after_the_queued_line_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let path = dir.path().to_path_buf();
+        let thread = std::thread::spawn(move || run(&path, &rx, false));
+        tx.send(Msg::Summary(Box::new(summary(None)))).unwrap();
+        assert!(flush_through(&tx, std::time::Duration::from_secs(10)));
+        let text = read(dir.path());
+        assert!(
+            text.lines().any(|l| l.contains("window_s=")),
+            "the queued line is written by the time the flush answers: {text}"
+        );
+        drop(tx);
+        thread.join().unwrap();
+        // A log thread that is gone answers nothing.
+        let (tx, rx) = mpsc::channel::<Msg>();
+        drop(rx);
+        assert!(!flush_through(&tx, std::time::Duration::from_millis(10)));
     }
 }

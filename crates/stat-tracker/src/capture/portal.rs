@@ -39,7 +39,7 @@ pub async fn capture(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let output = output_name.map(str::to_owned);
-    let wait = super::flight::lock_wait(super::tab_press().is_some(), SHOT_LOCK_WAIT_TAB);
+    let wait = super::grab_lock_wait(SHOT_LOCK_WAIT_TAB);
     run_shot(
         &SHOT_FLIGHT,
         wait,
@@ -882,11 +882,15 @@ mod tests {
             }));
             tokio::task::yield_now().await;
             let poll = FLIGHT
-                .run(lock_wait(false, SHOT_LOCK_WAIT_TAB), async {})
+                .run(
+                    lock_wait(false, SHOT_LOCK_WAIT_TAB, Duration::ZERO),
+                    async {},
+                )
                 .await;
             assert_eq!(poll, Err(FlightError::Busy));
             let tab = FLIGHT
-                .run(lock_wait(true, SHOT_LOCK_WAIT_TAB), async {})
+                .run(lock_wait(true, SHOT_LOCK_WAIT_TAB, Duration::ZERO), async {
+                })
                 .await;
             assert_eq!(tab.is_ok(), tab_gets_it, "request held {held_ms} ms");
             held.await.unwrap().unwrap();

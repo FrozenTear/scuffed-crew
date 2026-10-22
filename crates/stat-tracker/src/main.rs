@@ -4222,6 +4222,21 @@ fn poll_divisor(
     1
 }
 
+/// Upper bounds for [`tests::capture_futures_stay_small`] (debug build,
+/// rc.7: 15,168 and 1,640 bytes). Unboxing the KDE direct or portal grab
+/// puts `capture_screen_output_for` at 4.6 KB or 28 KB.
+#[cfg(test)]
+const HANDLE_CAPTURE_FUTURE_MAX: usize = 20 * 1024;
+#[cfg(test)]
+const CAPTURE_FUTURE_MAX: usize = 3 * 1024;
+
+/// Whether a finished poll grab restarts the slow-cadence count. A grab
+/// turned away because a Tab held the screenshot lock did not look at the
+/// screen, so the next tick must poll.
+fn poll_resets_cadence<T, E: std::fmt::Display, S>(grabbed: &Result<Result<T, E>, S>) -> bool {
+    !matches!(grabbed, Ok(Err(err)) if capture::is_capture_busy(&err.to_string()))
+}
+
 /// Whole ticks of `interval` that fit in [`IDLE_SHOT_POLL_FLOOR`], at
 /// least 1. Rounding down keeps the cadence at or under the floor.
 fn idle_shot_divisor(interval: std::time::Duration) -> u32 {
@@ -5033,11 +5048,17 @@ async fn run_loop(
                 // kept for the keyboard arm, never lost. A release does not
                 // preempt (`next_press` records it), so the outcome-only
                 // poll in the ~3 s end-reel window survives letting go of Tab.
+                // On a screenshot route the end-reel outcome-only poll waits
+                // up to OUTCOME_POLL_LOCK_WAIT for a Tab grab's shot lock;
+                // an ordinary poll that finds it held is skipped at once.
                 let grabbed = match stop_for_shutdown_or_key(
-                    capture::capture_screen_output_for(
-                        backend,
-                        capture_output,
-                        capture::CaptureKind::Poll,
+                    capture::with_poll_lock_wait(
+                        capture::poll_lock_wait(outcome_only),
+                        capture::capture_screen_output_for(
+                            backend,
+                            capture_output,
+                            capture::CaptureKind::Poll,
+                        ),
                     ),
                     stat_tracker::replace::shutdown_notified(),
                     stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -5052,9 +5073,12 @@ async fn run_loop(
                         continue;
                     }
                 };
-                // Reset only for a poll that got its frame: a dropped one
-                // leaves the slow cadence due on the next tick.
-                st.poll_ticks_skipped = 0;
+                // Reset only for a poll that ran its grab: a dropped one, or
+                // one turned away by a held screenshot lock, leaves the slow
+                // cadence due on the next tick.
+                if poll_resets_cadence(&grabbed) {
+                    st.poll_ticks_skipped = 0;
+                }
                 match grabbed {
                     Err(()) => {
                         shutdown_from_signal(
@@ -9695,6 +9719,12 @@ async fn shutdown_from_signal(
                     }
                     ShutdownStage::SnapshotExport => {
                         flush_snapshot_if_dirty(store, data_dir).await;
+                        // The last queued perf.log line goes to disk before
+                        // the process ends. Bounded, off the async workers.
+                        let _ = tokio::task::spawn_blocking(|| {
+                            stat_tracker::perf_log::flush(std::time::Duration::from_millis(500))
+                        })
+                        .await;
                     }
                 }
             }
@@ -10365,6 +10395,11 @@ mod tests {
         assert!(tab_outcome_rank(&unsure) > tab_outcome_rank(&rejected));
         // A busy lock is retried and never outranks a frame already grabbed.
         assert!(tab_result(&FrameAnalysisOutcome::CaptureBusy).retries());
+        assert_eq!(
+            tab_result(&FrameAnalysisOutcome::CaptureBusy),
+            TabResult::NoFrameYet,
+            "busy is no frame yet, not a rejected board"
+        );
         assert!(
             tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss)
                 > tab_outcome_rank(&FrameAnalysisOutcome::CaptureBusy)
@@ -10712,6 +10747,45 @@ mod tests {
         assert!(!poll_slow_mode(&st, now));
         let finished = session(Some(game(detect::MatchOutcome::Defeat, Some(2), now)), now);
         assert!(!poll_slow_mode(&finished, now));
+    }
+
+    /// Debug builds run the Tab capture future on a test thread's 2 MiB
+    /// stack; an unboxed grab future grew it past that once (#432). These
+    /// bounds sit at about twice today's sizes, so boxing removed from the
+    /// capture path fails here first.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn capture_futures_stay_small() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let now = test_now();
+        let g = game(detect::MatchOutcome::Unknown, None, now);
+        let req = build_capture_request(&g, false, now);
+        let handle = handle_capture(&ctx, req);
+        let handle_size = std::mem::size_of_val(&handle);
+        drop(handle);
+        let backend = capture::CaptureBackend::None;
+        let grab = capture::capture_screen_output_for(&backend, None, capture::CaptureKind::Tab);
+        let grab_size = std::mem::size_of_val(&grab);
+        drop(grab);
+        assert!(handle_size <= HANDLE_CAPTURE_FUTURE_MAX, "{handle_size}");
+        assert!(grab_size <= CAPTURE_FUTURE_MAX, "{grab_size}");
+    }
+
+    #[test]
+    fn a_poll_turned_away_by_the_shot_lock_keeps_the_cadence_due() {
+        type Grab = Result<Result<u8, String>, ()>;
+        let busy: Grab = Ok(Err(format!(
+            "portal screenshot: {}",
+            "a previous capture request is still running"
+        )));
+        assert!(!poll_resets_cadence(&busy), "busy: the next tick polls");
+        let kwin_busy: Grab = Ok(Err(capture::kwin::KwinError::Busy.to_string()));
+        assert!(!poll_resets_cadence(&kwin_busy));
+        let frame: Grab = Ok(Ok(1));
+        assert!(poll_resets_cadence(&frame));
+        let failed: Grab = Ok(Err("screencast stream ended".into()));
+        assert!(poll_resets_cadence(&failed), "a grab that ran counts");
     }
 
     #[test]
