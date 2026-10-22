@@ -9567,10 +9567,18 @@ async fn with_bridge_hold<K, E, H>(
 /// Run a Tab's retry sequence, then end the press's stream hold
 /// ([`capture::end_tab_stream_hold`]): no grab follows, so the stream may
 /// pause while the result is analysed.
-async fn then_end_tab_hold<T>(retries: impl std::future::Future<Output = T>) -> T {
-    let out = retries.await;
-    capture::end_tab_stream_hold();
-    out
+///
+/// Not an async fn: an async wrapper keeps the retries future in its own
+/// state as well as the awaited copy, which doubled that part of
+/// `handle_capture`'s future (23,280 B in a debug build). `inspect` wraps
+/// it in place.
+fn then_end_tab_hold<F: std::future::Future>(
+    retries: F,
+) -> impl std::future::Future<Output = F::Output> {
+    use futures_util::FutureExt as _;
+    retries.inspect(|_| {
+        capture::end_tab_stream_hold();
+    })
 }
 
 /// The key event a dropped poll kept, else the next one from `next`. A kept
