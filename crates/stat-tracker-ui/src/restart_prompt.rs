@@ -612,8 +612,9 @@ mod tests {
 
     #[test]
     fn restart_prompt_shows_once_the_install_finishes_after_two_failed_probes() {
-        // install.sh puts the GUI binary in place before its libraries; the
-        // first probes fail, then the finished install answers.
+        // An install still in progress (an older install.sh put the GUI
+        // binary in place before its libraries) fails the first probes;
+        // then the finished install answers.
         let t0 = Instant::now();
         let mut watch = RestartWatch::new(OWN, Some(stamp_n(1)));
         let probe = watch

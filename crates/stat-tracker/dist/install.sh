@@ -22,6 +22,10 @@
 #   ./install.sh
 #   PREFIX=$HOME/.local ./install.sh
 set -euo pipefail
+# The in-app updater runs bootstrap.sh, and so this script, on pipes. If the
+# app exits mid-install (tray Quit), a write to its closed pipe must not kill
+# the install, so SIGPIPE is ignored and every log write ignores a failure.
+trap '' PIPE
 
 PKG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=install-paths.sh
@@ -41,10 +45,11 @@ NC='\033[0m'
 # All logging goes to stderr; stdout is reserved for any machine-parseable
 # output. Mirrors the bootstrap.sh fix (3cd2c0c): a log line on stdout there
 # shifted a mapfile parse and broke the release fetch. error() was already on
-# stderr - info()/warn() now match it.
-info()  { echo -e "${GRN}[install]${NC} $*" >&2; }
-warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
-error() { echo -e "${RED}[error ]${NC} $*" >&2; }
+# stderr - info()/warn() now match it. A failed write (stderr closed by an
+# app that quit) is not fatal.
+info()  { echo -e "${GRN}[install]${NC} $*" >&2 || true; }
+warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2 || true; }
+error() { echo -e "${RED}[error ]${NC} $*" >&2 || true; }
 
 # Destinations come from install-paths.sh so uninstall cannot drift.
 _path_or_die() {
@@ -209,7 +214,7 @@ if ! groups 2>/dev/null | grep -qw input; then
     warn "Then log out of the desktop session and log back in."
     warn "A new terminal is not enough: open sessions keep the old groups."
     warn "Continuing anyway. You can fix this later."
-    echo >&2
+    echo >&2 || true
 fi
 
 # eng.traineddata locations across distros (daemon probes these at runtime too).
@@ -259,30 +264,14 @@ else
     warn "  Fedora:  sudo dnf install tesseract-langpack-eng"
     warn "  Paths:   /usr/share/tessdata, /usr/share/tesseract-ocr/*/tessdata,"
     warn "           /usr/share/tesseract/tessdata, or TESSDATA_PREFIX"
-    echo >&2
+    echo >&2 || true
 fi
 
-# ── Install binaries ──────────────────────────────────────────────────────────
-
-mkdir -p "$BIN_DIR"
-atomic_install "$DAEMON_BIN" "$BIN_DIR/scuffed-stat-tracker" 755
-atomic_install "$GUI_BIN" "$BIN_DIR/stat-tracker-gui" 755
-MANIFEST_ENTRIES+=("$BIN_DIR/scuffed-stat-tracker" "$BIN_DIR/stat-tracker-gui")
-info "Installed binaries → $BIN_DIR"
-
-if [[ -f "$PKG_ROOT/uninstall.sh" ]]; then
-    atomic_install "$PKG_ROOT/uninstall.sh" "$BIN_DIR/scuffed-stat-tracker-uninstall" 755
-    MANIFEST_ENTRIES+=("$BIN_DIR/scuffed-stat-tracker-uninstall")
-    info "Installed uninstaller → $BIN_DIR/scuffed-stat-tracker-uninstall"
-fi
-
-# The installed uninstaller sources this from lib/scuffed-stat-tracker
-# when it is not sitting next to the script (the $PREFIX/bin copy).
-if [[ -f "$PKG_ROOT/install-paths.sh" ]]; then
-    LIST_DEST="$(_path_or_die list install-paths.sh)"
-    atomic_install "$PKG_ROOT/install-paths.sh" "$LIST_DEST" 644
-    MANIFEST_ENTRIES+=("$LIST_DEST")
-fi
+# ── Install bundled libs, then binaries ───────────────────────────────────────
+# The libs go first. An install cut off part way (the app that ran it quit,
+# a crash) must never leave a new daemon or GUI next to the old libs it was
+# not built against. Old libs this tarball replaces are removed only after
+# the new binaries are in place.
 
 # Bundled native libs (portable releases). Never dump into $PREFIX/lib itself:
 # v0.4.0 put Ubuntu 22.04 libcrypto.so.3 there, and both binaries' RUNPATH
@@ -344,6 +333,26 @@ elif [[ -d "$PKG_ROOT/lib" ]] && compgen -G "$PKG_ROOT/lib/*" >/dev/null; then
         count=$((count + 1))
     done
     info "Installed $count bundled libs → $BUNDLE_DEST/ocr"
+fi
+
+mkdir -p "$BIN_DIR"
+atomic_install "$DAEMON_BIN" "$BIN_DIR/scuffed-stat-tracker" 755
+atomic_install "$GUI_BIN" "$BIN_DIR/stat-tracker-gui" 755
+MANIFEST_ENTRIES+=("$BIN_DIR/scuffed-stat-tracker" "$BIN_DIR/stat-tracker-gui")
+info "Installed binaries → $BIN_DIR"
+
+if [[ -f "$PKG_ROOT/uninstall.sh" ]]; then
+    atomic_install "$PKG_ROOT/uninstall.sh" "$BIN_DIR/scuffed-stat-tracker-uninstall" 755
+    MANIFEST_ENTRIES+=("$BIN_DIR/scuffed-stat-tracker-uninstall")
+    info "Installed uninstaller → $BIN_DIR/scuffed-stat-tracker-uninstall"
+fi
+
+# The installed uninstaller sources this from lib/scuffed-stat-tracker
+# when it is not sitting next to the script (the $PREFIX/bin copy).
+if [[ -f "$PKG_ROOT/install-paths.sh" ]]; then
+    LIST_DEST="$(_path_or_die list install-paths.sh)"
+    atomic_install "$PKG_ROOT/install-paths.sh" "$LIST_DEST" 644
+    MANIFEST_ENTRIES+=("$LIST_DEST")
 fi
 
 # Upgrade cleanup: v0.4.0 wrote sonames into $PREFIX/lib (the GUI RUNPATH).
@@ -516,9 +525,11 @@ info "Wrote install manifest → $MANIFEST"
 
 # ── Smoke check ───────────────────────────────────────────────────────────────
 
+SMOKE_OK=0
 if ! "$BIN_DIR/scuffed-stat-tracker" --version >/dev/null 2>&1; then
     warn "daemon --version failed. Missing host libs (display stack/evdev) or bundled OCR libs not at \$ORIGIN/../lib/scuffed-stat-tracker/ocr?"
 else
+    SMOKE_OK=1
     info "daemon binary runs ($("$BIN_DIR/scuffed-stat-tracker" --version))"
 fi
 
@@ -546,6 +557,30 @@ if [[ "$appindicator_found" -eq 0 ]]; then
     warn "  Fedora:        sudo dnf install libayatana-appindicator-gtk3"
     warn "  Arch:          sudo pacman -S libayatana-appindicator"
     warn "AerynOS may not ship this package; the window still works."
+fi
+
+# ── Autostart ─────────────────────────────────────────────────────────────────
+# The in-app updater stops the tracker before it installs and starts it again
+# when the install ends. If the app quit during the install, start it here,
+# but only when the stop came from this update (see start_enabled_daemon).
+# bootstrap.sh exports STAT_TRACKER_BOOTSTRAP_STARTED; a plain ./install.sh
+# run has none and never starts the unit.
+if [[ "$INSTALLED_UNITS" -eq 1 ]]; then
+    case "$(start_enabled_daemon "$SYSTEMCTL_BIN" "${STAT_TRACKER_BOOTSTRAP_STARTED:-}" "$SMOKE_OK")" in
+        started)
+            info "Starting the tracker service again (this update had stopped it)"
+            ;;
+        failed)
+            warn "Autostart is on, but the tracker service did not start."
+            warn "Start it from the app, or run: systemctl --user start $UNIT"
+            ;;
+        skip-smoke)
+            info "The tracker service is stopped. Not starting it: the daemon --version check failed."
+            ;;
+        skip-*)
+            info "The tracker service is stopped. Start it from the app when you want it."
+            ;;
+    esac
 fi
 
 # ── Done ──────────────────────────────────────────────────────────────────────
@@ -584,4 +619,4 @@ fi
     echo
     echo "  Source rebuilds (dev): crates/stat-tracker/install.sh (requires cargo)."
     echo
-} >&2
+} >&2 || true

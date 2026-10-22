@@ -31,6 +31,10 @@
 #   STAT_TRACKER_MINISIGN_PUB
 #                       optional path to a minisign .pub file, or the file
 #                       contents. Empty default: no key is shipped in git.
+#   STAT_TRACKER_BOOTSTRAP_STARTED
+#                       set by this script (epoch seconds) for install.sh,
+#                       which starts a stopped tracker again only when it
+#                       stopped right before the install began.
 #   SKIP_INTEGRATION    non-empty ⇒ install binaries/libs only (no desktop entry
 #                       or systemd unit); use for throwaway-PREFIX smoke tests
 #   STAT_TRACKER_BOOTSTRAP_FETCH_CMD
@@ -46,6 +50,10 @@
 # The script prints `sudo pacman -R <pkg>` or `sudo apt remove <pkg>`.
 # An AppImage is a script install, not a package.
 set -euo pipefail
+# The in-app updater runs this script on pipes. If the app exits mid-install
+# (tray Quit), a write to its closed pipe must not kill the install, so
+# SIGPIPE is ignored and the log helpers below ignore a failed write.
+trap '' PIPE
 
 REPO="${STAT_TRACKER_REPO:-FrozenTear/scuffed-crew}"
 ASSET_NAME="scuffed-stat-tracker-linux-x86_64.tar.gz"
@@ -67,9 +75,10 @@ NC='\033[0m'
 # All logging goes to stderr: resolve_release's stdout is machine-parsed
 # (mapfile below), so a single echo to stdout shifts tag/url/sha by one line
 # and the tag ends up passed to curl as a hostname.
-info()  { echo -e "${GRN}[bootstrap]${NC} $*" >&2; }
-warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
-error() { echo -e "${RED}[error ]${NC} $*" >&2; }
+# A failed write (stderr closed by an app that quit) is not fatal.
+info()  { echo -e "${GRN}[bootstrap]${NC} $*" >&2 || true; }
+warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2 || true; }
+error() { echo -e "${RED}[error ]${NC} $*" >&2 || true; }
 
 need() {
     command -v "$1" &>/dev/null || { error "need '$1' on PATH"; exit 1; }
@@ -246,6 +255,102 @@ pick_release_tag() {
     esac
 }
 
+# The release list is read page by page. Releases that do not ship the
+# tracker (site-*) share this list, so the newest stable tracker release can
+# sit far down it. /releases/latest is not used: a site-* release can take it.
+RELEASE_PAGE_SIZE=100
+RELEASE_MAX_PAGES=5
+
+# One page of the release list (JSON array) on stdout.
+fetch_release_page() {
+    curl_https "${GH_HEADERS[@]}" "${API}?per_page=${RELEASE_PAGE_SIZE}&page=$1"
+}
+
+# Number of releases in the JSON array on stdin.
+release_page_len() {
+    python3 -c '
+import json,sys
+page=json.load(sys.stdin)
+if not isinstance(page, list):
+    msg=page.get("message") if isinstance(page, dict) else None
+    sys.stderr.write("GitHub release list is not a list%s\n" % (": %s" % msg if msg else ""))
+    sys.exit(1)
+print(len(page))
+'
+}
+
+# Concatenated JSON arrays on stdin, one merged array on stdout. A release
+# seen twice (the list moved between two page reads) is kept once.
+merge_release_pages() {
+    python3 -c '
+import json,sys
+text=sys.stdin.read()
+dec=json.JSONDecoder()
+merged=[]
+seen=set()
+pos=0
+while True:
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    if pos >= len(text):
+        break
+    page, pos = dec.raw_decode(text, pos)
+    if not isinstance(page, list):
+        sys.stderr.write("GitHub release list is not a list\n")
+        sys.exit(1)
+    for r in page:
+        key = r.get("id") if isinstance(r, dict) else None
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        merged.append(r)
+json.dump(merged, sys.stdout)
+'
+}
+
+# The release list as one JSON array. Reads pages until one holds a stable
+# release that ships the asset (as choose_release_tags sees it), a page
+# comes back short, or RELEASE_MAX_PAGES pages were read. A failed page
+# after the first ends the list there: the pages read are printed and the
+# return is 3, so the caller knows the list was cut short.
+fetch_release_listing() {
+    local page=1 body count all="" stable_tag pre_tag cut=0
+    while :; do
+        if ! body="$(fetch_release_page "$page")" \
+            || ! count="$(release_page_len <<<"$body")"; then
+            # Page 1 is the whole answer when it fails. A later page (rate
+            # limit, error) only extends the search: use what was read.
+            if (( page == 1 )); then
+                return 1
+            fi
+            if (( page == 2 )); then
+                warn "Could not read page 2 of the release list; using page 1."
+            else
+                warn "Could not read page ${page} of the release list; using pages 1 to $((page - 1))."
+            fi
+            cut=1
+            break
+        fi
+        all="$(printf '%s\n%s\n' "$all" "$body" | merge_release_pages)" || return 1
+        if (( count < RELEASE_PAGE_SIZE || page >= RELEASE_MAX_PAGES )); then
+            break
+        fi
+        stable_tag=""
+        pre_tag=""
+        { read -r stable_tag; read -r pre_tag; } \
+            < <(choose_release_tags "$ASSET_NAME" <<<"$all" 2>/dev/null) || true
+        if [[ -n "$stable_tag" ]]; then
+            break
+        fi
+        page=$((page + 1))
+    done
+    printf '%s\n' "$all"
+    if (( cut )); then
+        return 3
+    fi
+}
+
 # Resolve asset download URL plus optional sha256 and minisign companions.
 resolve_release() {
     local json url tag
@@ -254,12 +359,25 @@ resolve_release() {
         json="$(curl_https "${GH_HEADERS[@]}" "${API}/tags/${STAT_TRACKER_TAG}")"
     else
         info "Fetching latest GitHub releases for ${REPO}…"
-        json="$(curl_https "${GH_HEADERS[@]}" "${API}?per_page=20")"
+        local listing_cut=0 listing_rc=0
+        json="$(fetch_release_listing)" || listing_rc=$?
+        case "$listing_rc" in
+            0) ;;
+            3) listing_cut=1 ;;
+            *) exit 1 ;;
+        esac
         # Newest stable that ships our asset, and a prerelease only when it
         # is newer than that stable. Drafts are skipped. No prompt.
         local stable_tag pre_tag chosen
         { read -r stable_tag; read -r pre_tag; } < <(choose_release_tags "$ASSET_NAME" <<<"$json")
         if [[ -z "$stable_tag" && -z "$pre_tag" ]]; then
+            exit 1
+        fi
+        # A list cut short by an error may hide the stable release. Do not
+        # fall back to a prerelease for that: only an asked-for prerelease
+        # channel may use what was read.
+        if (( listing_cut )) && [[ -z "$stable_tag" && "${STAT_TRACKER_CHANNEL:-}" != prerelease ]]; then
+            error "GitHub's release list was cut short before a stable release was found. Try again later, or set STAT_TRACKER_CHANNEL=prerelease, or pin STAT_TRACKER_TAG."
             exit 1
         fi
         chosen="$(pick_release_tag "$stable_tag" "$pre_tag" "${STAT_TRACKER_CHANNEL:-}")"
@@ -300,6 +418,10 @@ print(sig or "")
 ' "$ASSET_NAME" <<<"$json"
 }
 
+error_no_release() {
+    error "No release to install: could not read the release list from GitHub (offline or rate-limited), or no release matched (see above)."
+}
+
 resolve_handoff_tag() {
     if [[ -n "${STAT_TRACKER_TAG:-}" ]]; then
         printf '%s\n' "$STAT_TRACKER_TAG"
@@ -319,6 +441,10 @@ maybe_reexec_tag_bootstrap() {
     fi
     local tag url dest
     tag="$(resolve_handoff_tag)"
+    if [[ -z "$tag" ]]; then
+        error_no_release
+        exit 1
+    fi
     assert_safe_tag "$tag" || exit 1
     url="$(bootstrap_url_for_ref "$tag")"
     dest="$(mktemp -t scuffed-bootstrap-XXXXXX.sh)"
@@ -336,6 +462,13 @@ maybe_reexec_tag_bootstrap() {
     chmod +x "$dest"
     export STAT_TRACKER_BOOTSTRAP_PINNED=1
     export STAT_TRACKER_TAG="$tag"
+    # An ignored SIGPIPE carries over exec. The tag's script and the
+    # installer it unpacks may predate the trap at the top of this file and
+    # read lists with early-closing pipes; ignoring SIGPIPE there turns a
+    # quiet stop into "write error: Broken pipe" lines. Hand over the
+    # default, as before this file set the trap. A tag that has the trap
+    # sets it again itself.
+    trap - PIPE
     exec bash "$dest"
 }
 
@@ -606,6 +739,15 @@ case "$CHANNEL" in
         ;;
 esac
 
+# When this install began, handed to install.sh: it starts the tracker
+# again only when the tracker stopped right before this (the in-app
+# updater's stop), never a stop from long before. A re-exec keeps the
+# first copy's time.
+if [[ ! "${STAT_TRACKER_BOOTSTRAP_STARTED:-}" =~ ^[1-9][0-9]*$ ]]; then
+    STAT_TRACKER_BOOTSTRAP_STARTED="$(date +%s)"
+fi
+export STAT_TRACKER_BOOTSTRAP_STARTED
+
 need curl
 need tar
 need mktemp
@@ -625,7 +767,11 @@ fi
 maybe_reexec_tag_bootstrap
 
 mapfile -t _rel < <(resolve_release)
-TAG="${_rel[0]}"
+TAG="${_rel[0]:-}"
+if [[ -z "$TAG" ]]; then
+    error_no_release
+    exit 1
+fi
 URL="${_rel[1]}"
 SHA_URL="${_rel[2]:-}"
 SIG_URL="${_rel[3]:-}"

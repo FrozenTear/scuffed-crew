@@ -4,6 +4,11 @@
 # nothing. An extra file next to an installed file must survive. Keep-data
 # leaves config.toml in place.
 set -euo pipefail
+# Never reach the real user manager. install.sh, uninstall.sh and
+# import-session-env.sh call `systemctl --user` through SCUFFED_SYSTEMCTL;
+# unset, a local run would stop and disable the developer's own tracker.
+# Checks that need a recording stand-in pass their own on the command.
+export SCUFFED_SYSTEMCTL=/bin/true
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
@@ -557,5 +562,35 @@ out="$(env HOME="$HOME_DIR" PREFIX="$PREFIX" \
 grep -q 'delete it by hand' <<< "$out" || fail "no hint for crops behind a link"
 rm -f "$LINKED" "$HOME_DIR/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf"
 pass "own-name crops outside home or behind a link are left, with a hint"
+
+# install.sh and bootstrap.sh ignore SIGPIPE, so a lookup that stopped
+# reading at its match would leave the list writer on a closed pipe and
+# print "write error: Broken pipe". The writer here sends the match first,
+# waits, then writes the rest; every write must still land.
+DRAIN_OK="$TMP/drain-ok"
+rm -f "$DRAIN_OK"
+set +e
+drain_err="$(
+    bash -c '
+        trap "" PIPE
+        source "$1"
+        drain_ok="$2"
+        expanded_install_paths() {
+            printf "%s\n" "bin always /p/bin/scuffed-stat-tracker"
+            sleep 0.3
+            local i
+            for ((i = 0; i < 20; i++)); do
+                printf "%s\n" "data purge /h/.local/share/x$i" || exit 1
+            done
+            : > "$drain_ok"
+        }
+        install_path_named /h /p bin scuffed-stat-tracker
+    ' _ "$PATHS" "$DRAIN_OK" 2>&1
+)"
+set -e
+[[ "$drain_err" == "/p/bin/scuffed-stat-tracker" ]] \
+    || fail "lookup printed more than the path: $drain_err"
+[[ -f "$DRAIN_OK" ]] || fail "lookup stopped reading at its match"
+pass "path lookup reads the whole list (no broken pipe with SIGPIPE ignored)"
 
 echo "all uninstall path checks passed"

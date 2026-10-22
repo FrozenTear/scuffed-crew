@@ -283,8 +283,10 @@ grep -q 'requirements footer contains an en dash' "$TMP/guard.err" \
 pass "en dash in the footer exits 1 through the whole-notes guard"
 
 # Every stat-tracker-v* body has a terminal update pinned to that tag, so a
-# player whose in-app Update button does not offer the release can still
-# update. Other tags (manual drafts) do not host bootstrap.sh and skip it.
+# player can still update when the in-app update fails. An older app shows
+# the body inside its own Update offer, so the lead must point at the Update
+# button first. Other tags (manual drafts) do not host bootstrap.sh and skip
+# it.
 term_out="$(bash "$NOTES" --tag stat-tracker-v9.9.9-rc7 --changelog "$TMP/empty.md" --skip-commits)"
 printf '%s\n' "$term_out" | grep -qx '## Update from the terminal' \
   || fail "release notes are missing the Update from the terminal section"
@@ -297,6 +299,10 @@ printf '%s\n' "$term_out" | grep -qF 'About shows 9.9.9-rc7.' \
   || fail "terminal update does not name the version About shows"
 printf '%s\n' "$term_out" | grep -qF 'This is for the tarball install.' \
   || fail "terminal update does not say it is for the tarball install"
+printf '%s\n' "$term_out" | grep -qF 'Prefer the Update button in the app. If it fails or does not offer this release, close the app and paste this in a terminal.' \
+  || fail "terminal update lead does not put the Update button first: $(printf '%s\n' "$term_out" | grep -F 'tarball install')"
+printf '%s\n' "$term_out" | grep -qF 'If the Update button in the app does not offer this release' \
+  && fail "terminal update still leads with the button not offering the release"
 printf '%s\n' "$term_out" | grep -qF 'If you installed from the AUR, update with your AUR helper instead' \
   || fail "terminal update does not send AUR users to their AUR helper"
 manual_out="$(bash "$NOTES" --tag stat-tracker-manual-9 --changelog "$TMP/empty.md" --skip-commits)"
@@ -361,3 +367,50 @@ printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker: fix a thing (#3)' \
 printf '%s\n' "$git_out" | grep -q 'HOLD-MERGE' \
   && fail "git log path still contains HOLD-MERGE: $git_out"
 pass "commits since the previous tag drop HOLD-MERGE markers"
+
+# A stable tag lists the commits since the previous stable tag, not since
+# the rc tags cut between the two stables. An rc tag still lists the
+# commits since the newest tag of any kind. Own repo, with fixed dates, so
+# the tag order by creatordate does not depend on the clock.
+STABLE_REPO="$TMP/stable-repo"
+mkdir -p "$STABLE_REPO/crates/stat-tracker/dist"
+cp "$NOTES" "$STABLE_REPO/crates/stat-tracker/dist/release-notes.sh"
+printf '%s\n' '## 7.9.0' '' 'Stable summary.' '' '## 7.9.0-rc.2' '' 'Rc summary.' \
+  > "$STABLE_REPO/crates/stat-tracker/CHANGELOG.md"
+sgit() {
+  git -C "$STABLE_REPO" -c user.name=test -c user.email=test@example.invalid \
+    -c commit.gpgsign=false -c tag.gpgsign=false "$@" >/dev/null
+}
+dated_commit() {
+  local when="$1" name="$2" msg="$3"
+  echo "$name" > "$STABLE_REPO/crates/stat-tracker/$name.txt"
+  sgit add -A
+  GIT_AUTHOR_DATE="$when" GIT_COMMITTER_DATE="$when" sgit commit -q -m "$msg"
+}
+dated_tag() {
+  GIT_COMMITTER_DATE="$1" sgit tag -a -m "$2" "$2"
+}
+sgit init -q
+dated_commit 2026-01-01T00:00:00Z base 'stat-tracker: base (#9)'
+dated_tag 2026-01-01T00:00:01Z stat-tracker-v7.8.0
+dated_commit 2026-01-02T00:00:00Z c1 'stat-tracker: before rc.1 (#10)'
+dated_tag 2026-01-02T00:00:01Z stat-tracker-v7.9.0-rc.1
+dated_commit 2026-01-03T00:00:00Z c2 'stat-tracker: before rc.2 (#11)'
+dated_tag 2026-01-03T00:00:01Z stat-tracker-v7.9.0-rc.2
+dated_commit 2026-01-04T00:00:00Z c3 'stat-tracker: after rc.2 (#12)'
+dated_tag 2026-01-04T00:00:01Z stat-tracker-v7.9.0
+stable_out="$(bash "$STABLE_REPO/crates/stat-tracker/dist/release-notes.sh" --tag stat-tracker-v7.9.0)"
+printf '%s\n' "$stable_out" | grep -qx '## Commits since v7.8.0' \
+  || fail "stable notes did not list commits since the previous stable: $stable_out"
+for subject in 'before rc.1 (#10)' 'before rc.2 (#11)' 'after rc.2 (#12)'; do
+  printf '%s\n' "$stable_out" | grep -qxF -- "- stat-tracker: $subject" \
+    || fail "stable notes lost '$subject': $stable_out"
+done
+printf '%s\n' "$stable_out" | grep -qF -- '- stat-tracker: base (#9)' \
+  && fail "stable notes listed a commit from before the previous stable: $stable_out"
+printf '%s\n' "$stable_out" | grep -q 'Commits since v7.9.0-rc' \
+  && fail "stable notes listed commits since an rc: $stable_out"
+rc_out="$(bash "$STABLE_REPO/crates/stat-tracker/dist/release-notes.sh" --tag stat-tracker-v7.9.0-rc.2)"
+printf '%s\n' "$rc_out" | grep -qx '## Commits since v7.9.0' \
+  || fail "rc notes did not list commits since the newest tag: $rc_out"
+pass "a stable tag lists commits since the previous stable, past the rc tags"

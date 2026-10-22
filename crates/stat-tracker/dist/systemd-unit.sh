@@ -102,6 +102,85 @@ restart_running_daemon() {
     return 0
 }
 
+# Start the daemon unit again after an in-app update, when nothing else
+# will. The updater stops a running tracker, runs bootstrap.sh, and starts
+# the tracker when the install ends; an app that quit mid-install never
+# does that last step. The installer cannot tell that stop from a player's
+# own Stop, so it starts the unit only when all of these hold:
+#   - autostart is on (enabled) and the unit is stopped (inactive; a failed
+#     unit is left for the player to see);
+#   - the daemon just installed runs ($3 = 1 after the --version check);
+#   - the unit stopped no more than 2 minutes before bootstrap.sh began
+#     ($2, epoch seconds), and not after now (see unit_stop_epoch);
+#   - a graphical session is up (graphical-session.target is active).
+# Prints one word: "started", "failed", or "skip-<reason>". Prints nothing
+# when the unit is not an enabled, stopped one. --no-block: the 0.4.24
+# updater waits on this install with no timeout. Never fails the install.
+# Epoch seconds when the unit last stopped (InactiveEnterTimestamp), or
+# return 1. --timestamp=unix needs systemd 251; Ubuntu 22.04 and Debian 11
+# ship older ones, so fall back to --timestamp=utc (247+), then the default
+# form, read with date -d. Not the ...Monotonic value: compared with
+# /proc/uptime it drifts after a suspend.
+unit_stop_epoch() {
+    local systemctl_bin="$1" unit="$2" value fmt
+    value="$("$systemctl_bin" --user show --timestamp=unix \
+        -p InactiveEnterTimestamp --value "$unit" 2>/dev/null)" || value=""
+    if [[ "$value" =~ ^@[0-9]+$ ]]; then
+        printf '%s\n' "${value#@}"
+        return 0
+    fi
+    for fmt in --timestamp=utc ""; do
+        value="$("$systemctl_bin" --user show ${fmt:+"$fmt"} \
+            -p InactiveEnterTimestamp --value "$unit" 2>/dev/null)" || value=""
+        [[ -n "$value" ]] || continue
+        value="$(date -d "$value" +%s 2>/dev/null)" || value=""
+        if [[ "$value" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done
+    return 1
+}
+
+start_enabled_daemon() {
+    local systemctl_bin="$1" since="${2:-}" smoke_ok="${3:-0}"
+    local unit="scuffed-stat-tracker.service"
+    local enabled active stopped_at now
+    enabled="$("$systemctl_bin" --user is-enabled "$unit" 2>/dev/null)" || true
+    case "$enabled" in
+        enabled|enabled-runtime) ;;
+        *) return 0 ;;
+    esac
+    active="$("$systemctl_bin" --user is-active "$unit" 2>/dev/null)" || true
+    [[ "$active" == inactive ]] || return 0
+    if [[ "$smoke_ok" != 1 ]]; then
+        echo skip-smoke
+        return 0
+    fi
+    # No leading zero: bash would read 08 as a bad octal number.
+    if [[ ! "$since" =~ ^[1-9][0-9]*$ ]]; then
+        echo skip-no-bootstrap
+        return 0
+    fi
+    stopped_at="$(unit_stop_epoch "$systemctl_bin" "$unit")" || stopped_at=""
+    now="$(date +%s)"
+    if [[ ! "$stopped_at" =~ ^[1-9][0-9]*$ ]] \
+        || (( stopped_at < since - 120 || stopped_at > now )); then
+        echo skip-stopped-earlier
+        return 0
+    fi
+    if ! "$systemctl_bin" --user is-active --quiet graphical-session.target 2>/dev/null; then
+        echo skip-no-session
+        return 0
+    fi
+    if "$systemctl_bin" --user start --no-block "$unit" 2>/dev/null; then
+        echo started
+    else
+        echo failed
+    fi
+    return 0
+}
+
 # Absolute data_dir from config.toml, or empty. Relative paths are skipped:
 # the unit cannot name them.
 data_dir_from_config() {
@@ -178,7 +257,7 @@ install_data_dir_dropin() {
         return 0
     fi
     if [[ -f "$drop" ]] && ! grep -q 'scuffed-stat-tracker data_dir drop-in' "$drop"; then
-        echo "leaving $drop alone (not written by this installer)" >&2
+        echo "leaving $drop alone (not written by this installer)" >&2 || true
         return 0
     fi
     if ! data_dir="$(data_dir_from_config "$cfg")" || data_dir_covered_by_unit "$data_dir" "$home"; then

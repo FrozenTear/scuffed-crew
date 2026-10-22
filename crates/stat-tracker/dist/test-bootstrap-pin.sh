@@ -92,6 +92,46 @@ got="$(cat "$TMP/url")"
 [[ "$got" != *"/main/"* ]] || fail "re-exec fetched main"
 pass "unpinned run re-execs the tag bootstrap"
 
+# The tag's script (an older one has no trap) must get the default SIGPIPE
+# back, the way it ran before main set the trap. A shell that began with
+# SIGPIPE ignored (the CI runner's does) cannot undo that, so the check
+# runs in a bash that python starts with the default disposition. SIGPIPE
+# is signal 13: bit 12 of SigIgn.
+if [[ -r /proc/self/status ]]; then
+    cat > "$TMP/fetch-sig-state" << EOF
+#!/bin/bash
+cat > "\$2" << 'SCRIPT'
+#!/bin/bash
+sed -n 's/^SigIgn:[[:space:]]*//p' /proc/self/status
+SCRIPT
+EOF
+    chmod +x "$TMP/fetch-sig-state"
+    # shellcheck disable=SC2016 # $1, $2 and $$ are expanded by the inner bash
+    mapfile -t masks < <(
+        python3 -c '
+import os, signal, sys
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+os.execvp("bash", ["bash"] + sys.argv[1:])
+' -c '
+            set -euo pipefail
+            sed -n "s/^SigIgn:[[:space:]]*//p" /proc/$$/status
+            STAT_TRACKER_BOOTSTRAP_LIB_ONLY=1 source "$1"
+            sed -n "s/^SigIgn:[[:space:]]*//p" /proc/$$/status
+            STAT_TRACKER_TAG=stat-tracker-v0.4.7 \
+            STAT_TRACKER_BOOTSTRAP_PINNED="" \
+            STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$2" \
+            maybe_reexec_tag_bootstrap
+        ' _ "$BOOTSTRAP" "$TMP/fetch-sig-state"
+    )
+    [[ "${#masks[@]}" -eq 3 ]] || fail "SIGPIPE probe printed: ${masks[*]}"
+    pipe_bit() { echo $(( (16#$1 >> 12) & 1 )); }
+    [[ "$(pipe_bit "${masks[0]}")" -eq 0 ]] || fail "probe bash did not start with the default SIGPIPE"
+    [[ "$(pipe_bit "${masks[1]}")" -eq 1 ]] || fail "sourcing bootstrap.sh did not ignore SIGPIPE"
+    [[ "$(pipe_bit "${masks[2]}")" -eq 0 ]] \
+        || fail "re-exec kept SIGPIPE ignored (SigIgn ${masks[2]})"
+    pass "re-exec hands the tag script the default SIGPIPE"
+fi
+
 set +e
 unsafe="$(
     STAT_TRACKER_TAG='../evil' \
@@ -146,50 +186,58 @@ set -e
 [[ "$no_tool" != *"Signature check skipped"* ]] || fail "missing minisign fell back"
 pass "key plus .minisig refuses when minisign is not installed"
 
-if ! command -v minisign >/dev/null 2>&1; then
+# A real signature round trip needs minisign. CI installs it; a dev box
+# without it skips only this part, so the checks after it still run.
+if ! command -v minisign >/dev/null 2>&1 && [[ -n "${CI:-}" ]]; then
     # CI only. A dead mirror must fail in minutes, not hang the release job.
     apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
     sudo timeout 180 apt-get "${apt_opts[@]}" update -qq
     sudo timeout 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends minisign
 fi
-command -v minisign >/dev/null 2>&1 || fail "minisign is required to test signature verify"
-
+if [[ -n "${CI:-}" ]]; then
+    command -v minisign >/dev/null 2>&1 || fail "minisign is required to test signature verify"
+fi
 printf 'payload\n' > "$TMP/payload"
-# -W: empty password, no prompt. The secret key stays in $TMP and is removed
-# with the test directory. Do not commit it.
-minisign -G -p "$TMP/minisign.pub" -s "$TMP/minisign.key" -W >/dev/null
-# Distinct from ${asset}.minisig, which is where verify_release_signature
-# writes the downloaded signature. Copying a file onto itself fails.
-minisign -S -s "$TMP/minisign.key" -m "$TMP/payload" -x "$TMP/good.minisig" -W >/dev/null
+if ! command -v minisign >/dev/null 2>&1; then
+    echo "SKIP: minisign is not installed; the real-signature checks did not run (CI runs them)" >&2
+else
+    printf 'payload\n' > "$TMP/payload"
+    # -W: empty password, no prompt. The secret key stays in $TMP and is removed
+    # with the test directory. Do not commit it.
+    minisign -G -p "$TMP/minisign.pub" -s "$TMP/minisign.key" -W >/dev/null
+    # Distinct from ${asset}.minisig, which is where verify_release_signature
+    # writes the downloaded signature. Copying a file onto itself fails.
+    minisign -S -s "$TMP/minisign.key" -m "$TMP/payload" -x "$TMP/good.minisig" -W >/dev/null
 
-cat > "$TMP/fetch-sig" << EOF
+    cat > "$TMP/fetch-sig" << EOF
 #!/bin/bash
 cp "$TMP/good.minisig" "\$2"
 EOF
-chmod +x "$TMP/fetch-sig"
-good="$(
-    STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
-    STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
-    SIG_URL="https://example.invalid/payload.minisig" \
-    verify_release_signature "$TMP/payload" 2>&1
-)"
-[[ "$good" == *"minisign ok"* ]] || fail "good signature was not accepted: $good"
-pass "key plus good .minisig verifies"
+    chmod +x "$TMP/fetch-sig"
+    good="$(
+        STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
+        STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
+        SIG_URL="https://example.invalid/payload.minisig" \
+        verify_release_signature "$TMP/payload" 2>&1
+    )"
+    [[ "$good" == *"minisign ok"* ]] || fail "good signature was not accepted: $good"
+    pass "key plus good .minisig verifies"
 
-printf 'tampered\n' > "$TMP/payload"
-set +e
-bad="$(
-    STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
-    STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
-    SIG_URL="https://example.invalid/payload.minisig" \
-    verify_release_signature "$TMP/payload" 2>&1
-)"
-bad_code=$?
-set -e
-[[ "$bad_code" -ne 0 ]] || fail "bad signature was accepted"
-[[ "$bad" == *"signature verification failed"* ]] || fail "bad-sig error was: $bad"
-[[ "$bad" != *"Signature check skipped"* ]] || fail "bad signature fell back to sha256"
-pass "key plus bad .minisig refuses to install"
+    printf 'tampered\n' > "$TMP/payload"
+    set +e
+    bad="$(
+        STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
+        STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
+        SIG_URL="https://example.invalid/payload.minisig" \
+        verify_release_signature "$TMP/payload" 2>&1
+    )"
+    bad_code=$?
+    set -e
+    [[ "$bad_code" -ne 0 ]] || fail "bad signature was accepted"
+    [[ "$bad" == *"signature verification failed"* ]] || fail "bad-sig error was: $bad"
+    [[ "$bad" != *"Signature check skipped"* ]] || fail "bad signature fell back to sha256"
+    pass "key plus bad .minisig refuses to install"
+fi
 
 # sha256 verify and the signature check both run before extract.
 sha_line="$(grep -n 'Verifying sha256' "$BOOTSTRAP" | tail -1 | cut -d: -f1)"
@@ -376,5 +424,219 @@ pre_pick="$(pick_release_tag stat-tracker-v0.4.24 stat-tracker-v0.5.0-alpha.1 pr
 [[ "$pre_pick" == "stat-tracker-v0.5.0-alpha.1" ]] || fail "prerelease channel picked $pre_pick"
 grep -F 'Install [s]table' "$BOOTSTRAP" >/dev/null && fail "bootstrap still prompts for a prerelease"
 pass "stable skips the alpha unless the channel is prerelease"
+
+# The release list is paged. site-* releases share it, so the only stable
+# tracker release can sit past item 20 (0.4.24 was item 18 of 20 at rc.7).
+# fetch_release_page is swapped for a reader of fixture pages; the pages
+# come newest first, the way GitHub lists releases.
+PAGES="$TMP/pages"
+mkdir -p "$PAGES"
+# make_page FILE SPEC...: SPEC is tag:kind with kind stable, pre or site
+# (site ships no tracker asset).
+make_page() {
+    python3 - "$@" <<'PY'
+import json, sys, zlib
+out = sys.argv[1]
+asset = "scuffed-stat-tracker-linux-x86_64.tar.gz"
+page = []
+for spec in sys.argv[2:]:
+    tag, kind = spec.rsplit(":", 1)
+    assets = [] if kind == "site" else [
+        {"name": asset, "browser_download_url": "https://example.invalid/%s/%s" % (tag, asset)},
+        {"name": asset + ".sha256", "browser_download_url": "https://example.invalid/%s/%s.sha256" % (tag, asset)},
+    ]
+    page.append({"id": zlib.crc32(tag.encode()), "tag_name": tag, "draft": False,
+                 "prerelease": kind == "pre", "assets": assets})
+with open(out, "w") as fh:
+    json.dump(page, fh, indent=2)
+PY
+}
+# fill N PREFIX KIND: N specs PREFIX1..PREFIXN of one kind.
+fill() {
+    local n="$1" prefix="$2" kind="$3" i
+    for ((i = 1; i <= n; i++)); do
+        printf '%s%s:%s\n' "$prefix" "$i" "$kind"
+    done
+}
+fetch_release_page() {
+    printf '%s\n' "$1" >> "$PAGES/fetched"
+    [[ -f "$PAGES/page-$1.json" ]] || return 22
+    cat "$PAGES/page-$1.json"
+}
+reset_pages() {
+    rm -f "$PAGES"/page-*.json "$PAGES/fetched"
+}
+fetched_pages() {
+    tr '\n' ' ' < "$PAGES/fetched" | sed 's/ $//'
+}
+
+# Stable at item 31 of a full first page: one request, stable found.
+reset_pages
+mapfile -t specs < <(
+    fill 12 site-2026-10- site
+    fill 18 stat-tracker-v0.5.0-rc. pre
+    echo stat-tracker-v0.4.24:stable
+    fill 69 site-2026-09- site
+)
+[[ "${#specs[@]}" -eq 100 ]] || fail "fixture page 1 has ${#specs[@]} releases"
+make_page "$PAGES/page-1.json" "${specs[@]}"
+make_page "$PAGES/page-2.json" stat-tracker-v0.4.23:stable
+listing="$(fetch_release_listing)"
+[[ "$(fetched_pages)" == "1" ]] || fail "stable on page 1 still read pages: $(fetched_pages)"
+mapfile -t picked < <(choose_release_tags "$ASSET" <<<"$listing")
+[[ "${picked[0]}" == "stat-tracker-v0.4.24" ]] || fail "stable at item 31 was ${picked[0]}"
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-rc.18" ]] || fail "prerelease beside it was ${picked[1]}"
+pass "stable past item 20 is found on a 100-release page"
+
+# A full page with no stable: page 2 is read, and paging stops there.
+reset_pages
+mapfile -t specs < <(fill 60 site-a- site; fill 40 stat-tracker-v0.5.0-rc. pre)
+make_page "$PAGES/page-1.json" "${specs[@]}"
+mapfile -t specs < <(fill 4 site-b- site; echo stat-tracker-v0.4.24:stable; fill 95 site-c- site)
+make_page "$PAGES/page-2.json" "${specs[@]}"
+mapfile -t specs < <(fill 100 site-d- site)
+make_page "$PAGES/page-3.json" "${specs[@]}"
+listing="$(fetch_release_listing)"
+[[ "$(fetched_pages)" == "1 2" ]] || fail "stable on page 2 read pages: $(fetched_pages)"
+mapfile -t picked < <(choose_release_tags "$ASSET" <<<"$listing")
+[[ "${picked[0]}" == "stat-tracker-v0.4.24" ]] || fail "stable on page 2 was ${picked[0]}"
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-rc.40" ]] || fail "prerelease from page 1 was ${picked[1]}"
+pass "a stable on page 2 is found and page 3 is not read"
+
+# resolve_release end to end on those pages, stable channel: tag, asset,
+# and sha256 of the page-2 stable.
+rm -f "$PAGES/fetched"
+mapfile -t resolved < <(STAT_TRACKER_TAG='' STAT_TRACKER_CHANNEL=stable resolve_release 2>/dev/null)
+[[ "${resolved[0]:-}" == "stat-tracker-v0.4.24" ]] || fail "resolve_release tag was ${resolved[0]:-}"
+[[ "${resolved[1]:-}" == "https://example.invalid/stat-tracker-v0.4.24/$ASSET" ]] \
+    || fail "resolve_release url was ${resolved[1]:-}"
+[[ "${resolved[2]:-}" == "https://example.invalid/stat-tracker-v0.4.24/$ASSET.sha256" ]] \
+    || fail "resolve_release sha256 url was ${resolved[2]:-}"
+pass "resolve_release on the stable channel picks the page-2 stable"
+
+# A short page ends the list even with no stable in it.
+reset_pages
+mapfile -t specs < <(fill 30 site-a- site; fill 3 stat-tracker-v0.5.0-rc. pre)
+make_page "$PAGES/page-1.json" "${specs[@]}"
+listing="$(fetch_release_listing)"
+[[ "$(fetched_pages)" == "1" ]] || fail "short page still read on: $(fetched_pages)"
+mapfile -t picked < <(choose_release_tags "$ASSET" <<<"$listing")
+[[ -z "${picked[0]}" && "${picked[1]}" == "stat-tracker-v0.5.0-rc.3" ]] \
+    || fail "short page picks were '${picked[0]}' '${picked[1]}'"
+pass "a short page ends the list"
+
+# Never a stable: at most RELEASE_MAX_PAGES pages are read.
+reset_pages
+for n in 1 2 3 4 5 6; do
+    mapfile -t specs < <(fill 100 "site-p$n-" site)
+    make_page "$PAGES/page-$n.json" "${specs[@]}"
+done
+listing="$(fetch_release_listing)"
+[[ "$(fetched_pages)" == "1 2 3 4 5" ]] || fail "page cap read: $(fetched_pages)"
+count="$(release_page_len <<<"$listing")"
+[[ "$count" -eq 500 ]] || fail "five pages merged to $count releases"
+pass "paging stops after $RELEASE_MAX_PAGES pages"
+
+# The list moved between reads: a release seen on two pages is kept once.
+reset_pages
+mapfile -t specs < <(fill 100 site-a- site)
+make_page "$PAGES/page-1.json" "${specs[@]}"
+make_page "$PAGES/page-2.json" site-a-100:site stat-tracker-v0.4.24:stable
+listing="$(fetch_release_listing)"
+count="$(release_page_len <<<"$listing")"
+[[ "$count" -eq 101 ]] || fail "a repeated release was kept twice: $count releases"
+pass "a release repeated across pages is kept once"
+
+# A failed later page (rate limit, error) ends the list with the pages
+# already read. A failed first page, or an API error object there, fails.
+reset_pages
+mapfile -t specs < <(fill 99 site-a- site; echo stat-tracker-v0.5.0-rc.9:pre)
+make_page "$PAGES/page-1.json" "${specs[@]}"
+cut_rc=0
+listing="$(fetch_release_listing 2>"$TMP/page2.err")" || cut_rc=$?
+[[ "$cut_rc" -eq 3 ]] || fail "a failed page 2 read did not report a cut list (rc $cut_rc): $(cat "$TMP/page2.err")"
+[[ "$(release_page_len <<<"$listing")" -eq 100 ]] || fail "page 1 was not kept after a failed page 2"
+grep -q 'Could not read page 2 of the release list; using page 1.' "$TMP/page2.err" \
+    || fail "failed page 2 was not reported: $(cat "$TMP/page2.err")"
+printf '{"message":"API rate limit exceeded"}' > "$PAGES/page-2.json"
+cut_rc=0
+listing="$(fetch_release_listing 2>/dev/null)" || cut_rc=$?
+[[ "$cut_rc" -eq 3 ]] || fail "an API error on page 2 did not report a cut list (rc $cut_rc)"
+[[ "$(release_page_len <<<"$listing")" -eq 100 ]] || fail "page 1 was not kept after an API error on page 2"
+mapfile -t picked < <(choose_release_tags "$ASSET" <<<"$listing")
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-rc.9" ]] || fail "prerelease from page 1 was ${picked[1]}"
+reset_pages
+if fetch_release_listing >/dev/null 2>&1; then
+    fail "a failed page 1 read still returned a listing"
+fi
+printf '{"message":"API rate limit exceeded"}' > "$PAGES/page-1.json"
+set +e
+not_list="$(fetch_release_listing 2>&1)"
+not_list_code=$?
+set -e
+[[ "$not_list_code" -ne 0 ]] || fail "an API error object was taken as a release list"
+[[ "$not_list" == *"rate limit"* ]] || fail "API error was not reported: $not_list"
+pass "a failed later page keeps the pages read; a failed first page fails"
+
+# Pages 1 and 2 hold only prereleases and page 3 fails: the stable may be
+# further down, so the default and stable channels refuse instead of
+# installing the rc. The prerelease channel may use what was read.
+reset_pages
+mapfile -t specs < <(fill 100 stat-tracker-v0.5.0-rc. pre)
+make_page "$PAGES/page-1.json" "${specs[@]}"
+mapfile -t specs < <(fill 100 site-b- site)
+make_page "$PAGES/page-2.json" "${specs[@]}"
+grep -q 'using pages 1 to 2' <(fetch_release_listing 2>&1 >/dev/null) \
+    || fail "a failed page 3 did not name the pages used"
+for channel in "" stable; do
+    set +e
+    cut_out="$(STAT_TRACKER_TAG='' STAT_TRACKER_CHANNEL="$channel" resolve_release 2>&1)"
+    cut_code=$?
+    set -e
+    [[ "$cut_code" -ne 0 ]] || fail "channel '$channel' installed from a cut list: $cut_out"
+    [[ "$cut_out" != *"stat-tracker-v0.5.0-rc.100"$'\n'"https"* ]] \
+        || fail "channel '$channel' resolved the rc from a cut list: $cut_out"
+done
+[[ "$cut_out" == *"cut short before a stable release was found"* ]] \
+    || fail "cut list error did not say why: $cut_out"
+mapfile -t resolved < <(STAT_TRACKER_TAG='' STAT_TRACKER_CHANNEL=prerelease resolve_release 2>/dev/null)
+[[ "${resolved[0]:-}" == "stat-tracker-v0.5.0-rc.100" ]] \
+    || fail "prerelease channel on a cut list resolved '${resolved[0]:-}'"
+pass "a cut list with no stable fails closed unless the prerelease channel is asked for"
+
+# No release list at all: say so, not "refusing unsafe release tag ''".
+reset_pages
+set +e
+no_list="$(
+    STAT_TRACKER_TAG='' \
+    STAT_TRACKER_BOOTSTRAP_PINNED='' \
+    STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-fail" \
+    maybe_reexec_tag_bootstrap 2>&1
+)"
+no_list_code=$?
+set -e
+[[ "$no_list_code" -ne 0 ]] || fail "no release list still re-execed"
+[[ "$no_list" == *"could not read the release list from GitHub"* ]] \
+    || fail "no release list error was: $no_list"
+[[ "$no_list" != *"unsafe release tag"* ]] || fail "no release list reported an unsafe tag: $no_list"
+pass "no release list is reported as such"
+
+# Logging must survive a closed stderr: the app that ran the update quit.
+# The reader (true) exits at once; the writes after the sleep hit a pipe
+# with no reader.
+rm -f "$TMP/closed-ok"
+set +e
+bash -c '
+    set -euo pipefail
+    STAT_TRACKER_BOOTSTRAP_LIB_ONLY=1 source "$1"
+    sleep 0.3
+    info "to a closed pipe"
+    warn "to a closed pipe"
+    error "to a closed pipe"
+    echo survived > "$2"
+' _ "$BOOTSTRAP" "$TMP/closed-ok" 2>&1 | true
+set -e
+[[ -f "$TMP/closed-ok" ]] || fail "bootstrap logging died on a closed stderr"
+pass "bootstrap logging survives a closed stderr"
 
 echo "All bootstrap pin checks passed."
