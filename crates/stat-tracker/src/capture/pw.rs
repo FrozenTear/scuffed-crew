@@ -420,6 +420,11 @@ impl Handle {
     }
 
     #[cfg(test)]
+    pub(super) fn external_end_for_test(&self) -> bool {
+        lock(&self.state.pause).external_end
+    }
+
+    #[cfg(test)]
     pub(super) fn trip_for_test(&self) {
         self.trip(TRIP_STUCK);
     }

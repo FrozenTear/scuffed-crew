@@ -305,7 +305,11 @@ fn reopen_step(obs: Observe, has_token: bool, now: Instant, watch: &mut ReopenWa
 /// A portal session that closed ends the stream from outside: tell the
 /// pause fail-safe before it judges a resume or a death.
 fn mark_if_portal_closed(stream: &pw::Handle) {
-    if portal_session_closed() {
+    mark_external_if(portal_session_closed(), stream);
+}
+
+fn mark_external_if(closed: bool, stream: &pw::Handle) {
+    if closed {
         stream.mark_external_end();
     }
 }
@@ -3099,6 +3103,16 @@ mod tests {
         };
         reopen_step(tab, true, now, &mut watch);
         assert_eq!(watch.soft_misses, 1);
+    }
+
+    #[test]
+    fn a_closed_session_marks_the_stream_as_ended_from_outside() {
+        let open = pw::test_stream(true);
+        mark_external_if(false, &open);
+        assert!(!open.external_end_for_test());
+        let closed = pw::test_stream(true);
+        mark_external_if(true, &closed);
+        assert!(closed.external_end_for_test());
     }
 
     /// Where a closed portal session is told to the pause fail-safe, and
