@@ -299,10 +299,10 @@ printf '%s\n' "$term_out" | grep -qF 'About shows 9.9.9-rc7.' \
   || fail "terminal update does not name the version About shows"
 printf '%s\n' "$term_out" | grep -qF 'This is for the tarball install.' \
   || fail "terminal update does not say it is for the tarball install"
-printf '%s\n' "$term_out" | grep -qF 'Prefer the Update button in the app. Use this if that update fails, or to update from a terminal: close the app, then paste this in a terminal.' \
+printf '%s\n' "$term_out" | grep -qF 'Prefer the Update button in the app. If it fails or does not offer this release, close the app and paste this in a terminal.' \
   || fail "terminal update lead does not put the Update button first: $(printf '%s\n' "$term_out" | grep -F 'tarball install')"
-printf '%s\n' "$term_out" | grep -qF 'does not offer this release' \
-  && fail "terminal update still tells a player in the Update offer that the button does not offer it"
+printf '%s\n' "$term_out" | grep -qF 'If the Update button in the app does not offer this release' \
+  && fail "terminal update still leads with the button not offering the release"
 printf '%s\n' "$term_out" | grep -qF 'If you installed from the AUR, update with your AUR helper instead' \
   || fail "terminal update does not send AUR users to their AUR helper"
 manual_out="$(bash "$NOTES" --tag stat-tracker-manual-9 --changelog "$TMP/empty.md" --skip-commits)"

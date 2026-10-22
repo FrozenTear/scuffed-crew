@@ -178,50 +178,58 @@ set -e
 [[ "$no_tool" != *"Signature check skipped"* ]] || fail "missing minisign fell back"
 pass "key plus .minisig refuses when minisign is not installed"
 
-if ! command -v minisign >/dev/null 2>&1; then
+# A real signature round trip needs minisign. CI installs it; a dev box
+# without it skips only this part, so the checks after it still run.
+if ! command -v minisign >/dev/null 2>&1 && [[ -n "${CI:-}" ]]; then
     # CI only. A dead mirror must fail in minutes, not hang the release job.
     apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
     sudo timeout 180 apt-get "${apt_opts[@]}" update -qq
     sudo timeout 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends minisign
 fi
-command -v minisign >/dev/null 2>&1 || fail "minisign is required to test signature verify"
-
+if [[ -n "${CI:-}" ]]; then
+    command -v minisign >/dev/null 2>&1 || fail "minisign is required to test signature verify"
+fi
 printf 'payload\n' > "$TMP/payload"
-# -W: empty password, no prompt. The secret key stays in $TMP and is removed
-# with the test directory. Do not commit it.
-minisign -G -p "$TMP/minisign.pub" -s "$TMP/minisign.key" -W >/dev/null
-# Distinct from ${asset}.minisig, which is where verify_release_signature
-# writes the downloaded signature. Copying a file onto itself fails.
-minisign -S -s "$TMP/minisign.key" -m "$TMP/payload" -x "$TMP/good.minisig" -W >/dev/null
+if ! command -v minisign >/dev/null 2>&1; then
+    echo "SKIP: minisign is not installed; the real-signature checks did not run (CI runs them)" >&2
+else
+    printf 'payload\n' > "$TMP/payload"
+    # -W: empty password, no prompt. The secret key stays in $TMP and is removed
+    # with the test directory. Do not commit it.
+    minisign -G -p "$TMP/minisign.pub" -s "$TMP/minisign.key" -W >/dev/null
+    # Distinct from ${asset}.minisig, which is where verify_release_signature
+    # writes the downloaded signature. Copying a file onto itself fails.
+    minisign -S -s "$TMP/minisign.key" -m "$TMP/payload" -x "$TMP/good.minisig" -W >/dev/null
 
-cat > "$TMP/fetch-sig" << EOF
+    cat > "$TMP/fetch-sig" << EOF
 #!/bin/bash
 cp "$TMP/good.minisig" "\$2"
 EOF
-chmod +x "$TMP/fetch-sig"
-good="$(
-    STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
-    STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
-    SIG_URL="https://example.invalid/payload.minisig" \
-    verify_release_signature "$TMP/payload" 2>&1
-)"
-[[ "$good" == *"minisign ok"* ]] || fail "good signature was not accepted: $good"
-pass "key plus good .minisig verifies"
+    chmod +x "$TMP/fetch-sig"
+    good="$(
+        STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
+        STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
+        SIG_URL="https://example.invalid/payload.minisig" \
+        verify_release_signature "$TMP/payload" 2>&1
+    )"
+    [[ "$good" == *"minisign ok"* ]] || fail "good signature was not accepted: $good"
+    pass "key plus good .minisig verifies"
 
-printf 'tampered\n' > "$TMP/payload"
-set +e
-bad="$(
-    STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
-    STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
-    SIG_URL="https://example.invalid/payload.minisig" \
-    verify_release_signature "$TMP/payload" 2>&1
-)"
-bad_code=$?
-set -e
-[[ "$bad_code" -ne 0 ]] || fail "bad signature was accepted"
-[[ "$bad" == *"signature verification failed"* ]] || fail "bad-sig error was: $bad"
-[[ "$bad" != *"Signature check skipped"* ]] || fail "bad signature fell back to sha256"
-pass "key plus bad .minisig refuses to install"
+    printf 'tampered\n' > "$TMP/payload"
+    set +e
+    bad="$(
+        STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-sig" \
+        STAT_TRACKER_MINISIGN_PUB="$TMP/minisign.pub" \
+        SIG_URL="https://example.invalid/payload.minisig" \
+        verify_release_signature "$TMP/payload" 2>&1
+    )"
+    bad_code=$?
+    set -e
+    [[ "$bad_code" -ne 0 ]] || fail "bad signature was accepted"
+    [[ "$bad" == *"signature verification failed"* ]] || fail "bad-sig error was: $bad"
+    [[ "$bad" != *"Signature check skipped"* ]] || fail "bad signature fell back to sha256"
+    pass "key plus bad .minisig refuses to install"
+fi
 
 # sha256 verify and the signature check both run before extract.
 sha_line="$(grep -n 'Verifying sha256' "$BOOTSTRAP" | tail -1 | cut -d: -f1)"
@@ -531,12 +539,23 @@ count="$(release_page_len <<<"$listing")"
 [[ "$count" -eq 101 ]] || fail "a repeated release was kept twice: $count releases"
 pass "a release repeated across pages is kept once"
 
-# A failed page read, or an API error object, fails the listing.
+# A failed later page (rate limit, error) ends the list with the pages
+# already read. A failed first page, or an API error object there, fails.
 reset_pages
-mapfile -t specs < <(fill 100 site-a- site)
+mapfile -t specs < <(fill 99 site-a- site; echo stat-tracker-v0.5.0-rc.9:pre)
 make_page "$PAGES/page-1.json" "${specs[@]}"
+listing="$(fetch_release_listing 2>"$TMP/page2.err")" \
+    || fail "a failed page 2 read threw away page 1: $(cat "$TMP/page2.err")"
+[[ "$(release_page_len <<<"$listing")" -eq 100 ]] || fail "page 1 was not kept after a failed page 2"
+grep -q 'Could not read page 2' "$TMP/page2.err" || fail "failed page 2 was not reported: $(cat "$TMP/page2.err")"
+printf '{"message":"API rate limit exceeded"}' > "$PAGES/page-2.json"
+listing="$(fetch_release_listing 2>/dev/null)" || fail "an API error on page 2 threw away page 1"
+[[ "$(release_page_len <<<"$listing")" -eq 100 ]] || fail "page 1 was not kept after an API error on page 2"
+mapfile -t picked < <(choose_release_tags "$ASSET" <<<"$listing")
+[[ "${picked[1]}" == "stat-tracker-v0.5.0-rc.9" ]] || fail "prerelease from page 1 was ${picked[1]}"
+reset_pages
 if fetch_release_listing >/dev/null 2>&1; then
-    fail "a failed page 2 read still returned a listing"
+    fail "a failed page 1 read still returned a listing"
 fi
 printf '{"message":"API rate limit exceeded"}' > "$PAGES/page-1.json"
 set +e
@@ -545,7 +564,24 @@ not_list_code=$?
 set -e
 [[ "$not_list_code" -ne 0 ]] || fail "an API error object was taken as a release list"
 [[ "$not_list" == *"rate limit"* ]] || fail "API error was not reported: $not_list"
-pass "a failed or non-list page read fails the listing"
+pass "a failed later page keeps the pages read; a failed first page fails"
+
+# No release list at all: say so, not "refusing unsafe release tag ''".
+reset_pages
+set +e
+no_list="$(
+    STAT_TRACKER_TAG='' \
+    STAT_TRACKER_BOOTSTRAP_PINNED='' \
+    STAT_TRACKER_BOOTSTRAP_FETCH_CMD="$TMP/fetch-fail" \
+    maybe_reexec_tag_bootstrap 2>&1
+)"
+no_list_code=$?
+set -e
+[[ "$no_list_code" -ne 0 ]] || fail "no release list still re-execed"
+[[ "$no_list" == *"could not read the release list from GitHub"* ]] \
+    || fail "no release list error was: $no_list"
+[[ "$no_list" != *"unsafe release tag"* ]] || fail "no release list reported an unsafe tag: $no_list"
+pass "no release list is reported as such"
 
 # Logging must survive a closed stderr: the app that ran the update quit.
 # The reader (true) exits at once; the writes after the sleep hit a pipe

@@ -102,17 +102,24 @@ restart_running_daemon() {
     return 0
 }
 
-# Start the daemon unit when autostart is on (enabled) and the unit is
-# stopped (inactive). The in-app updater stops the tracker before it runs
-# the installer and starts it again afterwards. An app that quit during the
-# install never does that second step. A running, disabled, or failed unit
-# is left alone, so a second call does nothing. Prints "started" when it
-# started the unit and "failed" when that start did not work; never fails
-# the install.
+# Start the daemon unit again after an in-app update, when nothing else
+# will. The updater stops a running tracker, runs bootstrap.sh, and starts
+# the tracker when the install ends; an app that quit mid-install never
+# does that last step. The installer cannot tell that stop from a player's
+# own Stop, so it starts the unit only when all of these hold:
+#   - autostart is on (enabled) and the unit is stopped (inactive; a failed
+#     unit is left for the player to see);
+#   - the daemon just installed runs ($3 = 1 after the --version check);
+#   - the unit stopped no more than 2 minutes before bootstrap.sh began
+#     ($2, epoch seconds), and not after now;
+#   - a graphical session is up (graphical-session.target is active).
+# Prints one word: "started", "failed", or "skip-<reason>". Prints nothing
+# when the unit is not an enabled, stopped one. --no-block: the 0.4.24
+# updater waits on this install with no timeout. Never fails the install.
 start_enabled_daemon() {
-    local systemctl_bin="$1"
+    local systemctl_bin="$1" since="${2:-}" smoke_ok="${3:-0}"
     local unit="scuffed-stat-tracker.service"
-    local enabled active
+    local enabled active stopped_at now
     enabled="$("$systemctl_bin" --user is-enabled "$unit" 2>/dev/null)" || true
     case "$enabled" in
         enabled|enabled-runtime) ;;
@@ -120,7 +127,28 @@ start_enabled_daemon() {
     esac
     active="$("$systemctl_bin" --user is-active "$unit" 2>/dev/null)" || true
     [[ "$active" == inactive ]] || return 0
-    if "$systemctl_bin" --user start "$unit" 2>/dev/null; then
+    if [[ "$smoke_ok" != 1 ]]; then
+        echo skip-smoke
+        return 0
+    fi
+    if [[ ! "$since" =~ ^[0-9]+$ ]]; then
+        echo skip-no-bootstrap
+        return 0
+    fi
+    stopped_at="$("$systemctl_bin" --user show --timestamp=unix \
+        -p InactiveEnterTimestamp --value "$unit" 2>/dev/null)" || true
+    stopped_at="${stopped_at#@}"
+    now="$(date +%s)"
+    if [[ ! "$stopped_at" =~ ^[0-9]+$ ]] \
+        || (( stopped_at < since - 120 || stopped_at > now )); then
+        echo skip-stopped-earlier
+        return 0
+    fi
+    if ! "$systemctl_bin" --user is-active --quiet graphical-session.target 2>/dev/null; then
+        echo skip-no-session
+        return 0
+    fi
+    if "$systemctl_bin" --user start --no-block "$unit" 2>/dev/null; then
         echo started
     else
         echo failed

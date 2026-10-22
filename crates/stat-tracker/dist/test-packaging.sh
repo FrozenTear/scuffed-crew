@@ -2,6 +2,11 @@
 # Hermetic checks for the v0.4.1 OpenSSL-shadow packaging fix.
 # Run from anywhere: bash crates/stat-tracker/dist/test-packaging.sh
 set -euo pipefail
+# Never reach the real user manager. install.sh, uninstall.sh and
+# import-session-env.sh call `systemctl --user` through SCUFFED_SYSTEMCTL;
+# unset, a local run would stop and disable the developer's own tracker.
+# Checks that need a recording stand-in pass their own on the command.
+export SCUFFED_SYSTEMCTL=/bin/true
 
 DIST="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE="$DIST/bundle-native-libs.sh"
@@ -102,8 +107,44 @@ printf 'OLD-tess4-real\n' > "$PREFIX/lib/scuffed-stat-tracker/ocr/libtesseract.s
 
 # HOME is used for tessdata / desktop; keep it inside TMP.
 # Must run the in-tarball installer so PKG_ROOT is the fake tree.
-HOME="$HOME_DIR" PREFIX="$PREFIX" SKIP_INTEGRATION=1 \
-    "$PKG/install.sh" >/dev/null
+# An mv shim logs where atomic_install renames each file into place, so the
+# order the files land in can be checked below.
+SHIM="$TMP/shim"
+MV_LOG="$TMP/mv.log"
+mkdir -p "$SHIM"
+REAL_MV="$(command -v mv)"
+cat > "$SHIM/mv" <<EOF
+#!/bin/bash
+printf '%s\n' "\${!#}" >> "$MV_LOG"
+exec "$REAL_MV" "\$@"
+EOF
+chmod +x "$SHIM/mv"
+HOME="$HOME_DIR" PREFIX="$PREFIX" SKIP_INTEGRATION=1 PATH="$SHIM:$PATH" \
+    "$PKG/install.sh" >/dev/null 2>"$TMP/install1.err"
+
+# An install cut off part way must never leave new binaries beside old
+# libs: every bundled lib lands before either binary, and the libs this
+# tarball replaces go only after both binaries are in place.
+last_lib="$(grep -n "^$PREFIX/lib/scuffed-stat-tracker/\(ocr\|gui\)/" "$MV_LOG" | tail -1 | cut -d: -f1)"
+first_bin="$(grep -nx "$PREFIX/bin/\(scuffed-stat-tracker\|stat-tracker-gui\)" "$MV_LOG" | head -1 | cut -d: -f1)"
+if [[ -n "$last_lib" && -n "$first_bin" && "$last_lib" -lt "$first_bin" ]]; then
+    pass "bundled libs are in place before the binaries"
+else
+    fail "a binary was installed before the bundled libs (last lib $last_lib, first bin $first_bin)"
+    cat "$MV_LOG" >&2
+fi
+line_of() { grep -n -- "$1" "$TMP/install1.err" | head -1 | cut -d: -f1; }
+libs_at="$(line_of 'Installed [0-9]* bundled libs')"
+bins_at="$(line_of 'Installed binaries')"
+flat_at="$(line_of 'leftover v0.4.0 lib')"
+tess_at="$(line_of 'Removed leftover libtesseract.so.4')"
+if [[ -n "$libs_at" && -n "$bins_at" && -n "$flat_at" && -n "$tess_at" \
+    && "$libs_at" -lt "$bins_at" && "$bins_at" -lt "$flat_at" && "$bins_at" -lt "$tess_at" ]]; then
+    pass "replaced libs are removed after the binaries"
+else
+    fail "install order was libs=$libs_at bins=$bins_at flat=$flat_at tess4=$tess_at"
+    cat "$TMP/install1.err" >&2
+fi
 
 # OpenSSL from the tarball must not be installed anywhere under PREFIX.
 if [[ -e "$PREFIX/lib/scuffed-stat-tracker/ocr/libcrypto.so.3" \

@@ -4,6 +4,11 @@
 # nothing. An extra file next to an installed file must survive. Keep-data
 # leaves config.toml in place.
 set -euo pipefail
+# Never reach the real user manager. install.sh, uninstall.sh and
+# import-session-env.sh call `systemctl --user` through SCUFFED_SYSTEMCTL;
+# unset, a local run would stop and disable the developer's own tracker.
+# Checks that need a recording stand-in pass their own on the command.
+export SCUFFED_SYSTEMCTL=/bin/true
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"

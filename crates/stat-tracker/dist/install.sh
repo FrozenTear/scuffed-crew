@@ -525,9 +525,11 @@ info "Wrote install manifest → $MANIFEST"
 
 # ── Smoke check ───────────────────────────────────────────────────────────────
 
+SMOKE_OK=0
 if ! "$BIN_DIR/scuffed-stat-tracker" --version >/dev/null 2>&1; then
     warn "daemon --version failed. Missing host libs (display stack/evdev) or bundled OCR libs not at \$ORIGIN/../lib/scuffed-stat-tracker/ocr?"
 else
+    SMOKE_OK=1
     info "daemon binary runs ($("$BIN_DIR/scuffed-stat-tracker" --version))"
 fi
 
@@ -559,17 +561,24 @@ fi
 
 # ── Autostart ─────────────────────────────────────────────────────────────────
 # The in-app updater stops the tracker before it installs and starts it again
-# when the install ends. If the app quit during the install, start it here.
-# Only when autostart is on and the unit is stopped; a second start does
-# nothing.
+# when the install ends. If the app quit during the install, start it here,
+# but only when the stop came from this update (see start_enabled_daemon).
+# bootstrap.sh exports STAT_TRACKER_BOOTSTRAP_STARTED; a plain ./install.sh
+# run has none and never starts the unit.
 if [[ "$INSTALLED_UNITS" -eq 1 ]]; then
-    case "$(start_enabled_daemon "$SYSTEMCTL_BIN")" in
+    case "$(start_enabled_daemon "$SYSTEMCTL_BIN" "${STAT_TRACKER_BOOTSTRAP_STARTED:-}" "$SMOKE_OK")" in
         started)
-            info "Started the tracker service (autostart is on and it was stopped)"
+            info "Starting the tracker service again (this update had stopped it)"
             ;;
         failed)
             warn "Autostart is on, but the tracker service did not start."
             warn "Start it from the app, or run: systemctl --user start $UNIT"
+            ;;
+        skip-smoke)
+            info "The tracker service is stopped. Not starting it: the daemon --version check failed."
+            ;;
+        skip-*)
+            info "The tracker service is stopped. Start it from the app when you want it."
             ;;
     esac
 fi

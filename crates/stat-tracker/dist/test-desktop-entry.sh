@@ -2,6 +2,11 @@
 # Discriminating test: install.sh must write absolute Exec/TryExec.
 # A bare Exec=stat-tracker-gui (v0.4.2 and earlier) fails this script.
 set -euo pipefail
+# Never reach the real user manager. install.sh, uninstall.sh and
+# import-session-env.sh call `systemctl --user` through SCUFFED_SYSTEMCTL;
+# unset, a local run would stop and disable the developer's own tracker.
+# Checks that need a recording stand-in pass their own on the command.
+export SCUFFED_SYSTEMCTL=/bin/true
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL="$ROOT/dist/install.sh"

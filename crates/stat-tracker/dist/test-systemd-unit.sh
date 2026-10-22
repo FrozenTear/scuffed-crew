@@ -6,6 +6,11 @@
 # the user manager never received WAYLAND_DISPLAY / DISPLAY. These checks
 # fail on that installer.
 set -euo pipefail
+# Never reach the real user manager. install.sh, uninstall.sh and
+# import-session-env.sh call `systemctl --user` through SCUFFED_SYSTEMCTL;
+# unset, a local run would stop and disable the developer's own tracker.
+# Checks that need a recording stand-in pass their own on the command.
+export SCUFFED_SYSTEMCTL=/bin/true
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DIST="$ROOT/dist"
@@ -424,9 +429,11 @@ restart_at="$(grep -n -- 'try-restart' "$LOG" | head -1 | cut -d: -f1)"
 pass "upgrade restarts a running daemon, and only a running one"
 pass "upgrade adds OMP_THREAD_LIMIT=1 to a unit that lacked it"
 
-# Autostart on and the unit stopped: the in-app updater stopped it and then
-# quit mid-install. The install starts it at the end, after the manifest.
-# A running, disabled or failed unit is left alone.
+# Autostart on, and the unit stopped by the in-app updater, which then quit
+# mid-install. The install starts it again at the end, after the manifest,
+# without waiting on the job (--no-block). It must not start a unit the
+# player stopped on purpose, a disabled, running or failed unit, a unit
+# with no graphical session, or a daemon whose --version check failed.
 START_CTL="$TMP/systemctl-start"
 cat > "$START_CTL" << EOF
 #!/bin/sh
@@ -434,9 +441,13 @@ printf '%s\n' "\$*" >> "$LOG"
 case "\$*" in
     *is-enabled*) echo "\${FAKE_ENABLED-disabled}"
         [ "\${FAKE_ENABLED-}" = enabled ] || exit 1 ;;
+    *"is-active --quiet graphical-session.target"*)
+        [ "\${FAKE_SESSION-active}" = active ] || exit 3 ;;
     *is-active*) echo "\${FAKE_STATE-inactive}"
         [ "\${FAKE_STATE-}" = active ] || exit 3 ;;
-    *" start "*)
+    *"show --timestamp=unix -p InactiveEnterTimestamp --value"*)
+        echo "\${FAKE_STOPPED_AT-}" ;;
+    *" start --no-block "*)
         [ -f "$PREFIX/share/scuffed-stat-tracker/install-manifest.txt" ] \
             && echo "MANIFEST PRESENT AT START" >> "$LOG"
         [ "\${FAKE_START_FAILS-}" = 1 ] && exit 1 ;;
@@ -444,6 +455,9 @@ esac
 exit 0
 EOF
 chmod +x "$START_CTL"
+NOW="$(date +%s)"
+# The updater stopped the tracker a few seconds before bootstrap began.
+UPDATE_STOP="@$((NOW - 5))"
 run_start_install() {
     rm -f "$LOG" "$PREFIX/share/scuffed-stat-tracker/install-manifest.txt"
     env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
@@ -455,22 +469,64 @@ run_start_install() {
         bash "$PKG/install.sh" 2> "$ERR" \
         || fail "install failed: $(cat "$ERR")"
 }
-START_LINE='--user start scuffed-stat-tracker.service'
-FAKE_ENABLED=enabled FAKE_STATE=inactive run_start_install
-grep -qx -- "$START_LINE" "$LOG" || fail "enabled, stopped unit was not started: $(cat "$LOG")"
+START_LINE='--user start --no-block scuffed-stat-tracker.service'
+started() { grep -qx -- "$START_LINE" "$LOG"; }
+export STAT_TRACKER_BOOTSTRAP_STARTED="$NOW"
+
+FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
+started || fail "unit stopped by the update was not started: $(cat "$LOG")"
 grep -qx 'MANIFEST PRESENT AT START' "$LOG" || fail "unit was started before the manifest was written"
-grep -q 'Started the tracker service' "$ERR" || fail "start was not reported: $(cat "$ERR")"
-FAKE_ENABLED=enabled FAKE_STATE=active run_start_install
-grep -qx -- "$START_LINE" "$LOG" && fail "running unit was started again: $(cat "$LOG")"
-FAKE_ENABLED=disabled FAKE_STATE=inactive run_start_install
-grep -qx -- "$START_LINE" "$LOG" && fail "disabled unit was started: $(cat "$LOG")"
-FAKE_ENABLED=enabled FAKE_STATE=failed run_start_install
-grep -qx -- "$START_LINE" "$LOG" && fail "failed unit was started: $(cat "$LOG")"
-FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_START_FAILS=1 run_start_install
-grep -qx -- "$START_LINE" "$LOG" || fail "start was not tried: $(cat "$LOG")"
+grep -q 'Starting the tracker service again' "$ERR" || fail "start was not reported: $(cat "$ERR")"
+# Stopped 100 s before bootstrap began still counts (slow download start).
+FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="@$((NOW - 100))" run_start_install
+started || fail "unit stopped 100 s before the install was not started: $(cat "$LOG")"
+pass "install starts a unit the update stopped, without waiting on the job"
+
+FAKE_ENABLED=enabled FAKE_STATE=active FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
+started && fail "running unit was started again: $(cat "$LOG")"
+FAKE_ENABLED=disabled FAKE_STATE=inactive FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
+started && fail "disabled unit was started: $(cat "$LOG")"
+FAKE_ENABLED=enabled FAKE_STATE=failed FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
+started && fail "failed unit was started: $(cat "$LOG")"
+pass "running, disabled and failed units are left alone"
+
+# The player stopped it an hour ago: stays stopped, with one info line.
+FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="@$((NOW - 3600))" run_start_install
+started && fail "unit the player stopped an hour ago was started: $(cat "$LOG")"
+[[ "$(grep -c 'The tracker service is stopped' "$ERR")" -eq 1 ]] \
+    || fail "skipped start did not say so once: $(cat "$ERR")"
+# No stop time from systemd (never ran, or an old systemctl).
+FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="" run_start_install
+started && fail "unit with no stop time was started: $(cat "$LOG")"
+# A stop time after now is not this update's stop.
+FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="@$((NOW + 3600))" run_start_install
+started && fail "unit with a stop time in the future was started: $(cat "$LOG")"
+# No graphical session (an SSH install with lingering).
+FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="$UPDATE_STOP" FAKE_SESSION=inactive \
+    run_start_install
+started && fail "unit was started with no graphical session: $(cat "$LOG")"
+# A plain ./install.sh (no bootstrap start time) never starts the unit.
+STAT_TRACKER_BOOTSTRAP_STARTED='' FAKE_ENABLED=enabled FAKE_STATE=inactive \
+    FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
+started && fail "install without a bootstrap start time started the unit: $(cat "$LOG")"
+pass "a stop from before the update, no session, or no bootstrap time: not started"
+
+# The new daemon does not run: do not start it.
+cp "$PKG/bin/scuffed-stat-tracker" "$TMP/daemon-good"
+printf '%s\n' '#!/bin/sh' 'exit 1' > "$PKG/bin/scuffed-stat-tracker"
+FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
+cp "$TMP/daemon-good" "$PKG/bin/scuffed-stat-tracker"
+started && fail "unit was started after the --version check failed: $(cat "$LOG")"
+grep -q 'Not starting it: the daemon --version check failed' "$ERR" \
+    || fail "skipped start after a failed --version was not explained: $(cat "$ERR")"
+pass "a daemon that fails --version is not started"
+
+FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_STOPPED_AT="$UPDATE_STOP" FAKE_START_FAILS=1 \
+    run_start_install
+started || fail "start was not tried: $(cat "$LOG")"
 grep -q 'did not start' "$ERR" || fail "failed start was not reported: $(cat "$ERR")"
 grep -q 'Installation complete' "$ERR" || fail "failed start cut the install short: $(cat "$ERR")"
-pass "install starts an enabled, stopped unit, and only that one"
+pass "a failed start warns and the install still completes"
 
 # A closed stderr (the app that ran the update quit) must not stop the
 # install part way: the binaries, the manifest and the start still happen.
@@ -481,12 +537,14 @@ env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
     -u XDG_RUNTIME_DIR \
     HOME="$HOME_DIR" PREFIX="$PREFIX" SCUFFED_PROC_ROOT="$PROC" \
     SCUFFED_SYSTEMCTL="$START_CTL" FAKE_ENABLED=enabled FAKE_STATE=inactive \
+    FAKE_STOPPED_AT="$UPDATE_STOP" \
     bash -c 'sleep 0.3; exec bash "$1"' _ "$PKG/install.sh" 2>&1 | true
 set -e
 [[ -f "$PREFIX/share/scuffed-stat-tracker/install-manifest.txt" ]] \
     || fail "install died on a closed stderr before the manifest"
-grep -qx -- "$START_LINE" "$LOG" || fail "install died on a closed stderr before the start: $(cat "$LOG")"
+started || fail "install died on a closed stderr before the start: $(cat "$LOG")"
 pass "install survives a closed stderr"
+unset STAT_TRACKER_BOOTSTRAP_STARTED
 
 # The source-build installer (crates/stat-tracker/install.sh) has the same
 # restart call. Stage it in a fake repo whose `cargo` writes stub binaries.

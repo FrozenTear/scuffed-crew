@@ -160,7 +160,7 @@ if [[ "$TAG" == stat-tracker-v* ]]; then
   TERMINAL_UPDATE="$(cat <<TERMINAL
 ## Update from the terminal
 
-This is for the tarball install. Prefer the Update button in the app. Use this if that update fails, or to update from a terminal: close the app, then paste this in a terminal. It installs this release into \`~/.local\` and replaces both the tracker and the app. Afterwards About shows ${NOTES_VERSION}.
+This is for the tarball install. Prefer the Update button in the app. If it fails or does not offer this release, close the app and paste this in a terminal. It installs this release into \`~/.local\` and replaces both the tracker and the app. Afterwards About shows ${NOTES_VERSION}.
 
 If you installed from the AUR, update with your AUR helper instead, so you do not end up with a second copy in \`~/.local\`.
 

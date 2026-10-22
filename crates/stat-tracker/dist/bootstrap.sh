@@ -31,6 +31,10 @@
 #   STAT_TRACKER_MINISIGN_PUB
 #                       optional path to a minisign .pub file, or the file
 #                       contents. Empty default: no key is shipped in git.
+#   STAT_TRACKER_BOOTSTRAP_STARTED
+#                       set by this script (epoch seconds) for install.sh,
+#                       which starts a stopped tracker again only when it
+#                       stopped right before the install began.
 #   SKIP_INTEGRATION    non-empty ⇒ install binaries/libs only (no desktop entry
 #                       or systemd unit); use for throwaway-PREFIX smoke tests
 #   STAT_TRACKER_BOOTSTRAP_FETCH_CMD
@@ -307,12 +311,21 @@ json.dump(merged, sys.stdout)
 
 # The release list as one JSON array. Reads pages until one holds a stable
 # release that ships the asset (as choose_release_tags sees it), a page
-# comes back short, or RELEASE_MAX_PAGES pages were read.
+# comes back short, or RELEASE_MAX_PAGES pages were read. A failed page
+# after the first ends the list there.
 fetch_release_listing() {
     local page=1 body count all="" stable_tag pre_tag
     while :; do
-        body="$(fetch_release_page "$page")" || return 1
-        count="$(release_page_len <<<"$body")" || return 1
+        if ! body="$(fetch_release_page "$page")" \
+            || ! count="$(release_page_len <<<"$body")"; then
+            # Page 1 is the whole answer when it fails. A later page (rate
+            # limit, error) only extends the search: use what was read.
+            if (( page == 1 )); then
+                return 1
+            fi
+            warn "Could not read page ${page} of the release list; using the first $((page - 1))."
+            break
+        fi
         all="$(printf '%s\n%s\n' "$all" "$body" | merge_release_pages)" || return 1
         if (( count < RELEASE_PAGE_SIZE || page >= RELEASE_MAX_PAGES )); then
             break
@@ -383,6 +396,10 @@ print(sig or "")
 ' "$ASSET_NAME" <<<"$json"
 }
 
+error_no_release() {
+    error "No release to install: could not read the release list from GitHub (offline or rate-limited), or no release matched (see above)."
+}
+
 resolve_handoff_tag() {
     if [[ -n "${STAT_TRACKER_TAG:-}" ]]; then
         printf '%s\n' "$STAT_TRACKER_TAG"
@@ -402,6 +419,10 @@ maybe_reexec_tag_bootstrap() {
     fi
     local tag url dest
     tag="$(resolve_handoff_tag)"
+    if [[ -z "$tag" ]]; then
+        error_no_release
+        exit 1
+    fi
     assert_safe_tag "$tag" || exit 1
     url="$(bootstrap_url_for_ref "$tag")"
     dest="$(mktemp -t scuffed-bootstrap-XXXXXX.sh)"
@@ -696,6 +717,15 @@ case "$CHANNEL" in
         ;;
 esac
 
+# When this install began, handed to install.sh: it starts the tracker
+# again only when the tracker stopped right before this (the in-app
+# updater's stop), never a stop from long before. A re-exec keeps the
+# first copy's time.
+if [[ ! "${STAT_TRACKER_BOOTSTRAP_STARTED:-}" =~ ^[0-9]+$ ]]; then
+    STAT_TRACKER_BOOTSTRAP_STARTED="$(date +%s)"
+fi
+export STAT_TRACKER_BOOTSTRAP_STARTED
+
 need curl
 need tar
 need mktemp
@@ -715,7 +745,11 @@ fi
 maybe_reexec_tag_bootstrap
 
 mapfile -t _rel < <(resolve_release)
-TAG="${_rel[0]}"
+TAG="${_rel[0]:-}"
+if [[ -z "$TAG" ]]; then
+    error_no_release
+    exit 1
+fi
 URL="${_rel[1]}"
 SHA_URL="${_rel[2]:-}"
 SIG_URL="${_rel[3]:-}"

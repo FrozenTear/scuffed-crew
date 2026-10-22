@@ -73,7 +73,7 @@ COMPOSITOR_COMMS=(
     Xwayland
 )
 
-log() { echo "[session-env] $*" >&2; }
+log() { echo "[session-env] $*" >&2 || true; }
 
 valid_session_value() {
     local key="$1" val="$2"
