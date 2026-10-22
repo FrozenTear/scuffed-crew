@@ -7396,7 +7396,7 @@ fn tab_result(
     use stat_tracker::tab_retry::TabResult;
     match outcome {
         FrameAnalysisOutcome::Analyzed(a) if reader_refusal(a, use_new_reader).is_some() => {
-            TabResult::NotAScoreboard
+            TabResult::BoardRefused
         }
         FrameAnalysisOutcome::Analyzed(_) => TabResult::Accepted,
         FrameAnalysisOutcome::NotAScoreboard { .. } => TabResult::NotAScoreboard,
@@ -10601,7 +10601,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_retry_predicate_retries_only_not_a_scoreboard() {
+    fn tab_retry_predicate_retries_only_retryable_results() {
         let scan = detect::hero_portrait::RowScan {
             dip_count: 2,
             median_pitch: None,
@@ -10677,7 +10677,7 @@ mod tests {
         };
         assert_eq!(refusal(&refused()), Some("board was not found"));
         assert_eq!(refusal(&taken()), None);
-        assert_eq!(tab_result(&refused(), true), TabResult::NotAScoreboard);
+        assert_eq!(tab_result(&refused(), true), TabResult::BoardRefused);
         assert!(tab_result(&refused(), true).retries());
         assert_eq!(tab_result(&taken(), true), TabResult::Accepted);
         // ocr-v1, and a board read with ocr-v1 instead, keep their gate

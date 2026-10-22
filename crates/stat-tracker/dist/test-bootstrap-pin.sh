@@ -191,7 +191,11 @@ pass "key plus .minisig refuses when minisign is not installed"
 if ! command -v minisign >/dev/null 2>&1 && [[ -n "${CI:-}" ]]; then
     # CI only. A dead mirror must fail in minutes, not hang the release job.
     apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-    sudo timeout 180 apt-get "${apt_opts[@]}" update -qq
+    # An unrelated runner repo that refuses the update (a 403) must not
+    # fail the job: the install below, and the minisign check after it,
+    # decide.
+    sudo timeout 180 apt-get "${apt_opts[@]}" update -qq \
+        || echo "::warning::apt-get update failed; trying the minisign install with the cached lists"
     sudo timeout 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends minisign
 fi
 if [[ -n "${CI:-}" ]]; then
