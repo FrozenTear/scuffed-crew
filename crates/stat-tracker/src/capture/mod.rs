@@ -67,6 +67,66 @@ pub fn tab_press() -> Option<std::time::Instant> {
     TAB_PRESS.try_with(|press| *press).ok()
 }
 
+tokio::task_local! {
+    static POLL_LOCK_WAIT: std::time::Duration;
+}
+
+/// How long the end-reel outcome-only poll waits for the screenshot lock
+/// while a Tab grab holds it. The VICTORY banner lasts about 3 s and, with
+/// the new reader, polls come every 1.5 s (4 s with classic OCR), so a poll
+/// turned away at once could lose the banner while the player held Tab
+/// over it. One second keeps the poll arm short.
+pub const OUTCOME_POLL_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The lock wait for a poll: [`OUTCOME_POLL_LOCK_WAIT`] for the end-reel
+/// outcome-only poll, nothing for an ordinary one.
+pub fn poll_lock_wait(outcome_only: bool) -> std::time::Duration {
+    if outcome_only {
+        OUTCOME_POLL_LOCK_WAIT
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
+/// Run a poll grab that may wait `wait` for the screenshot lock. Not an
+/// async fn: it returns the scope future itself, so the poll future does
+/// not carry a second copy of `fut`.
+pub fn with_poll_lock_wait<F: std::future::Future>(
+    wait: std::time::Duration,
+    fut: F,
+) -> impl std::future::Future<Output = F::Output> {
+    POLL_LOCK_WAIT.scope(wait, fut)
+}
+
+/// The daemon's poll grab: [`capture_screen_output_for`] with
+/// [`CaptureKind::Poll`], waiting for the screenshot lock as
+/// [`poll_lock_wait`] says (the end-reel outcome-only poll waits up to
+/// [`OUTCOME_POLL_LOCK_WAIT`], an ordinary poll not at all).
+pub fn poll_grab<'a>(
+    backend: &'a CaptureBackend,
+    output_name: Option<&'a str>,
+    outcome_only: bool,
+) -> impl std::future::Future<Output = Result<CapturedFrame, Box<dyn std::error::Error + Send + Sync>>>
++ 'a {
+    with_poll_lock_wait(
+        poll_lock_wait(outcome_only),
+        capture_screen_output_for(backend, output_name, CaptureKind::Poll),
+    )
+}
+
+/// The lock wait for the grab running in this task: `tab_wait` in a Tab
+/// capture, the poll's wait ([`with_poll_lock_wait`]) otherwise, zero by
+/// default.
+pub(crate) fn grab_lock_wait(tab_wait: std::time::Duration) -> std::time::Duration {
+    flight::lock_wait(
+        tab_press().is_some(),
+        tab_wait,
+        POLL_LOCK_WAIT
+            .try_with(|wait| *wait)
+            .unwrap_or(std::time::Duration::ZERO),
+    )
+}
+
 /// Run `fut` as a Tab grab whose press time is `press`. Direct capture still
 /// sleeps before calling this. The stream path reads the press and does not.
 pub async fn with_tab_press<T>(
@@ -509,7 +569,7 @@ pub async fn detect_backend() -> CaptureBackend {
         // Plasma 6.8.1. On KDE a probe that can pass (KWin not on the bus
         // yet at login) is tried again for up to 15 s.
         kwin::probe_at_startup(
-            daemon_share_is_open(&prefs.data_dir),
+            || daemon_share_is_open(&prefs.data_dir),
             route::is_kde(&desktop),
         )
         .await
@@ -1091,6 +1151,113 @@ mod tests {
         ] {
             assert!(!oneshot_blocked(backend, "KDE", true), "{backend:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_grab_takes_its_lock_wait_from_its_task() {
+        let tab = std::time::Duration::from_secs(4);
+        assert_eq!(
+            grab_lock_wait(tab),
+            std::time::Duration::ZERO,
+            "a plain poll"
+        );
+        let reel = with_poll_lock_wait(poll_lock_wait(true), async { grab_lock_wait(tab) }).await;
+        assert_eq!(reel, OUTCOME_POLL_LOCK_WAIT);
+        let plain = with_poll_lock_wait(poll_lock_wait(false), async { grab_lock_wait(tab) }).await;
+        assert_eq!(plain, std::time::Duration::ZERO);
+        let in_tab = with_tab_press(std::time::Instant::now(), async { grab_lock_wait(tab) }).await;
+        assert_eq!(in_tab, tab);
+        assert_eq!(OUTCOME_POLL_LOCK_WAIT, std::time::Duration::from_secs(1));
+    }
+
+    /// A function body from `src` without its tests, whitespace removed:
+    /// from `sig` to the end of that item.
+    fn squashed_body(src: &'static str, sig: &str) -> String {
+        let code = src.split("\nmod tests {").next().unwrap();
+        let at = code.find(sig).unwrap_or_else(|| panic!("{sig}"));
+        code[at..]
+            .split("\n}\n")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect()
+    }
+
+    // Call sites the unit tests cannot reach without KWin or a portal
+    // (#433 review), one test each.
+
+    #[test]
+    fn the_poll_grab_passes_the_outcome_only_wait_and_grabs_read_the_task() {
+        let module = include_str!("mod.rs");
+        let poll = squashed_body(module, concat!("pub fn ", "poll_grab<"));
+        assert!(poll.contains(
+            "with_poll_lock_wait(poll_lock_wait(outcome_only),capture_screen_output_for(backend,output_name,CaptureKind::Poll)"
+        ));
+        let wait = squashed_body(module, concat!("pub(crate) fn ", "grab_lock_wait("));
+        assert!(wait.contains(
+            "flight::lock_wait(tab_press().is_some(),tab_wait,POLL_LOCK_WAIT.try_with(|wait|*wait).unwrap_or(std::time::Duration::ZERO)"
+        ));
+    }
+
+    #[test]
+    fn the_portal_grab_reads_its_lock_wait_from_the_task() {
+        let shot = squashed_body(
+            include_str!("portal.rs"),
+            concat!("pub async fn ", "capture("),
+        );
+        assert!(shot.contains("letwait=super::grab_lock_wait(SHOT_LOCK_WAIT_TAB);"));
+        assert!(shot.contains("run_shot(&SHOT_FLIGHT,wait,"));
+    }
+
+    #[test]
+    fn the_kwin_grab_reads_its_lock_wait_from_the_task() {
+        let grab = squashed_body(
+            include_str!("kwin.rs"),
+            concat!("pub async fn ", "capture("),
+        );
+        assert!(grab.contains("letwait=super::grab_lock_wait(LOCK_WAIT_TAB);"));
+        assert!(grab.contains("grab_in_flight(target,true,wait)"));
+    }
+
+    #[test]
+    fn the_kwin_grab_respects_the_reread_limit() {
+        let grab = squashed_body(
+            include_str!("kwin.rs"),
+            concat!("pub async fn ", "capture("),
+        );
+        assert!(grab.contains("letdue=native_reread_due("));
+        assert!(grab.contains("check_native_size(size,real,due,"));
+    }
+
+    #[test]
+    fn the_kwin_reread_counts_as_capture_cpu() {
+        let grab = squashed_body(
+            include_str!("kwin.rs"),
+            concat!("pub async fn ", "capture("),
+        );
+        assert!(grab.contains("crate::perf::record_cpu(crate::perf::Stage::Capture,reread_cpu);"));
+    }
+
+    #[test]
+    fn the_compare_half_runs_only_past_its_gate() {
+        let compare = squashed_body(
+            include_str!("kwin.rs"),
+            concat!("pub(crate) async fn ", "save_compare_half("),
+        );
+        assert!(compare.contains("letprobe=probe_beside_share(true).await;"));
+        assert!(compare.contains("ifletErr(why)=compare_half_allowed(&versions().await,&probe){"));
+        let gate_at = compare.find("compare_half_allowed(").unwrap();
+        let capture_at = compare.find("capture(output_name)").unwrap();
+        assert!(gate_at < capture_at, "the gate comes before the grab");
+    }
+
+    #[test]
+    fn the_startup_probe_gets_a_share_check_for_every_attempt() {
+        let detect = squashed_body(
+            include_str!("mod.rs"),
+            concat!("pub async fn ", "detect_backend("),
+        );
+        assert!(detect.contains("kwin::probe_at_startup(||daemon_share_is_open(&prefs.data_dir),"));
     }
 
     #[test]

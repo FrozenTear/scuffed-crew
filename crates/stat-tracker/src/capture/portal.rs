@@ -30,7 +30,9 @@ pub async fn is_available() -> bool {
 /// [`SHOT_OVERDUE_FIRST`] and every [`SHOT_OVERDUE_EVERY`] after, and grabs
 /// meanwhile get "busy".
 ///
-/// A poll that finds a request running is skipped. A Tab waits for it (up
+/// An ordinary poll that finds a request running is skipped; the end-reel
+/// outcome-only poll waits up to [`super::OUTCOME_POLL_LOCK_WAIT`] (1 s)
+/// for it ([`super::grab_lock_wait`]). A Tab waits for it (up
 /// to [`SHOT_LOCK_WAIT_TAB`]) and then takes its own screenshot: a poll's
 /// request was made before the key press, so its picture cannot show the
 /// board. The wait mostly overlaps the 400 ms the Tab already sleeps for
@@ -39,7 +41,7 @@ pub async fn capture(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let output = output_name.map(str::to_owned);
-    let wait = super::flight::lock_wait(super::tab_press().is_some(), SHOT_LOCK_WAIT_TAB);
+    let wait = super::grab_lock_wait(SHOT_LOCK_WAIT_TAB);
     run_shot(
         &SHOT_FLIGHT,
         wait,
@@ -83,9 +85,10 @@ async fn run_shot(
 /// One screenshot portal request in flight at a time.
 static SHOT_FLIGHT: super::flight::SingleFlight = super::flight::SingleFlight::new();
 
-/// How long a Tab grab waits for the request before it (a poll does not
-/// wait). A KDE screenshot takes about 450 ms, so this covers a poll's
-/// request and a slow one after it, while Tab is held.
+/// How long a Tab grab waits for the request before it (an ordinary poll
+/// does not wait; the end-reel outcome poll waits up to 1 s). A KDE
+/// screenshot takes about 450 ms, so this covers a poll's request and a
+/// slow one after it, while Tab is held.
 pub const SHOT_LOCK_WAIT_TAB: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// When an unanswered request is first warned about.
@@ -882,11 +885,15 @@ mod tests {
             }));
             tokio::task::yield_now().await;
             let poll = FLIGHT
-                .run(lock_wait(false, SHOT_LOCK_WAIT_TAB), async {})
+                .run(
+                    lock_wait(false, SHOT_LOCK_WAIT_TAB, Duration::ZERO),
+                    async {},
+                )
                 .await;
             assert_eq!(poll, Err(FlightError::Busy));
             let tab = FLIGHT
-                .run(lock_wait(true, SHOT_LOCK_WAIT_TAB), async {})
+                .run(lock_wait(true, SHOT_LOCK_WAIT_TAB, Duration::ZERO), async {
+                })
                 .await;
             assert_eq!(tab.is_ok(), tab_gets_it, "request held {held_ms} ms");
             held.await.unwrap().unwrap();

@@ -46,8 +46,11 @@ pub const INTERFACE: &str = "org.kde.KWin.ScreenShot2";
 
 /// The whole grab, call and pipe read, ends within this.
 pub const GRAB_TIMEOUT: Duration = Duration::from_secs(2);
+/// Making the session bus connection ends within this.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a Tab grab (or the probe) waits for the call before it, at
-/// most one [`GRAB_TIMEOUT`]. A poll does not wait.
+/// most one [`GRAB_TIMEOUT`]. An ordinary poll does not wait; the end-reel
+/// outcome poll waits up to [`super::OUTCOME_POLL_LOCK_WAIT`] (1 s).
 pub const LOCK_WAIT_TAB: Duration = Duration::from_secs(2);
 
 /// Plasma version with the full fix for KDE bug 524840.
@@ -365,17 +368,34 @@ pub enum SizeCheck {
     MatchesAfterReread,
     /// Still off after reading the geometry again: used as KWin sent it.
     StillDiffers,
+    /// Off, and the geometry was read again less than
+    /// [`NATIVE_REREAD_GAP`] ago: not read again; used as KWin sent it.
+    DiffersRereadSkipped,
+}
+
+/// A picture that keeps differing from the cached mode size (a monitor
+/// whose mode KWin reports differently) re-reads the geometry at most this
+/// often, not on every grab. The limit is one clock for the process, not
+/// one per output: a re-read for one monitor also holds off another
+/// monitor's re-read for this long (the capture monitor rarely changes).
+pub const NATIVE_REREAD_GAP: Duration = Duration::from_secs(60);
+
+/// Whether a size mismatch may read the geometry again at `now`.
+pub fn native_reread_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= NATIVE_REREAD_GAP)
 }
 
 /// Checks a KDE direct picture against the output's cached real size.
 /// `CaptureScreen` renders at that output's own scale, which is the
 /// (rotated) mode size on Plasma 6.5 and later, so a difference means the
-/// cached geometry is stale: `reread` drops and reads it again, once. If it
-/// still differs, the picture is kept as KWin rendered it. It is never
-/// resampled: any resample changes what the readers see.
+/// cached geometry is stale: `reread` drops and reads it again, once, when
+/// `reread_due` ([`native_reread_due`]). If it still differs, the picture
+/// is kept as KWin rendered it. It is never resampled: any resample changes
+/// what the readers see.
 pub async fn check_native_size<F, Fut>(
     size: (u32, u32),
     real: Option<(u32, u32)>,
+    reread_due: bool,
     reread: F,
 ) -> SizeCheck
 where
@@ -384,6 +404,9 @@ where
 {
     if !size_off(size, real) {
         return SizeCheck::Matches;
+    }
+    if !reread_due {
+        return SizeCheck::DiffersRereadSkipped;
     }
     if size_off(size, reread().await) {
         SizeCheck::StillDiffers
@@ -512,7 +535,8 @@ pub enum Target {
 /// The output to grab and its real size. A name is asked for as is (KWin
 /// answers `InvalidScreen` when it is gone). Auto picks the output the
 /// other portal paths pick ([`super::auto_output_index`]); with no
-/// geometry it is KWin's active screen, the one with the focused window.
+/// geometry it is KWin's active screen: the focused window's or the
+/// pointer's output, as KWin's focus settings decide.
 pub fn pick_target(
     outputs: &[OutputRect],
     output_name: Option<&str>,
@@ -549,28 +573,71 @@ pub fn probe_target(outputs: &[OutputRect]) -> Target {
     }
 }
 
-static CONNECTION: tokio::sync::Mutex<Option<zbus::Connection>> =
-    tokio::sync::Mutex::const_new(None);
+/// A value made on first use and kept, until an error says it is broken
+/// ([`KwinError::NoBus`]); the next use then makes it again. The D-Bus
+/// connection lives in one.
+pub struct Reconnecting<T> {
+    slot: tokio::sync::Mutex<Option<T>>,
+}
+
+impl<T: Clone> Reconnecting<T> {
+    pub const fn new() -> Self {
+        Self {
+            slot: tokio::sync::Mutex::const_new(None),
+        }
+    }
+
+    /// The kept value, or a new one from `make`, which must answer within
+    /// [`CONNECT_TIMEOUT`]. zbus has no handshake timeout: a session bus
+    /// that accepts and never authenticates would hang every caller,
+    /// including the startup probe whose retries then never run.
+    pub async fn get_or_make<F, Fut>(&self, make: F) -> Result<T, KwinError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<T, KwinError>>,
+    {
+        let mut slot = self.slot.lock().await;
+        if let Some(value) = slot.as_ref() {
+            return Ok(value.clone());
+        }
+        let value = tokio::time::timeout(CONNECT_TIMEOUT, make())
+            .await
+            .unwrap_or(Err(KwinError::Timeout))?;
+        *slot = Some(value.clone());
+        Ok(value)
+    }
+
+    /// Drops the kept value after an error that says it is broken.
+    pub async fn forget_after(&self, err: &KwinError) {
+        if matches!(err, KwinError::NoBus(_)) {
+            *self.slot.lock().await = None;
+        }
+    }
+}
+
+impl<T: Clone> Default for Reconnecting<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+static CONNECTION: Reconnecting<zbus::Connection> = Reconnecting::new();
 
 /// The session bus connection, made on first use and made again after a
 /// call found it gone ([`forget_connection`]).
 async fn connection() -> Result<zbus::Connection, KwinError> {
-    let mut slot = CONNECTION.lock().await;
-    if let Some(conn) = slot.as_ref() {
-        return Ok(conn.clone());
-    }
-    let conn = zbus::Connection::session()
+    CONNECTION
+        .get_or_make(|| async {
+            zbus::Connection::session()
+                .await
+                .map_err(|err| KwinError::NoBus(err.to_string()))
+        })
         .await
-        .map_err(|err| KwinError::NoBus(err.to_string()))?;
-    *slot = Some(conn.clone());
-    Ok(conn)
 }
 
 /// Drops the cached connection after an error that says it is broken.
 async fn forget_connection(err: &KwinError) {
-    if matches!(err, KwinError::NoBus(_)) {
-        *CONNECTION.lock().await = None;
-    }
+    CONNECTION.forget_after(err).await;
 }
 
 /// One call with a fresh pipe, then the pixels. `native` is
@@ -695,7 +762,7 @@ pub async fn capture(
         Target::Screen(name) => Some(name.clone()),
         _ => None,
     };
-    let wait = super::flight::lock_wait(super::tab_press().is_some(), LOCK_WAIT_TAB);
+    let wait = super::grab_lock_wait(LOCK_WAIT_TAB);
     let (meta, bytes) = match grab_in_flight(target, true, wait).await {
         Ok(grabbed) => grabbed,
         Err(err) => {
@@ -723,9 +790,17 @@ pub async fn capture(
         geometry_cpu.saturating_add(convert_cpu),
     );
     let size = (img.width(), img.height());
-    let checked = check_native_size(size, real, || async {
+    static LAST_REREAD: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    let due = native_reread_due(
+        *LAST_REREAD.lock().unwrap_or_else(|err| err.into_inner()),
+        Instant::now(),
+    );
+    let checked = check_native_size(size, real, due, || async {
+        *LAST_REREAD.lock().unwrap_or_else(|err| err.into_inner()) = Some(Instant::now());
         super::portal::invalidate_output_geometry();
-        let outputs = super::portal::output_geometry().await;
+        // This read is capture CPU too, as the first one is.
+        let (outputs, reread_cpu) = super::portal::output_geometry_timed().await;
+        crate::perf::record_cpu(crate::perf::Stage::Capture, reread_cpu);
         screen.and_then(|name| {
             outputs
                 .iter()
@@ -734,7 +809,10 @@ pub async fn capture(
         })
     })
     .await;
-    if checked == SizeCheck::StillDiffers {
+    if matches!(
+        checked,
+        SizeCheck::StillDiffers | SizeCheck::DiffersRereadSkipped
+    ) {
         tracing::debug!(
             width = size.0,
             height = size.1,
@@ -977,10 +1055,12 @@ pub const STARTUP_RETRY_WAITS: [Duration; 4] = [
 pub async fn probe_with_retries<B: ProbeBus>(
     prober: &Prober,
     bus: &B,
-    share_open: bool,
+    share_open: impl Fn() -> bool,
     waits: &[Duration],
 ) -> KwinProbe {
-    let mut answer = prober.probe(bus, share_open).await;
+    // The share is looked at again before every attempt, not once before
+    // the retries: a share that opened during a wait is seen.
+    let mut answer = prober.probe(bus, share_open()).await;
     for wait in waits {
         if !answer.transient {
             break;
@@ -990,7 +1070,7 @@ pub async fn probe_with_retries<B: ProbeBus>(
             "KDE direct probe will try again"
         );
         tokio::time::sleep(*wait).await;
-        answer = prober.probe(bus, share_open).await;
+        answer = prober.probe(bus, share_open()).await;
     }
     answer.probe
 }
@@ -1095,9 +1175,20 @@ pub async fn probe_beside_share(share_open: bool) -> KwinProbe {
 /// The probe at daemon or app startup. On KDE, a failure that can pass
 /// (KWin not on the bus yet at login, a timeout, no bus) is tried again
 /// for up to 15 s ([`STARTUP_RETRY_WAITS`]).
-pub async fn probe_at_startup(share_open: bool, on_kde: bool) -> KwinProbe {
+pub async fn probe_at_startup(share_open: impl Fn() -> bool, on_kde: bool) -> KwinProbe {
+    probe_at_startup_with(&PROBER, &RealBus, share_open, on_kde).await
+}
+
+/// [`probe_at_startup`] with its prober and bus given. Off KDE nothing is
+/// tried again: KWin is not coming.
+pub async fn probe_at_startup_with<B: ProbeBus>(
+    prober: &Prober,
+    bus: &B,
+    share_open: impl Fn() -> bool,
+    on_kde: bool,
+) -> KwinProbe {
     let waits: &[Duration] = if on_kde { &STARTUP_RETRY_WAITS } else { &[] };
-    probe_with_retries(&PROBER, &RealBus, share_open, waits).await
+    probe_with_retries(prober, bus, share_open, waits).await
 }
 
 /// KDE direct for Settings without rendering anything: the last probe
@@ -1118,6 +1209,23 @@ pub fn status_from_versions(interface: &Result<u32, KwinError>) -> KwinProbe {
     }
 }
 
+/// Whether the compare half may grab beside the open stream. It must pass
+/// the render gate as a fresh render beside a share would
+/// ([`render_gate`] with `share_open` and no kept result): a kept
+/// "available" from a probe made with no share open says nothing about
+/// grabbing beside one. And the probe must have found KDE direct working.
+pub fn compare_half_allowed(found: &Versions, probe: &KwinProbe) -> Result<(), String> {
+    match render_gate(true, &found.interface, found.plasma, false) {
+        RenderGate::Render => {}
+        RenderGate::Refused(why) | RenderGate::NotChecked(why) => return Err(why),
+        RenderGate::Cached => return Err("no kept result was offered".into()),
+    }
+    match probe {
+        KwinProbe::Available => Ok(()),
+        other => Err(format!("KDE direct is not available ({other:?})")),
+    }
+}
+
 /// The KDE direct half of a debug compare pair: the same Tab moment as the
 /// stream frame, saved as `NNNN-kwin.png`. KDE only. It runs beside the
 /// open stream, so it needs Plasma 6.8.1 ([`render_gate`]).
@@ -1127,10 +1235,10 @@ pub(crate) async fn save_compare_half(dir: &std::path::Path, n: u32, output_name
         return;
     }
     let probe = probe_beside_share(true).await;
-    if probe != KwinProbe::Available {
+    if let Err(why) = compare_half_allowed(&versions().await, &probe) {
         static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
         if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            tracing::info!(?probe, "KDE direct half of the compare pair skipped");
+            tracing::info!("KDE direct half of the compare pair skipped: {why}");
         }
         return;
     }
@@ -1336,18 +1444,28 @@ mod tests {
             }
         };
         // Matches: the geometry is not read again.
-        let got = check_native_size((2560, 1440), Some((2560, 1440)), reread(None)).await;
+        let got = check_native_size((2560, 1440), Some((2560, 1440)), true, reread(None)).await;
         assert_eq!((got, calls.get()), (SizeCheck::Matches, 0));
         // Unknown real size: nothing to compare.
-        let got = check_native_size((2560, 1440), None, reread(None)).await;
+        let got = check_native_size((2560, 1440), None, true, reread(None)).await;
         assert_eq!((got, calls.get()), (SizeCheck::Matches, 0));
         // Stale cache (the monitor changed mode): one re-read fixes it.
-        let got =
-            check_native_size((2560, 1440), Some((1920, 1080)), reread(Some((2560, 1440)))).await;
+        let got = check_native_size(
+            (2560, 1440),
+            Some((1920, 1080)),
+            true,
+            reread(Some((2560, 1440))),
+        )
+        .await;
         assert_eq!((got, calls.get()), (SizeCheck::MatchesAfterReread, 1));
         // Still off after the re-read: kept as KWin rendered it.
-        let got =
-            check_native_size((3200, 1800), Some((2560, 1440)), reread(Some((2560, 1440)))).await;
+        let got = check_native_size(
+            (3200, 1800),
+            Some((2560, 1440)),
+            true,
+            reread(Some((2560, 1440))),
+        )
+        .await;
         assert_eq!((got, calls.get()), (SizeCheck::StillDiffers, 2));
     }
 
@@ -1755,7 +1873,7 @@ mod tests {
             ],
         );
         let started = tokio::time::Instant::now();
-        let got = probe_with_retries(&prober, &bus, false, &STARTUP_RETRY_WAITS).await;
+        let got = probe_with_retries(&prober, &bus, || false, &STARTUP_RETRY_WAITS).await;
         assert_eq!(got, KwinProbe::Available);
         assert_eq!(bus.rendered(), 3);
         assert_eq!(
@@ -1767,14 +1885,14 @@ mod tests {
         let prober = Prober::new();
         let bus = FakeBus::new(Ok(4), None, vec![Err(KwinError::NotAuthorized)]);
         let started = tokio::time::Instant::now();
-        let got = probe_with_retries(&prober, &bus, false, &STARTUP_RETRY_WAITS).await;
+        let got = probe_with_retries(&prober, &bus, || false, &STARTUP_RETRY_WAITS).await;
         assert!(matches!(got, KwinProbe::Unavailable(_)));
         assert_eq!(started.elapsed(), Duration::ZERO);
         // Off KDE there are no waits.
         let prober = Prober::new();
         let bus = FakeBus::new(Err(KwinError::NotKwin), None, vec![]);
         let started = tokio::time::Instant::now();
-        probe_with_retries(&prober, &bus, false, &[]).await;
+        probe_with_retries(&prober, &bus, || false, &[]).await;
         assert_eq!(started.elapsed(), Duration::ZERO);
     }
 
@@ -1793,5 +1911,146 @@ mod tests {
         );
         assert!(!KwinError::Timeout.is_definitive());
         assert!(super::super::flight::is_busy(&KwinError::Busy.to_string()));
+    }
+
+    #[tokio::test]
+    async fn a_broken_connection_is_made_again_and_others_are_kept() {
+        let cache: Reconnecting<u32> = Reconnecting::new();
+        let made = std::sync::atomic::AtomicU32::new(0);
+        let make = || async {
+            Ok::<_, KwinError>(made.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1)
+        };
+        assert_eq!(cache.get_or_make(make).await, Ok(1));
+        assert_eq!(cache.get_or_make(make).await, Ok(1), "kept");
+        // A timeout or a refusal says nothing about the connection.
+        cache.forget_after(&KwinError::Timeout).await;
+        cache.forget_after(&KwinError::NotAuthorized).await;
+        assert_eq!(cache.get_or_make(make).await, Ok(1), "still kept");
+        // No bus: the next use connects again.
+        cache.forget_after(&KwinError::NoBus("closed".into())).await;
+        assert_eq!(cache.get_or_make(make).await, Ok(2), "made again");
+        // A failed make keeps nothing.
+        let empty: Reconnecting<u32> = Reconnecting::new();
+        let failed = empty
+            .get_or_make(|| async { Err::<u32, _>(KwinError::NoBus("x".into())) })
+            .await;
+        assert!(failed.is_err());
+        assert_eq!(empty.get_or_make(make).await, Ok(3));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn off_kde_the_startup_probe_does_not_try_again() {
+        let prober = Prober::new();
+        let bus = FakeBus::new(
+            Ok(5),
+            Some((6, 8, 1)),
+            vec![Err(KwinError::Timeout), Ok(())],
+        );
+        let started = tokio::time::Instant::now();
+        let got = probe_at_startup_with(&prober, &bus, || false, false).await;
+        assert!(matches!(got, KwinProbe::Unavailable(_)), "{got:?}");
+        assert_eq!(bus.rendered(), 1, "one try");
+        assert_eq!(started.elapsed(), Duration::ZERO, "no wait");
+        // On KDE the same failure is tried again.
+        let prober = Prober::new();
+        let bus = FakeBus::new(
+            Ok(5),
+            Some((6, 8, 1)),
+            vec![Err(KwinError::Timeout), Ok(())],
+        );
+        assert_eq!(
+            probe_at_startup_with(&prober, &bus, || false, true).await,
+            KwinProbe::Available
+        );
+        assert_eq!(bus.rendered(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_lasting_size_mismatch_rereads_at_most_once_a_minute() {
+        let t0 = Instant::now();
+        assert!(native_reread_due(None, t0));
+        assert!(!native_reread_due(Some(t0), t0 + Duration::from_secs(59)));
+        assert!(native_reread_due(Some(t0), t0 + NATIVE_REREAD_GAP));
+        let calls = std::cell::Cell::new(0);
+        let got = check_native_size((3200, 1800), Some((2560, 1440)), false, || {
+            calls.set(calls.get() + 1);
+            async { Some((2560, 1440)) }
+        })
+        .await;
+        assert_eq!(got, SizeCheck::DiffersRereadSkipped);
+        assert_eq!(calls.get(), 0, "not read again inside the gap");
+        // A matching size never reads, due or not.
+        let got = check_native_size((2560, 1440), Some((2560, 1440)), false, || {
+            calls.set(calls.get() + 1);
+            async { None }
+        })
+        .await;
+        assert_eq!((got, calls.get()), (SizeCheck::Matches, 0));
+    }
+
+    #[test]
+    fn the_compare_half_needs_the_full_fix_even_after_an_available_probe() {
+        let at = |plasma| Versions {
+            interface: Ok(5),
+            plasma,
+        };
+        // Probed with no share open on 6.8.0: available, yet not beside one.
+        let why = compare_half_allowed(&at(Some((6, 8, 0))), &KwinProbe::Available).unwrap_err();
+        assert!(why.contains("6.8.1"), "{why}");
+        assert!(compare_half_allowed(&at(None), &KwinProbe::Available).is_err());
+        assert_eq!(
+            compare_half_allowed(&at(Some((6, 8, 1))), &KwinProbe::Available),
+            Ok(())
+        );
+        assert!(
+            compare_half_allowed(&at(Some((6, 8, 1))), &KwinProbe::NotChecked("x".into())).is_err()
+        );
+        let down = Versions {
+            interface: Err(KwinError::NotKwin),
+            plasma: None,
+        };
+        assert!(compare_half_allowed(&down, &KwinProbe::Available).is_err());
+    }
+
+    /// A share that opens during a retry wait is seen by the next attempt:
+    /// on 6.8.0 that attempt renders nothing.
+    #[tokio::test(start_paused = true)]
+    async fn each_startup_retry_looks_at_the_share_again() {
+        let prober = Prober::new();
+        let bus = FakeBus::new(
+            Ok(5),
+            Some((6, 8, 0)),
+            vec![Err(KwinError::Timeout), Ok(())],
+        );
+        let looks = std::sync::atomic::AtomicUsize::new(0);
+        // Closed for the first attempt, open from the second.
+        let share_open = || looks.fetch_add(1, std::sync::atomic::Ordering::SeqCst) > 0;
+        let got = probe_at_startup_with(&prober, &bus, share_open, true).await;
+        assert!(matches!(got, KwinProbe::NotChecked(_)), "{got:?}");
+        assert_eq!(
+            bus.rendered(),
+            1,
+            "only the attempt with the share closed rendered"
+        );
+        assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A bus that never finishes the handshake ends the connect after
+    /// [`CONNECT_TIMEOUT`]; nothing is kept, and the next use tries again.
+    #[tokio::test(start_paused = true)]
+    async fn a_connect_that_never_answers_times_out_and_is_tried_again() {
+        let cache: Reconnecting<u32> = Reconnecting::new();
+        let started = tokio::time::Instant::now();
+        // The outer timeout only keeps a broken build from hanging here.
+        let hung = tokio::time::timeout(
+            Duration::from_secs(60),
+            cache.get_or_make(std::future::pending::<Result<u32, KwinError>>),
+        )
+        .await
+        .expect("the connect gave up on its own");
+        assert_eq!(hung, Err(KwinError::Timeout));
+        assert_eq!(started.elapsed(), CONNECT_TIMEOUT);
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(cache.get_or_make(|| async { Ok(9) }).await, Ok(9));
     }
 }

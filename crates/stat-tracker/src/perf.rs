@@ -91,7 +91,8 @@ pub struct PortalShot {
     pub round_trip: Duration,
     /// Size of the PNG file the portal wrote.
     pub png_bytes: u64,
-    /// Reading and decoding the PNG in the tracker.
+    /// Reading the PNG file and decoding it in the tracker, both on one
+    /// blocking thread since rc.7 (#432): this includes the file read.
     pub decode: Duration,
     /// Reading the output layout (a Wayland round trip).
     pub geometry: Duration,

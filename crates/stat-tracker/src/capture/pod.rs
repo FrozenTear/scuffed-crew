@@ -359,7 +359,6 @@ pub fn framerate_within_cap(bytes: &[u8], max_fps: u32) -> bool {
         })
 }
 
-/// One line for the session-start log. `configured` is the cap from config.
 /// The frame-rate cap in a negotiated Format's fractions (see
 /// [`negotiated_rate_line`] for the order): the max-framerate when it is
 /// not 0, else a fixed framerate that is not 0, else `None` (variable rate
@@ -373,6 +372,7 @@ pub fn negotiated_cap(rates: &[(u32, u32)]) -> Option<(u32, u32)> {
     }
 }
 
+/// One line for the session-start log. `configured` is the cap from config.
 pub fn negotiated_rate_line(rates: &[(u32, u32)], configured: u32) -> String {
     match rates {
         [rate, max, ..] => format!(

@@ -353,6 +353,25 @@ pub(crate) enum NoteTone {
     Warn,
 }
 
+/// Whether the app may run KDE direct's 1x1 KWin render: only when KDE
+/// direct is the saved route, or automatic is saved and automatic would
+/// use KDE direct ([`stat_tracker::capture::KWIN_DIRECT_DEFAULT_ON_KDE`]),
+/// or the user just chose its chip. Otherwise Settings reads the version
+/// only, which renders nothing.
+pub(crate) fn render_wanted(saved_route: CaptureRoute, chip_clicked: bool) -> bool {
+    render_wanted_with(
+        saved_route,
+        chip_clicked,
+        stat_tracker::capture::KWIN_DIRECT_DEFAULT_ON_KDE,
+    )
+}
+
+fn render_wanted_with(saved_route: CaptureRoute, chip_clicked: bool, default_on: bool) -> bool {
+    saved_route == CaptureRoute::Kwin
+        || (saved_route == CaptureRoute::Auto && default_on)
+        || chip_clicked
+}
+
 /// The KDE direct chip is shown on KDE, or when it is the saved choice.
 pub(crate) fn show_kde_direct(desktop: &str, route: CaptureRoute) -> bool {
     stat_tracker::capture::is_kde(desktop) || route == CaptureRoute::Kwin
@@ -3214,6 +3233,71 @@ token = \"not-a-real-token\"
             share_notice: String::new(),
             capture_notice: String::new(),
         }
+    }
+
+    #[test]
+    fn kde_direct_renders_only_when_saved_or_chosen() {
+        for route in [
+            CaptureRoute::Auto,
+            CaptureRoute::Screencast,
+            CaptureRoute::Screenshot,
+        ] {
+            assert!(!render_wanted(route, false), "{route:?} at launch");
+            assert!(render_wanted(route, true), "{route:?} then the chip");
+        }
+        assert!(render_wanted(CaptureRoute::Kwin, false));
+        assert!(render_wanted(CaptureRoute::Kwin, true));
+        // Flipping the default-on constant makes automatic render too, and
+        // nothing else.
+        assert!(render_wanted_with(CaptureRoute::Auto, false, true));
+        assert!(!render_wanted_with(CaptureRoute::Auto, false, false));
+        assert!(!render_wanted_with(CaptureRoute::Screencast, false, true));
+        assert!(!render_wanted_with(CaptureRoute::Screenshot, false, true));
+    }
+
+    /// `app.rs` with whitespace removed.
+    fn squashed_app() -> String {
+        include_str!("app.rs").split_whitespace().collect()
+    }
+
+    // The app's three KDE direct checks (#433 review): launch and the
+    // recheck after a restart or a closed share decide on the saved route
+    // alone; only a click on the KDE direct chip adds a render.
+
+    #[test]
+    fn the_app_has_three_kde_direct_checks() {
+        assert_eq!(
+            squashed_app()
+                .matches("stat_tracker::capture::kwin_direct_status(")
+                .count(),
+            3,
+            "launch, chip click, recheck"
+        );
+    }
+
+    #[test]
+    fn the_launch_check_renders_only_for_the_saved_route() {
+        assert!(squashed_app().contains(
+            "kwin_direct_status(app.data_dir.clone(),settings::render_wanted(app.saved_config.capture_route,false),)"
+        ));
+    }
+
+    #[test]
+    fn the_recheck_renders_only_for_the_saved_route() {
+        assert!(squashed_app().contains(
+            "ifstd::mem::take(&mutself.kde_direct_recheck){tasks.push(Task::perform(stat_tracker::capture::kwin_direct_status(self.data_dir.clone(),settings::render_wanted(self.saved_config.capture_route,false),"
+        ));
+    }
+
+    #[test]
+    fn the_chip_click_check_renders_for_the_chip() {
+        let app = squashed_app();
+        assert!(app.contains(
+            "letchip_clicked=route==stat_tracker::config::CaptureRoute::Kwin;ifchip_clicked&&self.fixture.is_none(){"
+        ));
+        assert!(app.contains(
+            "kwin_direct_status(self.data_dir.clone(),settings::render_wanted(self.saved_config.capture_route,chip_clicked),)"
+        ));
     }
 
     #[test]

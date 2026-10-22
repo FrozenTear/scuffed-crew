@@ -266,6 +266,9 @@ to screenshots. Where a screenshot is already safe, including GNOME when
 the stream was forced, screenshots continue. One log line and the app
 status say why. The saved permission is kept. Other desktops (niri, Sway,
 Hyprland, X11) keep their direct capture unless you force the stream.
+When the stream is the whole desktop, it is cut to your monitor with the
+monitor layout the tracker keeps for 30 seconds (5 when it could not be
+read); the layout is read again sooner when it cannot explain the frame.
 
 If the share cannot start, the tracker logs a warning. On niri, wlroots,
 and GNOME when the stream was forced, that grab takes a screenshot, and so
@@ -348,17 +351,23 @@ later (the full fix for KDE bug 524840). A grab waits 400 ms after Tab, as
 direct capture does, and retries as usual. The picture is the size KWin
 renders the monitor at, its real mode size; it is never resized. If it
 differs from the size the tracker last read for that monitor, the tracker
-reads the monitor layout again. Automatic does not choose KDE direct yet:
-route selection is unchanged.
+reads the monitor layout again, at most once a minute while it keeps
+differing. Automatic does not choose KDE direct yet: route selection is
+unchanged.
 
 Older screenshot on KDE takes about half a second of KWin and portal work
 per grab. The tracker runs one request at a time (a Tab waits for a poll's
 request to finish, then takes its own; a poll that finds one running is
-skipped), a rejected Tab is retried once instead of twice, and out of a
-match the poll grabs about every 3 seconds instead of every tick. KDE
-direct polls at that rate out of a match too. The app's Capture now is a
-separate process and can run at the same moment; KWin handles such calls
-one after the other. On GNOME,
+skipped; in the end-reel window the outcome poll waits up to a second, so
+holding Tab over VICTORY does not cost it), a rejected Tab is retried once
+instead of twice, and out of a match the poll grabs about every 3 seconds
+instead of every tick. KDE direct polls at that rate out of a match too.
+The app's Capture now is a separate process and is not in that one-at-a-
+time line. On KDE direct that is harmless (KWin handles such calls one
+after the other). On Older screenshot, a Capture now and a tracker poll
+in the same second can share one portal file, and one of the two can
+fail (the one whose file the other already removed; a file that was only
+replaced still gives a picture); press Capture now again. On GNOME,
 Older screenshot flashes the screen and plays a sound on every capture;
 the startup log warns when it is forced there, and Settings says so.
 When the environment variable is set, Settings says so and names the file
