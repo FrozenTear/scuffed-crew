@@ -336,6 +336,201 @@ pub fn consume_quit(data_dir: &Path) -> bool {
     consume(&QUIT_WATCH, quit_path(data_dir))
 }
 
+/// A process running the GUI binary, as [`scan_gui_processes`] read it
+/// from `/proc`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GuiProcess {
+    pub pid: u32,
+    pub ppid: u32,
+    /// The `/proc/<pid>/exe` target. Ends in ` (deleted)` once an update
+    /// replaced the file.
+    pub exe: String,
+    /// Started with `--companion`: an overlay child, not a GUI.
+    pub companion: bool,
+    /// Started with `--fixture`: a demo run, which never takes the lock.
+    pub fixture: bool,
+    /// Has the lock file open. `None` when its open files could not be read.
+    pub has_lock_open: Option<bool>,
+}
+
+/// Who this process is, for [`stale_gui_targets`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Me {
+    pub pid: u32,
+    pub ppid: u32,
+    pub uid: u32,
+}
+
+impl Me {
+    pub fn current() -> Self {
+        // SAFETY: getppid and getuid take no arguments and cannot fail.
+        let (ppid, uid) = unsafe { (libc::getppid(), libc::getuid()) };
+        Self {
+            pid: std::process::id(),
+            ppid: u32::try_from(ppid).unwrap_or(0),
+            uid,
+        }
+    }
+}
+
+/// True when `exe` (a `/proc/<pid>/exe` target) is the GUI binary, replaced
+/// on disk or not. The tracker daemon (`scuffed-stat-tracker`) never is.
+pub fn is_gui_exe(exe: &str) -> bool {
+    let path = Path::new(exe.strip_suffix(" (deleted)").unwrap_or(exe));
+    path.file_name().is_some_and(|name| name == GUI_BIN)
+}
+
+/// Real uid and parent pid from `/proc/<pid>/status`.
+fn read_status(dir: &Path) -> Option<(u32, u32)> {
+    let status = std::fs::read_to_string(dir.join("status")).ok()?;
+    let mut uid = None;
+    let mut ppid = None;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("Uid:") {
+            uid = rest.split_whitespace().next()?.parse().ok();
+        } else if let Some(rest) = line.strip_prefix("PPid:") {
+            ppid = rest.trim().parse().ok();
+        }
+    }
+    Some((uid?, ppid?))
+}
+
+fn read_exe(dir: &Path) -> Option<String> {
+    let target = std::fs::read_link(dir.join("exe")).ok()?;
+    Some(target.to_string_lossy().into_owned())
+}
+
+fn has_lock_open(dir: &Path) -> Option<bool> {
+    let fds = std::fs::read_dir(dir.join("fd")).ok()?;
+    Some(fds.flatten().any(|fd| {
+        std::fs::read_link(fd.path())
+            .is_ok_and(|target| target.file_name().is_some_and(|name| name == LOCK_FILE))
+    }))
+}
+
+/// The processes of user `uid` that run the GUI binary, read from
+/// `proc_root` (`/proc` in the app; a temp dir in tests). Processes of
+/// other users, and entries that vanish mid-scan, are left out.
+pub fn scan_gui_processes(proc_root: &Path, uid: u32) -> Vec<GuiProcess> {
+    let Ok(entries) = std::fs::read_dir(proc_root) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|n| n.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let dir = entry.path();
+        let Some(exe) = read_exe(&dir) else {
+            continue;
+        };
+        if !is_gui_exe(&exe) {
+            continue;
+        }
+        let Some((owner, ppid)) = read_status(&dir) else {
+            continue;
+        };
+        if owner != uid {
+            continue;
+        }
+        let cmdline = std::fs::read(dir.join("cmdline")).unwrap_or_default();
+        let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
+        found.push(GuiProcess {
+            pid,
+            ppid,
+            exe,
+            companion: args.iter().skip(1).any(|a| *a == b"--companion"),
+            fixture: args.iter().skip(1).any(|a| *a == b"--fixture"),
+            has_lock_open: has_lock_open(&dir),
+        });
+    }
+    found.sort_by_key(|p| p.pid);
+    found
+}
+
+/// The pids to stop once this process holds the lock (S5-UP-1): every GUI
+/// of this user that is not this process, not its parent (an old GUI that
+/// started it through "Restart now" and is on its way out), not a demo
+/// run, and does not have the lock file open, with that GUI's
+/// `--companion` children. That is a GUI from before the lock (0.4.x), or
+/// one whose binary was replaced and that lost the lock: either can save
+/// an older config over this one's settings.
+///
+/// A GUI with the lock file open is in the lock protocol (a launch that is
+/// about to show or replace this one) and is left to it. So is a GUI whose
+/// open files could not be read. Companions go first, so a GUI cannot
+/// start a new one in between.
+pub fn stale_gui_targets(procs: &[GuiProcess], me: Me) -> Vec<u32> {
+    let stale: Vec<u32> = procs
+        .iter()
+        .filter(|p| {
+            p.pid != me.pid
+                && p.pid != me.ppid
+                && !p.companion
+                && !p.fixture
+                && p.has_lock_open == Some(false)
+        })
+        .map(|p| p.pid)
+        .collect();
+    let mut targets: Vec<u32> = procs
+        .iter()
+        .filter(|p| p.companion && p.pid != me.pid && stale.contains(&p.ppid))
+        .map(|p| p.pid)
+        .collect();
+    targets.extend(stale);
+    targets
+}
+
+/// Stop the stale GUIs [`stale_gui_targets`] picks, with SIGTERM through
+/// `kill`. Each pid's `exe` is read again right before its signal and a pid
+/// that no longer runs the same binary is skipped, so a pid reused since
+/// the scan is never signalled. Returns the pids signalled.
+pub fn stop_stale_guis(
+    proc_root: &Path,
+    me: Me,
+    kill: &mut dyn FnMut(u32) -> io::Result<()>,
+) -> Vec<u32> {
+    let procs = scan_gui_processes(proc_root, me.uid);
+    let mut stopped = Vec::new();
+    for pid in stale_gui_targets(&procs, me) {
+        let Some(seen) = procs.iter().find(|p| p.pid == pid) else {
+            continue;
+        };
+        if read_exe(&proc_root.join(pid.to_string())).as_deref() != Some(seen.exe.as_str()) {
+            continue;
+        }
+        match kill(pid) {
+            Ok(()) => {
+                tracing::info!(pid, exe = %seen.exe, companion = seen.companion, "stopped an older tracker GUI that runs without the lock");
+                stopped.push(pid);
+            }
+            Err(e) => {
+                tracing::warn!(pid, error = %e, "could not stop an older tracker GUI");
+            }
+        }
+    }
+    stopped
+}
+
+/// SIGTERM `pid`.
+pub fn sigterm(pid: u32) -> io::Result<()> {
+    let pid =
+        libc::pid_t::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    if pid <= 0 {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    // SAFETY: kill only sends a signal; `pid` is a single positive pid.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -690,5 +885,306 @@ mod tests {
         assert!(watch.poll());
         assert!(!watch.poll());
         assert!(!watch.poll());
+    }
+
+    /// A fake `/proc/<pid>` under `root`: `exe` and the `fd/*` links are
+    /// dangling symlinks, which is all the scan reads. Never the real /proc.
+    struct FakeProc<'a> {
+        pid: u32,
+        ppid: u32,
+        uid: u32,
+        exe: &'a str,
+        args: &'a [&'a str],
+        /// `None`: no `fd` directory (its open files cannot be read).
+        fds: Option<&'a [&'a str]>,
+    }
+
+    fn fake_proc(root: &Path, p: FakeProc<'_>) {
+        let dir = root.join(p.pid.to_string());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink(p.exe, dir.join("exe")).unwrap();
+        std::fs::write(
+            dir.join("status"),
+            format!(
+                "Name:\tstat-tracker-gu\nState:\tS (sleeping)\nPPid:\t{}\nUid:\t{}\t{}\t{}\t{}\n",
+                p.ppid, p.uid, p.uid, p.uid, p.uid
+            ),
+        )
+        .unwrap();
+        let mut cmdline = Vec::new();
+        for arg in std::iter::once(p.exe).chain(p.args.iter().copied()) {
+            cmdline.extend_from_slice(arg.as_bytes());
+            cmdline.push(0);
+        }
+        std::fs::write(dir.join("cmdline"), cmdline).unwrap();
+        if let Some(fds) = p.fds {
+            let fd_dir = dir.join("fd");
+            std::fs::create_dir_all(&fd_dir).unwrap();
+            for (i, target) in fds.iter().enumerate() {
+                std::os::unix::fs::symlink(target, fd_dir.join(i.to_string())).unwrap();
+            }
+        }
+    }
+
+    const UID: u32 = 1000;
+    const GUI: &str = "/home/u/.local/bin/stat-tracker-gui";
+    const GUI_DELETED: &str = "/home/u/.local/bin/stat-tracker-gui (deleted)";
+    const LOCK: &str = "/run/user/1000/scuffed-stat-tracker-gui.lock";
+    const ME: Me = Me {
+        pid: 500,
+        ppid: 1,
+        uid: UID,
+    };
+
+    fn proc_tree() -> tempfile::TempDir {
+        let root = tempfile::tempdir().unwrap();
+        let r = root.path();
+        let plain: &[&str] = &["/dev/null", "socket:[123]"];
+        // This GUI, holding the lock.
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 500,
+                ppid: 1,
+                uid: UID,
+                exe: GUI,
+                args: &[],
+                fds: Some(&[LOCK]),
+            },
+        );
+        // A 0.4.24 GUI left running by its in-app update: binary replaced,
+        // no lock. Its companion overlay.
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 300,
+                ppid: 1,
+                uid: UID,
+                exe: GUI_DELETED,
+                args: &[],
+                fds: Some(plain),
+            },
+        );
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 301,
+                ppid: 300,
+                uid: UID,
+                exe: GUI_DELETED,
+                args: &["--companion"],
+                fds: Some(&[]),
+            },
+        );
+        // A lockless legacy GUI whose binary was not replaced.
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 310,
+                ppid: 1,
+                uid: UID,
+                exe: "/usr/bin/stat-tracker-gui",
+                args: &[],
+                fds: Some(&[]),
+            },
+        );
+        // A launch that is in the lock protocol right now.
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 320,
+                ppid: 1,
+                uid: UID,
+                exe: GUI,
+                args: &["--replace"],
+                fds: Some(&[LOCK]),
+            },
+        );
+        // A demo run, and this GUI's own companion.
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 330,
+                ppid: 1,
+                uid: UID,
+                exe: GUI_DELETED,
+                args: &["--fixture", "sample"],
+                fds: Some(&[]),
+            },
+        );
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 501,
+                ppid: 500,
+                uid: UID,
+                exe: GUI,
+                args: &["--companion"],
+                fds: Some(&[]),
+            },
+        );
+        // The tracker daemon, a stale GUI of another user, a GUI whose open
+        // files cannot be read, and an orphan companion.
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 340,
+                ppid: 1,
+                uid: UID,
+                exe: "/home/u/.local/bin/scuffed-stat-tracker (deleted)",
+                args: &[],
+                fds: Some(&[]),
+            },
+        );
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 350,
+                ppid: 1,
+                uid: 1001,
+                exe: GUI_DELETED,
+                args: &[],
+                fds: Some(&[]),
+            },
+        );
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 360,
+                ppid: 1,
+                uid: UID,
+                exe: GUI_DELETED,
+                args: &[],
+                fds: None,
+            },
+        );
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 370,
+                ppid: 1,
+                uid: UID,
+                exe: GUI_DELETED,
+                args: &["--companion"],
+                fds: Some(&[]),
+            },
+        );
+        // Not a pid, and an unrelated process.
+        std::fs::create_dir_all(r.join("self")).unwrap();
+        fake_proc(
+            r,
+            FakeProc {
+                pid: 380,
+                ppid: 1,
+                uid: UID,
+                exe: "/usr/bin/bash",
+                args: &[],
+                fds: Some(&[]),
+            },
+        );
+        root
+    }
+
+    #[test]
+    fn gui_exe_matches_the_gui_binary_only() {
+        assert!(is_gui_exe(GUI));
+        assert!(is_gui_exe(GUI_DELETED));
+        assert!(is_gui_exe("/tmp/.mount_abc/usr/bin/stat-tracker-gui"));
+        assert!(!is_gui_exe("/home/u/.local/bin/scuffed-stat-tracker"));
+        assert!(!is_gui_exe(
+            "/home/u/.local/bin/scuffed-stat-tracker (deleted)"
+        ));
+        assert!(!is_gui_exe("/usr/bin/stat-tracker-gui-old"));
+        assert!(!is_gui_exe(""));
+    }
+
+    #[test]
+    fn scan_reads_gui_processes_of_this_user_only() {
+        let root = proc_tree();
+        let procs = scan_gui_processes(root.path(), UID);
+        let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
+        assert_eq!(pids, vec![300, 301, 310, 320, 330, 360, 370, 500, 501]);
+        let legacy = &procs[0];
+        assert_eq!(legacy.exe, GUI_DELETED);
+        assert_eq!(legacy.has_lock_open, Some(false));
+        assert!(!legacy.companion && !legacy.fixture);
+        assert!(procs[1].companion);
+        assert_eq!(procs[1].ppid, 300);
+        assert_eq!(procs[3].has_lock_open, Some(true));
+        assert!(procs[4].fixture);
+        assert_eq!(procs[5].has_lock_open, None);
+        assert!(scan_gui_processes(&root.path().join("missing"), UID).is_empty());
+    }
+
+    #[test]
+    fn stale_targets_are_lockless_guis_and_their_companions() {
+        let root = proc_tree();
+        let procs = scan_gui_processes(root.path(), UID);
+        // Companions first, then the GUIs. Never this GUI or its companion,
+        // the launch in the lock protocol, the demo run, the daemon,
+        // another user's GUI, an unreadable one, or an orphan companion.
+        assert_eq!(stale_gui_targets(&procs, ME), vec![301, 300, 310]);
+    }
+
+    #[test]
+    fn stale_targets_skip_the_parent_that_restarted_this_gui() {
+        let root = proc_tree();
+        let procs = scan_gui_processes(root.path(), UID);
+        let me = Me { ppid: 300, ..ME };
+        assert_eq!(stale_gui_targets(&procs, me), vec![310]);
+    }
+
+    #[test]
+    fn stop_signals_only_the_targets_through_the_injected_kill() {
+        let root = proc_tree();
+        let mut sent = Vec::new();
+        let stopped = stop_stale_guis(root.path(), ME, &mut |pid| {
+            sent.push(pid);
+            if pid == 310 {
+                Err(io::Error::from_raw_os_error(libc::EPERM))
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(sent, vec![301, 300, 310]);
+        assert_eq!(stopped, vec![301, 300]);
+    }
+
+    #[test]
+    fn stop_skips_a_pid_reused_since_the_scan() {
+        let root = proc_tree();
+        let mut sent = Vec::new();
+        let mut first = true;
+        let stopped = stop_stale_guis(root.path(), ME, &mut |pid| {
+            if first {
+                first = false;
+                // Pid 300 exits and is reused before its turn.
+                let exe = root.path().join("300").join("exe");
+                std::fs::remove_file(&exe).unwrap();
+                std::os::unix::fs::symlink("/usr/bin/vim", &exe).unwrap();
+            }
+            sent.push(pid);
+            Ok(())
+        });
+        assert_eq!(sent, vec![301, 310]);
+        assert_eq!(stopped, vec![301, 310]);
+    }
+
+    #[test]
+    fn nothing_to_stop_when_this_is_the_only_gui() {
+        let root = tempfile::tempdir().unwrap();
+        fake_proc(
+            root.path(),
+            FakeProc {
+                pid: 500,
+                ppid: 1,
+                uid: UID,
+                exe: GUI,
+                args: &[],
+                fds: Some(&[LOCK]),
+            },
+        );
+        let stopped = stop_stale_guis(root.path(), ME, &mut |_| panic!("no signal"));
+        assert!(stopped.is_empty());
     }
 }

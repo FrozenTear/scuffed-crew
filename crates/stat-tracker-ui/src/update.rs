@@ -362,6 +362,42 @@ pub fn install_command_for(advertised: Option<&str>, current: Option<&str>) -> S
     UPDATE_CMD.to_string()
 }
 
+/// What a package-owned install (an AUR or distro package) is told in place
+/// of the install command. The curl installer would put a second copy in
+/// `~/.local` whose user unit and desktop entry shadow the package's, so a
+/// package update would stop reaching the app (S5-UP-2).
+pub fn package_update_line(owner: &crate::uninstall::PackageOwner) -> String {
+    use crate::uninstall::PackageManager;
+    match owner.manager {
+        PackageManager::Pacman => "Installed from a package: update with your package manager, \
+                                   for example `paru -Syu` or `yay -Syu`."
+            .to_string(),
+        PackageManager::Apt => "Installed from a package: update with your package manager, \
+                                for example `sudo apt update && sudo apt upgrade`."
+            .to_string(),
+    }
+}
+
+/// The update plan for this install: never Ready when a package owns the
+/// running binary (the in-app update runs the curl installer too), else
+/// [`evaluate_plan`].
+pub fn evaluate_plan_for(
+    latest: &str,
+    package: Option<&crate::uninstall::PackageOwner>,
+) -> UpdatePlan {
+    match package {
+        Some(owner) => package_plan(owner),
+        None => evaluate_plan(latest),
+    }
+}
+
+fn package_plan(owner: &crate::uninstall::PackageOwner) -> UpdatePlan {
+    UpdatePlan::Blocked {
+        reason: format!("This app comes from the {} package.", owner.package),
+        hint: package_update_line(owner),
+    }
+}
+
 /// Test hook `bootstrap.sh` honors. The GUI must not forward it into the
 /// installer, or a developer's shell could redirect the release download.
 pub const BOOTSTRAP_FETCH_HOOK_ENV: &str = "STAT_TRACKER_BOOTSTRAP_FETCH_CMD";
@@ -1395,6 +1431,10 @@ pub fn primary_action(
     }
 }
 
+/// The update prompt. `package` is the package that owns the running
+/// binary: such an install gets the package-manager line in place of the
+/// install command, Copy and Update now.
+#[allow(clippy::too_many_arguments)]
 pub fn banner<'a>(
     info: &UpdateInfo,
     progress: &UpdateProgress,
@@ -1403,6 +1443,7 @@ pub fn banner<'a>(
     notes_ui: crate::notes::NotesUi<'a>,
     notes_expanded: bool,
     restart: RestartNeed,
+    package: Option<&crate::uninstall::PackageOwner>,
 ) -> Element<'a, Message> {
     let url = info.url.clone();
     let cmd = pinned_install_command(&info.latest);
@@ -1452,43 +1493,57 @@ pub fn banner<'a>(
         }
     }
 
-    if let UpdatePlan::Blocked { reason, hint } = plan
-        && !matches!(progress, UpdateProgress::Succeeded(_))
-    {
+    // A package install is told to use its package manager: no install
+    // command, no Copy, no Update now (S5-UP-2).
+    if let Some(owner) = package {
         body = body.push(
-            text(format!("{reason} {hint}"))
+            text(package_update_line(owner))
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
-                .color(theme::WARN),
+                .color(TEXT_2),
+        );
+    } else {
+        if let UpdatePlan::Blocked { reason, hint } = plan
+            && !matches!(progress, UpdateProgress::Succeeded(_))
+        {
+            body = body.push(
+                text(format!("{reason} {hint}"))
+                    .size(SIZE_META)
+                    .font(FONT_MEDIUM)
+                    .color(theme::WARN),
+            );
+        }
+
+        body = body.push(
+            text(cmd)
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(theme::ACCENT),
         );
     }
 
-    body = body.push(
-        text(cmd)
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(theme::ACCENT),
-    );
-
-    let (label, on_press) = primary_action(progress, can_run, restart);
-    let mut update_btn = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
-        .padding(Padding::from([8, 16]))
-        .style(theme::chip(on_press.is_some()));
-    if let Some(message) = on_press {
-        update_btn = update_btn.on_press(message);
+    let mut actions = row![].spacing(8);
+    if package.is_none() {
+        let (label, on_press) = primary_action(progress, can_run, restart);
+        let mut update_btn = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
+            .padding(Padding::from([8, 16]))
+            .style(theme::chip(on_press.is_some()));
+        if let Some(message) = on_press {
+            update_btn = update_btn.on_press(message);
+        }
+        actions = actions.push(update_btn).push(
+            button(
+                text("Copy command")
+                    .size(SIZE_META)
+                    .font(FONT_SEMIBOLD)
+                    .color(TEXT),
+            )
+            .padding(Padding::from([8, 16]))
+            .style(theme::ghost_btn())
+            .on_press(Message::CopyUpdateCmd),
+        );
     }
-
-    let actions = row![
-        update_btn,
-        button(
-            text("Copy command")
-                .size(SIZE_META)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT),
-        )
-        .padding(Padding::from([8, 16]))
-        .style(theme::ghost_btn())
-        .on_press(Message::CopyUpdateCmd),
+    let actions = actions.push(
         button(
             text("Open on GitHub")
                 .size(SIZE_META)
@@ -1498,6 +1553,8 @@ pub fn banner<'a>(
         .padding(Padding::from([8, 16]))
         .style(theme::ghost_btn())
         .on_press(Message::OpenUpdate(url)),
+    );
+    let actions = actions.push(
         button(
             text(if banner_shows_notes(notes_expanded) {
                 "Hide what's new"
@@ -1511,8 +1568,7 @@ pub fn banner<'a>(
         .padding(Padding::from([8, 16]))
         .style(theme::ghost_btn())
         .on_press(Message::ToggleUpdateNotes),
-    ]
-    .spacing(8);
+    );
 
     body = body.push(actions);
     if banner_shows_notes(notes_expanded) {
@@ -2109,6 +2165,35 @@ mod tests {
         assert!(!cmd.contains("/main/"), "{cmd}");
         assert_eq!(bootstrap_raw_url("main"), BOOTSTRAP_URL);
         assert!(UPDATE_CMD.contains(BOOTSTRAP_URL));
+    }
+
+    #[test]
+    fn package_installs_are_sent_to_their_package_manager() {
+        use crate::uninstall::{PackageManager, PackageOwner};
+        let aur = PackageOwner {
+            manager: PackageManager::Pacman,
+            package: "scuffed-stat-tracker-bin".into(),
+        };
+        let deb = PackageOwner {
+            manager: PackageManager::Apt,
+            package: "scuffed-stat-tracker".into(),
+        };
+        let line = package_update_line(&aur);
+        assert!(line.starts_with("Installed from a package: update with your package manager"));
+        assert!(line.contains("paru -Syu") && line.contains("yay -Syu"));
+        assert!(package_update_line(&deb).contains("apt"));
+        for owner in [&aur, &deb] {
+            let line = package_update_line(owner);
+            assert!(!line.contains("curl") && !line.contains("bash"), "{line}");
+            // Never Ready: the in-app update runs the curl installer.
+            let plan = evaluate_plan_for("0.5.0", Some(owner));
+            let UpdatePlan::Blocked { reason, hint } = &plan else {
+                panic!("package plan must be blocked: {plan:?}");
+            };
+            assert!(reason.contains(&owner.package));
+            assert_eq!(*hint, line);
+            assert!(!plan.can_run());
+        }
     }
 
     #[test]

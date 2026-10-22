@@ -46,7 +46,24 @@ fn main() -> anyhow::Result<()> {
             instance::REPLACE_WAIT,
         );
         match claimed {
-            Ok(instance::Claim::Primary(file)) => Some(file),
+            Ok(instance::Claim::Primary(file)) => {
+                // A GUI from before the lock (0.4.x), or one left on a
+                // replaced binary without it, would keep running beside
+                // this one and save its older config over ours (S5-UP-1).
+                // Before this GUI reads config.
+                let stopped = instance::stop_stale_guis(
+                    std::path::Path::new("/proc"),
+                    instance::Me::current(),
+                    &mut instance::sigterm,
+                );
+                if !stopped.is_empty() {
+                    tracing::info!(
+                        ?stopped,
+                        "stopped older tracker GUIs that ran without the lock"
+                    );
+                }
+                Some(file)
+            }
             Ok(instance::Claim::Secondary) => {
                 tracing::info!(lock = %lock.display(), "tracker GUI already running; asking it to show");
                 if let Err(e) = instance::request_show(&cli.data_dir) {

@@ -299,6 +299,9 @@ pub enum Message {
     UpdateRechecked(Option<UpdateInfo>),
     OpenUpdate(String),
     CopyUpdateCmd,
+    /// Which package, if any, owns the running binary. Probed once at
+    /// start (it runs `pacman -Qo` / `dpkg -S`).
+    PackageOwnerProbed(Option<crate::uninstall::PackageOwner>),
     OpenUninstall,
     DismissUninstall,
     ToggleUninstallData(bool),
@@ -463,6 +466,9 @@ pub struct TrackerApp {
     pub backend: Option<CaptureBackend>,
     /// `XDG_CURRENT_DESKTOP`, read once.
     pub desktop: String,
+    /// Wayland session (`XDG_SESSION_TYPE`, else `WAYLAND_DISPLAY`), read
+    /// once. Off Wayland, Settings offers only Automatic capture.
+    pub wayland_session: bool,
     /// KDE direct on this desktop: `None` off KDE or until it is known.
     pub kde_direct: Option<stat_tracker::capture::KwinProbe>,
     /// The running tracker's pid and whether its share was open, at the
@@ -475,6 +481,11 @@ pub struct TrackerApp {
     pub update: Option<UpdateInfo>,
     pub update_progress: UpdateProgress,
     pub update_plan: UpdatePlan,
+    /// The package that owns the running binary, once probed. A package
+    /// install is told to update with its package manager, never given the
+    /// curl installer (S5-UP-2). `None` until probed, and for a script
+    /// install.
+    pub package_owner: Option<crate::uninstall::PackageOwner>,
     /// Notes for the offered update, drawn inside the update prompt.
     pub update_notes: Vec<ShownRelease>,
     update_open_details: HashSet<String>,
@@ -687,6 +698,7 @@ impl TrackerApp {
             outputs: Vec::new(),
             backend: None,
             desktop: std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
+            wayland_session: settings::wayland_session_from_env(),
             kde_direct: None,
             kde_direct_seen: (None, false),
             kde_direct_recheck: false,
@@ -696,6 +708,7 @@ impl TrackerApp {
             update: None,
             installed_version,
             update_progress: UpdateProgress::Idle,
+            package_owner: None,
             update_plan: UpdatePlan::Blocked {
                 reason: String::new(),
                 hint: String::new(),
@@ -782,6 +795,10 @@ impl TrackerApp {
                     settings::render_wanted(app.saved_config.capture_route, false),
                 ),
                 Message::KdeDirectReady,
+            ));
+            tasks.push(Task::perform(
+                probe_own_package_owner(),
+                Message::PackageOwnerProbed,
             ));
             tasks.push(Task::perform(
                 update::check_for_update(),
@@ -1486,7 +1503,7 @@ impl TrackerApp {
                     .unwrap_or_default();
                 self.update_plan = info
                     .as_ref()
-                    .map(|i| update::evaluate_plan(&i.latest))
+                    .map(|i| update::evaluate_plan_for(&i.latest, self.package_owner.as_ref()))
                     .unwrap_or_else(|| UpdatePlan::Blocked {
                         reason: String::new(),
                         hint: String::new(),
@@ -1677,7 +1694,24 @@ impl TrackerApp {
                     }
                 }
             }
+            Message::PackageOwnerProbed(owner) => {
+                if let Some(owner) = &owner {
+                    tracing::info!(package = %owner.package, "the running app is package-owned: updates go through the package manager");
+                }
+                self.package_owner = owner;
+                if let Some(info) = &self.update
+                    && !matches!(self.update_progress, UpdateProgress::Running)
+                {
+                    self.update_plan =
+                        update::evaluate_plan_for(&info.latest, self.package_owner.as_ref());
+                }
+                Task::none()
+            }
             Message::CopyUpdateCmd => {
+                // Package installs show no command (S5-UP-2).
+                if self.package_owner.is_some() {
+                    return Task::none();
+                }
                 let cmd = update::install_command_for(
                     self.update.as_ref().map(|i| i.latest.as_str()),
                     self.installed_version.as_deref(),
@@ -1705,7 +1739,7 @@ impl TrackerApp {
                 let Some(info) = self.update.clone() else {
                     return Task::none();
                 };
-                let plan = update::evaluate_plan(&info.latest);
+                let plan = update::evaluate_plan_for(&info.latest, self.package_owner.as_ref());
                 self.update_plan = plan.clone();
                 if let UpdatePlan::Blocked { reason, hint } = &plan {
                     let msg = format!("{reason} {hint}");
@@ -3062,6 +3096,19 @@ async fn uninstall_from_app(
         }
     }
     crate::uninstall::apply(&req)
+}
+
+/// The package that owns the running binary, off the UI thread: the probe
+/// runs `pacman -Qo` and `dpkg -S`. After a package update replaced the
+/// binary, `/proc/self/exe` ends in ` (deleted)`; the path without it is
+/// the one the package owns.
+async fn probe_own_package_owner() -> Option<crate::uninstall::PackageOwner> {
+    let exe = std::env::current_exe().ok()?;
+    let exe = crate::instance::relaunch_path(&exe);
+    tokio::task::spawn_blocking(move || crate::uninstall::probe_package_owner(&exe))
+        .await
+        .ok()
+        .flatten()
 }
 
 fn notes_dialog_escape(
