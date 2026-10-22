@@ -10601,7 +10601,7 @@ mod tests {
     }
 
     #[test]
-    fn tab_retry_predicate_retries_only_not_a_scoreboard() {
+    fn tab_retry_predicate_retries_only_retryable_results() {
         let scan = detect::hero_portrait::RowScan {
             dip_count: 2,
             median_pitch: None,

@@ -48,13 +48,18 @@ pub fn tab_retry_waits(route: crate::capture::ShotRoute) -> &'static [Duration] 
 /// ignored. A capture that took no board sets no debounce.
 pub const TAB_DEBOUNCE_AFTER_ACCEPT: Duration = Duration::from_secs(3);
 
-/// A capture with no accepted board whose Tab was released sooner than this
-/// after the press logs the hold-Tab hint.
+/// A capture with no accepted board, whose frame showed no scoreboard (or a
+/// board the reader refused), and whose Tab was released sooner than this
+/// after the press logs a hold-Tab hint.
 pub const TAB_HOLD_HINT_BELOW: Duration = Duration::from_secs(1);
 
 /// The hint for a tap that ended before the board could be captured.
 pub const TAB_HOLD_HINT: &str =
     "Tab was released before the scoreboard could be captured: hold Tab for about a second";
+
+/// The hint for a tap whose board the reader refused, released before a
+/// retry could grab it again.
+pub const TAB_REFUSED_HOLD_HINT: &str = "the scoreboard reader refused the board and Tab was released before a retry: hold Tab for about a second";
 
 /// How one Tab grab ended, for the retry loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,9 +68,10 @@ pub enum TabResult {
     Accepted,
     /// The frame did not show a full scoreboard. Retried while Tab is held.
     NotAScoreboard,
-    /// A board was on the frame and the new reader refused it. Retried
-    /// while Tab is held like [`TabResult::NotAScoreboard`], with no
-    /// hold-Tab hint: the board was up, so the tap was long enough.
+    /// The preflight passed (a board was seen) and the new reader refused
+    /// the board. Retried while Tab is held like
+    /// [`TabResult::NotAScoreboard`]; a short tap gets its own hint
+    /// ([`TAB_REFUSED_HOLD_HINT`]).
     BoardRefused,
     /// No frame yet (no fresh stream buffer, share still opening). Retried
     /// while Tab is held.
@@ -92,7 +98,7 @@ pub fn hold_hint_is_warn(last_warn: Option<Instant>, now: Instant) -> bool {
     last_warn.is_none_or(|at| now.saturating_duration_since(at) >= TAB_HOLD_HINT_WARN_EVERY)
 }
 
-fn log_hold_hint() {
+fn log_hold_hint(hint: &str) {
     static LAST_WARN: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
     let now = Instant::now();
     let warn = {
@@ -104,9 +110,9 @@ fn log_hold_hint() {
         warn
     };
     if warn {
-        tracing::warn!("{TAB_HOLD_HINT}");
+        tracing::warn!("{hint}");
     } else {
-        tracing::info!("{TAB_HOLD_HINT}");
+        tracing::info!("{hint}");
     }
 }
 
@@ -177,8 +183,8 @@ impl TabFlight {
     /// Record how the capture ended. A short tap whose frame showed no
     /// scoreboard logs the hold-Tab hint. [`with_retries`] calls this.
     pub fn finish(&self, result: TabResult) {
-        if short_tap_hint(result, self.press, self.released_at()) {
-            log_hold_hint();
+        if let Some(hint) = short_tap_hint(result, self.press, self.released_at()) {
+            log_hold_hint(hint);
         }
         self.set_phase(if result == TabResult::Accepted {
             TabFlightPhase::Accepted
@@ -242,14 +248,23 @@ impl TabFlight {
     }
 }
 
-/// Whether a finished capture should log [`TAB_HOLD_HINT`]: the frame it
-/// kept showed no scoreboard, and the key was released under
-/// [`TAB_HOLD_HINT_BELOW`] after the press. A missing stream frame, a share
-/// still opening or declined, a board the reader refused, and an accepted
-/// board get no hint.
-pub fn short_tap_hint(result: TabResult, press: Instant, released_at: Option<Instant>) -> bool {
-    result == TabResult::NotAScoreboard
-        && released_at.is_some_and(|at| at.saturating_duration_since(press) < TAB_HOLD_HINT_BELOW)
+/// The hint a finished capture logs, if any: the key was released under
+/// [`TAB_HOLD_HINT_BELOW`] after the press, and the frame it kept showed no
+/// scoreboard ([`TAB_HOLD_HINT`]) or a board the reader refused
+/// ([`TAB_REFUSED_HOLD_HINT`]). A missing stream frame, a share still
+/// opening or declined, and an accepted board get no hint.
+pub fn short_tap_hint(
+    result: TabResult,
+    press: Instant,
+    released_at: Option<Instant>,
+) -> Option<&'static str> {
+    let short =
+        released_at.is_some_and(|at| at.saturating_duration_since(press) < TAB_HOLD_HINT_BELOW);
+    match result {
+        TabResult::NotAScoreboard if short => Some(TAB_HOLD_HINT),
+        TabResult::BoardRefused if short => Some(TAB_REFUSED_HOLD_HINT),
+        _ => None,
+    }
 }
 
 tokio::task_local! {
@@ -1045,26 +1060,42 @@ mod tests {
     fn a_short_tap_without_a_board_gets_the_hold_hint() {
         let press = Instant::now();
         let at = |ms: u64| Some(press + Duration::from_millis(ms));
-        assert!(short_tap_hint(TabResult::NotAScoreboard, press, at(400)));
-        assert!(
-            !short_tap_hint(TabResult::NotAScoreboard, press, at(1_000)),
+        assert_eq!(
+            short_tap_hint(TabResult::NotAScoreboard, press, at(400)),
+            Some(TAB_HOLD_HINT)
+        );
+        assert_eq!(
+            short_tap_hint(TabResult::NotAScoreboard, press, at(1_000)),
+            None,
             "held a second"
         );
-        assert!(
-            !short_tap_hint(TabResult::Accepted, press, at(400)),
+        assert_eq!(
+            short_tap_hint(TabResult::Accepted, press, at(400)),
+            None,
             "board accepted"
         );
-        assert!(
-            !short_tap_hint(TabResult::NotAScoreboard, press, None),
+        assert_eq!(
+            short_tap_hint(TabResult::NotAScoreboard, press, None),
+            None,
             "still held"
         );
-        // Only a frame with no scoreboard: a missing stream frame or a
-        // share that is opening or declined is not the player's tap.
-        assert!(!short_tap_hint(TabResult::NoFrameYet, press, at(400)));
-        // A board was up and the reader refused it: the tap was not short.
-        assert!(!short_tap_hint(TabResult::BoardRefused, press, at(400)));
+        // Only a frame with no scoreboard or a refused board: a missing
+        // stream frame or a share that is opening or declined is not the
+        // player's tap.
+        assert_eq!(short_tap_hint(TabResult::NoFrameYet, press, at(400)), None);
+        assert_eq!(short_tap_hint(TabResult::Final, press, at(400)), None);
+        // #442 review B-2: a refused board on a short tap has its own line.
+        assert_eq!(
+            short_tap_hint(TabResult::BoardRefused, press, at(400)),
+            Some(TAB_REFUSED_HOLD_HINT)
+        );
+        assert_ne!(TAB_REFUSED_HOLD_HINT, TAB_HOLD_HINT);
+        assert_eq!(
+            short_tap_hint(TabResult::BoardRefused, press, at(1_000)),
+            None
+        );
+        assert_eq!(short_tap_hint(TabResult::BoardRefused, press, None), None);
         assert!(TabResult::BoardRefused.retries());
-        assert!(!short_tap_hint(TabResult::Final, press, at(400)));
     }
 
     #[test]
