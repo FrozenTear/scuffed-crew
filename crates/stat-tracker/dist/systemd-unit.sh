@@ -112,7 +112,10 @@ restart_running_daemon() {
 #   - the daemon just installed runs ($3 = 1 after the --version check);
 #   - the unit stopped no more than 2 minutes before bootstrap.sh began
 #     ($2, epoch seconds), and not after now (see unit_stop_epoch);
-#   - a graphical session is up (graphical-session.target is active).
+#   - a graphical session is up (graphical-session.target is active);
+#   - the update did not begin with the tracker stopped ($4 = 1, the app's
+#     STAT_TRACKER_KEEP_STOPPED: the player stopped it, perhaps just before
+#     pressing Update now, which the 2 minute window cannot tell apart).
 # Prints one word: "started", "failed", or "skip-<reason>". Prints nothing
 # when the unit is not an enabled, stopped one. --no-block: the 0.4.24
 # updater waits on this install with no timeout. Never fails the install.
@@ -143,7 +146,7 @@ unit_stop_epoch() {
 }
 
 start_enabled_daemon() {
-    local systemctl_bin="$1" since="${2:-}" smoke_ok="${3:-0}"
+    local systemctl_bin="$1" since="${2:-}" smoke_ok="${3:-0}" keep_stopped="${4:-}"
     local unit="scuffed-stat-tracker.service"
     local enabled active stopped_at now
     enabled="$("$systemctl_bin" --user is-enabled "$unit" 2>/dev/null)" || true
@@ -153,6 +156,10 @@ start_enabled_daemon() {
     esac
     active="$("$systemctl_bin" --user is-active "$unit" 2>/dev/null)" || true
     [[ "$active" == inactive ]] || return 0
+    if [[ "$keep_stopped" == 1 ]]; then
+        echo skip-kept-stopped
+        return 0
+    fi
     if [[ "$smoke_ok" != 1 ]]; then
         echo skip-smoke
         return 0

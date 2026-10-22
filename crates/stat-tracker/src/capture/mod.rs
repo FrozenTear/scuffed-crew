@@ -436,6 +436,14 @@ pub(crate) fn note_portal_state(state: PortalState) {
     }
 }
 
+/// A grab error from a screenshot portal that is not answering: a request
+/// given up ([`portal::SHOT_UNANSWERED`]), or a grab turned away while new
+/// requests are paused or held after one ([`portal::SHOT_BACKOFF`]). The
+/// portal code logs its own WARN for these.
+pub fn is_portal_unanswered(err: &str) -> bool {
+    err.contains(portal::SHOT_UNANSWERED)
+}
+
 /// The stream was asked for by the environment or by Settings, not chosen
 /// because the desktop is KDE or GNOME.
 pub fn stream_was_forced() -> bool {

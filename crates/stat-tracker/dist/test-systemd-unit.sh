@@ -566,6 +566,21 @@ STAT_TRACKER_BOOTSTRAP_STARTED='' FAKE_ENABLED=enabled FAKE_STATE=inactive \
 started && fail "install without a bootstrap start time started the unit: $(cat "$LOG")"
 pass "a stop from before the update, no session, or no bootstrap time: not started"
 
+# The player stopped the tracker, then pressed Update now within 2 minutes:
+# the app says so (STAT_TRACKER_KEEP_STOPPED=1) and the unit stays stopped,
+# though its stop time fits the window. Any other value changes nothing.
+STAT_TRACKER_KEEP_STOPPED=1 FAKE_ENABLED=enabled FAKE_STATE=inactive \
+    FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
+started && fail "unit the player stopped before the update was started: $(cat "$LOG")"
+grep -q 'it was not running when the update began' "$ERR" \
+    || fail "kept-stopped skip was not explained: $(cat "$ERR")"
+for keep in "" 0; do
+    STAT_TRACKER_KEEP_STOPPED="$keep" FAKE_ENABLED=enabled FAKE_STATE=inactive \
+        FAKE_STOPPED_AT="$UPDATE_STOP" run_start_install
+    started || fail "STAT_TRACKER_KEEP_STOPPED='$keep' kept the unit stopped: $(cat "$LOG")"
+done
+pass "an update that began with the tracker stopped does not start it"
+
 # The new daemon does not run: do not start it.
 cp "$PKG/bin/scuffed-stat-tracker" "$TMP/daemon-good"
 printf '%s\n' '#!/bin/sh' 'exit 1' > "$PKG/bin/scuffed-stat-tracker"

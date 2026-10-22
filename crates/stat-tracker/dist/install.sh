@@ -564,9 +564,12 @@ fi
 # when the install ends. If the app quit during the install, start it here,
 # but only when the stop came from this update (see start_enabled_daemon).
 # bootstrap.sh exports STAT_TRACKER_BOOTSTRAP_STARTED; a plain ./install.sh
-# run has none and never starts the unit.
+# run has none and never starts the unit. The app (rc.8 on) sets
+# STAT_TRACKER_KEEP_STOPPED=1 when the tracker was not running as the update
+# began: the player stopped it, so it stays stopped.
 if [[ "$INSTALLED_UNITS" -eq 1 ]]; then
-    case "$(start_enabled_daemon "$SYSTEMCTL_BIN" "${STAT_TRACKER_BOOTSTRAP_STARTED:-}" "$SMOKE_OK")" in
+    case "$(start_enabled_daemon "$SYSTEMCTL_BIN" "${STAT_TRACKER_BOOTSTRAP_STARTED:-}" "$SMOKE_OK" \
+        "${STAT_TRACKER_KEEP_STOPPED:-}")" in
         started)
             info "Starting the tracker service again (this update had stopped it)"
             ;;
@@ -576,6 +579,9 @@ if [[ "$INSTALLED_UNITS" -eq 1 ]]; then
             ;;
         skip-smoke)
             info "The tracker service is stopped. Not starting it: the daemon --version check failed."
+            ;;
+        skip-kept-stopped)
+            info "The tracker service is stopped. Not starting it: it was not running when the update began."
             ;;
         skip-*)
             info "The tracker service is stopped. Start it from the app when you want it."

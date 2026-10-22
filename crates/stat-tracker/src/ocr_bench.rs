@@ -109,7 +109,8 @@ fn tab(
         FrameAnalysisOutcome::StreamMiss
         | FrameAnalysisOutcome::ShareOpening
         | FrameAnalysisOutcome::Declined
-        | FrameAnalysisOutcome::CaptureBusy => {
+        | FrameAnalysisOutcome::CaptureBusy
+        | FrameAnalysisOutcome::PortalPaused => {
             return json!({"status": "stream_miss"});
         }
     };

@@ -444,9 +444,12 @@ fn apply_installer_env(
     latest: &str,
     prefix: &Path,
     download_dir: &Path,
+    keep_stopped: bool,
 ) {
     cmd.remove_env(BOOTSTRAP_FETCH_HOOK_ENV);
-    for (key, value) in bootstrap_env(latest, prefix) {
+    // Never inherited: only this update decides it.
+    cmd.remove_env(KEEP_STOPPED_ENV);
+    for (key, value) in bootstrap_env(latest, prefix, keep_stopped) {
         cmd.set_env(key, &value);
     }
     // bootstrap.sh downloads and extracts into STAT_TRACKER_DIR. Its own
@@ -462,14 +465,30 @@ fn installer_download_dir(script: &Path) -> PathBuf {
     script.parent().unwrap_or_else(|| Path::new(".")).join("dl")
 }
 
-pub fn bootstrap_env(latest: &str, prefix: &Path) -> Vec<(&'static str, String)> {
-    vec![
+/// Tells install.sh not to start the tracker service after the install:
+/// the tracker was not running when the update began (the player stopped
+/// it), so an update never starts a tracker the player stopped. bootstrap.sh
+/// passes it through. A GUI before rc.8 does not send it.
+pub const KEEP_STOPPED_ENV: &str = "STAT_TRACKER_KEEP_STOPPED";
+
+/// `keep_stopped` is true when the update began with the tracker not
+/// running (`stop_daemon` false): [`KEEP_STOPPED_ENV`] is set then.
+pub fn bootstrap_env(
+    latest: &str,
+    prefix: &Path,
+    keep_stopped: bool,
+) -> Vec<(&'static str, String)> {
+    let mut env = vec![
         ("STAT_TRACKER_TAG", release_tag(latest)),
         ("STAT_TRACKER_CHANNEL", "stable".into()),
         ("STAT_TRACKER_PREFIX", prefix.display().to_string()),
         // The GUI already downloaded this tag's script. Skip the re-exec.
         ("STAT_TRACKER_BOOTSTRAP_PINNED", "1".into()),
-    ]
+    ];
+    if keep_stopped {
+        env.push((KEEP_STOPPED_ENV, "1".into()));
+    }
+    env
 }
 
 /// Stop before install. Start again when the install succeeded, or when it
@@ -880,6 +899,9 @@ trait UpdateIo {
     ) -> Result<String, String>;
     /// Sleep between checks for a game in progress.
     async fn pause(&self, d: std::time::Duration);
+    /// `keep_stopped`: the tracker was not running when the update began,
+    /// so the installer must not start it ([`KEEP_STOPPED_ENV`]).
+    #[allow(clippy::too_many_arguments)]
     async fn install(
         &self,
         url: &str,
@@ -888,6 +910,7 @@ trait UpdateIo {
         prefix: &Path,
         tag: &str,
         log: &Path,
+        keep_stopped: bool,
     ) -> Result<String, String>;
     /// How long [`UpdateIo::install`] may run before it is dropped.
     fn install_timeout(&self) -> Duration {
@@ -919,8 +942,9 @@ impl UpdateIo for LiveUpdateIo {
         prefix: &Path,
         tag: &str,
         log: &Path,
+        keep_stopped: bool,
     ) -> Result<String, String> {
-        download_and_run_bootstrap(url, script, latest, prefix, tag, log).await
+        download_and_run_bootstrap(url, script, latest, prefix, tag, log, keep_stopped).await
     }
 }
 
@@ -1136,7 +1160,15 @@ async fn run_planned_update(
     // nothing is still writing to PREFIX/bin when the rollback below runs.
     let install = match tokio::time::timeout(
         limit,
-        io.install(&url, &script, &req.latest, &prefix, &tag, &log),
+        io.install(
+            &url,
+            &script,
+            &req.latest,
+            &prefix,
+            &tag,
+            &log,
+            !req.stop_daemon,
+        ),
     )
     .await
     {
@@ -1237,6 +1269,7 @@ fn note_daemon_left_stopped(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn download_and_run_bootstrap(
     url: &str,
     script: &Path,
@@ -1244,6 +1277,7 @@ async fn download_and_run_bootstrap(
     prefix: &Path,
     tag: &str,
     log: &Path,
+    keep_stopped: bool,
 ) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .user_agent("scuffed-stat-tracker-gui")
@@ -1269,7 +1303,13 @@ async fn download_and_run_bootstrap(
 
     let mut cmd = tokio::process::Command::new("bash");
     cmd.arg(script);
-    apply_installer_env(&mut cmd, latest, prefix, &installer_download_dir(script));
+    apply_installer_env(
+        &mut cmd,
+        latest,
+        prefix,
+        &installer_download_dir(script),
+        keep_stopped,
+    );
     let status = run_logged(cmd, log).await?;
     let combined = std::fs::read_to_string(log).unwrap_or_default();
     if !status.success() {
@@ -2451,7 +2491,7 @@ mod tests {
 
     #[test]
     fn bootstrap_env_pins_tag_channel_and_prefix() {
-        let env = bootstrap_env("0.4.7", Path::new("/tmp/prefix"));
+        let env = bootstrap_env("0.4.7", Path::new("/tmp/prefix"), false);
         assert_eq!(
             env.iter()
                 .find(|(k, _)| *k == "STAT_TRACKER_TAG")
@@ -2599,6 +2639,7 @@ mod tests {
             "0.4.15",
             Path::new("/tmp/prefix"),
             Path::new("/tmp/work/dl"),
+            false,
         );
         let out = cmd.output().expect("bash");
         assert!(
@@ -2636,6 +2677,8 @@ mod tests {
         quit_gate: Option<std::sync::Arc<UpdateGate>>,
         /// The script path the installer was given.
         script: std::sync::Mutex<Option<PathBuf>>,
+        /// The installer's keep-stopped flag.
+        keep_stopped: std::sync::Mutex<Option<bool>>,
     }
 
     impl FakeIo {
@@ -2651,6 +2694,7 @@ mod tests {
                 timeout: INSTALL_TIMEOUT,
                 quit_gate: None,
                 script: std::sync::Mutex::new(None),
+                keep_stopped: std::sync::Mutex::new(None),
             }
         }
     }
@@ -2692,7 +2736,9 @@ mod tests {
             prefix: &Path,
             _tag: &str,
             _log: &Path,
+            keep_stopped: bool,
         ) -> Result<String, String> {
+            *self.keep_stopped.lock().expect("keep_stopped") = Some(keep_stopped);
             self.urls.lock().expect("urls").push(url.to_string());
             *self.script.lock().expect("script") = Some(script.to_path_buf());
             // bootstrap.sh's download, in the folder the app gives it.
@@ -2817,6 +2863,59 @@ mod tests {
             io.verbs.lock().expect("verbs").as_slice(),
             &[DaemonVerb::Stop, DaemonVerb::Start]
         );
+    }
+
+    /// Final pre-tag review: an update that began with the tracker not
+    /// running (the player stopped it) tells the installer to keep it
+    /// stopped; one that stopped it itself does not.
+    #[tokio::test]
+    async fn the_installer_keeps_a_tracker_the_player_stopped_stopped() {
+        for (stop_daemon, keep) in [(true, false), (false, true)] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let io = FakeIo::new(Ok("installed".into()));
+            let _ = run_planned_update(
+                &run_request(stop_daemon),
+                ready_plan(dir.path()),
+                &io,
+                &UpdateGate::new(),
+            )
+            .await;
+            assert_eq!(
+                *io.keep_stopped.lock().expect("keep_stopped"),
+                Some(keep),
+                "stop_daemon={stop_daemon}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_keep_stopped_env_is_set_iff_the_tracker_was_not_running() {
+        let has = |keep: bool| {
+            bootstrap_env("0.5.0", Path::new("/tmp/prefix"), keep)
+                .iter()
+                .find(|(k, _)| *k == KEEP_STOPPED_ENV)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(has(true).as_deref(), Some("1"));
+        assert_eq!(has(false), None);
+        // The child sees it only when this update says so; one inherited
+        // from the app's own environment is dropped.
+        for keep in [true, false] {
+            let mut cmd = std::process::Command::new("bash");
+            cmd.arg("-c")
+                .arg(format!("printf '%s' \"${{{KEEP_STOPPED_ENV}-unset}}\""));
+            cmd.env(KEEP_STOPPED_ENV, "inherited");
+            apply_installer_env(
+                &mut cmd,
+                "0.5.0",
+                Path::new("/tmp/prefix"),
+                Path::new("/tmp/work/dl"),
+                keep,
+            );
+            let out = cmd.output().expect("bash");
+            let want = if keep { "1" } else { "unset" };
+            assert_eq!(String::from_utf8_lossy(&out.stdout), want, "keep={keep}");
+        }
     }
 
     #[tokio::test]
@@ -2985,6 +3084,7 @@ mod tests {
             "0.4.15",
             Path::new("/tmp/prefix"),
             Path::new("/tmp/work/dl"),
+            false,
         );
         let out = cmd.output().expect("bash");
         assert_eq!(String::from_utf8_lossy(&out.stdout), "/tmp/work/dl");

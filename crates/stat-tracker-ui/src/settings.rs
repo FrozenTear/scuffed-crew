@@ -494,6 +494,13 @@ pub(crate) fn x11_route_warning(route: CaptureRoute) -> String {
 /// about the selected choice is a warning. On X11 the KDE direct lines are
 /// left out (it is not offered there), and so is the tracker's notice about
 /// the same Wayland-only method, which the warning already says.
+/// The tracker's capture notice as a Settings line. A notice that already
+/// ends a sentence (the screenshot portal's) keeps one period, not two.
+fn tracker_note(notice: &str) -> String {
+    let notice = notice.trim_end();
+    format!("Tracker: {}.", notice.strip_suffix('.').unwrap_or(notice))
+}
+
 pub(crate) fn capture_route_notes(
     desktop: &str,
     session: SessionKind,
@@ -531,7 +538,7 @@ pub(crate) fn capture_route_notes(
                 && notice.contains("needs a Wayland session")
                 && !notice.contains("no other capture method works here"))
         {
-            notes.push((format!("Tracker: {notice}."), NoteTone::Warn));
+            notes.push((tracker_note(notice), NoteTone::Warn));
         }
         return notes;
     }
@@ -557,7 +564,7 @@ pub(crate) fn capture_route_notes(
         Some(stat_tracker::capture::KwinProbe::Available) | None => {}
     }
     if let Some(notice) = daemon_notice {
-        notes.push((format!("Tracker: {notice}."), NoteTone::Warn));
+        notes.push((tracker_note(notice), NoteTone::Warn));
     }
     notes
 }
@@ -3556,6 +3563,32 @@ token = \"not-a-real-token\"
         let nothing = "the saved capture method, the screen stream, needs a Wayland session and this one is X11; automatic is used: no other capture method works here";
         let notes = capture_route_notes("i3", x11, CaptureRoute::Screencast, None, Some(nothing));
         assert_eq!(notes.last().unwrap().0, format!("Tracker: {nothing}."));
+    }
+
+    /// The portal notices end in a period already: one is kept, not two.
+    #[test]
+    fn a_tracker_notice_that_ends_a_sentence_gets_one_period() {
+        use stat_tracker::capture::{PORTAL_PROMPT_NOTICE, PORTAL_STALL_NOTICE};
+        for notice in [PORTAL_PROMPT_NOTICE, PORTAL_STALL_NOTICE] {
+            assert!(notice.ends_with('.'), "{notice}");
+            for session in [SessionKind::Wayland, SessionKind::X11] {
+                let notes = capture_route_notes(
+                    "KDE",
+                    session,
+                    CaptureRoute::Screenshot,
+                    None,
+                    Some(notice),
+                );
+                let line = &notes.last().unwrap().0;
+                assert_eq!(*line, format!("Tracker: {notice}"), "{session:?}");
+                assert!(!line.ends_with(".."), "{line}");
+            }
+        }
+        assert_eq!(
+            tracker_note("no capture method"),
+            "Tracker: no capture method."
+        );
+        assert_eq!(tracker_note("route. Stall.  "), "Tracker: route. Stall.");
     }
 
     #[test]
