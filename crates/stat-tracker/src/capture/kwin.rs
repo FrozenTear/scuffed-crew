@@ -46,8 +46,11 @@ pub const INTERFACE: &str = "org.kde.KWin.ScreenShot2";
 
 /// The whole grab, call and pipe read, ends within this.
 pub const GRAB_TIMEOUT: Duration = Duration::from_secs(2);
+/// Making the session bus connection ends within this.
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a Tab grab (or the probe) waits for the call before it, at
-/// most one [`GRAB_TIMEOUT`]. A poll does not wait.
+/// most one [`GRAB_TIMEOUT`]. An ordinary poll does not wait; the end-reel
+/// outcome poll waits up to [`super::OUTCOME_POLL_LOCK_WAIT`] (1 s).
 pub const LOCK_WAIT_TAB: Duration = Duration::from_secs(2);
 
 /// Plasma version with the full fix for KDE bug 524840.
@@ -372,7 +375,9 @@ pub enum SizeCheck {
 
 /// A picture that keeps differing from the cached mode size (a monitor
 /// whose mode KWin reports differently) re-reads the geometry at most this
-/// often, not on every grab.
+/// often, not on every grab. The limit is one clock for the process, not
+/// one per output: a re-read for one monitor also holds off another
+/// monitor's re-read for this long (the capture monitor rarely changes).
 pub const NATIVE_REREAD_GAP: Duration = Duration::from_secs(60);
 
 /// Whether a size mismatch may read the geometry again at `now`.
@@ -582,7 +587,10 @@ impl<T: Clone> Reconnecting<T> {
         }
     }
 
-    /// The kept value, or a new one from `make`.
+    /// The kept value, or a new one from `make`, which must answer within
+    /// [`CONNECT_TIMEOUT`]. zbus has no handshake timeout: a session bus
+    /// that accepts and never authenticates would hang every caller,
+    /// including the startup probe whose retries then never run.
     pub async fn get_or_make<F, Fut>(&self, make: F) -> Result<T, KwinError>
     where
         F: FnOnce() -> Fut,
@@ -592,7 +600,9 @@ impl<T: Clone> Reconnecting<T> {
         if let Some(value) = slot.as_ref() {
             return Ok(value.clone());
         }
-        let value = make().await?;
+        let value = tokio::time::timeout(CONNECT_TIMEOUT, make())
+            .await
+            .unwrap_or(Err(KwinError::Timeout))?;
         *slot = Some(value.clone());
         Ok(value)
     }
@@ -2023,5 +2033,24 @@ mod tests {
             "only the attempt with the share closed rendered"
         );
         assert_eq!(looks.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// A bus that never finishes the handshake ends the connect after
+    /// [`CONNECT_TIMEOUT`]; nothing is kept, and the next use tries again.
+    #[tokio::test(start_paused = true)]
+    async fn a_connect_that_never_answers_times_out_and_is_tried_again() {
+        let cache: Reconnecting<u32> = Reconnecting::new();
+        let started = tokio::time::Instant::now();
+        // The outer timeout only keeps a broken build from hanging here.
+        let hung = tokio::time::timeout(
+            Duration::from_secs(60),
+            cache.get_or_make(std::future::pending::<Result<u32, KwinError>>),
+        )
+        .await
+        .expect("the connect gave up on its own");
+        assert_eq!(hung, Err(KwinError::Timeout));
+        assert_eq!(started.elapsed(), CONNECT_TIMEOUT);
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(2));
+        assert_eq!(cache.get_or_make(|| async { Ok(9) }).await, Ok(9));
     }
 }

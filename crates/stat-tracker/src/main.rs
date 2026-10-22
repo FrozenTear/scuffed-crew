@@ -4225,10 +4225,16 @@ fn poll_divisor(
 /// Upper bounds for [`tests::capture_futures_stay_small`] (debug build,
 /// rc.7: 15,168 and 1,640 bytes). Unboxing the KDE direct or portal grab
 /// puts `capture_screen_output_for` at 4.6 KB or 28 KB.
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 const HANDLE_CAPTURE_FUTURE_MAX: usize = 20 * 1024;
-#[cfg(test)]
+#[cfg(all(test, debug_assertions))]
 const CAPTURE_FUTURE_MAX: usize = 3 * 1024;
+
+/// The most the shutdown waits for queued perf.log lines: 500 ms, or less
+/// when less of the shutdown deadline is left.
+fn shutdown_flush_wait(left: std::time::Duration) -> std::time::Duration {
+    left.min(std::time::Duration::from_millis(500))
+}
 
 /// Whether a finished poll grab restarts the slow-cadence count. A grab
 /// turned away because a Tab held the screenshot lock did not look at the
@@ -5052,14 +5058,7 @@ async fn run_loop(
                 // up to OUTCOME_POLL_LOCK_WAIT for a Tab grab's shot lock;
                 // an ordinary poll that finds it held is skipped at once.
                 let grabbed = match stop_for_shutdown_or_key(
-                    capture::with_poll_lock_wait(
-                        capture::poll_lock_wait(outcome_only),
-                        capture::capture_screen_output_for(
-                            backend,
-                            capture_output,
-                            capture::CaptureKind::Poll,
-                        ),
-                    ),
+                    capture::poll_grab(backend, capture_output, outcome_only),
                     stat_tracker::replace::shutdown_notified(),
                     stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
                     &mut pending_key,
@@ -9719,12 +9718,22 @@ async fn shutdown_from_signal(
                     }
                     ShutdownStage::SnapshotExport => {
                         flush_snapshot_if_dirty(store, data_dir).await;
-                        // The last queued perf.log line goes to disk before
-                        // the process ends. Bounded, off the async workers.
-                        let _ = tokio::task::spawn_blocking(|| {
-                            stat_tracker::perf_log::flush(std::time::Duration::from_millis(500))
+                        // perf.log lines already queued go to disk before the
+                        // process ends (the open window is not closed here).
+                        // Bounded by what is left of the shutdown deadline,
+                        // off the async workers.
+                        let wait = shutdown_flush_wait(stat_tracker::replace::shutdown_time_left());
+                        let flushed = tokio::task::spawn_blocking(move || {
+                            stat_tracker::perf_log::flush(wait)
                         })
-                        .await;
+                        .await
+                        .unwrap_or(false);
+                        if !flushed {
+                            tracing::debug!(
+                                wait_ms = wait.as_millis() as u64,
+                                "perf.log lines may be lost: the log thread did not answer in time"
+                            );
+                        }
                     }
                 }
             }
@@ -10768,8 +10777,63 @@ mod tests {
         let grab = capture::capture_screen_output_for(&backend, None, capture::CaptureKind::Tab);
         let grab_size = std::mem::size_of_val(&grab);
         drop(grab);
+        let poll = capture::poll_grab(&backend, None, true);
+        let poll_size = std::mem::size_of_val(&poll);
+        drop(poll);
+        assert!(poll_size <= CAPTURE_FUTURE_MAX, "poll grab {poll_size}");
         assert!(handle_size <= HANDLE_CAPTURE_FUTURE_MAX, "{handle_size}");
         assert!(grab_size <= CAPTURE_FUTURE_MAX, "{grab_size}");
+    }
+
+    /// `main.rs` without its tests, whitespace removed, from `start` to the
+    /// next top-level item after it.
+    fn squashed_fn(start: &str) -> String {
+        let src = include_str!("main.rs");
+        let code = src.split("\nmod tests {").next().unwrap();
+        let at = code.find(start).unwrap_or_else(|| panic!("{start}"));
+        code[at..]
+            .split("\n}\n")
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .collect()
+    }
+
+    /// #433 review: the poll arm passes its own outcome-only flag to the
+    /// screenshot lock wait, and only a grab that ran resets the cadence.
+    #[test]
+    fn the_poll_arm_passes_its_outcome_only_flag() {
+        let run_loop = squashed_fn(concat!("async ", "fn run_loop"));
+        assert!(run_loop.contains("capture::poll_grab(backend,capture_output,outcome_only)"));
+        assert!(run_loop.contains("ifpoll_resets_cadence(&grabbed){"));
+    }
+
+    /// #433 review: shutdown flushes perf.log, bounded by the deadline.
+    #[test]
+    fn shutdown_flushes_perf_log_within_the_deadline() {
+        let shutdown = squashed_fn(concat!("async ", "fn shutdown_from_signal"));
+        assert!(
+            shutdown.contains(
+                "letwait=shutdown_flush_wait(stat_tracker::replace::shutdown_time_left());"
+            )
+        );
+        assert!(shutdown.contains("stat_tracker::perf_log::flush(wait)"));
+    }
+
+    #[test]
+    fn the_shutdown_flush_wait_is_the_smaller_of_500_ms_and_what_is_left() {
+        assert_eq!(
+            shutdown_flush_wait(std::time::Duration::from_secs(4)),
+            std::time::Duration::from_millis(500)
+        );
+        assert_eq!(
+            shutdown_flush_wait(std::time::Duration::from_millis(120)),
+            std::time::Duration::from_millis(120)
+        );
+        assert_eq!(
+            shutdown_flush_wait(std::time::Duration::ZERO),
+            std::time::Duration::ZERO
+        );
     }
 
     #[test]

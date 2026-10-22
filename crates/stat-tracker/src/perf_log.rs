@@ -79,9 +79,11 @@ pub fn write_summary(s: Summary) {
     }
 }
 
-/// Wait up to `wait` until every line queued so far is written. The daemon
-/// calls this at shutdown, so the last window's line is not lost with the
-/// thread. `true` when the log thread answered (or there is none).
+/// Wait up to `wait` until every line already queued is written. The
+/// daemon calls this at shutdown, so a closed window's line queued just
+/// before is not lost with the thread. The window still open at shutdown
+/// is not closed or written. `true` when the log thread answered (or there
+/// is none).
 pub fn flush(wait: std::time::Duration) -> bool {
     match TX.get() {
         Some(tx) => flush_through(tx, wait),

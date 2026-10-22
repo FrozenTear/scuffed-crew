@@ -19,8 +19,10 @@
 //! that is harmless: KWin runs such calls one after the other on its own
 //! thread. On Older screenshot it is not fully covered: an app request and
 //! a daemon poll in the same second can still share one portal file, and
-//! one of the two then fails (its file is gone or replaced). Capture now is
-//! a rare manual click, so this stays a known gap.
+//! one of the two can fail: the one whose file the other already removed
+//! (gone) fails; one whose file was only overwritten (replaced) still
+//! reads a picture. Capture now is a rare manual click, so this stays a
+//! known gap.
 //!
 //! Ordinary polls never wait for the lock ([`lock_wait`]): a poll that
 //! finds a request running is skipped, and the next tick polls again. That
@@ -29,6 +31,10 @@
 //! end-reel wake (the ~3 s VICTORY window) waits a little, about a second,
 //! so a Tab held over the banner does not cost it every tick. A Tab waits,
 //! up to its route's Tab wait.
+//!
+//! The lock is fair (FIFO): an end-reel poll that queues while a Tab
+//! attempt holds it goes before that Tab's next retry, so the retry can
+//! wait one more grab.
 
 use std::future::Future;
 use std::time::Duration;
@@ -151,7 +157,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
-    fn polls_never_wait_and_tabs_wait_their_route_wait() {
+    fn ordinary_polls_never_wait_the_reel_poll_waits_a_second_and_tabs_their_route_wait() {
         let tab = Duration::from_secs(4);
         let reel = Duration::from_secs(1);
         assert_eq!(lock_wait(false, tab, Duration::ZERO), Duration::ZERO);

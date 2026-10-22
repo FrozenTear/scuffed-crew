@@ -3254,6 +3254,51 @@ token = \"not-a-real-token\"
         assert!(!render_wanted_with(CaptureRoute::Screenshot, false, true));
     }
 
+    /// `app.rs` with whitespace removed.
+    fn squashed_app() -> String {
+        include_str!("app.rs").split_whitespace().collect()
+    }
+
+    // The app's three KDE direct checks (#433 review): launch and the
+    // recheck after a restart or a closed share decide on the saved route
+    // alone; only a click on the KDE direct chip adds a render.
+
+    #[test]
+    fn the_app_has_three_kde_direct_checks() {
+        assert_eq!(
+            squashed_app()
+                .matches("stat_tracker::capture::kwin_direct_status(")
+                .count(),
+            3,
+            "launch, chip click, recheck"
+        );
+    }
+
+    #[test]
+    fn the_launch_check_renders_only_for_the_saved_route() {
+        assert!(squashed_app().contains(
+            "kwin_direct_status(app.data_dir.clone(),settings::render_wanted(app.saved_config.capture_route,false),)"
+        ));
+    }
+
+    #[test]
+    fn the_recheck_renders_only_for_the_saved_route() {
+        assert!(squashed_app().contains(
+            "ifstd::mem::take(&mutself.kde_direct_recheck){tasks.push(Task::perform(stat_tracker::capture::kwin_direct_status(self.data_dir.clone(),settings::render_wanted(self.saved_config.capture_route,false),"
+        ));
+    }
+
+    #[test]
+    fn the_chip_click_check_renders_for_the_chip() {
+        let app = squashed_app();
+        assert!(app.contains(
+            "letchip_clicked=route==stat_tracker::config::CaptureRoute::Kwin;ifchip_clicked&&self.fixture.is_none(){"
+        ));
+        assert!(app.contains(
+            "kwin_direct_status(self.data_dir.clone(),settings::render_wanted(self.saved_config.capture_route,chip_clicked),)"
+        ));
+    }
+
     #[test]
     fn kde_direct_chip_shows_on_kde_or_when_saved() {
         assert!(show_kde_direct("KDE", CaptureRoute::Auto));

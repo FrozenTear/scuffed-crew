@@ -325,8 +325,9 @@ instead of every tick. KDE direct polls at that rate out of a match too.
 The app's Capture now is a separate process and is not in that one-at-a-
 time line. On KDE direct that is harmless (KWin handles such calls one
 after the other). On Older screenshot, a Capture now and a tracker poll
-in the same second can share one portal file, and one of the two fails;
-press Capture now again. On GNOME,
+in the same second can share one portal file, and one of the two can
+fail (the one whose file the other already removed; a file that was only
+replaced still gives a picture); press Capture now again. On GNOME,
 Older screenshot flashes the screen and plays a sound on every capture;
 the startup log warns when it is forced there, and Settings says so.
 When the environment variable is set, Settings says so and names the file
