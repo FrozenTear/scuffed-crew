@@ -1,5 +1,6 @@
-//! Retries for Tab captures that the scoreboard preflight rejected, and
-//! what a new Tab press does while a capture is still running.
+//! Retries for Tab captures that the scoreboard preflight rejected, or
+//! whose board the new reader refused, and what a new Tab press does while
+//! a capture is still running.
 //!
 //! A rejected Tab capture captures again after a short wait, at about
 //! 300 ms and about 700 ms after the first rejection, before giving up. Each
@@ -12,8 +13,10 @@
 //! was already closed or not open, not half drawn. The player's own next
 //! Tab is then the best chance of a board, so a new press stops the
 //! running capture's retries and runs as soon as that capture reports
-//! ([`tab_press_action`], [`next_press_after_report`]). The 3 s debounce
-//! applies only after a board was accepted.
+//! ([`tab_press_action`], [`next_press_after_report`]), unless that
+//! capture took its board. The 3 s debounce applies only after a board was
+//! taken: stored, held as a fresh-match board, or kept pending (the
+//! capture report says so, not the retry loop's verdict, S5-CAP-2).
 //!
 //! Retries run only while Tab is held: a frame taken after the key was
 //! released shows the game, not the board. A tap released before any frame
@@ -41,8 +44,8 @@ pub fn tab_retry_waits(route: crate::capture::ShotRoute) -> &'static [Duration] 
     }
 }
 
-/// After an accepted board, Tab presses this soon after its press are
-/// ignored. A rejected capture sets no debounce.
+/// After a board was taken, Tab presses this soon after its press are
+/// ignored. A capture that took no board sets no debounce.
 pub const TAB_DEBOUNCE_AFTER_ACCEPT: Duration = Duration::from_secs(3);
 
 /// A capture with no accepted board whose Tab was released sooner than this
@@ -263,16 +266,16 @@ pub fn current_flight() -> Arc<TabFlight> {
 pub enum TabPressAction {
     /// Start a capture for this press now.
     Start,
-    /// Within [`TAB_DEBOUNCE_AFTER_ACCEPT`] of an accepted board's press.
+    /// Within [`TAB_DEBOUNCE_AFTER_ACCEPT`] of a taken board's press.
     Debounced,
-    /// A capture is running and has no accepted board: stop its retries
-    /// and run this press as soon as it reports.
+    /// A capture is running: stop its retries and run this press as soon
+    /// as it reports, unless that capture takes its board
+    /// ([`next_press_after_report`]). A board the reader passed can still
+    /// go unrecorded, so a press is not dropped on the retry verdict alone.
     Queue,
-    /// The running capture already accepted a board.
-    Ignore,
 }
 
-/// `last_accepted` is the press of the last accepted board. `in_flight` is
+/// `last_accepted` is the press of the last taken board. `in_flight` is
 /// the phase of the capture still running (its report not yet handled).
 pub fn tab_press_action(
     press: Instant,
@@ -286,20 +289,23 @@ pub fn tab_press_action(
     }
     match in_flight {
         None => TabPressAction::Start,
-        Some(TabFlightPhase::Accepted) => TabPressAction::Ignore,
         Some(_) => TabPressAction::Queue,
     }
 }
 
-/// A capture reported. An accepted board starts the debounce from its
-/// press, and a press queued behind it is dropped (it would read the same
-/// board). Otherwise the queued press, if any, runs now.
+/// A capture reported. `board_taken` is whether its report took the board
+/// (stored, held as a fresh-match board, or kept pending), not what the
+/// retry loop said about the frame (S5-CAP-2). A taken board starts the
+/// debounce from its press, and a press queued behind it is dropped (it
+/// would read the same board). Otherwise the queued press, if any, runs
+/// now.
 pub fn next_press_after_report(
     flight: &TabFlight,
     queued: Option<Instant>,
     last_accepted: &mut Option<Instant>,
+    board_taken: bool,
 ) -> Option<Instant> {
-    if flight.phase() == TabFlightPhase::Accepted {
+    if board_taken {
         *last_accepted = Some(flight.press);
         return None;
     }
@@ -460,18 +466,21 @@ impl TabKeys {
                 tracing::debug!("Tab debounced: a board was accepted under 3 s ago");
                 None
             }
-            TabPressAction::Ignore => {
-                tracing::debug!("Tab ignored: the capture in progress already has a board");
-                None
-            }
             TabPressAction::Queue => {
+                let reading = in_flight == Some(TabFlightPhase::Accepted);
                 if let Some(flight) = &self.flight {
                     flight.cancel_retries();
                 }
                 self.queued = Some(press);
-                tracing::info!(
-                    "Tab pressed again before the capture found a board: its retries stop and this press runs next"
-                );
+                if reading {
+                    tracing::debug!(
+                        "Tab pressed again while the capture reads its board: this press runs only if that board is not taken"
+                    );
+                } else {
+                    tracing::info!(
+                        "Tab pressed again before the capture found a board: its retries stop and this press runs next"
+                    );
+                }
                 None
             }
             TabPressAction::Start => {
@@ -495,11 +504,16 @@ impl TabKeys {
         self.queued
     }
 
-    /// The running capture reported. Returns a queued press to start now
-    /// ([`next_press_after_report`]); an accepted board sets `last_accepted`.
-    pub fn on_report(&mut self, last_accepted: &mut Option<Instant>) -> Option<Instant> {
+    /// The running capture reported, and took its board or not. Returns a
+    /// queued press to start now ([`next_press_after_report`]); a taken
+    /// board sets `last_accepted`.
+    pub fn on_report(
+        &mut self,
+        last_accepted: &mut Option<Instant>,
+        board_taken: bool,
+    ) -> Option<Instant> {
         let flight = self.flight.take()?;
-        next_press_after_report(&flight, self.queued.take(), last_accepted)
+        next_press_after_report(&flight, self.queued.take(), last_accepted, board_taken)
     }
 }
 
@@ -873,7 +887,7 @@ mod tests {
         rejected.finish(TabResult::NotAScoreboard);
         let mut last_accepted = None;
         assert_eq!(
-            next_press_after_report(&rejected, None, &mut last_accepted),
+            next_press_after_report(&rejected, None, &mut last_accepted, false),
             None
         );
         assert_eq!(last_accepted, None);
@@ -881,11 +895,11 @@ mod tests {
             tab_press_action(at(1_000), last_accepted, None),
             TabPressAction::Start
         );
-        // An accepted board debounces presses within 3 s of its press.
+        // A taken board debounces presses within 3 s of its press.
         let accepted = TabFlight::new(at(1_000));
         accepted.finish(TabResult::Accepted);
         assert_eq!(
-            next_press_after_report(&accepted, None, &mut last_accepted),
+            next_press_after_report(&accepted, None, &mut last_accepted, true),
             None
         );
         assert_eq!(last_accepted, Some(at(1_000)));
@@ -900,12 +914,15 @@ mod tests {
     }
 
     #[test]
-    fn a_press_during_a_capture_queues_unless_a_board_was_accepted() {
+    fn a_press_during_a_capture_queues_and_a_taken_board_drops_it() {
         let t0 = Instant::now();
+        // Also while the capture reads a board the reader passed: that
+        // board can still go unrecorded (S5-CAP-2).
         for phase in [
             TabFlightPhase::Grabbing,
             TabFlightPhase::Retrying,
             TabFlightPhase::Rejected,
+            TabFlightPhase::Accepted,
         ] {
             assert_eq!(
                 tab_press_action(t0, None, Some(phase)),
@@ -913,10 +930,6 @@ mod tests {
                 "{phase:?}"
             );
         }
-        assert_eq!(
-            tab_press_action(t0, None, Some(TabFlightPhase::Accepted)),
-            TabPressAction::Ignore
-        );
 
         // The queued press runs when a capture without a board reports.
         let queued = t0 + Duration::from_millis(1_500);
@@ -926,16 +939,28 @@ mod tests {
         flight.finish(TabResult::NotAScoreboard);
         let mut last_accepted = None;
         assert_eq!(
-            next_press_after_report(&flight, Some(queued), &mut last_accepted),
+            next_press_after_report(&flight, Some(queued), &mut last_accepted, false),
             Some(queued)
         );
         assert_eq!(last_accepted, None);
 
-        // Behind an accepted board it would read the same board: dropped.
+        // S5-CAP-2: the retry loop accepted the frame, and the capture still
+        // took no board (a later gate refused it): the queued press runs and
+        // no debounce starts.
         let flight = TabFlight::new(t0);
         flight.finish(TabResult::Accepted);
         assert_eq!(
-            next_press_after_report(&flight, Some(queued), &mut last_accepted),
+            next_press_after_report(&flight, Some(queued), &mut last_accepted, false),
+            Some(queued)
+        );
+        assert_eq!(last_accepted, None, "an untaken board arms no debounce");
+
+        // Behind a taken board it would read the same board: dropped, and
+        // the debounce starts at that board's press.
+        let flight = TabFlight::new(t0);
+        flight.finish(TabResult::Accepted);
+        assert_eq!(
+            next_press_after_report(&flight, Some(queued), &mut last_accepted, true),
             None
         );
         assert_eq!(last_accepted, Some(t0));
@@ -1081,7 +1106,7 @@ mod tests {
         tabs.on_release(at(1_100));
 
         first.finish(TabResult::NotAScoreboard);
-        assert_eq!(tabs.on_report(&mut last_accepted), Some(at(900)));
+        assert_eq!(tabs.on_report(&mut last_accepted, false), Some(at(900)));
         assert_eq!(last_accepted, None, "a rejected capture sets no debounce");
         let second = TabFlight::new(at(900));
         tabs.started(Arc::clone(&second));
@@ -1092,7 +1117,7 @@ mod tests {
         );
 
         second.finish(TabResult::Accepted);
-        assert_eq!(tabs.on_report(&mut last_accepted), None);
+        assert_eq!(tabs.on_report(&mut last_accepted, true), None);
         assert_eq!(last_accepted, Some(at(900)));
         assert_eq!(tabs.on_press(at(2_000), last_accepted, false), None);
         assert_eq!(
@@ -1100,7 +1125,7 @@ mod tests {
             Some(at(3_900))
         );
         // No report pending: nothing to start.
-        assert_eq!(tabs.on_report(&mut last_accepted), None);
+        assert_eq!(tabs.on_report(&mut last_accepted, true), None);
     }
 
     #[test]

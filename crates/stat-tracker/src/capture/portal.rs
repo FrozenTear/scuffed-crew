@@ -25,10 +25,14 @@ pub async fn is_available() -> bool {
 /// and overwrites it, so two requests in one second shared one file and one
 /// request's cleanup could delete the other's picture. A detached request
 /// keeps the lock until its file is gone, and so does a request the portal
-/// has not answered: ashpd cannot cancel it, and giving the lock back would
-/// let a second request run beside it. Such a request is warned about at
-/// [`SHOT_OVERDUE_FIRST`] and every [`SHOT_OVERDUE_EVERY`] after, and grabs
-/// meanwhile get "busy".
+/// has not answered yet: it is warned about at [`SHOT_OVERDUE_FIRST`], and
+/// grabs meanwhile get "busy". After [`SHOT_GIVE_UP`] it is given up
+/// (S5-CAP-1): the request is closed (`org.freedesktop.portal.Request.Close`)
+/// and its bus connection dropped, so a late answer reaches nothing and no
+/// late file is read or removed; the lock is released, the grab fails, and
+/// the app shows that the portal stopped answering until a request works
+/// again. Before rc.8 such a request held the lock until a restart, so a
+/// portal that crashed mid-request stopped every capture.
 ///
 /// An ordinary poll that finds a request running is skipped; the end-reel
 /// outcome-only poll waits up to [`super::OUTCOME_POLL_LOCK_WAIT`] (1 s)
@@ -56,8 +60,10 @@ type ShotResult = Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>>
 /// that awaits a screenshot would otherwise carry copies of it inline.
 type ShotRequest = std::pin::Pin<Box<dyn std::future::Future<Output = ShotResult> + Send>>;
 
-/// Runs one portal request under `flight` until the portal answers, however
-/// long that takes: it is never given up, only warned about.
+/// Runs one portal request under `flight` until the portal answers, or
+/// [`SHOT_GIVE_UP`] passes. Then the request is dropped inside the flight
+/// task, which closes it ([`CloseOnDrop`]) and releases the lock, and the
+/// grab fails with [`SHOT_UNANSWERED`]. An answer clears the app's notice.
 async fn run_shot(
     flight: &'static super::flight::SingleFlight,
     wait: std::time::Duration,
@@ -65,18 +71,41 @@ async fn run_shot(
 ) -> ShotResult {
     flight
         .run(wait, async move {
-            super::flight::with_overdue_warnings(
-                request,
-                SHOT_OVERDUE_FIRST,
-                SHOT_OVERDUE_EVERY,
-                |waited| {
-                    tracing::warn!(
-                        waited_secs = waited.as_secs(),
-                        "portal screenshot request has not answered; screenshots wait for it"
-                    );
-                },
+            let answered = tokio::time::timeout(
+                SHOT_GIVE_UP,
+                super::flight::with_overdue_warnings(
+                    request,
+                    SHOT_OVERDUE_FIRST,
+                    SHOT_OVERDUE_EVERY,
+                    |waited| {
+                        tracing::warn!(
+                            waited_secs = waited.as_secs(),
+                            give_up_secs = SHOT_GIVE_UP.as_secs(),
+                            "portal screenshot request has not answered; screenshots wait for it"
+                        );
+                    },
+                ),
             )
-            .await
+            .await;
+            match answered {
+                Ok(result) => {
+                    // Any answer, a refusal included: the portal is there.
+                    super::note_portal_stall(false);
+                    result
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        waited_secs = SHOT_GIVE_UP.as_secs(),
+                        "{SHOT_UNANSWERED}: the request was closed and counts as a failed grab"
+                    );
+                    super::note_portal_stall(true);
+                    Err(format!(
+                        "{SHOT_UNANSWERED} (no answer in {} s)",
+                        SHOT_GIVE_UP.as_secs()
+                    )
+                    .into())
+                }
+            }
         })
         .await
         .map_err(|err| format!("portal screenshot: {err}"))?
@@ -94,8 +123,171 @@ pub const SHOT_LOCK_WAIT_TAB: std::time::Duration = std::time::Duration::from_se
 /// When an unanswered request is first warned about.
 pub const SHOT_OVERDUE_FIRST: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// And how often after that.
+/// And how often after that, while it is not given up.
 pub const SHOT_OVERDUE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// When an unanswered request is given up: closed, its lock released and
+/// the grab counted as failed (S5-CAP-1).
+pub const SHOT_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(45);
+
+/// The error and the app's notice for a request given up.
+pub const SHOT_UNANSWERED: &str = "the screenshot portal stopped answering";
+
+/// How long the Close call for a request given up may take.
+const SHOT_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How long making the session bus connection for one request may take.
+const SHOT_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+const PORTAL_DESKTOP: &str = "org.freedesktop.portal.Desktop";
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const PORTAL_REQUEST: &str = "org.freedesktop.portal.Request";
+
+/// A `handle_token` no other request of this process has used.
+fn next_handle_token() -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("sst{}_{n}", std::process::id())
+}
+
+/// The object path xdg-desktop-portal gives the request with `token` from
+/// the connection named `unique_name` (`:1.42` becomes `1_42`).
+pub fn request_path(unique_name: &str, token: &str) -> String {
+    let sender = unique_name.trim_start_matches(':').replace('.', "_");
+    format!("{PORTAL_PATH}/request/{sender}/{token}")
+}
+
+/// The file URI of a `Response` signal: `0` with a `uri` is a picture,
+/// `1` the user cancelled, anything else the portal failed.
+pub fn response_uri(
+    code: u32,
+    results: &std::collections::HashMap<String, ashpd::zvariant::OwnedValue>,
+) -> Result<String, String> {
+    match code {
+        0 => match results.get("uri").map(|value| &**value) {
+            Some(ashpd::zvariant::Value::Str(uri)) => Ok(uri.as_str().to_string()),
+            _ => Err("portal screenshot response failed: no file in the answer".into()),
+        },
+        1 => Err("portal screenshot response failed: cancelled".into()),
+        _ => Err("portal screenshot response failed: the portal could not take it".into()),
+    }
+}
+
+/// Closes a portal request when dropped before [`CloseOnDrop::answered`]:
+/// a request given up ([`SHOT_GIVE_UP`]) or a caller gone. The Close call
+/// runs on its own task, bounded by [`SHOT_CLOSE_TIMEOUT`], and the bus
+/// connection, which only this request used, goes with it: an answer that
+/// comes later has no one to reach.
+struct CloseOnDrop {
+    conn: ashpd::zbus::Connection,
+    path: String,
+    armed: bool,
+}
+
+impl CloseOnDrop {
+    fn answered(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CloseOnDrop {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let conn = self.conn.clone();
+        let path = std::mem::take(&mut self.path);
+        runtime.spawn(async move {
+            let close = conn.call_method(
+                Some(PORTAL_DESKTOP),
+                path.as_str(),
+                Some(PORTAL_REQUEST),
+                "Close",
+                &(),
+            );
+            match tokio::time::timeout(SHOT_CLOSE_TIMEOUT, close).await {
+                Ok(Ok(_)) => tracing::debug!("closed the unanswered portal screenshot request"),
+                // A portal that crashed has no such request any more.
+                Ok(Err(err)) => {
+                    tracing::debug!(error = %err, "portal screenshot request close failed")
+                }
+                Err(_) => tracing::debug!("portal screenshot request close did not answer"),
+            }
+        });
+    }
+}
+
+/// One `Screenshot` call on a session bus connection of its own, and the
+/// file URI its `Response` signal names. Dropped before the answer (given
+/// up, or its caller gone), the request is closed ([`CloseOnDrop`]).
+async fn screenshot_uri() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    use ashpd::zbus;
+    use futures_util::StreamExt as _;
+    let conn = tokio::time::timeout(SHOT_CONNECT_TIMEOUT, zbus::Connection::session())
+        .await
+        .map_err(|_| "portal screenshot request failed: the session bus did not answer")?
+        .map_err(|e| format!("portal screenshot request failed: {e}"))?;
+    let unique = conn
+        .unique_name()
+        .map(|name| name.as_str().to_string())
+        .ok_or("portal screenshot request failed: no bus name")?;
+    let token = next_handle_token();
+    let path = request_path(&unique, &token);
+    // Listen before asking, so an answer cannot come first.
+    let request = zbus::Proxy::new(&conn, PORTAL_DESKTOP, path.clone(), PORTAL_REQUEST)
+        .await
+        .map_err(|e| format!("portal screenshot request failed: {e}"))?;
+    let mut responses = request
+        .receive_signal("Response")
+        .await
+        .map_err(|e| format!("portal screenshot request failed: {e}"))?;
+    let mut close = CloseOnDrop {
+        conn: conn.clone(),
+        path: path.clone(),
+        armed: true,
+    };
+    let mut options: std::collections::HashMap<&str, ashpd::zvariant::Value<'_>> =
+        std::collections::HashMap::new();
+    options.insert("handle_token", token.as_str().into());
+    options.insert("interactive", false.into());
+    options.insert("modal", false.into());
+    let reply = conn
+        .call_method(
+            Some(PORTAL_DESKTOP),
+            PORTAL_PATH,
+            Some("org.freedesktop.portal.Screenshot"),
+            "Screenshot",
+            &("", options),
+        )
+        .await
+        .map_err(|e| format!("portal screenshot request failed: {e}"))?;
+    if let Ok(handle) = reply
+        .body()
+        .deserialize::<ashpd::zvariant::OwnedObjectPath>()
+        && handle.as_str() != path
+    {
+        // A portal before 0.9 picks its own path; every current one uses
+        // the token's. Its answer would not reach this listener.
+        tracing::debug!(handle = %handle.as_str(), "portal screenshot request has an unexpected path");
+        close.path = handle.as_str().to_string();
+    }
+    let message = responses
+        .next()
+        .await
+        .ok_or("portal screenshot response failed: the portal went away")?;
+    close.answered();
+    let (code, results) = message
+        .body()
+        .deserialize::<(
+            u32,
+            std::collections::HashMap<String, ashpd::zvariant::OwnedValue>,
+        )>()
+        .map_err(|e| format!("portal screenshot response failed: {e}"))?;
+    Ok(response_uri(code, &results)?)
+}
 
 /// Our CPU and the step times go to [`crate::perf`]. CPU is thread time
 /// around the synchronous sections only (PNG decode, crop and resize, and
@@ -105,17 +297,9 @@ async fn capture_request(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let sent = std::time::Instant::now();
-    let response = ashpd::desktop::screenshot::ScreenshotRequest::default()
-        .interactive(false)
-        .modal(false)
-        .send()
-        .await
-        .map_err(|e| format!("portal screenshot request failed: {e}"))?
-        .response()
-        .map_err(|e| format!("portal screenshot response failed: {e}"))?;
+    let uri = screenshot_uri().await?;
     let round_trip = sent.elapsed();
 
-    let uri = response.uri().to_string();
     let path = file_uri_path(&uri).ok_or("unexpected screenshot URI: not a local file")?;
     // The portal wrote this file for us. It goes on every path out of here,
     // a decode error included, so no screenshot is left behind.
@@ -902,15 +1086,18 @@ mod tests {
         assert_eq!(SHOT_OVERDUE_EVERY, Duration::from_secs(60));
     }
 
-    /// The portal cannot cancel a request, so one that has not answered
-    /// keeps the lock: no second request runs beside it, at 25 s or at
-    /// 5 minutes, and the next one runs once it answers.
+    /// S5-CAP-1: a request that has not answered keeps the lock for a
+    /// while (no second request runs beside it at 25 s), and is given up at
+    /// [`SHOT_GIVE_UP`]: the grab fails with [`SHOT_UNANSWERED`], the lock
+    /// is free for the next request, and the request is dropped, so a late
+    /// answer reaches nothing.
     #[tokio::test(start_paused = true)]
-    async fn an_unanswered_portal_request_keeps_the_lock_until_it_answers() {
+    async fn an_unanswered_portal_request_is_given_up_and_frees_the_lock() {
         use super::super::flight::SingleFlight;
         use std::time::Duration;
         static FLIGHT: SingleFlight = SingleFlight::new();
         let (answer_tx, answer_rx) = tokio::sync::oneshot::channel::<()>();
+        let started = tokio::time::Instant::now();
         let first = tokio::spawn(run_shot(
             &FLIGHT,
             Duration::ZERO,
@@ -919,23 +1106,26 @@ mod tests {
                 Ok(DynamicImage::new_rgb8(1, 1))
             }),
         ));
-        for at in [25u64, 300] {
-            tokio::time::sleep_until(tokio::time::Instant::now() + Duration::from_secs(at)).await;
-            assert!(FLIGHT.in_flight(), "held at {at} s");
-            let beside = run_shot(
-                &FLIGHT,
-                Duration::ZERO,
-                Box::pin(async { Ok(DynamicImage::new_rgb8(2, 2)) }),
-            )
-            .await;
-            assert!(
-                beside.is_err_and(|e| super::super::flight::is_busy(&e.to_string())),
-                "nothing runs beside it at {at} s"
-            );
-        }
-        answer_tx.send(()).unwrap();
-        let answered = first.await.unwrap().unwrap();
-        assert_eq!(answered.width(), 1);
+        tokio::time::sleep_until(started + Duration::from_secs(25)).await;
+        assert!(FLIGHT.in_flight(), "held at 25 s");
+        let beside = run_shot(
+            &FLIGHT,
+            Duration::ZERO,
+            Box::pin(async { Ok(DynamicImage::new_rgb8(2, 2)) }),
+        )
+        .await;
+        assert!(
+            beside.is_err_and(|e| super::super::flight::is_busy(&e.to_string())),
+            "nothing runs beside it at 25 s"
+        );
+        let given_up = first.await.unwrap().unwrap_err().to_string();
+        assert!(given_up.contains(SHOT_UNANSWERED), "{given_up}");
+        assert_eq!(started.elapsed(), SHOT_GIVE_UP, "given up at the bound");
+        assert!(!FLIGHT.in_flight(), "the lock is released");
+        assert!(
+            answer_tx.send(()).is_err(),
+            "the request was dropped: a late answer reaches nothing"
+        );
         let next = run_shot(
             &FLIGHT,
             Duration::ZERO,
@@ -944,6 +1134,58 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(next.width(), 2);
+        assert!((30..=60).contains(&SHOT_GIVE_UP.as_secs()));
+        assert!(SHOT_OVERDUE_FIRST < SHOT_GIVE_UP);
+    }
+
+    /// A request that answers inside the bound is not given up.
+    #[tokio::test(start_paused = true)]
+    async fn a_slow_answer_inside_the_bound_is_kept() {
+        use super::super::flight::SingleFlight;
+        use std::time::Duration;
+        static FLIGHT: SingleFlight = SingleFlight::new();
+        let shot = run_shot(
+            &FLIGHT,
+            Duration::ZERO,
+            Box::pin(async {
+                tokio::time::sleep(SHOT_GIVE_UP - Duration::from_secs(1)).await;
+                Ok(DynamicImage::new_rgb8(3, 3))
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(shot.width(), 3);
+    }
+
+    #[test]
+    fn the_request_path_follows_the_portal_rule() {
+        assert_eq!(
+            request_path(":1.42", "sst7_0"),
+            "/org/freedesktop/portal/desktop/request/1_42/sst7_0"
+        );
+        let (a, b) = (next_handle_token(), next_handle_token());
+        assert_ne!(a, b, "every request has its own token");
+        assert!(
+            a.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'),
+            "{a} is a valid handle token"
+        );
+    }
+
+    #[test]
+    fn a_response_names_its_file_or_why_not() {
+        use ashpd::zvariant::{OwnedValue, Str};
+        let mut results = std::collections::HashMap::new();
+        assert!(response_uri(0, &results).is_err(), "no uri");
+        results.insert(
+            "uri".to_string(),
+            OwnedValue::from(Str::from("file:///tmp/Screenshot_1.png")),
+        );
+        assert_eq!(
+            response_uri(0, &results).unwrap(),
+            "file:///tmp/Screenshot_1.png"
+        );
+        assert!(response_uri(1, &results).unwrap_err().contains("cancelled"));
+        assert!(response_uri(2, &results).is_err());
     }
 
     #[test]

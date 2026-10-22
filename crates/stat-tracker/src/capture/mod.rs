@@ -343,6 +343,67 @@ pub fn is_expected_poll_miss(err: &str) -> bool {
         || err.contains(pw::NO_STREAM_FRAME)
 }
 
+/// Set while the last screenshot portal request was given up unanswered
+/// (S5-CAP-1); cleared by the next request the portal answers.
+static PORTAL_STALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Where this process publishes [`capture_notice`]. Only the daemon sets
+/// it (the status file); the app's own grabs leave the daemon's file alone.
+type NoticeSink = Box<dyn Fn(&str) + Send + Sync>;
+static NOTICE_SINK: std::sync::OnceLock<NoticeSink> = std::sync::OnceLock::new();
+
+/// The daemon's sink for [`capture_notice`]. Set once; later calls are
+/// ignored.
+pub fn set_notice_sink(sink: impl Fn(&str) + Send + Sync + 'static) {
+    let _ = NOTICE_SINK.set(Box::new(sink));
+}
+
+/// The sentence the app shows under the capture method: the route notice
+/// ([`route_notice`]) and, while the screenshot portal is not answering,
+/// that. Empty when there is nothing to say.
+pub fn capture_notice() -> String {
+    notice_text(
+        &route_notice().unwrap_or_default(),
+        PORTAL_STALLED.load(std::sync::atomic::Ordering::Acquire),
+    )
+}
+
+/// [`capture_notice`] from its parts.
+fn notice_text(route: &str, portal_stalled: bool) -> String {
+    let stall = portal_stalled.then(|| {
+        format!(
+            "{}: a screenshot request got no answer in {} s and was closed; captures resume when it answers again (restart the tracker if they do not)",
+            capitalized(portal::SHOT_UNANSWERED),
+            portal::SHOT_GIVE_UP.as_secs()
+        )
+    });
+    match (route.trim(), stall) {
+        ("", None) => String::new(),
+        ("", Some(stall)) => stall,
+        (route, None) => route.to_string(),
+        (route, Some(stall)) => format!("{route}. {stall}"),
+    }
+}
+
+fn capitalized(text: &str) -> String {
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
+}
+
+/// A screenshot portal request was given up (`true`) or answered
+/// (`false`). A change is published through the daemon's sink.
+pub(crate) fn note_portal_stall(stalled: bool) {
+    let was = PORTAL_STALLED.swap(stalled, std::sync::atomic::Ordering::AcqRel);
+    if was != stalled
+        && let Some(sink) = NOTICE_SINK.get()
+    {
+        sink(&capture_notice());
+    }
+}
+
 /// The stream was asked for by the environment or by Settings, not chosen
 /// because the desktop is KDE or GNOME.
 pub fn stream_was_forced() -> bool {
@@ -1319,6 +1380,26 @@ mod tests {
         assert!(
             !ShotRoute::Kwin.one_tab_retry(),
             "KDE direct grabs are cheap"
+        );
+    }
+
+    #[test]
+    fn the_capture_notice_adds_the_portal_stall_to_the_route_notice() {
+        assert_eq!(notice_text("", false), "");
+        assert_eq!(notice_text("route reason", false), "route reason");
+        let stall = notice_text("", true);
+        assert!(
+            stall.starts_with("The screenshot portal stopped answering"),
+            "{stall}"
+        );
+        assert!(
+            stall.contains(&format!("{} s", portal::SHOT_GIVE_UP.as_secs())),
+            "{stall}"
+        );
+        let both = notice_text("route reason", true);
+        assert!(
+            both.starts_with("route reason. The screenshot portal"),
+            "{both}"
         );
     }
 

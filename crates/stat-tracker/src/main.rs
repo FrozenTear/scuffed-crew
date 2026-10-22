@@ -705,11 +705,14 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     tracing::info!(?backend, "capture backend selected");
     // KDE direct asked for and not there, a saved Wayland-only route off
     // Wayland, or no X11 capture: the app says why under the capture
-    // method. Written every start, so an old reason is cleared.
-    stat_tracker::ocr_switch::publish_capture_notice(
-        &config.data_dir,
-        &capture::route_notice().unwrap_or_default(),
-    );
+    // method. Written every start, so an old reason is cleared. A
+    // screenshot portal that stops answering, and answers again, rewrites
+    // it through the sink (S5-CAP-1).
+    let notice_dir = config.data_dir.clone();
+    capture::set_notice_sink(move |notice| {
+        stat_tracker::ocr_switch::publish_capture_notice(&notice_dir, notice);
+    });
+    stat_tracker::ocr_switch::publish_capture_notice(&config.data_dir, &capture::capture_notice());
 
     log_selected_output(backend, &config).await;
 
@@ -3552,6 +3555,15 @@ impl CaptureReport {
     fn pending(&self) -> bool {
         !self.recorded && self.gate_state.is_some()
     }
+
+    /// The capture took its board: a row was recorded, the board was held
+    /// as a fresh-match board, or it is kept pending. This, not the retry
+    /// loop's verdict on the frame, starts the Tab debounce and drops a
+    /// press queued behind the capture (S5-CAP-2). A board a later gate
+    /// refused (unreadable own row, the reader's trust gate) is not taken.
+    fn board_taken(&self) -> bool {
+        self.recorded || self.armed_reset || self.pending()
+    }
 }
 
 /// Volatile session-tracking state owned by [`run_loop`]. Bundles the mutable
@@ -5076,6 +5088,7 @@ async fn run_loop(
                 }
             }
             Some((sid, result)) = capture_rx.recv() => {
+                let board_taken = result.as_ref().is_ok_and(CaptureReport::board_taken);
                 // The report handler is the same function the night harness
                 // calls. Sync stays here so a slow upload cannot hide inside it.
                 if apply_capture_report(&mut st, store, data_dir, &sid, result, Instant::now()).await {
@@ -5090,11 +5103,11 @@ async fn run_loop(
                     );
                     refresh_snapshot(store, data_dir).await;
                 }
-                // A Tab pressed while that capture looked for a board runs
-                // now, unless the capture accepted one (it would read the
-                // same board). An accepted board starts the debounce.
+                // A Tab pressed while that capture ran runs now, unless the
+                // capture took its board (it would read the same board). A
+                // taken board starts the debounce; a refused one does not.
                 let queued_hold = queued_stream_hold.take();
-                if let Some(press) = tabs.on_report(&mut st.last_tab_capture) {
+                if let Some(press) = tabs.on_report(&mut st.last_tab_capture, board_taken) {
                     let hold = queued_hold.unwrap_or_else(|| capture::stream_key_hold(press));
                     let (task, flight) = start_tab_capture(
                         &mut st,
@@ -7352,14 +7365,39 @@ fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)>
     None
 }
 
+/// Why the new reader refuses an analysed Tab frame's board: the trust
+/// gate `handle_capture` runs on it ([`reader_apply::board_refusal`]), here
+/// inside the retried attempt so a refused board is grabbed again while
+/// Tab is held (S5-CAP-2). `None` under ocr-v1, for a board read with
+/// ocr-v1 instead, and for a board the reader vouches for.
+fn reader_refusal(analysis: &FrameAnalysis, use_new_reader: bool) -> Option<&'static str> {
+    if !use_new_reader || analysis.ocr_fallback {
+        return None;
+    }
+    match &analysis.board {
+        Some(board) => reader_apply::board_refusal(board, analysis.team_size),
+        None => reader_apply::board_refusal(
+            &shadow::reader::not_found(shadow::BoardStatus::NotFound),
+            analysis.team_size,
+        ),
+    }
+}
+
 /// How a Tab grab ended, for the retry loop. A frame with no full
-/// scoreboard, a Tab that got no fresh stream frame, and a share that is
-/// still opening are tried again ([`stat_tracker::tab_retry::TabResult::retries`]).
+/// scoreboard (the preflight's, or a board the new reader refuses), a Tab
+/// that got no fresh stream frame, and a share that is still opening are
+/// tried again ([`stat_tracker::tab_retry::TabResult::retries`]).
 /// A declined share, a team size the pitch does not settle, and an analysed
-/// frame are not.
-fn tab_result(outcome: &FrameAnalysisOutcome) -> stat_tracker::tab_retry::TabResult {
+/// frame the reader takes are not.
+fn tab_result(
+    outcome: &FrameAnalysisOutcome,
+    use_new_reader: bool,
+) -> stat_tracker::tab_retry::TabResult {
     use stat_tracker::tab_retry::TabResult;
     match outcome {
+        FrameAnalysisOutcome::Analyzed(a) if reader_refusal(a, use_new_reader).is_some() => {
+            TabResult::NotAScoreboard
+        }
         FrameAnalysisOutcome::Analyzed(_) => TabResult::Accepted,
         FrameAnalysisOutcome::NotAScoreboard { .. } => TabResult::NotAScoreboard,
         FrameAnalysisOutcome::StreamMiss
@@ -7371,11 +7409,12 @@ fn tab_result(outcome: &FrameAnalysisOutcome) -> stat_tracker::tab_retry::TabRes
     }
 }
 
-/// How useful a Tab outcome is, so a later grab never replaces a better
-/// one. Higher is better: analysed (4), team size unsure (3), not a
-/// scoreboard (2), stream miss (1), share still opening or declined (0).
-fn tab_retry_reason(outcome: &FrameAnalysisOutcome) -> &'static str {
+/// Why a Tab grab is tried again, for the log.
+fn tab_retry_reason(outcome: &FrameAnalysisOutcome, use_new_reader: bool) -> &'static str {
     match outcome {
+        FrameAnalysisOutcome::Analyzed(a) if reader_refusal(a, use_new_reader).is_some() => {
+            "the scoreboard reader refused the board (see board_refusal above)"
+        }
         FrameAnalysisOutcome::NotAScoreboard { .. } => {
             "rejected by the scoreboard check (the frame shows no full scoreboard)"
         }
@@ -7388,8 +7427,13 @@ fn tab_retry_reason(outcome: &FrameAnalysisOutcome) -> &'static str {
     }
 }
 
-fn tab_outcome_rank(outcome: &FrameAnalysisOutcome) -> u8 {
+/// How useful a Tab outcome is, so a later grab never replaces a better
+/// one. Higher is better: analysed and taken by the reader (4), team size
+/// unsure (3), not a scoreboard or refused by the reader (2), stream miss
+/// (1), share still opening or declined (0).
+fn tab_outcome_rank(outcome: &FrameAnalysisOutcome, use_new_reader: bool) -> u8 {
     match outcome {
+        FrameAnalysisOutcome::Analyzed(a) if reader_refusal(a, use_new_reader).is_some() => 2,
         FrameAnalysisOutcome::ShareOpening
         | FrameAnalysisOutcome::Declined
         | FrameAnalysisOutcome::CaptureBusy => 0,
@@ -7481,12 +7525,13 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         let flight = stat_tracker::tab_retry::current_flight();
         // No more grabs for this press once the retries end: the screen
         // stream may pause while the result is analysed.
+        let use_new_reader = ctx.use_new_reader;
         let (analysis, _retries) = then_end_tab_hold(stat_tracker::tab_retry::with_retries(
             &flight,
             stat_tracker::tab_retry::tab_retry_waits(capture::shot_route()),
-            tab_result,
-            tab_outcome_rank,
-            tab_retry_reason,
+            |outcome| tab_result(outcome, use_new_reader),
+            |outcome| tab_outcome_rank(outcome, use_new_reader),
+            |outcome| tab_retry_reason(outcome, use_new_reader),
             |attempt| {
                 let matcher = Arc::clone(&ctx.portrait_matcher);
                 // Clone player_name so the blocking closure can own it.
@@ -7548,6 +7593,11 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                         analysis
                     })
                     .await?;
+                    if let FrameAnalysisOutcome::Analyzed(a) = &analysis
+                        && let Some(board_refusal) = reader_refusal(a, use_new_reader)
+                    {
+                        tracing::info!(board_refusal, "Tab frame refused by the scoreboard reader");
+                    }
                     anyhow::Ok(analysis)
                 }
             },
@@ -10567,35 +10617,172 @@ mod tests {
             scan,
         };
         use stat_tracker::tab_retry::TabResult;
-        assert_eq!(tab_result(&rejected), TabResult::NotAScoreboard);
-        assert!(tab_result(&rejected).retries());
-        assert!(tab_result(&FrameAnalysisOutcome::StreamMiss).retries());
-        assert!(tab_result(&FrameAnalysisOutcome::ShareOpening).retries());
-        assert!(!tab_result(&FrameAnalysisOutcome::Declined).retries());
-        assert!(!tab_result(&unsure).retries());
-        assert!(tab_outcome_rank(&rejected) > tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss));
+        assert_eq!(tab_result(&rejected, true), TabResult::NotAScoreboard);
+        assert!(tab_result(&rejected, true).retries());
+        assert!(tab_result(&FrameAnalysisOutcome::StreamMiss, true).retries());
+        assert!(tab_result(&FrameAnalysisOutcome::ShareOpening, true).retries());
+        assert!(!tab_result(&FrameAnalysisOutcome::Declined, true).retries());
+        assert!(!tab_result(&unsure, true).retries());
         assert!(
-            tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss)
-                > tab_outcome_rank(&FrameAnalysisOutcome::ShareOpening)
+            tab_outcome_rank(&rejected, true)
+                > tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss, true)
         );
-        assert!(tab_outcome_rank(&unsure) > tab_outcome_rank(&rejected));
+        assert!(
+            tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss, true)
+                > tab_outcome_rank(&FrameAnalysisOutcome::ShareOpening, true)
+        );
+        assert!(tab_outcome_rank(&unsure, true) > tab_outcome_rank(&rejected, true));
         // A busy lock is retried and never outranks a frame already grabbed.
-        assert!(tab_result(&FrameAnalysisOutcome::CaptureBusy).retries());
+        assert!(tab_result(&FrameAnalysisOutcome::CaptureBusy, true).retries());
         assert_eq!(
-            tab_result(&FrameAnalysisOutcome::CaptureBusy),
+            tab_result(&FrameAnalysisOutcome::CaptureBusy, true),
             TabResult::NoFrameYet,
             "busy is no frame yet, not a rejected board"
         );
         assert!(
-            tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss)
-                > tab_outcome_rank(&FrameAnalysisOutcome::CaptureBusy)
+            tab_outcome_rank(&FrameAnalysisOutcome::StreamMiss, true)
+                > tab_outcome_rank(&FrameAnalysisOutcome::CaptureBusy, true)
         );
-        assert!(tab_retry_reason(&FrameAnalysisOutcome::CaptureBusy).contains("still running"));
+        assert!(
+            tab_retry_reason(&FrameAnalysisOutcome::CaptureBusy, true).contains("still running")
+        );
         // The saved rejected frames showed gameplay, killcams, VICTORY, chat
         // or the desktop, never a half-drawn board: the log says so.
-        let why = tab_retry_reason(&rejected);
+        let why = tab_retry_reason(&rejected, true);
         assert!(!why.contains("still be drawing"), "{why}");
         assert!(why.contains("no full scoreboard"), "{why}");
+    }
+
+    /// S5-CAP-2 (journal 2026-10-22 13:29:54, "board was not found" on
+    /// the end-of-match board, no retry): a Tab frame whose board the new
+    /// reader refuses is a rejected frame inside the retried attempt, so it
+    /// is grabbed again while Tab is held, and the flight ends on the board
+    /// the reader takes.
+    #[tokio::test]
+    async fn a_board_the_reader_refuses_is_retried_while_tab_is_held() {
+        use stat_tracker::tab_retry::{
+            TAB_RETRY_WAITS, TabFlight, TabFlightPhase, TabResult, with_retries,
+        };
+        let refused = || FrameAnalysisOutcome::Analyzed(Box::new(o8_analysis(None, None)));
+        let taken = || {
+            let mut analysis = o8_analysis(None, None);
+            analysis.board = Some(o8_board(Some("Ana")));
+            FrameAnalysisOutcome::Analyzed(Box::new(analysis))
+        };
+        let refusal = |outcome: &FrameAnalysisOutcome| match outcome {
+            FrameAnalysisOutcome::Analyzed(analysis) => reader_refusal(analysis, true),
+            _ => panic!("an analysed frame"),
+        };
+        assert_eq!(refusal(&refused()), Some("board was not found"));
+        assert_eq!(refusal(&taken()), None);
+        assert_eq!(tab_result(&refused(), true), TabResult::NotAScoreboard);
+        assert!(tab_result(&refused(), true).retries());
+        assert_eq!(tab_result(&taken(), true), TabResult::Accepted);
+        // ocr-v1, and a board read with ocr-v1 instead, keep their gate
+        // where it was.
+        assert_eq!(tab_result(&refused(), false), TabResult::Accepted);
+        let mut fallback = o8_analysis(None, None);
+        fallback.ocr_fallback = true;
+        assert_eq!(
+            tab_result(&FrameAnalysisOutcome::Analyzed(Box::new(fallback)), true),
+            TabResult::Accepted
+        );
+        assert!(tab_outcome_rank(&taken(), true) > tab_outcome_rank(&refused(), true));
+        assert!(tab_retry_reason(&refused(), true).contains("refused"));
+
+        // Refused, then the retry gets a board the reader takes.
+        let flight = TabFlight::new(Instant::now());
+        let (best, retries) = with_retries(
+            &flight,
+            &TAB_RETRY_WAITS,
+            |outcome| tab_result(outcome, true),
+            |outcome| tab_outcome_rank(outcome, true),
+            |outcome| tab_retry_reason(outcome, true),
+            |attempt| {
+                let outcome = if attempt == 0 { refused() } else { taken() };
+                async move { Ok::<_, ()>(outcome) }
+            },
+            |_| async {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(retries, 1);
+        assert_eq!(refusal(&best), None, "the taken board is kept");
+        assert_eq!(flight.phase(), TabFlightPhase::Accepted);
+
+        // Refused on every grab: the flight ends rejected, never accepted.
+        let flight = TabFlight::new(Instant::now());
+        let (best, retries) = with_retries(
+            &flight,
+            &TAB_RETRY_WAITS,
+            |outcome| tab_result(outcome, true),
+            |outcome| tab_outcome_rank(outcome, true),
+            |outcome| tab_retry_reason(outcome, true),
+            |_| {
+                let outcome = refused();
+                async move { Ok::<_, ()>(outcome) }
+            },
+            |_| async {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(retries, TAB_RETRY_WAITS.len());
+        assert!(refusal(&best).is_some());
+        assert_eq!(flight.phase(), TabFlightPhase::Rejected);
+    }
+
+    /// S5-CAP-2: the debounce and a queued press follow the capture
+    /// report, not the retry loop's verdict. A board refused after the
+    /// retries (the flight says Accepted) keeps the queued press and arms
+    /// no debounce; a recorded board arms it and drops the queued press.
+    #[test]
+    fn only_a_taken_board_arms_the_debounce_and_drops_a_queued_press() {
+        use stat_tracker::tab_retry::{TabFlight, TabKeys, TabResult};
+        let refused = rejected_report("s1");
+        assert!(!refused.board_taken());
+        let mut recorded = rejected_report("s1");
+        recorded.recorded = true;
+        assert!(recorded.board_taken());
+        let mut armed = rejected_report("s1");
+        armed.armed_reset = true;
+        assert!(armed.board_taken(), "a held fresh-match board is taken");
+        let mut pending = rejected_report("s1");
+        pending.gate_state = Some(GateState::default());
+        assert!(pending.board_taken(), "a pending board is taken");
+
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut tabs = TabKeys::default();
+        let mut last_accepted = None;
+        assert_eq!(tabs.on_press(at(0), last_accepted, false), Some(at(0)));
+        let first = TabFlight::new(at(0));
+        tabs.started(Arc::clone(&first));
+        first.finish(TabResult::Accepted);
+        // A press while the capture reads its board is queued, not lost.
+        assert_eq!(tabs.on_press(at(500), last_accepted, false), None);
+        assert_eq!(tabs.queued_press(), Some(at(500)));
+        // The board was refused after the retries: the queued press runs.
+        assert_eq!(
+            tabs.on_report(&mut last_accepted, refused.board_taken()),
+            Some(at(500))
+        );
+        assert_eq!(last_accepted, None, "a refused board arms no debounce");
+
+        let second = TabFlight::new(at(500));
+        tabs.started(Arc::clone(&second));
+        second.finish(TabResult::Accepted);
+        assert_eq!(tabs.on_press(at(900), last_accepted, false), None);
+        // Recorded: the queued press would read the same board.
+        assert_eq!(
+            tabs.on_report(&mut last_accepted, recorded.board_taken()),
+            None
+        );
+        assert_eq!(last_accepted, Some(at(500)), "the recorded board arms it");
+        assert_eq!(tabs.on_press(at(3_000), last_accepted, false), None);
+        assert_eq!(
+            tabs.on_press(at(3_600), last_accepted, false),
+            Some(at(3_600))
+        );
     }
 
     struct ScriptedWaiter {
@@ -11150,9 +11337,9 @@ mod tests {
         let (best, retries) = stat_tracker::tab_retry::with_retries(
             &flight,
             &stat_tracker::tab_retry::TAB_RETRY_WAITS,
-            tab_result,
-            tab_outcome_rank,
-            tab_retry_reason,
+            |outcome| tab_result(outcome, true),
+            |outcome| tab_outcome_rank(outcome, true),
+            |outcome| tab_retry_reason(outcome, true),
             |_| {
                 let next = attempts.lock().unwrap().pop();
                 async move { Ok::<_, ()>(next.unwrap_or(FrameAnalysisOutcome::CaptureBusy)) }
