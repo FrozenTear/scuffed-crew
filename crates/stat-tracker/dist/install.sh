@@ -564,7 +564,8 @@ fi
     echo "  Autostart (systemd) starts the daemon automatically on login."
     if [[ "$INSTALLED_UNITS" -eq 1 ]]; then
         echo "  The user unit loads ~/.config/scuffed-stat-tracker/session.env"
-        echo "  (WAYLAND_DISPLAY, DISPLAY, XDG_CURRENT_DESKTOP, XDG_SESSION_TYPE)."
+        echo "  (WAYLAND_DISPLAY, DISPLAY, XDG_CURRENT_DESKTOP, XDG_SESSION_TYPE,"
+        echo "  KDE_SESSION_VERSION)."
         echo "  On Sway/Hyprland those are read from the compositor each start."
         echo "  If you installed with no graphical session, start the daemon"
         echo "  again after login. The oneshot retries. See the README if"

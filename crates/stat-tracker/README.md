@@ -192,6 +192,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`). Must be absolute. The systemd unit can write this path, the config dir, and the session runtime dir; a custom directory gets a drop-in at install (see below) |
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown). `poll_interval_secs` is whole seconds; 4 means automatic (1.5 s with the new reader, 4 s otherwise). `poll_interval_ms`, when set, overrides that (500 to 10000). It is not written unless you set it |
 | `screencast_max_fps` | Screen-stream cap, 1 to 5 frames per second. Missing means 4 (2 before 0.5.0-rc.6; set 2 to go back). Sets the PipeWire max-framerate and the tracker's own throttle. Not written unless you set it |
+| `screencast_pause_between_grabs` | Missing or `true`: the screen stream is paused between grabs on KWin 6.1 or newer and on niri, so the compositor does not draw frames the tracker would throw away (see Screen capture route). Other desktops keep it running. `false` keeps it running everywhere, as before 0.5.0-rc.7. Put it near the top of the file, above any `[section]` line. Env `STAT_TRACKER_SCREENCAST_PAUSE=1` forces pausing on any desktop (for testing) and `=0` turns it off; the env var wins over this key and is not written to this file. Not written unless you set it |
 | `game_process_names` | Only capture while one of these processes runs (empty disables the gate) |
 | `debug_ocr` | Dump Tab OCR intermediates and poll Victory/Defeat evidence frames (confirm + first streak, not every tick) under `{data_dir}/debug/` (also env `STAT_TRACKER_DEBUG_OCR=1`). It also turns on `debug/accepted/` (the last 60 accepted scoreboard crops) and `debug/rejected/` (the last 30 rejected frames). Those images are not blanked and show other players' names, so they are off by default. Settings toggle: Save debug images from each capture. With it off, an existing folder is left as it is and the daemon logs once at start that it is no longer written. `debug/mapcrops/` and `debug/mapmiss/` hold only the map-name box and stay on |
 | `finished_game_close_secs` | Quiet time after the last activity before a finished game is closed and uploaded. Activity is a stored capture, a recorded outcome, an accolade map, or the session open. Never shorter than the 75-second grace. Default 180. Config-file only (no Settings control) |
@@ -219,7 +220,41 @@ are asked to allow that share once. The permission is remembered in
 `screencast-restore-token` inside the data directory, so it is not asked
 again after a reboot. The compositor is offered a variable framerate with
 a cap of `screencast_max_fps` frames per second (4 when that key is unset).
-A frame is copied only when the tracker needs one. A later poll that sees
+A frame is copied only when the tracker needs one. On KWin 6.1 or newer
+and on niri the stream is also paused between grabs, so the compositor
+stops drawing frames for it; a poll resumes it for its grab, and a Tab
+resumes it from the key press (50 ms after the press at 4 fps, so the
+compositor's next frame after the first lands just past the 300 ms overlay
+delay) and keeps it running until its retries are over. An open share
+stays paused while Overwatch is not running. GNOME, Plasma 5, KWin 6.0,
+wlroots portals and desktops the tracker does not recognise keep the
+stream running: Mutter and older KWin leak a signal connection on every
+resume. The tracker reads the desktop name, `KDE_SESSION_VERSION`, the
+running compositor processes and, on KDE, KWin's version (over D-Bus,
+once more after 3 seconds on Plasma 6, then from `kwin_wayland --version`)
+once at start, and logs one
+line saying whether it pauses and why. Pausing also needs PipeWire 1.4 or
+newer; older PipeWire keeps the stream running.
+
+A fail-safe watches each resume. A resume is answered when a frame
+arrives. On niri, which draws a shared screen only when it changes, the
+stream reaching Streaming again also answers it, so a still screen does
+not count. KWin always sends a frame on resume, so there a resume that
+reaches Streaming with no frame is a broken one. The tracker stops pausing
+a stream, keeps it running and logs one warning when two resumes in a row
+are not answered within 1.5 s of active time, when a Tab misses while its
+resume is not answered, when the stream stays paused (or fails) 1.5 s of
+active time after a resume, when the stream fails while the tracker holds
+it paused, or when the stream is closed while a resume is not answered. The next share or reopen tries pausing again once;
+after a second such stream it stays off until the tracker restarts. To
+turn pausing off yourself, set `screencast_pause_between_grabs = false`,
+or put `STAT_TRACKER_SCREENCAST_PAUSE=0` in `~/.config/environment.d/` for
+the systemd service (as for `STAT_TRACKER_CAPTURE` below). The log line
+`screencast timing:` (once a minute while grabs succeed) shows `resumes`,
+`avg_resume_ms`, `max_resume_ms` and `resumes_without_buffer`. With
+pausing on, the `screencast frames received per second` line (every 3
+minutes) reads far below the cap: frames arrive only while a grab holds
+the stream. A later poll that sees
 no new buffer does not count as a read, so a reused picture cannot confirm
 Victory or Defeat by itself. The share closes when Overwatch quits, once
 the permission has been saved, and the next game opens it again with that
@@ -268,7 +303,12 @@ on a direct capture or the screenshot portal still waits 400 ms for the
 overlay. On the stream it waits for a buffer at least 300 ms after the
 key, and gives up 1200 ms after the key. A buffer from those first 300 ms
 does not finish the wait. A poll waits one frame period plus 100 ms before
-it reuses the previous frame (350 ms at the default 4 fps, 600 ms at 2 fps).
+it reuses the previous frame (350 ms at the default 4 fps, 600 ms at 2 fps),
+and 400 ms more when it had to resume the paused stream (750 ms at 4 fps).
+The tracker's own pause does not count toward the 2-second pause, the
+8-second quiet stream, or the 6-second never-streaming limit: those clocks
+count active time, which runs only while the tracker wants the stream
+running.
 
 `STAT_TRACKER_CAPTURE`, when set and not empty, wins over `capture_route`.
 For the systemd service, put it in `~/.config/environment.d/` (for example
@@ -554,8 +594,9 @@ Install does three things:
 
 1. `ExecStart` becomes the absolute `$PREFIX/bin/scuffed-stat-tracker`.
    A custom prefix used to keep launching `~/.local/bin`.
-2. It imports `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`, and
-   `XDG_SESSION_TYPE` into the user manager when `systemctl --user` works.
+2. It imports `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_CURRENT_DESKTOP`,
+   `XDG_SESSION_TYPE`, and `KDE_SESSION_VERSION` (Plasma only) into the
+   user manager when `systemctl --user` works.
 3. It installs `scuffed-stat-tracker-session.service`, a oneshot that runs
    before every daemon start. The oneshot reads those variables from the
    compositor's `/proc/<pid>/environ` (sway and Hyprland first, then other
@@ -579,7 +620,8 @@ Caveats:
   each time the daemon starts.
 - A compositor not in the helper's list is invisible. From a terminal in
   that session run `systemctl --user import-environment WAYLAND_DISPLAY
-  DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE` and restart the daemon.
+  DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE KDE_SESSION_VERSION` and
+  restart the daemon.
 - Do not install with `sudo`. The helper only reads processes of the
   installing user. `session.env` is always `~/.config/scuffed-stat-tracker/`
   (the unit's `%h`), not `$XDG_CONFIG_HOME`.

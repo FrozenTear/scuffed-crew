@@ -689,6 +689,8 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         debug_frames: config.debug_portal_frames_enabled(),
         max_fps: config.screencast_max_fps(),
     });
+    // Pause the screen stream between grabs where the compositor handles it.
+    capture::decide_stream_pause(config.screencast_pause_override()).await;
     let backend = capture::detect_backend().await;
     tracing::info!(?backend, "capture backend selected");
     // KDE direct asked for and not there: the app says why under the
@@ -4642,6 +4644,7 @@ async fn start_tab_capture(
     sync_backoff: &Arc<std::sync::Mutex<sync::SyncBackoff>>,
     capture_tx: &tokio::sync::mpsc::UnboundedSender<(String, Result<CaptureReport, String>)>,
     press: Instant,
+    stream_hold: capture::KeyHold,
 ) -> (
     tokio::task::JoinHandle<()>,
     Arc<stat_tracker::tab_retry::TabFlight>,
@@ -4679,7 +4682,9 @@ async fn start_tab_capture(
                 ))
                 .await;
             }
-            let result = handle_capture(&ctx_task, req)
+            // Keeps a paused screen stream running from the key event until
+            // the Tab retry sequence ends (`capture::end_tab_stream_hold`).
+            let result = capture::with_tab_stream_hold(stream_hold, handle_capture(&ctx_task, req))
                 .await
                 // `{:#}` keeps anyhow's context chain in the string.
                 .map_err(|e| format!("{e:#}"));
@@ -4821,6 +4826,12 @@ async fn run_loop(
     // A Tab press that preempted a poll, handled by the keyboard arm on the
     // next turn of the loop.
     let mut pending_key: Option<Result<detect::TabKey, Box<dyn std::error::Error>>> = None;
+    // The stream hold of a press queued behind a running capture. Dropped
+    // when that capture reports and the press does not run.
+    let mut queued_stream_hold: Option<capture::KeyHold> = None;
+    // Taken as a Tab press preempts a poll, before the poll's grab is
+    // dropped, so the stream does not pause and resume in between.
+    let mut preempt_stream_hold: Option<capture::KeyHold> = None;
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -4893,6 +4904,10 @@ async fn run_loop(
                 return Ok(());
             }
             result = pending_or_next(&mut pending_key, kbd.wait_tab()) => {
+                // Held from a poll this event preempted. Dropped at the end
+                // of this arm, once a press has its own hold, and on a
+                // keyboard error too.
+                let bridge = preempt_stream_hold.take();
                 match result {
                     // A release stops the running capture's retries: a
                     // frame after it shows the game, not the board. It is
@@ -4926,6 +4941,10 @@ async fn run_loop(
                         let capture_gone = capture_task.as_ref().is_none_or(|t| t.is_finished())
                             && capture_rx.is_empty();
                         if let Some(press) = tabs.on_press(press, st.last_tab_capture, capture_gone) {
+                            // Resume a paused screen stream from the key
+                            // event, before the session choice below.
+                            let hold = capture::stream_key_hold(press);
+                            queued_stream_hold = None;
                             let (task, flight) = start_tab_capture(
                                 &mut st,
                                 &ctx,
@@ -4933,11 +4952,17 @@ async fn run_loop(
                                 &sync_backoff,
                                 &capture_tx,
                                 press,
+                                hold,
                             )
                             .await;
                             tabs.started(flight);
                             capture_task = Some(task);
+                        } else if tabs.queued_press() == Some(press) {
+                            // Queued by this press. An ignored or debounced
+                            // press leaves an earlier queued hold alone.
+                            queued_stream_hold = Some(capture::stream_key_hold(press));
                         }
+                        drop(bridge);
                     }
                     Err(e) => {
                         tracing::error!(error = %e, "keyboard devices lost: attempting to reopen");
@@ -4984,7 +5009,9 @@ async fn run_loop(
                 // A Tab pressed while that capture looked for a board runs
                 // now, unless the capture accepted one (it would read the
                 // same board). An accepted board starts the debounce.
+                let queued_hold = queued_stream_hold.take();
                 if let Some(press) = tabs.on_report(&mut st.last_tab_capture) {
+                    let hold = queued_hold.unwrap_or_else(|| capture::stream_key_hold(press));
                     let (task, flight) = start_tab_capture(
                         &mut st,
                         &ctx,
@@ -4992,6 +5019,7 @@ async fn run_loop(
                         &sync_backoff,
                         &capture_tx,
                         press,
+                        hold,
                     )
                     .await;
                     tabs.started(flight);
@@ -5057,10 +5085,15 @@ async fn run_loop(
                 // On a screenshot route the end-reel outcome-only poll waits
                 // up to OUTCOME_POLL_LOCK_WAIT for a Tab grab's shot lock;
                 // an ordinary poll that finds it held is skipped at once.
+                let mut bridge = None;
                 let grabbed = match stop_for_shutdown_or_key(
                     capture::poll_grab(backend, capture_output, outcome_only),
                     stat_tracker::replace::shutdown_notified(),
-                    stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
+                    with_bridge_hold(
+                        stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
+                        &mut bridge,
+                        capture::stream_bridge_hold,
+                    ),
                     &mut pending_key,
                 )
                 .await
@@ -5068,6 +5101,7 @@ async fn run_loop(
                     PollRace::Done(grabbed) => Ok(grabbed),
                     PollRace::Shutdown => Err(()),
                     PollRace::Preempted => {
+                        preempt_stream_hold = bridge.take();
                         tracing::debug!("poll dropped during its grab: a Tab press comes first");
                         continue;
                     }
@@ -7336,7 +7370,9 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         let own_seeds = own_name_seeds(ctx.own_name.as_ref());
         let names = ctx.names.clone();
         let flight = stat_tracker::tab_retry::current_flight();
-        let (analysis, _retries) = stat_tracker::tab_retry::with_retries(
+        // No more grabs for this press once the retries end: the screen
+        // stream may pause while the result is analysed.
+        let (analysis, _retries) = then_end_tab_hold(stat_tracker::tab_retry::with_retries(
             &flight,
             stat_tracker::tab_retry::tab_retry_waits(capture::shot_route()),
             tab_result,
@@ -7407,7 +7443,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 }
             },
             tokio::time::sleep,
-        )
+        ))
         .await?;
         let analysis = match analysis {
             FrameAnalysisOutcome::Analyzed(a) => Ok(*a),
@@ -9511,6 +9547,30 @@ where
             PollRace::Preempted
         }
     }
+}
+
+/// `key`, and a stream hold taken the moment a press comes in, before the
+/// race that awaits this drops the poll's grab (and the grab's hold). A
+/// keyboard error takes none.
+async fn with_bridge_hold<K, E, H>(
+    key: impl std::future::Future<Output = Result<K, E>>,
+    slot: &mut Option<H>,
+    hold: impl FnOnce() -> H,
+) -> Result<K, E> {
+    let key = key.await;
+    if key.is_ok() {
+        *slot = Some(hold());
+    }
+    key
+}
+
+/// Run a Tab's retry sequence, then end the press's stream hold
+/// ([`capture::end_tab_stream_hold`]): no grab follows, so the stream may
+/// pause while the result is analysed.
+async fn then_end_tab_hold<T>(retries: impl std::future::Future<Output = T>) -> T {
+    let out = retries.await;
+    capture::end_tab_stream_hold();
+    out
 }
 
 /// The key event a dropped poll kept, else the next one from `next`. A kept
@@ -17526,6 +17586,67 @@ mod tests {
         let next = pending_or_next(&mut pending, async { panic!("not read") }).await;
         assert_eq!(next.unwrap(), press);
         assert!(pending.is_none());
+    }
+
+    /// The bridge hold exists before the preempted poll's grab is dropped,
+    /// so the stream never pauses between the poll and the press.
+    #[tokio::test]
+    async fn a_preempting_press_takes_its_bridge_before_the_poll_is_dropped() {
+        struct DropLog(std::sync::Arc<std::sync::Mutex<Vec<&'static str>>>);
+        impl Drop for DropLog {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().push("poll dropped");
+            }
+        }
+        let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let press = detect::TabKey {
+            down: true,
+            at: Instant::now(),
+        };
+        let mut keys = ScriptedKeys([press].into_iter().collect());
+        let mut tabs = stat_tracker::tab_retry::TabKeys::default();
+        let mut pending = None;
+        let mut bridge = None;
+        let guard = DropLog(std::sync::Arc::clone(&log));
+        let raced = stop_for_shutdown_or_key(
+            async move {
+                let _guard = guard;
+                std::future::pending::<()>().await
+            },
+            std::future::pending::<()>(),
+            with_bridge_hold(
+                stat_tracker::tab_retry::next_press(&mut keys, &mut tabs),
+                &mut bridge,
+                || log.lock().unwrap().push("bridge"),
+            ),
+            &mut pending,
+        )
+        .await;
+        assert!(matches!(raced, PollRace::Preempted));
+        assert!(bridge.is_some());
+        assert_eq!(*log.lock().unwrap(), vec!["bridge", "poll dropped"]);
+        // A keyboard error takes no bridge.
+        let mut none: Option<()> = None;
+        let err: Result<(), &str> =
+            with_bridge_hold(async { Err("keyboard lost") }, &mut none, || ()).await;
+        assert!(err.is_err() && none.is_none());
+    }
+
+    /// The press's stream hold ends with the retry sequence, before the
+    /// result is analysed.
+    #[tokio::test]
+    async fn the_tab_stream_hold_ends_when_the_retries_end() {
+        // No stream is registered in this process: the hold is inert, but
+        // it still sits in the task until it is ended.
+        let hold = capture::stream_key_hold(Instant::now());
+        capture::with_tab_stream_hold(hold, async {
+            assert_eq!(then_end_tab_hold(async { 7 }).await, 7);
+            assert!(
+                !capture::end_tab_stream_hold(),
+                "then_end_tab_hold already ended it"
+            );
+        })
+        .await;
     }
 
     /// A release must not drop the poll: during the end-reel wake that poll
