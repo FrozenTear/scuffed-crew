@@ -24,15 +24,15 @@ pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "Your site stats are schedule
 /// JSON `code` on HTTP 409 while a stats delete is pending.
 const STATS_DELETE_PENDING_CODE: &str = "stats_delete_pending";
 
-/// Matches per stats upload. The server rejects a larger body with HTTP 413
-/// `batch_too_large`. This client stays at or under the cap, and shrinks
-/// further when a 413 names a smaller one. Same value as
-/// [`scuffed_types::STATS_UPLOAD_MAX_MATCHES`].
 /// `User-Agent` on every request the tracker makes to the site (uploads,
 /// daemon config, reader packs), so the server can tell which tracker
 /// version sent it (S5-SRV-4).
 pub const USER_AGENT: &str = concat!("scuffed-stat-tracker/", env!("CARGO_PKG_VERSION"));
 
+/// Matches per stats upload. The server rejects a larger body with HTTP 413
+/// `batch_too_large`. This client stays at or under the cap, and shrinks
+/// further when a 413 names a smaller one. Same value as
+/// [`scuffed_types::STATS_UPLOAD_MAX_MATCHES`].
 pub const SYNC_UPLOAD_MAX_MATCHES: usize = scuffed_types::STATS_UPLOAD_MAX_MATCHES;
 
 /// Deleted session ids per stats upload. Same 413 path as

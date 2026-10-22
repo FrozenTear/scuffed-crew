@@ -467,6 +467,14 @@ pub fn is_stream_miss(err: &str) -> bool {
     err.contains(STREAM_MISS)
 }
 
+/// A grab while the share is closed because the game stopped, and may
+/// only reopen once it runs again.
+pub const SHARE_CLOSED_UNTIL_GAME: &str = "screencast share stays closed until the game is running";
+
+pub fn is_share_closed_until_game(err: &str) -> bool {
+    err.contains(SHARE_CLOSED_UNTIL_GAME)
+}
+
 pub fn is_share_opening(err: &str) -> bool {
     err.contains(OPEN_IN_PROGRESS)
 }
@@ -1084,7 +1092,7 @@ pub async fn capture(
         state.opening,
     ) {
         drop(state);
-        return Err("screencast share stays closed until the game is running".into());
+        return Err(SHARE_CLOSED_UNTIL_GAME.into());
     }
     let age = state.last_fail.map(|at| at.elapsed());
     if !should_try_stream(age, START_BACKOFF) {

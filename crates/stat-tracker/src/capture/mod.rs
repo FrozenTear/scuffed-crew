@@ -328,6 +328,21 @@ pub fn route_notice() -> Option<String> {
     (!notice.is_empty()).then_some(notice)
 }
 
+/// A poll grab error that is a known state, not a capture failure: the
+/// capture lock was held, the share is still opening, was declined, or
+/// stays closed until the game runs, or the stream had no fresh frame for
+/// this poll. These have their own log lines (or none on purpose, like the
+/// one decline notice); the poll logs them at TRACE and they neither start
+/// nor end a failure run (S5-CAP-7).
+pub fn is_expected_poll_miss(err: &str) -> bool {
+    is_capture_busy(err)
+        || screencast::is_share_opening(err)
+        || screencast::is_declined_capture(err)
+        || screencast::is_share_closed_until_game(err)
+        || screencast::is_stream_miss(err)
+        || err.contains(pw::NO_STREAM_FRAME)
+}
+
 /// The stream was asked for by the environment or by Settings, not chosen
 /// because the desktop is KDE or GNOME.
 pub fn stream_was_forced() -> bool {
@@ -505,9 +520,10 @@ fn select_backend(
             // Unknown forced value, fail closed, no fallback.
             ForceTarget::Unknown => CaptureBackend::None,
         },
-        // Automatic priority: usable Wayshot, then X11. On a Wayland
-        // session: Wayshot, then Portal, then X11. Off Wayland the portal's
-        // screen stream does not exist (S5-CAP-5): a failed X11 is none.
+        // Automatic priority: usable Wayshot, then X11, then Portal. On a
+        // Wayland session: Wayshot, then Portal, then X11. On a known X11
+        // session `detect_backend` never reports the portal usable on
+        // automatic ([`auto_may_use_portal`], S5-CAP-5).
         None => {
             if wayshot_ok {
                 CaptureBackend::Wayshot
@@ -515,21 +531,12 @@ fn select_backend(
                 CaptureBackend::Portal
             } else if x11_ok {
                 CaptureBackend::X11
+            } else if portal_ok {
+                CaptureBackend::Portal
             } else {
                 CaptureBackend::None
             }
         }
-    }
-}
-
-/// True when the desktop session is Wayland, from `XDG_SESSION_TYPE`, or from
-/// `WAYLAND_DISPLAY` when the session type is missing. A session that says
-/// `x11` stays X11 even if a stray `WAYLAND_DISPLAY` is set.
-fn is_wayland_session(session_type: Option<&str>, wayland_display: bool) -> bool {
-    match session_type.map(str::to_ascii_lowercase).as_deref() {
-        Some("wayland") => true,
-        Some("x11") => false,
-        _ => wayland_display,
     }
 }
 
@@ -550,11 +557,12 @@ pub async fn detect_backend() -> CaptureBackend {
     };
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
     let wayland_display = std::env::var_os("WAYLAND_DISPLAY").is_some();
-    let wayland = is_wayland_session(session_type.as_deref(), wayland_display);
+    let session = route::SessionKind::from_env(session_type.as_deref(), wayland_display);
+    let wayland = session == route::SessionKind::Wayland;
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    // A saved Wayland-only route off Wayland is not probed: `resolve` uses
-    // automatic for it and says why.
-    let chosen = route::effective(env.as_deref(), route::saved_on_session(settings, wayland));
+    // A saved Wayland-only route on a known X11 session is not probed:
+    // `resolve_on_session` uses automatic for it and says why.
+    let chosen = route::effective(env.as_deref(), route::saved_on_session(settings, session));
 
     // KDE direct is probed when asked for, or on automatic on KDE once
     // `KWIN_DIRECT_DEFAULT_ON_KDE` is flipped. No screen stream is open
@@ -624,18 +632,22 @@ pub async fn detect_backend() -> CaptureBackend {
                     let x11_ok = !portal_ok && probe_x11_logged(&mut x11_failure).await;
                     (false, x11_ok, portal_ok)
                 } else {
-                    // S5-CAP-5: off Wayland there is no screen stream to
-                    // fall back to; a failed X11 probe means no capture.
-                    (false, probe_x11_logged(&mut x11_failure).await, false)
+                    let x11_ok = probe_x11_logged(&mut x11_failure).await;
+                    // S5-CAP-5: on a known X11 session there is no screen
+                    // stream to fall back to; a failed X11 probe means no
+                    // capture. An unknown session keeps rc.7's fallback.
+                    let portal_ok =
+                        !x11_ok && auto_may_use_portal(session) && portal::is_available().await;
+                    (false, x11_ok, portal_ok)
                 }
             }
         },
     };
 
-    let decision = route::resolve(
+    let decision = route::resolve_on_session(
         env.as_deref(),
         settings,
-        wayland,
+        session,
         wayshot_ok,
         x11_ok,
         portal_ok,
@@ -663,7 +675,9 @@ pub async fn detect_backend() -> CaptureBackend {
     );
     let notice = decision.fallback.clone().or_else(|| {
         x11_failure
-            .filter(|_| !wayland && decision.backend == CaptureBackend::None)
+            .filter(|_| {
+                session == route::SessionKind::X11 && decision.backend == CaptureBackend::None
+            })
             .map(|err| x11_failure_notice(&err))
     });
     *ROUTE_NOTICE.lock().unwrap_or_else(|err| err.into_inner()) = notice.unwrap_or_default();
@@ -716,8 +730,15 @@ async fn probe_x11_logged(failure: &mut Option<String>) -> bool {
     }
 }
 
-/// The app's notice when the X11 probe failed off Wayland and nothing
-/// else can capture.
+/// Whether automatic may fall back to the portal's screen stream when no
+/// direct capture works: not on a known X11 session, where that stream
+/// does not exist (S5-CAP-5).
+fn auto_may_use_portal(session: route::SessionKind) -> bool {
+    session != route::SessionKind::X11
+}
+
+/// The app's notice when the X11 probe failed on a known X11 session and
+/// nothing else can capture.
 fn x11_failure_notice(err: &str) -> String {
     format!("X11 capture is not available ({err}); no capture method works on this session")
 }
@@ -845,9 +866,9 @@ pub fn daemon_share_is_open(data_dir: &std::path::Path) -> bool {
 
 /// KDE direct for the app's Settings: `None` off KDE. With `render` (the
 /// saved route is KDE direct, or its chip was just chosen) it runs the 1x1
-/// probe, never on a Plasma without the full KWin crash fix and never
-/// beside the tracker's open share on an unknown Plasma
-/// ([`kwin::render_gate`]). Without, it renders nothing: the last probe
+/// probe, never on NVIDIA with a Plasma before the full KWin crash fix,
+/// and never beside the tracker's open share on a Plasma not known to have
+/// it ([`kwin::render_gate`]). Without, it renders nothing: the last probe
 /// result, or what the version read says.
 pub async fn kwin_direct_status(data_dir: std::path::PathBuf, render: bool) -> Option<KwinProbe> {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
@@ -1327,16 +1348,42 @@ mod tests {
     }
 
     #[test]
-    fn auto_failed_x11_falls_to_portal_only_on_wayland() {
-        assert_eq!(
-            select_backend(None, true, false, false, true),
-            CaptureBackend::Portal
-        );
-        // S5-CAP-5: off Wayland the screen stream does not exist.
+    fn auto_failed_x11_falls_to_portal() {
         assert_eq!(
             select_backend(None, false, false, false, true),
+            CaptureBackend::Portal
+        );
+        // S5-CAP-5: a known X11 session never reports the portal usable on
+        // automatic; Wayland and an unknown session may.
+        assert!(!auto_may_use_portal(route::SessionKind::X11));
+        assert!(auto_may_use_portal(route::SessionKind::Wayland));
+        assert!(auto_may_use_portal(route::SessionKind::Unknown));
+        assert_eq!(
+            select_backend(None, false, false, false, false),
             CaptureBackend::None
         );
+    }
+
+    #[test]
+    fn known_poll_states_are_not_capture_failures() {
+        for err in [
+            format!("portal screenshot: {}", flight::BUSY),
+            screencast::OPEN_IN_PROGRESS.to_string(),
+            screencast::NO_CAPTURE_DECLINE_NOTICE.to_string(),
+            screencast::timeout_notice(false).to_string(),
+            screencast::SHARE_CLOSED_UNTIL_GAME.to_string(),
+            screencast::STREAM_MISS.to_string(),
+            pw::NO_STREAM_FRAME.to_string(),
+        ] {
+            assert!(is_expected_poll_miss(&err), "{err}");
+        }
+        for err in [
+            "screencast stream ended",
+            "X11 capture failed: BadMatch",
+            "KDE direct capture: KWin did not answer in 2 s",
+        ] {
+            assert!(!is_expected_poll_miss(err), "{err}");
+        }
     }
 
     #[test]
@@ -1505,13 +1552,16 @@ mod tests {
 
     #[test]
     fn session_type_detection() {
-        assert!(is_wayland_session(Some("wayland"), false));
-        assert!(is_wayland_session(Some("Wayland"), true));
-        assert!(!is_wayland_session(Some("x11"), true));
-        assert!(is_wayland_session(None, true));
-        assert!(!is_wayland_session(None, false));
-        assert!(is_wayland_session(Some("tty"), true));
-        assert!(!is_wayland_session(Some(""), false));
+        use route::SessionKind::{self, *};
+        let kind = SessionKind::from_env;
+        assert_eq!(kind(Some("wayland"), false), Wayland);
+        assert_eq!(kind(Some("Wayland"), true), Wayland);
+        assert_eq!(kind(Some("x11"), true), Unknown, "a stray WAYLAND_DISPLAY");
+        assert_eq!(kind(Some("x11"), false), X11);
+        assert_eq!(kind(None, true), Wayland);
+        assert_eq!(kind(None, false), Unknown);
+        assert_eq!(kind(Some("tty"), true), Wayland);
+        assert_eq!(kind(Some(""), false), Unknown);
     }
 
     #[test]

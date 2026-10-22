@@ -36,6 +36,7 @@ const COMPOSITORS: &[&str] = &[
     "compiz",
     "budgie-wm",
     "gamescope",
+    "gamescope-wl",
     "cosmic-comp",
 ];
 
@@ -612,6 +613,7 @@ mod tests {
             "compiz",
             "budgie-wm",
             "gamescope",
+            "gamescope-wl",
             "cosmic-comp",
         ] {
             assert_eq!(classify(comm), Some(Role::Compositor), "{comm}");

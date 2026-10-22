@@ -4263,8 +4263,10 @@ const POLL_FAILURE_WARN_EVERY: std::time::Duration = std::time::Duration::from_s
 /// failure of a run is a WARN, then one at most every
 /// [`POLL_FAILURE_WARN_EVERY`] while the run lasts; the rest are TRACE.
 /// The clock is not reset by a success, so grabs that fail and work in
-/// turn do not warn on every tick. A grab turned away by a held capture
-/// lock is neither a failure nor a success.
+/// turn do not warn on every tick. A known state ([`capture::is_expected_poll_miss`]:
+/// a held capture lock, a share still opening, declined or closed until the
+/// game runs, no fresh stream frame) is neither a failure nor a success.
+/// The run ends when the game stops.
 #[derive(Debug, Default)]
 struct PollFailureStreak {
     /// Failures in this run.
@@ -4290,6 +4292,22 @@ impl PollFailureStreak {
         warn
     }
 
+    /// How to log one poll grab error, counting it when it is a failure.
+    fn on_error(&mut self, err: &str, now: Instant) -> PollErrorLog {
+        if capture::is_expected_poll_miss(err) {
+            PollErrorLog::Expected
+        } else if self.failed(now) {
+            PollErrorLog::Warn
+        } else {
+            PollErrorLog::Trace
+        }
+    }
+
+    /// The game stopped: counts and times do not carry into the next game.
+    fn game_stopped(&mut self) {
+        *self = Self::default();
+    }
+
     /// A grab worked: the run ends. Returns how many failed and for how
     /// long when the run logged a WARN, so its end is logged too.
     fn recovered(&mut self, now: Instant) -> Option<(u32, std::time::Duration)> {
@@ -4297,6 +4315,17 @@ impl PollFailureStreak {
         let count = std::mem::take(&mut self.count);
         std::mem::take(&mut self.warned).then(|| (count, now.saturating_duration_since(started)))
     }
+}
+
+/// How one poll grab error is logged ([`PollFailureStreak::on_error`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollErrorLog {
+    /// A known state, not a failure: TRACE, the run untouched.
+    Expected,
+    /// A failure logged at WARN.
+    Warn,
+    /// A failure inside the WARN gap: TRACE.
+    Trace,
 }
 
 /// Whole ticks of `interval` that fit in [`IDLE_SHOT_POLL_FLOOR`], at
@@ -5114,6 +5143,7 @@ async fn run_loop(
                 if !running {
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
+                    poll_failures.game_stopped();
                     continue;
                 }
 
@@ -5486,18 +5516,23 @@ async fn run_loop(
                         }
                     }
                     Ok(Err(e)) => {
-                        // The game gate ran first: the game is running and
-                        // the grab failed. A held capture lock is no failure.
-                        if capture::is_capture_busy(&e.to_string()) {
-                            tracing::trace!(error = %e, "poll capture skipped: a capture is in flight");
-                        } else if poll_failures.failed(Instant::now()) {
-                            tracing::warn!(
-                                error = %e,
-                                failures = poll_failures.count,
-                                "poll capture failed while the game runs; repeats are logged at most every 5 minutes"
-                            );
-                        } else {
-                            tracing::trace!(error = %e, failures = poll_failures.count, "poll capture failed");
+                        // The game gate ran first: the game is running. A
+                        // known state (a held lock, a share opening, declined
+                        // or closed) is no failure and has its own log line.
+                        match poll_failures.on_error(&e.to_string(), Instant::now()) {
+                            PollErrorLog::Expected => {
+                                tracing::trace!(error = %e, "poll capture skipped");
+                            }
+                            PollErrorLog::Warn => {
+                                tracing::warn!(
+                                    error = %e,
+                                    failures = poll_failures.count,
+                                    "poll capture failed while the game runs; repeats are logged at most every 5 minutes"
+                                );
+                            }
+                            PollErrorLog::Trace => {
+                                tracing::trace!(error = %e, failures = poll_failures.count, "poll capture failed");
+                            }
                         }
                     }
                 }
@@ -11022,6 +11057,46 @@ mod tests {
             Some((1, std::time::Duration::from_secs(1)))
         );
         assert_eq!(POLL_FAILURE_WARN_EVERY, std::time::Duration::from_secs(300));
+    }
+
+    /// Review of #437: a share that is opening (every game start on KDE
+    /// and GNOME), declined, or closed until the game runs is no failure,
+    /// and a run does not carry into the next game.
+    #[test]
+    fn known_poll_states_never_warn_and_the_run_ends_with_the_game() {
+        let t0 = Instant::now();
+        let mut streak = PollFailureStreak::default();
+        for err in [
+            "screencast open in progress",
+            "Screen share was declined: no captures until Overwatch is restarted",
+            "screencast share stays closed until the game is running",
+            "portal screenshot: a previous capture request is still running",
+        ] {
+            assert_eq!(streak.on_error(err, t0), PollErrorLog::Expected, "{err}");
+        }
+        assert_eq!(streak.count, 0, "nothing counted");
+        assert_eq!(streak.recovered(t0), None);
+        assert_eq!(
+            streak.on_error("screencast stream ended", t0),
+            PollErrorLog::Warn
+        );
+        assert_eq!(
+            streak.on_error(
+                "screencast stream ended",
+                t0 + std::time::Duration::from_secs(1)
+            ),
+            PollErrorLog::Trace
+        );
+        streak.game_stopped();
+        assert_eq!(streak.count, 0);
+        // The next game's first failure warns at once.
+        assert_eq!(
+            streak.on_error(
+                "screencast stream ended",
+                t0 + std::time::Duration::from_secs(2)
+            ),
+            PollErrorLog::Warn
+        );
     }
 
     #[test]

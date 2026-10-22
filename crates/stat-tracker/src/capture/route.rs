@@ -19,8 +19,10 @@
 //! `STAT_TRACKER_CAPTURE` or from Settings.
 //!
 //! KDE direct and the screen stream need a Wayland session. Saved in
-//! Settings on a session that is not Wayland, they are ignored: automatic
-//! runs, with a notice for the app ([`saved_on_session`]).
+//! Settings on a session that is X11 for sure ([`SessionKind::X11`]), they
+//! are ignored: automatic runs, with a notice for the app
+//! ([`resolve_on_session`]). A session that is neither known Wayland nor
+//! known X11 keeps the rc.7 behaviour.
 
 use super::{CaptureBackend, select_backend};
 
@@ -80,8 +82,10 @@ pub enum KwinProbe {
     /// The reason it cannot be used, for the log and the app.
     Unavailable(String),
     /// Not tested, and why: the 1x1 render would have run beside the
-    /// tracker's screen share on a Plasma without the full KDE bug 524840
-    /// fix. Not a verdict on KDE direct.
+    /// tracker's screen share on a Plasma not known to have the full KDE
+    /// bug 524840 fix (an unread version, or before 6.8.1 without NVIDIA;
+    /// with NVIDIA such a Plasma is [`KwinProbe::Unavailable`]). Not a
+    /// verdict on KDE direct.
     NotChecked(String),
 }
 
@@ -139,11 +143,107 @@ pub fn wayland_only(word: ForceWord) -> bool {
     matches!(word, ForceWord::Kwin | ForceWord::Stream)
 }
 
+/// What the session is, as far as the daemon's environment shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    Wayland,
+    /// Only on positive evidence: `XDG_SESSION_TYPE=x11` and no
+    /// `WAYLAND_DISPLAY`.
+    X11,
+    /// Neither is known (a type unset, `tty` or `unspecified` with no
+    /// `WAYLAND_DISPLAY`, or `x11` beside a stray `WAYLAND_DISPLAY`). A
+    /// Wayland session whose service environment lacks the variables looks
+    /// like this, and the portal needs only D-Bus, so this keeps the rc.7
+    /// behaviour: saved routes stand and automatic may use the portal.
+    Unknown,
+}
+
+impl SessionKind {
+    /// From `XDG_SESSION_TYPE` and whether `WAYLAND_DISPLAY` is set.
+    pub fn from_env(session_type: Option<&str>, wayland_display: bool) -> Self {
+        match session_type.map(str::to_ascii_lowercase).as_deref() {
+            Some("wayland") => SessionKind::Wayland,
+            Some("x11") if !wayland_display => SessionKind::X11,
+            Some("x11") => SessionKind::Unknown,
+            _ if wayland_display => SessionKind::Wayland,
+            _ => SessionKind::Unknown,
+        }
+    }
+}
+
 /// The saved (Settings) route as this session can use it: a Wayland-only
-/// route off Wayland is dropped, so automatic runs. [`resolve`] publishes
-/// the notice for it.
-pub fn saved_on_session(settings_word: Option<ForceWord>, wayland: bool) -> Option<ForceWord> {
-    settings_word.filter(|word| wayland || !wayland_only(*word))
+/// route on a known X11 session is dropped, so automatic runs.
+/// [`resolve_on_session`] publishes the notice for it.
+pub fn saved_on_session(
+    settings_word: Option<ForceWord>,
+    session: SessionKind,
+) -> Option<ForceWord> {
+    settings_word.filter(|word| session != SessionKind::X11 || !wayland_only(*word))
+}
+
+/// [`resolve`] for a session: a saved Wayland-only route on a known X11
+/// session (the app may not have hidden it, or the session changed) is
+/// automatic, with the reason in [`Decision::fallback`]. The environment
+/// is a deliberate override and keeps failing closed. `wayland` for
+/// [`resolve`] is `session == Wayland`.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_on_session(
+    env: Option<&str>,
+    settings_word: Option<ForceWord>,
+    session: SessionKind,
+    wayshot_ok: bool,
+    x11_ok: bool,
+    portal_ok: bool,
+    desktop: &str,
+    kwin: &KwinProbe,
+    kwin_default_on: bool,
+) -> Decision {
+    let wayland = session == SessionKind::Wayland;
+    let env_set = env.map(str::trim).is_some_and(|s| !s.is_empty());
+    if !env_set
+        && let Some(word) = settings_word
+        && saved_on_session(Some(word), session).is_none()
+    {
+        let mut decision = resolve(
+            None,
+            None,
+            wayland,
+            wayshot_ok,
+            x11_ok,
+            portal_ok,
+            desktop,
+            kwin,
+            kwin_default_on,
+        );
+        let saved = if word == ForceWord::Kwin {
+            "KDE direct"
+        } else {
+            "the screen stream"
+        };
+        let used = if decision.backend == CaptureBackend::None {
+            "no other capture method works here".to_string()
+        } else {
+            format!(
+                "using {} instead",
+                method_name(decision.backend, decision.portal)
+            )
+        };
+        decision.fallback = Some(format!(
+            "the saved capture method, {saved}, needs a Wayland session and this one is X11; automatic is used: {used}"
+        ));
+        return decision;
+    }
+    resolve(
+        env,
+        settings_word,
+        wayland,
+        wayshot_ok,
+        x11_ok,
+        portal_ok,
+        desktop,
+        kwin,
+        kwin_default_on,
+    )
 }
 
 /// Canonical keyword `select_backend` already understands.
@@ -257,43 +357,6 @@ pub fn resolve(
 ) -> Decision {
     let chosen = effective(env, settings_word);
     let desktop_shown = desktop_label(desktop);
-    // A saved Wayland-only route off Wayland (the app may not have hidden
-    // it, or the session changed): automatic, with the reason. The
-    // environment is a deliberate override and keeps failing closed.
-    let env_set = env.map(str::trim).is_some_and(|s| !s.is_empty());
-    if !env_set
-        && let Some(word) = settings_word
-        && saved_on_session(Some(word), wayland).is_none()
-    {
-        let mut decision = resolve(
-            None,
-            None,
-            wayland,
-            wayshot_ok,
-            x11_ok,
-            portal_ok,
-            desktop,
-            kwin,
-            kwin_default_on,
-        );
-        let saved = if word == ForceWord::Kwin {
-            "KDE direct"
-        } else {
-            "the screen stream"
-        };
-        let used = if decision.backend == CaptureBackend::None {
-            "no other capture method works here".to_string()
-        } else {
-            format!(
-                "using {} instead",
-                method_name(decision.backend, decision.portal)
-            )
-        };
-        decision.fallback = Some(format!(
-            "the saved capture method, {saved}, needs a Wayland session and this one is not; automatic is used: {used}"
-        ));
-        return decision;
-    }
     if let Effective::Forced(ForceWord::Kwin) = chosen {
         let source = if env.map(str::trim).is_some_and(|s| !s.is_empty()) {
             RouteSource::Environment
@@ -763,77 +826,151 @@ mod tests {
         assert!(gnome_stream.mismatch.is_none());
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn on_session(
+        env: Option<&str>,
+        settings: Option<ForceWord>,
+        session: SessionKind,
+        wayshot: bool,
+        x11: bool,
+        portal: bool,
+    ) -> Decision {
+        resolve_on_session(
+            env,
+            settings,
+            session,
+            wayshot,
+            x11,
+            portal,
+            "KDE",
+            &KwinProbe::Available,
+            true,
+        )
+    }
+
     #[test]
-    fn a_saved_wayland_only_route_off_wayland_is_automatic_with_a_notice() {
+    fn the_session_is_x11_only_on_positive_evidence() {
+        use SessionKind::*;
+        assert_eq!(SessionKind::from_env(Some("wayland"), false), Wayland);
+        assert_eq!(SessionKind::from_env(Some("Wayland"), true), Wayland);
+        assert_eq!(SessionKind::from_env(Some("x11"), false), X11);
+        assert_eq!(SessionKind::from_env(Some("X11"), false), X11);
+        // A stray WAYLAND_DISPLAY beside x11 is not sure either way.
+        assert_eq!(SessionKind::from_env(Some("x11"), true), Unknown);
+        for kind in [None, Some("tty"), Some("unspecified"), Some("")] {
+            assert_eq!(SessionKind::from_env(kind, false), Unknown, "{kind:?}");
+            assert_eq!(SessionKind::from_env(kind, true), Wayland, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_saved_wayland_only_route_on_x11_is_automatic_with_a_notice() {
         for (word, saved) in [
             (ForceWord::Kwin, "KDE direct"),
             (ForceWord::Stream, "the screen stream"),
         ] {
             // X11 works: automatic picks it and the notice says why.
-            let d = resolve(
-                None,
-                Some(word),
-                false,
-                false,
-                true,
-                true,
-                "KDE",
-                &KwinProbe::Available,
-                true,
-            );
+            let d = on_session(None, Some(word), SessionKind::X11, false, true, true);
             assert_eq!(d.backend, CaptureBackend::X11, "{word:?}");
             assert_eq!(d.source, RouteSource::Automatic);
             assert!(!d.forced);
             let notice = d.fallback.unwrap();
             assert!(notice.contains(saved), "{notice}");
             assert!(notice.contains("needs a Wayland session"), "{notice}");
+            assert!(notice.contains("this one is X11"), "{notice}");
             assert!(notice.contains("using x11 instead"), "{notice}");
             // Nothing works: no capture, and the notice says so.
-            let d = decide(None, Some(word), false, false, false, true, "KDE");
+            let d = on_session(None, Some(word), SessionKind::X11, false, false, false);
             assert_eq!(d.backend, CaptureBackend::None, "{word:?}");
             let notice = d.fallback.unwrap();
             assert!(notice.contains("no other capture method"), "{notice}");
         }
         // On Wayland the saved routes stand.
-        let d = decide(
+        let d = on_session(
             None,
             Some(ForceWord::Stream),
-            true,
+            SessionKind::Wayland,
             false,
             false,
             true,
-            "KDE",
         );
         assert_eq!(d.backend, CaptureBackend::Portal);
         assert!(d.forced && d.fallback.is_none());
         // Other saved routes are not Wayland-only.
-        let d = decide(None, Some(ForceWord::X11), false, false, true, false, "KDE");
+        let d = on_session(
+            None,
+            Some(ForceWord::X11),
+            SessionKind::X11,
+            false,
+            true,
+            false,
+        );
         assert_eq!(d.backend, CaptureBackend::X11);
         assert!(d.forced && d.fallback.is_none());
-        let d = decide(
+        let d = on_session(
             None,
             Some(ForceWord::Screenshot),
-            false,
+            SessionKind::X11,
             false,
             false,
             true,
-            "KDE",
         );
         assert_eq!(d.backend, CaptureBackend::Portal);
         assert!(d.fallback.is_none());
         // The environment keeps failing closed, with its mismatch line.
-        let d = decide(Some("screencast"), None, false, false, true, true, "KDE");
+        let d = on_session(
+            Some("screencast"),
+            None,
+            SessionKind::X11,
+            false,
+            true,
+            true,
+        );
         assert!(d.forced && d.fallback.is_none());
         assert!(d.mismatch.unwrap().contains("not a Wayland session"));
-        assert_eq!(saved_on_session(Some(ForceWord::Kwin), false), None);
         assert_eq!(
-            saved_on_session(Some(ForceWord::Kwin), true),
-            Some(ForceWord::Kwin)
+            saved_on_session(Some(ForceWord::Kwin), SessionKind::X11),
+            None
         );
+        for session in [SessionKind::Wayland, SessionKind::Unknown] {
+            assert_eq!(
+                saved_on_session(Some(ForceWord::Kwin), session),
+                Some(ForceWord::Kwin)
+            );
+        }
         assert_eq!(
-            saved_on_session(Some(ForceWord::Screenshot), false),
+            saved_on_session(Some(ForceWord::Screenshot), SessionKind::X11),
             Some(ForceWord::Screenshot)
         );
+    }
+
+    /// An unknown session keeps rc.7: a saved stream stands (the portal
+    /// needs only D-Bus), with no false "not Wayland" notice.
+    #[test]
+    fn an_unknown_session_keeps_the_saved_stream() {
+        let d = on_session(
+            None,
+            Some(ForceWord::Stream),
+            SessionKind::Unknown,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(d.backend, CaptureBackend::Portal);
+        assert_eq!(d.portal, PortalPath::Stream);
+        assert!(d.forced);
+        assert!(d.fallback.is_none(), "{:?}", d.fallback);
+        // A saved KDE direct that answered is used too.
+        let d = on_session(
+            None,
+            Some(ForceWord::Kwin),
+            SessionKind::Unknown,
+            false,
+            false,
+            true,
+        );
+        assert_eq!(d.backend, CaptureBackend::Kwin);
+        assert!(d.fallback.is_none());
     }
 
     #[test]

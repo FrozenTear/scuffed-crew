@@ -22,10 +22,13 @@
 //! active screencast. The fix is verified in 6.6.7 and 6.8.0 (a 6.7.6
 //! backport could not be verified), with a further fix in 6.8.1. The portal
 //! and this route share that code path, and the screencast may be another
-//! app's (a Discord or OBS share), so this route needs Plasma 6.8.1 or
-//! newer: on an older Plasma it is unavailable and renders nothing
-//! ([`render_gate`]). When the Plasma version cannot be read, the probe
-//! renders only while the tracker's own share is closed. Every call in
+//! app's (a Discord or OBS share), so with the NVIDIA driver loaded this
+//! route needs Plasma 6.8.1 or newer: on an older Plasma it is unavailable
+//! and renders nothing ([`render_gate`]). Plasma 6.0 to 6.7 refuse the
+//! route themselves, so the cut is Plasma 6.8.0 on NVIDIA. Without NVIDIA,
+//! and when the Plasma version cannot be read, the probe renders only while
+//! the tracker's own share is closed, unless the version is 6.8.1 or later
+//! for sure. Every call in
 //! this process goes through one lock ([`FLIGHT`]), so two of ours never
 //! overlap here. The app and the daemon are two processes and can call at
 //! the same moment; KWin runs those one after the other on its own thread.
@@ -876,49 +879,64 @@ pub struct Versions {
     pub interface: Result<u32, KwinError>,
     /// The Plasma (KWin) version, when KWin's support information has it.
     pub plasma: Option<(u32, u32, u32)>,
+    /// The NVIDIA kernel driver is loaded ([`nvidia_loaded`]): KDE bug
+    /// 524840 crashes KWin only there.
+    pub nvidia: bool,
+}
+
+/// Whether the NVIDIA kernel driver is loaded, from `/sys/module`.
+pub fn nvidia_loaded() -> bool {
+    nvidia_loaded_in(std::path::Path::new("/sys/module"))
+}
+
+/// [`nvidia_loaded`] under another `/sys/module`, for tests.
+pub fn nvidia_loaded_in(modules: &std::path::Path) -> bool {
+    ["nvidia", "nvidia_drm"]
+        .iter()
+        .any(|name| modules.join(name).exists())
 }
 
 fn version_label(v: Option<(u32, u32, u32)>) -> String {
     v.map_or_else(|| "unknown".to_string(), |(a, b, c)| format!("{a}.{b}.{c}"))
 }
 
-/// Why KDE direct is unavailable on a Plasma without the full KDE bug
-/// 524840 fix (before 6.8.1).
-pub const NEEDS_FULL_FIX: &str = "KDE direct needs Plasma 6.8.1 or newer";
+/// Why KDE direct is unavailable with NVIDIA on a Plasma without the full
+/// KDE bug 524840 fix (before 6.8.1). The app and the route line put
+/// "KDE direct is not available" in front of it.
+pub const NEEDS_FULL_FIX: &str = "it needs Plasma 6.8.1 or newer on NVIDIA";
 
 /// What a render probe may do now.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderGate {
     /// A probe result is cached: use it, render nothing.
     Cached,
-    /// The interface did not answer, or this Plasma lacks the full KDE bug
-    /// 524840 fix: unavailable, render nothing.
+    /// The interface did not answer, or the NVIDIA driver is loaded and this
+    /// Plasma lacks the full KDE bug 524840 fix: unavailable, render
+    /// nothing.
     Refused(String),
-    /// A screen share may be open and the Plasma version is unknown: not
-    /// checked, render nothing.
+    /// A screen share may be open and this Plasma is not known to have the
+    /// full fix: not checked, render nothing.
     NotChecked(String),
     /// Render the 1x1 probe.
     Render,
 }
 
-/// The one rule for a render probe. A Plasma known to be older than 6.8.1
-/// is refused whatever is open: KWin there can crash on NVIDIA when a
-/// screenshot meets any app's screen share. `share_open` is whether the
-/// tracker's screen share may be open beside this call; with it open, an
-/// unknown Plasma version renders nothing either.
-pub fn render_gate(
-    share_open: bool,
-    interface: &Result<u32, KwinError>,
-    plasma: Option<(u32, u32, u32)>,
-    probe_done: bool,
-) -> RenderGate {
+/// The one rule for a render probe. With the NVIDIA driver loaded, a
+/// Plasma known to be older than 6.8.1 is refused whatever is open: KWin
+/// there can crash when a screenshot meets any app's screen share
+/// (S5-CAP-3). `share_open` is whether the tracker's screen share may be
+/// open beside this call; with it open, only a Plasma known to be 6.8.1 or
+/// later renders (the rc.7 rule).
+pub fn render_gate(share_open: bool, found: &Versions, probe_done: bool) -> RenderGate {
     if probe_done {
         return RenderGate::Cached;
     }
-    if let Err(err) = interface {
+    if let Err(err) = &found.interface {
         return RenderGate::Refused(err.reason());
     }
-    if let Some(v) = plasma
+    let plasma = found.plasma;
+    if found.nvidia
+        && let Some(v) = plasma
         && crash_fix(v) != CrashFix::Full
     {
         return RenderGate::Refused(format!(
@@ -926,7 +944,7 @@ pub fn render_gate(
             version_label(plasma)
         ));
     }
-    if share_open && plasma.is_none() {
+    if share_open && plasma.is_none_or(|v| crash_fix(v) != CrashFix::Full) {
         return RenderGate::NotChecked(format!(
             "it is not tested while the tracker shares the screen on Plasma {} (needs 6.8.1, KDE bug 524840)",
             version_label(plasma)
@@ -988,7 +1006,7 @@ impl Prober {
             .filter(|(result, at)| reusable(result, *at, now))
             .map(|(result, _)| result.clone());
         let found = bus.versions().await;
-        match render_gate(share_open, &found.interface, found.plasma, cached.is_some()) {
+        match render_gate(share_open, &found, cached.is_some()) {
             RenderGate::Cached => ProbeAnswer {
                 probe: match &cached {
                     Some(result) => probe_outcome(result),
@@ -1040,8 +1058,9 @@ fn log_probe(result: &Result<(), KwinError>, found: &Versions) {
                 plasma = %plasma,
                 "KDE direct capture available (KWin ScreenShot2)"
             );
-            // A known Plasma before 6.8.1 never renders ([`render_gate`]).
-            if found.plasma.is_none() {
+            // With NVIDIA a known Plasma before 6.8.1 never renders
+            // ([`render_gate`]); an unread version is warned about.
+            if found.nvidia && found.plasma.is_none() {
                 tracing::warn!(
                     "could not read the Plasma version; KWin before 6.8.1 can crash on NVIDIA when a screenshot meets another app's screen share (KDE bug 524840)"
                 );
@@ -1125,6 +1144,7 @@ async fn read_versions() -> Versions {
             return Versions {
                 interface: Err(err),
                 plasma: None,
+                nvidia: nvidia_loaded(),
             };
         }
     };
@@ -1171,7 +1191,11 @@ async fn read_versions() -> Versions {
     } else {
         None
     };
-    Versions { interface, plasma }
+    Versions {
+        interface,
+        plasma,
+        nvidia: nvidia_loaded(),
+    }
 }
 
 /// What KWin says about itself, without rendering anything.
@@ -1219,7 +1243,7 @@ pub async fn status_without_render() -> KwinProbe {
 /// when the interface did not answer or the Plasma is before 6.8.1, else
 /// not probed yet.
 pub fn status_from_versions(found: &Versions) -> KwinProbe {
-    match render_gate(false, &found.interface, found.plasma, false) {
+    match render_gate(false, found, false) {
         RenderGate::Refused(reason) => KwinProbe::Unavailable(reason),
         RenderGate::Cached | RenderGate::NotChecked(_) | RenderGate::Render => KwinProbe::NotProbed,
     }
@@ -1231,7 +1255,7 @@ pub fn status_from_versions(found: &Versions) -> KwinProbe {
 /// "available" from a probe made with no share open says nothing about
 /// grabbing beside one. And the probe must have found KDE direct working.
 pub fn compare_half_allowed(found: &Versions, probe: &KwinProbe) -> Result<(), String> {
-    match render_gate(true, &found.interface, found.plasma, false) {
+    match render_gate(true, found, false) {
         RenderGate::Render => {}
         RenderGate::Refused(why) | RenderGate::NotChecked(why) => return Err(why),
         RenderGate::Cached => return Err("no kept result was offered".into()),
@@ -1737,49 +1761,102 @@ mod tests {
         assert_eq!(probe_target(&[]), Target::ActiveScreen);
     }
 
+    fn found(
+        interface: Result<u32, KwinError>,
+        plasma: Option<(u32, u32, u32)>,
+        nvidia: bool,
+    ) -> Versions {
+        Versions {
+            interface,
+            plasma,
+            nvidia,
+        }
+    }
+
     #[test]
     fn the_render_gate_has_one_answer_per_case() {
-        let up: Result<u32, KwinError> = Ok(5);
-        let down: Result<u32, KwinError> = Err(KwinError::NotKwin);
+        let up = |plasma, nvidia| found(Ok(5), plasma, nvidia);
+        let down = |plasma| found(Err(KwinError::NotKwin), plasma, true);
         let full = Some((6, 8, 1));
         let partial = Some((6, 8, 0));
         // A kept result wins over everything, and renders nothing.
-        assert_eq!(render_gate(true, &down, None, true), RenderGate::Cached);
-        assert_eq!(render_gate(true, &up, partial, true), RenderGate::Cached);
+        assert_eq!(render_gate(true, &down(None), true), RenderGate::Cached);
+        assert_eq!(
+            render_gate(true, &up(partial, true), true),
+            RenderGate::Cached
+        );
         // The interface did not answer.
         assert!(
-            matches!(render_gate(false, &down, full, false), RenderGate::Refused(r) if r.contains("not KDE"))
+            matches!(render_gate(false, &down(full), false), RenderGate::Refused(r) if r.contains("not KDE"))
         );
         assert!(matches!(
-            render_gate(true, &down, full, false),
+            render_gate(true, &down(full), false),
             RenderGate::Refused(_)
         ));
-        // 6.8.1 and later render, share or not.
-        assert_eq!(render_gate(true, &up, full, false), RenderGate::Render);
-        assert_eq!(render_gate(false, &up, full, false), RenderGate::Render);
-        assert_eq!(
-            render_gate(true, &up, Some((6, 9, 0)), false),
-            RenderGate::Render
-        );
-        // S5-CAP-3: a known Plasma before 6.8.1 is unavailable, share or
-        // not (another app's share can crash KWin on NVIDIA).
+        // 6.8.1 and later render, share or not, NVIDIA or not.
+        for nvidia in [true, false] {
+            for share in [true, false] {
+                assert_eq!(
+                    render_gate(share, &up(full, nvidia), false),
+                    RenderGate::Render
+                );
+                assert_eq!(
+                    render_gate(share, &up(Some((6, 9, 0)), nvidia), false),
+                    RenderGate::Render
+                );
+            }
+        }
+        // S5-CAP-3: with NVIDIA a known Plasma before 6.8.1 is unavailable,
+        // share or not (another app's share can crash KWin there).
         for share in [true, false] {
             for old in [partial, Some((6, 7, 6)), Some((6, 6, 7)), Some((6, 5, 0))] {
-                let got = render_gate(share, &up, old, false);
+                let got = render_gate(share, &up(old, true), false);
                 assert!(
                     matches!(&got, RenderGate::Refused(r) if r.starts_with(NEEDS_FULL_FIX)),
                     "{old:?} share={share}: {got:?}"
                 );
             }
         }
-        assert!(
-            matches!(render_gate(false, &up, partial, false), RenderGate::Refused(r) if r.contains("6.8.0"))
+        let why = match render_gate(false, &up(partial, true), false) {
+            RenderGate::Refused(why) => why,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(
+            why,
+            "it needs Plasma 6.8.1 or newer on NVIDIA (found 6.8.0, KDE bug 524840)"
         );
-        // An unknown version: not beside the tracker's share.
+        // Without NVIDIA the rc.7 rule: not beside the tracker's share
+        // unless 6.8.1 is known, any Plasma without one.
         assert!(
-            matches!(render_gate(true, &up, None, false), RenderGate::NotChecked(r) if r.contains("unknown"))
+            matches!(render_gate(true, &up(partial, false), false), RenderGate::NotChecked(r) if r.contains("6.8.0"))
         );
-        assert_eq!(render_gate(false, &up, None, false), RenderGate::Render);
+        assert_eq!(
+            render_gate(false, &up(partial, false), false),
+            RenderGate::Render
+        );
+        // An unknown version: not beside the tracker's share, NVIDIA or not.
+        for nvidia in [true, false] {
+            assert!(
+                matches!(render_gate(true, &up(None, nvidia), false), RenderGate::NotChecked(r) if r.contains("unknown"))
+            );
+            assert_eq!(
+                render_gate(false, &up(None, nvidia), false),
+                RenderGate::Render
+            );
+        }
+    }
+
+    #[test]
+    fn nvidia_is_seen_from_either_kernel_module() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!nvidia_loaded_in(dir.path()), "no module: AMD or Intel");
+        std::fs::create_dir(dir.path().join("amdgpu")).unwrap();
+        assert!(!nvidia_loaded_in(dir.path()));
+        std::fs::create_dir(dir.path().join("nvidia_drm")).unwrap();
+        assert!(nvidia_loaded_in(dir.path()));
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("nvidia")).unwrap();
+        assert!(nvidia_loaded_in(dir.path()));
     }
 
     /// A fake KWin for the prober: fixed versions, scripted render results.
@@ -1796,7 +1873,8 @@ mod tests {
             renders: Vec<Result<(), KwinError>>,
         ) -> Self {
             Self {
-                versions: Versions { interface, plasma },
+                // NVIDIA, where the KDE bug 524840 rule bites.
+                versions: found(interface, plasma, true),
                 renders: std::sync::Mutex::new(renders.into()),
                 rendered: std::sync::atomic::AtomicUsize::new(0),
             }
@@ -1853,6 +1931,18 @@ mod tests {
             assert!(!answer.transient, "a Plasma version does not pass");
         }
         assert_eq!(bus.rendered(), 0, "6.8.0 never renders");
+        // Without NVIDIA 6.8.0 keeps the rc.7 rule: not beside the share,
+        // and it renders with the share closed.
+        let prober = Prober::new();
+        let mut bus = FakeBus::new(Ok(5), Some((6, 8, 0)), vec![]);
+        bus.versions.nvidia = false;
+        assert!(matches!(
+            prober.probe(&bus, true).await.probe,
+            KwinProbe::NotChecked(_)
+        ));
+        assert_eq!(bus.rendered(), 0);
+        assert_eq!(prober.probe(&bus, false).await.probe, KwinProbe::Available);
+        assert_eq!(bus.rendered(), 1);
         // 6.8.1 renders beside the share.
         let prober = Prober::new();
         let bus = FakeBus::new(Ok(5), Some((6, 8, 1)), vec![]);
@@ -1938,7 +2028,7 @@ mod tests {
 
     #[test]
     fn settings_status_without_a_render() {
-        let at = |interface, plasma| Versions { interface, plasma };
+        let at = |interface, plasma| found(interface, plasma, true);
         assert_eq!(status_from_versions(&at(Ok(5), None)), KwinProbe::NotProbed);
         assert_eq!(
             status_from_versions(&at(Ok(5), Some((6, 8, 1)))),
@@ -2039,13 +2129,12 @@ mod tests {
 
     #[test]
     fn the_compare_half_needs_the_full_fix_even_after_an_available_probe() {
-        let at = |plasma| Versions {
-            interface: Ok(5),
-            plasma,
-        };
-        // A kept "available" does not let 6.8.0 through.
+        let at = |plasma| found(Ok(5), plasma, true);
+        // A kept "available" does not let 6.8.0 through, NVIDIA or not.
         let why = compare_half_allowed(&at(Some((6, 8, 0))), &KwinProbe::Available).unwrap_err();
         assert!(why.contains("6.8.1"), "{why}");
+        let amd = found(Ok(5), Some((6, 8, 0)), false);
+        assert!(compare_half_allowed(&amd, &KwinProbe::Available).is_err());
         assert!(compare_half_allowed(&at(None), &KwinProbe::Available).is_err());
         assert_eq!(
             compare_half_allowed(&at(Some((6, 8, 1))), &KwinProbe::Available),
@@ -2054,10 +2143,7 @@ mod tests {
         assert!(
             compare_half_allowed(&at(Some((6, 8, 1))), &KwinProbe::NotChecked("x".into())).is_err()
         );
-        let down = Versions {
-            interface: Err(KwinError::NotKwin),
-            plasma: None,
-        };
+        let down = found(Err(KwinError::NotKwin), None, true);
         assert!(compare_half_allowed(&down, &KwinProbe::Available).is_err());
     }
 
