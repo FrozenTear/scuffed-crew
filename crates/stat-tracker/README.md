@@ -397,8 +397,9 @@ A request the portal does not answer is looked at every 60 seconds. If
 the portal went away (a crash or restart), it is given up. If screenshot
 permission is already granted (or there is no permission entry and
 screenshots have worked before), it is closed and given up, ordinary polls
-make no request for 30 seconds (then 2, 5 and 10 minutes after later
-stalls), and Settings says the portal stopped answering. Otherwise a
+make no request for at least 30 seconds (then 2, 5 and 10 minutes after
+later stalls, and at least 2 minutes while the given-up request's Close is
+unanswered), and Settings says the portal stopped answering. Otherwise a
 permission prompt may be waiting, possibly behind the game: the request
 keeps waiting and Settings says so.
 When the environment variable is set, Settings says so and names the file
