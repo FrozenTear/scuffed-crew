@@ -683,10 +683,13 @@ async fn grab_in_flight(
 
 /// The game's monitor, full output, cursor hidden, at the size KWin
 /// renders it (the output's mode size). The pixels never touch the disk.
+/// Our CPU (the geometry read when the cache misses, and the pixel
+/// conversion, both on blocking threads) is capture CPU in [`crate::perf`],
+/// for a grab that produced a picture, as on the other routes.
 pub async fn capture(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
-    let outputs = super::portal::output_geometry().await;
+    let (outputs, geometry_cpu) = super::portal::output_geometry_timed().await;
     let (target, real) = pick_target(&outputs, output_name);
     let screen = match &target {
         Target::Screen(name) => Some(name.clone()),
@@ -707,9 +710,18 @@ pub async fn capture(
             });
         }
     };
-    let img = tokio::task::spawn_blocking(move || picture(&meta, &bytes))
-        .await
-        .map_err(|err| format!("KDE direct convert task failed: {err}"))??;
+    let (img, convert_cpu) = tokio::task::spawn_blocking(move || {
+        let cpu_started = crate::perf::thread_cpu();
+        let img = picture(&meta, &bytes);
+        (img, crate::perf::thread_cpu().saturating_sub(cpu_started))
+    })
+    .await
+    .map_err(|err| format!("KDE direct convert task failed: {err}"))?;
+    let img = img?;
+    crate::perf::record_cpu(
+        crate::perf::Stage::Capture,
+        geometry_cpu.saturating_add(convert_cpu),
+    );
     let size = (img.width(), img.height());
     let checked = check_native_size(size, real, || async {
         super::portal::invalidate_output_geometry();

@@ -61,6 +61,7 @@ fn system() -> SystemInfo {
         prerelease: true,
         daemon_running: true,
         last_exit: LastExit::Crashed,
+        host: None,
     }
 }
 
@@ -775,6 +776,29 @@ fn performance_report_sends_only_the_perf_log_with_empty_suspect_reads() {
     assert_eq!(names, ["log.txt", "manifest.json"]);
 }
 
+/// Two full `perf.log` files (the rotation size, about 20 hours of the
+/// longest lines) fit in a Performance report's `log.txt` with no line cut.
+#[test]
+fn a_full_perf_log_pair_fits_a_performance_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = format!(
+        "2026-10-22T01:00:00Z sample window_s=60 {}",
+        "compositor_cpu_pct=38.2 ".repeat(34)
+    );
+    assert!(line.len() > 840, "{}", line.len());
+    // Enough lines to rotate once and fill the new file again.
+    let per_file = crate::perf_log::MAX_BYTES as usize / (line.len() + 1);
+    for _ in 0..per_file * 2 {
+        crate::perf_log::append_to(dir.path(), &line, crate::perf_log::MAX_BYTES);
+    }
+    assert!(dir.path().join(crate::perf_log::ROTATED).is_file());
+    let raw = crate::perf_log::read(dir.path());
+    assert!(raw.len() > 1_000_000, "{}", raw.len());
+    let text = bundle::performance_log_text(&ctx(), &raw);
+    assert_eq!(text.lines().count(), raw.lines().count(), "no line was cut");
+    assert!(text.len() <= super::scrub::LOG_MAX_BYTES / 2);
+}
+
 #[test]
 fn bad_input_is_refused() {
     let dir = tempfile::tempdir().unwrap();
@@ -910,6 +934,49 @@ fn server_validator_accepts_log_only_manifest() {
         assert_eq!(checked.reason_category, category.as_str());
         assert_eq!(checked.files.len(), 1);
     }
+}
+
+const HOST_LINE: &str = "host desktop=KDE session=wayland drm=card0:amdgpu[eDP-1:disconnected];card1:nvidia[DP-1:connected] drm_output_cards=card1 nvidia_drm_modeset=Y";
+
+/// The host line (desktop, GPU topology) is the first line of `log.txt` in
+/// every log-only report, and the manifest's `system` keys do not change,
+/// so the site's validator (unknown `system` keys are invalid) still takes
+/// it.
+#[test]
+fn the_host_line_leads_log_txt_and_leaves_the_manifest_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_logs(dir.path());
+    crate::perf_log::append_to(
+        dir.path(),
+        "2026-10-16T17:00:00Z setup app=x session=wayland kernel=6.8.0 cpus=8 ram_mb=15890 proton=none cpu_model=\"x\"",
+        crate::perf_log::MAX_BYTES,
+    );
+    for category in [
+        LogOnlyCategory::Crash,
+        LogOnlyCategory::Performance,
+        LogOnlyCategory::Other,
+    ] {
+        let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
+        inp.category = category;
+        let without = bundle::build_log_report(&inp).unwrap();
+        // The host name is scrubbed here too.
+        inp.system.host = Some(format!("{HOST_LINE} {HOSTNAME}"));
+        let with = bundle::build_log_report(&inp).unwrap();
+        let expected = format!("{HOST_LINE} [host]\n{}", without.log_text);
+        assert_eq!(with.log_text, expected, "{}", category.as_str());
+        let m: Value = serde_json::from_str(&with.manifest_json).unwrap();
+        assert_eq!(keys(&m["system"]), sorted(SYSTEM_KEYS));
+        assert_eq!(m["files"][0]["bytes"], with.log_text.len());
+        scuffed_types::stat_report::parse_bundle_manifest(with.manifest_json.as_bytes())
+            .unwrap_or_else(|e| panic!("{}: {e}", category.as_str()));
+    }
+    // A blank host line adds nothing.
+    let mut inp = input(dir.path(), LogWindow::log_only(t("2030-01-01T00:00:00Z")));
+    inp.system.host = Some("  ".into());
+    assert_eq!(
+        bundle::build_log_report(&inp).unwrap().log_text,
+        "[no log lines in window]\n"
+    );
 }
 
 /// The daemon's own OCR log lines carry other players' names in fields that
@@ -1063,6 +1130,21 @@ mod game {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_game_report_log_starts_with_the_host_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        seed_logs(tmp.path());
+        kit::record_scoreboard(tmp.path(), "sess-1", &frame(), Some(6), &reads(Some(6))).unwrap();
+        let without = build_game_report(&input(tmp.path(), GameCategory::WrongHero)).unwrap();
+        let mut inp = input(tmp.path(), GameCategory::WrongHero);
+        inp.system.host = Some(HOST_LINE.into());
+        let with = build_game_report(&inp).unwrap();
+        assert_eq!(with.log_text, format!("{HOST_LINE}\n{}", without.log_text));
+        assert_eq!(unzip(&with.bytes)["log.txt"], with.log_text.as_bytes());
+        scuffed_types::stat_report::parse_bundle_manifest(with.manifest_json.as_bytes())
+            .expect("the site's validator takes the manifest");
     }
 
     /// The card preview shows the same pictures the report would carry,

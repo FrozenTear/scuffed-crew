@@ -30,7 +30,8 @@ pub const NO_LINES_IN_WINDOW: &str = "[no log lines in window]";
 /// whole bundle must stay under 10 MB uncompressed (section 8).
 pub const LOG_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-/// First line of `log.txt` when older lines were cut to fit [`LOG_MAX_BYTES`].
+/// First log line of `log.txt` when older lines were cut to fit
+/// [`LOG_MAX_BYTES`]. Only the report's `host` line comes before it.
 pub const LOG_CUT_NOTE: &str = "[older log lines cut to fit the size cap]";
 
 /// Log field keys whose value is a player name. The field is dropped from

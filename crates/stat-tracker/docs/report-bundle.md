@@ -424,7 +424,23 @@ Token-shaped scrub does not apply to `sha256` fields in the manifest. The config
 
 The config file is not attached. The sync token file is not attached. The shadow digit log is not attached. After scrubbing, the raw token, any Bearer credential, any token-shaped run, the raw URL, the raw home path, the account name, the hostname, the raw BattleTag, and the raw player names do not appear in the zip, including in `reason.text` and in file names.
 
-If the window has no lines, `log.txt` still exists and contains the single line `[no log lines in window]`.
+If the window has no lines, `log.txt` still exists and contains the single line `[no log lines in window]`, after the host line below.
+
+Host line (tracker 0.5.0-rc.7 and later): the app puts one line before the log lines, in every report kind. It is read when the report is built, from files only, and scrubbed like the log:
+
+`host desktop=KDE session=wayland drm_output_cards=card1 nvidia_drm_modeset=Y drm=card0:amdgpu[eDP-1:disconnected];card1:nvidia[DP-1:connected,HDMI-A-1:disconnected]`
+
+`desktop` is `XDG_CURRENT_DESKTOP` (letters, digits and `:_.-` only), `session` is `system.session_type`. `drm_output_cards` names the cards with a connected output (`none` when no card has one). `nvidia_drm_modeset` is `/sys/module/nvidia_drm/parameters/modeset`, or `na` when it cannot be read. `drm` lists each card under `/sys/class/drm` with its kernel driver (the `device/driver` link name, `?` when unreadable) and each connector with its `status`. The line is at most 2048 bytes; `drm` is last, so a cut at that cap only shortens the card list. It is in `log.txt` and not in `system`, because `system` rejects unknown keys and a site from before this revision would refuse the report. It holds no serial, no path, and no display name.
+
+Reading the `perf.log` sample lines in a Performance report (tracker 0.5.0-rc.7 and later):
+
+- Compare only lines with `window_s` close to 60. A window closes on the first capture after a minute, so a line after an idle stretch (`window_s=900`) averages over that stretch.
+- `cpu_pct` is the whole daemon. `cpu_pct` minus `capture_cpu_ms` and `ocr_cpu_ms` (both as a share of the window) is not zero: it includes PipeWire wakeups for buffers the tracker does not copy, the poll loop, the logs, and the other threads.
+- `capture_cpu_ms` is the tracker's thread CPU in synchronous capture work on every route: the X11 readback, the portal PNG decode and crop, the stream buffer copy and RGB conversion, and wayshot. CPU spent waiting on an await is not in it.
+- On the screenshot portal, the desktop side renders the desktop and encodes the PNG. On KDE, KWin draws and `xdg-desktop-portal-kde` encodes, so the cost is in `compositor_cpu_pct` and `portal_cpu_pct`. On GNOME, `gnome-shell` does both (`compositor_cpu_pct`). On wlroots desktops, `xdg-desktop-portal-wlr` runs `grim`, a short-lived process that no field counts. That time is in `portal_rt_*_ms`, and none of that CPU is in `cpu_pct`.
+- `portal_shots` counts every portal screenshot the daemon took, including the screenshots the debug-frames option takes beside stream frames for comparison. With debug frames on, `portal_*` does not describe the capture route alone.
+- `compositor_cpu_pct`, `xwayland_cpu_pct`, `portal_cpu_pct`, `pipewire_cpu_pct`, `gui_cpu_pct` and `companion_cpu_pct` are percent of one CPU over the window, from `/proc/<pid>/stat`, for processes owned by the member's uid. `none` means no such process; `na` means it has no earlier sample to compare with. `xorg_cpu_pct` is only on an X11 session (any owner); on Wayland the field is left out, so a display manager's Xorg is never counted.
+- `stream_fps` against `stream_cap`: a delivered rate far above the cap means the compositor does not keep the frame rate the tracker negotiated.
 
 ## 7. Flow
 
