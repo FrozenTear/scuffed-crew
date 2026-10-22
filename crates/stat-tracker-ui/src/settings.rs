@@ -28,6 +28,7 @@ use crate::theme::{
 };
 use crate::update;
 use crate::widgets;
+pub(crate) use stat_tracker::capture::SessionKind;
 
 /// Seconds / counts, must stay compact on ultrawide.
 pub(crate) const FIELD_NUMERIC: f32 = 168.0;
@@ -409,29 +410,12 @@ pub(crate) fn show_kde_direct(desktop: &str, route: CaptureRoute) -> bool {
     stat_tracker::capture::is_kde(desktop) || route == CaptureRoute::Kwin
 }
 
-/// TEMP until #437: the tracker's three-state session rule.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionKind {
-    Wayland,
-    X11,
-    Unknown,
-}
-
-impl SessionKind {
-    pub fn from_env(session_type: Option<&str>, wayland_display: bool) -> Self {
-        match session_type.map(str::to_ascii_lowercase).as_deref() {
-            Some("wayland") => SessionKind::Wayland,
-            Some("x11") if !wayland_display => SessionKind::X11,
-            Some("x11") => SessionKind::Unknown,
-            _ if wayland_display => SessionKind::Wayland,
-            _ => SessionKind::Unknown,
-        }
-    }
-}
-
-/// The session as the tracker sees it ([`SessionKind::from_env`]) for this
-/// process's environment. Settings hides Wayland-only capture methods only
-/// on [`SessionKind::X11`], where the tracker ignores them too.
+/// The session as the tracker sees it ([`SessionKind::from_env`], its
+/// three-state rule) for this process's environment. Settings hides the
+/// Wayland-only capture methods only on [`SessionKind::X11`], where the
+/// tracker ignores them too. [`SessionKind::Unknown`] (no `WAYLAND_DISPLAY`
+/// and a type that is unset, `tty` or `unspecified`, or `x11` beside a
+/// stray `WAYLAND_DISPLAY`) renders like rc.7: every chip, no warning.
 pub(crate) fn session_from_env() -> SessionKind {
     SessionKind::from_env(
         std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
