@@ -15,14 +15,26 @@
 //! starts nothing.
 //!
 //! This is one lock per process. The app and the daemon are two processes,
-//! so a "Capture now" in the app can overlap a daemon grab; KWin runs such
-//! calls one after the other on its own thread.
+//! so a "Capture now" in the app can overlap a daemon grab. On KDE direct
+//! that is harmless: KWin runs such calls one after the other on its own
+//! thread. On Older screenshot it is not fully covered: an app request and
+//! a daemon poll in the same second can still share one portal file, and
+//! one of the two can fail: the one whose file the other already removed
+//! (gone) fails; one whose file was only overwritten (replaced) still
+//! reads a picture. Capture now is a rare manual click, so this stays a
+//! known gap.
 //!
-//! Polls never wait for the lock ([`lock_wait`]): a poll that finds a
-//! request running is skipped, and the next tick polls again. That keeps
-//! the poll arm of the daemon loop, including the outcome-only poll that
-//! runs beside a Tab capture in the ~3 s VICTORY window, from sitting
-//! behind a Tab's screenshot. A Tab waits, up to its route's Tab wait.
+//! Ordinary polls never wait for the lock ([`lock_wait`]): a poll that
+//! finds a request running is skipped, and the next tick polls again. That
+//! keeps the poll arm of the daemon loop from sitting behind a Tab's
+//! screenshot. The outcome-only poll that runs beside a Tab capture in the
+//! end-reel wake (the ~3 s VICTORY window) waits a little, about a second,
+//! so a Tab held over the banner does not cost it every tick. A Tab waits,
+//! up to its route's Tab wait.
+//!
+//! The lock is fair (FIFO): an end-reel poll that queues while a Tab
+//! attempt holds it goes before that Tab's next retry, so the retry can
+//! wait one more grab.
 
 use std::future::Future;
 use std::time::Duration;
@@ -57,9 +69,10 @@ pub fn is_busy(err: &str) -> bool {
 }
 
 /// How long the current grab waits for the lock: `tab_wait` inside a Tab
-/// capture task, nothing for a poll or anything else.
-pub fn lock_wait(is_tab: bool, tab_wait: Duration) -> Duration {
-    if is_tab { tab_wait } else { Duration::ZERO }
+/// capture task, else `poll_wait` (zero for an ordinary poll, about a
+/// second for the end-reel outcome-only poll).
+pub fn lock_wait(is_tab: bool, tab_wait: Duration, poll_wait: Duration) -> Duration {
+    if is_tab { tab_wait } else { poll_wait }
 }
 
 /// Runs `request` to the end, calling `overdue` with the time waited so
@@ -106,9 +119,16 @@ impl SingleFlight {
         F: Future<Output = T> + Send + 'static,
         T: Send + 'static,
     {
-        let guard = tokio::time::timeout(wait, self.lock.lock())
-            .await
-            .map_err(|_| FlightError::Busy)?;
+        // A zero wait takes the lock only if it is free right now. Through
+        // `timeout(ZERO, lock())` a task whose coop budget is spent got
+        // Pending from a free lock and a spurious Busy.
+        let guard = if wait.is_zero() {
+            self.lock.try_lock().map_err(|_| FlightError::Busy)?
+        } else {
+            tokio::time::timeout(wait, self.lock.lock())
+                .await
+                .map_err(|_| FlightError::Busy)?
+        };
         let task = tokio::spawn(async move {
             let out = request.await;
             drop(guard);
@@ -137,10 +157,13 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     #[test]
-    fn polls_never_wait_and_tabs_wait_their_route_wait() {
+    fn ordinary_polls_never_wait_the_reel_poll_waits_a_second_and_tabs_their_route_wait() {
         let tab = Duration::from_secs(4);
-        assert_eq!(lock_wait(false, tab), Duration::ZERO);
-        assert_eq!(lock_wait(true, tab), tab);
+        let reel = Duration::from_secs(1);
+        assert_eq!(lock_wait(false, tab, Duration::ZERO), Duration::ZERO);
+        assert_eq!(lock_wait(false, tab, reel), reel);
+        assert_eq!(lock_wait(true, tab, Duration::ZERO), tab);
+        assert_eq!(lock_wait(true, tab, reel), tab);
         assert!(is_busy(&FlightError::Busy.to_string()));
         assert!(is_busy(&format!(
             "portal screenshot: {}",
@@ -161,12 +184,18 @@ mod tests {
         assert!(FLIGHT.in_flight());
         let started = tokio::time::Instant::now();
         let poll = FLIGHT
-            .run(lock_wait(false, Duration::from_secs(4)), async {})
+            .run(
+                lock_wait(false, Duration::from_secs(4), Duration::ZERO),
+                async {},
+            )
             .await;
         assert_eq!(poll, Err(FlightError::Busy));
         assert_eq!(started.elapsed(), Duration::ZERO, "the poll did not wait");
         let tab = FLIGHT
-            .run(lock_wait(true, Duration::from_secs(4)), async {})
+            .run(
+                lock_wait(true, Duration::from_secs(4), Duration::ZERO),
+                async {},
+            )
             .await;
         assert_eq!(tab, Ok(()));
         assert_eq!(started.elapsed(), Duration::from_secs(1), "the Tab waited");
@@ -204,6 +233,62 @@ mod tests {
         answer_tx.send(7).unwrap();
         assert_eq!(request.await.unwrap().unwrap(), Ok(7));
         assert!(!FLIGHT.in_flight());
+    }
+
+    /// A free lock is taken at once, even by a task that has spent its
+    /// coop budget. Through `timeout(ZERO, lock())` that task got Pending,
+    /// yielded, and a grab that ran in that yield took the lock: a Busy
+    /// for a lock that was free when the poll asked.
+    #[tokio::test(start_paused = true)]
+    async fn a_zero_wait_takes_a_free_lock_with_the_coop_budget_spent() {
+        static FLIGHT: SingleFlight = SingleFlight::new();
+        // A Tab grab that runs at this task's next yield and holds the
+        // lock for a second.
+        let tab = tokio::spawn(FLIGHT.run(Duration::from_secs(5), async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }));
+        let other = tokio::sync::Mutex::new(());
+        let mut spent = 0;
+        while tokio::task::coop::has_budget_remaining() && spent < 10_000 {
+            drop(other.lock().await);
+            spent += 1;
+        }
+        assert!(
+            !tokio::task::coop::has_budget_remaining(),
+            "the budget is spent after {spent} locks"
+        );
+        assert!(!FLIGHT.in_flight(), "the lock is free when the poll asks");
+        assert_eq!(FLIGHT.run(Duration::ZERO, async { 5 }).await, Ok(5));
+        tab.await.unwrap().unwrap();
+    }
+
+    /// The end-reel outcome-only poll waits about a second: it gets the
+    /// lock behind a 0.5 s Tab grab, and is turned away behind a 1.5 s one.
+    #[tokio::test(start_paused = true)]
+    async fn the_end_reel_poll_waits_a_second_and_an_ordinary_poll_none() {
+        static FLIGHT: SingleFlight = SingleFlight::new();
+        let reel = Duration::from_secs(1);
+        for (held_ms, reel_gets_it) in [(500u64, true), (1500, false)] {
+            let held = tokio::spawn(FLIGHT.run(Duration::ZERO, async move {
+                tokio::time::sleep(Duration::from_millis(held_ms)).await;
+            }));
+            tokio::task::yield_now().await;
+            assert_eq!(
+                FLIGHT
+                    .run(
+                        lock_wait(false, Duration::from_secs(4), Duration::ZERO),
+                        async {}
+                    )
+                    .await,
+                Err(FlightError::Busy),
+                "an ordinary poll never waits"
+            );
+            let got = FLIGHT
+                .run(lock_wait(false, Duration::from_secs(4), reel), async {})
+                .await;
+            assert_eq!(got.is_ok(), reel_gets_it, "Tab grab of {held_ms} ms");
+            held.await.unwrap().unwrap();
+        }
     }
 
     #[tokio::test]

@@ -53,9 +53,16 @@ pub enum ForceWord {
 ///
 /// `false` for now: automatic stays the screen stream on KDE, as in rc.6.
 /// Flip to `true` before the rc.7 tag only if the KDE tester's A/B shows
-/// KDE direct reads the same boards at a lower game-fps cost. Nothing else
-/// needs to change: the probe then runs on automatic too, and a failed
-/// probe keeps the stream.
+/// KDE direct reads the same boards at a lower game-fps cost.
+///
+/// With `true`, every process that runs `detect_backend` on a Wayland KDE
+/// session (the daemon, and the app at launch) runs the startup probe on
+/// automatic: the version read, then the 1x1 render when the render gate
+/// allows it, with up to 15 s of retries for a failure that can pass.
+/// Automatic then picks KDE direct when the probe answers and no wlroots
+/// capture works; otherwise it keeps the stream and logs one INFO line
+/// (no warning, nobody asked for KDE direct). The app's Settings follows
+/// the same constant (`render_wanted`), so nothing else needs to change.
 pub const KWIN_DIRECT_DEFAULT_ON_KDE: bool = false;
 
 /// The startup probe of KDE direct. Only read when KDE direct was asked
