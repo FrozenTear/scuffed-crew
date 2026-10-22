@@ -3358,10 +3358,7 @@ mod tests {
         assert!(lock(&handle.state.pause).failed_while_paused);
         handle.check_stuck_resume();
         assert!(handle.pause_tripped());
-        assert_eq!(
-            trip_warning(TRIP_FAILED_PAUSED).contains("may be unrelated"),
-            true
-        );
+        assert!(trip_warning(TRIP_FAILED_PAUSED).contains("may be unrelated"));
         assert!(!trip_warning(TRIP_STUCK).contains("may be unrelated"));
     }
 

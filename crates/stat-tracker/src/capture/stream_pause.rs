@@ -1103,8 +1103,8 @@ mod tests {
     #[test]
     fn the_applied_decision_keeps_the_niri_flag_when_forced_on() {
         let niri = niri_facts();
-        assert_eq!(applied_decision(PauseOverride::Auto, &niri).0, true);
-        assert_eq!(applied_decision(PauseOverride::Auto, &niri).1, true);
+        assert!(applied_decision(PauseOverride::Auto, &niri).0);
+        assert!(applied_decision(PauseOverride::Auto, &niri).1);
         assert_eq!(
             applied_decision(PauseOverride::EnvOn, &niri),
             (true, true, "forced on by STAT_TRACKER_SCREENCAST_PAUSE")
@@ -1113,11 +1113,8 @@ mod tests {
             kwin_version: Some((6, 8)),
             ..facts("KDE")
         };
-        assert_eq!(applied_decision(PauseOverride::Auto, &kde).1, false);
-        assert_eq!(
-            applied_decision(PauseOverride::EnvOn, &facts("sway")).1,
-            false
-        );
+        assert!(!applied_decision(PauseOverride::Auto, &kde).1);
+        assert!(!applied_decision(PauseOverride::EnvOn, &facts("sway")).1);
     }
 
     /// The startup path itself: what lands in the control slot, and which
