@@ -19,11 +19,11 @@ fn outcome_class(outcome: &str) -> &'static str {
 }
 
 /// Visible label when a row was not read by the old Tesseract reader.
-const NEW_READER_BADGE: &str = "New reader (alpha)";
+const NEW_READER_BADGE: &str = "New reader";
 /// Short label when the row is too narrow for the full badge.
-const NEW_READER_BADGE_SHORT: &str = "alpha";
+const NEW_READER_BADGE_SHORT: &str = "New";
 /// Tooltip for [`NEW_READER_BADGE`].
-const NEW_READER_TITLE: &str = "Read by the new stat reader, still in testing";
+const NEW_READER_TITLE: &str = "Read by the new stat reader";
 /// Shared tail of the unsure-cell tooltip. The stat's display name is the prefix.
 const UNSURE_DETAIL: &str = "unsure read. Check and edit if wrong.";
 
@@ -491,6 +491,12 @@ mod tests {
             "badge uses the existing tracker badge style: {html}"
         );
         assert!(html.contains(NEW_READER_BADGE_SHORT), "{html}");
+        assert_eq!(NEW_READER_BADGE, "New reader");
+        assert!(
+            !html.to_lowercase().contains("alpha"),
+            "the new reader is no longer labelled alpha: {html}"
+        );
+        assert!(!NEW_READER_TITLE.contains("testing"), "{NEW_READER_TITLE}");
         assert!(
             html.contains(&format!("title=\"{NEW_READER_TITLE}\"")),
             "{html}"
