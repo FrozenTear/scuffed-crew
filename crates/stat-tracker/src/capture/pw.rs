@@ -711,16 +711,21 @@ pub const TRIP_RETIRED: &str = "the stream was closed while a resume was still u
 pub const TRIP_FAILED_PAUSED: &str = "the stream ended within 2 s of a pause the tracker asked for";
 
 /// A stream that ends this soon after the Paused the tracker asked for is
-/// counted as a failed pause ([`TRIP_FAILED_PAUSED`]). A later end is
-/// something else: the user stopped the share, an output went away, a
-/// monitor slept, PipeWire or KWin restarted.
+/// counted as a failed pause ([`TRIP_FAILED_PAUSED`]). While a game is
+/// played the stream pauses again about every 1.5 s, so this window is
+/// nearly always open then; it only filters ends on a share that sits
+/// idle (slow poll mode, or Overwatch not running). What keeps external
+/// ends from counting are the exemptions: a lost PipeWire connection
+/// ([`state_is_core_fault`], so a PipeWire restart) and a closed portal
+/// session (on KDE a stopped share or an output change ends the KWin
+/// stream and xdg-desktop-portal-kde closes the session).
 pub const FAILED_AFTER_PAUSE_WINDOW: Duration = Duration::from_secs(2);
 
 /// The one warning a trip logs. A stream that ended right after a pause
 /// may have ended for another reason, so that line does not blame pausing.
 pub fn trip_warning(why: &str) -> &'static str {
     if why == TRIP_FAILED_PAUSED {
-        "screencast stream ended right after the tracker paused it; it may be unrelated (share stopped, monitor change, PipeWire restart), but pause between grabs is now off for this stream"
+        "screencast stream ended right after the tracker paused it; it can also be an output or monitor change, or the compositor ending the share, but pause between grabs is now off for this stream"
     } else {
         "screencast pause between grabs turned off for this stream; it stays running"
     }
@@ -942,7 +947,8 @@ impl PauseState {
     /// A grab ended while the stream was still held. A Tab miss while the
     /// resume is unanswered trips at once.
     fn grab_end(&mut self, tab_missed: bool, now: std::time::Instant) -> Option<&'static str> {
-        if !self.pausing() {
+        // A closed portal session ended the grab, not the resume.
+        if !self.pausing() || self.external_end {
             return None;
         }
         if tab_missed && self.unanswered_since.is_some() {
@@ -1051,8 +1057,9 @@ impl PauseState {
     }
 
     /// Error, or Unconnected after streaming.
-    /// `now` is wall time. Counted only within [`FAILED_AFTER_PAUSE_WINDOW`]
-    /// of the Paused that answered the tracker's own pause.
+    /// `now` is a monotonic `Instant` (suspend is not counted). Counted
+    /// only within [`FAILED_AFTER_PAUSE_WINDOW`] of the Paused that
+    /// answered the tracker's own pause.
     fn on_failed(&mut self, now: std::time::Instant) {
         let soon_after_our_pause = self
             .our_paused_wall
@@ -1819,11 +1826,25 @@ fn events() -> PwStreamEvents {
     }
 }
 
-extern "C" fn on_state(data: *mut c_void, _old: i32, state: i32, _error: *const c_char) {
+/// libpipewire reports a lost connection to the PipeWire daemon as
+/// Unconnected *with* an error message: `on_core_error` (`id == 0`,
+/// `-EPIPE`) passes the core's "connection error" (0.3.48 to 1.6.9). Its
+/// other Unconnected (`proxy_removed`, the node destroyed) has no message,
+/// and an Error state is the node failing, not the connection.
+pub fn state_is_core_fault(state: i32, has_error: bool) -> bool {
+    state == PW_STREAM_STATE_UNCONNECTED && has_error
+}
+
+extern "C" fn on_state(data: *mut c_void, _old: i32, state: i32, error: *const c_char) {
     if data.is_null() {
         return;
     }
     let state_ref = unsafe { &*(data as *const State) };
+    // The iterate loop keeps running after a core error, so the thread's
+    // own exit (which also sets this) never comes while the stream is up.
+    if state_is_core_fault(state, !error.is_null()) {
+        state_ref.core_fault.store(true, Ordering::Release);
+    }
     state_ref.pw_state.store(state, Ordering::Release);
     if state == PW_STREAM_STATE_STREAMING {
         state_ref.seen_streaming.store(true, Ordering::Release);
@@ -3335,6 +3356,109 @@ mod tests {
         assert_eq!(trips.load(Ordering::Acquire), 0, "closed session: no trip");
     }
 
+    /// A stream the tracker paused (Paused for its request), as `on_state`
+    /// sees it, then `end`: the new state and its error message.
+    fn paused_then(end: i32, error: Option<&std::ffi::CStr>) -> Handle {
+        let handle = test_stream(true);
+        assert!(handle.enable_pausing(false));
+        handle.set_active(false);
+        let data = Arc::as_ptr(&handle.state) as *mut c_void;
+        on_state(
+            data,
+            PW_STREAM_STATE_STREAMING,
+            PW_STREAM_STATE_PAUSED,
+            std::ptr::null(),
+        );
+        on_state(
+            data,
+            PW_STREAM_STATE_PAUSED,
+            end,
+            error.map_or(std::ptr::null(), std::ffi::CStr::as_ptr),
+        );
+        handle
+    }
+
+    /// libpipewire's lost connection (a PipeWire restart) is Unconnected
+    /// with "connection error". Right after our pause it must not count.
+    /// The node being destroyed (Unconnected, no message) and an Error
+    /// ("defined target not found") are not core faults and still count.
+    #[test]
+    fn a_lost_pipewire_connection_after_our_pause_is_not_a_failed_pause() {
+        let lost = paused_then(PW_STREAM_STATE_UNCONNECTED, Some(c"connection error"));
+        assert!(lost.state.core_fault.load(Ordering::Acquire));
+        assert!(lost.stream_report().core_fault);
+        lost.check_stuck_resume();
+        assert!(!lost.pause_tripped());
+        let trips = lost.state.trips;
+        drop(lost);
+        assert_eq!(trips.load(Ordering::Acquire), 0, "no trip on close either");
+
+        let removed = paused_then(PW_STREAM_STATE_UNCONNECTED, None);
+        assert!(!removed.state.core_fault.load(Ordering::Acquire));
+        removed.check_stuck_resume();
+        assert!(
+            removed.pause_tripped(),
+            "a node end right after our pause counts"
+        );
+
+        let target = paused_then(PW_STREAM_STATE_ERROR, Some(c"defined target not found"));
+        assert!(!target.state.core_fault.load(Ordering::Acquire));
+        target.check_stuck_resume();
+        assert!(target.pause_tripped());
+
+        assert!(state_is_core_fault(PW_STREAM_STATE_UNCONNECTED, true));
+        assert!(!state_is_core_fault(PW_STREAM_STATE_UNCONNECTED, false));
+        assert!(!state_is_core_fault(PW_STREAM_STATE_ERROR, true));
+        assert!(!state_is_core_fault(PW_STREAM_STATE_PAUSED, true));
+    }
+
+    /// Once `on_state` can set the core fault, a grab on that stream ends
+    /// at once instead of waiting out its timeout for frames that cannot
+    /// come.
+    #[test]
+    fn a_grab_on_a_lost_connection_ends_at_once() {
+        // Not streamed yet: Unconnected is not a dead state there, so only
+        // the core fault ends the wait (before, it ran its full timeout).
+        let handle = test_handle(None, Some(red_frame(3)), true);
+        handle.state.seen_streaming.store(false, Ordering::Release);
+        handle.state.streaming.store(false, Ordering::Release);
+        let data = Arc::as_ptr(&handle.state) as *mut c_void;
+        on_state(
+            data,
+            PW_STREAM_STATE_STREAMING,
+            PW_STREAM_STATE_UNCONNECTED,
+            c"connection error".as_ptr(),
+        );
+        let started = std::time::Instant::now();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_time()
+                .build()
+                .unwrap();
+            let out = runtime.block_on(handle.grab(Duration::from_secs(5), None));
+            let _ = tx.send(out.map(|_| ()));
+        });
+        let out = rx.recv_timeout(Duration::from_secs(3)).expect("no hang");
+        let _ = worker.join();
+        assert_eq!(out, Err("screencast stream ended".to_string()));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    /// A portal close marked before the grab's verdict: no Tab-miss or
+    /// slow-resume trip for a resume the closed session left unanswered.
+    #[test]
+    fn a_grab_ended_by_a_closed_session_does_not_trip() {
+        let t0 = std::time::Instant::now();
+        let mut pause = managed_state(t0);
+        pause.request(false, true, false, t0);
+        pause.request(true, true, false, t0 + ms(1_000));
+        pause.external_end = true;
+        assert_eq!(pause.grab_end(true, t0 + ms(2_200)), None);
+        assert_eq!(pause.grab_end(false, t0 + ms(9_000)), None);
+        assert!(pause.tripped.is_none());
+    }
+
     /// `on_state` itself flags a death right after our pause (the R2c
     /// wiring): Paused for our request, then Error.
     #[test]
@@ -3358,8 +3482,8 @@ mod tests {
         assert!(lock(&handle.state.pause).failed_while_paused);
         handle.check_stuck_resume();
         assert!(handle.pause_tripped());
-        assert!(trip_warning(TRIP_FAILED_PAUSED).contains("may be unrelated"));
-        assert!(!trip_warning(TRIP_STUCK).contains("may be unrelated"));
+        assert!(trip_warning(TRIP_FAILED_PAUSED).contains("can also be"));
+        assert!(!trip_warning(TRIP_STUCK).contains("can also be"));
     }
 
     #[test]

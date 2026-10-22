@@ -17648,7 +17648,39 @@ mod tests {
             branch.contains(concat!("preempt_stream_hold = ", "bridge.take();")),
             "the preempted poll hands its bridge to the keyboard arm"
         );
-        assert!(run_loop.contains(concat!("with_bridge_hold", "(")));
+        // Poll arm: its key future is the bridge-taking one.
+        let poll = run_loop
+            .find(concat!("capture::poll_", "grab(backend"))
+            .expect("the poll grab");
+        let race = &run_loop[poll..];
+        let race = &race[..race
+            .find(concat!("&mut pending", "_key,"))
+            .expect("race end")];
+        let wrap = race
+            .find(concat!("with_bridge_hold", "("))
+            .expect("the poll's key future takes the bridge");
+        let wrapped = &race[wrap..];
+        assert!(wrapped.contains(concat!("tab_retry::next_press", "(&mut kbd, &mut tabs)")));
+        assert!(wrapped.contains(concat!("&mut ", "bridge,")));
+        assert!(wrapped.contains(concat!("capture::stream_", "bridge_hold,")));
+    }
+
+    /// The pause decision (which can wait seconds for KWin's version) runs
+    /// next to the backend probe, not before it.
+    #[test]
+    fn the_pause_decision_runs_alongside_the_backend_probe() {
+        let src = include_str!("main.rs");
+        let join = src.find(concat!("tokio::", "join!(")).expect("join");
+        let call = &src[join..];
+        let call = &call[..call.find(");").expect("join end")];
+        assert!(call.contains(concat!("capture::decide_", "stream_pause(")));
+        assert!(call.contains(concat!("capture::detect_", "backend()")));
+        assert_eq!(
+            src.matches(concat!("capture::decide_", "stream_pause("))
+                .count(),
+            1,
+            "decided once, inside the join"
+        );
     }
 
     /// The bridge hold exists before the preempted poll's grab is dropped,
@@ -17707,6 +17739,15 @@ mod tests {
             assert!(
                 !capture::end_tab_stream_hold(),
                 "then_end_tab_hold already ended it"
+            );
+        })
+        .await;
+        // Not before: the hold is still there while the retries run.
+        let hold = capture::stream_key_hold(Instant::now());
+        capture::with_tab_stream_hold(hold, async {
+            assert!(
+                then_end_tab_hold(async { capture::end_tab_stream_hold() }).await,
+                "the retries still had the hold"
             );
         })
         .await;

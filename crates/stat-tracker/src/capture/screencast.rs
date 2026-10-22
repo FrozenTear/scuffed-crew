@@ -302,10 +302,16 @@ fn reopen_step(obs: Observe, has_token: bool, now: Instant, watch: &mut ReopenWa
 /// Health for a decision, after the pause fail-safe has had its look: a
 /// resume the compositor never answered trips there first, so a stream the
 /// tracker paused is not reopened with pausing still on.
-fn health_now(stream: &pw::Handle) -> StreamHealth {
+/// A portal session that closed ends the stream from outside: tell the
+/// pause fail-safe before it judges a resume or a death.
+fn mark_if_portal_closed(stream: &pw::Handle) {
     if portal_session_closed() {
         stream.mark_external_end();
     }
+}
+
+fn health_now(stream: &pw::Handle) -> StreamHealth {
+    mark_if_portal_closed(stream);
     stream.check_stuck_resume();
     health_of(stream.stream_report())
 }
@@ -349,9 +355,7 @@ impl Drop for Live {
         // consumer is gone before the portal session ends. A session the
         // portal already closed is not a failed pause.
         if let Some(stream) = self.stream.take() {
-            if portal_session_closed() {
-                stream.mark_external_end();
-            }
+            mark_if_portal_closed(&stream);
             drop(stream);
         }
         if let Some(tx) = self.close_session.take() {
@@ -1297,6 +1301,9 @@ pub async fn capture(
     // The mutex stays held so a second caller cannot open another share.
     let grab_started = Instant::now();
     let grabbed = stream.grab(timeout, tab_press).await;
+    // Before the grab's verdict: a portal close during an unanswered
+    // resume is not a Tab miss or a slow resume.
+    mark_if_portal_closed(&stream);
     stream.note_grab_result(&grabbed);
     let timing = stream.timing();
     let alive = stream.alive();
@@ -3092,6 +3099,46 @@ mod tests {
         };
         reopen_step(tab, true, now, &mut watch);
         assert_eq!(watch.soft_misses, 1);
+    }
+
+    /// Where a closed portal session is told to the pause fail-safe, and
+    /// that it comes first: in `health_now` before the stuck check, in
+    /// `Live::drop` before the stream (and its retire check) is dropped, and
+    /// in `capture` before the grab's verdict.
+    #[test]
+    fn a_closed_session_is_marked_before_each_pause_verdict() {
+        let src = include_str!("screencast.rs");
+        let body = |start: &str, end: &str| -> String {
+            let at = src.find(start).unwrap_or_else(|| panic!("{start}"));
+            let rest = &src[at..];
+            rest[..rest.find(end).unwrap_or_else(|| panic!("{end}"))].to_string()
+        };
+        let mark = concat!("mark_if_portal_closed(", "");
+        let health = body(concat!("fn health_now(", "stream"), "\n}\n");
+        assert!(
+            health.find(mark).expect("health_now marks")
+                < health
+                    .find(concat!("check_stuck_", "resume()"))
+                    .expect("stuck check")
+        );
+        let live = body(concat!("impl Drop for ", "Live {"), "\n}\n");
+        assert!(
+            live.find(mark).expect("Live::drop marks")
+                < live
+                    .find(concat!("drop(", "stream);"))
+                    .expect("stream dropped")
+        );
+        let capture = body(concat!("pub async fn ", "capture("), "\n}\n");
+        let grab = capture
+            .find(concat!("stream.grab(", "timeout"))
+            .expect("the grab");
+        let after = &capture[grab..];
+        assert!(
+            after.find(mark).expect("capture marks after the grab")
+                < after
+                    .find(concat!("note_grab_", "result(&grabbed)"))
+                    .expect("the verdict")
+        );
     }
 
     /// The round-1 fix's wiring: `health_now` runs the stuck-resume check

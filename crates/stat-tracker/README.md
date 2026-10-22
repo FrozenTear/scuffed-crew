@@ -247,11 +247,15 @@ resume is not answered, when the stream stays paused 1.5 s of active time
 after a resume, at once when the stream fails while a resume is not
 answered, at once when the stream fails within 2 seconds of a pause the
 tracker asked for, or when the stream is closed while a resume is not
-answered. A stream that ends later (the share stopped from the tray, a
-monitor unplugged or asleep, PipeWire or KWin restarted), a lost PipeWire
-connection, or a portal session that closed is not counted; the warning
-for a stream that ended just after a pause says it may be unrelated. The
-next share or reopen tries pausing again once;
+answered. During a game the stream pauses about every 1.5 seconds, so that
+2-second window is nearly always open; it only leaves out ends on an idle
+share. What keeps outside causes from counting: a lost PipeWire connection
+(a PipeWire restart) and a portal session that closed are never counted.
+On KDE a share stopped from the tray or an output change ends the KWin
+stream, and xdg-desktop-portal-kde then closes the session. The warning for
+a stream that ended just after a pause says it can also be an output or
+monitor change or the compositor ending the share. The next share or
+reopen tries pausing again once;
 after a second such stream it stays off until the tracker restarts. To
 turn pausing off yourself, set `screencast_pause_between_grabs = false`,
 or put `STAT_TRACKER_SCREENCAST_PAUSE=0` in `~/.config/environment.d/` for
