@@ -24,6 +24,11 @@ pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "Your site stats are schedule
 /// JSON `code` on HTTP 409 while a stats delete is pending.
 const STATS_DELETE_PENDING_CODE: &str = "stats_delete_pending";
 
+/// `User-Agent` on every request the tracker makes to the site (uploads,
+/// daemon config, reader packs), so the server can tell which tracker
+/// version sent it (S5-SRV-4).
+pub const USER_AGENT: &str = concat!("scuffed-stat-tracker/", env!("CARGO_PKG_VERSION"));
+
 /// Matches per stats upload. The server rejects a larger body with HTTP 413
 /// `batch_too_large`. This client stays at or under the cap, and shrinks
 /// further when a 413 names a smaller one. Same value as
@@ -411,6 +416,7 @@ impl SyncClient {
         // Redirects to a URL that fails the same check are errors, so a
         // downgrade to cleartext cannot carry the bearer token.
         let http = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
             .timeout(std::time::Duration::from_secs(30))
             .redirect(token_safe_redirects())
             .build()
@@ -1765,6 +1771,13 @@ mod tests {
         assert!(
             head.contains("get /api/stats/daemon-config"),
             "unexpected request {req:?}"
+        );
+        assert!(
+            head.contains(&format!(
+                "user-agent: scuffed-stat-tracker/{}\r\n",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "every site request names the tracker version; got {req:?}"
         );
     }
 

@@ -161,7 +161,9 @@ struct FpsWindow {
     info_at: std::time::Instant,
     count: u64,
     info_frames: u64,
-    info_secs: u64,
+    /// Seconds, with the fraction: whole seconds per window undercounted
+    /// a 1.9 s window as 1 s and overstated the rate (S5-CAP-9).
+    info_secs: f64,
 }
 
 struct State {
@@ -1482,7 +1484,7 @@ pub fn open_stream(fd: std::os::fd::RawFd, node_id: u32, max_fps: u32) -> Result
             info_at: std::time::Instant::now(),
             count: 0,
             info_frames: 0,
-            info_secs: 0,
+            info_secs: 0.0,
         }),
         loop_lock: Mutex::new(()),
         quit_requested: AtomicBool::new(false),
@@ -2082,19 +2084,19 @@ fn note_fps(state: &State) {
     window.count = window.count.saturating_add(1);
     window.info_frames = window.info_frames.saturating_add(1);
     if window.at.elapsed() >= Duration::from_secs(1) {
-        let secs = window.at.elapsed().as_secs().max(1);
+        let secs = window.at.elapsed().as_secs_f64();
         let line = fps_line(window.count, secs, state.max_fps);
-        window.info_secs = window.info_secs.saturating_add(secs);
+        window.info_secs += secs;
         window.count = 0;
         window.at = std::time::Instant::now();
         let info = window.info_at.elapsed() >= Duration::from_secs(180);
         if info {
             window.info_at = std::time::Instant::now();
         }
-        let info_line = fps_line(window.info_frames, window.info_secs.max(1), state.max_fps);
+        let info_line = fps_line(window.info_frames, window.info_secs, state.max_fps);
         if info {
             window.info_frames = 0;
-            window.info_secs = 0;
+            window.info_secs = 0.0;
         }
         drop(window);
         tracing::debug!("{line}");
@@ -2344,15 +2346,18 @@ pub fn pw_state_name(state: i32) -> &'static str {
     }
 }
 
-pub fn fps_line(frames: u64, secs: u64, configured: u32) -> String {
-    let per = frames as f64 / f64::from(u32::try_from(secs.max(1)).unwrap_or(u32::MAX));
+/// `secs` is the window's length with its fraction; under a second counts
+/// as one (the windows are at least a second long).
+pub fn fps_line(frames: u64, secs: f64, configured: u32) -> String {
+    let per = frames as f64 / secs.max(1.0);
     format!("screencast frames received per second: {per:.1} (configured {configured} fps)")
 }
 
-/// Counts only. No paths and no frame bytes.
+/// Counts only. No paths and no frame bytes. The counters are totals since
+/// this share opened, not per minute, and the line says so (S5-CAP-9).
 pub fn timing_line(timing: &Timing) -> String {
     format!(
-        "screencast timing: grabs={} avg_grab_ms={} frames_dropped={} resumes={} avg_resume_ms={} max_resume_ms={} resumes_without_buffer={}",
+        "screencast timing (totals since the share opened): grabs={} avg_grab_ms={} frames_dropped={} resumes={} avg_resume_ms={} max_resume_ms={} resumes_without_buffer={}",
         timing.grabs,
         timing.avg_grab_ms,
         timing.frames_dropped,
@@ -2509,7 +2514,7 @@ mod tests {
         });
         assert_eq!(
             line,
-            "screencast timing: grabs=4 avg_grab_ms=12 frames_dropped=80 resumes=3 avg_resume_ms=41 max_resume_ms=90 resumes_without_buffer=1"
+            "screencast timing (totals since the share opened): grabs=4 avg_grab_ms=12 frames_dropped=80 resumes=3 avg_resume_ms=41 max_resume_ms=90 resumes_without_buffer=1"
         );
         assert!(!line.contains('/'));
     }
@@ -2556,15 +2561,24 @@ mod tests {
         assert!(copy_ends_request(NO_TAB_NEED, 10));
         assert!(!copy_ends_request(300, 100));
         assert!(copy_ends_request(300, 300));
-        let line = fps_line(8, 4, 4);
+        let line = fps_line(8, 4.0, 4);
         assert_eq!(
             line,
             "screencast frames received per second: 2.0 (configured 4 fps)"
         );
         // One frame across two seconds. Integer division printed 0.
         assert_eq!(
-            fps_line(1, 2, 2),
+            fps_line(1, 2.0, 2),
             "screencast frames received per second: 0.5 (configured 2 fps)"
+        );
+        // S5-CAP-9: 19 frames in 1.9 s is 10 a second, not 19.
+        assert_eq!(
+            fps_line(19, 1.9, 10),
+            "screencast frames received per second: 10.0 (configured 10 fps)"
+        );
+        assert_eq!(
+            fps_line(3, 0.5, 10),
+            "screencast frames received per second: 3.0 (configured 10 fps)"
         );
     }
 
@@ -2720,7 +2734,7 @@ mod tests {
                     info_at: std::time::Instant::now(),
                     count: 0,
                     info_frames: 0,
-                    info_secs: 0,
+                    info_secs: 0.0,
                 }),
             }),
             join: None,

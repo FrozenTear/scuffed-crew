@@ -478,7 +478,6 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // Existing installs may have been created with umask 022. Tighten the
     // tree before the store opens so the DB and command queue are owner-only.
     stat_tracker::fs_mode::tighten_private_tree(&config.data_dir);
-    stat_tracker::perf_log::init(&config.data_dir);
 
     // Refuse to start alongside a live daemon. On drop the guard removes
     // daemon.pid only if the file still names this process. Held across
@@ -585,6 +584,12 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     if maybe_vacuum(&config.data_dir).await? {
         return Ok(());
     }
+
+    // perf.log belongs to the daemon that runs: started only once the pid
+    // guard is held and no one-shot command (`--vacuum`) is left to exit,
+    // so a refused second start writes no `setup` header into the live
+    // daemon's log (S5-CAP-8).
+    stat_tracker::perf_log::init(&config.data_dir);
 
     // Crash marker (report-bundle §7). Taken after the pid guard, so a live
     // daemon never reaches here. A stale run.marker becomes
@@ -698,8 +703,9 @@ async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         capture::detect_backend(),
     );
     tracing::info!(?backend, "capture backend selected");
-    // KDE direct asked for and not there: the app says why under the
-    // capture method. Written every start, so an old reason is cleared.
+    // KDE direct asked for and not there, a saved Wayland-only route off
+    // Wayland, or no X11 capture: the app says why under the capture
+    // method. Written every start, so an old reason is cleared.
     stat_tracker::ocr_switch::publish_capture_notice(
         &config.data_dir,
         &capture::route_notice().unwrap_or_default(),
@@ -4250,6 +4256,78 @@ fn poll_resets_cadence<T, E: std::fmt::Display, S>(grabbed: &Result<Result<T, E>
     !matches!(grabbed, Ok(Err(err)) if capture::is_capture_busy(&err.to_string()))
 }
 
+/// While poll grabs keep failing, a WARN repeats at most this often.
+const POLL_FAILURE_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+/// A run of failed poll grabs while the game runs (S5-CAP-7). The first
+/// failure of a run is a WARN, then one at most every
+/// [`POLL_FAILURE_WARN_EVERY`] while the run lasts; the rest are TRACE.
+/// The clock is not reset by a success, so grabs that fail and work in
+/// turn do not warn on every tick. A known state ([`capture::is_expected_poll_miss`]:
+/// a held capture lock, a share still opening, declined or closed until the
+/// game runs, no fresh stream frame) is neither a failure nor a success.
+/// The run ends when the game stops.
+#[derive(Debug, Default)]
+struct PollFailureStreak {
+    /// Failures in this run.
+    count: u32,
+    started: Option<Instant>,
+    /// This run logged a WARN.
+    warned: bool,
+    last_warn: Option<Instant>,
+}
+
+impl PollFailureStreak {
+    /// Counts one failure; true when this one is logged at WARN.
+    fn failed(&mut self, now: Instant) -> bool {
+        self.count = self.count.saturating_add(1);
+        self.started.get_or_insert(now);
+        let warn = self
+            .last_warn
+            .is_none_or(|at| now.saturating_duration_since(at) >= POLL_FAILURE_WARN_EVERY);
+        if warn {
+            self.last_warn = Some(now);
+            self.warned = true;
+        }
+        warn
+    }
+
+    /// How to log one poll grab error, counting it when it is a failure.
+    fn on_error(&mut self, err: &str, now: Instant) -> PollErrorLog {
+        if capture::is_expected_poll_miss(err) {
+            PollErrorLog::Expected
+        } else if self.failed(now) {
+            PollErrorLog::Warn
+        } else {
+            PollErrorLog::Trace
+        }
+    }
+
+    /// The game stopped: counts and times do not carry into the next game.
+    fn game_stopped(&mut self) {
+        *self = Self::default();
+    }
+
+    /// A grab worked: the run ends. Returns how many failed and for how
+    /// long when the run logged a WARN, so its end is logged too.
+    fn recovered(&mut self, now: Instant) -> Option<(u32, std::time::Duration)> {
+        let started = self.started.take()?;
+        let count = std::mem::take(&mut self.count);
+        std::mem::take(&mut self.warned).then(|| (count, now.saturating_duration_since(started)))
+    }
+}
+
+/// How one poll grab error is logged ([`PollFailureStreak::on_error`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PollErrorLog {
+    /// A known state, not a failure: TRACE, the run untouched.
+    Expected,
+    /// A failure logged at WARN.
+    Warn,
+    /// A failure inside the WARN gap: TRACE.
+    Trace,
+}
+
 /// Whole ticks of `interval` that fit in [`IDLE_SHOT_POLL_FLOOR`], at
 /// least 1. Rounding down keeps the cadence at or under the floor.
 fn idle_shot_divisor(interval: std::time::Duration) -> u32 {
@@ -4850,6 +4928,7 @@ async fn run_loop(
     let mut logged_binary_wait = false;
     let mut exec_failed_at: Option<std::time::Instant> = None;
     let mut seen_stream: Option<capture::SeenStream> = None;
+    let mut poll_failures = PollFailureStreak::default();
 
     loop {
         // `biased` polls in source order. Shutdown is first, so a signal
@@ -5064,6 +5143,7 @@ async fn run_loop(
                 if !running {
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
+                    poll_failures.game_stopped();
                     continue;
                 }
 
@@ -5133,6 +5213,13 @@ async fn run_loop(
                         return Ok(());
                     }
                     Ok(Ok(captured)) => {
+                        if let Some((failed, over)) = poll_failures.recovered(Instant::now()) {
+                            tracing::info!(
+                                failed,
+                                secs = over.as_secs(),
+                                "poll capture works again"
+                            );
+                        }
                         if capture::reused_frame_skips_the_read(
                             captured.is_new,
                             captured.seq,
@@ -5429,7 +5516,24 @@ async fn run_loop(
                         }
                     }
                     Ok(Err(e)) => {
-                        tracing::trace!(error = %e, "poll capture failed (game may not be running)");
+                        // The game gate ran first: the game is running. A
+                        // known state (a held lock, a share opening, declined
+                        // or closed) is no failure and has its own log line.
+                        match poll_failures.on_error(&e.to_string(), Instant::now()) {
+                            PollErrorLog::Expected => {
+                                tracing::trace!(error = %e, "poll capture skipped");
+                            }
+                            PollErrorLog::Warn => {
+                                tracing::warn!(
+                                    error = %e,
+                                    failures = poll_failures.count,
+                                    "poll capture failed while the game runs; repeats are logged at most every 5 minutes"
+                                );
+                            }
+                            PollErrorLog::Trace => {
+                                tracing::trace!(error = %e, failures = poll_failures.count, "poll capture failed");
+                            }
+                        }
                     }
                 }
             }
@@ -10923,6 +11027,76 @@ mod tests {
         assert!(poll_resets_cadence(&frame));
         let failed: Grab = Ok(Err("screencast stream ended".into()));
         assert!(poll_resets_cadence(&failed), "a grab that ran counts");
+    }
+
+    #[test]
+    fn poll_failures_warn_on_the_first_then_every_five_minutes() {
+        let t0 = Instant::now();
+        let at = |secs| t0 + std::time::Duration::from_secs(secs);
+        let mut streak = PollFailureStreak::default();
+        assert_eq!(streak.recovered(t0), None, "no run, nothing to say");
+        assert!(streak.failed(at(0)), "the first failure warns");
+        assert!(!streak.failed(at(1)));
+        assert!(!streak.failed(at(299)));
+        assert!(streak.failed(at(300)), "five minutes on, it warns again");
+        assert!(!streak.failed(at(301)));
+        assert_eq!(streak.count, 5);
+        assert_eq!(
+            streak.recovered(at(310)),
+            Some((5, std::time::Duration::from_secs(310)))
+        );
+        // A new run inside five minutes of the last WARN stays quiet, and
+        // its end is not logged either: flapping grabs do not flood.
+        assert!(!streak.failed(at(311)));
+        assert_eq!(streak.count, 1);
+        assert_eq!(streak.recovered(at(312)), None);
+        // Five minutes after the last WARN a new run warns at once.
+        assert!(streak.failed(at(600)));
+        assert_eq!(
+            streak.recovered(at(601)),
+            Some((1, std::time::Duration::from_secs(1)))
+        );
+        assert_eq!(POLL_FAILURE_WARN_EVERY, std::time::Duration::from_secs(300));
+    }
+
+    /// Review of #437: a share that is opening (every game start on KDE
+    /// and GNOME), declined, or closed until the game runs is no failure,
+    /// and a run does not carry into the next game.
+    #[test]
+    fn known_poll_states_never_warn_and_the_run_ends_with_the_game() {
+        let t0 = Instant::now();
+        let mut streak = PollFailureStreak::default();
+        for err in [
+            "screencast open in progress",
+            "Screen share was declined: no captures until Overwatch is restarted",
+            "screencast share stays closed until the game is running",
+            "portal screenshot: a previous capture request is still running",
+        ] {
+            assert_eq!(streak.on_error(err, t0), PollErrorLog::Expected, "{err}");
+        }
+        assert_eq!(streak.count, 0, "nothing counted");
+        assert_eq!(streak.recovered(t0), None);
+        assert_eq!(
+            streak.on_error("screencast stream ended", t0),
+            PollErrorLog::Warn
+        );
+        assert_eq!(
+            streak.on_error(
+                "screencast stream ended",
+                t0 + std::time::Duration::from_secs(1)
+            ),
+            PollErrorLog::Trace
+        );
+        streak.game_stopped();
+        assert_eq!(streak.count, 0);
+        // The next game's first failure warns at once.
+        assert_eq!(
+            streak.on_error(
+                "screencast stream ended",
+                t0 + std::time::Duration::from_secs(2)
+            ),
+            PollErrorLog::Warn
+        );
     }
 
     #[test]
@@ -17347,6 +17521,9 @@ mod tests {
         let call = body[run_loop..].split(';').next().expect("a statement");
         assert!(call.ends_with(".await"), "{call}");
         assert!(at("maybe_vacuum(") < at("marker::start_run("));
+        // S5-CAP-8: perf.log starts after the guard and the vacuum exit.
+        assert!(guard < at("perf_log::init("));
+        assert!(at("maybe_vacuum(") < at("perf_log::init("));
         assert!(at("packs::sync_on_startup(") < at("marker::start_run("));
         // The keeper is made after the paused / not paused branches have
         // both closed, so it does not depend on what the startup sync
