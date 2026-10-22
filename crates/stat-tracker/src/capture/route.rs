@@ -6,8 +6,17 @@
 //! screen stream (hidden cursor) rather than a fresh screenshot each time.
 //!
 //! `portal` and `screencast` are that stream. `portal-screenshot` is the
-//! older screenshot portal. wlroots and X11 stay on their direct capture
-//! unless the stream or the screenshot portal is forced.
+//! older screenshot portal. `kwin` asks KWin's own screenshot interface
+//! (KDE direct). wlroots and X11 stay on their direct capture unless the
+//! stream or the screenshot portal is forced.
+//!
+//! KDE direct is used only when its startup probe answered
+//! ([`KwinProbe::Available`]). When it was asked for and the probe failed,
+//! the route the user would have had on automatic is used instead, with
+//! one warning naming the reason ([`Decision::fallback`]). This is the one
+//! forced value that falls back: every other forced value fails closed
+//! (R1-3). `kwin` falls back the same way whether it came from
+//! `STAT_TRACKER_CAPTURE` or from Settings.
 
 use super::{CaptureBackend, select_backend};
 
@@ -35,7 +44,34 @@ pub enum ForceWord {
     X11,
     Stream,
     Screenshot,
+    /// KWin's ScreenShot2 interface, called directly (KDE direct).
+    Kwin,
     Unknown,
+}
+
+/// Whether automatic picks KDE direct on KDE when its probe answers.
+///
+/// `false` for now: automatic stays the screen stream on KDE, as in rc.6.
+/// Flip to `true` before the rc.7 tag only if the KDE tester's A/B shows
+/// KDE direct reads the same boards at a lower game-fps cost. Nothing else
+/// needs to change: the probe then runs on automatic too, and a failed
+/// probe keeps the stream.
+pub const KWIN_DIRECT_DEFAULT_ON_KDE: bool = false;
+
+/// The startup probe of KDE direct. Only read when KDE direct was asked
+/// for, or when [`KWIN_DIRECT_DEFAULT_ON_KDE`] lets automatic use it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KwinProbe {
+    /// The probe did not run.
+    NotProbed,
+    /// The interface answered a 1x1 capture with a picture.
+    Available,
+    /// The reason it cannot be used, for the log and the app.
+    Unavailable(String),
+    /// Not tested, and why: the 1x1 render would have run beside the
+    /// tracker's screen share on a Plasma without the full KDE bug 524840
+    /// fix. Not a verdict on KDE direct.
+    NotChecked(String),
 }
 
 /// Env, else Settings, else automatic.
@@ -58,6 +94,9 @@ pub struct Decision {
     pub forced_line: Option<String>,
     /// Logged at warn when the force does not match this desktop.
     pub mismatch: Option<String>,
+    /// KDE direct was asked for and its probe failed: the warning that
+    /// names the reason and the route used instead. The app shows it too.
+    pub fallback: Option<String>,
 }
 
 /// Keyword set shared with `force_target`. Exact, after ASCII case fold.
@@ -67,6 +106,7 @@ pub fn classify(raw: &str) -> ForceWord {
         "x11" => ForceWord::X11,
         "portal" | "screencast" => ForceWord::Stream,
         "portal-screenshot" => ForceWord::Screenshot,
+        "kwin" | "kde-direct" => ForceWord::Kwin,
         _ => ForceWord::Unknown,
     }
 }
@@ -89,6 +129,8 @@ fn keyword(word: ForceWord) -> &'static str {
         ForceWord::X11 => "x11",
         ForceWord::Stream => "screencast",
         ForceWord::Screenshot => "portal-screenshot",
+        // Never passed on: `resolve` decides KDE direct itself.
+        ForceWord::Kwin => "kwin",
         ForceWord::Unknown => "unknown",
     }
 }
@@ -97,6 +139,7 @@ fn method_name(backend: CaptureBackend, portal: PortalPath) -> &'static str {
     match backend {
         CaptureBackend::Wayshot => "wayshot",
         CaptureBackend::X11 => "x11",
+        CaptureBackend::Kwin => "KDE direct (KWin ScreenShot2)",
         CaptureBackend::None => "none",
         CaptureBackend::Portal => match portal {
             PortalPath::Stream => "screen stream",
@@ -117,6 +160,27 @@ fn desktop_label(desktop: &str) -> &str {
     let trimmed = desktop.trim();
     if trimmed.is_empty() { "unset" } else { trimmed }
 }
+
+fn desktop_has(desktop: &str, names: &[&str]) -> bool {
+    desktop.split(':').any(|token| {
+        let token = token.trim().to_ascii_lowercase();
+        names.iter().any(|name| token.contains(name))
+    })
+}
+
+/// KDE Plasma, from `XDG_CURRENT_DESKTOP`. The one KDE test: the screen
+/// stream's KWin guards use it too.
+pub fn is_kde(desktop: &str) -> bool {
+    desktop_has(desktop, &["kde", "plasma", "kwin"])
+}
+
+/// GNOME, from `XDG_CURRENT_DESKTOP`.
+pub fn is_gnome(desktop: &str) -> bool {
+    desktop_has(desktop, &["gnome"])
+}
+
+/// Logged at warn when the older screenshot portal is forced on GNOME.
+pub const GNOME_SCREENSHOT_WARNING: &str = "the older screenshot portal was forced on GNOME: GNOME flashes the screen and plays a sound on every capture";
 
 fn is_kde_or_gnome(desktop: &str) -> bool {
     desktop.split(':').any(|token| {
@@ -144,12 +208,18 @@ fn mismatch_for(word: ForceWord, wayland: bool, desktop: &str) -> Option<String>
             "capture method mismatch: the screen stream was forced but this is not a Wayland session"
                 .to_string(),
         ),
+        // xdg-desktop-portal-gnome asks gnome-shell for a flash and the
+        // shutter sound on every screenshot, and answers after the flash.
+        ForceWord::Screenshot if is_gnome(desktop) => Some(GNOME_SCREENSHOT_WARNING.to_string()),
         // The older screenshot portal on KDE is an intentional switch.
         _ => None,
     }
 }
 
-/// Pure decision. Probes are the caller's.
+/// Pure decision. Probes are the caller's. `kwin` is the KDE direct probe
+/// and `kwin_default_on` is [`KWIN_DIRECT_DEFAULT_ON_KDE`] (a parameter so
+/// both settings are tested).
+#[allow(clippy::too_many_arguments)]
 pub fn resolve(
     env: Option<&str>,
     settings_word: Option<ForceWord>,
@@ -158,8 +228,77 @@ pub fn resolve(
     x11_ok: bool,
     portal_ok: bool,
     desktop: &str,
+    kwin: &KwinProbe,
+    kwin_default_on: bool,
 ) -> Decision {
     let chosen = effective(env, settings_word);
+    let desktop_shown = desktop_label(desktop);
+    if let Effective::Forced(ForceWord::Kwin) = chosen {
+        let source = if env.map(str::trim).is_some_and(|s| !s.is_empty()) {
+            RouteSource::Environment
+        } else {
+            RouteSource::Settings
+        };
+        if *kwin == KwinProbe::Available {
+            let name = method_name(CaptureBackend::Kwin, PortalPath::Stream);
+            return Decision {
+                backend: CaptureBackend::Kwin,
+                portal: PortalPath::Stream,
+                source,
+                forced: true,
+                info: format!(
+                    "capture route resolved: {name}, source {}, desktop {desktop_shown}",
+                    source_name(source)
+                ),
+                forced_line: Some(format!(
+                    "capture method forced: {name}; desktop detected: {desktop_shown}"
+                )),
+                mismatch: None,
+                fallback: None,
+            };
+        }
+        // Asked for and not there: the automatic route, with the reason.
+        let mut decision = resolve(
+            None,
+            None,
+            wayland,
+            wayshot_ok,
+            x11_ok,
+            portal_ok,
+            desktop,
+            &KwinProbe::NotProbed,
+            false,
+        );
+        let reason = match kwin {
+            KwinProbe::Unavailable(reason) | KwinProbe::NotChecked(reason) => reason.as_str(),
+            _ => "it was not probed",
+        };
+        decision.fallback = Some(format!(
+            "KDE direct capture is not available ({reason}); using {} instead",
+            method_name(decision.backend, decision.portal)
+        ));
+        return decision;
+    }
+    if chosen == Effective::Auto
+        && kwin_default_on
+        && *kwin == KwinProbe::Available
+        && is_kde(desktop)
+        && select_backend(None, wayland, wayshot_ok, x11_ok, portal_ok) == CaptureBackend::Portal
+    {
+        let name = method_name(CaptureBackend::Kwin, PortalPath::Stream);
+        return Decision {
+            backend: CaptureBackend::Kwin,
+            portal: PortalPath::Stream,
+            source: RouteSource::Automatic,
+            forced: false,
+            info: format!(
+                "capture route resolved: {name}, source automatic, desktop {desktop_shown}"
+            ),
+            forced_line: None,
+            mismatch: None,
+            fallback: None,
+        };
+    }
     let (source, forced_word) = match chosen {
         Effective::Auto => (RouteSource::Automatic, None),
         Effective::Forced(word) => {
@@ -177,7 +316,6 @@ pub fn resolve(
         Some(ForceWord::Screenshot) => PortalPath::Screenshot,
         _ => PortalPath::Stream,
     };
-    let desktop_shown = desktop_label(desktop);
     let name = method_name(backend, portal);
     let info = format!(
         "capture route resolved: {name}, source {}, desktop {desktop_shown}",
@@ -208,6 +346,7 @@ pub fn resolve(
                 ForceWord::X11 => "x11",
                 ForceWord::Stream => "screen stream",
                 ForceWord::Screenshot => "screenshot portal",
+                ForceWord::Kwin => "KDE direct",
                 ForceWord::Unknown => "unknown value",
             }
         )),
@@ -222,6 +361,7 @@ pub fn resolve(
         info,
         forced_line,
         mismatch,
+        fallback: None,
     }
 }
 
@@ -238,7 +378,17 @@ mod tests {
         portal: bool,
         desktop: &str,
     ) -> Decision {
-        resolve(env, settings, wayland, wayshot, x11, portal, desktop)
+        resolve(
+            env,
+            settings,
+            wayland,
+            wayshot,
+            x11,
+            portal,
+            desktop,
+            &KwinProbe::NotProbed,
+            KWIN_DIRECT_DEFAULT_ON_KDE,
+        )
     }
 
     #[test]
@@ -373,6 +523,183 @@ mod tests {
         assert_eq!(d.source, RouteSource::Environment);
         assert!(d.forced_line.unwrap().contains("unknown"));
         assert!(d.info.contains("source environment"));
+    }
+
+    fn decide_kwin(
+        env: Option<&str>,
+        settings: Option<ForceWord>,
+        wayshot: bool,
+        desktop: &str,
+        kwin: KwinProbe,
+        default_on: bool,
+    ) -> Decision {
+        resolve(
+            env, settings, true, wayshot, true, true, desktop, &kwin, default_on,
+        )
+    }
+
+    #[test]
+    fn kde_direct_words() {
+        assert_eq!(classify("kwin"), ForceWord::Kwin);
+        assert_eq!(classify(" KWin "), ForceWord::Kwin);
+        assert_eq!(classify("kde-direct"), ForceWord::Kwin);
+        assert_eq!(classify("kde"), ForceWord::Unknown);
+        for kde in ["KDE", "plasma", "KWin", "ubuntu:KDE"] {
+            assert!(is_kde(kde), "{kde}");
+        }
+        assert!(!is_kde("GNOME"));
+        assert!(!is_kde("niri"));
+    }
+
+    #[test]
+    fn kde_direct_is_used_when_asked_for_and_the_probe_answered() {
+        let d = decide_kwin(
+            None,
+            Some(ForceWord::Kwin),
+            false,
+            "KDE",
+            KwinProbe::Available,
+            false,
+        );
+        assert_eq!(d.backend, CaptureBackend::Kwin);
+        assert_eq!(d.source, RouteSource::Settings);
+        assert!(d.forced);
+        assert!(d.fallback.is_none());
+        assert!(d.mismatch.is_none());
+        assert!(d.info.contains("KDE direct"), "{}", d.info);
+        assert!(d.forced_line.unwrap().contains("KDE direct"));
+        let env = decide_kwin(
+            Some("kwin"),
+            Some(ForceWord::Stream),
+            false,
+            "KDE",
+            KwinProbe::Available,
+            false,
+        );
+        assert_eq!(env.backend, CaptureBackend::Kwin);
+        assert_eq!(env.source, RouteSource::Environment);
+    }
+
+    #[test]
+    fn kde_direct_that_failed_its_probe_falls_back_to_the_automatic_route() {
+        // Plasma 6.7: KWin refuses callers without a .desktop grant.
+        let d = decide_kwin(
+            None,
+            Some(ForceWord::Kwin),
+            false,
+            "KDE",
+            KwinProbe::Unavailable("KWin refused the call".into()),
+            false,
+        );
+        assert_eq!(d.backend, CaptureBackend::Portal);
+        assert_eq!(d.portal, PortalPath::Stream);
+        assert_eq!(d.source, RouteSource::Automatic);
+        assert!(!d.forced, "the stream was not asked for");
+        let line = d.fallback.unwrap();
+        assert!(line.contains("KWin refused the call"), "{line}");
+        assert!(line.contains("screen stream"), "{line}");
+        // Not KDE at all: what automatic gives there.
+        let niri = decide_kwin(
+            Some("kwin"),
+            None,
+            true,
+            "niri",
+            KwinProbe::Unavailable("not KDE Plasma".into()),
+            false,
+        );
+        assert_eq!(niri.backend, CaptureBackend::Wayshot);
+        assert!(niri.fallback.unwrap().contains("using wayshot"));
+        // A probe that never ran still says why.
+        let unprobed = decide_kwin(
+            None,
+            Some(ForceWord::Kwin),
+            false,
+            "KDE",
+            KwinProbe::NotProbed,
+            false,
+        );
+        assert!(unprobed.fallback.unwrap().contains("not probed"));
+        let skipped = decide_kwin(
+            None,
+            Some(ForceWord::Kwin),
+            false,
+            "KDE",
+            KwinProbe::NotChecked("needs 6.8.1".into()),
+            false,
+        );
+        assert_eq!(skipped.backend, CaptureBackend::Portal);
+        assert!(skipped.fallback.unwrap().contains("needs 6.8.1"));
+    }
+
+    #[test]
+    fn automatic_keeps_the_stream_on_kde_until_the_default_constant_flips() {
+        let off = decide_kwin(None, None, false, "KDE", KwinProbe::Available, false);
+        assert_eq!(off.backend, CaptureBackend::Portal);
+        assert_eq!(off.portal, PortalPath::Stream);
+        let on = decide_kwin(None, None, false, "KDE", KwinProbe::Available, true);
+        assert_eq!(on.backend, CaptureBackend::Kwin);
+        assert_eq!(on.source, RouteSource::Automatic);
+        assert!(!on.forced);
+        // Default on, probe failed: the stream, and no warning (nobody asked).
+        let failed = decide_kwin(
+            None,
+            None,
+            false,
+            "KDE",
+            KwinProbe::Unavailable("x".into()),
+            true,
+        );
+        assert_eq!(failed.backend, CaptureBackend::Portal);
+        assert!(failed.fallback.is_none());
+        // Default on never takes over GNOME or a working wlroots capture.
+        let gnome = decide_kwin(None, None, false, "GNOME", KwinProbe::Available, true);
+        assert_eq!(gnome.backend, CaptureBackend::Portal);
+        let wlr = decide_kwin(None, None, true, "KDE", KwinProbe::Available, true);
+        assert_eq!(wlr.backend, CaptureBackend::Wayshot);
+        // A forced stream stays the stream.
+        let stream = decide_kwin(
+            None,
+            Some(ForceWord::Stream),
+            false,
+            "KDE",
+            KwinProbe::Available,
+            true,
+        );
+        assert_eq!(stream.backend, CaptureBackend::Portal);
+    }
+
+    #[test]
+    fn older_screenshot_on_gnome_warns_about_the_flash_and_sound() {
+        for (env, settings) in [
+            (Some("portal-screenshot"), None),
+            (None, Some(ForceWord::Screenshot)),
+        ] {
+            let d = decide(env, settings, true, false, false, true, "ubuntu:GNOME");
+            assert_eq!(d.portal, PortalPath::Screenshot);
+            let warn = d.mismatch.unwrap();
+            assert!(warn.contains("flashes the screen"), "{warn}");
+            assert!(warn.contains("sound"), "{warn}");
+        }
+        let kde = decide(
+            None,
+            Some(ForceWord::Screenshot),
+            true,
+            false,
+            false,
+            true,
+            "KDE",
+        );
+        assert!(kde.mismatch.is_none());
+        let gnome_stream = decide(
+            None,
+            Some(ForceWord::Stream),
+            true,
+            false,
+            false,
+            true,
+            "GNOME",
+        );
+        assert!(gnome_stream.mismatch.is_none());
     }
 
     #[test]

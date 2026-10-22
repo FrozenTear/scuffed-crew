@@ -272,6 +272,8 @@ pub enum Message {
     ToggleAutostart,
     AutostartReady(bool),
     BackendReady(CaptureBackend),
+    /// KDE direct's probe, `None` off KDE.
+    KdeDirectReady(Option<stat_tracker::capture::KwinProbe>),
     OutputsReady(Vec<String>),
     CaptureNow,
     CaptureReady(Result<PreviewShot, String>),
@@ -459,6 +461,14 @@ pub struct TrackerApp {
     pub daemon_busy: bool,
     pub outputs: Vec<String>,
     pub backend: Option<CaptureBackend>,
+    /// `XDG_CURRENT_DESKTOP`, read once.
+    pub desktop: String,
+    /// KDE direct on this desktop: `None` off KDE or until it is known.
+    pub kde_direct: Option<stat_tracker::capture::KwinProbe>,
+    /// The running tracker's pid and whether its share was open, at the
+    /// last tick: a restart or a share that closed checks KDE direct again.
+    kde_direct_seen: (Option<u32>, bool),
+    kde_direct_recheck: bool,
     pub capturing: bool,
     pub preview: Option<(Handle, String)>,
     pub preview_error: Option<String>,
@@ -676,6 +686,10 @@ impl TrackerApp {
             daemon_busy: false,
             outputs: Vec::new(),
             backend: None,
+            desktop: std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
+            kde_direct: None,
+            kde_direct_seen: (None, false),
+            kde_direct_recheck: false,
             capturing: false,
             preview: None,
             preview_error: None,
@@ -759,6 +773,15 @@ impl TrackerApp {
             tasks.push(Task::perform(
                 stat_tracker::capture::detect_backend(),
                 Message::BackendReady,
+            ));
+            // A 1x1 KWin render only when KDE direct is the saved route;
+            // otherwise the version read alone, which renders nothing.
+            tasks.push(Task::perform(
+                stat_tracker::capture::kwin_direct_status(
+                    app.data_dir.clone(),
+                    app.saved_config.capture_route == stat_tracker::config::CaptureRoute::Kwin,
+                ),
+                Message::KdeDirectReady,
             ));
             tasks.push(Task::perform(
                 update::check_for_update(),
@@ -1131,6 +1154,14 @@ impl TrackerApp {
             }
             Message::SelectCaptureRoute(route) => {
                 self.settings.capture_route = route;
+                // Choosing KDE direct checks it (a 1x1 KWin render, not
+                // beside the tracker's share before Plasma 6.8.1).
+                if route == stat_tracker::config::CaptureRoute::Kwin && self.fixture.is_none() {
+                    return Task::perform(
+                        stat_tracker::capture::kwin_direct_status(self.data_dir.clone(), true),
+                        Message::KdeDirectReady,
+                    );
+                }
                 Task::none()
             }
             Message::SaveSettings => {
@@ -1322,6 +1353,10 @@ impl TrackerApp {
             Message::BackendReady(backend) => {
                 self.backend = Some(backend);
                 Task::perform(capture::list_outputs(backend), Message::OutputsReady)
+            }
+            Message::KdeDirectReady(probe) => {
+                self.kde_direct = probe;
+                Task::none()
             }
             Message::OutputsReady(outputs) => {
                 self.outputs = outputs;
@@ -2526,6 +2561,16 @@ impl TrackerApp {
                 self.ocr_switch.health_notice = health;
                 self.health_status = self.health_now();
             }
+            self.ocr_switch.capture_notice =
+                settings::daemon_capture_notice(status.as_ref(), self.daemon.pid);
+            let seen = (
+                self.daemon.pid,
+                settings::daemon_share_open(status.as_ref(), self.daemon.pid),
+            );
+            if settings::kde_direct_recheck_due(self.kde_direct_seen, seen) {
+                self.kde_direct_recheck = true;
+            }
+            self.kde_direct_seen = seen;
             let share = settings::daemon_share_notice(status.as_ref(), self.daemon.pid);
             if share != self.ocr_switch.share_notice {
                 self.ocr_switch.share_notice = share;
@@ -2569,6 +2614,15 @@ impl TrackerApp {
         let mut tasks = Vec::new();
         if let Some(probe) = self.watch_installed_gui() {
             tasks.push(probe);
+        }
+        if std::mem::take(&mut self.kde_direct_recheck) {
+            tasks.push(Task::perform(
+                stat_tracker::capture::kwin_direct_status(
+                    self.data_dir.clone(),
+                    self.saved_config.capture_route == stat_tracker::config::CaptureRoute::Kwin,
+                ),
+                Message::KdeDirectReady,
+            ));
         }
         if let Some((url, code)) = self.setup.poll_request_if_due(std::time::Instant::now()) {
             tasks.push(Task::perform(

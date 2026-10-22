@@ -685,7 +685,7 @@ pub fn share_close_due(
 /// Capture now on KDE must not open the screenshot portal while the daemon
 /// says its share is open.
 pub fn capture_now_blocked_by_daemon_share(desktop: &str, daemon_share_open: bool) -> bool {
-    daemon_share_open && desktop_has(desktop, &["kde", "plasma", "kwin"])
+    daemon_share_open && is_kde(desktop)
 }
 
 /// Capture now's error when the daemon share is already open. Quitting
@@ -775,7 +775,7 @@ const SCREENCOPY_DESKTOPS: &[&str] = &[
 ];
 
 fn is_kde(desktop: &str) -> bool {
-    desktop_has(desktop, &["kde", "plasma", "kwin"])
+    super::route::is_kde(desktop)
 }
 
 pub fn screenshot_fallback_is_safe(desktop: &str, stream_forced: bool) -> bool {
@@ -2078,8 +2078,11 @@ async fn fit_stream(
     img: DynamicImage,
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
-    // The geometry read's CPU is measured on its blocking thread.
-    let (outputs, geometry_cpu) = portal::output_geometry_timed().await;
+    // The geometry read's CPU is measured on its blocking thread (zero
+    // when the cache answered). A layout that cannot explain this frame is
+    // read again.
+    let (outputs, geometry_cpu) =
+        portal::output_geometry_for_timed(img.width(), img.height(), output_name).await;
     let cpu_started = crate::perf::thread_cpu();
     let fitted = fit_stream_image(img, &outputs, output_name);
     if fitted.is_ok() {
@@ -2150,6 +2153,11 @@ async fn save_compare(
         return;
     }
     crate::fs_mode::tighten_private_file(&stream_path);
+    // KDE direct first: it is tens of milliseconds, so it is nearer the
+    // stream frame's moment than the portal screenshot after it.
+    // Boxed so the probe and KWin grab do not sit inline in every stream
+    // grab's future (debug-only path, large state).
+    Box::pin(super::kwin::save_compare_half(&dir, n, output_name)).await;
     match portal::capture(output_name).await {
         Ok(shot) => {
             if shot.save(&shot_path).is_ok() {
