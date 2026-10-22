@@ -28,6 +28,7 @@ use crate::theme::{
 };
 use crate::update;
 use crate::widgets;
+pub(crate) use stat_tracker::capture::SessionKind;
 
 /// Seconds / counts, must stay compact on ultrawide.
 pub(crate) const FIELD_NUMERIC: f32 = 168.0;
@@ -136,7 +137,7 @@ pub(crate) const SHADOW_READER_ENV_NOTE: &str = "\
 SCUFFED_SHADOW_RECOGNIZER is set for this app, so the toggle stays on and is not written to the config file. \
 The tracker service may differ.";
 
-pub(crate) const NEW_READER_LABEL: &str = "New reader (alpha)";
+pub(crate) const NEW_READER_LABEL: &str = "New reader";
 
 pub(crate) const NEW_READER_HINT: &str = "\
 Saved games and uploads use the new scoreboard reader. \
@@ -179,7 +180,7 @@ pub(crate) const DISMISS_REFUSAL_LABEL: &str = "OK";
 pub(crate) const CLASSIC_OCR_RESTART: &str =
     "The tracker reads this when it starts. Restart it after you save.";
 
-/// Shown in place of the "New reader (alpha)" switch while the tracker runs
+/// Shown in place of the "New reader" switch while the tracker runs
 /// with classic OCR off.
 pub(crate) const NEW_READER_IMPLIED: &str =
     "The tracker is running with classic OCR off, so it always uses the new reader.";
@@ -372,16 +373,130 @@ fn render_wanted_with(saved_route: CaptureRoute, chip_clicked: bool, default_on:
         || chip_clicked
 }
 
+/// The install / update row in the Tracker service card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstallRow {
+    pub caption: &'static str,
+    pub line: String,
+    /// Whether `line` is a command with a Copy button.
+    pub copy: bool,
+}
+
+/// A package install is told to update with its package manager, with no
+/// command to copy: the curl installer would add a second install in
+/// `~/.local` that shadows the package (S5-UP-2). Until the package probe
+/// answers there is no command yet. Any other install gets the pinned
+/// install command, as before.
+pub(crate) fn install_row(
+    package: update::PackageProbe<'_>,
+    advertised: Option<&str>,
+    current: Option<&str>,
+) -> InstallRow {
+    match package {
+        update::PackageProbe::Done(Some(owner)) => InstallRow {
+            caption: "Updates",
+            line: update::package_update_line(owner),
+            copy: false,
+        },
+        update::PackageProbe::Pending => InstallRow {
+            caption: "Install / update command",
+            line: update::PACKAGE_PROBE_PENDING.to_string(),
+            copy: false,
+        },
+        update::PackageProbe::Done(None) => InstallRow {
+            caption: "Install / update command",
+            line: update::install_command_for(advertised, current),
+            copy: true,
+        },
+    }
+}
+
 /// The KDE direct chip is shown on KDE, or when it is the saved choice.
 pub(crate) fn show_kde_direct(desktop: &str, route: CaptureRoute) -> bool {
     stat_tracker::capture::is_kde(desktop) || route == CaptureRoute::Kwin
 }
 
-/// Lines under the capture method: the GNOME flash for Older screenshot,
-/// KDE direct that is not there, and what the running tracker said. A line
-/// about the selected choice is a warning.
+/// The session as the tracker sees it ([`SessionKind::from_env`], its
+/// three-state rule) for this process's environment. Settings hides the
+/// Wayland-only capture methods only on [`SessionKind::X11`], where the
+/// tracker ignores them too. [`SessionKind::Unknown`] (no `WAYLAND_DISPLAY`
+/// and a type that is unset, `tty` or `unspecified`, or `x11` beside a
+/// stray `WAYLAND_DISPLAY`) renders like rc.7: every chip, no warning.
+pub(crate) fn session_from_env() -> SessionKind {
+    SessionKind::from_env(
+        std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+    )
+}
+
+/// Capture methods that need a Wayland session: the screen stream and KDE
+/// direct. Older screenshot (the portal) also runs on X11.
+pub(crate) fn wayland_only_route(route: CaptureRoute) -> bool {
+    matches!(route, CaptureRoute::Screencast | CaptureRoute::Kwin)
+}
+
+/// The capture method chips, in order: Automatic, Screen stream, Older
+/// screenshot, and KDE direct on KDE or when it is saved. On a session
+/// known to be X11 the Wayland-only methods are left out, except a saved
+/// one, which stays (selected) so the warning under it has a chip to point
+/// at. Wayland and an unknown session get every chip.
+pub(crate) fn capture_route_chips(
+    desktop: &str,
+    session: SessionKind,
+    route: CaptureRoute,
+) -> Vec<CaptureRoute> {
+    let mut chips = vec![
+        CaptureRoute::Auto,
+        CaptureRoute::Screencast,
+        CaptureRoute::Screenshot,
+    ];
+    if show_kde_direct(desktop, route) {
+        chips.push(CaptureRoute::Kwin);
+    }
+    if session == SessionKind::X11 {
+        chips.retain(|chip| !wayland_only_route(*chip) || *chip == route);
+    }
+    chips
+}
+
+pub(crate) fn capture_route_label(route: CaptureRoute) -> &'static str {
+    match route {
+        CaptureRoute::Auto => "Automatic",
+        CaptureRoute::Screencast => "Screen stream",
+        CaptureRoute::Screenshot => "Older screenshot",
+        CaptureRoute::Kwin => "KDE direct",
+    }
+}
+
+/// The line under the capture chips that says what Automatic does here.
+pub(crate) fn capture_route_help(session: SessionKind) -> &'static str {
+    if session == SessionKind::X11 {
+        "This is an X11 session. Automatic captures the screen directly with X11. Older screenshot is the previous portal."
+    } else {
+        "Automatic uses the screen stream on KDE and GNOME, and direct capture on other desktops. Screen stream forces that stream. Older screenshot is the previous portal."
+    }
+}
+
+/// Shown on X11 next to the Older screenshot choice.
+pub(crate) const X11_SCREENSHOT_NOTE: &str = "Older screenshot captures the whole desktop on X11 with more than one monitor, so Automatic is recommended.";
+
+/// The warning under a saved Wayland-only method on X11.
+pub(crate) fn x11_route_warning(route: CaptureRoute) -> String {
+    format!(
+        "{} works only on Wayland. This is an X11 session, so the tracker uses Automatic instead.",
+        capture_route_label(route)
+    )
+}
+
+/// Lines under the capture method: a saved Wayland-only method on X11,
+/// Older screenshot on X11, the GNOME flash for Older screenshot, KDE
+/// direct that is not there, and what the running tracker said. A line
+/// about the selected choice is a warning. On X11 the KDE direct lines are
+/// left out (it is not offered there), and so is the tracker's notice about
+/// the same Wayland-only method, which the warning already says.
 pub(crate) fn capture_route_notes(
     desktop: &str,
+    session: SessionKind,
     route: CaptureRoute,
     kde_direct: Option<&stat_tracker::capture::KwinProbe>,
     daemon_notice: Option<&str>,
@@ -394,6 +509,32 @@ pub(crate) fn capture_route_notes(
         }
     };
     let mut notes = Vec::new();
+    if session == SessionKind::X11 {
+        let warned = wayland_only_route(route);
+        if warned {
+            notes.push((x11_route_warning(route), NoteTone::Warn));
+        }
+        notes.push((
+            X11_SCREENSHOT_NOTE.to_string(),
+            tone(route == CaptureRoute::Screenshot),
+        ));
+        if stat_tracker::capture::is_gnome(desktop) {
+            notes.push((
+                GNOME_SCREENSHOT_NOTE.to_string(),
+                tone(route == CaptureRoute::Screenshot),
+            ));
+        }
+        // The tracker's notice about the same saved method is the warning
+        // above, unless it adds that nothing else works here.
+        if let Some(notice) = daemon_notice
+            && !(warned
+                && notice.contains("needs a Wayland session")
+                && !notice.contains("no other capture method works here"))
+        {
+            notes.push((format!("Tracker: {notice}."), NoteTone::Warn));
+        }
+        return notes;
+    }
     if stat_tracker::capture::is_gnome(desktop) {
         notes.push((
             GNOME_SCREENSHOT_NOTE.to_string(),
@@ -477,7 +618,7 @@ pub(crate) struct OcrCardBlocks {
     /// status. Tesseract's model: of no use to a tracker that runs with
     /// classic OCR off.
     pub reading_model: bool,
-    /// The "New reader (alpha)" switch. Off implies the new reader, so the
+    /// The "New reader" switch. Off implies the new reader, so the
     /// switch has nothing to choose.
     pub new_reader: bool,
 }
@@ -894,6 +1035,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             app.update_notes_ui(),
             app.update_notes_expanded,
             app.restart_need(),
+            app.package_probe(),
         ));
     }
 
@@ -1062,23 +1204,24 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     }
     body = body.push(actions);
 
-    let install_cmd = update::install_command_for(
+    let install = install_row(
+        app.package_probe(),
         app.update.as_ref().map(|i| i.latest.as_str()),
         app.installed_version.as_deref(),
     );
     body = body.push(
-        text("Install / update command")
+        text(install.caption)
             .size(SIZE_META)
             .font(FONT_SEMIBOLD)
             .color(TEXT_2),
     );
     body = body.push(
-        text(install_cmd)
+        text(install.line)
             .size(SIZE_LABEL)
             .font(FONT_MEDIUM)
-            .color(theme::ACCENT),
+            .color(if install.copy { theme::ACCENT } else { TEXT_2 }),
     );
-    if !demo {
+    if install.copy && !demo {
         body = body.push(action_btn("Copy command", false, Message::CopyUpdateCmd));
     }
     body = body.push(prerelease_updates_block(app));
@@ -1088,34 +1231,17 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 
 fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let route = app.settings.capture_route;
-    let route_chips = row![
-        output_chip(
-            "Automatic",
-            route == CaptureRoute::Auto,
-            Message::SelectCaptureRoute(CaptureRoute::Auto),
-        ),
-        output_chip(
-            "Screen stream",
-            route == CaptureRoute::Screencast,
-            Message::SelectCaptureRoute(CaptureRoute::Screencast),
-        ),
-        output_chip(
-            "Older screenshot",
-            route == CaptureRoute::Screenshot,
-            Message::SelectCaptureRoute(CaptureRoute::Screenshot),
-        ),
-    ]
-    .spacing(8);
-    let kde_direct = show_kde_direct(&app.desktop, route);
-    let route_chips = if kde_direct {
-        route_chips.push(output_chip(
-            "KDE direct",
-            route == CaptureRoute::Kwin,
-            Message::SelectCaptureRoute(CaptureRoute::Kwin),
-        ))
-    } else {
-        route_chips
-    };
+    let session = app.session;
+    let mut route_chips = row![].spacing(8);
+    for choice in capture_route_chips(&app.desktop, session, route) {
+        route_chips = route_chips.push(output_chip(
+            capture_route_label(choice),
+            route == choice,
+            Message::SelectCaptureRoute(choice),
+        ));
+    }
+    // KDE direct's help goes with its chip, and only where it can work.
+    let kde_direct = session != SessionKind::X11 && show_kde_direct(&app.desktop, route);
 
     let mut chips = row![output_chip(
         "Auto (first monitor)",
@@ -1157,7 +1283,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![
         field_caption("Capture method"),
         route_chips.wrap(),
-        text("Automatic uses the screen stream on KDE and GNOME, and direct capture on other desktops. Screen stream forces that stream. Older screenshot is the previous portal.")
+        text(capture_route_help(session))
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
@@ -1173,6 +1299,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     }
     for (note, tone) in capture_route_notes(
         &app.desktop,
+        session,
         route,
         app.kde_direct.as_ref(),
         app.ocr_switch.capture_notice.as_deref(),
@@ -3310,32 +3437,227 @@ token = \"not-a-real-token\"
     }
 
     #[test]
+    fn session_kind_follows_the_tracker_rule() {
+        use SessionKind::*;
+        assert_eq!(SessionKind::from_env(Some("wayland"), false), Wayland);
+        assert_eq!(SessionKind::from_env(Some("Wayland"), true), Wayland);
+        assert_eq!(SessionKind::from_env(Some("x11"), false), X11);
+        assert_eq!(SessionKind::from_env(Some("X11"), false), X11);
+        assert_eq!(SessionKind::from_env(None, true), Wayland);
+        assert_eq!(SessionKind::from_env(Some("tty"), true), Wayland);
+        // Not known: x11 beside a stray WAYLAND_DISPLAY, or no evidence.
+        assert_eq!(SessionKind::from_env(Some("x11"), true), Unknown);
+        for kind in [None, Some("tty"), Some("unspecified")] {
+            assert_eq!(SessionKind::from_env(kind, false), Unknown, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn capture_chips_on_wayland_or_an_unknown_session_are_unchanged() {
+        use CaptureRoute::*;
+        for session in [SessionKind::Wayland, SessionKind::Unknown] {
+            assert_eq!(
+                capture_route_chips("GNOME", session, Auto),
+                vec![Auto, Screencast, Screenshot]
+            );
+            assert_eq!(
+                capture_route_chips("KDE", session, Screencast),
+                vec![Auto, Screencast, Screenshot, Kwin]
+            );
+            assert_eq!(
+                capture_route_chips("niri", session, Kwin),
+                vec![Auto, Screencast, Screenshot, Kwin]
+            );
+            assert!(capture_route_help(session).starts_with("Automatic uses the screen stream"));
+            assert!(capture_route_notes("i3", session, Auto, None, None).is_empty());
+            assert!(capture_route_notes("i3", session, Screencast, None, None).is_empty());
+        }
+        assert_eq!(capture_route_label(Auto), "Automatic");
+        assert_eq!(capture_route_label(Screencast), "Screen stream");
+        assert_eq!(capture_route_label(Screenshot), "Older screenshot");
+        assert_eq!(capture_route_label(Kwin), "KDE direct");
+    }
+
+    #[test]
+    fn capture_chips_on_x11_drop_the_wayland_only_methods() {
+        use CaptureRoute::*;
+        let x11 = SessionKind::X11;
+        // Plasma X11 included: KDE direct needs Wayland too. Older
+        // screenshot (the portal) runs on X11.
+        for desktop in ["KDE", "GNOME", "i3", ""] {
+            assert_eq!(
+                capture_route_chips(desktop, x11, Auto),
+                vec![Auto, Screenshot]
+            );
+            assert_eq!(
+                capture_route_chips(desktop, x11, Screenshot),
+                vec![Auto, Screenshot]
+            );
+        }
+        // A saved Wayland-only route stays visible so its warning has a chip.
+        assert_eq!(
+            capture_route_chips("GNOME", x11, Screencast),
+            vec![Auto, Screencast, Screenshot]
+        );
+        assert_eq!(
+            capture_route_chips("KDE", x11, Kwin),
+            vec![Auto, Screenshot, Kwin]
+        );
+        assert!(capture_route_help(x11).contains("X11"));
+        assert!(capture_route_help(x11).contains("Older screenshot"));
+        assert!(!capture_route_help(x11).contains("Screen stream"));
+    }
+
+    #[test]
+    fn capture_notes_on_x11() {
+        use stat_tracker::capture::KwinProbe;
+        let x11 = SessionKind::X11;
+        // Automatic: the Older screenshot note only, never KDE direct's.
+        let missing = KwinProbe::Unavailable("no KWin".into());
+        assert_eq!(
+            capture_route_notes("KDE", x11, CaptureRoute::Auto, Some(&missing), None),
+            vec![(X11_SCREENSHOT_NOTE.to_string(), NoteTone::Info)]
+        );
+        assert!(X11_SCREENSHOT_NOTE.contains("whole desktop"));
+        assert!(X11_SCREENSHOT_NOTE.contains("Automatic is recommended"));
+        // Older screenshot saved: no Wayland warning, its note is a warning.
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Screenshot, None, None);
+        assert_eq!(
+            notes,
+            vec![(X11_SCREENSHOT_NOTE.to_string(), NoteTone::Warn)]
+        );
+        // GNOME X11 still flashes.
+        let notes = capture_route_notes("GNOME", x11, CaptureRoute::Auto, None, None);
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[1].0, GNOME_SCREENSHOT_NOTE);
+        for (saved, label) in [
+            (CaptureRoute::Screencast, "Screen stream"),
+            (CaptureRoute::Kwin, "KDE direct"),
+        ] {
+            let notes = capture_route_notes("KDE", x11, saved, Some(&missing), None);
+            assert_eq!(notes.len(), 2, "{notes:?}");
+            assert_eq!(notes[0], (x11_route_warning(saved), NoteTone::Warn));
+            assert!(notes[0].0.starts_with(label), "{}", notes[0].0);
+            assert!(notes[0].0.contains("only on Wayland"));
+            assert!(notes[0].0.contains("uses Automatic"));
+            assert_eq!(notes[1], (X11_SCREENSHOT_NOTE.to_string(), NoteTone::Info));
+        }
+        // The tracker's notice about the same thing is not said twice; any
+        // other notice is.
+        let same = "the saved capture method, the screen stream, needs a Wayland session and this one is X11; automatic is used: using X11 instead";
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Screencast, None, Some(same));
+        assert!(!notes.iter().any(|(n, _)| n.starts_with("Tracker:")));
+        let other = "X11 capture failed: no display";
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Screencast, None, Some(other));
+        assert_eq!(notes.last().unwrap().0, format!("Tracker: {other}."));
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Auto, None, Some(same));
+        assert!(notes.last().unwrap().0.starts_with("Tracker: the saved"));
+        // Kept when it says nothing else works: that is news.
+        let nothing = "the saved capture method, the screen stream, needs a Wayland session and this one is X11; automatic is used: no other capture method works here";
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Screencast, None, Some(nothing));
+        assert_eq!(notes.last().unwrap().0, format!("Tracker: {nothing}."));
+    }
+
+    #[test]
+    fn install_row_for_a_package_has_no_command_to_copy() {
+        use crate::uninstall::{PackageManager, PackageOwner};
+        let aur = PackageOwner {
+            manager: PackageManager::Pacman,
+            package: "scuffed-stat-tracker-bin".into(),
+        };
+        let row = install_row(
+            update::PackageProbe::Done(Some(&aur)),
+            Some("0.5.0"),
+            Some("0.5.0-rc.7"),
+        );
+        assert!(!row.copy);
+        assert!(!row.line.contains("curl"));
+        assert!(row.line.contains("paru -Syu"));
+        // A script install keeps the pinned command and its Copy button.
+        let row = install_row(
+            update::PackageProbe::Pending,
+            Some("0.5.0"),
+            Some("0.5.0-rc.7"),
+        );
+        assert!(!row.copy);
+        assert_eq!(row.line, update::PACKAGE_PROBE_PENDING);
+        let row = install_row(
+            update::PackageProbe::Done(None),
+            Some("0.5.0"),
+            Some("0.5.0-rc.7"),
+        );
+        assert!(row.copy);
+        assert_eq!(row.caption, "Install / update command");
+        assert_eq!(row.line, update::install_command_for(Some("0.5.0"), None));
+    }
+
+    #[test]
+    fn new_reader_switch_is_no_longer_called_alpha() {
+        assert_eq!(NEW_READER_LABEL, "New reader");
+        assert!(!NEW_READER_LABEL.contains("alpha"));
+    }
+
+    #[test]
     fn capture_notes_warn_about_the_gnome_flash_and_a_missing_kde_direct() {
         use stat_tracker::capture::KwinProbe;
         // GNOME: the flash is always said, as a warning once chosen.
-        let notes = capture_route_notes("ubuntu:GNOME", CaptureRoute::Auto, None, None);
+        let notes = capture_route_notes(
+            "ubuntu:GNOME",
+            SessionKind::Wayland,
+            CaptureRoute::Auto,
+            None,
+            None,
+        );
         assert_eq!(
             notes,
             vec![(GNOME_SCREENSHOT_NOTE.to_string(), NoteTone::Info)]
         );
         assert!(GNOME_SCREENSHOT_NOTE.contains("flashes the screen"));
         assert!(GNOME_SCREENSHOT_NOTE.contains("sound"));
-        let chosen = capture_route_notes("GNOME", CaptureRoute::Screenshot, None, None);
+        let chosen = capture_route_notes(
+            "GNOME",
+            SessionKind::Wayland,
+            CaptureRoute::Screenshot,
+            None,
+            None,
+        );
         assert_eq!(chosen[0].1, NoteTone::Warn);
         // Not on KDE.
-        assert!(capture_route_notes("KDE", CaptureRoute::Screenshot, None, None).is_empty());
+        assert!(
+            capture_route_notes(
+                "KDE",
+                SessionKind::Wayland,
+                CaptureRoute::Screenshot,
+                None,
+                None
+            )
+            .is_empty()
+        );
         // KDE direct there: nothing to say. Not there: the reason.
         assert!(
-            capture_route_notes("KDE", CaptureRoute::Kwin, Some(&KwinProbe::Available), None)
-                .is_empty()
+            capture_route_notes(
+                "KDE",
+                SessionKind::Wayland,
+                CaptureRoute::Kwin,
+                Some(&KwinProbe::Available),
+                None
+            )
+            .is_empty()
         );
         let missing = KwinProbe::Unavailable("KWin refused the call".into());
-        let notes = capture_route_notes("KDE", CaptureRoute::Auto, Some(&missing), None);
+        let notes = capture_route_notes(
+            "KDE",
+            SessionKind::Wayland,
+            CaptureRoute::Auto,
+            Some(&missing),
+            None,
+        );
         assert_eq!(notes.len(), 1);
         assert!(notes[0].0.contains("KWin refused the call"));
         assert_eq!(notes[0].1, NoteTone::Info);
         let notes = capture_route_notes(
             "KDE",
+            SessionKind::Wayland,
             CaptureRoute::Kwin,
             Some(&missing),
             Some("KDE direct capture is not available (x); using screen stream instead"),
@@ -3347,13 +3669,24 @@ token = \"not-a-real-token\"
         assert!(KDE_DIRECT_HELP.contains("never saved unless a debug option is on"));
         // Not checked is said plainly, never as a warning, even when chosen.
         let not_checked = KwinProbe::NotChecked("needs 6.8.1".into());
-        let notes = capture_route_notes("KDE", CaptureRoute::Kwin, Some(&not_checked), None);
+        let notes = capture_route_notes(
+            "KDE",
+            SessionKind::Wayland,
+            CaptureRoute::Kwin,
+            Some(&not_checked),
+            None,
+        );
         assert_eq!(notes.len(), 1);
         assert!(notes[0].0.starts_with("KDE direct was not checked"));
         assert!(!notes[0].0.contains("not available"));
         assert_eq!(notes[0].1, NoteTone::Info);
-        let notes =
-            capture_route_notes("KDE", CaptureRoute::Kwin, Some(&KwinProbe::NotProbed), None);
+        let notes = capture_route_notes(
+            "KDE",
+            SessionKind::Wayland,
+            CaptureRoute::Kwin,
+            Some(&KwinProbe::NotProbed),
+            None,
+        );
         assert_eq!(
             notes,
             vec![(KDE_DIRECT_NOT_CHECKED.to_string(), NoteTone::Info)]

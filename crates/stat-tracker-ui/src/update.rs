@@ -362,6 +362,56 @@ pub fn install_command_for(advertised: Option<&str>, current: Option<&str>) -> S
     UPDATE_CMD.to_string()
 }
 
+/// What a package-owned install (an AUR or distro package) is told in place
+/// of the install command. The curl installer would put a second copy in
+/// `~/.local` whose user unit and desktop entry shadow the package's, so a
+/// package update would stop reaching the app (S5-UP-2).
+pub fn package_update_line(owner: &crate::uninstall::PackageOwner) -> String {
+    use crate::uninstall::PackageManager;
+    match owner.manager {
+        PackageManager::Pacman => "Installed from a package: update with your package manager, \
+                                   for example `paru -Syu` or `yay -Syu`."
+            .to_string(),
+        PackageManager::Apt => "Installed from a package: update with your package manager, \
+                                for example `sudo apt update && sudo apt upgrade`."
+            .to_string(),
+    }
+}
+
+/// Which package owns the running binary, as far as the app knows yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageProbe<'a> {
+    /// The probe has not answered yet.
+    Pending,
+    /// The probe answered: the owning package, or `None` for a script
+    /// install (also when the probe failed or timed out).
+    Done(Option<&'a crate::uninstall::PackageOwner>),
+}
+
+/// Shown while the package probe has not answered.
+pub const PACKAGE_PROBE_PENDING: &str = "Checking how this app was installed…";
+
+/// The update plan for this install: never Ready when a package owns the
+/// running binary (the in-app update runs the curl installer), nor before
+/// the probe has answered, else [`evaluate_plan`].
+pub fn evaluate_plan_for(latest: &str, package: PackageProbe<'_>) -> UpdatePlan {
+    match package {
+        PackageProbe::Pending => UpdatePlan::Blocked {
+            reason: PACKAGE_PROBE_PENDING.into(),
+            hint: String::new(),
+        },
+        PackageProbe::Done(Some(owner)) => package_plan(owner),
+        PackageProbe::Done(None) => evaluate_plan(latest),
+    }
+}
+
+fn package_plan(owner: &crate::uninstall::PackageOwner) -> UpdatePlan {
+    UpdatePlan::Blocked {
+        reason: format!("This app comes from the {} package.", owner.package),
+        hint: package_update_line(owner),
+    }
+}
+
 /// Test hook `bootstrap.sh` honors. The GUI must not forward it into the
 /// installer, or a developer's shell could redirect the release download.
 pub const BOOTSTRAP_FETCH_HOOK_ENV: &str = "STAT_TRACKER_BOOTSTRAP_FETCH_CMD";
@@ -774,6 +824,9 @@ pub struct UpdateRunRequest {
     pub data_dir: PathBuf,
     pub stop_daemon: bool,
     pub service_installed: bool,
+    /// The package that owns the running binary: the plan is then never
+    /// Ready, even if a caller got here past the app's own check.
+    pub package: Option<crate::uninstall::PackageOwner>,
 }
 
 pub fn strip_ansi(s: &str) -> String {
@@ -993,7 +1046,7 @@ pub async fn run_in_app_update(
     req: UpdateRunRequest,
     gate: &'static UpdateGate,
 ) -> Result<String, String> {
-    let plan = evaluate_plan(&req.latest);
+    let plan = evaluate_plan_for(&req.latest, PackageProbe::Done(req.package.as_ref()));
     run_planned_update(&req, plan, &LiveUpdateIo, gate).await
 }
 
@@ -1395,6 +1448,71 @@ pub fn primary_action(
     }
 }
 
+/// What the update prompt shows, apart from the title, the notes and the
+/// GitHub / What's new buttons, which every install gets.
+#[derive(Debug, Clone)]
+pub struct BannerModel {
+    /// Why Update now cannot run (amber).
+    pub warning: Option<String>,
+    /// A package install: update with the package manager (S5-UP-2).
+    pub package_line: Option<String>,
+    /// The install command line, with its Copy button.
+    pub command: Option<String>,
+    /// Update now / Restart now: label and what it sends (`None`: shown
+    /// but disabled). The whole button is left out for a package install.
+    pub primary: Option<(&'static str, Option<Message>)>,
+}
+
+/// [`BannerModel`] for the banner's inputs. A package install gets only its
+/// package-manager line: no warning, no command or Copy, no Update now.
+/// Until the package probe answers there is no command or Copy either, and
+/// Update now is disabled.
+pub fn banner_model(
+    info: &UpdateInfo,
+    progress: &UpdateProgress,
+    plan: &UpdatePlan,
+    restart: RestartNeed,
+    package: PackageProbe<'_>,
+) -> BannerModel {
+    match package {
+        PackageProbe::Done(Some(owner)) => {
+            return BannerModel {
+                warning: None,
+                package_line: Some(package_update_line(owner)),
+                command: None,
+                primary: None,
+            };
+        }
+        PackageProbe::Pending => {
+            return BannerModel {
+                warning: Some(PACKAGE_PROBE_PENDING.into()),
+                package_line: None,
+                command: None,
+                primary: Some(("Update now", None)),
+            };
+        }
+        PackageProbe::Done(None) => {}
+    }
+    let running = matches!(progress, UpdateProgress::Running);
+    let succeeded = matches!(progress, UpdateProgress::Succeeded(_));
+    let can_run = plan.can_run() && !running && !succeeded;
+    let warning = match plan {
+        UpdatePlan::Blocked { reason, hint } if !succeeded => {
+            Some(format!("{reason} {hint}").trim().to_string()).filter(|w| !w.is_empty())
+        }
+        _ => None,
+    };
+    BannerModel {
+        warning,
+        package_line: None,
+        command: Some(pinned_install_command(&info.latest)),
+        primary: Some(primary_action(progress, can_run, restart)),
+    }
+}
+
+/// The update prompt. `package` is what the app knows about the package
+/// that owns the running binary: see [`banner_model`].
+#[allow(clippy::too_many_arguments)]
 pub fn banner<'a>(
     info: &UpdateInfo,
     progress: &UpdateProgress,
@@ -1403,11 +1521,10 @@ pub fn banner<'a>(
     notes_ui: crate::notes::NotesUi<'a>,
     notes_expanded: bool,
     restart: RestartNeed,
+    package: PackageProbe<'_>,
 ) -> Element<'a, Message> {
     let url = info.url.clone();
-    let cmd = pinned_install_command(&info.latest);
-    let running = matches!(progress, UpdateProgress::Running);
-    let can_run = plan.can_run() && !running && !matches!(progress, UpdateProgress::Succeeded(_));
+    let model = banner_model(info, progress, plan, restart, package);
     let lead = notes
         .first()
         .map(|section| banner_lead(&section.summary))
@@ -1452,43 +1569,50 @@ pub fn banner<'a>(
         }
     }
 
-    if let UpdatePlan::Blocked { reason, hint } = plan
-        && !matches!(progress, UpdateProgress::Succeeded(_))
-    {
+    if let Some(line) = model.package_line {
+        body = body.push(text(line).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2));
+    }
+    if let Some(warning) = model.warning {
         body = body.push(
-            text(format!("{reason} {hint}"))
+            text(warning)
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(theme::WARN),
         );
     }
-
-    body = body.push(
-        text(cmd)
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(theme::ACCENT),
-    );
-
-    let (label, on_press) = primary_action(progress, can_run, restart);
-    let mut update_btn = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
-        .padding(Padding::from([8, 16]))
-        .style(theme::chip(on_press.is_some()));
-    if let Some(message) = on_press {
-        update_btn = update_btn.on_press(message);
+    if let Some(cmd) = &model.command {
+        body = body.push(
+            text(cmd.clone())
+                .size(SIZE_META)
+                .font(FONT_MEDIUM)
+                .color(theme::ACCENT),
+        );
     }
 
-    let actions = row![
-        update_btn,
-        button(
-            text("Copy command")
-                .size(SIZE_META)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT),
-        )
-        .padding(Padding::from([8, 16]))
-        .style(theme::ghost_btn())
-        .on_press(Message::CopyUpdateCmd),
+    let mut actions = row![].spacing(8);
+    if let Some((label, on_press)) = model.primary {
+        let mut update_btn = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
+            .padding(Padding::from([8, 16]))
+            .style(theme::chip(on_press.is_some()));
+        if let Some(message) = on_press {
+            update_btn = update_btn.on_press(message);
+        }
+        actions = actions.push(update_btn);
+    }
+    if model.command.is_some() {
+        actions = actions.push(
+            button(
+                text("Copy command")
+                    .size(SIZE_META)
+                    .font(FONT_SEMIBOLD)
+                    .color(TEXT),
+            )
+            .padding(Padding::from([8, 16]))
+            .style(theme::ghost_btn())
+            .on_press(Message::CopyUpdateCmd),
+        );
+    }
+    let actions = actions.push(
         button(
             text("Open on GitHub")
                 .size(SIZE_META)
@@ -1498,6 +1622,8 @@ pub fn banner<'a>(
         .padding(Padding::from([8, 16]))
         .style(theme::ghost_btn())
         .on_press(Message::OpenUpdate(url)),
+    );
+    let actions = actions.push(
         button(
             text(if banner_shows_notes(notes_expanded) {
                 "Hide what's new"
@@ -1511,8 +1637,7 @@ pub fn banner<'a>(
         .padding(Padding::from([8, 16]))
         .style(theme::ghost_btn())
         .on_press(Message::ToggleUpdateNotes),
-    ]
-    .spacing(8);
+    );
 
     body = body.push(actions);
     if banner_shows_notes(notes_expanded) {
@@ -2112,6 +2237,130 @@ mod tests {
     }
 
     #[test]
+    fn package_installs_are_sent_to_their_package_manager() {
+        use crate::uninstall::{PackageManager, PackageOwner};
+        let aur = PackageOwner {
+            manager: PackageManager::Pacman,
+            package: "scuffed-stat-tracker-bin".into(),
+        };
+        let deb = PackageOwner {
+            manager: PackageManager::Apt,
+            package: "scuffed-stat-tracker".into(),
+        };
+        let line = package_update_line(&aur);
+        assert!(line.starts_with("Installed from a package: update with your package manager"));
+        assert!(line.contains("paru -Syu") && line.contains("yay -Syu"));
+        assert!(package_update_line(&deb).contains("apt"));
+        for owner in [&aur, &deb] {
+            let line = package_update_line(owner);
+            assert!(!line.contains("curl") && !line.contains("bash"), "{line}");
+            // Never Ready: the in-app update runs the curl installer.
+            let plan = evaluate_plan_for("0.5.0", PackageProbe::Done(Some(owner)));
+            let UpdatePlan::Blocked { reason, hint } = &plan else {
+                panic!("package plan must be blocked: {plan:?}");
+            };
+            assert!(reason.contains(&owner.package));
+            assert_eq!(*hint, line);
+            assert!(!plan.can_run());
+        }
+    }
+
+    fn banner_info() -> UpdateInfo {
+        UpdateInfo {
+            latest: "0.5.0".into(),
+            current: "0.5.0-rc.7".into(),
+            url: "https://example.invalid/release".into(),
+            release_bodies: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn package_probe_keeps_update_now_off_until_it_answers() {
+        let plan = evaluate_plan_for("0.5.0", PackageProbe::Pending);
+        assert!(!plan.can_run());
+        let UpdatePlan::Blocked { reason, .. } = &plan else {
+            unreachable!()
+        };
+        assert_eq!(reason, PACKAGE_PROBE_PENDING);
+        let model = banner_model(
+            &banner_info(),
+            &UpdateProgress::Idle,
+            &plan,
+            RestartNeed::Unknown,
+            PackageProbe::Pending,
+        );
+        assert!(matches!(model.primary, Some(("Update now", None))));
+        assert_eq!(model.warning.as_deref(), Some(PACKAGE_PROBE_PENDING));
+        // No curl command to copy before the app knows it is not a package.
+        assert!(model.command.is_none());
+    }
+
+    #[test]
+    fn banner_for_a_package_install_has_no_command_copy_or_update_now() {
+        use crate::uninstall::{PackageManager, PackageOwner};
+        let aur = PackageOwner {
+            manager: PackageManager::Pacman,
+            package: "scuffed-stat-tracker-bin".into(),
+        };
+        let plan = evaluate_plan_for("0.5.0", PackageProbe::Done(Some(&aur)));
+        for progress in [
+            UpdateProgress::Idle,
+            UpdateProgress::Failed("x".into()),
+            UpdateProgress::Running,
+        ] {
+            let model = banner_model(
+                &banner_info(),
+                &progress,
+                &plan,
+                RestartNeed::Unknown,
+                PackageProbe::Done(Some(&aur)),
+            );
+            assert!(model.command.is_none(), "no curl command or Copy");
+            assert!(model.primary.is_none(), "no Update now");
+            assert!(model.warning.is_none());
+            assert_eq!(model.package_line, Some(package_update_line(&aur)));
+        }
+    }
+
+    #[test]
+    fn banner_for_a_script_install_is_as_before() {
+        let ready = UpdatePlan::Ready {
+            prefix: PathBuf::from("/home/u/.local"),
+            tag: release_tag("0.5.0"),
+        };
+        let model = banner_model(
+            &banner_info(),
+            &UpdateProgress::Idle,
+            &ready,
+            RestartNeed::Unknown,
+            PackageProbe::Done(None),
+        );
+        assert_eq!(model.command, Some(pinned_install_command("0.5.0")));
+        assert!(matches!(
+            model.primary,
+            Some(("Update now", Some(Message::RunUpdate)))
+        ));
+        assert!(model.warning.is_none() && model.package_line.is_none());
+        let blocked = UpdatePlan::Blocked {
+            reason: "Cannot write to /usr.".into(),
+            hint: "Copy the command.".into(),
+        };
+        let model = banner_model(
+            &banner_info(),
+            &UpdateProgress::Idle,
+            &blocked,
+            RestartNeed::Unknown,
+            PackageProbe::Done(None),
+        );
+        assert_eq!(
+            model.warning.as_deref(),
+            Some("Cannot write to /usr. Copy the command.")
+        );
+        assert!(model.command.is_some());
+        assert!(matches!(model.primary, Some(("Update now", None))));
+    }
+
+    #[test]
     fn install_command_pins_advertised_tag_then_current() {
         let advertised = install_command_for(Some("0.4.15"), Some("0.4.14"));
         assert!(
@@ -2481,6 +2730,7 @@ mod tests {
             data_dir: PathBuf::from("/tmp/sst-update-test"),
             stop_daemon,
             service_installed: false,
+            package: None,
         }
     }
 

@@ -7,7 +7,7 @@ mod portal_backend;
 mod pw;
 mod route;
 pub use flight::is_busy as is_capture_busy;
-pub use route::{KWIN_DIRECT_DEFAULT_ON_KDE, KwinProbe, is_gnome, is_kde};
+pub use route::{KWIN_DIRECT_DEFAULT_ON_KDE, KwinProbe, SessionKind, is_gnome, is_kde};
 mod screencast;
 mod stream_pause;
 pub mod wayshot;
