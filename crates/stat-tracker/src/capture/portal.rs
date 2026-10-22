@@ -28,9 +28,14 @@ pub async fn capture(
         .map_err(|err| format!("portal screenshot task failed: {err}"))?
 }
 
+/// Our CPU and the step times go to [`crate::perf`]. CPU is thread time
+/// around the synchronous sections only (PNG decode, crop and resize, and
+/// the geometry read on its blocking thread), because an await can move
+/// this task to another thread.
 async fn capture_request(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    let sent = std::time::Instant::now();
     let response = ashpd::desktop::screenshot::ScreenshotRequest::default()
         .interactive(false)
         .modal(false)
@@ -39,14 +44,22 @@ async fn capture_request(
         .map_err(|e| format!("portal screenshot request failed: {e}"))?
         .response()
         .map_err(|e| format!("portal screenshot response failed: {e}"))?;
+    let round_trip = sent.elapsed();
 
     let uri = response.uri().to_string();
     let path = file_uri_path(&uri).ok_or("unexpected screenshot URI: not a local file")?;
     // The portal wrote this file for us. It goes on every path out of here,
     // a decode error included, so no screenshot is left behind.
     let file = RemoveOnDrop(path);
+    let png_bytes = std::fs::metadata(&file.0).map_or(0, |m| m.len());
 
+    // Synchronous on this worker thread, with no await inside, so thread
+    // CPU time measures it.
+    let decode_started = std::time::Instant::now();
+    let decode_cpu_started = crate::perf::thread_cpu();
     let img = image::open(&file.0).map_err(|e| format!("failed to open portal screenshot: {e}"))?;
+    let mut cpu = crate::perf::thread_cpu().saturating_sub(decode_cpu_started);
+    let decode = decode_started.elapsed();
     drop(file);
 
     tracing::debug!(
@@ -55,8 +68,37 @@ async fn capture_request(
         "screen captured via XDG Desktop Portal"
     );
 
-    let outputs = output_rects().await;
-    let Some((index, rect)) = crop_rect(&outputs, output_name, img.width(), img.height())? else {
+    let geometry_started = std::time::Instant::now();
+    let (outputs, geometry_cpu) = output_rects_timed().await;
+    let geometry = geometry_started.elapsed();
+    cpu = cpu.saturating_add(geometry_cpu);
+
+    let crop_started = std::time::Instant::now();
+    let crop_cpu_started = crate::perf::thread_cpu();
+    let fitted = crop_to_output(img, &outputs, output_name);
+    cpu = cpu.saturating_add(crate::perf::thread_cpu().saturating_sub(crop_cpu_started));
+    let crop = crop_started.elapsed();
+    if fitted.is_ok() {
+        crate::perf::record_cpu(crate::perf::Stage::Capture, cpu);
+        crate::perf::record_portal_shot(crate::perf::PortalShot {
+            round_trip,
+            png_bytes,
+            decode,
+            geometry,
+            crop,
+        });
+    }
+    fitted
+}
+
+/// Crop a whole-desktop screenshot to the chosen output and scale it to
+/// the output's real size. One output, or no geometry, keeps `img`.
+fn crop_to_output(
+    img: DynamicImage,
+    outputs: &[OutputRect],
+    output_name: Option<&str>,
+) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
+    let Some((index, rect)) = crop_rect(outputs, output_name, img.width(), img.height())? else {
         return Ok(img);
     };
     let output = &outputs[index];
@@ -98,24 +140,46 @@ pub async fn list_outputs() -> Vec<String> {
     output_rects().await.into_iter().map(|o| o.name).collect()
 }
 
-/// Output rectangles for a stream that may be one monitor or the whole desktop.
+/// Output rectangles for a stream that may be one monitor or the whole
+/// desktop. Stream open uses this; its CPU is not capture CPU.
 pub(crate) async fn output_geometry() -> Vec<OutputRect> {
     output_rects().await
 }
 
+/// [`output_geometry`] and the thread CPU of the read, for a stream grab,
+/// which counts that CPU as capture CPU.
+pub(crate) async fn output_geometry_timed() -> (Vec<OutputRect>, std::time::Duration) {
+    output_rects_timed().await
+}
+
 async fn output_rects() -> Vec<OutputRect> {
+    output_rects_timed().await.0
+}
+
+/// The output rectangles and the thread CPU the read took on its blocking
+/// thread.
+async fn output_rects_timed() -> (Vec<OutputRect>, std::time::Duration) {
     if !super::wayshot::is_available() {
-        return Vec::new();
+        return (Vec::new(), std::time::Duration::ZERO);
     }
-    match tokio::task::spawn_blocking(super::wayshot::output_rects).await {
-        Ok(Ok(outputs)) => outputs,
-        Ok(Err(e)) => {
+    let read = tokio::task::spawn_blocking(|| {
+        let cpu_started = crate::perf::thread_cpu();
+        let outputs = super::wayshot::output_rects();
+        (
+            outputs,
+            crate::perf::thread_cpu().saturating_sub(cpu_started),
+        )
+    })
+    .await;
+    match read {
+        Ok((Ok(outputs), cpu)) => (outputs, cpu),
+        Ok((Err(e), cpu)) => {
             tracing::debug!(error = %e, "could not read output geometry for the portal");
-            Vec::new()
+            (Vec::new(), cpu)
         }
         Err(e) => {
             tracing::debug!(error = %e, "output geometry task failed");
-            Vec::new()
+            (Vec::new(), std::time::Duration::ZERO)
         }
     }
 }

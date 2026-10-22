@@ -1324,6 +1324,8 @@ pub fn open_stream(fd: std::os::fd::RawFd, node_id: u32, max_fps: u32) -> Result
     }
     let lib = pipewire_library()?;
     let symbols = load_symbols(lib)?;
+    // Until PipeWire negotiates, the cap is the configured one.
+    crate::perf::set_stream_cap(configured_cap(max_fps));
     let state = Arc::new(State {
         stream: AtomicPtr::new(std::ptr::null_mut()),
         loop_: AtomicPtr::new(std::ptr::null_mut()),
@@ -1772,8 +1774,9 @@ extern "C" fn on_param(data: *mut c_void, id: u32, param: *const SpaPod) {
             state.height.store(info.height, Ordering::Release);
         }
     }
+    let rates = pod::fractions(bytes);
+    crate::perf::set_stream_cap(stream_cap(&rates, state.max_fps));
     if !state.rate_logged.swap(true, Ordering::AcqRel) {
-        let rates = pod::fractions(bytes);
         tracing::info!("{}", pod::negotiated_rate_line(&rates, state.max_fps));
     }
     let stream = state.stream.load(Ordering::Acquire);
@@ -1826,6 +1829,7 @@ extern "C" fn on_process(data: *mut c_void) {
         }
         let seq = state.dequeue_seq.fetch_add(1, Ordering::AcqRel) + 1;
         state.received.fetch_add(1, Ordering::Relaxed);
+        crate::perf::note_stream_delivered();
         // Every dequeued buffer, including one the throttle drops. This is
         // the PipeWire clock. There is no way to ask a consumer stream for
         // a frame, so a poll does not move this.
@@ -1862,8 +1866,15 @@ extern "C" fn on_process(data: *mut c_void) {
     // A black buffer does not end the grab. An early Tab buffer does not
     // either: the request stays up until a frame at or after the overlay
     // delay is stored, so the stream keeps delivering the next one.
+    // This callback runs on the PipeWire thread, start to end, so thread
+    // CPU time around the copy is the copy's CPU.
+    let cpu_started = crate::perf::thread_cpu();
+    let info = buffer_info(state, newest);
     let copied = copy_buffer(state, newest, newest_seq, newest_pts, now_ms);
+    let copy_cpu = crate::perf::thread_cpu().saturating_sub(cpu_started);
     unsafe { (state.queue)(stream, newest) };
+    // After the requeue, so the log never holds the buffer back.
+    crate::perf::record_stream_copy(info, copied.is_some(), copy_cpu);
     match copied {
         Some(frame) if !framebuf::frame_is_blank(&frame) => {
             let frame = Arc::new(frame);
@@ -1960,6 +1971,62 @@ fn note_fps(state: &State) {
         if info {
             tracing::info!("{info_line}");
         }
+    }
+}
+
+/// What `buf` is, for the performance log: the first data plane's memory
+/// type and chunk size, and the negotiated format and size.
+fn buffer_info(state: &State, buf: *mut PwBuffer) -> Option<crate::perf::StreamBuffer> {
+    if buf.is_null() {
+        return None;
+    }
+    let pw = unsafe { &*buf };
+    if pw.buffer.is_null() {
+        return None;
+    }
+    let spa = unsafe { &*pw.buffer };
+    if spa.n_datas == 0 || spa.datas.is_null() {
+        return None;
+    }
+    let data = unsafe { &*spa.datas };
+    let bytes = unsafe { data.chunk.as_ref() }.map_or(0, |c| c.size);
+    Some(crate::perf::StreamBuffer {
+        kind: data_type_name(data.type_),
+        bytes,
+        format: framebuf::format_name(state.format.load(Ordering::Acquire)),
+        width: state.width.load(Ordering::Acquire),
+        height: state.height.load(Ordering::Acquire),
+    })
+}
+
+fn configured_cap(max_fps: u32) -> crate::perf::StreamCap {
+    crate::perf::StreamCap {
+        num: max_fps,
+        den: 1,
+        source: "configured",
+    }
+}
+
+/// The negotiated max-framerate from a Format's fractions, else the
+/// configured `max_fps`.
+pub fn stream_cap(rates: &[(u32, u32)], max_fps: u32) -> crate::perf::StreamCap {
+    match pod::negotiated_cap(rates) {
+        Some((num, den)) => crate::perf::StreamCap {
+            num,
+            den,
+            source: "negotiated",
+        },
+        None => configured_cap(max_fps),
+    }
+}
+
+/// `spa_data_type` as the performance log names it.
+pub fn data_type_name(type_: u32) -> &'static str {
+    match type_ {
+        SPA_DATA_MEM_PTR => "memptr",
+        SPA_DATA_MEM_FD => "memfd",
+        SPA_DATA_DMA_BUF => "dmabuf",
+        _ => "other",
     }
 }
 
@@ -2245,6 +2312,35 @@ mod tests {
         assert!(plane_window(0, 0, 16, 16, 1).is_none());
         assert!(plane_window(0, 8, 4, 16, 1).is_none());
         assert!(plane_window(8, 16, 16, 16, 1).is_none());
+    }
+
+    #[test]
+    fn the_stream_cap_is_the_negotiated_max_framerate() {
+        // KWin's negotiated Format: framerate 0/1, maxFramerate 4/1 in a
+        // 0/1..60/1 range.
+        let pod = pod::kwin_negotiated_format_pod(framebuf::FMT_BGRX, 2560, 1440, 4);
+        let cap = stream_cap(&pod::fractions(&pod), 2);
+        assert_eq!((cap.num, cap.den, cap.source), (4, 1, "negotiated"));
+        assert_eq!(cap.label(), "4");
+        // A fixed rate alone is the cap.
+        let fixed = stream_cap(&[(60_000, 1_001)], 4);
+        assert_eq!(
+            (fixed.label(), fixed.source),
+            ("59.94".into(), "negotiated")
+        );
+        // Variable rate and no max: the configured cap.
+        for rates in [&[][..], &[(0, 1)][..], &[(0, 1), (0, 1)][..]] {
+            let c = stream_cap(rates, 3);
+            assert_eq!((c.num, c.den, c.source), (3, 1, "configured"), "{rates:?}");
+        }
+    }
+
+    #[test]
+    fn data_types_are_named() {
+        assert_eq!(data_type_name(SPA_DATA_MEM_PTR), "memptr");
+        assert_eq!(data_type_name(SPA_DATA_MEM_FD), "memfd");
+        assert_eq!(data_type_name(SPA_DATA_DMA_BUF), "dmabuf");
+        assert_eq!(data_type_name(0), "other");
     }
 
     #[test]

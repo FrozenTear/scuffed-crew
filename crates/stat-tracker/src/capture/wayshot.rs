@@ -127,7 +127,10 @@ pub async fn capture_with_output(
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let target = output_name.map(|s| s.to_string());
     tokio::task::spawn_blocking(move || {
-        with_wayshot(|wayshot| {
+        // The whole grab runs on this blocking thread, so its thread CPU
+        // (connect, screencopy, convert) is the capture's CPU.
+        let cpu_started = crate::perf::thread_cpu();
+        let result = with_wayshot(|wayshot| {
             let outputs = wayshot.get_all_outputs();
             if outputs.is_empty() {
                 return Err("no Wayland outputs found".into());
@@ -166,7 +169,14 @@ pub async fn capture_with_output(
                 "screen captured via libwayshot"
             );
             Ok(img)
-        })
+        });
+        if result.is_ok() {
+            crate::perf::record_cpu(
+                crate::perf::Stage::Capture,
+                crate::perf::thread_cpu().saturating_sub(cpu_started),
+            );
+        }
+        result
     })
     .await?
 }
