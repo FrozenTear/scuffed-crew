@@ -241,8 +241,9 @@ arrives. On niri, which draws a shared screen only when it changes, the
 stream reaching Streaming again also answers it, so a still screen does
 not count. KWin always sends a frame on resume, so there a resume that
 reaches Streaming with no frame is a broken one. The tracker stops pausing
-a stream, keeps it running and logs one warning when two resumes in a row
-are not answered within 1.5 s of active time, when a Tab misses while its
+a stream, keeps it running and logs one warning when resumes stay
+unanswered for 1.5 s of active time twice with no answer in between (the
+time adds up across resumes), when a Tab misses while its
 resume is not answered, when the stream stays paused 1.5 s of active time
 after a resume, at once when the stream fails while a resume is not
 answered, at once when the stream fails within 2 seconds of a pause the

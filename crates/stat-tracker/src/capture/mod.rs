@@ -341,6 +341,7 @@ pub fn is_expected_poll_miss(err: &str) -> bool {
         || screencast::is_share_closed_until_game(err)
         || screencast::is_stream_miss(err)
         || err.contains(pw::NO_STREAM_FRAME)
+        || err.contains(portal::SHOT_BACKOFF)
 }
 
 /// What the screenshot portal's last request came to, for the app's
@@ -386,7 +387,7 @@ pub fn capture_notice() -> String {
 }
 
 /// The prompt notice: a request waits on a permission dialog, perhaps.
-pub const PORTAL_PROMPT_NOTICE: &str = "A screenshot permission prompt may be waiting, possibly behind the game. Answer it to start capturing.";
+pub const PORTAL_PROMPT_NOTICE: &str = "A screenshot permission prompt may be waiting, possibly behind the game. Screenshots wait for it.";
 
 /// The stall notice: permission is granted and the portal did not answer.
 pub const PORTAL_STALL_NOTICE: &str = "No answer from the screenshot portal. It may have stopped; restarting the tracker or the portal can help.";
@@ -1488,6 +1489,7 @@ mod tests {
             screencast::SHARE_CLOSED_UNTIL_GAME.to_string(),
             screencast::STREAM_MISS.to_string(),
             pw::NO_STREAM_FRAME.to_string(),
+            format!("portal screenshot: {}", portal::SHOT_BACKOFF),
         ] {
             assert!(is_expected_poll_miss(&err), "{err}");
         }
