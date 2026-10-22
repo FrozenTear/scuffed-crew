@@ -774,6 +774,29 @@ fn performance_report_sends_only_the_perf_log_with_empty_suspect_reads() {
     assert_eq!(names, ["log.txt", "manifest.json"]);
 }
 
+/// Two full `perf.log` files (the rotation size, about 20 hours of the
+/// longest lines) fit in a Performance report's `log.txt` with no line cut.
+#[test]
+fn a_full_perf_log_pair_fits_a_performance_report() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = format!(
+        "2026-10-22T01:00:00Z sample window_s=60 {}",
+        "compositor_cpu_pct=38.2 ".repeat(34)
+    );
+    assert!(line.len() > 840, "{}", line.len());
+    // Enough lines to rotate once and fill the new file again.
+    let per_file = crate::perf_log::MAX_BYTES as usize / (line.len() + 1);
+    for _ in 0..per_file * 2 {
+        crate::perf_log::append_to(dir.path(), &line, crate::perf_log::MAX_BYTES);
+    }
+    assert!(dir.path().join(crate::perf_log::ROTATED).is_file());
+    let raw = crate::perf_log::read(dir.path());
+    assert!(raw.len() > 1_000_000, "{}", raw.len());
+    let text = bundle::performance_log_text(&ctx(), &raw);
+    assert_eq!(text.lines().count(), raw.lines().count(), "no line was cut");
+    assert!(text.len() <= super::scrub::LOG_MAX_BYTES / 2);
+}
+
 #[test]
 fn bad_input_is_refused() {
     let dir = tempfile::tempdir().unwrap();

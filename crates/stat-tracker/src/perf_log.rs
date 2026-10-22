@@ -28,11 +28,14 @@ use crate::perf::Summary;
 
 pub const FILE: &str = "perf.log";
 pub const ROTATED: &str = "perf.log.1";
-/// Rotate once `perf.log` reaches this size. A sample line with the
-/// stream and desktop fields is about 800 bytes, so one file holds about
-/// 650 one-minute lines (11 hours) and the pair about 22 hours. The pair
-/// (at most about 1 MiB) stays under the Performance report's 2 MiB
-/// `log.txt` share and the 4 MiB scrub cap, so a report carries all of it.
+/// Rotate once `perf.log` reaches this size. The longest sample line (the
+/// portal split, the stream fields and every desktop field) is about 850
+/// bytes, so one file holds at least about 600 one-minute lines (10 hours)
+/// and the pair about 20 hours; a stream-only KDE line is shorter (about
+/// 600 bytes, 14 hours a file). The pair, at most about 1 MiB, is under
+/// the Performance report's `log.txt` share (half of the 4 MiB
+/// [`crate::report::scrub::LOG_MAX_BYTES`], 2 MiB), so a report carries
+/// all of it.
 pub const MAX_BYTES: u64 = 512 * 1024;
 
 enum Msg {
@@ -605,7 +608,7 @@ mod tests {
              compositor=kwin_wayland compositor_cpu_pct=38.2 xwayland_cpu_pct=9.0 portal_cpu_pct=0.4 \
              pipewire_cpu_pct=na gui_cpu_pct=0.3 companion=running companion_cpu_pct=4.5"
         );
-        // MAX_BYTES assumes about 800 bytes a line.
+        // MAX_BYTES assumes at most about 850 bytes a line.
         assert!(line.len() < 1_000, "{} bytes", line.len());
         // A stream with nothing delivered has no ratio, and no buffer line.
         s.portal = None;
