@@ -82,7 +82,10 @@ jobs:
           set -euo pipefail
           # A dead mirror must fail the job in minutes, not hang it (alpha.5).
           APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          sudo timeout 300 apt-get "${APT_OPTS[@]}" update
+          # An unrelated runner repo that refuses the update (a 403) must
+          # not fail the job: the install below decides.
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
+            || echo "WARN: apt-get update failed; trying install with the cached lists" >&2
           sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
             libegl-dev libgbm-dev \
@@ -274,7 +277,10 @@ jobs:
           set -euo pipefail
           # A dead mirror must fail the job in minutes, not hang it (alpha.5).
           APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          sudo timeout 300 apt-get "${APT_OPTS[@]}" update
+          # An unrelated runner repo that refuses the update (a 403) must
+          # not fail the job: the install below decides.
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
+            || echo "WARN: apt-get update failed; trying install with the cached lists" >&2
           sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
             libegl-dev libgbm-dev \
