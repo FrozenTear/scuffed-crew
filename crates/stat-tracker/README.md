@@ -260,8 +260,9 @@ after a second such stream it stays off until the tracker restarts. To
 turn pausing off yourself, set `screencast_pause_between_grabs = false`,
 or put `STAT_TRACKER_SCREENCAST_PAUSE=0` in `~/.config/environment.d/` for
 the systemd service (as for `STAT_TRACKER_CAPTURE` below). The log line
-`screencast timing:` (once a minute while grabs succeed) shows `resumes`,
-`avg_resume_ms`, `max_resume_ms` and `resumes_without_buffer`. With
+`screencast timing (totals since the share opened):` (once a minute while
+grabs succeed) shows `resumes`, `avg_resume_ms`, `max_resume_ms` and
+`resumes_without_buffer`, counted since the share opened. With
 pausing on, the `screencast frames received per second` line (every 3
 minutes) reads far below the cap: frames arrive only while a grab holds
 the stream. A later poll that sees

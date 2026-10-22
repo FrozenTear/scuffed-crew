@@ -26,7 +26,23 @@ const COMPOSITORS: &[&str] = &[
     "labwc",
     "wayfire",
     "river",
+    // X11 window managers and compositors, and gamescope and COSMIC
+    // (S5-CAP-14: these desktops logged no compositor CPU).
+    "cinnamon",
+    "muffin",
+    "xfwm4",
+    "marco",
+    "picom",
+    "compiz",
+    "budgie-wm",
+    "gamescope",
+    "gamescope-wl",
+    "cosmic-comp",
 ];
+
+/// The X server's `comm`: `Xorg`, or `X` when it was started through the
+/// `/usr/bin/X` link.
+const XORG_COMMS: &[&str] = &["Xorg", "X"];
 
 /// `stat-tracker-gui` as `comm` shows it, cut to 15 bytes. The same
 /// binary runs the main window and, with `--companion`, the overlay.
@@ -63,7 +79,7 @@ pub fn classify(comm: &str) -> Option<Role> {
     let comm = comm.trim_end_matches('\n');
     if COMPOSITORS.contains(&comm) {
         Some(Role::Compositor)
-    } else if comm == "Xorg" {
+    } else if XORG_COMMS.contains(&comm) {
         Some(Role::Xorg)
     } else if comm == "Xwayland" {
         Some(Role::Xwayland)
@@ -586,7 +602,23 @@ mod tests {
         assert_eq!(classify("Hyprland"), Some(Role::Compositor));
         assert_eq!(classify("gnome-shell"), Some(Role::Compositor));
         assert_eq!(classify("Xorg"), Some(Role::Xorg));
+        assert_eq!(classify("X"), Some(Role::Xorg));
         assert_eq!(classify("Xwayland"), Some(Role::Xwayland));
+        for comm in [
+            "cinnamon",
+            "muffin",
+            "xfwm4",
+            "marco",
+            "picom",
+            "compiz",
+            "budgie-wm",
+            "gamescope",
+            "gamescope-wl",
+            "cosmic-comp",
+        ] {
+            assert_eq!(classify(comm), Some(Role::Compositor), "{comm}");
+            assert!(comm.len() <= 15, "{comm} is longer than comm keeps");
+        }
         // stat-tracker-gui, cut to 15 bytes; the overlay is told apart by
         // its cmdline in `scan`
         assert_eq!(classify("stat-tracker-gu"), Some(Role::Gui));

@@ -1221,6 +1221,7 @@ async fn run_sync(
     };
     sweep_stale_staging(data_dir);
     let client = match reqwest::Client::builder()
+        .user_agent(crate::sync::USER_AGENT)
         .timeout(std::time::Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -2582,7 +2583,13 @@ mod tests {
                     .nth(1)
                     .unwrap_or("");
                 fake.requested.lock().expect("paths").push(path.to_string());
-                let response = if !authed {
+                // S5-SRV-4: every pack request names the tracker version.
+                let named = head.lines().any(|line| {
+                    line.eq_ignore_ascii_case(&format!("user-agent: {}", crate::sync::USER_AGENT))
+                });
+                let response = if !named {
+                    http_bytes(400, br#"{"error":"no tracker User-Agent"}"#, None, false)
+                } else if !authed {
                     http_bytes(401, br#"{"error":"Unauthorized"}"#, None, false)
                 } else if path == "/api/tracker/packs" {
                     http_bytes(fake.list_status, &fake.list_body, fake.list_retry, false)
@@ -2868,7 +2875,10 @@ mod tests {
             requested: requested_paths(),
         });
         let base = spawn_fake(fake);
-        let client = reqwest::Client::new();
+        let client = reqwest::Client::builder()
+            .user_agent(crate::sync::USER_AGENT)
+            .build()
+            .expect("client");
         let response = client
             .get(format!("{base}/api/tracker/packs/{HEROES_PACK_NAME}"))
             .bearer_auth("pack-token")
