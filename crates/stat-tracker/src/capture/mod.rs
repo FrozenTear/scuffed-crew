@@ -9,6 +9,7 @@ mod route;
 pub use flight::is_busy as is_capture_busy;
 pub use route::{KWIN_DIRECT_DEFAULT_ON_KDE, KwinProbe, is_gnome, is_kde};
 mod screencast;
+mod stream_pause;
 pub mod wayshot;
 /// Native X11 capture (pure X11 sessions). Wired into selection by Lane C.
 pub mod x11;
@@ -277,6 +278,10 @@ pub use screencast::{
 };
 
 pub use framebuf::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, first_grab_press, tab_retry_press};
+pub use stream_pause::{
+    KeyHold, bridge_hold as stream_bridge_hold, decide_and_apply as decide_stream_pause,
+    end_tab_stream_hold, key_hold as stream_key_hold, with_tab_stream_hold,
+};
 
 /// One captured image plus whether the stream had not already handed it out.
 /// Screenshots are always new and have no sequence.

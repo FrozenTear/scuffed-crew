@@ -178,6 +178,28 @@ mode="$(stat -c %a "$ENV_FILE")"
 [[ "$mode" == "600" ]] || fail "session.env mode is $mode, want 600"
 pass "compositor environ overrides stale process env"
 
+# ── helper: KDE_SESSION_VERSION is carried from kwin_wayland, validated ─────
+KPROC="$TMP/kproc"
+mkdir -p "$KPROC/40" "$KPROC/41"
+printf 'kwin_wayland\n' > "$KPROC/40/comm"
+printf 'plasmashell\n' > "$KPROC/41/comm"
+write_environ "$KPROC/40/environ" \
+    "WAYLAND_DISPLAY=wayland-0" \
+    "XDG_CURRENT_DESKTOP=KDE" \
+    "KDE_SESSION_VERSION=6"
+write_environ "$KPROC/41/environ" "KDE_SESSION_VERSION=6;rm"
+KENV="$TMP/kde-session.env"
+env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE -u KDE_SESSION_VERSION \
+    HOME="$TMP/home" \
+    SCUFFED_PROC_ROOT="$KPROC" \
+    SCUFFED_SYSTEMCTL="$FAKE_CTL" \
+    SCUFFED_SESSION_ENV_FILE="$KENV" \
+    bash "$HELPER" 2> "$TMP/kde.err"
+grep -qx 'KDE_SESSION_VERSION=6' "$KENV" \
+    || fail "KDE_SESSION_VERSION not carried from kwin_wayland: $(cat "$KENV")"
+grep -q ';rm' "$KENV" && fail "invalid KDE_SESSION_VERSION landed: $(cat "$KENV")"
+pass "KDE_SESSION_VERSION carried and validated"
+
 # Invalid process value is dropped when no compositor has the key.
 mkdir -p "$TMP/empty-proc"
 rm -f "$LOG" "$ENV_FILE"

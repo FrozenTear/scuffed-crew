@@ -41,7 +41,9 @@ PROC_ROOT="${SCUFFED_PROC_ROOT:-/proc}"
 SYSTEMCTL_BIN="${SCUFFED_SYSTEMCTL:-systemctl}"
 SESSION_ENV_FILE="${SCUFFED_SESSION_ENV_FILE:-${HOME:-}/.config/scuffed-stat-tracker/session.env}"
 
-SESSION_VARS=(WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE)
+# KDE_SESSION_VERSION lets the daemon tell Plasma 5 from 6 (screen-stream
+# pausing is off on Plasma 5). Other desktops do not set it.
+SESSION_VARS=(WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE KDE_SESSION_VERSION)
 
 # Highest priority first. Sway and Hyprland lead: they are the desktops
 # that do not run `systemctl --user import-environment` on login.
@@ -96,6 +98,9 @@ valid_session_value() {
         XDG_SESSION_TYPE)
             [[ "$val" == "wayland" || "$val" == "x11" || "$val" == "tty" || "$val" == "mir" || "$val" == "unspecified" ]]
             ;;
+        KDE_SESSION_VERSION)
+            [[ "$val" =~ ^[0-9]{1,3}$ ]]
+            ;;
         *)
             return 1
             ;;
@@ -112,7 +117,7 @@ read_environ_file() {
         [[ "$key" == "$kv" ]] && continue
         val="${kv#*=}"
         case "$key" in
-            WAYLAND_DISPLAY|DISPLAY|XDG_CURRENT_DESKTOP|XDG_SESSION_TYPE)
+            WAYLAND_DISPLAY|DISPLAY|XDG_CURRENT_DESKTOP|XDG_SESSION_TYPE|KDE_SESSION_VERSION)
                 if valid_session_value "$key" "$val"; then
                     printf '%s=%s\n' "$key" "$val"
                 else
@@ -280,7 +285,7 @@ main() {
     for key in "${SESSION_VARS[@]}"; do
         if [[ -n "${FOUND[$key]:-}" ]]; then
             log "$key=${FOUND[$key]} (${FOUND_NOTE[$key]})"
-        else
+        elif [[ "$key" != KDE_SESSION_VERSION ]]; then
             missing+=("$key")
         fi
     done
