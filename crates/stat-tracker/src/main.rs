@@ -7428,19 +7428,21 @@ fn tab_retry_reason(outcome: &FrameAnalysisOutcome, use_new_reader: bool) -> &'s
 }
 
 /// How useful a Tab outcome is, so a later grab never replaces a better
-/// one. Higher is better: analysed and taken by the reader (4), team size
-/// unsure (3), not a scoreboard or refused by the reader (2), stream miss
-/// (1), share still opening or declined (0).
+/// one. Higher is better: analysed and taken by the reader (5), team size
+/// unsure (4), analysed but refused by the reader (3), not a scoreboard
+/// (2), stream miss (1), share still opening or declined (0). A refused
+/// board outranks a preflight reject: it carries the frame's outcome, the
+/// header outcome fallback and the own-seed verdict.
 fn tab_outcome_rank(outcome: &FrameAnalysisOutcome, use_new_reader: bool) -> u8 {
     match outcome {
-        FrameAnalysisOutcome::Analyzed(a) if reader_refusal(a, use_new_reader).is_some() => 2,
+        FrameAnalysisOutcome::Analyzed(a) if reader_refusal(a, use_new_reader).is_some() => 3,
         FrameAnalysisOutcome::ShareOpening
         | FrameAnalysisOutcome::Declined
         | FrameAnalysisOutcome::CaptureBusy => 0,
         FrameAnalysisOutcome::StreamMiss => 1,
         FrameAnalysisOutcome::NotAScoreboard { .. } => 2,
-        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 3,
-        FrameAnalysisOutcome::Analyzed(_) => 4,
+        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 4,
+        FrameAnalysisOutcome::Analyzed(_) => 5,
     }
 }
 
@@ -10688,6 +10690,18 @@ mod tests {
             TabResult::Accepted
         );
         assert!(tab_outcome_rank(&taken(), true) > tab_outcome_rank(&refused(), true));
+        // A refused board outranks a preflight reject, so a retry's
+        // refused board replaces an earlier reject.
+        let preflight_reject = FrameAnalysisOutcome::NotAScoreboard {
+            outcome: detect::MatchOutcome::Unknown,
+            frame: image::DynamicImage::new_rgb8(4, 4),
+            scan: detect::hero_portrait::RowScan {
+                dip_count: 0,
+                median_pitch: None,
+                spectral_pitch: None,
+            },
+        };
+        assert!(tab_outcome_rank(&refused(), true) > tab_outcome_rank(&preflight_reject, true));
         assert!(tab_retry_reason(&refused(), true).contains("refused"));
 
         // Refused, then the retry gets a board the reader takes.

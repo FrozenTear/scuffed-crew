@@ -343,9 +343,29 @@ pub fn is_expected_poll_miss(err: &str) -> bool {
         || err.contains(pw::NO_STREAM_FRAME)
 }
 
-/// Set while the last screenshot portal request was given up unanswered
-/// (S5-CAP-1); cleared by the next request the portal answers.
-static PORTAL_STALLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// What the screenshot portal's last request came to, for the app's
+/// notice (S5-CAP-1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PortalState {
+    /// Nothing to say: it answered, or nothing asked it.
+    Answering = 0,
+    /// A request waits and permission is not granted: a permission prompt
+    /// may be up, perhaps behind the game.
+    MayBePrompt = 1,
+    /// Permission is granted and a request got no answer: it was given up.
+    Stalled = 2,
+}
+
+static PORTAL_STATE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+fn portal_state() -> PortalState {
+    match PORTAL_STATE.load(std::sync::atomic::Ordering::Acquire) {
+        1 => PortalState::MayBePrompt,
+        2 => PortalState::Stalled,
+        _ => PortalState::Answering,
+    }
+}
 
 /// Where this process publishes [`capture_notice`]. Only the daemon sets
 /// it (the status file); the app's own grabs leave the daemon's file alone.
@@ -359,25 +379,26 @@ pub fn set_notice_sink(sink: impl Fn(&str) + Send + Sync + 'static) {
 }
 
 /// The sentence the app shows under the capture method: the route notice
-/// ([`route_notice`]) and, while the screenshot portal is not answering,
-/// that. Empty when there is nothing to say.
+/// ([`route_notice`]) and what the screenshot portal is up to. Empty when
+/// there is nothing to say.
 pub fn capture_notice() -> String {
-    notice_text(
-        &route_notice().unwrap_or_default(),
-        PORTAL_STALLED.load(std::sync::atomic::Ordering::Acquire),
-    )
+    notice_text(&route_notice().unwrap_or_default(), portal_state())
 }
 
+/// The prompt notice: a request waits on a permission dialog, perhaps.
+pub const PORTAL_PROMPT_NOTICE: &str = "A screenshot permission prompt may be waiting, possibly behind the game. Answer it to start capturing.";
+
+/// The stall notice: permission is granted and the portal did not answer.
+pub const PORTAL_STALL_NOTICE: &str = "No answer from the screenshot portal. It may have stopped; restarting the tracker or the portal can help.";
+
 /// [`capture_notice`] from its parts.
-fn notice_text(route: &str, portal_stalled: bool) -> String {
-    let stall = portal_stalled.then(|| {
-        format!(
-            "{}: a screenshot request got no answer in {} s and was closed; captures resume when it answers again (restart the tracker if they do not)",
-            capitalized(portal::SHOT_UNANSWERED),
-            portal::SHOT_GIVE_UP.as_secs()
-        )
-    });
-    match (route.trim(), stall) {
+fn notice_text(route: &str, portal: PortalState) -> String {
+    let portal = match portal {
+        PortalState::Answering => None,
+        PortalState::MayBePrompt => Some(PORTAL_PROMPT_NOTICE.to_string()),
+        PortalState::Stalled => Some(PORTAL_STALL_NOTICE.to_string()),
+    };
+    match (route.trim(), portal) {
         ("", None) => String::new(),
         ("", Some(stall)) => stall,
         (route, None) => route.to_string(),
@@ -385,19 +406,29 @@ fn notice_text(route: &str, portal_stalled: bool) -> String {
     }
 }
 
-fn capitalized(text: &str) -> String {
-    let mut chars = text.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+/// A grab worked, on any route: a stalled-portal notice no longer holds.
+/// A possible permission prompt stays until its request ends.
+fn note_grab_worked() {
+    if PORTAL_STATE
+        .compare_exchange(
+            PortalState::Stalled as u8,
+            PortalState::Answering as u8,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+        && let Some(sink) = NOTICE_SINK.get()
+    {
+        sink(&capture_notice());
+    }
 }
 
-/// A screenshot portal request was given up (`true`) or answered
-/// (`false`). A change is published through the daemon's sink.
-pub(crate) fn note_portal_stall(stalled: bool) {
-    let was = PORTAL_STALLED.swap(stalled, std::sync::atomic::Ordering::AcqRel);
-    if was != stalled
+/// What the screenshot portal's last request came to. A change is
+/// published through the daemon's sink. A successful grab on any route
+/// and a new route decision set [`PortalState::Answering`].
+pub(crate) fn note_portal_state(state: PortalState) {
+    let was = PORTAL_STATE.swap(state as u8, std::sync::atomic::Ordering::AcqRel);
+    if was != state as u8
         && let Some(sink) = NOTICE_SINK.get()
     {
         sink(&capture_notice());
@@ -742,6 +773,11 @@ pub async fn detect_backend() -> CaptureBackend {
             .map(|err| x11_failure_notice(&err))
     });
     *ROUTE_NOTICE.lock().unwrap_or_else(|err| err.into_inner()) = notice.unwrap_or_default();
+    // A new route decision: an old portal notice no longer holds.
+    PORTAL_STATE.store(
+        PortalState::Answering as u8,
+        std::sync::atomic::Ordering::Release,
+    );
     tracing::info!("{}", decision.info);
     if let Some(line) = &decision.forced_line {
         tracing::info!("{line}");
@@ -983,6 +1019,7 @@ pub async fn capture_screen_output_for(
     if result.is_ok() {
         crate::perf::set_backend(name);
         crate::perf::record(crate::perf::Stage::Capture, started.elapsed());
+        note_grab_worked();
     }
     result
 }
@@ -1385,20 +1422,16 @@ mod tests {
 
     #[test]
     fn the_capture_notice_adds_the_portal_stall_to_the_route_notice() {
-        assert_eq!(notice_text("", false), "");
-        assert_eq!(notice_text("route reason", false), "route reason");
-        let stall = notice_text("", true);
+        use PortalState::*;
+        assert_eq!(notice_text("", Answering), "");
+        assert_eq!(notice_text("route reason", Answering), "route reason");
+        assert_eq!(notice_text("", Stalled), PORTAL_STALL_NOTICE);
+        assert_eq!(notice_text("", MayBePrompt), PORTAL_PROMPT_NOTICE);
+        // A pending prompt is never told to restart anything.
+        assert!(!PORTAL_PROMPT_NOTICE.contains("restart"));
+        let both = notice_text("route reason", Stalled);
         assert!(
-            stall.starts_with("The screenshot portal stopped answering"),
-            "{stall}"
-        );
-        assert!(
-            stall.contains(&format!("{} s", portal::SHOT_GIVE_UP.as_secs())),
-            "{stall}"
-        );
-        let both = notice_text("route reason", true);
-        assert!(
-            both.starts_with("route reason. The screenshot portal"),
+            both.starts_with("route reason. No answer from the screenshot portal"),
             "{both}"
         );
     }

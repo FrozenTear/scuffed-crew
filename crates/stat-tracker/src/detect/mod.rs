@@ -404,9 +404,11 @@ async fn run_device(
 /// Pick up keyboards that appear after startup (USB re-plug, KVM switch, a
 /// hotkey daemon's uinput pass-through device). Cheap: a `stat` of
 /// `/dev/input` per tick, a full enumerate only when its mtime moved or the
-/// slow full-rescan timer fired. Duplicate Tab events (a physical key echoed
-/// by a non-grabbing pass-through device) are absorbed by the main loop's Tab
-/// debounce.
+/// slow full-rescan timer fired. A duplicate Tab event (a physical key
+/// echoed by a non-grabbing pass-through device) arrives while the capture
+/// of the first is running: it is queued, and dropped when that capture
+/// takes its board (the 3 s debounce covers one that comes after). Behind
+/// a capture that took no board it runs one more capture.
 async fn hotplug_scanner(registry: Registry, tx: mpsc::UnboundedSender<TabKey>) {
     let dir = std::path::Path::new("/dev/input");
     let mut last_mtime = std::fs::metadata(dir).and_then(|m| m.modified()).ok();
