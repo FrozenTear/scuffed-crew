@@ -3026,6 +3026,39 @@ mod tests {
     }
 
     #[test]
+    fn a_grab_result_tells_the_fail_safe_whether_a_tab_missed() {
+        let resumed = || {
+            let handle = test_stream(true);
+            assert!(handle.enable_pausing());
+            handle
+                .state
+                .pw_state
+                .store(PW_STREAM_STATE_PAUSED, Ordering::Release);
+            handle.set_active(false);
+            handle.set_active(true);
+            handle
+        };
+        let tab_miss = resumed();
+        tab_miss.note_grab_result(&Ok(GrabOutcome::TabMiss { delay_ms: 1_200 }));
+        assert!(
+            tab_miss.pause_tripped(),
+            "a Tab miss on an unanswered resume"
+        );
+        let frame = resumed();
+        frame.note_grab_result(&Ok(GrabOutcome::Frame {
+            frame: Arc::new(red_frame(1)),
+            is_new: true,
+        }));
+        assert!(!frame.pause_tripped());
+        let ended = resumed();
+        ended.note_grab_result(&Err(NO_STREAM_FRAME.into()));
+        assert!(
+            !ended.pause_tripped(),
+            "a poll with nothing is not a Tab miss"
+        );
+    }
+
+    #[test]
     fn a_stuck_resume_trips_through_the_handle_before_health_is_read() {
         let handle = test_stream(true);
         assert!(handle.enable_pausing());
