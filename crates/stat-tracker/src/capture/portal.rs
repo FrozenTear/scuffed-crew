@@ -261,7 +261,8 @@ where
                 tracing::warn!(
                     waited_secs = SHOT_GIVE_UP.as_secs(),
                     pause_secs = pause.as_secs(),
-                    "{SHOT_UNANSWERED}: the request was closed, counts as a failed grab, and ordinary polls make no portal request during the pause"
+                    unclosed_hold_secs = pause.max(SHOT_UNCLOSED_HOLD).as_secs(),
+                    "{SHOT_UNANSWERED}: the request was closed and counts as a failed grab; ordinary polls make no portal request for pause_secs, or unclosed_hold_secs while the portal has not answered the Close"
                 );
                 checks.note(super::PortalState::Stalled);
                 return Err(format!(
@@ -281,7 +282,9 @@ fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// Polls' pauses after successive stalled requests; the last repeats. The
 /// first is short: ordinary polls are what wake the end-reel outcome poll,
 /// so while they pause the match result screens go unread, and a stall
-/// that passes should cost at most half a minute of them.
+/// that passes should cost at most half a minute of them. That is a floor:
+/// while the Close of the request given up is unanswered, the pause is at
+/// least [`SHOT_UNCLOSED_HOLD`] (2 minutes).
 pub const SHOT_BACKOFF_STEPS: [std::time::Duration; 4] = [
     std::time::Duration::from_secs(30),
     std::time::Duration::from_secs(2 * 60),
@@ -308,12 +311,13 @@ pub const SHOT_BACKOFF: &str =
 /// given up was answered.
 ///
 /// While that Close is unanswered the request may still be open at the
-/// portal, so no grab makes a request for [`SHOT_UNCLOSED_HOLD`] (2
-/// minutes) after the give-up, even past a 30 s first step: never two of
-/// ours outstanding inside that hold. After it, a new request may run
-/// beside a request whose Close never came back (the portal's problem by
-/// then; waiting longer would stop capture for good). An answered request
-/// ends the pause.
+/// portal, so no grab, urgent or not, makes a request for the whole pause,
+/// and for at least [`SHOT_UNCLOSED_HOLD`] (2 minutes) after the give-up
+/// even past a 30 s first step: never two of ours outstanding while the
+/// pause lasts. Once it is over, a new request may run beside a request
+/// whose Close never came back (the portal's problem by then; waiting
+/// longer would stop capture for good). An answered request ends the
+/// pause.
 #[derive(Debug, Default)]
 pub(crate) struct ShotBackoff {
     until: Option<tokio::time::Instant>,
@@ -355,9 +359,10 @@ impl ShotBackoff {
     pub(crate) fn refuses(&self, urgent: bool, now: tokio::time::Instant) -> Option<&'static str> {
         let paused = self.until.is_some_and(|until| now < until);
         let unclosed = self.abandoned_open
-            && self
-                .gave_up_at
-                .is_some_and(|at| now < at + SHOT_UNCLOSED_HOLD);
+            && (paused
+                || self
+                    .gave_up_at
+                    .is_some_and(|at| now < at + SHOT_UNCLOSED_HOLD));
         ((paused && !urgent) || unclosed).then_some(SHOT_BACKOFF)
     }
 }
@@ -1732,6 +1737,28 @@ mod tests {
         assert_eq!(state.refuses(false, at(29)), Some(SHOT_BACKOFF));
         assert_eq!(state.refuses(false, at(30)), None);
         assert_eq!(state.refuses(true, at(1)), None);
+    }
+
+    /// #442 review A-R1: an unanswered Close blocks urgent grabs for the
+    /// whole pause, not only the 2 minute hold; an answered Close lets a
+    /// Tab try at once.
+    #[test]
+    fn an_unclosed_request_blocks_tabs_for_the_whole_pause() {
+        use std::time::Duration;
+        let t0 = tokio::time::Instant::now();
+        let at = |secs| t0 + Duration::from_secs(secs);
+        let mut state = ShotBackoff::default();
+        state.gave_up(t0);
+        state.gave_up(t0);
+        // The third stall: a 5 minute pause.
+        assert_eq!(state.gave_up(t0), Duration::from_secs(300));
+        assert_eq!(state.refuses(true, at(121)), Some(SHOT_BACKOFF));
+        assert_eq!(state.refuses(true, at(299)), Some(SHOT_BACKOFF));
+        assert_eq!(state.refuses(true, at(300)), None);
+        assert_eq!(state.refuses(false, at(300)), None);
+        state.closed();
+        assert_eq!(state.refuses(true, at(0)), None, "a Tab may try at once");
+        assert_eq!(state.refuses(false, at(299)), Some(SHOT_BACKOFF));
     }
 
     /// Review L1 (N4): a request that showed the prompt notice and then

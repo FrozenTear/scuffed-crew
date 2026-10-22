@@ -57,9 +57,9 @@ pub const TAB_HOLD_HINT_BELOW: Duration = Duration::from_secs(1);
 pub const TAB_HOLD_HINT: &str =
     "Tab was released before the scoreboard could be captured: hold Tab for about a second";
 
-/// The hint for a tap whose board the reader refused, released before a
-/// retry could grab it again.
-pub const TAB_REFUSED_HOLD_HINT: &str = "the scoreboard reader refused the board and Tab was released before a retry: hold Tab for about a second";
+/// The hint for a tap whose board the reader refused, released before
+/// another grab could be made.
+pub const TAB_REFUSED_HOLD_HINT: &str = "the scoreboard reader refused the board and Tab was released before another grab: hold Tab for about a second";
 
 /// How one Tab grab ended, for the retry loop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

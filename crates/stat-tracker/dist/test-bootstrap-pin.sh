@@ -195,7 +195,7 @@ if ! command -v minisign >/dev/null 2>&1 && [[ -n "${CI:-}" ]]; then
     # fail the job: the install below, and the minisign check after it,
     # decide.
     sudo timeout 180 apt-get "${apt_opts[@]}" update -qq \
-        || echo "WARN: apt-get update failed; trying install with the cached lists" >&2
+        || echo "::warning::apt-get update failed; trying the minisign install with the cached lists"
     sudo timeout 180 apt-get "${apt_opts[@]}" install -y --no-install-recommends minisign
 fi
 if [[ -n "${CI:-}" ]]; then
