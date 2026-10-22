@@ -95,16 +95,19 @@ expanded_install_paths() {
 }
 
 # Absolute path for one spec. category + basename must match one line.
+# The loop reads the whole list, not up to the match: the installers ignore
+# SIGPIPE, so a reader that stopped early would leave the writer printing
+# "write error: Broken pipe".
 install_path_named() {
     local home="$1" prefix="$2" want_cat="$3" base="$4"
-    local cat when path
+    local cat when path found=""
     while read -r cat when path; do
-        if [[ "$cat" == "$want_cat" && "$(basename "$path")" == "$base" ]]; then
-            printf '%s\n' "$path"
-            return 0
+        if [[ -z "$found" && "$cat" == "$want_cat" && "$(basename "$path")" == "$base" ]]; then
+            found="$path"
         fi
     done < <(expanded_install_paths "$home" "$prefix")
-    return 1
+    [[ -n "$found" ]] || return 1
+    printf '%s\n' "$found"
 }
 
 # Stop and disable these user units before any installed file is removed.

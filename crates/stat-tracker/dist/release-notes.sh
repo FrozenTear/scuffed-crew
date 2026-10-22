@@ -152,14 +152,15 @@ EOF
 )"
 no_long_dash "requirements footer" "$FOOTER"
 
-# Every stat-tracker-v* body carries a terminal update, pinned to the tag,
-# for a player whose in-app Update button does not offer this release.
+# Every stat-tracker-v* body carries a terminal update, pinned to the tag.
+# An older app shows this body inside its own Update offer, so the lead
+# points at the Update button first and keeps the terminal as the fallback.
 TERMINAL_UPDATE=""
 if [[ "$TAG" == stat-tracker-v* ]]; then
   TERMINAL_UPDATE="$(cat <<TERMINAL
 ## Update from the terminal
 
-This is for the tarball install. If the Update button in the app does not offer this release, close the app and paste this in a terminal. It installs this release into \`~/.local\` and replaces both the tracker and the app. Afterwards About shows ${NOTES_VERSION}.
+This is for the tarball install. Prefer the Update button in the app. Use this if that update fails, or to update from a terminal: close the app, then paste this in a terminal. It installs this release into \`~/.local\` and replaces both the tracker and the app. Afterwards About shows ${NOTES_VERSION}.
 
 If you installed from the AUR, update with your AUR helper instead, so you do not end up with a second copy in \`~/.local\`.
 
@@ -186,8 +187,15 @@ if [[ "$SKIP_COMMITS" -eq 0 ]]; then
     fi
   else
     # Exclude the tag being released. On a tag push that tag is already local.
-    PREV="$(git -C "$REPO" tag --list 'stat-tracker-v*' --sort=-creatordate \
-      | grep -vx "${TAG}" | head -1 || true)"
+    # A stable tag (no '-') lists the commits since the previous stable tag,
+    # not since the last rc or alpha in between.
+    if [[ "${TAG#stat-tracker-v}" == *-* ]]; then
+      PREV="$(git -C "$REPO" tag --list 'stat-tracker-v*' --sort=-creatordate \
+        | grep -vx "${TAG}" | head -1 || true)"
+    else
+      PREV="$(git -C "$REPO" tag --list 'stat-tracker-v*' --sort=-creatordate \
+        | grep -vx "${TAG}" | grep -vE '^stat-tracker-v[^-]*-' | head -1 || true)"
+    fi
     if [[ -n "${PREV}" ]]; then
       subjects="$(strip_hold_merge "$(flatten_subject_dashes "$(git -C "$REPO" log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
         crates/stat-tracker crates/stat-tracker-ui \

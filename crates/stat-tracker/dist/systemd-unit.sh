@@ -102,6 +102,32 @@ restart_running_daemon() {
     return 0
 }
 
+# Start the daemon unit when autostart is on (enabled) and the unit is
+# stopped (inactive). The in-app updater stops the tracker before it runs
+# the installer and starts it again afterwards. An app that quit during the
+# install never does that second step. A running, disabled, or failed unit
+# is left alone, so a second call does nothing. Prints "started" when it
+# started the unit and "failed" when that start did not work; never fails
+# the install.
+start_enabled_daemon() {
+    local systemctl_bin="$1"
+    local unit="scuffed-stat-tracker.service"
+    local enabled active
+    enabled="$("$systemctl_bin" --user is-enabled "$unit" 2>/dev/null)" || true
+    case "$enabled" in
+        enabled|enabled-runtime) ;;
+        *) return 0 ;;
+    esac
+    active="$("$systemctl_bin" --user is-active "$unit" 2>/dev/null)" || true
+    [[ "$active" == inactive ]] || return 0
+    if "$systemctl_bin" --user start "$unit" 2>/dev/null; then
+        echo started
+    else
+        echo failed
+    fi
+    return 0
+}
+
 # Absolute data_dir from config.toml, or empty. Relative paths are skipped:
 # the unit cannot name them.
 data_dir_from_config() {
@@ -178,7 +204,7 @@ install_data_dir_dropin() {
         return 0
     fi
     if [[ -f "$drop" ]] && ! grep -q 'scuffed-stat-tracker data_dir drop-in' "$drop"; then
-        echo "leaving $drop alone (not written by this installer)" >&2
+        echo "leaving $drop alone (not written by this installer)" >&2 || true
         return 0
     fi
     if ! data_dir="$(data_dir_from_config "$cfg")" || data_dir_covered_by_unit "$data_dir" "$home"; then

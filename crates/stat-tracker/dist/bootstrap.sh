@@ -46,6 +46,10 @@
 # The script prints `sudo pacman -R <pkg>` or `sudo apt remove <pkg>`.
 # An AppImage is a script install, not a package.
 set -euo pipefail
+# The in-app updater runs this script on pipes. If the app exits mid-install
+# (tray Quit), a write to its closed pipe must not kill the install, so
+# SIGPIPE is ignored and the log helpers below ignore a failed write.
+trap '' PIPE
 
 REPO="${STAT_TRACKER_REPO:-FrozenTear/scuffed-crew}"
 ASSET_NAME="scuffed-stat-tracker-linux-x86_64.tar.gz"
@@ -67,9 +71,10 @@ NC='\033[0m'
 # All logging goes to stderr: resolve_release's stdout is machine-parsed
 # (mapfile below), so a single echo to stdout shifts tag/url/sha by one line
 # and the tag ends up passed to curl as a hostname.
-info()  { echo -e "${GRN}[bootstrap]${NC} $*" >&2; }
-warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2; }
-error() { echo -e "${RED}[error ]${NC} $*" >&2; }
+# A failed write (stderr closed by an app that quit) is not fatal.
+info()  { echo -e "${GRN}[bootstrap]${NC} $*" >&2 || true; }
+warn()  { echo -e "${YLW}[ warn ]${NC} $*" >&2 || true; }
+error() { echo -e "${RED}[error ]${NC} $*" >&2 || true; }
 
 need() {
     command -v "$1" &>/dev/null || { error "need '$1' on PATH"; exit 1; }
@@ -246,6 +251,84 @@ pick_release_tag() {
     esac
 }
 
+# The release list is read page by page. Releases that do not ship the
+# tracker (site-*) share this list, so the newest stable tracker release can
+# sit far down it. /releases/latest is not used: a site-* release can take it.
+RELEASE_PAGE_SIZE=100
+RELEASE_MAX_PAGES=5
+
+# One page of the release list (JSON array) on stdout.
+fetch_release_page() {
+    curl_https "${GH_HEADERS[@]}" "${API}?per_page=${RELEASE_PAGE_SIZE}&page=$1"
+}
+
+# Number of releases in the JSON array on stdin.
+release_page_len() {
+    python3 -c '
+import json,sys
+page=json.load(sys.stdin)
+if not isinstance(page, list):
+    msg=page.get("message") if isinstance(page, dict) else None
+    sys.stderr.write("GitHub release list is not a list%s\n" % (": %s" % msg if msg else ""))
+    sys.exit(1)
+print(len(page))
+'
+}
+
+# Concatenated JSON arrays on stdin, one merged array on stdout. A release
+# seen twice (the list moved between two page reads) is kept once.
+merge_release_pages() {
+    python3 -c '
+import json,sys
+text=sys.stdin.read()
+dec=json.JSONDecoder()
+merged=[]
+seen=set()
+pos=0
+while True:
+    while pos < len(text) and text[pos].isspace():
+        pos += 1
+    if pos >= len(text):
+        break
+    page, pos = dec.raw_decode(text, pos)
+    if not isinstance(page, list):
+        sys.stderr.write("GitHub release list is not a list\n")
+        sys.exit(1)
+    for r in page:
+        key = r.get("id") if isinstance(r, dict) else None
+        if key is not None:
+            if key in seen:
+                continue
+            seen.add(key)
+        merged.append(r)
+json.dump(merged, sys.stdout)
+'
+}
+
+# The release list as one JSON array. Reads pages until one holds a stable
+# release that ships the asset (as choose_release_tags sees it), a page
+# comes back short, or RELEASE_MAX_PAGES pages were read.
+fetch_release_listing() {
+    local page=1 body count all="" stable_tag pre_tag
+    while :; do
+        body="$(fetch_release_page "$page")" || return 1
+        count="$(release_page_len <<<"$body")" || return 1
+        all="$(printf '%s\n%s\n' "$all" "$body" | merge_release_pages)" || return 1
+        if (( count < RELEASE_PAGE_SIZE || page >= RELEASE_MAX_PAGES )); then
+            break
+        fi
+        stable_tag=""
+        pre_tag=""
+        { read -r stable_tag; read -r pre_tag; } \
+            < <(choose_release_tags "$ASSET_NAME" <<<"$all" 2>/dev/null) || true
+        if [[ -n "$stable_tag" ]]; then
+            break
+        fi
+        page=$((page + 1))
+    done
+    printf '%s\n' "$all"
+}
+
 # Resolve asset download URL plus optional sha256 and minisign companions.
 resolve_release() {
     local json url tag
@@ -254,7 +337,7 @@ resolve_release() {
         json="$(curl_https "${GH_HEADERS[@]}" "${API}/tags/${STAT_TRACKER_TAG}")"
     else
         info "Fetching latest GitHub releases for ${REPO}…"
-        json="$(curl_https "${GH_HEADERS[@]}" "${API}?per_page=20")"
+        json="$(fetch_release_listing)" || exit 1
         # Newest stable that ships our asset, and a prerelease only when it
         # is newer than that stable. Drafts are skipped. No prompt.
         local stable_tag pre_tag chosen
@@ -336,6 +419,13 @@ maybe_reexec_tag_bootstrap() {
     chmod +x "$dest"
     export STAT_TRACKER_BOOTSTRAP_PINNED=1
     export STAT_TRACKER_TAG="$tag"
+    # An ignored SIGPIPE carries over exec. The tag's script and the
+    # installer it unpacks may predate the trap at the top of this file and
+    # read lists with early-closing pipes; ignoring SIGPIPE there turns a
+    # quiet stop into "write error: Broken pipe" lines. Hand over the
+    # default, as before this file set the trap. A tag that has the trap
+    # sets it again itself.
+    trap - PIPE
     exec bash "$dest"
 }
 

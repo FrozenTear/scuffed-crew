@@ -424,6 +424,70 @@ restart_at="$(grep -n -- 'try-restart' "$LOG" | head -1 | cut -d: -f1)"
 pass "upgrade restarts a running daemon, and only a running one"
 pass "upgrade adds OMP_THREAD_LIMIT=1 to a unit that lacked it"
 
+# Autostart on and the unit stopped: the in-app updater stopped it and then
+# quit mid-install. The install starts it at the end, after the manifest.
+# A running, disabled or failed unit is left alone.
+START_CTL="$TMP/systemctl-start"
+cat > "$START_CTL" << EOF
+#!/bin/sh
+printf '%s\n' "\$*" >> "$LOG"
+case "\$*" in
+    *is-enabled*) echo "\${FAKE_ENABLED-disabled}"
+        [ "\${FAKE_ENABLED-}" = enabled ] || exit 1 ;;
+    *is-active*) echo "\${FAKE_STATE-inactive}"
+        [ "\${FAKE_STATE-}" = active ] || exit 3 ;;
+    *" start "*)
+        [ -f "$PREFIX/share/scuffed-stat-tracker/install-manifest.txt" ] \
+            && echo "MANIFEST PRESENT AT START" >> "$LOG"
+        [ "\${FAKE_START_FAILS-}" = 1 ] && exit 1 ;;
+esac
+exit 0
+EOF
+chmod +x "$START_CTL"
+run_start_install() {
+    rm -f "$LOG" "$PREFIX/share/scuffed-stat-tracker/install-manifest.txt"
+    env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
+        -u XDG_RUNTIME_DIR \
+        HOME="$HOME_DIR" \
+        PREFIX="$PREFIX" \
+        SCUFFED_PROC_ROOT="$PROC" \
+        SCUFFED_SYSTEMCTL="$START_CTL" \
+        bash "$PKG/install.sh" 2> "$ERR" \
+        || fail "install failed: $(cat "$ERR")"
+}
+START_LINE='--user start scuffed-stat-tracker.service'
+FAKE_ENABLED=enabled FAKE_STATE=inactive run_start_install
+grep -qx -- "$START_LINE" "$LOG" || fail "enabled, stopped unit was not started: $(cat "$LOG")"
+grep -qx 'MANIFEST PRESENT AT START' "$LOG" || fail "unit was started before the manifest was written"
+grep -q 'Started the tracker service' "$ERR" || fail "start was not reported: $(cat "$ERR")"
+FAKE_ENABLED=enabled FAKE_STATE=active run_start_install
+grep -qx -- "$START_LINE" "$LOG" && fail "running unit was started again: $(cat "$LOG")"
+FAKE_ENABLED=disabled FAKE_STATE=inactive run_start_install
+grep -qx -- "$START_LINE" "$LOG" && fail "disabled unit was started: $(cat "$LOG")"
+FAKE_ENABLED=enabled FAKE_STATE=failed run_start_install
+grep -qx -- "$START_LINE" "$LOG" && fail "failed unit was started: $(cat "$LOG")"
+FAKE_ENABLED=enabled FAKE_STATE=inactive FAKE_START_FAILS=1 run_start_install
+grep -qx -- "$START_LINE" "$LOG" || fail "start was not tried: $(cat "$LOG")"
+grep -q 'did not start' "$ERR" || fail "failed start was not reported: $(cat "$ERR")"
+grep -q 'Installation complete' "$ERR" || fail "failed start cut the install short: $(cat "$ERR")"
+pass "install starts an enabled, stopped unit, and only that one"
+
+# A closed stderr (the app that ran the update quit) must not stop the
+# install part way: the binaries, the manifest and the start still happen.
+rm -f "$LOG" "$PREFIX/share/scuffed-stat-tracker/install-manifest.txt"
+set +e
+# shellcheck disable=SC2016 # $1 is expanded by the inner bash
+env -u WAYLAND_DISPLAY -u DISPLAY -u XDG_CURRENT_DESKTOP -u XDG_SESSION_TYPE \
+    -u XDG_RUNTIME_DIR \
+    HOME="$HOME_DIR" PREFIX="$PREFIX" SCUFFED_PROC_ROOT="$PROC" \
+    SCUFFED_SYSTEMCTL="$START_CTL" FAKE_ENABLED=enabled FAKE_STATE=inactive \
+    bash -c 'sleep 0.3; exec bash "$1"' _ "$PKG/install.sh" 2>&1 | true
+set -e
+[[ -f "$PREFIX/share/scuffed-stat-tracker/install-manifest.txt" ]] \
+    || fail "install died on a closed stderr before the manifest"
+grep -qx -- "$START_LINE" "$LOG" || fail "install died on a closed stderr before the start: $(cat "$LOG")"
+pass "install survives a closed stderr"
+
 # The source-build installer (crates/stat-tracker/install.sh) has the same
 # restart call. Stage it in a fake repo whose `cargo` writes stub binaries.
 SRC_REPO="$TMP/src-repo"
