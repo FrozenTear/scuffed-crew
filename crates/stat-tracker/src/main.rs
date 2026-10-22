@@ -3468,6 +3468,11 @@ enum FrameAnalysisOutcome {
     /// The share was declined or the permission dialog timed out. Not an
     /// error: the one warn already happened, and a later Tab stays quiet.
     Declined,
+    /// The screenshot portal is not answering: its request was given up,
+    /// or new requests are paused after one was. Not retried (a retry
+    /// inside the pause gets the same answer), and not an error: the portal
+    /// code logged its own WARN.
+    PortalPaused,
 }
 
 /// What a Tab capture actually did, reported back to the session state machine.
@@ -7403,9 +7408,9 @@ fn tab_result(
         FrameAnalysisOutcome::StreamMiss
         | FrameAnalysisOutcome::ShareOpening
         | FrameAnalysisOutcome::CaptureBusy => TabResult::NoFrameYet,
-        FrameAnalysisOutcome::Declined | FrameAnalysisOutcome::TeamSizeUncertain { .. } => {
-            TabResult::Final
-        }
+        FrameAnalysisOutcome::Declined
+        | FrameAnalysisOutcome::PortalPaused
+        | FrameAnalysisOutcome::TeamSizeUncertain { .. } => TabResult::Final,
     }
 }
 
@@ -7422,26 +7427,30 @@ fn tab_retry_reason(outcome: &FrameAnalysisOutcome, use_new_reader: bool) -> &'s
         FrameAnalysisOutcome::ShareOpening => "the share is still opening",
         FrameAnalysisOutcome::CaptureBusy => "the previous screenshot was still running",
         FrameAnalysisOutcome::Declined
+        | FrameAnalysisOutcome::PortalPaused
         | FrameAnalysisOutcome::TeamSizeUncertain { .. }
         | FrameAnalysisOutcome::Analyzed(_) => "not retried",
     }
 }
 
 /// How useful a Tab outcome is, so a later grab never replaces a better
-/// one. Higher is better: analysed and taken by the reader (5), team size
-/// unsure (4), analysed but refused by the reader (3), not a scoreboard
-/// (2), stream miss (1), share still opening or declined (0). A refused
-/// board outranks a preflight reject: it carries the frame's outcome, the
-/// header outcome fallback and the own-seed verdict.
+/// one. Higher is better: analysed and taken by the reader (5), analysed
+/// but refused by the reader (4), team size unsure (3), not a scoreboard
+/// (2), stream miss (1), share still opening or declined, a busy lock or a
+/// paused portal (0). Any analysed board outranks the rejects, as in rc.7:
+/// it carries the frame's outcome (an end-of-match VICTORY or DEFEAT the
+/// report back-fills), the header outcome fallback and the own-seed
+/// verdict, which an unsure team size or a preflight reject does not.
 fn tab_outcome_rank(outcome: &FrameAnalysisOutcome, use_new_reader: bool) -> u8 {
     match outcome {
-        FrameAnalysisOutcome::Analyzed(a) if reader_refusal(a, use_new_reader).is_some() => 3,
+        FrameAnalysisOutcome::Analyzed(a) if reader_refusal(a, use_new_reader).is_some() => 4,
         FrameAnalysisOutcome::ShareOpening
         | FrameAnalysisOutcome::Declined
-        | FrameAnalysisOutcome::CaptureBusy => 0,
+        | FrameAnalysisOutcome::CaptureBusy
+        | FrameAnalysisOutcome::PortalPaused => 0,
         FrameAnalysisOutcome::StreamMiss => 1,
         FrameAnalysisOutcome::NotAScoreboard { .. } => 2,
-        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 4,
+        FrameAnalysisOutcome::TeamSizeUncertain { .. } => 3,
         FrameAnalysisOutcome::Analyzed(_) => 5,
     }
 }
@@ -7562,6 +7571,9 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                         Err(err) if capture::is_capture_busy(&err.to_string()) => {
                             return Ok(FrameAnalysisOutcome::CaptureBusy);
                         }
+                        Err(err) if capture::is_portal_unanswered(&err.to_string()) => {
+                            return Ok(FrameAnalysisOutcome::PortalPaused);
+                        }
                         Err(err) => {
                             return Err(
                                 anyhow::Error::from_boxed(err).context("screen capture failed")
@@ -7611,12 +7623,16 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             FrameAnalysisOutcome::StreamMiss
             | FrameAnalysisOutcome::ShareOpening
             | FrameAnalysisOutcome::Declined
-            | FrameAnalysisOutcome::CaptureBusy => {
+            | FrameAnalysisOutcome::CaptureBusy
+            | FrameAnalysisOutcome::PortalPaused => {
                 if matches!(analysis, FrameAnalysisOutcome::StreamMiss) {
                     tracing::info!("Tab capture missed: no fresh stream frame");
                 }
                 if matches!(analysis, FrameAnalysisOutcome::CaptureBusy) {
                     tracing::info!("Tab capture missed: the previous screenshot was still running");
+                }
+                if matches!(analysis, FrameAnalysisOutcome::PortalPaused) {
+                    tracing::info!("Tab capture missed: the screenshot portal is not answering");
                 }
                 return Ok(CaptureReport {
                     best_guess: None,
@@ -10743,6 +10759,106 @@ mod tests {
         assert_eq!(retries, TAB_RETRY_WAITS.len());
         assert!(refusal(&best).is_some());
         assert_eq!(flight.phase(), TabFlightPhase::Rejected);
+    }
+
+    /// Final pre-tag review: a board the reader refuses outranks an unsure
+    /// team size, as any analysed board did in rc.7. When attempt 0 is a
+    /// refused end-of-match board carrying VICTORY and the retry is unsure
+    /// with no outcome, the loop keeps the refused board, so the report
+    /// still back-fills the outcome.
+    #[tokio::test]
+    async fn a_refused_board_outranks_an_unsure_team_size_and_keeps_its_outcome() {
+        use stat_tracker::tab_retry::{TAB_RETRY_WAITS, TabFlight, with_retries};
+        let scan = detect::hero_portrait::RowScan {
+            dip_count: 0,
+            median_pitch: None,
+            spectral_pitch: None,
+        };
+        let refused_victory = || {
+            let mut analysis = o8_analysis(None, None);
+            analysis.frame_outcome = detect::MatchOutcome::Victory;
+            FrameAnalysisOutcome::Analyzed(Box::new(analysis))
+        };
+        let unsure = || FrameAnalysisOutcome::TeamSizeUncertain {
+            outcome: detect::MatchOutcome::Unknown,
+            frame: image::DynamicImage::new_rgb8(4, 4),
+            scan,
+        };
+        let preflight_reject = FrameAnalysisOutcome::NotAScoreboard {
+            outcome: detect::MatchOutcome::Unknown,
+            frame: image::DynamicImage::new_rgb8(4, 4),
+            scan,
+        };
+        let taken = {
+            let mut analysis = o8_analysis(None, None);
+            analysis.board = Some(o8_board(Some("Ana")));
+            FrameAnalysisOutcome::Analyzed(Box::new(analysis))
+        };
+        let rank = |outcome: &FrameAnalysisOutcome| tab_outcome_rank(outcome, true);
+        // taken > refused > unsure > preflight reject > stream miss > busy.
+        assert!(rank(&taken) > rank(&refused_victory()));
+        assert!(rank(&refused_victory()) > rank(&unsure()));
+        assert!(rank(&unsure()) > rank(&preflight_reject));
+        assert!(rank(&preflight_reject) > rank(&FrameAnalysisOutcome::StreamMiss));
+        assert!(rank(&FrameAnalysisOutcome::StreamMiss) > rank(&FrameAnalysisOutcome::CaptureBusy));
+        assert_eq!(rank(&FrameAnalysisOutcome::PortalPaused), 0);
+
+        let flight = TabFlight::new(Instant::now());
+        let (best, _) = with_retries(
+            &flight,
+            &TAB_RETRY_WAITS,
+            |outcome| tab_result(outcome, true),
+            |outcome| tab_outcome_rank(outcome, true),
+            |outcome| tab_retry_reason(outcome, true),
+            |attempt| {
+                let outcome = if attempt == 0 {
+                    refused_victory()
+                } else {
+                    unsure()
+                };
+                async move { Ok::<_, ()>(outcome) }
+            },
+            |_| async {},
+        )
+        .await
+        .unwrap();
+        match best {
+            FrameAnalysisOutcome::Analyzed(analysis) => {
+                assert!(reader_refusal(&analysis, true).is_some());
+                assert_eq!(analysis.frame_outcome, detect::MatchOutcome::Victory);
+            }
+            _ => panic!("the refused board with its outcome is kept"),
+        }
+    }
+
+    /// Final pre-tag review: a Tab turned away by a paused or unanswering
+    /// screenshot portal is a quiet missed capture, not a failed cycle, and
+    /// is not retried.
+    #[test]
+    fn a_paused_portal_is_a_quiet_missed_tab() {
+        use stat_tracker::tab_retry::TabResult;
+        for err in [
+            format!("portal screenshot: {}", capture::portal::SHOT_BACKOFF),
+            format!("{} (no answer in 60 s)", capture::portal::SHOT_UNANSWERED),
+            format!(
+                "{} (the portal went away)",
+                capture::portal::SHOT_UNANSWERED
+            ),
+        ] {
+            assert!(capture::is_portal_unanswered(&err), "{err}");
+            assert!(!capture::is_capture_busy(&err), "{err}");
+        }
+        assert!(!capture::is_portal_unanswered(
+            "portal screenshot: a previous capture request is still running"
+        ));
+        assert!(!capture::is_portal_unanswered(
+            "portal screenshot request failed: x"
+        ));
+        assert_eq!(
+            tab_result(&FrameAnalysisOutcome::PortalPaused, true),
+            TabResult::Final
+        );
+        assert!(!tab_result(&FrameAnalysisOutcome::PortalPaused, true).retries());
     }
 
     /// S5-CAP-2: the debounce and a queued press follow the capture

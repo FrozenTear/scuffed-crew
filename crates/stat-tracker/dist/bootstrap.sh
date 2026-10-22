@@ -35,6 +35,11 @@
 #                       set by this script (epoch seconds) for install.sh,
 #                       which starts a stopped tracker again only when it
 #                       stopped right before the install began.
+#   STAT_TRACKER_KEEP_STOPPED
+#                       1 from the app's updater when the tracker was not
+#                       running as the update began: install.sh then never
+#                       starts it. Passed through unchanged (the re-exec and
+#                       the install.sh run inherit the environment).
 #   SKIP_INTEGRATION    non-empty ⇒ install binaries/libs only (no desktop entry
 #                       or systemd unit); use for throwaway-PREFIX smoke tests
 #   STAT_TRACKER_BOOTSTRAP_FETCH_CMD
