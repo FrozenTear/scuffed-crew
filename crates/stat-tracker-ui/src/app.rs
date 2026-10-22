@@ -466,9 +466,9 @@ pub struct TrackerApp {
     pub backend: Option<CaptureBackend>,
     /// `XDG_CURRENT_DESKTOP`, read once.
     pub desktop: String,
-    /// Wayland session (`XDG_SESSION_TYPE`, else `WAYLAND_DISPLAY`), read
-    /// once. Off Wayland, Settings offers only Automatic capture.
-    pub wayland_session: bool,
+    /// The session as the tracker sees it, read once. On a known X11
+    /// session Settings does not offer the Wayland-only capture methods.
+    pub session: settings::SessionKind,
     /// KDE direct on this desktop: `None` off KDE or until it is known.
     pub kde_direct: Option<stat_tracker::capture::KwinProbe>,
     /// The running tracker's pid and whether its share was open, at the
@@ -486,6 +486,9 @@ pub struct TrackerApp {
     /// curl installer (S5-UP-2). `None` until probed, and for a script
     /// install.
     pub package_owner: Option<crate::uninstall::PackageOwner>,
+    /// The package probe has answered (or timed out). Until then the
+    /// update plan is never Ready. Fixture runs do not probe.
+    package_probed: bool,
     /// Notes for the offered update, drawn inside the update prompt.
     pub update_notes: Vec<ShownRelease>,
     update_open_details: HashSet<String>,
@@ -698,7 +701,7 @@ impl TrackerApp {
             outputs: Vec::new(),
             backend: None,
             desktop: std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default(),
-            wayland_session: settings::wayland_session_from_env(),
+            session: settings::session_from_env(),
             kde_direct: None,
             kde_direct_seen: (None, false),
             kde_direct_recheck: false,
@@ -709,6 +712,7 @@ impl TrackerApp {
             installed_version,
             update_progress: UpdateProgress::Idle,
             package_owner: None,
+            package_probed: cli.fixture.is_some(),
             update_plan: UpdatePlan::Blocked {
                 reason: String::new(),
                 hint: String::new(),
@@ -811,6 +815,15 @@ impl TrackerApp {
             ));
         }
         (app, Task::batch(tasks))
+    }
+
+    /// What the update plan knows about the package that owns this binary.
+    pub fn package_probe(&self) -> update::PackageProbe<'_> {
+        if self.package_probed {
+            update::PackageProbe::Done(self.package_owner.as_ref())
+        } else {
+            update::PackageProbe::Pending
+        }
     }
 
     pub fn title(&self, _window: window::Id) -> String {
@@ -1503,7 +1516,7 @@ impl TrackerApp {
                     .unwrap_or_default();
                 self.update_plan = info
                     .as_ref()
-                    .map(|i| update::evaluate_plan_for(&i.latest, self.package_owner.as_ref()))
+                    .map(|i| update::evaluate_plan_for(&i.latest, self.package_probe()))
                     .unwrap_or_else(|| UpdatePlan::Blocked {
                         reason: String::new(),
                         hint: String::new(),
@@ -1699,11 +1712,12 @@ impl TrackerApp {
                     tracing::info!(package = %owner.package, "the running app is package-owned: updates go through the package manager");
                 }
                 self.package_owner = owner;
+                self.package_probed = true;
                 if let Some(info) = &self.update
                     && !matches!(self.update_progress, UpdateProgress::Running)
                 {
                     self.update_plan =
-                        update::evaluate_plan_for(&info.latest, self.package_owner.as_ref());
+                        update::evaluate_plan_for(&info.latest, self.package_probe());
                 }
                 Task::none()
             }
@@ -1739,7 +1753,7 @@ impl TrackerApp {
                 let Some(info) = self.update.clone() else {
                     return Task::none();
                 };
-                let plan = update::evaluate_plan_for(&info.latest, self.package_owner.as_ref());
+                let plan = update::evaluate_plan_for(&info.latest, self.package_probe());
                 self.update_plan = plan.clone();
                 if let UpdatePlan::Blocked { reason, hint } = &plan {
                     let msg = format!("{reason} {hint}");
@@ -1756,6 +1770,7 @@ impl TrackerApp {
                             data_dir: self.data_dir.clone(),
                             stop_daemon: self.daemon.running(),
                             service_installed: self.daemon.service_installed,
+                            package: self.package_owner.clone(),
                         },
                         self.update_gate,
                     ),
@@ -3098,17 +3113,29 @@ async fn uninstall_from_app(
     crate::uninstall::apply(&req)
 }
 
+/// How long the package probe may take before the app treats the binary
+/// as a script install (today's behaviour).
+const PACKAGE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// The package that owns the running binary, off the UI thread: the probe
 /// runs `pacman -Qo` and `dpkg -S`. After a package update replaced the
 /// binary, `/proc/self/exe` ends in ` (deleted)`; the path without it is
-/// the one the package owns.
+/// the one the package owns. A probe slower than
+/// [`PACKAGE_PROBE_TIMEOUT`] counts as no package.
 async fn probe_own_package_owner() -> Option<crate::uninstall::PackageOwner> {
     let exe = std::env::current_exe().ok()?;
     let exe = crate::instance::relaunch_path(&exe);
-    tokio::task::spawn_blocking(move || crate::uninstall::probe_package_owner(&exe))
-        .await
-        .ok()
-        .flatten()
+    let probe = tokio::task::spawn_blocking(move || crate::uninstall::probe_package_owner(&exe));
+    match tokio::time::timeout(PACKAGE_PROBE_TIMEOUT, probe).await {
+        Ok(owner) => owner.ok().flatten(),
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = PACKAGE_PROBE_TIMEOUT.as_secs(),
+                "the package manager did not answer; treating this as a script install"
+            );
+            None
+        }
+    }
 }
 
 fn notes_dialog_escape(
@@ -3608,6 +3635,76 @@ token = \"secret-token-must-stay\"
         let _ = app.update(super::Message::DaemonDone(Ok("restarted".into())));
         assert_eq!(app.toast.as_deref(), Some("restarted"));
         assert!(app.toast_action.is_none());
+    }
+
+    fn aur_owner() -> crate::uninstall::PackageOwner {
+        crate::uninstall::PackageOwner {
+            manager: crate::uninstall::PackageManager::Pacman,
+            package: "scuffed-stat-tracker-bin".into(),
+        }
+    }
+
+    fn offered_update() -> super::UpdateInfo {
+        super::UpdateInfo {
+            latest: "0.5.0".into(),
+            current: "0.5.0-rc.7".into(),
+            url: "https://example.invalid/release".into(),
+            release_bodies: Vec::new(),
+        }
+    }
+
+    // Only Pending and package-owned plans here: a script-install plan
+    // probes PATH and writes a probe file under the install prefix.
+    #[test]
+    fn the_package_probe_re_plans_unless_an_update_runs() {
+        use super::{Message, UpdatePlan, UpdateProgress};
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(tmp.path());
+        app.package_probed = false;
+        let _ = app.update(Message::UpdateChecked(Some(offered_update())));
+        assert_eq!(
+            app.update_plan,
+            UpdatePlan::Blocked {
+                reason: crate::update::PACKAGE_PROBE_PENDING.into(),
+                hint: String::new(),
+            }
+        );
+        // Update now is a no-op until the probe answers.
+        let _ = app.update(Message::RunUpdate);
+        assert!(!matches!(app.update_progress, UpdateProgress::Running));
+
+        // An update in progress keeps its plan.
+        app.update_progress = UpdateProgress::Running;
+        let _ = app.update(Message::PackageOwnerProbed(Some(aur_owner())));
+        assert_eq!(app.package_owner, Some(aur_owner()));
+        assert!(app.package_probed);
+        assert!(matches!(
+            &app.update_plan,
+            UpdatePlan::Blocked { reason, .. } if reason == crate::update::PACKAGE_PROBE_PENDING
+        ));
+
+        app.update_progress = UpdateProgress::Idle;
+        let _ = app.update(Message::PackageOwnerProbed(Some(aur_owner())));
+        let UpdatePlan::Blocked { reason, hint } = &app.update_plan else {
+            panic!("a package install is never Ready");
+        };
+        assert!(reason.contains("scuffed-stat-tracker-bin"));
+        assert!(hint.contains("paru -Syu"));
+    }
+
+    #[test]
+    fn copy_update_command_does_nothing_on_a_package_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut app = fixture_app(tmp.path());
+        app.package_owner = Some(aur_owner());
+        app.update = Some(offered_update());
+        app.toast = None;
+        let _ = app.update(super::Message::CopyUpdateCmd);
+        assert!(
+            app.toast.is_none(),
+            "no clipboard, no toast: {:?}",
+            app.toast
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@
 use std::ffi::OsString;
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read, Seek, Write};
+use std::os::fd::{AsRawFd as _, FromRawFd as _};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
@@ -78,15 +79,27 @@ pub fn lock_path(runtime_dir: Option<OsString>, data_dir: &Path) -> PathBuf {
 /// Try to become the one GUI. Never blocks. On success the lock file holds
 /// `<pid>\n<version>\n`.
 pub fn claim(lock_path: &Path, version: &str) -> io::Result<Claim> {
+    let file = open_lock(lock_path)?;
+    try_claim(file, version).map(|(claim, _)| claim)
+}
+
+fn open_lock(lock_path: &Path) -> io::Result<File> {
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new()
+    OpenOptions::new()
         .read(true)
         .write(true)
         .create(true)
         .truncate(false)
-        .open(lock_path)?;
+        .open(lock_path)
+}
+
+/// [`claim`] on an open lock file. On [`Claim::Secondary`] the file comes
+/// back, so a launch that retries keeps it open between tries: a GUI with
+/// the lock file open is in the claim flow, and [`stale_gui_targets`]
+/// leaves it alone.
+fn try_claim(mut file: File, version: &str) -> io::Result<(Claim, Option<File>)> {
     match file.try_lock() {
         Ok(()) => {
             let _ = ACQUIRED_AT.set(SystemTime::now());
@@ -97,9 +110,9 @@ pub fn claim(lock_path: &Path, version: &str) -> io::Result<Claim> {
                 .and_then(|()| file.rewind())
                 .and_then(|()| write!(file, "{}\n{}\n", std::process::id(), version.trim()))
                 .and_then(|()| file.flush());
-            Ok(Claim::Primary(file))
+            Ok((Claim::Primary(file), None))
         }
-        Err(TryLockError::WouldBlock) => Ok(Claim::Secondary),
+        Err(TryLockError::WouldBlock) => Ok((Claim::Secondary, Some(file))),
         Err(TryLockError::Error(e)) => Err(e),
     }
 }
@@ -149,14 +162,19 @@ pub fn claim_replacing(
     version: &str,
     wait: Duration,
 ) -> io::Result<Claim> {
+    // One open file for every try, so this launch has the lock file open
+    // for its whole wait (see [`try_claim`]).
+    let mut file = open_lock(lock_path)?;
     request_quit(data_dir)?;
     let start = Instant::now();
     let claimed = loop {
-        match claim(lock_path, version) {
-            Ok(Claim::Secondary) if start.elapsed() < wait => {
+        match try_claim(file, version) {
+            Ok((Claim::Secondary, Some(open))) if start.elapsed() < wait => {
+                file = open;
                 std::thread::sleep(Duration::from_millis(100));
             }
-            other => break other,
+            Ok((claim, _)) => break Ok(claim),
+            Err(e) => break Err(e),
         }
     };
     let _ = std::fs::remove_file(quit_path(data_dir));
@@ -338,7 +356,7 @@ pub fn consume_quit(data_dir: &Path) -> bool {
 
 /// A process running the GUI binary, as [`scan_gui_processes`] read it
 /// from `/proc`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GuiProcess {
     pub pid: u32,
     pub ppid: u32,
@@ -349,8 +367,20 @@ pub struct GuiProcess {
     pub companion: bool,
     /// Started with `--fixture`: a demo run, which never takes the lock.
     pub fixture: bool,
-    /// Has the lock file open. `None` when its open files could not be read.
+    /// Started with `--replace`: a launch in the claim flow.
+    pub replace: bool,
+    /// Has the lock file open (also when that file was unlinked since).
+    /// `None` when its open files could not be read.
     pub has_lock_open: Option<bool>,
+    /// Start time in clock ticks after boot (`/proc/<pid>/stat` field 22).
+    pub start_ticks: Option<u64>,
+    /// Has a live child other than its `--companion` overlay or the tracker
+    /// daemon: a 0.4.x GUI runs its in-app update's `bash bootstrap.sh` as a
+    /// child, and stopping the GUI would kill that install half way.
+    pub busy_child: bool,
+    /// A 0.4.x in-app update work dir (`$TMPDIR/sst-gui-update-<pid>-*`)
+    /// of this pid exists: an update is in progress.
+    pub update_dir: bool,
 }
 
 /// Who this process is, for [`stale_gui_targets`].
@@ -359,25 +389,75 @@ pub struct Me {
     pub pid: u32,
     pub ppid: u32,
     pub uid: u32,
+    /// This process's start, in clock ticks after boot.
+    pub start_ticks: u64,
+    /// Clock ticks per second (`sysconf(_SC_CLK_TCK)`).
+    pub clk_tck: u64,
 }
 
 impl Me {
-    pub fn current() -> Self {
-        // SAFETY: getppid and getuid take no arguments and cannot fail.
-        let (ppid, uid) = unsafe { (libc::getppid(), libc::getuid()) };
-        Self {
+    /// This process, from libc and `/proc/self/stat`. `None` when its start
+    /// time cannot be read: then no process is stopped.
+    pub fn current() -> Option<Self> {
+        // SAFETY: getppid, getuid and sysconf take no pointers and cannot
+        // fail in a way that matters here.
+        let (ppid, uid, clk_tck) = unsafe {
+            (
+                libc::getppid(),
+                libc::getuid(),
+                libc::sysconf(libc::_SC_CLK_TCK),
+            )
+        };
+        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+        Some(Self {
             pid: std::process::id(),
             ppid: u32::try_from(ppid).unwrap_or(0),
             uid,
+            start_ticks: parse_start_ticks(&stat)?,
+            clk_tck: u64::try_from(clk_tck).ok().filter(|t| *t > 0)?,
+        })
+    }
+}
+
+/// Where [`scan_gui_processes`] looks: `/proc` and the temp dir a process
+/// without `TMPDIR` in its environment uses (`/tmp`). Tests point both at
+/// temp dirs.
+#[derive(Debug, Clone, Copy)]
+pub struct ScanRoots<'a> {
+    pub proc_root: &'a Path,
+    pub default_tmp: &'a Path,
+}
+
+impl ScanRoots<'static> {
+    pub fn live() -> Self {
+        Self {
+            proc_root: Path::new("/proc"),
+            default_tmp: Path::new("/tmp"),
         }
     }
+}
+
+/// How long a GUI must have run before this one started to count as stale.
+/// A launch that just started may be about to claim the lock, show the
+/// running GUI or read `--build-id`, with no lock file open yet.
+pub const MIN_STALE_AGE: Duration = Duration::from_secs(5);
+
+const DAEMON_BIN: &str = "scuffed-stat-tracker";
+
+fn strip_deleted(path: &str) -> &str {
+    path.strip_suffix(" (deleted)").unwrap_or(path)
+}
+
+fn exe_named(exe: &str, name: &str) -> bool {
+    Path::new(strip_deleted(exe))
+        .file_name()
+        .is_some_and(|n| n == name)
 }
 
 /// True when `exe` (a `/proc/<pid>/exe` target) is the GUI binary, replaced
 /// on disk or not. The tracker daemon (`scuffed-stat-tracker`) never is.
 pub fn is_gui_exe(exe: &str) -> bool {
-    let path = Path::new(exe.strip_suffix(" (deleted)").unwrap_or(exe));
-    path.file_name().is_some_and(|name| name == GUI_BIN)
+    exe_named(exe, GUI_BIN)
 }
 
 /// Real uid and parent pid from `/proc/<pid>/status`.
@@ -395,6 +475,15 @@ fn read_status(dir: &Path) -> Option<(u32, u32)> {
     Some((uid?, ppid?))
 }
 
+/// Field 22 (`starttime`) of a `/proc/<pid>/stat` line. The command name in
+/// field 2 may hold spaces and parentheses, so fields are counted after the
+/// last `)`.
+pub fn parse_start_ticks(stat: &str) -> Option<u64> {
+    let rest = &stat[stat.rfind(')')? + 1..];
+    // After `)`: field 3 (state) is the first.
+    rest.split_whitespace().nth(22 - 3)?.parse().ok()
+}
+
 fn read_exe(dir: &Path) -> Option<String> {
     let target = std::fs::read_link(dir.join("exe")).ok()?;
     Some(target.to_string_lossy().into_owned())
@@ -403,19 +492,60 @@ fn read_exe(dir: &Path) -> Option<String> {
 fn has_lock_open(dir: &Path) -> Option<bool> {
     let fds = std::fs::read_dir(dir.join("fd")).ok()?;
     Some(fds.flatten().any(|fd| {
-        std::fs::read_link(fd.path())
-            .is_ok_and(|target| target.file_name().is_some_and(|name| name == LOCK_FILE))
+        std::fs::read_link(fd.path()).is_ok_and(|target| {
+            let target = target.to_string_lossy();
+            exe_named(&target, LOCK_FILE)
+        })
     }))
 }
 
+/// `TMPDIR` from `/proc/<pid>/environ` when set, else `default_tmp`.
+fn process_tmp(dir: &Path, default_tmp: &Path) -> PathBuf {
+    std::fs::read(dir.join("environ"))
+        .ok()
+        .and_then(|env| {
+            env.split(|b| *b == 0)
+                .find_map(|var| var.strip_prefix(b"TMPDIR="))
+                .filter(|v| !v.is_empty())
+                .map(|v| PathBuf::from(String::from_utf8_lossy(v).into_owned()))
+        })
+        .unwrap_or_else(|| default_tmp.to_path_buf())
+}
+
+fn has_update_dir(tmp: &Path, pid: u32) -> bool {
+    let prefix = format!("sst-gui-update-{pid}-");
+    std::fs::read_dir(tmp).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with(&prefix))
+    })
+}
+
+/// One `/proc` entry, any user.
+struct ProcEntry {
+    pid: u32,
+    ppid: u32,
+    uid: u32,
+    exe: Option<String>,
+    args: Vec<Vec<u8>>,
+}
+
+impl ProcEntry {
+    fn has_arg(&self, arg: &[u8]) -> bool {
+        self.args.iter().skip(1).any(|a| a == arg)
+    }
+}
+
 /// The processes of user `uid` that run the GUI binary, read from
-/// `proc_root` (`/proc` in the app; a temp dir in tests). Processes of
-/// other users, and entries that vanish mid-scan, are left out.
-pub fn scan_gui_processes(proc_root: &Path, uid: u32) -> Vec<GuiProcess> {
-    let Ok(entries) = std::fs::read_dir(proc_root) else {
+/// `roots.proc_root` (`/proc` in the app; a temp dir in tests). Processes
+/// of other users, and entries that vanish mid-scan, are left out. Children
+/// of every user count for [`GuiProcess::busy_child`]: an installer may run
+/// `sudo`.
+pub fn scan_gui_processes(roots: ScanRoots<'_>, uid: u32) -> Vec<GuiProcess> {
+    let Ok(entries) = std::fs::read_dir(roots.proc_root) else {
         return Vec::new();
     };
-    let mut found = Vec::new();
+    let mut all = Vec::new();
     for entry in entries.flatten() {
         let Some(pid) = entry
             .file_name()
@@ -425,46 +555,86 @@ pub fn scan_gui_processes(proc_root: &Path, uid: u32) -> Vec<GuiProcess> {
             continue;
         };
         let dir = entry.path();
-        let Some(exe) = read_exe(&dir) else {
-            continue;
-        };
-        if !is_gui_exe(&exe) {
-            continue;
-        }
         let Some((owner, ppid)) = read_status(&dir) else {
             continue;
         };
-        if owner != uid {
-            continue;
-        }
-        let cmdline = std::fs::read(dir.join("cmdline")).unwrap_or_default();
-        let args: Vec<&[u8]> = cmdline.split(|b| *b == 0).collect();
-        found.push(GuiProcess {
+        let exe = read_exe(&dir);
+        let args = if owner == uid && exe.as_deref().is_some_and(is_gui_exe) {
+            std::fs::read(dir.join("cmdline"))
+                .unwrap_or_default()
+                .split(|b| *b == 0)
+                .map(<[u8]>::to_vec)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        all.push(ProcEntry {
             pid,
             ppid,
+            uid: owner,
             exe,
-            companion: args.iter().skip(1).any(|a| *a == b"--companion"),
-            fixture: args.iter().skip(1).any(|a| *a == b"--fixture"),
+            args,
+        });
+    }
+    let mut found = Vec::new();
+    for p in &all {
+        let Some(exe) = p.exe.as_deref() else {
+            continue;
+        };
+        if p.uid != uid || !is_gui_exe(exe) {
+            continue;
+        }
+        let dir = roots.proc_root.join(p.pid.to_string());
+        let busy_child = all.iter().any(|child| {
+            child.ppid == p.pid
+                && !match child.exe.as_deref() {
+                    Some(exe) if is_gui_exe(exe) => child.has_arg(b"--companion"),
+                    Some(exe) => exe_named(exe, DAEMON_BIN),
+                    None => false,
+                }
+        });
+        found.push(GuiProcess {
+            pid: p.pid,
+            ppid: p.ppid,
+            exe: exe.to_string(),
+            companion: p.has_arg(b"--companion"),
+            fixture: p.has_arg(b"--fixture"),
+            replace: p.has_arg(b"--replace"),
             has_lock_open: has_lock_open(&dir),
+            start_ticks: std::fs::read_to_string(dir.join("stat"))
+                .ok()
+                .as_deref()
+                .and_then(parse_start_ticks),
+            busy_child,
+            update_dir: has_update_dir(&process_tmp(&dir, roots.default_tmp), p.pid),
         });
     }
     found.sort_by_key(|p| p.pid);
     found
 }
 
-/// The pids to stop once this process holds the lock (S5-UP-1): every GUI
-/// of this user that is not this process, not its parent (an old GUI that
-/// started it through "Restart now" and is on its way out), not a demo
-/// run, and does not have the lock file open, with that GUI's
+/// The pids to stop once this process holds the lock (S5-UP-1): GUIs of
+/// this user that run outside the lock protocol, then those GUIs'
 /// `--companion` children. That is a GUI from before the lock (0.4.x), or
-/// one whose binary was replaced and that lost the lock: either can save
-/// an older config over this one's settings.
+/// one whose binary was replaced and that lost the lock: either can save an
+/// older config over this one's settings.
 ///
-/// A GUI with the lock file open is in the lock protocol (a launch that is
-/// about to show or replace this one) and is left to it. So is a GUI whose
-/// open files could not be read. Companions go first, so a GUI cannot
-/// start a new one in between.
+/// A GUI is left alone when it:
+/// - is this process, or its parent (an old GUI that started this one
+///   through "Restart now" and is on its way out);
+/// - is a `--companion`, `--fixture` or `--replace` run;
+/// - has the lock file open (it holds the lock, or is in the claim flow),
+///   or its open files could not be read;
+/// - started less than [`MIN_STALE_AGE`] before this one, or its start
+///   could not be read (a launch on its way into the claim flow);
+/// - has a live child other than its companion or the tracker daemon, or
+///   an update work dir: a 0.4.x GUI in the middle of its in-app update.
+///   Stopping it would kill the installer half way with the tracker
+///   stopped.
+///
+/// The GUIs go first; their companions were picked from the same scan.
 pub fn stale_gui_targets(procs: &[GuiProcess], me: Me) -> Vec<u32> {
+    let min_age = MIN_STALE_AGE.as_secs() * me.clk_tck;
     let stale: Vec<u32> = procs
         .iter()
         .filter(|p| {
@@ -472,38 +642,44 @@ pub fn stale_gui_targets(procs: &[GuiProcess], me: Me) -> Vec<u32> {
                 && p.pid != me.ppid
                 && !p.companion
                 && !p.fixture
+                && !p.replace
                 && p.has_lock_open == Some(false)
+                && p.start_ticks
+                    .is_some_and(|start| start.saturating_add(min_age) <= me.start_ticks)
+                && !p.busy_child
+                && !p.update_dir
         })
         .map(|p| p.pid)
         .collect();
-    let mut targets: Vec<u32> = procs
+    let companions = procs
         .iter()
         .filter(|p| p.companion && p.pid != me.pid && stale.contains(&p.ppid))
-        .map(|p| p.pid)
-        .collect();
-    targets.extend(stale);
+        .map(|p| p.pid);
+    let mut targets = stale.clone();
+    targets.extend(companions);
     targets
 }
 
 /// Stop the stale GUIs [`stale_gui_targets`] picks, with SIGTERM through
-/// `kill`. Each pid's `exe` is read again right before its signal and a pid
-/// that no longer runs the same binary is skipped, so a pid reused since
-/// the scan is never signalled. Returns the pids signalled.
+/// `kill(pid, exe)`. Each pid's `exe` is read again right before its signal
+/// and a pid that no longer runs the same binary is skipped; the live
+/// `kill` ([`sigterm_if_exe`]) checks once more through a pidfd. Returns
+/// the pids signalled.
 pub fn stop_stale_guis(
-    proc_root: &Path,
+    roots: ScanRoots<'_>,
     me: Me,
-    kill: &mut dyn FnMut(u32) -> io::Result<()>,
+    kill: &mut dyn FnMut(u32, &str) -> io::Result<()>,
 ) -> Vec<u32> {
-    let procs = scan_gui_processes(proc_root, me.uid);
+    let procs = scan_gui_processes(roots, me.uid);
     let mut stopped = Vec::new();
     for pid in stale_gui_targets(&procs, me) {
         let Some(seen) = procs.iter().find(|p| p.pid == pid) else {
             continue;
         };
-        if read_exe(&proc_root.join(pid.to_string())).as_deref() != Some(seen.exe.as_str()) {
+        if read_exe(&roots.proc_root.join(pid.to_string())).as_deref() != Some(seen.exe.as_str()) {
             continue;
         }
-        match kill(pid) {
+        match kill(pid, &seen.exe) {
             Ok(()) => {
                 tracing::info!(pid, exe = %seen.exe, companion = seen.companion, "stopped an older tracker GUI that runs without the lock");
                 stopped.push(pid);
@@ -516,15 +692,53 @@ pub fn stop_stale_guis(
     stopped
 }
 
-/// SIGTERM `pid`.
-pub fn sigterm(pid: u32) -> io::Result<()> {
-    let pid =
+/// SIGTERM `pid` when `/proc/<pid>/exe` still reads `exe`. The check and
+/// the signal go through one pidfd, so a pid that exits and is reused
+/// after the check is not signalled. Without pidfds (kernel before 5.3) it
+/// falls back to a check and `kill`.
+pub fn sigterm_if_exe(pid: u32, exe: &str) -> io::Result<()> {
+    let raw =
         libc::pid_t::try_from(pid).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-    if pid <= 0 {
+    if raw <= 0 {
         return Err(io::Error::from(io::ErrorKind::InvalidInput));
     }
-    // SAFETY: kill only sends a signal; `pid` is a single positive pid.
-    if unsafe { libc::kill(pid, libc::SIGTERM) } == 0 {
+    let same_exe = || read_exe(&Path::new("/proc").join(pid.to_string())).as_deref() == Some(exe);
+    // SAFETY: pidfd_open takes a pid and flags and returns a new fd or -1.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, raw, 0) };
+    if fd < 0 {
+        let err = io::Error::last_os_error();
+        if err.raw_os_error() != Some(libc::ENOSYS) {
+            return Err(err);
+        }
+        if !same_exe() {
+            return Err(io::Error::other("the process changed before the signal"));
+        }
+        // SAFETY: kill only sends a signal to one positive pid.
+        return if unsafe { libc::kill(raw, libc::SIGTERM) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        };
+    }
+    // SAFETY: `fd` is a pidfd this function owns from here on.
+    let fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(fd as std::os::fd::RawFd) };
+    // The signal goes only to the process the pidfd refers to. If that
+    // process died and the pid was reused before this check, the check
+    // reads the new process, but the signal then fails with ESRCH.
+    if !same_exe() {
+        return Err(io::Error::other("the process changed before the signal"));
+    }
+    // SAFETY: pidfd_send_signal on an owned pidfd with no siginfo.
+    let sent = unsafe {
+        libc::syscall(
+            libc::SYS_pidfd_send_signal,
+            fd.as_raw_fd(),
+            libc::SIGTERM,
+            std::ptr::null::<libc::siginfo_t>(),
+            0,
+        )
+    };
+    if sent == 0 {
         Ok(())
     } else {
         Err(io::Error::last_os_error())
@@ -897,6 +1111,39 @@ mod tests {
         args: &'a [&'a str],
         /// `None`: no `fd` directory (its open files cannot be read).
         fds: Option<&'a [&'a str]>,
+        /// Start in clock ticks; `None` writes no `stat` file.
+        start: Option<u64>,
+        /// `TMPDIR` in its environment.
+        tmpdir: Option<&'a Path>,
+    }
+
+    const UID: u32 = 1000;
+    const TCK: u64 = 100;
+    /// This GUI started 1000 s after boot; old GUIs at 100 s.
+    const MY_START: u64 = 1000 * TCK;
+    const OLD: Option<u64> = Some(100 * TCK);
+    const GUI: &str = "/home/u/.local/bin/stat-tracker-gui";
+    const GUI_DELETED: &str = "/home/u/.local/bin/stat-tracker-gui (deleted)";
+    const LOCK: &str = "/run/user/1000/scuffed-stat-tracker-gui.lock";
+    const ME: Me = Me {
+        pid: 500,
+        ppid: 1,
+        uid: UID,
+        start_ticks: MY_START,
+        clk_tck: TCK,
+    };
+
+    fn base(pid: u32, exe: &str) -> FakeProc<'_> {
+        FakeProc {
+            pid,
+            ppid: 1,
+            uid: UID,
+            exe,
+            args: &[],
+            fds: Some(&[]),
+            start: OLD,
+            tmpdir: None,
+        }
     }
 
     fn fake_proc(root: &Path, p: FakeProc<'_>) {
@@ -911,12 +1158,28 @@ mod tests {
             ),
         )
         .unwrap();
+        if let Some(start) = p.start {
+            // Field 22 is starttime; the name has a space and a ')'.
+            std::fs::write(
+                dir.join("stat"),
+                format!(
+                    "{} (stat tracker) gui) S {} 1 1 0 -1 4194560 0 0 0 0 0 0 0 0 20 0 1 0 {start} 0 0\n",
+                    p.pid, p.ppid
+                ),
+            )
+            .unwrap();
+        }
         let mut cmdline = Vec::new();
         for arg in std::iter::once(p.exe).chain(p.args.iter().copied()) {
             cmdline.extend_from_slice(arg.as_bytes());
             cmdline.push(0);
         }
         std::fs::write(dir.join("cmdline"), cmdline).unwrap();
+        let mut environ = b"HOME=/home/u\0".to_vec();
+        if let Some(tmp) = p.tmpdir {
+            environ.extend_from_slice(format!("TMPDIR={}\0", tmp.display()).as_bytes());
+        }
+        std::fs::write(dir.join("environ"), environ).unwrap();
         if let Some(fds) = p.fds {
             let fd_dir = dir.join("fd");
             std::fs::create_dir_all(&fd_dir).unwrap();
@@ -926,163 +1189,100 @@ mod tests {
         }
     }
 
-    const UID: u32 = 1000;
-    const GUI: &str = "/home/u/.local/bin/stat-tracker-gui";
-    const GUI_DELETED: &str = "/home/u/.local/bin/stat-tracker-gui (deleted)";
-    const LOCK: &str = "/run/user/1000/scuffed-stat-tracker-gui.lock";
-    const ME: Me = Me {
-        pid: 500,
-        ppid: 1,
-        uid: UID,
-    };
+    /// A fake `/proc` and an empty default temp dir.
+    struct Tree {
+        proc: tempfile::TempDir,
+        tmp: tempfile::TempDir,
+    }
 
-    fn proc_tree() -> tempfile::TempDir {
-        let root = tempfile::tempdir().unwrap();
-        let r = root.path();
-        let plain: &[&str] = &["/dev/null", "socket:[123]"];
-        // This GUI, holding the lock.
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 500,
-                ppid: 1,
-                uid: UID,
-                exe: GUI,
-                args: &[],
-                fds: Some(&[LOCK]),
-            },
-        );
+    impl Tree {
+        fn new() -> Self {
+            Self {
+                proc: tempfile::tempdir().unwrap(),
+                tmp: tempfile::tempdir().unwrap(),
+            }
+        }
+
+        fn roots(&self) -> ScanRoots<'_> {
+            ScanRoots {
+                proc_root: self.proc.path(),
+                default_tmp: self.tmp.path(),
+            }
+        }
+
+        fn add(&self, p: FakeProc<'_>) {
+            fake_proc(self.proc.path(), p);
+        }
+
+        fn targets(&self, me: Me) -> Vec<u32> {
+            stale_gui_targets(&scan_gui_processes(self.roots(), UID), me)
+        }
+    }
+
+    fn proc_tree() -> Tree {
+        let t = Tree::new();
+        // This GUI, holding the lock, and its companion.
+        t.add(FakeProc {
+            fds: Some(&[LOCK]),
+            start: Some(MY_START),
+            ..base(500, GUI)
+        });
+        t.add(FakeProc {
+            ppid: 500,
+            args: &["--companion"],
+            start: Some(MY_START),
+            ..base(501, GUI)
+        });
         // A 0.4.24 GUI left running by its in-app update: binary replaced,
-        // no lock. Its companion overlay.
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 300,
-                ppid: 1,
-                uid: UID,
-                exe: GUI_DELETED,
-                args: &[],
-                fds: Some(plain),
-            },
-        );
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 301,
-                ppid: 300,
-                uid: UID,
-                exe: GUI_DELETED,
-                args: &["--companion"],
-                fds: Some(&[]),
-            },
-        );
+        // no lock. Its companion overlay and the daemon it started.
+        t.add(FakeProc {
+            fds: Some(&["/dev/null", "socket:[123]"]),
+            ..base(300, GUI_DELETED)
+        });
+        t.add(FakeProc {
+            ppid: 300,
+            args: &["--companion"],
+            ..base(301, GUI_DELETED)
+        });
+        t.add(FakeProc {
+            ppid: 300,
+            ..base(302, "/home/u/.local/bin/scuffed-stat-tracker (deleted)")
+        });
         // A lockless legacy GUI whose binary was not replaced.
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 310,
-                ppid: 1,
-                uid: UID,
-                exe: "/usr/bin/stat-tracker-gui",
-                args: &[],
-                fds: Some(&[]),
-            },
-        );
-        // A launch that is in the lock protocol right now.
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 320,
-                ppid: 1,
-                uid: UID,
-                exe: GUI,
-                args: &["--replace"],
-                fds: Some(&[LOCK]),
-            },
-        );
-        // A demo run, and this GUI's own companion.
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 330,
-                ppid: 1,
-                uid: UID,
-                exe: GUI_DELETED,
-                args: &["--fixture", "sample"],
-                fds: Some(&[]),
-            },
-        );
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 501,
-                ppid: 500,
-                uid: UID,
-                exe: GUI,
-                args: &["--companion"],
-                fds: Some(&[]),
-            },
-        );
+        t.add(base(310, "/usr/bin/stat-tracker-gui"));
+        // A replacing launch waiting for the lock with the file open.
+        t.add(FakeProc {
+            args: &["--replace"],
+            fds: Some(&[LOCK]),
+            ..base(320, GUI)
+        });
+        // A demo run.
+        t.add(FakeProc {
+            args: &["--fixture", "sample"],
+            ..base(330, GUI_DELETED)
+        });
         // The tracker daemon, a stale GUI of another user, a GUI whose open
         // files cannot be read, and an orphan companion.
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 340,
-                ppid: 1,
-                uid: UID,
-                exe: "/home/u/.local/bin/scuffed-stat-tracker (deleted)",
-                args: &[],
-                fds: Some(&[]),
-            },
-        );
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 350,
-                ppid: 1,
-                uid: 1001,
-                exe: GUI_DELETED,
-                args: &[],
-                fds: Some(&[]),
-            },
-        );
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 360,
-                ppid: 1,
-                uid: UID,
-                exe: GUI_DELETED,
-                args: &[],
-                fds: None,
-            },
-        );
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 370,
-                ppid: 1,
-                uid: UID,
-                exe: GUI_DELETED,
-                args: &["--companion"],
-                fds: Some(&[]),
-            },
-        );
+        t.add(base(
+            340,
+            "/home/u/.local/bin/scuffed-stat-tracker (deleted)",
+        ));
+        t.add(FakeProc {
+            uid: 1001,
+            ..base(350, GUI_DELETED)
+        });
+        t.add(FakeProc {
+            fds: None,
+            ..base(360, GUI_DELETED)
+        });
+        t.add(FakeProc {
+            args: &["--companion"],
+            ..base(370, GUI_DELETED)
+        });
         // Not a pid, and an unrelated process.
-        std::fs::create_dir_all(r.join("self")).unwrap();
-        fake_proc(
-            r,
-            FakeProc {
-                pid: 380,
-                ppid: 1,
-                uid: UID,
-                exe: "/usr/bin/bash",
-                args: &[],
-                fds: Some(&[]),
-            },
-        );
-        root
+        std::fs::create_dir_all(t.proc.path().join("self")).unwrap();
+        t.add(base(380, "/usr/bin/bash"));
+        t
     }
 
     #[test]
@@ -1099,92 +1299,218 @@ mod tests {
     }
 
     #[test]
+    fn start_ticks_are_field_22_after_the_name() {
+        let line = "42 (a) b (c)) S 1 42 42 0 -1 4194560 1 2 3 4 5 6 7 8 20 0 3 0 123456 999 77\n";
+        assert_eq!(parse_start_ticks(line), Some(123456));
+        assert_eq!(parse_start_ticks("42 (x) S 1"), None);
+        assert_eq!(parse_start_ticks("no name"), None);
+    }
+
+    #[test]
     fn scan_reads_gui_processes_of_this_user_only() {
-        let root = proc_tree();
-        let procs = scan_gui_processes(root.path(), UID);
+        let t = proc_tree();
+        let procs = scan_gui_processes(t.roots(), UID);
         let pids: Vec<u32> = procs.iter().map(|p| p.pid).collect();
         assert_eq!(pids, vec![300, 301, 310, 320, 330, 360, 370, 500, 501]);
         let legacy = &procs[0];
         assert_eq!(legacy.exe, GUI_DELETED);
         assert_eq!(legacy.has_lock_open, Some(false));
-        assert!(!legacy.companion && !legacy.fixture);
+        assert_eq!(legacy.start_ticks, OLD);
+        // Its companion and the daemon it started are not busy children.
+        assert!(!legacy.busy_child && !legacy.update_dir);
+        assert!(!legacy.companion && !legacy.fixture && !legacy.replace);
         assert!(procs[1].companion);
         assert_eq!(procs[1].ppid, 300);
+        assert!(procs[3].replace);
         assert_eq!(procs[3].has_lock_open, Some(true));
         assert!(procs[4].fixture);
         assert_eq!(procs[5].has_lock_open, None);
-        assert!(scan_gui_processes(&root.path().join("missing"), UID).is_empty());
+        let missing = t.proc.path().join("missing");
+        let roots = ScanRoots {
+            proc_root: &missing,
+            ..t.roots()
+        };
+        assert!(scan_gui_processes(roots, UID).is_empty());
     }
 
     #[test]
-    fn stale_targets_are_lockless_guis_and_their_companions() {
-        let root = proc_tree();
-        let procs = scan_gui_processes(root.path(), UID);
-        // Companions first, then the GUIs. Never this GUI or its companion,
-        // the launch in the lock protocol, the demo run, the daemon,
-        // another user's GUI, an unreadable one, or an orphan companion.
-        assert_eq!(stale_gui_targets(&procs, ME), vec![301, 300, 310]);
+    fn stale_targets_are_lockless_guis_then_their_companions() {
+        let t = proc_tree();
+        // GUIs first, then companions. Never this GUI or its companion,
+        // the replacing launch, the demo run, the daemon, another user's
+        // GUI, an unreadable one, or an orphan companion.
+        assert_eq!(t.targets(ME), vec![300, 310, 301]);
     }
 
     #[test]
     fn stale_targets_skip_the_parent_that_restarted_this_gui() {
-        let root = proc_tree();
-        let procs = scan_gui_processes(root.path(), UID);
-        let me = Me { ppid: 300, ..ME };
-        assert_eq!(stale_gui_targets(&procs, me), vec![310]);
+        let t = proc_tree();
+        assert_eq!(t.targets(Me { ppid: 300, ..ME }), vec![310]);
+    }
+
+    #[test]
+    fn a_gui_mid_update_is_left_alone() {
+        // 0.4.24 runs `bash bootstrap.sh` as a child; the installer may run
+        // sudo (another user, exe unreadable).
+        let t = Tree::new();
+        t.add(base(300, GUI_DELETED));
+        t.add(FakeProc {
+            ppid: 300,
+            ..base(303, "/usr/bin/bash")
+        });
+        t.add(base(310, GUI_DELETED));
+        t.add(FakeProc {
+            ppid: 310,
+            uid: 0,
+            ..base(311, "/usr/bin/sudo")
+        });
+        std::fs::remove_file(t.proc.path().join("311").join("exe")).unwrap();
+        // Between download and install: only the work dir, in its TMPDIR.
+        let its_tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(its_tmp.path().join("sst-gui-update-320-1729600000000")).unwrap();
+        t.add(FakeProc {
+            tmpdir: Some(its_tmp.path()),
+            ..base(320, GUI_DELETED)
+        });
+        // No TMPDIR: the default temp dir.
+        std::fs::create_dir(t.tmp.path().join("sst-gui-update-330-1")).unwrap();
+        t.add(base(330, GUI_DELETED));
+        // Another pid's work dir does not count.
+        std::fs::create_dir(t.tmp.path().join("sst-gui-update-3400-1")).unwrap();
+        t.add(base(340, GUI_DELETED));
+        let procs = scan_gui_processes(t.roots(), UID);
+        assert!(procs[0].busy_child && procs[1].busy_child);
+        assert!(procs[2].update_dir && procs[3].update_dir);
+        assert!(!procs[4].busy_child && !procs[4].update_dir);
+        assert_eq!(stale_gui_targets(&procs, ME), vec![340]);
+    }
+
+    #[test]
+    fn a_young_or_undated_gui_is_left_alone() {
+        let t = Tree::new();
+        // Started 4 s before this one, after it, or with no readable start.
+        t.add(FakeProc {
+            start: Some(MY_START - 4 * TCK),
+            ..base(300, GUI)
+        });
+        t.add(FakeProc {
+            start: Some(MY_START + TCK),
+            ..base(310, GUI)
+        });
+        t.add(FakeProc {
+            start: None,
+            ..base(320, GUI)
+        });
+        // Exactly the minimum age counts as stale.
+        t.add(FakeProc {
+            start: Some(MY_START - 5 * TCK),
+            ..base(330, GUI)
+        });
+        assert_eq!(t.targets(ME), vec![330]);
+    }
+
+    #[test]
+    fn a_holder_of_an_unlinked_lock_file_is_left_alone() {
+        let t = Tree::new();
+        let unlinked = format!("{LOCK} (deleted)");
+        t.add(FakeProc {
+            fds: Some(&[unlinked.as_str()]),
+            ..base(300, GUI_DELETED)
+        });
+        t.add(FakeProc {
+            fds: Some(&["/run/user/1000/other.lock (deleted)"]),
+            ..base(310, GUI_DELETED)
+        });
+        let procs = scan_gui_processes(t.roots(), UID);
+        assert_eq!(procs[0].has_lock_open, Some(true));
+        assert_eq!(procs[1].has_lock_open, Some(false));
+        assert_eq!(stale_gui_targets(&procs, ME), vec![310]);
     }
 
     #[test]
     fn stop_signals_only_the_targets_through_the_injected_kill() {
-        let root = proc_tree();
+        let t = proc_tree();
         let mut sent = Vec::new();
-        let stopped = stop_stale_guis(root.path(), ME, &mut |pid| {
-            sent.push(pid);
+        let stopped = stop_stale_guis(t.roots(), ME, &mut |pid, exe| {
+            sent.push((pid, exe.to_string()));
             if pid == 310 {
                 Err(io::Error::from_raw_os_error(libc::EPERM))
             } else {
                 Ok(())
             }
         });
-        assert_eq!(sent, vec![301, 300, 310]);
-        assert_eq!(stopped, vec![301, 300]);
+        assert_eq!(
+            sent,
+            vec![
+                (300, GUI_DELETED.to_string()),
+                (310, "/usr/bin/stat-tracker-gui".to_string()),
+                (301, GUI_DELETED.to_string()),
+            ]
+        );
+        assert_eq!(stopped, vec![300, 301]);
     }
 
     #[test]
     fn stop_skips_a_pid_reused_since_the_scan() {
-        let root = proc_tree();
+        let t = proc_tree();
         let mut sent = Vec::new();
         let mut first = true;
-        let stopped = stop_stale_guis(root.path(), ME, &mut |pid| {
+        let stopped = stop_stale_guis(t.roots(), ME, &mut |pid, _| {
             if first {
                 first = false;
-                // Pid 300 exits and is reused before its turn.
-                let exe = root.path().join("300").join("exe");
+                // Pid 310 exits and is reused before its turn.
+                let exe = t.proc.path().join("310").join("exe");
                 std::fs::remove_file(&exe).unwrap();
                 std::os::unix::fs::symlink("/usr/bin/vim", &exe).unwrap();
             }
             sent.push(pid);
             Ok(())
         });
-        assert_eq!(sent, vec![301, 310]);
-        assert_eq!(stopped, vec![301, 310]);
+        assert_eq!(sent, vec![300, 301]);
+        assert_eq!(stopped, vec![300, 301]);
     }
 
     #[test]
     fn nothing_to_stop_when_this_is_the_only_gui() {
-        let root = tempfile::tempdir().unwrap();
-        fake_proc(
-            root.path(),
-            FakeProc {
-                pid: 500,
-                ppid: 1,
-                uid: UID,
-                exe: GUI,
-                args: &[],
-                fds: Some(&[LOCK]),
-            },
-        );
-        let stopped = stop_stale_guis(root.path(), ME, &mut |_| panic!("no signal"));
+        let t = Tree::new();
+        t.add(FakeProc {
+            fds: Some(&[LOCK]),
+            start: Some(MY_START),
+            ..base(500, GUI)
+        });
+        let stopped = stop_stale_guis(t.roots(), ME, &mut |_, _| panic!("no signal"));
         assert!(stopped.is_empty());
+    }
+
+    #[test]
+    fn a_launch_that_must_wait_gets_its_lock_file_back() {
+        // claim_replacing retries on this one file, so the waiting launch
+        // has the lock file open the whole time and the stale scan leaves
+        // it alone.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        let holder = claim(&path, "1.0.0").unwrap();
+        assert!(matches!(holder, Claim::Primary(_)));
+        let (claimed, kept) = try_claim(open_lock(&path).unwrap(), "1.0.1").unwrap();
+        assert!(matches!(claimed, Claim::Secondary));
+        let kept = kept.expect("the file comes back on Secondary");
+        let (claimed, kept) = try_claim(kept, "1.0.1").unwrap();
+        assert!(matches!(claimed, Claim::Secondary));
+        assert!(kept.is_some());
+        drop(holder);
+        // Other tests fork children that briefly share this process's open
+        // files, so the flock can outlive `drop` by a moment.
+        let mut file = kept.unwrap();
+        let start = Instant::now();
+        loop {
+            match try_claim(file, "1.0.1").unwrap() {
+                (Claim::Primary(_), None) => break,
+                (Claim::Secondary, Some(open)) if start.elapsed() < Duration::from_secs(5) => {
+                    file = open;
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
     }
 }

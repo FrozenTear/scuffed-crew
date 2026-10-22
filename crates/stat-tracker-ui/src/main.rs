@@ -48,19 +48,26 @@ fn main() -> anyhow::Result<()> {
         match claimed {
             Ok(instance::Claim::Primary(file)) => {
                 // A GUI from before the lock (0.4.x), or one left on a
-                // replaced binary without it, would keep running beside
-                // this one and save its older config over ours (S5-UP-1).
-                // Before this GUI reads config.
-                let stopped = instance::stop_stale_guis(
-                    std::path::Path::new("/proc"),
-                    instance::Me::current(),
-                    &mut instance::sigterm,
-                );
-                if !stopped.is_empty() {
-                    tracing::info!(
-                        ?stopped,
-                        "stopped older tracker GUIs that ran without the lock"
-                    );
+                // replaced binary without it, keeps running beside this
+                // one, and its Save writes an older config over this one's
+                // settings (S5-UP-1). Stop it, unless it is mid-update.
+                match instance::Me::current() {
+                    Some(me) => {
+                        let stopped = instance::stop_stale_guis(
+                            instance::ScanRoots::live(),
+                            me,
+                            &mut instance::sigterm_if_exe,
+                        );
+                        if !stopped.is_empty() {
+                            tracing::info!(
+                                ?stopped,
+                                "stopped older tracker GUIs that ran without the lock"
+                            );
+                        }
+                    }
+                    None => tracing::warn!(
+                        "could not read this process's start time; older GUIs are left running"
+                    ),
                 }
                 Some(file)
             }

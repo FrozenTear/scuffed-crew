@@ -409,43 +409,52 @@ pub(crate) fn show_kde_direct(desktop: &str, route: CaptureRoute) -> bool {
     stat_tracker::capture::is_kde(desktop) || route == CaptureRoute::Kwin
 }
 
-/// True when the desktop session is Wayland: `XDG_SESSION_TYPE` when it
-/// says `wayland` or `x11`, else whether `WAYLAND_DISPLAY` is set. The same
-/// rule the tracker uses to pick a capture method, so Settings and the
-/// tracker agree on what "X11" means.
-pub(crate) fn is_wayland_session(session_type: Option<&str>, wayland_display: bool) -> bool {
-    match session_type.map(str::to_ascii_lowercase).as_deref() {
-        Some("wayland") => true,
-        Some("x11") => false,
-        _ => wayland_display,
+/// TEMP until #437: the tracker's three-state session rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionKind {
+    Wayland,
+    X11,
+    Unknown,
+}
+
+impl SessionKind {
+    pub fn from_env(session_type: Option<&str>, wayland_display: bool) -> Self {
+        match session_type.map(str::to_ascii_lowercase).as_deref() {
+            Some("wayland") => SessionKind::Wayland,
+            Some("x11") if !wayland_display => SessionKind::X11,
+            Some("x11") => SessionKind::Unknown,
+            _ if wayland_display => SessionKind::Wayland,
+            _ => SessionKind::Unknown,
+        }
     }
 }
 
-/// [`is_wayland_session`] for this process's environment.
-pub(crate) fn wayland_session_from_env() -> bool {
-    is_wayland_session(
+/// The session as the tracker sees it ([`SessionKind::from_env`]) for this
+/// process's environment. Settings hides Wayland-only capture methods only
+/// on [`SessionKind::X11`], where the tracker ignores them too.
+pub(crate) fn session_from_env() -> SessionKind {
+    SessionKind::from_env(
         std::env::var("XDG_SESSION_TYPE").ok().as_deref(),
         std::env::var_os("WAYLAND_DISPLAY").is_some(),
     )
 }
 
-/// The capture method chips, in order. On Wayland: Automatic, Screen
-/// stream, Older screenshot, and KDE direct on KDE or when it is saved.
-/// Off Wayland only Automatic (X11 direct there): the screen stream and
-/// both screenshot routes need Wayland. A saved Wayland-only route is still
-/// shown, selected, so the warning under it has a chip to point at.
+/// Capture methods that need a Wayland session: the screen stream and KDE
+/// direct. Older screenshot (the portal) also runs on X11.
+pub(crate) fn wayland_only_route(route: CaptureRoute) -> bool {
+    matches!(route, CaptureRoute::Screencast | CaptureRoute::Kwin)
+}
+
+/// The capture method chips, in order: Automatic, Screen stream, Older
+/// screenshot, and KDE direct on KDE or when it is saved. On a session
+/// known to be X11 the Wayland-only methods are left out, except a saved
+/// one, which stays (selected) so the warning under it has a chip to point
+/// at. Wayland and an unknown session get every chip.
 pub(crate) fn capture_route_chips(
     desktop: &str,
-    wayland: bool,
+    session: SessionKind,
     route: CaptureRoute,
 ) -> Vec<CaptureRoute> {
-    if !wayland {
-        return if route == CaptureRoute::Auto {
-            vec![CaptureRoute::Auto]
-        } else {
-            vec![CaptureRoute::Auto, route]
-        };
-    }
     let mut chips = vec![
         CaptureRoute::Auto,
         CaptureRoute::Screencast,
@@ -453,6 +462,9 @@ pub(crate) fn capture_route_chips(
     ];
     if show_kde_direct(desktop, route) {
         chips.push(CaptureRoute::Kwin);
+    }
+    if session == SessionKind::X11 {
+        chips.retain(|chip| !wayland_only_route(*chip) || *chip == route);
     }
     chips
 }
@@ -467,22 +479,34 @@ pub(crate) fn capture_route_label(route: CaptureRoute) -> &'static str {
 }
 
 /// The line under the capture chips that says what Automatic does here.
-pub(crate) fn capture_route_help(wayland: bool) -> &'static str {
-    if wayland {
-        "Automatic uses the screen stream on KDE and GNOME, and direct capture on other desktops. Screen stream forces that stream. Older screenshot is the previous portal."
+pub(crate) fn capture_route_help(session: SessionKind) -> &'static str {
+    if session == SessionKind::X11 {
+        "This is an X11 session. Automatic captures the screen directly with X11. Older screenshot is the previous portal."
     } else {
-        "This is an X11 session. Automatic captures the screen directly with X11, the only method that works here."
+        "Automatic uses the screen stream on KDE and GNOME, and direct capture on other desktops. Screen stream forces that stream. Older screenshot is the previous portal."
     }
 }
 
-/// Lines under the capture method: a saved Wayland-only method on X11, the
-/// GNOME flash for Older screenshot, KDE direct that is not there, and what
-/// the running tracker said. A line about the selected choice is a warning.
-/// Off Wayland the GNOME and KDE direct lines are left out: those methods
-/// are not offered there.
+/// Shown on X11 next to the Older screenshot choice.
+pub(crate) const X11_SCREENSHOT_NOTE: &str = "Older screenshot captures the whole desktop on X11 with more than one monitor, so Automatic is recommended.";
+
+/// The warning under a saved Wayland-only method on X11.
+pub(crate) fn x11_route_warning(route: CaptureRoute) -> String {
+    format!(
+        "{} works only on Wayland. This is an X11 session, so the tracker uses Automatic instead.",
+        capture_route_label(route)
+    )
+}
+
+/// Lines under the capture method: a saved Wayland-only method on X11,
+/// Older screenshot on X11, the GNOME flash for Older screenshot, KDE
+/// direct that is not there, and what the running tracker said. A line
+/// about the selected choice is a warning. On X11 the KDE direct lines are
+/// left out (it is not offered there), and so is the tracker's notice about
+/// the same Wayland-only method, which the warning already says.
 pub(crate) fn capture_route_notes(
     desktop: &str,
-    wayland: bool,
+    session: SessionKind,
     route: CaptureRoute,
     kde_direct: Option<&stat_tracker::capture::KwinProbe>,
     daemon_notice: Option<&str>,
@@ -495,17 +519,24 @@ pub(crate) fn capture_route_notes(
         }
     };
     let mut notes = Vec::new();
-    if !wayland {
-        if route != CaptureRoute::Auto {
+    if session == SessionKind::X11 {
+        let warned = wayland_only_route(route);
+        if warned {
+            notes.push((x11_route_warning(route), NoteTone::Warn));
+        }
+        notes.push((
+            X11_SCREENSHOT_NOTE.to_string(),
+            tone(route == CaptureRoute::Screenshot),
+        ));
+        if stat_tracker::capture::is_gnome(desktop) {
             notes.push((
-                format!(
-                    "{} works only on Wayland. This is an X11 session, so the tracker uses Automatic instead.",
-                    capture_route_label(route)
-                ),
-                NoteTone::Warn,
+                GNOME_SCREENSHOT_NOTE.to_string(),
+                tone(route == CaptureRoute::Screenshot),
             ));
         }
-        if let Some(notice) = daemon_notice {
+        if let Some(notice) = daemon_notice
+            && !(warned && notice.contains("needs a Wayland session"))
+        {
             notes.push((format!("Tracker: {notice}."), NoteTone::Warn));
         }
         return notes;
@@ -1206,9 +1237,9 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 
 fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let route = app.settings.capture_route;
-    let wayland = app.wayland_session;
+    let session = app.session;
     let mut route_chips = row![].spacing(8);
-    for choice in capture_route_chips(&app.desktop, wayland, route) {
+    for choice in capture_route_chips(&app.desktop, session, route) {
         route_chips = route_chips.push(output_chip(
             capture_route_label(choice),
             route == choice,
@@ -1216,7 +1247,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         ));
     }
     // KDE direct's help goes with its chip, and only where it can work.
-    let kde_direct = wayland && show_kde_direct(&app.desktop, route);
+    let kde_direct = session != SessionKind::X11 && show_kde_direct(&app.desktop, route);
 
     let mut chips = row![output_chip(
         "Auto (first monitor)",
@@ -1258,7 +1289,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![
         field_caption("Capture method"),
         route_chips.wrap(),
-        text(capture_route_help(wayland))
+        text(capture_route_help(session))
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
@@ -1274,7 +1305,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     }
     for (note, tone) in capture_route_notes(
         &app.desktop,
-        wayland,
+        session,
         route,
         app.kde_direct.as_ref(),
         app.ocr_switch.capture_notice.as_deref(),
@@ -3412,31 +3443,41 @@ token = \"not-a-real-token\"
     }
 
     #[test]
-    fn wayland_session_follows_the_tracker_rule() {
-        assert!(is_wayland_session(Some("wayland"), false));
-        assert!(is_wayland_session(Some("Wayland"), false));
-        // A session that says x11 stays X11 with a stray WAYLAND_DISPLAY.
-        assert!(!is_wayland_session(Some("x11"), true));
-        assert!(is_wayland_session(None, true));
-        assert!(is_wayland_session(Some("tty"), true));
-        assert!(!is_wayland_session(None, false));
+    fn session_kind_follows_the_tracker_rule() {
+        use SessionKind::*;
+        assert_eq!(SessionKind::from_env(Some("wayland"), false), Wayland);
+        assert_eq!(SessionKind::from_env(Some("Wayland"), true), Wayland);
+        assert_eq!(SessionKind::from_env(Some("x11"), false), X11);
+        assert_eq!(SessionKind::from_env(Some("X11"), false), X11);
+        assert_eq!(SessionKind::from_env(None, true), Wayland);
+        assert_eq!(SessionKind::from_env(Some("tty"), true), Wayland);
+        // Not known: x11 beside a stray WAYLAND_DISPLAY, or no evidence.
+        assert_eq!(SessionKind::from_env(Some("x11"), true), Unknown);
+        for kind in [None, Some("tty"), Some("unspecified")] {
+            assert_eq!(SessionKind::from_env(kind, false), Unknown, "{kind:?}");
+        }
     }
 
     #[test]
-    fn capture_chips_on_wayland_are_unchanged() {
+    fn capture_chips_on_wayland_or_an_unknown_session_are_unchanged() {
         use CaptureRoute::*;
-        assert_eq!(
-            capture_route_chips("GNOME", true, Auto),
-            vec![Auto, Screencast, Screenshot]
-        );
-        assert_eq!(
-            capture_route_chips("KDE", true, Screencast),
-            vec![Auto, Screencast, Screenshot, Kwin]
-        );
-        assert_eq!(
-            capture_route_chips("niri", true, Kwin),
-            vec![Auto, Screencast, Screenshot, Kwin]
-        );
+        for session in [SessionKind::Wayland, SessionKind::Unknown] {
+            assert_eq!(
+                capture_route_chips("GNOME", session, Auto),
+                vec![Auto, Screencast, Screenshot]
+            );
+            assert_eq!(
+                capture_route_chips("KDE", session, Screencast),
+                vec![Auto, Screencast, Screenshot, Kwin]
+            );
+            assert_eq!(
+                capture_route_chips("niri", session, Kwin),
+                vec![Auto, Screencast, Screenshot, Kwin]
+            );
+            assert!(capture_route_help(session).starts_with("Automatic uses the screen stream"));
+            assert!(capture_route_notes("i3", session, Auto, None, None).is_empty());
+            assert!(capture_route_notes("i3", session, Screencast, None, None).is_empty());
+        }
         assert_eq!(capture_route_label(Auto), "Automatic");
         assert_eq!(capture_route_label(Screencast), "Screen stream");
         assert_eq!(capture_route_label(Screenshot), "Older screenshot");
@@ -3444,52 +3485,79 @@ token = \"not-a-real-token\"
     }
 
     #[test]
-    fn capture_chips_on_x11_offer_only_automatic() {
+    fn capture_chips_on_x11_drop_the_wayland_only_methods() {
         use CaptureRoute::*;
-        // Plasma X11 included: KDE direct needs Wayland too.
+        let x11 = SessionKind::X11;
+        // Plasma X11 included: KDE direct needs Wayland too. Older
+        // screenshot (the portal) runs on X11.
         for desktop in ["KDE", "GNOME", "i3", ""] {
-            assert_eq!(capture_route_chips(desktop, false, Auto), vec![Auto]);
+            assert_eq!(
+                capture_route_chips(desktop, x11, Auto),
+                vec![Auto, Screenshot]
+            );
+            assert_eq!(
+                capture_route_chips(desktop, x11, Screenshot),
+                vec![Auto, Screenshot]
+            );
         }
         // A saved Wayland-only route stays visible so its warning has a chip.
-        for saved in [Screencast, Screenshot, Kwin] {
-            assert_eq!(capture_route_chips("KDE", false, saved), vec![Auto, saved]);
-        }
-        assert!(capture_route_help(false).contains("X11"));
-        assert!(!capture_route_help(false).contains("Screen stream"));
-        assert!(capture_route_help(true).starts_with("Automatic uses the screen stream"));
+        assert_eq!(
+            capture_route_chips("GNOME", x11, Screencast),
+            vec![Auto, Screencast, Screenshot]
+        );
+        assert_eq!(
+            capture_route_chips("KDE", x11, Kwin),
+            vec![Auto, Screenshot, Kwin]
+        );
+        assert!(capture_route_help(x11).contains("X11"));
+        assert!(capture_route_help(x11).contains("Older screenshot"));
+        assert!(!capture_route_help(x11).contains("Screen stream"));
     }
 
     #[test]
-    fn capture_notes_on_x11_warn_about_a_saved_wayland_route_only() {
+    fn capture_notes_on_x11() {
         use stat_tracker::capture::KwinProbe;
-        // Automatic on X11: nothing to say, not even GNOME's flash or KDE direct.
-        assert!(capture_route_notes("GNOME", false, CaptureRoute::Auto, None, None).is_empty());
+        let x11 = SessionKind::X11;
+        // Automatic: the Older screenshot note only, never KDE direct's.
         let missing = KwinProbe::Unavailable("no KWin".into());
-        assert!(
-            capture_route_notes("KDE", false, CaptureRoute::Auto, Some(&missing), None).is_empty()
+        assert_eq!(
+            capture_route_notes("KDE", x11, CaptureRoute::Auto, Some(&missing), None),
+            vec![(X11_SCREENSHOT_NOTE.to_string(), NoteTone::Info)]
         );
+        assert!(X11_SCREENSHOT_NOTE.contains("whole desktop"));
+        assert!(X11_SCREENSHOT_NOTE.contains("Automatic is recommended"));
+        // Older screenshot saved: no Wayland warning, its note is a warning.
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Screenshot, None, None);
+        assert_eq!(
+            notes,
+            vec![(X11_SCREENSHOT_NOTE.to_string(), NoteTone::Warn)]
+        );
+        // GNOME X11 still flashes.
+        let notes = capture_route_notes("GNOME", x11, CaptureRoute::Auto, None, None);
+        assert_eq!(notes.len(), 2);
+        assert_eq!(notes[1].0, GNOME_SCREENSHOT_NOTE);
         for (saved, label) in [
             (CaptureRoute::Screencast, "Screen stream"),
-            (CaptureRoute::Screenshot, "Older screenshot"),
             (CaptureRoute::Kwin, "KDE direct"),
         ] {
-            let notes = capture_route_notes("KDE", false, saved, Some(&missing), None);
-            assert_eq!(notes.len(), 1, "{notes:?}");
-            assert_eq!(notes[0].1, NoteTone::Warn);
+            let notes = capture_route_notes("KDE", x11, saved, Some(&missing), None);
+            assert_eq!(notes.len(), 2, "{notes:?}");
+            assert_eq!(notes[0], (x11_route_warning(saved), NoteTone::Warn));
             assert!(notes[0].0.starts_with(label), "{}", notes[0].0);
             assert!(notes[0].0.contains("only on Wayland"));
             assert!(notes[0].0.contains("uses Automatic"));
+            assert_eq!(notes[1], (X11_SCREENSHOT_NOTE.to_string(), NoteTone::Info));
         }
-        // The running tracker's notice is still shown.
-        let notes = capture_route_notes(
-            "GNOME",
-            false,
-            CaptureRoute::Screencast,
-            None,
-            Some("screen stream needs Wayland; using X11"),
-        );
-        assert_eq!(notes.len(), 2);
-        assert!(notes[1].0.starts_with("Tracker: screen stream"));
+        // The tracker's notice about the same thing is not said twice; any
+        // other notice is.
+        let same = "the saved capture method, screencast, needs a Wayland session and this one is X11; automatic is used: x11";
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Screencast, None, Some(same));
+        assert!(!notes.iter().any(|(n, _)| n.starts_with("Tracker:")));
+        let other = "X11 capture failed: no display";
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Screencast, None, Some(other));
+        assert_eq!(notes.last().unwrap().0, format!("Tracker: {other}."));
+        let notes = capture_route_notes("i3", x11, CaptureRoute::Auto, None, Some(same));
+        assert!(notes.last().unwrap().0.starts_with("Tracker: the saved"));
     }
 
     #[test]
@@ -3511,18 +3579,6 @@ token = \"not-a-real-token\"
     }
 
     #[test]
-    fn package_owned_banner_drops_the_command_and_copy() {
-        let src: String = include_str!("update.rs").split_whitespace().collect();
-        // The command, Copy and Update now are inside the non-package branch.
-        assert!(
-            src.contains(
-                "ifletSome(owner)=package{body=body.push(text(package_update_line(owner))"
-            )
-        );
-        assert!(src.contains("letmutactions=row![].spacing(8);ifpackage.is_none(){"));
-    }
-
-    #[test]
     fn new_reader_switch_is_no_longer_called_alpha() {
         assert_eq!(NEW_READER_LABEL, "New reader");
         assert!(!NEW_READER_LABEL.contains("alpha"));
@@ -3532,22 +3588,43 @@ token = \"not-a-real-token\"
     fn capture_notes_warn_about_the_gnome_flash_and_a_missing_kde_direct() {
         use stat_tracker::capture::KwinProbe;
         // GNOME: the flash is always said, as a warning once chosen.
-        let notes = capture_route_notes("ubuntu:GNOME", true, CaptureRoute::Auto, None, None);
+        let notes = capture_route_notes(
+            "ubuntu:GNOME",
+            SessionKind::Wayland,
+            CaptureRoute::Auto,
+            None,
+            None,
+        );
         assert_eq!(
             notes,
             vec![(GNOME_SCREENSHOT_NOTE.to_string(), NoteTone::Info)]
         );
         assert!(GNOME_SCREENSHOT_NOTE.contains("flashes the screen"));
         assert!(GNOME_SCREENSHOT_NOTE.contains("sound"));
-        let chosen = capture_route_notes("GNOME", true, CaptureRoute::Screenshot, None, None);
+        let chosen = capture_route_notes(
+            "GNOME",
+            SessionKind::Wayland,
+            CaptureRoute::Screenshot,
+            None,
+            None,
+        );
         assert_eq!(chosen[0].1, NoteTone::Warn);
         // Not on KDE.
-        assert!(capture_route_notes("KDE", true, CaptureRoute::Screenshot, None, None).is_empty());
+        assert!(
+            capture_route_notes(
+                "KDE",
+                SessionKind::Wayland,
+                CaptureRoute::Screenshot,
+                None,
+                None
+            )
+            .is_empty()
+        );
         // KDE direct there: nothing to say. Not there: the reason.
         assert!(
             capture_route_notes(
                 "KDE",
-                true,
+                SessionKind::Wayland,
                 CaptureRoute::Kwin,
                 Some(&KwinProbe::Available),
                 None
@@ -3555,13 +3632,19 @@ token = \"not-a-real-token\"
             .is_empty()
         );
         let missing = KwinProbe::Unavailable("KWin refused the call".into());
-        let notes = capture_route_notes("KDE", true, CaptureRoute::Auto, Some(&missing), None);
+        let notes = capture_route_notes(
+            "KDE",
+            SessionKind::Wayland,
+            CaptureRoute::Auto,
+            Some(&missing),
+            None,
+        );
         assert_eq!(notes.len(), 1);
         assert!(notes[0].0.contains("KWin refused the call"));
         assert_eq!(notes[0].1, NoteTone::Info);
         let notes = capture_route_notes(
             "KDE",
-            true,
+            SessionKind::Wayland,
             CaptureRoute::Kwin,
             Some(&missing),
             Some("KDE direct capture is not available (x); using screen stream instead"),
@@ -3573,14 +3656,20 @@ token = \"not-a-real-token\"
         assert!(KDE_DIRECT_HELP.contains("never saved unless a debug option is on"));
         // Not checked is said plainly, never as a warning, even when chosen.
         let not_checked = KwinProbe::NotChecked("needs 6.8.1".into());
-        let notes = capture_route_notes("KDE", true, CaptureRoute::Kwin, Some(&not_checked), None);
+        let notes = capture_route_notes(
+            "KDE",
+            SessionKind::Wayland,
+            CaptureRoute::Kwin,
+            Some(&not_checked),
+            None,
+        );
         assert_eq!(notes.len(), 1);
         assert!(notes[0].0.starts_with("KDE direct was not checked"));
         assert!(!notes[0].0.contains("not available"));
         assert_eq!(notes[0].1, NoteTone::Info);
         let notes = capture_route_notes(
             "KDE",
-            true,
+            SessionKind::Wayland,
             CaptureRoute::Kwin,
             Some(&KwinProbe::NotProbed),
             None,

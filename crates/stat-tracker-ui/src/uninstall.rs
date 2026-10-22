@@ -229,9 +229,19 @@ pub fn parse_pacman_qo(text: &str) -> Option<String> {
     valid_package_name(pkg).then(|| pkg.to_string())
 }
 
+/// The owning package from `dpkg -S` output. Diversion lines
+/// (`diversion by pkg from: …`, `local diversion …`) are skipped. A path
+/// shared by several packages reads `pkg1, pkg2: /path`: the first is
+/// used. A multiarch name (`pkg:amd64: /path`) gives `pkg`.
 pub fn parse_dpkg_s(text: &str) -> Option<String> {
-    let line = text.lines().find(|line| line.contains(':'))?;
-    let pkg = line.split(':').next()?.trim();
+    let line = text.lines().find(|line| {
+        let line = line.trim_start();
+        line.contains(':')
+            && !line.starts_with("diversion by ")
+            && !line.starts_with("local diversion")
+    })?;
+    let owners = line.split(':').next()?;
+    let pkg = owners.split(',').next()?.trim();
     valid_package_name(pkg).then(|| pkg.to_string())
 }
 
@@ -1559,6 +1569,28 @@ mod tests {
                 .iter()
                 .filter(|spec| spec.class == PathClass::Data || spec.class == PathClass::Config)
                 .all(|spec| spec.when == When::Purge)
+        );
+    }
+
+    #[test]
+    fn dpkg_owner_skips_diversions_and_takes_the_first_of_several() {
+        let diverted = "diversion by other-pkg from: /usr/bin/stat-tracker-gui\n\
+                        diversion by other-pkg to: /usr/bin/stat-tracker-gui.real\n\
+                        scuffed-stat-tracker: /usr/bin/stat-tracker-gui\n";
+        assert_eq!(
+            parse_dpkg_s(diverted).as_deref(),
+            Some("scuffed-stat-tracker")
+        );
+        let local = "local diversion from: /usr/bin/stat-tracker-gui\n\
+                     local diversion to: /usr/bin/stat-tracker-gui.distrib\n";
+        assert_eq!(parse_dpkg_s(local), None);
+        assert_eq!(
+            parse_dpkg_s("scuffed-stat-tracker, scuffed-extra: /usr/share/doc/x").as_deref(),
+            Some("scuffed-stat-tracker")
+        );
+        assert_eq!(
+            parse_dpkg_s("scuffed-stat-tracker:amd64: /usr/bin/stat-tracker-gui").as_deref(),
+            Some("scuffed-stat-tracker")
         );
     }
 
