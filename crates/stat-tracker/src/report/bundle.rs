@@ -13,13 +13,13 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use super::marker::{self, LastExit};
 use super::scrub::{self, LogWindow, ScrubContext};
 use crate::capture::CaptureBackend;
 use crate::config::{Config, OcrSetting, ReaderSetting};
 
+pub use super::hash::sha256_hex;
 pub use crate::capture::capture_backend_label;
 pub use crate::host_probe::SessionType;
 pub use crate::version::APP_VERSION;
@@ -438,16 +438,6 @@ impl From<&SystemInfo> for SystemJson {
             last_exit: s.last_exit.as_str(),
         }
     }
-}
-
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    let digest = Sha256::digest(bytes);
-    let mut out = String::with_capacity(64);
-    for b in digest {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
 }
 
 /// Scrubbed `reason.text`: section 6 rules, no NUL, at most 500 characters.
