@@ -21,6 +21,8 @@ members = [
     "crates/chat",
     # Overwatch stat tracker
     "crates/stat-tracker",
+    # Its bottom layer (0.6 N4), re-exported by scuffed-stat-tracker.
+    "crates/stat-tracker-core",
     # Iced 0.14 tracker GUI. Binary name: stat-tracker-gui.
     "crates/stat-tracker-ui",
 ]
