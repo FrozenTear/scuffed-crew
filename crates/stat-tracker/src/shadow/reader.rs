@@ -2283,7 +2283,7 @@ mod tests {
         assert_eq!(reader.read_top_bar(&frame), None);
         let staging = data.path().join("templates/.maps-v1-staging");
         write_pack(&staging, LETTERS);
-        crate::packs::swap_dir(&staging, &MapTemplates::dir_v1_in(data.path())).unwrap();
+        crate::packs::layout::swap_dir(&staging, &MapTemplates::dir_v1_in(data.path())).unwrap();
         assert_eq!(reader.read_top_bar(&frame), None, "the noticing read");
         reader.maps.wait_reload();
         assert_eq!(reader.read_top_bar(&frame).unwrap().name, "Ilios");
@@ -2295,7 +2295,7 @@ mod tests {
         let c = ReaderConfig::from_data_dir(root);
         assert_eq!(c.map_v1_dir, Some(root.join("templates/maps-v1")));
         assert_eq!(c.map_dir, Some(root.join("templates/maps")));
-        let spec = crate::packs::PACKS
+        let spec = crate::packs::layout::PACKS
             .iter()
             .find(|s| s.name == "maps-v1.tar")
             .unwrap();

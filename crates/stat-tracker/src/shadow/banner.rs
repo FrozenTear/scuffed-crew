@@ -1239,7 +1239,7 @@ fn load_glyphs(dir: &Path) -> Option<(HashMap<char, Gray>, f64, f64)> {
     if !atlas
         .glyphs
         .values()
-        .all(|f| crate::packs::is_glyph_name(f))
+        .all(|f| crate::packs::layout::is_glyph_name(f))
     {
         tracing::warn!(
             folder = ?dir.file_name(),
@@ -2589,7 +2589,7 @@ mod tests {
     fn swap_in_v1(data: &Path, letters: &str, tag: &str) {
         let staging = data.join(format!("templates/.maps-v1-staging-{tag}"));
         write_pack(&staging, letters);
-        crate::packs::swap_dir(&staging, &MapTemplates::dir_v1_in(data)).unwrap();
+        crate::packs::layout::swap_dir(&staging, &MapTemplates::dir_v1_in(data)).unwrap();
     }
 
     #[test]
