@@ -32,3 +32,7 @@ mod tests_layering;
 /// README, bootstrap and changelog pins on this package's version.
 #[cfg(test)]
 mod tests_release_pins;
+
+/// The README's `config.toml` examples load as written.
+#[cfg(test)]
+mod tests_readme_config;

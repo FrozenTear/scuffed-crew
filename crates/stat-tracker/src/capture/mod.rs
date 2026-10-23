@@ -137,6 +137,10 @@ pub use stream::pause::{
 };
 pub use tab::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, first_grab_press, tab_retry_press};
 
+/// Forget the saved screen-share permission (the restore token and its temp
+/// file). Call only while the daemon is stopped.
+pub use stream::remove_restore_token;
+
 /// A saved restore token can reopen the share without a prompt.
 pub fn share_restorable(data_dir: &std::path::Path) -> bool {
     stream::restore_token_saved(data_dir)

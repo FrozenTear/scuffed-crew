@@ -1713,7 +1713,7 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
 fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let running = app.daemon.running();
     let mut copy = column![hint(
-        "Compact rewrites the store and keeps one backup. Delete removes local matches only, not the website."
+        "Compact rewrites the store and keeps one backup. Delete removes local matches and the saved screen-share permission, not the website. The next screen share asks for permission again."
     ),]
     .spacing(6);
 
@@ -1727,7 +1727,7 @@ fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     }
     if app.confirm_clear {
         copy = copy.push(
-            text("Really delete all local match history? This cannot be undone.")
+            text("Really delete all local match history? The screen-share permission is forgotten too. This cannot be undone.")
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(theme::DANGER),

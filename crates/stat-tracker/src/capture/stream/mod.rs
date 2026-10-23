@@ -35,7 +35,7 @@ pub use policy::{
     capture_now_blocked_message, is_declined_capture, is_share_closed_until_game, is_share_opening,
     is_stream_miss, share_close_due, should_close_share,
 };
-pub use token::restore_token_saved;
+pub use token::{remove_restore_token, restore_token_saved};
 
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
