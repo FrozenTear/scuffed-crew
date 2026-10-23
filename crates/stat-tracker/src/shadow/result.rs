@@ -56,7 +56,7 @@
 //! against the runner-up, and an under-read runner-up widens it. So a read
 //! the fast scores call sure is certified: for every template of another
 //! word, an exact bound (the block projection plus Cauchy-Schwarz on the
-//! rest, [`super::ncc::bound_at`]) rules out every window, and the windows it cannot
+//! rest, `ncc::bound_at`) rules out every window, and the windows it cannot
 //! rule out are scored exactly. Any window at `s1 - MARGIN` or above flags
 //! the read. A sure fast read is therefore a sure exhaustive read of the
 //! same word; a word the fast search under-reads can only lower confidence.
@@ -786,7 +786,7 @@ impl FinalScoreTemplate {
     /// does makes the read sure, and a check that runs out of budget leaves
     /// it suspect. So a sure read here is a sure exhaustive read, and the
     /// reverse holds whenever the fast score is at [`PRESENT`] (both up to
-    /// [`super::ncc::ncc_at`]'s f32 error at the floor, see [`certify`]).
+    /// `ncc::ncc_at`'s f32 error at the floor, see [`certify`]).
     ///
     /// Cost note (F257-6): a suspect fast score certifies with the full
     /// [`CERT_MACS`] budget, and the bound pass is not budgeted (F253-13).
