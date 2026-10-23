@@ -156,6 +156,7 @@ impl ShadowRecognizerControl {
 }
 
 impl Config {
+    /// Whether OCR should write debug PNGs this process (config and/or env).
     pub fn debug_ocr_enabled(&self) -> bool {
         self.debug_ocr || Self::env_truthy("STAT_TRACKER_DEBUG_OCR")
     }

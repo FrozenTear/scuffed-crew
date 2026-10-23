@@ -956,7 +956,7 @@ fn the_would_be_crates_have_no_back_edges() {
         ("capture", "perf", false),
         ("boundary", "model", false),
         ("detect", "model", false),
-        ("storage", "suspect", false),
+        ("storage::edits", "suspect", false),
         ("ocr_switch", "ocr_status", false),
         ("report::kit", "report::blank", false),
         ("report::kit", "report::blank::tests_synth", true),

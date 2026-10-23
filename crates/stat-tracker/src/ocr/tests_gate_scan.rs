@@ -621,7 +621,7 @@ fn files_of(sites: &[String]) -> Vec<String> {
 /// The scanned tree has at least this many files (one less than on
 /// 2026-10-23), so a module-tree bug cannot drop files from the scan
 /// unseen.
-const MIN_SCANNED: usize = 85;
+const MIN_SCANNED: usize = 128;
 
 /// Nothing outside the gate can start Tesseract or open the gate:
 /// - one `LepTess` construction in the whole tree, in `ocr_with`;

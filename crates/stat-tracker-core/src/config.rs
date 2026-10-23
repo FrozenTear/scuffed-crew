@@ -26,40 +26,44 @@ pub use sync::{
     SYNC_URL_HTTPS_REQUIRED, SYNC_URL_INVALID, SyncConfig, SyncUrlReject, validate_sync_server_url,
 };
 
+/// The settings in `config.toml`, in `$XDG_CONFIG_HOME/scuffed-stat-tracker/`
+/// (usually `~/.config/scuffed-stat-tracker/`; see [`Config::config_path`]).
+///
+/// The Config table in `crates/stat-tracker/README.md` is the reference for
+/// what each key does. The field docs here are the schema: what the key is,
+/// its default, its env or CLI override, where it matters whether it is left
+/// out of the file, and the code that applies it. They do not repeat the
+/// README.
+///
+/// Field order is the file's key order, and the serde attributes are its
+/// format; `config/tests_pins.rs` pins both byte for byte.
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Config {
     pub data_dir: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub capture_output: Option<String>,
-    /// Which portal image source to use. Missing or `auto` keeps the usual
-    /// probe: wlroots and X11 stay direct, and a portal desktop uses the
-    /// screen stream. `screencast` forces the stream. `screenshot` forces
-    /// the older screenshot portal. `kwin` asks KWin directly (KDE direct,
-    /// Plasma 6.8 or later), and falls back to automatic when KWin does not
-    /// answer. A non-empty `STAT_TRACKER_CAPTURE` wins over this key.
-    /// Edited in place when this is the only change.
+    /// Portal image source: `auto` (also when missing), `screencast`,
+    /// `screenshot` or `kwin` (KDE direct). A non-empty [`CAPTURE_ENV`] wins over
+    /// this key. A full save leaves `auto` out; when this is the only change it
+    /// is edited in place, and the new word is written, `auto` included. The
+    /// daemon passes it to `stat_tracker::capture` in `CapturePrefs`.
     #[serde(default, skip_serializing_if = "CaptureRoute::is_auto")]
     pub capture_route: CaptureRoute,
-    /// Save a few Tab frames from the screen stream and the screenshot
-    /// portal side by side under `{data_dir}/debug/portal-compare/`. Off
-    /// by default. Also enabled by `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`,
-    /// which is not written back to the file. The pictures stay on this
-    /// machine. Leave this off while a voice app is sharing the screen:
-    /// the screenshot half can hit the KWin cursor crash.
+    /// Save stream/screenshot Tab pairs under `{data_dir}/debug/portal-compare/`.
+    /// Off by default and not written while off. Also
+    /// `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`, which is not
+    /// stored here ([`Self::debug_portal_frames_enabled`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub debug_portal_frames: bool,
-    /// Cap on the screen-stream rate, in frames per second. Missing means
-    /// [`SCREENCAST_MAX_FPS_DEFAULT`] (4). Values outside 1..=5 are clamped. This is the PipeWire
-    /// max-framerate and the tracker's own throttle. Not written unless set.
+    /// Screen-stream cap in frames per second. Missing means
+    /// [`SCREENCAST_MAX_FPS_DEFAULT`]; clamped to 1..=5 ([`Self::screencast_max_fps`]).
+    /// Not written unless set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screencast_max_fps: Option<u32>,
-    /// Pause the screen stream between grabs, so the compositor does not
-    /// render frames the tracker throws away. Missing or `true` means on
-    /// where the compositor handles it (KWin 6.1 or newer, niri) and off
-    /// elsewhere. `false` keeps the stream running the whole time, as before
-    /// 0.5.0-rc.7, on every desktop. `STAT_TRACKER_SCREENCAST_PAUSE=1` forces
-    /// it on anywhere and `=0` off; the env var wins over this key and is not
-    /// written back. Not written unless set.
+    /// Pause the screen stream between grabs. Missing or `true` lets
+    /// `stat_tracker::capture` decide per compositor; `false` keeps the stream
+    /// running everywhere. [`SCREENCAST_PAUSE_ENV`] wins over this key and is not
+    /// stored ([`Self::screencast_pause_override`]). Not written unless set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screencast_pause_between_grabs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -70,28 +74,20 @@ pub struct Config {
     pub auto_detect: AutoDetectConfig,
     #[serde(default = "default_session_window_secs")]
     pub session_window_secs: u64,
-    /// Quiet time after the last activity before a finished game is closed
-    /// and uploaded. Activity is a stored capture, a recorded outcome, an
-    /// accolade map, or the session open. The daemon clamps this to the
-    /// 75-second post-match grace, so a shorter setting still waits that
-    /// grace out. Missing means [`FINISHED_GAME_CLOSE_DEFAULT_SECS`].
-    /// Config-file only: Settings keeps the value from the file.
+    /// Quiet time after the last activity before a finished game is closed and
+    /// uploaded. Missing means [`FINISHED_GAME_CLOSE_DEFAULT_SECS`]. The daemon
+    /// never waits less than its 75-second post-match grace. Config-file only:
+    /// Settings keeps the value from the file.
     #[serde(default = "default_finished_game_close_secs")]
     pub finished_game_close_secs: u64,
-    /// Process names (as they appear in /proc/<pid>/comm) that must be running
-    /// for captures and auto-detect polling to fire. Prevents Tab presses on the
-    /// desktop / in other apps from recording garbage frames. Empty list
-    /// disables the gate.
+    /// Process names (as in `/proc/<pid>/comm`) that must be running for
+    /// captures and auto-detect polling. An empty list disables the gate.
     #[serde(default = "default_game_process_names")]
     pub game_process_names: Vec<String>,
-    /// When true, Tab OCR writes intermediate PNGs under `{data_dir}/debug/`,
-    /// and the poller writes Victory/Defeat evidence frames to `debug/poll/`
-    /// on confirm (second agreeing word-OCR) and first word-OCR
-    /// streak, not every mid-match tick. Off by default, the Tab path
-    /// recomputes preprocess just to dump stages and dominated capture
-    /// latency. Also enabled by env `STAT_TRACKER_DEBUG_OCR=1`. Also gates
-    /// the `debug/accepted/` and `debug/rejected/` rings: those crops are
-    /// unblanked and show other players' names.
+    /// Debug image dumps under `{data_dir}/debug/`, including the unblanked
+    /// `debug/accepted/` and `debug/rejected/` rings. Off by default: the
+    /// dumps slow Tab captures and the rings show other players' names. Also
+    /// env `STAT_TRACKER_DEBUG_OCR=1` ([`Self::debug_ocr_enabled`]).
     #[serde(default)]
     pub debug_ocr: bool,
     /// Most games whose report pictures are kept in `report-kit/`. Missing
@@ -103,22 +99,19 @@ pub struct Config {
     /// even when it alone is larger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_kit_max_mb: Option<u64>,
-    /// Parallel OCR workers (each keeps a ~23 MB Tesseract model resident).
-    /// `None` / omit = auto (`(cores/2).clamp(2, 4)`). Set to `1` for lowest
-    /// RAM, higher for faster Tab OCR. Clamped to 1..=8 at resolve time.
-    /// Overlay: env `STAT_TRACKER_OCR_THREADS`, CLI `--ocr-threads N`.
+    /// Parallel OCR workers. Missing means automatic; clamped to 1..=8
+    /// ([`Self::ocr_threads_resolved`]). Overlay: CLI `--ocr-threads N`, then env
+    /// `STAT_TRACKER_OCR_THREADS`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_threads: Option<u32>,
-    /// Shadow digit recognizer. When true, a background thread reads each
-    /// accepted scoreboard with a template digit matcher and appends where it
-    /// disagrees with ocr-v1 to `{data_dir}/shadow/digits.jsonl` (capped at
-    /// about 4 MB). Log only: stored stats, the capture gate, and uploads
-    /// still use ocr-v1, unless [`Self::reader`] is [`ReaderSetting::New`].
-    /// That setting forces this log on for the process. Off by default. Also
-    /// enabled by env `SCUFFED_SHADOW_RECOGNIZER=1`. When hero icon templates
-    /// are installed in `{data_dir}/templates/heroes/`, the same thread also
-    /// reads each Tab row's hero and logs it to `{data_dir}/shadow/heroes.jsonl`;
-    /// without templates that step is skipped.
+    /// The shadow recognizer's log under `{data_dir}/shadow/` (log only). Off by
+    /// default, and a full save leaves `false` out. The daemon also runs the
+    /// log whenever the reader in effect is the new one (`reader = "new"`, or
+    /// a granted `ocr = "off"`), whatever this says
+    /// (`stat_tracker::shadow::worker::ShadowWorker::start_for_reader`). Env
+    /// `SCUFFED_SHADOW_RECOGNIZER=1` also turns it on and is never stored
+    /// ([`Self::shadow_recognizer_control`]). When this is the only change it
+    /// is edited in place, and `true` or `false` is written.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shadow_recognizer: bool,
     /// `prerelease` opts the desktop updater into alphas and rcs. Any other
@@ -139,66 +132,27 @@ pub struct Config {
     /// parses and saves back unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reader_pack_url: Option<String>,
-    /// Which reader supplies saved and uploaded stats.
-    ///
-    /// Missing, or `"new"`, stores the new reader's values when a field is
-    /// read and not suspect (the default from alpha.12, after cv-v6 read
-    /// 720 of 720 held-out benchmark boards with none wrong). `"ocr-v1"`
-    /// keeps the Tesseract reads; Settings writes it explicitly, so a member
-    /// who switches back stays on it. Under `"new"` with classic OCR on, a
-    /// Tab whose board the new reader finds nothing on (not found, team size
-    /// unknown, no digit values) is read with ocr-v1 instead and stored with
-    /// recognizer `ocr-v1`. On every other Tab under `"new"` the six stats
-    /// come from the new reader only: a Tab whose board it does not vouch
-    /// for is not stored, and a stat cell it is unsure of keeps the game's
-    /// last accepted value and is marked, with no OCR number in its place.
-    /// A game has no stored row until each of the six stats has
-    /// had a sure read on some Tab of it: a stat never read is not stored
-    /// or uploaded as 0, and a game that ends that way is not stored at
-    /// all. The member's own row is found from the own-name seeds and the
-    /// highlight; a name is read with OCR only on a board where neither
-    /// names a row and a player name is set. `name_reader` (on unless the
-    /// file says `false`) can take that read, and the ocr-v1 name match,
-    /// from the names-v1 pack. The top-bar map still falls
-    /// back to OCR when the banner reader abstains. Under `"new"` the
-    /// result words, the FINAL SCORE line and the
-    /// game-start screens are read from the words pack, with OCR only where
-    /// a template or mask is not loaded; the accolade and rank words and
-    /// the accolade map are still OCR.
+    /// Which reader supplies saved and uploaded stats: `"new"` (also when
+    /// missing, the default from alpha.12) or `"ocr-v1"` (Tesseract). A full
+    /// save leaves `"new"` out and writes `"ocr-v1"`, so a switch back survives
+    /// a reload. Not consulted while `ocr = "off"` is granted
+    /// (`stat_tracker::ocr_switch`). Edited in place when it is the only change
+    /// (or with `shadow_recognizer`). What each value reads, including which
+    /// screens come from the reader packs: the README `reader` row.
     #[serde(default, skip_serializing_if = "ReaderSetting::is_default")]
     pub reader: ReaderSetting,
-    /// Whether classic OCR (Tesseract) may run at all.
-    ///
-    /// Missing, or `"on"`, is today's behaviour for both values of
-    /// [`Self::reader`]. `"off"` makes the tracker read everything with the
-    /// new reader and never start Tesseract:
-    ///
-    /// | `ocr` | `reader` | what reads |
-    /// | --- | --- | --- |
-    /// | `on` | `ocr-v1` | Tesseract, everywhere |
-    /// | `on` | `new` | the new reader for saved stats, Tesseract for the rest and as its fallback |
-    /// | `off` | either | the new reader, everywhere; a field it cannot read is held, never read with OCR |
-    ///
-    /// `off` implies the new reader, so `reader` is not consulted (its value
-    /// stays in the file). `off` is granted only when nothing would go
-    /// unread: the build has to read everything without Tesseract, and the
-    /// hero, map and word packs have to be loaded with what those readers
-    /// need. Otherwise the tracker keeps OCR on for the run and logs why
-    /// (`stat_tracker::ocr_switch`). The tracker reads this when it starts.
-    /// Overlay for tests and tools: env [`OCR_ENV`] (`on` or `off`).
+    /// Whether classic OCR (Tesseract) may run: `"on"` (also when missing) or
+    /// `"off"`. `off` implies the new reader and is granted only when nothing
+    /// would go unread; otherwise the tracker keeps OCR on for the run and logs
+    /// why (`stat_tracker::ocr_switch`). Read when the tracker starts. Env
+    /// [`OCR_ENV`] overrides it for one run and is never stored
+    /// ([`Self::ocr_control`]). A full save leaves `"on"` out; when this is the
+    /// only change it is edited in place, and `"on"` or `"off"` is written.
     #[serde(default, skip_serializing_if = "OcrSetting::is_on")]
     pub ocr: OcrSetting,
-    /// Letter-template names for the configured player's own row.
-    ///
-    /// Missing, or `true`, is on (rc.1). `false` keeps today's Tesseract
-    /// read of that row. Independent of [`Self::reader`]: ocr-v1 and the
-    /// new reader both honor it. With a `names-v1` pack loaded, a row is
-    /// used when its confidence meets the pack's own `min_confidence`. A
-    /// blank row, or one under that threshold, is read with Tesseract for
-    /// that row. With no pack installed, `stat_tracker::names::read_names`
-    /// already uses Tesseract, so leaving this on does not change that
-    /// path. The pack is not in the repo. A default install downloads it
-    /// with the other reader packs.
+    /// Letter-template names (the `names-v1` pack) for the player's own row: on
+    /// unless the file says `false`, with either [`Self::reader`]. Not written
+    /// while on.
     #[serde(
         default = "default_name_reader",
         skip_serializing_if = "name_reader_is_on"

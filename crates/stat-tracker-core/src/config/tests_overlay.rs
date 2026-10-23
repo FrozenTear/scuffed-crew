@@ -71,6 +71,71 @@ fn shadow_env_override_is_never_saved() {
         !load.contains(concat!("config.shadow_", "recognizer =")),
         "load() must not persist SCUFFED_SHADOW_RECOGNIZER into the config"
     );
+    // Across all of config's production files (config.rs and every
+    // non-test file in config/): the env var is read once, in
+    // `shadow_recognizer_control` (reader.rs), and the field is only ever
+    // copied from another config by the in-place editor, never set from
+    // the environment.
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = vec![src_dir.join("config.rs")];
+    for entry in std::fs::read_dir(src_dir.join("config")).expect("config/") {
+        let path = entry.expect("entry").path();
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if path.extension().is_some_and(|ext| ext == "rs") && !stem.starts_with("tests") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    assert!(files.len() >= 8, "config's production files: {files:?}");
+    // Comment lines (`//`, `///`, `//!`) are skipped. The env var counts as
+    // read wherever its quoted name appears (`var`, `var_os`, a `const`,
+    // `env_truthy`): once in all, in reader.rs. The field may be named before
+    // `=`, `|=`, `&=`, `^=` or a struct-literal `:` only by the in-place
+    // editor's copy between two configs, the field declaration and `Default`.
+    let env_name = concat!("\"SCUFFED_SHADOW_", "RECOGNIZER\"");
+    let field = concat!("shadow_", "recognizer");
+    let allowed = [
+        concat!("same.shadow_", "recognizer = next.shadow_recognizer;"),
+        concat!("pub shadow_", "recognizer: bool,"),
+        concat!("shadow_", "recognizer: false,"),
+    ];
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let mut reads = Vec::new();
+    let mut writes = Vec::new();
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("read a config file");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        for (index, line) in src.lines().enumerate() {
+            let code = line.trim();
+            if code.starts_with("//") {
+                continue;
+            }
+            reads.extend(code.matches(env_name).map(|_| name.clone()));
+            for (at, _) in code.match_indices(field) {
+                let before = code[..at].chars().next_back();
+                let rest = &code[at + field.len()..];
+                if before.is_some_and(is_ident) || rest.chars().next().is_some_and(is_ident) {
+                    continue;
+                }
+                let rest = rest.trim_start();
+                let sets = ["|=", "&=", "^="].iter().any(|op| rest.starts_with(op))
+                    || (rest.starts_with('=') && !rest.starts_with("=="))
+                    || (rest.starts_with(':') && !rest.starts_with("::"));
+                if sets && !allowed.contains(&code) {
+                    writes.push(format!("{name}:{}: {code}", index + 1));
+                }
+            }
+        }
+    }
+    assert!(
+        writes.is_empty(),
+        "shadow_recognizer set outside the in-place editor: {writes:#?}"
+    );
+    assert_eq!(
+        reads,
+        ["reader.rs"],
+        "SCUFFED_SHADOW_RECOGNIZER is read only by shadow_recognizer_control"
+    );
 }
 
 #[test]
