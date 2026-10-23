@@ -19,7 +19,7 @@ use iced::widget::{column, container, row, space, text};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Shadow};
 use scuffed_types::Season;
 use stat_tracker::detect::MatchOutcome;
-use stat_tracker::detect::game_running::GameProcessGate;
+use stat_tracker::game_running::GameProcessGate;
 
 use crate::aggregate::{Record, aggregate};
 use crate::cli::{Cli, FixtureKind};

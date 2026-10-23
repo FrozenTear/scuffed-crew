@@ -8,8 +8,9 @@
 //!          /        |          |           \
 //!      game      capture     store       vision
 //!   boundary,    capture/*   storage,    ocr, detect, shadow, names,
-//!   capture_gate             sync        packs, mapcrops, report::blank,
-//!                                        ocr_switch, frame
+//!   capture_gate,            sync        packs, mapcrops, report::blank,
+//!   input,                               ocr_switch, frame
+//!   game_running
 //!          \        |          |           /
 //!     core: config, parse, perf, perf_log, setup, replace, proc_id, fs_mode,
 //!           omp, host_probe, sandbox, hero_auth, model, version, suspect,
@@ -85,6 +86,8 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("version", Crate::Core),
     ("boundary", Crate::Game),
     ("capture_gate", Crate::Game),
+    ("game_running", Crate::Game),
+    ("input", Crate::Game),
     ("capture", Crate::Capture),
     ("storage", Crate::Store),
     ("sync", Crate::Store),
@@ -508,6 +511,11 @@ fn crate_sources(dir: &'static str, home: Crate) -> Vec<Source> {
 
 // ------------------------------------------------------------------ paths
 
+/// A path segment as the name it is: `r#TabKey` is `TabKey`.
+fn raw_ident(segment: &str) -> String {
+    segment.strip_prefix("r#").unwrap_or(segment).to_string()
+}
+
 /// `a::{b, c::{self, d as e}, f::*}` -> `[a,b]`, `[a,c]`, `[a,c,d]`, `[a,f]`.
 fn expand_use(tree: &str) -> Vec<Vec<String>> {
     // Drop each `as alias`, keeping what follows the alias (`b,` -> `,`).
@@ -545,13 +553,13 @@ fn expand_use(tree: &str) -> Vec<Vec<String>> {
                     part[..open]
                         .split("::")
                         .filter(|x| !x.is_empty())
-                        .map(String::from),
+                        .map(raw_ident),
                 );
                 let close = part.rfind('}').unwrap_or(part.len());
                 rec(&p, &part[open + 1..close], out);
             } else {
                 let mut p = prefix.to_vec();
-                p.extend(part.split("::").filter(|x| !x.is_empty()).map(String::from));
+                p.extend(part.split("::").filter(|x| !x.is_empty()).map(raw_ident));
                 if matches!(p.last().map(String::as_str), Some("self" | "*")) {
                     p.pop();
                 }
@@ -604,6 +612,10 @@ fn written_paths(s: &Source) -> Vec<(usize, Vec<String>)> {
         let mut segs = Vec::new();
         let mut k = i;
         loop {
+            // A raw identifier (`r#TabKey`) names `TabKey`.
+            if starts_with(t, k, "r#") && t.get(k + 2).is_some_and(|c| is_ident(*c)) {
+                k += 2;
+            }
             let end = (k..t.len()).find(|&e| !is_ident(t[e])).unwrap_or(t.len());
             if end == k {
                 break;
@@ -669,7 +681,180 @@ struct Edge {
     from_module: String,
     to_module: String,
     test: bool,
+    /// The path is in a module-level, bare `pub use` with no glob: a
+    /// re-export for users outside the crate ([`is_pub_use`]).
+    reexport: bool,
     site: String,
+    /// The path named, absolute below its crate root.
+    path: Vec<String>,
+}
+
+/// Whether the `use` at `at` in `s` is a re-export [`COMPAT_REEXPORTS`]
+/// can take: a bare `pub use` (not `pub(crate)`, `pub(super)`, `pub(in …)`
+/// or `pub(self)`, which serve users inside the crate), at module level
+/// (not inside a function or an inline module), with no `*` and no `as` in
+/// its tree: a renamed re-export (`TabKey as Key2`, `game_running as gr`)
+/// would add a name nothing pins.
+fn is_pub_use(s: &Source, at: usize) -> bool {
+    let t = &s.text;
+    if !starts_with(t, at, "use") {
+        return false;
+    }
+    let mut k = at;
+    while k > 0 && t[k - 1].is_whitespace() {
+        k -= 1;
+    }
+    let bare_pub = k >= 3 && starts_with(t, k - 3, "pub") && (k == 3 || !is_ident(t[k - 4]));
+    let depth = t[..at].iter().fold(0i32, |d, c| match c {
+        '{' => d + 1,
+        '}' => d - 1,
+        _ => d,
+    });
+    let end = (at..t.len()).find(|&e| t[e] == ';').unwrap_or(t.len());
+    let renames = (at..end).any(|k| {
+        starts_with(t, k, "as")
+            && !is_ident(t[k - 1])
+            && t.get(k + 2).is_some_and(|c| !is_ident(*c))
+    });
+    bare_pub && depth == 0 && !t[at..end].contains(&'*') && !renames
+}
+
+/// One re-export that keeps an old path working across a would-be crate
+/// boundary until every user names the new path.
+struct Compat {
+    /// The module the old path is in.
+    from: &'static str,
+    /// The module the item moved to.
+    to: &'static str,
+    /// The names re-exported, each as `pub use crate::<to>::<name>;`. Empty:
+    /// the module itself, `pub use crate::<to>;`.
+    names: &'static [&'static str],
+}
+
+impl Compat {
+    /// The names the re-export adds to `from`.
+    fn aliases(&self) -> Vec<&'static str> {
+        if self.names.is_empty() {
+            vec![self.to]
+        } else {
+            self.names.to_vec()
+        }
+    }
+}
+
+/// The re-exports the bin still needs. Each entry allows exactly its
+/// `pub use` lines ([`compat_reexport`]): any other path from `from` into
+/// `to` is still a back-edge, and so is any pair not listed here. Nothing in
+/// the lib may name the old path ([`compat_aliases_are_not_named_in_the_lib`]),
+/// and an entry fails once main.rs and main_tests stop naming it
+/// ([`compat_old_paths_are_still_used_by_the_bin`]).
+const COMPAT_REEXPORTS: &[Compat] = &[
+    // `detect::{MultiKeyboardStream, TabKey}`: the Tab key reader moved to
+    // `input`. Remove when main.rs and main_tests name `input::` (the GUI and
+    // tab_retry already do).
+    Compat {
+        from: "detect",
+        to: "input",
+        names: &["MultiKeyboardStream", "TabKey"],
+    },
+    // `detect::game_running`: the game-process check moved to the top-level
+    // `game_running`. Remove when main.rs names `game_running::` (the GUI
+    // already does).
+    Compat {
+        from: "detect",
+        to: "game_running",
+        names: &[],
+    },
+];
+
+/// Whether `e` is one of the re-exports [`COMPAT_REEXPORTS`] allows.
+fn compat_reexport(e: &Edge) -> bool {
+    e.reexport
+        && !e.test
+        && COMPAT_REEXPORTS.iter().any(|c| {
+            e.from_module == c.from
+                && e.to_module == c.to
+                && if c.names.is_empty() {
+                    e.path == [c.to]
+                } else {
+                    e.path.len() == 2 && e.path[0] == c.to && c.names.contains(&e.path[1].as_str())
+                }
+        })
+}
+
+/// Every place in `sources` that reaches a [`COMPAT_REEXPORTS`] item
+/// through its old path, as `file:line: what`:
+/// * a path in any form (`crate::`, `super::`, `self::`, the lib name) to
+///   `<from>::<alias>`;
+/// * a `use` of the `from` module itself, or a glob of it, outside it
+///   (`detect::TabKey` after `use crate::detect;`, or a bare name after
+///   `use crate::detect::*;`);
+/// * a bare alias name in `from`'s own production code, outside the
+///   re-export lines.
+fn compat_alias_uses(sources: &[Source]) -> Vec<String> {
+    let mut bad = Vec::new();
+    let froms: BTreeSet<&str> = COMPAT_REEXPORTS.iter().map(|c| c.from).collect();
+    for s in sources {
+        for (at, segs) in written_paths(s) {
+            let Some((abs, _)) = absolute(s, at, &segs) else {
+                continue;
+            };
+            for c in COMPAT_REEXPORTS {
+                for alias in c.aliases() {
+                    let mut old = path_of(c.from);
+                    old.push(alias.to_string());
+                    if abs.starts_with(&old) {
+                        bad.push(format!("{}: {}", s.site(at), segs.join("::")));
+                    }
+                }
+            }
+            let module_use = starts_with(&s.text, at, "use")
+                && froms
+                    .iter()
+                    .any(|f| abs == path_of(f) && s.module != path_of(f));
+            if module_use {
+                bad.push(format!("{}: use of {}", s.site(at), segs.join("::")));
+            }
+        }
+        for from in &froms {
+            if s.module != path_of(from) {
+                continue;
+            }
+            let aliases: BTreeSet<&str> = COMPAT_REEXPORTS
+                .iter()
+                .filter(|c| c.from == *from)
+                .flat_map(|c| c.aliases())
+                .collect();
+            let t = &s.text;
+            let mut skip = cfg_regions(t, cfg_needs_test);
+            for (at, segs) in written_paths(s) {
+                let into_to = absolute(s, at, &segs).is_some_and(|(abs, _)| {
+                    COMPAT_REEXPORTS
+                        .iter()
+                        .any(|c| c.from == *from && abs.first().is_some_and(|f| f == c.to))
+                });
+                if is_pub_use(s, at) && into_to {
+                    let end = (at..t.len()).find(|&e| t[e] == ';').unwrap_or(t.len());
+                    skip.push((at, end));
+                }
+            }
+            let mut i = 0;
+            while i < t.len() {
+                if !is_ident(t[i]) || (i > 0 && is_ident(t[i - 1])) {
+                    i += 1;
+                    continue;
+                }
+                let end = (i..t.len()).find(|&e| !is_ident(t[e])).unwrap_or(t.len());
+                let word: String = t[i..end].iter().collect();
+                let skipped = skip.iter().any(|&(a, b)| a <= i && i <= b);
+                if !skipped && aliases.contains(word.as_str()) {
+                    bad.push(format!("{}: bare {word}", s.site(i)));
+                }
+                i = end;
+            }
+        }
+    }
+    bad
 }
 
 /// Every path in `sources` from one would-be crate into another.
@@ -714,7 +899,9 @@ fn crate_edges(sources: &[Source]) -> Vec<Edge> {
                 from_module: s.module.join("::"),
                 to_module: target.join("::"),
                 test: s.is_test(at),
+                reexport: is_pub_use(s, at),
                 site: format!("{}: {}", s.site(at), segs.join("::")),
+                path: abs.clone(),
             });
         }
     }
@@ -924,7 +1111,7 @@ fn the_would_be_crates_have_no_back_edges() {
     let edges = crate_edges(&sources);
     let back: Vec<String> = edges
         .iter()
-        .filter(|e| !e.from.may_use(e.to))
+        .filter(|e| !e.from.may_use(e.to) && !compat_reexport(e))
         .map(|e| {
             format!(
                 "{} ({} {:?} -> {} {:?}{})",
@@ -1651,6 +1838,229 @@ fn f() -> std::path::PathBuf { crate::names::pack::dir_in(std::path::Path::new("
             "super::result::FLOOR",
             "super",
             "crate::frame::geometry::game_rect_16_9"
+        ]
+    );
+}
+
+/// Every [`COMPAT_REEXPORTS`] re-export is still there: a stale entry (the
+/// old path was dropped) fails here, so the list only shrinks.
+#[test]
+fn compat_reexports_are_still_there() {
+    let edges = crate_edges(&all_sources());
+    for c in COMPAT_REEXPORTS {
+        let wanted: Vec<Vec<String>> = if c.names.is_empty() {
+            vec![path_of(c.to)]
+        } else {
+            c.names
+                .iter()
+                .map(|n| vec![c.to.to_string(), n.to_string()])
+                .collect()
+        };
+        for path in wanted {
+            assert!(
+                edges.iter().any(|e| e.from_module == c.from
+                    && e.path == path
+                    && compat_reexport(e)
+                    && !e.from.may_use(e.to)),
+                "COMPAT_REEXPORTS: no `pub use crate::{}` left in {}: remove it",
+                path.join("::"),
+                c.from
+            );
+        }
+    }
+}
+
+/// Nothing in the lib reaches a moved item through its old path: in-lib
+/// users name the new path, so the re-export serves the bin only.
+#[test]
+fn compat_aliases_are_not_named_in_the_lib() {
+    let bad = compat_alias_uses(&all_sources());
+    assert!(
+        bad.is_empty(),
+        "{} use(s) of a compat re-export inside the lib (name the new path):\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+}
+
+/// Each [`COMPAT_REEXPORTS`] alias is still named by main.rs or main_tests
+/// (comments and strings do not count). When none is left, the re-export
+/// has no user and goes.
+#[test]
+fn compat_old_paths_are_still_used_by_the_bin() {
+    let src = crates_dir().join("stat-tracker").join("src");
+    let mut files = vec![src.join("main.rs")];
+    let mut todo = vec![src.join("main_tests")];
+    while let Some(dir) = todo.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read main_tests") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                todo.push(path);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    let text: String = files
+        .iter()
+        .map(|f| {
+            blank(&std::fs::read_to_string(f).expect("read"))
+                .into_iter()
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for c in COMPAT_REEXPORTS {
+        for alias in c.aliases() {
+            let needle = format!("{}::{alias}", c.from);
+            let used = text.match_indices(&needle).any(|(at, _)| {
+                let before = text[..at].chars().next_back();
+                let after = text[at + needle.len()..].chars().next();
+                !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+            });
+            assert!(
+                used,
+                "{needle}: nothing uses the old path; delete the alias and this entry \
+                 (or the bin names it in a form this check does not read, such as a \
+                 grouped `as` import)"
+            );
+        }
+    }
+}
+
+/// The re-export rule and the alias check on small sources.
+#[test]
+fn the_compat_exception_takes_only_listed_pub_uses() {
+    let source = |name: &str, module: &[&str], text: &str| {
+        let mut s = parse_source(
+            "stat-tracker",
+            Crate::Top,
+            name.into(),
+            module.iter().map(|m| m.to_string()).collect(),
+            false,
+            text,
+        );
+        declared_modules(&mut s);
+        s
+    };
+    let detect = source(
+        "detect/mod.rs",
+        &["detect"],
+        "pub use crate::input::{TabKey, tab_key_event};
+pub use crate::game_running;
+pub(crate) use crate::input::MultiKeyboardStream;
+use crate::input::MAX_KEY_EVENT_AGE;
+fn f() { crate::input::key_event_instant(); }
+pub use crate::capture_gate::Gate;
+pub use crate::input::*;
+pub use crate::input;
+mod inner {
+    pub use crate::input::TabKey;
+}
+#[cfg(test)]
+pub use crate::input::TabKey as Probe;
+pub use crate::input::TabKey as Key2;
+pub use crate::game_running as gr;
+pub use crate::input::r#MultiKeyboardStream;
+",
+    );
+    let sources = vec![
+        detect,
+        source("input.rs", &["input"], ""),
+        source("game_running.rs", &["game_running"], ""),
+        source("capture_gate.rs", &["capture_gate"], ""),
+    ];
+    let mut back: Vec<String> = crate_edges(&sources)
+        .iter()
+        .filter(|e| !e.from.may_use(e.to) && !compat_reexport(e))
+        .map(|e| e.site.rsplit(": ").next().unwrap_or("").to_string())
+        .collect();
+    back.sort();
+    assert_eq!(
+        back,
+        [
+            "crate::capture_gate::Gate",
+            "crate::game_running",
+            "crate::input",
+            "crate::input",
+            "crate::input::MAX_KEY_EVENT_AGE",
+            "crate::input::MultiKeyboardStream",
+            "crate::input::TabKey",
+            "crate::input::TabKey",
+            "crate::input::TabKey",
+            "crate::input::key_event_instant",
+            "crate::input::tab_key_event",
+        ]
+    );
+    let src = &sources[0];
+    let at = |needle: &str| {
+        src.raw
+            .iter()
+            .collect::<String>()
+            .find(needle)
+            .expect(needle)
+    };
+    assert!(is_pub_use(src, at("use crate::input::{")));
+    assert!(is_pub_use(src, at("use crate::game_running")));
+    assert!(!is_pub_use(src, at("use crate::input::Multi")));
+    assert!(!is_pub_use(src, at("use crate::input::MAX")));
+    assert!(!is_pub_use(src, at("use crate::input::*")));
+    assert!(!is_pub_use(src, at("use crate::input::TabKey;")));
+    assert!(!is_pub_use(src, at("use crate::input::TabKey as Key2")));
+    assert!(!is_pub_use(src, at("use crate::game_running as gr")));
+    // A raw identifier is its name: `r#MultiKeyboardStream` is the pinned
+    // name, so this one passes.
+    assert!(is_pub_use(src, at("use crate::input::r#Multi")));
+    assert_eq!(
+        expand_use(" crate::input::{r#TabKey, r#game_running::r#X}"),
+        [
+            path_of("crate::input::TabKey"),
+            path_of("crate::input::game_running::X")
+        ]
+    );
+
+    // The alias check: old paths in any form, a use of `detect` itself,
+    // and a bare alias in detect's own code.
+    let clean = source(
+        "detect/mod.rs",
+        &["detect"],
+        "pub use crate::game_running;\npub use crate::input::{MultiKeyboardStream, TabKey};\n#[cfg(test)]\nfn t(_: TabKey) {}\n",
+    );
+    assert!(compat_alias_uses(&[clean]).is_empty());
+    let sources = vec![
+        source(
+            "detect/mod.rs",
+            &["detect"],
+            "pub use crate::game_running;\npub use crate::input::{MultiKeyboardStream, TabKey};\nfn f(_: TabKey) { self::game_running::x(); }\n",
+        ),
+        source(
+            "detect/own_row.rs",
+            &["detect", "own_row"],
+            "use super::TabKey;\n",
+        ),
+        source(
+            "shadow/worker.rs",
+            &["shadow", "worker"],
+            "fn g() { crate::detect::game_running::GameProcessGate::new(); }\nuse crate::detect::*;\nuse stat_tracker::detect;\nfn h() { crate::detect::r#TabKey::f(); }\nuse crate::detect::{r#MultiKeyboardStream};\n",
+        ),
+    ];
+    let mut bad: Vec<String> = compat_alias_uses(&sources)
+        .into_iter()
+        .map(|b| b.rsplit(": ").next().unwrap_or("").to_string())
+        .collect();
+    bad.sort();
+    assert_eq!(
+        bad,
+        [
+            "bare TabKey",
+            "bare game_running",
+            "crate::detect::MultiKeyboardStream",
+            "crate::detect::TabKey::f",
+            "crate::detect::game_running::GameProcessGate::new",
+            "self::game_running::x",
+            "super::TabKey",
+            "use of crate::detect",
+            "use of stat_tracker::detect",
         ]
     );
 }
