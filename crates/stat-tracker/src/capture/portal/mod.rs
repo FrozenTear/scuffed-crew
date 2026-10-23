@@ -1,9 +1,21 @@
+mod answer;
+mod backoff;
+
+pub use answer::{
+    SHOT_GIVE_UP, SHOT_OVERDUE_EVERY, SHOT_OVERDUE_FIRST, SHOT_UNANSWERED, lookup_error_is_absent,
+    owner_error_is_gone,
+};
+pub use backoff::{SHOT_BACKOFF, SHOT_BACKOFF_STEPS, SHOT_UNCLOSED_HOLD};
+
 use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
 
 use super::geom::{OutputRect, crop_rect, native_size};
 use super::outputs::output_geometry_for_timed;
+
+use answer::{BusChecks, TakerSlot, await_answer};
+use backoff::{BACKOFF, lock_backoff};
 
 pub async fn is_available() -> bool {
     std::env::var("XDG_CURRENT_DESKTOP").is_ok()
@@ -58,6 +70,8 @@ pub async fn is_available() -> bool {
 /// request was made before the key press, so its picture cannot show the
 /// board. The wait mostly overlaps the 400 ms the Tab already sleeps for
 /// the overlay to draw.
+///
+/// [`ShotBackoff`]: backoff::ShotBackoff
 pub async fn capture(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
@@ -97,376 +111,8 @@ async fn run_shot(
         .map_err(|err| format!("portal screenshot: {err}"))?
 }
 
-/// Who owns `org.freedesktop.portal.Desktop` now.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum OwnerLookup {
-    Owner(String),
-    /// `NameHasNoOwner`: no portal is running.
-    NoOwner,
-    /// A timeout or another error: nothing is known.
-    Unknown,
-}
-
-/// The permission store's `screenshot` entry for unsandboxed apps.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Permission {
-    Yes,
-    /// No entry (`NotFound`, or no row for app id `""`).
-    Absent,
-    /// Anything else: "no", "ask", or the store could not be read.
-    Other,
-}
-
-/// What [`await_answer`] needs from the desktop; a fake in tests.
-pub(crate) trait ShotChecks: Sync {
-    fn portal_owner(&self) -> impl std::future::Future<Output = OwnerLookup> + Send;
-    fn screenshot_permission(&self) -> impl std::future::Future<Output = Permission> + Send;
-    /// Publish what the portal is up to for the app's notice.
-    fn note(&self, state: super::types::PortalState) {
-        super::state::note_portal_state(state);
-    }
-}
-
-/// Why an unanswered request was given up, or that it keeps waiting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Unanswered {
-    /// The portal that took the request is gone or was replaced.
-    PortalGone,
-    /// Permission is granted, yet no answer: the portal stopped answering.
-    Stalled,
-    /// A permission prompt may be waiting for the player.
-    MayBePrompt,
-    /// Nothing could be read: keep waiting, change nothing.
-    Unknown,
-}
-
-/// The verdict on a request still unanswered at a check. `taker` is the
-/// unique name that sent the `Screenshot` method reply (the frontend that
-/// took the request), once that reply came. `answered_before` is whether a
-/// request of this process ever got a picture: where the permission store
-/// has no entry and requests did answer, the frontend asks no permission,
-/// so a hang cannot be a prompt.
-pub(crate) async fn judge_unanswered<C: ShotChecks>(
-    checks: &C,
-    taker: Option<&str>,
-    answered_before: bool,
-) -> Unanswered {
-    match checks.portal_owner().await {
-        OwnerLookup::NoOwner => return Unanswered::PortalGone,
-        OwnerLookup::Owner(owner) if taker.is_some_and(|taker| taker != owner) => {
-            return Unanswered::PortalGone;
-        }
-        OwnerLookup::Owner(_) => {}
-        OwnerLookup::Unknown => return Unanswered::Unknown,
-    }
-    match checks.screenshot_permission().await {
-        Permission::Yes => Unanswered::Stalled,
-        Permission::Absent if answered_before => Unanswered::Stalled,
-        Permission::Absent | Permission::Other => Unanswered::MayBePrompt,
-    }
-}
-
-/// The unique name that took a request (the `Screenshot` reply's sender).
-pub(crate) type TakerSlot = std::sync::Mutex<Option<String>>;
-
-/// Waits for the portal's answer to `request` (the outer `Err` is a request
-/// the portal never took: no bus, a method error; the inner result is the
-/// Response). Every [`SHOT_GIVE_UP`] without one, [`judge_unanswered`]
-/// decides: a dead or stalled request is dropped (which closes it,
-/// [`CloseOnDrop`]) and the grab fails; a possible permission prompt keeps
-/// it waiting, with a notice. A real Response clears the notices; a
-/// request that ends without one clears its own prompt notice.
-pub(crate) async fn await_answer<F, C>(
-    request: F,
-    checks: &C,
-    backoff: &std::sync::Mutex<ShotBackoff>,
-    taker: &TakerSlot,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>>
-where
-    F: std::future::Future<
-            Output = Result<Result<String, String>, Box<dyn std::error::Error + Send + Sync>>,
-        >,
-    C: ShotChecks,
-{
-    use futures_util::FutureExt as _;
-    let request = super::flight::with_overdue_warnings(
-        request,
-        SHOT_OVERDUE_FIRST,
-        SHOT_OVERDUE_EVERY,
-        |waited| {
-            tracing::warn!(
-                waited_secs = waited.as_secs(),
-                "portal screenshot request has not answered; screenshots wait for it"
-            );
-        },
-    );
-    tokio::pin!(request);
-    let mut prompt_said = false;
-    // Leaving without an answer: a prompt notice of this request goes.
-    let clear_prompt = |prompt_said: bool| {
-        if prompt_said {
-            checks.note(super::types::PortalState::Answering);
-        }
-    };
-    loop {
-        let asked = tokio::time::timeout(SHOT_GIVE_UP, request.as_mut())
-            .await
-            .ok();
-        let verdict = match asked {
-            Some(asked) => Err(asked),
-            None => {
-                let answered_before = lock(backoff).answered_ok;
-                let taker = lock(taker).clone();
-                let verdict = judge_unanswered(checks, taker.as_deref(), answered_before).await;
-                // An answer that came during the check is not dropped.
-                match request.as_mut().now_or_never() {
-                    Some(asked) => Err(asked),
-                    None => Ok(verdict),
-                }
-            }
-        };
-        let verdict = match verdict {
-            Err(Ok(answer)) => {
-                // A Response arrived: the portal is there and answering.
-                let mut state = lock(backoff);
-                state.answered(answer.is_ok());
-                drop(state);
-                checks.note(super::types::PortalState::Answering);
-                return Ok(answer?);
-            }
-            Err(Err(not_taken)) => {
-                clear_prompt(prompt_said);
-                return Err(not_taken);
-            }
-            Ok(verdict) => verdict,
-        };
-        match verdict {
-            Unanswered::Unknown => {}
-            Unanswered::MayBePrompt => {
-                if !prompt_said {
-                    prompt_said = true;
-                    tracing::warn!(
-                        "the screenshot portal has not answered and screenshot permission is not granted: a permission prompt may be waiting, possibly behind the game"
-                    );
-                }
-                checks.note(super::types::PortalState::MayBePrompt);
-            }
-            Unanswered::PortalGone => {
-                tracing::warn!(
-                    "the screenshot portal went away during a request: it was given up and the next request goes to the new portal"
-                );
-                clear_prompt(prompt_said);
-                return Err(format!("{SHOT_UNANSWERED} (the portal went away)").into());
-            }
-            Unanswered::Stalled => {
-                // Set before the request is dropped and its Close runs.
-                let pause = lock(backoff).gave_up(tokio::time::Instant::now());
-                tracing::warn!(
-                    waited_secs = SHOT_GIVE_UP.as_secs(),
-                    pause_secs = pause.as_secs(),
-                    unclosed_hold_secs = pause.max(SHOT_UNCLOSED_HOLD).as_secs(),
-                    "{SHOT_UNANSWERED}: the request was closed and counts as a failed grab; ordinary polls make no portal request for pause_secs, or unclosed_hold_secs while the portal has not answered the Close"
-                );
-                checks.note(super::types::PortalState::Stalled);
-                return Err(format!(
-                    "{SHOT_UNANSWERED} (no answer in {} s)",
-                    SHOT_GIVE_UP.as_secs()
-                )
-                .into());
-            }
-        }
-    }
-}
-
 fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|err| err.into_inner())
-}
-
-/// Polls' pauses after successive stalled requests; the last repeats. The
-/// first is short: ordinary polls are what wake the end-reel outcome poll,
-/// so while they pause the match result screens go unread, and a stall
-/// that passes should cost at most half a minute of them. That is a floor:
-/// while the Close of the request given up is unanswered, the pause is at
-/// least [`SHOT_UNCLOSED_HOLD`] (2 minutes).
-pub const SHOT_BACKOFF_STEPS: [std::time::Duration; 4] = [
-    std::time::Duration::from_secs(30),
-    std::time::Duration::from_secs(2 * 60),
-    std::time::Duration::from_secs(5 * 60),
-    std::time::Duration::from_secs(10 * 60),
-];
-
-/// While the Close of a request given up has not been answered, no new
-/// request is made for at least this long after the give-up, whatever the
-/// pause step (the first step is shorter).
-pub const SHOT_UNCLOSED_HOLD: std::time::Duration = std::time::Duration::from_secs(2 * 60);
-
-/// The error for a grab turned away while polls back off.
-pub const SHOT_BACKOFF: &str =
-    "the screenshot portal stopped answering: no new request until its pause ends";
-
-/// After a stalled request ([`Unanswered::Stalled`]) ordinary polls make no
-/// portal request for a growing pause ([`SHOT_BACKOFF_STEPS`]: 30 s, then
-/// 2, 5 and 10 minutes). Ordinary polls also wake the end-reel outcome
-/// poll, so during a pause the match result screens are not read either;
-/// only an outcome poll whose wake was already set before the pause, while
-/// a Tab capture runs, can still run. A Tab (and such an outcome poll, the
-/// urgent grabs) may try during a pause once the Close of the request
-/// given up was answered.
-///
-/// While that Close is unanswered the request may still be open at the
-/// portal, so no grab, urgent or not, makes a request for the whole pause,
-/// and for at least [`SHOT_UNCLOSED_HOLD`] (2 minutes) after the give-up
-/// even past a 30 s first step: never two of ours outstanding while the
-/// pause lasts. Once it is over, a new request may run beside a request
-/// whose Close never came back (the portal's problem by then; waiting
-/// longer would stop capture for good). An answered request ends the
-/// pause.
-#[derive(Debug, Default)]
-pub(crate) struct ShotBackoff {
-    until: Option<tokio::time::Instant>,
-    gave_up_at: Option<tokio::time::Instant>,
-    stalls: usize,
-    abandoned_open: bool,
-    /// A request of this process got a picture (Response code 0) at
-    /// least once. Kept for the life of the process.
-    answered_ok: bool,
-}
-
-impl ShotBackoff {
-    /// A request was given up stalled at `now`; returns the pause.
-    pub(crate) fn gave_up(&mut self, now: tokio::time::Instant) -> std::time::Duration {
-        let pause = SHOT_BACKOFF_STEPS[self.stalls.min(SHOT_BACKOFF_STEPS.len() - 1)];
-        self.stalls += 1;
-        self.until = Some(now + pause);
-        self.gave_up_at = Some(now);
-        self.abandoned_open = true;
-        pause
-    }
-
-    /// The portal answered the Close of the request given up.
-    pub(crate) fn closed(&mut self) {
-        self.abandoned_open = false;
-    }
-
-    /// The portal answered a request (`picture`: with a file): no pause.
-    pub(crate) fn answered(&mut self, picture: bool) {
-        let answered_ok = self.answered_ok || picture;
-        *self = Self {
-            answered_ok,
-            ..Self::default()
-        };
-    }
-
-    /// Why a grab may not make a request now, if it may not. `urgent` is a
-    /// Tab or the end-reel outcome poll.
-    pub(crate) fn refuses(&self, urgent: bool, now: tokio::time::Instant) -> Option<&'static str> {
-        let paused = self.until.is_some_and(|until| now < until);
-        let unclosed = self.abandoned_open
-            && (paused
-                || self
-                    .gave_up_at
-                    .is_some_and(|at| now < at + SHOT_UNCLOSED_HOLD));
-        ((paused && !urgent) || unclosed).then_some(SHOT_BACKOFF)
-    }
-}
-
-static BACKOFF: std::sync::Mutex<ShotBackoff> = std::sync::Mutex::new(ShotBackoff {
-    until: None,
-    gave_up_at: None,
-    stalls: 0,
-    abandoned_open: false,
-    answered_ok: false,
-});
-
-fn lock_backoff() -> std::sync::MutexGuard<'static, ShotBackoff> {
-    lock(&BACKOFF)
-}
-
-/// The real [`ShotChecks`], on the request's bus connection.
-struct BusChecks {
-    conn: ashpd::zbus::Connection,
-}
-
-impl ShotChecks for BusChecks {
-    async fn portal_owner(&self) -> OwnerLookup {
-        let reply = tokio::time::timeout(
-            SHOT_CHECK_TIMEOUT,
-            self.conn.call_method(
-                Some("org.freedesktop.DBus"),
-                "/org/freedesktop/DBus",
-                Some("org.freedesktop.DBus"),
-                "GetNameOwner",
-                &(PORTAL_DESKTOP,),
-            ),
-        )
-        .await;
-        match reply {
-            Ok(Ok(reply)) => reply
-                .body()
-                .deserialize::<String>()
-                .map_or(OwnerLookup::Unknown, OwnerLookup::Owner),
-            Ok(Err(ashpd::zbus::Error::MethodError(name, _, _)))
-                if owner_error_is_gone(name.as_str()) =>
-            {
-                OwnerLookup::NoOwner
-            }
-            Ok(Err(_)) | Err(_) => OwnerLookup::Unknown,
-        }
-    }
-
-    async fn screenshot_permission(&self) -> Permission {
-        let reply = tokio::time::timeout(
-            SHOT_CHECK_TIMEOUT,
-            self.conn.call_method(
-                Some("org.freedesktop.impl.portal.PermissionStore"),
-                "/org/freedesktop/impl/portal/PermissionStore",
-                Some("org.freedesktop.impl.portal.PermissionStore"),
-                "Lookup",
-                &("screenshot", "screenshot"),
-            ),
-        )
-        .await;
-        match reply {
-            Ok(Ok(reply)) => reply
-                .body()
-                .deserialize::<(
-                    std::collections::HashMap<String, Vec<String>>,
-                    ashpd::zvariant::OwnedValue,
-                )>()
-                .map_or(Permission::Other, |(permissions, _)| {
-                    screenshot_permission(&permissions)
-                }),
-            Ok(Err(ashpd::zbus::Error::MethodError(name, _, _)))
-                if lookup_error_is_absent(name.as_str()) =>
-            {
-                Permission::Absent
-            }
-            Ok(Err(_)) | Err(_) => Permission::Other,
-        }
-    }
-}
-
-/// `GetNameOwner` failed because nothing owns the name.
-pub fn owner_error_is_gone(error_name: &str) -> bool {
-    error_name == "org.freedesktop.DBus.Error.NameHasNoOwner"
-}
-
-/// `Lookup` failed because the store has no `screenshot` entry ("No entry
-/// for screenshot").
-pub fn lookup_error_is_absent(error_name: &str) -> bool {
-    error_name == "org.freedesktop.portal.Error.NotFound"
-}
-
-/// The permission store's `screenshot` entry for an unsandboxed app (app
-/// id `""`, which the tracker is).
-pub(crate) fn screenshot_permission(
-    permissions: &std::collections::HashMap<String, Vec<String>>,
-) -> Permission {
-    match permissions.get("").and_then(|values| values.first()) {
-        Some(value) if value == "yes" => Permission::Yes,
-        Some(_) => Permission::Other,
-        None => Permission::Absent,
-    }
 }
 
 /// One screenshot portal request in flight at a time.
@@ -477,22 +123,6 @@ static SHOT_FLIGHT: super::flight::SingleFlight = super::flight::SingleFlight::n
 /// screenshot takes about 450 ms, so this covers a poll's request and a
 /// slow one after it, while Tab is held.
 pub const SHOT_LOCK_WAIT_TAB: std::time::Duration = std::time::Duration::from_secs(4);
-
-/// When an unanswered request is first warned about.
-pub const SHOT_OVERDUE_FIRST: std::time::Duration = std::time::Duration::from_secs(20);
-
-/// And how often after that, while it is not given up.
-pub const SHOT_OVERDUE_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// How often an unanswered request is looked at, and so when one is first
-/// given up (S5-CAP-1). At least the share dialog's 60 s timeout.
-pub const SHOT_GIVE_UP: std::time::Duration = std::time::Duration::from_secs(60);
-
-/// The error for a request given up.
-pub const SHOT_UNANSWERED: &str = "the screenshot portal stopped answering";
-
-/// How long one permission-store or name-owner read may take.
-const SHOT_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// How long the Close call for a request given up may take.
 const SHOT_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -837,6 +467,8 @@ pub fn file_uri_path(uri: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use super::answer::*;
+    use super::backoff::*;
     use super::*;
     use crate::capture::geom::PixelRect;
     use crate::capture::outputs::{

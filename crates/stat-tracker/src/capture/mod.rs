@@ -581,7 +581,7 @@ mod tests {
     #[test]
     fn the_portal_grab_reads_its_lock_wait_from_the_task() {
         let shot = squashed_body(
-            include_str!("portal.rs"),
+            include_str!("portal/mod.rs"),
             concat!("pub async fn ", "capture("),
         );
         assert!(shot.contains("letwait=super::tab::grab_lock_wait(SHOT_LOCK_WAIT_TAB);"));
