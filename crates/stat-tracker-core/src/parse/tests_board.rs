@@ -1,5 +1,6 @@
+use super::catalog::guess_role;
 use super::*;
-use crate::model::{CellOcrResult, RowOcrResult};
+use crate::model::{CellOcrResult, MatchOutcome, RowOcrResult};
 
 fn cell(value: &str) -> CellOcrResult {
     CellOcrResult {
@@ -627,4 +628,32 @@ fn both_teams_need_a_stat_row_before_an_alias_is_trusted() {
     let mut enemy_blank: Vec<_> = team.into_iter().take(5).collect();
     enemy_blank.extend((0..5).map(|_| garbage_row()));
     assert!(!both_teams_have_stats(&enemy_blank, 5));
+}
+
+#[test]
+fn reads_result_word_from_header_lines() {
+    assert_eq!(
+        outcome_from_board_header("~ Defeat\n\u{2014} J | J |"),
+        MatchOutcome::Defeat
+    );
+    assert_eq!(
+        outcome_from_board_header("\n  VICTORY   RIALTO\nE A D DMG"),
+        MatchOutcome::Victory
+    );
+    assert_eq!(outcome_from_board_header("Draw"), MatchOutcome::Draw);
+}
+
+#[test]
+fn ignores_words_deeper_than_the_header_and_substrings() {
+    // Chat / names below the header never decide a game.
+    assert_eq!(
+        outcome_from_board_header("E A D DMG\nFROZEN 12 3 4\nSOOT: ez victory"),
+        MatchOutcome::Unknown
+    );
+    // Whole word only: "VICTORYLANE" is a name, not a result.
+    assert_eq!(
+        outcome_from_board_header("VICTORYLANE 3 4"),
+        MatchOutcome::Unknown
+    );
+    assert_eq!(outcome_from_board_header(""), MatchOutcome::Unknown);
 }
