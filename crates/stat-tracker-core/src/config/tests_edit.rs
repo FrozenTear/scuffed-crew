@@ -218,6 +218,54 @@ fn save_replaces_the_file_atomically_with_mode_0600() {
     );
 }
 
+/// The first-run guide's writer is owner-only too: a changed file is
+/// replaced with mode 0600, an unchanged one is tightened where it is, and
+/// a missing one is created 0600.
+#[cfg(unix)]
+#[test]
+fn setup_patch_writes_mode_0600() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |path: &std::path::Path| {
+        std::fs::metadata(path).expect("meta").permissions().mode() & 0o777
+    };
+    let open_up = |path: &std::path::Path| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644)).expect("chmod")
+    };
+    let patch = SetupDiskPatch {
+        setup_completed: Some(true),
+        sync: None,
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+
+    std::fs::write(&path, hand_edited_config("shadow_recognizer = false")).expect("seed");
+    open_up(&path);
+    Config::apply_setup_patch(&path, &patch).expect("patch");
+    let patched = std::fs::read_to_string(&path).expect("read");
+    assert!(patched.contains("setup_completed = true"), "{patched}");
+    assert_eq!(mode(&path), 0o600, "a patched config must be owner-only");
+
+    open_up(&path);
+    Config::apply_setup_patch(&path, &patch).expect("unchanged patch");
+    assert_eq!(std::fs::read_to_string(&path).expect("read"), patched);
+    assert_eq!(mode(&path), 0o600, "an unchanged config is tightened");
+
+    let fresh = dir.path().join("fresh").join("config.toml");
+    Config::apply_setup_patch(&fresh, &patch).expect("fresh patch");
+    assert_eq!(mode(&fresh), 0o600, "a new config must be owner-only");
+
+    let mut names: Vec<_> = std::fs::read_dir(dir.path())
+        .expect("dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["config.toml", "fresh"].map(std::ffi::OsString::from),
+        "the temp file must be renamed, not left behind"
+    );
+}
+
 fn table_block(text: &str) -> &str {
     text.find("[auto_detect]")
         .map(|index| &text[index..])

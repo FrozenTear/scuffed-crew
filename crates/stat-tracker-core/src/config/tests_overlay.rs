@@ -64,7 +64,7 @@ fn shadow_env_override_is_never_saved() {
     let raw = toml::to_string_pretty(&cfg).unwrap();
     assert!(!raw.contains("shadow_recognizer"), "{raw}");
     // Config::load must not fold the env var into the struct.
-    let src = include_str!("../config.rs");
+    let src = include_str!("file.rs");
     let load = &src[src.find("pub fn load").expect("load")..];
     let load = &load[..load.find("pub fn config_path").expect("end of load")];
     assert!(

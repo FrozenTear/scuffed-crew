@@ -538,7 +538,7 @@ fn a_names_pack_that_lands_after_startup_is_reloaded() {
 
     let staging = tmp.path().join("templates").join(".names-v1-staging");
     write_pack(&staging, &["ABC"]);
-    crate::packs::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    crate::packs::layout::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
 
     let board = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
         64,
@@ -575,7 +575,7 @@ fn a_names_pack_that_lands_after_startup_is_reloaded() {
     assert_eq!(switch.reload_spawns(), 1, "later reads do not load again");
     let again = tmp.path().join("templates").join(".names-v1-again");
     write_pack(&again, &["CAB"]);
-    crate::packs::swap_dir(&again, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    crate::packs::layout::swap_dir(&again, &crate::names::pack::dir_in(tmp.path())).unwrap();
     assert!(
         std::sync::Arc::ptr_eq(&loaded, &switch.pack().expect("still cached")),
         "a pack swapped in after the first load waits for the next start"
@@ -619,7 +619,7 @@ fn a_names_pack_loaded_at_startup_is_cached() {
     assert_eq!(switch.reload_spawns(), 1);
     let staging = tmp.path().join("templates").join(".names-v1-next");
     write_pack(&staging, &["CAB"]);
-    crate::packs::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
+    crate::packs::layout::swap_dir(&staging, &crate::names::pack::dir_in(tmp.path())).unwrap();
     assert!(std::sync::Arc::ptr_eq(
         &loaded,
         &switch.pack().expect("still the startup pack")
@@ -802,7 +802,7 @@ fn install_synthetic(data_dir: &std::path::Path, tag: &str, training: &[&str]) -
     let staging = data_dir.join("templates").join(format!(".names-v1-{tag}"));
     write_pack(&staging, training);
     let live = crate::names::pack::dir_in(data_dir);
-    crate::packs::swap_dir(&staging, &live).unwrap();
+    crate::packs::layout::swap_dir(&staging, &live).unwrap();
     installed(&live, "test")
 }
 
@@ -1155,7 +1155,7 @@ fn a_record_written_after_the_swap_and_a_read_still_reloads() {
         let staging = tmp.path().join("templates").join(".names-v1-next-1-2");
         write_pack(&staging, &["ABC", "CBA"]);
         set_version(&staging, Some("full-20990101"));
-        crate::packs::swap_dir(&staging, &live).unwrap();
+        crate::packs::layout::swap_dir(&staging, &live).unwrap();
         for _ in 0..5 {
             assert!(
                 std::sync::Arc::ptr_eq(&a, &switch.pack().unwrap()),

@@ -678,3 +678,132 @@ fn pin_disk_writes_match_the_text() {
         Config::text_for_setup_patch(Some(&base), &setup_patch()).unwrap()
     );
 }
+
+/// [`SET`] after [`setup_patch`]: `setup_completed` and both `[sync]`
+/// strings spliced in place.
+fn set_after_setup_patch() -> String {
+    let text = one_edit(SET, "setup_completed = false\n", "setup_completed = true\n");
+    let text = one_edit(
+        &text,
+        "server_url = \"https://old.example\"\n",
+        "server_url = \"https://crew.example\"\n",
+    );
+    one_edit(
+        &text,
+        "token = \"old-token\"\n",
+        "token = \"pasted-token\"\n",
+    )
+}
+
+/// [`base_with_sync`] after [`setup_patch`]: `setup_completed` inserted on
+/// the root, both `[sync]` strings spliced.
+fn base_after_setup_patch() -> String {
+    one_edit(
+        &root_insert(&base_with_sync(), "setup_completed = true\n"),
+        "server_url = \"https://old.example\"\ntoken = \"old-token\"\n",
+        "server_url = \"https://crew.example\"\ntoken = \"pasted-token\"\n",
+    )
+}
+
+/// CRLF line endings, as the code handles them today (captured, not
+/// designed). An unchanged save returns the file as it is, and a splice
+/// changes only the value bytes, so CRLF stays. An insert goes through
+/// `toml_edit::DocumentMut`, which writes the whole file back with LF.
+/// A full rewrite is LF.
+#[test]
+fn pin_crlf_files_through_the_in_place_paths() {
+    let crlf = |text: &str| text.replace('\n', "\r\n");
+    let base = crlf(&base_with_sync());
+    let set = crlf(SET);
+    assert_eq!(save(&base, |_| {}), base);
+    assert_eq!(save(&set, |_| {}), set);
+    // Splices keep CRLF.
+    assert_eq!(
+        save(&set, |c| c.shadow_recognizer = true),
+        crlf(&one_edit(
+            SET,
+            "shadow_recognizer   =   false #",
+            "shadow_recognizer   =   true #"
+        ))
+    );
+    assert_eq!(
+        save(&set, |c| c.reader = ReaderSetting::New),
+        crlf(&one_edit(
+            SET,
+            "reader = \"ocr-v1\" #",
+            "reader = \"new\" #"
+        ))
+    );
+    assert_eq!(
+        Config::text_for_setup_patch(Some(&set), &setup_patch()).unwrap(),
+        crlf(&set_after_setup_patch())
+    );
+    // Inserts write the whole file back with LF.
+    assert_eq!(
+        save(&base, |c| c.shadow_recognizer = true),
+        root_insert(&base_with_sync(), "shadow_recognizer = true\n")
+    );
+    assert_eq!(
+        save(&base, |c| c.reader = ReaderSetting::OcrV1),
+        root_insert(&base_with_sync(), "reader = \"ocr-v1\"\n")
+    );
+    assert_eq!(
+        Config::text_for_setup_patch(Some(&base), &setup_patch()).unwrap(),
+        base_after_setup_patch()
+    );
+    // A full rewrite is the usual LF text.
+    assert_eq!(
+        save(&base, |c| c.debug_ocr = true),
+        save(&base_with_sync(), |c| c.debug_ocr = true)
+    );
+}
+
+/// A UTF-8 byte-order mark, as the code handles it today (captured, not
+/// designed). The file parses. An unchanged save and a splice keep the BOM.
+/// An insert (`toml_edit::DocumentMut`) and a full rewrite drop it.
+#[test]
+fn pin_bom_files_through_the_in_place_paths() {
+    let bom = |text: &str| format!("\u{feff}{text}");
+    let base = bom(&base_with_sync());
+    let set = bom(SET);
+    assert_eq!(
+        Config::parse_file_contents(&set).unwrap(),
+        Config::parse_file_contents(SET).unwrap()
+    );
+    assert_eq!(save(&base, |_| {}), base);
+    assert_eq!(save(&set, |_| {}), set);
+    // Splices keep the BOM.
+    assert_eq!(
+        save(&set, |c| c.shadow_recognizer = true),
+        bom(&one_edit(
+            SET,
+            "shadow_recognizer   =   false #",
+            "shadow_recognizer   =   true #"
+        ))
+    );
+    assert_eq!(
+        save(&set, |c| c.reader = ReaderSetting::New),
+        bom(&one_edit(
+            SET,
+            "reader = \"ocr-v1\" #",
+            "reader = \"new\" #"
+        ))
+    );
+    assert_eq!(
+        Config::text_for_setup_patch(Some(&set), &setup_patch()).unwrap(),
+        bom(&set_after_setup_patch())
+    );
+    // Inserts and a full rewrite drop it.
+    assert_eq!(
+        save(&base, |c| c.shadow_recognizer = true),
+        root_insert(&base_with_sync(), "shadow_recognizer = true\n")
+    );
+    assert_eq!(
+        Config::text_for_setup_patch(Some(&base), &setup_patch()).unwrap(),
+        base_after_setup_patch()
+    );
+    assert_eq!(
+        save(&base, |c| c.debug_ocr = true),
+        save(&base_with_sync(), |c| c.debug_ocr = true)
+    );
+}
