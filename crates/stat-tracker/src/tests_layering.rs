@@ -954,7 +954,7 @@ fn the_would_be_crates_have_no_back_edges() {
     for (from, to, test) in [
         ("reader_apply", "shadow", false),
         ("capture", "perf", false),
-        ("boundary", "model", false),
+        ("boundary::machine", "model", false),
         ("detect", "model", false),
         ("storage::edits", "suspect", false),
         ("ocr_switch", "ocr_status", false),
