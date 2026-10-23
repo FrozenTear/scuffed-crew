@@ -595,6 +595,9 @@ fn order_suspects(names: Vec<String>) -> Vec<String> {
 }
 
 #[cfg(test)]
+mod tests_board_merge;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::shadow::{FieldRead, Value};

@@ -1296,10 +1296,7 @@ mod tests {
             ShotRoute::None
         );
         // Reports keep a word the site's validator accepts.
-        assert_eq!(
-            crate::report::bundle::capture_backend_label(CaptureBackend::Kwin),
-            "portal"
-        );
+        assert_eq!(capture_backend_label(CaptureBackend::Kwin), "portal");
     }
 
     /// Capture now on KDE: the portal and KDE direct are both blocked beside
