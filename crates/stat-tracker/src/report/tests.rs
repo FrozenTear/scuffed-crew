@@ -558,14 +558,15 @@ fn system_collects_the_ocr_switch_from_the_daemon_status() {
 
     // With a daemon running, only the file that daemon wrote counts.
     let written = ocr_switch::read_status(dir.path());
-    let used = |running, pid| bundle::switch_for_report(written.clone(), running, pid).is_some();
+    let used =
+        |running, pid| super::input::switch_for_report(written.clone(), running, pid).is_some();
     assert!(used(false, None), "no daemon: the last run's file");
     assert!(used(true, Some(1)), "this daemon's file");
     assert!(!used(true, Some(2)), "another run's file");
     assert!(!used(true, None), "a daemon without a pid file");
-    assert!(bundle::switch_for_report(None, false, None).is_none());
+    assert!(super::input::switch_for_report(None, false, None).is_none());
 
-    assert!(bundle::blocked_sites(&status(1, OcrSetting::On, &sites)).is_empty());
+    assert!(super::input::blocked_sites(&status(1, OcrSetting::On, &sites)).is_empty());
 }
 
 /// Whatever the status file holds, the call sites a report sends pass the
@@ -605,7 +606,7 @@ fn the_call_sites_a_report_sends_always_pass_the_site_validator() {
         let mut inp = input(dir.path(), LogWindow::log_only(t("2026-10-09T12:06:00Z")));
         inp.system = SystemInfo {
             ocr: OcrSetting::Off,
-            ocr_blocked_calls: bundle::blocked_sites(&status(sites)),
+            ocr_blocked_calls: super::input::blocked_sites(&status(sites)),
             ..system()
         };
         let json = bundle::build_log_report(&inp).unwrap().manifest_json;
@@ -656,7 +657,7 @@ fn the_call_sites_a_report_sends_always_pass_the_site_validator() {
     many.push(site("main.rs:7 recognize_cell", u64::from(u32::MAX) + 9));
     many.push(site("detect/match_end.rs:1133 recognize_prepared", 4000));
     many.push(site("detect/match_end.rs:1133 recognize_prepared", 500));
-    let capped = bundle::blocked_sites(&status(&many));
+    let capped = super::input::blocked_sites(&status(&many));
     assert_eq!(capped.len(), bundle::OCR_BLOCKED_SITES_MAX);
     assert_eq!(
         capped[0],
