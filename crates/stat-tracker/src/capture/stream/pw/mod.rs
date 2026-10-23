@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use super::framebuf::{self, PackedFrame};
 use super::pod;
-use super::tab;
+use crate::capture::tab;
 
 mod buffer;
 mod ffi;
@@ -1653,7 +1653,7 @@ mod tests {
             let seen = pause.paused_for(now).unwrap_or_default();
             let why = pause.stuck(PwPhase::Paused, false, now);
             assert!(
-                why.is_some() || seen < crate::capture::screencast::PAUSED_PERSIST,
+                why.is_some() || seen < crate::capture::stream::PAUSED_PERSIST,
                 "a dead read at {seen:?} without the trip"
             );
             pause.trip(why?, now);
@@ -1677,7 +1677,7 @@ mod tests {
 
     #[test]
     fn a_resume_that_stays_paused_trips_before_the_paused_rule_reopens() {
-        let persist = crate::capture::screencast::PAUSED_PERSIST;
+        let persist = crate::capture::stream::PAUSED_PERSIST;
         let t0 = std::time::Instant::now();
         let mut pause = managed_state(t0);
         // Our own pause: PipeWire reports Paused after the request.

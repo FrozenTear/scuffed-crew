@@ -30,13 +30,16 @@ use ashpd::desktop::{PersistMode, Session};
 use futures_util::StreamExt;
 use image::DynamicImage;
 
-use super::framebuf;
 use super::geom::{self, OutputRect};
 use super::outputs;
 use super::portal;
-use super::portal_backend;
-use super::pw;
 use super::types::CaptureKind;
+
+mod framebuf;
+pub(super) mod pause;
+mod pod;
+pub(super) mod portal_backend;
+pub(super) mod pw;
 
 /// How long a grab waits after the session is up. The permission dialog
 /// is not on this timer.
@@ -1162,7 +1165,7 @@ pub async fn capture(
                         Some(live)
                     } else {
                         if let Some(stream) = live.stream.as_ref() {
-                            super::stream_pause::register(stream);
+                            pause::register(stream);
                         }
                         state.live = Some(live);
                         state.last_fail = None;
@@ -1303,8 +1306,7 @@ pub async fn capture(
     // Resume the stream for this grab. It pauses again when the hold is
     // dropped below, after the post-grab health read, or on any early
     // return. A Tab grab takes over the key hold from the press.
-    let (resuming, grab_hold) =
-        super::stream_pause::prepare_grab(&stream, tab_press, max_fps).await;
+    let (resuming, grab_hold) = pause::prepare_grab(&stream, tab_press, max_fps).await;
     let timeout = if tab_press.is_some() {
         Duration::from_millis(super::tab::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS)
     } else if fresh {
@@ -3131,7 +3133,7 @@ mod tests {
     /// in `capture` before the grab's verdict.
     #[test]
     fn a_closed_session_is_marked_before_each_pause_verdict() {
-        let src = include_str!("screencast.rs");
+        let src = include_str!("mod.rs");
         let body = |start: &str, end: &str| -> String {
             let at = src.find(start).unwrap_or_else(|| panic!("{start}"));
             let rest = &src[at..];
@@ -3432,7 +3434,7 @@ mod tests {
         assert_eq!(reuse_wait(4), Duration::from_millis(350));
         assert_eq!(REOPEN_GAP_MIN, Duration::from_secs(60));
         assert_eq!(REOPEN_GAP_MAX, Duration::from_secs(5 * 60));
-        let src = include_str!("screencast.rs");
+        let src = include_str!("mod.rs");
         let capture_at = src.find("pub async fn capture(").expect("capture");
         let after = &src[capture_at..];
         let end = after.find("\nasync fn tab_timeout(").expect("tab_timeout");
