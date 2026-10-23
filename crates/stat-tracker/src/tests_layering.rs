@@ -16,14 +16,23 @@
 //!           ocr_status
 //! ```
 //!
-//! The four middle crates do not use each other. The test reads `src/`
-//! (the lib only: not `main.rs`, `main_tests/` or `ocr_bench.rs`), follows
-//! every `crate::`, `super::` and `self::` path in `use` trees and in code,
-//! and fails on any path from a module to a crate it may not use, in
-//! production code and in tests alike. A path through a re-export counts
-//! where it is written: `crate::detect::MatchOutcome` from `parse` is a
-//! back-edge even though the type lives in `model`, because `parse` will
-//! not see `detect` once the crates are split.
+//! The four middle crates do not use each other. The test reads the `src/`
+//! of every crate the split has made so far ([`PHYSICAL`]: the lib only,
+//! not `main.rs`, `main_tests/` or `ocr_bench.rs`), follows every
+//! `crate::`, `super::` and `self::` path (and every path through an
+//! extracted crate's name, such as `stat_tracker_core::`) in `use` trees
+//! and in code, and fails on any path from a module to a crate it may not
+//! use, in production code and in tests alike. A path through a re-export
+//! counts where it is written: `crate::detect::MatchOutcome` from `parse`
+//! is a back-edge even though the type lives in `model`, because `parse`
+//! will not see `detect` once the crates are split.
+//!
+//! An extracted crate's modules keep their names: `scuffed-stat-tracker`
+//! re-exports each one at its old path ([`the_extracted_crates_are_reexported_at_their_old_paths`]),
+//! so `crate::config` written in this crate and in `stat-tracker-core` name
+//! the same module, and the walk joins both trees into one module map.
+//! The compiler now checks every path out of an extracted crate; the scan
+//! still checks the would-be crates that share this one.
 //!
 //! A new top-level module fails [`every_module_has_a_crate`] until it is
 //! given one here.
@@ -93,6 +102,15 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("tab_retry", Crate::Top),
     ("tests_layering", Crate::Top),
     ("tests_release_pins", Crate::Top),
+];
+
+/// The crates the split has made so far: directory under `crates/`, the
+/// would-be crate it holds, and its lib name. `stat-tracker` still holds
+/// every would-be crate not yet extracted. An extraction PR adds its crate
+/// here, and the test then walks its `src/` too, from its `lib.rs`.
+const PHYSICAL: &[(&str, Crate, &str)] = &[
+    ("stat-tracker", Crate::Top, "stat_tracker"),
+    ("stat-tracker-core", Crate::Core, "stat_tracker_core"),
 ];
 
 fn crate_of(module: &[String]) -> Option<Crate> {
@@ -299,6 +317,10 @@ fn test_regions(t: &[char]) -> Vec<(usize, usize)> {
 // ------------------------------------------------------------ module tree
 
 struct Source {
+    /// The crate directory under `crates/` ([`PHYSICAL`]).
+    dir: &'static str,
+    /// The would-be crate of that directory: the crate of its root.
+    home: Crate,
     /// `src/`-relative file name.
     name: String,
     module: Vec<String>,
@@ -319,12 +341,35 @@ impl Source {
     fn line(&self, at: usize) -> usize {
         self.raw[..at].iter().filter(|c| **c == '\n').count() + 1
     }
+
+    /// The would-be crate of this file's module. A crate root (`lib.rs`) is
+    /// the crate of its directory.
+    fn krate(&self) -> Option<Crate> {
+        if self.module.is_empty() {
+            Some(self.home)
+        } else {
+            crate_of(&self.module)
+        }
+    }
+
+    fn site(&self, at: usize) -> String {
+        format!("{}/src/{}:{}", self.dir, self.name, self.line(at))
+    }
 }
 
-fn parse_source(name: String, module: Vec<String>, test_file: bool, raw: &str) -> Source {
+fn parse_source(
+    dir: &'static str,
+    home: Crate,
+    name: String,
+    module: Vec<String>,
+    test_file: bool,
+    raw: &str,
+) -> Source {
     let text = blank(raw);
     let tests = test_regions(&text);
     Source {
+        dir,
+        home,
         name,
         module,
         test_file,
@@ -389,8 +434,27 @@ fn declared_modules(s: &mut Source) -> Vec<(String, Option<String>, bool)> {
     out
 }
 
-/// Every lib source file, reached from `lib.rs` through its `mod`s.
-fn lib_sources(src: &Path) -> Vec<Source> {
+/// `crates/`, next to this crate.
+fn crates_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates/")
+        .to_path_buf()
+}
+
+/// Every lib source file of every crate in [`PHYSICAL`].
+fn all_sources() -> Vec<Source> {
+    PHYSICAL
+        .iter()
+        .flat_map(|&(dir, home, _)| crate_sources(dir, home))
+        .collect()
+}
+
+/// Every lib source file of `crates/{dir}`, reached from its `lib.rs`
+/// through its `mod`s.
+fn crate_sources(dir: &'static str, home: Crate) -> Vec<Source> {
+    let src = crates_dir().join(dir).join("src");
+    let src = src.as_path();
     let mut out = Vec::new();
     let mut todo = vec![(src.join("lib.rs"), Vec::<String>::new(), false)];
     while let Some((file, module, test_file)) = todo.pop() {
@@ -401,21 +465,21 @@ fn lib_sources(src: &Path) -> Vec<Source> {
             .expect("below src")
             .to_string_lossy()
             .replace('\\', "/");
-        let mut s = parse_source(name, module.clone(), test_file, &raw);
-        let dir = file.parent().expect("a directory").to_path_buf();
+        let mut s = parse_source(dir, home, name, module.clone(), test_file, &raw);
+        let file_dir = file.parent().expect("a directory").to_path_buf();
         let stem = file.file_stem().and_then(|x| x.to_str()).unwrap_or("");
         for (child, path, child_test) in declared_modules(&mut s) {
             let candidates: Vec<PathBuf> = match path {
-                Some(p) => vec![dir.join(p)],
+                Some(p) => vec![file_dir.join(p)],
                 None if matches!(stem, "lib" | "mod") => {
                     vec![
-                        dir.join(format!("{child}.rs")),
-                        dir.join(&child).join("mod.rs"),
+                        file_dir.join(format!("{child}.rs")),
+                        file_dir.join(&child).join("mod.rs"),
                     ]
                 }
                 None => vec![
-                    dir.join(stem).join(format!("{child}.rs")),
-                    dir.join(stem).join(&child).join("mod.rs"),
+                    file_dir.join(stem).join(format!("{child}.rs")),
+                    file_dir.join(stem).join(&child).join("mod.rs"),
                 ],
             };
             let found = candidates
@@ -490,8 +554,9 @@ fn expand_use(tree: &str) -> Vec<Vec<String>> {
     out
 }
 
-/// Every `crate::`/`super::`/`self::` path in `s`, as written, with its
-/// offset: the paths of `use` trees and the qualified paths in code.
+/// Every `crate::`/`super::`/`self::` path in `s` (and every path through
+/// the lib name of a crate in [`PHYSICAL`]), as written, with its offset:
+/// the paths of `use` trees and the qualified paths in code.
 fn written_paths(s: &Source) -> Vec<(usize, Vec<String>)> {
     let t = &s.text;
     let mut out = Vec::new();
@@ -512,13 +577,16 @@ fn written_paths(s: &Source) -> Vec<(usize, Vec<String>)> {
             i += 1;
         }
     }
+    let heads: Vec<String> = ["crate", "super", "self"]
+        .into_iter()
+        .chain(PHYSICAL.iter().map(|&(_, _, lib)| lib))
+        .map(|h| format!("{h}::"))
+        .collect();
     let mut i = 0;
     while i < t.len() {
         let free = (i == 0 || !(is_ident(t[i - 1]) || t[i - 1] == ':'))
             && !in_use.iter().any(|&(a, b)| a <= i && i < b);
-        let head = ["crate::", "super::", "self::"]
-            .into_iter()
-            .find(|h| starts_with(t, i, h));
+        let head = heads.iter().find(|h| starts_with(t, i, h));
         if !(free && head.is_some()) {
             i += 1;
             continue;
@@ -544,13 +612,16 @@ fn written_paths(s: &Source) -> Vec<(usize, Vec<String>)> {
     out
 }
 
-/// The absolute path (from the crate root) a written path names, or `None`
-/// when it is not a path into this crate or stays inside an inline module
-/// of the same file.
-fn absolute(s: &Source, at: usize, segs: &[String]) -> Option<Vec<String>> {
+/// The absolute path (from a crate root) a written path names, and the
+/// would-be crate of that root; or `None` when it is not a path into a
+/// crate of [`PHYSICAL`] or stays inside an inline module of the same file.
+fn absolute(s: &Source, at: usize, segs: &[String]) -> Option<(Vec<String>, Crate)> {
     let first = segs.first()?;
     if first == "crate" {
-        return Some(segs[1..].to_vec());
+        return Some((segs[1..].to_vec(), s.home));
+    }
+    if let Some(&(_, root, _)) = PHYSICAL.iter().find(|(_, _, lib)| first == lib) {
+        return Some((segs[1..].to_vec(), root));
     }
     if first != "super" && first != "self" {
         return None;
@@ -577,7 +648,7 @@ fn absolute(s: &Source, at: usize, segs: &[String]) -> Option<Vec<String>> {
         return None;
     }
     base.extend(rest.iter().cloned());
-    Some(base)
+    Some((base, s.home))
 }
 
 /// One path that crosses a would-be crate boundary.
@@ -596,22 +667,32 @@ fn crate_edges(sources: &[Source]) -> Vec<Edge> {
     let modules: BTreeSet<Vec<String>> = sources.iter().map(|s| s.module.clone()).collect();
     let mut out = Vec::new();
     for s in sources {
-        let Some(from) = crate_of(&s.module) else {
+        let Some(from) = s.krate() else {
             continue;
         };
         for (at, segs) in written_paths(s) {
-            let Some(abs) = absolute(s, at, &segs) else {
+            let Some((abs, root)) = absolute(s, at, &segs) else {
                 continue;
             };
-            let target = (0..=abs.len())
+            let mut target = (0..=abs.len())
                 .rev()
                 .map(|k| abs[..k].to_vec())
                 .find(|p| modules.contains(p))
                 .unwrap_or_default();
-            if target == s.module {
+            if target.is_empty() && !abs.is_empty() && crate_of(&abs[..1]).is_some() {
+                // A module of a crate this scan does not walk, re-exported
+                // at the root: it counts as its own crate, not the root's
+                // (PR #452 review, F2).
+                target = abs[..1].to_vec();
+            }
+            if target == s.module && root == s.home {
                 continue;
             }
-            let Some(to) = crate_of(&target) else {
+            let Some(to) = (if target.is_empty() {
+                Some(root)
+            } else {
+                crate_of(&target)
+            }) else {
                 continue;
             };
             if to == from {
@@ -623,7 +704,7 @@ fn crate_edges(sources: &[Source]) -> Vec<Edge> {
                 from_module: s.module.join("::"),
                 to_module: target.join("::"),
                 test: s.is_test(at),
-                site: format!("src/{}:{}: {}", s.name, s.line(at), segs.join("::")),
+                site: format!("{}: {}", s.site(at), segs.join("::")),
             });
         }
     }
@@ -631,8 +712,193 @@ fn crate_edges(sources: &[Source]) -> Vec<Edge> {
     out
 }
 
-fn src_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("src")
+// ------------------------------------------------------------------ impls
+
+/// One `impl` block: the trait it implements (last path segment), if any,
+/// and its self type (last path segment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Impl {
+    at: usize,
+    trait_name: Option<String>,
+    self_type: String,
+}
+
+/// The last path segment of the type or trait that starts `text`
+/// (`fmt::Display` -> `Display`, `&'a mut Foo<T>` -> `Foo`), or `None` for
+/// a tuple, slice, array, pointer or fn-pointer type.
+fn last_segment(text: &str) -> Option<String> {
+    let mut t = text.trim_start();
+    loop {
+        let before = t;
+        t = t.trim_start_matches(['&', '!', '?']).trim_start();
+        if let Some(rest) = t.strip_prefix('\'') {
+            t = rest.trim_start_matches(is_ident).trim_start();
+        }
+        for keyword in ["mut ", "dyn ", "const "] {
+            if let Some(rest) = t.strip_prefix(keyword) {
+                t = rest.trim_start();
+            }
+        }
+        if t == before {
+            break;
+        }
+    }
+    let end = t
+        .find(|c: char| !(is_ident(c) || c == ':'))
+        .unwrap_or(t.len());
+    let last = t[..end].rsplit("::").next()?;
+    (!last.is_empty() && !last.starts_with(|c: char| c.is_ascii_digit()) && last != "fn")
+        .then(|| last.to_string())
+}
+
+/// Every `impl` item in `s` (not `impl Trait` in argument or return
+/// position): its offset, trait and self type.
+fn impls(s: &Source) -> Vec<Impl> {
+    let t = &s.text;
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < t.len() {
+        let word = (i == 0 || !is_ident(t[i - 1]))
+            && starts_with(t, i, "impl")
+            && t.get(i + 4).is_some_and(|c| c.is_whitespace() || *c == '<');
+        if !word {
+            i += 1;
+            continue;
+        }
+        // An item starts after the end of an item or attribute, at a block
+        // start, or after `unsafe`. `-> impl`, `: impl`, `(impl`, `<impl`
+        // and `, impl` are types.
+        let prev = (0..i).rev().find(|&k| !t[k].is_whitespace());
+        let item = match prev {
+            None => true,
+            Some(k) if matches!(t[k], '}' | ';' | '{' | ']') => true,
+            Some(k) => {
+                k >= 5
+                    && t[k - 5..=k].iter().collect::<String>() == "unsafe"
+                    && (k == 5 || !is_ident(t[k - 6]))
+            }
+        };
+        if !item {
+            i += 4;
+            continue;
+        }
+        // The header: optional generics, then up to the body's `{` (or a
+        // `where`) outside brackets. `->` inside `Fn(..) -> T` is no `>`.
+        let mut k = skip_ws(t, i + 4);
+        let mut depth = 0i32;
+        let mut header = String::new();
+        let mut generics = t.get(k) == Some(&'<');
+        while k < t.len() {
+            let c = t[k];
+            match c {
+                '<' | '(' | '[' => depth += 1,
+                '>' if k > 0 && t[k - 1] == '-' => {}
+                '>' | ')' | ']' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0 && generics {
+                // the closing `>` of `impl<…>`
+                generics = false;
+                k += 1;
+                continue;
+            }
+            if !generics {
+                if depth == 0 && (c == '{' || c == ';') {
+                    break;
+                }
+                if depth == 0
+                    && starts_with(t, k, "where")
+                    && !is_ident(t[k - 1])
+                    && t.get(k + 5).is_some_and(|c| !is_ident(*c))
+                {
+                    break;
+                }
+                header.push(c);
+            }
+            k += 1;
+        }
+        // `Trait for Type`: the first `for` word outside brackets that is
+        // not `for<'a>` (a higher-ranked bound).
+        let chars: Vec<char> = header.chars().collect();
+        let mut depth = 0i32;
+        let mut split = None;
+        for (j, c) in chars.iter().enumerate() {
+            match c {
+                '<' | '(' | '[' => depth += 1,
+                '>' if j > 0 && chars[j - 1] == '-' => {}
+                '>' | ')' | ']' => depth -= 1,
+                _ => {}
+            }
+            if depth == 0
+                && j > 0
+                && chars[j - 1].is_whitespace()
+                && starts_with(&chars, j, "for")
+                && chars.get(j + 3).is_some_and(|c| c.is_whitespace())
+            {
+                split = Some(j);
+                break;
+            }
+        }
+        let (trait_text, type_text) = match split {
+            Some(j) => (
+                Some(chars[..j].iter().collect::<String>()),
+                chars[j + 3..].iter().collect::<String>(),
+            ),
+            None => (None, header.clone()),
+        };
+        if let Some(self_type) = last_segment(&type_text) {
+            out.push(Impl {
+                at: i,
+                trait_name: trait_text.as_deref().and_then(last_segment),
+                self_type,
+            });
+        }
+        i = k.max(i + 4);
+    }
+    out
+}
+
+/// The would-be crates that define a type (`struct`, `enum`, `union`) or a
+/// trait of each name. `type` aliases and associated types are left out.
+fn defined_names(
+    sources: &[Source],
+) -> (
+    BTreeMap<String, BTreeSet<Crate>>,
+    BTreeMap<String, BTreeSet<Crate>>,
+) {
+    let mut types: BTreeMap<String, BTreeSet<Crate>> = BTreeMap::new();
+    let mut traits: BTreeMap<String, BTreeSet<Crate>> = BTreeMap::new();
+    for s in sources {
+        let Some(krate) = s.krate() else {
+            continue;
+        };
+        let t = &s.text;
+        for keyword in ["struct", "enum", "union", "trait"] {
+            let into = if keyword == "trait" {
+                &mut traits
+            } else {
+                &mut types
+            };
+            let mut i = 0;
+            while i < t.len() {
+                if (i == 0 || !is_ident(t[i - 1]))
+                    && starts_with(t, i, keyword)
+                    && t.get(i + keyword.len()).is_some_and(|c| c.is_whitespace())
+                {
+                    let k = skip_ws(t, i + keyword.len());
+                    let end = (k..t.len()).find(|&e| !is_ident(t[e])).unwrap_or(t.len());
+                    if end > k {
+                        let name: String = t[k..end].iter().collect();
+                        into.entry(name).or_default().insert(krate);
+                    }
+                    i = end.max(i + 1);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    }
+    (types, traits)
 }
 
 // ------------------------------------------------------------------ tests
@@ -644,7 +910,7 @@ fn src_dir() -> PathBuf {
 /// by moving the test up to the crate that has everything it needs.
 #[test]
 fn the_would_be_crates_have_no_back_edges() {
-    let sources = lib_sources(&src_dir());
+    let sources = all_sources();
     let edges = crate_edges(&sources);
     let back: Vec<String> = edges
         .iter()
@@ -700,20 +966,43 @@ fn the_would_be_crates_have_no_back_edges() {
     );
 }
 
-/// Every module of the lib has a crate, and the walk from `lib.rs` reached
-/// every lib file under `src/` (so no file escapes the scan).
+/// Every module of the lib has a crate, every module sits in the crate
+/// directory of its would-be crate (or in `stat-tracker` while that crate
+/// is not extracted yet), and the walk from each `lib.rs` reached every lib
+/// file under that crate's `src/` (so no file escapes the scan).
 #[test]
 fn every_module_has_a_crate() {
-    let src = src_dir();
-    let sources = lib_sources(&src);
+    let sources = all_sources();
     let unassigned: Vec<String> = sources
         .iter()
-        .filter(|s| crate_of(&s.module).is_none())
-        .map(|s| s.name.clone())
+        .filter(|s| s.krate().is_none())
+        .map(|s| format!("{}/src/{}", s.dir, s.name))
         .collect();
     assert!(
         unassigned.is_empty(),
         "give these modules a crate in CRATE_OF: {unassigned:?}"
+    );
+
+    let extracted: BTreeSet<Crate> = PHYSICAL
+        .iter()
+        .map(|&(_, krate, _)| krate)
+        .filter(|krate| *krate != Crate::Top)
+        .collect();
+    let misplaced: Vec<String> = sources
+        .iter()
+        .filter(|s| {
+            let krate = s.krate().expect("assigned");
+            if s.home == Crate::Top {
+                extracted.contains(&krate)
+            } else {
+                krate != s.home
+            }
+        })
+        .map(|s| format!("{}/src/{} ({:?})", s.dir, s.name, s.krate()))
+        .collect();
+    assert!(
+        misplaced.is_empty(),
+        "modules outside the crate directory of their CRATE_OF crate: {misplaced:?}"
     );
 
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -726,29 +1015,205 @@ fn every_module_has_a_crate() {
             }
         }
     }
-    let mut files = Vec::new();
-    walk(&src, &mut files);
-    let on_disk: BTreeSet<String> = files
+    let mut on_disk = BTreeSet::new();
+    for &(dir, _, _) in PHYSICAL {
+        let src = crates_dir().join(dir).join("src");
+        let mut files = Vec::new();
+        walk(&src, &mut files);
+        on_disk.extend(
+            files
+                .iter()
+                .map(|p| {
+                    p.strip_prefix(&src)
+                        .expect("below src")
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                })
+                // the bin and its tests
+                .filter(|n| {
+                    dir != "stat-tracker"
+                        || (n != "main.rs" && n != "ocr_bench.rs" && !n.starts_with("main_tests/"))
+                })
+                .map(|n| format!("{dir}/src/{n}")),
+        );
+    }
+    let walked: BTreeSet<String> = sources
         .iter()
-        .map(|p| {
-            p.strip_prefix(&src)
-                .expect("below src")
-                .to_string_lossy()
-                .replace('\\', "/")
-        })
-        // the bin and its tests
-        .filter(|n| n != "main.rs" && n != "ocr_bench.rs" && !n.starts_with("main_tests/"))
+        .map(|s| format!("{}/src/{}", s.dir, s.name))
         .collect();
-    let walked: BTreeSet<String> = sources.iter().map(|s| s.name.clone()).collect();
-    assert_eq!(walked, on_disk, "files the walk from lib.rs did not reach");
+    assert_eq!(walked, on_disk, "files the walks from lib.rs did not reach");
     assert!(walked.len() > 80, "{}", walked.len());
 
     let per_crate: BTreeMap<Crate, usize> = sources.iter().fold(BTreeMap::new(), |mut acc, s| {
-        *acc.entry(crate_of(&s.module).expect("assigned"))
-            .or_default() += 1;
+        *acc.entry(s.krate().expect("assigned")).or_default() += 1;
         acc
     });
     assert_eq!(per_crate.len(), 6, "{per_crate:?}");
+    for &(dir, krate, _) in PHYSICAL {
+        let walked_here = sources.iter().filter(|s| s.dir == dir).count();
+        assert!(
+            walked_here > 10,
+            "{dir} ({krate:?}): {walked_here} files walked"
+        );
+    }
+}
+
+/// `scuffed-stat-tracker` re-exports every top-level module of each
+/// extracted crate at the root, under its own name, so the old paths
+/// (`stat_tracker::config`, `crate::config`) keep working, and nothing
+/// else comes in that way. A module added to an extracted crate fails here
+/// until it is re-exported (or, if it should stay private to that crate,
+/// until it is not `pub mod`).
+#[test]
+fn the_extracted_crates_are_reexported_at_their_old_paths() {
+    let sources = all_sources();
+    let top_lib = sources
+        .iter()
+        .find(|s| s.dir == "stat-tracker" && s.name == "lib.rs")
+        .expect("stat-tracker/src/lib.rs");
+    let reexported: Vec<Vec<String>> = written_paths(top_lib)
+        .into_iter()
+        .map(|(_, segs)| segs)
+        .collect();
+    let mut checked = 0;
+    for &(dir, krate, lib) in PHYSICAL {
+        if krate == Crate::Top {
+            continue;
+        }
+        let declared: BTreeSet<String> = sources
+            .iter()
+            .filter(|s| s.dir == dir && s.module.len() == 1 && !s.test_file)
+            .map(|s| s.module[0].clone())
+            .collect();
+        let through: BTreeSet<String> = reexported
+            .iter()
+            .filter(|segs| segs.len() == 2 && segs[0] == lib)
+            .map(|segs| segs[1].clone())
+            .collect();
+        assert_eq!(
+            through, declared,
+            "{lib}: pub use in stat-tracker/src/lib.rs"
+        );
+        checked += declared.len();
+    }
+    assert!(checked >= 16, "{checked}");
+}
+
+/// No `impl` of a type of one would-be crate is written in another one:
+/// no inherent impl, and no trait impl unless the trait belongs to the
+/// impl's own crate. Once the two crates are split, the first is E0116
+/// and the second E0117 (orphan rule), which is what forced
+/// `PackReadiness::on_disk` out of `ocr_status` in PR #452.
+///
+/// For the types of an extracted crate (`stat-tracker-core` today) rustc
+/// already enforces this, and this test agrees with it. It earns its place
+/// for the would-be crates still inside `stat-tracker` (game, capture,
+/// store, vision and top), where it reports now what would otherwise only
+/// fail at the PR that extracts them. Types are matched by name; a name
+/// defined in more than one would-be crate is skipped.
+#[test]
+fn no_impl_for_a_type_of_another_crate() {
+    let sources = all_sources();
+    let (types, traits) = defined_names(&sources);
+    let mut bad = Vec::new();
+    let mut allowed = Vec::new();
+    let mut total = 0;
+    let mut core_types_seen = 0;
+    for s in &sources {
+        let Some(from) = s.krate() else {
+            continue;
+        };
+        for imp in impls(s) {
+            total += 1;
+            let Some(owners) = types.get(&imp.self_type) else {
+                continue;
+            };
+            if owners.len() != 1 {
+                continue;
+            }
+            let owner = *owners.iter().next().expect("one owner");
+            if owner == Crate::Core {
+                core_types_seen += 1;
+            }
+            if owner == from {
+                continue;
+            }
+            let line = format!(
+                "{}: impl {}{} ({from:?} impl of a {owner:?} type)",
+                s.site(imp.at),
+                imp.trait_name
+                    .as_deref()
+                    .map(|t| format!("{t} for "))
+                    .unwrap_or_default(),
+                imp.self_type
+            );
+            let own_trait = imp
+                .trait_name
+                .as_ref()
+                .and_then(|t| traits.get(t))
+                .is_some_and(|crates| crates.len() == 1 && crates.contains(&from));
+            if own_trait {
+                allowed.push(line);
+            } else {
+                bad.push(line);
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} impl(s) of another would-be crate's type:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+    // The scan sees the tree.
+    // 310 at PR1: every line-start `impl` under both src trees.
+    assert!(total > 250, "impl blocks found: {total}");
+    assert!(
+        core_types_seen > 20,
+        "impls of core types found: {core_types_seen}"
+    );
+    assert!(
+        allowed
+            .iter()
+            .any(|l| l.contains("impl TabKeySource for MultiKeyboardStream")),
+        "{allowed:?}"
+    );
+}
+
+/// The impl scan on a small source: generics with `Fn(..) -> T`, paths,
+/// references, `unsafe impl`, `where`, and `impl Trait` in types.
+#[test]
+fn the_impl_scan_reads_item_headers_only() {
+    let src = parse_source(
+        "stat-tracker",
+        Crate::Top,
+        "x.rs".into(),
+        vec!["x".into()],
+        false,
+        r#"
+impl<F: Fn() -> u8> fmt::Display for Wrap<F> {}
+impl Plain { fn f(&self) -> impl Iterator<Item = u8> { std::iter::empty() } }
+fn g(_: impl Sized) {}
+unsafe impl Send for crate::model::Raw {}
+impl<'a> From<&'a str> for &'a mut Thing where Thing: Sized {}
+impl<T> Bound for T where T: for<'b> Fn(&'b u8) {}
+"#,
+    );
+    let found: Vec<(Option<String>, String)> = impls(&src)
+        .into_iter()
+        .map(|imp| (imp.trait_name, imp.self_type))
+        .collect();
+    let own = |t: Option<&str>, ty: &str| (t.map(String::from), ty.to_string());
+    assert_eq!(
+        found,
+        vec![
+            own(Some("Display"), "Wrap"),
+            own(None, "Plain"),
+            own(Some("Send"), "Raw"),
+            own(Some("From"), "Thing"),
+            own(Some("Bound"), "T"),
+        ]
+    );
 }
 
 /// The scanner on small sources: `use` trees, `super::` out of inline test
@@ -756,6 +1221,8 @@ fn every_module_has_a_crate() {
 #[test]
 fn the_scan_follows_use_trees_super_paths_and_test_regions() {
     let src = parse_source(
+        "stat-tracker",
+        Crate::Top,
         "report/kit.rs".into(),
         vec!["report".into(), "kit".into()],
         false,
@@ -779,7 +1246,7 @@ mod tests {
     assert_eq!(src.inline.len(), 1);
     let found: Vec<(Vec<String>, bool)> = written_paths(&src)
         .into_iter()
-        .filter_map(|(at, segs)| Some((absolute(&src, at, &segs)?, src.is_test(at))))
+        .filter_map(|(at, segs)| Some((absolute(&src, at, &segs)?.0, src.is_test(at))))
         .collect();
     let path = |p: &str| p.split("::").map(String::from).collect::<Vec<_>>();
     for (want, test) in [
@@ -806,21 +1273,34 @@ mod tests {
     // From core, `crate::reader_apply` and `super::` into `report` are
     // back-edges; from top they are not.
     let lower = parse_source(
+        "stat-tracker-core",
+        Crate::Core,
         "parse.rs".into(),
         vec!["parse".into()],
         false,
         "use crate::reader_apply::upload_suspect_fields;\nfn f() { crate::model::is_clean_stat(\"1\"); }\n",
     );
+    // From top, a path through core's lib name resolves into core, and a
+    // root name that is no walked module (`sync` here) counts as its crate.
     let upper = parse_source(
+        "stat-tracker",
+        Crate::Top,
         "reader_apply.rs".into(),
         vec!["reader_apply".into()],
         false,
-        "use crate::parse::canonical_hero;\n",
+        "use crate::parse::canonical_hero;\nfn g() { stat_tracker_core::model::f(); crate::sync::up(); }\n",
     );
     let modules = vec![
         lower,
         upper,
-        parse_source("model.rs".into(), vec!["model".into()], false, ""),
+        parse_source(
+            "stat-tracker-core",
+            Crate::Core,
+            "model.rs".into(),
+            vec!["model".into()],
+            false,
+            "",
+        ),
     ];
     let edges = crate_edges(&modules);
     let back: Vec<&Edge> = edges.iter().filter(|e| !e.from.may_use(e.to)).collect();
@@ -832,7 +1312,23 @@ mod tests {
     assert!(
         back[0]
             .site
-            .starts_with("src/parse.rs:1: crate::reader_apply")
+            .starts_with("stat-tracker-core/src/parse.rs:1: crate::reader_apply"),
+        "{}",
+        back[0].site
+    );
+    let from_top: BTreeSet<(Crate, &str)> = edges
+        .iter()
+        .filter(|e| e.from_module == "reader_apply")
+        .map(|e| (e.to, e.to_module.as_str()))
+        .collect();
+    assert_eq!(
+        from_top,
+        BTreeSet::from([
+            (Crate::Core, "model"),
+            (Crate::Core, "parse"),
+            (Crate::Store, "sync")
+        ]),
+        "{edges:?}"
     );
     assert!(Crate::Top.may_use(Crate::Vision));
     assert!(!Crate::Store.may_use(Crate::Vision));
