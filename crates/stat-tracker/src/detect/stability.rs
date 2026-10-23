@@ -14,8 +14,7 @@
 //! Cost of the trade: detection shifts one poll tick later (the first tick of
 //! a new screen has no matching predecessor). The post-match screens stay up
 //! ~15–20s (several ticks) and word outcomes already need two agreeing reads
-//! inside the confirmation window, so the miss-rate budget is unchanged; the
-//! ~3s banner is untouched (color-flood, never OCR-gated).
+//! inside the confirmation window, so the miss-rate budget is unchanged.
 
 use std::collections::HashMap;
 

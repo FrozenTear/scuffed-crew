@@ -37,7 +37,7 @@ pub fn detect_phase(img: &DynamicImage) -> GamePhase {
 }
 
 /// Same as [`detect_phase`] when the caller already holds an RGB conversion
-/// (e.g. poll tick that also runs banner detection on the same frame).
+/// (e.g. poll tick that also runs the outcome detectors on the same frame).
 pub fn detect_phase_with_rgb(img: &DynamicImage, rgb: &RgbImage) -> GamePhase {
     if let Some(phase) = detect_map_vote(img, rgb) {
         return phase;

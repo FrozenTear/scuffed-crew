@@ -1023,7 +1023,9 @@ async fn a_rejoin_with_reset_stats_on_the_same_map_continues_the_recovered_game(
         .await;
     assert_eq!(night.id(), id);
 
-    night.banner(detect::MatchOutcome::Victory).await;
+    night
+        .confirmed_without_map(detect::MatchOutcome::Victory)
+        .await;
     assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
     assert_eq!(night.id(), id);
 
@@ -1185,7 +1187,9 @@ async fn a_board_on_a_different_map_after_a_crash_starts_a_new_game() {
 async fn a_restart_after_a_result_still_starts_a_new_game_on_the_first_tab_past_75_s() {
     let mut night = Night::new().await;
     let id = rialto_before_crash(&mut night).await;
-    night.banner(detect::MatchOutcome::Victory).await;
+    night
+        .confirmed_without_map(detect::MatchOutcome::Victory)
+        .await;
     night.crash_and_restart().await;
     assert_eq!(
         night.id(),

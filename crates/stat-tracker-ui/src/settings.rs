@@ -488,12 +488,6 @@ pub(crate) fn x11_route_warning(route: CaptureRoute) -> String {
     )
 }
 
-/// Lines under the capture method: a saved Wayland-only method on X11,
-/// Older screenshot on X11, the GNOME flash for Older screenshot, KDE
-/// direct that is not there, and what the running tracker said. A line
-/// about the selected choice is a warning. On X11 the KDE direct lines are
-/// left out (it is not offered there), and so is the tracker's notice about
-/// the same Wayland-only method, which the warning already says.
 /// The tracker's capture notice as a Settings line. A notice that already
 /// ends a sentence (the screenshot portal's) keeps one period, not two.
 fn tracker_note(notice: &str) -> String {
@@ -501,6 +495,12 @@ fn tracker_note(notice: &str) -> String {
     format!("Tracker: {}.", notice.strip_suffix('.').unwrap_or(notice))
 }
 
+/// Lines under the capture method: a saved Wayland-only method on X11,
+/// Older screenshot on X11, the GNOME flash for Older screenshot, KDE
+/// direct that is not there, and what the running tracker said. A line
+/// about the selected choice is a warning. On X11 the KDE direct lines are
+/// left out (it is not offered there), and so is the tracker's notice about
+/// the same Wayland-only method, which the warning already says.
 pub(crate) fn capture_route_notes(
     desktop: &str,
     session: SessionKind,

@@ -69,6 +69,8 @@ fn game(outcome: detect::MatchOutcome, recorded_secs_ago: Option<u64>, now: Inst
         restored_with_result: false,
         restart_recovered_at: None,
         rejoin_carry: None,
+        outcome_locked: false,
+        last_board_pressed_at: None,
     }
 }
 
@@ -87,6 +89,8 @@ fn session(active_game: Option<ActiveGame>, now: Instant) -> SessionState {
         poll_ticks_skipped: 0,
         end_reel_wake_until: None,
         settle_closed_unknown: None,
+        tab_probe: None,
+        tab_press: None,
     }
 }
 
@@ -596,6 +600,223 @@ async fn o8_tabs(
 
 async fn no_edit(_: &DaemonCtx, _: usize) {}
 
+/// R9-2: one Tab frame of the new reader on `map`, own row `c`.
+fn r9_frame(c: Counters, map: &str) -> InjectedCapture {
+    let mut analysis = o8_analysis(None, Some("Ana"));
+    analysis.map_from_panel = Some(map.to_string());
+    analysis.map_panel_raw = Some(map.to_uppercase());
+    let mut board = o8_board(Some("Ana"));
+    for field in &mut board.fields {
+        let value = match field.name.as_str() {
+            "map" => Some(shadow::Value::Text(map.to_string())),
+            "r0.e" => Some(shadow::Value::Int(c.elims)),
+            "r0.a" => Some(shadow::Value::Int(c.assists)),
+            "r0.d" => Some(shadow::Value::Int(c.deaths)),
+            "r0.dmg" => Some(shadow::Value::Int(c.damage)),
+            "r0.h" => Some(shadow::Value::Int(c.healing)),
+            "r0.mit" => Some(shadow::Value::Int(c.mitigation)),
+            _ => continue,
+        };
+        field.value = value;
+    }
+    InjectedCapture {
+        analysis,
+        board: Some(board),
+    }
+}
+
+fn r9_counters(e: u32, d: u32, dmg: u32) -> Counters {
+    Counters {
+        elims: e,
+        assists: 3,
+        deaths: d,
+        damage: dmg,
+        healing: 0,
+        mitigation: dmg / 2,
+    }
+}
+
+/// R9-2: one Tab the way the daemon runs it: the session choice at the
+/// press ([`tab_capture_request`]), the capture, then the probe settle
+/// and the report. `frame` is what the capture sees: a board, or a grab
+/// error. Returns the probe verdict the report carried.
+async fn r9_tab(
+    st: &mut SessionState,
+    ctx: &DaemonCtx,
+    press: Instant,
+    frame: Result<InjectedCapture, &str>,
+    synced: &std::cell::Cell<u32>,
+) -> Option<boundary::FinishedGameTab> {
+    let req = tab_capture_request(st, &ctx.store, &ctx.data_dir, press, || {
+        synced.set(synced.get() + 1);
+        std::future::ready(())
+    })
+    .await;
+    let sid = req.session_id.clone();
+    match frame {
+        Ok(capture) => *INJECTED_CAPTURE.lock().unwrap() = Some(capture),
+        Err(err) => *INJECTED_GRAB_ERROR.lock().unwrap() = Some(err.to_string()),
+    }
+    let result = handle_capture(ctx, req).await.map_err(|e| format!("{e:#}"));
+    let verdict = result.as_ref().ok().and_then(|r| r.finished_game_tab);
+    let now = press + Duration::from_secs(1);
+    let sid = settle_tab_probe(st, &ctx.store, &ctx.data_dir, sid, &result, now, || {
+        synced.set(synced.get() + 1);
+        std::future::ready(())
+    })
+    .await;
+    apply_capture_report(st, &ctx.store, &ctx.data_dir, &sid, result, now).await;
+    verdict
+}
+
+/// R9-2: one poll tick with a sure accolade result word, the way the
+/// poll loop handles it: the word's read goes into the game's result
+/// evidence (`reader = "new"`), then [`resolve_word_tick`] and
+/// [`apply_poll_tick`] decide.
+async fn r9_word(
+    st: &mut SessionState,
+    ctx: &DaemonCtx,
+    outcome: detect::MatchOutcome,
+    at: Instant,
+) {
+    let word = match outcome {
+        detect::MatchOutcome::Victory => shadow::result::Outcome::Victory,
+        detect::MatchOutcome::Defeat => shadow::result::Outcome::Defeat,
+        other => panic!("no word for {other:?}"),
+    };
+    if let Some(g) = st.active_game.as_mut() {
+        g.result_evidence.add(shadow::result::ResultRead {
+            outcome: Some(word),
+            source: Some(shadow::result::ACCOLADE.into()),
+            score: 0.97,
+            margin: 0.6,
+            suspect: false,
+        });
+    }
+    let tick = resolve_word_tick(
+        &mut st.word_outcome_streak,
+        Some((outcome, detect::match_end::OutcomeSource::ResultWord)),
+        at,
+        None,
+    );
+    apply_poll_tick(
+        st,
+        &ctx.store,
+        &ctx.data_dir,
+        &tick,
+        None,
+        at,
+        Duration::from_secs(120),
+        true,
+    )
+    .await;
+}
+
+/// R9-2: a Busan game (session "live") with three Tabs, then a result
+/// confirmed by two result words at `t0 + 66 s` and `t0 + 72 s`. The
+/// last board, 9/8, was taken at `t0 + 70 s` (its report landed at
+/// `t0 + 71 s`), before the result. Returns the state and `t0`.
+async fn r9_finished_game(
+    ctx: &DaemonCtx,
+    result: detect::MatchOutcome,
+    synced: &std::cell::Cell<u32>,
+) -> (SessionState, Instant) {
+    let t0 = test_now();
+    let mut active = game(detect::MatchOutcome::Unknown, None, t0);
+    active.session_id = "live".into();
+    active.map = Some("Busan".into());
+    active.map_source = Some(boundary::MapSource::TopBar);
+    active.session_created = false;
+    active.opened_at = t0;
+    let mut st = session(Some(active), t0);
+    for (at, c) in [
+        (0, r9_counters(6, 6, 3000)),
+        (40, r9_counters(7, 7, 3500)),
+        (70, r9_counters(9, 8, 4200)),
+    ] {
+        let press = t0 + Duration::from_secs(at);
+        assert_eq!(
+            r9_tab(&mut st, ctx, press, Ok(r9_frame(c, "Busan")), synced).await,
+            None,
+            "an unfinished game is never probed"
+        );
+    }
+    r9_word(&mut st, ctx, result, t0 + Duration::from_secs(66)).await;
+    r9_word(&mut st, ctx, result, t0 + Duration::from_secs(72)).await;
+    let g = st.active_game.as_ref().unwrap();
+    assert_eq!(g.session_id, "live");
+    assert_eq!(g.outcome, result, "two agreeing words record the result");
+    assert_eq!(g.outcome_recorded_at, Some(t0 + Duration::from_secs(72)));
+    assert_eq!(r9_final_outcome(ctx, "live").await, result.to_string());
+    (st, t0)
+}
+
+async fn r9_rows(ctx: &DaemonCtx, sid: &str) -> Vec<(u32, String)> {
+    ctx.store
+        .get_session_snapshots(sid)
+        .await
+        .unwrap()
+        .iter()
+        .map(|row| (row.elims, row.outcome.clone()))
+        .collect()
+}
+
+async fn r9_final_outcome(ctx: &DaemonCtx, sid: &str) -> String {
+    ctx.store
+        .get_all_sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.session_id == sid)
+        .expect("session row")
+        .final_outcome
+}
+
+/// R9-2, the KDE tester's 2026-10-22 Route 66 game: DEFEAT was taken
+/// mid-match, Tabs inside the 75 s grace window kept showing the board
+/// rising, and the first Tab after it (board 10/9) closed the game
+/// "superseded by Tab-opened game" and opened a new one. Now that board
+/// keeps the game, the false result is cleared on the game and in the
+/// store along with the result words behind it (review M1: `reader =
+/// "new"` would stamp them on every later row), the probe frame's own
+/// VICTORY is not taken (review A3), and the real result comes through
+/// the poller's word path.
+/// R9-2: the tester's sequence up to the clearing Tab: a false DEFEAT
+/// (two words) at `t0 + 72 s`, a rising board inside the grace window
+/// at `t0 + 110 s`, and the first Tab past it at `t0 + 150 s` (board
+/// 10/9, its frame reading VICTORY). Returns the state and `t0`.
+async fn r9_unlatched_game(
+    ctx: &DaemonCtx,
+    synced: &std::cell::Cell<u32>,
+) -> (SessionState, Instant) {
+    let (mut st, t0) = r9_finished_game(ctx, detect::MatchOutcome::Defeat, synced).await;
+    // Inside the grace window (72 + 75 s): the post-match board rule,
+    // no probe. The board is stored on the game with its result.
+    let press = t0 + Duration::from_secs(110);
+    assert!(!should_start_fresh_session(st.active_game.as_ref(), press));
+    assert!(!finished_game_tab_probe(st.active_game.as_ref(), press));
+    let verdict = r9_tab(
+        &mut st,
+        ctx,
+        press,
+        Ok(r9_frame(r9_counters(9, 8, 4300), "Busan")),
+        synced,
+    )
+    .await;
+    assert_eq!(verdict, None);
+    assert_eq!(st.active_game.as_ref().unwrap().session_id, "live");
+    // Past it, 39 s after that board (Tab pressed after the result):
+    // the board decides.
+    let press = t0 + Duration::from_secs(150);
+    assert!(should_start_fresh_session(st.active_game.as_ref(), press));
+    assert!(finished_game_tab_probe(st.active_game.as_ref(), press));
+    let mut probe = r9_frame(r9_counters(10, 9, 4600), "Busan");
+    probe.analysis.frame_outcome = detect::MatchOutcome::Victory;
+    let verdict = r9_tab(&mut st, ctx, press, Ok(probe), synced).await;
+    assert_eq!(verdict, Some(boundary::FinishedGameTab::StillPlaying));
+    (st, t0)
+}
+
 /// The own row's board hero with the hero authority as given: a 5v5
 /// board whose own row names `row` while the authority (own row and
 /// career panel portrait) names `authority`.
@@ -1010,15 +1231,16 @@ impl Night {
         self.word_tick(outcome, None).await;
     }
 
-    /// A banner confirms on one tick and has no accolade map. Production
-    /// reads the map crop only on result-word ticks.
-    async fn banner(&mut self, outcome: detect::MatchOutcome) {
-        let tick = resolve_word_tick(
-            &mut self.st.word_outcome_streak,
-            Some((outcome, detect::match_end::OutcomeSource::Banner)),
-            self.now,
-            None,
-        );
+    /// A result confirmed on this tick with no accolade map: the second
+    /// agreeing end-title or rank-screen read, whose first read the
+    /// test does not need. Production reads the map crop only on
+    /// result-word ticks.
+    async fn confirmed_without_map(&mut self, outcome: detect::MatchOutcome) {
+        let tick = ResolvedWordTick {
+            signal: Some(outcome),
+            signal_confirmed: true,
+            accolade_map: None,
+        };
         self.apply_resolved_tick(tick, None).await;
     }
 
@@ -1193,6 +1415,7 @@ impl Night {
                 held_at: None,
                 map_replaces_text_fallback: false,
                 rejoin_carry: None,
+                finished_game_tab: None,
             };
             apply_capture_report(
                 &mut self.st,
@@ -1252,6 +1475,7 @@ impl Night {
             held_at: None,
             map_replaces_text_fallback: staged.replaced_text_fallback,
             rejoin_carry: rejoin.carry,
+            finished_game_tab: None,
         };
         apply_capture_report(
             &mut self.st,
@@ -1440,6 +1664,7 @@ fn rejected_report(session_id: &str) -> CaptureReport {
         held_at: None,
         map_replaces_text_fallback: false,
         rejoin_carry: None,
+        finished_game_tab: None,
     }
 }
 
