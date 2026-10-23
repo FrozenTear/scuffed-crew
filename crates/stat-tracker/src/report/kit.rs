@@ -1318,7 +1318,6 @@ mod tests {
         use crate::detect::match_end::OutcomeSource;
         for src in [
             None,
-            Some(OutcomeSource::Banner),
             Some(OutcomeSource::ResultWord),
             Some(OutcomeSource::EndTitle),
         ] {
@@ -1348,12 +1347,7 @@ mod tests {
             P::NotAScoreboard,
             true
         ));
-        for src in [
-            None,
-            Some(S::Banner),
-            Some(S::ResultWord),
-            Some(S::EndTitle),
-        ] {
+        for src in [None, Some(S::ResultWord), Some(S::EndTitle)] {
             assert!(
                 !rank_outcome_allowed(src, P::NotAScoreboard, false),
                 "{src:?}"

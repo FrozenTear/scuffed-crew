@@ -7,15 +7,21 @@ use super::MatchOutcome;
 use super::stability::FrameStability;
 use crate::shadow::result::{Outcome, ResultRead, ResultScreen, ResultScreens, ScreenRead};
 
-/// Which detector produced an outcome. The banner color-flood is specific
-/// enough to act on from a single frame; the word sources (accolade
-/// screen, competitive rank screen) are cheap but weaker evidence, so the
-/// poller requires two agreeing word reads inside a confirmation window.
-/// Who reads those two words depends on the reader ([`ResultWords`]): OCR
-/// under `reader = "ocr-v1"`, the words-v1 pack under `reader = "new"`.
+/// Which detector produced an outcome. Every source is a result word
+/// (accolade screen, competitive rank screen, end title), and the poller
+/// requires two agreeing reads inside a confirmation window. Who reads
+/// those words depends on the reader ([`ResultWords`]): OCR under
+/// `reader = "ocr-v1"`, the words-v1 pack under `reader = "new"`.
+///
+/// There is no colour source. A gold or red colour flood across the
+/// middle of the screen used to be read as VICTORY or DEFEAT from one
+/// frame; red hero effects mid-match (Vendetta, 0.5.0-rc.8 report of
+/// 2026-10-22) set a game's result to Defeat while it was still being
+/// played, so it was removed in 0.5.0-rc.9 (R9-1). Every real end shows
+/// the result word on the end title, the accolade screen or the rank
+/// screen; a player who skips all of them sets Win or Loss by hand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutcomeSource {
-    Banner,
     /// Top-left result word on the post-match accolade screen.
     ResultWord,
     /// Result word under the "COMPETITIVE" title on the rank-update screen.
@@ -446,9 +452,9 @@ pub fn detect_outcome_with(
 
 /// Outcome detection with its evidence source, for the poller.
 ///
-/// Order: the full-screen VICTORY/DEFEAT banner color-flood first (fast, very
-/// specific), then OCR of the accolade screen's top-left result word. The word
-/// OCR runs unconditionally — it used to be gated behind a "60% of pixels lean
+/// Order: OCR of the accolade screen's top-left result word, the rank
+/// screen's word, then the end title. No colour flood is an outcome
+/// ([`OutcomeSource`]). The word OCR runs unconditionally — it used to be gated behind a "60% of pixels lean
 /// blue" accolade-screen check, but custom UI color schemes (e.g. magenta)
 /// break any assumption about the screen's dominant color, and the full-frame
 /// pixel scan cost more than the small-crop OCR it was guarding. The Otsu-based
@@ -479,8 +485,7 @@ pub fn detect_outcome_signal_with_rgb(
 /// Poll-tick outcome detection: identical to
 /// [`detect_outcome_signal_with_rgb`] except the word-OCR crops are gated on
 /// temporal stability — Tesseract only runs once a crop has held still across
-/// consecutive ticks (see [`FrameStability`]). The banner color-flood is never
-/// gated: it is cheap, lasts ~3s, and a second tick may never come. Word
+/// consecutive ticks (see [`FrameStability`]). Word
 /// detection shifts at most one tick later, inside the budget of screens that
 /// stay up 15–20s and already need two agreeing reads to confirm.
 ///
@@ -523,9 +528,6 @@ fn detect_outcome_signal_inner(
         // Held is settled in `read_end_title`, which reads nothing for it.
         Titles::Ocr | Titles::Held => None,
     };
-    if let Some(outcome) = detect_banner(rgb) {
-        return Some((outcome, OutcomeSource::Banner));
-    }
     match read_result_word(img, rgb, stability.as_deref_mut(), words) {
         MatchOutcome::Unknown => {}
         outcome => return Some((outcome, OutcomeSource::ResultWord)),
@@ -1018,66 +1020,9 @@ fn prepare_end_title(crop: &DynamicImage) -> GrayImage {
     }
 }
 
-// Detect the brief VICTORY/DEFEAT full-screen banner (gold or red backdrop).
-// OW2 banners saturate >40% of the screen with a very specific color range.
-// Previous thresholds (15%, loose color ranges) caused false positives on
-// websites with warm/red colors during normal browsing.
-//
-// Pixel scan uses stride 2 — ratio tests tolerate 1-in-2 sampling.
-fn detect_banner(rgb: &RgbImage) -> Option<MatchOutcome> {
-    let (w, h) = rgb.dimensions();
-    let (gx, gy, gw, gh) = crate::ocr::preprocess::game_rect_16_9(w, h);
-
-    // Sample the middle horizontal band (30%-70% of the 16:9 playfield) where
-    // the banner colour flood is most consistent.
-    let y_start = gy + gh * 30 / 100;
-    let y_end = gy + gh * 70 / 100;
-    let x_end = gx + gw;
-    let mut gold_count = 0u32;
-    let mut red_count = 0u32;
-    let mut total = 0u32;
-    const STRIDE: u32 = 2;
-
-    for y in (y_start..y_end).step_by(STRIDE as usize) {
-        for x in (gx..x_end).step_by(STRIDE as usize) {
-            let [r, g, b] = rgb.get_pixel(x, y).0;
-            total += 1;
-            // OW2 victory gold: saturated warm gold, green channel well above blue
-            if r > 200 && g > 140 && g < 220 && b < 60 && (r as i32 - b as i32) > 150 {
-                gold_count += 1;
-            }
-            // OW2 defeat red: deep red, very low green and blue
-            if r > 180 && g < 60 && b < 60 {
-                red_count += 1;
-            }
-        }
-    }
-
-    if total == 0 {
-        return None;
-    }
-
-    let gold_ratio = gold_count as f32 / total as f32;
-    let red_ratio = red_count as f32 / total as f32;
-
-    // OW2 banners flood >40% of the sampled region with the dominant color.
-    // 35% threshold with tighter color ranges eliminates web page false positives.
-    const THRESHOLD: f32 = 0.35;
-
-    if gold_ratio > THRESHOLD {
-        tracing::debug!(gold_ratio, "victory banner detected");
-        Some(MatchOutcome::Victory)
-    } else if red_ratio > THRESHOLD {
-        tracing::debug!(red_ratio, "defeat banner detected");
-        Some(MatchOutcome::Defeat)
-    } else {
-        None
-    }
-}
-
 /// Cheap Play of the Game / highlight end-reel hint for the poller.
 ///
-/// Not an outcome confirm — banner / two-agreeing word OCR are unchanged.
+/// Not an outcome confirm: that takes two agreeing word reads.
 /// The poller uses this only to leave mid-match slow cadence (~8s) so the
 /// short Victory/Defeat window that follows the reel is sampled at full
 /// rate. Accolade / MVP lands ~15–20s after POTG (see [`read_result_word`]).
@@ -1811,25 +1756,54 @@ mod tests {
     }
 
     #[test]
-    fn gold_flood_is_victory_banner() {
-        assert_eq!(
-            detect_outcome_signal(&flood([230, 180, 20])),
-            Some((MatchOutcome::Victory, OutcomeSource::Banner))
-        );
-    }
-
-    #[test]
-    fn red_flood_is_defeat_banner() {
-        assert_eq!(
-            detect_outcome_signal(&flood([200, 30, 30])),
-            Some((MatchOutcome::Defeat, OutcomeSource::Banner))
-        );
-    }
-
-    #[test]
     fn black_frame_is_no_signal() {
         assert_eq!(detect_outcome_signal(&flood([0, 0, 0])), None);
         assert_eq!(detect_outcome(&flood([0, 0, 0])), MatchOutcome::Unknown);
+    }
+
+    /// R9-1 (0.5.0-rc.9): on 2026-10-22 one mid-match poll frame of a
+    /// Vendetta game was taken as Defeat because red covered more than 35%
+    /// of the middle band of the screen, and the game was split in two. A
+    /// red or gold flood is no outcome on any entry point, under either
+    /// reader, on any number of ticks.
+    #[test]
+    fn a_red_flooded_mid_match_frame_is_no_outcome() {
+        // A Vendetta-red middle band over a dark game frame, and the
+        // full-screen floods the colour check took as DEFEAT and VICTORY.
+        let mut band = RgbImage::from_pixel(640, 360, Rgb([20, 24, 30]));
+        for y in 90..270 {
+            for x in 0..640 {
+                band.put_pixel(x, y, Rgb([200, 30, 30]));
+            }
+        }
+        let frames = [
+            DynamicImage::ImageRgb8(band),
+            flood([200, 30, 30]),
+            flood([230, 180, 20]),
+        ];
+        // A lit crop is read by the words pack (it finds no word there).
+        let words = || pack_words(BOTH, Some(unread_frame()));
+        for img in &frames {
+            let rgb = img.to_rgb8();
+            assert_eq!(detect_outcome_signal(img), None);
+            assert_eq!(detect_outcome(img), MatchOutcome::Unknown);
+            assert_eq!(
+                detect_outcome_with(img, NEW, &no_title(), &words()),
+                MatchOutcome::Unknown
+            );
+            let mut st = FrameStability::default();
+            for tick in 0..3 {
+                assert_eq!(
+                    poll_new(&(img.clone(), rgb.clone()), &mut st, &words()),
+                    None
+                );
+                assert_eq!(
+                    poll_ocr(&(img.clone(), rgb.clone()), &mut st),
+                    None,
+                    "tick {tick}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2168,12 +2142,15 @@ mod tests {
         assert_eq!(poll(&mut st, &defeat), None);
         assert_eq!(poll(&mut st, &defeat), signal(MatchOutcome::Defeat));
 
-        // The colour flood is read before any word, and the end title's
-        // memory moves on that tick too: a banner tick with no title on it
-        // breaks the run, one with the title on it continues it.
+        // A colour flood is no outcome (R9-1): the end title on that tick
+        // decides, and its memory moves on as on any other tick. A flood
+        // tick with no title on it breaks the run, one with the title on
+        // it continues it.
         let gold = flood([230, 180, 20]);
         let gold_rgb = gold.to_rgb8();
-        let banner = Some((MatchOutcome::Victory, OutcomeSource::Banner));
+        // The flood lights the accolade and rank crops, so the words pack
+        // is asked; it finds no word.
+        let flood_words = pack_words(BOTH, Some(unread_frame()));
         let mut st = FrameStability::default();
         assert_eq!(poll(&mut st, &defeat), None);
         assert_eq!(
@@ -2183,16 +2160,15 @@ mod tests {
                 &mut st,
                 NEW,
                 &words(None, true),
-                &unread_words()
+                &flood_words
             ),
-            banner
+            None
         );
-        assert_eq!(poll(&mut st, &defeat), None, "the banner tick had no title");
+        assert_eq!(poll(&mut st, &defeat), None, "the flood tick had no title");
         assert_eq!(
-            detect_outcome_signal_polled(&gold, &gold_rgb, &mut st, NEW, &defeat, &unread_words()),
-            banner
+            detect_outcome_signal_polled(&gold, &gold_rgb, &mut st, NEW, &defeat, &flood_words),
+            signal(MatchOutcome::Defeat)
         );
-        assert_eq!(poll(&mut st, &defeat), signal(MatchOutcome::Defeat));
 
         // a Tab frame is one shot: a sure word is that frame's outcome
         assert_eq!(
@@ -2298,14 +2274,6 @@ mod tests {
             assert!(detect_end_reel_with(&img, &rgb, &titles), "{titles:?}");
         }
         assert_eq!(ocr_calls(), before, "no OCR under the new reader");
-    }
-
-    #[test]
-    fn gold_flood_still_wins_over_end_title() {
-        assert_eq!(
-            detect_outcome_signal(&flood([230, 180, 20])),
-            Some((MatchOutcome::Victory, OutcomeSource::Banner))
-        );
     }
 
     #[test]

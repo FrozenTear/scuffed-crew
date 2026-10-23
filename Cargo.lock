@@ -10977,7 +10977,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.5.0-rc.8"
+version = "0.5.0-rc.9"
 dependencies = [
  "ab_glyph",
  "anyhow",
