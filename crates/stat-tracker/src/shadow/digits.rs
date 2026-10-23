@@ -47,38 +47,9 @@ use crate::ocr::preprocess;
 
 pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 
-/// Identifies this recognizer's output. Bump it whenever any value,
-/// confidence or suspect flag can change, so logged reads from different
-/// builds are never pooled by mistake. Every `shadow/digits.jsonl` line
-/// carries it. The `recognizer_snapshot_is_pinned` test fails until the bump
-/// is made when, on its synthetic fixtures, any value or suspect flag
-/// changes, any calibration constant changes, a pinned sample confidence
-/// moves more than 0.02, or a board's mean confidence moves more than 0.005.
-/// Float drift below those tolerances is accepted on purpose.
-///
-/// * `cv-v1`: template matcher as shipped in 0.4.23 (raw margins, 0.06 cut).
-/// * `cv-v2`: per-digit calibrated confidence, suspect below 0.35.
-/// * `cv-v3`: 1080p templates and typical margins rebuilt with real
-///   1920x1080 captures added to the downscaled 1440p set; cells with too
-///   little ink for the digits read are flagged.
-/// * `cv-v4`: pair checks for 4 vs 6 and for dim 0 vs 3 can lift a glyph
-///   margin that sits below the suspect line; touching glyphs can also be
-///   split along slanted cut lines.
-/// * `cv-v5`: a thousands-separator gap (width in range, or bottom-band comma
-///   ink) joins digit groups instead of splitting them; any ink left of the
-///   picked group inside the cell forces suspect.
-/// * `cv-v6`: alpha.8 reader. Written as [`RECOGNIZER_ID_NO_OCR`] when the
-///   tracker runs with OCR off, so those rows and reports can be told apart.
-/// * `cv-v7`: header labels are found with
-///   [`preprocess::header_label_groups_scaled`]: the dark cut follows the
-///   strip's background brightness and a 2 px "H" label is kept on boards
-///   narrower than 1664 px. Downscaled and dimmed boards now find their
-///   columns; boards that already found them read the same.
-/// * `cv-v8`: the digit reads are the same as `cv-v7`. A held own-row cell
-///   now stores the reader's unsure read, flagged, when the capture gate
-///   would take that read, instead of the game's older accepted value
-///   (report a6f3). Stored stats can differ from `cv-v7` rows.
-pub const RECOGNIZER_ID: &str = "cv-v8";
+// The id and its version history live in `crate::model`, below the modules
+// that store and upload it. Bump it there (and `RECOGNIZER_ID_NO_OCR` here).
+pub use crate::model::RECOGNIZER_ID;
 
 /// [`RECOGNIZER_ID`] for a run with OCR off.
 pub const RECOGNIZER_ID_NO_OCR: &str = "cv-v8-noocr";

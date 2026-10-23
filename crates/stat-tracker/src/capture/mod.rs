@@ -550,6 +550,19 @@ pub enum CaptureBackend {
     None,
 }
 
+/// `system.capture_backend` in problem reports (`report::bundle`).
+pub const fn capture_backend_label(backend: CaptureBackend) -> &'static str {
+    match backend {
+        CaptureBackend::X11 => "x11",
+        CaptureBackend::Wayshot => "wayshot",
+        // KDE direct goes out as `portal`: the site's validator
+        // (`scuffed_types::stat_report`) knows no other word yet, and a
+        // report it refuses is lost. The log in the bundle names the route.
+        CaptureBackend::Portal | CaptureBackend::Kwin => "portal",
+        CaptureBackend::None => "none",
+    }
+}
+
 /// Normalized force target parsed from `STAT_TRACKER_CAPTURE` (pure; unit-tested).
 /// The accepted keyword set (and its case-folding) lives here and nowhere else,
 /// both `select_backend` and `detect_backend` route through `force_target`.
@@ -966,7 +979,7 @@ pub fn oneshot_blocked(backend: CaptureBackend, desktop: &str, share_open: bool)
 /// The running tracker's screen share is open, from its status file.
 pub fn daemon_share_is_open(data_dir: &std::path::Path) -> bool {
     let live_pid = live_daemon_pid(data_dir);
-    crate::ocr_switch::read_status(data_dir)
+    crate::ocr_status::read_status(data_dir)
         .is_some_and(|status| live_share_open(status.share_open, status.pid, live_pid))
 }
 
@@ -1118,12 +1131,12 @@ mod tests {
         assert!(live_share_open(true, 41, Some(41)));
         assert!(!live_share_open(false, 41, Some(41)));
         let dir = tempfile::tempdir().unwrap();
-        let status = crate::ocr_switch::Status {
+        let status = crate::ocr_status::Status {
             pid: 999_999,
             share_open: true,
-            ..crate::ocr_switch::Status::default()
+            ..crate::ocr_status::Status::default()
         };
-        crate::ocr_switch::write_status(dir.path(), &status).unwrap();
+        crate::ocr_status::write_status(dir.path(), &status).unwrap();
         std::fs::write(dir.path().join("daemon.pid"), "999999\n").unwrap();
         assert_eq!(live_daemon_pid(dir.path()), None);
         assert!(!live_share_open(

@@ -399,28 +399,8 @@ pub struct OcrResult {
     pub confidence: i32,
 }
 
-#[derive(Debug)]
-pub struct CellOcrResult {
-    pub value: String,
-    pub confidence: i32,
-    /// Glyph ink touches a vertical crop edge (CG-3 clip/bleed). Suspect values
-    /// are still parsed — they may be right — but the capture gate strips their
-    /// corroboration/un-latch influence (see `capture_gate::apply_gate`).
-    pub suspect: bool,
-}
-
-#[derive(Debug)]
-pub struct RowOcrResult {
-    /// Read of name window 0 ([`preprocess::name_windows`]).
-    pub name: Option<CellOcrResult>,
-    /// Reads of the other name windows: `name_alternates[k]` is window
-    /// `k + 1`, `None` where that read failed, so the index always names the
-    /// window. Empty for 6v6, which has one window. The row matcher scores
-    /// `name` and these together and keeps the best.
-    pub name_alternates: Vec<Option<CellOcrResult>>,
-    pub stats: Vec<CellOcrResult>,
-    pub mean_confidence: i32,
-}
+pub(crate) use crate::model::is_clean_stat;
+pub use crate::model::{CellOcrResult, RowOcrResult};
 
 fn tessdata_path_for_lang(lang: &str) -> Option<PathBuf> {
     let custom = dirs::data_dir().map(|d| d.join("scuffed-stat-tracker").join("tessdata"));
@@ -1438,17 +1418,6 @@ pub(crate) fn is_valid_stat_for_column(text: &str, col_idx: usize) -> bool {
     } else {
         true
     }
-}
-
-/// Whether a cell's OCR text looks like a real stat value: at least one digit,
-/// nothing but digits and thousands-separator commas.
-pub(crate) fn is_clean_stat(text: &str) -> bool {
-    if text.is_empty() {
-        return false;
-    }
-    let has_digit = text.chars().any(|c| c.is_ascii_digit());
-    let all_valid = text.chars().all(|c| c.is_ascii_digit() || c == ',');
-    has_digit && all_valid
 }
 
 /// Full-image OCR (original approach with adaptive preprocessing).

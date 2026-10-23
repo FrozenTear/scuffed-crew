@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use crate::detect::MatchOutcome;
+use crate::model::MatchOutcome;
 use crate::storage::PersonalMatch;
 
 #[derive(Debug, Clone, PartialEq)]

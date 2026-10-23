@@ -3016,7 +3016,7 @@ impl TrackerApp {
 /// carries a waiting click on the classic OCR switch.
 fn check_reader_packs(data_dir: PathBuf, turn_off: bool) -> Task<Message> {
     Task::perform(
-        async move { stat_tracker::ocr_switch::PackReadiness::on_disk(&data_dir) },
+        async move { stat_tracker::ocr_switch::pack_readiness_on_disk(&data_dir) },
         move |packs| Message::ReaderPacksChecked { packs, turn_off },
     )
 }

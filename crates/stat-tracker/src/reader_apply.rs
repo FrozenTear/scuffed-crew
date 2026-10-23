@@ -54,6 +54,7 @@ use crate::shadow::confirm::{CellTrust, cell_trust};
 use crate::shadow::digits::RECOGNIZER_ID;
 use crate::shadow::{BoardRead, BoardStatus, FieldRead, Value};
 use crate::storage::PersonalMatch;
+pub use crate::suspect::{clear_edited_suspects, upload_suspect_fields};
 
 /// The six stat fields of a board row, in capture gate column order.
 pub const STAT_SUFFIXES: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
@@ -391,32 +392,6 @@ pub fn own_row_guesses(board: &BoardRead, own: OwnRow) -> [Option<u32>; 6] {
     })
 }
 
-/// Flat suspect names safe to upload.
-///
-/// Row names such as `r3.dmg` become `dmg`. Unknown names, duplicates, and
-/// anything that is not in the server's allowlist are dropped. Order follows
-/// [`SUSPECT_FIELD_NAMES`].
-pub fn upload_suspect_fields(stored: &[String]) -> Vec<String> {
-    let mut seen = [false; SUSPECT_FIELD_NAMES.len()];
-    for name in stored {
-        let Some(flat) = flat_suspect_name(name) else {
-            continue;
-        };
-        if let Some(idx) = SUSPECT_FIELD_NAMES
-            .iter()
-            .position(|allowed| *allowed == flat)
-        {
-            seen[idx] = true;
-        }
-    }
-    SUSPECT_FIELD_NAMES
-        .iter()
-        .enumerate()
-        .filter(|(idx, _)| seen[*idx])
-        .map(|(_, name)| (*name).to_string())
-        .collect()
-}
-
 /// The fields read off the member's own row: the hero and the six stats.
 /// The map, the mode and the result are the same on every row.
 pub const OWN_ROW_FIELDS: [&str; 7] = ["hero", "e", "a", "d", "dmg", "h", "mit"];
@@ -434,23 +409,6 @@ pub fn mark_own_row_suspect(fields: &mut Vec<String>) {
         push_suspect(fields, name);
     }
     *fields = upload_suspect_fields(fields);
-}
-
-/// Drop suspect names cleared by a manual edit.
-///
-/// `storage_field` is the tracker's edit name (`elims`, `map_name`, ...).
-/// Both the flat API name and a leftover `rN.` form of that name are removed.
-pub fn clear_edited_suspects(fields: &mut Vec<String>, storage_field: &str) {
-    let drop_names = suspect_names_for_edit(storage_field);
-    if drop_names.is_empty() {
-        return;
-    }
-    fields.retain(|name| {
-        let Some(flat) = flat_suspect_name(name) else {
-            return true;
-        };
-        !drop_names.contains(&flat)
-    });
 }
 
 /// Why a provided board cannot replace any field.
@@ -510,33 +468,6 @@ fn board_fallback_reason(board: &BoardRead) -> Option<&'static str> {
 /// raw string compare is not a reason to drop the board.
 fn canonical_board_hero(raw: &str) -> String {
     crate::parse::canonical_hero(raw)
-}
-
-fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
-    match storage_field {
-        "hero" => &["hero"],
-        "map_name" => &["map", "mode"],
-        "outcome" => &["result"],
-        "elims" => &["e"],
-        "assists" => &["a"],
-        "deaths" => &["d"],
-        "damage" => &["dmg"],
-        "healing" => &["h"],
-        "mitigation" => &["mit"],
-        _ => &[],
-    }
-}
-
-fn flat_suspect_name(name: &str) -> Option<&str> {
-    if SUSPECT_FIELD_NAMES.contains(&name) {
-        return Some(name);
-    }
-    let (row, field) = name.split_once('.')?;
-    let digits = row.strip_prefix('r')?;
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    SUSPECT_FIELD_NAMES.contains(&field).then_some(field)
 }
 
 /// Non-empty text on a field, including a suspect read. Missing and blank

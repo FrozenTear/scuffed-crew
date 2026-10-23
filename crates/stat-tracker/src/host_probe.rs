@@ -547,6 +547,60 @@ pub fn host_line_now(session: &str) -> String {
     host_line(&desktop, session, &cards, modeset.as_deref())
 }
 
+/// The desktop session type: `system.session_type` in problem reports
+/// (`report::SessionType`), and the X11 switch and `session` field of
+/// `perf.log`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionType {
+    X11,
+    Wayland,
+    Unknown,
+}
+
+impl SessionType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::X11 => "x11",
+            Self::Wayland => "wayland",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// `XDG_SESSION_TYPE` when it is `x11` or `wayland`, else
+    /// `WAYLAND_DISPLAY`, else `DISPLAY`. Empty values count as unset.
+    pub fn detect(
+        xdg_session_type: Option<&str>,
+        wayland_display: Option<&str>,
+        display: Option<&str>,
+    ) -> Self {
+        let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
+        match xdg_session_type
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("x11") => return Self::X11,
+            Some("wayland") => return Self::Wayland,
+            _ => {}
+        }
+        if set(wayland_display) {
+            Self::Wayland
+        } else if set(display) {
+            Self::X11
+        } else {
+            Self::Unknown
+        }
+    }
+
+    pub fn from_env() -> Self {
+        let var = |k: &str| std::env::var(k).ok();
+        Self::detect(
+            var("XDG_SESSION_TYPE").as_deref(),
+            var("WAYLAND_DISPLAY").as_deref(),
+            var("DISPLAY").as_deref(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

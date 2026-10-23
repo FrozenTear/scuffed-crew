@@ -24,10 +24,7 @@ pub const SYNC_STATS_DELETE_PENDING_STATUS: &str = "Your site stats are schedule
 /// JSON `code` on HTTP 409 while a stats delete is pending.
 const STATS_DELETE_PENDING_CODE: &str = "stats_delete_pending";
 
-/// `User-Agent` on every request the tracker makes to the site (uploads,
-/// daemon config, reader packs), so the server can tell which tracker
-/// version sent it (S5-SRV-4).
-pub const USER_AGENT: &str = concat!("scuffed-stat-tracker/", env!("CARGO_PKG_VERSION"));
+pub use crate::version::USER_AGENT;
 
 /// Matches per stats upload. The server rejects a larger body with HTTP 413
 /// `batch_too_large`. This client stays at or under the cap, and shrinks
@@ -1011,7 +1008,7 @@ pub fn upload_request(
                 // A string on every row, including a full fallback's ocr-v1.
                 // None is what an older client omits; this client does not.
                 recognizer: Some(m.stored_recognizer().to_string()),
-                suspect_fields: crate::reader_apply::upload_suspect_fields(&m.suspect_fields),
+                suspect_fields: crate::suspect::upload_suspect_fields(&m.suspect_fields),
                 // None omits the key. An older server that ignores
                 // name_recognizer still accepts the rest of the row.
                 name_recognizer: m

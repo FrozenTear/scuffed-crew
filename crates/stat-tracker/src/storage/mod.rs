@@ -9,131 +9,10 @@ use surrealdb::engine::local::SurrealKv;
 use surrealdb_types::Datetime as SurrealDatetime;
 use surrealdb_types::SurrealValue;
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
-pub struct PersonalMatch {
-    /// Local store record id — set on rows read back from SurrealKV, `None`
-    /// on freshly parsed captures. Excluded from the JSON snapshot/log
-    /// (readers identify games by `session_id`); used to mark exactly the
-    /// fetched rows as synced.
-    #[serde(skip)]
-    #[surreal(default)]
-    pub id: Option<surrealdb_types::RecordId>,
-    pub hero: String,
-    pub map_name: String,
-    pub game_mode: String,
-    pub role: String,
-    pub outcome: String,
-    pub elims: u32,
-    pub deaths: u32,
-    pub assists: u32,
-    pub damage: u32,
-    pub healing: u32,
-    pub mitigation: u32,
-    pub played_at: SurrealDatetime,
-    #[serde(default)]
-    pub synced: bool,
-    /// Payload revision for sync compare-and-swap. Every statement that
-    /// changes an uploaded field bumps this in the same write that sets
-    /// `synced = false`. `mark_synced` stamps a row only when the revision
-    /// still matches the value captured at read time, so a local write during
-    /// the HTTP upload is not marked synced. Missing on legacy rows (treated
-    /// as 0).
-    #[serde(default)]
-    #[surreal(default)]
-    pub sync_rev: u64,
-    /// Server refused this row with HTTP 400 or 422. The row stays
-    /// `synced = false` and is left out of automatic uploads until the
-    /// member edits the game or retries the upload. The string is the
-    /// game-list line (`Upload rejected by server: <message>`), including
-    /// the server code when the body sent one. Missing on older rows.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub upload_reject: Option<String>,
-    #[serde(default)]
-    pub session_id: String,
-
-    // --- Manual edit overlay (transparency) ---------------------------------
-    // The OCR-captured values above are IMMUTABLE. A manual correction records
-    // the fixed value in the matching `corrected_*` field and appends the field
-    // name to `edited_fields`; the effective (displayed) value is `corrected_*`
-    // if present, else the OCR read. This keeps "OCR read X → corrected Y"
-    // recoverable for the badge/tooltip and never destroys the original read.
-    // All fields are additive Options / empty-by-default, so rows written before
-    // this feature deserialize unchanged.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_hero: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_role: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_map_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_outcome: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_elims: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_deaths: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_assists: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_damage: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_healing: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub corrected_mitigation: Option<u32>,
-    /// Names of fields carrying a manual correction (e.g. `["elims", "hero"]`).
-    /// Non-empty ⇒ the row is edited (drives the badge).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[surreal(default)]
-    pub edited_fields: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub edited_at: Option<SurrealDatetime>,
-
-    // --- Hero timeline (HS-1) -----------------------------------------------
-    /// Consecutive-run hero segments derived from the session's RAW snapshots
-    /// (see [`derive_hero_segments`]). The daemon stamps this after each
-    /// capture; legacy rows (empty) are derived on the fly in
-    /// [`latest_per_game`]. Per-snapshot `hero`/`role` stay raw — this field
-    /// carries the swap history, and the primary hero/role for the game is the
-    /// snapshot-count majority over these segments ([`primary_hero_role`]).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[surreal(default)]
-    pub heroes_played: Vec<HeroSegment>,
-    /// Manual confirm/dismiss decisions for hero segments, by segment index.
-    /// Source of truth for the flags inside `heroes_played`, which are
-    /// recomputed from these on every re-derivation.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    #[surreal(default)]
-    pub segment_resolutions: Vec<SegmentResolution>,
-    /// Recognizer that produced the stored numbers. Empty on rows written
-    /// before the column existed; those read as `ocr-v1` at upload time.
-    #[serde(default)]
-    #[surreal(default)]
-    pub recognizer: String,
-    /// Flat or leftover row names the new reader was not sure about.
-    /// Uploads flatten this to the server's allowlist.
-    #[serde(default)]
-    #[surreal(default)]
-    pub suspect_fields: Vec<String>,
-    /// Which reader found this player's own scoreboard row.
-    /// `names-v1` or `ocr-v1`. Absent when this match never read a name.
-    /// A later snapshot of the same match keeps the value already stored, and
-    /// every upload of the match sends it. Omitted from JSON when absent, so
-    /// an older row sends nothing and an older server still accepts the row.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub name_recognizer: Option<String>,
-}
+pub use crate::model::{
+    HeroSegment, PersonalMatch, SEGMENT_CONFIRM, SEGMENT_DISMISS, SegmentResolution,
+    primary_hero_role,
+};
 
 /// Identity and payload revision captured when a row was read for upload.
 ///
@@ -181,126 +60,6 @@ impl SyncClaim {
         } else {
             self.session_id == row.session_id
         }
-    }
-}
-
-/// Count an unconfirmed hero segment toward the majority (it was a real swap).
-pub const SEGMENT_CONFIRM: &str = "confirm";
-/// Mark a hero segment as a misread: excluded from display and from the
-/// majority vote. The raw snapshots stay untouched.
-pub const SEGMENT_DISMISS: &str = "dismiss";
-
-/// One consecutive run of the same hero across a session's snapshots, in
-/// capture-time order.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
-pub struct HeroSegment {
-    pub hero: String,
-    pub role: String,
-    pub first_seen: SurrealDatetime,
-    pub last_seen: SurrealDatetime,
-    /// Number of captures in the run.
-    pub snapshots: u32,
-    /// ≥2 snapshots, or manually confirmed. A 1-snapshot segment is recorded
-    /// but unconfirmed — a lone minority read is indistinguishable from a
-    /// misread (the 07-18 Lijiang "Wuyang" flap), so it needs a human call.
-    pub confirmed: bool,
-    /// Manual resolution ([`SEGMENT_CONFIRM`] / [`SEGMENT_DISMISS`]), applied
-    /// from the match's `segment_resolutions` during derivation.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[surreal(default)]
-    pub resolution: Option<String>,
-}
-
-impl HeroSegment {
-    /// Manually dismissed as a misread — excluded from display and majority.
-    pub fn is_dismissed(&self) -> bool {
-        self.resolution.as_deref() == Some(SEGMENT_DISMISS)
-    }
-}
-
-/// A manual decision about one derived hero segment, keyed by index into the
-/// derived segment list (stable: snapshots only ever append, so existing
-/// segments never change position).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
-pub struct SegmentResolution {
-    pub segment: u32,
-    /// [`SEGMENT_CONFIRM`] or [`SEGMENT_DISMISS`].
-    pub action: String,
-}
-
-impl PersonalMatch {
-    /// True when at least one field carries a manual correction.
-    pub fn is_edited(&self) -> bool {
-        !self.edited_fields.is_empty()
-    }
-
-    /// Id sent on upload. A missing column is `ocr-v1`.
-    pub fn stored_recognizer(&self) -> &str {
-        scuffed_types::effective_recognizer(&self.recognizer)
-    }
-
-    /// Server message for a quarantined row. Empty and missing both mean
-    /// the row is still eligible for upload.
-    pub fn upload_rejection(&self) -> Option<&str> {
-        self.upload_reject
-            .as_deref()
-            .map(str::trim)
-            .filter(|message| !message.is_empty())
-    }
-
-    /// True when `field` (storage name, e.g. `"map_name"`) was manually edited.
-    pub fn field_edited(&self, field: &str) -> bool {
-        self.edited_fields.iter().any(|f| f == field)
-    }
-
-    /// True when this row carries a member's own map choice (a map edit or
-    /// pick: `corrected_map_name`, or `map_name` in `edited_fields`).
-    pub fn has_member_map_edit(&self) -> bool {
-        self.corrected_map_name.is_some() || self.field_edited("map_name")
-    }
-
-    /// Effective hero: a manual correction wins, else the majority-derived
-    /// primary from the hero timeline, else the raw OCR read.
-    pub fn display_hero(&self) -> &str {
-        if let Some(h) = self.corrected_hero.as_deref() {
-            return h;
-        }
-        primary_hero_role(&self.heroes_played)
-            .map(|(h, _)| h)
-            .unwrap_or(&self.hero)
-    }
-    /// Effective role, resolved like [`Self::display_hero`].
-    pub fn display_role(&self) -> &str {
-        if let Some(r) = self.corrected_role.as_deref() {
-            return r;
-        }
-        primary_hero_role(&self.heroes_played)
-            .map(|(_, r)| r)
-            .unwrap_or(&self.role)
-    }
-    pub fn display_map_name(&self) -> &str {
-        self.corrected_map_name.as_deref().unwrap_or(&self.map_name)
-    }
-    pub fn display_outcome(&self) -> &str {
-        self.corrected_outcome.as_deref().unwrap_or(&self.outcome)
-    }
-    pub fn display_elims(&self) -> u32 {
-        self.corrected_elims.unwrap_or(self.elims)
-    }
-    pub fn display_deaths(&self) -> u32 {
-        self.corrected_deaths.unwrap_or(self.deaths)
-    }
-    pub fn display_assists(&self) -> u32 {
-        self.corrected_assists.unwrap_or(self.assists)
-    }
-    pub fn display_damage(&self) -> u32 {
-        self.corrected_damage.unwrap_or(self.damage)
-    }
-    pub fn display_healing(&self) -> u32 {
-        self.corrected_healing.unwrap_or(self.healing)
-    }
-    pub fn display_mitigation(&self) -> u32 {
-        self.corrected_mitigation.unwrap_or(self.mitigation)
     }
 }
 
@@ -1404,7 +1163,7 @@ impl LocalStore {
                 m.map_name = map.clone();
                 m.game_mode = mode.clone();
                 m.upload_reject = None;
-                crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "map_name");
+                crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "map_name");
             }),
         );
         Ok(())
@@ -1455,7 +1214,7 @@ impl LocalStore {
                     .await?;
             }
             let mut suspects = m.suspect_fields.clone();
-            crate::reader_apply::clear_edited_suspects(&mut suspects, "map_name");
+            crate::suspect::clear_edited_suspects(&mut suspects, "map_name");
             if suspects != m.suspect_fields {
                 self.db
                     .query("UPDATE $id SET suspect_fields = $sf")
@@ -1475,7 +1234,7 @@ impl LocalStore {
                 m.map_name = map.clone();
                 m.game_mode = mode.clone();
                 m.upload_reject = None;
-                crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "map_name");
+                crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "map_name");
             }),
         );
         Ok(kept)
@@ -1507,7 +1266,7 @@ impl LocalStore {
             Some(&|m| {
                 m.outcome = outcome.clone();
                 m.upload_reject = None;
-                crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "outcome");
+                crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "outcome");
             }),
         );
         Ok(())
@@ -1523,7 +1282,7 @@ impl LocalStore {
         for m in snaps {
             let Some(id) = m.id.clone() else { continue };
             let mut fields = m.suspect_fields.clone();
-            crate::reader_apply::clear_edited_suspects(&mut fields, storage_field);
+            crate::suspect::clear_edited_suspects(&mut fields, storage_field);
             if fields == m.suspect_fields {
                 continue;
             }
@@ -1814,8 +1573,8 @@ struct SessionOutcome {
 /// A stored outcome label that names a result (`victory`, `defeat`, `draw`).
 fn outcome_is_decided(label: &str) -> bool {
     label
-        .parse::<crate::detect::MatchOutcome>()
-        .is_ok_and(crate::detect::MatchOutcome::is_decided)
+        .parse::<crate::model::MatchOutcome>()
+        .is_ok_and(crate::model::MatchOutcome::is_decided)
 }
 
 /// Game-list line for a row the server refused. The desktop list shows this
@@ -2030,7 +1789,7 @@ pub fn carry_member_hero_edit(edited: &PersonalMatch, row: &mut PersonalMatch) -
     };
     row.corrected_hero = Some(hero);
     mark_edited(&mut row.edited_fields, "hero");
-    crate::reader_apply::clear_edited_suspects(&mut row.suspect_fields, "hero");
+    crate::suspect::clear_edited_suspects(&mut row.suspect_fields, "hero");
     if let Some(role) = edited.corrected_role.clone() {
         row.corrected_role = Some(role);
         mark_edited(&mut row.edited_fields, "role");
@@ -2051,7 +1810,7 @@ fn apply_match_edit(m: &mut PersonalMatch, edit: &MatchEdit, now: SurrealDatetim
     if let Some(v) = &edit.hero {
         m.corrected_hero = Some(v.clone());
         mark_edited(&mut m.edited_fields, "hero");
-        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "hero");
+        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "hero");
         changed = true;
         let guessed = crate::parse::guess_role_public(v);
         if edit.role.is_none()
@@ -2070,7 +1829,7 @@ fn apply_match_edit(m: &mut PersonalMatch, edit: &MatchEdit, now: SurrealDatetim
     if let Some(v) = &edit.map_name {
         m.corrected_map_name = Some(v.clone());
         mark_edited(&mut m.edited_fields, "map_name");
-        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "map_name");
+        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "map_name");
         changed = true;
         let derived = crate::parse::stored_game_mode(v);
         if !derived.is_empty() {
@@ -2080,43 +1839,43 @@ fn apply_match_edit(m: &mut PersonalMatch, edit: &MatchEdit, now: SurrealDatetim
     if let Some(v) = &edit.outcome {
         m.corrected_outcome = Some(v.clone());
         mark_edited(&mut m.edited_fields, "outcome");
-        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "outcome");
+        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "outcome");
         changed = true;
     }
     if let Some(v) = edit.elims {
         m.corrected_elims = Some(v);
         mark_edited(&mut m.edited_fields, "elims");
-        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "elims");
+        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "elims");
         changed = true;
     }
     if let Some(v) = edit.deaths {
         m.corrected_deaths = Some(v);
         mark_edited(&mut m.edited_fields, "deaths");
-        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "deaths");
+        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "deaths");
         changed = true;
     }
     if let Some(v) = edit.assists {
         m.corrected_assists = Some(v);
         mark_edited(&mut m.edited_fields, "assists");
-        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "assists");
+        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "assists");
         changed = true;
     }
     if let Some(v) = edit.damage {
         m.corrected_damage = Some(v);
         mark_edited(&mut m.edited_fields, "damage");
-        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "damage");
+        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "damage");
         changed = true;
     }
     if let Some(v) = edit.healing {
         m.corrected_healing = Some(v);
         mark_edited(&mut m.edited_fields, "healing");
-        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "healing");
+        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "healing");
         changed = true;
     }
     if let Some(v) = edit.mitigation {
         m.corrected_mitigation = Some(v);
         mark_edited(&mut m.edited_fields, "mitigation");
-        crate::reader_apply::clear_edited_suspects(&mut m.suspect_fields, "mitigation");
+        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "mitigation");
         changed = true;
     }
     if changed {
@@ -2256,50 +2015,6 @@ pub fn derive_hero_segments(
         }
     }
     segments
-}
-
-/// The primary hero/role for a game: snapshot-count majority across its hero
-/// segments. Dismissed segments never vote; unconfirmed segments vote only
-/// when every non-dismissed segment is unconfirmed (a lone flap must not
-/// outvote 25 solid captures, but an all-unconfirmed game still needs a
-/// label). Ties break to the hero seen latest, then alphabetically for
-/// determinism. `None` when nothing can vote (no segments, or all dismissed)
-/// — callers fall back to the raw read.
-pub fn primary_hero_role(segments: &[HeroSegment]) -> Option<(&str, &str)> {
-    let live: Vec<&HeroSegment> = segments.iter().filter(|s| !s.is_dismissed()).collect();
-    let voters: Vec<&HeroSegment> = if live.iter().any(|s| s.confirmed) {
-        live.iter().copied().filter(|s| s.confirmed).collect()
-    } else {
-        live
-    };
-    struct Vote<'a> {
-        count: u32,
-        latest: chrono::DateTime<chrono::Utc>,
-        role: &'a str,
-    }
-    let mut votes: std::collections::HashMap<&str, Vote> = std::collections::HashMap::new();
-    for s in voters {
-        let seen: chrono::DateTime<chrono::Utc> = s.last_seen.into();
-        let v = votes.entry(s.hero.as_str()).or_insert(Vote {
-            count: 0,
-            latest: seen,
-            role: &s.role,
-        });
-        v.count += s.snapshots;
-        if seen >= v.latest {
-            v.latest = seen;
-            v.role = &s.role;
-        }
-    }
-    votes
-        .into_iter()
-        .max_by(|a, b| {
-            a.1.count
-                .cmp(&b.1.count)
-                .then(a.1.latest.cmp(&b.1.latest))
-                .then(b.0.cmp(a.0))
-        })
-        .map(|(hero, v)| (hero, v.role))
 }
 
 /// The majority hero across a session's snapshots. Individual captures can
@@ -4219,7 +3934,7 @@ mod tests {
     #[tokio::test]
     async fn recognizer_and_suspects_survive_reopen_and_an_edit_clears_one_field() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let recognizer = crate::shadow::digits::RECOGNIZER_ID.to_string();
+        let recognizer = crate::model::RECOGNIZER_ID.to_string();
         {
             let store = LocalStore::open(dir.path()).await.unwrap();
             let mut row = snap("kept", 4);

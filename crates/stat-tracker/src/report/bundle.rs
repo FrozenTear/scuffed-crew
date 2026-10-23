@@ -20,12 +20,14 @@ use super::scrub::{self, LogWindow, ScrubContext};
 use crate::capture::CaptureBackend;
 use crate::config::{Config, OcrSetting, ReaderSetting};
 
+pub use crate::capture::capture_backend_label;
+pub use crate::host_probe::SessionType;
+pub use crate::version::APP_VERSION;
+
 /// `bundle_version` this build writes.
 pub const BUNDLE_VERSION: u64 = 2;
 /// `recognizers.ocr`.
 pub const OCR_ID: &str = "ocr-v1";
-/// `app_version`: the tracker version of this build.
-pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// `session_id` of a report that is not about one game.
 pub const NO_SESSION: &str = "none";
 /// Longest `reason.text`, in characters.
@@ -49,71 +51,6 @@ impl LogOnlyCategory {
             Self::Performance => "performance",
             Self::Other => "other",
         }
-    }
-}
-
-/// `system.session_type`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SessionType {
-    X11,
-    Wayland,
-    Unknown,
-}
-
-impl SessionType {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::X11 => "x11",
-            Self::Wayland => "wayland",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    /// `XDG_SESSION_TYPE` when it is `x11` or `wayland`, else
-    /// `WAYLAND_DISPLAY`, else `DISPLAY`. Empty values count as unset.
-    pub fn detect(
-        xdg_session_type: Option<&str>,
-        wayland_display: Option<&str>,
-        display: Option<&str>,
-    ) -> Self {
-        let set = |v: Option<&str>| v.is_some_and(|s| !s.trim().is_empty());
-        match xdg_session_type
-            .map(|s| s.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("x11") => return Self::X11,
-            Some("wayland") => return Self::Wayland,
-            _ => {}
-        }
-        if set(wayland_display) {
-            Self::Wayland
-        } else if set(display) {
-            Self::X11
-        } else {
-            Self::Unknown
-        }
-    }
-
-    pub fn from_env() -> Self {
-        let var = |k: &str| std::env::var(k).ok();
-        Self::detect(
-            var("XDG_SESSION_TYPE").as_deref(),
-            var("WAYLAND_DISPLAY").as_deref(),
-            var("DISPLAY").as_deref(),
-        )
-    }
-}
-
-/// `system.capture_backend`.
-pub const fn capture_backend_label(backend: CaptureBackend) -> &'static str {
-    match backend {
-        CaptureBackend::X11 => "x11",
-        CaptureBackend::Wayshot => "wayshot",
-        // KDE direct goes out as `portal`: the site's validator
-        // (`scuffed_types::stat_report`) knows no other word yet, and a
-        // report it refuses is lost. The log in the bundle names the route.
-        CaptureBackend::Portal | CaptureBackend::Kwin => "portal",
-        CaptureBackend::None => "none",
     }
 }
 

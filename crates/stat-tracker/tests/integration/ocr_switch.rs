@@ -625,7 +625,7 @@ fn words_pack(data_dir: &Path, which: Words) {
 fn the_pack_check_follows_what_each_reader_needs() {
     let dir = tempfile::tempdir().unwrap();
     let data = dir.path();
-    let none = PackReadiness::on_disk(data);
+    let none = ocr_switch::pack_readiness_on_disk(data);
     assert_eq!(none, PackReadiness::default());
     assert_eq!(none.counts(), (0, 3));
     assert_eq!(
@@ -636,12 +636,12 @@ fn the_pack_check_follows_what_each_reader_needs() {
 
     hero_pack(data);
     assert_eq!(
-        PackReadiness::on_disk(data).problems(),
+        ocr_switch::pack_readiness_on_disk(data).problems(),
         [PackProblem::MapsMissing, PackProblem::WordsMissing]
     );
     map_pack(data);
     assert_eq!(
-        PackReadiness::on_disk(data).problems(),
+        ocr_switch::pack_readiness_on_disk(data).problems(),
         [PackProblem::WordsMissing]
     );
 
@@ -656,7 +656,7 @@ fn the_pack_check_follows_what_each_reader_needs() {
         (Words::NoEndTitles, PackProblem::WordsLackEndTitles),
     ] {
         words_pack(data, which);
-        let old = PackReadiness::on_disk(data);
+        let old = ocr_switch::pack_readiness_on_disk(data);
         assert_eq!(old.problems(), [problem]);
         assert!(old.words, "the pack itself loads");
         assert_eq!(old.counts(), (2, 3));
@@ -671,7 +671,7 @@ fn the_pack_check_follows_what_each_reader_needs() {
     }
 
     words_pack(data, Words::Current);
-    let ready = PackReadiness::on_disk(data);
+    let ready = ocr_switch::pack_readiness_on_disk(data);
     assert_eq!(ready, READY);
     assert_eq!(ready.status_line(), "Reader packs ready: 3 of 3");
     let granted = ocr_switch::decide(OcrSetting::Off, &ready, &[]);
@@ -687,7 +687,7 @@ fn the_pack_check_follows_what_each_reader_needs() {
     std::fs::rename(t.join("maps-v1"), t.join("maps")).unwrap();
     std::fs::rename(t.join("words-v1"), t.join("result")).unwrap();
     assert_eq!(
-        PackReadiness::on_disk(legacy.path()).problems(),
+        ocr_switch::pack_readiness_on_disk(legacy.path()).problems(),
         [PackProblem::MapsMissing, PackProblem::WordsMissing]
     );
 
@@ -697,11 +697,11 @@ fn the_pack_check_follows_what_each_reader_needs() {
     map_pack(small.path());
     words_pack(small.path(), Words::Current);
     assert_eq!(
-        PackReadiness::on_disk(small.path()).problems(),
+        ocr_switch::pack_readiness_on_disk(small.path()).problems(),
         [PackProblem::HeroesMissing]
     );
     hero_pack_in(small.path(), "heroes-v2");
-    assert!(PackReadiness::on_disk(small.path()).ready());
+    assert!(ocr_switch::pack_readiness_on_disk(small.path()).ready());
 }
 
 // ----------------------------------------------------------- the daemon
