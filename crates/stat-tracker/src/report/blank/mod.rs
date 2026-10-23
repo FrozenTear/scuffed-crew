@@ -29,7 +29,10 @@ mod port_check;
 mod portrait;
 mod reader;
 #[cfg(test)]
-pub(crate) mod synth;
+pub(crate) mod tests_synth;
+// The synthetic boards, at their old name inside `report::blank`.
+#[cfg(test)]
+use tests_synth as synth;
 #[cfg(test)]
 mod tests_measured;
 

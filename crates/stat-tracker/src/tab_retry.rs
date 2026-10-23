@@ -572,11 +572,11 @@ mod tests {
     }
     use crate::frame::layout::{ScoreboardPreflight, preflight_scoreboard};
     use crate::ocr::preprocess::{crop_scoreboard, crop_scoreboard_rect};
-    use crate::report::blank::synth::{self, Layout};
+    use crate::report::blank::tests_synth::{self as synth, Layout};
     use image::{DynamicImage, Rgb, RgbImage};
     use std::cell::RefCell;
 
-    /// The synthetic 6v6 frame (`report::blank::synth`, no member pixels).
+    /// The synthetic 6v6 frame (`report::blank::tests_synth`, no member pixels).
     fn full_6v6() -> RgbImage {
         synth::frame(Layout::L1, &synth::VALUES).to_rgb8()
     }
