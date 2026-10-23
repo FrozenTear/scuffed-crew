@@ -6,6 +6,8 @@
 
 use image::{DynamicImage, RgbImage};
 
+pub use super::tab::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, TAB_OVERLAY_AFTER_PRESS_MS};
+
 /// What the stream thread does with one delivered buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BufferAction {
@@ -119,18 +121,6 @@ pub enum RowCopy {
     PerRow,
 }
 
-/// Milliseconds after a Tab press before a stream frame can show the
-/// scoreboard overlay. The stream path waits for a buffer instead of
-/// sleeping a fixed 400 ms.
-pub const TAB_OVERLAY_AFTER_PRESS_MS: u64 = 300;
-
-/// Hard stop for that wait, measured from the same press. This is a
-/// constant, not a config key. A 2 fps cap (the default is 4, a member can
-/// set 2) can leave about half a second between buffers, so the stop sits past one of those gaps. A later check
-/// still accepts a buffer that arrived in the gap once its arrival is at or
-/// after the overlay delay.
-pub const TAB_GRAB_TIMEOUT_AFTER_PRESS_MS: u64 = 1200;
-
 /// What to do with the newest stream buffer for one Tab press.
 ///
 /// Times are milliseconds on one clock. `press_ms` is the key event.
@@ -157,25 +147,6 @@ pub fn select_tab_frame(arrived_ms: Option<u64>, press_ms: u64, now_ms: u64) -> 
     } else {
         TabFrameChoice::Wait
     }
-}
-
-/// The press a Tab retry hands the stream grab, given the instant the retry
-/// starts. A retry is not a new key press: the overlay delay already passed
-/// for the real press, so the grab takes the next buffer that arrives from
-/// `now` on instead of waiting another 300 ms on top. The hard stop is then
-/// 900 ms after `now`, still past one 2 fps gap.
-pub fn tab_retry_press(now: std::time::Instant) -> std::time::Instant {
-    now.checked_sub(std::time::Duration::from_millis(TAB_OVERLAY_AFTER_PRESS_MS))
-        .unwrap_or(now)
-}
-
-/// The press the first Tab grab hands the stream, given the key-event time
-/// and the instant the grab starts. Normally the key time. A grab that
-/// starts late (a press queued behind a running capture) would already be
-/// past the key's 1200 ms hard stop and miss at once, counting as a soft
-/// miss; it then takes the next buffer from `now` on, as a retry does.
-pub fn first_grab_press(key: std::time::Instant, now: std::time::Instant) -> std::time::Instant {
-    key.max(tab_retry_press(now))
 }
 
 /// Delay from the Tab press to the chosen frame, in milliseconds.
@@ -379,6 +350,7 @@ pub fn to_dynamic(frame: &PackedFrame) -> Option<DynamicImage> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::tab::{first_grab_press, tab_retry_press};
 
     fn clock() -> FrameClock {
         FrameClock { seq: 1, pts: 1 }
