@@ -12,6 +12,7 @@
 
 pub mod blank;
 pub mod bundle;
+mod hash;
 pub mod kit;
 pub mod marker;
 pub mod scrub;

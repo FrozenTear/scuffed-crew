@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 
 use super::blank::{self, TeamLayout};
 pub use crate::config::{DEFAULT_MAX_GAMES, DEFAULT_MAX_MB, Retention};
+pub use crate::reader_apply::ReaderRead;
 
 pub const KIT_DIR: &str = "report-kit";
 
@@ -126,7 +127,7 @@ impl KitReads {
         layout: TeamLayout,
         captured_at: DateTime<Utc>,
     ) -> Self {
-        let suspects = crate::reader_apply::upload_suspect_fields(&after.suspect_fields);
+        let suspects = crate::suspect::upload_suspect_fields(&after.suspect_fields);
         let text = |s: &str| {
             let s = s.trim();
             (!s.is_empty()).then(|| s.chars().take(64).collect::<String>())
@@ -181,26 +182,6 @@ impl KitReads {
                 after.recognizer.clone()
             },
             reads,
-        }
-    }
-}
-
-/// One field as the active reader read it: its confidence and its own
-/// value (before the capture gate), for [`KitReads::with_confidences`].
-#[derive(Debug, Clone, PartialEq)]
-pub struct ReaderRead {
-    pub confidence: f64,
-    pub value: Option<String>,
-}
-
-impl ReaderRead {
-    pub fn from_field(f: &crate::shadow::FieldRead) -> Self {
-        Self {
-            confidence: f64::from(f.confidence),
-            value: f.value.as_ref().map(|v| match v {
-                crate::shadow::Value::Int(n) => n.to_string(),
-                crate::shadow::Value::Text(t) => t.trim().to_string(),
-            }),
         }
     }
 }
@@ -468,7 +449,7 @@ pub fn record_scoreboard_at(
     }
     let png = encode_png(&board.image)?;
     let mut reads = reads.clone();
-    reads.scoreboard_sha256 = super::bundle::sha256_hex(&png);
+    reads.scoreboard_sha256 = super::hash::sha256_hex(&png);
     let json = serde_json::to_vec_pretty(&reads).map_err(io::Error::other)?;
     let _guard = write_lock();
     if was_removed(&dir) {
@@ -683,7 +664,7 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
             return Kit::default();
         };
         if reads.scoreboard_sha256.is_empty()
-            || super::bundle::sha256_hex(&png) != reads.scoreboard_sha256
+            || super::hash::sha256_hex(&png) != reads.scoreboard_sha256
         {
             continue;
         }
@@ -705,7 +686,7 @@ pub fn is_trusted(kit: &Kit) -> bool {
         (Some(reads), Some(png)) => {
             reads.blank_table == blank::BLANK_TABLE_VERSION
                 && !reads.scoreboard_sha256.is_empty()
-                && super::bundle::sha256_hex(png) == reads.scoreboard_sha256
+                && super::hash::sha256_hex(png) == reads.scoreboard_sha256
         }
         (Some(reads), None) => {
             reads.blank_table == blank::BLANK_TABLE_VERSION && reads.scoreboard_sha256.is_empty()

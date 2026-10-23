@@ -549,6 +549,26 @@ fn stat_row_attempted(board: &BoardRead, index: usize) -> bool {
     })
 }
 
+/// One field as the active reader read it: its confidence and its own
+/// value (before the capture gate), for [`crate::report::kit::KitReads::with_confidences`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReaderRead {
+    pub confidence: f64,
+    pub value: Option<String>,
+}
+
+impl ReaderRead {
+    pub fn from_field(f: &crate::shadow::FieldRead) -> Self {
+        Self {
+            confidence: f64::from(f.confidence),
+            value: f.value.as_ref().map(|v| match v {
+                crate::shadow::Value::Int(n) => n.to_string(),
+                crate::shadow::Value::Text(t) => t.trim().to_string(),
+            }),
+        }
+    }
+}
+
 /// The new reader's confidence for each report kit read key (`mode`,
 /// `hero`, `e`, `a`, `d`, `dmg`, `h`, `mit`) of the own row. A field the
 /// reader did not attempt has no entry. `result` is not on the board until
@@ -558,14 +578,11 @@ fn stat_row_attempted(board: &BoardRead, index: usize) -> bool {
 pub fn kit_confidences(
     board: &BoardRead,
     own: OwnRow,
-) -> std::collections::BTreeMap<String, crate::report::kit::ReaderRead> {
+) -> std::collections::BTreeMap<String, ReaderRead> {
     let mut out = std::collections::BTreeMap::new();
     let mut put = |key: &str, name: &str| {
         if let Some(f) = board.get(name).filter(|f| field_attempted(f)) {
-            out.insert(
-                key.to_string(),
-                crate::report::kit::ReaderRead::from_field(f),
-            );
+            out.insert(key.to_string(), ReaderRead::from_field(f));
         }
     };
     put("mode", "mode");
