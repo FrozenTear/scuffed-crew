@@ -22,7 +22,7 @@ Not released yet. Notes for the 0.6 line collect here and move under its version
 ### Fixes
 
 - Settings, Stored data, Delete all local match data now also removes the saved screen-share permission (`screencast-restore-token` and its `.tmp` file in the data folder). Before, the file stayed, so the next share opened without asking. Now the next share asks again. Settings, debug images and logs still stay, and nothing on the website is deleted.
-- The low-RAM config example in the README now loads when copied. A `config.toml` must set `data_dir`, and the example left it out, so the tracker could not read the file. The example now sets it, the `data_dir` row of the Config table says it is required, and a test checks that every config example in the README loads.
+- The low-RAM config example in the README now loads when copied. A `config.toml` must set `data_dir`, and the example left it out, so the tracker could not read the file. The example now sets it, the `data_dir` row of the Config table says it is required, and a test checks that every config example in the tracker and desktop app READMEs loads.
 
 ### Technical detail
 

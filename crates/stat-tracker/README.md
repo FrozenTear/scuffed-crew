@@ -213,7 +213,7 @@ Example low-RAM (a config file must set `data_dir`; the default path is
 only used when there is no file at all, so copy your own path in):
 
 ```toml
-data_dir = "/home/you/.local/share/scuffed-stat-tracker"
+data_dir = "/home/<you>/.local/share/scuffed-stat-tracker"
 ocr_threads = 1
 ```
 
@@ -228,8 +228,9 @@ hides the cursor, instead of taking a new screenshot for every frame. You
 are asked to allow that share once. The permission is remembered in
 `screencast-restore-token` inside the data directory, so it is not asked
 again after a reboot. Settings → Stored data → Delete all local match data
-removes that file too (and its `.tmp`), so the next share asks again. The compositor is offered a variable framerate with
-a cap of `screencast_max_fps` frames per second (4 when that key is unset).
+removes that file too (and its `.tmp`), so the next share asks again.
+The compositor is offered a variable framerate with a cap of
+`screencast_max_fps` frames per second (4 when that key is unset).
 A frame is copied only when the tracker needs one. On KWin 6.1 or newer
 and on niri the stream is also paused between grabs, so the compositor
 stops drawing frames for it; a poll resumes it for its grab, and a Tab
