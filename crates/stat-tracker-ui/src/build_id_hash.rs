@@ -73,6 +73,10 @@ pub struct BuildId {
 /// the GUI embeds for uninstall) are in. Its changelog is out: every release
 /// edits it, and a GUI that keeps running only misses the newest entry in
 /// What's new until its next start.
+///
+/// The crates split out of the stat-tracker lib (0.6 N4: today
+/// `stat-tracker-core`) are listed the same way: `Cargo.toml` and `src`,
+/// with the same [`DAEMON_ONLY`] exclusions.
 pub fn workspace_inputs(gui_manifest_dir: &Path) -> Inputs {
     let root = gui_manifest_dir.join("..").join("..");
     let crates = root.join("crates");
@@ -100,12 +104,13 @@ pub fn workspace_inputs(gui_manifest_dir: &Path) -> Inputs {
                     "assets/blank-letters",
                     "dist/install-paths.sh",
                 ]),
-                exclude: strings(&[
-                    "src/main.rs",
-                    "src/main_tests",
-                    "src/ocr_bench.rs",
-                    "src/bin",
-                ]),
+                exclude: strings(DAEMON_ONLY),
+            },
+            CrateInputs {
+                package: "scuffed-stat-tracker-core".into(),
+                dir: crates.join("stat-tracker-core"),
+                include: strings(&["Cargo.toml", "build.rs", "src"]),
+                exclude: strings(DAEMON_ONLY),
             },
             CrateInputs {
                 package: "scuffed-types".into(),
@@ -116,6 +121,16 @@ pub fn workspace_inputs(gui_manifest_dir: &Path) -> Inputs {
         ],
     }
 }
+
+/// Paths the stat-tracker crates leave out of the build id: the daemon
+/// binary (`src/main.rs`), its test modules and any other binary. The GUI
+/// does not link them.
+pub const DAEMON_ONLY: &[&str] = &[
+    "src/main.rs",
+    "src/main_tests",
+    "src/ocr_bench.rs",
+    "src/bin",
+];
 
 pub fn compute(inputs: &Inputs) -> Result<BuildId, String> {
     let lock = read_text(&inputs.lockfile)?;
@@ -745,26 +760,135 @@ axum = "0.8"
 
     /// The daemon binary and its tests are out of the GUI build id: a release
     /// that only touches them must not ask a running GUI to restart (G3).
+    /// The same rules hold for every stat-tracker lib crate.
     #[test]
     fn workspace_inputs_leave_out_the_daemon_binary_and_its_tests() {
         let inputs = workspace_inputs(Path::new(env!("CARGO_MANIFEST_DIR")));
-        let tracker = inputs
-            .crates
-            .iter()
-            .find(|c| c.package == "scuffed-stat-tracker")
-            .expect("the tracker lib is listed");
-        for rel in [
-            "src/main.rs",
-            "src/main_tests/mod.rs",
-            "src/main_tests/poll_cadence.rs",
-            "src/ocr_bench.rs",
-            "src/bin/tool.rs",
-        ] {
-            assert!(excluded(rel, &tracker.exclude), "{rel}");
+        for package in ["scuffed-stat-tracker", "scuffed-stat-tracker-core"] {
+            let tracker = inputs
+                .crates
+                .iter()
+                .find(|c| c.package == package)
+                .unwrap_or_else(|| panic!("{package} is listed"));
+            for rel in [
+                "src/main.rs",
+                "src/main_tests/mod.rs",
+                "src/main_tests/poll_cadence.rs",
+                "src/ocr_bench.rs",
+                "src/bin/tool.rs",
+            ] {
+                assert!(excluded(rel, &tracker.exclude), "{package}: {rel}");
+            }
+            for rel in [
+                "src/lib.rs",
+                "src/main_tests_helper.rs",
+                "src/ocr/mod.rs",
+                "src/config.rs",
+            ] {
+                assert!(!excluded(rel, &tracker.exclude), "{package}: {rel}");
+            }
+            assert!(tracker.include.iter().any(|i| i == "src"), "{package}");
+            assert!(
+                tracker.include.iter().any(|i| i == "Cargo.toml"),
+                "{package}"
+            );
         }
-        for rel in ["src/lib.rs", "src/main_tests_helper.rs", "src/ocr/mod.rs"] {
-            assert!(!excluded(rel, &tracker.exclude), "{rel}");
+    }
+
+    /// Every `crates/stat-tracker*` crate but the GUI is a lib crate the GUI
+    /// links (the 0.6 N4 split adds them one by one): each one is listed,
+    /// by its package name, with its `src` hashed. A crate the GUI does not
+    /// reach would be listed for nothing, so this also catches a crate the
+    /// split forgot to wire up.
+    #[test]
+    fn workspace_inputs_list_every_stat_tracker_lib_crate() {
+        let gui = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let inputs = workspace_inputs(gui);
+        let crates_dir = gui.parent().expect("crates/");
+        let mut found = Vec::new();
+        for entry in fs::read_dir(crates_dir).expect("read crates/") {
+            let dir = entry.expect("dir entry").path();
+            let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if !name.starts_with("stat-tracker") || name == "stat-tracker-ui" {
+                continue;
+            }
+            let manifest = fs::read_to_string(dir.join("Cargo.toml")).expect("Cargo.toml");
+            let package = manifest
+                .lines()
+                .find_map(|l| {
+                    let rest = l.trim().strip_prefix("name")?.trim_start();
+                    Some(rest.strip_prefix('=')?.trim().trim_matches('"').to_string())
+                })
+                .expect("[package] name");
+            let listed = inputs
+                .crates
+                .iter()
+                .find(|c| c.package == package)
+                .unwrap_or_else(|| panic!("crates/{name} ({package}) has no build-id inputs"));
+            assert_eq!(listed.dir.file_name(), dir.file_name(), "{package}");
+            found.push(package);
         }
+        found.sort();
+        assert_eq!(
+            found,
+            ["scuffed-stat-tracker", "scuffed-stat-tracker-core"],
+            "the walk found the tracker crates"
+        );
+        let watched = compute(&inputs).expect("workspace build id").watched;
+        assert!(
+            watched.iter().any(|p| p.ends_with("stat-tracker-core/src")),
+            "{watched:?}"
+        );
+    }
+
+    /// A lower lib crate, listed with the same exclusions: its sources count,
+    /// its daemon-only files and its version do not.
+    #[test]
+    fn build_id_counts_a_listed_lower_lib_crate() {
+        let tree = Tree::new();
+        tree.edit(
+            "Cargo.lock",
+            " \"serde 1.0.0 (registry",
+            " \"core\",\n \"serde 1.0.0 (registry",
+        );
+        let lock = fs::read_to_string(tree.path("Cargo.lock")).unwrap();
+        tree.write(
+            "Cargo.lock",
+            &format!("{lock}\n[[package]]\nname = \"core\"\nversion = \"0.5.0-alpha.6\"\n"),
+        );
+        tree.write(
+            "crates/core/Cargo.toml",
+            "[package]\nname = \"core\"\nversion = \"0.5.0-alpha.6\"\n",
+        );
+        tree.write("crates/core/src/lib.rs", "pub fn base() -> u32 { 1 }\n");
+        tree.write("crates/core/src/bin/tool.rs", "fn main() {}\n");
+        let unlisted = compute(&tree.inputs()).err().expect("core is unlisted");
+        assert!(unlisted.contains("core"), "{unlisted}");
+        let inputs = || {
+            let mut inputs = tree.inputs();
+            inputs.crates.push(CrateInputs {
+                package: "core".into(),
+                dir: tree.path("crates/core"),
+                include: vec!["Cargo.toml".into(), "src".into()],
+                exclude: DAEMON_ONLY.iter().map(|s| s.to_string()).collect(),
+            });
+            compute(&inputs).expect("build id").id
+        };
+        let before = inputs();
+        tree.edit(
+            "crates/core/Cargo.toml",
+            "version = \"0.5.0-alpha.6\"",
+            "version = \"0.5.0-alpha.7\"",
+        );
+        tree.edit(
+            "Cargo.lock",
+            "name = \"core\"\nversion = \"0.5.0-alpha.6\"",
+            "name = \"core\"\nversion = \"0.5.0-alpha.7\"",
+        );
+        tree.write("crates/core/src/bin/tool.rs", "fn main() { other(); }\n");
+        assert_eq!(inputs(), before, "version bump and a core binary");
+        tree.edit("crates/core/src/lib.rs", "1 }", "2 }");
+        assert_ne!(inputs(), before, "core lib source");
     }
 
     #[test]
