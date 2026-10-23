@@ -1,4 +1,5 @@
-//! Release pins that read files of this package and its version.
+//! Release pins that read files of this package and its version, and the
+//! guard that the version constants built in stat-tracker-core carry it.
 //!
 //! `README.md`, `dist/bootstrap.sh` and `CHANGELOG.md` sit next to this
 //! crate's `Cargo.toml`, and `CARGO_PKG_VERSION` here is the release
@@ -65,5 +66,24 @@ fn readme_and_bootstrap_examples_pin_this_crate_version() {
     assert!(
         has_changelog_section(changelog, version),
         "CHANGELOG is missing a section for {version}"
+    );
+}
+
+/// `APP_VERSION` (report bundles, `perf.log`) and `USER_AGENT` (every site
+/// request) are built in stat-tracker-core from its `CARGO_PKG_VERSION`.
+/// That must be this package's version, the release version, so a bump of
+/// `crates/stat-tracker/Cargo.toml` that misses
+/// `crates/stat-tracker-core/Cargo.toml` fails here (PR #452 review, F3).
+#[test]
+fn the_version_constants_are_this_release() {
+    let version = env!("CARGO_PKG_VERSION");
+    assert_eq!(
+        crate::version::APP_VERSION,
+        version,
+        "crates/stat-tracker-core/Cargo.toml must carry the release version"
+    );
+    assert_eq!(
+        crate::version::USER_AGENT,
+        format!("scuffed-stat-tracker/{version}")
     );
 }
