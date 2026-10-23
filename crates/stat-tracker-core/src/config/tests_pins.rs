@@ -587,35 +587,52 @@ fn pin_sync_table_missing_a_key_is_not_replaced() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
 }
 
+/// The `data_dir` value of a serialized config and the text after its line.
+/// The value's quoting depends on the path: toml 1 writes a path with a `"`
+/// as `"""…"""`, and one with a newline as a multi-line string over
+/// several lines. So the value is found by its parsed span, not by the
+/// first line break.
+fn split_data_dir(text: &str) -> (PathBuf, &str) {
+    let doc = toml_edit::Document::parse(text).expect("serialized config parses");
+    let value = doc
+        .get("data_dir")
+        .and_then(|item| item.as_value())
+        .expect("a root data_dir value");
+    let span = value.span().expect("a parsed value has a span");
+    assert_eq!(
+        &text[..span.start],
+        "data_dir = ",
+        "data_dir comes first:\n{text}"
+    );
+    let rest = text[span.end..]
+        .strip_prefix('\n')
+        .expect("a line break after the data_dir value");
+    (PathBuf::from(value.as_str().expect("a string")), rest)
+}
+
 /// A missing file is the default config with the patch applied. `data_dir`
-/// is the host's data dir, so its line is checked by value and only the
-/// rest is pinned byte for byte. The serializer escapes newlines, so the
-/// value is always one line, whatever the path holds.
+/// is the host's data dir, so it is checked by value, and only the text
+/// after it is pinned byte for byte.
 #[test]
 fn pin_setup_patch_on_a_missing_file() {
     let fresh = Config::text_for_setup_patch(None, &setup_patch()).unwrap();
-    let (first, rest) = fresh.split_once('\n').expect("lines");
-    assert!(first.starts_with("data_dir = "), "{first}");
-    assert_eq!(
-        Config::parse_file_contents(first)
-            .expect("data_dir line")
-            .data_dir,
-        Config::default().data_dir,
-        "{first}"
-    );
-    // The same check holds for a data dir with quotes in it.
-    let odd = Config {
-        data_dir: PathBuf::from("/home/a\"b'c/share"),
-        ..Config::default()
-    };
-    let text = toml::to_string_pretty(&odd).unwrap();
-    let (odd_first, odd_rest) = text.split_once('\n').expect("lines");
-    assert!(odd_first.starts_with("data_dir = "), "{odd_first}");
-    assert_eq!(
-        Config::parse_file_contents(odd_first).unwrap().data_dir,
-        odd.data_dir
-    );
-    assert_eq!(odd_rest, DEFAULT_TEXT.split_once('\n').unwrap().1);
+    let (data_dir, rest) = split_data_dir(&fresh);
+    assert_eq!(data_dir, Config::default().data_dir, "{fresh}");
+    // The same split works whatever the host path holds.
+    for odd in [
+        "/home/a\"b'c/share",
+        "/home/a\nb/share",
+        "/home/'''\"\"\"\\/share",
+    ] {
+        let odd = Config {
+            data_dir: PathBuf::from(odd),
+            ..Config::default()
+        };
+        let text = toml::to_string_pretty(&odd).unwrap();
+        let (odd_dir, odd_rest) = split_data_dir(&text);
+        assert_eq!(odd_dir, odd.data_dir, "{text}");
+        assert_eq!(odd_rest, DEFAULT_TEXT.split_once('\n').unwrap().1, "{text}");
+    }
     assert_eq!(
         rest,
         "\
