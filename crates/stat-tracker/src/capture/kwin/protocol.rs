@@ -300,6 +300,8 @@ pub fn to_rgb_image(meta: &RawMeta, data: &[u8]) -> Result<RgbImage, KwinError> 
 
 /// The raw pixels as the picture the detectors get: RGB, at the size KWin
 /// rendered. Never resampled ([`check_native_size`]).
+///
+/// [`check_native_size`]: super::check_native_size
 pub fn picture(meta: &RawMeta, data: &[u8]) -> Result<DynamicImage, KwinError> {
     to_rgb_image(meta, data).map(DynamicImage::ImageRgb8)
 }
