@@ -9,7 +9,7 @@
 //!      game      capture     store       vision
 //!   boundary,    capture/*   storage,    ocr, detect, shadow, names,
 //!   capture_gate             sync,       packs, mapcrops, report::blank,
-//!                            stats       ocr_switch
+//!                            stats       ocr_switch, frame
 //!          \        |          |           /
 //!     core: config, parse, perf, perf_log, setup, replace, proc_id, fs_mode,
 //!           omp, host_probe, sandbox, hero_auth, model, version, suspect,
@@ -90,6 +90,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("storage", Crate::Store),
     ("sync", Crate::Store),
     ("detect", Crate::Vision),
+    ("frame", Crate::Vision),
     ("mapcrops", Crate::Vision),
     ("names", Crate::Vision),
     ("ocr", Crate::Vision),
