@@ -37,11 +37,13 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use image::imageops::{self, FilterType};
-use image::{ImageBuffer, Luma, RgbImage};
+use image::RgbImage;
 use serde::Deserialize;
 
 use crate::ocr::preprocess::game_rect_16_9;
+
+// `Gray` lives with the NCC kernel in `shadow/ncc.rs` (0.6 lane D V5).
+pub use super::ncc::Gray;
 
 /// Identifies this recognizer's output. Bump on any change that can move a read.
 /// `map-v2` (alpha.7 M1): `ADLERSBRUNN` is a banner the reader can name.
@@ -525,54 +527,6 @@ pub const ADLERSBRUNN_KEY: &str = "adlersbrunn";
 /// accepts this text, which is how a banner read reaches the same check as
 /// ocr-v1's top-bar label.
 pub const ADLERSBRUNN: &str = "ADLERSBRUNN";
-
-/// Float grey image, row-major, values 0..1.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Gray {
-    pub w: usize,
-    pub h: usize,
-    pub px: Vec<f32>,
-}
-
-impl Gray {
-    pub fn new(w: usize, h: usize) -> Self {
-        Self {
-            w,
-            h,
-            px: vec![0.0; w * h],
-        }
-    }
-
-    #[inline]
-    pub fn at(&self, x: usize, y: usize) -> f32 {
-        self.px[y * self.w + x]
-    }
-
-    /// Bilinear (triangle) resize, area-aware when shrinking. Values must be
-    /// in 0..1: the image crate clamps float pixels to that range.
-    pub fn resize(&self, w: usize, h: usize) -> Gray {
-        if w == self.w && h == self.h {
-            return self.clone();
-        }
-        let Some(buf) = ImageBuffer::<Luma<f32>, Vec<f32>>::from_raw(
-            self.w as u32,
-            self.h as u32,
-            self.px.clone(),
-        ) else {
-            return Gray::new(w, h);
-        };
-        let out = imageops::resize(&buf, w.max(1) as u32, h.max(1) as u32, FilterType::Triangle);
-        Gray {
-            w: w.max(1),
-            h: h.max(1),
-            px: out.into_raw(),
-        }
-    }
-
-    fn mean(&self) -> f64 {
-        self.px.iter().map(|&v| v as f64).sum::<f64>() / self.px.len().max(1) as f64
-    }
-}
 
 /// numpy-style percentile (linear interpolation).
 pub(crate) fn percentile(v: &mut [f32], p: f64) -> f32 {
