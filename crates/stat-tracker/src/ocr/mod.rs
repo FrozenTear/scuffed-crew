@@ -1535,22 +1535,21 @@ fn run_ocr(
     })
 }
 
+/// The OCR-off source scan: nothing outside the gate starts Tesseract.
+#[cfg(test)]
+mod tests_gate_scan;
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The functions of this file, by name: `(is it pub or pub(crate), body)`.
-    /// Top-level items only, up to the first test module.
+    /// Top-level items only, test items left out wherever they sit.
     fn production_functions() -> std::collections::BTreeMap<String, (bool, String)> {
-        let source = include_str!("mod.rs");
-        let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
-            .iter()
-            .filter_map(|marker| source.find(marker))
-            .min()
-            .expect("the test modules");
+        let source = super::tests_gate_scan::production_text(include_str!("mod.rs"));
         let mut out = std::collections::BTreeMap::new();
         let mut current: Option<(String, bool, String)> = None;
-        for line in source[..end].lines() {
+        for line in source.lines() {
             let header = ["pub fn ", "pub(crate) fn ", "fn "]
                 .iter()
                 .find_map(|prefix| line.strip_prefix(prefix).map(|rest| (*prefix, rest)));
@@ -1693,131 +1692,6 @@ mod tests {
         assert!(tessdata_lang_probed());
         assert!(ocr_pool().is_ok());
         assert!(pool_started());
-    }
-
-    /// Every `.rs` file below the `src/` of every stat-tracker crate but the
-    /// GUI (`crates/stat-tracker*/src`: this lib, its bin `main.rs` and the
-    /// crates split out of it in 0.6 N4), with the part of it that is not
-    /// test code: the text before its first test module. Files that are test
-    /// code as a whole are left out. Names are relative to each crate's
-    /// `src/`, so they do not change when a module moves to another crate.
-    fn production_sources() -> Vec<(String, String)> {
-        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-            for entry in std::fs::read_dir(dir).expect("read src") {
-                let path = entry.expect("dir entry").path();
-                if path.is_dir() {
-                    walk(&path, out);
-                } else if path.extension().is_some_and(|ext| ext == "rs") {
-                    out.push(path);
-                }
-            }
-        }
-        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("crates/");
-        let mut roots: Vec<std::path::PathBuf> = std::fs::read_dir(crates)
-            .expect("read crates/")
-            .map(|entry| entry.expect("dir entry").path())
-            .filter(|dir| {
-                let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                // The GUI is no OCR caller, and its `set_mode(` calls are
-                // std file permissions.
-                name.starts_with("stat-tracker") && name != "stat-tracker-ui"
-            })
-            .map(|dir| dir.join("src"))
-            .filter(|src| src.is_dir())
-            .collect();
-        roots.sort();
-        let mut out = Vec::new();
-        for src in roots {
-            let mut files = Vec::new();
-            walk(&src, &mut files);
-            files.sort();
-            out.extend(
-                files
-                    .into_iter()
-                    .filter(|path| {
-                        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                        // `mod tests;` files, the OCR-off bench and the daemon's
-                        // `main_tests/` (main.rs's test module) are test code.
-                        !stem.starts_with("tests")
-                            && stem != "ocr_bench"
-                            && !path.starts_with(src.join("main_tests"))
-                    })
-                    .map(|path| {
-                        let text = std::fs::read_to_string(&path).expect("read a source file");
-                        let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
-                            .iter()
-                            .filter_map(|marker| text.find(marker))
-                            .min()
-                            .unwrap_or(text.len());
-                        let name = path
-                            .strip_prefix(&src)
-                            .expect("below src")
-                            .to_string_lossy()
-                            .replace('\\', "/");
-                        (name, text[..end].to_string())
-                    }),
-            );
-        }
-        out
-    }
-
-    /// Nothing outside this file can start Tesseract or open the gate:
-    /// - one `LepTess` construction in the whole tree, in `ocr_with`;
-    /// - `ocr_with` is called from this file only;
-    /// - the process-wide mode is set from `ocr_switch.rs` only, and no
-    ///   code outside tests sets a scoped mode.
-    #[test]
-    fn nothing_outside_the_gate_starts_tesseract_or_opens_the_gate() {
-        // Built at run time, so this test does not find itself.
-        let construct = format!("LepTess::{}(", "new");
-        let read = format!("ocr_{}(", "with");
-        let set_mode = format!("set_{}(", "mode");
-        let scoped = format!("scop{}(", "ed");
-        let sources = production_sources();
-        assert!(
-            sources.len() > 20,
-            "the walk found the tree: {}",
-            sources.len()
-        );
-        // The daemon binary and stat-tracker-core are in the walk, not only
-        // the crate that hosts this test.
-        for file in ["main.rs", "ocr/mod.rs", "config.rs", "ocr_status.rs"] {
-            assert!(
-                sources.iter().any(|(name, _)| name == file),
-                "the walk reached {file}"
-            );
-        }
-        let holding = |needle: &str| -> Vec<(String, usize)> {
-            sources
-                .iter()
-                .map(|(name, text)| (name.clone(), text.matches(needle).count()))
-                .filter(|(_, count)| *count > 0)
-                .collect()
-        };
-        assert_eq!(
-            holding(&construct),
-            [("ocr/mod.rs".to_string(), 1)],
-            "one Tesseract instance is built, in ocr_with"
-        );
-        let callers = holding(&read);
-        assert_eq!(callers.len(), 1, "{callers:?}");
-        assert_eq!(
-            callers[0].0, "ocr/mod.rs",
-            "ocr_with is private to this file"
-        );
-        let setters: Vec<String> = holding(&set_mode)
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
-        assert_eq!(
-            setters,
-            ["ocr/gate.rs", "ocr_switch.rs"],
-            "only the switch sets the process-wide mode"
-        );
-        let scopes: Vec<String> = holding(&scoped).into_iter().map(|(name, _)| name).collect();
-        assert_eq!(scopes, ["ocr/gate.rs"], "a scoped mode is for tests");
     }
 
     /// The line above `fn name` (after its doc comment) is `#[track_caller]`.
