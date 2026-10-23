@@ -38,6 +38,18 @@ license = "MIT OR Apache-2.0"
 [profile.dev]
 debug = "line-tables-only"
 
+# The tracker's tests are pixel work (blanking, template matching, digit
+# reads) that runs 5-6x faster optimized: the lib tests go from about
+# 180 s to 34 s on 4 cores, for about 110 s more compile. Only `cargo test`
+# uses this; `cargo build` / `cargo run` (dev) stay unoptimized, and so do
+# the other crates. Assertions and overflow checks stay on, and line tables
+# (from `dev`) keep file:line in panics. For a debuggable test build:
+#   cargo test -p scuffed-stat-tracker --config 'profile.test.package.scuffed-stat-tracker.opt-level=0'
+[profile.test.package.scuffed-stat-tracker]
+opt-level = 2
+debug-assertions = true
+overflow-checks = true
+
 # Thin LTO: worthwhile binary-size/speed win for the release daemon + server,
 # small compile-time cost only on release builds.
 [profile.release]

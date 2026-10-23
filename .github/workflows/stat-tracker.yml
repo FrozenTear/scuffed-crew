@@ -130,8 +130,9 @@ jobs:
           # rust-cache hashes member manifests + Cargo.lock only, NOT the root
           # Cargo.toml [profile.*] tables. Bump this whenever a root profile
           # changes, or a full-match restore of stale artifacts skips the
-          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
-          prefix-key: v1-rust
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only;
+          # v1 -> v2: test opt-level for scuffed-stat-tracker).
+          prefix-key: v2-rust
           # Save on main and the long-lived wip/0.6 lane only: PRs into
           # wip/0.6 restore from it. Other refs would evict these (repo cap).
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
@@ -187,8 +188,9 @@ jobs:
           # rust-cache hashes member manifests + Cargo.lock only, NOT the root
           # Cargo.toml [profile.*] tables. Bump this whenever a root profile
           # changes, or a full-match restore of stale artifacts skips the
-          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
-          prefix-key: v1-rust
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only;
+          # v1 -> v2: test opt-level for scuffed-stat-tracker).
+          prefix-key: v2-rust
           # Save on main and the long-lived wip/0.6 lane only: PRs into
           # wip/0.6 restore from it. Other refs would evict these (repo cap).
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
@@ -244,8 +246,9 @@ jobs:
           # rust-cache hashes member manifests + Cargo.lock only, NOT the root
           # Cargo.toml [profile.*] tables. Bump this whenever a root profile
           # changes, or a full-match restore of stale artifacts skips the
-          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
-          prefix-key: v1-rust
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only;
+          # v1 -> v2: test opt-level for scuffed-stat-tracker).
+          prefix-key: v2-rust
           # Save on main and the long-lived wip/0.6 lane only: PRs into
           # wip/0.6 restore from it. Other refs would evict these (repo cap).
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
