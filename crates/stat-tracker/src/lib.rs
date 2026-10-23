@@ -34,3 +34,7 @@ pub mod version;
 /// Pins the layering of the coming lib split (0.6 N4).
 #[cfg(test)]
 mod tests_layering;
+
+/// README, bootstrap and changelog pins on this package's version.
+#[cfg(test)]
+mod tests_release_pins;

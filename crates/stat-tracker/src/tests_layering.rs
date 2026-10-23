@@ -92,6 +92,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("report", Crate::Top),
     ("tab_retry", Crate::Top),
     ("tests_layering", Crate::Top),
+    ("tests_release_pins", Crate::Top),
 ];
 
 fn crate_of(module: &[String]) -> Option<Crate> {
