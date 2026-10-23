@@ -103,9 +103,18 @@ jobs:
           # No `workspaces:` here. The root workspace builds into <repo>/target,
           # and the default `. -> target` caches that dir. The old
           # `crates/stat-tracker` path cached a target dir that is never built.
+          # Do NOT remove this `key:`. ci.yml has jobs with the same ids
+          # (`build-and-test`, `clippy`) and the same env hash, so without it
+          # both workflows compute the same cache key and clobber each other.
           key: stat-tracker-build-test
-          # Save on main only: other refs would evict main's caches (repo cap).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # rust-cache hashes member manifests + Cargo.lock only, NOT the root
+          # Cargo.toml [profile.*] tables. Bump this whenever a root profile
+          # changes, or a full-match restore of stale artifacts skips the
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
+          prefix-key: v1-rust
+          # Save on main and the long-lived wip/0.6 lane only: PRs into
+          # wip/0.6 restore from it. Other refs would evict these (repo cap).
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
 
       - name: Build
         run: cargo build --locked
@@ -151,9 +160,18 @@ jobs:
           # No `workspaces:` here. The root workspace builds into <repo>/target,
           # and the default `. -> target` caches that dir. The old
           # `crates/stat-tracker` path cached a target dir that is never built.
+          # Do NOT remove this `key:`. ci.yml has jobs with the same ids
+          # (`build-and-test`, `clippy`) and the same env hash, so without it
+          # both workflows compute the same cache key and clobber each other.
           key: stat-tracker-clippy
-          # Save on main only: other refs would evict main's caches (repo cap).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # rust-cache hashes member manifests + Cargo.lock only, NOT the root
+          # Cargo.toml [profile.*] tables. Bump this whenever a root profile
+          # changes, or a full-match restore of stale artifacts skips the
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
+          prefix-key: v1-rust
+          # Save on main and the long-lived wip/0.6 lane only: PRs into
+          # wip/0.6 restore from it. Other refs would evict these (repo cap).
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -196,8 +214,14 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: stat-tracker-ui
-          # Save on main only: other refs would evict main's caches (repo cap).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          # rust-cache hashes member manifests + Cargo.lock only, NOT the root
+          # Cargo.toml [profile.*] tables. Bump this whenever a root profile
+          # changes, or a full-match restore of stale artifacts skips the
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
+          prefix-key: v1-rust
+          # Save on main and the long-lived wip/0.6 lane only: PRs into
+          # wip/0.6 restore from it. Other refs would evict these (repo cap).
+          save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
 
       - name: Rustfmt
         run: cargo fmt -p scuffed-stat-tracker-ui --check

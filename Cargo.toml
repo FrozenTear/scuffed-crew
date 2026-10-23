@@ -28,14 +28,16 @@ members = [
 [workspace.package]
 license = "MIT OR Apache-2.0"
 
-# Thin LTO: worthwhile binary-size/speed win for the release daemon + server,
-# small compile-time cost only on release builds.
 # Line tables keep file:line in backtraces and panics but skip full DWARF
 # (types, locals). Debug and test builds link faster and use less disk.
 # `test` inherits `dev`. Release profiles below are unchanged.
+# rust-cache keys do NOT hash this file's [profile.*] tables: bump
+# `prefix-key` in stat-tracker.yml and ci.yml whenever a profile changes.
 [profile.dev]
 debug = "line-tables-only"
 
+# Thin LTO: worthwhile binary-size/speed win for the release daemon + server,
+# small compile-time cost only on release builds.
 [profile.release]
 lto = "thin"
 
