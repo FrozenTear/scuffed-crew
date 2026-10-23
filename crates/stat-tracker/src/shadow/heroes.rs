@@ -54,12 +54,9 @@ pub const HERO_RECOGNIZER_ID: &str = "hero-v1.2";
 pub const MIN_SCORE: f32 = 0.65;
 /// Minimum lead over the best other class for an accepted read.
 pub const MIN_LEAD: f32 = 0.10;
-/// Template directory under the data dir (heroes-v1).
-pub const TEMPLATE_SUBDIR: &str = "templates/heroes";
-/// heroes-v2 pack directory under the data dir (1440p-scale cuts).
-pub const TEMPLATE_SUBDIR_V2: &str = "templates/heroes-v2";
-/// heroes-v2-1080 pack directory under the data dir (1080p-scale cuts).
-pub const TEMPLATE_SUBDIR_V2_1080: &str = "templates/heroes-v2-1080";
+// The pack folders live with the pack layout (0.6 lane D V4), so pack sync
+// does not reach into the reader. Re-exported at their old paths.
+pub use crate::packs::layout::{TEMPLATE_SUBDIR, TEMPLATE_SUBDIR_V2, TEMPLATE_SUBDIR_V2_1080};
 /// Scoreboard crops at most this many px high use the 1080 set: about
 /// halfway between the 1080p crop (756 px) and the 1440p crop (1007 px).
 pub const MAX_1080_CROP_H: u32 = 881;
@@ -2021,7 +2018,7 @@ mod tests {
             ("heroes-v2.tar", TEMPLATE_SUBDIR_V2),
             ("heroes-v2-1080.tar", TEMPLATE_SUBDIR_V2_1080),
         ] {
-            let spec = crate::packs::pack_spec(name).unwrap();
+            let spec = crate::packs::layout::pack_spec(name).unwrap();
             assert_eq!(spec.dir_in(Path::new("/d")), Path::new("/d").join(sub));
         }
     }
@@ -2513,7 +2510,7 @@ mod tests {
         let staging = data.join(format!("templates/.heroes-v2-staging-{art}"));
         write_templates(&staging, &IDS, 74, art);
         write_skull(&staging);
-        crate::packs::swap_dir(&staging, &data.join(TEMPLATE_SUBDIR_V2)).unwrap();
+        crate::packs::layout::swap_dir(&staging, &data.join(TEMPLATE_SUBDIR_V2)).unwrap();
     }
 
     /// F249-7: a newer heroes-v2 over an installed one (the folder exists

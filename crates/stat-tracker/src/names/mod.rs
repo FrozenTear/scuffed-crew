@@ -155,7 +155,7 @@ pub struct InstalledNames {
 /// the daemon gets no call for those. Each name read also stats the live
 /// folder's `manifest.json` and the two record files sync writes after the
 /// swap (`pack-versions.json`, `pack-manifests.json`; see
-/// [`crate::packs::installed_record`]). When they changed since the latest
+/// [`crate::packs::layout::installed_record`]). When they changed since the latest
 /// load and describe a complete install of the live folder, the same
 /// checked reload runs in the background, and that read keeps the pack it
 /// has. See [`Self::watch`]. A folder changed by hand with no matching
@@ -237,13 +237,13 @@ impl LiveInner {
     }
 
     /// The live folder's `manifest.json`, then the two record files sync
-    /// writes after the swap ([`crate::packs::record_paths`]). Only the
+    /// writes after the swap ([`crate::packs::layout::record_paths`]). Only the
     /// live folder is looked at: a `.names-v1-next-*` staging folder or a
     /// `-prev-` backup never changes this key.
     fn watch_key(&self) -> WatchKey {
         let records = self
             .data_dir()
-            .map(crate::packs::record_paths)
+            .map(crate::packs::layout::record_paths)
             .map(|[versions, manifests]| (file_stamp(&versions), file_stamp(&manifests)))
             .unwrap_or((None, None));
         (
@@ -533,7 +533,7 @@ impl LiveNames {
         let record = self
             .inner
             .data_dir()
-            .and_then(|data_dir| crate::packs::installed_record(data_dir, pack::PACK_NAME));
+            .and_then(|data_dir| crate::packs::layout::installed_record(data_dir, pack::PACK_NAME));
         let complete = record.as_ref().is_some_and(|(version, sha)| {
             manifest_version(dir).as_deref() == Some(version.as_str())
                 && sha

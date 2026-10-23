@@ -1045,7 +1045,7 @@ impl ResultTemplates {
     /// (not UTF-8, not a file, no permission) or does not parse refuses the
     /// folder; only a missing file means no extra layouts. Each entry is
     /// checked:
-    /// * an id that is not a plain word id ([`crate::packs::is_word_id`]:
+    /// * an id that is not a plain word id ([`crate::packs::layout::is_word_id`]:
     ///   no `/`, no `..`, not absolute) or a region that is not inside the
     ///   game rect refuses the whole folder (`None`, so the caller falls
     ///   back);
@@ -1068,7 +1068,7 @@ impl ResultTemplates {
             match serde_json::from_str::<Vec<Layout>>(&text) {
                 Ok(extra) => {
                     for l in extra {
-                        if !crate::packs::is_word_id(&l.id) || !roi_is_valid(l.roi) {
+                        if !crate::packs::layout::is_word_id(&l.id) || !roi_is_valid(l.roi) {
                             tracing::warn!(
                                 dir = %dir.display(),
                                 "result layouts.json has an unsafe id or region; folder refused"
@@ -4162,7 +4162,7 @@ mod tests {
     fn swap_in_words(data: &Path, victory_seed: u32) {
         let staging = data.join(format!("templates/.words-v1-staging-{victory_seed}"));
         pack(&staging, victory_seed);
-        crate::packs::swap_dir(&staging, &data.join(WORDS_SUBDIR)).unwrap();
+        crate::packs::layout::swap_dir(&staging, &data.join(WORDS_SUBDIR)).unwrap();
     }
 
     #[test]
@@ -4197,7 +4197,7 @@ mod tests {
         assert_eq!(reads_victory(&live, 5), (Some(ResultPack::Legacy), true));
         let staging = data.path().join("templates/.result-staging");
         pack(&staging, 7);
-        crate::packs::swap_dir(&staging, &legacy).unwrap();
+        crate::packs::layout::swap_dir(&staging, &legacy).unwrap();
         live.current();
         live.wait_reload();
         assert_eq!(reads_victory(&live, 7), (Some(ResultPack::Legacy), true));
