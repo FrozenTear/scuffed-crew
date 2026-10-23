@@ -57,15 +57,20 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # +15 min over the old cap: on a crawling mirror a cache miss may spend
+    # up to ~30 min in apt (update 2 x 300 s, install 2 x 600 s).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
+      # Offline from cached .debs when it can, else the mirror with retries
+      # and timeouts (.github/actions/apt-install). CI runs on main only.
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+        uses: ./.github/actions/apt-install
+        with:
+          save: ${{ github.ref == 'refs/heads/main' }}
+          packages: >-
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
             libvulkan-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
@@ -112,7 +117,9 @@ jobs:
   build-and-test:
     name: Build & Test
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # +15 min over the old cap: on a crawling mirror a cache miss may spend
+    # up to ~30 min in apt (update 2 x 300 s, install 2 x 600 s).
+    timeout-minutes: 60
     env:
       # Debuginfo dominates target/ size; without it the workspace build fits
       # the hosted runner's disk alongside the restored cache. Backtraces in CI
@@ -127,11 +134,14 @@ jobs:
             /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # Offline from cached .debs when it can, else the mirror with retries
+      # and timeouts (.github/actions/apt-install). CI runs on main only.
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+        uses: ./.github/actions/apt-install
+        with:
+          save: ${{ github.ref == 'refs/heads/main' }}
+          packages: >-
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
             libvulkan-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
