@@ -3,7 +3,26 @@
 //! its comments, order and unknown keys when only an in-place key changes.
 
 use super::file::{atomic_write_600, unreadable_config};
+use super::parse_error::{TomlFailure, describe};
 use super::{CaptureRoute, Config, OcrSetting, ReaderSetting, SyncConfig};
+
+/// `existing` did not parse. The text names the line and toml's reason,
+/// never the line itself, so the sync token cannot reach Settings or a log.
+fn not_parsed(existing: &str, err: &impl TomlFailure) -> Box<dyn std::error::Error + Send + Sync> {
+    unreadable_config(format!(
+        "config.toml could not be parsed, so it was not replaced: {}",
+        describe(existing, err)
+    ))
+}
+
+/// The in-place edit produced `text` that does not parse. Same redaction
+/// as [`not_parsed`].
+fn not_patched(text: &str, err: &impl TomlFailure) -> Box<dyn std::error::Error + Send + Sync> {
+    unreadable_config(format!(
+        "config.toml could not be updated in place, so it was not replaced: {}",
+        describe(text, err)
+    ))
+}
 
 impl Config {
     /// Text `save` would write.
@@ -24,11 +43,7 @@ impl Config {
         let Some(existing) = existing else {
             return Ok(toml::to_string_pretty(next)?);
         };
-        let loaded = toml::from_str::<Self>(existing).map_err(|err| {
-            unreadable_config(format!(
-                "config.toml could not be parsed, so it was not replaced: {err}"
-            ))
-        })?;
+        let loaded = toml::from_str::<Self>(existing).map_err(|err| not_parsed(existing, &err))?;
         if loaded == *next {
             return Ok(existing.to_string());
         }
@@ -69,11 +84,7 @@ fn patch_capture_route(
     route: CaptureRoute,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let word = route.as_str();
-    let doc = toml_edit::Document::parse(existing).map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let doc = toml_edit::Document::parse(existing).map_err(|err| not_parsed(existing, &err))?;
     if doc.get("capture_route").is_some() {
         return splice_root_string(existing, &doc, "capture_route", word);
     }
@@ -115,11 +126,7 @@ fn patch_update_channel(
     raw: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let word = channel_word(raw);
-    let doc = toml_edit::Document::parse(existing).map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let doc = toml_edit::Document::parse(existing).map_err(|err| not_parsed(existing, &err))?;
     if doc.get("update_channel").is_some() {
         return splice_root_string(existing, &doc, "update_channel", word);
     }
@@ -162,11 +169,9 @@ fn insert_root_string(
     key: &str,
     word: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let mut doc = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|err| not_parsed(existing, &err))?;
     if doc.get(key).is_some() {
         return Err(unreadable_config(
             "config.toml already has that key at the root, so it was not replaced".to_string(),
@@ -202,11 +207,7 @@ fn patch_ocr(
     existing: &str,
     ocr: OcrSetting,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let doc = toml_edit::Document::parse(existing).map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let doc = toml_edit::Document::parse(existing).map_err(|err| not_parsed(existing, &err))?;
     if doc.get("ocr").is_some() {
         return splice_root_string(existing, &doc, "ocr", ocr.as_str());
     }
@@ -234,11 +235,7 @@ fn patch_shadow_recognizer(
     existing: &str,
     on: bool,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let doc = toml_edit::Document::parse(existing).map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let doc = toml_edit::Document::parse(existing).map_err(|err| not_parsed(existing, &err))?;
     if doc.get("shadow_recognizer").is_some() {
         return splice_root_shadow_bool(existing, &doc, on);
     }
@@ -281,11 +278,9 @@ fn insert_root_shadow_recognizer(
     existing: &str,
     on: bool,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let mut doc = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|err| not_parsed(existing, &err))?;
     if doc.get("shadow_recognizer").is_some() {
         return Err(unreadable_config(
             "config.toml already has shadow_recognizer at the root, so it was not replaced"
@@ -307,11 +302,7 @@ fn patch_reader(
     existing: &str,
     reader: ReaderSetting,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let doc = toml_edit::Document::parse(existing).map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let doc = toml_edit::Document::parse(existing).map_err(|err| not_parsed(existing, &err))?;
     if doc.get("reader").is_some() {
         return splice_root_reader(existing, &doc, reader);
     }
@@ -349,11 +340,9 @@ fn insert_root_reader(
     existing: &str,
     reader: ReaderSetting,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let mut doc = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|err| not_parsed(existing, &err))?;
     if doc.get("reader").is_some() {
         return Err(unreadable_config(
             "config.toml already has reader at the root, so it was not replaced".to_string(),
@@ -417,11 +406,7 @@ impl Config {
             }
             return Ok(toml::to_string_pretty(&fresh)?);
         };
-        let _loaded = toml::from_str::<Self>(existing).map_err(|err| {
-            unreadable_config(format!(
-                "config.toml could not be parsed, so it was not replaced: {err}"
-            ))
-        })?;
+        let _loaded = toml::from_str::<Self>(existing).map_err(|err| not_parsed(existing, &err))?;
         let mut text = existing.to_string();
         if let Some(done) = patch.setup_completed {
             text = patch_root_bool(&text, "setup_completed", done)?;
@@ -429,11 +414,7 @@ impl Config {
         if let Some(sync) = &patch.sync {
             text = patch_sync_keys(&text, sync)?;
         }
-        let _check = toml::from_str::<Self>(&text).map_err(|err| {
-            unreadable_config(format!(
-                "config.toml could not be updated in place, so it was not replaced: {err}"
-            ))
-        })?;
+        let _check = toml::from_str::<Self>(&text).map_err(|err| not_patched(&text, &err))?;
         Ok(text)
     }
 }
@@ -445,11 +426,7 @@ fn patch_root_bool(
     key: &str,
     on: bool,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let doc = toml_edit::Document::parse(existing).map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let doc = toml_edit::Document::parse(existing).map_err(|err| not_parsed(existing, &err))?;
     if doc.get(key).is_some() {
         return splice_root_bool(existing, &doc, key, on);
     }
@@ -489,11 +466,9 @@ fn insert_root_bool(
     key: &str,
     on: bool,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let mut doc = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|err| not_parsed(existing, &err))?;
     if doc.get(key).is_some() {
         return Err(unreadable_config(
             "config.toml already has that key at the root, so it was not replaced".to_string(),
@@ -507,11 +482,7 @@ fn patch_sync_keys(
     existing: &str,
     sync: &SyncConfig,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let doc = toml_edit::Document::parse(existing).map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let doc = toml_edit::Document::parse(existing).map_err(|err| not_parsed(existing, &err))?;
     if doc.get("sync").and_then(|item| item.as_table()).is_none() {
         return insert_sync_table(existing, sync);
     }
@@ -523,11 +494,9 @@ fn insert_sync_table(
     existing: &str,
     sync: &SyncConfig,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let mut doc = existing.parse::<toml_edit::DocumentMut>().map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let mut doc = existing
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|err| not_parsed(existing, &err))?;
     if doc.get("sync").is_some() {
         return Err(unreadable_config(
             "config.toml already has a sync entry, so it was not replaced".to_string(),
@@ -546,11 +515,7 @@ fn upsert_table_string(
     key: &str,
     raw: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let doc = toml_edit::Document::parse(existing).map_err(|err| {
-        unreadable_config(format!(
-            "config.toml could not be parsed, so it was not replaced: {err}"
-        ))
-    })?;
+    let doc = toml_edit::Document::parse(existing).map_err(|err| not_parsed(existing, &err))?;
     let Some(tbl) = doc.get(table).and_then(|item| item.as_table()) else {
         return Err(unreadable_config(
             "config.toml could not be updated in place, so it was not replaced".to_string(),

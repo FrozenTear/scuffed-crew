@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 mod capture;
 mod edit;
 mod file;
+mod parse_error;
 mod poll;
 mod reader;
 mod report_kit;
@@ -246,6 +247,9 @@ mod tests_format;
 
 #[cfg(test)]
 mod tests_overlay;
+
+#[cfg(test)]
+mod tests_parse_error;
 
 #[cfg(test)]
 mod tests_pins;

@@ -84,10 +84,15 @@ impl Config {
     /// Parse `config.toml` text the way [`Self::load`] reads the file.
     ///
     /// No CLI or env overlay. A missing `shadow_recognizer` stays off.
+    ///
+    /// The error names the line and toml's reason but never quotes the file,
+    /// and secret values (the sync token) are redacted from it, so it is safe
+    /// for Settings and the logs (`config/parse_error.rs`).
     pub fn parse_file_contents(
         content: &str,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(toml::from_str(content)?)
+        toml::from_str(content)
+            .map_err(|err| unreadable_config(super::parse_error::describe(content, &err)))
     }
 
     /// Read the on-disk file [`Self::load`] starts from, without env overlays.
