@@ -30,7 +30,9 @@ tracing = { workspace = true }
 dirs = "6"
 toml = "1"
 toml_edit = "0.23"
-reqwest = { version = "0.12", features = ["json"] }
+# config.rs parses the sync URL. reqwest::Url is a re-export of url::Url;
+# naming url directly keeps reqwest (hyper, rustls) out of this crate.
+url = "2"
 surrealdb-types = "3"
 tempfile = "3"
 strsim = "0.11"

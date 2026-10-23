@@ -634,7 +634,8 @@ impl std::error::Error for SyncUrlReject {}
 /// which covers local dev (`http://localhost`, `http://127.0.0.1`,
 /// `http://[::1]`, any port).
 ///
-/// Parsing is the URL standard (via reqwest's `Url`), so `http://127.0.0.1.evil`
+/// Parsing is the URL standard (the `url` crate's `Url`, which is what
+/// `reqwest::Url` re-exports), so `http://127.0.0.1.evil`
 /// and `http://10.0.0.1` are rejected without a DNS lookup. Existing configs
 /// still deserialize; callers refuse to send rather than crash.
 pub fn validate_sync_server_url(raw: &str) -> Result<(), SyncUrlReject> {
@@ -642,7 +643,7 @@ pub fn validate_sync_server_url(raw: &str) -> Result<(), SyncUrlReject> {
     if raw.is_empty() {
         return Err(SyncUrlReject::Invalid);
     }
-    let parsed = reqwest::Url::parse(raw).map_err(|_| SyncUrlReject::Invalid)?;
+    let parsed = url::Url::parse(raw).map_err(|_| SyncUrlReject::Invalid)?;
     match parsed.scheme() {
         "https" if parsed.host_str().is_some_and(|h| !h.is_empty()) => Ok(()),
         "http" if http_host_is_loopback(&parsed) => Ok(()),
@@ -650,7 +651,7 @@ pub fn validate_sync_server_url(raw: &str) -> Result<(), SyncUrlReject> {
     }
 }
 
-fn http_host_is_loopback(url: &reqwest::Url) -> bool {
+fn http_host_is_loopback(url: &url::Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };

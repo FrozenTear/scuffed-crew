@@ -11019,7 +11019,6 @@ dependencies = [
  "chrono",
  "dirs",
  "libc",
- "reqwest 0.12.28",
  "scuffed-types",
  "serde",
  "serde_json",
@@ -11030,6 +11029,7 @@ dependencies = [
  "toml 1.1.6+spec-1.1.0",
  "toml_edit 0.23.10+spec-1.0.0",
  "tracing",
+ "url",
 ]
 
 [[package]]
