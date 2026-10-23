@@ -3735,7 +3735,7 @@ mod tests {
     /// raw `pw_loop_leave` that would skip the unpublish.
     #[test]
     fn run_loop_leaves_through_leave_loop() {
-        let src = include_str!("pw.rs");
+        let src = include_str!("mod.rs");
         let at = src
             .find(concat!("fn run_loop(", "symbols: Symbols"))
             .expect("run_loop");
