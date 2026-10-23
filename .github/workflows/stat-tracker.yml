@@ -96,6 +96,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates/stat-tracker
+          # Save on main only: other refs would evict main's caches (repo cap).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build
         run: cargo build --locked
@@ -130,6 +132,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates/stat-tracker
+          # Save on main only: other refs would evict main's caches (repo cap).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Clippy
         run: cargo clippy --locked --all-targets -- -D warnings
@@ -167,6 +171,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           key: stat-tracker-ui
+          # Save on main only: other refs would evict main's caches (repo cap).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Rustfmt
         run: cargo fmt -p scuffed-stat-tracker-ui --check
