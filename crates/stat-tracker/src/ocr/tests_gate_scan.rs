@@ -5,9 +5,16 @@
 //! crate but the GUI, with its test items left out: each item behind a
 //! `#[cfg(test)]` (or `#[cfg(all(test, …))]`) attribute, wherever in the file
 //! it is declared. The rest of the file is scanned, also the code after an
-//! early `#[cfg(test)] mod tests;`. Files that are test code as a whole (named
-//! `tests*`, or reached only through a `#[cfg(test)] mod x;`) are left out.
+//! early `#[cfg(test)] mod tests;`. A file is left out as a whole only when
+//! every declaration that loads it is test-only (`#[cfg(test)] mod x;`, or a
+//! declaration inside a test module); never by its name.
+//!
+//! It is a text search, not name resolution: it misses an alias
+//! (`use leptess::LepTess as T; T::new(…)`, `<LepTess>::new(…)`) and a
+//! function pointer (`let read = ocr_with;`). It does see `name (` with a
+//! space. Review such indirection by hand.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 fn is_ident(c: char) -> bool {
@@ -207,6 +214,8 @@ fn item_kind(t: &[char], mut k: usize) -> String {
                 }
             }
             "unsafe" | "async" | "extern" | "default" | "safe" => {}
+            // An inline `const { … }` block, not a `const` item.
+            "const" if t.get(skip_ws(t, k)) == Some(&'{') => return String::new(),
             "const"
                 if matches!(
                     word_at(t, skip_ws(t, k)).as_str(),
@@ -254,10 +263,9 @@ fn item_end(t: &[char], k: usize) -> usize {
 }
 
 /// One item behind a test-only `#[cfg(…)]`: `start..end` covers its
-/// attributes and the item; `item` is where the item itself starts.
+/// attributes and the item.
 struct TestItem {
     start: usize,
-    item: usize,
     end: usize,
 }
 
@@ -284,7 +292,6 @@ fn test_items(t: &[char]) -> Vec<TestItem> {
         if needs_test(&pred) {
             out.push(TestItem {
                 start: i,
-                item: k,
                 end: item_end(t, k),
             });
         }
@@ -315,23 +322,9 @@ fn inline_modules_at(t: &[char], at: usize) -> Vec<String> {
         match c {
             '{' => {
                 // `mod name {`: walk back over the name and the keyword.
-                let mut k = i;
-                while k > 0 && t[k - 1].is_whitespace() {
-                    k -= 1;
-                }
-                let name_end = k;
-                while k > 0 && is_ident(t[k - 1]) {
-                    k -= 1;
-                }
-                let name: String = t[k..name_end].iter().collect();
-                while k > 0 && t[k - 1].is_whitespace() {
-                    k -= 1;
-                }
-                let is_mod = k >= 3
-                    && t[k - 3..k] == ['m', 'o', 'd']
-                    && (k == 3 || !is_ident(t[k - 4]))
-                    && !name.is_empty();
-                stack.push(is_mod.then_some(name));
+                let (name, start) = word_before(t, i);
+                let (keyword, _) = word_before(t, start);
+                stack.push((keyword == "mod" && !name.is_empty()).then_some(name));
             }
             '}' => {
                 stack.pop();
@@ -342,63 +335,204 @@ fn inline_modules_at(t: &[char], at: usize) -> Vec<String> {
     stack.into_iter().flatten().collect()
 }
 
-/// The files (and module directories) that the `#[cfg(test)] mod x;`
-/// declarations of `path` load: test code as a whole, reached only through
-/// a test-only declaration. Paths follow the Rust reference, `#[path]`
-/// included; they need not exist.
-pub(super) fn test_module_files(path: &Path, source: &str) -> Vec<PathBuf> {
+/// The identifier that ends right before `at` (whitespace skipped), and
+/// where it starts; empty when there is none.
+fn word_before(t: &[char], at: usize) -> (String, usize) {
+    let mut end = at.min(t.len());
+    while end > 0 && t[end - 1].is_whitespace() {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && is_ident(t[start - 1]) {
+        start -= 1;
+    }
+    (t[start..end].iter().collect(), start)
+}
+
+/// Index of the bracket that opens the one that closes at `close`.
+fn opening(t: &[char], close: usize) -> usize {
+    let (o, c) = match t[close] {
+        '}' => ('{', '}'),
+        ')' => ('(', ')'),
+        _ => ('[', ']'),
+    };
+    let mut depth = 0usize;
+    for k in (0..=close).rev() {
+        if t[k] == c {
+            depth += 1;
+        } else if t[k] == o {
+            depth -= 1;
+            if depth == 0 {
+                return k;
+            }
+        }
+    }
+    0
+}
+
+/// Where the item whose keyword is at `at` starts: before its visibility
+/// (`pub`, `pub(crate)`) and its attributes.
+fn item_start(t: &[char], mut at: usize) -> usize {
+    loop {
+        let mut q = at;
+        while q > 0 && t[q - 1].is_whitespace() {
+            q -= 1;
+        }
+        if q == 0 {
+            return at;
+        }
+        match t[q - 1] {
+            ']' => {
+                let open = opening(t, q - 1);
+                if open == 0 || t[open - 1] != '#' {
+                    return at;
+                }
+                at = open - 1;
+            }
+            ')' => {
+                let (word, start) = word_before(t, opening(t, q - 1));
+                if word != "pub" {
+                    return at;
+                }
+                at = start;
+            }
+            _ => {
+                let (word, start) = word_before(t, q);
+                if word != "pub" {
+                    return at;
+                }
+                at = start;
+            }
+        }
+    }
+}
+
+/// One out-of-line `mod name;` declaration.
+#[derive(Debug)]
+struct ModDecl {
+    /// Where its file may be; the first one that exists is it.
+    candidates: Vec<PathBuf>,
+    /// Loaded through `#[path]`: such a file owns its directory.
+    path_attr: bool,
+    /// Behind a test-only cfg: its own, or that of an item around it.
+    test: bool,
+}
+
+/// The out-of-line `mod name;` declarations of the file `path`, resolved by
+/// the Rust reference's rules. `mod_rs`: the file owns its directory (a
+/// crate root, a `mod.rs`, a file loaded through `#[path]`); otherwise its
+/// child modules live in `dir/stem/`. The file name alone does not say: a
+/// `lib.rs` that is not a crate root is a plain module file.
+fn mod_decls(path: &Path, mod_rs: bool, source: &str) -> Vec<ModDecl> {
     let src: Vec<char> = source.chars().collect();
     let t = code_only(&src);
+    let tests = test_items(&t);
     let dir = path.parent().unwrap_or(Path::new(""));
     let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-    let mod_rs = matches!(stem, "mod" | "lib" | "main");
     let mut out = Vec::new();
-    for item in test_items(&t) {
-        if item_kind(&t, item.item) != "mod" || t.get(item.end - 1) != Some(&';') {
+    for at in 0..t.len() {
+        if !starts_with(&t, at, "mod")
+            || (at > 0 && is_ident(t[at - 1]))
+            || t.get(at + 3).is_some_and(|c| is_ident(*c))
+        {
             continue;
         }
-        let at = item.item
-            + t[item.item..]
-                .iter()
-                .collect::<String>()
-                .find("mod ")
-                .unwrap_or(0)
-            + 4;
-        let name = word_at(&t, skip_ws(&t, at));
-        let inline = inline_modules_at(&t, item.start);
+        let name_at = skip_ws(&t, at + 3);
+        let name = word_at(&t, name_at);
+        if name.is_empty() || t.get(skip_ws(&t, name_at + name.chars().count())) != Some(&';') {
+            continue;
+        }
         // `#[path = "…"]` from the raw text (strings are blank in `t`).
-        let attrs: String = src[item.start..item.item].iter().collect();
-        let path_attr = attrs.find("#[path").and_then(|at| {
-            let rest = attrs[at + 6..].trim_start().strip_prefix('=')?;
+        let attrs: String = src[item_start(&t, at)..at].iter().collect();
+        let path_attr = attrs.find("#[path").and_then(|p| {
+            let rest = attrs[p + 6..].trim_start().strip_prefix('=')?;
             let rest = rest.trim_start().strip_prefix('"')?;
             Some(rest[..rest.find('"')?].to_string())
         });
+        let inline = inline_modules_at(&t, at);
         let mut base = dir.to_path_buf();
         if !mod_rs && (path_attr.is_none() || !inline.is_empty()) {
             base.push(stem);
         }
         base.extend(&inline);
-        match path_attr {
-            Some(file) => {
-                let file = base.join(file);
-                out.push(file.with_extension(""));
-                out.push(file);
-            }
-            None => {
-                out.push(base.join(format!("{name}.rs")));
-                out.push(base.join(&name));
-            }
-        }
+        out.push(ModDecl {
+            candidates: match &path_attr {
+                Some(file) => vec![base.join(file)],
+                None => vec![
+                    base.join(format!("{name}.rs")),
+                    base.join(&name).join("mod.rs"),
+                ],
+            },
+            path_attr: path_attr.is_some(),
+            test: tests.iter().any(|item| item.start <= at && at < item.end),
+        });
     }
     out
 }
 
-/// Every `.rs` file below the `src/` of every stat-tracker crate but the
-/// GUI (`crates/stat-tracker*/src`: this lib, its bin `main.rs` and the
-/// crates split out of it in 0.6 N4), with its production code
-/// ([`production_text`]). Names are crate-qualified
+/// The crate roots among `files` below `src`: `lib.rs`, `main.rs`,
+/// `bin/*.rs`, `bin/*/main.rs`.
+fn crate_roots(files: &BTreeMap<PathBuf, String>, src: &Path) -> Vec<PathBuf> {
+    files
+        .keys()
+        .filter(|path| {
+            let Ok(rel) = path.strip_prefix(src) else {
+                return false;
+            };
+            let parts: Vec<&str> = rel.iter().filter_map(|p| p.to_str()).collect();
+            matches!(parts.as_slice(), ["lib.rs" | "main.rs"] | ["bin", _])
+                || matches!(parts.as_slice(), ["bin", _, "main.rs"])
+        })
+        .cloned()
+        .collect()
+}
+
+/// The files the module tree reaches from `roots`, through every
+/// declaration (`with_tests`) or through those that are not test-only.
+fn reached(
+    files: &BTreeMap<PathBuf, String>,
+    roots: &[PathBuf],
+    with_tests: bool,
+) -> BTreeSet<PathBuf> {
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut todo: Vec<(PathBuf, bool)> = roots.iter().map(|root| (root.clone(), true)).collect();
+    while let Some((path, mod_rs)) = todo.pop() {
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        for decl in mod_decls(&path, mod_rs, &files[&path]) {
+            if decl.test && !with_tests {
+                continue;
+            }
+            if let Some(file) = decl.candidates.iter().find(|c| files.contains_key(*c)) {
+                let owns_dir = decl.path_attr || file.file_name().is_some_and(|n| n == "mod.rs");
+                todo.push((file.clone(), owns_dir));
+            }
+        }
+    }
+    seen
+}
+
+/// The test-only files among `files` (a crate's `src/`): reached through a
+/// test-only declaration and through no other. A file that a production
+/// declaration also loads (a `cfg(not(test))` twin, a `#[path]`) is
+/// production code, and so is a file no declaration reaches.
+fn test_only_files(files: &BTreeMap<PathBuf, String>, src: &Path) -> BTreeSet<PathBuf> {
+    let roots = crate_roots(files, src);
+    let production = reached(files, &roots, false);
+    reached(files, &roots, true)
+        .into_iter()
+        .filter(|path| !production.contains(path))
+        .collect()
+}
+
+/// The scanned tree: every `.rs` file below the `src/` of every
+/// stat-tracker crate but the GUI (`crates/stat-tracker*/src`: this lib,
+/// its bin `main.rs` and the crates split out of it in 0.6 N4) that is not
+/// test-only, with its production code ([`production_text`]); and the
+/// test-only files left out. Names are crate-qualified
 /// (`stat-tracker/src/ocr/mod.rs`), so two crates' `lib.rs` stay apart.
-pub(super) fn production_sources() -> Vec<(String, String)> {
+pub(super) fn production_sources() -> (Vec<(String, String)>, Vec<String>) {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         for entry in std::fs::read_dir(dir).expect("read src") {
             let path = entry.expect("dir entry").path();
@@ -425,40 +559,25 @@ pub(super) fn production_sources() -> Vec<(String, String)> {
         .filter(|src| src.is_dir())
         .collect();
     roots.sort();
-    let mut out = Vec::new();
+    let (mut scanned, mut left_out) = (Vec::new(), Vec::new());
     for src in roots {
-        let mut files = Vec::new();
-        walk(&src, &mut files);
-        files.sort();
-        let texts: Vec<(PathBuf, String)> = files
+        let mut paths = Vec::new();
+        walk(&src, &mut paths);
+        let files: BTreeMap<PathBuf, String> = paths
             .into_iter()
             .map(|path| {
                 let text = std::fs::read_to_string(&path).expect("read a source file");
                 (path, text)
             })
             .collect();
-        let test_only: Vec<PathBuf> = texts
-            .iter()
-            .flat_map(|(path, text)| test_module_files(path, text))
-            .collect();
+        let test_only = test_only_files(&files, &src);
         let crate_dir = src
             .parent()
             .and_then(|dir| dir.file_name())
             .and_then(|name| name.to_str())
             .expect("a crate directory")
             .to_string();
-        for (path, text) in texts {
-            let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-            // `mod tests;` files, the OCR-off bench, the daemon's
-            // `main_tests/` (main.rs's test module) and every other module
-            // loaded only by a `#[cfg(test)] mod x;` are test code.
-            if stem.starts_with("tests")
-                || stem == "ocr_bench"
-                || path.starts_with(src.join("main_tests"))
-                || test_only.iter().any(|test| path.starts_with(test))
-            {
-                continue;
-            }
+        for (path, text) in files {
             let name = format!(
                 "{crate_dir}/src/{}",
                 path.strip_prefix(&src)
@@ -466,19 +585,25 @@ pub(super) fn production_sources() -> Vec<(String, String)> {
                     .to_string_lossy()
                     .replace('\\', "/")
             );
-            out.push((name, production_text(&text)));
+            if test_only.contains(&path) {
+                left_out.push(name);
+            } else {
+                scanned.push((name, production_text(&text)));
+            }
         }
     }
-    out
+    (scanned, left_out)
 }
 
-/// Each place `needle` occurs in `sources`, as `file:line`.
-fn sites(sources: &[(String, String)], needle: &str) -> Vec<String> {
+/// Each call of `name` in `sources` (`name(`, also `name (`), as
+/// `file:line`.
+fn sites(sources: &[(String, String)], name: &str) -> Vec<String> {
     sources
         .iter()
-        .flat_map(|(name, text)| {
-            text.match_indices(needle)
-                .map(move |(at, _)| format!("{name}:{}", text[..at].matches('\n').count() + 1))
+        .flat_map(|(file, text)| {
+            text.match_indices(name)
+                .filter(|(at, _)| text[at + name.len()..].trim_start().starts_with('('))
+                .map(move |(at, _)| format!("{file}:{}", text[..at].matches('\n').count() + 1))
         })
         .collect()
 }
@@ -493,6 +618,11 @@ fn files_of(sites: &[String]) -> Vec<String> {
     files
 }
 
+/// The scanned tree has at least this many files (one less than on
+/// 2026-10-23), so a module-tree bug cannot drop files from the scan
+/// unseen.
+const MIN_SCANNED: usize = 85;
+
 /// Nothing outside the gate can start Tesseract or open the gate:
 /// - one `LepTess` construction in the whole tree, in `ocr_with`;
 /// - `ocr_with` is called from `ocr/mod.rs` only;
@@ -502,14 +632,14 @@ fn files_of(sites: &[String]) -> Vec<String> {
 fn nothing_outside_the_gate_starts_tesseract_or_opens_the_gate() {
     // Built at run time, so this test does not find itself (its file is
     // test code and left out anyway).
-    let construct = format!("LepTess::{}(", "new");
-    let read = format!("ocr_{}(", "with");
-    let set_mode = format!("set_{}(", "mode");
-    let scoped = format!("scop{}(", "ed");
-    let sources = production_sources();
+    let construct = format!("LepTess::{}", "new");
+    let read = format!("ocr_{}", "with");
+    let set_mode = format!("set_{}", "mode");
+    let scoped = format!("scop{}", "ed");
+    let (sources, left_out) = production_sources();
     assert!(
-        sources.len() > 20,
-        "the walk found the tree: {}",
+        sources.len() >= MIN_SCANNED,
+        "the walk found the tree: {} files scanned",
         sources.len()
     );
     // The daemon binary and stat-tracker-core are in the walk, not only
@@ -530,10 +660,37 @@ fn nothing_outside_the_gate_starts_tesseract_or_opens_the_gate() {
     // Test code as a whole stays out: main.rs's `#[cfg(test)] mod
     // main_tests;` and the files below it.
     assert!(
+        left_out
+            .iter()
+            .any(|name| name == "stat-tracker/src/main_tests/mod.rs")
+    );
+    assert!(
         !sources
             .iter()
             .any(|(name, _)| name.starts_with("stat-tracker/src/main_tests/")),
         "main_tests/ is test code"
+    );
+    // A file left out is named as test code (`tests*`, `*_tests`,
+    // `ocr_bench`, or below such a module), or pinned here: a new
+    // exclusion of any other file is a visible diff.
+    let test_named = |name: &str| {
+        name.split('/').skip(2).any(|part| {
+            let stem = part.strip_suffix(".rs").unwrap_or(part);
+            stem.starts_with("tests") || stem.ends_with("_tests") || stem == "ocr_bench"
+        })
+    };
+    let other: Vec<&str> = left_out
+        .iter()
+        .map(String::as_str)
+        .filter(|name| !test_named(name))
+        .collect();
+    assert_eq!(
+        other,
+        [
+            "stat-tracker/src/report/blank/port_check.rs",
+            "stat-tracker/src/report/blank/synth.rs",
+        ],
+        "files left out as test-only, all: {left_out:?}"
     );
     let built = sites(&sources, &construct);
     assert_eq!(
@@ -640,11 +797,15 @@ fn production() {
     {
         set_mode(Off);
     }
+    #[cfg(test)]
+    const { assert!(true) }
+    set_mode(D);
     set_mode(C);
 }
 "#;
     let text = production_text(source);
-    assert_eq!(lines_with(&text, "set_mode("), [18, 20, 33]);
+    assert_eq!(lines_with(&text, "set_mode("), [18, 20, 35, 36]);
+    assert!(!text.contains("assert!(true)"));
     for gone in [
         "LepTess",
         "scoped(",
@@ -718,40 +879,131 @@ fn after() { set_mode(On); }
     assert_eq!(lines_with(&text, "set_mode("), [10, 14, 17]);
 }
 
-/// The files a `#[cfg(test)] mod x;` loads, by the Rust reference's rules:
-/// from a mod-rs file, from a non-mod-rs file, inside an inline module and
-/// through `#[path]`. Non-test declarations load nothing here.
+/// The test-only files of a synthetic `src/`, as `src/…` names.
+fn test_only_of(files: &[(&str, &str)]) -> Vec<String> {
+    let files: BTreeMap<PathBuf, String> = files
+        .iter()
+        .map(|(path, text)| (PathBuf::from(path), text.to_string()))
+        .collect();
+    test_only_files(&files, Path::new("src"))
+        .into_iter()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .collect()
+}
+
+/// A file is never left out for its name: a production module named
+/// `tests_*` is scanned. Only test-only declarations leave a file out, and
+/// with it the modules below it.
 #[test]
-fn test_module_files_follow_the_module_rules() {
-    let files = |path: &str, source: &str| -> Vec<String> {
-        test_module_files(Path::new(path), source)
-            .into_iter()
-            .map(|p| p.to_string_lossy().replace('\\', "/"))
-            .collect()
-    };
+fn files_are_left_out_by_their_declarations_not_their_names() {
     assert_eq!(
-        files(
-            "src/main.rs",
-            "mod prod;\n#[cfg(test)]\nmod main_tests;\nfn main() {}\n"
-        ),
-        ["src/main_tests.rs", "src/main_tests"]
+        test_only_of(&[
+            (
+                "src/lib.rs",
+                "pub mod tests_prod_helper;\n#[cfg(test)]\nmod tests;\n"
+            ),
+            ("src/tests_prod_helper.rs", "fn f() { set_mode(On); }\n"),
+            ("src/tests.rs", ""),
+        ]),
+        ["src/tests.rs"]
     );
     assert_eq!(
-        files("src/a/b.rs", "#[cfg(test)]\npub(crate) mod synth;\n"),
-        ["src/a/b/synth.rs", "src/a/b/synth"]
+        test_only_of(&[
+            (
+                "src/main.rs",
+                "mod run;\n#[cfg(test)]\nmod\n    main_tests;\n#[cfg(test)]\nmod ocr_bench;\n"
+            ),
+            ("src/run.rs", ""),
+            ("src/ocr_bench.rs", ""),
+            ("src/main_tests/mod.rs", "mod cell_trust;\n"),
+            ("src/main_tests/cell_trust.rs", ""),
+        ]),
+        [
+            "src/main_tests/cell_trust.rs",
+            "src/main_tests/mod.rs",
+            "src/ocr_bench.rs"
+        ]
+    );
+}
+
+/// A file that a production declaration also loads is production code: a
+/// `cfg(not(test))` twin of a test declaration, or a `#[path]` to a file
+/// that also has its own declaration.
+#[test]
+fn a_file_is_test_only_when_every_declaration_of_it_is() {
+    assert_eq!(
+        test_only_of(&[
+            (
+                "src/lib.rs",
+                r#"#[cfg(test)]
+pub(crate) mod synth;
+#[cfg(not(test))]
+pub(crate) mod synth;
+mod prod;
+#[cfg(test)]
+#[path = "prod.rs"]
+mod again;
+#[cfg(test)]
+#[path = "only_test.rs"]
+mod t;
+"#
+            ),
+            ("src/synth.rs", ""),
+            ("src/prod.rs", ""),
+            ("src/only_test.rs", ""),
+        ]),
+        ["src/only_test.rs"]
+    );
+}
+
+/// Where a declaration's file is: below a non-mod-rs file (a `lib.rs` that
+/// is no crate root is one), inside an inline module, inside a test module,
+/// and through `#[path]`. A file no declaration reaches is scanned.
+#[test]
+fn test_only_files_follow_the_module_rules() {
+    assert_eq!(
+        test_only_of(&[
+            ("src/lib.rs", "mod a;\npub mod detect;\n"),
+            ("src/a/mod.rs", "mod lib;\nmod b;\n"),
+            ("src/a/lib.rs", "#[cfg(test)]\nmod t;\n"),
+            ("src/a/t.rs", ""),
+            ("src/a/lib/t.rs", ""),
+            ("src/a/b.rs", "#[cfg(test)]\npub(crate) mod synth;\n"),
+            ("src/a/b/synth.rs", ""),
+            ("src/detect/mod.rs", "mod own_row;\n"),
+            (
+                "src/detect/own_row.rs",
+                "#[cfg(test)]\n#[path = \"own_row_tests.rs\"]\nmod tests;\n"
+            ),
+            ("src/detect/own_row_tests.rs", ""),
+        ]),
+        [
+            "src/a/b/synth.rs",
+            "src/a/lib/t.rs",
+            "src/detect/own_row_tests.rs"
+        ]
     );
     assert_eq!(
-        files(
-            "src/detect/own_row.rs",
-            "#[cfg(test)]\n#[path = \"own_row_tests.rs\"]\nmod tests;\n"
-        ),
-        ["src/detect/own_row_tests", "src/detect/own_row_tests.rs"]
+        test_only_of(&[
+            (
+                "src/lib.rs",
+                "mod outer {\n    #[cfg(test)]\n    mod t;\n}\n#[cfg(test)]\nmod inl {\n    mod deeper;\n}\nmod my_mod;\n"
+            ),
+            ("src/outer/t.rs", ""),
+            ("src/inl/deeper.rs", ""),
+            ("src/t.rs", ""),
+            ("src/my_mod.rs", ""),
+        ]),
+        ["src/inl/deeper.rs", "src/outer/t.rs"]
     );
-    assert_eq!(
-        files(
-            "src/lib.rs",
-            "mod outer {\n    #[cfg(test)]\n    mod t;\n}\n#[cfg(test)]\nmod inline { fn x() {} }\n"
-        ),
-        ["src/outer/t.rs", "src/outer/t"]
-    );
+}
+
+/// A call is found with a space before its parenthesis too.
+#[test]
+fn sites_see_a_space_before_the_parenthesis() {
+    let sources = [(
+        "a.rs".to_string(),
+        "fn f() {\n    set_mode (On);\n    set_mode(Off);\n    let x = set_mode;\n}\n".to_string(),
+    )];
+    assert_eq!(sites(&sources, "set_mode"), ["a.rs:2", "a.rs:3"]);
 }
