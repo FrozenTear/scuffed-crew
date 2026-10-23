@@ -1,7 +1,7 @@
 //! Startup / maintenance helpers around the local SurrealKV store and logs.
 //!
 //! SurrealKV keeps historical versions; weeks of captures leave the store
-//! dominated by dead data (see [`super::LocalStore::vacuum`]). Manual
+//! dominated by dead data (see [`LocalStore::vacuum`] below). Manual
 //! `--vacuum` already compact, but nothing ran unless the user remembered.
 //! These helpers run at daemon start (pid-guard held, store not yet open):
 //! rotate `daemon.log`, prune old pre-vacuum backups, and auto-vacuum when
