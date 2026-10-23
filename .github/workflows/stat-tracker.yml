@@ -139,12 +139,50 @@ jobs:
       - name: Build
         run: cargo build --locked $TRACKER_PACKAGES
 
+      - name: Stack guard (opt-level 0)
+        # `capture_futures_stay_small` guards #432: in a debug build the Tab
+        # capture future runs on a test thread's 2 MiB stack, and its bounds
+        # (main.rs) are opt-level 0 sizes. The Test step below builds the
+        # tracker at opt-level 2, where futures and frames shrink, so this
+        # one test also runs unoptimized, the way every local build runs it.
+        # Costs one opt-level 0 compile of the bin test harness (~20-40 s);
+        # the Build step's artifacts are not reused (dev-dependency features
+        # differ). The grep fails the step if a rename leaves the filter
+        # matching nothing.
+        run: |
+          set -o pipefail
+          cargo test --locked -p scuffed-stat-tracker --bin scuffed-stat-tracker \
+            -- --exact main_tests::poll_cadence::capture_futures_stay_small \
+            | tee "$RUNNER_TEMP/stack-guard.log"
+          grep -q "test result: ok. 1 passed" "$RUNNER_TEMP/stack-guard.log"
+
       - name: Test
         # No --examples: plain `cargo test` also links the 19 dev-tool
         # examples, and nothing here runs them. Clippy --all-targets still
         # checks they compile. The crate has no doctests (only ```text blocks),
         # so --lib --bins --tests covers every test it has. Same for core.
-        run: cargo test --locked $TRACKER_PACKAGES --lib --bins --tests
+        #
+        # CI builds the tracker crate at opt-level 2 for its tests: they are
+        # pixel work in the crate itself (blanking, template matching, digit
+        # reads). In CI the lib tests took 443 s -> 51 s, integration
+        # 67 s -> 19 s, for 40 s -> 143 s of compile (opt-level 1: 120 s
+        # compile, 281 s lib, so 2 it is). Local `cargo test` and the Build
+        # step stay at opt-level 0. Assertions and overflow checks stay on,
+        # set explicitly; line tables come from [profile.dev]. The stack
+        # guard above covers the one test whose bounds are opt-level 0 sizes.
+        # Core gets no override: its 200 tests take 0.06 s.
+        # The per-package `--config` changes only workspace-member artifacts,
+        # which rust-cache does not store; the cached deps are unchanged, so
+        # this needs no prefix-key bump (unlike a root [profile.*] change).
+        # The same fast full run locally:
+        #   cargo test -p scuffed-stat-tracker --config 'profile.test.package.scuffed-stat-tracker.opt-level=2'
+        env:
+          OPT: profile.test.package.scuffed-stat-tracker
+        run: >-
+          cargo test --locked $TRACKER_PACKAGES --lib --bins --tests
+          --config "$OPT.opt-level=2"
+          --config "$OPT.debug-assertions=true"
+          --config "$OPT.overflow-checks=true"
 
   clippy:
     name: Clippy (stat-tracker)
