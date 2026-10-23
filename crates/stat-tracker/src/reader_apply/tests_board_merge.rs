@@ -226,8 +226,8 @@ fn digits_board(rows: usize) -> digits::BoardRead {
 #[test]
 fn only_a_sure_result_from_the_words_pack_is_saved() {
     use crate::reader_apply::{OwnRow, PolicyRow, merge_saved};
-    use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
     use crate::shadow::result::{ACCOLADE, Outcome, RANK_SCREEN, WORDS_SUBDIR};
+    use crate::shadow::tests_fixtures::result::{lay, paint, word, write_pack};
     let data = tempfile::tempdir().unwrap();
     let words = data.path().join(WORDS_SUBDIR);
     write_pack(

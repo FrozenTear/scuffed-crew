@@ -1027,7 +1027,7 @@ fn real_ocr_text_fields_are_dropped_without_a_name_list() {
 
 mod game {
     use super::*;
-    use crate::report::blank::synth::{self, Layout};
+    use crate::report::blank::tests_synth::{self as synth, Layout};
     use crate::report::bundle::{GameCategory, GameReportInput, build_game_report};
     use crate::report::kit::{self, KitRead, KitReads};
     use image::{DynamicImage, Rgb, RgbImage};

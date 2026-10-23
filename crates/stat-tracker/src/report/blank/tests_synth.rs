@@ -461,7 +461,7 @@ pub(crate) fn frame(layout: Layout, values: &[[u32; 6]; 12]) -> image::DynamicIm
     let mut f = RgbImage::from_fn(2560, 1440, |x, y| {
         Rgb([(30 + x * 40 / 2560) as u8, (45 + y * 40 / 1440) as u8, 60])
     });
-    let (x, y, _, _) = crate::ocr::preprocess::crop_scoreboard_rect(2560, 1440);
+    let (x, y, _, _) = crate::frame::geometry::crop_scoreboard_rect(2560, 1440);
     image::imageops::replace(
         &mut f,
         &board_with(layout, values),
@@ -641,7 +641,7 @@ pub(crate) fn tab_frame(teams: Teams, width: u32, drawn: usize) -> image::Dynami
             60,
         ])
     });
-    let (x, y, cw, ch) = crate::ocr::preprocess::crop_scoreboard_rect(width, height);
+    let (x, y, cw, ch) = crate::frame::geometry::crop_scoreboard_rect(width, height);
     let crop = tab_crop(teams, drawn);
     let crop = if (cw, ch) == (W, H) {
         crop

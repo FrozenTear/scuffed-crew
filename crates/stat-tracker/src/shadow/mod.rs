@@ -19,7 +19,7 @@ pub mod confirm;
 pub mod digits;
 pub mod heroes;
 pub mod log;
-pub mod ncc;
+mod ncc;
 pub mod reader;
 pub mod result;
 pub mod worker;
@@ -31,3 +31,6 @@ pub use reader::{
     read_final_score, read_heroes, read_phrase, read_result, read_result_screens, read_top_bar,
     result_field, result_screens, suspect_field_names, top_bar_map,
 };
+
+#[cfg(test)]
+pub(crate) mod tests_fixtures;

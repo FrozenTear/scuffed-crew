@@ -686,10 +686,7 @@ fn nothing_outside_the_gate_starts_tesseract_or_opens_the_gate() {
         .collect();
     assert_eq!(
         other,
-        [
-            "stat-tracker/src/report/blank/port_check.rs",
-            "stat-tracker/src/report/blank/synth.rs",
-        ],
+        ["stat-tracker/src/report/blank/port_check.rs",],
         "files left out as test-only, all: {left_out:?}"
     );
     let built = sites(&sources, &construct);
