@@ -59,7 +59,7 @@ pub fn list_outputs() -> Result<Vec<String>, Box<dyn std::error::Error>> {
 
 /// Output names and logical rectangles (xdg-output), for cropping portal
 /// screenshots. KDE serves these even without screencopy.
-pub fn output_rects()
+pub(crate) fn output_rects()
 -> Result<Vec<super::geom::OutputRect>, Box<dyn std::error::Error + Send + Sync>> {
     with_wayshot(|wayshot| {
         Ok(wayshot
