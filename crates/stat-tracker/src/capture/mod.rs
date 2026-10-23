@@ -715,9 +715,9 @@ mod tests {
         for err in [
             format!("portal screenshot: {}", flight::BUSY),
             stream::OPEN_IN_PROGRESS.to_string(),
-            stream::NO_CAPTURE_DECLINE_NOTICE.to_string(),
-            stream::timeout_notice(false).to_string(),
-            stream::SHARE_CLOSED_UNTIL_GAME.to_string(),
+            stream::policy::NO_CAPTURE_DECLINE_NOTICE.to_string(),
+            stream::policy::timeout_notice(false).to_string(),
+            stream::policy::SHARE_CLOSED_UNTIL_GAME.to_string(),
             stream::STREAM_MISS.to_string(),
             stream::pw::NO_STREAM_FRAME.to_string(),
             format!("portal screenshot: {}", portal::SHOT_BACKOFF),
