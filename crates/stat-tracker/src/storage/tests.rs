@@ -1,6 +1,6 @@
 //! Shared fixtures for the `storage` tests (`snap`, `mark_current`,
-//! `reopen_store`), and the tests of the store handle: the directory flock
-//! and the writer lock held until exit.
+//! `reopen_store`, `session_row`, `final_outcome`), and the tests of the
+//! store handle: the directory flock and the writer lock held until exit.
 
 use super::*;
 use chrono::Utc;
@@ -63,6 +63,29 @@ pub(super) async fn reopen_store(path: &std::path::Path) -> LocalStore {
         }
     }
     panic!("store did not reopen: {}", last.unwrap_or_default());
+}
+
+pub(super) fn session_row(session_id: &str, outcome: &str) -> MatchSession {
+    MatchSession {
+        session_id: session_id.into(),
+        hero: "Test".into(),
+        map_name: String::new(),
+        role: "Tank".into(),
+        started_at: SurrealDatetime::from(Utc::now()),
+        last_capture_at: SurrealDatetime::from(Utc::now()),
+        capture_count: 1,
+        final_outcome: outcome.into(),
+    }
+}
+
+pub(super) async fn final_outcome(store: &LocalStore, session_id: &str) -> Option<String> {
+    store
+        .get_all_sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|s| s.session_id == session_id)
+        .map(|s| s.final_outcome)
 }
 
 fn expect_busy<T>(result: Result<T, Box<dyn std::error::Error + Send + Sync>>, what: &str) {
