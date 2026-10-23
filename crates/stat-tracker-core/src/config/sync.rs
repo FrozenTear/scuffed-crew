@@ -1,12 +1,45 @@
-//! `[sync]`: the site URL and daemon token, and the check that the token
-//! is never sent in the clear.
+//! `[sync]`: the site URL and daemon token, the rule that a missing token
+//! means sync is off, and the check that the token is never sent in the
+//! clear.
 
-use serde::{Deserialize, Serialize};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct SyncConfig {
     pub server_url: String,
     pub token: String,
+}
+
+/// `[sync]` as written in config.toml, before the "no token means off" rule.
+/// `expecting` names the table in errors instead of this type.
+#[derive(Deserialize)]
+#[serde(expecting = "a [sync] table with server_url and token")]
+struct StoredSync {
+    server_url: Option<String>,
+    token: Option<String>,
+}
+
+/// Reads `Config::sync`. A `[sync]` table whose `token` is missing, empty or
+/// only spaces is sync off (`None`), like a file with no `[sync]` at all, and
+/// the rest of the file loads as usual. Settings then shows sync as off, and
+/// the daemon starts without a sync client.
+///
+/// A table that has a token but no `server_url` is still an error: reading it
+/// as off would let a later full save drop the token.
+pub(super) fn deserialize_sync<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SyncConfig>, D::Error> {
+    let Some(stored) = Option::<StoredSync>::deserialize(deserializer)? else {
+        return Ok(None);
+    };
+    let Some(token) = stored.token.filter(|token| !token.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let server_url = stored
+        .server_url
+        .ok_or_else(|| D::Error::missing_field("server_url"))?;
+    Ok(Some(SyncConfig { server_url, token }))
 }
 
 /// Settings copy and the daemon log share this sentence. Plain `http` to a

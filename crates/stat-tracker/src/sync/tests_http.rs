@@ -403,3 +403,143 @@ async fn upload_429_rate_limited_keeps_retry_after() {
         } if wait == std::time::Duration::from_secs(45)
     ));
 }
+
+/// Serve one canned response per connection, in order, and return each
+/// request head. Stops at the first accept that does not come within the
+/// deadline, so a request that never arrives shows as a missing entry.
+fn serve_http(listener: std::net::TcpListener, responses: Vec<Vec<u8>>) -> Vec<String> {
+    let mut heads = Vec::new();
+    for response in responses {
+        let head = exchange_http(listener.try_clone().expect("clone listener"), &response);
+        if head.is_empty() {
+            break;
+        }
+        heads.push(head);
+    }
+    heads
+}
+
+fn redirect_to(location: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn same_origin_needs_scheme_host_and_port() {
+    let url = |raw: &str| reqwest::Url::parse(raw).expect("url");
+    let base = url("https://crew.example/api/stats/upload");
+    assert!(super::client::same_origin(
+        &base,
+        &url("https://crew.example:443/other/path?x=1")
+    ));
+    assert!(super::client::same_origin(
+        &base,
+        &url("https://CREW.example/api/stats/upload")
+    ));
+    for other in [
+        "http://crew.example/api/stats/upload",
+        "https://crew.example:8443/api/stats/upload",
+        "https://www.crew.example/api/stats/upload",
+        "https://evil.example/api/stats/upload",
+    ] {
+        assert!(!super::client::same_origin(&base, &url(other)), "{other}");
+    }
+}
+
+#[tokio::test]
+async fn redirect_to_another_port_is_refused_before_it_is_sent() {
+    let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind site");
+    let site_port = site.local_addr().expect("addr").port();
+    let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").expect("bind elsewhere");
+    let elsewhere_port = elsewhere.local_addr().expect("addr").port();
+    let target = format!("http://127.0.0.1:{elsewhere_port}/api/stats/daemon-config");
+    let site_server = std::thread::spawn(move || exchange_http(site, &redirect_to(&target)));
+    let elsewhere_server = std::thread::spawn(move || recv_one_http(elsewhere));
+
+    let c = client(&format!("http://127.0.0.1:{site_port}"));
+    let err = c.fetch_daemon_config().await.expect_err("redirect refused");
+    let first = site_server.join().expect("site");
+    let leaked = elsewhere_server.join().expect("elsewhere");
+
+    assert!(
+        first
+            .to_ascii_lowercase()
+            .contains("authorization: bearer super-secret-token"),
+        "the configured server still gets the token: {first:?}"
+    );
+    assert!(
+        leaked.is_empty(),
+        "nothing may reach the redirect target, got {leaked:?}"
+    );
+    assert!(
+        err.message.contains(super::client::SYNC_REDIRECT_OFF_SITE),
+        "the member is told why: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("super-secret-token"),
+        "{}",
+        err.message
+    );
+    assert_eq!(err.status, None, "a refused redirect is not a site status");
+    assert!(
+        !matches!(err.attempt(), SyncAttempt::AuthRejected),
+        "a refused redirect must not pause sync as a rejected token"
+    );
+}
+
+#[tokio::test]
+async fn redirect_to_another_host_or_scheme_is_refused() {
+    for target in [
+        // Same port, other host name: still another origin.
+        "http://localhost:{port}/api/stats/upload",
+        // Same host and port, other scheme.
+        "https://127.0.0.1:{port}/api/stats/upload",
+        "https://203.0.113.10/api/stats/upload",
+    ] {
+        let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind site");
+        let port = site.local_addr().expect("addr").port();
+        let location = target.replace("{port}", &port.to_string());
+        let responses = vec![redirect_to(&location), redirect_to(&location)];
+        let server = std::thread::spawn(move || serve_http(site, responses));
+        let c = client(&format!("http://127.0.0.1:{port}"));
+        let err = c.upload_matches(&[], &[]).await.expect_err("refused");
+        let heads = server.join().expect("site");
+        assert_eq!(heads.len(), 1, "{location}: only the first request is sent");
+        assert!(
+            err.message.contains(super::client::SYNC_REDIRECT_OFF_SITE),
+            "{location}: {}",
+            err.message
+        );
+    }
+}
+
+#[tokio::test]
+async fn same_site_redirect_is_followed_with_the_token() {
+    let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind site");
+    let port = site.local_addr().expect("addr").port();
+    let responses = vec![
+        redirect_to("/api/stats/daemon-config/"),
+        b"HTTP/1.1 401 no\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+    ];
+    let server = std::thread::spawn(move || serve_http(site, responses));
+    let c = client(&format!("http://127.0.0.1:{port}"));
+    let err = c
+        .fetch_daemon_config()
+        .await
+        .expect_err("401 after the hop");
+    let heads = server.join().expect("site");
+    assert_eq!(heads.len(), 2, "the same-site hop is followed: {heads:?}");
+    let second = heads[1].to_ascii_lowercase();
+    assert!(
+        second.contains("get /api/stats/daemon-config/ "),
+        "{second:?}"
+    );
+    assert!(
+        second.contains("authorization: bearer super-secret-token"),
+        "{second:?}"
+    );
+    assert_eq!(err.status, Some(401));
+}

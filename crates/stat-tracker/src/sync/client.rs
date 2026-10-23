@@ -30,8 +30,9 @@ impl SyncClient {
         // A hung connection must never hang the caller: sync runs concurrently
         // with capture, and shutdown does a final inline upload. Fail closed,
         // a client without the timeout re-opens the M4 daemon-stall bug.
-        // Redirects to a URL that fails the same check are errors, so a
-        // downgrade to cleartext cannot carry the bearer token.
+        // Redirects are followed only on the configured server's own
+        // scheme, host and port (`token_safe_redirects`), so the bearer
+        // token never follows a redirect to another host or to cleartext.
         let http = reqwest::Client::builder()
             .user_agent(USER_AGENT)
             .timeout(std::time::Duration::from_secs(30))
@@ -128,7 +129,7 @@ impl SyncClient {
             .bearer_auth(&creds.token)
             .send()
             .await
-            .map_err(|e| SyncUploadError::plain(e.to_string()))?;
+            .map_err(|e| SyncUploadError::plain(send_error_text(&e)))?;
 
         if !resp.status().is_success() {
             return Err(error_from_response(resp, "daemon-config fetch").await.0);
@@ -164,7 +165,7 @@ impl SyncClient {
             .json(&upload_request(matches, deleted_sessions))
             .send()
             .await
-            .map_err(|e| SyncUploadError::plain(e.to_string()))?;
+            .map_err(|e| SyncUploadError::plain(send_error_text(&e)))?;
 
         if !resp.status().is_success() {
             let (err, scheduled_at) = error_from_response(resp, "Upload").await;
@@ -225,14 +226,59 @@ fn retry_after_from_response(resp: &reqwest::Response) -> Option<std::time::Dura
     parse_retry_after(raw, chrono::Utc::now())
 }
 
-fn token_safe_redirects() -> reqwest::redirect::Policy {
+/// Follow a redirect only when it stays on the scheme, host and port of the
+/// first request, which is the configured server. The site's stats routes
+/// never redirect; a proxy may still send a same-site path redirect. Anything
+/// else (another host, another port, `https` to `http` or back) is an error,
+/// so neither the bearer token nor the upload body goes to a server the
+/// member did not configure. reqwest would drop `Authorization` on a
+/// cross-host hop, but the request would still go there, and a 401 from it
+/// would pause sync as a rejected token.
+///
+/// Public for every client that sends the sync token or a link secret: the
+/// desktop app's token check, sign-in link and report upload use it too.
+pub fn token_safe_redirects() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 10 {
             return attempt.error(std::io::Error::other("too many sync redirects"));
+        }
+        let same_server = attempt
+            .previous()
+            .first()
+            .is_some_and(|first| same_origin(first, attempt.url()));
+        if !same_server {
+            return attempt.error(std::io::Error::other(SYNC_REDIRECT_OFF_SITE));
         }
         if let Err(reject) = validate_sync_server_url(attempt.url().as_str()) {
             return attempt.error(reject);
         }
         attempt.follow()
     })
+}
+
+/// `e` as text. A refused redirect also names why: reqwest's own text is
+/// only "error following redirect for url (...)", and the reason sits in
+/// its source.
+fn send_error_text(e: &reqwest::Error) -> String {
+    let mut text = e.to_string();
+    if e.is_redirect() {
+        let mut source = std::error::Error::source(e);
+        while let Some(cause) = source {
+            text.push_str(": ");
+            text.push_str(&cause.to_string());
+            source = cause.source();
+        }
+    }
+    text
+}
+
+/// Error text for a redirect away from the configured server.
+pub(super) const SYNC_REDIRECT_OFF_SITE: &str = "the site redirected sync to a different address; \
+     set the Website URL in Settings to the address the site uses";
+
+/// Same scheme, host and port (the default port counts as written).
+pub(super) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {
+    a.scheme() == b.scheme()
+        && a.host_str() == b.host_str()
+        && a.port_or_known_default() == b.port_or_known_default()
 }

@@ -830,9 +830,13 @@ pub fn site_link_url(server_url: &str) -> Result<String, String> {
     Ok(format!("{base}/link"))
 }
 
+/// Sign-in link and token check. These carry the device code or the sync
+/// token, so a redirect is followed only on the site's own scheme, host
+/// and port, the same rule as the tracker's uploads.
 fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
+        .redirect(stat_tracker::sync::token_safe_redirects())
         .build()
         .map_err(|_| REACH_SITE.to_string())
 }
@@ -2600,6 +2604,32 @@ mod tests {
             PollUpdate::Outcome(outcome) => outcome,
             PollUpdate::RateLimited { seconds } => panic!("rate limited for {seconds}s"),
         }
+    }
+
+    /// The token check follows a redirect only on the site's own origin:
+    /// a hop to another port never reaches it, so the token stays home.
+    #[tokio::test]
+    async fn token_check_does_not_follow_a_redirect_off_the_site() {
+        let elsewhere_hits = Arc::new(Mutex::new(Vec::<String>::new()));
+        let elsewhere_log = elsewhere_hits.clone();
+        let elsewhere = spawn_mock(move |head, _body| {
+            elsewhere_log.lock().expect("hits").push(head.to_string());
+            (200, vec![], r#"{"display_name":"someone"}"#.into())
+        });
+        let target = format!("{elsewhere}/api/stats/token-check");
+        let site = spawn_mock(move |_head, _body| {
+            (302, vec![("Location", target.clone())], String::new())
+        });
+
+        let result = check_token(site, "tok-must-stay-home".into()).await;
+        assert!(
+            matches!(&result, Err(message) if message == REACH_SITE),
+            "a refused redirect reads as an unreachable site"
+        );
+        assert!(
+            elsewhere_hits.lock().expect("hits").is_empty(),
+            "nothing may reach the redirect target"
+        );
     }
 
     #[tokio::test]

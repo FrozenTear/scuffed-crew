@@ -737,8 +737,11 @@ pub async fn send(server_url: String, token: String, bytes: Arc<ReportZip>) -> S
         Ok(url) => url,
         Err(e) => return SendOutcome::Failed(format!("The report was not sent. {e}")),
     };
+    // The upload carries the sync token and the zip: a redirect is followed
+    // only on the site's own scheme, host and port.
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
+        .redirect(stat_tracker::sync::token_safe_redirects())
         .build()
     {
         Ok(client) => client,

@@ -563,17 +563,18 @@ fn pin_setup_patch_writes_completed_false() {
     );
 }
 
-/// A `[sync]` table without `token` does not parse as a config, so no save
-/// path edits it and neither writer touches the file.
+/// A `[sync]` table with a token but no `server_url` does not parse as a
+/// config, so no save path edits it and neither writer touches the file.
+/// (A table without `token` is sync off and parses: `tests_sync_off.rs`.)
 #[test]
 fn pin_sync_table_missing_a_key_is_not_replaced() {
-    let broken = format!("{BASE}\n[sync]\nserver_url = \"https://old.example\"\n");
+    let broken = format!("{BASE}\n[sync]\ntoken = \"old-token\"\n");
     let prefix = "config.toml could not be parsed, so it was not replaced: ";
     let err = Config::text_for_setup_patch(Some(&broken), &setup_patch())
         .unwrap_err()
         .to_string();
     assert!(err.starts_with(prefix), "{err}");
-    assert!(err.contains("missing field `token`"), "{err}");
+    assert!(err.contains("missing field `server_url`"), "{err}");
     let err = Config::text_for_save(Some(&broken), &pinned_default())
         .unwrap_err()
         .to_string();
