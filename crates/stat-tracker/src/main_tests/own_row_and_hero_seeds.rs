@@ -496,7 +496,7 @@ fn the_own_row_goes_through_the_reader_switch() {
     let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
     assert!(hc_body.contains("text_fallback_name(board_reader, player_row_idx, player_name),"));
     assert!(hc_body.contains(
-        "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, session_id).await;"
+        "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, seed_session).await;"
     ));
     // the offer sits on the new reader's own read path (O10)
     assert!(hc_body.contains(

@@ -151,30 +151,25 @@ fn poll_debug_hit_skips_mid_match_no_signal() {
     );
 }
 
+/// R9-1 (0.5.0-rc.9): no source confirms a result on one tick. The
+/// colour flood that did is gone; every source needs a second agreeing
+/// read inside the confirm window.
 #[test]
-fn poll_debug_hit_banner_is_confirm() {
-    assert_eq!(
-        poll_debug_hit(
-            Some((
-                detect::MatchOutcome::Victory,
-                detect::match_end::OutcomeSource::Banner
-            )),
-            None,
-            OUTCOME_CONFIRM_WINDOW
-        ),
-        Some((PollDebugHit::Confirm, detect::MatchOutcome::Victory))
-    );
-    assert_eq!(
-        poll_debug_hit(
-            Some((
-                detect::MatchOutcome::Defeat,
-                detect::match_end::OutcomeSource::Banner
-            )),
-            Some((detect::MatchOutcome::Defeat, Duration::from_secs(1))),
-            OUTCOME_CONFIRM_WINDOW
-        ),
-        Some((PollDebugHit::Confirm, detect::MatchOutcome::Defeat))
-    );
+fn one_read_of_any_source_is_never_a_confirm() {
+    use detect::match_end::OutcomeSource as S;
+    for source in [S::ResultWord, S::RankScreen, S::EndTitle] {
+        for outcome in [detect::MatchOutcome::Victory, detect::MatchOutcome::Defeat] {
+            assert_eq!(
+                poll_debug_hit(Some((outcome, source)), None, OUTCOME_CONFIRM_WINDOW),
+                Some((PollDebugHit::Streak, outcome)),
+                "{source:?}"
+            );
+            let mut streak = None;
+            let tick = resolve_word_tick(&mut streak, Some((outcome, source)), test_now(), None);
+            assert_eq!(tick.signal, Some(outcome));
+            assert!(!tick.signal_confirmed, "{source:?} {outcome:?}");
+        }
+    }
 }
 
 #[test]

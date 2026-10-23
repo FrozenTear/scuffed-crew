@@ -60,15 +60,17 @@ async fn a_single_different_map_word_does_not_replace_the_hint_before_a_vote() {
 }
 
 #[tokio::test]
-async fn an_armed_banner_has_no_map_and_seals_onto_the_open_session() {
+async fn an_armed_result_without_a_map_seals_onto_the_open_session() {
     let mut night = Night::new().await;
     let busan = arm_busan_defeat(&mut night).await;
-    night.banner(detect::MatchOutcome::Victory).await;
+    night
+        .confirmed_without_map(detect::MatchOutcome::Victory)
+        .await;
     assert_eq!(night.id(), busan);
     assert_eq!(
         night.game().outcome,
         detect::MatchOutcome::Victory,
-        "a banner carries no accolade map, so it still seals onto A"
+        "a result with no accolade map still seals onto A"
     );
 }
 
@@ -331,7 +333,9 @@ async fn progressed_boards_clear_the_lock_so_the_accolade_can_correct_the_map() 
 async fn a_finished_text_fallback_session_keeps_its_map() {
     let mut night = Night::new().await;
     let busan = text_fallback(&mut night, "Busan").await;
-    night.banner(detect::MatchOutcome::Victory).await;
+    night
+        .confirmed_without_map(detect::MatchOutcome::Victory)
+        .await;
     assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
     assert_eq!(night.game().map.as_deref(), Some("Busan"));
     night
@@ -923,6 +927,7 @@ async fn a_rejected_frame_adopts_the_outcome_and_clears_the_arm() {
         held_at: None,
         map_replaces_text_fallback: false,
         rejoin_carry: None,
+        finished_game_tab: None,
     };
     apply_capture_report(
         &mut night.st,
@@ -961,7 +966,9 @@ async fn a_result_decided_while_a_tab_capture_runs_survives_the_capture() {
     night.advance(Duration::from_secs(30));
     let req = night.tab_request().await;
     assert_eq!(req.game_outcome, detect::MatchOutcome::Unknown);
-    night.banner(detect::MatchOutcome::Victory).await;
+    night
+        .confirmed_without_map(detect::MatchOutcome::Victory)
+        .await;
     assert_eq!(night.id(), busan);
     assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
     night
@@ -1015,7 +1022,9 @@ async fn a_first_capture_that_lands_after_the_result_is_re_sealed() {
     let busan = night.id();
     let req = night.tab_request().await;
     assert!(req.create_session);
-    night.banner(detect::MatchOutcome::Victory).await;
+    night
+        .confirmed_without_map(detect::MatchOutcome::Victory)
+        .await;
     assert_eq!(night.id(), busan);
     assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
     night

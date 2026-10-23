@@ -79,8 +79,9 @@
 //! the templates when either folder changes, the way the hero packs do.
 //! Only `accolade` and `rank_screen` have real templates so far; DRAW,
 //! `tab_header` and 1080p-native accolade frames are untested.
-//! The tracker's colour-flood banner (gold or red over y 30-70%) is not read
-//! here: it depends on colour, and a word read covers the same screens.
+//! No colour flood is read here or anywhere else: the colour-flood banner
+//! outcome was removed in 0.5.0-rc.9, and the word reads cover the same
+//! screens.
 //!
 //! The words-v1 pack also ships `p4_final_score.png`, the FINAL SCORE line
 //! under the end title ([`FinalScoreTemplate`], region x 36-64%, y 70-84%,

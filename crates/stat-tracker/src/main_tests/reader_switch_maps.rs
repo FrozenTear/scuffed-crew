@@ -319,12 +319,7 @@ fn ocr_v1_reads_the_accolade_map_by_ocr_only() {
     );
     // no result word on the tick, or Tab cell OCR in flight: nothing runs
     let no_ocr = || -> Option<String> { panic!("accolade OCR off a result-word tick") };
-    for signal in [
-        None,
-        Some(S::Banner),
-        Some(S::RankScreen),
-        Some(S::EndTitle),
-    ] {
+    for signal in [None, Some(S::RankScreen), Some(S::EndTitle)] {
         assert_eq!(
             choose_accolade_map(false, false, signal, pack, no_ocr),
             None
@@ -372,12 +367,7 @@ fn the_new_reader_reads_the_accolade_map_from_the_pack_and_never_by_ocr() {
         reads.set(reads.get() + 1);
         accolade_read("Ilios")
     };
-    for signal in [
-        None,
-        Some(S::Banner),
-        Some(S::RankScreen),
-        Some(S::EndTitle),
-    ] {
+    for signal in [None, Some(S::RankScreen), Some(S::EndTitle)] {
         assert_eq!(choose_accolade_map(true, false, signal, counted, ocr), None);
     }
     assert_eq!(
@@ -430,7 +420,6 @@ fn the_new_reader_reads_the_accolade_map_by_ocr_when_no_map_pack_is_loaded() {
     // off a result-word tick, or with Tab cell OCR in flight: nothing runs
     for (outcome_only, signal) in [
         (false, None),
-        (false, Some(S::Banner)),
         (false, Some(S::RankScreen)),
         (false, Some(S::EndTitle)),
         (true, Some(S::ResultWord)),
@@ -810,8 +799,8 @@ fn the_result_words_go_through_the_reader_switch() {
 
 /// One words-pack read per poll tick: the read the signal detection took
 /// is the tick's result evidence, and the frame is not read again. A
-/// tick whose signal came without one (colour flood, end title, an OCR
-/// word) reads the frame as before. No signal, or `reader = "ocr-v1"`:
+/// tick whose signal came without one (end title, an OCR word) reads
+/// the frame as before. No signal, or `reader = "ocr-v1"`:
 /// no evidence and no read.
 #[test]
 fn a_poll_tick_reads_the_frames_result_words_once() {
@@ -863,7 +852,7 @@ fn a_poll_tick_reads_the_frames_result_words_once() {
 /// `detect::match_end` and `tests/result_signal_wiring.rs`). The poll
 /// tick hands the source of its own signal to `choose_accolade_map`, and
 /// that source alone decides whether the map pack is read: a rank-screen
-/// word, an end title, a colour flood and no signal read no map.
+/// word, an end title and no signal read no map.
 #[test]
 fn a_result_word_tick_still_starts_the_accolade_map_read() {
     use detect::match_end::OutcomeSource as S;
@@ -899,12 +888,7 @@ fn a_result_word_tick_still_starts_the_accolade_map_read() {
     // No other source does (a counter, not a panic: a panic in the pack
     // read is caught and would hide a call).
     let reads = std::cell::Cell::new(0);
-    for source in [
-        None,
-        Some(S::RankScreen),
-        Some(S::EndTitle),
-        Some(S::Banner),
-    ] {
+    for source in [None, Some(S::RankScreen), Some(S::EndTitle)] {
         let counted = || {
             reads.set(reads.get() + 1);
             accolade_read("Ilios")
