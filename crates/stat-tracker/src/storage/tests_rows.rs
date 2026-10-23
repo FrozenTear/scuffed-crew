@@ -1,7 +1,7 @@
-//! Tests of the capture write path and stored rows: decided outcomes, rows
-//! landing after a delete, and fields that must survive a reopen.
+//! Tests of the capture write path and stored rows: decided outcomes and
+//! fields that must survive a reopen.
 
-use super::tests::{reopen_store, snap};
+use super::tests::{final_outcome, reopen_store, session_row, snap};
 use super::*;
 use chrono::Utc;
 
@@ -17,29 +17,6 @@ fn old_rows_without_edit_fields_deserialize_unchanged() {
     assert_eq!(m.display_elims(), 20);
     assert_eq!(m.display_hero(), "Genji");
     assert_eq!(m.corrected_elims, None);
-}
-
-fn session_row(session_id: &str, outcome: &str) -> MatchSession {
-    MatchSession {
-        session_id: session_id.into(),
-        hero: "Test".into(),
-        map_name: String::new(),
-        role: "Tank".into(),
-        started_at: SurrealDatetime::from(Utc::now()),
-        last_capture_at: SurrealDatetime::from(Utc::now()),
-        capture_count: 1,
-        final_outcome: outcome.into(),
-    }
-}
-
-async fn final_outcome(store: &LocalStore, session_id: &str) -> Option<String> {
-    store
-        .get_all_sessions()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|s| s.session_id == session_id)
-        .map(|s| s.final_outcome)
 }
 
 /// MAIN-1: a capture requested before the result was known writes
@@ -94,73 +71,6 @@ async fn an_in_flight_unknown_capture_keeps_a_decided_outcome() {
     );
     let rows = store.get_session_snapshots("s2").await.unwrap();
     assert_eq!(rows[0].outcome, "unknown");
-}
-
-/// MAIN-1 (3): a capture that was in flight when its game was deleted
-/// does not bring the game back, neither the session row nor the
-/// snapshot nor the `matches.jsonl` line.
-#[tokio::test]
-async fn a_capture_landing_after_a_delete_does_not_resurrect_the_game() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = LocalStore::open(dir.path()).await.expect("open store");
-    store
-        .create_session(&session_row("gone", "unknown"))
-        .await
-        .unwrap();
-    store.insert_match(snap("gone", 1)).await.unwrap();
-    store.delete_session("gone").await.unwrap();
-    // The in-flight capture's writes, in the order the capture runs them.
-    store
-        .create_session(&session_row("gone", "unknown"))
-        .await
-        .unwrap();
-    store
-        .append_capture("gone", SurrealDatetime::from(Utc::now()), "victory")
-        .await
-        .unwrap();
-    append_match_log(dir.path(), &snap("gone", 2));
-    store.insert_match(snap("gone", 2)).await.unwrap();
-    assert_eq!(store.match_count().await.unwrap(), 0);
-    assert_eq!(final_outcome(&store, "gone").await, None);
-    assert!(read_match_log(dir.path()).is_empty());
-    assert_eq!(
-        store.get_pending_tombstones().await.unwrap(),
-        vec!["gone".to_string()],
-        "the tombstone still goes to the server"
-    );
-    // Other games are stored as before.
-    store.insert_match(snap("kept", 1)).await.unwrap();
-    assert_eq!(store.match_count().await.unwrap(), 1);
-}
-
-/// A pending tombstone is not a delete. A game whose server copy goes
-/// (re-read as an untracked map or mode) keeps its local rows and can be
-/// the open game: its new rows are stored and its `matches.jsonl` lines
-/// stay. Only a delete in this process blocks a late capture.
-#[tokio::test]
-async fn a_pending_tombstone_without_a_delete_does_not_block_rows() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let store = LocalStore::open(dir.path()).await.expect("open store");
-    store
-        .create_session(&session_row("dm", "unknown"))
-        .await
-        .unwrap();
-    append_match_log(dir.path(), &snap("dm", 1));
-    store.insert_match(snap("dm", 1)).await.unwrap();
-    // Stands in for a server-side removal queued for a game kept here.
-    store.insert_tombstone("dm").await.unwrap();
-    append_match_log(dir.path(), &snap("dm", 2));
-    store.insert_match(snap("dm", 2)).await.unwrap();
-    store
-        .create_session(&session_row("dm", "victory"))
-        .await
-        .unwrap();
-    assert_eq!(store.get_session_snapshots("dm").await.unwrap().len(), 2);
-    assert_eq!(
-        final_outcome(&store, "dm").await.as_deref(),
-        Some("victory")
-    );
-    assert_eq!(read_match_log(dir.path()).len(), 2);
 }
 
 /// The fallback log follows a row that took the session's result.
