@@ -111,7 +111,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub setup_completed: bool,
     /// Not used. Reader packs come from the signed-in site
-    /// (`GET /api/tracker/packs`, see [`crate::packs`]) and the setup guide
+    /// (`GET /api/tracker/packs`, see `stat_tracker::packs`) and the setup guide
     /// always shows its pack step. Kept so a config.toml that still sets it
     /// parses and saves back unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,7 +161,7 @@ pub struct Config {
     /// unread: the build has to read everything without Tesseract, and the
     /// hero, map and word packs have to be loaded with what those readers
     /// need. Otherwise the tracker keeps OCR on for the run and logs why
-    /// ([`crate::ocr_switch`]). The tracker reads this when it starts.
+    /// (`stat_tracker::ocr_switch`). The tracker reads this when it starts.
     /// Overlay for tests and tools: env [`OCR_ENV`] (`on` or `off`).
     #[serde(default, skip_serializing_if = "OcrSetting::is_on")]
     pub ocr: OcrSetting,
@@ -172,7 +172,7 @@ pub struct Config {
     /// new reader both honor it. With a `names-v1` pack loaded, a row is
     /// used when its confidence meets the pack's own `min_confidence`. A
     /// blank row, or one under that threshold, is read with Tesseract for
-    /// that row. With no pack installed, [`crate::names::read_names`]
+    /// that row. With no pack installed, `stat_tracker::names::read_names`
     /// already uses Tesseract, so leaving this on does not change that
     /// path. The pack is not in the repo. A default install downloads it
     /// with the other reader packs.
@@ -319,7 +319,7 @@ pub struct OcrControl {
 
 impl OcrControl {
     /// What this process asks for: the env value when set, else the file.
-    /// The daemon may still keep OCR on ([`crate::ocr_switch::decide`]).
+    /// The daemon may still keep OCR on (`stat_tracker::ocr_switch::decide`).
     pub fn requested(self) -> OcrSetting {
         self.env.unwrap_or(self.file)
     }

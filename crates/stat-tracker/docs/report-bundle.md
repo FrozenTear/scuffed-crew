@@ -42,7 +42,7 @@ The app builds the zip in a temp directory, then reads that same zip back for th
 
 `recognizers` has two ids:
 
-- `matcher` is the `RECOGNIZER_ID` constant compiled into that build (`crates/stat-tracker/src/shadow/digits.rs`). On 2026-10-11 that constant is `cv-v5`. When the constant changes, the field reports the new id. It is not a second copy that someone updates by hand, and the server does not require a particular id.
+- `matcher` is the `RECOGNIZER_ID` constant compiled into that build (`crates/stat-tracker-core/src/model.rs`, re-exported as `shadow::digits::RECOGNIZER_ID`). On 2026-10-11 that constant is `cv-v5`. When the constant changes, the field reports the new id. It is not a second copy that someone updates by hand, and the server does not require a particular id.
 - `ocr` is the string `ocr-v1`. That is the Tesseract read the tracker already stores.
 
 `resolution` is the capture size in pixels, `width` and `height`, both positive integers. It is the full frame, not the 16:9 playfield inside it.
