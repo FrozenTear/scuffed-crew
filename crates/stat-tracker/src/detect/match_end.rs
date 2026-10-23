@@ -8,8 +8,12 @@ use super::stability::FrameStability;
 use crate::shadow::result::{Outcome, ResultRead, ResultScreen, ResultScreens, ScreenRead};
 
 /// Which detector produced an outcome. Every source is a result word
-/// (accolade screen, competitive rank screen, end title), and the poller
-/// requires two agreeing reads inside a confirmation window. Who reads
+/// (accolade screen, competitive rank screen, end title). The poller
+/// confirms a result only on two agreeing reads inside a confirmation
+/// window. A Tab frame still takes its outcome from one read of its own
+/// frame (the accolade or rank-screen word when the session is old enough,
+/// the end title, or the scoreboard OCR header line under ocr-v1), as
+/// before. Who reads
 /// those words depends on the reader ([`ResultWords`]): OCR under
 /// `reader = "ocr-v1"`, the words-v1 pack under `reader = "new"`.
 ///

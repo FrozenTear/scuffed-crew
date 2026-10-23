@@ -81,7 +81,7 @@
 //! | PostResultStreak | same totals, or a decided header | Append. The hint stays. |
 //! | PostResultStreak | fresh-match board | Defer, then split on the next fresh board. The split seals the hint. An armed streak splits on this board. |
 //! | PostResultStreak | 120s gap | Split. Seal the hint. Keep this frame's header. |
-//! | PostResultStreak | end screen, both maps trusted and different | Split, armed or not. Seal the old hint. The new session takes the end-screen outcome and that map, including a map carried from the previous read of the same outcome. That map is re-stored on every word read (accolade, rank screen or end title), not a banner, and kept while the previous read is inside the confirm window. If either side has no trusted name, the word seals onto this session. A banner has no map, so a banner-only confirmation still seals onto this session. The close is an end-screen map, counted apart from a stat regression. |
+//! | PostResultStreak | end screen, both maps trusted and different | Split, armed or not. Seal the old hint. The new session takes the end-screen outcome and that map, including a map carried from the previous read of the same outcome. That map is re-stored on every word read (accolade, rank screen or end title) and kept while the previous read is inside the confirm window. If either side has no trusted name, the word seals onto this session. A confirmation with no map (rank screen or end title reads only) still seals onto this session. The close is an end-screen map, counted apart from a stat regression. |
 //! | PostResultStreak | hinted Tab, different map | Split. Seal the hint. The new session keeps this frame's header. [`plan_capture`] builds [`Obs::HintedDifferentMap`] only when the stored map is the top bar or the accolade and the gap has elapsed, or when the session has no board yet. A text-fallback map does not build it. |
 //! | PostMatch | word | Ignore the outcome. Adopt an accolade map when this session has none. Do not rewrite a text-fallback map once the outcome is recorded. |
 //! | PostMatch | start screen, not blocked | Split. No seal. The new session is Unknown and has no grace. |
@@ -183,8 +183,8 @@ pub fn end_screen_log_fields(armed: bool, open: &OpenNew) -> Option<(bool, Strin
 /// map are both trusted and differ opens the next session, armed or not.
 /// That close is logged as an end-screen map, apart from a stat
 /// regression, with whether a boundary was armed, the sealed hint, and
-/// the accolade map. A banner carries no map, so a banner-only
-/// confirmation still seals onto this session. Two mapless reads do the
+/// the accolade map. A confirmation with no map (rank screen or end title
+/// reads only) still seals onto this session. Two mapless reads do the
 /// same, including when a Tab capture is in flight and the accolade crop
 /// is skipped. An idle close does not seal the hint. A full-board text
 /// fallback is not a map for the split. An accolade may replace that name
@@ -484,34 +484,44 @@ pub enum FinishedGameTab {
     NewGame,
     /// The same game's board with nothing moved on, or only one column (one
     /// column can be a misread): a late look at the same board. The game
-    /// keeps its result.
+    /// keeps its result, and the board is not stored (it adds nothing, and
+    /// a one-column rise may be a misread).
     SameBoard,
-    /// The same game, still being played: two or more columns moved on
-    /// since the last accepted board, and none fell except at most one by
-    /// an OCR-sized step. The recorded result was
-    /// false (a mid-match frame taken for an end), and the game takes the
-    /// real one when it comes.
+    /// The same game, still being played: a board accepted after the result
+    /// was recorded has since moved on in two or more columns, and none fell
+    /// except at most one by an OCR-sized step. The recorded result was
+    /// false (a mid-match frame taken for an end).
     StillPlaying,
+}
+
+/// The last accepted board is far enough into a match that neither a new
+/// game nor a late quick-play backfill can be mistaken for it soon after:
+/// elims at least 4, deaths at least 2 and damage at least 1500, all with a
+/// number. Stricter than the reset rule's [`mature_board`], because a wrong
+/// merge here clears a real result.
+fn probe_mature(prev: &Counters, known: &[bool; GATE_COLS]) -> bool {
+    known[0] && known[2] && known[3] && prev.elims >= 4 && prev.deaths >= 2 && prev.damage >= 1500
 }
 
 /// Whether a Tab past the grace window of a finished game reads that same
 /// game's board. `prev` is the game's last accepted board, `elapsed` the time
-/// since it was accepted.
+/// since it was accepted, `board_after_result` whether that board was
+/// accepted after the result was recorded.
 ///
 /// On 2026-10-22 a red mid-match frame was taken for DEFEAT, and the first
 /// Tab after the grace window opened a new session for a board on the same
-/// map whose elims and deaths were still rising (9/8, then 10/9): one game
-/// split in two. A board is the same game only when every check below holds;
-/// anything that cannot be compared is [`FinishedGameTab::NewGame`], the rule
-/// before rc.9:
+/// map whose elims and deaths were still rising (9/8 taken after the false
+/// result, then 10/9): one game split in two. A board is the same game only
+/// when every check below holds; anything that cannot be compared is
+/// [`FinishedGameTab::NewGame`], the rule before rc.9:
 ///
 /// * the map read on this Tab names the game's map;
 /// * the own row is identified, its cells parsed, and not suspect;
-/// * elims and deaths have a number on both boards: read on this Tab (not
-///   held, not edge-ink suspect) and confirmed on the last accepted board;
-/// * the last accepted board is mature (elims at least 4 or damage at least
-///   400), so a new game's near-zero board, a quick-play backfill
-///   included, can never look like it;
+/// * elims, deaths and damage have a number on both boards: read on this
+///   Tab (not held, not edge-ink suspect) and confirmed on the last
+///   accepted board;
+/// * the last accepted board is mature ([`probe_mature`]), so a new game's
+///   board, a quick-play backfill included, can never look like it;
 /// * the board is judged as a set, not on one value: no compared column is
 ///   below the last accepted board, except that one column may be a little
 ///   below it (one kill-column count, or a tenth of a wide column), an OCR
@@ -519,9 +529,15 @@ pub enum FinishedGameTab {
 ///   column back near zero, so it fails this on several columns at once;
 /// * no growth above the rate ceiling for `elapsed`.
 ///
+/// A board that moved on in two or more columns is
+/// [`FinishedGameTab::StillPlaying`] only when the board it is compared with
+/// was accepted after the result. Compared with a board from before the
+/// result, the rise is what any real end looks like (the last fight between
+/// that Tab and the end), so it is not evidence against the result:
+/// [`FinishedGameTab::NewGame`], as before rc.9, which keeps the result.
+///
 /// The caller asks only while the last accepted board is recent (main's
-/// `FINISHED_GAME_TAB_MAX_GAP`), too soon for a new game to have started and
-/// caught up with a mature board.
+/// `FINISHED_GAME_TAB_MAX_GAP`).
 #[allow(clippy::too_many_arguments)]
 pub fn finished_game_tab(
     prev: &GateState,
@@ -532,6 +548,7 @@ pub fn finished_game_tab(
     held: &[bool; GATE_COLS],
     own_row_trusted: bool,
     elapsed: Duration,
+    board_after_result: bool,
 ) -> FinishedGameTab {
     let same_map = matches!(
         (named_map(session_map), named_map(incoming_map)),
@@ -543,9 +560,7 @@ pub fn finished_game_tab(
     let known: [bool; GATE_COLS] = std::array::from_fn(|col| {
         !held[col] && !suspect[col] && !prev.unread[col] && !prev.unconfirmed[col]
     });
-    // Elims and deaths (cols 0 and 2) are the columns a reset is read from
-    // that every hero moves.
-    if !known[0] || !known[2] || !mature_board(&prev.accepted, &known) {
+    if !probe_mature(&prev.accepted, &known) {
         return FinishedGameTab::NewGame;
     }
     let before = prev.accepted.to_array();
@@ -576,7 +591,10 @@ pub fn finished_game_tab(
         .filter(|&col| known[col] && now[col] > before[col])
         .count();
     match (grew >= 2, fell.is_empty()) {
-        (true, _) => FinishedGameTab::StillPlaying,
+        (true, _) if board_after_result => FinishedGameTab::StillPlaying,
+        // Rising past a board from before the result: the game's own final
+        // board, or another game. Not evidence against the result.
+        (true, _) => FinishedGameTab::NewGame,
         (false, true) => FinishedGameTab::SameBoard,
         // A small drop with nothing else moving is not shown to be anything.
         (false, false) => FinishedGameTab::NewGame,
@@ -613,7 +631,8 @@ pub struct CapturePlanInput<'a> {
     /// Outcome of the session this Tab was requested for. Never written onto
     /// a session a reset split opens.
     pub inherited_outcome: MatchOutcome,
-    /// Result read off this frame (banner, header). A gap split keeps it.
+    /// Result read off this Tab frame (a result word, the end title, the
+    /// scoreboard header). A gap split keeps it.
     /// A reset split does not.
     pub frame_outcome: MatchOutcome,
     /// Hero already stored on the session. Not a split signal.
@@ -1358,8 +1377,8 @@ fn end_screen(state: &BoundaryState, phase: Phase, outcome: MatchOutcome) -> Eff
     match phase {
         Phase::PostMatch | Phase::Idle | Phase::NewGameStarting => Effect::Ignore,
         // Both names are trusted and they differ. Armed or not, this word
-        // belongs to the next session. A banner, or a word with no trusted
-        // name, never reaches here: it is a confirmed word and seals here.
+        // belongs to the next session. A word with no trusted name never
+        // reaches here: it is a confirmed word and seals here.
         Phase::LiveMatch | Phase::PostResultStreak => Effect::Split {
             reason: CloseReason::EndScreenMap,
             seal: sealable_hint(state),
@@ -1867,8 +1886,9 @@ mod tests {
     const CLEAN: [bool; GATE_COLS] = [false; GATE_COLS];
 
     /// R9-2: a Tab past the grace window of a finished game, against its
-    /// last accepted board. The 2026-10-22 Route 66 game: Defeat taken off
-    /// a red mid-match frame, last board 9/8, the next Tab 40 s later 10/9.
+    /// last accepted board, taken after the result. The 2026-10-22 Route 66
+    /// game: Defeat taken off a red mid-match frame, then a board 9/8, the
+    /// next Tab 40 s later 10/9.
     #[test]
     fn a_finished_game_tab_is_the_same_game_only_on_rising_stats_and_the_same_map() {
         use FinishedGameTab::{NewGame, SameBoard, StillPlaying};
@@ -1884,6 +1904,7 @@ mod tests {
                 &CLEAN,
                 true,
                 Duration::from_secs(40),
+                true,
             )
         };
         // the tester's board: still the same game, still being played
@@ -1930,12 +1951,75 @@ mod tests {
                 &CLEAN,
                 true,
                 Duration::from_secs(40),
+                true,
             ),
             NewGame,
             "a game with no map of its own"
         );
         // growth above the rate ceiling for 40 s is a misread
         assert_eq!(at(counters(40, 3, 9, 4600, 0, 3400), route), NewGame);
+    }
+
+    /// R9-2 review (H1): the last board was taken before a real result (a
+    /// Tab in the final fight), and the frozen final board is opened past
+    /// the grace window. The rise is the last fight, not a live game: the
+    /// result is not cleared (new game, as before rc.9). The same board is
+    /// still a late look at it.
+    #[test]
+    fn a_rise_past_a_board_from_before_the_result_never_clears_it() {
+        use FinishedGameTab::{NewGame, SameBoard};
+        let prev = gate(counters(9, 3, 8, 4200, 0, 3100));
+        let route = Some("Route 66");
+        let at = |cur: Counters| {
+            finished_game_tab(
+                &prev,
+                route,
+                route,
+                &cur,
+                &CLEAN,
+                &CLEAN,
+                true,
+                Duration::from_secs(80),
+                false,
+            )
+        };
+        assert_eq!(at(counters(10, 3, 9, 4600, 0, 3400)), NewGame);
+        assert_eq!(at(counters(8, 3, 9, 4600, 0, 3400)), NewGame);
+        assert_eq!(at(counters(9, 3, 8, 4200, 0, 3100)), SameBoard);
+        assert_eq!(at(counters(9, 3, 8, 4500, 0, 3100)), SameBoard);
+    }
+
+    /// R9-2 review (L1): a low-stat last board, such as a late quick-play
+    /// backfill that ended in a real loss, is never compared: the next game
+    /// on the same map could rise past it within the window.
+    #[test]
+    fn a_low_stat_last_board_is_never_continued() {
+        let route = Some("Busan");
+        for (prev, cur) in [
+            // the reviewers' backfills
+            (counters(4, 1, 0, 650, 0, 0), counters(4, 2, 0, 900, 0, 0)),
+            (counters(1, 0, 0, 450, 0, 0), counters(2, 1, 0, 900, 0, 300)),
+            // each bar alone: elims 4, deaths 2, damage 1500
+            (counters(3, 2, 5, 3000, 0, 0), counters(5, 3, 6, 3600, 0, 0)),
+            (counters(6, 2, 1, 3000, 0, 0), counters(7, 3, 2, 3600, 0, 0)),
+            (counters(6, 2, 5, 1400, 0, 0), counters(7, 3, 6, 1900, 0, 0)),
+        ] {
+            assert_eq!(
+                finished_game_tab(
+                    &gate(prev),
+                    route,
+                    route,
+                    &cur,
+                    &CLEAN,
+                    &CLEAN,
+                    true,
+                    Duration::from_secs(60),
+                    true,
+                ),
+                FinishedGameTab::NewGame,
+                "{prev:?} -> {cur:?}"
+            );
+        }
     }
 
     /// R9-2: what cannot be compared keeps the rule before rc.9.
@@ -1954,14 +2038,15 @@ mod tests {
                 &held,
                 trusted,
                 Duration::from_secs(40),
+                true,
             )
         };
         let prev = gate(counters(9, 3, 8, 4200, 0, 3100));
         assert_eq!(check(&prev, CLEAN, CLEAN, true), StillPlaying);
         // the own row was not identified, or is suspect
         assert_eq!(check(&prev, CLEAN, CLEAN, false), NewGame);
-        // elims or deaths without a number on this Tab
-        for col in [0, 2] {
+        // elims, deaths or damage without a number on this Tab
+        for col in [0, 2, 3] {
             let mut flagged = CLEAN;
             flagged[col] = true;
             assert_eq!(check(&prev, flagged, CLEAN, true), NewGame, "suspect {col}");
@@ -1980,17 +2065,18 @@ mod tests {
         assert_eq!(check(&prev, CLEAN, healing_held, true), StillPlaying);
         // an early board (not mature) is not compared: a new game's board
         // could be above it
-        let early = gate(counters(1, 0, 1, 250, 0, 100));
+        let early = gate(counters(3, 0, 3, 1400, 0, 100));
         assert_eq!(
             finished_game_tab(
                 &early,
                 route,
                 route,
-                &counters(2, 0, 2, 300, 0, 200),
+                &counters(4, 0, 4, 1700, 0, 200),
                 &CLEAN,
                 &CLEAN,
                 true,
                 Duration::from_secs(40),
+                true,
             ),
             NewGame
         );

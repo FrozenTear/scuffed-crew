@@ -374,6 +374,7 @@ where
     let mut best = attempt(0).await?;
     let mut retries = 0;
     let mut stopped = None;
+    let mut failed = false;
     for &wait in waits {
         if !retry(&best) {
             break;
@@ -403,11 +404,14 @@ where
         let next = match attempt(retries).await {
             Ok(next) => next,
             Err(err) => {
+                // A grab error, or the analysis of the grabbed frame
+                // failing (in the daemon, a panic in it).
                 tracing::warn!(
                     retries,
                     error = ?err,
-                    "Tab capture retry failed: keeping the earlier grab"
+                    "Tab capture retry failed (screen grab or frame analysis): keeping the earlier result"
                 );
+                failed = true;
                 break;
             }
         };
@@ -421,7 +425,7 @@ where
             RetryStop::Released => "Tab was released (a later frame shows the game, not the board)",
         };
         tracing::info!(retries, "Tab capture retries stopped: {line}");
-    } else if retries > 0 {
+    } else if retries > 0 && !failed {
         if retry(&best) {
             let reason = why(&best);
             tracing::warn!(retries, "Tab capture gave up after retries: {reason}");
@@ -799,7 +803,13 @@ mod tests {
             assert_eq!(got, Ok((0, 1)), "the held result, after one retry");
         });
         assert_eq!(*grabs.borrow(), 2, "no grab after the failed one");
-        assert!(text.contains("Tab capture retry failed: keeping the earlier grab"));
+        assert!(text.contains(
+            "Tab capture retry failed (screen grab or frame analysis): keeping the earlier result"
+        ));
+        assert!(
+            !text.contains("Tab capture gave up after retries"),
+            "the retries did not run out"
+        );
         assert_eq!(flight.phase(), TabFlightPhase::Rejected);
 
         let got = block_on(with_retries(
