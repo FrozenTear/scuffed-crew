@@ -1407,30 +1407,42 @@ fn strictly_test_file(sources: &[Source], s: &Source) -> bool {
     declared_strictly || strictly_test_file(sources, p)
 }
 
-/// Whether a production path from `frame` may name `abs` (an absolute
-/// path below the crate root `root`): `frame` itself or a core module
-/// (through `stat_tracker_core::` or its re-export at this crate's root).
-fn frame_may_name(abs: &[String], root: Crate) -> bool {
+/// The leaf modules of vision: each one's production code names only its
+/// own subtree and the core modules (and outside crates), never another
+/// module of this crate. `frame` is the shared pixel layer (geometry,
+/// layout, stability), `packs::layout` the on-disk pack layout the readers
+/// share (so the `names` <-> `packs` loop cannot come back), and
+/// `shadow::ncc` the correlation kernel of the words-v1 readers. All the
+/// modules they must not reach are vision like them, so
+/// [`the_would_be_crates_have_no_back_edges`] cannot see such a path.
+/// Re-exports at the old paths point the other way.
+const LEAVES: &[&str] = &["frame", "packs::layout", "shadow::ncc"];
+
+/// Whether a production path from the leaf `leaf` may name `abs` (an
+/// absolute path below the crate root `root`): the leaf itself or a core
+/// module (through `stat_tracker_core::` or its re-export at this crate's
+/// root).
+fn leaf_may_name(leaf: &[String], abs: &[String], root: Crate) -> bool {
     if root == Crate::Core {
         return true;
     }
-    abs.first().is_some_and(|first| {
-        first == "frame"
-            || CRATE_OF
+    abs.starts_with(leaf)
+        || abs.first().is_some_and(|first| {
+            CRATE_OF
                 .iter()
                 .any(|(m, krate)| *krate == Crate::Core && m == first)
-    })
+        })
 }
 
-/// Each production path in the `frame` file `s` that [`frame_may_name`]
-/// refuses, as `(site, path as written)`. A path that names the crate root
-/// itself (`use crate as root;`, `use crate::*;`, `use super::super::*;`
-/// from a frame file) is refused too: it would let a bare `detect::` path
-/// through. Comments, doc comments and strings do not count; an item
-/// behind `#[cfg(test)]` or `#[cfg(all(test, …))]` does not either, and
-/// one behind `#[cfg(any(test, …))]` does. `test_file` is
+/// Each production path in `s`, a file of the leaf `leaf`, that
+/// [`leaf_may_name`] refuses, as `(site, path as written)`. A path that
+/// names the crate root itself (`use crate as root;`, `use crate::*;`,
+/// `use super::super::*;` from a frame file) is refused too: it would let a
+/// bare `detect::` path through. Comments, doc comments and strings do not
+/// count; an item behind `#[cfg(test)]` or `#[cfg(all(test, …))]` does not
+/// either, and one behind `#[cfg(any(test, …))]` does. `test_file` is
 /// [`strictly_test_file`] for `s`.
-fn frame_paths_outside(s: &Source, test_file: bool) -> Vec<(String, String)> {
+fn leaf_paths_outside(s: &Source, leaf: &[String], test_file: bool) -> Vec<(String, String)> {
     if test_file {
         return Vec::new();
     }
@@ -1440,50 +1452,55 @@ fn frame_paths_outside(s: &Source, test_file: bool) -> Vec<(String, String)> {
         .filter(|&(at, _)| !tests.iter().any(|&(a, b)| a <= at && at <= b))
         .filter_map(|(at, segs)| {
             let (abs, root) = absolute(s, at, &segs)?;
-            (!frame_may_name(&abs, root)).then(|| (s.site(at), segs.join("::")))
+            (!leaf_may_name(leaf, &abs, root)).then(|| (s.site(at), segs.join("::")))
         })
         .collect()
 }
 
-/// `frame` (geometry, layout, stability) is the shared pixel layer. Its
-/// production code names only `frame` and the core modules (and outside
-/// crates): no reader (`ocr`, `shadow`, `names`), no detector (`detect`)
-/// and no other vision module (`packs`, `ocr_switch`, `mapcrops`,
-/// `report::blank`). All of those are vision like `frame`, so
-/// [`the_would_be_crates_have_no_back_edges`] cannot see such a path.
-/// Re-exports at the old paths point the other way.
+fn path_of(module: &str) -> Vec<String> {
+    module.split("::").map(String::from).collect()
+}
+
+/// Every [`LEAVES`] module names only itself and core.
 #[test]
-fn frame_names_only_frame_and_core() {
+fn leaves_name_only_themselves_and_core() {
     let sources = all_sources();
-    let frame: Vec<&Source> = sources
-        .iter()
-        .filter(|s| s.module.first().is_some_and(|m| m == "frame"))
-        .collect();
-    assert!(
-        frame.len() >= 4,
-        "the walk found {} frame file(s)",
-        frame.len()
-    );
-    let bad: Vec<String> = frame
-        .iter()
-        .flat_map(|s| frame_paths_outside(s, strictly_test_file(&sources, s)))
-        .map(|(site, path)| format!("{site}: {path}"))
-        .collect();
+    let mut bad = Vec::new();
+    for leaf in LEAVES {
+        let leaf = path_of(leaf);
+        let files: Vec<&Source> = sources
+            .iter()
+            .filter(|s| s.module.starts_with(&leaf))
+            .collect();
+        let want = if leaf == ["frame"] { 4 } else { 1 };
+        assert!(
+            files.len() >= want,
+            "the walk found {} file(s) of {}",
+            files.len(),
+            leaf.join("::")
+        );
+        for s in files {
+            for (site, path) in leaf_paths_outside(s, &leaf, strictly_test_file(&sources, s)) {
+                bad.push(format!("{site}: {path} (leaf {})", leaf.join("::")));
+            }
+        }
+    }
     assert!(
         bad.is_empty(),
-        "{} path(s) from frame to something other than frame or core:\n{}",
+        "{} path(s) from a leaf to something other than itself or core:\n{}",
         bad.len(),
         bad.join("\n")
     );
-    // The scan reads frame's production paths: layout uses geometry.
-    let layout = frame
+    // The scan reads the leaves' production paths: frame's layout uses
+    // geometry.
+    let layout = sources
         .iter()
         .find(|s| s.name == "frame/layout.rs")
         .expect("frame/layout.rs");
     let to_geometry = |(at, segs): &(usize, Vec<String>)| {
         !layout.is_test(*at)
             && absolute(layout, *at, segs)
-                .is_some_and(|(abs, _)| abs.starts_with(&["frame".into(), "geometry".into()]))
+                .is_some_and(|(abs, _)| abs.starts_with(&path_of("frame::geometry")))
     };
     assert!(
         written_paths(layout).iter().any(to_geometry),
@@ -1491,9 +1508,10 @@ fn frame_names_only_frame_and_core() {
     );
 }
 
-/// The frame check on a small source.
+/// The leaf check on small sources.
 #[test]
-fn the_frame_check_allows_only_frame_and_core() {
+fn the_leaf_check_allows_only_the_leaf_and_core() {
+    let frame = path_of("frame");
     let mut src = parse_source(
         "stat-tracker",
         Crate::Top,
@@ -1529,7 +1547,7 @@ mod tests {
 "#,
     );
     declared_modules(&mut src);
-    let bad: Vec<String> = frame_paths_outside(&src, false)
+    let bad: Vec<String> = leaf_paths_outside(&src, &frame, false)
         .into_iter()
         .map(|(_, path)| path)
         .collect();
@@ -1546,7 +1564,7 @@ mod tests {
             "crate::mapcrops::save",
         ]
     );
-    assert!(frame_paths_outside(&src, true).is_empty());
+    assert!(leaf_paths_outside(&src, &frame, true).is_empty());
 
     for (cfg, needs) in [
         ("test", true),
@@ -1583,5 +1601,50 @@ mod tests {
     let sources = vec![parent, child("tests_a"), child("tests_b")];
     assert!(!strictly_test_file(&sources, &sources[1]));
     assert!(strictly_test_file(&sources, &sources[2]));
-    assert_eq!(frame_paths_outside(&sources[1], false).len(), 1);
+    assert_eq!(leaf_paths_outside(&sources[1], &frame, false).len(), 1);
+
+    // packs::layout may name itself and core, not the downloader above it
+    // (`super::`) and not a reader.
+    let layout = path_of("packs::layout");
+    let src = parse_source(
+        "stat-tracker",
+        Crate::Top,
+        "packs/layout.rs".into(),
+        layout.clone(),
+        false,
+        r#"
+use super::PACK_UNSAFE;
+use crate::packs::layout::PACKS;
+use self::inner::X;
+use crate::config::Config;
+fn f() -> std::path::PathBuf { crate::names::pack::dir_in(std::path::Path::new("")) }
+"#,
+    );
+    let bad: Vec<String> = leaf_paths_outside(&src, &layout, false)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    assert_eq!(bad, ["super::PACK_UNSAFE", "crate::names::pack::dir_in"]);
+
+    // shadow::ncc may not name the readers it serves.
+    let ncc = path_of("shadow::ncc");
+    let src = parse_source(
+        "stat-tracker",
+        Crate::Top,
+        "shadow/ncc.rs".into(),
+        ncc.clone(),
+        false,
+        "use super::result::FLOOR;\nuse crate::shadow::ncc::Gray;\nuse crate::frame::geometry::game_rect_16_9;\n",
+    );
+    let bad: Vec<String> = leaf_paths_outside(&src, &ncc, false)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    assert_eq!(
+        bad,
+        [
+            "super::result::FLOOR",
+            "crate::frame::geometry::game_rect_16_9"
+        ]
+    );
 }

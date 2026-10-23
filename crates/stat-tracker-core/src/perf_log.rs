@@ -24,7 +24,7 @@ use std::sync::mpsc;
 use std::time::Instant;
 
 use crate::host_probe::{HostCpu, ProcCpuTracker, ProcSample};
-use crate::perf::Summary;
+use crate::perf::summary::Summary;
 
 pub const FILE: &str = "perf.log";
 pub const ROTATED: &str = "perf.log.1";
