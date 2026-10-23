@@ -76,7 +76,14 @@ runs:
           # --no-download: apt resolves against the local .debs plus what the
           # image already has, and never touches the mirror. If the image
           # moved on (newer libudev1, …) apt refuses before changing anything.
-          if sudo apt-get install -y --no-install-recommends --no-download "${debs[@]}"; then
+          # An empty lists dir hides the image's own (stale) package lists:
+          # with them apt may pick a mirror URI for a version it has locally
+          # and then fail to "fetch" it.
+          lists="$(mktemp -d)"
+          mkdir -p "$lists/partial"
+          OFFLINE_OPTS=(-o Dir::State::Lists="$lists" -o Dir::Cache::archives="$DEB_DIR")
+          if sudo apt-get "${OFFLINE_OPTS[@]}" install -y --no-install-recommends --no-download "${debs[@]}"; then
+            sudo rm -rf "$DEB_DIR/partial" "$DEB_DIR/lock"
             if all_installed; then
               echo "::notice title=apt cache::installed from ${#debs[@]} cached .debs in $((SECONDS - start)) s, no mirror"
               echo "saveable=true" >> "$GITHUB_OUTPUT"
@@ -87,6 +94,9 @@ runs:
             echo "::warning title=apt cache::cached .debs miss some packages; fetching the rest from the mirror"
           else
             echo "::warning title=apt cache::cached .debs don't fit this runner image; using the mirror"
+            # What apt wanted from the network, for the log.
+            sudo apt-get "${OFFLINE_OPTS[@]}" install -y --no-install-recommends --print-uris "${debs[@]}" \
+              | grep "^'" | grep -v "^'file:" || true
             sudo find "$DEB_DIR" -maxdepth 1 -name '*.deb' -delete
           fi
         fi
