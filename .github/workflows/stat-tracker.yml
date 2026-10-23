@@ -12,6 +12,7 @@ on:
       - "Cargo.lock"
       - ".github/workflows/stat-tracker.yml"
       - ".github/workflows/stat-tracker-release.yml"
+      - ".github/actions/apt-install/**"
   pull_request:
     branches: [main, "wip/0.6"]
     paths:
@@ -23,6 +24,7 @@ on:
       - "Cargo.lock"
       - ".github/workflows/stat-tracker.yml"
       - ".github/workflows/stat-tracker-release.yml"
+      - ".github/actions/apt-install/**"
 
 # A new push to a PR cancels that PR's older run. Pushes to main group by
 # commit SHA and never cancel.
@@ -82,11 +84,28 @@ jobs:
     runs-on: ubuntu-latest
     # Warm runs take about 20 minutes, but a passing main push took 61
     # (job 118130839766: build 16m, test 41m) and cancelled runs 54 and 67.
-    timeout-minutes: 90
+    # +15 min over the old cap: on a crawling mirror a cache miss may spend
+    # up to ~30 min in apt (update 2 x 300 s, install 2 x 600 s).
+    timeout-minutes: 105
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+
+      # Offline from cached .debs when it can, else the mirror with the
+      # old retries/timeouts (.github/actions/apt-install). Ahead of
+      # "Packaging scripts": with minisign installed, test-bootstrap-pin.sh
+      # skips its own apt-get update + install from the mirror.
+      - name: Install system dependencies
+        uses: ./.github/actions/apt-install
+        with:
+          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          packages: >-
+            libwayland-dev libxkbcommon-dev
+            libegl-dev libgbm-dev
+            tesseract-ocr libtesseract-dev libleptonica-dev
+            libevdev-dev libudev-dev
+            pkg-config minisign
 
       - name: Packaging scripts
         run: |
@@ -98,21 +117,6 @@ jobs:
           bash dist/test-stage-assets.sh
           bash tests/check-no-game-art.sh
           bash dist/test-tag-version.sh
-
-      - name: Install system dependencies
-        run: |
-          set -euo pipefail
-          # A dead mirror must fail the job in minutes, not hang it for
-          # 15-20 (same options as stat-tracker-release.yml).
-          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
-            || { sleep 15; sudo timeout 300 apt-get "${APT_OPTS[@]}" update; }
-          sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
-            libwayland-dev libxkbcommon-dev \
-            libegl-dev libgbm-dev \
-            tesseract-ocr libtesseract-dev libleptonica-dev \
-            libevdev-dev libudev-dev \
-            pkg-config
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
@@ -187,26 +191,27 @@ jobs:
   clippy:
     name: Clippy (stat-tracker)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # +15 min over the old cap: on a crawling mirror a cache miss may spend
+    # up to ~30 min in apt (update 2 x 300 s, install 2 x 600 s).
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
 
+      # Offline from cached .debs when it can, else the mirror with the
+      # old retries/timeouts (.github/actions/apt-install).
       - name: Install system dependencies
-        run: |
-          set -euo pipefail
-          # A dead mirror must fail the job in minutes, not hang it for
-          # 15-20 (same options as stat-tracker-release.yml).
-          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
-            || { sleep 15; sudo timeout 300 apt-get "${APT_OPTS[@]}" update; }
-          sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
-            libwayland-dev libxkbcommon-dev \
-            libegl-dev libgbm-dev \
-            tesseract-ocr libtesseract-dev libleptonica-dev \
-            libevdev-dev libudev-dev \
-            pkg-config
+        uses: ./.github/actions/apt-install
+        with:
+          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          # minisign: not needed by clippy, listed so it shares Build & Test's key.
+          packages: >-
+            libwayland-dev libxkbcommon-dev
+            libegl-dev libgbm-dev
+            tesseract-ocr libtesseract-dev libleptonica-dev
+            libevdev-dev libudev-dev
+            pkg-config minisign
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
@@ -245,7 +250,9 @@ jobs:
     # Iced desktop GUI (scuffed-stat-tracker-ui). Depends on the tracker lib.
     name: Build & Test (stat-tracker-ui)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    # +15 min over the old cap: on a crawling mirror a cache miss may spend
+    # up to ~30 min in apt (update 2 x 300 s, install 2 x 600 s).
+    timeout-minutes: 55
     defaults:
       run:
         working-directory: .
@@ -254,21 +261,19 @@ jobs:
         with:
           persist-credentials: false
 
+      # Offline from cached .debs when it can, else the mirror with the
+      # old retries/timeouts (.github/actions/apt-install).
       - name: Install system dependencies
-        run: |
-          set -euo pipefail
-          # A dead mirror must fail the job in minutes, not hang it for
-          # 15-20 (same options as stat-tracker-release.yml).
-          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
-          sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
-            || { sleep 15; sudo timeout 300 apt-get "${APT_OPTS[@]}" update; }
-          sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
-            libwayland-dev libxkbcommon-dev \
-            libegl-dev libgbm-dev \
-            tesseract-ocr libtesseract-dev libleptonica-dev \
-            libevdev-dev libudev-dev \
-            libasound2-dev libvulkan-dev libssl-dev \
-            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev \
+        uses: ./.github/actions/apt-install
+        with:
+          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          packages: >-
+            libwayland-dev libxkbcommon-dev
+            libegl-dev libgbm-dev
+            tesseract-ocr libtesseract-dev libleptonica-dev
+            libevdev-dev libudev-dev
+            libasound2-dev libvulkan-dev libssl-dev
+            libgtk-3-dev libayatana-appindicator3-dev libxdo-dev
             pkg-config
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16

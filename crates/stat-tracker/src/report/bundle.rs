@@ -25,9 +25,6 @@ pub use crate::capture::capture_backend_label;
 pub use crate::host_probe::SessionType;
 pub use crate::version::APP_VERSION;
 
-#[cfg(test)]
-pub(super) use super::input::{blocked_sites, switch_for_report};
-
 /// `bundle_version` this build writes.
 pub const BUNDLE_VERSION: u64 = 2;
 /// `recognizers.ocr`.

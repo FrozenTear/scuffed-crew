@@ -7,12 +7,13 @@ use chrono::{DateTime, Utc};
 
 use super::bundle::{
     GameCategory, GameReportInput, LogOnlyCategory, LogReportInput, OCR_BLOCKED_SITES_MAX,
-    ReportError, Resolution, SessionType, SystemInfo,
+    ReportError, Resolution, SystemInfo,
 };
 use super::marker;
 use super::scrub::{LogWindow, ScrubContext};
 use crate::capture::CaptureBackend;
 use crate::config::{Config, OcrSetting};
+use crate::host_probe::SessionType;
 
 impl SystemInfo {
     /// Read the setup from `config`, the environment, and the markers in
