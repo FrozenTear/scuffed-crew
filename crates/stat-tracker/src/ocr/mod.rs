@@ -1748,8 +1748,11 @@ mod tests {
             .into_iter()
             .filter(|path| {
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                // `mod tests;` files and the OCR-off bench are test code.
-                !stem.starts_with("tests") && stem != "ocr_bench"
+                // `mod tests;` files, the OCR-off bench and the daemon's
+                // `main_tests/` (main.rs's test module) are test code.
+                !stem.starts_with("tests")
+                    && stem != "ocr_bench"
+                    && !path.starts_with(src.join("main_tests"))
             })
             .map(|path| {
                 let text = std::fs::read_to_string(&path).expect("read a source file");
