@@ -441,13 +441,13 @@ where
 pub trait TabKeySource {
     fn next_key(
         &mut self,
-    ) -> impl Future<Output = Result<crate::detect::TabKey, Box<dyn std::error::Error>>>;
+    ) -> impl Future<Output = Result<crate::input::TabKey, Box<dyn std::error::Error>>>;
 }
 
-impl TabKeySource for crate::detect::MultiKeyboardStream {
+impl TabKeySource for crate::input::MultiKeyboardStream {
     fn next_key(
         &mut self,
-    ) -> impl Future<Output = Result<crate::detect::TabKey, Box<dyn std::error::Error>>> {
+    ) -> impl Future<Output = Result<crate::input::TabKey, Box<dyn std::error::Error>>> {
         self.wait_tab()
     }
 }
@@ -458,7 +458,7 @@ impl TabKeySource for crate::detect::MultiKeyboardStream {
 pub async fn next_press<S: TabKeySource>(
     source: &mut S,
     tabs: &mut TabKeys,
-) -> Result<crate::detect::TabKey, Box<dyn std::error::Error>> {
+) -> Result<crate::input::TabKey, Box<dyn std::error::Error>> {
     loop {
         let key = source.next_key().await?;
         if key.down {
@@ -1176,12 +1176,12 @@ mod tests {
     }
 
     /// Key events from a list; then nothing more ever arrives.
-    pub(crate) struct FakeKeys(pub std::collections::VecDeque<crate::detect::TabKey>);
+    pub(crate) struct FakeKeys(pub std::collections::VecDeque<crate::input::TabKey>);
 
     impl TabKeySource for FakeKeys {
         fn next_key(
             &mut self,
-        ) -> impl Future<Output = Result<crate::detect::TabKey, Box<dyn std::error::Error>>>
+        ) -> impl Future<Output = Result<crate::input::TabKey, Box<dyn std::error::Error>>>
         {
             let key = self.0.pop_front();
             async move {
@@ -1193,8 +1193,8 @@ mod tests {
         }
     }
 
-    fn key(down: bool, at: Instant) -> crate::detect::TabKey {
-        crate::detect::TabKey { down, at }
+    fn key(down: bool, at: Instant) -> crate::input::TabKey {
+        crate::input::TabKey { down, at }
     }
 
     /// The loop's Tab wiring: a second press during a capture is queued
