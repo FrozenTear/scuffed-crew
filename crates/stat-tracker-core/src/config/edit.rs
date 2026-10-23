@@ -2,10 +2,8 @@
 //! first-run guide's [`Config::apply_setup_patch`]. A hand-edited file keeps
 //! its comments, order and unknown keys when only an in-place key changes.
 
-use super::{
-    CaptureRoute, Config, OcrSetting, ReaderSetting, SyncConfig, atomic_write_600,
-    unreadable_config,
-};
+use super::file::{atomic_write_600, unreadable_config};
+use super::{CaptureRoute, Config, OcrSetting, ReaderSetting, SyncConfig};
 
 impl Config {
     /// Text `save` would write.
