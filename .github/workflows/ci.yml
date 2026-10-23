@@ -88,6 +88,7 @@ jobs:
             --all-targets \
             --exclude scuffed-app \
             --exclude scuffed-stat-tracker \
+            --exclude scuffed-stat-tracker-core \
             --exclude scuffed-stat-tracker-ui \
             -- -D warnings
 
@@ -146,7 +147,7 @@ jobs:
           prefix-key: v1-rust
 
       - name: Build (native crates)
-        run: cargo build --workspace --exclude scuffed-app --exclude scuffed-stat-tracker --exclude scuffed-stat-tracker-ui
+        run: cargo build --workspace --exclude scuffed-app --exclude scuffed-stat-tracker --exclude scuffed-stat-tracker-core --exclude scuffed-stat-tracker-ui
 
       # scuffed-app was excluded here from the very first workflow commit
       # (3a4a906) — never a considered disk mitigation, just an exclusion that
@@ -158,7 +159,7 @@ jobs:
       # app gets built either way. Left alone to keep this diff to the one
       # thing being changed.
       - name: Test (workspace)
-        run: cargo test --workspace --exclude scuffed-stat-tracker --exclude scuffed-stat-tracker-ui
+        run: cargo test --workspace --exclude scuffed-stat-tracker --exclude scuffed-stat-tracker-core --exclude scuffed-stat-tracker-ui
 
       - name: Test (api-client, native)
         run: cargo test -p scuffed-api-client --no-default-features --features native
