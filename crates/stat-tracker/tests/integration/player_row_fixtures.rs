@@ -9,7 +9,7 @@
 //! Frames live in the gitignored local fixture dir; missing files are
 //! skipped (but resolving zero frames fails the run).
 //!
-//! Run: cargo test -p scuffed-stat-tracker --test player_row_fixtures -- --ignored
+//! Run: cargo test -p scuffed-stat-tracker --test integration -- --ignored player_row_fixtures::
 
 use stat_tracker::ocr;
 use stat_tracker::ocr::preprocess::crop_scoreboard;
@@ -68,7 +68,7 @@ const ROW_ENV: &str = "SCUFFED_5V5_OWN_ROW";
 /// digits or the perk icons on every row.
 ///
 /// Run: SCUFFED_5V5_FRAMES=<dir> SCUFFED_PLAYER_NAME=<name> \
-///   cargo test -p scuffed-stat-tracker --test player_row_fixtures -- --ignored
+///   cargo test -p scuffed-stat-tracker --test integration -- --ignored player_row_fixtures::
 #[test]
 #[ignore = "needs private 5v5 frames (SCUFFED_5V5_FRAMES, SCUFFED_PLAYER_NAME)"]
 fn player_row_resolves_by_name_in_5v5() {

@@ -140,7 +140,7 @@ pub struct BoardNames {
 // `#[track_caller]` is needed: the ocr-v1 call below is `#[track_caller]`
 // too, and the OCR gate records the line that asked when it refuses a read
 // (OCR off). With it, a refusal names the daemon's call site, as a direct
-// ocr-v1 call does; `tests/names_fallback.rs` checks this.
+// ocr-v1 call does; `tests/integration/names_fallback.rs` checks this.
 #[track_caller]
 pub fn read_names(board: &DynamicImage, team_size: usize, pack: Option<&NamePack>) -> BoardNames {
     let Some(pack) = pack else {

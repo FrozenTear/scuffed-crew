@@ -12,7 +12,7 @@
 //! reach the keyboard open, and like it the daemon is started through
 //! `common::spawn_daemon`, so it cannot outlive the test.
 
-mod common;
+use crate::common;
 
 use std::io::{Read, Write};
 use std::os::unix::process::ExitStatusExt;

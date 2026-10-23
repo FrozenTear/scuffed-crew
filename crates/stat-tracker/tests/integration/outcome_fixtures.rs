@@ -6,7 +6,7 @@
 //!   none_*.png                                — frames that must NOT detect an
 //!                                               outcome (desktop, mid-game, menus)
 //!
-//! Run: cargo test -p scuffed-stat-tracker --test outcome_fixtures -- --ignored
+//! Run: cargo test -p scuffed-stat-tracker --test integration -- --ignored outcome_fixtures::
 
 use stat_tracker::detect::MatchOutcome;
 use stat_tracker::detect::match_end::detect_outcome;

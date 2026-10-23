@@ -1,6 +1,10 @@
 //! Without a usable names-v1 pack, `names::read_names` is today's ocr-v1
 //! name path: the same reads byte for byte, the same Tesseract calls, and
 //! nothing read with OCR off. Boards are synthetic (no game art, no names).
+//! The test compares the process-wide Tesseract call count, so it runs in a
+//! process of its own.
+
+use crate::common;
 
 use stat_tracker::names::{self, NamePack, NameRecognizer, PackError};
 use stat_tracker::ocr::{self, gate};
@@ -75,6 +79,12 @@ fn boards() -> Vec<(image::DynamicImage, usize)> {
 
 #[test]
 fn without_a_pack_names_are_read_exactly_as_ocr_v1_reads_them() {
+    if !common::own_process(
+        module_path!(),
+        "without_a_pack_names_are_read_exactly_as_ocr_v1_reads_them",
+    ) {
+        return;
+    }
     let tmp = tempfile::tempdir().unwrap();
     // Every way of having no usable pack.
     let empty = tmp.path().join("templates").join("names-v1");
@@ -128,7 +138,7 @@ fn without_a_pack_names_are_read_exactly_as_ocr_v1_reads_them() {
     for b in &blocked {
         assert_eq!(b.site.entry, "recognize_scoreboard_names_pre_cropped");
         assert!(
-            b.site.file.ends_with("tests/names_fallback.rs"),
+            b.site.file.ends_with("tests/integration/names_fallback.rs"),
             "{}",
             b.site
         );

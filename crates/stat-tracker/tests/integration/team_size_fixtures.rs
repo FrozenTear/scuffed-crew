@@ -4,7 +4,7 @@
 //! local fixture dirs, so missing files are skipped (but detecting zero
 //! frames fails the run).
 //!
-//! Run: cargo test -p scuffed-stat-tracker --test team_size_fixtures -- --ignored
+//! Run: cargo test -p scuffed-stat-tracker --test integration -- --ignored team_size_fixtures::
 
 use stat_tracker::detect::hero_portrait::detect_team_size;
 use stat_tracker::ocr::preprocess::crop_scoreboard;

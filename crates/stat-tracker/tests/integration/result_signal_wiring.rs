@@ -6,6 +6,8 @@
 //! templates, not game art. One test per process, so the reader is set up
 //! exactly once, here.
 
+use crate::common;
+
 use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
 use stat_tracker::detect::MatchOutcome;
 use stat_tracker::detect::match_end::{
@@ -55,6 +57,12 @@ const WARM: [u8; 3] = [150, 100, 30];
 
 #[test]
 fn the_daemon_reads_the_result_word_from_the_words_pack() {
+    if !common::own_process(
+        module_path!(),
+        "the_daemon_reads_the_result_word_from_the_words_pack",
+    ) {
+        return;
+    }
     let data = tempfile::tempdir().unwrap();
     let words_dir = data.path().join(WORDS_SUBDIR);
     std::fs::create_dir_all(&words_dir).unwrap();
@@ -71,8 +79,9 @@ fn the_daemon_reads_the_result_word_from_the_words_pack() {
     ] {
         img.save(words_dir.join(name)).unwrap();
     }
-    // SAFETY: this is the only test in this binary; nothing else reads the
-    // environment concurrently.
+    // SAFETY: this test runs alone in a process of its own
+    // (`common::own_process`); nothing else reads the environment
+    // concurrently.
     unsafe { std::env::set_var(TEMPLATE_DIR_ENV, data.path()) };
     let p4 = FinalScoreSource::for_reader(true);
     let gold = [255, 220, 0];

@@ -7,7 +7,7 @@
 //!                                              phase (scoreboards, menus,
 //!                                              end-cards, transitions)
 //!
-//! Run: cargo test -p scuffed-stat-tracker --test phase_fixtures -- --ignored
+//! Run: cargo test -p scuffed-stat-tracker --test integration -- --ignored phase_fixtures::
 
 use stat_tracker::detect::GamePhase;
 use stat_tracker::detect::match_start::detect_phase;
