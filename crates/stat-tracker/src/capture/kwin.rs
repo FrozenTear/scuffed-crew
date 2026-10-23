@@ -541,7 +541,7 @@ pub enum Target {
 /// other portal paths pick ([`super::geom::auto_output_index`]); with no
 /// geometry it is KWin's active screen: the focused window's or the
 /// pointer's output, as KWin's focus settings decide.
-pub fn pick_target(
+pub(crate) fn pick_target(
     outputs: &[OutputRect],
     output_name: Option<&str>,
 ) -> (Target, Option<(u32, u32)>) {
@@ -566,7 +566,7 @@ pub fn pick_target(
 /// The probe's 1x1 area: the top-left pixel of the output Auto would
 /// capture, so it lies on a real output. With no geometry, KWin's active
 /// screen at scale 1.
-pub fn probe_target(outputs: &[OutputRect]) -> Target {
+pub(crate) fn probe_target(outputs: &[OutputRect]) -> Target {
     match super::geom::auto_output_index(outputs.iter().map(|o| (o.name.as_str(), o.area()))) {
         Some(index) => Target::Area {
             x: outputs[index].x,
