@@ -142,7 +142,7 @@ impl PhraseTemplates {
     ///
     /// The file comes from a downloaded pack, so a file that does not parse
     /// refuses the folder, and so does any entry (read or not) whose id is
-    /// not a plain word id ([`crate::packs::is_word_id`]), whose region is
+    /// not a plain word id ([`crate::packs::layout::is_word_id`]), whose region is
     /// not inside the game rect, or whose work scale is not the reader's.
     /// A listed phrase whose mask is missing or flat is left out, and so is
     /// one whose mask cannot fit its region ([`fits`]): a mask that can
@@ -167,7 +167,7 @@ impl PhraseTemplates {
         };
         let mut tpls = Vec::new();
         for (id, e) in entries {
-            if !crate::packs::is_word_id(&id)
+            if !crate::packs::layout::is_word_id(&id)
                 || !roi_is_valid(e.roi)
                 || !e.work.is_finite()
                 || (e.work - WORK).abs() > 1e-9
