@@ -106,7 +106,7 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/apt-install
         with:
-          save: true # TEMP hit-path proof, revert before review
+          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
           packages: >-
             libwayland-dev libxkbcommon-dev
             libegl-dev libgbm-dev
@@ -198,7 +198,7 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/apt-install
         with:
-          save: true # TEMP hit-path proof, revert before review
+          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
           packages: >-
             libwayland-dev libxkbcommon-dev
             libegl-dev libgbm-dev
@@ -257,7 +257,7 @@ jobs:
       - name: Install system dependencies
         uses: ./.github/actions/apt-install
         with:
-          save: true # TEMP hit-path proof, revert before review
+          save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
           packages: >-
             libwayland-dev libxkbcommon-dev
             libegl-dev libgbm-dev
