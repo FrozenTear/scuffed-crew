@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn the_kwin_grab_reads_its_lock_wait_from_the_task() {
         let grab = squashed_body(
-            include_str!("kwin.rs"),
+            include_str!("kwin/mod.rs"),
             concat!("pub async fn ", "capture("),
         );
         assert!(grab.contains("letwait=super::tab::grab_lock_wait(LOCK_WAIT_TAB);"));
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn the_kwin_grab_respects_the_reread_limit() {
         let grab = squashed_body(
-            include_str!("kwin.rs"),
+            include_str!("kwin/mod.rs"),
             concat!("pub async fn ", "capture("),
         );
         assert!(grab.contains("letdue=native_reread_due("));
@@ -611,7 +611,7 @@ mod tests {
     #[test]
     fn the_kwin_reread_counts_as_capture_cpu() {
         let grab = squashed_body(
-            include_str!("kwin.rs"),
+            include_str!("kwin/mod.rs"),
             concat!("pub async fn ", "capture("),
         );
         assert!(grab.contains("crate::perf::record_cpu(crate::perf::Stage::Capture,reread_cpu);"));
@@ -620,7 +620,7 @@ mod tests {
     #[test]
     fn the_compare_half_runs_only_past_its_gate() {
         let compare = squashed_body(
-            include_str!("kwin.rs"),
+            include_str!("kwin/mod.rs"),
             concat!("pub(crate) async fn ", "save_compare_half("),
         );
         assert!(compare.contains("letprobe=probe_beside_share(true).await;"));
