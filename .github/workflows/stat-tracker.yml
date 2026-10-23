@@ -81,8 +81,13 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          # A dead mirror must fail the job in minutes, not hang it for
+          # 15-20 (same options as stat-tracker-release.yml).
+          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
+            || { sleep 15; sudo timeout 300 apt-get "${APT_OPTS[@]}" update; }
+          sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
             libegl-dev libgbm-dev \
             tesseract-ocr libtesseract-dev libleptonica-dev \
@@ -95,7 +100,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: crates/stat-tracker
+          # No `workspaces:` here. The root workspace builds into <repo>/target,
+          # and the default `. -> target` caches that dir. The old
+          # `crates/stat-tracker` path cached a target dir that is never built.
+          key: stat-tracker-build-test
           # Save on main only: other refs would evict main's caches (repo cap).
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -103,7 +111,11 @@ jobs:
         run: cargo build --locked
 
       - name: Test
-        run: cargo test --locked
+        # No --examples: plain `cargo test` also links the 19 dev-tool
+        # examples, and nothing here runs them. Clippy --all-targets still
+        # checks they compile. The crate has no doctests (only ```text blocks),
+        # so --lib --bins --tests covers every test it has.
+        run: cargo test --locked --lib --bins --tests
 
   clippy:
     name: Clippy (stat-tracker)
@@ -116,8 +128,13 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          # A dead mirror must fail the job in minutes, not hang it for
+          # 15-20 (same options as stat-tracker-release.yml).
+          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
+            || { sleep 15; sudo timeout 300 apt-get "${APT_OPTS[@]}" update; }
+          sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
             libegl-dev libgbm-dev \
             tesseract-ocr libtesseract-dev libleptonica-dev \
@@ -131,7 +148,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: crates/stat-tracker
+          # No `workspaces:` here. The root workspace builds into <repo>/target,
+          # and the default `. -> target` caches that dir. The old
+          # `crates/stat-tracker` path cached a target dir that is never built.
+          key: stat-tracker-clippy
           # Save on main only: other refs would evict main's caches (repo cap).
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
@@ -153,8 +173,13 @@ jobs:
 
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          set -euo pipefail
+          # A dead mirror must fail the job in minutes, not hang it for
+          # 15-20 (same options as stat-tracker-release.yml).
+          APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+          sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
+            || { sleep 15; sudo timeout 300 apt-get "${APT_OPTS[@]}" update; }
+          sudo timeout 600 apt-get "${APT_OPTS[@]}" install -y --no-install-recommends \
             libwayland-dev libxkbcommon-dev \
             libegl-dev libgbm-dev \
             tesseract-ocr libtesseract-dev libleptonica-dev \
