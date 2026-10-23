@@ -13,6 +13,8 @@
 //! timers that used to run on the wall clock run on [`ActiveClock`]
 //! instead, which only advances while the tracker wants the stream running,
 //! so a pause the tracker asked for never looks like a stalled stream.
+//!
+//! [`ActiveClock`]: pause::ActiveClock
 
 use std::ffi::c_void;
 use std::sync::atomic::{
@@ -76,6 +78,8 @@ struct State {
     /// `loop_`, under `loop_lock`.
     pw_loop: AtomicPtr<c_void>,
     /// Both set, or neither: see [`pause_symbols`].
+    ///
+    /// [`pause_symbols`]: ffi::pause_symbols
     set_active: Option<SetActiveFn>,
     loop_invoke: Option<PwLoopInvokeFn>,
     /// [`PAUSE_TRIPS`] outside tests.
@@ -291,6 +295,9 @@ impl Handle {
     /// trips the fail-safe at once, and an unanswered resume that has run
     /// [`RESUME_BUFFER_BOUND`] of active time counts toward
     /// [`RESUME_FAILS_TO_TRIP`].
+    ///
+    /// [`RESUME_BUFFER_BOUND`]: pause::RESUME_BUFFER_BOUND
+    /// [`RESUME_FAILS_TO_TRIP`]: pause::RESUME_FAILS_TO_TRIP
     pub fn note_grab_end(&self, tab_missed: bool) {
         let fail = lock(&self.state.pause).grab_end(tab_missed, std::time::Instant::now());
         if let Some(why) = fail {

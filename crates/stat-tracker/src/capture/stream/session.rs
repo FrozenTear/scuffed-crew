@@ -64,6 +64,8 @@ pub(super) fn cursor_modes_block(
 /// How long a portal-unavailable warning stays quiet. The open itself
 /// retries every [`START_BACKOFF`], so the warning window has to be longer
 /// than that gap or every retry warns again.
+///
+/// [`START_BACKOFF`]: super::policy::START_BACKOFF
 pub(super) const PORTAL_WARN_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 /// Which portal check failed. The warning episode is this kind, not the

@@ -17,6 +17,8 @@
 //! times out is that same No only when no restore token was sent. A timeout
 //! after a token was sent waits out the backoff and is not a No. Shutdown
 //! aborts the dialog.
+//!
+//! [`QUIET_STALL`]: policy::QUIET_STALL
 
 mod fit;
 mod framebuf;

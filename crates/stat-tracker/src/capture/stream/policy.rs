@@ -672,6 +672,8 @@ pub fn quiet_poll_shot_due(last: Option<Instant>, now: Instant) -> bool {
 }
 
 /// Where in [`capture`] a stalled stream can be noticed.
+///
+/// [`capture`]: super::capture
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StallSite {
     /// The stream had streamed and is no longer alive. No grab runs.
@@ -687,6 +689,8 @@ pub(super) enum StallSite {
 /// reused frame only matters to a poll. Nothing is taken while shutting
 /// down. A poll on a quiet stream also waits out [`QUIET_SHOT_GAP`]
 /// (`quiet_due`).
+///
+/// [`capture`]: super::capture
 pub(super) fn stall_fallback_at(
     site: StallSite,
     kind: CaptureKind,
