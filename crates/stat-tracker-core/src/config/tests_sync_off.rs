@@ -169,3 +169,62 @@ fn the_setup_guide_fills_in_the_missing_token_in_place() {
     assert_eq!(written.sync, patch.sync);
     assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
 }
+
+#[test]
+fn a_cli_token_pairs_with_the_url_of_a_token_less_table() {
+    let file_on = Some(SyncConfig {
+        server_url: "https://file.example".to_string(),
+        token: "file-token".to_string(),
+    });
+    let url = |raw: &str| Some(raw.to_string());
+    // No CLI token: the file decides.
+    assert_eq!(
+        Config::sync_with_cli(file_on.clone(), None, None, url("https://cli.example")),
+        file_on
+    );
+    assert_eq!(
+        Config::sync_with_cli(None, url("https://stored.example"), None, None),
+        None
+    );
+    // A CLI token takes the file's URL, from a loaded table or a token-less one.
+    let pair = |server: &str, token: &str| {
+        Some(SyncConfig {
+            server_url: server.to_string(),
+            token: token.to_string(),
+        })
+    };
+    assert_eq!(
+        Config::sync_with_cli(file_on.clone(), None, url("cli-token"), None),
+        pair("https://file.example", "cli-token")
+    );
+    assert_eq!(
+        Config::sync_with_cli(None, url("https://stored.example"), url("cli-token"), None),
+        pair("https://stored.example", "cli-token")
+    );
+    // The CLI server wins over both.
+    assert_eq!(
+        Config::sync_with_cli(
+            None,
+            url("https://stored.example"),
+            url("cli-token"),
+            url("https://cli.example")
+        ),
+        pair("https://cli.example", "cli-token")
+    );
+}
+
+#[test]
+fn the_url_of_a_token_less_table_is_found() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    let (_, server_only) = token_less_files().remove(0);
+    std::fs::write(&path, &server_only).expect("seed");
+    assert_eq!(
+        Config::token_less_sync_url(&path),
+        Some(Some("https://crew.example".to_string()))
+    );
+    std::fs::write(&path, with_sync("")).expect("seed");
+    assert_eq!(Config::token_less_sync_url(&path), Some(None));
+    std::fs::write(&path, ROOT).expect("seed");
+    assert_eq!(Config::token_less_sync_url(&path), None);
+}

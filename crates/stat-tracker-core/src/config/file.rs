@@ -23,20 +23,25 @@ impl Config {
         let cli_server =
             Self::arg_value("--server").or_else(|| std::env::var("SCUFFED_SERVER").ok());
 
-        if let Some(token) = cli_token {
-            let server = cli_server.unwrap_or_else(|| {
-                // Preserve existing server URL if only --token was given
-                config
-                    .sync
-                    .as_ref()
-                    .map(|s| s.server_url.clone())
-                    .unwrap_or_default()
-            });
-            config.sync = Some(SyncConfig {
-                server_url: server,
-                token,
-            });
+        // A `[sync]` table without a token loads as sync off. Its URL still
+        // pairs with a token from --token / SCUFFED_TOKEN.
+        let token_less_sync = if config.sync.is_none() {
+            Self::token_less_sync_url(&config_path)
+        } else {
+            None
+        };
+        if cli_token.is_none() && token_less_sync.is_some() {
+            tracing::warn!(
+                "config.toml has a [sync] section without a token, so sync is off. \
+                 Add the token in Settings, or check that the key is spelled `token`."
+            );
         }
+        config.sync = Self::sync_with_cli(
+            config.sync.take(),
+            token_less_sync.flatten(),
+            cli_token,
+            cli_server,
+        );
 
         // Auto-save if we built a usable sync config from CLI args and there was
         // no file yet, avoids requiring flags on every subsequent start.
@@ -79,6 +84,41 @@ impl Config {
         }
 
         Ok(config)
+    }
+
+    /// `[sync]` after the CLI / env overlay of [`Self::load`].
+    ///
+    /// No CLI token keeps the file's value. A CLI token pairs with the CLI
+    /// server, else the file's server URL: from `file_sync`, or from
+    /// `stored_url`, the `server_url` of a `[sync]` table that loaded as off
+    /// because it has no token.
+    pub(super) fn sync_with_cli(
+        file_sync: Option<SyncConfig>,
+        stored_url: Option<String>,
+        cli_token: Option<String>,
+        cli_server: Option<String>,
+    ) -> Option<SyncConfig> {
+        let Some(token) = cli_token else {
+            return file_sync;
+        };
+        let server_url = cli_server
+            .or_else(|| file_sync.map(|sync| sync.server_url))
+            .or(stored_url)
+            .unwrap_or_default();
+        Some(SyncConfig { server_url, token })
+    }
+
+    /// `Some` when `path` has a `[sync]` table, holding its `server_url` if
+    /// that is a string. Only asked when the table loaded as sync off.
+    pub(super) fn token_less_sync_url(path: &std::path::Path) -> Option<Option<String>> {
+        let text = std::fs::read_to_string(path).ok()?;
+        let doc = text.parse::<toml::Table>().ok()?;
+        let sync = doc.get("sync")?.as_table()?;
+        Some(
+            sync.get("server_url")
+                .and_then(|url| url.as_str())
+                .map(str::to_string),
+        )
     }
 
     /// Parse `config.toml` text the way [`Self::load`] reads the file.
