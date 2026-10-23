@@ -69,7 +69,13 @@ pub struct Config {
     pub screencast_pause_between_grabs: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub player_name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    /// `[sync]`. Missing, or a table without a non-empty `token`, means sync
+    /// is off (`sync::deserialize_sync`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "sync::deserialize_sync"
+    )]
     pub sync: Option<SyncConfig>,
     #[serde(default)]
     pub auto_detect: AutoDetectConfig,
@@ -253,6 +259,9 @@ mod tests_parse_error;
 
 #[cfg(test)]
 mod tests_pins;
+
+#[cfg(test)]
+mod tests_sync_off;
 
 #[cfg(test)]
 mod tests_sync_url;
