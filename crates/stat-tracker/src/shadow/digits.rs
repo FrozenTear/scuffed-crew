@@ -47,38 +47,9 @@ use crate::ocr::preprocess;
 
 pub const FIELDS: [&str; 6] = ["E", "A", "D", "DMG", "H", "MIT"];
 
-/// Identifies this recognizer's output. Bump it whenever any value,
-/// confidence or suspect flag can change, so logged reads from different
-/// builds are never pooled by mistake. Every `shadow/digits.jsonl` line
-/// carries it. The `recognizer_snapshot_is_pinned` test fails until the bump
-/// is made when, on its synthetic fixtures, any value or suspect flag
-/// changes, any calibration constant changes, a pinned sample confidence
-/// moves more than 0.02, or a board's mean confidence moves more than 0.005.
-/// Float drift below those tolerances is accepted on purpose.
-///
-/// * `cv-v1`: template matcher as shipped in 0.4.23 (raw margins, 0.06 cut).
-/// * `cv-v2`: per-digit calibrated confidence, suspect below 0.35.
-/// * `cv-v3`: 1080p templates and typical margins rebuilt with real
-///   1920x1080 captures added to the downscaled 1440p set; cells with too
-///   little ink for the digits read are flagged.
-/// * `cv-v4`: pair checks for 4 vs 6 and for dim 0 vs 3 can lift a glyph
-///   margin that sits below the suspect line; touching glyphs can also be
-///   split along slanted cut lines.
-/// * `cv-v5`: a thousands-separator gap (width in range, or bottom-band comma
-///   ink) joins digit groups instead of splitting them; any ink left of the
-///   picked group inside the cell forces suspect.
-/// * `cv-v6`: alpha.8 reader. Written as [`RECOGNIZER_ID_NO_OCR`] when the
-///   tracker runs with OCR off, so those rows and reports can be told apart.
-/// * `cv-v7`: header labels are found with
-///   [`preprocess::header_label_groups_scaled`]: the dark cut follows the
-///   strip's background brightness and a 2 px "H" label is kept on boards
-///   narrower than 1664 px. Downscaled and dimmed boards now find their
-///   columns; boards that already found them read the same.
-/// * `cv-v8`: the digit reads are the same as `cv-v7`. A held own-row cell
-///   now stores the reader's unsure read, flagged, when the capture gate
-///   would take that read, instead of the game's older accepted value
-///   (report a6f3). Stored stats can differ from `cv-v7` rows.
-pub const RECOGNIZER_ID: &str = "cv-v8";
+// The id and its version history live in `crate::model`, below the modules
+// that store and upload it. Bump it there (and `RECOGNIZER_ID_NO_OCR` here).
+pub use crate::model::RECOGNIZER_ID;
 
 /// [`RECOGNIZER_ID`] for a run with OCR off.
 pub const RECOGNIZER_ID_NO_OCR: &str = "cv-v8-noocr";
@@ -1716,14 +1687,14 @@ pub(crate) mod test_glyphs {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use image::{Rgb, RgbImage};
     use test_glyphs::{draw_text, glyph_means, ink_cols, text_for};
 
     /// 1664x1007 scoreboard (a 1440p crop): bright header with six dark labels,
     /// dark rows holding the given stat values. No name or hero pixels.
-    fn synth_board(values: &[[u32; 6]], team: usize, gap: usize) -> DynamicImage {
+    pub(crate) fn synth_board(values: &[[u32; 6]], team: usize, gap: usize) -> DynamicImage {
         let (w, h) = (1664usize, 1007usize);
         let mut img = RgbImage::from_pixel(w as u32, h as u32, Rgb([18, 20, 32]));
         for y in 0..26 {
@@ -1760,7 +1731,7 @@ mod tests {
         DynamicImage::ImageRgb8(img)
     }
 
-    fn sample_values(team: usize) -> Vec<[u32; 6]> {
+    pub(crate) fn sample_values(team: usize) -> Vec<[u32; 6]> {
         let base: [[u32; 6]; 12] = [
             [12, 3, 3, 5480, 950, 2347],
             [0, 0, 0, 0, 0, 0],
@@ -2108,187 +2079,6 @@ mod tests {
         assert_eq!(cell.value, None);
         assert!(cell.suspect);
         assert_eq!(read.rows[0].cells[4].value, Some(want[0][4]));
-    }
-
-    /// Grey row bands in the name strip so the saturation scan sees a pitch.
-    /// Stat digits stay where `synth_board` drew them.
-    fn with_row_pitch(board: &DynamicImage, pitch: f64) -> DynamicImage {
-        let mut img = board.to_rgb8();
-        let (w, h) = img.dimensions();
-        let x0 = (w as f64 * 0.06) as u32;
-        let x1 = (w as f64 * 0.40) as u32;
-        for y in 0..h {
-            for x in x0..x1 {
-                img.put_pixel(x, y, Rgb([40, 90, 160]));
-            }
-        }
-        let step = pitch * h as f64;
-        let mut y = step / 2.0;
-        while y + 12.0 < h as f64 * 0.45 {
-            for dy in 0..12 {
-                for x in x0..x1 {
-                    img.put_pixel(x, y as u32 + dy, Rgb([150, 150, 150]));
-                }
-            }
-            y += step;
-        }
-        DynamicImage::ImageRgb8(img)
-    }
-
-    fn frame_with_board(board: &DynamicImage) -> DynamicImage {
-        let mut img = RgbImage::from_pixel(2560, 1440, Rgb([0, 0, 0]));
-        let src = board.to_rgb8();
-        for y in 0..src.height() {
-            for x in 0..src.width() {
-                img.put_pixel(448 + x, 216 + y, *src.get_pixel(x, y));
-            }
-        }
-        DynamicImage::ImageRgb8(img)
-    }
-
-    #[test]
-    fn blank_rows_and_an_empty_frame_do_not_invent_a_team_size() {
-        let reader = crate::shadow::Reader::load(&crate::shadow::ReaderConfig::default());
-        let ocr = crate::reader_apply::PolicyRow {
-            map: "Busan".into(),
-            mode: "Control".into(),
-            result: "victory".into(),
-            hero: "Ana".into(),
-            elims: 10,
-            assists: 4,
-            deaths: 2,
-            damage: 4000,
-            healing: 8000,
-            mitigation: 100,
-        };
-        let own = |team| crate::reader_apply::OwnRow::Identified {
-            index: 0,
-            team_size: team,
-        };
-        for (team, pitch) in [(5usize, 0.086), (6usize, 0.074)] {
-            let zeros = vec![[0u32; 6]; team * 2];
-            let drawn = with_row_pitch(&synth_board(&zeros, team, 3), pitch);
-            let board = reader.read_board(&frame_with_board(&drawn));
-            if board.status == crate::shadow::BoardStatus::Read {
-                assert_eq!(board.team_size, Some(team));
-            }
-            let other = if team == 5 { 6 } else { 5 };
-            assert_ne!(
-                board.team_size,
-                Some(other),
-                "a board of zeros must not be read as {other}v{other}: {:?}",
-                (board.status, board.team_size)
-            );
-            let saved = crate::reader_apply::merge_saved(&ocr, own(team), Some(&board));
-            for stat in [
-                saved.elims,
-                saved.assists,
-                saved.deaths,
-                saved.damage,
-                saved.healing,
-                saved.mitigation,
-            ] {
-                let ocr_stat = [
-                    ocr.elims,
-                    ocr.assists,
-                    ocr.deaths,
-                    ocr.damage,
-                    ocr.healing,
-                    ocr.mitigation,
-                ];
-                assert!(
-                    stat == 0 || ocr_stat.contains(&stat),
-                    "blank rows must not store a made-up stat {stat}"
-                );
-            }
-            for name in ["map", "mode", "result", "hero"] {
-                assert!(
-                    !saved.suspect_fields.iter().any(|field| field == name),
-                    "{name} was not attempted: {:?}",
-                    saved.suspect_fields
-                );
-            }
-        }
-
-        let shell = {
-            let mut img = synth_board(&vec![[0u32; 6]; 10], 5, 3).to_rgb8();
-            let (w, h) = img.dimensions();
-            for y in 27..h {
-                for x in 900..w {
-                    img.put_pixel(x, y, Rgb([18, 20, 32]));
-                }
-            }
-            with_row_pitch(&DynamicImage::ImageRgb8(img), 0.086)
-        };
-        let empty_rows = reader.read_board(&frame_with_board(&shell));
-        assert_eq!(empty_rows.status, crate::shadow::BoardStatus::NotFound);
-        assert_eq!(
-            empty_rows.team_size, None,
-            "empty stat rows must not guess a team size"
-        );
-        let saved = crate::reader_apply::merge_saved(&ocr, own(5), Some(&empty_rows));
-        assert_eq!(saved.map, ocr.map);
-        assert_eq!(saved.mode, ocr.mode);
-        assert_eq!(saved.result, ocr.result);
-        assert_eq!(saved.hero, ocr.hero);
-        assert_eq!(saved.elims, ocr.elims);
-        assert_eq!(saved.assists, ocr.assists);
-        assert_eq!(saved.deaths, ocr.deaths);
-        assert_eq!(saved.damage, ocr.damage);
-        assert_eq!(saved.healing, ocr.healing);
-        assert_eq!(saved.mitigation, ocr.mitigation);
-        assert_eq!(saved.recognizer, scuffed_types::RECOGNIZER_OCR_V1);
-        assert!(saved.suspect_fields.is_empty());
-
-        let empty = reader.read_board(&DynamicImage::new_rgb8(2560, 1440));
-        assert_eq!(empty.status, crate::shadow::BoardStatus::NotFound);
-        assert_eq!(empty.team_size, None, "an empty frame must not guess 5v5");
-        let saved = crate::reader_apply::merge_saved(&ocr, own(5), Some(&empty));
-        assert_eq!(saved.map, ocr.map);
-        assert_eq!(saved.mode, ocr.mode);
-        assert_eq!(saved.result, ocr.result);
-        assert_eq!(saved.hero, ocr.hero);
-        assert_eq!(saved.elims, ocr.elims);
-        assert_eq!(saved.damage, ocr.damage);
-        assert_eq!(saved.recognizer, scuffed_types::RECOGNIZER_OCR_V1);
-        assert!(saved.suspect_fields.is_empty());
-    }
-
-    #[test]
-    fn empty_reader_config_does_not_flag_unattempted_fields() {
-        let reader = crate::shadow::Reader::load(&crate::shadow::ReaderConfig::default());
-        assert!(!reader.has_heroes());
-        let drawn = with_row_pitch(&synth_board(&sample_values(5), 5, 3), 0.086);
-        let board = reader.read_board(&frame_with_board(&drawn));
-        assert_eq!(
-            (board.status, board.team_size),
-            (crate::shadow::BoardStatus::Read, Some(5)),
-            "a drawn 5v5 board with no packs"
-        );
-        let saved = crate::reader_apply::merge_saved(
-            &crate::reader_apply::PolicyRow {
-                map: "Busan".into(),
-                mode: "Control".into(),
-                result: "victory".into(),
-                hero: "Ana".into(),
-                elims: 10,
-                assists: 4,
-                deaths: 2,
-                damage: 4000,
-                healing: 8000,
-                mitigation: 100,
-            },
-            crate::reader_apply::OwnRow::Identified {
-                index: 0,
-                team_size: 5,
-            },
-            Some(&board),
-        );
-        assert!(
-            saved.suspect_fields.is_empty(),
-            "empty ReaderConfig flagged {:?}",
-            saved.suspect_fields
-        );
     }
 
     #[test]

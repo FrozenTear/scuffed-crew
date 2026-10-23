@@ -7,8 +7,10 @@ pub mod fs_mode;
 pub mod hero_auth;
 pub mod host_probe;
 pub mod mapcrops;
+pub mod model;
 pub mod names;
 pub mod ocr;
+pub mod ocr_status;
 pub mod ocr_switch;
 pub mod omp;
 pub mod packs;
@@ -24,5 +26,11 @@ pub mod setup;
 pub mod shadow;
 pub mod stats;
 pub mod storage;
+pub mod suspect;
 pub mod sync;
 pub mod tab_retry;
+pub mod version;
+
+/// Pins the layering of the coming lib split (0.6 N4).
+#[cfg(test)]
+mod tests_layering;

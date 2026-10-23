@@ -72,11 +72,11 @@ pub struct Config {
     #[serde(default)]
     pub debug_ocr: bool,
     /// Most games whose report pictures are kept in `report-kit/`. Missing
-    /// means [`crate::report::kit::DEFAULT_MAX_GAMES`] (50). Oldest go first.
+    /// means [`DEFAULT_MAX_GAMES`] (50). Oldest go first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_kit_max_games: Option<usize>,
     /// Total size cap of `report-kit/` in MB. Missing means
-    /// [`crate::report::kit::DEFAULT_MAX_MB`] (500). The newest game is kept
+    /// [`DEFAULT_MAX_MB`] (500). The newest game is kept
     /// even when it alone is larger.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report_kit_max_mb: Option<u64>,
@@ -454,6 +454,36 @@ pub const POLL_INTERVAL_MS_MAX: u64 = 10_000;
 pub const SCREENCAST_MAX_FPS_DEFAULT: u32 = 4;
 pub const SCREENCAST_MAX_FPS_MIN: u32 = 1;
 pub const SCREENCAST_MAX_FPS_MAX: u32 = 5;
+
+/// Games kept by default. Config: `report_kit_max_games`.
+pub const DEFAULT_MAX_GAMES: usize = 50;
+/// Total size cap by default, in MB. Config: `report_kit_max_mb`.
+pub const DEFAULT_MAX_MB: u64 = 500;
+
+/// How many game kits (`report::kit`) are kept and how large they may be
+/// together. The oldest games go first; the newest game is never trimmed,
+/// even when it alone is over `max_bytes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Retention {
+    pub max_games: usize,
+    pub max_bytes: u64,
+}
+
+impl Default for Retention {
+    fn default() -> Self {
+        Self::new(DEFAULT_MAX_GAMES, DEFAULT_MAX_MB)
+    }
+}
+
+impl Retention {
+    /// `max_games` is at least 1, so the newest game always stays.
+    pub fn new(max_games: usize, max_mb: u64) -> Self {
+        Self {
+            max_games: max_games.max(1),
+            max_bytes: max_mb.saturating_mul(1024 * 1024),
+        }
+    }
+}
 
 /// Clamp a configured stream cap. Missing means [`SCREENCAST_MAX_FPS_DEFAULT`].
 pub fn clamp_screencast_max_fps(raw: Option<u32>) -> u32 {
@@ -885,12 +915,10 @@ impl Config {
 
     /// Whether OCR should write debug PNGs this process (config and/or env).
     /// Report kit retention from `report_kit_max_games` and `report_kit_max_mb`.
-    pub fn report_kit_retention(&self) -> crate::report::kit::Retention {
-        crate::report::kit::Retention::new(
-            self.report_kit_max_games
-                .unwrap_or(crate::report::kit::DEFAULT_MAX_GAMES),
-            self.report_kit_max_mb
-                .unwrap_or(crate::report::kit::DEFAULT_MAX_MB),
+    pub fn report_kit_retention(&self) -> Retention {
+        Retention::new(
+            self.report_kit_max_games.unwrap_or(DEFAULT_MAX_GAMES),
+            self.report_kit_max_mb.unwrap_or(DEFAULT_MAX_MB),
         )
     }
 
@@ -2026,18 +2054,12 @@ reader_pack_url = "https://crew.example/packs/reader.zip"
     #[test]
     fn report_kit_retention_defaults_to_50_games_and_500_mb() {
         let cfg: Config = toml::from_str("data_dir = \"/tmp/x\"").unwrap();
-        assert_eq!(
-            cfg.report_kit_retention(),
-            crate::report::kit::Retention::new(50, 500)
-        );
+        assert_eq!(cfg.report_kit_retention(), Retention::new(50, 500));
         let cfg: Config = toml::from_str(
             "data_dir = \"/tmp/x\"\nreport_kit_max_games = 20\nreport_kit_max_mb = 100",
         )
         .unwrap();
-        assert_eq!(
-            cfg.report_kit_retention(),
-            crate::report::kit::Retention::new(20, 100)
-        );
+        assert_eq!(cfg.report_kit_retention(), Retention::new(20, 100));
     }
 
     #[test]

@@ -34,7 +34,7 @@ pub const ROTATED: &str = "perf.log.1";
 /// and the pair about 20 hours; a stream-only KDE line is shorter (about
 /// 600 bytes, 14 hours a file). The pair, at most about 1 MiB, is under
 /// the Performance report's `log.txt` share (half of the 4 MiB
-/// [`crate::report::scrub::LOG_MAX_BYTES`], 2 MiB), so a report carries
+/// `report::scrub::LOG_MAX_BYTES`, 2 MiB), so a report carries
 /// all of it.
 pub const MAX_BYTES: u64 = 512 * 1024;
 
@@ -53,7 +53,7 @@ static TX: OnceLock<mpsc::Sender<Msg>> = OnceLock::new();
 pub fn init(data_dir: &Path) {
     let (tx, rx) = mpsc::channel();
     let dir = data_dir.to_path_buf();
-    let x11 = crate::report::SessionType::from_env() == crate::report::SessionType::X11;
+    let x11 = crate::host_probe::SessionType::from_env() == crate::host_probe::SessionType::X11;
     let spawned = std::thread::Builder::new()
         .name("perf-log".into())
         .spawn(move || run(&dir, &rx, x11));
@@ -231,7 +231,7 @@ impl SetupInfo {
             .and_then(|m| mem_total_mb(&m))
             .unwrap_or(0);
         Self {
-            session: crate::report::SessionType::from_env().as_str(),
+            session: crate::host_probe::SessionType::from_env().as_str(),
             kernel,
             cpus: std::thread::available_parallelism().map_or(1, |n| n.get()),
             cpu_model: std::fs::read_to_string("/proc/cpuinfo")
@@ -251,7 +251,7 @@ pub fn header_line(s: &SetupInfo) -> String {
     format!(
         "{} setup app={} session={} kernel={} cpus={} ram_mb={} proton={} cpu_model=\"{}\"",
         now_stamp(),
-        crate::report::bundle::APP_VERSION,
+        crate::version::APP_VERSION,
         s.session,
         s.kernel,
         s.cpus,

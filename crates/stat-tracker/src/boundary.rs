@@ -101,7 +101,7 @@
 use std::time::{Duration, Instant};
 
 use crate::capture_gate::{self, Counters, GATE_COLS, GateState};
-use crate::detect::MatchOutcome;
+use crate::model::MatchOutcome;
 
 /// The first fresh-match board has to land at least this long after the
 /// board it is compared with (the reset baseline, or the gate when there is

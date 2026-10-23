@@ -1,5 +1,4 @@
-use crate::ocr::RowOcrResult;
-use crate::storage::PersonalMatch;
+use crate::model::{PersonalMatch, RowOcrResult};
 use chrono::Utc;
 use strsim::normalized_levenshtein;
 use surrealdb_types::Datetime as SurrealDatetime;
@@ -182,7 +181,7 @@ pub fn looks_like_scoreboard(rows: &[RowOcrResult]) -> bool {
         .filter(|r| {
             r.stats
                 .iter()
-                .filter(|c| crate::ocr::is_clean_stat(c.value.trim()))
+                .filter(|c| crate::model::is_clean_stat(c.value.trim()))
                 .count()
                 >= 4
         })
@@ -203,7 +202,7 @@ pub fn both_teams_have_stats(rows: &[RowOcrResult], team_size: usize) -> bool {
     let plausible = |row: &RowOcrResult| {
         row.stats
             .iter()
-            .filter(|cell| crate::ocr::is_clean_stat(cell.value.trim()))
+            .filter(|cell| crate::model::is_clean_stat(cell.value.trim()))
             .count()
             >= 4
     };
@@ -451,16 +450,16 @@ pub fn player_row_suspect_mask(
 ///
 /// The number is `scuffed_types::PLAUSIBLE_ELIMS_MAX`. Server hero and role
 /// averages use that same ceiling.
-pub(crate) const MAX_ELIMS: u32 = scuffed_types::PLAUSIBLE_ELIMS_MAX;
+pub const MAX_ELIMS: u32 = scuffed_types::PLAUSIBLE_ELIMS_MAX;
 /// Assists past this are a damage or timer digit in the assists column.
 ///
 /// The number is `scuffed_types::PLAUSIBLE_ASSISTS_MAX`.
-pub(crate) const MAX_ASSISTS: u32 = scuffed_types::PLAUSIBLE_ASSISTS_MAX;
+pub const MAX_ASSISTS: u32 = scuffed_types::PLAUSIBLE_ASSISTS_MAX;
 /// Deaths past this are a damage or timer digit in the deaths column.
 ///
 /// The number is `scuffed_types::PLAUSIBLE_DEATHS_MAX`. Server hero and role
 /// averages use that same ceiling.
-pub(crate) const MAX_DEATHS: u32 = scuffed_types::PLAUSIBLE_DEATHS_MAX;
+pub const MAX_DEATHS: u32 = scuffed_types::PLAUSIBLE_DEATHS_MAX;
 
 /// E/A above [`MAX_ELIMS`] / [`MAX_ASSISTS`] or D above [`MAX_DEATHS`] is a
 /// column bleed, not a real scoreboard. Shared with the text fallback and
@@ -783,7 +782,7 @@ const NAME_MATCH_MIN: f64 = 0.55;
 pub struct NameMatch {
     /// Row index across both teams.
     pub row: usize,
-    /// Index into [`crate::ocr::preprocess::name_windows`] of the read that
+    /// Index into `ocr::preprocess::name_windows` of the read that
     /// matched: a substring hit if there is one, else the best fuzzy read
     /// (the lower index on a tie).
     pub window: usize,
@@ -1078,8 +1077,8 @@ pub fn exact_map_in_text(text: &str) -> Option<String> {
 /// first two non-empty lines count — that is where a header lives; player
 /// names and chat sit deeper and must never supply an outcome. Whole-word,
 /// case-insensitive (the 2026-08-16 22:19:24Z frame OCR'd as "~ Defeat").
-pub fn outcome_from_board_header(raw_text: &str) -> crate::detect::MatchOutcome {
-    use crate::detect::MatchOutcome;
+pub fn outcome_from_board_header(raw_text: &str) -> crate::model::MatchOutcome {
+    use crate::model::MatchOutcome;
     for line in raw_text
         .lines()
         .map(str::trim)
@@ -1227,7 +1226,7 @@ const MAPS: &[(&str, &str)] = &[
 /// legit name into a non-match (e.g. `ilios`→`iiios` on both sides still matches,
 /// `hollywood`→`hoiiywood` on both sides still matches). Named for the class of
 /// misread it fixes: ILIOS (three capital I's) reads as `1LIOS`/`IL10S`/`|LIOS`.
-pub(crate) fn normalize_ocr_glyphs(s: &str) -> String {
+pub fn normalize_ocr_glyphs(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if ('\u{0300}'..='\u{036f}').contains(&c) {
@@ -1258,7 +1257,7 @@ pub(crate) fn normalize_ocr_glyphs(s: &str) -> String {
 /// The tracker stores the display string and fills `game_mode` from this
 /// table. It does not consult `scuffed_types::MapName`. A name that is not
 /// in the table has no bucket.
-pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
+pub fn map_mode(canonical_name: &str) -> Option<&'static str> {
     match canonical_name {
         "Circuit Royal"
         | "Dorado"
@@ -1310,7 +1309,7 @@ pub(crate) fn map_mode(canonical_name: &str) -> Option<&'static str> {
 /// long-name bar so player names / stat fragments still don't cross it — the
 /// King's-Row false-positive that justified the strict bar is a substring trap
 /// (guarded by dropping bare "king" from MAPS), not a fuzzy near-miss.
-pub(crate) fn map_fuzzy_threshold(len: usize) -> f64 {
+pub fn map_fuzzy_threshold(len: usize) -> f64 {
     if len <= 6 { 0.80 } else { 0.85 }
 }
 
@@ -1564,7 +1563,7 @@ fn fuzzy_match_map(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocr::{CellOcrResult, RowOcrResult};
+    use crate::model::{CellOcrResult, RowOcrResult};
 
     fn cell(value: &str) -> CellOcrResult {
         CellOcrResult {
@@ -2969,7 +2968,7 @@ mod hero_map_name_tests {
 #[cfg(test)]
 mod board_header_tests {
     use super::outcome_from_board_header;
-    use crate::detect::MatchOutcome;
+    use crate::model::MatchOutcome;
 
     #[test]
     fn reads_result_word_from_header_lines() {

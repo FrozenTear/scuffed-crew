@@ -1221,7 +1221,7 @@ async fn run_sync(
     };
     sweep_stale_staging(data_dir);
     let client = match reqwest::Client::builder()
-        .user_agent(crate::sync::USER_AGENT)
+        .user_agent(crate::version::USER_AGENT)
         .timeout(std::time::Duration::from_secs(60))
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -2585,7 +2585,10 @@ mod tests {
                 fake.requested.lock().expect("paths").push(path.to_string());
                 // S5-SRV-4: every pack request names the tracker version.
                 let named = head.lines().any(|line| {
-                    line.eq_ignore_ascii_case(&format!("user-agent: {}", crate::sync::USER_AGENT))
+                    line.eq_ignore_ascii_case(&format!(
+                        "user-agent: {}",
+                        crate::version::USER_AGENT
+                    ))
                 });
                 let response = if !named {
                     http_bytes(400, br#"{"error":"no tracker User-Agent"}"#, None, false)
@@ -2876,7 +2879,7 @@ mod tests {
         });
         let base = spawn_fake(fake);
         let client = reqwest::Client::builder()
-            .user_agent(crate::sync::USER_AGENT)
+            .user_agent(crate::version::USER_AGENT)
             .build()
             .expect("client");
         let response = client

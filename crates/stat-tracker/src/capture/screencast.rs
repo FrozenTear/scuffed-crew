@@ -652,7 +652,7 @@ fn apply_share_decline(
     if let Some(notice) = action.notice {
         let mut already = DECLINE_LOGGED.swap(true, Ordering::AcqRel);
         warn_share_declined(&mut already, notice);
-        crate::ocr_switch::publish_share_notice(data_dir, notice);
+        crate::ocr_status::publish_share_notice(data_dir, notice);
     }
     action
 }
@@ -685,7 +685,7 @@ pub fn note_game_seen(was_running: bool, running: bool, data_dir: &Path) {
         return;
     }
     DECLINE_LOGGED.store(false, Ordering::Release);
-    crate::ocr_switch::publish_share_notice(data_dir, "");
+    crate::ocr_status::publish_share_notice(data_dir, "");
 }
 
 /// A new session may start when the game-exit close is not holding the
@@ -999,7 +999,7 @@ pub fn tab_timeout_counts() -> (u64, u64) {
 fn mark_share(open: bool, data_dir: Option<&Path>) {
     SESSION_OPEN.store(open, Ordering::Release);
     if let Some(dir) = data_dir {
-        crate::ocr_switch::publish_share_open(dir, open);
+        crate::ocr_status::publish_share_open(dir, open);
     }
 }
 
@@ -2448,7 +2448,7 @@ mod tests {
         fn drop(&mut self) {
             SHARE_DECLINED.store(false, Ordering::Release);
             DECLINE_LOGGED.store(false, Ordering::Release);
-            crate::ocr_switch::set_share_notice("");
+            crate::ocr_status::set_share_notice("");
         }
     }
 
@@ -3571,11 +3571,11 @@ mod tests {
             );
         });
         assert_eq!(first.matches(NO_CAPTURE_DECLINE_NOTICE).count(), 1);
-        let status = crate::ocr_switch::read_status(dir.path()).unwrap();
+        let status = crate::ocr_status::read_status(dir.path()).unwrap();
         assert_eq!(status.share_notice, NO_CAPTURE_DECLINE_NOTICE);
-        crate::ocr_switch::publish_share_open(dir.path(), false);
+        crate::ocr_status::publish_share_open(dir.path(), false);
         assert_eq!(
-            crate::ocr_switch::read_status(dir.path())
+            crate::ocr_status::read_status(dir.path())
                 .unwrap()
                 .share_notice,
             NO_CAPTURE_DECLINE_NOTICE
@@ -3591,7 +3591,7 @@ mod tests {
         assert!(!share_is_declined());
         assert!(share_prompt_allowed(share_is_declined()));
         assert!(
-            crate::ocr_switch::read_status(dir.path())
+            crate::ocr_status::read_status(dir.path())
                 .unwrap()
                 .share_notice
                 .is_empty()
