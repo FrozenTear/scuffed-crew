@@ -287,7 +287,7 @@ mod tests {
         }
     }
 
-    use crate::report::blank::synth::{self, Layout};
+    use crate::report::blank::tests_synth::{self as synth, Layout};
 
     /// A 2560x1440 frame with a synthetic 6v6 scoreboard.
     fn frame() -> DynamicImage {

@@ -1584,136 +1584,9 @@ pub struct HeroRecord {
 }
 
 #[cfg(test)]
-pub(crate) mod test_fixtures {
-    //! Synthetic boards and templates for tests. No game art.
-    use super::*;
-    use image::{Rgb, Rgba};
-
-    pub(crate) const PURPLE: [u8; 3] = [110, 20, 120];
-    pub(crate) const YELLOW: [u8; 3] = [150, 125, 10];
-    pub(crate) const TEAL: [u8; 3] = [20, 110, 120];
-
-    /// Deterministic synthetic "portrait" for class `id`: a few coloured
-    /// shapes on the background. No game art.
-    pub(crate) fn portrait(id: u32, size: u32, bg: Option<[u8; 3]>) -> RgbaImage {
-        let mut img = RgbaImage::from_pixel(size, size, Rgba([0, 0, 0, 0]));
-        if let Some(b) = bg {
-            for p in img.pixels_mut() {
-                *p = Rgba([b[0], b[1], b[2], 255]);
-            }
-        }
-        let mut seed = id.wrapping_mul(2_654_435_761).wrapping_add(12345);
-        let mut rnd = |m: u32| {
-            seed ^= seed << 13;
-            seed ^= seed >> 17;
-            seed ^= seed << 5;
-            seed % m
-        };
-        let s = size as f32;
-        for _ in 0..6 {
-            let (cx, cy) = (rnd(1000) as f32 / 1000.0 * s, rnd(1000) as f32 / 1000.0 * s);
-            let r = (0.12 + rnd(1000) as f32 / 1000.0 * 0.25) * s;
-            let col = [rnd(256) as u8, rnd(256) as u8, rnd(256) as u8];
-            let square = rnd(2) == 0;
-            for y in 0..size {
-                for x in 0..size {
-                    let (dx, dy) = (x as f32 - cx, y as f32 - cy);
-                    let inside = if square {
-                        dx.abs() < r && dy.abs() < r
-                    } else {
-                        dx * dx + dy * dy < r * r
-                    };
-                    if inside {
-                        img.put_pixel(x, y, Rgba([col[0], col[1], col[2], 255]));
-                    }
-                }
-            }
-        }
-        img
-    }
-
-    /// Synthetic board: header bar, two team blocks of `team` rows with
-    /// role column, separators and a portrait per row.
-    pub(crate) fn board(ids: &[u32], team: usize, pitch: u32, colours: [[u8; 3]; 2]) -> RgbImage {
-        let hh = (pitch as f32 * 0.39) as u32;
-        let w = pitch * 14;
-        let gap = pitch;
-        let h = hh + 2 * team as u32 * pitch + gap + pitch;
-        let mut img = RgbImage::from_pixel(w, h, Rgb([12, 14, 24]));
-        let x0 = pitch / 2;
-        for y in 0..hh {
-            for x in x0..w - pitch / 2 {
-                img.put_pixel(x, y, Rgb([205, 208, 212]));
-            }
-        }
-        for (t, colour) in colours.iter().enumerate() {
-            let top = hh + t as u32 * (team as u32 * pitch + gap);
-            for k in 0..team as u32 {
-                let ry0 = top + k * pitch;
-                let rh = pitch - 2;
-                for y in ry0..ry0 + rh {
-                    for x in x0..w - pitch / 2 {
-                        img.put_pixel(x, y, Rgb(*colour));
-                    }
-                }
-                let (px0, py0, px1, _) =
-                    portrait_box((x0 as usize, 0, 0, 0), (ry0 as usize, (ry0 + rh) as usize));
-                let p = portrait(ids[t * team + k as usize], (px1 - px0) as u32, None);
-                for (x, y, px) in p.enumerate_pixels() {
-                    if px.0[3] > 0 {
-                        img.put_pixel(
-                            px0 as u32 + x,
-                            py0 as u32 + y,
-                            Rgb([px.0[0], px.0[1], px.0[2]]),
-                        );
-                    }
-                }
-            }
-        }
-        img
-    }
-
-    /// Templates as the cutting script writes them: portrait on PURPLE with
-    /// alpha marking the foreground, 95 px.
-    pub(crate) fn template_dir(ids: &[u32]) -> tempfile::TempDir {
-        let dir = tempfile::tempdir().unwrap();
-        write_templates(dir.path(), ids, 95, 0);
-        dir
-    }
-
-    /// Write `hero-{id}.png` for each id into `dir` (created if missing):
-    /// `size` px, drawn as synthetic portrait `id + art`, so two packs can
-    /// hold different art under the same hero keys.
-    pub(crate) fn write_templates(dir: &Path, ids: &[u32], size: u32, art: u32) {
-        std::fs::create_dir_all(dir).unwrap();
-        for &id in ids {
-            let fg = portrait(id + art, size, None);
-            let mut t = RgbaImage::new(size, size);
-            for (x, y, p) in fg.enumerate_pixels() {
-                let v = if p.0[3] > 0 {
-                    Rgba([p.0[0], p.0[1], p.0[2], 255])
-                } else {
-                    Rgba([PURPLE[0], PURPLE[1], PURPLE[2], 0])
-                };
-                t.put_pixel(x, y, v);
-            }
-            t.save(dir.join(format!("hero-{id}.png"))).unwrap();
-        }
-    }
-
-    /// A `special/skull_01.png` in `dir`.
-    pub(crate) fn write_skull(dir: &Path) {
-        std::fs::create_dir_all(dir.join("special")).unwrap();
-        portrait(501, 74, Some(PURPLE))
-            .save(dir.join("special/skull_01.png"))
-            .unwrap();
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use super::test_fixtures::*;
     use super::*;
+    use crate::shadow::tests_fixtures::heroes::*;
     use image::Rgba;
 
     fn load(dir: &tempfile::TempDir) -> HeroTemplates {
@@ -2186,7 +2059,7 @@ mod tests {
     /// hero. Synthetic board, no game art.
     #[test]
     fn a_clipped_5v5_crop_read_alone_accepts_no_row() {
-        use crate::report::blank::synth::{Teams, tab_crop};
+        use crate::report::blank::tests_synth::{Teams, tab_crop};
         let data = data_dir(true, None, None);
         let set = HeroSet::load_data_dir(data.path()).unwrap();
         let crop = DynamicImage::ImageRgb8(tab_crop(Teams::Five, 5));

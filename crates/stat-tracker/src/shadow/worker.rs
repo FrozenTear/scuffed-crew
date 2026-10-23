@@ -549,7 +549,7 @@ mod tests {
 
     #[test]
     fn hero_stage_reads_installed_templates_and_logs_votes() {
-        use crate::shadow::heroes::test_fixtures::{TEAL, YELLOW, board, template_dir};
+        use crate::shadow::tests_fixtures::heroes::{TEAL, YELLOW, board, template_dir};
         let ids: Vec<u32> = (1..=12).collect();
         let dir = tempfile::tempdir().unwrap();
         let tdir = template_dir(&ids);

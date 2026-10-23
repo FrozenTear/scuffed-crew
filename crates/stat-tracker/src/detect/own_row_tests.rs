@@ -1,10 +1,10 @@
 //! Tests for [`super`] (`detect::own_row`). Synthetic boards and made-up
 //! glyphs only: no captured pixels and no real name.
 use super::*;
-use crate::shadow::heroes::test_fixtures::{PURPLE, TEAL, YELLOW, board};
 use crate::shadow::heroes::{
     HeroBoard, HeroFrameRead, HeroPack, HeroRead, PANEL_MIN_SCORE, PanelRead, RowClass,
 };
+use crate::shadow::tests_fixtures::heroes::{PURPLE, TEAL, YELLOW, board};
 use image::Rgb;
 
 /// Made-up 5x7 glyphs (bit 4 is the left column).

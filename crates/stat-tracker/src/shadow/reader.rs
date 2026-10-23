@@ -1156,8 +1156,8 @@ mod tests {
     /// no read at all.
     #[test]
     fn the_end_title_read_needs_end_title_templates() {
-        use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
         use crate::shadow::result::{ACCOLADE, END_TITLE, Outcome, WORDS_SUBDIR};
+        use crate::shadow::tests_fixtures::result::{lay, paint, word, write_pack};
         let blank = || image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
         let mut title = blank();
         paint(
@@ -1214,8 +1214,8 @@ mod tests {
     /// is no read, and no screen is named.
     #[test]
     fn the_result_screens_read_is_the_result_read_of_the_frame() {
-        use crate::shadow::result::test_fixtures::{lay, paint, word, write_pack};
         use crate::shadow::result::{ACCOLADE, Outcome, ResultScreen, WORDS_SUBDIR};
+        use crate::shadow::tests_fixtures::result::{lay, paint, word, write_pack};
         let blank = || image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
         let mut victory = blank();
         paint(
@@ -1669,7 +1669,8 @@ mod tests {
     /// portrait (synthetic art `ids[row]`) sit left of the crop edge, placed
     /// with the hero matcher's own geometry on the board's real header.
     fn clipped_tab_stand_in(ids: &[u32; 10], left: u32) -> DynamicImage {
-        use crate::shadow::heroes::{View, find_header, find_rows, portrait_box, test_fixtures};
+        use crate::shadow::heroes::{View, find_header, find_rows, portrait_box};
+        use crate::shadow::tests_fixtures::heroes as test_fixtures;
         let mut img = tab_stand_in(2560, 1440, 5, PITCH_5V5, BLUE_RED, true).to_rgb8();
         let (cx, cy, crop_w, ch) = crop_rect(2560, 1440);
         let strip = at_scale(26.0, ch).round() as u32;
@@ -1712,7 +1713,7 @@ mod tests {
     /// then shows v2 art).
     #[test]
     fn a_clipped_5v5_board_reads_its_heroes() {
-        use crate::shadow::heroes::test_fixtures::write_templates;
+        use crate::shadow::tests_fixtures::heroes::write_templates;
         let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         for art in [0, 100] {
             let data = tempfile::tempdir().unwrap();
@@ -1745,7 +1746,7 @@ mod tests {
     /// next board after the background reload reads with v2.
     #[test]
     fn heroes_v2_installed_after_start_is_used_on_a_later_board() {
-        use crate::shadow::heroes::test_fixtures::write_templates;
+        use crate::shadow::tests_fixtures::heroes::write_templates;
         let ids = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         let data = tempfile::tempdir().unwrap();
         write_templates(&HeroTemplates::dir_in(data.path()), &ids, 95, 0);
@@ -2164,7 +2165,7 @@ mod tests {
 
     #[test]
     fn the_reader_reads_the_top_bar_from_maps_v1() {
-        use crate::shadow::banner::test_fixtures::{LETTERS, frame_with_banner, write_pack};
+        use crate::shadow::tests_fixtures::banner::{LETTERS, frame_with_banner, write_pack};
         let data = tempfile::tempdir().unwrap();
         write_pack(&MapTemplates::dir_v1_in(data.path()), LETTERS);
         let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
@@ -2188,7 +2189,7 @@ mod tests {
     /// map pack nothing is read, and the answer says so (F265-3).
     #[test]
     fn the_reader_reads_the_accolade_map_from_maps_v1() {
-        use crate::shadow::banner::test_fixtures::{
+        use crate::shadow::tests_fixtures::banner::{
             Accolade, accolade_letters, frame_with_accolade, frame_with_banner, write_accolade_pack,
         };
         let data = tempfile::tempdir().unwrap();
@@ -2235,7 +2236,7 @@ mod tests {
     /// line is flagged, so there is no accolade map. Nothing is guessed.
     #[test]
     fn a_flagged_accolade_read_is_no_map() {
-        use crate::shadow::banner::test_fixtures::{
+        use crate::shadow::tests_fixtures::banner::{
             Accolade, LETTERS, frame_with_accolade, write_accolade_pack,
         };
         let data = tempfile::tempdir().unwrap();
@@ -2259,7 +2260,7 @@ mod tests {
     /// flagged, so nothing is stored, while a map it can spell still reads.
     #[test]
     fn a_flagged_top_bar_read_is_not_stored() {
-        use crate::shadow::banner::test_fixtures::{LETTERS, frame_with_banner, write_pack};
+        use crate::shadow::tests_fixtures::banner::{LETTERS, frame_with_banner, write_pack};
         let data = tempfile::tempdir().unwrap();
         write_pack(
             &MapTemplates::dir_in(data.path()),
@@ -2276,7 +2277,7 @@ mod tests {
     /// keeps abstaining, the next one after the background load reads.
     #[test]
     fn maps_v1_installed_after_start_is_used_on_a_later_read() {
-        use crate::shadow::banner::test_fixtures::{LETTERS, frame_with_banner, write_pack};
+        use crate::shadow::tests_fixtures::banner::{LETTERS, frame_with_banner, write_pack};
         let data = tempfile::tempdir().unwrap();
         let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
         let frame = DynamicImage::ImageRgb8(frame_with_banner("ILIOS"));
@@ -2308,7 +2309,7 @@ mod tests {
     /// (`None`) leaves it unread even when a pack is loaded.
     #[test]
     fn the_board_uses_the_banner_read_it_is_given() {
-        use crate::shadow::banner::test_fixtures::{LETTERS, write_pack};
+        use crate::shadow::tests_fixtures::banner::{LETTERS, write_pack};
         let data = tempfile::tempdir().unwrap();
         write_pack(&MapTemplates::dir_v1_in(data.path()), LETTERS);
         let reader = Reader::load(&ReaderConfig::from_data_dir(data.path()));
@@ -2546,8 +2547,8 @@ mod tests {
     /// reads the line; without the file it is `None` (P4 then uses OCR).
     #[test]
     fn the_reader_reads_the_final_score_line_from_the_words_pack() {
-        use crate::shadow::result::test_fixtures::{paint_at, word, write_pack};
         use crate::shadow::result::{FinalScoreRead, WORDS_SUBDIR};
+        use crate::shadow::tests_fixtures::result::{paint_at, word, write_pack};
         let line = word(4, 123, 28);
         let mut frame = image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, 26, 50]));
         paint_at(&mut frame, 1102, 1060, &line, [235, 235, 235]);
