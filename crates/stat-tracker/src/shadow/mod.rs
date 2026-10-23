@@ -19,6 +19,7 @@ pub mod confirm;
 pub mod digits;
 pub mod heroes;
 pub mod log;
+pub mod ncc;
 pub mod reader;
 pub mod result;
 pub mod worker;
