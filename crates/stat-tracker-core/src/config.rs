@@ -44,8 +44,9 @@ pub struct Config {
     pub capture_output: Option<String>,
     /// Portal image source: `auto` (also when missing), `screencast`,
     /// `screenshot` or `kwin` (KDE direct). A non-empty [`CAPTURE_ENV`] wins over
-    /// this key. Not written while `auto`. Edited in place when it is the only
-    /// change. The daemon passes it to `stat_tracker::capture` in `CapturePrefs`.
+    /// this key. A full save leaves `auto` out; when this is the only change it
+    /// is edited in place, and the new word is written, `auto` included. The
+    /// daemon passes it to `stat_tracker::capture` in `CapturePrefs`.
     #[serde(default, skip_serializing_if = "CaptureRoute::is_auto")]
     pub capture_route: CaptureRoute,
     /// Save stream/screenshot Tab pairs under `{data_dir}/debug/portal-compare/`.
@@ -104,13 +105,13 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_threads: Option<u32>,
     /// The shadow recognizer's log under `{data_dir}/shadow/` (log only). Off by
-    /// default and not written while off. The daemon also runs the log whenever
-    /// the reader in effect is the new one (`reader = "new"`, or a granted
-    /// `ocr = "off"`), whatever this says
+    /// default, and a full save leaves `false` out. The daemon also runs the
+    /// log whenever the reader in effect is the new one (`reader = "new"`, or
+    /// a granted `ocr = "off"`), whatever this says
     /// (`stat_tracker::shadow::worker::ShadowWorker::start_for_reader`). Env
     /// `SCUFFED_SHADOW_RECOGNIZER=1` also turns it on and is never stored
-    /// ([`Self::shadow_recognizer_control`]). Edited in place when it is the
-    /// only change.
+    /// ([`Self::shadow_recognizer_control`]). When this is the only change it
+    /// is edited in place, and `true` or `false` is written.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shadow_recognizer: bool,
     /// `prerelease` opts the desktop updater into alphas and rcs. Any other
@@ -145,8 +146,8 @@ pub struct Config {
     /// would go unread; otherwise the tracker keeps OCR on for the run and logs
     /// why (`stat_tracker::ocr_switch`). Read when the tracker starts. Env
     /// [`OCR_ENV`] overrides it for one run and is never stored
-    /// ([`Self::ocr_control`]). Not written while on. Edited in place when it is
-    /// the only change.
+    /// ([`Self::ocr_control`]). A full save leaves `"on"` out; when this is the
+    /// only change it is edited in place, and `"on"` or `"off"` is written.
     #[serde(default, skip_serializing_if = "OcrSetting::is_on")]
     pub ocr: OcrSetting,
     /// Letter-template names (the `names-v1` pack) for the player's own row: on
