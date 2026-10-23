@@ -1,7 +1,7 @@
 //! Pause the screen stream between grabs.
 //!
 //! The portal stream runs only while something holds it: a grab in
-//! [`super::screencast`], or a Tab press from its key event until its retry
+//! [`super`], or a Tab press from its key event until its retry
 //! sequence ends. With no hold it is set inactive, so the compositor stops
 //! rendering frames the tracker would only throw away. Polls and Tabs do not
 //! grab while Overwatch is not running, so an open share then stays paused.
@@ -43,7 +43,7 @@ use std::time::{Duration, Instant};
 use crate::config::PauseOverride;
 
 use super::pw;
-use super::tab::TAB_OVERLAY_AFTER_PRESS_MS;
+use crate::capture::tab::TAB_OVERLAY_AFTER_PRESS_MS;
 
 #[derive(Debug, Default)]
 struct Ctl {
@@ -249,7 +249,7 @@ fn key_hold_in(slot: &'static Mutex<Ctl>, at: Instant, now: Instant) -> KeyHold 
 /// [`tab_resume_at`]. The Tab task keeps it until its retries end. Needs a
 /// Tokio runtime when the stream pauses.
 pub fn key_hold(press: Instant) -> KeyHold {
-    let at = tab_resume_at(press, super::state::prefs().max_fps);
+    let at = tab_resume_at(press, crate::capture::state::prefs().max_fps);
     key_hold_in(&CTL, at, Instant::now())
 }
 
