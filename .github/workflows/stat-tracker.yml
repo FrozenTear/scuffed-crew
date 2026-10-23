@@ -160,7 +160,7 @@ jobs:
           OPT: profile.test.package.scuffed-stat-tracker
         run: >-
           cargo test --locked $TRACKER_PACKAGES --lib --bins --tests
-          --config "$OPT.opt-level=2"
+          --config "$OPT.opt-level=1"
           --config "$OPT.debug-assertions=true"
           --config "$OPT.overflow-checks=true"
 
