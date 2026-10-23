@@ -22,7 +22,6 @@ pub mod x11;
 
 pub use geom::auto_output_index;
 pub use select::detect_backend;
-pub(crate) use state::note_portal_state;
 pub use state::{
     PORTAL_PROMPT_NOTICE, PORTAL_STALL_NOTICE, capture_notice, daemon_share_is_open,
     live_share_open, route_notice, set_notice_sink, set_prefs, shot_route, stream_route_active,
@@ -35,7 +34,6 @@ pub use tab::{
     poll_lock_wait, tab_attempt_press, tab_press, tab_press_after_late_open, with_poll_lock_wait,
     with_tab_press,
 };
-pub(crate) use tab::{grab_lock_wait, stream_miss_log_suppressed};
 use types::as_new_capture;
 pub use types::{
     CaptureBackend, CaptureKind, CapturePrefs, CapturedFrame, PortalState, REUSED_FRAME_LOG_WINDOW,
@@ -276,7 +274,7 @@ pub async fn list_outputs(
         // The portal shoots the whole desktop and is cropped to one output
         // afterwards, so the picker lists the Wayland outputs it can crop to.
         // KWin names its outputs as Wayland does, for KDE direct.
-        CaptureBackend::Portal | CaptureBackend::Kwin => Ok(portal::list_outputs().await),
+        CaptureBackend::Portal | CaptureBackend::Kwin => Ok(outputs::list_outputs().await),
         CaptureBackend::None => Ok(Vec::new()),
     }
 }
@@ -286,6 +284,7 @@ mod tests {
     use super::route::{ForceTarget, force_target, select_backend};
     use super::select::{auto_may_use_portal, x11_failure_notice};
     use super::state::{RouteFlags, live_daemon_pid, notice_text, route_flags};
+    use super::tab::{grab_lock_wait, stream_miss_log_suppressed};
     use super::*;
 
     /// alpha.10 check: the capture p50 in the perf summary is recorded for
@@ -590,7 +589,7 @@ mod tests {
             include_str!("portal.rs"),
             concat!("pub async fn ", "capture("),
         );
-        assert!(shot.contains("letwait=super::grab_lock_wait(SHOT_LOCK_WAIT_TAB);"));
+        assert!(shot.contains("letwait=super::tab::grab_lock_wait(SHOT_LOCK_WAIT_TAB);"));
         assert!(shot.contains("run_shot(&SHOT_FLIGHT,wait,"));
     }
 
@@ -600,7 +599,7 @@ mod tests {
             include_str!("kwin.rs"),
             concat!("pub async fn ", "capture("),
         );
-        assert!(grab.contains("letwait=super::grab_lock_wait(LOCK_WAIT_TAB);"));
+        assert!(grab.contains("letwait=super::tab::grab_lock_wait(LOCK_WAIT_TAB);"));
         assert!(grab.contains("grab_in_flight(target,true,wait)"));
     }
 

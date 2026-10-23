@@ -1,5 +1,5 @@
 //! Capture's process-wide state: prefs, the route the last
-//! [`detect_backend`](super::detect_backend) chose, the notice the app
+//! [`detect_backend`](super::select::detect_backend) chose, the notice the app
 //! shows, and the running daemon's share status.
 
 use super::route;
@@ -39,7 +39,8 @@ pub fn set_prefs(prefs: CapturePrefs) {
 
 static PREFS: std::sync::Mutex<Option<CapturePrefs>> = std::sync::Mutex::new(None);
 
-/// Portal path chosen by the last [`detect_backend`](super::detect_backend) call.
+/// Portal path chosen by the last
+/// [`detect_backend`](super::select::detect_backend) call.
 pub(super) fn portal_path() -> route::PortalPath {
     match PORTAL_PATH.load(std::sync::atomic::Ordering::Acquire) {
         1 => route::PortalPath::Screenshot,
@@ -73,10 +74,11 @@ pub fn shot_route() -> ShotRoute {
 
 pub(super) static ROUTE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 
-/// The warning from the last [`detect_backend`](super::detect_backend) the app should show: KDE
-/// direct was asked for and could not be used, a saved Wayland-only route
-/// was ignored off Wayland, or the X11 probe failed and nothing else can
-/// capture. `None` when there is none.
+/// The warning from the last
+/// [`detect_backend`](super::select::detect_backend) the app should
+/// show: KDE direct was asked for and could not be used, a saved
+/// Wayland-only route was ignored off Wayland, or the X11 probe failed
+/// and nothing else can capture. `None` when there is none.
 pub fn route_notice() -> Option<String> {
     let notice = ROUTE_NOTICE
         .lock()
