@@ -234,7 +234,10 @@ fn retry_after_from_response(resp: &reqwest::Response) -> Option<std::time::Dura
 /// member did not configure. reqwest would drop `Authorization` on a
 /// cross-host hop, but the request would still go there, and a 401 from it
 /// would pause sync as a rejected token.
-fn token_safe_redirects() -> reqwest::redirect::Policy {
+///
+/// Public for every client that sends the sync token or a link secret: the
+/// desktop app's token check, sign-in link and report upload use it too.
+pub fn token_safe_redirects() -> reqwest::redirect::Policy {
     reqwest::redirect::Policy::custom(|attempt| {
         if attempt.previous().len() >= 10 {
             return attempt.error(std::io::Error::other("too many sync redirects"));
