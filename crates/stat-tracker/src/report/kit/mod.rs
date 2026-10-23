@@ -16,227 +16,30 @@
 //! files 0600) and every file is replaced atomically. `reads.json` carries
 //! the hash of the `scoreboard.png` it was written with, and [`load`] only
 //! returns a matching pair: the app reads a kit while the daemon replaces it.
-
-use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::Path;
 
-use chrono::{DateTime, Utc};
-use image::{DynamicImage, ImageEncoder, RgbImage};
-use serde::{Deserialize, Serialize};
-
-use super::blank::{self, TeamLayout};
+use super::blank;
 pub use crate::config::{DEFAULT_MAX_GAMES, DEFAULT_MAX_MB, Retention};
 pub use crate::reader_apply::ReaderRead;
 
-pub const KIT_DIR: &str = "report-kit";
+mod blanking;
+mod outcome;
+mod reads;
+mod store;
 
-static RETENTION_GAMES: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_GAMES);
-static RETENTION_BYTES: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(DEFAULT_MAX_MB * 1024 * 1024);
-
-/// Set the retention the daemon prunes with after each kit write.
-pub fn set_retention(r: Retention) {
-    use std::sync::atomic::Ordering::Relaxed;
-    RETENTION_GAMES.store(r.max_games.max(1), Relaxed);
-    RETENTION_BYTES.store(r.max_bytes, Relaxed);
-}
-
-pub fn retention() -> Retention {
-    use std::sync::atomic::Ordering::Relaxed;
-    Retention {
-        max_games: RETENTION_GAMES.load(Relaxed),
-        max_bytes: RETENTION_BYTES.load(Relaxed),
-    }
-}
-
-/// A kit older than this (14 days) is deleted on the next prune.
-pub const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(14 * 24 * 60 * 60);
-
-pub const SCOREBOARD_PNG: &str = "scoreboard.png";
-pub const OUTCOME_PNG: &str = "outcome.png";
-pub const READS_JSON: &str = "reads.json";
-/// Player names read on this session's boards. Local only: never put in a
-/// report zip, only handed to the log scrubber so those names are removed.
-pub const NAMES_JSON: &str = "names.json";
-/// Most names kept per session (two full 6v6 boards plus misreads).
-const NAMES_MAX: usize = 64;
-
-/// One read in `reads.json`, the same shape as a manifest read.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct KitRead {
-    pub value: Option<String>,
-    /// The new reader's confidence for this read, 0 to 1
-    /// ([`KitReads::with_confidences`]). `null` under ocr-v1, for a stat
-    /// the capture gate replaced, and for a result filled from the stored
-    /// game ([`KitReads::fill_result`]).
-    pub confidence: Option<f64>,
-    /// The read before the capture gate (spec section 2). `reader =
-    /// "ocr-v1"`: the Tesseract read. `reader = "new"`: Tesseract reads no
-    /// stat cell, so for the six stats this is the digit read (for a held
-    /// cell, the stored value). [`KitReads::recognizer`] tells the two
-    /// apart. The wire name is unchanged.
-    pub ocr_v1: Option<String>,
-    pub suspect: bool,
-}
-
-/// `reads.json`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct KitReads {
-    pub captured_at: DateTime<Utc>,
-    pub width: u32,
-    pub height: u32,
-    /// `null` when the board was blanked with both layouts.
-    pub team_size: Option<u32>,
-    pub map: Option<String>,
-    pub mode: Option<String>,
-    pub result: Option<String>,
-    /// The stored row's recognizer tag: the matcher id (`cv-v5`) for a
-    /// capture whose stats came from the digit reader, `ocr-v1` for a
-    /// Tesseract capture. Under `reader = "new"` every stored capture has
-    /// at least four digit-read stats, so this is always the matcher id
-    /// there, and the stats' `ocr_v1` are then digit reads too.
-    pub recognizer: String,
-    /// [`blank::BLANK_TABLE_VERSION`] the scoreboard was blanked with. A kit
-    /// from another table is not reported ([`load`] drops its scoreboard).
-    #[serde(default)]
-    pub blank_table: u32,
-    /// SHA-256 (hex) of the `scoreboard.png` written together with these
-    /// reads. The daemon replaces the two files one after the other, so a
-    /// reader in another process can land between the two renames; [`load`]
-    /// only returns a pair whose hash matches.
-    #[serde(default)]
-    pub scoreboard_sha256: String,
-    /// Keyed by the manifest read keys (`mode`, `result`, `hero`, `e`, `a`,
-    /// `d`, `dmg`, `h`, `mit`).
-    pub reads: BTreeMap<String, KitRead>,
-}
-
-impl KitReads {
-    /// Reads of one accepted capture. `before` is the match as it was read,
-    /// before the capture gate changed a stat (the `ocr_v1` read: the
-    /// Tesseract pass under `reader = "ocr-v1"`, the digit reads under
-    /// `reader = "new"`); `after` is what was stored.
-    pub fn from_capture(
-        before: &crate::storage::PersonalMatch,
-        after: &crate::storage::PersonalMatch,
-        width: u32,
-        height: u32,
-        layout: TeamLayout,
-        captured_at: DateTime<Utc>,
-    ) -> Self {
-        let suspects = crate::suspect::upload_suspect_fields(&after.suspect_fields);
-        let text = |s: &str| {
-            let s = s.trim();
-            (!s.is_empty()).then(|| s.chars().take(64).collect::<String>())
-        };
-        let mut reads = BTreeMap::new();
-        // Spec section 2: a read is suspect when the tracker flags it, when
-        // its value is null, or (stats) when the stored value and the
-        // Tesseract read disagree.
-        let mut put = |key: &str, value: Option<String>, ocr: Option<String>, disagree: bool| {
-            let suspect = suspects.iter().any(|f| f == key) || value.is_none() || disagree;
-            reads.insert(
-                key.to_string(),
-                KitRead {
-                    value,
-                    confidence: None,
-                    ocr_v1: ocr,
-                    suspect,
-                },
-            );
-        };
-        put(
-            "mode",
-            text(&after.game_mode),
-            text(&before.game_mode),
-            false,
-        );
-        put("result", text(&after.outcome), text(&before.outcome), false);
-        put("hero", text(&after.hero), text(&before.hero), false);
-        for (key, a, b) in [
-            ("e", after.elims, before.elims),
-            ("a", after.assists, before.assists),
-            ("d", after.deaths, before.deaths),
-            ("dmg", after.damage, before.damage),
-            ("h", after.healing, before.healing),
-            ("mit", after.mitigation, before.mitigation),
-        ] {
-            put(key, Some(a.to_string()), Some(b.to_string()), a != b);
-        }
-        Self {
-            captured_at,
-            width,
-            height,
-            team_size: layout.team_size(),
-            map: text(&after.map_name),
-            mode: text(&after.game_mode),
-            result: text(&after.outcome),
-            blank_table: blank::BLANK_TABLE_VERSION,
-            scoreboard_sha256: String::new(),
-            recognizer: if after.recognizer.is_empty() {
-                "ocr-v1".to_string()
-            } else {
-                after.recognizer.clone()
-            },
-            reads,
-        }
-    }
-}
-
-/// True unless `result` is a decided outcome (victory, defeat, draw).
-pub fn result_is_unknown(result: &str) -> bool {
-    let r = result.trim();
-    !["victory", "defeat", "draw"]
-        .iter()
-        .any(|o| r.eq_ignore_ascii_case(o))
-}
-
-impl KitReads {
-    /// Fill each read's `confidence` from the active reader's (keyed by read
-    /// key). A stat the capture gate replaced (the stored value is not the
-    /// reader's own read) gets none: the confidence belongs to the read, not
-    /// to the stored value. A reader read that disagrees with Tesseract
-    /// (`ocr_v1`) keeps its confidence. NaN and infinite give none; other
-    /// values are clamped to 0..1.
-    pub fn with_confidences(mut self, confidences: &BTreeMap<String, ReaderRead>) -> Self {
-        for (key, read) in self.reads.iter_mut() {
-            let Some(r) = confidences.get(key) else {
-                continue;
-            };
-            let c = r.confidence;
-            let gated = matches!(key.as_str(), "e" | "a" | "d" | "dmg" | "h" | "mit")
-                && (r.value.is_none() || read.value != r.value);
-            if !gated && c.is_finite() {
-                read.confidence = Some(c.clamp(0.0, 1.0));
-            }
-        }
-        self
-    }
-
-    /// The game's result as stored when the game closed, for a kit whose
-    /// Tab capture came before the result was known. The Tab read stays in
-    /// `ocr_v1`. A known kit result is never replaced.
-    pub fn fill_result(&mut self, stored_outcome: &str) {
-        let known = |s: &str| !result_is_unknown(s);
-        if !known(stored_outcome) || self.result.as_deref().is_some_and(known) {
-            return;
-        }
-        let outcome = stored_outcome.trim().chars().take(64).collect::<String>();
-        self.result = Some(outcome.clone());
-        let read = self.reads.entry("result".into()).or_insert(KitRead {
-            value: None,
-            confidence: None,
-            ocr_v1: None,
-            suspect: false,
-        });
-        read.value = Some(outcome);
-        read.confidence = None;
-        read.suspect = false;
-    }
-}
+pub use blanking::{forget_portraits, record_scoreboard, record_scoreboard_at};
+pub use outcome::{rank_outcome_allowed, rank_outcome_png, record_outcome_png};
+pub use reads::{KitRead, KitReads, result_is_unknown};
+pub use store::{
+    KIT_DIR, MAX_AGE, NAMES_JSON, OUTCOME_PNG, READS_JSON, SCOREBOARD_PNG, encode_png, kit_root,
+    retention, session_dir, set_retention,
+};
+use store::{
+    modified, prune_locked, read_reads, removed, safe_session, was_removed, write_lock,
+    write_private,
+};
 
 /// What [`load`] found for one session.
 #[derive(Debug, Clone, Default)]
@@ -246,308 +49,8 @@ pub struct Kit {
     pub reads: Option<KitReads>,
 }
 
-/// A session id is used as a directory name only when it is plain: ASCII
-/// letters, digits, `-`, `_`, 1 to 64 characters. Anything else has no kit.
-fn safe_session(session_id: &str) -> Option<&str> {
-    let ok = !session_id.is_empty()
-        && session_id.len() <= 64
-        && session_id
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
-    ok.then_some(session_id)
-}
-
-pub fn kit_root(data_dir: &Path) -> PathBuf {
-    data_dir.join(KIT_DIR)
-}
-
-pub fn session_dir(data_dir: &Path, session_id: &str) -> Option<PathBuf> {
-    safe_session(session_id).map(|s| kit_root(data_dir).join(s))
-}
-
-/// Serialises kit writes in this process: accepted captures hand their kit
-/// to blocking tasks, and those can finish out of order.
-static WRITE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-fn write_lock() -> std::sync::MutexGuard<'static, ()> {
-    WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-fn read_reads(dir: &Path) -> Option<KitReads> {
-    fs::read(dir.join(READS_JSON))
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-}
-
-fn private_dir(dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(dir)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-/// Write `bytes` to `dir/name` through a private temp file and a rename.
-fn write_private(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let tmp = dir.join(format!(".{name}.{}.{seq}.tmp", std::process::id()));
-    {
-        let mut opts = fs::OpenOptions::new();
-        opts.write(true).create(true).truncate(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            opts.mode(0o600);
-        }
-        let written = opts.open(&tmp).and_then(|mut f| {
-            f.write_all(bytes)?;
-            f.sync_all()
-        });
-        if let Err(e) = written {
-            let _ = fs::remove_file(&tmp);
-            return Err(e);
-        }
-    }
-    if let Err(e) = fs::rename(&tmp, dir.join(name)) {
-        let _ = fs::remove_file(&tmp);
-        return Err(e);
-    }
-    // the rename itself survives a crash only once the directory is synced
-    #[cfg(unix)]
-    fs::File::open(dir)?.sync_all()?;
-    Ok(())
-}
-
-/// Lossless 8-bit RGB PNG with no ancillary chunks.
-pub fn encode_png(img: &RgbImage) -> io::Result<Vec<u8>> {
-    let mut out = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut out)
-        .write_image(
-            img.as_raw(),
-            img.width(),
-            img.height(),
-            image::ExtendedColorType::Rgb8,
-        )
-        .map_err(io::Error::other)?;
-    Ok(out)
-}
-
-/// Session directories deleted while the daemon runs: a capture still in
-/// flight when the member deleted the game never writes its kit again.
-fn removed() -> &'static std::sync::Mutex<std::collections::HashSet<PathBuf>> {
-    static R: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<PathBuf>>> =
-        std::sync::OnceLock::new();
-    R.get_or_init(Default::default)
-}
-
-fn was_removed(dir: &Path) -> bool {
-    removed()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .contains(dir)
-}
-
-/// Sessions whose portrait memory is kept in memory. Tests run many
-/// sessions at once through the one process-wide memory.
-#[cfg(not(test))]
-const MEMORY_SESSIONS: usize = 4;
-#[cfg(test)]
-const MEMORY_SESSIONS: usize = 256;
-
-/// The portrait memory of the newest sessions, keyed by session directory
-/// ([`blank::PortraitMemory`]: unblanked portrait cells, in memory only).
-fn portrait_memory() -> &'static std::sync::Mutex<Vec<(PathBuf, blank::PortraitMemory)>> {
-    static M: std::sync::OnceLock<std::sync::Mutex<Vec<(PathBuf, blank::PortraitMemory)>>> =
-        std::sync::OnceLock::new();
-    M.get_or_init(Default::default)
-}
-
-/// Drop a session's portrait memory: the game ended or was deleted.
-pub fn forget_portraits(data_dir: &Path, session_id: &str) {
-    if let Some(dir) = session_dir(data_dir, session_id) {
-        let mut all = portrait_memory().lock().unwrap_or_else(|e| e.into_inner());
-        all.retain(|(d, _)| *d != dir);
-    }
-}
-
-/// Blank `frame` against the session's earlier captures and remember it.
-fn blank_seen(
-    dir: &Path,
-    frame: &DynamicImage,
-    team_size: Option<usize>,
-    at: blank::CaptureTime,
-) -> blank::BlankedBoard {
-    let mut all = portrait_memory().lock().unwrap_or_else(|e| e.into_inner());
-    // a session with no capture for longer than a reference may be old
-    // holds nothing usable
-    all.retain(|(_, m)| m.latest().is_none_or(|t| at.wall - t <= blank::REF_MAX_AGE));
-    let i = match all.iter().position(|(d, _)| d == dir) {
-        Some(i) => i,
-        None => {
-            if all.len() >= MEMORY_SESSIONS {
-                all.remove(0);
-            }
-            all.push((dir.to_path_buf(), blank::PortraitMemory::new()));
-            all.len() - 1
-        }
-    };
-    blank::blanked_scoreboard_seen(frame, team_size, &mut all[i].1, at)
-}
-
-/// [`record_scoreboard_at`] for a capture grabbed now, stamped
-/// `reads.captured_at`.
-pub fn record_scoreboard(
-    data_dir: &Path,
-    session_id: &str,
-    frame: &DynamicImage,
-    team_size: Option<usize>,
-    reads: &KitReads,
-) -> io::Result<()> {
-    let at = blank::CaptureTime {
-        wall: reads.captured_at,
-        mono: std::time::Instant::now(),
-    };
-    record_scoreboard_at(data_dir, session_id, frame, team_size, reads, at)
-}
-
-/// Record an accepted scoreboard capture: cut and blank the board (its
-/// portraits checked against the session's earlier captures, aged from
-/// `grabbed`, the frame grab or the Tab press that asked for it), and
-/// replace the session's `scoreboard.png` and `reads.json`. A board the
-/// blanker keeps nothing of writes no kit.
-pub fn record_scoreboard_at(
-    data_dir: &Path,
-    session_id: &str,
-    frame: &DynamicImage,
-    team_size: Option<usize>,
-    reads: &KitReads,
-    grabbed: blank::CaptureTime,
-) -> io::Result<()> {
-    let Some(dir) = session_dir(data_dir, session_id) else {
-        return Ok(());
-    };
-    let board = blank_seen(&dir, frame, team_size, grabbed);
-    if !board.has_picture() {
-        // No picture is safe to keep, but the reads still link a report to
-        // this game. Written only when the session has no picture yet, so a
-        // good picture is never dropped for a later board that blanked to
-        // nothing.
-        tracing::info!(
-            session_id,
-            reason = board
-                .board
-                .as_ref()
-                .err()
-                .map(String::as_str)
-                .unwrap_or("all fill"),
-            "report kit: board blanked to nothing, saving the reads without a picture"
-        );
-        return record_reads_only(data_dir, &dir, reads);
-    }
-    let png = encode_png(&board.image)?;
-    let mut reads = reads.clone();
-    reads.scoreboard_sha256 = super::hash::sha256_hex(&png);
-    let json = serde_json::to_vec_pretty(&reads).map_err(io::Error::other)?;
-    let _guard = write_lock();
-    if was_removed(&dir) {
-        return Ok(());
-    }
-    // An older capture that finishes late never replaces a newer one.
-    if read_reads(&dir).is_some_and(|cur| cur.captured_at > reads.captured_at) {
-        return Ok(());
-    }
-    private_dir(&kit_root(data_dir))?;
-    private_dir(&dir)?;
-    // The scoreboard first, then the reads that carry its hash: a reader
-    // between the two renames (or a crash there) sees a pair that does not
-    // match, and [`load`] reports nothing.
-    write_private(&dir, SCOREBOARD_PNG, &png)?;
-    write_private(&dir, READS_JSON, &json)?;
-    prune_locked(data_dir, retention());
-    Ok(())
-}
-
-/// Save `reads.json` with no `scoreboard.png` (empty `scoreboard_sha256`).
-/// [`load`] returns such a kit with reads and no scoreboard, so the game
-/// can still be reported and linked by session id.
-fn record_reads_only(data_dir: &Path, dir: &Path, reads: &KitReads) -> io::Result<()> {
-    let mut reads = reads.clone();
-    reads.scoreboard_sha256 = String::new();
-    let json = serde_json::to_vec_pretty(&reads).map_err(io::Error::other)?;
-    let _guard = write_lock();
-    if was_removed(dir) {
-        return Ok(());
-    }
-    if let Some(cur) = read_reads(dir)
-        && (!cur.scoreboard_sha256.is_empty() || cur.captured_at > reads.captured_at)
-    {
-        return Ok(());
-    }
-    private_dir(&kit_root(data_dir))?;
-    private_dir(dir)?;
-    write_private(dir, READS_JSON, &json)?;
-    prune_locked(data_dir, retention());
-    Ok(())
-}
-
-/// Whether a polled frame may give `outcome.png` (spec section 3).
-///
-/// Only when the rank screen detector fired on this frame AND the scoreboard
-/// detector did not accept it. The rank word match is loose (a title such as
-/// "QUICKDRAW" contains DRAW), so a Tab-held scoreboard could fire it, and
-/// on a scoreboard the word box holds the member's portrait, badge, and
-/// title next to their name.
-pub fn rank_outcome_allowed(
-    source: Option<crate::detect::match_end::OutcomeSource>,
-    preflight: crate::detect::hero_portrait::ScoreboardPreflight,
-    rows_look_like_scoreboard: bool,
-) -> bool {
-    source == Some(crate::detect::match_end::OutcomeSource::RankScreen)
-        && preflight == crate::detect::hero_portrait::ScoreboardPreflight::NotAScoreboard
-        && !rows_look_like_scoreboard
-}
-
-/// The `outcome.png` bytes for one polled frame, or `None`
-/// ([`rank_outcome_allowed`] decides).
-pub fn rank_outcome_png(
-    source: Option<crate::detect::match_end::OutcomeSource>,
-    frame: &DynamicImage,
-) -> Option<Vec<u8>> {
-    if source != Some(crate::detect::match_end::OutcomeSource::RankScreen) {
-        return None;
-    }
-    let board = crate::ocr::preprocess::crop_scoreboard(frame);
-    let (preflight, scan) = crate::detect::hero_portrait::preflight_scoreboard(&board);
-    if !rank_outcome_allowed(source, preflight, scan.looks_like_scoreboard()) {
-        return None;
-    }
-    encode_png(&blank::outcome_band(frame)).ok()
-}
-
-/// Store the bytes from [`rank_outcome_png`] as the session's `outcome.png`.
-pub fn record_outcome_png(data_dir: &Path, session_id: &str, png: &[u8]) -> io::Result<()> {
-    let Some(dir) = session_dir(data_dir, session_id) else {
-        return Ok(());
-    };
-    let _guard = write_lock();
-    if was_removed(&dir) {
-        return Ok(());
-    }
-    private_dir(&kit_root(data_dir))?;
-    private_dir(&dir)?;
-    write_private(&dir, OUTCOME_PNG, png)?;
-    prune_locked(data_dir, retention());
-    Ok(())
-}
-
-fn modified(path: &Path) -> std::time::SystemTime {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .unwrap_or(std::time::UNIX_EPOCH)
-}
+/// Most names kept per session (two full 6v6 boards plus misreads).
+const NAMES_MAX: usize = 64;
 
 /// Add `names` (player names read on a stored board) to the session's
 /// local [`NAMES_JSON`]. Only when the session already has a kit folder,
@@ -721,56 +224,9 @@ pub fn prune(data_dir: &Path, keep: Retention) {
     prune_locked(data_dir, keep);
 }
 
-fn prune_locked(data_dir: &Path, keep: Retention) {
-    let root = kit_root(data_dir);
-    let Ok(rd) = fs::read_dir(&root) else {
-        return;
-    };
-    let mut dirs: Vec<(std::time::SystemTime, PathBuf)> = rd
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .map(|p| (modified(&p), p))
-        .collect();
-    dirs.sort_by_key(|d| std::cmp::Reverse(d.0));
-    let now = std::time::SystemTime::now();
-    let mut total: u64 = 0;
-    // Strictly oldest first: once a game is dropped, every older one goes
-    // too, so an older game is never kept while a newer one is deleted.
-    let mut dropping = false;
-    for (i, (at, p)) in dirs.into_iter().enumerate() {
-        // The newest kit is always kept, by every limit.
-        if i > 0 && !dropping {
-            let size = dir_bytes(&p);
-            let too_old = now.duration_since(at).is_ok_and(|age| age > MAX_AGE);
-            let too_big = total.saturating_add(size) > keep.max_bytes;
-            dropping = i >= keep.max_games || too_old || too_big;
-            if !dropping {
-                total += size;
-            }
-        } else if i == 0 {
-            total = dir_bytes(&p);
-        }
-        if dropping {
-            let _ = fs::remove_dir_all(p);
-        }
-    }
-}
-
-fn dir_bytes(dir: &Path) -> u64 {
-    fs::read_dir(dir)
-        .map(|rd| {
-            rd.filter_map(Result::ok)
-                .filter_map(|e| e.metadata().ok())
-                .filter(|m| m.is_file())
-                .map(|m| m.len())
-                .sum()
-        })
-        .unwrap_or(0)
-}
-
 #[cfg(test)]
 mod names_tests {
+    use super::store::private_dir;
     use super::*;
 
     #[test]
@@ -796,6 +252,14 @@ mod names_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    use chrono::{DateTime, Utc};
+    use image::{DynamicImage, RgbImage};
+
+    use super::super::blank::TeamLayout;
+    use super::blanking::portrait_memory;
+    use super::store::private_dir;
 
     fn reads() -> KitReads {
         let mut r = BTreeMap::new();
