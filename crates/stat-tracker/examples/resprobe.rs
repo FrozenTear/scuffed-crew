@@ -6,7 +6,7 @@
 //! e.g. factors 0.75 (1440p→1080p) and 0.5 (1440p→720p).
 
 use image::imageops::FilterType;
-use stat_tracker::detect::hero_portrait::scan_rows;
+use stat_tracker::frame::layout::scan_rows;
 use stat_tracker::ocr;
 
 fn run(label: &str, cropped: &image::DynamicImage) {

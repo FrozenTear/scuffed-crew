@@ -322,6 +322,14 @@ pub async fn watch(switch: SharedSwitch) {
     }
 }
 
+/// The reader id for this process, from the OCR gate.
+///
+/// Moved here from `shadow::digits` (0.6 lane D V3) so the cv reader does
+/// not read the gate; `shadow::digits` re-exports it at its old path.
+pub fn live_recognizer_id() -> &'static str {
+    crate::shadow::digits::recognizer_id(!gate::is_off())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

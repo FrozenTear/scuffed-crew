@@ -2,6 +2,7 @@ pub mod game_running;
 pub mod hero_portrait;
 pub mod match_end;
 pub mod match_start;
+pub mod names;
 pub mod own_row;
 // Moved to `frame/stability.rs` (0.6 lane D V2); old path kept.
 pub use crate::frame::stability;

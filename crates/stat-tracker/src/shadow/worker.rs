@@ -33,7 +33,7 @@ use super::heroes::{
     HeroVoter,
 };
 use super::log::{CellDiff, ShadowLog, ShadowRecord};
-use crate::ocr::RowOcrResult;
+use crate::model::RowOcrResult;
 
 /// Matcher time allowed per board.
 pub const FRAME_BUDGET: Duration = Duration::from_millis(300);
@@ -384,7 +384,7 @@ pub fn compare(
 ) -> ShadowRecord {
     let mut record = ShadowRecord {
         ts: job.captured_at.to_rfc3339_opts(SecondsFormat::Millis, true),
-        recognizer: digits::live_recognizer_id(),
+        recognizer: crate::ocr_switch::live_recognizer_id(),
         session: job.session.clone(),
         resolution: job.frame_height,
         team_size: job.team_size,
@@ -435,7 +435,7 @@ pub fn compare(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ocr::CellOcrResult;
+    use crate::model::CellOcrResult;
     use crate::shadow::digits::{CellRead, RowRead};
     use std::sync::Mutex;
     use std::sync::mpsc;

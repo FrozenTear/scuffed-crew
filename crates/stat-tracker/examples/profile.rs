@@ -5,7 +5,7 @@
 //! Usage: cargo run -p scuffed-stat-tracker --example profile -- <image.png>
 
 use image::DynamicImage;
-use stat_tracker::{detect, ocr};
+use stat_tracker::{frame, ocr};
 
 fn saturation(r: u8, g: u8, b: u8) -> f64 {
     let max = r.max(g).max(b) as f64;
@@ -86,7 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     // --- Player-row brightness: mean at center thin slice, multiple x zones ---
-    let team_size = detect::hero_portrait::detect_team_size(&board);
+    let team_size = frame::layout::detect_team_size(&board);
     {
         let rgb = board.to_rgb8();
         let (bw, bh) = rgb.dimensions();

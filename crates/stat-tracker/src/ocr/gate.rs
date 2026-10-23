@@ -153,7 +153,7 @@ pub fn is_off() -> bool {
 /// Ask the gate for one call of the `ocr` function `entry`. `Err` when OCR
 /// is off; the call is then counted under the caller's source line.
 #[track_caller]
-pub(crate) fn check(entry: &'static str) -> Result<(), OcrOff> {
+pub(super) fn check(entry: &'static str) -> Result<(), OcrOff> {
     if !is_off() {
         return Ok(());
     }
@@ -166,7 +166,7 @@ pub(crate) fn check(entry: &'static str) -> Result<(), OcrOff> {
 }
 
 /// Count a blocked call at `site` and return its [`OcrOff`].
-pub(crate) fn block(site: Site) -> OcrOff {
+pub(super) fn block(site: Site) -> OcrOff {
     let first = {
         let mut blocked = BLOCKED.lock().unwrap_or_else(|e| e.into_inner());
         let count = blocked.entry(site).or_insert(0);
@@ -187,11 +187,11 @@ pub(crate) fn block(site: Site) -> OcrOff {
     OcrOff { site }
 }
 
-pub(crate) fn note_leptess_created() {
+pub(super) fn note_leptess_created() {
     LEPTESS_CREATED.fetch_add(1, Ordering::Relaxed);
 }
 
-pub(crate) fn note_tesseract_call() {
+pub(super) fn note_tesseract_call() {
     TESSERACT_CALLS.fetch_add(1, Ordering::Relaxed);
     THREAD_TESSERACT_CALLS.with(|calls| calls.set(calls.get() + 1));
 }

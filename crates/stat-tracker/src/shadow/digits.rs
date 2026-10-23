@@ -63,10 +63,9 @@ pub fn recognizer_id(ocr_on: bool) -> &'static str {
     }
 }
 
-/// The reader id for this process, from the OCR gate.
-pub fn live_recognizer_id() -> &'static str {
-    recognizer_id(!crate::ocr::gate::is_off())
-}
+// The live id reads the OCR gate, so it lives above the reader, in
+// `ocr_switch` (0.6 lane D V3). Re-exported at its old path.
+pub use crate::ocr_switch::live_recognizer_id;
 
 /// Flag a cell when its calibrated confidence is below this.
 ///
