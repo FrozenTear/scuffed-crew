@@ -84,6 +84,8 @@ pub(crate) type TakerSlot = std::sync::Mutex<Option<String>>;
 /// [`CloseOnDrop`]) and the grab fails; a possible permission prompt keeps
 /// it waiting, with a notice. A real Response clears the notices; a
 /// request that ends without one clears its own prompt notice.
+///
+/// [`CloseOnDrop`]: super::CloseOnDrop
 pub(crate) async fn await_answer<F, C>(
     request: F,
     checks: &C,

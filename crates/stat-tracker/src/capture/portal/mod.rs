@@ -70,6 +70,8 @@ pub async fn is_available() -> bool {
 /// request was made before the key press, so its picture cannot show the
 /// board. The wait mostly overlaps the 400 ms the Tab already sleeps for
 /// the overlay to draw.
+///
+/// [`ShotBackoff`]: backoff::ShotBackoff
 pub async fn capture(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {

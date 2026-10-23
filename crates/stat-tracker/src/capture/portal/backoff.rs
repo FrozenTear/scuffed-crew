@@ -42,6 +42,8 @@ pub const SHOT_BACKOFF: &str =
 /// whose Close never came back (the portal's problem by then; waiting
 /// longer would stop capture for good). An answered request ends the
 /// pause.
+///
+/// [`Unanswered::Stalled`]: super::answer::Unanswered::Stalled
 #[derive(Debug, Default)]
 pub(crate) struct ShotBackoff {
     pub(super) until: Option<tokio::time::Instant>,
