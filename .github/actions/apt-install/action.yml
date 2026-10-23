@@ -68,6 +68,9 @@ runs:
           done
         }
         start=$SECONDS
+        # The man-db trigger rebuilds the man index after every install:
+        # ~30 s of a ~40 s offline install. CI never reads man pages.
+        sudo rm -f /var/lib/man-db/auto-update
         shopt -s nullglob
         debs=("$DEB_DIR"/*.deb)
 
