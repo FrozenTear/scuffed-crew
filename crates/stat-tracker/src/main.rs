@@ -46,12 +46,12 @@ const SLOW_POLL_DIVISOR: u32 = 2;
 /// - The map vote (~15 s, the shortest start screen) needs two consecutive
 ///   ticks because of the OCR stability gate: 3 s or less gives it five.
 ///   Hero ban and hero select are longer.
-/// - The VICTORY/DEFEAT banner (~3 s) acts on one tick. Out of a match the
-///   banner only matters when no game is open (tracker started mid-match,
-///   start screens missed): a 3 s cadence still lands about one tick on it,
-///   and the accolade and rank screens that follow (word reads, 60 s
-///   confirm window) back it up. The classic reader polls every 4 s, so
-///   this is never slower than a cadence those screens already work with.
+/// - The result is read from words: the end title, the accolade screen and
+///   the rank screen, two agreeing reads inside the 60 s confirm window. A
+///   3 s cadence lands several ticks on each. The classic reader polls
+///   every 4 s, so this is never slower than a cadence those screens
+///   already work with. The ~3 s colour banner gives no result
+///   (0.5.0-rc.9, [`detect::match_end::OutcomeSource`]).
 /// - Any end-reel / POTG wake or fresh result-word read returns to full
 ///   cadence at once ([`cadence_wake_active`]).
 ///
@@ -404,6 +404,16 @@ struct CaptureRequest {
     rejoin_window_open: bool,
     /// See [`ActiveGame::rejoin_carry`].
     rejoin_carry: Option<Counters>,
+    /// R9-2: this request is for the fresh session a Tab past the grace
+    /// window would open, and this is the finished game's own request. The
+    /// board decides which one the capture uses ([`finished_game_tab_probe`]).
+    /// `None` from [`build_capture_request`].
+    finished_game_probe: Option<Box<CaptureRequest>>,
+    /// Tab was pressed for the game's last accepted board after its result
+    /// was recorded (not just reported after it: a result can be confirmed
+    /// while a capture runs). Only such a board can show the result was
+    /// false ([`boundary::finished_game_tab`]).
+    last_board_after_result: bool,
 }
 
 /// Package version shown by `--version` / `--help`.
@@ -1444,6 +1454,16 @@ struct ActiveGame {
     /// Result-word reads for `reader = "new"`. Memory only: a restart loses
     /// them and the next capture falls back the result field to ocr-v1.
     result_evidence: shadow::result::ResultEvidence,
+    /// The recorded result may not be cleared by a Tab past the grace window
+    /// (R9-2, [`finished_game_tab_probe`]): a member set it in the app, or it
+    /// came back from a previous run whose source is not known. Memory only.
+    outcome_locked: bool,
+    /// When Tab was pressed for the board in [`Self::gate`]. A result
+    /// confirmed while that capture ran lands before its report, so
+    /// [`Self::last_stats_at`] (report time) can be after a result whose
+    /// board is from before it. Memory only: a restored game has none, and
+    /// none is never after a result ([`CaptureRequest::last_board_after_result`]).
+    last_board_pressed_at: Option<Instant>,
 }
 
 impl ActiveGame {
@@ -1494,6 +1514,8 @@ impl ActiveGame {
             restored_with_result: false,
             restart_recovered_at: None,
             rejoin_carry: None,
+            outcome_locked: false,
+            last_board_pressed_at: None,
         }
     }
 
@@ -1565,6 +1587,14 @@ impl ActiveGame {
         self.outcome = outcome;
         self.outcome_recorded_at = Some(now);
         self.last_activity = now;
+        self.outcome_locked = false;
+    }
+
+    /// A result the member set in the app (SetOutcome, EditMatch). A Tab
+    /// never clears it (R9-2).
+    fn record_member_outcome(&mut self, outcome: detect::MatchOutcome) {
+        self.record_outcome(outcome);
+        self.outcome_locked = outcome.is_decided();
     }
 
     fn touch_at(&mut self, now: Instant) {
@@ -2404,6 +2434,9 @@ fn active_game_from_persisted(
         restored_with_result: hint_recovered,
         restart_recovered_at: None,
         rejoin_carry: p.rejoin_carry,
+        // The source of a restored result is not saved: never un-latched.
+        outcome_locked: p.outcome.is_decided(),
+        last_board_pressed_at: None,
     })
 }
 
@@ -2745,12 +2778,14 @@ const UNFINISHED_SESSION_IDLE: std::time::Duration = std::time::Duration::from_s
 /// holds the unknown rows locally.
 const UNFINISHED_SESSION_MAX: std::time::Duration = std::time::Duration::from_secs(6 * 60 * 60);
 
-/// Minimum age of a poller-opened game before a banner-color outcome read off
-/// a Tab frame is trusted. The color-flood detector can false-positive on
-/// heavy mid-fight red vignettes; a real banner can't appear this early into
-/// a match. The end-title text path stays available regardless, and a
-/// session freshly opened by the Tab itself (daemon joined mid/post match) is
-/// exempt, there the banner is exactly the evidence being recovered.
+/// Minimum age of a poller-opened game before a Tab frame's accolade and
+/// rank-screen word reads are trusted ([`FrameFlags::allow_banner_recovery`]);
+/// a real end can't appear this early into a match. The end-title text path
+/// stays available regardless, and a session freshly opened by the Tab
+/// itself (daemon joined mid/post match) is exempt, there the end screen is
+/// exactly the evidence being recovered. Named for the colour-flood outcome
+/// this gate was made for, which false-positived on heavy mid-fight red and
+/// is gone since 0.5.0-rc.9.
 const MIN_BANNER_SESSION_AGE: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Wall-vs-monotonic divergence treated as a suspend (m4). `Instant` is
@@ -2789,6 +2824,46 @@ fn should_start_fresh_session(game: Option<&ActiveGame>, now: Instant) -> bool {
             .outcome_recorded_at
             .is_none_or(|t| now.duration_since(t) > POST_MATCH_GRACE),
     }
+}
+
+/// How recent a finished game's last accepted board must be for a Tab past
+/// the grace window to be compared with it ([`finished_game_tab_probe`]).
+/// After a real end, the next game's board needs the end screens, a queue,
+/// hero select and play before it can reach a mature board's numbers; well
+/// over this. The same gap as [`STAT_SPLIT_MIN_GAP`], below which a stat
+/// drop does not split an unfinished game either.
+const FINISHED_GAME_TAB_MAX_GAP: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Whether this Tab would open a fresh session past the grace window of a
+/// finished game (as [`should_start_fresh_session`] says) but its board may
+/// show that same game still being played (R9-2, 0.5.0-rc.9). Then the board
+/// decides ([`boundary::finished_game_tab`]): the Tab's capture carries the
+/// open game's request too ([`CaptureRequest::finished_game_probe`]), and
+/// the fresh session opens only when its report lands and the board was not
+/// that game ([`settle_tab_probe`]).
+///
+/// Only a game whose last accepted board is recent
+/// ([`FINISHED_GAME_TAB_MAX_GAP`]), with a stored row, a trusted map, a
+/// result the tracker read itself ([`ActiveGame::outcome_locked`]), and no
+/// held fresh-match board, rejoin carry or restored result. Anything else
+/// opens the fresh session at the press, as before.
+fn finished_game_tab_probe(game: Option<&ActiveGame>, now: Instant) -> bool {
+    let Some(g) = game else {
+        return false;
+    };
+    g.finished()
+        && !g.outcome_locked
+        && g.session_created
+        && !g.restored_with_result
+        && !g.awaiting_first_board
+        && g.deferred.is_none()
+        && g.rejoin_carry.is_none()
+        && known_label(g.map.as_deref()).is_some()
+        && g.map_is_trusted()
+        && g.gate.is_some()
+        && g.last_stats_at
+            .is_some_and(|at| now.saturating_duration_since(at) <= FINISHED_GAME_TAB_MAX_GAP)
+        && should_start_fresh_session(game, now)
 }
 
 /// Identity of a would-be new session (map-vote, Tab, or stat-regression split).
@@ -3484,7 +3559,7 @@ struct CaptureReport {
     /// session's first capture). False = rejected by a trust gate.
     recorded: bool,
     /// Outcome stored on the snapshot, may have been recovered from the frame
-    /// itself (banner colors / end-title text) when the game's outcome was still
+    /// itself (a result word or the end title) when the game's outcome was still
     /// Unknown, in which case the caller back-fills it onto the session.
     outcome: detect::MatchOutcome,
     /// Map stored on the snapshot, if one was read, the caller adopts the
@@ -3547,6 +3622,10 @@ struct CaptureReport {
     /// See [`ActiveGame::rejoin_carry`]. Set on a stored board of a game a
     /// rejoin continued ([`rejoin_board`]).
     rejoin_carry: Option<Counters>,
+    /// R9-2: what the board said when this Tab was past the grace window of
+    /// a finished game ([`TabProbe`]); `None` for every other capture, and
+    /// for one whose frame was missed or rejected before its board was read.
+    finished_game_tab: Option<boundary::FinishedGameTab>,
 }
 
 impl CaptureReport {
@@ -3623,6 +3702,12 @@ struct SessionState {
     /// send them. Other unknown rows stay unsynced. Cleared when the
     /// settle is scheduled.
     settle_closed_unknown: Option<String>,
+    /// The running Tab capture's board decides between two sessions
+    /// ([`TabProbe`]).
+    tab_probe: Option<TabProbe>,
+    /// The press of the running Tab capture, taken by the report that lands
+    /// for it ([`ActiveGame::last_board_pressed_at`]).
+    tab_press: Option<Instant>,
 }
 
 /// Unexpired POTG / end-reel deadline. Exclusive at the instant (`now < until`)
@@ -3715,6 +3800,11 @@ fn build_capture_request(g: &ActiveGame, opened_by_this_tab: bool, now: Instant)
             && g.restart_recovered_at
                 .is_some_and(|at| now.saturating_duration_since(at) <= REJOIN_CONTINUE_WINDOW),
         rejoin_carry: g.rejoin_carry,
+        finished_game_probe: None,
+        last_board_after_result: g
+            .last_board_pressed_at
+            .zip(g.outcome_recorded_at)
+            .is_some_and(|(pressed, result)| pressed > result),
     }
 }
 
@@ -3749,6 +3839,212 @@ where
     opened
 }
 
+/// A Tab past the grace window of a finished game whose board decides
+/// whether it is that game ([`finished_game_tab_probe`]). Memory only, and
+/// only while that Tab's capture runs: [`settle_tab_probe`] takes it when
+/// the report lands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TabProbe {
+    /// The finished game the board may continue.
+    old_session: String,
+    /// The session the Tab opens when it does not (the request's own).
+    fresh_session: String,
+    /// The Tab press: that session opens as of then, as it did before rc.9.
+    press: Instant,
+}
+
+/// The capture request for the Tab pressed at `press`: the session choice of
+/// [`open_fresh_for_tab_and_sync`], or past the grace window of a finished
+/// game that its board may continue ([`finished_game_tab_probe`]), the fresh
+/// session's request with the finished game's request inside. Nothing is
+/// closed or opened then; [`settle_tab_probe`] does that when the report
+/// lands.
+async fn tab_capture_request<F, Fut>(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    press: Instant,
+    sync_now: F,
+) -> CaptureRequest
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    st.tab_press = Some(press);
+    if finished_game_tab_probe(st.active_game.as_ref(), press) {
+        let old = st.active_game.as_ref().expect("checked by the probe");
+        let fresh_session = format!("{:016x}", rand_id());
+        // Peeked, not taken: the pending outcome is taken when the fresh
+        // session opens.
+        let mut pending = st.pending_outcome;
+        let fresh = tab_opened_game(
+            fresh_session.clone(),
+            take_fresh_pending(&mut pending, press),
+            carried_deferred(Some(old)),
+            press,
+        );
+        let mut req = build_capture_request(&fresh, true, press);
+        req.finished_game_probe = Some(Box::new(build_capture_request(old, false, press)));
+        tracing::info!(
+            session_id = %old.session_id,
+            outcome = %old.outcome,
+            "Tab past the post-match grace window: the board decides whether this is the same game"
+        );
+        st.tab_probe = Some(TabProbe {
+            old_session: old.session_id.clone(),
+            fresh_session,
+            press,
+        });
+        return req;
+    }
+    let opened_by_this_tab =
+        open_fresh_for_tab_and_sync(st, store, data_dir, press, sync_now).await;
+    build_capture_request(
+        st.active_game.as_ref().expect("active_game set above"),
+        opened_by_this_tab,
+        press,
+    )
+}
+
+/// The capture of a [`TabProbe`] Tab reported (`sid` is the request's
+/// session, the fresh one). Returns the session the report is for.
+///
+/// * The board was the finished game's: that game stays open. The same
+///   board ([`boundary::FinishedGameTab::SameBoard`]) is not stored and the
+///   result stays. Still being played
+///   ([`boundary::FinishedGameTab::StillPlaying`]), the capture stored the
+///   board there, and the recorded result was false and is cleared
+///   ([`unlatch_false_outcome`]).
+/// * Anything else (another game's board, a board that cannot be compared,
+///   a rejected or missed frame, a failed capture): the fresh session opens
+///   as of the press and the finished game closes, as a Tab past the grace
+///   window did before rc.9, with the upload of a closed game that had rows
+///   ([`open_fresh_for_tab_and_sync`]). Not when another game took over
+///   while the capture ran.
+async fn settle_tab_probe<F, Fut>(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    sid: String,
+    result: &Result<CaptureReport, String>,
+    now: Instant,
+    sync_now: F,
+) -> String
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    let Some(probe) = st.tab_probe.take_if(|probe| probe.fresh_session == sid) else {
+        return sid;
+    };
+    let still_open = st
+        .active_game
+        .as_ref()
+        .is_some_and(|g| g.session_id == probe.old_session);
+    match result
+        .as_ref()
+        .ok()
+        .and_then(|report| report.finished_game_tab)
+    {
+        Some(boundary::FinishedGameTab::SameBoard) => {
+            tracing::info!(
+                session_id = %probe.old_session,
+                "Tab past the grace window shows the same board: same game, result kept"
+            );
+            probe.old_session
+        }
+        Some(boundary::FinishedGameTab::StillPlaying) => {
+            // A result the member set while this capture ran stays (the
+            // report re-seals it on the row).
+            let unlocked = st.active_game.as_ref().is_some_and(|g| !g.outcome_locked);
+            if still_open && unlocked {
+                unlatch_false_outcome(st, store, data_dir, now).await;
+            }
+            probe.old_session
+        }
+        Some(boundary::FinishedGameTab::NewGame) | None => {
+            if still_open || st.active_game.is_none() {
+                let upload_closed = st
+                    .active_game
+                    .as_ref()
+                    .is_some_and(|g| g.finished() && g.session_created);
+                open_tab_game(st, store, data_dir, probe.fresh_session, probe.press).await;
+                if upload_closed {
+                    sync_now().await;
+                }
+            } else {
+                tracing::warn!(
+                    session_id = %sid,
+                    "another game opened while this Tab was read: its report is not applied"
+                );
+            }
+            sid
+        }
+    }
+}
+
+/// R9-2: the open game's board moved on past the grace window
+/// ([`boundary::FinishedGameTab::StillPlaying`]), so its recorded result was
+/// false (0.5.0-rc.8 report of 2026-10-22: DEFEAT taken off a red mid-match
+/// frame). The result is cleared on the game and in the store, with the
+/// result words read for this game (`reader = "new"` stamps them on every
+/// later row otherwise), and the next confirmed result word sets it.
+///
+/// Result words read while the false result was held are not replayed:
+/// those ticks were ignored (the game was past its end), and their reads
+/// go with the cleared evidence. A real end screen already past is then not
+/// read again, and the game ends without a result unless the member sets
+/// one. A word streak from at or before the cleared result is dropped, so
+/// a repeating misread needs two new reads again; a newer read (an end
+/// screen seen while the false result was held) still pairs with the next
+/// one inside the 60 s window.
+///
+/// Rows already uploaded with the false result keep it on the site:
+/// `unknown` rows are not uploaded (`storage::LocalStore::get_unsynced`
+/// selects `outcome != 'unknown'`, and the site skips them), so the site
+/// is corrected only when a result is set on this game again.
+async fn unlatch_false_outcome(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    now: Instant,
+) {
+    let Some(g) = st.active_game.as_mut() else {
+        return;
+    };
+    if let Some(recorded) = g.outcome_recorded_at
+        && st
+            .word_outcome_streak
+            .as_ref()
+            .is_some_and(|streak| streak.seen_at <= recorded)
+    {
+        st.word_outcome_streak = None;
+    }
+    let cleared = g.outcome;
+    g.outcome = detect::MatchOutcome::Unknown;
+    g.outcome_recorded_at = None;
+    g.result_mark = None;
+    // Cleared with the hint ([`ActiveGame::text_fallback_locked`]).
+    g.text_fallback_locked = false;
+    g.result_evidence = Default::default();
+    g.touch_at(now);
+    tracing::warn!(
+        session_id = %g.session_id,
+        cleared = %cleared,
+        "the board moved on after the result was recorded: the game is still being played, result cleared \
+         (if its rows were already uploaded, the site keeps the old result until one is set again)"
+    );
+    if g.session_created
+        && let Err(e) = store
+            .set_session_outcome(&g.session_id, &detect::MatchOutcome::Unknown.to_string())
+            .await
+    {
+        tracing::warn!(error = %e, "failed to clear the session outcome");
+    }
+    persist_active_game(data_dir, Some(g));
+    refresh_snapshot(store, data_dir).await;
+}
+
 /// Open a session when this Tab is past grace or the unfinished idle bound.
 /// Returns whether this Tab opened it. The deferred board of the session
 /// being closed is carried onto the new one.
@@ -3761,29 +4057,58 @@ async fn open_fresh_if_tab_starts_one(
     if !should_start_fresh_session(st.active_game.as_ref(), now) {
         return false;
     }
-    let carried_deferred = st.active_game.as_ref().and_then(|g| {
+    open_tab_game(st, store, data_dir, format!("{:016x}", rand_id()), now).await;
+    true
+}
+
+/// The deferred board a Tab-opened game carries from `previous`.
+type CarriedDeferred = (Counters, Option<String>, Option<chrono::DateTime<Utc>>);
+
+fn carried_deferred(previous: Option<&ActiveGame>) -> Option<CarriedDeferred> {
+    previous.and_then(|g| {
         g.deferred
             .map(|counters| (counters, g.deferred_hero.clone(), g.deferred_at))
-    });
-    retire_active_game(st, store, data_dir, None, "superseded by Tab-opened game").await;
-    let inherited = take_fresh_pending(&mut st.pending_outcome, now);
+    })
+}
+
+/// The game a Tab opens as `session_id` at `now`: the pending outcome
+/// `inherited`, and the deferred board of the game it replaces.
+fn tab_opened_game(
+    session_id: String,
+    inherited: Option<detect::MatchOutcome>,
+    carried: Option<CarriedDeferred>,
+    now: Instant,
+) -> ActiveGame {
     let mut opened = ActiveGame::open_at(
-        format!("{:016x}", rand_id()),
+        session_id,
         inherited.unwrap_or(detect::MatchOutcome::Unknown),
         Vec::new(),
         now,
     );
-    if let Some((counters, hero, at)) = carried_deferred {
+    if let Some((counters, hero, at)) = carried {
         opened.deferred = Some(counters);
         opened.deferred_hero = hero;
         opened.deferred_at = at;
         opened.deferred_imported = true;
     }
-    st.active_game = Some(opened);
+    opened
+}
+
+/// Close the open game and open the Tab's game `session_id` at `now`.
+async fn open_tab_game(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    session_id: String,
+    now: Instant,
+) {
+    let carried = carried_deferred(st.active_game.as_ref());
+    retire_active_game(st, store, data_dir, None, "superseded by Tab-opened game").await;
+    let inherited = take_fresh_pending(&mut st.pending_outcome, now);
+    st.active_game = Some(tab_opened_game(session_id, inherited, carried, now));
     st.last_game_open = Some(now);
     clear_cadence_wakes(st);
     persist_active_game(data_dir, st.active_game.as_ref());
-    true
 }
 
 /// The previous game is not a latch for a session that has no board yet.
@@ -3934,6 +4259,10 @@ async fn apply_capture_report(
     result: Result<CaptureReport, String>,
     now: Instant,
 ) -> bool {
+    // The press of this report's Tab (one capture runs at a time). A caller
+    // that made no request through `tab_capture_request` has none: then the
+    // report time stands in.
+    let pressed = st.tab_press.take().unwrap_or(now);
     match result {
         Err(e) => {
             tracing::error!(error = %e, "capture cycle failed");
@@ -4108,6 +4437,7 @@ async fn apply_capture_report(
                         now,
                     );
                     g.apply_boundary_state(&state);
+                    g.last_board_pressed_at = Some(pressed);
                 }
                 // The imported board was written with this stored capture.
                 // Drop it so a later Tab that does not refresh the baseline
@@ -4204,8 +4534,8 @@ async fn apply_capture_report(
 /// PR-B: whether the poller sits mid-match with nothing imminent, a mature
 /// open game, outcome still unknown, and no cadence wake (fresh word-OCR
 /// streak or POTG / end-reel deadline). Every end-of-match signal path
-/// already drops this back to full cadence through existing state: a banner
-/// records the outcome (`finished()`), a word read sets `word_outcome_streak`,
+/// already drops this back to full cadence through existing state: a confirmed
+/// result records the outcome (`finished()`), a word read sets `word_outcome_streak`,
 /// an end-reel / POTG hit sets `end_reel_wake_until`, and a detected start
 /// phase opens a new game (resetting `last_game_open`).
 fn poll_slow_mode(st: &SessionState, now: Instant) -> bool {
@@ -4411,11 +4741,6 @@ fn resolve_word_tick(
     });
     let hit = poll_debug_hit(signal, prior, OUTCOME_CONFIRM_WINDOW);
     match signal {
-        Some((outcome, detect::match_end::OutcomeSource::Banner)) => ResolvedWordTick {
-            signal: Some(outcome),
-            signal_confirmed: true,
-            accolade_map: None,
-        },
         Some((outcome, source)) => {
             let agreed = matches!(hit, Some((PollDebugHit::Confirm, _)));
             let accolade_map = note_word_streak(streak, outcome, seen_at, this_map);
@@ -4565,8 +4890,8 @@ fn reused_frame_is_not_a_confirm_and_a_new_pair_is() {
 /// `taken` is the read the tick's signal detection already made of this
 /// frame's result words (the accolade or rank screen, alpha.7 O11). It is
 /// `shadow::read_result`'s read of the same frame, so it is the evidence
-/// and the frame is not read again. Without one (a colour flood, an end
-/// title, or a word OCR read because the pack lacks that screen) `read`
+/// and the frame is not read again. Without one (an end title, or a word
+/// OCR read because the pack lacks that screen) `read`
 /// reads the frame here.
 fn tick_result_read(
     use_new_reader: bool,
@@ -4699,6 +5024,8 @@ fn startup_session(data_dir: &std::path::Path) -> SessionState {
         poll_ticks_skipped: 0,
         end_reel_wake_until: None,
         settle_closed_unknown: None,
+        tab_probe: None,
+        tab_press: None,
     }
 }
 
@@ -4754,17 +5081,13 @@ async fn start_tab_capture(
     let sync_client = ctx.sync_client.as_ref();
     // Session choice: reuse the active game (mid-game, or post-match
     // scoreboard within the grace window), or open a fresh one, inheriting
-    // a still-fresh outcome the poller saw before any game was open.
-    let opened_by_this_tab = open_fresh_for_tab_and_sync(st, store, data_dir, press, || {
+    // a still-fresh outcome the poller saw before any game was open. Past
+    // the grace window of a finished game, the board may decide (R9-2).
+    let req = tab_capture_request(st, store, data_dir, press, || {
         schedule_store_sync(sync_task, sync_backoff, store, sync_client, data_dir, None);
         std::future::ready(())
     })
     .await;
-    let req = build_capture_request(
-        st.active_game.as_ref().expect("active_game set above"),
-        opened_by_this_tab,
-        press,
-    );
     let on_stream = capture::stream_route_active();
     let sid = req.session_id.clone();
     let tx = capture_tx.clone();
@@ -5094,6 +5417,13 @@ async fn run_loop(
             }
             Some((sid, result)) = capture_rx.recv() => {
                 let board_taken = result.as_ref().is_ok_and(CaptureReport::board_taken);
+                // A Tab past the grace window of a finished game: its board
+                // picked the session (R9-2).
+                let sid = settle_tab_probe(&mut st, store, data_dir, sid, &result, Instant::now(), || {
+                    schedule_store_sync(&mut sync_task, &sync_backoff, store, sync_client, data_dir, None);
+                    std::future::ready(())
+                })
+                .await;
                 // The report handler is the same function the night harness
                 // calls. Sync stays here so a slow upload cannot hide inside it.
                 if apply_capture_report(&mut st, store, data_dir, &sid, result, Instant::now()).await {
@@ -5275,7 +5605,7 @@ async fn run_loop(
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
-                            // One RGBA→RGB conversion shared by banner + phase
+                            // One RGBA→RGB conversion shared by the outcome + phase
                             // detectors (P6); title OCR still uses the original frame.
                             let rgb = img.to_rgb8();
                             // PR-A: the polled variants gate their OCR on the
@@ -5459,11 +5789,10 @@ async fn run_loop(
                             }
                         }
 
-                        // The banner color-flood is specific enough to act on
-                        // immediately (and only lasts ~3s, a second tick may
-                        // never come). A word-OCR outcome (accolade or rank
-                        // screen) needs a second agreeing read within the
-                        // confirmation window. The streak is recorded before
+                        // Every outcome (end title, accolade or rank screen)
+                        // needs a second agreeing read within the
+                        // confirmation window; no source acts on one tick
+                        // (0.5.0-rc.9). The streak is recorded before
                         // the decision and carries a map only inside that
                         // window. [`resolve_word_tick`] is the same rule the
                         // night harness runs.
@@ -5719,7 +6048,8 @@ async fn run_loop(
 /// the call site (F251-4).
 #[derive(Debug, Clone, Copy)]
 struct FrameFlags {
-    /// Colour-flood outcome detection is plausible for this session's age.
+    /// The Tab frame's accolade and rank-screen word reads run: the session
+    /// is old enough for an end ([`MIN_BANNER_SESSION_AGE`]).
     allow_banner_recovery: bool,
     /// The open session already has a map (the lazy full-board OCR may skip).
     session_map_known: bool,
@@ -5751,8 +6081,8 @@ fn analyze_frame(
         use_new_reader,
     } = flags;
     // Outcome: prefer the open game's result (read off the accolade
-    // screen by the poller); else color-flood detection plus the word reads
-    // (only when the caller deems a banner plausible, see
+    // screen by the poller); else the accolade and rank-screen word reads
+    // (only when the session is old enough for an end, see
     // MIN_BANNER_SESSION_AGE), which end in the end-title read; else the
     // end-title read alone. T1, an OCR of the top-centre band for a result
     // header, is gone (alpha.7 O4; what that was measured on is in
@@ -6492,6 +6822,7 @@ fn skipped_capture_report(
         held_at,
         map_replaces_text_fallback: false,
         rejoin_carry: None,
+        finished_game_tab: None,
     }
 }
 
@@ -6691,6 +7022,7 @@ fn blank_rejected_report(
         held_at: None,
         map_replaces_text_fallback: false,
         rejoin_carry: None,
+        finished_game_tab: None,
     }
 }
 
@@ -7370,6 +7702,20 @@ fn take_injected_capture() -> Option<(FrameAnalysis, Option<shadow::BoardRead>)>
     None
 }
 
+/// A screen grab error for tests of [`handle_capture`]'s missed-capture
+/// arms, returned by the next [`grab_tab_attempt`]. Production never sets it.
+#[cfg(test)]
+static INJECTED_GRAB_ERROR: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+fn take_injected_grab_error() -> Option<String> {
+    #[cfg(test)]
+    {
+        return INJECTED_GRAB_ERROR.lock().unwrap().take();
+    }
+    #[cfg(not(test))]
+    None
+}
+
 /// Why the new reader refuses an analysed Tab frame's board: the trust
 /// gate `handle_capture` runs on it ([`reader_apply::board_refusal`]), here
 /// inside the retried attempt so a refused board is grabbed again while
@@ -7438,9 +7784,12 @@ fn tab_retry_reason(outcome: &FrameAnalysisOutcome, use_new_reader: bool) -> &'s
 /// but refused by the reader (4), team size unsure (3), not a scoreboard
 /// (2), stream miss (1), share still opening or declined, a busy lock or a
 /// paused portal (0). Any analysed board outranks the rejects, as in rc.7:
-/// it carries the frame's outcome (an end-of-match VICTORY or DEFEAT the
-/// report back-fills), the header outcome fallback and the own-seed
-/// verdict, which an unsure team size or a preflight reject does not.
+/// it carries the header outcome fallback and the own-seed verdict, which
+/// a reject does not. All of them carry the frame's outcome (the report
+/// back-fills an end-of-match VICTORY or DEFEAT from a reject too), and the
+/// rank does not look at it: a refused board with no outcome outranks an
+/// unsure team size that read one, and that read is lost. An outcome-aware
+/// tie-break is left for 0.6.
 fn tab_outcome_rank(outcome: &FrameAnalysisOutcome, use_new_reader: bool) -> u8 {
     match outcome {
         FrameAnalysisOutcome::Analyzed(a) if reader_refusal(a, use_new_reader).is_some() => 4,
@@ -7479,6 +7828,9 @@ async fn grab_tab_attempt(
     output: Option<&str>,
     attempt: usize,
 ) -> Result<capture::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(err) = take_injected_grab_error() {
+        return Err(err.into());
+    }
     if attempt != 0 {
         // A retry is not a new key press: on the stream it takes the next
         // buffer that arrives, with no second overlay delay.
@@ -7660,6 +8012,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     held_at: None,
                     map_replaces_text_fallback: false,
                     rejoin_carry: None,
+                    finished_game_tab: None,
                 });
             }
             FrameAnalysisOutcome::NotAScoreboard {
@@ -7726,6 +8079,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                     held_at: None,
                     map_replaces_text_fallback: false,
                     rejoin_carry: None,
+                    finished_game_tab: None,
                 });
             }
         };
@@ -7755,7 +8109,13 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
         shadow_input,
     } = analysis;
     if ctx.use_new_reader {
-        note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, session_id).await;
+        // R9-2: a probe Tab's verdict is the finished game's, whose
+        // session exists; the fresh id may never be used.
+        let seed_session = req
+            .finished_game_probe
+            .as_ref()
+            .map_or(session_id, |old| old.session_id.as_str());
+        note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, seed_session).await;
     }
     let ocr_result = ocr
         .map_err(anyhow::Error::from_boxed)
@@ -7878,6 +8238,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             held_at: None,
             map_replaces_text_fallback: false,
             rejoin_carry: None,
+            finished_game_tab: None,
         });
     }
 
@@ -7917,6 +8278,89 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
             // The own-row name reader for this Tab. Absent when the row
             // came from a highlight, a seed, or the career hero.
             parsed.name_recognizer = name_recognizer.map(|id| id.as_str().to_string());
+            // R9-2: a Tab past the grace window of a finished game. This
+            // board decides whether it continues that game (then the capture
+            // is that game's, with its false result cleared when the board
+            // moved on) or is the fresh session's, as before rc.9.
+            let mut finished_game_tab = None;
+            if let Some(old) = req.finished_game_probe.take() {
+                let probe_suspect = if board_reader {
+                    held_cols
+                } else {
+                    parse::player_row_suspect_mask(&rows, player_row_idx)
+                };
+                let verdict = match old.prev_gate {
+                    Some((prev, age)) => boundary::finished_game_tab(
+                        &prev,
+                        old.session_map.as_deref(),
+                        map_from_panel.as_deref(),
+                        &Counters {
+                            elims: parsed.elims,
+                            assists: parsed.assists,
+                            deaths: parsed.deaths,
+                            damage: parsed.damage,
+                            healing: parsed.healing,
+                            mitigation: parsed.mitigation,
+                        },
+                        &probe_suspect,
+                        &held_cols,
+                        trusted_cells && player_row_idx.is_some() && !own_row_suspect,
+                        age,
+                        old.last_board_after_result,
+                    ),
+                    None => boundary::FinishedGameTab::NewGame,
+                };
+                tracing::info!(
+                    ?verdict,
+                    finished_session = %old.session_id,
+                    map = ?map_from_panel,
+                    elims = parsed.elims,
+                    deaths = parsed.deaths,
+                    "Tab past the grace window: board compared with the finished game"
+                );
+                if verdict == boundary::FinishedGameTab::SameBoard {
+                    // A late look at the finished game's board: the game
+                    // and its result stay, and the board is not stored, so
+                    // it neither replaces the game's last row nor restarts
+                    // the window ([`FINISHED_GAME_TAB_MAX_GAP`]).
+                    return Ok(CaptureReport {
+                        finished_game_tab: Some(verdict),
+                        ..blank_rejected_report(
+                            old.game_outcome,
+                            &old.session_id,
+                            old.hero_auth.clone(),
+                            &old,
+                        )
+                    });
+                }
+                if verdict == boundary::FinishedGameTab::StillPlaying {
+                    req = *old;
+                    // The result is cleared when this report lands
+                    // (`settle_tab_probe`); this row does not carry it, nor
+                    // the result words read for it (`unlatch_false_outcome`).
+                    req.game_outcome = detect::MatchOutcome::Unknown;
+                    req.hint = None;
+                    req.after_end_screen = false;
+                    req.result_evidence = Default::default();
+                    // A live board and a result word on the same frame
+                    // disagree, and this frame was read with the fresh
+                    // session's age gate: its outcome is not taken.
+                    frame_outcome = detect::MatchOutcome::Unknown;
+                    if ctx.use_new_reader {
+                        req.member_map_edit = session_has_member_map_edit(&ctx.store, &req).await;
+                    }
+                    hero_auth = req.hero_auth.clone();
+                    outcome = if req.game_outcome.is_decided() {
+                        req.game_outcome
+                    } else {
+                        frame_outcome
+                    };
+                    outcome_label = outcome.to_string();
+                    parsed.outcome = outcome_label.clone();
+                }
+                finished_game_tab = Some(verdict);
+            }
+            let session_id: &str = &req.session_id;
             if held_cols.iter().any(|&held| held) {
                 // Until the gate runs, a held column reads as the game's
                 // last accepted value, so the split and reset checks see no
@@ -8096,14 +8540,17 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 // A deferred board with a held cell is not carried
                 // (`plan.deferred_counters` is none): no hero or time either.
                 let carried = plan.defer && plan.deferred_counters.is_some();
-                return Ok(skipped_capture_report(
-                    &plan,
-                    session_id,
-                    source.is_authority(),
-                    hero_auth,
-                    carried.then(|| parsed.hero.clone()),
-                    carried.then_some(captured_at),
-                ));
+                return Ok(CaptureReport {
+                    finished_game_tab,
+                    ..skipped_capture_report(
+                        &plan,
+                        session_id,
+                        source.is_authority(),
+                        hero_auth,
+                        carried.then(|| parsed.hero.clone()),
+                        carried.then_some(captured_at),
+                    )
+                });
             }
             let mut staged = stage_capture(&req, &plan, &facts, captured_at);
             // Shadow recognizer: hand the accepted board to the log-only
@@ -8262,7 +8709,10 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 },
             ) == PreparedRow::Drop
             {
-                return Ok(blank_rejected_report(outcome, session_id, hero_auth, &req));
+                return Ok(CaptureReport {
+                    finished_game_tab,
+                    ..blank_rejected_report(outcome, session_id, hero_auth, &req)
+                });
             }
 
             // The session is owned by the active game (map-vote to accolade). The
@@ -8399,6 +8849,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 held_at: None,
                 map_replaces_text_fallback: staged.replaced_text_fallback,
                 rejoin_carry: rejoin.carry,
+                finished_game_tab,
             };
             // A stat column this game has never read is a placeholder, not
             // a number: no row is written while one is left (F266-1). The
@@ -8600,6 +9051,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
                 held_at: None,
                 map_replaces_text_fallback: false,
                 rejoin_carry: None,
+                finished_game_tab: None,
             })
         }
     }
@@ -8610,7 +9062,7 @@ async fn handle_capture(ctx: &DaemonCtx, mut req: CaptureRequest) -> anyhow::Res
 /// hammer and stays independent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PollDebugHit {
-    /// Banner one-shot, or the second agreeing word-OCR tick.
+    /// The second agreeing word-OCR tick.
     Confirm,
     /// First word-OCR streak sighting (pre-confirm). A lone VICTORY/SVACTORY
     /// that never gets a second tick still leaves a frame.
@@ -8626,9 +9078,6 @@ fn poll_debug_hit(
     confirm_window: std::time::Duration,
 ) -> Option<(PollDebugHit, detect::MatchOutcome)> {
     match signal {
-        Some((outcome, detect::match_end::OutcomeSource::Banner)) => {
-            Some((PollDebugHit::Confirm, outcome))
-        }
         Some((outcome, _)) => {
             let agreed =
                 prior_streak.is_some_and(|(prev, age)| prev == outcome && age <= confirm_window);
@@ -9455,7 +9904,9 @@ async fn apply_queued_commands(
                 if let Some(g) = st.active_game.as_mut()
                     && g.session_id == *session_id
                 {
-                    g.record_outcome(outcome.parse().unwrap_or(detect::MatchOutcome::Unknown));
+                    g.record_member_outcome(
+                        outcome.parse().unwrap_or(detect::MatchOutcome::Unknown),
+                    );
                     persist_active_game(data_dir, Some(g));
                 }
             }
@@ -9476,7 +9927,9 @@ async fn apply_queued_commands(
                     && g.session_id == *session_id
                     && let Some(outcome) = &edit.outcome
                 {
-                    g.record_outcome(outcome.parse().unwrap_or(detect::MatchOutcome::Unknown));
+                    g.record_member_outcome(
+                        outcome.parse().unwrap_or(detect::MatchOutcome::Unknown),
+                    );
                     persist_active_game(data_dir, Some(g));
                 }
             }
@@ -9909,6 +10362,11 @@ async fn apply_landed_capture_reports(
     data_dir: &std::path::Path,
 ) {
     while let Ok((sid, result)) = capture_rx.try_recv() {
+        // The shutdown sync that follows uploads a game this closes.
+        let sid = settle_tab_probe(st, store, data_dir, sid, &result, Instant::now(), || {
+            std::future::ready(())
+        })
+        .await;
         apply_capture_report(st, store, data_dir, &sid, result, Instant::now()).await;
     }
 }
@@ -11143,6 +11601,8 @@ mod tests {
             restored_with_result: false,
             restart_recovered_at: None,
             rejoin_carry: None,
+            outcome_locked: false,
+            last_board_pressed_at: None,
         }
     }
 
@@ -11161,6 +11621,8 @@ mod tests {
             poll_ticks_skipped: 0,
             end_reel_wake_until: None,
             settle_closed_unknown: None,
+            tab_probe: None,
+            tab_press: None,
         }
     }
 
@@ -12988,12 +13450,7 @@ mod tests {
         );
         // no result word on the tick, or Tab cell OCR in flight: nothing runs
         let no_ocr = || -> Option<String> { panic!("accolade OCR off a result-word tick") };
-        for signal in [
-            None,
-            Some(S::Banner),
-            Some(S::RankScreen),
-            Some(S::EndTitle),
-        ] {
+        for signal in [None, Some(S::RankScreen), Some(S::EndTitle)] {
             assert_eq!(
                 choose_accolade_map(false, false, signal, pack, no_ocr),
                 None
@@ -13041,12 +13498,7 @@ mod tests {
             reads.set(reads.get() + 1);
             accolade_read("Ilios")
         };
-        for signal in [
-            None,
-            Some(S::Banner),
-            Some(S::RankScreen),
-            Some(S::EndTitle),
-        ] {
+        for signal in [None, Some(S::RankScreen), Some(S::EndTitle)] {
             assert_eq!(choose_accolade_map(true, false, signal, counted, ocr), None);
         }
         assert_eq!(
@@ -13099,7 +13551,6 @@ mod tests {
         // off a result-word tick, or with Tab cell OCR in flight: nothing runs
         for (outcome_only, signal) in [
             (false, None),
-            (false, Some(S::Banner)),
             (false, Some(S::RankScreen)),
             (false, Some(S::EndTitle)),
             (true, Some(S::ResultWord)),
@@ -13568,8 +14019,8 @@ mod tests {
 
     /// One words-pack read per poll tick: the read the signal detection took
     /// is the tick's result evidence, and the frame is not read again. A
-    /// tick whose signal came without one (colour flood, end title, an OCR
-    /// word) reads the frame as before. No signal, or `reader = "ocr-v1"`:
+    /// tick whose signal came without one (end title, an OCR word) reads
+    /// the frame as before. No signal, or `reader = "ocr-v1"`:
     /// no evidence and no read.
     #[test]
     fn a_poll_tick_reads_the_frames_result_words_once() {
@@ -13621,7 +14072,7 @@ mod tests {
     /// `detect::match_end` and `tests/result_signal_wiring.rs`). The poll
     /// tick hands the source of its own signal to `choose_accolade_map`, and
     /// that source alone decides whether the map pack is read: a rank-screen
-    /// word, an end title, a colour flood and no signal read no map.
+    /// word, an end title and no signal read no map.
     #[test]
     fn a_result_word_tick_still_starts_the_accolade_map_read() {
         use detect::match_end::OutcomeSource as S;
@@ -13657,12 +14108,7 @@ mod tests {
         // No other source does (a counter, not a panic: a panic in the pack
         // read is caught and would hide a call).
         let reads = std::cell::Cell::new(0);
-        for source in [
-            None,
-            Some(S::RankScreen),
-            Some(S::EndTitle),
-            Some(S::Banner),
-        ] {
+        for source in [None, Some(S::RankScreen), Some(S::EndTitle)] {
             let counted = || {
                 reads.set(reads.get() + 1);
                 accolade_read("Ilios")
@@ -14179,30 +14625,26 @@ mod tests {
         );
     }
 
+    /// R9-1 (0.5.0-rc.9): no source confirms a result on one tick. The
+    /// colour flood that did is gone; every source needs a second agreeing
+    /// read inside the confirm window.
     #[test]
-    fn poll_debug_hit_banner_is_confirm() {
-        assert_eq!(
-            poll_debug_hit(
-                Some((
-                    detect::MatchOutcome::Victory,
-                    detect::match_end::OutcomeSource::Banner
-                )),
-                None,
-                OUTCOME_CONFIRM_WINDOW
-            ),
-            Some((PollDebugHit::Confirm, detect::MatchOutcome::Victory))
-        );
-        assert_eq!(
-            poll_debug_hit(
-                Some((
-                    detect::MatchOutcome::Defeat,
-                    detect::match_end::OutcomeSource::Banner
-                )),
-                Some((detect::MatchOutcome::Defeat, Duration::from_secs(1))),
-                OUTCOME_CONFIRM_WINDOW
-            ),
-            Some((PollDebugHit::Confirm, detect::MatchOutcome::Defeat))
-        );
+    fn one_read_of_any_source_is_never_a_confirm() {
+        use detect::match_end::OutcomeSource as S;
+        for source in [S::ResultWord, S::RankScreen, S::EndTitle] {
+            for outcome in [detect::MatchOutcome::Victory, detect::MatchOutcome::Defeat] {
+                assert_eq!(
+                    poll_debug_hit(Some((outcome, source)), None, OUTCOME_CONFIRM_WINDOW),
+                    Some((PollDebugHit::Streak, outcome)),
+                    "{source:?}"
+                );
+                let mut streak = None;
+                let tick =
+                    resolve_word_tick(&mut streak, Some((outcome, source)), test_now(), None);
+                assert_eq!(tick.signal, Some(outcome));
+                assert!(!tick.signal_confirmed, "{source:?} {outcome:?}");
+            }
+        }
     }
 
     #[test]
@@ -15962,6 +16404,838 @@ mod tests {
 
     async fn no_edit(_: &DaemonCtx, _: usize) {}
 
+    /// R9-2: one Tab frame of the new reader on `map`, own row `c`.
+    fn r9_frame(c: Counters, map: &str) -> InjectedCapture {
+        let mut analysis = o8_analysis(None, Some("Ana"));
+        analysis.map_from_panel = Some(map.to_string());
+        analysis.map_panel_raw = Some(map.to_uppercase());
+        let mut board = o8_board(Some("Ana"));
+        for field in &mut board.fields {
+            let value = match field.name.as_str() {
+                "map" => Some(shadow::Value::Text(map.to_string())),
+                "r0.e" => Some(shadow::Value::Int(c.elims)),
+                "r0.a" => Some(shadow::Value::Int(c.assists)),
+                "r0.d" => Some(shadow::Value::Int(c.deaths)),
+                "r0.dmg" => Some(shadow::Value::Int(c.damage)),
+                "r0.h" => Some(shadow::Value::Int(c.healing)),
+                "r0.mit" => Some(shadow::Value::Int(c.mitigation)),
+                _ => continue,
+            };
+            field.value = value;
+        }
+        InjectedCapture {
+            analysis,
+            board: Some(board),
+        }
+    }
+
+    fn r9_counters(e: u32, d: u32, dmg: u32) -> Counters {
+        Counters {
+            elims: e,
+            assists: 3,
+            deaths: d,
+            damage: dmg,
+            healing: 0,
+            mitigation: dmg / 2,
+        }
+    }
+
+    /// R9-2: one Tab the way the daemon runs it: the session choice at the
+    /// press ([`tab_capture_request`]), the capture, then the probe settle
+    /// and the report. `frame` is what the capture sees: a board, or a grab
+    /// error. Returns the probe verdict the report carried.
+    async fn r9_tab(
+        st: &mut SessionState,
+        ctx: &DaemonCtx,
+        press: Instant,
+        frame: Result<InjectedCapture, &str>,
+        synced: &std::cell::Cell<u32>,
+    ) -> Option<boundary::FinishedGameTab> {
+        let req = tab_capture_request(st, &ctx.store, &ctx.data_dir, press, || {
+            synced.set(synced.get() + 1);
+            std::future::ready(())
+        })
+        .await;
+        let sid = req.session_id.clone();
+        match frame {
+            Ok(capture) => *INJECTED_CAPTURE.lock().unwrap() = Some(capture),
+            Err(err) => *INJECTED_GRAB_ERROR.lock().unwrap() = Some(err.to_string()),
+        }
+        let result = handle_capture(ctx, req).await.map_err(|e| format!("{e:#}"));
+        let verdict = result.as_ref().ok().and_then(|r| r.finished_game_tab);
+        let now = press + Duration::from_secs(1);
+        let sid = settle_tab_probe(st, &ctx.store, &ctx.data_dir, sid, &result, now, || {
+            synced.set(synced.get() + 1);
+            std::future::ready(())
+        })
+        .await;
+        apply_capture_report(st, &ctx.store, &ctx.data_dir, &sid, result, now).await;
+        verdict
+    }
+
+    /// R9-2: one poll tick with a sure accolade result word, the way the
+    /// poll loop handles it: the word's read goes into the game's result
+    /// evidence (`reader = "new"`), then [`resolve_word_tick`] and
+    /// [`apply_poll_tick`] decide.
+    async fn r9_word(
+        st: &mut SessionState,
+        ctx: &DaemonCtx,
+        outcome: detect::MatchOutcome,
+        at: Instant,
+    ) {
+        let word = match outcome {
+            detect::MatchOutcome::Victory => shadow::result::Outcome::Victory,
+            detect::MatchOutcome::Defeat => shadow::result::Outcome::Defeat,
+            other => panic!("no word for {other:?}"),
+        };
+        if let Some(g) = st.active_game.as_mut() {
+            g.result_evidence.add(shadow::result::ResultRead {
+                outcome: Some(word),
+                source: Some(shadow::result::ACCOLADE.into()),
+                score: 0.97,
+                margin: 0.6,
+                suspect: false,
+            });
+        }
+        let tick = resolve_word_tick(
+            &mut st.word_outcome_streak,
+            Some((outcome, detect::match_end::OutcomeSource::ResultWord)),
+            at,
+            None,
+        );
+        apply_poll_tick(
+            st,
+            &ctx.store,
+            &ctx.data_dir,
+            &tick,
+            None,
+            at,
+            Duration::from_secs(120),
+            true,
+        )
+        .await;
+    }
+
+    /// R9-2: a Busan game (session "live") with three Tabs, then a result
+    /// confirmed by two result words at `t0 + 66 s` and `t0 + 72 s`. The
+    /// last board, 9/8, was taken at `t0 + 70 s` (its report landed at
+    /// `t0 + 71 s`), before the result. Returns the state and `t0`.
+    async fn r9_finished_game(
+        ctx: &DaemonCtx,
+        result: detect::MatchOutcome,
+        synced: &std::cell::Cell<u32>,
+    ) -> (SessionState, Instant) {
+        let t0 = test_now();
+        let mut active = game(detect::MatchOutcome::Unknown, None, t0);
+        active.session_id = "live".into();
+        active.map = Some("Busan".into());
+        active.map_source = Some(boundary::MapSource::TopBar);
+        active.session_created = false;
+        active.opened_at = t0;
+        let mut st = session(Some(active), t0);
+        for (at, c) in [
+            (0, r9_counters(6, 6, 3000)),
+            (40, r9_counters(7, 7, 3500)),
+            (70, r9_counters(9, 8, 4200)),
+        ] {
+            let press = t0 + Duration::from_secs(at);
+            assert_eq!(
+                r9_tab(&mut st, ctx, press, Ok(r9_frame(c, "Busan")), synced).await,
+                None,
+                "an unfinished game is never probed"
+            );
+        }
+        r9_word(&mut st, ctx, result, t0 + Duration::from_secs(66)).await;
+        r9_word(&mut st, ctx, result, t0 + Duration::from_secs(72)).await;
+        let g = st.active_game.as_ref().unwrap();
+        assert_eq!(g.session_id, "live");
+        assert_eq!(g.outcome, result, "two agreeing words record the result");
+        assert_eq!(g.outcome_recorded_at, Some(t0 + Duration::from_secs(72)));
+        assert_eq!(r9_final_outcome(ctx, "live").await, result.to_string());
+        (st, t0)
+    }
+
+    async fn r9_rows(ctx: &DaemonCtx, sid: &str) -> Vec<(u32, String)> {
+        ctx.store
+            .get_session_snapshots(sid)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| (row.elims, row.outcome.clone()))
+            .collect()
+    }
+
+    async fn r9_final_outcome(ctx: &DaemonCtx, sid: &str) -> String {
+        ctx.store
+            .get_all_sessions()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|s| s.session_id == sid)
+            .expect("session row")
+            .final_outcome
+    }
+
+    /// R9-2, the KDE tester's 2026-10-22 Route 66 game: DEFEAT was taken
+    /// mid-match, Tabs inside the 75 s grace window kept showing the board
+    /// rising, and the first Tab after it (board 10/9) closed the game
+    /// "superseded by Tab-opened game" and opened a new one. Now that board
+    /// keeps the game, the false result is cleared on the game and in the
+    /// store along with the result words behind it (review M1: `reader =
+    /// "new"` would stamp them on every later row), the probe frame's own
+    /// VICTORY is not taken (review A3), and the real result comes through
+    /// the poller's word path.
+    /// R9-2: the tester's sequence up to the clearing Tab: a false DEFEAT
+    /// (two words) at `t0 + 72 s`, a rising board inside the grace window
+    /// at `t0 + 110 s`, and the first Tab past it at `t0 + 150 s` (board
+    /// 10/9, its frame reading VICTORY). Returns the state and `t0`.
+    async fn r9_unlatched_game(
+        ctx: &DaemonCtx,
+        synced: &std::cell::Cell<u32>,
+    ) -> (SessionState, Instant) {
+        let (mut st, t0) = r9_finished_game(ctx, detect::MatchOutcome::Defeat, synced).await;
+        // Inside the grace window (72 + 75 s): the post-match board rule,
+        // no probe. The board is stored on the game with its result.
+        let press = t0 + Duration::from_secs(110);
+        assert!(!should_start_fresh_session(st.active_game.as_ref(), press));
+        assert!(!finished_game_tab_probe(st.active_game.as_ref(), press));
+        let verdict = r9_tab(
+            &mut st,
+            ctx,
+            press,
+            Ok(r9_frame(r9_counters(9, 8, 4300), "Busan")),
+            synced,
+        )
+        .await;
+        assert_eq!(verdict, None);
+        assert_eq!(st.active_game.as_ref().unwrap().session_id, "live");
+        // Past it, 39 s after that board (Tab pressed after the result):
+        // the board decides.
+        let press = t0 + Duration::from_secs(150);
+        assert!(should_start_fresh_session(st.active_game.as_ref(), press));
+        assert!(finished_game_tab_probe(st.active_game.as_ref(), press));
+        let mut probe = r9_frame(r9_counters(10, 9, 4600), "Busan");
+        probe.analysis.frame_outcome = detect::MatchOutcome::Victory;
+        let verdict = r9_tab(&mut st, ctx, press, Ok(probe), synced).await;
+        assert_eq!(verdict, Some(boundary::FinishedGameTab::StillPlaying));
+        (st, t0)
+    }
+
+    /// R9-2, the KDE tester's 2026-10-22 Route 66 game: DEFEAT was taken
+    /// mid-match, Tabs inside the 75 s grace window kept showing the board
+    /// rising, and the first Tab after it (board 10/9) closed the game
+    /// "superseded by Tab-opened game" and opened a new one. Now that board
+    /// keeps the game, the false result is cleared on the game and in the
+    /// store along with the result words behind it (review M1: `reader =
+    /// "new"` would stamp them on every later row), the probe frame's own
+    /// VICTORY is not taken (review A3), and the real result comes through
+    /// the poller's word path.
+    #[tokio::test]
+    async fn a_board_still_rising_after_a_false_result_keeps_the_game_and_clears_it() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let synced = std::cell::Cell::new(0);
+        let (mut st, t0) = r9_unlatched_game(&ctx, &synced).await;
+        assert!(st.tab_probe.is_none(), "the probe is settled");
+        let g = st.active_game.as_ref().unwrap();
+        assert_eq!(g.session_id, "live", "no new session");
+        assert_eq!(
+            g.outcome,
+            detect::MatchOutcome::Unknown,
+            "the false result is cleared, and the probe frame's word is not taken"
+        );
+        assert!(g.outcome_recorded_at.is_none());
+        assert!(g.result_mark.is_none());
+        assert!(g.result_evidence.is_empty());
+        assert_eq!(g.gate.map(|gate| gate.accepted.elims), Some(10));
+        assert_eq!(r9_final_outcome(&ctx, "live").await, "unknown");
+        assert_eq!(ctx.store.get_all_sessions().await.unwrap().len(), 1);
+        assert_eq!(synced.get(), 0, "nothing closed, nothing uploaded early");
+        // A later Tab is an ordinary mid-game Tab of the same game, and its
+        // row carries no result either.
+        let press = t0 + Duration::from_secs(190);
+        assert!(!finished_game_tab_probe(st.active_game.as_ref(), press));
+        r9_tab(
+            &mut st,
+            &ctx,
+            press,
+            Ok(r9_frame(r9_counters(12, 10, 5200), "Busan")),
+            &synced,
+        )
+        .await;
+        assert_eq!(
+            r9_rows(&ctx, "live").await,
+            vec![
+                (6, "unknown".into()),
+                (7, "unknown".into()),
+                (9, "unknown".into()),
+                (9, "unknown".into()),
+                (10, "unknown".into()),
+                (12, "unknown".into()),
+            ]
+        );
+        // The real end: the poller's two agreeing words record it.
+        r9_word(
+            &mut st,
+            &ctx,
+            detect::MatchOutcome::Victory,
+            t0 + Duration::from_secs(300),
+        )
+        .await;
+        assert!(
+            !st.active_game.as_ref().unwrap().finished(),
+            "one word is a hint"
+        );
+        r9_word(
+            &mut st,
+            &ctx,
+            detect::MatchOutcome::Victory,
+            t0 + Duration::from_secs(306),
+        )
+        .await;
+        let g = st.active_game.as_ref().unwrap();
+        assert_eq!(g.session_id, "live");
+        assert_eq!(g.outcome, detect::MatchOutcome::Victory);
+        assert_eq!(r9_final_outcome(&ctx, "live").await, "victory");
+        assert!(
+            r9_rows(&ctx, "live")
+                .await
+                .iter()
+                .all(|(_, o)| o == "victory"),
+            "every row of the game takes the real result"
+        );
+    }
+
+    /// R9-2 review round 2 (B #3): the false result's word streak goes with
+    /// it, so one more misread of the same word does not finish the game
+    /// again; two new agreeing reads still do.
+    #[tokio::test]
+    async fn a_misread_after_the_clear_needs_two_new_reads() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let synced = std::cell::Cell::new(0);
+        let (mut st, t0) = r9_unlatched_game(&ctx, &synced).await;
+        assert!(st.word_outcome_streak.is_none());
+        r9_word(
+            &mut st,
+            &ctx,
+            detect::MatchOutcome::Defeat,
+            t0 + Duration::from_secs(155),
+        )
+        .await;
+        assert!(
+            !st.active_game.as_ref().unwrap().finished(),
+            "one read is a hint"
+        );
+        r9_word(
+            &mut st,
+            &ctx,
+            detect::MatchOutcome::Defeat,
+            t0 + Duration::from_secs(161),
+        )
+        .await;
+        assert_eq!(
+            st.active_game.as_ref().unwrap().outcome,
+            detect::MatchOutcome::Defeat
+        );
+    }
+
+    /// R9-2 review round 2 (R2-1): the last board's Tab was pressed before
+    /// the result, but its report landed after it (the poller confirmed the
+    /// result while the capture ran). The board still counts as from before
+    /// the result: a rise on the frozen final board past the grace window
+    /// does not clear the real result.
+    #[tokio::test]
+    async fn a_board_pressed_before_the_result_counts_as_before_it_even_if_reported_after() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let synced = std::cell::Cell::new(0);
+        let t0 = test_now();
+        let mut active = game(detect::MatchOutcome::Unknown, None, t0);
+        active.session_id = "live".into();
+        active.map = Some("Busan".into());
+        active.map_source = Some(boundary::MapSource::TopBar);
+        active.session_created = false;
+        active.opened_at = t0;
+        let mut st = session(Some(active), t0);
+        for (at, c) in [(0, r9_counters(6, 6, 3000)), (40, r9_counters(7, 7, 3500))] {
+            let press = t0 + Duration::from_secs(at);
+            r9_tab(&mut st, &ctx, press, Ok(r9_frame(c, "Busan")), &synced).await;
+        }
+        // Tab at 70 s; the poller confirms VICTORY at 66 and 72 s while it
+        // runs; the report lands at 74 s.
+        let press = t0 + Duration::from_secs(70);
+        let req = tab_capture_request(&mut st, &ctx.store, &ctx.data_dir, press, || {
+            std::future::ready(())
+        })
+        .await;
+        let sid = req.session_id.clone();
+        *INJECTED_CAPTURE.lock().unwrap() = Some(r9_frame(r9_counters(9, 8, 4200), "Busan"));
+        let result = handle_capture(&ctx, req)
+            .await
+            .map_err(|e| format!("{e:#}"));
+        r9_word(
+            &mut st,
+            &ctx,
+            detect::MatchOutcome::Victory,
+            t0 + Duration::from_secs(66),
+        )
+        .await;
+        r9_word(
+            &mut st,
+            &ctx,
+            detect::MatchOutcome::Victory,
+            t0 + Duration::from_secs(72),
+        )
+        .await;
+        let landed = t0 + Duration::from_secs(74);
+        let sid = settle_tab_probe(
+            &mut st,
+            &ctx.store,
+            &ctx.data_dir,
+            sid,
+            &result,
+            landed,
+            || std::future::ready(()),
+        )
+        .await;
+        apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, &sid, result, landed).await;
+        let g = st.active_game.as_ref().unwrap();
+        assert_eq!(g.outcome, detect::MatchOutcome::Victory);
+        assert_eq!(g.last_stats_at, Some(landed), "reported after the result");
+        assert_eq!(g.last_board_pressed_at, Some(press), "pressed before it");
+        // The frozen final board, opened past the grace window.
+        let press = t0 + Duration::from_secs(150);
+        assert!(finished_game_tab_probe(st.active_game.as_ref(), press));
+        let verdict = r9_tab(
+            &mut st,
+            &ctx,
+            press,
+            Ok(r9_frame(r9_counters(10, 9, 4600), "Busan")),
+            &synced,
+        )
+        .await;
+        assert_eq!(verdict, Some(boundary::FinishedGameTab::NewGame));
+        assert_ne!(st.active_game.as_ref().unwrap().session_id, "live");
+        assert_eq!(r9_final_outcome(&ctx, "live").await, "victory");
+    }
+
+    /// R9-2 review round 2 (N1): a result the member sets while the
+    /// clearing Tab's capture runs is kept.
+    #[tokio::test]
+    async fn a_result_set_by_the_member_during_the_probe_is_kept() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let synced = std::cell::Cell::new(0);
+        let (mut st, t0) = r9_finished_game(&ctx, detect::MatchOutcome::Defeat, &synced).await;
+        r9_tab(
+            &mut st,
+            &ctx,
+            t0 + Duration::from_secs(110),
+            Ok(r9_frame(r9_counters(9, 8, 4300), "Busan")),
+            &synced,
+        )
+        .await;
+        let press = t0 + Duration::from_secs(150);
+        let req = tab_capture_request(&mut st, &ctx.store, &ctx.data_dir, press, || {
+            std::future::ready(())
+        })
+        .await;
+        assert!(req.finished_game_probe.is_some());
+        let sid = req.session_id.clone();
+        // The member sets Victory in the app while the capture runs.
+        st.active_game
+            .as_mut()
+            .unwrap()
+            .record_member_outcome(detect::MatchOutcome::Victory);
+        ctx.store
+            .set_session_outcome("live", "victory")
+            .await
+            .unwrap();
+        *INJECTED_CAPTURE.lock().unwrap() = Some(r9_frame(r9_counters(10, 9, 4600), "Busan"));
+        let result = handle_capture(&ctx, req)
+            .await
+            .map_err(|e| format!("{e:#}"));
+        assert_eq!(
+            result.as_ref().ok().and_then(|r| r.finished_game_tab),
+            Some(boundary::FinishedGameTab::StillPlaying)
+        );
+        let now = press + Duration::from_secs(1);
+        let sid = settle_tab_probe(
+            &mut st,
+            &ctx.store,
+            &ctx.data_dir,
+            sid,
+            &result,
+            now,
+            || std::future::ready(()),
+        )
+        .await;
+        apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, &sid, result, now).await;
+        let g = st.active_game.as_ref().unwrap();
+        assert_eq!(g.session_id, "live");
+        assert_eq!(g.outcome, detect::MatchOutcome::Victory);
+        assert_eq!(r9_final_outcome(&ctx, "live").await, "victory");
+        assert!(
+            r9_rows(&ctx, "live")
+                .await
+                .iter()
+                .all(|(_, o)| o == "victory")
+        );
+    }
+
+    /// R9-2: a new game on the same map right after a loss. Its board is
+    /// back near zero: the loss stays, and the Tab opens the next game as
+    /// before rc.9 (the board stored there, the closed game uploaded).
+    #[tokio::test]
+    async fn a_reset_board_on_the_same_map_after_a_loss_is_the_next_game() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let synced = std::cell::Cell::new(0);
+        let (mut st, t0) = r9_finished_game(&ctx, detect::MatchOutcome::Defeat, &synced).await;
+        let press = t0 + Duration::from_secs(150);
+        assert!(finished_game_tab_probe(st.active_game.as_ref(), press));
+        let verdict = r9_tab(
+            &mut st,
+            &ctx,
+            press,
+            Ok(r9_frame(r9_counters(1, 0, 400), "Busan")),
+            &synced,
+        )
+        .await;
+        assert_eq!(verdict, Some(boundary::FinishedGameTab::NewGame));
+        let g = st.active_game.as_ref().unwrap();
+        assert_ne!(g.session_id, "live");
+        assert_eq!(g.opened_at, press, "the new game opens as of the press");
+        assert_eq!(g.outcome, detect::MatchOutcome::Unknown);
+        let fresh = g.session_id.clone();
+        assert_eq!(r9_rows(&ctx, &fresh).await, vec![(1, "unknown".into())]);
+        assert_eq!(r9_final_outcome(&ctx, "live").await, "defeat");
+        assert!(
+            r9_rows(&ctx, "live")
+                .await
+                .iter()
+                .all(|(_, o)| o == "defeat"),
+            "the loss stays on the closed game"
+        );
+        assert_eq!(synced.get(), 1, "the closed game is uploaded at once");
+    }
+
+    /// R9-2: a late look at the same board after a real result (nothing
+    /// moved on), or one column moved (could be a misread), stays on that
+    /// game and keeps its result. It is not stored and does not restart the
+    /// 120 s window (review L2).
+    #[tokio::test]
+    async fn the_same_board_past_the_grace_window_keeps_the_game_and_its_result() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let synced = std::cell::Cell::new(0);
+        let (mut st, t0) = r9_finished_game(&ctx, detect::MatchOutcome::Victory, &synced).await;
+        let last_board = st.active_game.as_ref().unwrap().last_stats_at;
+        for (at, c) in [
+            (150, r9_counters(9, 8, 4200)),
+            (170, r9_counters(10, 8, 4200)),
+        ] {
+            let verdict = r9_tab(
+                &mut st,
+                &ctx,
+                t0 + Duration::from_secs(at),
+                Ok(r9_frame(c, "Busan")),
+                &synced,
+            )
+            .await;
+            assert_eq!(verdict, Some(boundary::FinishedGameTab::SameBoard), "{c:?}");
+            let g = st.active_game.as_ref().unwrap();
+            assert_eq!(g.session_id, "live");
+            assert_eq!(g.outcome, detect::MatchOutcome::Victory);
+            assert_eq!(g.last_stats_at, last_board, "the window is not restarted");
+            assert_eq!(g.gate.map(|gate| gate.accepted.elims), Some(9));
+        }
+        assert_eq!(
+            r9_rows(&ctx, "live").await.len(),
+            3,
+            "nothing stored past the result"
+        );
+        assert_eq!(r9_final_outcome(&ctx, "live").await, "victory");
+        assert_eq!(ctx.store.get_all_sessions().await.unwrap().len(), 1);
+        assert_eq!(synced.get(), 0);
+        // The window runs from the game's own last board: past it, the
+        // fresh session opens at the press as before.
+        let press = t0 + Duration::from_secs(72) + FINISHED_GAME_TAB_MAX_GAP;
+        assert!(!finished_game_tab_probe(st.active_game.as_ref(), press));
+    }
+
+    /// R9-2: what cannot be shown to be the same game keeps the rule before
+    /// rc.9: another map, a misread drop, a Tab whose frame was missed, a
+    /// finished game whose last board is too old to compare with, and (review
+    /// H1) the frozen final board of a real result whose last Tab came
+    /// before the end: it rose through the last fight, and the result stays.
+    #[tokio::test]
+    async fn a_finished_game_tab_that_is_not_shown_to_be_the_same_game_opens_the_next() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let missed = format!("{} (no answer in 60 s)", capture::portal::SHOT_UNANSWERED);
+        for (case, result, frame) in [
+            (
+                "another map",
+                detect::MatchOutcome::Defeat,
+                Ok(r9_frame(r9_counters(10, 9, 4600), "Ilios")),
+            ),
+            (
+                "elims fell",
+                detect::MatchOutcome::Defeat,
+                Ok(r9_frame(r9_counters(5, 9, 4600), "Busan")),
+            ),
+            (
+                "missed frame",
+                detect::MatchOutcome::Defeat,
+                Err(missed.as_str()),
+            ),
+            (
+                "final board after a real result",
+                detect::MatchOutcome::Victory,
+                Ok(r9_frame(r9_counters(10, 9, 4600), "Busan")),
+            ),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = o8_ctx(dir.path(), true).await;
+            let synced = std::cell::Cell::new(0);
+            let (mut st, t0) = r9_finished_game(&ctx, result, &synced).await;
+            let press = t0 + Duration::from_secs(150);
+            assert!(
+                finished_game_tab_probe(st.active_game.as_ref(), press),
+                "{case}"
+            );
+            r9_tab(&mut st, &ctx, press, frame, &synced).await;
+            let g = st.active_game.as_ref().unwrap();
+            assert_ne!(g.session_id, "live", "{case}");
+            assert_eq!(g.opened_at, press, "{case}");
+            assert_eq!(
+                r9_final_outcome(&ctx, "live").await,
+                result.to_string(),
+                "{case}: the result stays"
+            );
+            assert_eq!(synced.get(), 1, "{case}");
+            assert!(st.tab_probe.is_none(), "{case}");
+        }
+
+        // The last board is more than 120 s old: no probe, the fresh
+        // session opens at the press as before.
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let synced = std::cell::Cell::new(0);
+        let (mut st, t0) = r9_finished_game(&ctx, detect::MatchOutcome::Defeat, &synced).await;
+        // The last board was taken at `t0 + 71 s` (its report landed then).
+        let press = t0 + Duration::from_secs(72) + FINISHED_GAME_TAB_MAX_GAP;
+        assert!(!finished_game_tab_probe(st.active_game.as_ref(), press));
+        let req = tab_capture_request(&mut st, &ctx.store, &ctx.data_dir, press, || {
+            synced.set(synced.get() + 1);
+            std::future::ready(())
+        })
+        .await;
+        assert!(req.finished_game_probe.is_none());
+        assert!(st.tab_probe.is_none());
+        assert_ne!(st.active_game.as_ref().unwrap().session_id, "live");
+        assert_eq!(req.session_id, st.active_game.as_ref().unwrap().session_id);
+        assert_eq!(synced.get(), 1);
+    }
+
+    /// R9-2 review (M4): a result the member set in the app is never
+    /// cleared by a Tab, even a rising board taken after it. The GUI's
+    /// SetOutcome and EditMatch go through `record_member_outcome`; the Tab
+    /// past the grace window opens the next game as before rc.9.
+    #[tokio::test]
+    async fn a_result_the_member_set_is_never_cleared_by_a_tab() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let synced = std::cell::Cell::new(0);
+        let (mut st, t0) = r9_finished_game(&ctx, detect::MatchOutcome::Defeat, &synced).await;
+        // The member sets Victory by hand at t0 + 80 s (the GUI command's
+        // store write and its in-memory effect).
+        let g = st.active_game.as_mut().unwrap();
+        g.record_member_outcome(detect::MatchOutcome::Victory);
+        g.outcome_recorded_at = Some(t0 + Duration::from_secs(80));
+        assert!(g.outcome_locked);
+        ctx.store
+            .set_session_outcome("live", "victory")
+            .await
+            .unwrap();
+        // A rising board inside the edit's grace window, then past it.
+        r9_tab(
+            &mut st,
+            &ctx,
+            t0 + Duration::from_secs(120),
+            Ok(r9_frame(r9_counters(10, 9, 4600), "Busan")),
+            &synced,
+        )
+        .await;
+        let press = t0 + Duration::from_secs(200);
+        assert!(should_start_fresh_session(st.active_game.as_ref(), press));
+        assert!(!finished_game_tab_probe(st.active_game.as_ref(), press));
+        st.active_game.as_mut().unwrap().outcome_locked = false;
+        assert!(
+            finished_game_tab_probe(st.active_game.as_ref(), press),
+            "only the member's lock keeps this Tab from being compared"
+        );
+        st.active_game.as_mut().unwrap().outcome_locked = true;
+        let verdict = r9_tab(
+            &mut st,
+            &ctx,
+            press,
+            Ok(r9_frame(r9_counters(11, 10, 5000), "Busan")),
+            &synced,
+        )
+        .await;
+        assert_eq!(verdict, None, "no probe");
+        assert_ne!(st.active_game.as_ref().unwrap().session_id, "live");
+        assert_eq!(r9_final_outcome(&ctx, "live").await, "victory");
+        // A result the tracker reads itself takes the lock off.
+        let mut read = game(detect::MatchOutcome::Unknown, None, press);
+        read.outcome_locked = true;
+        read.record_outcome_at(detect::MatchOutcome::Defeat, press);
+        assert!(!read.outcome_locked);
+    }
+
+    /// R9-4: `handle_capture`'s arm for a Tab turned away by a paused or
+    /// unanswering screenshot portal: a quiet missed capture of the open
+    /// game, not a failed cycle. Nothing is stored and the game is as it was.
+    #[tokio::test]
+    async fn a_tab_turned_away_by_a_paused_portal_is_a_missed_capture_of_the_open_game() {
+        let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        let now = test_now();
+        let mut active = game(detect::MatchOutcome::Defeat, Some(10), now);
+        active.session_id = "open".into();
+        active.gate = Some(GateState::default());
+        active.last_stats_at = Some(now - Duration::from_secs(20));
+        let mut st = session(Some(active), now);
+        *INJECTED_GRAB_ERROR.lock().unwrap() = Some(format!(
+            "{} (no answer in 60 s)",
+            capture::portal::SHOT_UNANSWERED
+        ));
+        let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+        let report = handle_capture(&ctx, req)
+            .await
+            .expect("a missed capture, not an error");
+        assert!(
+            INJECTED_GRAB_ERROR.lock().unwrap().is_none(),
+            "one grab, no retry"
+        );
+        assert!(!report.recorded);
+        assert!(!report.board_taken());
+        assert!(!report.split && !report.armed_reset);
+        assert_eq!(report.session_id, "open");
+        assert_eq!(report.outcome, detect::MatchOutcome::Defeat);
+        assert!(report.gate_state.is_none());
+        assert_eq!(report.finished_game_tab, None);
+        assert!(
+            !apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, "open", Ok(report), now)
+                .await
+        );
+        let g = st.active_game.as_ref().unwrap();
+        assert_eq!(g.session_id, "open");
+        assert_eq!(g.outcome, detect::MatchOutcome::Defeat);
+        assert_eq!(g.gate, Some(GateState::default()));
+        assert!(ctx.store.get_all_matches().await.unwrap().is_empty());
+    }
+
+    /// R9-4, the mirror of the final pre-tag review case: a refused board
+    /// with no outcome on attempt 0, an unsure team size carrying VICTORY on
+    /// the retry. `tab_outcome_rank` ranks any analysed board above an
+    /// unsure team size whatever the outcomes, so the refused board is kept
+    /// and the unsure frame's VICTORY is not.
+    #[tokio::test]
+    async fn a_refused_board_without_an_outcome_still_outranks_an_unsure_victory() {
+        use stat_tracker::tab_retry::{TAB_RETRY_WAITS, TabFlight, with_retries};
+        let refused = || FrameAnalysisOutcome::Analyzed(Box::new(o8_analysis(None, None)));
+        let unsure_victory = || FrameAnalysisOutcome::TeamSizeUncertain {
+            outcome: detect::MatchOutcome::Victory,
+            frame: image::DynamicImage::new_rgb8(4, 4),
+            scan: detect::hero_portrait::RowScan {
+                dip_count: 0,
+                median_pitch: None,
+                spectral_pitch: None,
+            },
+        };
+        assert!(tab_outcome_rank(&refused(), true) > tab_outcome_rank(&unsure_victory(), true));
+        let (best, retries) = with_retries(
+            &TabFlight::new(Instant::now()),
+            &TAB_RETRY_WAITS,
+            |outcome| tab_result(outcome, true),
+            |outcome| tab_outcome_rank(outcome, true),
+            |outcome| tab_retry_reason(outcome, true),
+            |attempt| {
+                let outcome = if attempt == 0 {
+                    refused()
+                } else {
+                    unsure_victory()
+                };
+                async move { Ok::<_, ()>(outcome) }
+            },
+            |_| async {},
+        )
+        .await
+        .unwrap();
+        // The kept board is a refused one, so the retries go on; every
+        // unsure grab ranks below it.
+        assert_eq!(retries, TAB_RETRY_WAITS.len());
+        match best {
+            FrameAnalysisOutcome::Analyzed(analysis) => {
+                assert!(reader_refusal(&analysis, true).is_some());
+                assert_eq!(analysis.frame_outcome, detect::MatchOutcome::Unknown);
+            }
+            _ => panic!("the refused board is kept"),
+        }
+    }
+
+    /// R9-3: a refused end-of-match board carrying VICTORY, then a retry
+    /// whose screen grab fails: the capture keeps that board and its
+    /// outcome instead of failing the whole cycle.
+    #[tokio::test]
+    async fn a_failed_retry_grab_keeps_the_refused_board_and_its_outcome() {
+        use stat_tracker::tab_retry::{TAB_RETRY_WAITS, TabFlight, with_retries};
+        let refused_victory = || {
+            let mut analysis = o8_analysis(None, None);
+            analysis.frame_outcome = detect::MatchOutcome::Victory;
+            FrameAnalysisOutcome::Analyzed(Box::new(analysis))
+        };
+        let (best, retries) = with_retries(
+            &TabFlight::new(Instant::now()),
+            &TAB_RETRY_WAITS,
+            |outcome| tab_result(outcome, true),
+            |outcome| tab_outcome_rank(outcome, true),
+            |outcome| tab_retry_reason(outcome, true),
+            |attempt| {
+                let outcome = refused_victory();
+                async move {
+                    if attempt == 0 {
+                        Ok(outcome)
+                    } else {
+                        Err(anyhow::anyhow!("screen capture failed"))
+                    }
+                }
+            },
+            |_| async {},
+        )
+        .await
+        .expect("the held board, not the retry's error");
+        assert_eq!(retries, 1);
+        match best {
+            FrameAnalysisOutcome::Analyzed(analysis) => {
+                assert!(reader_refusal(&analysis, true).is_some());
+                assert_eq!(analysis.frame_outcome, detect::MatchOutcome::Victory);
+            }
+            _ => panic!("the refused board with its outcome is kept"),
+        }
+    }
+
     /// The own row's board hero with the hero authority as given: a 5v5
     /// board whose own row names `row` while the authority (own row and
     /// career panel portrait) names `authority`.
@@ -16678,7 +17952,7 @@ mod tests {
         let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
         assert!(hc_body.contains("text_fallback_name(board_reader, player_row_idx, player_name),"));
         assert!(hc_body.contains(
-            "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, session_id).await;"
+            "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, seed_session).await;"
         ));
         // the offer sits on the new reader's own read path (O10)
         assert!(hc_body.contains(
@@ -18737,15 +20011,16 @@ mod tests {
             self.word_tick(outcome, None).await;
         }
 
-        /// A banner confirms on one tick and has no accolade map. Production
-        /// reads the map crop only on result-word ticks.
-        async fn banner(&mut self, outcome: detect::MatchOutcome) {
-            let tick = resolve_word_tick(
-                &mut self.st.word_outcome_streak,
-                Some((outcome, detect::match_end::OutcomeSource::Banner)),
-                self.now,
-                None,
-            );
+        /// A result confirmed on this tick with no accolade map: the second
+        /// agreeing end-title or rank-screen read, whose first read the
+        /// test does not need. Production reads the map crop only on
+        /// result-word ticks.
+        async fn confirmed_without_map(&mut self, outcome: detect::MatchOutcome) {
+            let tick = ResolvedWordTick {
+                signal: Some(outcome),
+                signal_confirmed: true,
+                accolade_map: None,
+            };
             self.apply_resolved_tick(tick, None).await;
         }
 
@@ -18920,6 +20195,7 @@ mod tests {
                     held_at: None,
                     map_replaces_text_fallback: false,
                     rejoin_carry: None,
+                    finished_game_tab: None,
                 };
                 apply_capture_report(
                     &mut self.st,
@@ -18985,6 +20261,7 @@ mod tests {
                 held_at: None,
                 map_replaces_text_fallback: staged.replaced_text_fallback,
                 rejoin_carry: rejoin.carry,
+                finished_game_tab: None,
             };
             apply_capture_report(
                 &mut self.st,
@@ -20159,15 +21436,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_armed_banner_has_no_map_and_seals_onto_the_open_session() {
+    async fn an_armed_result_without_a_map_seals_onto_the_open_session() {
         let mut night = Night::new().await;
         let busan = arm_busan_defeat(&mut night).await;
-        night.banner(detect::MatchOutcome::Victory).await;
+        night
+            .confirmed_without_map(detect::MatchOutcome::Victory)
+            .await;
         assert_eq!(night.id(), busan);
         assert_eq!(
             night.game().outcome,
             detect::MatchOutcome::Victory,
-            "a banner carries no accolade map, so it still seals onto A"
+            "a result with no accolade map still seals onto A"
         );
     }
 
@@ -20457,7 +21736,9 @@ mod tests {
     async fn a_finished_text_fallback_session_keeps_its_map() {
         let mut night = Night::new().await;
         let busan = text_fallback(&mut night, "Busan").await;
-        night.banner(detect::MatchOutcome::Victory).await;
+        night
+            .confirmed_without_map(detect::MatchOutcome::Victory)
+            .await;
         assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
         assert_eq!(night.game().map.as_deref(), Some("Busan"));
         night
@@ -21049,6 +22330,7 @@ mod tests {
             held_at: None,
             map_replaces_text_fallback: false,
             rejoin_carry: None,
+            finished_game_tab: None,
         };
         apply_capture_report(
             &mut night.st,
@@ -21087,7 +22369,9 @@ mod tests {
         night.advance(Duration::from_secs(30));
         let req = night.tab_request().await;
         assert_eq!(req.game_outcome, detect::MatchOutcome::Unknown);
-        night.banner(detect::MatchOutcome::Victory).await;
+        night
+            .confirmed_without_map(detect::MatchOutcome::Victory)
+            .await;
         assert_eq!(night.id(), busan);
         assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
         night
@@ -21141,7 +22425,9 @@ mod tests {
         let busan = night.id();
         let req = night.tab_request().await;
         assert!(req.create_session);
-        night.banner(detect::MatchOutcome::Victory).await;
+        night
+            .confirmed_without_map(detect::MatchOutcome::Victory)
+            .await;
         assert_eq!(night.id(), busan);
         assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
         night
@@ -21768,6 +23054,7 @@ mod tests {
             held_at: None,
             map_replaces_text_fallback: false,
             rejoin_carry: None,
+            finished_game_tab: None,
         }
     }
 
@@ -24465,7 +25752,9 @@ mod tests {
             .await;
         assert_eq!(night.id(), id);
 
-        night.banner(detect::MatchOutcome::Victory).await;
+        night
+            .confirmed_without_map(detect::MatchOutcome::Victory)
+            .await;
         assert_eq!(night.game().outcome, detect::MatchOutcome::Victory);
         assert_eq!(night.id(), id);
 
@@ -24627,7 +25916,9 @@ mod tests {
     async fn a_restart_after_a_result_still_starts_a_new_game_on_the_first_tab_past_75_s() {
         let mut night = Night::new().await;
         let id = rialto_before_crash(&mut night).await;
-        night.banner(detect::MatchOutcome::Victory).await;
+        night
+            .confirmed_without_map(detect::MatchOutcome::Victory)
+            .await;
         night.crash_and_restart().await;
         assert_eq!(
             night.id(),

@@ -342,8 +342,11 @@ pub fn next_press_after_report(
 /// frame, and a share that is still opening are not the same line.
 /// A later result replaces the kept one only when `rank` scores it higher,
 /// so a rejected grab never replaces a more useful one. Returns the best
-/// result and how many retries ran. An error from `attempt` (a failed
-/// screen grab) ends the loop at once.
+/// result and how many retries ran. An error from the first `attempt` (a
+/// failed screen grab) ends the loop at once with that error. An error from
+/// a retry ends the loop too, but returns the best result so far: a board
+/// an earlier grab already held (a refused board and the outcome on its
+/// frame) is not dropped because a later grab failed (R9-3).
 ///
 /// `flight` moves to [`TabFlightPhase::Retrying`] before the first retry.
 /// Once [`TabFlight::cancel_retries`] or [`TabFlight::note_release`] is
@@ -363,6 +366,7 @@ pub async fn with_retries<T, E, A, AF, S, SF>(
 where
     A: FnMut(usize) -> AF,
     AF: Future<Output = Result<T, E>>,
+    E: std::fmt::Debug,
     S: FnMut(Duration) -> SF,
     SF: Future<Output = ()>,
 {
@@ -370,6 +374,7 @@ where
     let mut best = attempt(0).await?;
     let mut retries = 0;
     let mut stopped = None;
+    let mut failed = false;
     for &wait in waits {
         if !retry(&best) {
             break;
@@ -396,7 +401,20 @@ where
             stopped = Some(why);
             break;
         }
-        let next = attempt(retries).await?;
+        let next = match attempt(retries).await {
+            Ok(next) => next,
+            Err(err) => {
+                // A grab error, or the analysis of the grabbed frame
+                // failing (in the daemon, a panic in it).
+                tracing::warn!(
+                    retries,
+                    error = ?err,
+                    "Tab capture retry failed (screen grab or frame analysis): keeping the earlier result"
+                );
+                failed = true;
+                break;
+            }
+        };
         if rank(&next) > rank(&best) {
             best = next;
         }
@@ -407,7 +425,7 @@ where
             RetryStop::Released => "Tab was released (a later frame shows the game, not the board)",
         };
         tracing::info!(retries, "Tab capture retries stopped: {line}");
-    } else if retries > 0 {
+    } else if retries > 0 && !failed {
         if retry(&best) {
             let reason = why(&best);
             tracing::warn!(retries, "Tab capture gave up after retries: {reason}");
@@ -753,6 +771,57 @@ mod tests {
             assert_eq!(retries, want, "{route:?}");
             assert_eq!(*grabs.borrow(), want + 1, "grabs including the first");
         }
+    }
+
+    /// R9-3: a retry whose screen grab fails ends the retries and keeps
+    /// what an earlier grab held (in the daemon: a board the reader refused
+    /// and the outcome on its frame), with a warning. A failed first grab
+    /// is still the error.
+    #[test]
+    fn a_failed_retry_keeps_the_earlier_result() {
+        let grabs = RefCell::new(0usize);
+        let flight = TabFlight::new(Instant::now());
+        let text = capture_thread_logs(|| {
+            let got = block_on(with_retries(
+                &flight,
+                &TAB_RETRY_WAITS,
+                |v: &u8| u8_result(*v),
+                |v: &u8| *v,
+                |_| "the scoreboard reader refused the board",
+                |i| {
+                    *grabs.borrow_mut() += 1;
+                    async move {
+                        if i == 0 {
+                            Ok(0u8)
+                        } else {
+                            Err("screen capture failed")
+                        }
+                    }
+                },
+                |_| async {},
+            ));
+            assert_eq!(got, Ok((0, 1)), "the held result, after one retry");
+        });
+        assert_eq!(*grabs.borrow(), 2, "no grab after the failed one");
+        assert!(text.contains(
+            "Tab capture retry failed (screen grab or frame analysis): keeping the earlier result"
+        ));
+        assert!(
+            !text.contains("Tab capture gave up after retries"),
+            "the retries did not run out"
+        );
+        assert_eq!(flight.phase(), TabFlightPhase::Rejected);
+
+        let got = block_on(with_retries(
+            &TabFlight::new(Instant::now()),
+            &TAB_RETRY_WAITS,
+            |v: &u8| u8_result(*v),
+            |v: &u8| *v,
+            |_| "rejected by the scoreboard check",
+            |_| async { Err::<u8, _>("screen capture failed") },
+            |_| async {},
+        ));
+        assert_eq!(got, Err("screen capture failed"));
     }
 
     #[test]
