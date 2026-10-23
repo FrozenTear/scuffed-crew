@@ -31,9 +31,10 @@ use std::path::Path;
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
-use super::{
-    CERT_MACS, Cert, Gray, Level, PRESENT, Phased, Plane, Proj, Stack, WORK, certify, load_gray,
-    make_phased, region, roi_is_valid, scaled_stacks, search_fast, search_full,
+use super::{Plane, WORK, region, roi_is_valid};
+use crate::shadow::ncc::{
+    CERT_MACS, Cert, Gray, Level, PRESENT, Phased, Proj, Stack, certify, load_gray, make_phased,
+    scaled_stacks, search_fast, search_full,
 };
 
 /// The phrase list in the words pack folder.
