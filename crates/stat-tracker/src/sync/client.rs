@@ -5,10 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use crate::config::{SyncConfig, SyncUrlReject, validate_sync_server_url};
 use crate::storage::PersonalMatch;
+use crate::version::USER_AGENT;
 
 use scuffed_types::api::{DaemonConfigResponse, StatsUploadResponse};
 
-use super::USER_AGENT;
 use super::backoff::parse_retry_after;
 use super::batching::BatchCaps;
 use super::errors::{SyncUploadError, parse_upload_error_body, server_error_text};
