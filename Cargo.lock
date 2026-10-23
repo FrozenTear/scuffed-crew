@@ -10995,6 +10995,7 @@ dependencies = [
  "rayon",
  "regex",
  "reqwest 0.12.28",
+ "scuffed-stat-tracker-core",
  "scuffed-types",
  "serde",
  "serde_json",
@@ -11004,12 +11005,31 @@ dependencies = [
  "surrealdb-types",
  "tempfile",
  "tokio",
- "toml 1.1.6+spec-1.1.0",
- "toml_edit 0.23.10+spec-1.0.0",
  "tracing",
  "tracing-subscriber",
  "x11rb 0.14.0",
  "zip",
+]
+
+[[package]]
+name = "scuffed-stat-tracker-core"
+version = "0.5.0-rc.9"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dirs",
+ "libc",
+ "scuffed-types",
+ "serde",
+ "serde_json",
+ "strsim",
+ "surrealdb-types",
+ "tempfile",
+ "tokio",
+ "toml 1.1.6+spec-1.1.0",
+ "toml_edit 0.23.10+spec-1.0.0",
+ "tracing",
+ "url",
 ]
 
 [[package]]

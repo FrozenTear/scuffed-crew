@@ -1,0 +1,39 @@
+[package]
+license.workspace = true
+name = "scuffed-stat-tracker-core"
+# Keep equal to crates/stat-tracker/Cargo.toml: `version::APP_VERSION` and
+# `version::USER_AGENT` are built here from CARGO_PKG_VERSION. A guard test
+# in scuffed-stat-tracker (src/tests_release_pins.rs) and
+# dist/check-tag-version.sh both fail when the two differ.
+version = "0.5.0-rc.9"
+edition = "2024"
+description = "Bottom layer of the Scuffed Crew stat tracker: config, text parsing, shared model types, perf and host probes."
+
+# The tracker's lowest crate (0.6 N4). It uses no other tracker crate, and
+# `scuffed-stat-tracker` re-exports each of its modules at the same path
+# (`stat_tracker::config` is `stat_tracker_core::config`).
+[lib]
+name = "stat_tracker_core"
+path = "src/lib.rs"
+
+# The same requirements and features as crates/stat-tracker/Cargo.toml, for
+# the subset these modules use. `workspace = true` where the workspace entry
+# is the same requirement (tokio stays local: the workspace one is "full").
+[dependencies]
+scuffed-types = { path = "../types" }
+anyhow = "1"
+tokio = { version = "1", features = ["sync", "time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { version = "0.4", features = ["serde", "clock"] }
+tracing = { workspace = true }
+dirs = "6"
+toml = "1"
+toml_edit = "0.23"
+# config.rs parses the sync URL. reqwest::Url is a re-export of url::Url;
+# naming url directly keeps reqwest (hyper, rustls) out of this crate.
+url = "2"
+surrealdb-types = "3"
+tempfile = "3"
+strsim = "0.11"
+libc = "0.2"

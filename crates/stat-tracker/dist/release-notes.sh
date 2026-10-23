@@ -197,8 +197,11 @@ if [[ "$SKIP_COMMITS" -eq 0 ]]; then
         | grep -vx "${TAG}" | grep -vE '^stat-tracker-v[^-]*-' | head -1 || true)"
     fi
     if [[ -n "${PREV}" ]]; then
+      # 'crates/stat-tracker*' is every tracker crate: the daemon, the GUI and
+      # the crates split out of the lib (stat-tracker-core, ...). A plain
+      # pathspec's * also matches '/', so it covers their files.
       subjects="$(strip_hold_merge "$(flatten_subject_dashes "$(git -C "$REPO" log "${PREV}..HEAD" --no-merges --pretty='- %s' -- \
-        crates/stat-tracker crates/stat-tracker-ui \
+        'crates/stat-tracker*' \
         .github/workflows/stat-tracker-release.yml)")")"
       COMMITS_BLOCK="$(printf '## Commits since %s\n\n%s' "${PREV#stat-tracker-}" "$subjects")"
     fi

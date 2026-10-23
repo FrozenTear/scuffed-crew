@@ -1695,9 +1695,12 @@ mod tests {
         assert!(pool_started());
     }
 
-    /// Every `.rs` file below `src/`, with the part of it that is not test
-    /// code: the text before its first test module. Files that are test
-    /// code as a whole are left out.
+    /// Every `.rs` file below the `src/` of every stat-tracker crate but the
+    /// GUI (`crates/stat-tracker*/src`: this lib, its bin `main.rs` and the
+    /// crates split out of it in 0.6 N4), with the part of it that is not
+    /// test code: the text before its first test module. Files that are test
+    /// code as a whole are left out. Names are relative to each crate's
+    /// `src/`, so they do not change when a module moves to another crate.
     fn production_sources() -> Vec<(String, String)> {
         fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).expect("read src") {
@@ -1709,35 +1712,55 @@ mod tests {
                 }
             }
         }
-        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files = Vec::new();
-        walk(&src, &mut files);
-        files.sort();
-        files
-            .into_iter()
-            .filter(|path| {
-                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-                // `mod tests;` files, the OCR-off bench and the daemon's
-                // `main_tests/` (main.rs's test module) are test code.
-                !stem.starts_with("tests")
-                    && stem != "ocr_bench"
-                    && !path.starts_with(src.join("main_tests"))
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/");
+        let mut roots: Vec<std::path::PathBuf> = std::fs::read_dir(crates)
+            .expect("read crates/")
+            .map(|entry| entry.expect("dir entry").path())
+            .filter(|dir| {
+                let name = dir.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                // The GUI is no OCR caller, and its `set_mode(` calls are
+                // std file permissions.
+                name.starts_with("stat-tracker") && name != "stat-tracker-ui"
             })
-            .map(|path| {
-                let text = std::fs::read_to_string(&path).expect("read a source file");
-                let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
-                    .iter()
-                    .filter_map(|marker| text.find(marker))
-                    .min()
-                    .unwrap_or(text.len());
-                let name = path
-                    .strip_prefix(&src)
-                    .expect("below src")
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                (name, text[..end].to_string())
-            })
-            .collect()
+            .map(|dir| dir.join("src"))
+            .filter(|src| src.is_dir())
+            .collect();
+        roots.sort();
+        let mut out = Vec::new();
+        for src in roots {
+            let mut files = Vec::new();
+            walk(&src, &mut files);
+            files.sort();
+            out.extend(
+                files
+                    .into_iter()
+                    .filter(|path| {
+                        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                        // `mod tests;` files, the OCR-off bench and the daemon's
+                        // `main_tests/` (main.rs's test module) are test code.
+                        !stem.starts_with("tests")
+                            && stem != "ocr_bench"
+                            && !path.starts_with(src.join("main_tests"))
+                    })
+                    .map(|path| {
+                        let text = std::fs::read_to_string(&path).expect("read a source file");
+                        let end = ["\n#[cfg(test)]\nmod ", "\n#[cfg(test)]\npub(crate) mod "]
+                            .iter()
+                            .filter_map(|marker| text.find(marker))
+                            .min()
+                            .unwrap_or(text.len());
+                        let name = path
+                            .strip_prefix(&src)
+                            .expect("below src")
+                            .to_string_lossy()
+                            .replace('\\', "/");
+                        (name, text[..end].to_string())
+                    }),
+            );
+        }
+        out
     }
 
     /// Nothing outside this file can start Tesseract or open the gate:
@@ -1758,6 +1781,14 @@ mod tests {
             "the walk found the tree: {}",
             sources.len()
         );
+        // The daemon binary and stat-tracker-core are in the walk, not only
+        // the crate that hosts this test.
+        for file in ["main.rs", "ocr/mod.rs", "config.rs", "ocr_status.rs"] {
+            assert!(
+                sources.iter().any(|(name, _)| name == file),
+                "the walk reached {file}"
+            );
+        }
         let holding = |needle: &str| -> Vec<(String, usize)> {
             sources
                 .iter()

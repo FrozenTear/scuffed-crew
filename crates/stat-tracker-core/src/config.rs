@@ -111,7 +111,7 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub setup_completed: bool,
     /// Not used. Reader packs come from the signed-in site
-    /// (`GET /api/tracker/packs`, see [`crate::packs`]) and the setup guide
+    /// (`GET /api/tracker/packs`, see `stat_tracker::packs`) and the setup guide
     /// always shows its pack step. Kept so a config.toml that still sets it
     /// parses and saves back unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -161,7 +161,7 @@ pub struct Config {
     /// unread: the build has to read everything without Tesseract, and the
     /// hero, map and word packs have to be loaded with what those readers
     /// need. Otherwise the tracker keeps OCR on for the run and logs why
-    /// ([`crate::ocr_switch`]). The tracker reads this when it starts.
+    /// (`stat_tracker::ocr_switch`). The tracker reads this when it starts.
     /// Overlay for tests and tools: env [`OCR_ENV`] (`on` or `off`).
     #[serde(default, skip_serializing_if = "OcrSetting::is_on")]
     pub ocr: OcrSetting,
@@ -172,7 +172,7 @@ pub struct Config {
     /// new reader both honor it. With a `names-v1` pack loaded, a row is
     /// used when its confidence meets the pack's own `min_confidence`. A
     /// blank row, or one under that threshold, is read with Tesseract for
-    /// that row. With no pack installed, [`crate::names::read_names`]
+    /// that row. With no pack installed, `stat_tracker::names::read_names`
     /// already uses Tesseract, so leaving this on does not change that
     /// path. The pack is not in the repo. A default install downloads it
     /// with the other reader packs.
@@ -319,7 +319,7 @@ pub struct OcrControl {
 
 impl OcrControl {
     /// What this process asks for: the env value when set, else the file.
-    /// The daemon may still keep OCR on ([`crate::ocr_switch::decide`]).
+    /// The daemon may still keep OCR on (`stat_tracker::ocr_switch::decide`).
     pub fn requested(self) -> OcrSetting {
         self.env.unwrap_or(self.file)
     }
@@ -634,7 +634,8 @@ impl std::error::Error for SyncUrlReject {}
 /// which covers local dev (`http://localhost`, `http://127.0.0.1`,
 /// `http://[::1]`, any port).
 ///
-/// Parsing is the URL standard (via reqwest's `Url`), so `http://127.0.0.1.evil`
+/// Parsing is the URL standard (the `url` crate's `Url`, which is what
+/// `reqwest::Url` re-exports), so `http://127.0.0.1.evil`
 /// and `http://10.0.0.1` are rejected without a DNS lookup. Existing configs
 /// still deserialize; callers refuse to send rather than crash.
 pub fn validate_sync_server_url(raw: &str) -> Result<(), SyncUrlReject> {
@@ -642,7 +643,7 @@ pub fn validate_sync_server_url(raw: &str) -> Result<(), SyncUrlReject> {
     if raw.is_empty() {
         return Err(SyncUrlReject::Invalid);
     }
-    let parsed = reqwest::Url::parse(raw).map_err(|_| SyncUrlReject::Invalid)?;
+    let parsed = url::Url::parse(raw).map_err(|_| SyncUrlReject::Invalid)?;
     match parsed.scheme() {
         "https" if parsed.host_str().is_some_and(|h| !h.is_empty()) => Ok(()),
         "http" if http_host_is_loopback(&parsed) => Ok(()),
@@ -650,7 +651,7 @@ pub fn validate_sync_server_url(raw: &str) -> Result<(), SyncUrlReject> {
     }
 }
 
-fn http_host_is_loopback(url: &reqwest::Url) -> bool {
+fn http_host_is_loopback(url: &url::Url) -> bool {
     let Some(host) = url.host_str() else {
         return false;
     };
@@ -2174,68 +2175,6 @@ capture_output = \"DP-1\"
             let back: Config = toml::from_str(&raw).expect("toml 1 output must parse");
             assert_eq!(back, cfg);
         }
-    }
-
-    /// `needle` as a whole word on some line: nothing but whitespace (or
-    /// the line's start or end) on either side. `TAG=…-v0.5.0` then does
-    /// not match a line that pins `…-v0.5.0-rc.7` (S5-REL-3).
-    fn has_whole_word_line(text: &str, needle: &str) -> bool {
-        text.lines().any(|line| {
-            line.match_indices(needle).any(|(at, _)| {
-                let before = line[..at].chars().next_back();
-                let after = line[at + needle.len()..].chars().next();
-                before.is_none_or(char::is_whitespace) && after.is_none_or(char::is_whitespace)
-            })
-        })
-    }
-
-    /// A `## {version}` heading line, exactly (trailing spaces aside).
-    fn has_changelog_section(text: &str, version: &str) -> bool {
-        let heading = format!("## {version}");
-        text.lines().any(|line| line.trim_end() == heading)
-    }
-
-    #[test]
-    fn the_pin_matchers_take_whole_lines_only() {
-        let pin = "TAG=stat-tracker-v0.5.0";
-        assert!(has_whole_word_line("TAG=stat-tracker-v0.5.0\n", pin));
-        assert!(has_whole_word_line("#   TAG=stat-tracker-v0.5.0\n", pin));
-        assert!(has_whole_word_line(
-            "  TAG=stat-tracker-v0.5.0 bash x.sh\n",
-            pin
-        ));
-        assert!(!has_whole_word_line("TAG=stat-tracker-v0.5.0-rc.7\n", pin));
-        assert!(!has_whole_word_line(
-            "#   TAG=stat-tracker-v0.5.0-rc.7\n",
-            pin
-        ));
-        assert!(!has_whole_word_line("XTAG=stat-tracker-v0.5.0\n", pin));
-        assert!(has_changelog_section("# Log\n\n## 0.5.0\n", "0.5.0"));
-        assert!(has_changelog_section("## 0.5.0  \n", "0.5.0"));
-        assert!(!has_changelog_section("## 0.5.0-rc.7\n", "0.5.0"));
-        assert!(!has_changelog_section("### 0.5.0\n", "0.5.0"));
-        assert!(!has_changelog_section("text ## 0.5.0\n", "0.5.0"));
-    }
-
-    #[test]
-    fn readme_and_bootstrap_examples_pin_this_crate_version() {
-        let tag = format!("stat-tracker-v{}", env!("CARGO_PKG_VERSION"));
-        let readme = include_str!("../README.md");
-        let bootstrap = include_str!("../dist/bootstrap.sh");
-        assert!(
-            has_whole_word_line(readme, &format!("TAG={tag}")),
-            "README pin example is stale; want TAG={tag}"
-        );
-        assert!(
-            has_whole_word_line(bootstrap, &format!("TAG={tag}")),
-            "bootstrap.sh pin example is stale; want TAG={tag}"
-        );
-        let changelog = include_str!("../CHANGELOG.md");
-        let version = env!("CARGO_PKG_VERSION");
-        assert!(
-            has_changelog_section(changelog, version),
-            "CHANGELOG is missing a section for {version}"
-        );
     }
 
     fn hand_edited_config(shadow_line: &str) -> String {

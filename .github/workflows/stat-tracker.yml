@@ -4,8 +4,9 @@ on:
   push:
     branches: [main, "wip/0.6"]
     paths:
-      - "crates/stat-tracker/**"
-      - "crates/stat-tracker-ui/**"
+      # The tracker lib, the crates split out of it (stat-tracker-core, …)
+      # and the GUI.
+      - "crates/stat-tracker*/**"
       - "crates/types/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -14,8 +15,9 @@ on:
   pull_request:
     branches: [main, "wip/0.6"]
     paths:
-      - "crates/stat-tracker/**"
-      - "crates/stat-tracker-ui/**"
+      # The tracker lib, the crates split out of it (stat-tracker-core, …)
+      # and the GUI.
+      - "crates/stat-tracker*/**"
       - "crates/types/**"
       - "Cargo.toml"
       - "Cargo.lock"
@@ -34,6 +36,11 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # Every tracker crate but the GUI (0.6 N4 split). Without -p, cargo in
+  # crates/stat-tracker acts on that package only, and a split-out crate's
+  # tests, lints and formatting would silently not run. The fmt job checks
+  # that this list names every crates/stat-tracker*/Cargo.toml but the GUI.
+  TRACKER_PACKAGES: "-p scuffed-stat-tracker -p scuffed-stat-tracker-core"
 
 defaults:
   run:
@@ -54,8 +61,21 @@ jobs:
           toolchain: stable
           components: rustfmt
 
+      - name: Every tracker crate is in TRACKER_PACKAGES
+        run: |
+          set -euo pipefail
+          for manifest in ../stat-tracker*/Cargo.toml; do
+            [[ "$manifest" == ../stat-tracker-ui/Cargo.toml ]] && continue
+            name="$(awk -F'"' '/^\[package\]/ {p = 1; next} /^\[/ {p = 0} p && /^name[[:space:]]*=/ {print $2; exit}' "$manifest")"
+            [[ -n "$name" ]] || { echo "no [package] name in $manifest" >&2; exit 1; }
+            case " $TRACKER_PACKAGES " in
+              *" -p $name "*) echo "ok: $name" ;;
+              *) echo "$manifest ($name) is missing from TRACKER_PACKAGES" >&2; exit 1 ;;
+            esac
+          done
+
       - name: Rustfmt
-        run: cargo fmt --check
+        run: cargo fmt --check $TRACKER_PACKAGES
 
   build-and-test:
     name: Build & Test (stat-tracker)
@@ -117,14 +137,14 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
 
       - name: Build
-        run: cargo build --locked
+        run: cargo build --locked $TRACKER_PACKAGES
 
       - name: Test
         # No --examples: plain `cargo test` also links the 19 dev-tool
         # examples, and nothing here runs them. Clippy --all-targets still
         # checks they compile. The crate has no doctests (only ```text blocks),
-        # so --lib --bins --tests covers every test it has.
-        run: cargo test --locked --lib --bins --tests
+        # so --lib --bins --tests covers every test it has. Same for core.
+        run: cargo test --locked $TRACKER_PACKAGES --lib --bins --tests
 
   clippy:
     name: Clippy (stat-tracker)
@@ -174,7 +194,14 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
 
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked $TRACKER_PACKAGES --all-targets -- -D warnings
+
+      # Every other step builds core together with scuffed-stat-tracker, whose
+      # dependency features (tokio, chrono, ...) unify into core's. On its own,
+      # core gets only the features its own Cargo.toml asks for, so a missing
+      # one shows up here and nowhere else.
+      - name: Clippy (stat-tracker-core on its own)
+        run: cargo clippy --locked -p scuffed-stat-tracker-core --all-targets -- -D warnings
 
   ui-overview:
     # Iced desktop GUI (scuffed-stat-tracker-ui). Depends on the tracker lib.

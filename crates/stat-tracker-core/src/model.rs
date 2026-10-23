@@ -139,7 +139,13 @@ pub fn is_clean_stat(text: &str) -> bool {
 
 // ------------------------------------------------------------- stored games
 
+// `#[surreal(crate = …)]` pins the path the `SurrealValue` derive writes.
+// Its default is `::surrealdb::types` whenever any crate in the build turns
+// on surrealdb's `sdk-path` feature (the surrealdb crate does), and this
+// crate does not depend on `surrealdb`. `surrealdb::types` is a re-export
+// of `surrealdb_types`, so the impls are the same either way.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
 pub struct PersonalMatch {
     /// Local store record id — set on rows read back from SurrealKV, `None`
     /// on freshly parsed captures. Excluded from the JSON snapshot/log
@@ -274,6 +280,7 @@ pub const SEGMENT_DISMISS: &str = "dismiss";
 /// One consecutive run of the same hero across a session's snapshots, in
 /// capture-time order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
 pub struct HeroSegment {
     pub hero: String,
     pub role: String,
@@ -303,6 +310,7 @@ impl HeroSegment {
 /// derived segment list (stable: snapshots only ever append, so existing
 /// segments never change position).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
 pub struct SegmentResolution {
     pub segment: u32,
     /// [`SEGMENT_CONFIRM`] or [`SEGMENT_DISMISS`].
