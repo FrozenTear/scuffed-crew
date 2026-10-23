@@ -74,6 +74,12 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # rust-cache hashes member manifests + Cargo.lock only, NOT the root
+          # Cargo.toml [profile.*] tables. Bump this whenever a root profile
+          # changes, or a full-match restore of stale artifacts skips the
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
+          prefix-key: v1-rust
 
       - name: Clippy (native crates)
         run: |
@@ -132,6 +138,12 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # rust-cache hashes member manifests + Cargo.lock only, NOT the root
+          # Cargo.toml [profile.*] tables. Bump this whenever a root profile
+          # changes, or a full-match restore of stale artifacts skips the
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
+          prefix-key: v1-rust
 
       - name: Build (native crates)
         run: cargo build --workspace --exclude scuffed-app --exclude scuffed-stat-tracker --exclude scuffed-stat-tracker-ui
@@ -173,6 +185,12 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          # rust-cache hashes member manifests + Cargo.lock only, NOT the root
+          # Cargo.toml [profile.*] tables. Bump this whenever a root profile
+          # changes, or a full-match restore of stale artifacts skips the
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
+          prefix-key: v1-rust
 
       - name: Install dioxus-cli
         run: cargo install --locked dioxus-cli@0.7.9
