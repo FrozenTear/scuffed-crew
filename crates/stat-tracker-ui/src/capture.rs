@@ -138,6 +138,11 @@ pub async fn clear_store(data_dir: std::path::PathBuf) -> Result<String, String>
                     .map_err(|e| e.to_string())?;
             }
         }
+        // The screen-share permission goes too, so the next share asks
+        // again. Same gate as the store: the daemon is stopped here.
+        stat_tracker::capture::remove_restore_token(&data_dir).map_err(|e| {
+            format!("Match data deleted, but the screen-share permission could not be removed: {e}")
+        })?;
         Ok::<(), String>(())
     }
     .await;
@@ -205,12 +210,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clear_store_removes_the_screencast_restore_token() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let token = dir.path().join("screencast-restore-token");
+        let tmp = dir.path().join("screencast-restore-token.tmp");
+        std::fs::write(&token, "tok").unwrap();
+        std::fs::write(&tmp, "half").unwrap();
+        assert!(stat_tracker::capture::share_restorable(dir.path()));
+
+        clear_store(dir.path().to_path_buf())
+            .await
+            .expect("clear with the tracker stopped");
+
+        assert!(!stat_tracker::capture::share_restorable(dir.path()));
+        assert!(!token.exists(), "restore token left behind");
+        assert!(!tmp.exists(), "restore token temp file left behind");
+    }
+
+    #[tokio::test]
     async fn clear_store_does_not_wipe_a_locked_store() {
         let dir = tempfile::tempdir().expect("tempdir");
         let _held = stat_tracker::storage::LocalStore::open(dir.path())
             .await
             .expect("open");
         std::fs::write(dir.path().join("live_snapshot.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("screencast-restore-token"), "tok").unwrap();
         let err = clear_store(dir.path().to_path_buf())
             .await
             .expect_err("locked store");
@@ -223,5 +247,9 @@ mod tests {
             "force-clear must not run while the store lock is held"
         );
         assert!(dir.path().join("live_snapshot.json").exists());
+        assert!(
+            stat_tracker::capture::share_restorable(dir.path()),
+            "a refused delete keeps the screen-share permission"
+        );
     }
 }

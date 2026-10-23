@@ -194,7 +194,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `capture_output` | Display/output name to capture (`--list-outputs`) |
 | `capture_route` | `auto` (default), `screencast`, `screenshot`, or `kwin` (KDE direct). See below. A non-empty `STAT_TRACKER_CAPTURE` wins over this |
 | `debug_portal_frames` | Off by default. Saves up to four Tab pairs under `{data_dir}/debug/portal-compare/` (`0001-stream.png` and `0001-screenshot.png`). Also `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`, which is not written to this file. The pictures stay on this machine and are not uploaded. Leave it off while a voice app is sharing the screen: the screenshot half can hit the KWin cursor crash |
-| `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`). Must be absolute. The systemd unit can write this path, the config dir, and the session runtime dir; a custom directory gets a drop-in at install (see below) |
+| `data_dir` | Store/log/debug location (default `~/.local/share/scuffed-stat-tracker`). Must be absolute. Required in the file: a `config.toml` without it does not load, and the default applies only when there is no file. `~` is not expanded, so write the full path. The systemd unit can write this path, the config dir, and the session runtime dir; a custom directory gets a drop-in at install (see below) |
 | `auto_detect.*` | Poll-based match start/end detection (interval, cooldown). `poll_interval_secs` is whole seconds; 4 means automatic (1.5 s with the new reader, 4 s otherwise). `poll_interval_ms`, when set, overrides that (500 to 10000). It is not written unless you set it |
 | `screencast_max_fps` | Screen-stream cap, 1 to 5 frames per second. Missing means 4 (2 before 0.5.0-rc.6; set 2 to go back). Sets the PipeWire max-framerate and the tracker's own throttle. Not written unless you set it |
 | `screencast_pause_between_grabs` | Missing or `true`: the screen stream is paused between grabs on KWin 6.1 or newer and on niri, so the compositor does not draw frames the tracker would throw away (see Screen capture route). Other desktops keep it running. `false` keeps it running everywhere, as before 0.5.0-rc.7. Put it near the top of the file, above any `[section]` line. Env `STAT_TRACKER_SCREENCAST_PAUSE=1` forces pausing on any desktop (for testing) and `=0` turns it off; the env var wins over this key and is not written to this file. Forced on, damage-driven portals (xdg-desktop-portal-wlr, -hyprland, possibly COSMIC) send no frame for a still screen and may trip the fail-safe, and Plasma 5 / KWin 6.0 (and GNOME) get their per-resume signal leak back. Not written unless you set it |
@@ -209,9 +209,11 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `setup_completed` | Set when the first-run guide is finished or skipped. Missing or false shows the guide on launch. |
 | `reader_pack_url` | Not used. Reader packs come from the signed-in site, and the setup guide always shows its reader pack step. Older files that still set it load fine. |
 
-Example low-RAM:
+Example low-RAM (a config file must set `data_dir`; the default path is
+only used when there is no file at all, so copy your own path in):
 
 ```toml
+data_dir = "/home/you/.local/share/scuffed-stat-tracker"
 ocr_threads = 1
 ```
 
@@ -225,7 +227,8 @@ On KDE and GNOME Wayland the tracker opens one screen-share (PipeWire) and
 hides the cursor, instead of taking a new screenshot for every frame. You
 are asked to allow that share once. The permission is remembered in
 `screencast-restore-token` inside the data directory, so it is not asked
-again after a reboot. The compositor is offered a variable framerate with
+again after a reboot. Settings → Stored data → Delete all local match data
+removes that file too (and its `.tmp`), so the next share asks again. The compositor is offered a variable framerate with
 a cap of `screencast_max_fps` frames per second (4 when that key is unset).
 A frame is copied only when the tracker needs one. On KWin 6.1 or newer
 and on niri the stream is also paused between grabs, so the compositor
