@@ -1,19 +1,14 @@
 mod flight;
-mod framebuf;
 mod geom;
 pub mod kwin;
 mod outputs;
-mod pod;
 pub mod portal;
-mod portal_backend;
-mod pw;
 mod route;
 pub use flight::is_busy as is_capture_busy;
 pub use route::{KWIN_DIRECT_DEFAULT_ON_KDE, KwinProbe, SessionKind, is_gnome, is_kde};
-mod screencast;
 mod select;
 mod state;
-mod stream_pause;
+mod stream;
 mod tab;
 mod types;
 pub mod wayshot;
@@ -95,7 +90,7 @@ where
                 waited_for_open = true;
                 match first_tab_while_opening(elapsed(), FIRST_TAB_OPEN_WAIT) {
                     OpeningTab::Wait => pause().await,
-                    OpeningTab::Miss => return Err(screencast::OPEN_IN_PROGRESS.into()),
+                    OpeningTab::Miss => return Err(stream::OPEN_IN_PROGRESS.into()),
                 }
             }
             Err(err) if suppress && is_stream_miss(&err.to_string()) => {
@@ -115,11 +110,11 @@ where
 /// nor end a failure run (S5-CAP-7).
 pub fn is_expected_poll_miss(err: &str) -> bool {
     is_capture_busy(err)
-        || screencast::is_share_opening(err)
-        || screencast::is_declined_capture(err)
-        || screencast::is_share_closed_until_game(err)
-        || screencast::is_stream_miss(err)
-        || err.contains(pw::NO_STREAM_FRAME)
+        || stream::is_share_opening(err)
+        || stream::is_declined_capture(err)
+        || stream::is_share_closed_until_game(err)
+        || stream::is_stream_miss(err)
+        || err.contains(stream::pw::NO_STREAM_FRAME)
         || err.contains(portal::SHOT_BACKOFF)
 }
 
@@ -131,12 +126,12 @@ pub fn is_portal_unanswered(err: &str) -> bool {
     err.contains(portal::SHOT_UNANSWERED)
 }
 
-pub use screencast::{
+pub use stream::{
     STREAM_MISS, close_if_open, is_declined_capture, is_share_opening, is_stream_miss,
     note_game_running, note_game_seen, session_is_open, share_close_due, should_close_share,
 };
 
-pub use stream_pause::{
+pub use stream::pause::{
     KeyHold, bridge_hold as stream_bridge_hold, decide_and_apply as decide_stream_pause,
     end_tab_stream_hold, key_hold as stream_key_hold, with_tab_stream_hold,
 };
@@ -144,7 +139,7 @@ pub use tab::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, first_grab_press, tab_retry_press
 
 /// A saved restore token can reopen the share without a prompt.
 pub fn share_restorable(data_dir: &std::path::Path) -> bool {
-    screencast::restore_token_saved(data_dir)
+    stream::restore_token_saved(data_dir)
 }
 
 pub async fn capture_screen_output(
@@ -173,8 +168,8 @@ pub async fn capture_screen_oneshot(
                 tracing::warn!(
                     "Capture now skipped: the tracker is sharing the screen, and a screenshot beside it can crash KWin"
                 );
-                let token_saved = screencast::restore_token_saved(data_dir);
-                return Err(screencast::capture_now_blocked_message(token_saved).into());
+                let token_saved = stream::restore_token_saved(data_dir);
+                return Err(stream::capture_now_blocked_message(token_saved).into());
             }
             if *backend == CaptureBackend::Kwin {
                 kwin::capture(output_name).await
@@ -191,7 +186,7 @@ pub async fn capture_screen_oneshot(
 /// tracker's open share on KDE. Wayshot and X11 never do.
 pub fn oneshot_blocked(backend: CaptureBackend, desktop: &str, share_open: bool) -> bool {
     matches!(backend, CaptureBackend::Portal | CaptureBackend::Kwin)
-        && screencast::capture_now_blocked_by_daemon_share(desktop, share_open)
+        && stream::capture_now_blocked_by_daemon_share(desktop, share_open)
 }
 
 /// KDE direct for the app's Settings: `None` off KDE. With `render` (the
@@ -239,7 +234,7 @@ pub async fn capture_screen_output_for(
                 .map(as_new_capture),
             route::PortalPath::Stream => {
                 let prefs = prefs();
-                screencast::capture(output_name, kind, &prefs.data_dir, prefs.debug_frames).await
+                stream::capture(output_name, kind, &prefs.data_dir, prefs.debug_frames).await
             }
         },
         // Never the stream: this route and the tracker's own screen share
@@ -422,7 +417,7 @@ mod tests {
             || async {
                 let elapsed_ms = at.load(std::sync::atomic::Ordering::Relaxed);
                 if elapsed_ms < open_ms {
-                    return Err(super::screencast::OPEN_IN_PROGRESS.into());
+                    return Err(super::stream::OPEN_IN_PROGRESS.into());
                 }
                 let n = after_open.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n == 0 {
@@ -719,12 +714,12 @@ mod tests {
     fn known_poll_states_are_not_capture_failures() {
         for err in [
             format!("portal screenshot: {}", flight::BUSY),
-            screencast::OPEN_IN_PROGRESS.to_string(),
-            screencast::NO_CAPTURE_DECLINE_NOTICE.to_string(),
-            screencast::timeout_notice(false).to_string(),
-            screencast::SHARE_CLOSED_UNTIL_GAME.to_string(),
-            screencast::STREAM_MISS.to_string(),
-            pw::NO_STREAM_FRAME.to_string(),
+            stream::OPEN_IN_PROGRESS.to_string(),
+            stream::policy::NO_CAPTURE_DECLINE_NOTICE.to_string(),
+            stream::policy::timeout_notice(false).to_string(),
+            stream::policy::SHARE_CLOSED_UNTIL_GAME.to_string(),
+            stream::STREAM_MISS.to_string(),
+            stream::pw::NO_STREAM_FRAME.to_string(),
             format!("portal screenshot: {}", portal::SHOT_BACKOFF),
         ] {
             assert!(is_expected_poll_miss(&err), "{err}");
