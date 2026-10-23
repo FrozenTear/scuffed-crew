@@ -50,7 +50,7 @@ pub(crate) const NAME_WINDOWS_5V5: [(f64, f64); 3] = [
 ];
 /// Index of the in-match no-perk window in `ocr::preprocess::name_windows`
 /// for 5v5. The 5v5 portrait grid fits only this layout (see
-/// [`crate::detect::hero_portrait::portrait_seed_layout_known`]).
+/// `detect::hero_portrait::portrait_seed_layout_known`).
 pub const NAME_WINDOW_5V5_INGAME: usize = 0;
 /// Index of the in-match with-perks window in
 /// `ocr::preprocess::name_windows` for 5v5.

@@ -25,8 +25,8 @@ use std::time::{Duration, Instant};
 
 use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
 use stat_tracker::config::{Config, OcrSetting, ReaderSetting};
-use stat_tracker::detect::hero_portrait::ScoreboardPreflight;
 use stat_tracker::detect::{GamePhase, MatchOutcome, match_end, match_start};
+use stat_tracker::frame::layout::ScoreboardPreflight;
 use stat_tracker::ocr::{self, gate};
 use stat_tracker::ocr_switch::{self, Audience, PackProblem, PackReadiness, Read, Switch};
 use stat_tracker::shadow::{Reader, ReaderConfig};

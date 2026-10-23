@@ -570,7 +570,7 @@ mod tests {
             _ => TabResult::Accepted,
         }
     }
-    use crate::detect::hero_portrait::{ScoreboardPreflight, preflight_scoreboard};
+    use crate::frame::layout::{ScoreboardPreflight, preflight_scoreboard};
     use crate::ocr::preprocess::{crop_scoreboard, crop_scoreboard_rect};
     use crate::report::blank::synth::{self, Layout};
     use image::{DynamicImage, Rgb, RgbImage};

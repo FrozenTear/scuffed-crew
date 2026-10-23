@@ -6,7 +6,7 @@
 //!
 //! Run: cargo test -p scuffed-stat-tracker --test integration -- --ignored team_size_fixtures::
 
-use stat_tracker::detect::hero_portrait::detect_team_size;
+use stat_tracker::frame::layout::detect_team_size;
 use stat_tracker::ocr::preprocess::crop_scoreboard;
 
 /// (path relative to the crate dir, expected team size)

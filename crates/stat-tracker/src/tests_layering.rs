@@ -291,6 +291,15 @@ fn item_end(t: &[char], mut k: usize) -> usize {
 /// `(start, end)` of every item behind a `#[cfg(...)]` that needs `test`
 /// (`cfg(test)`, `cfg(all(test, unix))`, not `cfg(not(test))`).
 fn test_regions(t: &[char]) -> Vec<(usize, usize)> {
+    cfg_regions(t, |cfg| {
+        cfg.split(|c: char| !is_ident(c)).any(|word| word == "test")
+            && !cfg.replace(' ', "").contains("not(test)")
+    })
+}
+
+/// `(start, end)` of every item behind a `#[cfg(...)]` whose predicate (the
+/// text inside `cfg(`…`)`) `needs_test` accepts.
+fn cfg_regions(t: &[char], needs_test: impl Fn(&str) -> bool) -> Vec<(usize, usize)> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < t.len() {
@@ -299,9 +308,10 @@ fn test_regions(t: &[char]) -> Vec<(usize, usize)> {
             continue;
         }
         let close = closing(t, i + 1);
+        // `t[close]` is the `]`; drop the `)` of `cfg(` before it too.
         let cfg: String = t[i + 6..close].iter().collect();
-        let needs_test = cfg.split(|c: char| !is_ident(c)).any(|word| word == "test")
-            && !cfg.replace(' ', "").contains("not(test)");
+        let cfg = cfg.trim_end();
+        let needs_test = needs_test(cfg.strip_suffix(')').unwrap_or(cfg));
         let mut k = skip_ws(t, close + 1);
         while starts_with(t, k, "#[") {
             k = skip_ws(t, closing(t, k + 1) + 1);
@@ -1338,47 +1348,130 @@ mod tests {
 
 // ------------------------------------------------------------ frame
 
-/// Modules `frame` must not reach from production code. All four are vision
-/// like `frame`, so [`the_would_be_crates_have_no_back_edges`] cannot see
-/// such a path; this keeps `frame` below both readers and the detectors.
-const ABOVE_FRAME: &[&str] = &["ocr", "shadow", "names", "detect"];
+/// Whether a `#[cfg(...)]` predicate holds only in test builds: `test`, or
+/// `all(…)` with such a predicate among its arguments. `any(test, …)`,
+/// `not(…)` and anything else can hold in a release build, so they guard
+/// production code.
+fn cfg_needs_test(cfg: &str) -> bool {
+    let cfg: String = cfg.chars().filter(|c| !c.is_whitespace()).collect();
+    if cfg == "test" {
+        return true;
+    }
+    let Some(inner) = cfg.strip_prefix("all(").and_then(|r| r.strip_suffix(')')) else {
+        return false;
+    };
+    let (mut depth, mut arg, mut args) = (0i32, String::new(), Vec::new());
+    for ch in inner.chars() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            _ => {}
+        }
+        if ch == ',' && depth == 0 {
+            args.push(std::mem::take(&mut arg));
+        } else {
+            arg.push(ch);
+        }
+    }
+    args.push(arg);
+    args.iter().any(|a| cfg_needs_test(a))
+}
 
-/// Each production path in `s` (a `frame` file) into [`ABOVE_FRAME`], as
-/// `file:line: path`. Comments, doc comments, strings and `#[cfg(test)]`
-/// items do not count.
-fn frame_paths_above(s: &Source) -> Vec<String> {
+/// Whether `s` is test code in every build: reached through a `mod`
+/// declaration that [`cfg_needs_test`] accepts, at some level. A file
+/// declared under `#[cfg(any(test, …))]` is production.
+fn strictly_test_file(sources: &[Source], s: &Source) -> bool {
+    if !s.test_file {
+        return false;
+    }
+    let Some((name, parent)) = s.module.split_last() else {
+        return false;
+    };
+    let Some(p) = sources.iter().find(|p| p.module == parent) else {
+        return false;
+    };
+    let strict = cfg_regions(&p.text, cfg_needs_test);
+    let t = &p.text;
+    let declared_strictly = (0..t.len()).any(|i| {
+        (i == 0 || !is_ident(t[i - 1]))
+            && starts_with(t, i, "mod")
+            && t.get(i + 3).is_some_and(|c| c.is_whitespace())
+            && {
+                let k = skip_ws(t, i + 3);
+                let end = (k..t.len()).find(|&e| !is_ident(t[e])).unwrap_or(t.len());
+                t[k..end].iter().collect::<String>() == *name
+                    && t.get(skip_ws(t, end)) == Some(&';')
+            }
+            && strict.iter().any(|&(a, b)| a <= i && i <= b)
+    });
+    declared_strictly || strictly_test_file(sources, p)
+}
+
+/// Whether a production path from `frame` may name `abs` (an absolute
+/// path below the crate root `root`): `frame` itself or a core module
+/// (through `stat_tracker_core::` or its re-export at this crate's root).
+fn frame_may_name(abs: &[String], root: Crate) -> bool {
+    if root == Crate::Core {
+        return true;
+    }
+    abs.first().is_some_and(|first| {
+        first == "frame"
+            || CRATE_OF
+                .iter()
+                .any(|(m, krate)| *krate == Crate::Core && m == first)
+    })
+}
+
+/// Each production path in the `frame` file `s` that [`frame_may_name`]
+/// refuses, as `(site, path as written)`. A path that names the crate root
+/// itself (`use crate as root;`, `use crate::*;`, `use super::super::*;`
+/// from a frame file) is refused too: it would let a bare `detect::` path
+/// through. Comments, doc comments and strings do not count; an item
+/// behind `#[cfg(test)]` or `#[cfg(all(test, …))]` does not either, and
+/// one behind `#[cfg(any(test, …))]` does. `test_file` is
+/// [`strictly_test_file`] for `s`.
+fn frame_paths_outside(s: &Source, test_file: bool) -> Vec<(String, String)> {
+    if test_file {
+        return Vec::new();
+    }
+    let tests = cfg_regions(&s.text, cfg_needs_test);
     written_paths(s)
         .into_iter()
-        .filter(|&(at, _)| !s.is_test(at))
+        .filter(|&(at, _)| !tests.iter().any(|&(a, b)| a <= at && at <= b))
         .filter_map(|(at, segs)| {
-            let (abs, _) = absolute(s, at, &segs)?;
-            let first = abs.first()?;
-            ABOVE_FRAME
-                .contains(&first.as_str())
-                .then(|| format!("{}: {}", s.site(at), segs.join("::")))
+            let (abs, root) = absolute(s, at, &segs)?;
+            (!frame_may_name(&abs, root)).then(|| (s.site(at), segs.join("::")))
         })
         .collect()
 }
 
-/// `frame` (geometry, layout, stability) is the shared pixel layer: its
-/// production code names no reader (`ocr`, `shadow`, `names`) and no
-/// detector (`detect`). Re-exports at the old paths point the other way.
+/// `frame` (geometry, layout, stability) is the shared pixel layer. Its
+/// production code names only `frame` and the core modules (and outside
+/// crates): no reader (`ocr`, `shadow`, `names`), no detector (`detect`)
+/// and no other vision module (`packs`, `ocr_switch`, `mapcrops`,
+/// `report::blank`). All of those are vision like `frame`, so
+/// [`the_would_be_crates_have_no_back_edges`] cannot see such a path.
+/// Re-exports at the old paths point the other way.
 #[test]
-fn frame_names_no_reader_or_detector() {
+fn frame_names_only_frame_and_core() {
     let sources = all_sources();
     let frame: Vec<&Source> = sources
         .iter()
         .filter(|s| s.module.first().is_some_and(|m| m == "frame"))
         .collect();
     assert!(
-        frame.len() >= 3,
+        frame.len() >= 4,
         "the walk found {} frame file(s)",
         frame.len()
     );
-    let bad: Vec<String> = frame.iter().flat_map(|s| frame_paths_above(s)).collect();
+    let bad: Vec<String> = frame
+        .iter()
+        .flat_map(|s| frame_paths_outside(s, strictly_test_file(&sources, s)))
+        .map(|(site, path)| format!("{site}: {path}"))
+        .collect();
     assert!(
         bad.is_empty(),
-        "{} path(s) from frame into a reader or a detector:\n{}",
+        "{} path(s) from frame to something other than frame or core:\n{}",
         bad.len(),
         bad.join("\n")
     );
@@ -1387,20 +1480,20 @@ fn frame_names_no_reader_or_detector() {
         .iter()
         .find(|s| s.name == "frame/layout.rs")
         .expect("frame/layout.rs");
+    let to_geometry = |(at, segs): &(usize, Vec<String>)| {
+        !layout.is_test(*at)
+            && absolute(layout, *at, segs)
+                .is_some_and(|(abs, _)| abs.starts_with(&["frame".into(), "geometry".into()]))
+    };
     assert!(
-        written_paths(layout)
-            .iter()
-            .any(|(at, segs)| !layout.is_test(*at)
-                && absolute(layout, *at, segs)
-                    .is_some_and(|(abs, _)| abs.starts_with(&["frame".into(), "geometry".into()]))),
+        written_paths(layout).iter().any(to_geometry),
         "the scan saw no frame::geometry path in frame/layout.rs"
     );
 }
 
-/// The frame check on a small source: a `use`, a `super::` path and a path
-/// in code are caught; doc comments, strings and test items are not.
+/// The frame check on a small source.
 #[test]
-fn the_frame_check_skips_docs_strings_and_tests() {
+fn the_frame_check_allows_only_frame_and_core() {
     let mut src = parse_source(
         "stat-tracker",
         Crate::Top,
@@ -1411,8 +1504,24 @@ fn the_frame_check_skips_docs_strings_and_tests() {
 /// See [`crate::detect::own_row`].
 use crate::ocr::preprocess::prepare;
 use crate::frame::geometry::crop_player_row;
+use super::geometry::game_rect_16_9;
+use crate::model::RowOcrResult;
+use stat_tracker_core::config::Config;
+use std::path::Path;
+use crate::packs::PACKS;
+use crate as root;
+use crate::*;
+use super::super::*;
 fn f() -> &'static str { "crate::names::read_names" }
 fn g() { super::super::shadow::read_board(); }
+#[cfg(any(test, feature = "x"))]
+fn h() { crate::ocr_switch::live_recognizer_id(); }
+#[cfg(not(test))]
+fn k() { crate::mapcrops::save(); }
+#[cfg(all(test, unix))]
+mod t2 {
+    use crate::detect::hero_portrait::PortraitMatcher;
+}
 #[cfg(test)]
 mod tests {
     use crate::detect::hero_portrait::PortraitMatcher;
@@ -1420,14 +1529,59 @@ mod tests {
 "#,
     );
     declared_modules(&mut src);
-    let bad = frame_paths_above(&src);
-    assert_eq!(bad.len(), 2, "{bad:?}");
-    assert!(
-        bad[0].ends_with("crate::ocr::preprocess::prepare"),
-        "{bad:?}"
+    let bad: Vec<String> = frame_paths_outside(&src, false)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    assert_eq!(
+        bad,
+        [
+            "crate::ocr::preprocess::prepare",
+            "crate::packs::PACKS",
+            "crate",
+            "crate",
+            "super::super",
+            "super::super::shadow::read_board",
+            "crate::ocr_switch::live_recognizer_id",
+            "crate::mapcrops::save",
+        ]
     );
-    assert!(
-        bad[1].ends_with("super::super::shadow::read_board"),
-        "{bad:?}"
+    assert!(frame_paths_outside(&src, true).is_empty());
+
+    for (cfg, needs) in [
+        ("test", true),
+        ("all(test, unix)", true),
+        ("all(unix, all(test, debug_assertions))", true),
+        ("any(test, feature = \"x\")", false),
+        ("all(unix, any(test, debug_assertions))", false),
+        ("not(test)", false),
+        ("unix", false),
+    ] {
+        assert_eq!(cfg_needs_test(cfg), needs, "{cfg}");
+    }
+
+    // A file declared under `cfg(any(test, …))` is production; one under
+    // `cfg(test)` is test code.
+    let parent = parse_source(
+        "stat-tracker",
+        Crate::Top,
+        "frame/mod.rs".into(),
+        vec!["frame".into()],
+        false,
+        "pub mod geometry;\n#[cfg(any(test, feature = \"x\"))]\nmod tests_a;\n#[cfg(test)]\nmod tests_b;\n",
     );
+    let child = |name: &str| {
+        parse_source(
+            "stat-tracker",
+            Crate::Top,
+            format!("frame/{name}.rs"),
+            vec!["frame".into(), name.into()],
+            true,
+            "use crate::detect::GamePhase;\n",
+        )
+    };
+    let sources = vec![parent, child("tests_a"), child("tests_b")];
+    assert!(!strictly_test_file(&sources, &sources[1]));
+    assert!(strictly_test_file(&sources, &sources[2]));
+    assert_eq!(frame_paths_outside(&sources[1], false).len(), 1);
 }

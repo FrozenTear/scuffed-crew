@@ -72,7 +72,7 @@ const ROW_ENV: &str = "SCUFFED_5V5_OWN_ROW";
 #[test]
 #[ignore = "needs private 5v5 frames (SCUFFED_5V5_FRAMES, SCUFFED_PLAYER_NAME)"]
 fn player_row_resolves_by_name_in_5v5() {
-    use stat_tracker::detect::hero_portrait::{ScoreboardPreflight, preflight_scoreboard};
+    use stat_tracker::frame::layout::{ScoreboardPreflight, preflight_scoreboard};
 
     let dir = std::env::var(FRAMES_5V5_ENV)
         .unwrap_or_else(|_| panic!("set {FRAMES_5V5_ENV} to a directory of 5v5 boards"));

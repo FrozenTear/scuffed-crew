@@ -37,7 +37,7 @@ pub(crate) fn detect_player_row_inner(
 
 /// The highlighted row ([`resolve_player_row`]'s own rule) and how far its
 /// background leads the next brightest team 1 row's (`brightest / next`).
-/// The own-row seeding gate ([`crate::detect::own_row`]) needs the lead: a
+/// The own-row seeding gate (`detect::own_row`) needs the lead: a
 /// cursor hover or a party tint lights a second row. A board with one
 /// measurable row has no lead (`f64::INFINITY`).
 pub fn player_row_highlight(scoreboard: &DynamicImage, team_size: usize) -> Option<(usize, f64)> {

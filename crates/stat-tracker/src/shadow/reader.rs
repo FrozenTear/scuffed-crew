@@ -308,7 +308,7 @@ impl Reader {
     }
 
     /// What `ocr = "off"` needs, as this reader has it loaded now
-    /// ([`crate::ocr_switch::PackGroup`]): one flag per reader that has no
+    /// ([`crate::ocr_status::PackGroup`]): one flag per reader that has no
     /// OCR to fall back on.
     ///
     /// * heroes: a main hero set (heroes-v2 or heroes-v1). heroes-v2-1080
@@ -320,14 +320,14 @@ impl Reader {
     ///
     /// Like every read, this starts a background re-load of a pack whose
     /// folder changed, so a later call sees a pack that arrived or went away.
-    pub fn pack_readiness(&self) -> crate::ocr_switch::PackReadiness {
+    pub fn pack_readiness(&self) -> crate::ocr_status::PackReadiness {
         use super::result::ResultPack;
         let words = self
             .results
             .current()
             .filter(|loaded| loaded.pack == ResultPack::WordsV1);
         let words = words.as_deref();
-        crate::ocr_switch::PackReadiness {
+        crate::ocr_status::PackReadiness {
             heroes: self
                 .heroes
                 .current()
@@ -622,7 +622,7 @@ fn elapsed_ms(t0: Instant) -> u32 {
 /// needs [`digits::stat_columns_found`]; otherwise it is
 /// [`BoardStatus::NotFound`].
 pub fn board_layout(scoreboard: &DynamicImage) -> Result<usize, BoardStatus> {
-    let scan = crate::detect::hero_portrait::scan_rows(scoreboard);
+    let scan = crate::frame::layout::scan_rows(scoreboard);
     let labels = crate::ocr::preprocess::header_label_groups(scoreboard).len();
     let n = layout_from_scan(&scan, labels);
     if n != Err(BoardStatus::NotFound) && !digits::stat_columns_found(scoreboard) {
@@ -655,7 +655,7 @@ fn has_stat_rows(d: &digits::BoardRead) -> bool {
 /// as team size uncertain. With no pitch at all there is no layout either,
 /// where `checked_team_size` would default to 5. Nothing guesses a size.
 pub fn layout_from_scan(
-    scan: &crate::detect::hero_portrait::RowScan,
+    scan: &crate::frame::layout::RowScan,
     header_labels: usize,
 ) -> Result<usize, BoardStatus> {
     if !scan.looks_like_scoreboard() && !(3..=10).contains(&header_labels) {
@@ -975,7 +975,7 @@ pub fn read_phrase(phrase: Phrase, frame: &RgbImage) -> Option<PhraseRead> {
 }
 
 /// [`Reader::pack_readiness`] with the process-wide reader.
-pub fn pack_readiness() -> crate::ocr_switch::PackReadiness {
+pub fn pack_readiness() -> crate::ocr_status::PackReadiness {
     READER
         .get_or_init(|| Reader::load(&ReaderConfig::from_env()))
         .pack_readiness()
@@ -984,7 +984,7 @@ pub fn pack_readiness() -> crate::ocr_switch::PackReadiness {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::detect::hero_portrait::RowScan;
+    use crate::frame::layout::RowScan;
     use crate::shadow::digits::{CellRead, RowRead};
     use crate::shadow::heroes::HeroRead;
 
@@ -1430,7 +1430,7 @@ mod tests {
         ];
         for (what, frame) in cases {
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
-            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let scan = crate::frame::layout::scan_rows(&crop);
             let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
             // the stand-in fools the preflight and the pitch rule alone. The
             // history one's spectral pitch (0.0824) is in #201's no-guess
@@ -1533,7 +1533,7 @@ mod tests {
             let pitch = deciding_pitch(dip, spectral);
             let frame = stand_in_at(w, h, pitch, 0.45, None);
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
-            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let scan = crate::frame::layout::scan_rows(&crop);
             let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
             assert!(scan.looks_like_scoreboard(), "{what}: {scan:?}");
             let got = scan.median_pitch.unwrap();
@@ -1656,7 +1656,7 @@ mod tests {
         for (team, pitch) in [(5, PITCH_5V5), (6, PITCH_6V6)] {
             let frame = tab_stand_in(2560, 1440, team, pitch, BLUE_RED, true);
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
-            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let scan = crate::frame::layout::scan_rows(&crop);
             let got = scan.median_pitch.unwrap();
             assert!((got - pitch).abs() < 0.004, "{team}v{team}: {scan:?}");
             let b = reader.read_board(&frame);
@@ -1844,7 +1844,7 @@ mod tests {
             );
             let frame = tab_stand_in(w, h, team, dip, BLUE_RED, false);
             let crop = crate::ocr::preprocess::crop_scoreboard(&frame);
-            let scan = crate::detect::hero_portrait::scan_rows(&crop);
+            let scan = crate::frame::layout::scan_rows(&crop);
             let labels = crate::ocr::preprocess::header_label_groups(&crop).len();
             assert_eq!(layout_from_scan(&scan, labels), rule, "{what}: {scan:?}");
             assert!(!digits::stat_columns_found(&crop), "{what}");
