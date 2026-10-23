@@ -7,6 +7,10 @@
 //! to the `Config` struct, its serde attributes, the default fns or the
 //! in-place editor that changes a byte here is a format change, not a
 //! refactor.
+//!
+//! The expected text is also the output of the `toml` and `toml_edit`
+//! crates, so bumping either can change it. When that happens, re-capture
+//! the expected strings on purpose and review the diff as a format change.
 
 use super::*;
 
@@ -275,6 +279,42 @@ fn pin_minimal_file_is_the_default() {
     assert_eq!(loaded, pinned_default());
 }
 
+/// What each field is when the file sets only `data_dir`, spelled out
+/// value by value. [`pin_minimal_file_is_the_default`] compares with
+/// `Config::default()`, so it would not notice a default that changed in
+/// both places at once (for example in an enum's `#[default]`, `Default`
+/// and `is_auto` together).
+#[test]
+fn pin_minimal_file_field_values() {
+    let c = Config::parse_file_contents("data_dir = \"/pin/data\"\n").expect("parse");
+    assert_eq!(c.data_dir, PathBuf::from("/pin/data"));
+    assert_eq!(c.capture_output, None);
+    assert_eq!(c.capture_route.as_str(), "auto");
+    assert!(!c.debug_portal_frames);
+    assert_eq!(c.screencast_max_fps, None);
+    assert_eq!(c.screencast_pause_between_grabs, None);
+    assert_eq!(c.player_name, None);
+    assert_eq!(c.sync, None);
+    assert!(c.auto_detect.enabled);
+    assert_eq!(c.auto_detect.poll_interval_secs, None);
+    assert_eq!(c.auto_detect.poll_interval_ms, None);
+    assert_eq!(c.auto_detect.cooldown_secs, 120);
+    assert_eq!(c.session_window_secs, 1800);
+    assert_eq!(c.finished_game_close_secs, 180);
+    assert_eq!(c.game_process_names, ["Overwatch.exe"]);
+    assert!(!c.debug_ocr);
+    assert_eq!(c.report_kit_max_games, None);
+    assert_eq!(c.report_kit_max_mb, None);
+    assert_eq!(c.ocr_threads, None);
+    assert!(!c.shadow_recognizer);
+    assert_eq!(c.update_channel, "");
+    assert!(!c.setup_completed);
+    assert_eq!(c.reader_pack_url, None);
+    assert_eq!(c.reader.as_str(), "new");
+    assert_eq!(c.ocr.as_str(), "on");
+    assert!(c.name_reader);
+}
+
 #[test]
 fn pin_unchanged_save_returns_the_file() {
     let base = base_with_sync();
@@ -415,6 +455,65 @@ cooldown_secs = 120
     );
 }
 
+/// Settings can change `reader` and `ocr` in one save. Only `reader` +
+/// `shadow_recognizer` has a combined in-place path, so this pair takes the
+/// full rewrite, from either fixture.
+#[test]
+fn pin_reader_and_ocr_together_rewrite_the_whole_file() {
+    let saved = save(&base_with_sync(), |c| {
+        c.reader = ReaderSetting::OcrV1;
+        c.ocr = OcrSetting::Off;
+    });
+    assert_eq!(
+        saved,
+        "\
+data_dir = \"/pin/data\"
+capture_output = \"DP-1\"
+player_name = \"FrozenTear\"
+session_window_secs = 1800
+finished_game_close_secs = 180
+game_process_names = [\"Overwatch.exe\"]
+debug_ocr = false
+reader = \"ocr-v1\"
+ocr = \"off\"
+
+[sync]
+server_url = \"https://old.example\"
+token = \"old-token\"
+
+[auto_detect]
+enabled = true
+poll_interval_secs = 4
+cooldown_secs = 120
+"
+    );
+    let saved = save(SET, |c| {
+        c.reader = ReaderSetting::New;
+        c.ocr = OcrSetting::On;
+    });
+    assert_eq!(
+        saved,
+        "\
+data_dir = \"/pin/data\"
+capture_route = \"screenshot\"
+session_window_secs = 1800
+finished_game_close_secs = 180
+game_process_names = [\"Overwatch.exe\"]
+debug_ocr = false
+update_channel = \"prerelease\"
+
+[sync]
+server_url = \"https://old.example\"
+token = \"old-token\"
+
+[auto_detect]
+enabled = true
+poll_interval_secs = 4
+cooldown_secs = 120
+"
+    );
+}
+
 #[test]
 fn pin_setup_patch_in_place() {
     let base = base_with_sync();
@@ -445,13 +544,78 @@ fn pin_setup_patch_in_place() {
     );
 }
 
+/// `setup_completed = false` is written, not left out, when the key is
+/// missing, and spliced when it is there.
+#[test]
+fn pin_setup_patch_writes_completed_false() {
+    let not_done = SetupDiskPatch {
+        setup_completed: Some(false),
+        sync: None,
+    };
+    assert_eq!(
+        Config::text_for_setup_patch(Some(BASE), &not_done).unwrap(),
+        root_insert(BASE, "setup_completed = false\n")
+    );
+    let done = one_edit(SET, "setup_completed = false\n", "setup_completed = true\n");
+    assert_eq!(
+        Config::text_for_setup_patch(Some(&done), &not_done).unwrap(),
+        SET
+    );
+}
+
+/// A `[sync]` table without `token` does not parse as a config, so no save
+/// path edits it and neither writer touches the file.
+#[test]
+fn pin_sync_table_missing_a_key_is_not_replaced() {
+    let broken = format!("{BASE}\n[sync]\nserver_url = \"https://old.example\"\n");
+    let prefix = "config.toml could not be parsed, so it was not replaced: ";
+    let err = Config::text_for_setup_patch(Some(&broken), &setup_patch())
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with(prefix), "{err}");
+    assert!(err.contains("missing field `token`"), "{err}");
+    let err = Config::text_for_save(Some(&broken), &pinned_default())
+        .unwrap_err()
+        .to_string();
+    assert!(err.starts_with(prefix), "{err}");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, &broken).expect("seed");
+    assert!(Config::apply_setup_patch(&path, &setup_patch()).is_err());
+    assert!(pinned_default().save_at(&path).is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+}
+
 /// A missing file is the default config with the patch applied. `data_dir`
-/// is the host's data dir, so only the rest is pinned.
+/// is the host's data dir, so its line is checked by value and only the
+/// rest is pinned byte for byte. The serializer escapes newlines, so the
+/// value is always one line, whatever the path holds.
 #[test]
 fn pin_setup_patch_on_a_missing_file() {
     let fresh = Config::text_for_setup_patch(None, &setup_patch()).unwrap();
     let (first, rest) = fresh.split_once('\n').expect("lines");
-    assert!(first.starts_with("data_dir = \""), "{first}");
+    assert!(first.starts_with("data_dir = "), "{first}");
+    assert_eq!(
+        Config::parse_file_contents(first)
+            .expect("data_dir line")
+            .data_dir,
+        Config::default().data_dir,
+        "{first}"
+    );
+    // The same check holds for a data dir with quotes in it.
+    let odd = Config {
+        data_dir: PathBuf::from("/home/a\"b'c/share"),
+        ..Config::default()
+    };
+    let text = toml::to_string_pretty(&odd).unwrap();
+    let (odd_first, odd_rest) = text.split_once('\n').expect("lines");
+    assert!(odd_first.starts_with("data_dir = "), "{odd_first}");
+    assert_eq!(
+        Config::parse_file_contents(odd_first).unwrap().data_dir,
+        odd.data_dir
+    );
+    assert_eq!(odd_rest, DEFAULT_TEXT.split_once('\n').unwrap().1);
     assert_eq!(
         rest,
         "\

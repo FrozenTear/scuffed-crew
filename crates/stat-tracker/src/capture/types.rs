@@ -10,7 +10,7 @@ pub enum CaptureKind {
 }
 
 /// Prefs the daemon and the app set before
-/// [`detect_backend`](super::detect_backend). The env var still wins over
+/// [`detect_backend`](super::select::detect_backend). The env var still wins over
 /// `route` when it is non-empty.
 #[derive(Debug, Clone)]
 pub struct CapturePrefs {
@@ -22,7 +22,7 @@ pub struct CapturePrefs {
 }
 
 /// A route that takes one fresh screenshot per grab, as
-/// [`detect_backend`](super::detect_backend) chose it.
+/// [`detect_backend`](super::select::detect_backend) chose it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShotRoute {
     /// The stream, wayshot or X11.

@@ -1336,3 +1336,99 @@ mod tests {
     assert!(!Crate::Vision.may_use(Crate::Store));
     assert!(Crate::Game.may_use(Crate::Core));
 }
+
+// ------------------------------------------------------------ frame
+
+/// Modules `frame` must not reach from production code. All four are vision
+/// like `frame`, so [`the_would_be_crates_have_no_back_edges`] cannot see
+/// such a path; this keeps `frame` below both readers and the detectors.
+const ABOVE_FRAME: &[&str] = &["ocr", "shadow", "names", "detect"];
+
+/// Each production path in `s` (a `frame` file) into [`ABOVE_FRAME`], as
+/// `file:line: path`. Comments, doc comments, strings and `#[cfg(test)]`
+/// items do not count.
+fn frame_paths_above(s: &Source) -> Vec<String> {
+    written_paths(s)
+        .into_iter()
+        .filter(|&(at, _)| !s.is_test(at))
+        .filter_map(|(at, segs)| {
+            let (abs, _) = absolute(s, at, &segs)?;
+            let first = abs.first()?;
+            ABOVE_FRAME
+                .contains(&first.as_str())
+                .then(|| format!("{}: {}", s.site(at), segs.join("::")))
+        })
+        .collect()
+}
+
+/// `frame` (geometry, layout, stability) is the shared pixel layer: its
+/// production code names no reader (`ocr`, `shadow`, `names`) and no
+/// detector (`detect`). Re-exports at the old paths point the other way.
+#[test]
+fn frame_names_no_reader_or_detector() {
+    let sources = all_sources();
+    let frame: Vec<&Source> = sources
+        .iter()
+        .filter(|s| s.module.first().is_some_and(|m| m == "frame"))
+        .collect();
+    assert!(
+        frame.len() >= 3,
+        "the walk found {} frame file(s)",
+        frame.len()
+    );
+    let bad: Vec<String> = frame.iter().flat_map(|s| frame_paths_above(s)).collect();
+    assert!(
+        bad.is_empty(),
+        "{} path(s) from frame into a reader or a detector:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
+    // The scan reads frame's production paths: layout uses geometry.
+    let layout = frame
+        .iter()
+        .find(|s| s.name == "frame/layout.rs")
+        .expect("frame/layout.rs");
+    assert!(
+        written_paths(layout)
+            .iter()
+            .any(|(at, segs)| !layout.is_test(*at)
+                && absolute(layout, *at, segs)
+                    .is_some_and(|(abs, _)| abs.starts_with(&["frame".into(), "geometry".into()]))),
+        "the scan saw no frame::geometry path in frame/layout.rs"
+    );
+}
+
+/// The frame check on a small source: a `use`, a `super::` path and a path
+/// in code are caught; doc comments, strings and test items are not.
+#[test]
+fn the_frame_check_skips_docs_strings_and_tests() {
+    let mut src = parse_source(
+        "stat-tracker",
+        Crate::Top,
+        "frame/layout.rs".into(),
+        vec!["frame".into(), "layout".into()],
+        false,
+        r#"
+/// See [`crate::detect::own_row`].
+use crate::ocr::preprocess::prepare;
+use crate::frame::geometry::crop_player_row;
+fn f() -> &'static str { "crate::names::read_names" }
+fn g() { super::super::shadow::read_board(); }
+#[cfg(test)]
+mod tests {
+    use crate::detect::hero_portrait::PortraitMatcher;
+}
+"#,
+    );
+    declared_modules(&mut src);
+    let bad = frame_paths_above(&src);
+    assert_eq!(bad.len(), 2, "{bad:?}");
+    assert!(
+        bad[0].ends_with("crate::ocr::preprocess::prepare"),
+        "{bad:?}"
+    );
+    assert!(
+        bad[1].ends_with("super::super::shadow::read_board"),
+        "{bad:?}"
+    );
+}

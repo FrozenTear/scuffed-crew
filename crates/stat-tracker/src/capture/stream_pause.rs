@@ -42,8 +42,8 @@ use std::time::{Duration, Instant};
 
 use crate::config::PauseOverride;
 
-use super::framebuf::TAB_OVERLAY_AFTER_PRESS_MS;
 use super::pw;
+use super::tab::TAB_OVERLAY_AFTER_PRESS_MS;
 
 #[derive(Debug, Default)]
 struct Ctl {
@@ -249,7 +249,7 @@ fn key_hold_in(slot: &'static Mutex<Ctl>, at: Instant, now: Instant) -> KeyHold 
 /// [`tab_resume_at`]. The Tab task keeps it until its retries end. Needs a
 /// Tokio runtime when the stream pauses.
 pub fn key_hold(press: Instant) -> KeyHold {
-    let at = tab_resume_at(press, super::prefs().max_fps);
+    let at = tab_resume_at(press, super::state::prefs().max_fps);
     key_hold_in(&CTL, at, Instant::now())
 }
 

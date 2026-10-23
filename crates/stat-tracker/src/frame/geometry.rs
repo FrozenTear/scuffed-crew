@@ -1096,7 +1096,7 @@ mod five_v_five_crop_tests {
         bottom_pad_clamped, crop_scoreboard, crop_scoreboard_for, crop_scoreboard_rect,
         crop_scoreboard_rect_for, row_slot_height,
     };
-    use crate::detect::hero_portrait::portrait_rect;
+    use crate::frame::layout::portrait_rect;
     use image::{DynamicImage, Rgb, RgbImage};
 
     fn frame(w: u32, h: u32) -> DynamicImage {

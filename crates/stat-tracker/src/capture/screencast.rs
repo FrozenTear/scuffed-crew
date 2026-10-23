@@ -30,11 +30,13 @@ use ashpd::desktop::{PersistMode, Session};
 use futures_util::StreamExt;
 use image::DynamicImage;
 
-use super::CaptureKind;
 use super::framebuf;
-use super::portal::{self, OutputRect};
+use super::geom::{self, OutputRect};
+use super::outputs;
+use super::portal;
 use super::portal_backend;
 use super::pw;
+use super::types::CaptureKind;
 
 /// How long a grab waits after the session is up. The permission dialog
 /// is not on this timer.
@@ -975,7 +977,7 @@ fn decide_stall(
         kind,
         stall,
         &desktop,
-        super::stream_was_forced(),
+        super::state::stream_was_forced(),
         quiet_due,
     );
     if take == Some(Stall::Quiet) && kind == CaptureKind::Poll {
@@ -1019,8 +1021,8 @@ impl Drop for ClearOpening {
     }
 }
 
-fn fresh_capture(image: DynamicImage) -> super::CapturedFrame {
-    super::CapturedFrame {
+fn fresh_capture(image: DynamicImage) -> super::types::CapturedFrame {
+    super::types::CapturedFrame {
         image,
         seq: None,
         stream: None,
@@ -1040,7 +1042,7 @@ async fn release_live(live: Option<Live>) {
 /// route. A no-op otherwise. Does not start the failure backoff. The PipeWire
 /// join runs on a blocking thread so a shutdown timer can still fire.
 pub async fn close_if_open() {
-    if !super::stream_route_active() {
+    if !super::state::stream_route_active() {
         return;
     }
     let mut state = CAST.lock().await;
@@ -1071,8 +1073,8 @@ pub async fn capture(
     kind: CaptureKind,
     data_dir: &Path,
     debug_frames: bool,
-) -> Result<super::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
-    let max_fps = super::prefs().max_fps.max(1);
+) -> Result<super::types::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
+    let max_fps = super::state::prefs().max_fps.max(1);
     let mut state = CAST.lock().await;
     apply_stall_reset(&mut state.watch);
     state.data_dir = Some(data_dir.to_path_buf());
@@ -1294,7 +1296,7 @@ pub async fn capture(
             .map(fresh_capture);
     }
     let tab_press = match kind {
-        CaptureKind::Tab => Some(super::tab_press().unwrap_or_else(Instant::now)),
+        CaptureKind::Tab => Some(super::tab::tab_press().unwrap_or_else(Instant::now)),
         CaptureKind::Poll => None,
     };
     let fresh = stream.needs_fresh_frame();
@@ -1304,7 +1306,7 @@ pub async fn capture(
     let (resuming, grab_hold) =
         super::stream_pause::prepare_grab(&stream, tab_press, max_fps).await;
     let timeout = if tab_press.is_some() {
-        Duration::from_millis(framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS)
+        Duration::from_millis(super::tab::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS)
     } else if fresh {
         SCREENCAST_FRAME_WAIT
     } else {
@@ -1412,7 +1414,7 @@ pub async fn capture(
             if compare {
                 save_compare(data_dir, index, &img, output_name).await;
             }
-            Ok(super::CapturedFrame {
+            Ok(super::types::CapturedFrame {
                 image: img,
                 seq: Some(seq),
                 stream: Some(stream_id),
@@ -1484,7 +1486,7 @@ pub async fn capture(
 async fn stall_fallback(
     output_name: Option<&str>,
     stall: Stall,
-) -> Result<super::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<super::types::CapturedFrame, Box<dyn std::error::Error + Send + Sync>> {
     let why = stall.reason();
     let (image, method) = screenshot_with(output_name, why).await?;
     let line = fallback_line_for(why, Some(method));
@@ -1512,7 +1514,7 @@ async fn tab_timeout(
     delay_ms: u64,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    match tab_timeout_action(&desktop, super::stream_was_forced()) {
+    match tab_timeout_action(&desktop, super::state::stream_was_forced()) {
         TabTimeoutAction::Screenshot => {
             let count = TAB_SHOT_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
             tracing::info!(
@@ -1525,7 +1527,7 @@ async fn tab_timeout(
         TabTimeoutAction::Skip => {
             // A press the open already pushed past the frame budget is
             // discarded and grabbed again. That miss is not a log line.
-            note_tab_stream_miss(delay_ms, super::stream_miss_log_suppressed());
+            note_tab_stream_miss(delay_ms, super::tab::stream_miss_log_suppressed());
             Err(STREAM_MISS.into())
         }
     }
@@ -1558,7 +1560,7 @@ async fn while_opening(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    if screenshot_fallback_is_safe(&desktop, super::stream_was_forced()) {
+    if screenshot_fallback_is_safe(&desktop, super::state::stream_was_forced()) {
         return screenshot(output_name, OPEN_IN_PROGRESS).await;
     }
     Err(OPEN_IN_PROGRESS.into())
@@ -1566,7 +1568,7 @@ async fn while_opening(
 
 fn fallback_is_safe() -> bool {
     let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
-    screenshot_fallback_is_safe(&desktop, super::stream_was_forced())
+    screenshot_fallback_is_safe(&desktop, super::state::stream_was_forced())
 }
 
 /// `method` is the screenshot that is (or was) used, `None` when skipped.
@@ -1932,7 +1934,7 @@ async fn open_once(
     if let Some(restore) = streams.restore_token() {
         write_token(data_dir, restore);
     }
-    let outputs = portal::output_geometry().await;
+    let outputs = outputs::output_geometry().await;
     let Some(chosen) = pick_stream(streams.streams(), output_name, &outputs) else {
         return Err(guard
             .fail(OpenFail::Other(
@@ -2110,7 +2112,7 @@ async fn fit_stream(
     // when the cache answered). A layout that cannot explain this frame is
     // read again.
     let (outputs, geometry_cpu) =
-        portal::output_geometry_for_timed(img.width(), img.height(), output_name).await;
+        outputs::output_geometry_for_timed(img.width(), img.height(), output_name).await;
     let cpu_started = crate::perf::thread_cpu();
     let fitted = fit_stream_image(img, &outputs, output_name);
     if fitted.is_ok() {
@@ -2135,7 +2137,7 @@ pub fn fit_stream_image(
             .iter()
             .position(|output| output.name == name)
             .ok_or_else(|| format!("output '{name}' not found"))?,
-        None => super::auto_output_index(
+        None => geom::auto_output_index(
             outputs
                 .iter()
                 .map(|output| (output.name.as_str(), output.area())),
@@ -2144,7 +2146,7 @@ pub fn fit_stream_image(
     };
     let chosen = &outputs[index];
     if stream_should_crop(img.width(), img.height(), chosen.area(), outputs.len()) {
-        let Some((_, rect)) = portal::crop_rect(outputs, output_name, img.width(), img.height())?
+        let Some((_, rect)) = geom::crop_rect(outputs, output_name, img.width(), img.height())?
         else {
             return Ok(img);
         };
@@ -3454,7 +3456,9 @@ mod tests {
             .expect("note_tab_stream_miss");
         let timeout = &src[src.find("async fn tab_timeout(").unwrap()..skip];
         assert!(
-            timeout.contains("note_tab_stream_miss(delay_ms, super::stream_miss_log_suppressed())"),
+            timeout.contains(
+                "note_tab_stream_miss(delay_ms, super::tab::stream_miss_log_suppressed())"
+            ),
             "the first-Tab suppress flag must gate the miss log"
         );
         let before = tab_timeout_counts().0;
