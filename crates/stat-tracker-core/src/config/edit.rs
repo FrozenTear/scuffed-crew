@@ -10,8 +10,10 @@ impl Config {
     ///
     /// An `existing` document that parses as `next` is returned unchanged
     /// (byte for byte), comments included. When the only change is
-    /// `shadow_recognizer`, `reader`, `ocr`, or `update_channel`, that key is
-    /// edited in place so comments, order, and every other key stay as they were. A
+    /// `shadow_recognizer`, `reader`, `ocr`, `update_channel`, or
+    /// `capture_route` (or `reader` together with `shadow_recognizer`), that
+    /// key is edited in place so comments, order, and every other key stay as
+    /// they were. A
     /// document that does not parse is an error, not a pretty-printed
     /// replacement. A missing file (no `existing` text) is a fresh
     /// pretty-printed document.
