@@ -66,7 +66,8 @@ pub struct BuildId {
 /// workspace crate the GUI links must be listed here: [`compute`] refuses a
 /// lock walk that reaches an unlisted one.
 ///
-/// The stat-tracker lib leaves out `src/main.rs` and `src/bin`: those are the
+/// The stat-tracker lib leaves out `src/main.rs`, its test modules
+/// (`src/main_tests/`, `src/ocr_bench.rs`) and `src/bin`: those are the
 /// daemon binary, which the GUI does not link. Its embedded assets
 /// (portraits, digit and letter templates) and `dist/install-paths.sh` (which
 /// the GUI embeds for uninstall) are in. Its changelog is out: every release
@@ -99,7 +100,12 @@ pub fn workspace_inputs(gui_manifest_dir: &Path) -> Inputs {
                     "assets/blank-letters",
                     "dist/install-paths.sh",
                 ]),
-                exclude: strings(&["src/main.rs", "src/bin"]),
+                exclude: strings(&[
+                    "src/main.rs",
+                    "src/main_tests",
+                    "src/ocr_bench.rs",
+                    "src/bin",
+                ]),
             },
             CrateInputs {
                 package: "scuffed-types".into(),
@@ -520,6 +526,8 @@ axum = "0.8"
             tree.write("crates/lib/src/lib.rs", "pub fn shared() -> u32 { 1 }\n");
             tree.write("crates/lib/src/main.rs", "fn main() { daemon(); }\n");
             tree.write("crates/lib/src/bin/tool.rs", "fn main() {}\n");
+            tree.write("crates/lib/src/main_tests/mod.rs", "mod area;\n");
+            tree.write("crates/lib/src/main_tests/area.rs", "#[test]\nfn t() {}\n");
             tree.write("crates/lib/assets/d.png", "PNG digits");
             tree.write("crates/lib/CHANGELOG.md", "## 0.5.0-alpha.6\n");
             tree
@@ -558,7 +566,7 @@ axum = "0.8"
                         package: "lib".into(),
                         dir: self.path("crates/lib"),
                         include: strings(&["Cargo.toml", "src", "assets"]),
-                        exclude: strings(&["src/main.rs", "src/bin"]),
+                        exclude: strings(&["src/main.rs", "src/main_tests", "src/bin"]),
                     },
                 ],
             }
@@ -614,6 +622,11 @@ axum = "0.8"
         assert_eq!(tree.id(), before, "version bump and changelog");
         tree.edit("crates/lib/src/main.rs", "daemon();", "daemon(); retry();");
         tree.write("crates/lib/src/bin/tool.rs", "fn main() { other(); }\n");
+        tree.edit("crates/lib/src/main_tests/area.rs", "fn t()", "fn t2()");
+        tree.write(
+            "crates/lib/src/main_tests/new_area.rs",
+            "#[test]\nfn n() {}\n",
+        );
         assert_eq!(tree.id(), before, "daemon-only files");
     }
 
@@ -728,6 +741,30 @@ axum = "0.8"
         assert!(!stripped.contains("1.2.3"));
         assert!(stripped.contains("foo = { version = \"1\" }"));
         assert!(stripped.contains("version = \"2\""));
+    }
+
+    /// The daemon binary and its tests are out of the GUI build id: a release
+    /// that only touches them must not ask a running GUI to restart (G3).
+    #[test]
+    fn workspace_inputs_leave_out_the_daemon_binary_and_its_tests() {
+        let inputs = workspace_inputs(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let tracker = inputs
+            .crates
+            .iter()
+            .find(|c| c.package == "scuffed-stat-tracker")
+            .expect("the tracker lib is listed");
+        for rel in [
+            "src/main.rs",
+            "src/main_tests/mod.rs",
+            "src/main_tests/poll_cadence.rs",
+            "src/ocr_bench.rs",
+            "src/bin/tool.rs",
+        ] {
+            assert!(excluded(rel, &tracker.exclude), "{rel}");
+        }
+        for rel in ["src/lib.rs", "src/main_tests_helper.rs", "src/ocr/mod.rs"] {
+            assert!(!excluded(rel, &tracker.exclude), "{rel}");
+        }
     }
 
     #[test]
