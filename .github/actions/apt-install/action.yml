@@ -1,0 +1,116 @@
+name: Install apt packages (cached .debs)
+description: >
+  apt-get install with the downloaded .debs kept in the Actions cache. A
+  restore installs offline (--no-download, no apt-get update), so a slow or
+  dead Ubuntu mirror cannot fail or stall the job. A miss, or cached .debs
+  that no longer fit the runner image, falls back to the mirror with the
+  same retries and timeouts as before.
+inputs:
+  packages:
+    description: Packages to install, separated by spaces or newlines.
+    required: true
+  save:
+    description: >
+      'true' to save the .debs after a miss. Callers pass true on main and
+      wip/0.6 only, like rust-cache's save-if, so PR runs don't fill the
+      repo cache.
+    required: false
+    default: "false"
+runs:
+  using: composite
+  steps:
+    - name: Compute apt cache key
+      id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        set -euo pipefail
+        . /etc/os-release
+        # Normalised package list: order and line breaks don't change the key.
+        pkgs="$(printf '%s\n' $PACKAGES | sort -u | tr '\n' ' ')"
+        hash="$(printf '%s' "$pkgs" | sha256sum | cut -c1-16)"
+        # OS + arch + package list. ImageVersion (the weekly runner image
+        # build) goes last: an exact hit was saved on this very image, and a
+        # restore-keys match from an older image is tried offline first and
+        # dropped if apt refuses it.
+        prefix="apt-debs-v1-${ID}-${VERSION_ID}-$(dpkg --print-architecture)-${hash}-"
+        dir=/var/cache/apt-ci-debs
+        sudo install -d -o "$(id -u)" -g "$(id -g)" "$dir"
+        {
+          echo "prefix=$prefix"
+          echo "key=${prefix}${ImageVersion:-unknown}"
+          echo "dir=$dir"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Restore cached .debs
+      id: restore
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: /var/cache/apt-ci-debs
+        key: ${{ steps.key.outputs.key }}
+        restore-keys: ${{ steps.key.outputs.prefix }}
+
+    - name: Install packages
+      id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        DEB_DIR: ${{ steps.key.outputs.dir }}
+        CACHE_HIT: ${{ steps.restore.outputs.cache-hit }}
+      run: |
+        set -euo pipefail
+        read -ra PKGS <<< "$(printf '%s ' $PACKAGES)"
+        all_installed() {
+          local p
+          for p in "${PKGS[@]}"; do
+            [ "$(dpkg-query -W -f='${db:Status-Status}' "$p" 2>/dev/null)" = installed ] || return 1
+          done
+        }
+        start=$SECONDS
+        shopt -s nullglob
+        debs=("$DEB_DIR"/*.deb)
+
+        if (( ${#debs[@]} )); then
+          echo "Restored ${#debs[@]} .debs (exact key hit: ${CACHE_HIT:-false}). Installing offline."
+          # --no-download: apt resolves against the local .debs plus what the
+          # image already has, and never touches the mirror. If the image
+          # moved on (newer libudev1, …) apt refuses before changing anything.
+          if sudo apt-get install -y --no-install-recommends --no-download "${debs[@]}"; then
+            if all_installed; then
+              echo "::notice title=apt cache::installed from ${#debs[@]} cached .debs in $((SECONDS - start)) s, no mirror"
+              echo "saveable=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # Installed fine but a package is missing (the older image had it
+            # preinstalled). Keep these .debs and add the rest from the mirror.
+            echo "::warning title=apt cache::cached .debs miss some packages; fetching the rest from the mirror"
+          else
+            echo "::warning title=apt cache::cached .debs don't fit this runner image; using the mirror"
+            sudo find "$DEB_DIR" -maxdepth 1 -name '*.deb' -delete
+          fi
+        fi
+
+        # Mirror path, as before: a dead mirror must fail the job in minutes,
+        # not hang it for 15-20 (same options as stat-tracker-release.yml).
+        APT_OPTS=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30)
+        sudo timeout 300 apt-get "${APT_OPTS[@]}" update \
+          || { sleep 15; sudo timeout 300 apt-get "${APT_OPTS[@]}" update; }
+        sudo mkdir -p "$DEB_DIR/partial"
+        sudo timeout 600 apt-get "${APT_OPTS[@]}" \
+          -o Dir::Cache::archives="$DEB_DIR" -o APT::Keep-Downloaded-Packages=true \
+          install -y --no-install-recommends "${PKGS[@]}"
+        all_installed
+        # Keep only the .debs: apt's lock and partial/ are not cache content.
+        sudo rm -rf "$DEB_DIR/partial" "$DEB_DIR/lock"
+        sudo chown -R "$(id -u):$(id -g)" "$DEB_DIR"
+        debs=("$DEB_DIR"/*.deb)
+        echo "::notice title=apt cache::installed from the mirror in $((SECONDS - start)) s; ${#debs[@]} .debs, $(du -sh "$DEB_DIR" | cut -f1)"
+        if (( ${#debs[@]} )); then echo "saveable=true" >> "$GITHUB_OUTPUT"; fi
+
+    - name: Save .debs to the cache
+      if: inputs.save == 'true' && steps.restore.outputs.cache-hit != 'true' && steps.install.outputs.saveable == 'true'
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      with:
+        path: /var/cache/apt-ci-debs
+        key: ${{ steps.key.outputs.key }}

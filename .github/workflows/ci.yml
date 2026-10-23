@@ -61,11 +61,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Offline from cached .debs when it can, else the mirror with retries
+      # and timeouts (.github/actions/apt-install). CI runs on main only.
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+        uses: ./.github/actions/apt-install
+        with:
+          save: ${{ github.ref == 'refs/heads/main' }}
+          packages: >-
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
             libvulkan-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
@@ -127,11 +130,14 @@ jobs:
             /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # Offline from cached .debs when it can, else the mirror with retries
+      # and timeouts (.github/actions/apt-install). CI runs on main only.
       - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev \
+        uses: ./.github/actions/apt-install
+        with:
+          save: ${{ github.ref == 'refs/heads/main' }}
+          packages: >-
+            libasound2-dev libudev-dev libwayland-dev libxkbcommon-dev
             libvulkan-dev pkg-config
 
       - uses: dtolnay/rust-toolchain@stable
