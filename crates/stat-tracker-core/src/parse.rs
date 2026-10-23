@@ -1,7 +1,8 @@
 //! Text the tracker reads off a capture, in four layers: the map
 //! catalog and its upload policy (`catalog`), map names from OCR text
 //! (`map_text`, uses the catalog), the player's row by name (`names`), and
-//! the scoreboard reader (`board`, uses all three). Every public item is
+//! the scoreboard reader (`board`, uses the catalog and map text; the
+//! callers run the name match themselves). Every public item is
 //! re-exported here, so `parse::X` paths are unchanged.
 
 // Hero list + matching live in scuffed-types (hero-stats W1). Re-export for

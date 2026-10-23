@@ -9,7 +9,7 @@ pub const GATE_COLS: usize = 6;
 
 /// The six cumulative scoreboard counters, in the positional order
 /// `[elims, assists, deaths, damage, healing, mitigation]` — matching the
-/// column order produced by `parse::stats_from_row`.
+/// column order produced by `parse::board::stats_from_row`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Counters {
     pub elims: u32,

@@ -657,14 +657,17 @@ mod tests {
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join(crate::proc_id::DAEMON_BIN);
         std::fs::copy(sleep_bin(), &fake).unwrap();
-        let child = Child(spawn_retrying_busy(&fake));
+        let mut child = Child(spawn_retrying_busy(&fake));
         let pid = child.0.id();
-        // The child can still show the test binary in /proc for a moment.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        // The child can still show the test binary in /proc for a moment. A
+        // loaded CI runner has needed more than 5 s for the exec to land.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         while !crate::proc_id::pid_is_live_tracker(pid) {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the fake tracker never showed as live"
+                "the fake tracker never showed as live: /proc exe {:?}, try_wait {:?}",
+                crate::proc_id::proc_exe(pid),
+                child.0.try_wait(),
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
