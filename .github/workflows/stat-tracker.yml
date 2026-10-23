@@ -2,7 +2,7 @@ name: Stat Tracker CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, "wip/0.6"]
     paths:
       - "crates/stat-tracker/**"
       - "crates/stat-tracker-ui/**"
@@ -12,7 +12,7 @@ on:
       - ".github/workflows/stat-tracker.yml"
       - ".github/workflows/stat-tracker-release.yml"
   pull_request:
-    branches: [main]
+    branches: [main, "wip/0.6"]
     paths:
       - "crates/stat-tracker/**"
       - "crates/stat-tracker-ui/**"
