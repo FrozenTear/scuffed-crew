@@ -34,7 +34,8 @@ runs:
         # 26.04 runners pull amd64v3 builds (APT::Architecture-Variants) while
         # dpkg still says amd64: a runner pool without the variant must not
         # restore v3 binaries.
-        variants="$(apt-config dump | sed -n 's/^APT::Architecture-Variants:: "\(.*\)";$/\1/p' | sort -u | paste -sd+)"
+        # apt-config prints it as `APT::Architecture-Variants "amd64v3";`.
+        variants="$(apt-config dump | grep -i '^APT::Architecture-Variants' | grep -o '"[^"]\+"' | tr -d '"' | sort -u | paste -sd+ || true)"
         arch="$(dpkg --print-architecture)${variants:+-$variants}"
         # OS + arch (+variant) + package list, then ImageVersion (the weekly
         # runner image build): an exact hit was saved on this very image.
@@ -150,8 +151,10 @@ runs:
         sudo chown -R "$(id -u):$(id -g)" "$DEB_DIR"
         pruned=0
         for f in "$DEB_DIR"/*.deb; do
-          read -r p v < <(dpkg-deb -f "$f" Package Version | awk '{print $2}' | paste -sd' ')
-          if [ "$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)" != "$v" ]; then
+          p="" v=""
+          # A corrupt .deb reads as empty and is pruned, not a step failure.
+          read -r p v < <(dpkg-deb -f "$f" Package Version 2>/dev/null | awk '{print $2}' | paste -sd' ') || true
+          if [ -z "$p" ] || [ "$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)" != "$v" ]; then
             rm -f "$f"; pruned=$((pruned + 1))
           fi
         done

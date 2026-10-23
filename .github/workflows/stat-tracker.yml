@@ -205,12 +205,13 @@ jobs:
         uses: ./.github/actions/apt-install
         with:
           save: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
+          # minisign: not needed by clippy, listed so it shares Build & Test's key.
           packages: >-
             libwayland-dev libxkbcommon-dev
             libegl-dev libgbm-dev
             tesseract-ocr libtesseract-dev libleptonica-dev
             libevdev-dev libudev-dev
-            pkg-config
+            pkg-config minisign
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable branch, 2026-10-16
         with:
