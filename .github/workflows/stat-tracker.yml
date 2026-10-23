@@ -130,9 +130,8 @@ jobs:
           # rust-cache hashes member manifests + Cargo.lock only, NOT the root
           # Cargo.toml [profile.*] tables. Bump this whenever a root profile
           # changes, or a full-match restore of stale artifacts skips the
-          # save and every run rebuilds (v0 -> v1: dev line-tables-only;
-          # v1 -> v2: test opt-level for scuffed-stat-tracker).
-          prefix-key: v2-rust
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
+          prefix-key: v1-rust
           # Save on main and the long-lived wip/0.6 lane only: PRs into
           # wip/0.6 restore from it. Other refs would evict these (repo cap).
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
@@ -145,7 +144,25 @@ jobs:
         # examples, and nothing here runs them. Clippy --all-targets still
         # checks they compile. The crate has no doctests (only ```text blocks),
         # so --lib --bins --tests covers every test it has. Same for core.
-        run: cargo test --locked $TRACKER_PACKAGES --lib --bins --tests
+        #
+        # CI builds the tracker crate optimized for its tests: they are pixel
+        # work in the crate itself (blanking, template matching, digit reads),
+        # 5-20x faster at opt-level 2. Lib tests take 181 s -> 34 s on 4
+        # cores, for about +105 s of compile. Local `cargo test` stays at
+        # opt-level 0 (a short edit-test loop), and so does the Build step
+        # above, whose artifacts the tests do not reuse anyway (dev-dependency
+        # features differ). Assertions and overflow checks stay on, set
+        # explicitly; line tables come from [profile.dev]. The same fast full
+        # run locally:
+        #   cargo test -p scuffed-stat-tracker --config 'profile.test.package.scuffed-stat-tracker.opt-level=2'
+        # Core gets no override: its 200 tests take 0.02 s.
+        env:
+          OPT: profile.test.package.scuffed-stat-tracker
+        run: >-
+          cargo test --locked $TRACKER_PACKAGES --lib --bins --tests
+          --config "$OPT.opt-level=2"
+          --config "$OPT.debug-assertions=true"
+          --config "$OPT.overflow-checks=true"
 
   clippy:
     name: Clippy (stat-tracker)
@@ -188,9 +205,8 @@ jobs:
           # rust-cache hashes member manifests + Cargo.lock only, NOT the root
           # Cargo.toml [profile.*] tables. Bump this whenever a root profile
           # changes, or a full-match restore of stale artifacts skips the
-          # save and every run rebuilds (v0 -> v1: dev line-tables-only;
-          # v1 -> v2: test opt-level for scuffed-stat-tracker).
-          prefix-key: v2-rust
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
+          prefix-key: v1-rust
           # Save on main and the long-lived wip/0.6 lane only: PRs into
           # wip/0.6 restore from it. Other refs would evict these (repo cap).
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
@@ -246,9 +262,8 @@ jobs:
           # rust-cache hashes member manifests + Cargo.lock only, NOT the root
           # Cargo.toml [profile.*] tables. Bump this whenever a root profile
           # changes, or a full-match restore of stale artifacts skips the
-          # save and every run rebuilds (v0 -> v1: dev line-tables-only;
-          # v1 -> v2: test opt-level for scuffed-stat-tracker).
-          prefix-key: v2-rust
+          # save and every run rebuilds (v0 -> v1: dev line-tables-only).
+          prefix-key: v1-rust
           # Save on main and the long-lived wip/0.6 lane only: PRs into
           # wip/0.6 restore from it. Other refs would evict these (repo cap).
           save-if: ${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/wip/0.6' }}
