@@ -87,22 +87,50 @@ fn shadow_env_override_is_never_saved() {
     }
     files.sort();
     assert!(files.len() >= 8, "config's production files: {files:?}");
-    let env_read = concat!("var(\"SCUFFED_SHADOW_", "RECOGNIZER\")");
-    // `= ` with the space, so `==` comparisons do not count.
-    let field_set = concat!(".shadow_", "recognizer = ");
+    // Comment lines (`//`, `///`, `//!`) are skipped. The env var counts as
+    // read wherever its quoted name appears (`var`, `var_os`, a `const`,
+    // `env_truthy`): once in all, in reader.rs. The field may be named before
+    // `=`, `|=`, `&=`, `^=` or a struct-literal `:` only by the in-place
+    // editor's copy between two configs, the field declaration and `Default`.
+    let env_name = concat!("\"SCUFFED_SHADOW_", "RECOGNIZER\"");
+    let field = concat!("shadow_", "recognizer");
+    let allowed = [
+        concat!("same.shadow_", "recognizer = next.shadow_recognizer;"),
+        concat!("pub shadow_", "recognizer: bool,"),
+        concat!("shadow_", "recognizer: false,"),
+    ];
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     let mut reads = Vec::new();
+    let mut writes = Vec::new();
     for path in &files {
         let src = std::fs::read_to_string(path).expect("read a config file");
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        reads.extend(src.matches(env_read).map(|_| name.clone()));
-        for line in src.lines().filter(|line| line.contains(field_set)) {
-            assert_eq!(
-                line.trim(),
-                concat!("same.shadow_", "recognizer = next.shadow_recognizer;"),
-                "{name} sets shadow_recognizer from something other than a config"
-            );
+        for (index, line) in src.lines().enumerate() {
+            let code = line.trim();
+            if code.starts_with("//") {
+                continue;
+            }
+            reads.extend(code.matches(env_name).map(|_| name.clone()));
+            for (at, _) in code.match_indices(field) {
+                let before = code[..at].chars().next_back();
+                let rest = &code[at + field.len()..];
+                if before.is_some_and(is_ident) || rest.chars().next().is_some_and(is_ident) {
+                    continue;
+                }
+                let rest = rest.trim_start();
+                let sets = ["|=", "&=", "^="].iter().any(|op| rest.starts_with(op))
+                    || (rest.starts_with('=') && !rest.starts_with("=="))
+                    || (rest.starts_with(':') && !rest.starts_with("::"));
+                if sets && !allowed.contains(&code) {
+                    writes.push(format!("{name}:{}: {code}", index + 1));
+                }
+            }
         }
     }
+    assert!(
+        writes.is_empty(),
+        "shadow_recognizer set outside the in-place editor: {writes:#?}"
+    );
     assert_eq!(
         reads,
         ["reader.rs"],

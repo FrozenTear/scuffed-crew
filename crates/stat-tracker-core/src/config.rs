@@ -26,12 +26,14 @@ pub use sync::{
     SYNC_URL_HTTPS_REQUIRED, SYNC_URL_INVALID, SyncConfig, SyncUrlReject, validate_sync_server_url,
 };
 
-/// The settings in `config.toml` (`~/.config/scuffed-stat-tracker/`).
+/// The settings in `config.toml`, in `$XDG_CONFIG_HOME/scuffed-stat-tracker/`
+/// (usually `~/.config/scuffed-stat-tracker/`; see [`Config::config_path`]).
 ///
 /// The Config table in `crates/stat-tracker/README.md` is the reference for
 /// what each key does. The field docs here are the schema: what the key is,
-/// its default, its env or CLI override, whether it is written when unset,
-/// and the code that applies it. They do not repeat the README.
+/// its default, its env or CLI override, where it matters whether it is left
+/// out of the file, and the code that applies it. They do not repeat the
+/// README.
 ///
 /// Field order is the file's key order, and the serde attributes are its
 /// format; `config/tests_pins.rs` pins both byte for byte.
@@ -42,12 +44,13 @@ pub struct Config {
     pub capture_output: Option<String>,
     /// Portal image source: `auto` (also when missing), `screencast`,
     /// `screenshot` or `kwin` (KDE direct). A non-empty [`CAPTURE_ENV`] wins over
-    /// this key. Edited in place when it is the only change. The daemon passes
-    /// it to `stat_tracker::capture` in `CapturePrefs`.
+    /// this key. Not written while `auto`. Edited in place when it is the only
+    /// change. The daemon passes it to `stat_tracker::capture` in `CapturePrefs`.
     #[serde(default, skip_serializing_if = "CaptureRoute::is_auto")]
     pub capture_route: CaptureRoute,
     /// Save stream/screenshot Tab pairs under `{data_dir}/debug/portal-compare/`.
-    /// Off by default. Also `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`, which is not
+    /// Off by default and not written while off. Also
+    /// `STAT_TRACKER_DEBUG_PORTAL_FRAMES=1`, which is not
     /// stored here ([`Self::debug_portal_frames_enabled`]).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub debug_portal_frames: bool,
@@ -101,10 +104,13 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ocr_threads: Option<u32>,
     /// The shadow recognizer's log under `{data_dir}/shadow/` (log only). Off by
-    /// default. `reader = "new"` turns the log on for the process whatever this
-    /// says ([`Self::shadow_log_enabled`]). Env `SCUFFED_SHADOW_RECOGNIZER=1` also
-    /// turns it on and is never stored ([`Self::shadow_recognizer_control`]).
-    /// Edited in place when it is the only change. Read by `stat_tracker::shadow`.
+    /// default and not written while off. The daemon also runs the log whenever
+    /// the reader in effect is the new one (`reader = "new"`, or a granted
+    /// `ocr = "off"`), whatever this says
+    /// (`stat_tracker::shadow::worker::ShadowWorker::start_for_reader`). Env
+    /// `SCUFFED_SHADOW_RECOGNIZER=1` also turns it on and is never stored
+    /// ([`Self::shadow_recognizer_control`]). Edited in place when it is the
+    /// only change.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shadow_recognizer: bool,
     /// `prerelease` opts the desktop updater into alphas and rcs. Any other
@@ -128,8 +134,10 @@ pub struct Config {
     /// Which reader supplies saved and uploaded stats: `"new"` (also when
     /// missing, the default from alpha.12) or `"ocr-v1"` (Tesseract). A full
     /// save leaves `"new"` out and writes `"ocr-v1"`, so a switch back survives
-    /// a reload. Not consulted while [`Self::ocr`] is off. Edited in place when it
-    /// is the only change (or with `shadow_recognizer`).
+    /// a reload. Not consulted while `ocr = "off"` is granted
+    /// (`stat_tracker::ocr_switch`). Edited in place when it is the only change
+    /// (or with `shadow_recognizer`). What each value reads, including which
+    /// screens come from the reader packs: the README `reader` row.
     #[serde(default, skip_serializing_if = "ReaderSetting::is_default")]
     pub reader: ReaderSetting,
     /// Whether classic OCR (Tesseract) may run: `"on"` (also when missing) or
@@ -137,7 +145,8 @@ pub struct Config {
     /// would go unread; otherwise the tracker keeps OCR on for the run and logs
     /// why (`stat_tracker::ocr_switch`). Read when the tracker starts. Env
     /// [`OCR_ENV`] overrides it for one run and is never stored
-    /// ([`Self::ocr_control`]). Edited in place when it is the only change.
+    /// ([`Self::ocr_control`]). Not written while on. Edited in place when it is
+    /// the only change.
     #[serde(default, skip_serializing_if = "OcrSetting::is_on")]
     pub ocr: OcrSetting,
     /// Letter-template names (the `names-v1` pack) for the player's own row: on
