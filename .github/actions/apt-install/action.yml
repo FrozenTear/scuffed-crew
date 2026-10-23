@@ -68,9 +68,15 @@ runs:
           done
         }
         start=$SECONDS
-        # The man-db trigger rebuilds the man index after every install:
-        # ~30 s of a ~40 s offline install. CI never reads man pages.
-        sudo rm -f /var/lib/man-db/auto-update
+        # libudev-dev pulls a newer libudev1, which upgrades systemd, and the
+        # dracut trigger then rebuilds the initramfs: ~30 s of a ~40 s
+        # offline install. This runner VM is thrown away and never boots
+        # it, so divert update-initramfs to a no-op.
+        if [ -x /usr/sbin/update-initramfs ] && ! dpkg-divert --list /usr/sbin/update-initramfs | grep -q .; then
+          sudo dpkg-divert --local --rename --divert /usr/sbin/update-initramfs.ci-real \
+            --add /usr/sbin/update-initramfs
+          sudo ln -s /bin/true /usr/sbin/update-initramfs
+        fi
         shopt -s nullglob
         debs=("$DEB_DIR"/*.deb)
 
