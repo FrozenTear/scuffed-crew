@@ -68,6 +68,32 @@ same way; the bundled copy is canonical and replaces an older one (a `.bak` is
 kept), since most hosts cannot regenerate it locally (`text2image`
 hangs/segfaults with pango ≥ 1.56).
 
+**Arch and CachyOS (AUR):** the
+[scuffed-stat-tracker-bin](https://aur.archlinux.org/packages/scuffed-stat-tracker-bin)
+package installs the same release tarball, checked against its sha256:
+
+```sh
+paru -S scuffed-stat-tracker-bin
+systemctl --user enable --now scuffed-stat-tracker.service
+```
+
+`yay` works too. Updates come through `paru`, so skip the in-app update prompt
+for now. It still shows the curl command.
+
+Moving from the curl install to the AUR package: remove the curl copy first,
+or its service file in `~/.config/systemd/user` keeps overriding the
+package's. Saved games and settings stay:
+
+```sh
+scuffed-stat-tracker-uninstall
+paru -S scuffed-stat-tracker-bin
+systemctl --user enable --now scuffed-stat-tracker.service
+```
+
+Leave out `--purge`, which deletes saved games. The uninstall also clears
+`private/own-name/` (see Uninstall below); the tracker learns those crops
+again over your next few games.
+
 **One-liner** (downloads latest matching release and installs into
 `~/.local`):
 
