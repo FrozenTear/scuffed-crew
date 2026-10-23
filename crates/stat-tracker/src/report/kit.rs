@@ -679,7 +679,7 @@ pub fn load(data_dir: &Path, session_id: &str) -> Kit {
 
 /// True when `kit` passes the checks [`load`] makes: reads blanked with
 /// this [`blank::BLANK_TABLE_VERSION`] and a scoreboard whose SHA-256 is
-/// the one in those reads. [`super::bundle::build_game_report`] checks again
+/// the one in those reads. `bundle::build_game_report` checks again
 /// at the sink, since a [`Kit`] can also be built by hand.
 pub fn is_trusted(kit: &Kit) -> bool {
     match (&kit.reads, &kit.scoreboard_png) {
@@ -893,7 +893,7 @@ mod tests {
             }
         }
         let mut want = reads();
-        want.scoreboard_sha256 = crate::report::bundle::sha256_hex(&png);
+        want.scoreboard_sha256 = crate::report::hash::sha256_hex(&png);
         assert_eq!(kit.reads, Some(want));
         assert!(has_kit(tmp.path(), "s-1"));
         assert_eq!(sessions(tmp.path()), vec!["s-1".to_string()]);
@@ -1001,7 +1001,7 @@ mod tests {
                 for _ in 0..300 {
                     let kit = load(&dir, "s-1");
                     if let (Some(png), Some(r)) = (kit.scoreboard_png, kit.reads) {
-                        assert_eq!(super::super::bundle::sha256_hex(&png), r.scoreboard_sha256);
+                        assert_eq!(super::super::hash::sha256_hex(&png), r.scoreboard_sha256);
                         assert!(
                             last.is_none_or(|l| r.captured_at >= l),
                             "kit went back in time"

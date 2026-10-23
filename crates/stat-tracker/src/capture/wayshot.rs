@@ -60,7 +60,7 @@ pub fn list_outputs() -> Result<Vec<String>, Box<dyn std::error::Error>> {
 /// Output names and logical rectangles (xdg-output), for cropping portal
 /// screenshots. KDE serves these even without screencopy.
 pub fn output_rects()
--> Result<Vec<super::portal::OutputRect>, Box<dyn std::error::Error + Send + Sync>> {
+-> Result<Vec<super::geom::OutputRect>, Box<dyn std::error::Error + Send + Sync>> {
     with_wayshot(|wayshot| {
         Ok(wayshot
             .get_all_outputs()
@@ -68,7 +68,7 @@ pub fn output_rects()
             .map(|o| {
                 let r = o.logical_region.inner;
                 let (real_width, real_height) = real_size(o);
-                super::portal::OutputRect {
+                super::geom::OutputRect {
                     name: o.name.clone(),
                     x: r.position.x,
                     y: r.position.y,
@@ -148,7 +148,7 @@ pub async fn capture_with_output(
             } else {
                 // Auto: the external monitor, then the largest (see
                 // `auto_output_index`). One output is that output, as before.
-                let index = super::auto_output_index(outputs.iter().map(|o| {
+                let index = super::geom::auto_output_index(outputs.iter().map(|o| {
                     let (w, h) = real_size(o);
                     (o.name.as_str(), u64::from(w) * u64::from(h))
                 }))

@@ -41,7 +41,7 @@ use ashpd::zbus;
 use ashpd::zvariant::{self, OwnedValue, Value};
 use image::{DynamicImage, RgbImage};
 
-use super::portal::OutputRect;
+use super::geom::OutputRect;
 use super::route::KwinProbe;
 
 pub const SERVICE: &str = "org.kde.KWin.ScreenShot2";
@@ -54,7 +54,7 @@ pub const GRAB_TIMEOUT: Duration = Duration::from_secs(2);
 pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 /// How long a Tab grab (or the probe) waits for the call before it, at
 /// most one [`GRAB_TIMEOUT`]. An ordinary poll does not wait; the end-reel
-/// outcome poll waits up to [`super::OUTCOME_POLL_LOCK_WAIT`] (1 s).
+/// outcome poll waits up to [`super::tab::OUTCOME_POLL_LOCK_WAIT`] (1 s).
 pub const LOCK_WAIT_TAB: Duration = Duration::from_secs(2);
 
 /// Plasma version with the full fix for KDE bug 524840.
@@ -538,7 +538,7 @@ pub enum Target {
 
 /// The output to grab and its real size. A name is asked for as is (KWin
 /// answers `InvalidScreen` when it is gone). Auto picks the output the
-/// other portal paths pick ([`super::auto_output_index`]); with no
+/// other portal paths pick ([`super::geom::auto_output_index`]); with no
 /// geometry it is KWin's active screen: the focused window's or the
 /// pointer's output, as KWin's focus settings decide.
 pub fn pick_target(
@@ -551,8 +551,9 @@ pub fn pick_target(
             Target::Screen(name.to_string()),
             outputs.iter().find(|o| o.name == name).and_then(real),
         ),
-        None => match super::auto_output_index(outputs.iter().map(|o| (o.name.as_str(), o.area())))
-        {
+        None => match super::geom::auto_output_index(
+            outputs.iter().map(|o| (o.name.as_str(), o.area())),
+        ) {
             Some(index) => (
                 Target::Screen(outputs[index].name.clone()),
                 real(&outputs[index]),
@@ -566,7 +567,7 @@ pub fn pick_target(
 /// capture, so it lies on a real output. With no geometry, KWin's active
 /// screen at scale 1.
 pub fn probe_target(outputs: &[OutputRect]) -> Target {
-    match super::auto_output_index(outputs.iter().map(|o| (o.name.as_str(), o.area()))) {
+    match super::geom::auto_output_index(outputs.iter().map(|o| (o.name.as_str(), o.area()))) {
         Some(index) => Target::Area {
             x: outputs[index].x,
             y: outputs[index].y,
@@ -760,18 +761,18 @@ async fn grab_in_flight(
 pub async fn capture(
     output_name: Option<&str>,
 ) -> Result<DynamicImage, Box<dyn std::error::Error + Send + Sync>> {
-    let (outputs, geometry_cpu) = super::portal::output_geometry_timed().await;
+    let (outputs, geometry_cpu) = super::outputs::output_geometry_timed().await;
     let (target, real) = pick_target(&outputs, output_name);
     let screen = match &target {
         Target::Screen(name) => Some(name.clone()),
         _ => None,
     };
-    let wait = super::grab_lock_wait(LOCK_WAIT_TAB);
+    let wait = super::tab::grab_lock_wait(LOCK_WAIT_TAB);
     let (meta, bytes) = match grab_in_flight(target, true, wait).await {
         Ok(grabbed) => grabbed,
         Err(err) => {
             if err.invalidates_geometry() {
-                super::portal::invalidate_output_geometry();
+                super::outputs::invalidate_output_geometry();
             }
             return Err(match (&err, output_name) {
                 (KwinError::InvalidScreen, Some(name)) => {
@@ -801,9 +802,9 @@ pub async fn capture(
     );
     let checked = check_native_size(size, real, due, || async {
         *LAST_REREAD.lock().unwrap_or_else(|err| err.into_inner()) = Some(Instant::now());
-        super::portal::invalidate_output_geometry();
+        super::outputs::invalidate_output_geometry();
         // This read is capture CPU too, as the first one is.
-        let (outputs, reread_cpu) = super::portal::output_geometry_timed().await;
+        let (outputs, reread_cpu) = super::outputs::output_geometry_timed().await;
         crate::perf::record_cpu(crate::perf::Stage::Capture, reread_cpu);
         screen.and_then(|name| {
             outputs
@@ -1129,7 +1130,7 @@ impl ProbeBus for RealBus {
     }
 
     async fn render(&self) -> Result<(), KwinError> {
-        let target = probe_target(&super::portal::output_geometry().await);
+        let target = probe_target(&super::outputs::output_geometry().await);
         let (meta, bytes) = grab_in_flight(target, false, LOCK_WAIT_TAB).await?;
         to_rgb_image(&meta, &bytes).map(|_| ())
     }

@@ -550,7 +550,7 @@ fn stat_row_attempted(board: &BoardRead, index: usize) -> bool {
 }
 
 /// One field as the active reader read it: its confidence and its own
-/// value (before the capture gate), for [`crate::report::kit::KitReads::with_confidences`].
+/// value (before the capture gate), for `report::kit::KitReads::with_confidences`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ReaderRead {
     pub confidence: f64,

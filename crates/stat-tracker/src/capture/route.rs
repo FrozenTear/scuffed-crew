@@ -24,7 +24,7 @@
 //! ([`resolve_on_session`]). A session that is neither known Wayland nor
 //! known X11 keeps the rc.7 behaviour.
 
-use super::{CaptureBackend, select_backend};
+use super::types::CaptureBackend;
 
 /// Where the winning choice came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -486,6 +486,97 @@ pub fn resolve(
         forced_line,
         mismatch,
         fallback: None,
+    }
+}
+
+/// Normalized force target parsed from `STAT_TRACKER_CAPTURE` (pure; unit-tested).
+/// The accepted keyword set (and its case-folding) lives here and nowhere else,
+/// both `select_backend` and `detect_backend` route through `force_target`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ForceTarget {
+    Wayshot,
+    X11,
+    Portal,
+    Unknown,
+}
+
+pub(super) fn force_target(raw: &str) -> ForceTarget {
+    match classify(raw) {
+        ForceWord::Wayshot => ForceTarget::Wayshot,
+        ForceWord::X11 => ForceTarget::X11,
+        // `portal` and `screencast` are the stream. `portal-screenshot` is
+        // the older portal. Both are the portal backend; `route` picks which.
+        ForceWord::Stream | ForceWord::Screenshot => ForceTarget::Portal,
+        // KDE direct is decided in `route::resolve` from its probe and
+        // never reaches `select_backend`.
+        ForceWord::Kwin | ForceWord::Unknown => ForceTarget::Unknown,
+    }
+}
+
+/// Pure backend-selection policy (R1-6). Every env read and live probe happens
+/// in `detect_backend`; this takes their already-normalized results so the exact
+/// production decision is unit-testable without touching process env or an X
+/// server. `detect_backend` routes through this, the tests below exercise the
+/// real logic, not a parallel copy.
+///
+/// `force` is the raw `STAT_TRACKER_CAPTURE` value (or `None`), normalized here
+/// via `force_target` so the keyword set exists once. A forced backend never
+/// silently falls back (R1-3): unavailable/unknown force → `None`.
+///
+/// `wayland_session` is true when the desktop itself is Wayland. There the
+/// X11 probe can pass through XWayland (KDE, GNOME) even though X11 cannot
+/// see the real screen, so the portal goes ahead of X11 and X11 is only a
+/// last resort.
+pub(super) fn select_backend(
+    force: Option<&str>,
+    wayland_session: bool,
+    wayshot_ok: bool,
+    x11_ok: bool,
+    portal_ok: bool,
+) -> CaptureBackend {
+    match force {
+        Some(raw) => match force_target(raw) {
+            ForceTarget::Wayshot => {
+                if wayshot_ok {
+                    CaptureBackend::Wayshot
+                } else {
+                    CaptureBackend::None
+                }
+            }
+            ForceTarget::X11 => {
+                if x11_ok {
+                    CaptureBackend::X11
+                } else {
+                    CaptureBackend::None
+                }
+            }
+            ForceTarget::Portal => {
+                if portal_ok {
+                    CaptureBackend::Portal
+                } else {
+                    CaptureBackend::None
+                }
+            }
+            // Unknown forced value, fail closed, no fallback.
+            ForceTarget::Unknown => CaptureBackend::None,
+        },
+        // Automatic priority: usable Wayshot, then X11, then Portal. On a
+        // Wayland session: Wayshot, then Portal, then X11. On a known X11
+        // session `detect_backend` never reports the portal usable on
+        // automatic ([`auto_may_use_portal`](super::select::auto_may_use_portal), S5-CAP-5).
+        None => {
+            if wayshot_ok {
+                CaptureBackend::Wayshot
+            } else if wayland_session && portal_ok {
+                CaptureBackend::Portal
+            } else if x11_ok {
+                CaptureBackend::X11
+            } else if portal_ok {
+                CaptureBackend::Portal
+            } else {
+                CaptureBackend::None
+            }
+        }
     }
 }
 

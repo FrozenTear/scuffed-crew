@@ -23,6 +23,7 @@ use std::time::Duration;
 
 use super::framebuf::{self, PackedFrame};
 use super::pod;
+use super::tab;
 
 #[cfg_attr(not(test), allow(dead_code))]
 const PW_ID_ANY: u32 = 0xffff_ffff;
@@ -554,7 +555,7 @@ impl Handle {
         }
         let _need = tab_press.map(|press| {
             let press_ms = rel_ms(self.state.started, press);
-            let ready = press_ms.saturating_add(framebuf::TAB_OVERLAY_AFTER_PRESS_MS);
+            let ready = press_ms.saturating_add(tab::TAB_OVERLAY_AFTER_PRESS_MS);
             self.state.need_arrived_ms.store(ready, Ordering::Release);
             NeedReset(&self.state.need_arrived_ms)
         });
@@ -601,9 +602,7 @@ impl Handle {
             }
             let now = std::time::Instant::now();
             let deadline = match tab_press {
-                Some(press) => {
-                    press + Duration::from_millis(framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS)
-                }
+                Some(press) => press + Duration::from_millis(tab::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS),
                 None => poll_deadline,
             };
             if now >= deadline {
@@ -2584,7 +2583,7 @@ mod tests {
     #[test]
     fn an_early_frame_then_a_two_fps_frame_is_captured() {
         let press = 1_000u64;
-        let need = press + framebuf::TAB_OVERLAY_AFTER_PRESS_MS;
+        let need = press + tab::TAB_OVERLAY_AFTER_PRESS_MS;
         let early = press + 100;
         let gap = throttle_gap_ms(2);
         assert_eq!(gap, 500);
@@ -2592,7 +2591,7 @@ mod tests {
         // before the hard stop.
         let fresh = early + gap;
         assert!(fresh >= need);
-        assert!(fresh < press + framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
+        assert!(fresh < press + tab::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS);
 
         assert!(
             !copy_for_wait(0, early, gap, 0, need),
@@ -2618,7 +2617,7 @@ mod tests {
             framebuf::select_tab_frame(
                 Some(early),
                 press,
-                press + framebuf::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS
+                press + tab::TAB_GRAB_TIMEOUT_AFTER_PRESS_MS
             ),
             framebuf::TabFrameChoice::Miss
         );
