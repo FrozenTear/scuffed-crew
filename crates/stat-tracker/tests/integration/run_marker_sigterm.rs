@@ -7,7 +7,7 @@
 //! no display, so it reads no real config, holds no sync token, and captures
 //! nothing.
 
-mod common;
+use crate::common;
 
 use std::path::Path;
 use std::process::{Command, Stdio};

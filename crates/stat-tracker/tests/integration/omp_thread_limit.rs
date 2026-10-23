@@ -6,7 +6,7 @@
 //! exits before any daemon start-up, so those runs read no config and open
 //! no store.
 
-mod common;
+use crate::common;
 
 use std::collections::HashMap;
 use std::io::Read as _;
@@ -305,7 +305,7 @@ fn a_failed_restart_keeps_sigpipe_ignored() {
 // ── a started daemon never outlives the process that started it ─────────────
 
 const STARTER_ROOT: &str = "SCUFFED_TEST_DAEMON_STARTER_ROOT";
-const STARTER_TEST: &str = "starter_half_starts_a_daemon_and_waits";
+const STARTER_FN: &str = "starter_half_starts_a_daemon_and_waits";
 const STARTER_ARGV0: &str = "tracker-under-test";
 const HELD_FILE: &str = "held.lock";
 
@@ -377,7 +377,8 @@ fn starter_half_starts_a_daemon_and_waits() {
 fn a_daemon_dies_with_the_process_that_started_it() {
     let root = tempfile::tempdir().unwrap();
     let mut cmd = Command::new(std::env::current_exe().unwrap());
-    cmd.args(["--exact", STARTER_TEST, "--ignored", "--nocapture"])
+    let starter_test = common::test_name(module_path!(), STARTER_FN);
+    cmd.args(["--exact", &starter_test, "--ignored", "--nocapture"])
         .env(STARTER_ROOT, root.path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())

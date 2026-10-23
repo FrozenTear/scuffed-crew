@@ -1693,7 +1693,7 @@ mod tests {
                 "recognize_scoreboard_names_pre_cropped",
                 "recognize_sparse_region",
             ],
-            "the entry points changed: update this list and tests/ocr_switch.rs"
+            "the entry points changed: update this list and tests/integration/ocr_switch.rs"
         );
         // A public function that reaches nothing is not gated and need not be.
         assert!(functions.contains_key("cell_edge_ink"));

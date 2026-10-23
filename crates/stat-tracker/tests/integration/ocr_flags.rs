@@ -21,6 +21,8 @@
 //! The process-wide mode and reader are set here, so this file holds one
 //! test.
 
+use crate::common;
+
 use std::cell::Cell;
 use std::collections::BTreeMap;
 
@@ -164,6 +166,12 @@ fn judge(read: Read, what: &str, calls: u64, blocked: &[(&str, &str, u64)]) {
 
 #[test]
 fn a_read_marked_as_done_without_ocr_never_reaches_the_gate() {
+    if !common::own_process(
+        module_path!(),
+        "a_read_marked_as_done_without_ocr_never_reaches_the_gate",
+    ) {
+        return;
+    }
     for read in Read::ALL {
         // Compiles only while every read has a place; say it at run time too.
         let _ = checked(read);

@@ -8,7 +8,7 @@
 //! Frames stay gitignored under `test-data/dorado-20261008/` (copyrighted
 //! game captures). Drop the full Tab screenshots there.
 //!
-//! Run: cargo test -p scuffed-stat-tracker --test dorado_dim_zero_fixtures -- --ignored
+//! Run: cargo test -p scuffed-stat-tracker --test integration -- --ignored dorado_dim_zero_fixtures::
 
 use stat_tracker::ocr;
 use stat_tracker::parse;

@@ -6,6 +6,8 @@
 //! reader is set up exactly once, here. (The other setup, no end-title
 //! templates and the OCR fallback, is a unit test in `detect::match_end`.)
 
+use crate::common;
+
 use image::{DynamicImage, GrayImage, Luma, Rgb, RgbImage};
 use stat_tracker::detect::MatchOutcome;
 use stat_tracker::detect::match_end::{
@@ -43,6 +45,12 @@ fn frame(word: Option<&GrayImage>) -> RgbImage {
 
 #[test]
 fn the_daemon_reads_the_end_title_from_the_words_pack() {
+    if !common::own_process(
+        module_path!(),
+        "the_daemon_reads_the_end_title_from_the_words_pack",
+    ) {
+        return;
+    }
     let data = tempfile::tempdir().unwrap();
     let words = data.path().join(WORDS_SUBDIR);
     std::fs::create_dir_all(&words).unwrap();
@@ -55,8 +63,9 @@ fn the_daemon_reads_the_end_title_from_the_words_pack() {
     ] {
         img.save(words.join(name)).unwrap();
     }
-    // SAFETY: this is the only test in this binary; nothing else reads the
-    // environment concurrently.
+    // SAFETY: this test runs alone in a process of its own
+    // (`common::own_process`); nothing else reads the environment
+    // concurrently.
     unsafe { std::env::set_var(TEMPLATE_DIR_ENV, data.path()) };
     let new = FinalScoreSource::for_reader(true);
     // The accolade and rank-screen words by reader (O11). These frames show

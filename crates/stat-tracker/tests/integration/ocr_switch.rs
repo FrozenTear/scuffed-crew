@@ -11,12 +11,13 @@
 //! * The real daemon binary: what it decides and what it writes.
 //!
 //! The gate test switches the process-wide mode and installs the
-//! process-wide reader, so it is the only test here that does either. The
-//! daemon tests run the binary with an empty HOME and XDG dirs in a temp
-//! directory and no display: it reads no real config, holds no sync token,
-//! and captures nothing.
+//! process-wide reader, so it is the only test here that does either, and
+//! it runs in a process of its own (`common::own_process`). The daemon
+//! tests run the binary with an empty HOME and XDG dirs in a temp directory
+//! and no display: it reads no real config, holds no sync token, and
+//! captures nothing.
 
-mod common;
+use crate::common;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -84,7 +85,7 @@ fn config(data_dir: &Path, ocr: OcrSetting) -> Config {
 /// starts the switch several times in one process and checks the classic
 /// OCR path: under ocr-v1 a refused off loads no process-wide reader, so the
 /// reader the later granted start loads is the one that reads. The new
-/// reader's version of that test is `tests/ocr_switch_new_reader.rs`.
+/// reader's version of that test is `tests/integration/ocr_switch_new_reader.rs`.
 fn config_ocr_v1(data_dir: &Path, ocr: OcrSetting) -> Config {
     Config {
         reader: ReaderSetting::OcrV1,
@@ -94,6 +95,12 @@ fn config_ocr_v1(data_dir: &Path, ocr: OcrSetting) -> Config {
 
 #[test]
 fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
+    if !common::own_process(
+        module_path!(),
+        "with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts",
+    ) {
+        return;
+    }
     assert_eq!(
         gate::mode(),
         gate::OcrMode::On,
@@ -179,7 +186,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
         };
         assert_eq!(b.count, calls, "{}", b.site);
         assert!(
-            b.site.file.ends_with("tests/ocr_switch.rs"),
+            b.site.file.ends_with("tests/integration/ocr_switch.rs"),
             "a call is counted where it was made, not inside ocr: {}",
             b.site
         );
@@ -202,7 +209,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
     ));
     let held: Vec<_> = gate::blocked_calls()
         .into_iter()
-        .filter(|b| !b.site.file.ends_with("tests/ocr_switch.rs"))
+        .filter(|b| !b.site.file.ends_with("tests/integration/ocr_switch.rs"))
         .collect();
     let in_file = |name: &str| -> u64 {
         held.iter()
@@ -213,7 +220,7 @@ fn with_ocr_off_every_entry_is_blocked_and_nothing_of_tesseract_starts() {
     // The result word (accolade and rank screen) and the accolade map each
     // reach the gate while this build needs OCR for them. Once a read is
     // marked as done without OCR its call must be gone: that direction is
-    // tests/ocr_flags.rs, per read.
+    // tests/integration/ocr_flags.rs, per read.
     let still_ocr = [(Read::ResultWord, 2), (Read::AccoladeMap, 1)]
         .into_iter()
         .filter(|(read, _)| !read.without_ocr())

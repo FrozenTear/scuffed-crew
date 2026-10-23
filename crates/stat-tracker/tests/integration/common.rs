@@ -1,5 +1,6 @@
-//! Starting the real daemon binary from a test without ever leaving one
-//! behind.
+//! Helpers shared by the modules of the integration test binary.
+//!
+//! # Starting the real daemon binary from a test without ever leaving one behind
 //!
 //! A daemon that outlives its test is a live tracker: it reads `/dev/input`,
 //! and it keeps every file descriptor it was handed, including a build
@@ -14,8 +15,9 @@
 //! - Every descriptor from 3 up is marked close-on-exec in the child, so
 //!   the daemon holds nothing it inherited by accident.
 
+use std::io::{Read as _, Seek as _};
 use std::os::unix::process::CommandExt;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 
 /// A started daemon. Dropping it kills the process and waits for it.
 pub struct Daemon {
@@ -90,4 +92,79 @@ unsafe fn close_inherited_fds_on_exec() {
         // with EBADF and changes nothing.
         unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     }
+}
+
+// ── a test in a process of its own ──────────────────────────────────────────
+
+/// Set in the process [`own_process`] starts, to the one test it runs.
+const OWN_PROCESS: &str = "SCUFFED_IT_OWN_PROCESS";
+
+/// The name libtest gives `function` in the module `module_path` (the
+/// caller's `module_path!()`): the path without this binary's crate name,
+/// as `--exact` takes it.
+pub fn test_name(module_path: &str, function: &str) -> String {
+    match module_path.split_once("::") {
+        Some((_, module)) => format!("{module}::{function}"),
+        None => function.to_string(),
+    }
+}
+
+/// Run the calling test alone in a fresh process of this test binary.
+///
+/// All integration tests share one binary, and libtest runs them on
+/// threads of one process. A test that sets process-wide state (the OCR
+/// mode, the process-wide reader, an environment variable) or reads a
+/// process-wide counter needs the process to itself, as it had when it was
+/// a test binary of its own. Call this first, with `module_path!()` and the
+/// test's own function name:
+///
+/// ```ignore
+/// #[test]
+/// fn a_test() {
+///     if !common::own_process(module_path!(), "a_test") {
+///         return;
+///     }
+///     // the test, alone in its process
+/// }
+/// ```
+///
+/// In the test binary it starts this binary again with only that test
+/// (`--exact`, one thread), waits, and fails with the child's output if the
+/// child failed or did not run exactly one test; then it returns `false`.
+/// In the child it returns `true`. The child is started like a daemon
+/// ([`spawn_daemon`]), so it dies with the test that started it.
+pub fn own_process(module_path: &str, function: &str) -> bool {
+    let name = test_name(module_path, function);
+    if let Some(running) = std::env::var_os(OWN_PROCESS) {
+        assert_eq!(
+            running.to_str(),
+            Some(name.as_str()),
+            "a process of its own runs one test"
+        );
+        return true;
+    }
+    // One file for both streams, so the output keeps its order.
+    let mut log = tempfile::tempfile().expect("a log file");
+    let mut cmd = Command::new(std::env::current_exe().expect("this test binary"));
+    cmd.args(["--exact", &name, "--test-threads=1", "--nocapture"])
+        .env(OWN_PROCESS, &name)
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().expect("log"))
+        .stderr(log.try_clone().expect("log"));
+    let mut child = spawn_daemon(cmd);
+    let status = child.child.wait().expect("wait for the test's process");
+    let mut out = String::new();
+    log.rewind().expect("rewind the log");
+    log.read_to_string(&mut out).expect("read the log");
+    assert!(
+        status.success(),
+        "{name} failed in its own process ({status}):\n{out}"
+    );
+    assert!(
+        out.contains("test result: ok. 1 passed;"),
+        "{name} did not run exactly one test in its own process:\n{out}"
+    );
+    // Shown with the parent's output: captured unless --nocapture.
+    print!("{out}");
+    false
 }

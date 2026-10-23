@@ -2,7 +2,9 @@
 //! in a process of its own: the switch installs the process-wide reader and
 //! shuts the process-wide gate, and nothing of Tesseract starts while the
 //! new reader reads. The ocr-v1 version is the gate test in
-//! `tests/ocr_switch.rs`.
+//! `tests/integration/ocr_switch.rs`.
+
+use crate::common;
 
 use std::path::Path;
 
@@ -37,7 +39,7 @@ fn save_png(path: &Path, img: &GrayImage) {
     img.save(path).unwrap();
 }
 
-/// The same synthetic packs as `tests/ocr_switch.rs` writes for a granted off.
+/// The same synthetic packs as `tests/integration/ocr_switch.rs` writes for a granted off.
 fn packs(data_dir: &Path) {
     let heroes = data_dir.join("templates").join("heroes");
     save_png(&heroes.join("ana.png"), &blocks(64, 64, 8, 0));
@@ -127,6 +129,12 @@ fn nothing_of_tesseract_started(when: &str) {
 
 #[test]
 fn with_ocr_off_the_new_reader_starts_nothing_of_tesseract() {
+    if !common::own_process(
+        module_path!(),
+        "with_ocr_off_the_new_reader_starts_nothing_of_tesseract",
+    ) {
+        return;
+    }
     assert_eq!(
         gate::mode(),
         gate::OcrMode::On,

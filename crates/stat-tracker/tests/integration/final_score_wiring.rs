@@ -3,6 +3,8 @@
 //! data dir in `SCUFFED_TEMPLATE_DIR`. Synthetic templates, not game art. One
 //! test per process, so the reader is set up exactly once, here.
 
+use crate::common;
+
 use image::{GrayImage, Luma, Rgb, RgbImage};
 use stat_tracker::shadow::reader::TEMPLATE_DIR_ENV;
 use stat_tracker::shadow::result::{FinalScoreRead, WORDS_SUBDIR};
@@ -18,6 +20,12 @@ fn bars(seed: u32, w: u32, h: u32) -> GrayImage {
 
 #[test]
 fn the_process_wide_reader_reads_the_final_score_line() {
+    if !common::own_process(
+        module_path!(),
+        "the_process_wide_reader_reads_the_final_score_line",
+    ) {
+        return;
+    }
     let data = tempfile::tempdir().unwrap();
     let words = data.path().join(WORDS_SUBDIR);
     std::fs::create_dir_all(&words).unwrap();
@@ -29,8 +37,9 @@ fn the_process_wide_reader_reads_the_final_score_line() {
         .unwrap();
     let line = bars(4, 123, 28);
     line.save(words.join("p4_final_score.png")).unwrap();
-    // SAFETY: this is the only test in this binary; nothing else reads the
-    // environment concurrently.
+    // SAFETY: this test runs alone in a process of its own
+    // (`common::own_process`); nothing else reads the environment
+    // concurrently.
     unsafe { std::env::set_var(TEMPLATE_DIR_ENV, data.path()) };
 
     // the line, painted at the 1440p frame's FINAL SCORE position

@@ -4,7 +4,7 @@ Drop native-resolution scoreboard screenshots here to validate the capture
 pipeline. Files are gitignored (copyrighted game captures, do not commit).
 
 `real-cells/` is the exception: name-free single stat cells, tracked, and
-read by `tests/real_dim_zero_cells.rs`. Full scoreboard frames stay gitignored.
+read by `tests/integration/real_dim_zero_cells.rs`. Full scoreboard frames stay gitignored.
 
 Run the extraction pipeline against any image:
 
@@ -22,7 +22,7 @@ Optional end-reel / POTG nameplate replay (not committed):
 - `end-reel/known-potg-003708.png`: 2560×1440 Play of the Game title card
   that misses the letterbox and cinematic-title-band gates. Local copy of
   the frame used to add the nameplate wake path. The skip-if-missing test
-  is `tests/end_reel_fixtures.rs`.
+  is `tests/integration/end_reel_fixtures.rs`.
 
 Most useful frames to capture:
 - A native-res (1080p+) **post-match scoreboard** in default blue/red colors.
