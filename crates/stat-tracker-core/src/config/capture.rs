@@ -54,8 +54,16 @@ impl<'de> Deserialize<'de> for CaptureRoute {
     {
         let raw = String::deserialize(deserializer)?;
         Ok(Self::parse(&raw).unwrap_or_else(|| {
+            // A short word is a typo worth showing. Anything longer may be a
+            // token pasted into the wrong key, so it stays out of the log.
+            let shown =
+                if raw.len() <= 16 && raw.chars().all(|c| c.is_ascii_alphabetic() || c == '-') {
+                    raw.as_str()
+                } else {
+                    "(value hidden)"
+                };
             tracing::warn!(
-                capture_route = %raw,
+                capture_route = %shown,
                 "unknown capture_route; using auto"
             );
             Self::Auto

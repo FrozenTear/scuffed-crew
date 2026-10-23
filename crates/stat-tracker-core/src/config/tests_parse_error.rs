@@ -212,3 +212,114 @@ fn redaction_leaves_other_values_alone() {
     // A very short value is not replaced; it would blank ordinary letters.
     assert_eq!(redact_secrets("token = \"ab\"", "about"), "about");
 }
+
+/// A 64-hex token, the shape the site hands out.
+const HEX_TOKEN: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
+
+/// A token pasted under a key that is not a secret key and wants another
+/// type: serde quotes the whole string in its type error.
+#[test]
+fn a_token_under_any_key_is_redacted_from_type_errors() {
+    for (line, expected) in [
+        (
+            format!("sync = \"{HEX_TOKEN}\""),
+            "invalid type: string \"[redacted]\", expected a [sync] table with server_url and token",
+        ),
+        (
+            format!("debug_ocr = \"{HEX_TOKEN}\""),
+            "invalid type: string \"[redacted]\", expected a boolean",
+        ),
+        (
+            format!("session_window_secs = \"{HEX_TOKEN}\""),
+            "invalid type: string \"[redacted]\", expected u64",
+        ),
+        (
+            format!("[auto_detect]\nenabled = \"{HEX_TOKEN}\""),
+            "invalid type: string \"[redacted]\", expected a boolean",
+        ),
+        (
+            format!("ocr = \"{HEX_TOKEN}\""),
+            "ocr must be \"on\" or \"off\"",
+        ),
+    ] {
+        let text = format!("data_dir = \"/tmp/sst-parse-error\"\n{line}\n");
+        let err = Config::parse_file_contents(&text).expect_err(&line);
+        let forms = shown_forms(err.as_ref());
+        for form in &forms {
+            assert!(!form.contains(HEX_TOKEN), "{line}: {form}");
+            assert!(!form.contains("9f86d0"), "{line}: {form}");
+        }
+        assert!(forms[0].contains(expected), "{line}: {}", forms[0]);
+
+        let err = Config::text_for_save(Some(&text), &Config::default()).expect_err(&line);
+        for form in shown_forms(err.as_ref()) {
+            assert!(!form.contains(HEX_TOKEN), "{line}: {form}");
+        }
+    }
+}
+
+#[test]
+fn an_unknown_variant_is_redacted() {
+    #[derive(Debug, serde::Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    #[allow(dead_code)]
+    enum Mode {
+        Auto,
+        Manual,
+    }
+    #[derive(Debug, serde::Deserialize)]
+    #[allow(dead_code)]
+    struct Probe {
+        mode: Mode,
+    }
+    let text = format!("mode = \"{HEX_TOKEN}\"\n");
+    let err = toml::from_str::<Probe>(&text).expect_err("unknown variant");
+    assert!(
+        err.message().contains(HEX_TOKEN),
+        "fixture: serde quotes it"
+    );
+    let shown = super::parse_error::describe(&text, &err);
+    assert!(!shown.contains(HEX_TOKEN), "{shown}");
+    assert!(
+        shown.contains("unknown variant `[redacted]`, expected `auto` or `manual`"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn quoted_payloads_are_blanked_and_the_wording_kept() {
+    use super::parse_error::redact_quoted_values;
+    for (raw, shown) in [
+        (
+            "invalid type: string \"abc\\\"def\", expected a boolean",
+            "invalid type: string \"[redacted]\", expected a boolean",
+        ),
+        (
+            "unknown variant `abc`, expected one of `on`, `off`",
+            "unknown variant `[redacted]`, expected one of `on`, `off`",
+        ),
+        (
+            "invalid value: integer `98765`, expected u32",
+            "invalid value: integer `[redacted]`, expected u32",
+        ),
+        (
+            "invalid type: floating point `1.5`, expected u64",
+            "invalid type: floating point `[redacted]`, expected u64",
+        ),
+        (
+            "invalid type: char 'x', expected u64",
+            "invalid type: char '[redacted]', expected u64",
+        ),
+        (
+            "invalid type: string \"unterminated",
+            "invalid type: string \"[redacted]",
+        ),
+        ("missing field `server_url`", "missing field `server_url`"),
+        (
+            "ocr must be \"on\" or \"off\"",
+            "ocr must be \"on\" or \"off\"",
+        ),
+    ] {
+        assert_eq!(redact_quoted_values(raw), shown, "{raw}");
+    }
+}

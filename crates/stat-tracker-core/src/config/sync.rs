@@ -12,7 +12,9 @@ pub struct SyncConfig {
 }
 
 /// `[sync]` as written in config.toml, before the "no token means off" rule.
+/// `expecting` names the table in errors instead of this type.
 #[derive(Deserialize)]
+#[serde(expecting = "a [sync] table with server_url and token")]
 struct StoredSync {
     server_url: Option<String>,
     token: Option<String>,

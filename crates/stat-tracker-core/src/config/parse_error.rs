@@ -54,7 +54,57 @@ pub(super) fn describe(source: &str, err: &impl TomlFailure) -> String {
         }
         None => err.message().trim().to_string(),
     };
-    redact_secrets(source, &text)
+    redact_secrets(source, &redact_quoted_values(&text))
+}
+
+/// Where serde quotes the value it rejected, with the closing delimiter:
+/// `invalid type: string "…"`, `unknown variant `…``, and the number and
+/// char forms. A token pasted under any key (`sync = "<token>"`,
+/// `debug_ocr = "<token>"`) comes back this way, whatever the key is called,
+/// so these payloads are blanked without looking at the key. The type and
+/// field wording around them stays.
+const QUOTED_VALUE_MARKERS: [(&str, char); 6] = [
+    ("string \"", '"'),
+    ("variant `", '`'),
+    ("integer `", '`'),
+    ("floating point `", '`'),
+    ("char '", '\''),
+    ("bytes \"", '"'),
+];
+
+/// `text` with every payload after a [`QUOTED_VALUE_MARKERS`] marker
+/// replaced by [`REDACTED`]. A backslash escapes the next character (serde
+/// writes strings with `{:?}`), and a payload with no closing delimiter
+/// runs to the end of the text.
+pub(super) fn redact_quoted_values(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'scan: while !rest.is_empty() {
+        let next = QUOTED_VALUE_MARKERS
+            .iter()
+            .filter_map(|(marker, close)| rest.find(marker).map(|at| (at, *marker, *close)))
+            .min_by_key(|(at, marker, _)| (*at, std::cmp::Reverse(marker.len())));
+        let Some((at, marker, close)) = next else {
+            break;
+        };
+        let body_start = at + marker.len();
+        out.push_str(&rest[..body_start]);
+        let body = &rest[body_start..];
+        let mut chars = body.char_indices();
+        while let Some((i, c)) = chars.next() {
+            if c == '\\' {
+                chars.next();
+            } else if c == close {
+                out.push_str(REDACTED);
+                rest = &body[i..];
+                continue 'scan;
+            }
+        }
+        out.push_str(REDACTED);
+        rest = "";
+    }
+    out.push_str(rest);
+    out
 }
 
 /// 1-based line and column (in characters) of byte `index` in `source`.
@@ -135,6 +185,12 @@ fn key_before(before: &str) -> &str {
 
 /// The value written after an `=`, as raw text, plus its unescaped form
 /// for a basic string. An unterminated string runs to the end of the line.
+///
+/// The unescaping is rough (`\u0041` comes out as `u0041`, `\t` as `t`), and
+/// a `"""` value that starts on the next line is not found. Neither matters
+/// for the site's tokens, which are 64 hex characters, and serde's quoted
+/// payloads are blanked by [`redact_quoted_values`] whatever this finds. Do
+/// not rely on this function for values with escapes.
 fn value_after(after: &str) -> Vec<String> {
     let rest = after.trim_start();
     let mut out = Vec::new();
