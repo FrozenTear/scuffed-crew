@@ -3008,3 +3008,6 @@ cooldown_secs = 120
         assert_eq!(kwin.capture_route, CaptureRoute::Kwin);
     }
 }
+
+#[cfg(test)]
+mod tests_pins;
