@@ -1,6 +1,6 @@
 use image::DynamicImage;
 use serde::Deserialize;
-use stat_tracker::detect::hero_portrait::detect_team_size;
+use stat_tracker::frame::layout::detect_team_size;
 use stat_tracker::ocr;
 use stat_tracker::ocr::preprocess;
 

@@ -20,11 +20,11 @@ use super::store::{
 /// title next to their name.
 pub fn rank_outcome_allowed(
     source: Option<crate::detect::match_end::OutcomeSource>,
-    preflight: crate::detect::hero_portrait::ScoreboardPreflight,
+    preflight: crate::frame::layout::ScoreboardPreflight,
     rows_look_like_scoreboard: bool,
 ) -> bool {
     source == Some(crate::detect::match_end::OutcomeSource::RankScreen)
-        && preflight == crate::detect::hero_portrait::ScoreboardPreflight::NotAScoreboard
+        && preflight == crate::frame::layout::ScoreboardPreflight::NotAScoreboard
         && !rows_look_like_scoreboard
 }
 
@@ -38,7 +38,7 @@ pub fn rank_outcome_png(
         return None;
     }
     let board = crate::ocr::preprocess::crop_scoreboard(frame);
-    let (preflight, scan) = crate::detect::hero_portrait::preflight_scoreboard(&board);
+    let (preflight, scan) = crate::frame::layout::preflight_scoreboard(&board);
     if !rank_outcome_allowed(source, preflight, scan.looks_like_scoreboard()) {
         return None;
     }

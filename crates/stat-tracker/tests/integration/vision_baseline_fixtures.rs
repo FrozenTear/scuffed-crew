@@ -9,7 +9,7 @@
 //!    slot off.
 
 use image::DynamicImage;
-use stat_tracker::detect::hero_portrait::RowScan;
+use stat_tracker::frame::layout::RowScan;
 use stat_tracker::ocr::{self, preprocess};
 
 fn fixture(name: &str) -> DynamicImage {

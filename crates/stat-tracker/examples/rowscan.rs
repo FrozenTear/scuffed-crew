@@ -2,7 +2,7 @@
 //! behind team-size detection and the scoreboard preflight.
 //! Usage: cargo run -p scuffed-stat-tracker --example rowscan -- <img.png>...
 
-use stat_tracker::detect::hero_portrait::scan_rows;
+use stat_tracker::frame::layout::scan_rows;
 use stat_tracker::ocr::preprocess::crop_scoreboard;
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {

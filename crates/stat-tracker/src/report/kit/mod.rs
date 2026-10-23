@@ -748,8 +748,8 @@ mod tests {
 
     #[test]
     fn a_scoreboard_never_gives_an_outcome_crop_even_when_rank_screen_fired() {
-        use crate::detect::hero_portrait::ScoreboardPreflight as P;
         use crate::detect::match_end::OutcomeSource as S;
+        use crate::frame::layout::ScoreboardPreflight as P;
         // R235-2: a Tab-held board whose title contains DRAW fires RankScreen.
         for pre in [P::Ready(5), P::Ready(6), P::TeamSizeUncertain] {
             for rows in [false, true] {
@@ -797,8 +797,8 @@ mod tests {
                 continue;
             };
             let board = crate::ocr::preprocess::crop_scoreboard(&img);
-            let (pre, scan) = crate::detect::hero_portrait::preflight_scoreboard(&board);
-            let is_board = pre != crate::detect::hero_portrait::ScoreboardPreflight::NotAScoreboard
+            let (pre, scan) = crate::frame::layout::preflight_scoreboard(&board);
+            let is_board = pre != crate::frame::layout::ScoreboardPreflight::NotAScoreboard
                 || scan.looks_like_scoreboard();
             let real = crate::detect::match_end::detect_outcome_signal(&img).map(|(_, s)| s);
             let forced = rank_outcome_png(Some(OutcomeSource::RankScreen), &img);

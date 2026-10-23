@@ -6,8 +6,9 @@ use super::state::{
     PORTAL_PATH, PORTAL_STATE, ROUTE_NOTICE, SHOT_ROUTE, STREAM_FORCED, STREAM_ROUTE,
     daemon_share_is_open, prefs, route_flags,
 };
+use super::stream::portal_backend;
 use super::types::{CaptureBackend, PortalState, ShotRoute, perf_backend_label};
-use super::{kwin, portal, portal_backend, route, wayshot, x11};
+use super::{kwin, portal, route, wayshot, x11};
 
 pub async fn detect_backend() -> CaptureBackend {
     // STAT_TRACKER_CAPTURE override (R1-3, fail-closed). A non-empty value

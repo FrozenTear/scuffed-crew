@@ -48,6 +48,8 @@ pub const TRIP_FAILED_PAUSED: &str = "the stream ended within 2 s of a pause the
 /// ([`state_is_core_fault`], so a PipeWire restart) and a closed portal
 /// session (on KDE a stopped share or an output change ends the KWin
 /// stream and xdg-desktop-portal-kde closes the session).
+///
+/// [`state_is_core_fault`]: super::state_is_core_fault
 pub const FAILED_AFTER_PAUSE_WINDOW: Duration = Duration::from_secs(2);
 
 /// The one warning a trip logs. A stream that ended right after a pause

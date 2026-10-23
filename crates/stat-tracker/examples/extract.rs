@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use stat_tracker::{detect, ocr, parse};
+use stat_tracker::{detect, frame, ocr, parse};
 
 fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     // --- mirror handle_capture's blocking section ---
     let scoreboard = ocr::preprocess::crop_scoreboard(&img);
-    let detected_team = detect::hero_portrait::detect_team_size(&scoreboard);
+    let detected_team = frame::layout::detect_team_size(&scoreboard);
     let team_size = team_override.unwrap_or(detected_team);
     println!("detected team size: {detected_team} (using: {team_size})");
 
@@ -52,7 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         None => println!("portrait: no highlighted player row matched"),
     }
-    let brightness_row_idx = detect::hero_portrait::resolve_player_row(
+    let brightness_row_idx = frame::layout::resolve_player_row(
         player_match.as_ref().map(|(_, _, idx)| *idx),
         &scoreboard,
         team_size,
@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // from dedicated regions outside the scoreboard crop.
     let career_raw =
         ocr::recognize_region(&ocr::preprocess::crop_career_hero(&img)).unwrap_or_default();
-    let (preflight, _) = detect::hero_portrait::preflight_scoreboard(&scoreboard);
+    let (preflight, _) = frame::layout::preflight_scoreboard(&scoreboard);
     let map_raw = ocr::recognize_map_label(&img, preflight);
     println!(
         "career hero: raw={:?} -> {:?}",

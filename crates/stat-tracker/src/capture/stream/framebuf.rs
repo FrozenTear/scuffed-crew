@@ -6,7 +6,7 @@
 
 use image::{DynamicImage, RgbImage};
 
-use super::tab::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, TAB_OVERLAY_AFTER_PRESS_MS};
+use crate::capture::tab::{TAB_GRAB_TIMEOUT_AFTER_PRESS_MS, TAB_OVERLAY_AFTER_PRESS_MS};
 
 /// What the stream thread does with one delivered buffer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
