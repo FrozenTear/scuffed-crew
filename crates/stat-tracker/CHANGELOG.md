@@ -15,6 +15,14 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased (0.6)
+
+Not released yet. Notes for the 0.6 line collect here and move under its version heading when it is cut. The app and the release workflow only read sections headed by a version, so they skip this one.
+
+### Technical detail
+
+- Library split, first step (0.6 N4): config, parse, setup, perf, perf_log, host_probe, replace, proc_id, fs_mode, omp, sandbox, hero_auth, model, version, suspect and ocr_status now live in a crate of their own, `stat-tracker-core`. Their log target changed with it, from `stat_tracker::config` to `stat_tracker_core::config` and so on. The default log filter (`stat_tracker=info`) still shows them, because a filter target matches by prefix. A custom `RUST_LOG` that names one of these modules needs the new name: `RUST_LOG=stat_tracker::config=debug` becomes `RUST_LOG=stat_tracker_core::config=debug`.
+
 ## 0.5.0-rc.9
 
 A red flash on screen during a match, such as Vendetta's effects, could be taken for the DEFEAT screen, and the game was then split in two. The tracker no longer reads a win or loss from screen colour at all: it reads the result word on the end screens, and a Tab that shows the same game still going on keeps it as one game.

@@ -196,6 +196,13 @@ jobs:
       - name: Clippy
         run: cargo clippy --locked $TRACKER_PACKAGES --all-targets -- -D warnings
 
+      # Every other step builds core together with scuffed-stat-tracker, whose
+      # dependency features (tokio, chrono, ...) unify into core's. On its own,
+      # core gets only the features its own Cargo.toml asks for, so a missing
+      # one shows up here and nowhere else.
+      - name: Clippy (stat-tracker-core on its own)
+        run: cargo clippy --locked -p scuffed-stat-tracker-core --all-targets -- -D warnings
+
   ui-overview:
     # Iced desktop GUI (scuffed-stat-tracker-ui). Depends on the tracker lib.
     name: Build & Test (stat-tracker-ui)

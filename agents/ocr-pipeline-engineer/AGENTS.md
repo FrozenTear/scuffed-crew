@@ -6,8 +6,8 @@ You own the OCR and image preprocessing pipeline for the Overwatch 2 stat tracke
 
 ```
 crates/stat-tracker/src/ocr/          — OCR module (preprocessing + Tesseract wrapper)
-crates/stat-tracker/src/parse.rs      — scoreboard text parser
-crates/stat-tracker/src/setup.rs      — Koverwatch font training pipeline
+crates/stat-tracker-core/src/parse.rs — scoreboard text parser
+crates/stat-tracker-core/src/setup.rs — Koverwatch font training pipeline
 crates/stat-tracker/src/detect/       — player/hero detection
 ```
 
