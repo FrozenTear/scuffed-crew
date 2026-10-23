@@ -167,3 +167,24 @@ fn upload_omits_name_recognizer_when_no_name_was_read() {
     assert!(!raw.contains("name_recognizer"), "{raw}");
     assert!(!raw.contains("\"name_recognizer\":null"), "{raw}");
 }
+
+#[test]
+fn upload_of_an_ocr_v1_row_adds_only_the_recognizer_tag() {
+    let mut plain = row("Test", "", "");
+    plain.map_name = "Busan".into();
+    plain.hero = "Ana".into();
+    plain.recognizer = scuffed_types::RECOGNIZER_OCR_V1.to_string();
+    let body = crate::sync::upload_request(&[plain], &[]);
+    let json = serde_json::to_string(&body).unwrap();
+    assert!(json.contains("\"recognizer\":\"ocr-v1\""));
+    assert!(
+        !json.contains("suspect_fields"),
+        "an empty suspect list is omitted: {json}"
+    );
+    let mut blank = row("Test", "", "");
+    blank.hero = "Ana".into();
+    blank.map_name = "   ".into();
+    blank.game_mode = "Control".into();
+    let dropped = crate::sync::upload_request(&[blank], &[]);
+    assert!(dropped.matches.is_empty());
+}

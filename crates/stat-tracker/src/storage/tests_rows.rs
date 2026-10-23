@@ -305,24 +305,3 @@ async fn name_recognizer_survives_restart_and_is_resent() {
         "a resend still sends the stored recognizer"
     );
 }
-
-#[test]
-fn upload_of_an_ocr_v1_row_adds_only_the_recognizer_tag() {
-    let mut row = snap("plain", 1);
-    row.map_name = "Busan".into();
-    row.hero = "Ana".into();
-    row.recognizer = scuffed_types::RECOGNIZER_OCR_V1.to_string();
-    let body = crate::sync::upload_request(&[row], &[]);
-    let json = serde_json::to_string(&body).unwrap();
-    assert!(json.contains("\"recognizer\":\"ocr-v1\""));
-    assert!(
-        !json.contains("suspect_fields"),
-        "an empty suspect list is omitted: {json}"
-    );
-    let mut blank = snap("blank", 1);
-    blank.hero = "Ana".into();
-    blank.map_name = "   ".into();
-    blank.game_mode = "Control".into();
-    let dropped = crate::sync::upload_request(&[blank], &[]);
-    assert!(dropped.matches.is_empty());
-}
