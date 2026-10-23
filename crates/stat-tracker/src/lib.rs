@@ -30,3 +30,7 @@ pub mod suspect;
 pub mod sync;
 pub mod tab_retry;
 pub mod version;
+
+/// Pins the layering of the coming lib split (0.6 N4).
+#[cfg(test)]
+mod tests_layering;
