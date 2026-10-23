@@ -470,7 +470,9 @@ fn proton_from_path(arg: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::host_probe::{GroupCpu, HostCpu};
-    use crate::perf::{PortalStats, StageStats, StreamBuffer, StreamCap, StreamStats, X11Stats};
+    use crate::perf::summary::{
+        PortalStats, StageStats, StreamBuffer, StreamCap, StreamStats, X11Stats,
+    };
 
     fn summary(x11: Option<X11Stats>) -> Summary {
         Summary {

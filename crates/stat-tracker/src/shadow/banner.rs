@@ -160,7 +160,7 @@ pub const MAPS: &[MapInfo] = &[
     },
     // Not an OverFast map: the Halloween event's label for Eichenwalde
     // (Junkenstein's Revenge and its variants are played there). ocr-v1
-    // stores it as Eichenwalde (`parse::MAPS`), so `name` is that name. It
+    // stores it as Eichenwalde (`parse::catalog::MAPS`), so `name` is that name. It
     // has its own entry, not a second spelling of `eichenwalde`, so that
     // (a) a banner between the two names is flagged by the margin instead
     // of named, and (b) the read says which label it saw: the capture

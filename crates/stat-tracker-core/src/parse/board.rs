@@ -298,9 +298,10 @@ pub const MAX_ASSISTS: u32 = scuffed_types::PLAUSIBLE_ASSISTS_MAX;
 pub const MAX_DEATHS: u32 = scuffed_types::PLAUSIBLE_DEATHS_MAX;
 
 /// E/A above [`MAX_ELIMS`] / [`MAX_ASSISTS`] or D above [`MAX_DEATHS`] is a
-/// column bleed, not a real scoreboard. Shared with the text fallback and
-/// the capture gate's first-capture check.
-pub(crate) fn kill_columns_implausible(elims: u32, assists: u32, deaths: u32) -> bool {
+/// column bleed, not a real scoreboard. Used by the per-cell row check and
+/// the text fallback; the capture gate's first-capture check compares with
+/// the same `MAX_*` ceilings.
+fn kill_columns_implausible(elims: u32, assists: u32, deaths: u32) -> bool {
     elims > MAX_ELIMS || assists > MAX_ASSISTS || deaths > MAX_DEATHS
 }
 

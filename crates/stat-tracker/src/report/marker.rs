@@ -474,13 +474,25 @@ mod tests {
             .expect("sleep binary")
     }
 
-    /// Spawn a just-copied binary. Another test thread's fork can still hold
-    /// the copy's write fd until its own exec, which fails this exec with
-    /// ETXTBSY ("Text file busy"); retry until that fd is gone.
+    /// Spawn a just-copied `sleep 30`. Another test thread's fork can still
+    /// hold the copy's write fd until its own exec, which fails this exec
+    /// with ETXTBSY ("Text file busy"); retry until that fd is gone.
+    ///
+    /// argv[0] is `sleep`, not the copy's name: on a multicall coreutils
+    /// (uutils, as on some ubuntu-26.04 CI runners) `sleep` is one binary
+    /// that dispatches on argv[0], and under the tracker's name it prints
+    /// "unknown program" and exits at once. The liveness check reads
+    /// `/proc/<pid>/exe` (the copy's path), not argv[0], so this does not
+    /// change what the tests check.
     fn spawn_retrying_busy(bin: &Path) -> std::process::Child {
+        use std::os::unix::process::CommandExt;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
-            match std::process::Command::new(bin).arg("30").spawn() {
+            match std::process::Command::new(bin)
+                .arg0("sleep")
+                .arg("30")
+                .spawn()
+            {
                 Ok(child) => return child,
                 Err(e)
                     if e.kind() == std::io::ErrorKind::ExecutableFileBusy
@@ -657,14 +669,16 @@ mod tests {
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join(crate::proc_id::DAEMON_BIN);
         std::fs::copy(sleep_bin(), &fake).unwrap();
-        let child = Child(spawn_retrying_busy(&fake));
+        let mut child = Child(spawn_retrying_busy(&fake));
         let pid = child.0.id();
         // The child can still show the test binary in /proc for a moment.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !crate::proc_id::pid_is_live_tracker(pid) {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the fake tracker never showed as live"
+                "the fake tracker never showed as live: /proc exe {:?}, try_wait {:?}",
+                crate::proc_id::proc_exe(pid),
+                child.0.try_wait(),
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
