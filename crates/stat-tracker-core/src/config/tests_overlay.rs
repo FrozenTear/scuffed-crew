@@ -71,6 +71,43 @@ fn shadow_env_override_is_never_saved() {
         !load.contains(concat!("config.shadow_", "recognizer =")),
         "load() must not persist SCUFFED_SHADOW_RECOGNIZER into the config"
     );
+    // Across all of config's production files (config.rs and every
+    // non-test file in config/): the env var is read once, in
+    // `shadow_recognizer_control` (reader.rs), and the field is only ever
+    // copied from another config by the in-place editor, never set from
+    // the environment.
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = vec![src_dir.join("config.rs")];
+    for entry in std::fs::read_dir(src_dir.join("config")).expect("config/") {
+        let path = entry.expect("entry").path();
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if path.extension().is_some_and(|ext| ext == "rs") && !stem.starts_with("tests") {
+            files.push(path);
+        }
+    }
+    files.sort();
+    assert!(files.len() >= 8, "config's production files: {files:?}");
+    let env_read = concat!("var(\"SCUFFED_SHADOW_", "RECOGNIZER\")");
+    // `= ` with the space, so `==` comparisons do not count.
+    let field_set = concat!(".shadow_", "recognizer = ");
+    let mut reads = Vec::new();
+    for path in &files {
+        let src = std::fs::read_to_string(path).expect("read a config file");
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        reads.extend(src.matches(env_read).map(|_| name.clone()));
+        for line in src.lines().filter(|line| line.contains(field_set)) {
+            assert_eq!(
+                line.trim(),
+                concat!("same.shadow_", "recognizer = next.shadow_recognizer;"),
+                "{name} sets shadow_recognizer from something other than a config"
+            );
+        }
+    }
+    assert_eq!(
+        reads,
+        ["reader.rs"],
+        "SCUFFED_SHADOW_RECOGNIZER is read only by shadow_recognizer_control"
+    );
 }
 
 #[test]
