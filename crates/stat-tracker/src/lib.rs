@@ -10,6 +10,7 @@ pub mod boundary;
 pub mod capture;
 pub mod capture_gate;
 pub mod detect;
+pub mod frame;
 pub mod mapcrops;
 pub mod names;
 pub mod ocr;
