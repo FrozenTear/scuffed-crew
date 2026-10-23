@@ -357,7 +357,27 @@ git_q commit -q -m 'HOLD-MERGE: stat-tracker 7.7.7 (#2)'
 echo b > "$GITREPO/crates/stat-tracker/b.txt"
 git_q add -A
 git_q commit -q -m 'stat-tracker: fix a thing (HOLD-MERGE) (#3)'
+# A commit that touches only a crate split out of the tracker lib, one that
+# touches only the GUI, and one outside the tracker.
+mkdir -p "$GITREPO/crates/stat-tracker-core/src" "$GITREPO/crates/stat-tracker-ui/src" \
+  "$GITREPO/crates/site-server/src"
+echo c > "$GITREPO/crates/stat-tracker-core/src/c.rs"
+git_q add -A
+git_q commit -q -m 'stat-tracker-core: core-only change (#4)'
+echo u > "$GITREPO/crates/stat-tracker-ui/src/u.rs"
+git_q add -A
+git_q commit -q -m 'stat-tracker-ui: gui-only change (#5)'
+echo s > "$GITREPO/crates/site-server/src/s.rs"
+git_q add -A
+git_q commit -q -m 'site-server: not a tracker change (#6)'
 git_out="$(bash "$GITREPO/crates/stat-tracker/dist/release-notes.sh" --tag stat-tracker-v7.7.7)"
+printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker-core: core-only change (#4)' \
+  || fail "a commit touching only stat-tracker-core is missing: $git_out"
+printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker-ui: gui-only change (#5)' \
+  || fail "a commit touching only the GUI is missing: $git_out"
+printf '%s\n' "$git_out" | grep -qF 'site-server: not a tracker change' \
+  && fail "a commit outside the tracker crates is listed: $git_out"
+pass "commits since the previous tag cover every crates/stat-tracker* crate, and only those"
 printf '%s\n' "$git_out" | grep -qx '## Commits since v7.7.6' \
   || fail "git log path did not print a commit list: $git_out"
 printf '%s\n' "$git_out" | grep -qxF -- '- stat-tracker 7.7.7 (#2)' \
