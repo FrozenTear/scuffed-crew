@@ -27,25 +27,40 @@ the 0.5.x line are carried over by re-running, not by hand-merging.
 Usage (from anywhere):
 
   split-main-tests.py                 # split the working-tree main.rs in place
+                                      # (refuses if src/main_tests/ has files,
+                                      # unless --force)
   split-main-tests.py --check REV     # prove the working tree is the split of
                                       # REV:crates/stat-tracker/src/main.rs
-  split-main-tests.py --from FILE --tests-only
+  split-main-tests.py --check REV --tests-only
+                                      # the same for src/main_tests/ only, for a
+                                      # branch whose main.rs has diverged
+  split-main-tests.py --from FILE --tests-only --base REV
                                       # regenerate src/main_tests/ from FILE (an
-                                      # old-layout main.rs), main.rs untouched
+                                      # old-layout main.rs), main.rs untouched;
+                                      # refuses unless src/main_tests/ is exactly
+                                      # the split of REV's main.rs (--force to
+                                      # overwrite anyway)
 
 Bringing a newer main (old layout) into a branch that has the split:
 
   git merge origin/main               # main.rs: conflicts only where main
                                       # touched the test block
-  git show origin/main:crates/stat-tracker/src/main.rs > /tmp/main-new.rs
+  base=$(git merge-base HEAD MERGE_HEAD)   # while the merge is in progress
+  git show MERGE_HEAD:crates/stat-tracker/src/main.rs > /tmp/main-new.rs
   # resolve main.rs: keep every non-test hunk as git merged it, and keep the
   # `#[cfg(test)] mod main_tests;` side for the test block, then
-  crates/stat-tracker/scripts/split-main-tests.py --from /tmp/main-new.rs --tests-only
-  # If the branch's main.rs (outside the tests) equals main's, this also holds:
-  crates/stat-tracker/scripts/split-main-tests.py --check origin/main
+  crates/stat-tracker/scripts/split-main-tests.py --from /tmp/main-new.rs --tests-only --base "$base"
+  crates/stat-tracker/scripts/split-main-tests.py --check MERGE_HEAD --tests-only
 
-Regenerating overwrites src/main_tests/: test edits made only on the branch
-inside src/main_tests/ must be re-applied (or made on main first).
+The `--base` comparison is what keeps branch-only work safe: if anything in
+src/main_tests/ differs from the split of the merge base (a branch-only test,
+an edited expectation, a new area file), the script lists the files and stops.
+Re-apply that work after regenerating with --force, or land it on main first.
+
+A re-run needs a hand edit when: an anchor test of AREAS is renamed or
+removed, a new test sits before the first anchor, or main adds a site that a
+REWRITE covers (each REWRITE has a fixed count). The script aborts and says
+which in every case; it never guesses.
 
 `--check` re-runs the split in memory from the old main.rs at REV and
 verifies: (1) the new main.rs is byte-identical to the old one with the
@@ -77,16 +92,6 @@ REL_MAIN = "crates/stat-tracker/src/main.rs"
 OPEN_BLOCK = "#[cfg(test)]\nmod tests {\n"
 NEW_DECL = "#[cfg(test)]\nmod main_tests;\n"
 INDENT = "    "
-
-# ---------------------------------------------------------------------------
-# Areas. A test goes to the first area whose pattern matches its name
-# (`re.search`); a test no pattern matches goes to `misc`. Order matters.
-# A new test on main falls into an area by its name, so re-running the script
-# never needs a hand edit. Keep patterns broad; `--check` reports area sizes.
-# ---------------------------------------------------------------------------
-AREAS: list[tuple[str, str]] = []  # filled in below
-FALLBACK_AREA = "misc"
-
 
 # ---------------------------------------------------------------------------
 # Lexer: just enough Rust to know, for every character, whether it is code,
@@ -412,8 +417,13 @@ def assign_areas(items: list[Item]) -> None:
         if anchor not in names:
             raise SystemExit(f"anchor test `{anchor}` of area `{area}` is gone; update AREAS")
         starts.append(names.index(anchor))
-    if starts != sorted(starts) or starts[0] != 0:
-        raise SystemExit("AREAS anchors are out of order or the first is not the first test")
+    if starts[0] != 0:
+        raise SystemExit(
+            f"test `{names[0]}` comes before `{AREAS[0][1]}`, the anchor of the first "
+            f"area `{AREAS[0][0]}`; make it that area's anchor in AREAS"
+        )
+    if starts != sorted(starts):
+        raise SystemExit("AREAS anchors are no longer in block order; reorder AREAS")
     k = 0
     for idx, t in enumerate(tests):
         while k + 1 < len(starts) and idx >= starts[k + 1]:
@@ -611,10 +621,51 @@ def summary(files: dict[str, str], items: list[Item], report: list[str]) -> str:
     return "\n".join(lines)
 
 
-def do_split(source: Path | None, tests_only: bool) -> None:
+def read_rev(rev: str) -> str:
+    r = subprocess.run(
+        ["git", "-C", str(REPO), "show", f"{rev}:{REL_MAIN}"],
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        raise SystemExit(f"git show {rev}:{REL_MAIN} failed: {r.stderr.strip()}")
+    return r.stdout
+
+
+def on_disk_tests() -> dict[str, str]:
+    return {f.name: f.read_text() for f in sorted(OUT_DIR.glob("*"))} if OUT_DIR.exists() else {}
+
+
+def differing(expected: dict[str, str], actual: dict[str, str]) -> list[str]:
+    out = []
+    for name in sorted(set(expected) | set(actual)):
+        if name not in actual:
+            out.append(f"{name} (missing on disk)")
+        elif name not in expected:
+            out.append(f"{name} (only on disk)")
+        elif expected[name] != actual[name]:
+            out.append(f"{name} (edited)")
+    return out
+
+
+def do_split(source: Path | None, tests_only: bool, base: str | None, force: bool) -> None:
     old = (source or MAIN_RS).read_text()
     new_main, files, items, report = generate(old)
     files = rustfmt(files)
+    current = on_disk_tests()
+    if tests_only and base is None and not force:
+        raise SystemExit("--tests-only needs --base REV (the merge base) so branch-only "
+                         "work in src/main_tests/ is not overwritten; or pass --force")
+    if base is not None:
+        _, base_raw, _, _ = generate(read_rev(base))
+        changed = differing(rustfmt(base_raw), current)
+        if changed and not force:
+            raise SystemExit(
+                f"src/main_tests/ is not the split of {base}'s main.rs; these would be "
+                "lost:\n  " + "\n  ".join(changed)
+                + "\nRe-apply them after regenerating with --force, or land them on main first."
+            )
+    elif current and not force:
+        raise SystemExit("src/main_tests/ already has files; pass --base REV or --force")
     OUT_DIR.mkdir(exist_ok=True)
     for f in OUT_DIR.glob("*.rs"):
         f.unlink()
@@ -663,17 +714,19 @@ def fmt_token_changes(before: str, after: str) -> list[str] | None:
     return notes
 
 
-def do_check(rev: str) -> None:
-    old = subprocess.run(
-        ["git", "-C", str(REPO), "show", f"{rev}:{REL_MAIN}"],
-        capture_output=True, text=True, check=True,
-    ).stdout
+def do_check(rev: str, tests_only: bool) -> None:
+    old = read_rev(rev)
     new_main, raw, items, report = generate(old)
     ok = True
     # (1) main.rs: the old one, the block replaced by the one mod line
     cur_main = MAIN_RS.read_text()
     a, b = find_block(old)
-    if cur_main != new_main or old[:a] + NEW_DECL != cur_main or old[b:] != "":
+    if tests_only:
+        print("skip main.rs identity (--tests-only); main.rs must still end with the mod line")
+        if not cur_main.endswith("\n" + NEW_DECL):
+            print(f"FAIL main.rs does not end with {NEW_DECL!r}")
+            ok = False
+    elif cur_main != new_main or old[:a] + NEW_DECL != cur_main or old[b:] != "":
         print("FAIL main.rs is not the old main.rs minus the block plus the mod line")
         ok = False
     else:
@@ -690,14 +743,9 @@ def do_check(rev: str) -> None:
             for e in extra:
                 print(f"note rustfmt in {name}: {e}")
     # (3) the files on disk are exactly the formatted split
-    on_disk = {f.name: f.read_text() for f in OUT_DIR.glob("*.rs")}
-    if set(on_disk) != set(fmt):
-        print(f"FAIL main_tests/ files differ: {sorted(set(on_disk) ^ set(fmt))}")
+    for line in differing(fmt, on_disk_tests()):
+        print(f"FAIL main_tests/{line}: not the split's output")
         ok = False
-    for name in fmt:
-        if on_disk.get(name) != fmt[name]:
-            print(f"FAIL main_tests/{name} is not the split's output")
-            ok = False
     # (4) independent re-read: split every file back into items and compare
     # them, in order, with the old block's items (dedented; rewrites undone)
     old_items = split_items(old, a, b)
@@ -745,18 +793,22 @@ def main() -> None:
     ap.add_argument("--from", dest="source", type=Path, metavar="FILE",
                     help="read the old main.rs (with the inline block) from FILE")
     ap.add_argument("--tests-only", action="store_true",
-                    help="write only src/main_tests/, leave src/main.rs alone (merges)")
+                    help="write (or with --check, verify) only src/main_tests/; main.rs untouched")
+    ap.add_argument("--base", metavar="REV",
+                    help="with --tests-only: refuse unless src/main_tests/ is the split of REV's main.rs")
+    ap.add_argument("--force", action="store_true",
+                    help="overwrite src/main_tests/ even if it holds work the split would drop")
     ap.add_argument("--dump", action="store_true", help="list the block's items and exit")
     args = ap.parse_args()
     if args.dump:
-        src = MAIN_RS.read_text()
+        src = (args.source or MAIN_RS).read_text()
         a, b = find_block(src)
         for it in split_items(src, a, b):
             print(f"{it.first_line}\t{'T' if it.is_test else 'H'}\t{it.name}\t{it.text.count(chr(10))}")
     elif args.check:
-        do_check(args.check)
+        do_check(args.check, args.tests_only)
     else:
-        do_split(args.source, args.tests_only)
+        do_split(args.source, args.tests_only, args.base, args.force)
 
 
 if __name__ == "__main__":
