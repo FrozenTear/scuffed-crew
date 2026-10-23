@@ -2,8 +2,8 @@
 // here at the path it had in this crate, so `stat_tracker::config::…` and
 // `crate::config::…` keep resolving.
 pub use stat_tracker_core::{
-    config, fs_mode, hero_auth, host_probe, model, ocr_status, omp, parse, perf, perf_log,
-    proc_id, replace, sandbox, setup, suspect, version,
+    config, fs_mode, hero_auth, host_probe, model, ocr_status, omp, parse, perf, perf_log, proc_id,
+    replace, sandbox, setup, suspect, version,
 };
 
 pub mod boundary;
