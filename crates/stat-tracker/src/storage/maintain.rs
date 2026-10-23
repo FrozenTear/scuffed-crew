@@ -1,7 +1,7 @@
 //! Startup / maintenance helpers around the local SurrealKV store and logs.
 //!
 //! SurrealKV keeps historical versions; weeks of captures leave the store
-//! dominated by dead data (see [`super::LocalStore::vacuum`]). Manual
+//! dominated by dead data (see [`LocalStore::vacuum`] below). Manual
 //! `--vacuum` already compact, but nothing ran unless the user remembered.
 //! These helpers run at daemon start (pid-guard held, store not yet open):
 //! rotate `daemon.log`, prune old pre-vacuum backups, and auto-vacuum when
@@ -181,6 +181,86 @@ pub async fn startup_maintenance(
         "auto-vacuum complete"
     );
     Ok(())
+}
+
+impl LocalStore {
+    /// Rewrite all live rows into a brand-new store and swap it in, leaving
+    /// the old directory as `stats.surrealkv.pre-vacuum-<stamp>`.
+    ///
+    /// SurrealKV keeps every historical version of every record; the tracker
+    /// only ever needs latest state, so weeks of captures leave the store
+    /// ~99% dead versions (observed 87 MB for ~1 MB of live rows). SurrealDB's
+    /// periodic embedded housekeeping range-scans then spend entire cores
+    /// skipping those versions — two threads at 100% around the clock on an
+    /// idle daemon (2026-07-15). The daemon must NOT be running (single-
+    /// writer: `open` flocks the store directory; the caller also checks the
+    /// pid file).
+    ///
+    /// Returns (matches, sessions, tombstones) copied.
+    pub async fn vacuum(
+        data_dir: &Path,
+    ) -> Result<(usize, usize, usize), Box<dyn std::error::Error + Send + Sync>> {
+        let live_path = data_dir.join("stats.surrealkv");
+        let fresh_dir = data_dir.join("vacuum.tmp");
+        if fresh_dir.exists() {
+            std::fs::remove_dir_all(&fresh_dir)?;
+        }
+
+        let (matches, sessions, tombstones) = {
+            let old = LocalStore::open(data_dir).await?;
+            (
+                old.get_all_matches().await?,
+                old.get_all_sessions().await?,
+                old.get_pending_tombstones().await?,
+            )
+        };
+
+        let fresh = LocalStore::open(&fresh_dir).await?;
+        for mut m in matches.iter().cloned() {
+            // Record ids belong to the old store; fresh inserts mint new ones.
+            m.id = None;
+            fresh.insert_match(m).await?;
+        }
+        for s in &sessions {
+            fresh.create_session(s).await?;
+        }
+        for t in &tombstones {
+            fresh.insert_tombstone(t).await?;
+        }
+        drop(fresh);
+        // Dropping the handle only SIGNALS engine shutdown — the memtable
+        // flush runs detached (engine/local/native.rs router loop), and there
+        // is no awaitable close in the SDK. Renaming the directory mid-flush
+        // makes the flush ENOENT. Every commit is WAL-synced so nothing can
+        // be lost either way, but give the flush time to land at the stable
+        // path so the store swaps in fully compacted and error-free.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+        let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let backup = data_dir.join(format!("stats.surrealkv.pre-vacuum-{stamp}"));
+        std::fs::rename(&live_path, &backup)?;
+        std::fs::rename(fresh_dir.join("stats.surrealkv"), &live_path)?;
+        let _ = std::fs::remove_dir_all(&fresh_dir);
+        // Keep only the newest pre-vacuum backup (this one) so data_dir does
+        // not accumulate multi-hundred-MB copies across repeated vacua.
+        if let Ok(n) = prune_pre_vacuum_backups(data_dir, PRE_VACUUM_BACKUPS_KEEP)
+            && n > 0
+        {
+            tracing::info!(
+                pruned = n,
+                keep = PRE_VACUUM_BACKUPS_KEEP,
+                "pruned older pre-vacuum backups after vacuum"
+            );
+        }
+        tracing::info!(
+            matches = matches.len(),
+            sessions = sessions.len(),
+            tombstones = tombstones.len(),
+            backup = %backup.display(),
+            "store vacuumed"
+        );
+        Ok((matches.len(), sessions.len(), tombstones.len()))
+    }
 }
 
 #[cfg(test)]
