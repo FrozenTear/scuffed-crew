@@ -33,7 +33,6 @@ impl Retention {
 }
 
 impl Config {
-    /// Whether OCR should write debug PNGs this process (config and/or env).
     /// Report kit retention from `report_kit_max_games` and `report_kit_max_mb`.
     pub fn report_kit_retention(&self) -> Retention {
         Retention::new(

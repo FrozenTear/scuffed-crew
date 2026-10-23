@@ -19,11 +19,12 @@
 //! ocr-v1 takes no signal from them.
 //!
 //! The search and its certification are the result word's
-//! ([`super::search_fast`], [`super::certify`]): a fast score at the floor
-//! is a real window's score, so it is sure; a fast score between
-//! [`PRESENT`] and the floor may be an under-read, so the exact check
-//! decides whether any window reaches [`PHRASE_FLOOR`]. A sure read here is
-//! therefore a sure exhaustive read. Only a sure read is a phase signal.
+//! ([`crate::shadow::ncc::search_fast`], [`crate::shadow::ncc::certify`]):
+//! a fast score at the floor is a real window's score, so it is sure; a fast
+//! score between [`PRESENT`] and the floor may be an under-read, so the exact
+//! check decides whether any window reaches [`PHRASE_FLOOR`]. A sure read
+//! here is therefore a sure exhaustive read. Only a sure read is a phase
+//! signal.
 
 use std::collections::BTreeMap;
 use std::path::Path;

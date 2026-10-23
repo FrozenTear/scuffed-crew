@@ -621,7 +621,7 @@ fn files_of(sites: &[String]) -> Vec<String> {
 /// The scanned tree has at least this many files (one less than on
 /// 2026-10-23), so a module-tree bug cannot drop files from the scan
 /// unseen.
-const MIN_SCANNED: usize = 85;
+const MIN_SCANNED: usize = 128;
 
 /// Nothing outside the gate can start Tesseract or open the gate:
 /// - one `LepTess` construction in the whole tree, in `ocr_with`;
@@ -686,10 +686,7 @@ fn nothing_outside_the_gate_starts_tesseract_or_opens_the_gate() {
         .collect();
     assert_eq!(
         other,
-        [
-            "stat-tracker/src/report/blank/port_check.rs",
-            "stat-tracker/src/report/blank/synth.rs",
-        ],
+        ["stat-tracker/src/report/blank/port_check.rs",],
         "files left out as test-only, all: {left_out:?}"
     );
     let built = sites(&sources, &construct);

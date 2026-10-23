@@ -101,8 +101,8 @@ use std::sync::Arc;
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
-// The NCC kernel lives in `shadow/ncc.rs` (0.6 lane D V5).
 use super::heroes::{DirStamp, dir_stamp};
+// The NCC kernel lives in `shadow/ncc.rs`; `PRESENT` is re-exported here.
 pub use super::ncc::PRESENT;
 use super::ncc::{
     CERT_MACS, Cert, Found, Gray, Level, NONE_FOUND, Phased, Proj, SKIP_BLOCKS, Stack, certify,
@@ -1413,65 +1413,10 @@ impl ResultEvidence {
 }
 
 #[cfg(test)]
-pub(crate) mod test_fixtures {
-    //! Synthetic word templates and frames. Not game art.
-    use super::*;
-    use image::Rgb;
-
-    /// Synthetic word: vertical bars in a word-specific rhythm.
-    pub(crate) fn word(seed: u32, w: usize, h: usize) -> Gray {
-        let mut g = Gray::new(w, h);
-        for y in 2..h - 2 {
-            for x in 0..w {
-                let on = (x / (2 + seed as usize)).is_multiple_of(2)
-                    || (y + x * seed as usize).is_multiple_of(11);
-                if on {
-                    g.px[y * w + x] = 0.9;
-                }
-            }
-        }
-        g
-    }
-
-    pub(crate) fn lay(id: &str) -> Layout {
-        Layout::by_id(id).unwrap()
-    }
-
-    /// Paint a work-scale word into a 2560x1440 frame at (x0, y0), doubled.
-    pub(crate) fn paint_at(img: &mut RgbImage, x0: u32, y0: u32, t: &Gray, colour: [u8; 3]) {
-        for y in 0..t.h * 2 {
-            for x in 0..t.w * 2 {
-                if t.at(x / 2, y / 2) > 0.4 {
-                    img.put_pixel(x0 + x as u32, y0 + y as u32, Rgb(colour));
-                }
-            }
-        }
-    }
-
-    /// Paint a work-scale word into a 2560x1440 frame inside a layout's region.
-    pub(crate) fn paint(img: &mut RgbImage, layout: &Layout, t: &Gray, colour: [u8; 3]) {
-        let [fx0, fy0, _, _] = layout.roi;
-        let (x0, y0) = ((fx0 * 2560.0) as u32 + 20, (fy0 * 1440.0) as u32 + 10);
-        paint_at(img, x0, y0, t, colour);
-    }
-
-    /// Write `<id>_<word>.png` files the way a pack ships them.
-    pub(crate) fn write_pack(dir: &Path, files: &[(&str, &Gray)]) {
-        std::fs::create_dir_all(dir).unwrap();
-        for (name, g) in files {
-            let img = image::GrayImage::from_fn(g.w as u32, g.h as u32, |x, y| {
-                image::Luma([(g.at(x as usize, y as usize) * 255.0) as u8])
-            });
-            img.save(dir.join(name)).unwrap();
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use super::test_fixtures::*;
     use super::*;
     use crate::shadow::ncc::*;
+    use crate::shadow::tests_fixtures::result::*;
     use image::Rgb;
 
     fn templates() -> ResultTemplates {

@@ -956,10 +956,10 @@ fn the_would_be_crates_have_no_back_edges() {
         ("capture", "perf", false),
         ("boundary", "model", false),
         ("detect", "model", false),
-        ("storage", "suspect", false),
+        ("storage::edits", "suspect", false),
         ("ocr_switch", "ocr_status", false),
         ("report::kit", "report::blank", false),
-        ("report::kit", "report::blank::synth", true),
+        ("report::kit", "report::blank::tests_synth", true),
         ("reader_apply::tests_board_merge", "sync", true),
     ] {
         assert!(seen(from, to, test), "the scan missed {from} -> {to}");
@@ -1436,9 +1436,10 @@ fn leaf_may_name(leaf: &[String], abs: &[String], root: Crate) -> bool {
 
 /// Each production path in `s`, a file of the leaf `leaf`, that
 /// [`leaf_may_name`] refuses, as `(site, path as written)`. A path that
-/// names the crate root itself (`use crate as root;`, `use crate::*;`,
-/// `use super::super::*;` from a frame file) is refused too: it would let a
-/// bare `detect::` path through. Comments, doc comments and strings do not
+/// names a module above the leaf is refused too, the crate root included
+/// (`use crate as root;`, `use crate::*;`, or `use super::*;` from the
+/// leaf's top file): a glob or an alias of it would let a bare path such as
+/// `detect::` through. Comments, doc comments and strings do not
 /// count; an item behind `#[cfg(test)]` or `#[cfg(all(test, …))]` does not
 /// either, and one behind `#[cfg(any(test, …))]` does. `test_file` is
 /// [`strictly_test_file`] for `s`.
@@ -1614,6 +1615,7 @@ mod tests {
         false,
         r#"
 use super::PACK_UNSAFE;
+use super::*;
 use crate::packs::layout::PACKS;
 use self::inner::X;
 use crate::config::Config;
@@ -1624,7 +1626,10 @@ fn f() -> std::path::PathBuf { crate::names::pack::dir_in(std::path::Path::new("
         .into_iter()
         .map(|(_, path)| path)
         .collect();
-    assert_eq!(bad, ["super::PACK_UNSAFE", "crate::names::pack::dir_in"]);
+    assert_eq!(
+        bad,
+        ["super::PACK_UNSAFE", "super", "crate::names::pack::dir_in"]
+    );
 
     // shadow::ncc may not name the readers it serves.
     let ncc = path_of("shadow::ncc");
@@ -1634,7 +1639,7 @@ fn f() -> std::path::PathBuf { crate::names::pack::dir_in(std::path::Path::new("
         "shadow/ncc.rs".into(),
         ncc.clone(),
         false,
-        "use super::result::FLOOR;\nuse crate::shadow::ncc::Gray;\nuse crate::frame::geometry::game_rect_16_9;\n",
+        "use super::result::FLOOR;\nuse super::*;\nuse crate::shadow::ncc::Gray;\nuse crate::frame::geometry::game_rect_16_9;\n",
     );
     let bad: Vec<String> = leaf_paths_outside(&src, &ncc, false)
         .into_iter()
@@ -1644,6 +1649,7 @@ fn f() -> std::path::PathBuf { crate::names::pack::dir_in(std::path::Path::new("
         bad,
         [
             "super::result::FLOOR",
+            "super",
             "crate::frame::geometry::game_rect_16_9"
         ]
     );

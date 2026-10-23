@@ -1190,7 +1190,7 @@ mod player_row_fallback_tests {
 #[cfg(test)]
 mod installed_pack_tests {
     use super::PortraitMatcher;
-    use crate::shadow::heroes::test_fixtures::portrait;
+    use crate::shadow::tests_fixtures::heroes::portrait;
     use image::DynamicImage;
 
     fn save(dir: &std::path::Path, name: &str, id: u32) {
@@ -1354,7 +1354,7 @@ mod pack_parity_tests {
         let load = |f: &str| image::open(base.join(f)).unwrap();
         // 5v5: the synthetic board from `report/blank/synth`, generated here
         // (nothing committed), and its 0.75 downscale for 1080p.
-        let five_1440 = DynamicImage::ImageRgb8(crate::report::blank::synth::board_5v5(5));
+        let five_1440 = DynamicImage::ImageRgb8(crate::report::blank::tests_synth::board_5v5(5));
         let five_1080 = five_1440.resize_exact(1248, 756, FilterType::Lanczos3);
         let boards: Vec<(&str, &str, DynamicImage, Option<usize>)> = vec![
             (

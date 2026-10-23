@@ -253,6 +253,15 @@ fn setup_patch_writes_mode_0600() {
     let fresh = dir.path().join("fresh").join("config.toml");
     Config::apply_setup_patch(&fresh, &patch).expect("fresh patch");
     assert_eq!(mode(&fresh), 0o600, "a new config must be owner-only");
+    let fresh_names: Vec<_> = std::fs::read_dir(fresh.parent().expect("fresh/"))
+        .expect("fresh dir")
+        .map(|entry| entry.expect("entry").file_name())
+        .collect();
+    assert_eq!(
+        fresh_names,
+        [std::ffi::OsString::from("config.toml")],
+        "no temp file is left in fresh/"
+    );
 
     let mut names: Vec<_> = std::fs::read_dir(dir.path())
         .expect("dir")
