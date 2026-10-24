@@ -756,13 +756,12 @@ pub async fn send(server_url: String, token: String, bytes: Arc<ReportZip>) -> S
         .await;
     let response = match response {
         Ok(response) => response,
-        Err(e) if stat_tracker::sync::is_off_site_redirect(&e) => {
-            return SendOutcome::Failed(format!(
-                "The report was not sent. {}",
-                stat_tracker::sync::REDIRECT_OFF_SITE
-            ));
+        Err(e) => {
+            return SendOutcome::Failed(match stat_tracker::sync::off_site_redirect_message(&e) {
+                Some(advice) => format!("The report was not sent. {advice}"),
+                None => not_sent_unreachable(),
+            });
         }
-        Err(_) => return SendOutcome::Failed(not_sent_unreachable()),
     };
     let status = response.status().as_u16();
     let retry_after = retry_after_secs(response.headers());
@@ -1712,6 +1711,7 @@ mod tests {
             "http://127.0.0.1:{}/api/reports",
             elsewhere.local_addr().expect("addr").port()
         );
+        let origin = target.trim_end_matches("/api/reports").to_string();
         let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let site_url = format!(
             "http://127.0.0.1:{}",
@@ -1743,10 +1743,14 @@ mod tests {
         assert_eq!(
             outcome,
             SendOutcome::Failed(format!(
-                "The report was not sent. {}",
-                stat_tracker::sync::REDIRECT_OFF_SITE
+                "The report was not sent. The site redirected to {origin}. \
+                 Set the Website URL in Settings to the address the site uses."
             ))
         );
+        let SendOutcome::Failed(text) = &outcome else {
+            unreachable!()
+        };
+        assert!(!text.contains("/api/reports"), "{text}");
         assert!(
             elsewhere.accept().is_err(),
             "nothing may reach the redirect target"

@@ -454,7 +454,7 @@ async fn redirect_to_another_port_is_refused_before_it_is_sent() {
     let site_port = site.local_addr().expect("addr").port();
     let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").expect("bind elsewhere");
     let elsewhere_port = elsewhere.local_addr().expect("addr").port();
-    let target = format!("http://127.0.0.1:{elsewhere_port}/api/stats/daemon-config");
+    let target = format!("http://127.0.0.1:{elsewhere_port}/moved-path?code=hidden");
     let site_server = std::thread::spawn(move || exchange_http(site, &redirect_to(&target)));
     let elsewhere_server = std::thread::spawn(move || recv_one_http(elsewhere));
 
@@ -474,8 +474,16 @@ async fn redirect_to_another_port_is_refused_before_it_is_sent() {
         "nothing may reach the redirect target, got {leaked:?}"
     );
     assert!(
-        err.message.contains(super::client::SYNC_REDIRECT_OFF_SITE),
-        "the member is told why: {}",
+        err.message.contains(&format!(
+            "the site redirected sync to http://127.0.0.1:{elsewhere_port}; \
+             set the Website URL in Settings to the address the site uses"
+        )),
+        "the member is told why and where: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("moved-path") && !err.message.contains("hidden"),
+        "only the target's origin is named: {}",
         err.message
     );
     assert!(
@@ -508,8 +516,15 @@ async fn redirect_to_another_host_or_scheme_is_refused() {
         let err = c.upload_matches(&[], &[]).await.expect_err("refused");
         let heads = server.join().expect("site");
         assert_eq!(heads.len(), 1, "{location}: only the first request is sent");
+        let origin = reqwest::Url::parse(&location)
+            .expect("url")
+            .origin()
+            .ascii_serialization();
         assert!(
-            err.message.contains(super::client::SYNC_REDIRECT_OFF_SITE),
+            err.message.contains(&format!(
+                "the site redirected sync to {origin}; \
+                 set the Website URL in Settings to the address the site uses"
+            )),
             "{location}: {}",
             err.message
         );
@@ -557,7 +572,10 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
     let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind site");
     let port = site.local_addr().expect("addr").port();
     let server = std::thread::spawn(move || {
-        serve_http(site, vec![redirect_to("https://203.0.113.10/elsewhere")])
+        serve_http(
+            site,
+            vec![redirect_to("https://203.0.113.10:8443/elsewhere?k=v")],
+        )
     });
     let err = http
         .get(format!("http://127.0.0.1:{port}/"))
@@ -566,6 +584,14 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
         .expect_err("refused");
     server.join().expect("site");
     assert!(super::is_off_site_redirect(&err), "{err:?}");
+    // The desktop app's advice names the target's origin, not its path.
+    let message = super::off_site_redirect_message(&err).expect("off-site");
+    assert_eq!(
+        message,
+        "The site redirected to https://203.0.113.10:8443. \
+         Set the Website URL in Settings to the address the site uses."
+    );
+    assert!(!message.contains("elsewhere") && !message.contains("k=v"));
 
     // Ten same-site hops: refused as too many, not as off-site.
     let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind site");
@@ -583,6 +609,7 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
     );
     assert!(err.is_redirect(), "{err:?}");
     assert!(!super::is_off_site_redirect(&err), "{err:?}");
+    assert_eq!(super::off_site_redirect_message(&err), None);
 
     let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = closed.local_addr().expect("addr").port();
@@ -593,4 +620,18 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
         .await
         .expect_err("closed port");
     assert!(!super::is_off_site_redirect(&err), "{err:?}");
+}
+
+/// Without a known target the advice keeps the "a different address" text.
+#[test]
+fn redirect_advice_without_a_target_keeps_the_old_text() {
+    assert_eq!(
+        super::client::redirect_off_site_text(None),
+        super::REDIRECT_OFF_SITE
+    );
+    assert_eq!(
+        super::client::redirect_off_site_text(Some("https://www.example.com")),
+        "The site redirected to https://www.example.com. \
+         Set the Website URL in Settings to the address the site uses."
+    );
 }

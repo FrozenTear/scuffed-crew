@@ -842,14 +842,11 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|_| REACH_SITE.to_string())
 }
 
-/// Text for a request that got no response: the site's redirect advice
-/// when [`http_client`] refused an off-site hop, else [`REACH_SITE`].
+/// Text for a request that got no response: the site's redirect advice,
+/// naming where it redirected to, when [`http_client`] refused an off-site
+/// hop, else [`REACH_SITE`].
 fn send_error_message(e: &reqwest::Error) -> String {
-    if stat_tracker::sync::is_off_site_redirect(e) {
-        stat_tracker::sync::REDIRECT_OFF_SITE.to_string()
-    } else {
-        REACH_SITE.to_string()
-    }
+    stat_tracker::sync::off_site_redirect_message(e).unwrap_or_else(|| REACH_SITE.to_string())
 }
 
 fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
@@ -2632,21 +2629,27 @@ mod tests {
             (302, vec![("Location", target.clone())], String::new())
         });
 
+        // The message names the target's scheme, host and port, never its path.
+        let named = format!(
+            "The site redirected to {elsewhere}. Set the Website URL in Settings to the address the site uses."
+        );
+        assert!(!named.contains("token-check"));
+
         // The sign-in link's start and poll name the redirect the same way.
         let started = start_link(site.clone(), "desk".into(), "0.6".into()).await;
         assert!(
-            matches!(&started, Err(message) if message == stat_tracker::sync::REDIRECT_OFF_SITE),
+            matches!(&started, Err(message) if *message == named),
             "link start: {started:?}"
         );
         let polled = poll_link(site.clone(), "a".repeat(64)).await;
         assert!(
-            matches!(&polled, Err(message) if message == stat_tracker::sync::REDIRECT_OFF_SITE),
+            matches!(&polled, Err(message) if *message == named),
             "link poll: {polled:?}"
         );
 
         let result = check_token(site, "tok-must-stay-home".into()).await;
         assert!(
-            matches!(&result, Err(message) if message == stat_tracker::sync::REDIRECT_OFF_SITE),
+            matches!(&result, Err(message) if *message == named),
             "a refused redirect names the redirect, not an unreachable site: {result:?}"
         );
         assert!(
