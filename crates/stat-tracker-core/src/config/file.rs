@@ -19,7 +19,8 @@ impl Config {
         let mut config = Self::read_at(&config_path)?;
 
         // CLI / env overlay: --token / SCUFFED_TOKEN and --server / SCUFFED_SERVER.
-        // A blank value counts as not given (`non_blank`).
+        // A blank value counts as not given, and a given one is trimmed
+        // (`non_blank`).
         let cli_token = Self::cli_or_env("--token", "SCUFFED_TOKEN");
         let cli_server = Self::cli_or_env("--server", "SCUFFED_SERVER");
 
@@ -242,9 +243,20 @@ pub(super) fn first_time(flag: &std::sync::atomic::AtomicBool) -> bool {
     !flag.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// `None` for a missing, empty or whitespace-only value.
+/// `None` for a missing, empty or whitespace-only value, else the value
+/// trimmed. A token read with `$(cat token)` ends in a newline, which
+/// reqwest refuses in a header and the first-run auto-save would write into
+/// config.toml.
 pub(super) fn non_blank(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else if trimmed.len() == value.len() {
+        Some(value)
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 pub(super) fn unreadable_config(message: String) -> Box<dyn std::error::Error + Send + Sync> {
