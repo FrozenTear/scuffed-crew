@@ -213,7 +213,11 @@ static BASE64_RUN_RE: LazyLock<Regex> =
 static URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)\b[a-z][a-z0-9+.\-]*://[^\s"'<>]+"#).expect("url regex"));
 /// Characters cut from the end of a URL match before its host is read.
-const URL_TRAILING_PUNCT: &[char] = &['.', ',', ';', ':', '!', '?', ')'];
+const URL_TRAILING_PUNCT: &[char] = &['.', ',', ';', ':', '!', '?', ')', '>', '"', '\''];
+/// `scheme%3A%2F%2F` (or `%3a%2f%2f`) at the end of the text before a host.
+static ENC_SCHEME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b[a-z][a-z0-9+.\-]*%3A%2F%2F\z").expect("encoded scheme regex")
+});
 static HOME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"/(?:var/home|home|Users)/[^/\s"'=,;:]+"#).expect("home regex"));
 // Wider than the 2..12 letters a BattleTag allows: a longer run before `#`
@@ -250,63 +254,196 @@ pub struct Scrubber {
 
 /// The configured site host, matched in its `www.` and bare forms.
 struct SiteHost {
-    /// Lowercase host without a leading `www.`.
-    apex: String,
-    /// The apex with any labels in front (`www.`, `api.`) and any port.
-    bare_re: Regex,
+    /// Lowercase host without a leading `www.` or a trailing dot, in its
+    /// punycode and Unicode forms (one entry when they are the same).
+    apexes: Vec<String>,
+    /// Each apex, case-insensitive, its dots also matched as `%2E`.
+    apex_res: Vec<Regex>,
 }
 
 impl SiteHost {
     fn new(host: &str) -> Option<Self> {
-        let host = host.to_ascii_lowercase();
+        let host = host.strip_suffix('.').unwrap_or(host).to_lowercase();
+        if !host.chars().any(char::is_alphanumeric) {
+            return None;
+        }
         // `www.example` keeps its `www.`: a single label is not a site.
         let apex = match host.strip_prefix("www.") {
             Some(rest) if rest.contains('.') => rest.to_string(),
             _ => host,
         };
-        let pattern = format!(
-            r"(?i)(?:[a-z0-9_-]+\.)*{}(?::[0-9]+)?",
-            regex::escape(&apex)
-        );
-        let bare_re = Regex::new(&pattern).ok()?;
-        Some(Self { apex, bare_re })
+        let mut apexes = vec![apex.clone()];
+        // The sync client logs hosts in punycode (`xn--…`); a person may
+        // type either form in Settings.
+        if let Ok(ascii) = idna::domain_to_ascii(&apex) {
+            apexes.push(ascii);
+        }
+        let (unicode, ok) = idna::domain_to_unicode(&apex);
+        if ok.is_ok() {
+            apexes.push(unicode.to_lowercase());
+        }
+        apexes.retain(|a| !a.is_empty());
+        apexes.sort();
+        apexes.dedup();
+        let apex_res = apexes
+            .iter()
+            .filter_map(|a| {
+                let labels: Vec<String> = a.split('.').map(regex::escape).collect();
+                Regex::new(&format!("(?i){}", labels.join(r"(?:\.|%2[eE])"))).ok()
+            })
+            .collect();
+        Some(Self { apexes, apex_res })
     }
 
-    /// `host` is the site: the apex itself or a name under it.
+    /// `host` is the site: an apex itself or a name under it.
     fn is_site(&self, host: &str) -> bool {
-        let host = host.to_ascii_lowercase();
-        host == self.apex
-            || host
-                .strip_suffix(self.apex.as_str())
-                .is_some_and(|front| front.ends_with('.'))
+        let host = host.strip_suffix('.').unwrap_or(host).to_lowercase();
+        self.apexes.iter().any(|apex| {
+            host == *apex
+                || host
+                    .strip_suffix(apex.as_str())
+                    .is_some_and(|front| front.ends_with('.'))
+        })
     }
 
-    /// Bare mentions of the site host. A match must not sit inside a longer
-    /// host name: `notcrew.example` and `crew.example.evil.com` are other
-    /// sites and stay.
+    /// Bare mentions of the site host. Each apex occurrence is checked on
+    /// its own, so a rejected longer candidate never hides a clean apex:
+    /// - Labels in front (`www.`, `api.`, `bücher.`) and a port behind are
+    ///   taken in when they are clean, else the plain apex is scrubbed.
+    /// - The apex must not sit inside a longer host name: `notcrew.example`,
+    ///   `crew.example.evil.com` and `crew.example-evil.com` stay. Only an
+    ///   ASCII host character in front rejects it, so `.crew.example`,
+    ///   `...crew.example` and `ü.crew.example` are scrubbed.
+    /// - A percent escape counts as the character it encodes, so
+    ///   `https%3A%2F%2Fcrew.example` is scrubbed whole.
     fn push_bare(&self, text: &str, out: &mut Vec<Span>) {
-        for m in self.bare_re.find_iter(text) {
-            let before = text[..m.start()].chars().next_back();
-            if before.is_some_and(|c| is_host_char(c) || c == '.') {
-                continue;
+        for re in &self.apex_res {
+            for m in re.find_iter(text) {
+                if prev_unit(&text[..m.start()]).is_some_and(|(c, _)| is_ascii_host_char(c)) {
+                    continue;
+                }
+                if continues_host(&text[m.end()..]) {
+                    continue;
+                }
+                let start = encoded_scheme_start(text, labels_start(text, m.start()));
+                let end = m.end() + port_len(&text[m.end()..]);
+                out.push(Span {
+                    start,
+                    end,
+                    placeholder: PH_SERVER_URL,
+                });
             }
-            let mut after = text[m.end()..].chars();
-            match after.next() {
-                Some(c) if is_host_char(c) => continue,
-                Some('.') if after.next().is_some_and(is_host_char) => continue,
-                _ => {}
-            }
-            out.push(Span {
-                start: m.start(),
-                end: m.end(),
-                placeholder: PH_SERVER_URL,
-            });
         }
     }
 }
 
+/// The site host goes on in `rest`: a host character, or a dot and then
+/// one (`crew.example.evil.com`). A trailing sentence dot does not count.
+fn continues_host(rest: &str) -> bool {
+    match next_unit(rest) {
+        Some((c, _)) if is_ascii_host_char(c) => true,
+        Some(('.', n)) => next_unit(&rest[n..]).is_some_and(|(c, _)| is_ascii_host_char(c)),
+        _ => false,
+    }
+}
+
+/// Bytes of a `:port` at the start of `rest`, or 0. A port that runs on
+/// into a host character (`:8443x`) is left out, and only the host is
+/// scrubbed.
+fn port_len(rest: &str) -> usize {
+    let Some(digits) = rest.strip_prefix(':') else {
+        return 0;
+    };
+    let n = digits.bytes().take_while(u8::is_ascii_digit).count();
+    if n == 0 || continues_host(&digits[n..]) {
+        return 0;
+    }
+    1 + n
+}
+
+/// Start of the host labels in front of an apex at `at` (`www.`, `api.`,
+/// `bücher.`), or `at` when none are clean. A label run that has an ASCII
+/// host character before it is not taken in.
+fn labels_start(text: &str, mut at: usize) -> usize {
+    loop {
+        let Some(dot) = text[..at].strip_suffix('.') else {
+            return at;
+        };
+        let label = dot.len()
+            - dot
+                .chars()
+                .rev()
+                .take_while(|&c| is_host_char(c))
+                .map(char::len_utf8)
+                .sum::<usize>();
+        // A run right after a `%` starts with the escape's two hex digits.
+        let label = if dot[..label].ends_with('%') {
+            label + 2
+        } else {
+            label
+        };
+        if label >= dot.len() {
+            return at;
+        }
+        at = label;
+    }
+}
+
+/// Start of an encoded `scheme%3A%2F%2F` right before `at`, or `at`.
+fn encoded_scheme_start(text: &str, at: usize) -> usize {
+    ENC_SCHEME_RE.find(&text[..at]).map_or(at, |m| m.start())
+}
+
+/// First character of `s`, a percent escape decoded, and its byte length.
+fn next_unit(s: &str) -> Option<(char, usize)> {
+    if let Some(b) = s
+        .strip_prefix('%')
+        .and_then(|h| h.get(..2))
+        .and_then(|hex| u8::from_str_radix(hex, 16).ok())
+    {
+        return Some((char::from(b), 3));
+    }
+    s.chars().next().map(|c| (c, c.len_utf8()))
+}
+
+/// Last character of `s`, a percent escape decoded, and its byte length.
+fn prev_unit(s: &str) -> Option<(char, usize)> {
+    if let Some(b) = s
+        .get(s.len().saturating_sub(3)..)
+        .and_then(|esc| esc.strip_prefix('%'))
+        .and_then(|h| u8::from_str_radix(h, 16).ok())
+    {
+        return Some((char::from(b), 3));
+    }
+    s.chars().next_back().map(|c| (c, c.len_utf8()))
+}
+
 fn is_host_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
+}
+
+fn is_ascii_host_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Cut sentence punctuation and closing wrappers from the end of a URL
+/// match. A `]` closes an IPv6 host when the URL opened one, so it stays.
+fn trim_url_end(url: &str) -> &str {
+    let mut url = url;
+    loop {
+        let Some(last) = url.chars().next_back() else {
+            return url;
+        };
+        let cut = match last {
+            ']' => url.matches('[').count() < url.matches(']').count(),
+            '}' => url.matches('{').count() < url.matches('}').count(),
+            c => URL_TRAILING_PUNCT.contains(&c),
+        };
+        if !cut {
+            return url;
+        }
+        url = &url[..url.len() - last.len_utf8()];
+    }
 }
 
 impl Scrubber {
@@ -335,12 +472,16 @@ impl Scrubber {
         }
         // The URL and bare-host rules in `scrub` cover the configured URL
         // on host boundaries. The literal is only a fallback for an address
-        // with no host that can be read.
+        // that is not a URL at all. An address with a scheme but no host
+        // (`https://`, `http://:8443`) scrubs nothing: its literal would
+        // hide every `https://` in the log.
         let server_url = non_empty(ctx.server_url.as_deref());
         let site = server_url
             .and_then(|u| url_host(u).or_else(|| bare_host(u)))
             .and_then(|h| SiteHost::new(&h));
-        if let (Some(url), None) = (server_url, &site) {
+        if let (Some(url), None) = (server_url, &site)
+            && !url.contains("://")
+        {
             add(url, true, false, PH_SERVER_URL);
         }
         if let Some(home) = ctx.home_dir.as_deref() {
@@ -395,7 +536,7 @@ impl Scrubber {
         if let Some(site) = &self.site {
             for m in URL_RE.find_iter(text) {
                 // Sentence punctuation after a URL is not part of it.
-                let url = m.as_str().trim_end_matches(URL_TRAILING_PUNCT);
+                let url = trim_url_end(m.as_str());
                 if url_host(url).is_some_and(|h| site.is_site(&h)) {
                     spans.push(Span {
                         start: m.start(),
@@ -492,6 +633,9 @@ fn apply_spans(text: &str, mut spans: Vec<Span>) -> String {
 /// Host of a server address given without `http://` or `https://`, such
 /// as `crew.example:8443`. `None` when it holds anything else.
 fn bare_host(addr: &str) -> Option<String> {
+    if addr.contains("://") {
+        return None;
+    }
     addr.chars()
         .all(|c| is_host_char(c) || matches!(c, '.' | ':' | '/'))
         .then(|| url_host(&format!("https://{addr}")))
@@ -959,6 +1103,115 @@ mod tests {
         );
         let c = site_ctx("not a url");
         assert_eq!(scrub_text(&c, "this is not a url"), "this is [server-url]");
+    }
+
+    /// Review repros on #494: each was scrubbed before the www/apex change
+    /// and must stay scrubbed.
+    #[test]
+    fn a_rejected_longer_match_still_scrubs_the_apex() {
+        let c = site_ctx("https://crew.x");
+        let cases = [
+            ("domain=.crew.x", "domain=.[server-url]"),
+            ("see...crew.x", "see...[server-url]"),
+            ("retrying...crew.x", "retrying...[server-url]"),
+            ("ü.crew.x end", "[server-url] end"),
+            ("bücher.crew.x end", "[server-url] end"),
+            ("host crew.x:8443x", "host [server-url]:8443x"),
+            ("host crew.x:8443abc", "host [server-url]:8443abc"),
+            ("host crew.x:8443-", "host [server-url]:8443-"),
+            ("host crew.x:8443.", "host [server-url]."),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+        let c = site_ctx("https://www.crew.example.test");
+        assert_eq!(scrub_text(&c, "x=.crew.example.test"), "x=.[server-url]");
+    }
+
+    #[test]
+    fn wrappers_around_a_site_url_survive() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("[https://www.crew.example.test]", "[[server-url]]"),
+            ("{https://crew.example.test/a}", "{[server-url]}"),
+            ("(https://crew.example.test/a).", "([server-url])."),
+            ("see https://crew.example.test:8443!", "see [server-url]!"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+        let c = site_ctx("http://[2001:db8::1]:8443");
+        assert_eq!(scrub_text(&c, "to http://[2001:db8::1]"), "to [server-url]");
+    }
+
+    #[test]
+    fn an_idn_site_is_scrubbed_in_punycode_and_unicode() {
+        for site in ["https://crëw.ex", "https://xn--crw-kma.ex"] {
+            let c = site_ctx(site);
+            let cases = [
+                ("to https://www.xn--crw-kma.ex; x", "to [server-url]; x"),
+                ("to https://xn--crw-kma.ex:8443 x", "to [server-url] x"),
+                ("to https://www.crëw.ex/ x", "to [server-url] x"),
+                (
+                    "dns error for crëw.ex and XN--CRW-KMA.EX",
+                    "dns error for [server-url] and [server-url]",
+                ),
+                ("other xn--crw-dma.ex stays", "other xn--crw-dma.ex stays"),
+            ];
+            for (input, want) in cases {
+                assert_eq!(scrub_text(&c, input), want, "site {site} input: {input}");
+            }
+            let got = scrub_text(&c, &redirect_line("https://www.xn--crw-kma.ex"));
+            assert_eq!(got, REDIRECT_SCRUBBED, "site {site}");
+        }
+    }
+
+    #[test]
+    fn a_site_configured_with_a_trailing_dot_still_scrubs() {
+        let c = site_ctx("https://crew.example.test./");
+        let cases = [
+            ("a https://crew.example.test/a b", "a [server-url] b"),
+            ("a crew.example.test b", "a [server-url] b"),
+            ("a crew.example.test. b", "a [server-url]. b"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+        let got = scrub_text(&c, &redirect_line("https://www.crew.example.test"));
+        assert_eq!(got, REDIRECT_SCRUBBED);
+    }
+
+    #[test]
+    fn a_site_address_with_no_host_never_scrubs_scheme_words() {
+        let text = "https://crew.example.test/a https http://x.io/b";
+        for site in [
+            "https://",
+            "https:///x",
+            "http://:8443",
+            "https://.",
+            "https://@/",
+        ] {
+            assert_eq!(scrub_text(&site_ctx(site), text), text, "site {site}");
+        }
+    }
+
+    #[test]
+    fn percent_encoded_site_urls_are_scrubbed() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            (
+                "u=https%3A%2F%2Fcrew.example.test%2Fx",
+                "u=[server-url]%2Fx",
+            ),
+            ("u=http%3a%2f%2fwww.crew.example.test&y", "u=[server-url]&y"),
+            ("u=%40crew.example.test", "u=%40[server-url]"),
+            ("u=crew%2Eexample%2etest%2F", "u=[server-url]%2F"),
+            ("u=%41crew.example.test", "u=%41crew.example.test"),
+            ("u=crew.example.test%2Eev.io", "u=crew.example.test%2Eev.io"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
     }
 
     #[test]

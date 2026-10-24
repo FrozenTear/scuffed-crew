@@ -10987,6 +10987,7 @@ dependencies = [
  "enumflags2",
  "evdev",
  "futures-util",
+ "idna",
  "image",
  "leptess",
  "libc",
