@@ -70,7 +70,9 @@ pub const OCR_TEXT_KEYS: &[&str] = &[
 pub struct ScrubContext {
     /// Configured sync token, removed on exact match.
     pub sync_token: Option<String>,
-    /// Configured server URL. Any URL on its host is removed too.
+    /// Configured server URL. Any URL or bare mention of its host is
+    /// removed too, with any port. The `www.` and bare forms of the host
+    /// count as the same site, and so does any name under it.
     pub server_url: Option<String>,
     /// Home directory of the account running the app.
     pub home_dir: Option<PathBuf>,
@@ -210,6 +212,8 @@ static BASE64_RUN_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]{24,}={0,2}").expect("base64 regex"));
 static URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)\b[a-z][a-z0-9+.\-]*://[^\s"'<>]+"#).expect("url regex"));
+/// Characters cut from the end of a URL match before its host is read.
+const URL_TRAILING_PUNCT: &[char] = &['.', ',', ';', ':', '!', '?', ')'];
 static HOME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"/(?:var/home|home|Users)/[^/\s"'=,;:]+"#).expect("home regex"));
 // Wider than the 2..12 letters a BattleTag allows: a longer run before `#`
@@ -241,7 +245,68 @@ struct Literal {
 /// [`ScrubContext`] with its literal patterns compiled.
 pub struct Scrubber {
     literals: Vec<Literal>,
-    server_host: Option<String>,
+    site: Option<SiteHost>,
+}
+
+/// The configured site host, matched in its `www.` and bare forms.
+struct SiteHost {
+    /// Lowercase host without a leading `www.`.
+    apex: String,
+    /// The apex with any labels in front (`www.`, `api.`) and any port.
+    bare_re: Regex,
+}
+
+impl SiteHost {
+    fn new(host: &str) -> Option<Self> {
+        let host = host.to_ascii_lowercase();
+        // `www.example` keeps its `www.`: a single label is not a site.
+        let apex = match host.strip_prefix("www.") {
+            Some(rest) if rest.contains('.') => rest.to_string(),
+            _ => host,
+        };
+        let pattern = format!(
+            r"(?i)(?:[a-z0-9_-]+\.)*{}(?::[0-9]+)?",
+            regex::escape(&apex)
+        );
+        let bare_re = Regex::new(&pattern).ok()?;
+        Some(Self { apex, bare_re })
+    }
+
+    /// `host` is the site: the apex itself or a name under it.
+    fn is_site(&self, host: &str) -> bool {
+        let host = host.to_ascii_lowercase();
+        host == self.apex
+            || host
+                .strip_suffix(self.apex.as_str())
+                .is_some_and(|front| front.ends_with('.'))
+    }
+
+    /// Bare mentions of the site host. A match must not sit inside a longer
+    /// host name: `notcrew.example` and `crew.example.evil.com` are other
+    /// sites and stay.
+    fn push_bare(&self, text: &str, out: &mut Vec<Span>) {
+        for m in self.bare_re.find_iter(text) {
+            let before = text[..m.start()].chars().next_back();
+            if before.is_some_and(|c| is_host_char(c) || c == '.') {
+                continue;
+            }
+            let mut after = text[m.end()..].chars();
+            match after.next() {
+                Some(c) if is_host_char(c) => continue,
+                Some('.') if after.next().is_some_and(is_host_char) => continue,
+                _ => {}
+            }
+            out.push(Span {
+                start: m.start(),
+                end: m.end(),
+                placeholder: PH_SERVER_URL,
+            });
+        }
+    }
+}
+
+fn is_host_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
 }
 
 impl Scrubber {
@@ -268,12 +333,15 @@ impl Scrubber {
         if let Some(tok) = non_empty(ctx.sync_token.as_deref()) {
             add(tok, false, false, PH_SYNC_TOKEN);
         }
-        let server_host = non_empty(ctx.server_url.as_deref()).and_then(url_host);
-        if let Some(url) = non_empty(ctx.server_url.as_deref()) {
+        // The URL and bare-host rules in `scrub` cover the configured URL
+        // on host boundaries. The literal is only a fallback for an address
+        // with no host that can be read.
+        let server_url = non_empty(ctx.server_url.as_deref());
+        let site = server_url
+            .and_then(|u| url_host(u).or_else(|| bare_host(u)))
+            .and_then(|h| SiteHost::new(&h));
+        if let (Some(url), None) = (server_url, &site) {
             add(url, true, false, PH_SERVER_URL);
-        }
-        if let Some(host) = &server_host {
-            add(host, true, true, PH_SERVER_URL);
         }
         if let Some(home) = ctx.home_dir.as_deref() {
             let home = home.to_string_lossy();
@@ -299,10 +367,7 @@ impl Scrubber {
         for name in names {
             add(name, true, true, PH_PLAYER);
         }
-        Self {
-            literals,
-            server_host,
-        }
+        Self { literals, site }
     }
 
     pub fn scrub(&self, text: &str) -> String {
@@ -327,16 +392,19 @@ impl Scrubber {
         }
         push_re(&TOKEN_RUN_RE, PH_SYNC_TOKEN, &mut spans);
         push_re(&BASE64_RUN_RE, PH_SYNC_TOKEN, &mut spans);
-        if let Some(host) = &self.server_host {
+        if let Some(site) = &self.site {
             for m in URL_RE.find_iter(text) {
-                if url_host(m.as_str()).is_some_and(|h| h.eq_ignore_ascii_case(host)) {
+                // Sentence punctuation after a URL is not part of it.
+                let url = m.as_str().trim_end_matches(URL_TRAILING_PUNCT);
+                if url_host(url).is_some_and(|h| site.is_site(&h)) {
                     spans.push(Span {
                         start: m.start(),
-                        end: m.end(),
+                        end: m.start() + url.len(),
                         placeholder: PH_SERVER_URL,
                     });
                 }
             }
+            site.push_bare(text, &mut spans);
         }
         push_re(&HOME_RE, PH_HOME, &mut spans);
         push_re(&BATTLETAG_RE, PH_BATTLETAG, &mut spans);
@@ -421,6 +489,15 @@ fn apply_spans(text: &str, mut spans: Vec<Span>) -> String {
     out
 }
 
+/// Host of a server address given without `http://` or `https://`, such
+/// as `crew.example:8443`. `None` when it holds anything else.
+fn bare_host(addr: &str) -> Option<String> {
+    addr.chars()
+        .all(|c| is_host_char(c) || matches!(c, '.' | ':' | '/'))
+        .then(|| url_host(&format!("https://{addr}")))
+        .flatten()
+}
+
 /// Lowercase host of `url`, without port or user info.
 fn url_host(url: &str) -> Option<String> {
     let rest = url.trim().split_once("://")?.1;
@@ -429,7 +506,11 @@ fn url_host(url: &str) -> Option<String> {
     let host = if let Some(v6) = authority.strip_prefix('[') {
         v6.split(']').next()?
     } else {
-        authority.split(':').next()?
+        // The host ends at the port or at the first character a host name
+        // cannot hold.
+        authority
+            .split(|c: char| !(is_host_char(c) || c == '.'))
+            .next()?
     };
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
@@ -775,6 +856,124 @@ mod tests {
         ];
         for (input, want) in cases {
             assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    fn site_ctx(url: &str) -> ScrubContext {
+        ScrubContext {
+            server_url: Some(url.into()),
+            ..ScrubContext::default()
+        }
+    }
+
+    /// The daemon's off-site redirect line (sync client, `OffSiteRedirect`).
+    fn redirect_line(target: &str) -> String {
+        format!(
+            "2026-10-24T10:00:00Z WARN sync: the site redirected sync to {target}; \
+             if that is your site's new address, set the Website URL in Settings to it"
+        )
+    }
+
+    const REDIRECT_SCRUBBED: &str = "2026-10-24T10:00:00Z WARN sync: the site redirected sync \
+         to [server-url]; if that is your site's new address, set the Website URL in Settings to it";
+
+    #[test]
+    fn apex_site_scrubs_its_www_form() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            (
+                "go https://www.crew.example.test/x now",
+                "go [server-url] now",
+            ),
+            (
+                "go http://WWW.Crew.Example.Test:8443 now",
+                "go [server-url] now",
+            ),
+            ("bare www.crew.example.test here", "bare [server-url] here"),
+            ("bare www.crew.example.test:8443.", "bare [server-url]."),
+            ("sub https://api.crew.example.test/a", "sub [server-url]"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn www_site_scrubs_its_apex_form() {
+        let c = site_ctx("https://www.crew.example.test/");
+        let cases = [
+            ("go https://crew.example.test/x now", "go [server-url] now"),
+            (
+                "go http://crew.example.test:8080, now",
+                "go [server-url], now",
+            ),
+            ("bare crew.example.test here", "bare [server-url] here"),
+            ("bare www.crew.example.test here", "bare [server-url] here"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn another_port_on_the_site_host_is_scrubbed() {
+        let c = site_ctx("https://crew.example.test:8443");
+        let cases = [
+            ("a https://crew.example.test:9000/api b", "a [server-url] b"),
+            ("a https://crew.example.test b", "a [server-url] b"),
+            ("a crew.example.test:9000 b", "a [server-url] b"),
+            ("a www.crew.example.test:1 b", "a [server-url] b"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    #[test]
+    fn look_alike_hosts_are_not_scrubbed() {
+        for site in ["https://crew.example.test", "https://www.crew.example.test"] {
+            let c = site_ctx(site);
+            for text in [
+                "https://notcrew.example.test/x",
+                "notcrew.example.test",
+                "https://crew.example.test.ev.io/x",
+                "crew.example.test.ev.io",
+                "https://crew.example.test-ev.io",
+                "crew.example.tester",
+                "https://ev.io/crew",
+            ] {
+                assert_eq!(scrub_text(&c, text), text, "site {site}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_site_address_without_a_scheme_still_scrubs_its_host() {
+        let c = site_ctx("crew.example.test:8443");
+        assert_eq!(
+            scrub_text(
+                &c,
+                "to https://www.crew.example.test/x and crew.example.test"
+            ),
+            "to [server-url] and [server-url]"
+        );
+        let c = site_ctx("not a url");
+        assert_eq!(scrub_text(&c, "this is not a url"), "this is [server-url]");
+    }
+
+    #[test]
+    fn redirect_log_line_is_scrubbed_both_ways() {
+        let cases = [
+            ("https://crew.example.test", "https://www.crew.example.test"),
+            ("https://www.crew.example.test", "https://crew.example.test"),
+            (
+                "https://crew.example.test",
+                "https://crew.example.test:8443",
+            ),
+        ];
+        for (site, target) in cases {
+            let got = scrub_text(&site_ctx(site), &redirect_line(target));
+            assert_eq!(got, REDIRECT_SCRUBBED, "site {site} to {target}");
         }
     }
 

@@ -32,6 +32,7 @@ Not released yet. Notes for the 0.6 line collect here and move under its version
 - The redirect message now names where the site redirected to: its http or https, host and port, for example "The site redirected to https://www.example.com. If that is your site's new address, set the Website URL in Settings to it." The tracker log says the same. The rest of the address (any user name or password, the path and anything after it) is never shown. When the address is not known, or is longer than 200 characters, the message says "a different address" as before.
 - In the setup guide, the redirect message now says "set the Website URL above", because the Website URL field is on the setup guide page itself. Before, it said "in Settings". The report upload still says "in Settings", where its address is set.
 - The log warning that a `[sync]` section has no token now shows once per run. The desktop app reads config.toml again about once per game, and each read logged the same warning again. The tracker still warns once when it starts.
+- A report now hides the site address in both its forms, with and without `www.`, and on any port. Before, when the site redirected sync from `crew.example` to `www.crew.example`, the log line in the report kept the `www.` part next to the placeholder, and a redirect from `www.crew.example` to `crew.example` was not hidden at all. Names that only look like the site, such as `notcrew.example` or `crew.example.other.com`, are left as they are.
 
 ### Technical detail
 
