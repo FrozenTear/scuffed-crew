@@ -9,6 +9,7 @@
 //! longest first. A shorter match that overlaps a longer one is merged into
 //! it, so no part of a matched secret survives beside a placeholder.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -214,10 +215,9 @@ static URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)\b[a-z][a-z0-9+.\-]*://[^\s"'<>]+"#).expect("url regex"));
 /// Characters cut from the end of a URL match before its host is read.
 const URL_TRAILING_PUNCT: &[char] = &['.', ',', ';', ':', '!', '?', ')', '>', '"', '\''];
-/// `scheme%3A%2F%2F` (or `%3a%2f%2f`) at the end of the text before a host.
-static ENC_SCHEME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b[a-z][a-z0-9+.\-]*%3A%2F%2F\z").expect("encoded scheme regex")
-});
+/// `scheme://` at the end of the [`HostView`] before a host.
+static SCHEME_SEP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b[a-z][a-z0-9+.\-]*://\z").expect("scheme regex"));
 static HOME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"/(?:var/home|home|Users)/[^/\s"'=,;:]+"#).expect("home regex"));
 // Wider than the 2..12 letters a BattleTag allows: a longer run before `#`
@@ -257,7 +257,9 @@ struct SiteHost {
     /// Lowercase host without a leading `www.` or a trailing dot, in its
     /// punycode and Unicode forms (one entry when they are the same).
     apexes: Vec<String>,
-    /// Each apex, case-insensitive, its dots also matched as `%2E`.
+    /// Each apex, case-insensitive, matched on the [`HostView`] of the
+    /// text. Zero-width characters may sit between any two of its
+    /// characters.
     apex_res: Vec<Regex>,
 }
 
@@ -287,10 +289,7 @@ impl SiteHost {
         apexes.dedup();
         let apex_res = apexes
             .iter()
-            .filter_map(|a| {
-                let labels: Vec<String> = a.split('.').map(regex::escape).collect();
-                Regex::new(&format!("(?i){}", labels.join(r"(?:\.|%2[eE])"))).ok()
-            })
+            .filter_map(|a| Regex::new(&format!("(?i){}", apex_pattern(a))).ok())
             .collect();
         Some(Self { apexes, apex_res })
     }
@@ -306,34 +305,46 @@ impl SiteHost {
         })
     }
 
-    /// Bare mentions of the site host. Each apex occurrence is checked on
-    /// its own, so a rejected longer candidate never hides a clean apex:
+    /// Bare mentions of the site host, read on the [`HostView`] of the
+    /// text. Each apex occurrence is checked on its own, so a rejected
+    /// longer candidate never hides a clean apex:
     /// - Labels in front (`www.`, `api.`, `bücher.`) and a port behind are
     ///   taken in when they are clean, else the plain apex is scrubbed.
     /// - The apex must not sit inside a longer host name: `notcrew.example`,
     ///   `crew.example.evil.com` and `crew.example-evil.com` stay. Only an
     ///   ASCII host character in front rejects it, so `.crew.example`,
     ///   `...crew.example` and `ü.crew.example` are scrubbed.
-    /// - A percent escape counts as the character it encodes, so
-    ///   `https%3A%2F%2Fcrew.example` is scrubbed whole.
-    fn push_bare(&self, text: &str, out: &mut Vec<Span>) {
+    /// - A percent escape counts as the character it encodes, even when it
+    ///   is encoded again (`%252E`), so `https%3A%2F%2Fwww%2Ecrew.example%3A8443`
+    ///   and `%63rew.example` are scrubbed whole.
+    /// - An IDNA full stop (`。`) counts as a dot between labels, and a
+    ///   zero-width character inside the host is skipped.
+    fn push_bare(&self, view: &HostView<'_>, out: &mut Vec<Span>) {
+        let dec = view.dec.as_ref();
         for re in &self.apex_res {
             // End of the last match taken: the next label walk stops there.
             let mut floor = 0;
-            for m in re.find_iter(text) {
-                if prev_unit(&text[..m.start()]).is_some_and(|(c, _)| is_ascii_host_char(c)) {
+            for m in re.find_iter(dec) {
+                if m.start() < floor {
                     continue;
                 }
-                if continues_host(&text[m.end()..]) {
+                if dec[..m.start()]
+                    .chars()
+                    .next_back()
+                    .is_some_and(is_ascii_host_char)
+                {
                     continue;
                 }
-                let start = labels_start(text, floor, m.start());
-                let start = encoded_scheme_start(text, floor, start);
-                let end = m.end() + port_len(&text[m.end()..]);
+                if continues_host(view, m.end()) {
+                    continue;
+                }
+                let start = labels_start(dec, floor, m.start());
+                let start = encoded_scheme_start(view, floor, start);
+                let end = m.end() + port_len(view, m.end());
                 floor = end;
                 out.push(Span {
-                    start,
-                    end,
+                    start: view.orig(start),
+                    end: view.orig(end),
                     placeholder: PH_SERVER_URL,
                 });
             }
@@ -341,25 +352,191 @@ impl SiteHost {
     }
 }
 
-/// The site host goes on in `rest`: a host character, or a dot and then
-/// one (`crew.example.evil.com`). A trailing sentence dot does not count.
-fn continues_host(rest: &str) -> bool {
-    match next_unit(rest) {
-        Some((c, _)) if is_ascii_host_char(c) => true,
-        Some(('.', n)) => next_unit(&rest[n..]).is_some_and(|(c, _)| is_ascii_host_char(c)),
+/// Characters IDNA drops from a host name: zero-width space, zero-width
+/// non-joiner and joiner, the byte-order mark and the soft hyphen. They are
+/// skipped inside the site host. Right before or after it they still end
+/// it, as before.
+fn is_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}' | '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}'
+    )
+}
+
+/// Any run of [`is_ignorable`] characters, as a regex.
+const IGNORABLE_RUN: &str = r"[\x{AD}\x{200B}-\x{200D}\x{FEFF}]*";
+
+/// IDNA full stops that count as a dot between labels: ideographic (`。`),
+/// fullwidth (`．`) and halfwidth (`｡`).
+fn is_idna_dot(c: char) -> bool {
+    matches!(c, '\u{3002}' | '\u{FF0E}' | '\u{FF61}')
+}
+
+/// Regex for one apex: its characters with any zero-width run between
+/// them.
+fn apex_pattern(apex: &str) -> String {
+    let mut buf = [0u8; 4];
+    apex.chars()
+        .map(|c| regex::escape(c.encode_utf8(&mut buf)))
+        .collect::<Vec<_>>()
+        .join(IGNORABLE_RUN)
+}
+
+/// Most layers of percent-encoding read: `%2E`, `%252E` and `%25252E` are
+/// all a dot.
+const MAX_ESCAPE_LAYERS: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UnitKind {
+    /// A percent escape, maybe encoded again.
+    Escape,
+    /// An IDNA full stop, read as `.`.
+    IdnaDot,
+}
+
+/// One character of a [`HostView`] that is not a plain copy of the text.
+#[derive(Debug, Clone, Copy)]
+struct Unit {
+    /// Byte offset in the view, and the character's length there.
+    dec: usize,
+    len: usize,
+    /// End of its bytes in the text.
+    end: usize,
+    kind: UnitKind,
+}
+
+/// The text as the bare host rule reads it. Each percent escape is decoded
+/// to the character it stands for, up to [`MAX_ESCAPE_LAYERS`] deep (a byte
+/// above ASCII becomes U+FFFD, which no host holds), and each IDNA full
+/// stop is read as `.`. Everything else is copied, so offsets map back to
+/// the text with one binary search.
+struct HostView<'a> {
+    dec: Cow<'a, str>,
+    /// Every character that is not a plain copy, in text order.
+    units: Vec<Unit>,
+}
+
+impl<'a> HostView<'a> {
+    fn new(text: &'a str) -> Self {
+        let b = text.as_bytes();
+        let mut dec = String::new();
+        let mut units = Vec::new();
+        let (mut i, mut copied) = (0, 0);
+        while i < b.len() {
+            let found = match b[i] {
+                b'%' => decode_escape(&b[i..]).map(|(c, n)| (c, n, UnitKind::Escape)),
+                x if x >= 0x80 => {
+                    let c = text[i..].chars().next().unwrap_or('\u{FFFD}');
+                    if !is_idna_dot(c) {
+                        i += c.len_utf8();
+                        continue;
+                    }
+                    Some(('.', c.len_utf8(), UnitKind::IdnaDot))
+                }
+                _ => None,
+            };
+            let Some((c, n, kind)) = found else {
+                i += 1;
+                continue;
+            };
+            dec.push_str(&text[copied..i]);
+            units.push(Unit {
+                dec: dec.len(),
+                len: c.len_utf8(),
+                end: i + n,
+                kind,
+            });
+            dec.push(c);
+            i += n;
+            copied = i;
+        }
+        if units.is_empty() {
+            return Self {
+                dec: Cow::Borrowed(text),
+                units,
+            };
+        }
+        dec.push_str(&text[copied..]);
+        Self {
+            dec: Cow::Owned(dec),
+            units,
+        }
+    }
+
+    /// Byte offset in the text of view offset `at` (a char boundary).
+    fn orig(&self, at: usize) -> usize {
+        let before = self.units.partition_point(|u| u.dec + u.len <= at);
+        match before.checked_sub(1).map(|i| self.units[i]) {
+            Some(u) => u.end + (at - (u.dec + u.len)),
+            None => at,
+        }
+    }
+
+    /// How the character at view offset `at` was read, or `None` for a
+    /// plain copy.
+    fn kind_at(&self, at: usize) -> Option<UnitKind> {
+        let i = self.units.partition_point(|u| u.dec < at);
+        self.units.get(i).filter(|u| u.dec == at).map(|u| u.kind)
+    }
+}
+
+/// The character a percent escape at the start of `b` stands for, and the
+/// escape's length in bytes. After an encoded `%` (`%25`), two more hex
+/// digits are read again, up to [`MAX_ESCAPE_LAYERS`] in all.
+fn decode_escape(b: &[u8]) -> Option<(char, usize)> {
+    let hex = |at: usize| match b.get(at..at + 2) {
+        Some(&[h, l]) if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
+            let digit = |d: u8| char::from(d).to_digit(16).unwrap_or(0) as u8;
+            Some(digit(h) << 4 | digit(l))
+        }
+        _ => None,
+    };
+    if b.first() != Some(&b'%') {
+        return None;
+    }
+    let mut v = hex(1)?;
+    let mut n = 3;
+    let mut layers = 1;
+    while v == b'%' && layers < MAX_ESCAPE_LAYERS {
+        let Some(w) = hex(n) else {
+            break;
+        };
+        v = w;
+        n += 2;
+        layers += 1;
+    }
+    let c = if v.is_ascii() {
+        char::from(v)
+    } else {
+        '\u{FFFD}'
+    };
+    Some((c, n))
+}
+
+/// The site host goes on at view offset `at`: a host character, or a dot
+/// and then one (`crew.example.evil.com`). A trailing sentence dot does not
+/// count, and neither does an IDNA full stop: after a host, `。` is the CJK
+/// end of a sentence.
+fn continues_host(view: &HostView<'_>, at: usize) -> bool {
+    let mut rest = view.dec[at..].chars();
+    match rest.next() {
+        Some(c) if is_ascii_host_char(c) => true,
+        Some('.') if view.kind_at(at) != Some(UnitKind::IdnaDot) => {
+            rest.next().is_some_and(is_ascii_host_char)
+        }
         _ => false,
     }
 }
 
-/// Bytes of a `:port` at the start of `rest`, or 0. A port that runs on
-/// into a host character (`:8443x`) is left out, and only the host is
-/// scrubbed.
-fn port_len(rest: &str) -> usize {
-    let Some(digits) = rest.strip_prefix(':') else {
+/// Bytes of a `:port` at view offset `at`, or 0. A port that runs on into
+/// a host character (`:8443x`) is left out, and only the host is scrubbed.
+/// An encoded `%3A` counts as the `:`.
+fn port_len(view: &HostView<'_>, at: usize) -> usize {
+    let Some(digits) = view.dec[at..].strip_prefix(':') else {
         return 0;
     };
     let n = digits.bytes().take_while(u8::is_ascii_digit).count();
-    if n == 0 || continues_host(&digits[n..]) {
+    if n == 0 || continues_host(view, at + 1 + n) {
         return 0;
     }
     1 + n
@@ -369,80 +546,56 @@ fn port_len(rest: &str) -> usize {
 /// in bytes: the DNS name limit.
 const MAX_HOST_BYTES: usize = 253;
 
-/// Start of the host labels in front of an apex at `at` (`www.`, `api.`,
-/// `bücher.`), or `at` when none are clean. The walk never goes below
-/// `floor` (the end of the previous match) or more than [`MAX_HOST_BYTES`]
-/// back, so a line of many mentions stays linear.
-fn labels_start(text: &str, floor: usize, mut at: usize) -> usize {
+/// `floor`, raised to at most [`MAX_HOST_BYTES`] before `at` and then to a
+/// char boundary.
+fn walk_floor(text: &str, floor: usize, at: usize) -> usize {
     let mut floor = floor.max(at.saturating_sub(MAX_HOST_BYTES));
-    while !text.is_char_boundary(floor) {
+    while floor < at && !text.is_char_boundary(floor) {
         floor += 1;
     }
+    floor.min(at)
+}
+
+/// Start of the host labels in front of an apex at `at` (`www.`, `api.`,
+/// `bücher.`), or `at` when none are clean. `text` is the view, so `%2E`
+/// and `。` read as dots. The walk never goes below `floor` (the end of the
+/// previous match) or more than [`MAX_HOST_BYTES`] back, so a line of many
+/// mentions stays linear.
+fn labels_start(text: &str, floor: usize, mut at: usize) -> usize {
+    let floor = walk_floor(text, floor, at);
     loop {
         let Some(dot) = text[floor..at].strip_suffix('.') else {
             return at;
         };
+        let label_end = floor + dot.len();
         let run: usize = dot
             .chars()
             .rev()
-            .take_while(|&c| is_host_char(c))
+            .take_while(|&c| is_host_char(c) || is_ignorable(c))
             .map(char::len_utf8)
             .sum();
-        if run == 0 {
+        let label = label_end - run;
+        // A label needs a host character. A run right after a `%` that is
+        // not an escape is not taken.
+        if !text[label..label_end].chars().any(is_host_char) || text[..label].ends_with('%') {
             return at;
-        }
-        let mut label = floor + dot.len() - run;
-        // A run right after a `%` starts with the escape's two hex digits.
-        // When they are not both ASCII hex digits, the walk stops.
-        if text[..label].ends_with('%') {
-            let b = text.as_bytes();
-            let hex = |i: usize| b.get(i).is_some_and(u8::is_ascii_hexdigit);
-            if !(hex(label) && hex(label + 1)) {
-                return at;
-            }
-            label += 2;
-            if label >= floor + dot.len() {
-                return at;
-            }
         }
         at = label;
     }
 }
 
-/// Start of an encoded `scheme%3A%2F%2F` right before `at` and not below
-/// `floor`, or `at`.
-fn encoded_scheme_start(text: &str, floor: usize, at: usize) -> usize {
-    let mut floor = floor.max(at.saturating_sub(MAX_HOST_BYTES));
-    while !text.is_char_boundary(floor) {
-        floor += 1;
+/// Start of an encoded `scheme%3A%2F%2F` (encoded once or more) right
+/// before view offset `at` and not below `floor`, or `at`. A plain
+/// `scheme://` is left to the URL rule.
+fn encoded_scheme_start(view: &HostView<'_>, floor: usize, at: usize) -> usize {
+    let dec = view.dec.as_ref();
+    let floor = walk_floor(dec, floor, at);
+    match SCHEME_SEP_RE.find(&dec[floor..at]) {
+        Some(m) if (at - 3..at).any(|d| view.kind_at(d) == Some(UnitKind::Escape)) => {
+            floor + m.start()
+        }
+        _ => at,
     }
-    ENC_SCHEME_RE
-        .find(&text[floor..at])
-        .map_or(at, |m| floor + m.start())
-}
-
-/// First character of `s`, a percent escape decoded, and its byte length.
-fn next_unit(s: &str) -> Option<(char, usize)> {
-    if let Some(b) = s
-        .strip_prefix('%')
-        .and_then(|h| h.get(..2))
-        .and_then(|hex| u8::from_str_radix(hex, 16).ok())
-    {
-        return Some((char::from(b), 3));
-    }
-    s.chars().next().map(|c| (c, c.len_utf8()))
-}
-
-/// Last character of `s`, a percent escape decoded, and its byte length.
-fn prev_unit(s: &str) -> Option<(char, usize)> {
-    if let Some(b) = s
-        .get(s.len().saturating_sub(3)..)
-        .and_then(|esc| esc.strip_prefix('%'))
-        .and_then(|h| u8::from_str_radix(h, 16).ok())
-    {
-        return Some((char::from(b), 3));
-    }
-    s.chars().next_back().map(|c| (c, c.len_utf8()))
 }
 
 fn is_host_char(c: char) -> bool {
@@ -572,7 +725,7 @@ impl Scrubber {
                     });
                 }
             }
-            site.push_bare(text, &mut spans);
+            site.push_bare(&HostView::new(text), &mut spans);
         }
         push_re(&HOME_RE, PH_HOME, &mut spans);
         push_re(&BATTLETAG_RE, PH_BATTLETAG, &mut spans);
@@ -616,39 +769,33 @@ fn push_literal(text: &str, lit: &Literal, out: &mut Vec<Span>) {
     }
 }
 
-/// Longest match first. A match overlapping an accepted one is merged into
-/// it and keeps the longer match's placeholder.
+/// Overlapping matches merge into one span; matches that only touch stay
+/// apart. A merged span keeps the placeholder of its longest match, the
+/// first one on a tie. One sort and one pass, so many matches stay fast.
 fn apply_spans(text: &str, mut spans: Vec<Span>) -> String {
-    spans.sort_by(|a, b| {
-        (b.end - b.start)
-            .cmp(&(a.end - a.start))
-            .then(a.start.cmp(&b.start))
-    });
-    let mut accepted: Vec<Span> = Vec::new();
+    spans.retain(|s| s.start < s.end);
+    // Stable: matches with the same start keep their rule order.
+    spans.sort_by_key(|s| s.start);
+    let mut merged: Vec<Span> = Vec::new();
+    let mut longest = 0;
     for s in spans {
-        if s.start == s.end {
-            continue;
-        }
-        let mut merged = s;
-        let mut placeholder = None;
-        accepted.retain(|a| {
-            let overlaps = a.start < merged.end && merged.start < a.end;
-            if overlaps {
-                placeholder.get_or_insert(a.placeholder);
-                merged.start = merged.start.min(a.start);
-                merged.end = merged.end.max(a.end);
+        match merged.last_mut() {
+            Some(cur) if s.start < cur.end => {
+                cur.end = cur.end.max(s.end);
+                if s.end - s.start > longest {
+                    longest = s.end - s.start;
+                    cur.placeholder = s.placeholder;
+                }
             }
-            !overlaps
-        });
-        if let Some(ph) = placeholder {
-            merged.placeholder = ph;
+            _ => {
+                longest = s.end - s.start;
+                merged.push(s);
+            }
         }
-        accepted.push(merged);
     }
-    accepted.sort_by_key(|s| s.start);
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    for s in accepted {
+    for s in merged {
         out.push_str(&text[at..s.start]);
         out.push_str(s.placeholder);
         at = s.end;
@@ -660,6 +807,7 @@ fn apply_spans(text: &str, mut spans: Vec<Span>) -> String {
 /// Host of a server address given without `http://` or `https://`, such
 /// as `crew.example:8443`. `None` when it holds anything else.
 fn bare_host(addr: &str) -> Option<String> {
+    let addr = host_chars(addr);
     if addr.contains("://") {
         return None;
     }
@@ -669,8 +817,23 @@ fn bare_host(addr: &str) -> Option<String> {
         .flatten()
 }
 
-/// Lowercase host of `url`, without port or user info.
+/// `s` with each IDNA full stop read as `.` and zero-width characters
+/// dropped, as IDNA maps them in a host name.
+fn host_chars(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(|c| is_ignorable(c) || is_idna_dot(c)) {
+        return Cow::Borrowed(s);
+    }
+    s.chars()
+        .filter(|&c| !is_ignorable(c))
+        .map(|c| if is_idna_dot(c) { '.' } else { c })
+        .collect()
+}
+
+/// Lowercase host of `url`, without port or user info. An IDNA full stop
+/// counts as a dot and a zero-width character is skipped, so a site typed
+/// as `https://crëw。example` reads as `crëw.example`.
 fn url_host(url: &str) -> Option<String> {
+    let url = host_chars(url);
     let rest = url.trim().split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next()?;
     let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
@@ -1309,6 +1472,20 @@ mod tests {
             "crëw.ex",
             "https://",
             "https%3A%2F%2F",
+            "%25",
+            "%252E",
+            "%252F",
+            "%253A",
+            "%63",
+            "www%2E",
+            "\u{200B}",
+            "\u{200C}",
+            "\u{200D}",
+            "\u{FEFF}",
+            "\u{AD}",
+            "。",
+            "．",
+            "｡",
         ];
         let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = move || {
@@ -1317,16 +1494,236 @@ mod tests {
             seed ^= seed << 17;
             seed
         };
-        for site in ["https://crew.example.test", "https://crëw.ex"] {
+        for (site, host) in [
+            ("https://crew.example.test", "crew.example.test"),
+            ("https://crëw.ex", "crëw.ex"),
+            ("https://crëw。ex", "crëw.ex"),
+        ] {
             let scrubber = Scrubber::new(&site_ctx(site));
+            let clean = format!(" {host} ");
             for _ in 0..3_000 {
                 let len = (next() % 24) as usize;
                 let text: String = (0..len)
                     .map(|_| pieces[(next() % pieces.len() as u64) as usize])
                     .collect();
                 let _ = scrubber.scrub(&text);
+                // A clean mention among the noise is always hidden.
+                let out = scrubber.scrub(&format!("{text}{clean}{text}"));
+                assert!(!out.contains(&clean), "site {site} text {text:?}");
             }
         }
+    }
+
+    /// #494 follow-up: a URL encoded twice or more (a link inside a link
+    /// inside a query) is read through each `%25` layer, up to 3 deep.
+    #[test]
+    fn double_percent_encoded_site_urls_are_scrubbed() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("u=%252F%252Fcrew.example.test", "u=%252F%252F[server-url]"),
+            (
+                "u=https%253A%252F%252Fcrew.example.test%252Fx",
+                "u=[server-url]%252Fx",
+            ),
+            ("u=crew%252Eexample%252etest&y", "u=[server-url]&y"),
+            ("u=crew%25252Eexample.test", "u=[server-url]"),
+            // Four layers is past the bound and stays.
+            ("u=crew%2525252Eexample.test", "u=crew%2525252Eexample.test"),
+            // An encoded `A` in front, or a label behind, is a look-alike.
+            ("u=%2541crew.example.test", "u=%2541crew.example.test"),
+            (
+                "u=crew.example.test%252Eev.io",
+                "u=crew.example.test%252Eev.io",
+            ),
+            // Broken escapes are plain text.
+            (
+                "%25 %25% %252 %25zz crew.example.test",
+                "%25 %25% %252 %25zz [server-url]",
+            ),
+            ("crew.example.test%25", "[server-url]%25"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// #494 follow-up: an escape that encodes a host letter counts as that
+    /// letter, with either case of hex digit.
+    #[test]
+    fn percent_encoded_letters_in_the_host_are_scrubbed() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("u=%63rew.example.test", "u=[server-url]"),
+            ("u=%43REW.%65xample.tes%74/x", "u=[server-url]/x"),
+            ("u=cr%65w%2eexample%2Etest", "u=[server-url]"),
+            ("u=%2563rew.example.test", "u=[server-url]"),
+            ("u=%E9crew.example.test", "u=%E9[server-url]"),
+            ("u=%6Eotcrew.example.test", "u=%6Eotcrew.example.test"),
+            ("u=crew.example.tes%74er", "u=crew.example.tes%74er"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// #494 follow-up: zero-width characters, the byte-order mark and the
+    /// soft hyphen inside the host are skipped, and hidden with it.
+    #[test]
+    fn zero_width_characters_inside_the_host_are_scrubbed() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("a crew\u{200B}.example.test b", "a [server-url] b"),
+            ("a c\u{200C}rew.ex\u{200D}ample.test b", "a [server-url] b"),
+            ("a crew.\u{FEFF}example.test b", "a [server-url] b"),
+            ("a cr\u{AD}ew.example.test b", "a [server-url] b"),
+            ("a www\u{200B}.crew.example.test:8443 b", "a [server-url] b"),
+            (
+                "a https://crew\u{200B}.example.test/p b",
+                "a [server-url] b",
+            ),
+            // Next to the host it is a break, as before.
+            (
+                "a \u{200B}crew.example.test\u{200B} b",
+                "a \u{200B}[server-url]\u{200B} b",
+            ),
+            // Look-alikes stay.
+            ("crew\u{200B}.example.tester", "crew\u{200B}.example.tester"),
+            (
+                "notcrew\u{200B}.example.test",
+                "notcrew\u{200B}.example.test",
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input:?}");
+        }
+    }
+
+    /// #494 follow-up: an IDNA full stop (`。`, `．`, `｡`) in the Website
+    /// URL is mapped to a dot first, so the site is found in both forms.
+    #[test]
+    fn a_site_typed_with_an_ideographic_full_stop_is_normalised() {
+        for site in [
+            "https://crëw。ex",
+            "https://crëw．ex/",
+            "crëw｡ex",
+            "https://xn--crw-kma。ex",
+        ] {
+            let c = site_ctx(site);
+            let got = scrub_text(&c, &redirect_line("https://www.xn--crw-kma.ex"));
+            assert_eq!(got, REDIRECT_SCRUBBED, "site {site}");
+            let cases = [
+                (
+                    "dns crëw.ex and xn--crw-kma.ex:8443",
+                    "dns [server-url] and [server-url]",
+                ),
+                ("other xn--crw-dma.ex stays", "other xn--crw-dma.ex stays"),
+                ("other crëw。ex", "other [server-url]"),
+            ];
+            for (input, want) in cases {
+                assert_eq!(scrub_text(&c, input), want, "site {site} input: {input}");
+            }
+        }
+    }
+
+    /// #494 follow-up: in log text an IDNA full stop counts as a dot
+    /// between labels. After the host it ends a sentence.
+    #[test]
+    fn idna_full_stops_in_the_log_count_as_dots() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("a crew。example。test b", "a [server-url] b"),
+            ("a www．crew.example.test b", "a [server-url] b"),
+            ("a crew｡example.test:8443 b", "a [server-url] b"),
+            ("a https://www。crew.example.test/x b", "a [server-url] b"),
+            ("see crew.example.test。次", "see [server-url]。次"),
+            ("see crew.example.test。Then", "see [server-url]。Then"),
+            ("notcrew。example.test", "notcrew。example.test"),
+            ("crew。example。tester", "crew。example。tester"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// #494 follow-up: an encoded `www%2E` in front and an encoded
+    /// `%3A<port>` behind are hidden with the host.
+    #[test]
+    fn an_encoded_www_and_port_go_with_the_host() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            (
+                "x%2F%2Fwww%2Ecrew%2Eexample%2Etest%3A8443%2Fp",
+                "x%2F%2F[server-url]%2Fp",
+            ),
+            ("host=crew.example.test%3A8443", "host=[server-url]"),
+            (
+                "u=https%3A%2F%2Fwww%2Ecrew.example.test%3A8443%2Fx",
+                "u=[server-url]%2Fx",
+            ),
+            (
+                "u=www%252Ecrew.example.test%253A8443%252F",
+                "u=[server-url]%252F",
+            ),
+            ("crew.example.test%3A8443x", "[server-url]%3A8443x"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// #494 follow-up: matches merge in one pass after one sort. 100k
+    /// mentions took about 18 s before.
+    #[test]
+    fn many_site_mentions_merge_fast() {
+        let c = site_ctx("https://crew.example.test");
+        let text = "see crew.example.test ".repeat(100_000);
+        assert!(text.len() > 2_000_000);
+        let started = std::time::Instant::now();
+        let out = scrub_text(&c, &text);
+        let took = started.elapsed();
+        assert_eq!(out.matches(PH_SERVER_URL).count(), 100_000);
+        assert!(!out.contains("crew.example.test"));
+        assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    }
+
+    /// A match that starts inside the port just taken is skipped. Before,
+    /// its label walk sliced the text backwards and panicked.
+    #[test]
+    fn a_match_inside_a_taken_port_does_not_panic() {
+        let c = site_ctx("http://4");
+        assert_eq!(scrub_text(&c, "4:4"), "[server-url]");
+        assert_eq!(
+            scrub_text(&c, "a 4:4 b 4:44"),
+            "a [server-url] b [server-url]"
+        );
+    }
+
+    #[test]
+    fn overlapping_spans_merge_and_keep_the_longest_placeholder() {
+        let span = |start, end, placeholder| Span {
+            start,
+            end,
+            placeholder,
+        };
+        let text = "abcdefghij";
+        // Overlap: one span, the longer match's placeholder.
+        let got = apply_spans(text, vec![span(0, 4, "[a]"), span(2, 8, "[b]")]);
+        assert_eq!(got, "[b]ij");
+        // Touching spans stay apart.
+        let got = apply_spans(text, vec![span(2, 4, "[b]"), span(0, 2, "[a]")]);
+        assert_eq!(got, "[a][b]efghij");
+        // A chain merges whole; a tie goes to the first match.
+        let got = apply_spans(
+            text,
+            vec![span(4, 6, "[c]"), span(0, 3, "[a]"), span(2, 5, "[b]")],
+        );
+        assert_eq!(got, "[a]ghij");
+        // Empty spans and a span inside another are dropped.
+        let got = apply_spans(
+            text,
+            vec![span(1, 1, "[e]"), span(1, 9, "[x]"), span(3, 4, "[y]")],
+        );
+        assert_eq!(got, "a[x]j");
     }
 
     #[test]
