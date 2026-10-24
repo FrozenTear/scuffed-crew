@@ -9,6 +9,7 @@
 //! longest first. A shorter match that overlaps a longer one is merged into
 //! it, so no part of a matched secret survives beside a placeholder.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
@@ -214,10 +215,9 @@ static URL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?i)\b[a-z][a-z0-9+.\-]*://[^\s"'<>]+"#).expect("url regex"));
 /// Characters cut from the end of a URL match before its host is read.
 const URL_TRAILING_PUNCT: &[char] = &['.', ',', ';', ':', '!', '?', ')', '>', '"', '\''];
-/// `scheme%3A%2F%2F` (or `%3a%2f%2f`) at the end of the text before a host.
-static ENC_SCHEME_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b[a-z][a-z0-9+.\-]*%3A%2F%2F\z").expect("encoded scheme regex")
-});
+/// `scheme://` at the end of the [`HostView`] before a host.
+static SCHEME_SEP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\b[a-z][a-z0-9+.\-]*://\z").expect("scheme regex"));
 static HOME_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"/(?:var/home|home|Users)/[^/\s"'=,;:]+"#).expect("home regex"));
 // Wider than the 2..12 letters a BattleTag allows: a longer run before `#`
@@ -254,86 +254,168 @@ pub struct Scrubber {
 
 /// The configured site host, matched in its `www.` and bare forms.
 struct SiteHost {
-    /// Lowercase host without a leading `www.` or a trailing dot, in its
-    /// punycode and Unicode forms (one entry when they are the same).
+    /// Lowercase host without a leading `www.` or a trailing dot, as
+    /// typed, in punycode and in Unicode (NFC) form. Duplicates are
+    /// dropped.
     apexes: Vec<String>,
-    /// Each apex, case-insensitive, its dots also matched as `%2E`.
+    /// Each apex, case-insensitive, matched on the [`HostView`] of the
+    /// text. Invisible characters may sit between any two of its
+    /// characters.
     apex_res: Vec<Regex>,
 }
 
 impl SiteHost {
     fn new(host: &str) -> Option<Self> {
         let host = host.strip_suffix('.').unwrap_or(host).to_lowercase();
-        if !host.chars().any(char::is_alphanumeric) {
+        // A host with fewer than two letters or digits (`.`, `%`, a lone
+        // zero-width character, `a.`) is not a site address. Its pattern
+        // would hide every such character in the log. An IP address
+        // (`::1`) always is one.
+        let is_ip = host.parse::<std::net::IpAddr>().is_ok();
+        if !is_ip && !names_something(&host) {
             return None;
         }
         // `www.example` keeps its `www.`: a single label is not a site.
-        let apex = match host.strip_prefix("www.") {
+        let apex_of = |h: &str| match h.strip_prefix("www.") {
             Some(rest) if rest.contains('.') => rest.to_string(),
-            _ => host,
+            _ => h.to_string(),
         };
-        let mut apexes = vec![apex.clone()];
-        // The sync client logs hosts in punycode (`xn--…`); a person may
-        // type either form in Settings.
-        if let Ok(ascii) = idna::domain_to_ascii(&apex) {
-            apexes.push(ascii);
+        let mut apexes = vec![apex_of(&host)];
+        // IDNA maps the typed host (NFC, case, width), and the sync client
+        // logs it in punycode (`xn--…`). A person may type either form in
+        // Settings, composed or not.
+        if let Ok(ascii) = idna::domain_to_ascii(&host) {
+            let (unicode, ok) = idna::domain_to_unicode(&ascii);
+            if ok.is_ok() {
+                apexes.push(apex_of(&unicode.to_lowercase()));
+            }
+            apexes.push(apex_of(&ascii));
         }
-        let (unicode, ok) = idna::domain_to_unicode(&apex);
-        if ok.is_ok() {
-            apexes.push(unicode.to_lowercase());
-        }
-        apexes.retain(|a| !a.is_empty());
+        apexes.retain(|a| is_ip || names_something(a));
         apexes.sort();
         apexes.dedup();
         let apex_res = apexes
             .iter()
-            .filter_map(|a| {
-                let labels: Vec<String> = a.split('.').map(regex::escape).collect();
-                Regex::new(&format!("(?i){}", labels.join(r"(?:\.|%2[eE])"))).ok()
-            })
+            .filter_map(|a| Regex::new(&format!("(?i){}", apex_pattern(a))).ok())
             .collect();
         Some(Self { apexes, apex_res })
     }
 
-    /// `host` is the site: an apex itself or a name under it.
+    /// `host` is the site: an apex itself or a name under it, as written
+    /// or after IDNA mapping (`XN--…`, NFD, fullwidth).
     fn is_site(&self, host: &str) -> bool {
         let host = host.strip_suffix('.').unwrap_or(host).to_lowercase();
+        self.on_site(&host) || idna::domain_to_ascii(&host).is_ok_and(|a| self.on_site(&a))
+    }
+
+    /// Lowercase `host` equals an apex or ends in `.apex`.
+    fn on_site(&self, host: &str) -> bool {
         self.apexes.iter().any(|apex| {
-            host == *apex
+            host == apex
                 || host
                     .strip_suffix(apex.as_str())
                     .is_some_and(|front| front.ends_with('.'))
         })
     }
 
-    /// Bare mentions of the site host. Each apex occurrence is checked on
-    /// its own, so a rejected longer candidate never hides a clean apex:
+    /// Host-like runs with a non-ASCII character that IDNA maps onto the
+    /// site: NFD or NFC spellings, compatibility forms (Thai `ำ` and
+    /// `ํา`), and any case. The apex patterns in [`Self::push_bare`] only
+    /// find the spellings the site was typed in. A run is a whole host
+    /// name, so `notcrëw.example` and `crëw.example.evil.com` map to other
+    /// hosts and stay. A cheap check on the last label keeps IDNA off most
+    /// runs, and only the last [`MAX_HOST_BYTES`] of a run are mapped.
+    fn push_mapped(&self, view: &HostView<'_>, out: &mut Vec<Span>) {
+        let dec = view.dec.as_ref();
+        for m in HOST_RUN_RE.find_iter(dec) {
+            let run = m.as_str();
+            if !run.chars().any(|c| !c.is_ascii() && !is_ignorable(c)) {
+                continue;
+            }
+            let mut start = m.start();
+            // As in the label walk, a label right after a `%` that is not
+            // an escape is not taken.
+            if dec[..start].ends_with('%') {
+                match run.find('.') {
+                    Some(dot) => start += dot + 1,
+                    None => continue,
+                }
+            }
+            if m.end() - start > MAX_HOST_BYTES {
+                // Start at the first label inside the bound, if any.
+                let cut = walk_floor(dec, m.end() - MAX_HOST_BYTES, m.end());
+                match dec[cut..m.end()].find('.') {
+                    Some(dot) => start = cut + dot + 1,
+                    None => continue,
+                }
+            }
+            let host: String = dec[start..m.end()]
+                .chars()
+                .filter(|&c| !is_ignorable(c))
+                .collect();
+            let last = host.rsplit('.').next().unwrap_or_default();
+            if last.is_ascii()
+                && !self.apexes.iter().any(|a| {
+                    a.rsplit('.')
+                        .next()
+                        .is_some_and(|t| t.eq_ignore_ascii_case(last))
+                })
+            {
+                continue;
+            }
+            if !idna::domain_to_ascii(&host).is_ok_and(|a| self.on_site(&a)) {
+                continue;
+            }
+            let end = m.end() + port_len(view, m.end());
+            let start = encoded_scheme_start(view, 0, start);
+            out.push(Span {
+                start: view.orig(start),
+                end: view.orig(end),
+                placeholder: PH_SERVER_URL,
+            });
+        }
+    }
+
+    /// Bare mentions of the site host, read on the [`HostView`] of the
+    /// text. Each apex occurrence is checked on its own, so a rejected
+    /// longer candidate never hides a clean apex:
     /// - Labels in front (`www.`, `api.`, `bücher.`) and a port behind are
     ///   taken in when they are clean, else the plain apex is scrubbed.
     /// - The apex must not sit inside a longer host name: `notcrew.example`,
     ///   `crew.example.evil.com` and `crew.example-evil.com` stay. Only an
     ///   ASCII host character in front rejects it, so `.crew.example`,
     ///   `...crew.example` and `ü.crew.example` are scrubbed.
-    /// - A percent escape counts as the character it encodes, so
-    ///   `https%3A%2F%2Fcrew.example` is scrubbed whole.
-    fn push_bare(&self, text: &str, out: &mut Vec<Span>) {
+    /// - A percent escape counts as the character it encodes, even when it
+    ///   is encoded again (`%252E`) or is UTF-8 (`cr%C3%ABw`), so
+    ///   `https%3A%2F%2Fwww%2Ecrew.example%3A8443` and `%63rew.example` are
+    ///   scrubbed whole.
+    /// - An IDNA full stop (`。`) counts as a dot between labels, fullwidth
+    ///   Latin as its ASCII letter, and an invisible character inside the
+    ///   host is skipped.
+    fn push_bare(&self, view: &HostView<'_>, out: &mut Vec<Span>) {
+        let dec = view.dec.as_ref();
         for re in &self.apex_res {
             // End of the last match taken: the next label walk stops there.
             let mut floor = 0;
-            for m in re.find_iter(text) {
-                if prev_unit(&text[..m.start()]).is_some_and(|(c, _)| is_ascii_host_char(c)) {
+            for m in re.find_iter(dec) {
+                if m.start() < floor {
                     continue;
                 }
-                if continues_host(&text[m.end()..]) {
+                if let Some(c) = dec[..m.start()].chars().next_back()
+                    && view.rejects_host(m.start() - c.len_utf8(), c, view.is_folded(m.start()))
+                {
                     continue;
                 }
-                let start = labels_start(text, floor, m.start());
-                let start = encoded_scheme_start(text, floor, start);
-                let end = m.end() + port_len(&text[m.end()..]);
+                if continues_host(view, m.end()) {
+                    continue;
+                }
+                let start = labels_start(dec, floor, m.start());
+                let start = encoded_scheme_start(view, floor, start);
+                let end = m.end() + port_len(view, m.end());
                 floor = end;
                 out.push(Span {
-                    start,
-                    end,
+                    start: view.orig(start),
+                    end: view.orig(end),
                     placeholder: PH_SERVER_URL,
                 });
             }
@@ -341,25 +423,283 @@ impl SiteHost {
     }
 }
 
-/// The site host goes on in `rest`: a host character, or a dot and then
-/// one (`crew.example.evil.com`). A trailing sentence dot does not count.
-fn continues_host(rest: &str) -> bool {
-    match next_unit(rest) {
-        Some((c, _)) if is_ascii_host_char(c) => true,
-        Some(('.', n)) => next_unit(&rest[n..]).is_some_and(|(c, _)| is_ascii_host_char(c)),
-        _ => false,
+/// Default_Ignorable_Code_Point characters: invisible, and dropped from a
+/// host name by IDNA (zero-width space, joiners, word joiner, the
+/// byte-order mark, the soft hyphen, variation selectors, bidi marks and
+/// the like). They are skipped inside the site host. Right before or after
+/// it they still end it, as before.
+fn is_ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{34F}'
+            | '\u{61C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
+}
+
+/// The [`is_ignorable`] characters, as the inside of a regex class.
+const IGNORABLE_CLASS: &str = r"\x{AD}\x{34F}\x{61C}\x{115F}\x{1160}\x{17B4}\x{17B5}\x{180B}-\x{180F}\x{200B}-\x{200F}\x{202A}-\x{202E}\x{2060}-\x{206F}\x{3164}\x{FE00}-\x{FE0F}\x{FEFF}\x{FFA0}\x{FFF0}-\x{FFF8}\x{1BCA0}-\x{1BCA3}\x{1D173}-\x{1D17A}\x{E0000}-\x{E0FFF}";
+
+/// A host-like run in the [`HostView`]: labels of letters, marks, digits,
+/// `_`, `-` and invisible characters, joined by dots.
+static HOST_RUN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    let label = format!(r"[\p{{L}}\p{{M}}\p{{N}}_\-{IGNORABLE_CLASS}]+");
+    Regex::new(&format!(r"{label}(?:\.{label})*")).expect("host run regex")
+});
+
+/// IDNA full stops that count as a dot between labels: ideographic (`。`),
+/// fullwidth (`．`) and halfwidth (`｡`).
+fn is_idna_dot(c: char) -> bool {
+    matches!(c, '\u{3002}' | '\u{FF0E}' | '\u{FF61}')
+}
+
+/// `c` as a host name reads it: an IDNA full stop as `.` and fullwidth
+/// ASCII (`ｃ`, `Ｃ`, `：`) as plain ASCII, the NFKC width fold.
+fn fold_char(c: char) -> char {
+    if is_idna_dot(c) {
+        return '.';
+    }
+    match c {
+        '\u{FF01}'..='\u{FF5E}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+        _ => c,
     }
 }
 
-/// Bytes of a `:port` at the start of `rest`, or 0. A port that runs on
-/// into a host character (`:8443x`) is left out, and only the host is
-/// scrubbed.
-fn port_len(rest: &str) -> usize {
-    let Some(digits) = rest.strip_prefix(':') else {
+/// Regex for one apex: its characters with any invisible run between
+/// them.
+fn apex_pattern(apex: &str) -> String {
+    let mut buf = [0u8; 4];
+    apex.chars()
+        .map(|c| regex::escape(c.encode_utf8(&mut buf)))
+        .collect::<Vec<_>>()
+        .join(&format!("[{IGNORABLE_CLASS}]*"))
+}
+
+/// Most layers of percent-encoding read: `%2E`, `%252E`, … up to
+/// `%25252525252525252E` are all a dot. Each layer takes two more bytes of
+/// the text, so the decode stays linear.
+const MAX_ESCAPE_LAYERS: usize = 8;
+
+/// One character of a [`HostView`] that is not a plain copy of the text.
+#[derive(Debug, Clone, Copy)]
+struct Unit {
+    /// Byte offset in the view, and the character's length there.
+    dec: usize,
+    len: usize,
+    /// End of its bytes in the text.
+    end: usize,
+    /// It was percent-encoded.
+    escaped: bool,
+    /// It is an IDNA full stop read as `.`.
+    idna_dot: bool,
+    /// It is fullwidth ASCII read as ASCII.
+    folded: bool,
+}
+
+/// The text as the host rules read it. Each percent escape is decoded to
+/// the character it stands for, up to [`MAX_ESCAPE_LAYERS`] deep; a run of
+/// escaped bytes that is valid UTF-8 is one character, and a byte that is
+/// not becomes U+FFFD, which no host holds. Each IDNA full stop is read as
+/// `.` and fullwidth ASCII as ASCII. Everything else is copied, so offsets
+/// map back to the text with one binary search.
+struct HostView<'a> {
+    dec: Cow<'a, str>,
+    /// Every character that is not a plain copy, in text order.
+    units: Vec<Unit>,
+}
+
+impl<'a> HostView<'a> {
+    fn new(text: &'a str) -> Self {
+        let b = text.as_bytes();
+        let mut dec = String::new();
+        let mut units = Vec::new();
+        let (mut i, mut copied) = (0, 0);
+        while i < b.len() {
+            let (raw, n, escaped) = match b[i] {
+                b'%' => match decode_escaped_char(&b[i..]) {
+                    Some((c, n)) => (c, n, true),
+                    None => {
+                        i += 1;
+                        continue;
+                    }
+                },
+                x if x >= 0x80 => {
+                    let c = text[i..].chars().next().unwrap_or('\u{FFFD}');
+                    if fold_char(c) == c {
+                        i += c.len_utf8();
+                        continue;
+                    }
+                    (c, c.len_utf8(), false)
+                }
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            let c = fold_char(raw);
+            dec.push_str(&text[copied..i]);
+            units.push(Unit {
+                dec: dec.len(),
+                len: c.len_utf8(),
+                end: i + n,
+                escaped,
+                idna_dot: is_idna_dot(raw),
+                folded: c != raw && !is_idna_dot(raw),
+            });
+            dec.push(c);
+            i += n;
+            copied = i;
+        }
+        if units.is_empty() {
+            return Self {
+                dec: Cow::Borrowed(text),
+                units,
+            };
+        }
+        dec.push_str(&text[copied..]);
+        Self {
+            dec: Cow::Owned(dec),
+            units,
+        }
+    }
+
+    /// Byte offset in the text of view offset `at` (a char boundary).
+    fn orig(&self, at: usize) -> usize {
+        let before = self.units.partition_point(|u| u.dec + u.len <= at);
+        match before.checked_sub(1).map(|i| self.units[i]) {
+            Some(u) => u.end + (at - (u.dec + u.len)),
+            None => at,
+        }
+    }
+
+    /// The decoded character at view offset `at`, or `None` for a plain
+    /// copy.
+    fn unit_at(&self, at: usize) -> Option<Unit> {
+        let i = self.units.partition_point(|u| u.dec < at);
+        self.units.get(i).filter(|u| u.dec == at).copied()
+    }
+
+    /// The character at view offset `at` is fullwidth ASCII read as ASCII.
+    fn is_folded(&self, at: usize) -> bool {
+        self.unit_at(at).is_some_and(|u| u.folded)
+    }
+
+    /// `c` at view offset `at` joins a host name next to the site host:
+    /// an ASCII host character as written or percent-encoded. A fullwidth
+    /// one joins only a host whose edge (`edge_folded`) is fullwidth too,
+    /// so `ｎｏｔｃｒｅｗ.example` is a look-alike while `ｎｏｔcrew.example`
+    /// is scrubbed, as before.
+    fn rejects_host(&self, at: usize, c: char, edge_folded: bool) -> bool {
+        is_ascii_host_char(c) && (edge_folded || !self.is_folded(at))
+    }
+}
+
+/// The byte a percent escape at the start of `b` stands for, and the
+/// escape's length. After an encoded `%` (`%25`), two more hex digits are
+/// read again, up to [`MAX_ESCAPE_LAYERS`] in all.
+fn decode_escape(b: &[u8]) -> Option<(u8, usize)> {
+    let hex = |at: usize| match b.get(at..at + 2) {
+        Some(&[h, l]) if h.is_ascii_hexdigit() && l.is_ascii_hexdigit() => {
+            let digit = |d: u8| char::from(d).to_digit(16).unwrap_or(0) as u8;
+            Some(digit(h) << 4 | digit(l))
+        }
+        _ => None,
+    };
+    if b.first() != Some(&b'%') {
+        return None;
+    }
+    let mut v = hex(1)?;
+    let mut n = 3;
+    let mut layers = 1;
+    while v == b'%' && layers < MAX_ESCAPE_LAYERS {
+        let Some(w) = hex(n) else {
+            break;
+        };
+        v = w;
+        n += 2;
+        layers += 1;
+    }
+    Some((v, n))
+}
+
+/// The character the escapes at the start of `b` stand for, and their
+/// length. An ASCII byte is itself; a lead byte takes the escaped
+/// continuation bytes after it when they make valid UTF-8 (`%C3%AB` is
+/// `ë`). Any other byte is U+FFFD and only its own escape is taken.
+fn decode_escaped_char(b: &[u8]) -> Option<(char, usize)> {
+    let (lead, mut n) = decode_escape(b)?;
+    if lead.is_ascii() {
+        return Some((char::from(lead), n));
+    }
+    let first = n;
+    let want = match lead {
+        0xC2..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF4 => 4,
+        _ => return Some(('\u{FFFD}', first)),
+    };
+    let mut bytes = [lead, 0, 0, 0];
+    for slot in bytes.iter_mut().take(want).skip(1) {
+        match decode_escape(&b[n..]) {
+            Some((cont @ 0x80..=0xBF, len)) => {
+                *slot = cont;
+                n += len;
+            }
+            _ => return Some(('\u{FFFD}', first)),
+        }
+    }
+    match std::str::from_utf8(&bytes[..want])
+        .ok()
+        .and_then(|s| s.chars().next())
+    {
+        Some(c) => Some((c, n)),
+        None => Some(('\u{FFFD}', first)),
+    }
+}
+
+/// The site host goes on at view offset `at`: an ASCII host character
+/// (see [`HostView::rejects_host`]), or a dot and then one
+/// (`crew.example.evil.com`). A trailing sentence dot does not count, and
+/// neither does an IDNA full stop: after a host, `。` is the CJK end of a
+/// sentence. After a fullwidth host, `．` is its next dot.
+fn continues_host(view: &HostView<'_>, at: usize) -> bool {
+    let edge_folded = view.dec[..at]
+        .chars()
+        .next_back()
+        .is_some_and(|c| view.is_folded(at - c.len_utf8()));
+    let mut rest = view.dec[at..].chars();
+    match rest.next() {
+        Some('.') if edge_folded || !view.unit_at(at).is_some_and(|u| u.idna_dot) => rest
+            .next()
+            .is_some_and(|c| view.rejects_host(at + 1, c, edge_folded)),
+        Some(c) => view.rejects_host(at, c, edge_folded),
+        None => false,
+    }
+}
+
+/// Bytes of a `:port` at view offset `at`, or 0. A port that runs on into
+/// a host character (`:8443x`) is left out, and only the host is scrubbed.
+/// An encoded `%3A` counts as the `:`.
+fn port_len(view: &HostView<'_>, at: usize) -> usize {
+    let Some(digits) = view.dec[at..].strip_prefix(':') else {
         return 0;
     };
     let n = digits.bytes().take_while(u8::is_ascii_digit).count();
-    if n == 0 || continues_host(&digits[n..]) {
+    if n == 0 || continues_host(view, at + 1 + n) {
         return 0;
     }
     1 + n
@@ -369,84 +709,68 @@ fn port_len(rest: &str) -> usize {
 /// in bytes: the DNS name limit.
 const MAX_HOST_BYTES: usize = 253;
 
-/// Start of the host labels in front of an apex at `at` (`www.`, `api.`,
-/// `bücher.`), or `at` when none are clean. The walk never goes below
-/// `floor` (the end of the previous match) or more than [`MAX_HOST_BYTES`]
-/// back, so a line of many mentions stays linear.
-fn labels_start(text: &str, floor: usize, mut at: usize) -> usize {
+/// `floor`, raised to at most [`MAX_HOST_BYTES`] before `at` and then to a
+/// char boundary.
+fn walk_floor(text: &str, floor: usize, at: usize) -> usize {
     let mut floor = floor.max(at.saturating_sub(MAX_HOST_BYTES));
-    while !text.is_char_boundary(floor) {
+    while floor < at && !text.is_char_boundary(floor) {
         floor += 1;
     }
+    floor.min(at)
+}
+
+/// Start of the host labels in front of an apex at `at` (`www.`, `api.`,
+/// `bücher.`), or `at` when none are clean. `text` is the view, so `%2E`
+/// and `。` read as dots. The walk never goes below `floor` (the end of the
+/// previous match) or more than [`MAX_HOST_BYTES`] back, so a line of many
+/// mentions stays linear.
+fn labels_start(text: &str, floor: usize, mut at: usize) -> usize {
+    let floor = walk_floor(text, floor, at);
     loop {
         let Some(dot) = text[floor..at].strip_suffix('.') else {
             return at;
         };
+        let label_end = floor + dot.len();
         let run: usize = dot
             .chars()
             .rev()
-            .take_while(|&c| is_host_char(c))
+            .take_while(|&c| is_host_char(c) || is_ignorable(c))
             .map(char::len_utf8)
             .sum();
-        if run == 0 {
+        let label = label_end - run;
+        // A label needs a host character. A run right after a `%` that is
+        // not an escape is not taken.
+        if !text[label..label_end].chars().any(is_host_char) || text[..label].ends_with('%') {
             return at;
-        }
-        let mut label = floor + dot.len() - run;
-        // A run right after a `%` starts with the escape's two hex digits.
-        // When they are not both ASCII hex digits, the walk stops.
-        if text[..label].ends_with('%') {
-            let b = text.as_bytes();
-            let hex = |i: usize| b.get(i).is_some_and(u8::is_ascii_hexdigit);
-            if !(hex(label) && hex(label + 1)) {
-                return at;
-            }
-            label += 2;
-            if label >= floor + dot.len() {
-                return at;
-            }
         }
         at = label;
     }
 }
 
-/// Start of an encoded `scheme%3A%2F%2F` right before `at` and not below
-/// `floor`, or `at`.
-fn encoded_scheme_start(text: &str, floor: usize, at: usize) -> usize {
-    let mut floor = floor.max(at.saturating_sub(MAX_HOST_BYTES));
-    while !text.is_char_boundary(floor) {
-        floor += 1;
+/// Start of an encoded `scheme%3A%2F%2F` (encoded once or more) right
+/// before view offset `at` and not below `floor`, or `at`. A plain
+/// `scheme://` is left to the URL rule.
+fn encoded_scheme_start(view: &HostView<'_>, floor: usize, at: usize) -> usize {
+    let dec = view.dec.as_ref();
+    let floor = walk_floor(dec, floor, at);
+    match SCHEME_SEP_RE.find(&dec[floor..at]) {
+        Some(m) if (at - 3..at).any(|d| view.unit_at(d).is_some_and(|u| u.escaped)) => {
+            floor + m.start()
+        }
+        _ => at,
     }
-    ENC_SCHEME_RE
-        .find(&text[floor..at])
-        .map_or(at, |m| floor + m.start())
 }
 
-/// First character of `s`, a percent escape decoded, and its byte length.
-fn next_unit(s: &str) -> Option<(char, usize)> {
-    if let Some(b) = s
-        .strip_prefix('%')
-        .and_then(|h| h.get(..2))
-        .and_then(|hex| u8::from_str_radix(hex, 16).ok())
-    {
-        return Some((char::from(b), 3));
-    }
-    s.chars().next().map(|c| (c, c.len_utf8()))
-}
-
-/// Last character of `s`, a percent escape decoded, and its byte length.
-fn prev_unit(s: &str) -> Option<(char, usize)> {
-    if let Some(b) = s
-        .get(s.len().saturating_sub(3)..)
-        .and_then(|esc| esc.strip_prefix('%'))
-        .and_then(|h| u8::from_str_radix(h, 16).ok())
-    {
-        return Some((char::from(b), 3));
-    }
-    s.chars().next_back().map(|c| (c, c.len_utf8()))
-}
+/// A combining mark (`\p{M}`): Thai tone marks, Indic viramas, the
+/// combining diaeresis of a decomposed `ë`. They belong to the letter
+/// before them in a host name.
+static MARK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\A\p{M}\z").expect("mark regex"));
 
 fn is_host_char(c: char) -> bool {
-    c.is_alphanumeric() || c == '_' || c == '-'
+    if c.is_alphanumeric() || c == '_' || c == '-' {
+        return true;
+    }
+    !c.is_ascii() && MARK_RE.is_match(c.encode_utf8(&mut [0u8; 4]))
 }
 
 fn is_ascii_host_char(c: char) -> bool {
@@ -501,13 +825,16 @@ impl Scrubber {
         // on host boundaries. The literal is only a fallback for an address
         // that is not a URL at all. An address with a scheme but no host
         // (`https://`, `http://:8443`) scrubs nothing: its literal would
-        // hide every `https://` in the log.
+        // hide every `https://` in the log. Nor does one with fewer than
+        // two letters or digits (`。`, `%`, `a。`): it would hide every
+        // such character.
         let server_url = non_empty(ctx.server_url.as_deref());
         let site = server_url
             .and_then(|u| url_host(u).or_else(|| bare_host(u)))
             .and_then(|h| SiteHost::new(&h));
         if let (Some(url), None) = (server_url, &site)
             && !url.contains("://")
+            && names_something(url)
         {
             add(url, true, false, PH_SERVER_URL);
         }
@@ -572,7 +899,9 @@ impl Scrubber {
                     });
                 }
             }
-            site.push_bare(text, &mut spans);
+            let view = HostView::new(text);
+            site.push_bare(&view, &mut spans);
+            site.push_mapped(&view, &mut spans);
         }
         push_re(&HOME_RE, PH_HOME, &mut spans);
         push_re(&BATTLETAG_RE, PH_BATTLETAG, &mut spans);
@@ -616,39 +945,33 @@ fn push_literal(text: &str, lit: &Literal, out: &mut Vec<Span>) {
     }
 }
 
-/// Longest match first. A match overlapping an accepted one is merged into
-/// it and keeps the longer match's placeholder.
+/// Overlapping matches merge into one span; matches that only touch stay
+/// apart. A merged span keeps the placeholder of its longest match, the
+/// first one on a tie. One sort and one pass, so many matches stay fast.
 fn apply_spans(text: &str, mut spans: Vec<Span>) -> String {
-    spans.sort_by(|a, b| {
-        (b.end - b.start)
-            .cmp(&(a.end - a.start))
-            .then(a.start.cmp(&b.start))
-    });
-    let mut accepted: Vec<Span> = Vec::new();
+    spans.retain(|s| s.start < s.end);
+    // Stable: matches with the same start keep their rule order.
+    spans.sort_by_key(|s| s.start);
+    let mut merged: Vec<Span> = Vec::new();
+    let mut longest = 0;
     for s in spans {
-        if s.start == s.end {
-            continue;
-        }
-        let mut merged = s;
-        let mut placeholder = None;
-        accepted.retain(|a| {
-            let overlaps = a.start < merged.end && merged.start < a.end;
-            if overlaps {
-                placeholder.get_or_insert(a.placeholder);
-                merged.start = merged.start.min(a.start);
-                merged.end = merged.end.max(a.end);
+        match merged.last_mut() {
+            Some(cur) if s.start < cur.end => {
+                cur.end = cur.end.max(s.end);
+                if s.end - s.start > longest {
+                    longest = s.end - s.start;
+                    cur.placeholder = s.placeholder;
+                }
             }
-            !overlaps
-        });
-        if let Some(ph) = placeholder {
-            merged.placeholder = ph;
+            _ => {
+                longest = s.end - s.start;
+                merged.push(s);
+            }
         }
-        accepted.push(merged);
     }
-    accepted.sort_by_key(|s| s.start);
     let mut out = String::with_capacity(text.len());
     let mut at = 0;
-    for s in accepted {
+    for s in merged {
         out.push_str(&text[at..s.start]);
         out.push_str(s.placeholder);
         at = s.end;
@@ -660,6 +983,7 @@ fn apply_spans(text: &str, mut spans: Vec<Span>) -> String {
 /// Host of a server address given without `http://` or `https://`, such
 /// as `crew.example:8443`. `None` when it holds anything else.
 fn bare_host(addr: &str) -> Option<String> {
+    let addr = host_chars(addr);
     if addr.contains("://") {
         return None;
     }
@@ -669,21 +993,46 @@ fn bare_host(addr: &str) -> Option<String> {
         .flatten()
 }
 
-/// Lowercase host of `url`, without port or user info.
+/// `s` with each IDNA full stop read as `.` and invisible characters
+/// dropped, as IDNA maps them in a host name.
+fn host_chars(s: &str) -> Cow<'_, str> {
+    if !s.chars().any(|c| is_ignorable(c) || is_idna_dot(c)) {
+        return Cow::Borrowed(s);
+    }
+    s.chars()
+        .filter(|&c| !is_ignorable(c))
+        .map(|c| if is_idna_dot(c) { '.' } else { c })
+        .collect()
+}
+
+/// Lowercase host of `url`, without port or user info. The URL's parts
+/// are found on the text as written. The host is then read on its
+/// [`HostView`]: escapes decoded (`%63rew`), an IDNA full stop as a dot,
+/// fullwidth as ASCII and invisible characters skipped, so a site typed as
+/// `https://crëw。example` reads as `crëw.example`.
 fn url_host(url: &str) -> Option<String> {
     let rest = url.trim().split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next()?;
     let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
     let host = if let Some(v6) = authority.strip_prefix('[') {
-        v6.split(']').next()?
+        v6.split(']').next()?.to_string()
     } else {
         // The host ends at the port or at the first character a host name
         // cannot hold.
-        authority
+        let view = HostView::new(authority);
+        let chars = host_chars(&view.dec);
+        chars
             .split(|c: char| !(is_host_char(c) || c == '.'))
             .next()?
+            .to_string()
     };
     (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// `s` holds at least two letters or digits: the least a site address
+/// needs.
+fn names_something(s: &str) -> bool {
+    s.chars().filter(|c| c.is_alphanumeric()).nth(1).is_some()
 }
 
 /// Remove terminal colour codes the log writer adds.
@@ -1309,6 +1658,35 @@ mod tests {
             "crëw.ex",
             "https://",
             "https%3A%2F%2F",
+            "%25",
+            "%252E",
+            "%252F",
+            "%253A",
+            "%63",
+            "www%2E",
+            "\u{200B}",
+            "\u{200C}",
+            "\u{200D}",
+            "\u{FEFF}",
+            "\u{AD}",
+            "。",
+            "．",
+            "｡",
+            "\u{308}",
+            "\u{BCD}",
+            "\u{E49}",
+            "\u{2060}",
+            "\u{34F}",
+            "\u{180E}",
+            "ｃ",
+            "Ｅ",
+            "％",
+            "：",
+            "%C3",
+            "%AB",
+            "%E3%80%82",
+            "%2525252E",
+            "தமிழ்.ex",
         ];
         let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
         let mut next = move || {
@@ -1317,16 +1695,468 @@ mod tests {
             seed ^= seed << 17;
             seed
         };
-        for site in ["https://crew.example.test", "https://crëw.ex"] {
+        for (site, host) in [
+            ("https://crew.example.test", "crew.example.test"),
+            ("https://crëw.ex", "crëw.ex"),
+            ("https://crëw。ex", "crëw.ex"),
+            ("https://தமிழ்.ex", "தமிழ்.ex"),
+            ("https://cre\u{308}w.ex", "crëw.ex"),
+        ] {
             let scrubber = Scrubber::new(&site_ctx(site));
+            let clean = format!(" {host} ");
             for _ in 0..3_000 {
                 let len = (next() % 24) as usize;
                 let text: String = (0..len)
                     .map(|_| pieces[(next() % pieces.len() as u64) as usize])
                     .collect();
                 let _ = scrubber.scrub(&text);
+                // A clean mention among the noise is always hidden.
+                let out = scrubber.scrub(&format!("{text}{clean}{text}"));
+                assert!(!out.contains(&clean), "site {site} text {text:?}");
             }
         }
+    }
+
+    /// #494 follow-up: a URL encoded twice or more (a link inside a link
+    /// inside a query) is read through each `%25` layer, up to 8 deep.
+    #[test]
+    fn double_percent_encoded_site_urls_are_scrubbed() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("u=%252F%252Fcrew.example.test", "u=%252F%252F[server-url]"),
+            (
+                "u=https%253A%252F%252Fcrew.example.test%252Fx",
+                "u=[server-url]%252Fx",
+            ),
+            ("u=crew%252Eexample%252etest&y", "u=[server-url]&y"),
+            ("u=crew%25252Eexample.test", "u=[server-url]"),
+            // Up to 8 layers is read.
+            ("u=crew%2525252Eexample.test", "u=[server-url]"),
+            ("u=crew%252525252525252Eexample.test", "u=[server-url]"),
+            // An encoded `A` in front, or a label behind, is a look-alike.
+            ("u=%2541crew.example.test", "u=%2541crew.example.test"),
+            (
+                "u=crew.example.test%252Eev.io",
+                "u=crew.example.test%252Eev.io",
+            ),
+            // Broken escapes are plain text.
+            (
+                "%25 %25% %252 %25zz crew.example.test",
+                "%25 %25% %252 %25zz [server-url]",
+            ),
+            ("crew.example.test%25", "[server-url]%25"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+        // 9 layers is past the bound: the site rule does not read it (the
+        // long run is still caught by the token rule).
+        let nine = scrub_text(&c, "u=crew%25252525252525252Eexample.test");
+        assert!(!nine.contains(PH_SERVER_URL), "{nine}");
+    }
+
+    /// #494 follow-up: an escape that encodes a host letter counts as that
+    /// letter, with either case of hex digit.
+    #[test]
+    fn percent_encoded_letters_in_the_host_are_scrubbed() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("u=%63rew.example.test", "u=[server-url]"),
+            ("u=%43REW.%65xample.tes%74/x", "u=[server-url]/x"),
+            ("u=cr%65w%2eexample%2Etest", "u=[server-url]"),
+            ("u=%2563rew.example.test", "u=[server-url]"),
+            ("u=%E9crew.example.test", "u=%E9[server-url]"),
+            ("u=%6Eotcrew.example.test", "u=%6Eotcrew.example.test"),
+            ("u=crew.example.tes%74er", "u=crew.example.tes%74er"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// #494 follow-up: zero-width characters, the byte-order mark and the
+    /// soft hyphen inside the host are skipped, and hidden with it.
+    #[test]
+    fn zero_width_characters_inside_the_host_are_scrubbed() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("a crew\u{200B}.example.test b", "a [server-url] b"),
+            ("a c\u{200C}rew.ex\u{200D}ample.test b", "a [server-url] b"),
+            ("a crew.\u{FEFF}example.test b", "a [server-url] b"),
+            ("a cr\u{AD}ew.example.test b", "a [server-url] b"),
+            ("a www\u{200B}.crew.example.test:8443 b", "a [server-url] b"),
+            (
+                "a https://crew\u{200B}.example.test/p b",
+                "a [server-url] b",
+            ),
+            // Next to the host it is a break, as before.
+            (
+                "a \u{200B}crew.example.test\u{200B} b",
+                "a \u{200B}[server-url]\u{200B} b",
+            ),
+            // Look-alikes stay.
+            ("crew\u{200B}.example.tester", "crew\u{200B}.example.tester"),
+            (
+                "notcrew\u{200B}.example.test",
+                "notcrew\u{200B}.example.test",
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input:?}");
+        }
+    }
+
+    /// #494 follow-up: an IDNA full stop (`。`, `．`, `｡`) in the Website
+    /// URL is mapped to a dot first, so the site is found in both forms.
+    #[test]
+    fn a_site_typed_with_an_ideographic_full_stop_is_normalised() {
+        for site in [
+            "https://crëw。ex",
+            "https://crëw．ex/",
+            "crëw｡ex",
+            "https://xn--crw-kma。ex",
+        ] {
+            let c = site_ctx(site);
+            let got = scrub_text(&c, &redirect_line("https://www.xn--crw-kma.ex"));
+            assert_eq!(got, REDIRECT_SCRUBBED, "site {site}");
+            let cases = [
+                (
+                    "dns crëw.ex and xn--crw-kma.ex:8443",
+                    "dns [server-url] and [server-url]",
+                ),
+                ("other xn--crw-dma.ex stays", "other xn--crw-dma.ex stays"),
+                ("other crëw。ex", "other [server-url]"),
+            ];
+            for (input, want) in cases {
+                assert_eq!(scrub_text(&c, input), want, "site {site} input: {input}");
+            }
+        }
+    }
+
+    /// #494 follow-up: in log text an IDNA full stop counts as a dot
+    /// between labels. After the host it ends a sentence.
+    #[test]
+    fn idna_full_stops_in_the_log_count_as_dots() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("a crew。example。test b", "a [server-url] b"),
+            ("a www．crew.example.test b", "a [server-url] b"),
+            ("a crew｡example.test:8443 b", "a [server-url] b"),
+            ("a https://www。crew.example.test/x b", "a [server-url] b"),
+            ("see crew.example.test。次", "see [server-url]。次"),
+            ("see crew.example.test。Then", "see [server-url]。Then"),
+            ("notcrew。example.test", "notcrew。example.test"),
+            ("crew。example。tester", "crew。example。tester"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// #494 follow-up: an encoded `www%2E` in front and an encoded
+    /// `%3A<port>` behind are hidden with the host.
+    #[test]
+    fn an_encoded_www_and_port_go_with_the_host() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            (
+                "x%2F%2Fwww%2Ecrew%2Eexample%2Etest%3A8443%2Fp",
+                "x%2F%2F[server-url]%2Fp",
+            ),
+            ("host=crew.example.test%3A8443", "host=[server-url]"),
+            (
+                "u=https%3A%2F%2Fwww%2Ecrew.example.test%3A8443%2Fx",
+                "u=[server-url]%2Fx",
+            ),
+            (
+                "u=www%252Ecrew.example.test%253A8443%252F",
+                "u=[server-url]%252F",
+            ),
+            ("crew.example.test%3A8443x", "[server-url]%3A8443x"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// #494 follow-up: matches merge in one pass after one sort. 100k
+    /// mentions took about 18 s before.
+    #[test]
+    fn many_site_mentions_merge_fast() {
+        let c = site_ctx("https://crew.example.test");
+        let text = "see crew.example.test ".repeat(100_000);
+        assert!(text.len() > 2_000_000);
+        let started = std::time::Instant::now();
+        let out = scrub_text(&c, &text);
+        let took = started.elapsed();
+        assert_eq!(out.matches(PH_SERVER_URL).count(), 100_000);
+        assert!(!out.contains("crew.example.test"));
+        assert!(took < std::time::Duration::from_secs(5), "took {took:?}");
+    }
+
+    /// #495 review: a host whose name holds combining marks (Thai tone
+    /// marks, Tamil and Devanagari viramas, a decomposed `ë`) is read
+    /// whole, and IDNA gives its punycode and NFC forms.
+    #[test]
+    fn an_idn_site_with_combining_marks_is_scrubbed_in_both_forms() {
+        let sites = [
+            ("น้ำ.ex", "xn--q3c4c8cq.ex"),
+            ("தமிழ்.ex", "xn--rlcus7b3d.ex"),
+            ("संस्कृत.ex", "xn--i1b2b4b6db1e6c.ex"),
+            ("cre\u{308}w.ex", "xn--crw-kma.ex"),
+        ];
+        for (unicode, puny) in sites {
+            for site in [format!("https://{unicode}"), format!("https://{puny}/")] {
+                let c = site_ctx(&site);
+                for target in [
+                    format!("https://www.{puny}"),
+                    format!("https://{puny}:8443"),
+                    format!("https://www.{unicode}"),
+                ] {
+                    let got = scrub_text(&c, &redirect_line(&target));
+                    assert_eq!(got, REDIRECT_SCRUBBED, "site {site} to {target}");
+                }
+                let bare = format!("dns {unicode} and {puny} and www.{unicode}:1 end");
+                assert_eq!(
+                    scrub_text(&c, &bare),
+                    "dns [server-url] and [server-url] and [server-url] end",
+                    "site {site}"
+                );
+            }
+        }
+        // The decomposed site also finds the composed form, and the reverse.
+        let c = site_ctx("https://cre\u{308}w.ex");
+        assert_eq!(scrub_text(&c, "a crëw.ex b"), "a [server-url] b");
+        let c = site_ctx("https://crëw.ex");
+        assert_eq!(scrub_text(&c, "a cre\u{308}w.ex b"), "a [server-url] b");
+        // Typed as punycode, the site finds the Thai name as people type
+        // it (`ำ`, which IDNA maps to `ํา`) and in its mapped form.
+        let c = site_ctx("https://xn--q3c4c8cq.ex");
+        let mapped = "\u{E19}\u{E49}\u{E4D}\u{E32}.ex";
+        assert_eq!(scrub_text(&c, &format!("a {mapped} b")), "a [server-url] b");
+        // Look-alikes of an IDN site stay.
+        let c = site_ctx("https://น้ำ.ex");
+        for text in ["notน้ำ.ex", "น้ำ.ex.evil.io", "น้ำ.exx", "xn--q3c4c8cq.exx"]
+        {
+            assert_eq!(scrub_text(&c, text), text);
+        }
+        // A label with marks in front is taken in whole.
+        let c = site_ctx("https://crew.example.test");
+        assert_eq!(
+            scrub_text(&c, "a संस्कृत.crew.example.test b"),
+            "a [server-url] b"
+        );
+    }
+
+    /// #495 review: the URL rule reads the host on the decoded view, so an
+    /// escaped host hides its whole URL.
+    #[test]
+    fn a_url_with_an_escaped_host_is_hidden_whole() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("a https://%63rew.example.test/p?q=1 b", "a [server-url] b"),
+            ("a https://crew%2Eexample.test/p b", "a [server-url] b"),
+            (
+                "a https://www%252Ecrew.example.test/p b",
+                "a [server-url] b",
+            ),
+            ("a https://ｃｒｅｗ.example.test/p b", "a [server-url] b"),
+            ("a https://crew.example.test%2Fevil/p b", "a [server-url] b"),
+            (
+                "a https://notcrew.example.test/p b",
+                "a https://notcrew.example.test/p b",
+            ),
+            (
+                "a https://crew.example.test%2Eevil.io/p b",
+                "a https://crew.example.test%2Eevil.io/p b",
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// #495 review: escaped bytes that make valid UTF-8 are one character
+    /// (`cr%C3%ABw`). Bytes that do not are a non-host character.
+    #[test]
+    fn percent_encoded_utf8_hosts_are_scrubbed() {
+        let c = site_ctx("https://crëw.ex");
+        let cases = [
+            ("u=cr%C3%ABw.ex", "u=[server-url]"),
+            ("u=CR%c3%abW.EX&y", "u=[server-url]&y"),
+            ("u=https%3A%2F%2Fwww.cr%C3%ABw.ex%2Fp", "u=[server-url]%2Fp"),
+            ("u=cr%25C3%25ABw.ex", "u=[server-url]"),
+            ("u=cr%C3w.ex", "u=cr%C3w.ex"),
+            ("u=cr%C3%41w.ex", "u=cr%C3%41w.ex"),
+            ("u=cr%FF%FEw.ex", "u=cr%FF%FEw.ex"),
+            ("u=%F0%9F%98", "u=%F0%9F%98"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("u=b%C3%BCcher.crew.example.test", "u=[server-url]"),
+            ("u=crew%E3%80%82example.test", "u=[server-url]"),
+            ("u=%E9crew.example.test", "u=%E9[server-url]"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// #495 review: every Default_Ignorable_Code_Point inside the host is
+    /// skipped, not only the zero-width space family.
+    #[test]
+    fn other_invisible_characters_inside_the_host_are_scrubbed() {
+        let c = site_ctx("https://crew.example.test");
+        for inv in [
+            '\u{2060}',
+            '\u{034F}',
+            '\u{180E}',
+            '\u{FE0F}',
+            '\u{200E}',
+            '\u{202E}',
+            '\u{E0041}',
+        ] {
+            let input = format!("a cr{inv}ew.exa{inv}mple.test b");
+            assert_eq!(scrub_text(&c, &input), "a [server-url] b", "char {inv:?}");
+            let edge = format!("a {inv}crew.example.test{inv} b");
+            assert_eq!(
+                scrub_text(&c, &edge),
+                format!("a {inv}[server-url]{inv} b"),
+                "char {inv:?}"
+            );
+        }
+    }
+
+    /// #495 review: fullwidth Latin in the log reads as ASCII. A fullwidth
+    /// letter next to a plain host does not make a look-alike, as before;
+    /// next to a fullwidth host it does.
+    #[test]
+    fn fullwidth_latin_in_the_log_is_folded() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("a ｃｒｅｗ.ｅｘａｍｐｌｅ.ｔｅｓｔ b", "a [server-url] b"),
+            ("a ＣＲＥＷ．example．test：８４４３ b", "a [server-url] b"),
+            ("a ｗｗｗ.crew.example.test b", "a [server-url] b"),
+            ("a ｎｏｔcrew.example.test b", "a ｎｏｔ[server-url] b"),
+            ("a crew.example.testｅｒ b", "a [server-url]ｅｒ b"),
+            (
+                "a notｃｒｅｗ.example.test b",
+                "a notｃｒｅｗ.example.test b",
+            ),
+            (
+                "a ｎｏｔｃｒｅｗ.example.test b",
+                "a ｎｏｔｃｒｅｗ.example.test b",
+            ),
+            (
+                "a ｃｒｅｗ.ｅｘａｍｐｌｅ.ｔｅｓｔｅｒ b",
+                "a ｃｒｅｗ.ｅｘａｍｐｌｅ.ｔｅｓｔｅｒ b",
+            ),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+        // After a fullwidth host, `．` is its next dot; `。` ends a sentence.
+        let c = site_ctx("http://crew");
+        assert_eq!(scrub_text(&c, "a ＣＲＥＷ．ｅｘ b"), "a ＣＲＥＷ．ｅｘ b");
+        assert_eq!(
+            scrub_text(&c, "a ＣＲＥＷ．example b"),
+            "a ＣＲＥＷ．example b"
+        );
+        assert_eq!(scrub_text(&c, "a ＣＲＥＷ。 b"), "a [server-url]。 b");
+    }
+
+    /// #495 review: an IP address is a site address whatever its count
+    /// of letters and digits (`::1`), so it is still scrubbed. A bare `4`
+    /// is not an IP address and stays no host.
+    #[test]
+    fn an_ip_site_with_few_digits_is_still_scrubbed() {
+        for (site, ip) in [
+            ("http://[::1]:3030", "::1"),
+            ("http://[::1]", "::1"),
+            ("https://[fe80::1]/", "fe80::1"),
+            ("http://127.0.0.1:3030", "127.0.0.1"),
+        ] {
+            let c = site_ctx(site);
+            let text = format!("a http://[{ip}]:3030/x b {ip} c");
+            let text = text.replace("[127.0.0.1]", "127.0.0.1");
+            let got = scrub_text(&c, &text);
+            assert_eq!(got, "a [server-url] b [server-url] c", "site {site}");
+        }
+        let c = site_ctx("http://[::1]:3030");
+        let got = scrub_text(&c, "bind [::1]:3030 ok");
+        assert!(!got.contains("::1"), "{got}");
+        let c = site_ctx("http://4");
+        let text = "4 x 4:4 http://4/a";
+        assert_eq!(scrub_text(&c, text), text);
+    }
+
+    /// #495 review: a Website URL with fewer than two letters or digits in
+    /// its host is no site address and scrubs nothing.
+    #[test]
+    fn a_garbage_site_address_scrubs_nothing() {
+        let text = "a。b % \u{200B} a data。 https://a/x a. - _ 1";
+        for site in [
+            "。",
+            "%",
+            "\u{200B}",
+            "https://a。",
+            "https://。",
+            "a",
+            "a。",
+            "https://-.-",
+            "https://%2E",
+            "https://\u{200B}",
+            "https://%61",
+        ] {
+            assert_eq!(scrub_text(&site_ctx(site), text), text, "site {site:?}");
+        }
+    }
+
+    /// A match that starts inside the port just taken is skipped. Before,
+    /// its label walk sliced the text backwards and panicked (site
+    /// `http://4`, text `4:4` on 00231219; a one-character host is no site
+    /// now, so the test uses two digits).
+    #[test]
+    fn a_match_inside_a_taken_port_does_not_panic() {
+        let c = site_ctx("http://44");
+        assert_eq!(scrub_text(&c, "44:44"), "[server-url]");
+        // A fullwidth number holding the host is another name.
+        assert_eq!(scrub_text(&c, "port ８４４３"), "port ８４４３");
+        assert_eq!(
+            scrub_text(&c, "a 44:44 b 44:444"),
+            "a [server-url] b [server-url]"
+        );
+    }
+
+    #[test]
+    fn overlapping_spans_merge_and_keep_the_longest_placeholder() {
+        let span = |start, end, placeholder| Span {
+            start,
+            end,
+            placeholder,
+        };
+        let text = "abcdefghij";
+        // Overlap: one span, the longer match's placeholder.
+        let got = apply_spans(text, vec![span(0, 4, "[a]"), span(2, 8, "[b]")]);
+        assert_eq!(got, "[b]ij");
+        // Touching spans stay apart.
+        let got = apply_spans(text, vec![span(2, 4, "[b]"), span(0, 2, "[a]")]);
+        assert_eq!(got, "[a][b]efghij");
+        // A chain merges whole; a tie goes to the first match.
+        let got = apply_spans(
+            text,
+            vec![span(4, 6, "[c]"), span(0, 3, "[a]"), span(2, 5, "[b]")],
+        );
+        assert_eq!(got, "[a]ghij");
+        // Empty spans and a span inside another are dropped.
+        let got = apply_spans(
+            text,
+            vec![span(1, 1, "[e]"), span(1, 9, "[x]"), span(3, 4, "[y]")],
+        );
+        assert_eq!(got, "a[x]j");
     }
 
     #[test]
