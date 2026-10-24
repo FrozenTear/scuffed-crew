@@ -18,10 +18,10 @@ impl Config {
 
         let mut config = Self::read_at(&config_path)?;
 
-        // CLI / env overlay: --token / SCUFFED_TOKEN and --server / SCUFFED_SERVER
-        let cli_token = Self::arg_value("--token").or_else(|| std::env::var("SCUFFED_TOKEN").ok());
-        let cli_server =
-            Self::arg_value("--server").or_else(|| std::env::var("SCUFFED_SERVER").ok());
+        // CLI / env overlay: --token / SCUFFED_TOKEN and --server / SCUFFED_SERVER.
+        // A blank value counts as not given (`non_blank`).
+        let cli_token = Self::cli_or_env("--token", "SCUFFED_TOKEN");
+        let cli_server = Self::cli_or_env("--server", "SCUFFED_SERVER");
 
         // A `[sync]` table without a token loads as sync off. Its URL still
         // pairs with a token from --token / SCUFFED_TOKEN.
@@ -92,16 +92,21 @@ impl Config {
     /// server, else the file's server URL: from `file_sync`, or from
     /// `stored_url`, the `server_url` of a `[sync]` table that loaded as off
     /// because it has no token.
+    ///
+    /// A blank CLI token or server (empty or only spaces, e.g.
+    /// `SCUFFED_TOKEN=`) counts as not given, the same rule as a blank file
+    /// token. Otherwise it would replace a working file token, and the
+    /// daemon would send an empty bearer and pause sync on the 401.
     pub(super) fn sync_with_cli(
         file_sync: Option<SyncConfig>,
         stored_url: Option<String>,
         cli_token: Option<String>,
         cli_server: Option<String>,
     ) -> Option<SyncConfig> {
-        let Some(token) = cli_token else {
+        let Some(token) = non_blank(cli_token) else {
             return file_sync;
         };
-        let server_url = cli_server
+        let server_url = non_blank(cli_server)
             .or_else(|| file_sync.map(|sync| sync.server_url))
             .or(stored_url)
             .unwrap_or_default();
@@ -213,11 +218,23 @@ impl Config {
         let _ = path;
     }
 
+    /// `--flag value`, else the env var, skipping blank values: a blank
+    /// `--token ""` still lets `SCUFFED_TOKEN` through, and a blank pair
+    /// leaves the file's value.
+    fn cli_or_env(flag: &str, env: &str) -> Option<String> {
+        non_blank(Self::arg_value(flag)).or_else(|| non_blank(std::env::var(env).ok()))
+    }
+
     /// Find a `--key value` pair in std::env::args().
     fn arg_value(key: &str) -> Option<String> {
         let args: Vec<String> = std::env::args().collect();
         args.windows(2).find(|w| w[0] == key).map(|w| w[1].clone())
     }
+}
+
+/// `None` for a missing, empty or whitespace-only value.
+pub(super) fn non_blank(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
 }
 
 pub(super) fn unreadable_config(message: String) -> Box<dyn std::error::Error + Send + Sync> {
