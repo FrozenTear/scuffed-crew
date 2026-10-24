@@ -281,6 +281,16 @@ macro_rules! website_url_fix {
     };
 }
 
+/// Where the desktop app's Website URL field is, from the screen that shows
+/// the redirect advice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebsiteUrlField {
+    /// In Settings: the report upload uses the saved Website URL.
+    Settings,
+    /// On the setup guide page itself, above its messages.
+    Above,
+}
+
 /// Error text for a redirect away from the configured server (daemon log),
 /// when the target is not known.
 pub(super) const SYNC_REDIRECT_OFF_SITE: &str = concat!(
@@ -297,20 +307,25 @@ pub const REDIRECT_OFF_SITE: &str = concat!(
     "."
 );
 
-/// The desktop app's redirect advice. `target` is the redirect's origin
-/// (scheme, host and port, never a path), named in place of "a different
-/// address" when known.
-pub(super) fn redirect_off_site_text(target: Option<&str>) -> String {
+/// [`REDIRECT_OFF_SITE`] for the setup guide, where the Website URL field is
+/// on the same page.
+pub const REDIRECT_OFF_SITE_ABOVE: &str = concat!(
+    "The site redirected to a different address. Set ",
+    website_url_fix!("above"),
+    "."
+);
+
+/// The desktop app's redirect advice for `field`. `target` is the
+/// redirect's origin (scheme, host and port, never a path), named in place
+/// of "a different address" when known.
+pub(super) fn redirect_off_site_text(target: Option<&str>, field: WebsiteUrlField) -> String {
+    let (fallback, fix) = match field {
+        WebsiteUrlField::Settings => (REDIRECT_OFF_SITE, website_url_fix!("in Settings")),
+        WebsiteUrlField::Above => (REDIRECT_OFF_SITE_ABOVE, website_url_fix!("above")),
+    };
     match target {
-        Some(target) => format!(
-            concat!(
-                "The site redirected to {}. Set ",
-                website_url_fix!("in Settings"),
-                "."
-            ),
-            target
-        ),
-        None => REDIRECT_OFF_SITE.to_string(),
+        Some(target) => format!("The site redirected to {target}. Set {fix}."),
+        None => fallback.to_string(),
     }
 }
 
@@ -374,9 +389,10 @@ pub fn is_off_site_redirect(e: &reqwest::Error) -> bool {
 
 /// The desktop app's advice for `e` when it is an off-site redirect
 /// refusal ([`is_off_site_redirect`]), naming the target's origin when
-/// known. `None` for any other error.
-pub fn off_site_redirect_message(e: &reqwest::Error) -> Option<String> {
-    off_site_redirect(e).map(|off_site| redirect_off_site_text(off_site.target.as_deref()))
+/// known and saying where the Website URL field is (`field`). `None` for
+/// any other error.
+pub fn off_site_redirect_message(e: &reqwest::Error, field: WebsiteUrlField) -> Option<String> {
+    off_site_redirect(e).map(|off_site| redirect_off_site_text(off_site.target.as_deref(), field))
 }
 
 /// Same scheme, host and port (the default port counts as written).

@@ -131,6 +131,8 @@ pub fn user_facing_copy() -> &'static [&'static str] {
     &[
         CAPTURE_FAILED,
         REACH_SITE,
+        stat_tracker::sync::REDIRECT_OFF_SITE_ABOVE,
+        // The report upload's form, checked here with the guide's.
         stat_tracker::sync::REDIRECT_OFF_SITE,
         TOKEN_REJECTED,
         TOKEN_UNCHECKED,
@@ -846,7 +848,9 @@ fn http_client() -> Result<reqwest::Client, String> {
 /// naming where it redirected to, when [`http_client`] refused an off-site
 /// hop, else [`REACH_SITE`].
 fn send_error_message(e: &reqwest::Error) -> String {
-    stat_tracker::sync::off_site_redirect_message(e).unwrap_or_else(|| REACH_SITE.to_string())
+    // The Website URL field is on the guide's own page, above this message.
+    stat_tracker::sync::off_site_redirect_message(e, stat_tracker::sync::WebsiteUrlField::Above)
+        .unwrap_or_else(|| REACH_SITE.to_string())
 }
 
 fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
@@ -2631,9 +2635,11 @@ mod tests {
 
         // The message names the target's scheme, host and port, never its path.
         let named = format!(
-            "The site redirected to {elsewhere}. Set the Website URL in Settings to the address the site uses."
+            "The site redirected to {elsewhere}. Set the Website URL above to the address the site uses."
         );
         assert!(!named.contains("token-check"));
+        // The Website URL field is on the guide page, not in Settings.
+        assert!(!named.contains("in Settings"));
 
         // The sign-in link's start and poll name the redirect the same way.
         let started = start_link(site.clone(), "desk".into(), "0.6".into()).await;

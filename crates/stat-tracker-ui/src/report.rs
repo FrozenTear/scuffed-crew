@@ -757,10 +757,16 @@ pub async fn send(server_url: String, token: String, bytes: Arc<ReportZip>) -> S
     let response = match response {
         Ok(response) => response,
         Err(e) => {
-            return SendOutcome::Failed(match stat_tracker::sync::off_site_redirect_message(&e) {
-                Some(advice) => format!("The report was not sent. {advice}"),
-                None => not_sent_unreachable(),
-            });
+            return SendOutcome::Failed(
+                match stat_tracker::sync::off_site_redirect_message(
+                    &e,
+                    // The report uses the Website URL saved in Settings.
+                    stat_tracker::sync::WebsiteUrlField::Settings,
+                ) {
+                    Some(advice) => format!("The report was not sent. {advice}"),
+                    None => not_sent_unreachable(),
+                },
+            );
         }
     };
     let status = response.status().as_u16();

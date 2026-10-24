@@ -585,7 +585,8 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
     server.join().expect("site");
     assert!(super::is_off_site_redirect(&err), "{err:?}");
     // The desktop app's advice names the target's origin, not its path.
-    let message = super::off_site_redirect_message(&err).expect("off-site");
+    let message =
+        super::off_site_redirect_message(&err, super::WebsiteUrlField::Settings).expect("off-site");
     assert_eq!(
         message,
         "The site redirected to https://203.0.113.10:8443. \
@@ -609,7 +610,12 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
     );
     assert!(err.is_redirect(), "{err:?}");
     assert!(!super::is_off_site_redirect(&err), "{err:?}");
-    assert_eq!(super::off_site_redirect_message(&err), None);
+    for field in [
+        super::WebsiteUrlField::Settings,
+        super::WebsiteUrlField::Above,
+    ] {
+        assert_eq!(super::off_site_redirect_message(&err, field), None);
+    }
 
     let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = closed.local_addr().expect("addr").port();
@@ -623,15 +629,31 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
 }
 
 /// Without a known target the advice keeps the "a different address" text.
+/// The setup guide says "above": its Website URL field is on the same page.
 #[test]
 fn redirect_advice_without_a_target_keeps_the_old_text() {
+    use super::WebsiteUrlField::{Above, Settings};
     assert_eq!(
-        super::client::redirect_off_site_text(None),
+        super::client::redirect_off_site_text(None, Settings),
         super::REDIRECT_OFF_SITE
     );
     assert_eq!(
-        super::client::redirect_off_site_text(Some("https://www.example.com")),
+        super::client::redirect_off_site_text(None, Above),
+        super::REDIRECT_OFF_SITE_ABOVE
+    );
+    assert_eq!(
+        super::REDIRECT_OFF_SITE_ABOVE,
+        "The site redirected to a different address. \
+         Set the Website URL above to the address the site uses."
+    );
+    assert_eq!(
+        super::client::redirect_off_site_text(Some("https://www.example.com"), Settings),
         "The site redirected to https://www.example.com. \
          Set the Website URL in Settings to the address the site uses."
+    );
+    assert_eq!(
+        super::client::redirect_off_site_text(Some("https://www.example.com"), Above),
+        "The site redirected to https://www.example.com. \
+         Set the Website URL above to the address the site uses."
     );
 }
