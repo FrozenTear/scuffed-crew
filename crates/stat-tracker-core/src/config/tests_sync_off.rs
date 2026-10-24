@@ -228,3 +228,100 @@ fn the_url_of_a_token_less_table_is_found() {
     std::fs::write(&path, ROOT).expect("seed");
     assert_eq!(Config::token_less_sync_url(&path), None);
 }
+
+#[test]
+fn a_blank_cli_token_or_server_counts_as_not_given() {
+    let file_on = Some(SyncConfig {
+        server_url: "https://file.example".to_string(),
+        token: "file-token".to_string(),
+    });
+    let some = |raw: &str| Some(raw.to_string());
+    for blank in ["", " ", "\t", "  \n "] {
+        // `SCUFFED_TOKEN=` or `--token ""` keeps the working file token.
+        assert_eq!(
+            Config::sync_with_cli(file_on.clone(), None, some(blank), None),
+            file_on,
+            "blank token {blank:?}"
+        );
+        assert_eq!(
+            Config::sync_with_cli(
+                file_on.clone(),
+                None,
+                some(blank),
+                some("https://cli.example")
+            ),
+            file_on,
+            "blank token {blank:?} with a CLI server"
+        );
+        // A token-less file stays off rather than turning on with no token.
+        assert_eq!(
+            Config::sync_with_cli(None, some("https://stored.example"), some(blank), None),
+            None,
+            "blank token {blank:?} over a token-less table"
+        );
+        // A blank server leaves the file's URL in place for a real CLI token.
+        assert_eq!(
+            Config::sync_with_cli(file_on.clone(), None, some("cli-token"), some(blank)),
+            Some(SyncConfig {
+                server_url: "https://file.example".to_string(),
+                token: "cli-token".to_string(),
+            }),
+            "blank server {blank:?}"
+        );
+        assert_eq!(
+            Config::sync_with_cli(
+                None,
+                some("https://stored.example"),
+                some("cli-token"),
+                some(blank)
+            ),
+            Some(SyncConfig {
+                server_url: "https://stored.example".to_string(),
+                token: "cli-token".to_string(),
+            }),
+            "blank server {blank:?} over a token-less table"
+        );
+    }
+    // A non-blank CLI token still overrides the file token.
+    assert_eq!(
+        Config::sync_with_cli(file_on, None, some("cli-token"), None),
+        Some(SyncConfig {
+            server_url: "https://file.example".to_string(),
+            token: "cli-token".to_string(),
+        })
+    );
+}
+
+#[test]
+fn non_blank_drops_empty_and_whitespace() {
+    assert_eq!(super::file::non_blank(None), None);
+    assert_eq!(super::file::non_blank(Some(String::new())), None);
+    assert_eq!(super::file::non_blank(Some(" \t\n".to_string())), None);
+    assert_eq!(
+        super::file::non_blank(Some("tok".to_string())),
+        Some("tok".to_string())
+    );
+}
+
+/// The "sync is off" warning gate. Each test owns its flag, so the
+/// process-wide one in `Config::load` never makes tests order-dependent.
+#[test]
+fn the_sync_off_warning_gate_opens_once() {
+    let flag = std::sync::atomic::AtomicBool::new(false);
+    assert!(super::file::first_time(&flag));
+    for _ in 0..3 {
+        assert!(!super::file::first_time(&flag));
+    }
+    let shared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let firsts = (0..8)
+        .map(|_| {
+            let shared = shared.clone();
+            std::thread::spawn(move || super::file::first_time(&shared))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|handle| handle.join().expect("thread"))
+        .filter(|first| *first)
+        .count();
+    assert_eq!(firsts, 1, "exactly one thread logs");
+}

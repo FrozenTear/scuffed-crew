@@ -102,7 +102,7 @@ impl Cli {
             {
                 seasons_url = Some(crate::seasons::seasons_url_from_server(&sync.server_url));
             } else if let Ok(server) = std::env::var("SCUFFED_SERVER")
-                && !server.is_empty()
+                && !server.trim().is_empty()
             {
                 seasons_url = Some(crate::seasons::seasons_url_from_server(&server));
             }

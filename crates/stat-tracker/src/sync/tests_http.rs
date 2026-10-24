@@ -543,3 +543,54 @@ async fn same_site_redirect_is_followed_with_the_token() {
     );
     assert_eq!(err.status, Some(401));
 }
+
+/// `is_off_site_redirect` holds only for the policy's off-site refusal:
+/// the desktop app shows `REDIRECT_OFF_SITE` for it, and its generic
+/// "Could not reach the site" for a redirect loop or a closed port.
+#[tokio::test]
+async fn only_an_off_site_redirect_is_reported_as_one() {
+    let http = reqwest::Client::builder()
+        .redirect(super::token_safe_redirects())
+        .build()
+        .expect("client");
+
+    let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind site");
+    let port = site.local_addr().expect("addr").port();
+    let server = std::thread::spawn(move || {
+        serve_http(site, vec![redirect_to("https://203.0.113.10/elsewhere")])
+    });
+    let err = http
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .await
+        .expect_err("refused");
+    server.join().expect("site");
+    assert!(super::is_off_site_redirect(&err), "{err:?}");
+
+    // Ten same-site hops: refused as too many, not as off-site.
+    let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind site");
+    let port = site.local_addr().expect("addr").port();
+    let server = std::thread::spawn(move || serve_http(site, vec![redirect_to("/again"); 10]));
+    let err = http
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .await
+        .expect_err("too many");
+    let heads = server.join().expect("site");
+    assert!(
+        heads.iter().all(|head| !head.is_empty()),
+        "ten hops were sent"
+    );
+    assert!(err.is_redirect(), "{err:?}");
+    assert!(!super::is_off_site_redirect(&err), "{err:?}");
+
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = closed.local_addr().expect("addr").port();
+    drop(closed);
+    let err = http
+        .get(format!("http://127.0.0.1:{port}/"))
+        .send()
+        .await
+        .expect_err("closed port");
+    assert!(!super::is_off_site_redirect(&err), "{err:?}");
+}
