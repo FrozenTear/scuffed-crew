@@ -269,8 +269,10 @@ impl SiteHost {
         let host = host.strip_suffix('.').unwrap_or(host).to_lowercase();
         // A host with fewer than two letters or digits (`.`, `%`, a lone
         // zero-width character, `a.`) is not a site address. Its pattern
-        // would hide every such character in the log.
-        if !names_something(&host) {
+        // would hide every such character in the log. An IP address
+        // (`::1`) always is one.
+        let is_ip = host.parse::<std::net::IpAddr>().is_ok();
+        if !is_ip && !names_something(&host) {
             return None;
         }
         // `www.example` keeps its `www.`: a single label is not a site.
@@ -289,7 +291,7 @@ impl SiteHost {
             }
             apexes.push(apex_of(&ascii));
         }
-        apexes.retain(|a| names_something(a));
+        apexes.retain(|a| is_ip || names_something(a));
         apexes.sort();
         apexes.dedup();
         let apex_res = apexes
@@ -2064,6 +2066,31 @@ mod tests {
             "a ＣＲＥＷ．example b"
         );
         assert_eq!(scrub_text(&c, "a ＣＲＥＷ。 b"), "a [server-url]。 b");
+    }
+
+    /// #495 review: an IP address is a site address whatever its count
+    /// of letters and digits (`::1`), so it is still scrubbed. A bare `4`
+    /// is not an IP address and stays no host.
+    #[test]
+    fn an_ip_site_with_few_digits_is_still_scrubbed() {
+        for (site, ip) in [
+            ("http://[::1]:3030", "::1"),
+            ("http://[::1]", "::1"),
+            ("https://[fe80::1]/", "fe80::1"),
+            ("http://127.0.0.1:3030", "127.0.0.1"),
+        ] {
+            let c = site_ctx(site);
+            let text = format!("a http://[{ip}]:3030/x b {ip} c");
+            let text = text.replace("[127.0.0.1]", "127.0.0.1");
+            let got = scrub_text(&c, &text);
+            assert_eq!(got, "a [server-url] b [server-url] c", "site {site}");
+        }
+        let c = site_ctx("http://[::1]:3030");
+        let got = scrub_text(&c, "bind [::1]:3030 ok");
+        assert!(!got.contains("::1"), "{got}");
+        let c = site_ctx("http://4");
+        let text = "4 x 4:4 http://4/a";
+        assert_eq!(scrub_text(&c, text), text);
     }
 
     /// #495 review: a Website URL with fewer than two letters or digits in
