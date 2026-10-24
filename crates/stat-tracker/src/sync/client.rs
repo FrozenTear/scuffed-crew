@@ -247,7 +247,7 @@ pub fn token_safe_redirects() -> reqwest::redirect::Policy {
             .first()
             .is_some_and(|first| same_origin(first, attempt.url()));
         if !same_server {
-            return attempt.error(std::io::Error::other(SYNC_REDIRECT_OFF_SITE));
+            return attempt.error(OffSiteRedirect);
         }
         if let Err(reject) = validate_sync_server_url(attempt.url().as_str()) {
             return attempt.error(reject);
@@ -272,9 +272,56 @@ fn send_error_text(e: &reqwest::Error) -> String {
     text
 }
 
-/// Error text for a redirect away from the configured server.
-pub(super) const SYNC_REDIRECT_OFF_SITE: &str = "the site redirected sync to a different address; \
-     set the Website URL in Settings to the address the site uses";
+/// The advice both redirect texts end with, kept in one place.
+macro_rules! website_url_fix {
+    () => {
+        "the Website URL in Settings to the address the site uses"
+    };
+}
+
+/// Error text for a redirect away from the configured server (daemon log).
+pub(super) const SYNC_REDIRECT_OFF_SITE: &str = concat!(
+    "the site redirected sync to a different address; set ",
+    website_url_fix!()
+);
+
+/// The same advice as a sentence for the desktop app, shown when
+/// [`is_off_site_redirect`] holds for a request error.
+pub const REDIRECT_OFF_SITE: &str = concat!(
+    "The site redirected to a different address. Set ",
+    website_url_fix!(),
+    "."
+);
+
+/// The error [`token_safe_redirects`] refuses an off-site hop with, so a
+/// caller can tell it apart from other failures by type, not by text.
+#[derive(Debug)]
+struct OffSiteRedirect;
+
+impl std::fmt::Display for OffSiteRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(SYNC_REDIRECT_OFF_SITE)
+    }
+}
+
+impl std::error::Error for OffSiteRedirect {}
+
+/// `true` when `e` is [`token_safe_redirects`] refusing a redirect to
+/// another scheme, host or port. Other redirect errors (too many hops)
+/// and network failures are `false`.
+pub fn is_off_site_redirect(e: &reqwest::Error) -> bool {
+    if !e.is_redirect() {
+        return false;
+    }
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        if cause.downcast_ref::<OffSiteRedirect>().is_some() {
+            return true;
+        }
+        source = cause.source();
+    }
+    false
+}
 
 /// Same scheme, host and port (the default port counts as written).
 pub(super) fn same_origin(a: &reqwest::Url, b: &reqwest::Url) -> bool {

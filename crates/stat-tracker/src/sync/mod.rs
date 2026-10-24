@@ -34,7 +34,7 @@ pub use batching::{
     SYNC_UPLOAD_MAX_MATCHES, UploadIsolation, isolate_rejected, isolation_request_budget,
     lower_batch_limits, payload_names_a_row,
 };
-pub use client::{SyncClient, token_safe_redirects};
+pub use client::{REDIRECT_OFF_SITE, SyncClient, is_off_site_redirect, token_safe_redirects};
 pub use errors::{SyncUploadError, server_error_text};
 pub use wire::{row_needs_review, upload_request};
 

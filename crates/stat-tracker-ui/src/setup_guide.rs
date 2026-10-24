@@ -131,6 +131,7 @@ pub fn user_facing_copy() -> &'static [&'static str] {
     &[
         CAPTURE_FAILED,
         REACH_SITE,
+        stat_tracker::sync::REDIRECT_OFF_SITE,
         TOKEN_REJECTED,
         TOKEN_UNCHECKED,
         CAPTURE_CONTINUE_WARN,
@@ -841,6 +842,16 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|_| REACH_SITE.to_string())
 }
 
+/// Text for a request that got no response: the site's redirect advice
+/// when [`http_client`] refused an off-site hop, else [`REACH_SITE`].
+fn send_error_message(e: &reqwest::Error) -> String {
+    if stat_tracker::sync::is_off_site_redirect(e) {
+        stat_tracker::sync::REDIRECT_OFF_SITE.to_string()
+    } else {
+        REACH_SITE.to_string()
+    }
+}
+
 fn retry_after_secs(headers: &reqwest::header::HeaderMap) -> Option<u64> {
     headers
         .get(reqwest::header::RETRY_AFTER)
@@ -884,7 +895,7 @@ pub async fn start_link(
         })
         .send()
         .await
-        .map_err(|_| REACH_SITE.to_string())?;
+        .map_err(|e| send_error_message(&e))?;
     let status = response.status();
     let retry = retry_after_secs(response.headers());
     if status.as_u16() == 429 {
@@ -928,7 +939,7 @@ pub async fn poll_link(base: String, device_code: String) -> Result<PollUpdate, 
         })
         .send()
         .await
-        .map_err(|_| REACH_SITE.to_string())?;
+        .map_err(|e| send_error_message(&e))?;
     let status = response.status();
     let retry = retry_after_secs(response.headers());
     if status.as_u16() == 429 {
@@ -955,7 +966,7 @@ pub async fn check_token(base: String, token: String) -> Result<TokenCheckResult
         .bearer_auth(&token)
         .send()
         .await
-        .map_err(|_| REACH_SITE.to_string())?;
+        .map_err(|e| send_error_message(&e))?;
     let status = response.status().as_u16();
     let retry = retry_after_secs(response.headers());
     if status == 429 {
@@ -2621,10 +2632,22 @@ mod tests {
             (302, vec![("Location", target.clone())], String::new())
         });
 
+        // The sign-in link's start and poll name the redirect the same way.
+        let started = start_link(site.clone(), "desk".into(), "0.6".into()).await;
+        assert!(
+            matches!(&started, Err(message) if message == stat_tracker::sync::REDIRECT_OFF_SITE),
+            "link start: {started:?}"
+        );
+        let polled = poll_link(site.clone(), "a".repeat(64)).await;
+        assert!(
+            matches!(&polled, Err(message) if message == stat_tracker::sync::REDIRECT_OFF_SITE),
+            "link poll: {polled:?}"
+        );
+
         let result = check_token(site, "tok-must-stay-home".into()).await;
         assert!(
-            matches!(&result, Err(message) if message == REACH_SITE),
-            "a refused redirect reads as an unreachable site"
+            matches!(&result, Err(message) if message == stat_tracker::sync::REDIRECT_OFF_SITE),
+            "a refused redirect names the redirect, not an unreachable site: {result:?}"
         );
         assert!(
             elsewhere_hits.lock().expect("hits").is_empty(),

@@ -756,6 +756,12 @@ pub async fn send(server_url: String, token: String, bytes: Arc<ReportZip>) -> S
         .await;
     let response = match response {
         Ok(response) => response,
+        Err(e) if stat_tracker::sync::is_off_site_redirect(&e) => {
+            return SendOutcome::Failed(format!(
+                "The report was not sent. {}",
+                stat_tracker::sync::REDIRECT_OFF_SITE
+            ));
+        }
         Err(_) => return SendOutcome::Failed(not_sent_unreachable()),
     };
     let status = response.status().as_u16();
@@ -1692,6 +1698,59 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    /// A site that redirects the upload to another port is refused by
+    /// `token_safe_redirects`, and the failure names the redirect instead
+    /// of "Could not reach the site". Nothing reaches the target.
+    #[tokio::test]
+    async fn send_names_a_refused_off_site_redirect() {
+        use std::io::{Read as _, Write as _};
+        let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        elsewhere.set_nonblocking(true).expect("nonblocking");
+        let target = format!(
+            "http://127.0.0.1:{}/api/reports",
+            elsewhere.local_addr().expect("addr").port()
+        );
+        let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let site_url = format!(
+            "http://127.0.0.1:{}",
+            site.local_addr().expect("addr").port()
+        );
+        std::thread::spawn(move || {
+            let Ok((mut stream, _)) = site.accept() else {
+                return;
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_millis(500)))
+                .expect("timeout");
+            let mut buf = [0u8; 4096];
+            let _ = stream.read(&mut buf);
+            let resp = format!(
+                "HTTP/1.1 302 Found\r\nLocation: {target}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let _ = stream.write_all(resp.as_bytes());
+        });
+        let zip = Arc::new(ReportZip {
+            bytes: vec![1, 2, 3],
+            manifest_json: "{}".into(),
+            files: Vec::new(),
+            log_text: String::new(),
+            images: Vec::new(),
+        });
+
+        let outcome = send(site_url, "tok-must-stay-home".into(), zip).await;
+        assert_eq!(
+            outcome,
+            SendOutcome::Failed(format!(
+                "The report was not sent. {}",
+                stat_tracker::sync::REDIRECT_OFF_SITE
+            ))
+        );
+        assert!(
+            elsewhere.accept().is_err(),
+            "nothing may reach the redirect target"
+        );
     }
 
     #[test]
