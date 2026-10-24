@@ -2635,8 +2635,9 @@ mod tests {
 
         // The message names the target's scheme, host and port, never its path.
         let named = format!(
-            "The site redirected to {elsewhere}. Set the Website URL above to the address the site uses."
+            "The site redirected to {elsewhere}. If that is your site's new address, set the Website URL above to it."
         );
+        assert_plain(&named);
         assert!(!named.contains("token-check"));
         // The Website URL field is on the guide page, not in Settings.
         assert!(!named.contains("in Settings"));

@@ -281,6 +281,25 @@ macro_rules! website_url_fix {
     };
 }
 
+/// The advice once the target is named. It asks rather than tells: the
+/// target may be a server the member does not trust. `$if` is "if" or "If".
+macro_rules! website_url_if_new {
+    ($if:literal, $field:literal) => {
+        concat!(
+            $if,
+            " that is your site's new address, set the Website URL ",
+            $field,
+            " to it"
+        )
+    };
+}
+
+/// The longest target origin a message names. A longer one (a host can be
+/// tens of thousands of characters) gives the "a different address" text,
+/// so it never floods the log or the window. `errors.rs` clips server
+/// bodies the same way.
+pub(super) const REDIRECT_ORIGIN_MAX_CHARS: usize = 200;
+
 /// Where the desktop app's Website URL field is, from the screen that shows
 /// the redirect advice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -316,15 +335,16 @@ pub const REDIRECT_OFF_SITE_ABOVE: &str = concat!(
 );
 
 /// The desktop app's redirect advice for `field`. `target` is the
-/// redirect's origin (scheme, host and port, never a path), named in place
-/// of "a different address" when known.
+/// redirect's origin ([`redirect_origin`]). When known it is named, and the
+/// advice asks whether it is the site's new address; else the text says
+/// "a different address".
 pub(super) fn redirect_off_site_text(target: Option<&str>, field: WebsiteUrlField) -> String {
     let (fallback, fix) = match field {
-        WebsiteUrlField::Settings => (REDIRECT_OFF_SITE, website_url_fix!("in Settings")),
-        WebsiteUrlField::Above => (REDIRECT_OFF_SITE_ABOVE, website_url_fix!("above")),
+        WebsiteUrlField::Settings => (REDIRECT_OFF_SITE, website_url_if_new!("If", "in Settings")),
+        WebsiteUrlField::Above => (REDIRECT_OFF_SITE_ABOVE, website_url_if_new!("If", "above")),
     };
     match target {
-        Some(target) => format!("The site redirected to {target}. Set {fix}."),
+        Some(target) => format!("The site redirected to {target}. {fix}."),
         None => fallback.to_string(),
     }
 }
@@ -340,11 +360,22 @@ struct OffSiteRedirect {
 
 impl OffSiteRedirect {
     fn to(url: &reqwest::Url) -> Self {
-        let origin = url.origin();
         Self {
-            target: origin.is_tuple().then(|| origin.ascii_serialization()),
+            target: redirect_origin(url),
         }
     }
+}
+
+/// `url`'s scheme, host and port as a message names them: no userinfo,
+/// path or query, IDN hosts in punycode, the default port left out. `None`
+/// for an opaque origin or one longer than [`REDIRECT_ORIGIN_MAX_CHARS`].
+pub(super) fn redirect_origin(url: &reqwest::Url) -> Option<String> {
+    let origin = url.origin();
+    if !origin.is_tuple() {
+        return None;
+    }
+    let text = origin.ascii_serialization();
+    (text.chars().count() <= REDIRECT_ORIGIN_MAX_CHARS).then_some(text)
 }
 
 impl std::fmt::Display for OffSiteRedirect {
@@ -353,8 +384,8 @@ impl std::fmt::Display for OffSiteRedirect {
             Some(target) => write!(
                 f,
                 concat!(
-                    "the site redirected sync to {}; set ",
-                    website_url_fix!("in Settings")
+                    "the site redirected sync to {}; ",
+                    website_url_if_new!("if", "in Settings")
                 ),
                 target
             ),

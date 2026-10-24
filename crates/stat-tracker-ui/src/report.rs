@@ -1750,7 +1750,7 @@ mod tests {
             outcome,
             SendOutcome::Failed(format!(
                 "The report was not sent. The site redirected to {origin}. \
-                 Set the Website URL in Settings to the address the site uses."
+                 If that is your site's new address, set the Website URL in Settings to it."
             ))
         );
         let SendOutcome::Failed(text) = &outcome else {

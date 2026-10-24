@@ -476,7 +476,7 @@ async fn redirect_to_another_port_is_refused_before_it_is_sent() {
     assert!(
         err.message.contains(&format!(
             "the site redirected sync to http://127.0.0.1:{elsewhere_port}; \
-             set the Website URL in Settings to the address the site uses"
+             if that is your site's new address, set the Website URL in Settings to it"
         )),
         "the member is told why and where: {}",
         err.message
@@ -523,7 +523,7 @@ async fn redirect_to_another_host_or_scheme_is_refused() {
         assert!(
             err.message.contains(&format!(
                 "the site redirected sync to {origin}; \
-                 set the Website URL in Settings to the address the site uses"
+                 if that is your site's new address, set the Website URL in Settings to it"
             )),
             "{location}: {}",
             err.message
@@ -590,7 +590,7 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
     assert_eq!(
         message,
         "The site redirected to https://203.0.113.10:8443. \
-         Set the Website URL in Settings to the address the site uses."
+         If that is your site's new address, set the Website URL in Settings to it."
     );
     assert!(!message.contains("elsewhere") && !message.contains("k=v"));
 
@@ -649,11 +649,71 @@ fn redirect_advice_without_a_target_keeps_the_old_text() {
     assert_eq!(
         super::client::redirect_off_site_text(Some("https://www.example.com"), Settings),
         "The site redirected to https://www.example.com. \
-         Set the Website URL in Settings to the address the site uses."
+         If that is your site's new address, set the Website URL in Settings to it."
     );
     assert_eq!(
         super::client::redirect_off_site_text(Some("https://www.example.com"), Above),
         "The site redirected to https://www.example.com. \
-         Set the Website URL above to the address the site uses."
+         If that is your site's new address, set the Website URL above to it."
     );
+}
+
+/// The origin a redirect message names: no userinfo, path or query, IPv6
+/// in brackets, IDN in punycode, a default port left out. An over-long or
+/// opaque origin is not named.
+#[test]
+fn redirect_origin_is_only_scheme_host_and_port() {
+    let origin = |raw: &str| super::client::redirect_origin(&reqwest::Url::parse(raw).expect(raw));
+    let some = |text: &str| Some(text.to_string());
+    assert_eq!(
+        origin("https://user:pass@site.example/p?token=x#f"),
+        some("https://site.example")
+    );
+    assert_eq!(origin("http://[::1]:8080/x"), some("http://[::1]:8080"));
+    assert_eq!(
+        origin("https://bücher.example/"),
+        some("https://xn--bcher-kva.example")
+    );
+    assert_eq!(
+        origin("https://site.example:443/"),
+        some("https://site.example")
+    );
+    assert_eq!(
+        origin("http://site.example:80/"),
+        some("http://site.example")
+    );
+    assert_eq!(
+        origin("https://site.example:8443/"),
+        some("https://site.example:8443")
+    );
+    assert_eq!(origin("data:text/plain,hello"), None);
+
+    let max = super::client::REDIRECT_ORIGIN_MAX_CHARS;
+    // "https://" + host == the cap: still named.
+    let at_cap = format!(
+        "https://{}.example/",
+        "a".repeat(max - "https://.example".len())
+    );
+    assert_eq!(origin(&at_cap).map(|text| text.len()), Some(max));
+    let long = format!("https://{}.example/", "a".repeat(60_000));
+    assert_eq!(origin(&long), None, "an over-long origin is not named");
+}
+
+/// The named messages carry no em or en dash, like the fixed copy.
+#[test]
+fn redirect_advice_has_no_dash() {
+    use super::WebsiteUrlField::{Above, Settings};
+    for target in [
+        None,
+        Some("https://www.example.com"),
+        Some("http://[::1]:8080"),
+    ] {
+        for field in [Settings, Above] {
+            let text = super::client::redirect_off_site_text(target, field);
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text}"
+            );
+        }
+    }
 }
