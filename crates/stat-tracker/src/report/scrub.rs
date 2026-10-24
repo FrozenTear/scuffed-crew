@@ -318,6 +318,8 @@ impl SiteHost {
     ///   `https%3A%2F%2Fcrew.example` is scrubbed whole.
     fn push_bare(&self, text: &str, out: &mut Vec<Span>) {
         for re in &self.apex_res {
+            // End of the last match taken: the next label walk stops there.
+            let mut floor = 0;
             for m in re.find_iter(text) {
                 if prev_unit(&text[..m.start()]).is_some_and(|(c, _)| is_ascii_host_char(c)) {
                     continue;
@@ -325,8 +327,10 @@ impl SiteHost {
                 if continues_host(&text[m.end()..]) {
                     continue;
                 }
-                let start = encoded_scheme_start(text, labels_start(text, m.start()));
+                let start = labels_start(text, floor, m.start());
+                let start = encoded_scheme_start(text, floor, start);
                 let end = m.end() + port_len(&text[m.end()..]);
+                floor = end;
                 out.push(Span {
                     start,
                     end,
@@ -361,37 +365,60 @@ fn port_len(rest: &str) -> usize {
     1 + n
 }
 
+/// Longest host name in front of an apex that the label walk looks at,
+/// in bytes: the DNS name limit.
+const MAX_HOST_BYTES: usize = 253;
+
 /// Start of the host labels in front of an apex at `at` (`www.`, `api.`,
-/// `bücher.`), or `at` when none are clean. A label run that has an ASCII
-/// host character before it is not taken in.
-fn labels_start(text: &str, mut at: usize) -> usize {
+/// `bücher.`), or `at` when none are clean. The walk never goes below
+/// `floor` (the end of the previous match) or more than [`MAX_HOST_BYTES`]
+/// back, so a line of many mentions stays linear.
+fn labels_start(text: &str, floor: usize, mut at: usize) -> usize {
+    let mut floor = floor.max(at.saturating_sub(MAX_HOST_BYTES));
+    while !text.is_char_boundary(floor) {
+        floor += 1;
+    }
     loop {
-        let Some(dot) = text[..at].strip_suffix('.') else {
+        let Some(dot) = text[floor..at].strip_suffix('.') else {
             return at;
         };
-        let label = dot.len()
-            - dot
-                .chars()
-                .rev()
-                .take_while(|&c| is_host_char(c))
-                .map(char::len_utf8)
-                .sum::<usize>();
+        let run: usize = dot
+            .chars()
+            .rev()
+            .take_while(|&c| is_host_char(c))
+            .map(char::len_utf8)
+            .sum();
+        if run == 0 {
+            return at;
+        }
+        let mut label = floor + dot.len() - run;
         // A run right after a `%` starts with the escape's two hex digits.
-        let label = if dot[..label].ends_with('%') {
-            label + 2
-        } else {
-            label
-        };
-        if label >= dot.len() {
-            return at;
+        // When they are not both ASCII hex digits, the walk stops.
+        if text[..label].ends_with('%') {
+            let b = text.as_bytes();
+            let hex = |i: usize| b.get(i).is_some_and(u8::is_ascii_hexdigit);
+            if !(hex(label) && hex(label + 1)) {
+                return at;
+            }
+            label += 2;
+            if label >= floor + dot.len() {
+                return at;
+            }
         }
         at = label;
     }
 }
 
-/// Start of an encoded `scheme%3A%2F%2F` right before `at`, or `at`.
-fn encoded_scheme_start(text: &str, at: usize) -> usize {
-    ENC_SCHEME_RE.find(&text[..at]).map_or(at, |m| m.start())
+/// Start of an encoded `scheme%3A%2F%2F` right before `at` and not below
+/// `floor`, or `at`.
+fn encoded_scheme_start(text: &str, floor: usize, at: usize) -> usize {
+    let mut floor = floor.max(at.saturating_sub(MAX_HOST_BYTES));
+    while !text.is_char_boundary(floor) {
+        floor += 1;
+    }
+    ENC_SCHEME_RE
+        .find(&text[floor..at])
+        .map_or(at, |m| floor + m.start())
 }
 
 /// First character of `s`, a percent escape decoded, and its byte length.
@@ -1211,6 +1238,94 @@ mod tests {
         ];
         for (input, want) in cases {
             assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// Review repros on #494: a `%` before a non-ASCII label must not
+    /// slice inside a character.
+    #[test]
+    fn a_percent_before_a_non_ascii_label_does_not_panic() {
+        let c = site_ctx("https://crew.example.test");
+        let cases = [
+            ("%aé.crew.example.test", "%aé.[server-url]"),
+            ("x%aü.crew.example.test", "x%aü.[server-url]"),
+            ("%aéé.crew.example.test", "%aéé.[server-url]"),
+            ("é%aé.crew.example.test", "é%aé.[server-url]"),
+            ("%1日.crew.example.test", "%1日.[server-url]"),
+            ("%2Fé.crew.example.test", "%2F[server-url]"),
+        ];
+        for (input, want) in cases {
+            assert_eq!(scrub_text(&c, input), want, "input: {input}");
+        }
+    }
+
+    /// Each label walk stops at the previous match, so many mentions in a
+    /// row stay linear (this took about 113 s before the floor).
+    #[test]
+    fn many_mentions_with_non_ascii_labels_stay_fast() {
+        let c = site_ctx("https://crew.example.test");
+        let text = "ü.crew.example.test".repeat(20_000);
+        let started = std::time::Instant::now();
+        let out = scrub_text(&c, &text);
+        let took = started.elapsed();
+        assert!(!out.contains("crew.example.test"));
+        assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+        let long_label = format!("{}.crew.example.test", "é".repeat(100_000));
+        let started = std::time::Instant::now();
+        let out = scrub_text(&c, &long_label);
+        assert!(out.ends_with("[server-url]"), "{}", &out[out.len() - 40..]);
+        let took = started.elapsed();
+        assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
+    }
+
+    /// Fuzz-style: random mixes of `%`, hex digits, non-ASCII letters,
+    /// dots, ports and the site host never panic.
+    #[test]
+    fn random_text_around_the_site_host_never_panics() {
+        let pieces = [
+            "%",
+            "%2",
+            "%2F",
+            "%2E",
+            "%e",
+            "a",
+            "é",
+            "日",
+            "ü",
+            ".",
+            ":",
+            "8443",
+            "-",
+            "_",
+            " ",
+            "/",
+            "@",
+            "[",
+            "]",
+            "crew.example.test",
+            "crew%2Eexample",
+            "www.",
+            "xn--crw-kma.ex",
+            "crëw.ex",
+            "https://",
+            "https%3A%2F%2F",
+        ];
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for site in ["https://crew.example.test", "https://crëw.ex"] {
+            let scrubber = Scrubber::new(&site_ctx(site));
+            for _ in 0..3_000 {
+                let len = (next() % 24) as usize;
+                let text: String = (0..len)
+                    .map(|_| pieces[(next() % pieces.len() as u64) as usize])
+                    .collect();
+                let _ = scrubber.scrub(&text);
+            }
         }
     }
 
