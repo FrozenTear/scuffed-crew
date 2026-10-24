@@ -454,7 +454,7 @@ async fn redirect_to_another_port_is_refused_before_it_is_sent() {
     let site_port = site.local_addr().expect("addr").port();
     let elsewhere = std::net::TcpListener::bind("127.0.0.1:0").expect("bind elsewhere");
     let elsewhere_port = elsewhere.local_addr().expect("addr").port();
-    let target = format!("http://127.0.0.1:{elsewhere_port}/api/stats/daemon-config");
+    let target = format!("http://127.0.0.1:{elsewhere_port}/moved-path?code=hidden");
     let site_server = std::thread::spawn(move || exchange_http(site, &redirect_to(&target)));
     let elsewhere_server = std::thread::spawn(move || recv_one_http(elsewhere));
 
@@ -474,8 +474,16 @@ async fn redirect_to_another_port_is_refused_before_it_is_sent() {
         "nothing may reach the redirect target, got {leaked:?}"
     );
     assert!(
-        err.message.contains(super::client::SYNC_REDIRECT_OFF_SITE),
-        "the member is told why: {}",
+        err.message.contains(&format!(
+            "the site redirected sync to http://127.0.0.1:{elsewhere_port}; \
+             if that is your site's new address, set the Website URL in Settings to it"
+        )),
+        "the member is told why and where: {}",
+        err.message
+    );
+    assert!(
+        !err.message.contains("moved-path") && !err.message.contains("hidden"),
+        "only the target's origin is named: {}",
         err.message
     );
     assert!(
@@ -508,8 +516,15 @@ async fn redirect_to_another_host_or_scheme_is_refused() {
         let err = c.upload_matches(&[], &[]).await.expect_err("refused");
         let heads = server.join().expect("site");
         assert_eq!(heads.len(), 1, "{location}: only the first request is sent");
+        let origin = reqwest::Url::parse(&location)
+            .expect("url")
+            .origin()
+            .ascii_serialization();
         assert!(
-            err.message.contains(super::client::SYNC_REDIRECT_OFF_SITE),
+            err.message.contains(&format!(
+                "the site redirected sync to {origin}; \
+                 if that is your site's new address, set the Website URL in Settings to it"
+            )),
             "{location}: {}",
             err.message
         );
@@ -557,7 +572,10 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
     let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind site");
     let port = site.local_addr().expect("addr").port();
     let server = std::thread::spawn(move || {
-        serve_http(site, vec![redirect_to("https://203.0.113.10/elsewhere")])
+        serve_http(
+            site,
+            vec![redirect_to("https://203.0.113.10:8443/elsewhere?k=v")],
+        )
     });
     let err = http
         .get(format!("http://127.0.0.1:{port}/"))
@@ -566,6 +584,15 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
         .expect_err("refused");
     server.join().expect("site");
     assert!(super::is_off_site_redirect(&err), "{err:?}");
+    // The desktop app's advice names the target's origin, not its path.
+    let message =
+        super::off_site_redirect_message(&err, super::WebsiteUrlField::Settings).expect("off-site");
+    assert_eq!(
+        message,
+        "The site redirected to https://203.0.113.10:8443. \
+         If that is your site's new address, set the Website URL in Settings to it."
+    );
+    assert!(!message.contains("elsewhere") && !message.contains("k=v"));
 
     // Ten same-site hops: refused as too many, not as off-site.
     let site = std::net::TcpListener::bind("127.0.0.1:0").expect("bind site");
@@ -583,6 +610,12 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
     );
     assert!(err.is_redirect(), "{err:?}");
     assert!(!super::is_off_site_redirect(&err), "{err:?}");
+    for field in [
+        super::WebsiteUrlField::Settings,
+        super::WebsiteUrlField::Above,
+    ] {
+        assert_eq!(super::off_site_redirect_message(&err, field), None);
+    }
 
     let closed = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = closed.local_addr().expect("addr").port();
@@ -593,4 +626,94 @@ async fn only_an_off_site_redirect_is_reported_as_one() {
         .await
         .expect_err("closed port");
     assert!(!super::is_off_site_redirect(&err), "{err:?}");
+}
+
+/// Without a known target the advice keeps the "a different address" text.
+/// The setup guide says "above": its Website URL field is on the same page.
+#[test]
+fn redirect_advice_without_a_target_keeps_the_old_text() {
+    use super::WebsiteUrlField::{Above, Settings};
+    assert_eq!(
+        super::client::redirect_off_site_text(None, Settings),
+        super::REDIRECT_OFF_SITE
+    );
+    assert_eq!(
+        super::client::redirect_off_site_text(None, Above),
+        super::REDIRECT_OFF_SITE_ABOVE
+    );
+    assert_eq!(
+        super::REDIRECT_OFF_SITE_ABOVE,
+        "The site redirected to a different address. \
+         Set the Website URL above to the address the site uses."
+    );
+    assert_eq!(
+        super::client::redirect_off_site_text(Some("https://www.example.com"), Settings),
+        "The site redirected to https://www.example.com. \
+         If that is your site's new address, set the Website URL in Settings to it."
+    );
+    assert_eq!(
+        super::client::redirect_off_site_text(Some("https://www.example.com"), Above),
+        "The site redirected to https://www.example.com. \
+         If that is your site's new address, set the Website URL above to it."
+    );
+}
+
+/// The origin a redirect message names: no userinfo, path or query, IPv6
+/// in brackets, IDN in punycode, a default port left out. An over-long or
+/// opaque origin is not named.
+#[test]
+fn redirect_origin_is_only_scheme_host_and_port() {
+    let origin = |raw: &str| super::client::redirect_origin(&reqwest::Url::parse(raw).expect(raw));
+    let some = |text: &str| Some(text.to_string());
+    assert_eq!(
+        origin("https://user:pass@site.example/p?token=x#f"),
+        some("https://site.example")
+    );
+    assert_eq!(origin("http://[::1]:8080/x"), some("http://[::1]:8080"));
+    assert_eq!(
+        origin("https://bücher.example/"),
+        some("https://xn--bcher-kva.example")
+    );
+    assert_eq!(
+        origin("https://site.example:443/"),
+        some("https://site.example")
+    );
+    assert_eq!(
+        origin("http://site.example:80/"),
+        some("http://site.example")
+    );
+    assert_eq!(
+        origin("https://site.example:8443/"),
+        some("https://site.example:8443")
+    );
+    assert_eq!(origin("data:text/plain,hello"), None);
+
+    let max = super::client::REDIRECT_ORIGIN_MAX_CHARS;
+    // "https://" + host == the cap: still named.
+    let at_cap = format!(
+        "https://{}.example/",
+        "a".repeat(max - "https://.example".len())
+    );
+    assert_eq!(origin(&at_cap).map(|text| text.len()), Some(max));
+    let long = format!("https://{}.example/", "a".repeat(60_000));
+    assert_eq!(origin(&long), None, "an over-long origin is not named");
+}
+
+/// The named messages carry no em or en dash, like the fixed copy.
+#[test]
+fn redirect_advice_has_no_dash() {
+    use super::WebsiteUrlField::{Above, Settings};
+    for target in [
+        None,
+        Some("https://www.example.com"),
+        Some("http://[::1]:8080"),
+    ] {
+        for field in [Settings, Above] {
+            let text = super::client::redirect_off_site_text(target, field);
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text}"
+            );
+        }
+    }
 }

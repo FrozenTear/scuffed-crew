@@ -247,7 +247,8 @@ pub fn token_safe_redirects() -> reqwest::redirect::Policy {
             .first()
             .is_some_and(|first| same_origin(first, attempt.url()));
         if !same_server {
-            return attempt.error(OffSiteRedirect);
+            let refused = OffSiteRedirect::to(attempt.url());
+            return attempt.error(refused);
         }
         if let Err(reject) = validate_sync_server_url(attempt.url().as_str()) {
             return attempt.error(reject);
@@ -272,55 +273,157 @@ fn send_error_text(e: &reqwest::Error) -> String {
     text
 }
 
-/// The advice both redirect texts end with, kept in one place.
+/// The advice every redirect text ends with, kept in one place. `$field`
+/// says where the Website URL field is.
 macro_rules! website_url_fix {
-    () => {
-        "the Website URL in Settings to the address the site uses"
+    ($field:literal) => {
+        concat!("the Website URL ", $field, " to the address the site uses")
     };
 }
 
-/// Error text for a redirect away from the configured server (daemon log).
+/// The advice once the target is named. It asks rather than tells: the
+/// target may be a server the member does not trust. `$if` is "if" or "If".
+macro_rules! website_url_if_new {
+    ($if:literal, $field:literal) => {
+        concat!(
+            $if,
+            " that is your site's new address, set the Website URL ",
+            $field,
+            " to it"
+        )
+    };
+}
+
+/// The longest target origin a message names. A longer one (a host can be
+/// tens of thousands of characters) gives the "a different address" text,
+/// so it never floods the log or the window. `errors.rs` clips server
+/// bodies the same way.
+pub(super) const REDIRECT_ORIGIN_MAX_CHARS: usize = 200;
+
+/// Where the desktop app's Website URL field is, from the screen that shows
+/// the redirect advice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WebsiteUrlField {
+    /// In Settings: the report upload uses the saved Website URL.
+    Settings,
+    /// On the setup guide page itself, above its messages.
+    Above,
+}
+
+/// Error text for a redirect away from the configured server (daemon log),
+/// when the target is not known.
 pub(super) const SYNC_REDIRECT_OFF_SITE: &str = concat!(
     "the site redirected sync to a different address; set ",
-    website_url_fix!()
+    website_url_fix!("in Settings")
 );
 
 /// The same advice as a sentence for the desktop app, shown when
-/// [`is_off_site_redirect`] holds for a request error.
+/// [`is_off_site_redirect`] holds for a request error and the target is not
+/// known. [`off_site_redirect_message`] names the target when it is.
 pub const REDIRECT_OFF_SITE: &str = concat!(
     "The site redirected to a different address. Set ",
-    website_url_fix!(),
+    website_url_fix!("in Settings"),
     "."
 );
 
+/// [`REDIRECT_OFF_SITE`] for the setup guide, where the Website URL field is
+/// on the same page.
+pub const REDIRECT_OFF_SITE_ABOVE: &str = concat!(
+    "The site redirected to a different address. Set ",
+    website_url_fix!("above"),
+    "."
+);
+
+/// The desktop app's redirect advice for `field`. `target` is the
+/// redirect's origin ([`redirect_origin`]). When known it is named, and the
+/// advice asks whether it is the site's new address; else the text says
+/// "a different address".
+pub(super) fn redirect_off_site_text(target: Option<&str>, field: WebsiteUrlField) -> String {
+    let (fallback, fix) = match field {
+        WebsiteUrlField::Settings => (REDIRECT_OFF_SITE, website_url_if_new!("If", "in Settings")),
+        WebsiteUrlField::Above => (REDIRECT_OFF_SITE_ABOVE, website_url_if_new!("If", "above")),
+    };
+    match target {
+        Some(target) => format!("The site redirected to {target}. {fix}."),
+        None => fallback.to_string(),
+    }
+}
+
 /// The error [`token_safe_redirects`] refuses an off-site hop with, so a
 /// caller can tell it apart from other failures by type, not by text.
+/// `target` is the refused hop's origin only, so no path or query (which
+/// may carry a secret) ends up in a message.
 #[derive(Debug)]
-struct OffSiteRedirect;
+struct OffSiteRedirect {
+    target: Option<String>,
+}
+
+impl OffSiteRedirect {
+    fn to(url: &reqwest::Url) -> Self {
+        Self {
+            target: redirect_origin(url),
+        }
+    }
+}
+
+/// `url`'s scheme, host and port as a message names them: no userinfo,
+/// path or query, IDN hosts in punycode, the default port left out. `None`
+/// for an opaque origin or one longer than [`REDIRECT_ORIGIN_MAX_CHARS`].
+pub(super) fn redirect_origin(url: &reqwest::Url) -> Option<String> {
+    let origin = url.origin();
+    if !origin.is_tuple() {
+        return None;
+    }
+    let text = origin.ascii_serialization();
+    (text.chars().count() <= REDIRECT_ORIGIN_MAX_CHARS).then_some(text)
+}
 
 impl std::fmt::Display for OffSiteRedirect {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(SYNC_REDIRECT_OFF_SITE)
+        match &self.target {
+            Some(target) => write!(
+                f,
+                concat!(
+                    "the site redirected sync to {}; ",
+                    website_url_if_new!("if", "in Settings")
+                ),
+                target
+            ),
+            None => f.write_str(SYNC_REDIRECT_OFF_SITE),
+        }
     }
 }
 
 impl std::error::Error for OffSiteRedirect {}
 
+/// The [`OffSiteRedirect`] in `e`'s sources, if any.
+fn off_site_redirect(e: &reqwest::Error) -> Option<&OffSiteRedirect> {
+    if !e.is_redirect() {
+        return None;
+    }
+    let mut source = std::error::Error::source(e);
+    while let Some(cause) = source {
+        if let Some(off_site) = cause.downcast_ref::<OffSiteRedirect>() {
+            return Some(off_site);
+        }
+        source = cause.source();
+    }
+    None
+}
+
 /// `true` when `e` is [`token_safe_redirects`] refusing a redirect to
 /// another scheme, host or port. Other redirect errors (too many hops)
 /// and network failures are `false`.
 pub fn is_off_site_redirect(e: &reqwest::Error) -> bool {
-    if !e.is_redirect() {
-        return false;
-    }
-    let mut source = std::error::Error::source(e);
-    while let Some(cause) = source {
-        if cause.downcast_ref::<OffSiteRedirect>().is_some() {
-            return true;
-        }
-        source = cause.source();
-    }
-    false
+    off_site_redirect(e).is_some()
+}
+
+/// The desktop app's advice for `e` when it is an off-site redirect
+/// refusal ([`is_off_site_redirect`]), naming the target's origin when
+/// known and saying where the Website URL field is (`field`). `None` for
+/// any other error.
+pub fn off_site_redirect_message(e: &reqwest::Error, field: WebsiteUrlField) -> Option<String> {
+    off_site_redirect(e).map(|off_site| redirect_off_site_text(off_site.target.as_deref(), field))
 }
 
 /// Same scheme, host and port (the default port counts as written).

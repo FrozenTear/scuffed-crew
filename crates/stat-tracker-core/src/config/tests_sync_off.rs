@@ -303,6 +303,49 @@ fn non_blank_drops_empty_and_whitespace() {
     );
 }
 
+#[test]
+fn non_blank_trims_a_given_value() {
+    let some = |raw: &str| Some(raw.to_string());
+    // `--token "$(cat token)"` keeps the file's trailing newline.
+    assert_eq!(super::file::non_blank(some("tok\n")), some("tok"));
+    assert_eq!(super::file::non_blank(some("tok\r\n")), some("tok"));
+    assert_eq!(super::file::non_blank(some("  x  ")), some("x"));
+    assert_eq!(
+        super::file::non_blank(some("https://site.example/ \n")),
+        some("https://site.example/")
+    );
+    // A valid token has no surrounding space and comes back unchanged.
+    assert_eq!(
+        super::file::non_blank(some("st_live_abc-123")),
+        some("st_live_abc-123")
+    );
+}
+
+#[test]
+fn a_cli_token_with_a_newline_is_trimmed_before_it_is_saved() {
+    let sync = Config::sync_with_cli(
+        None,
+        None,
+        Some("cli-token\n".to_string()),
+        Some(" https://cli.example\n".to_string()),
+    )
+    .expect("sync on");
+    assert_eq!(sync.token, "cli-token");
+    assert_eq!(sync.server_url, "https://cli.example");
+
+    // The first-run auto-save writes the trimmed token.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let config = Config {
+        sync: Some(sync),
+        ..Config::default()
+    };
+    config.save_at(&path).unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("token = \"cli-token\""), "{text}");
+    assert!(!text.contains("cli-token\n"), "{text}");
+}
+
 /// The "sync is off" warning gate. Each test owns its flag, so the
 /// process-wide one in `Config::load` never makes tests order-dependent.
 #[test]
