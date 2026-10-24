@@ -30,7 +30,9 @@ impl Config {
         } else {
             None
         };
-        if cli_token.is_none() && token_less_sync.is_some() {
+        // Once per process: the desktop app re-reads config.toml (the overlay
+        // does so about once per game), and the file has not changed.
+        if cli_token.is_none() && token_less_sync.is_some() && first_time(&SYNC_OFF_WARNED) {
             tracing::warn!(
                 "config.toml has a [sync] section without a token, so sync is off. \
                  Add the token in Settings, or check that the key is spelled `token`."
@@ -230,6 +232,14 @@ impl Config {
         let args: Vec<String> = std::env::args().collect();
         args.windows(2).find(|w| w[0] == key).map(|w| w[1].clone())
     }
+}
+
+/// Set once [`Config::load`] has logged the "sync is off" warning.
+static SYNC_OFF_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `true` only on the first call for `flag`, from any thread.
+pub(super) fn first_time(flag: &std::sync::atomic::AtomicBool) -> bool {
+    !flag.swap(true, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// `None` for a missing, empty or whitespace-only value.

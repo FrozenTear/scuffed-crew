@@ -302,3 +302,26 @@ fn non_blank_drops_empty_and_whitespace() {
         Some("tok".to_string())
     );
 }
+
+/// The "sync is off" warning gate. Each test owns its flag, so the
+/// process-wide one in `Config::load` never makes tests order-dependent.
+#[test]
+fn the_sync_off_warning_gate_opens_once() {
+    let flag = std::sync::atomic::AtomicBool::new(false);
+    assert!(super::file::first_time(&flag));
+    for _ in 0..3 {
+        assert!(!super::file::first_time(&flag));
+    }
+    let shared = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let firsts = (0..8)
+        .map(|_| {
+            let shared = shared.clone();
+            std::thread::spawn(move || super::file::first_time(&shared))
+        })
+        .collect::<Vec<_>>()
+        .into_iter()
+        .map(|handle| handle.join().expect("thread"))
+        .filter(|first| *first)
+        .count();
+    assert_eq!(firsts, 1, "exactly one thread logs");
+}
