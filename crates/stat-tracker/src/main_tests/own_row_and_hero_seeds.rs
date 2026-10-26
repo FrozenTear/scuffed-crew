@@ -449,8 +449,8 @@ fn the_text_fallback_gets_no_name_when_the_new_reader_has_no_own_row() {
 fn the_own_row_goes_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let src = daemon_source();
-    let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
+    let body = norm(fn_source("analyze_frame"));
     // the per-cell pass (names and stat cells) is ocr-v1's only: the new
     // reader gets rows with nothing read on them (O10 took the stat
     // cells out of it, so `ocr::Names::Skip` has no caller here)

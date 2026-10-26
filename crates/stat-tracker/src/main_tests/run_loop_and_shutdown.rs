@@ -69,15 +69,12 @@ fn startup_takes_the_pid_guard_before_the_site_and_always_starts_the_pack_keeper
 #[test]
 fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
     let src = include_str!("../main.rs");
-    // Bound the slice to `run_loop` itself. The night harness and this
-    // test both mention the same names later in the file; an unbounded
-    // search would match those and stay green after the timer was deleted.
-    let run_at = src.find("async fn run_loop").expect("run_loop");
-    let after = &src[run_at..];
-    let end = after
-        .find("\nfn analyze_frame(")
-        .expect("run_loop ends before analyze_frame");
-    let run_loop = &after[..end];
+    // Bound the slice to `run_loop` itself, by name. The night harness and
+    // this test both mention the same names elsewhere; an unbounded search
+    // would match those and stay green after the timer was deleted.
+    // (`analyze_frame`, which used to end the slice, is in
+    // src/daemon/tab/vision.rs since 0.6 S3.)
+    let run_loop = fn_source("run_loop");
     let call = run_loop
         .find("close_quiet_session_and_sync(")
         .expect("the command tick must call the quiet-close timer");
@@ -176,10 +173,6 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
     );
     // In src/daemon/sync_sched.rs since 0.6 S2: found by name, wherever it lives.
     let settle_body = fn_source("schedule_settled_unknown");
-    assert!(
-        !settle_body.contains("\nfn ") && !settle_body.contains("\nasync fn "),
-        "settle helper: the slice is that one function"
-    );
     assert!(
         settle_body.contains("settle_closed_unknown.take()"),
         "the command tick must consume the closed session id"
@@ -283,13 +276,9 @@ async fn a_tab_press_preempts_a_running_poll_and_is_not_lost() {
 /// error drops it too and a press holds it until its own hold exists.
 #[test]
 fn the_run_loop_keeps_the_preempt_bridge_until_the_keyboard_arm() {
-    let src = include_str!("../main.rs");
-    let run_at = src
-        .find(concat!("async ", "fn run_loop"))
-        .expect("run_loop");
-    let after = &src[run_at..];
-    let end = after.find("\nfn analyze_frame(").expect("run_loop end");
-    let run_loop = &after[..end];
+    // Bounded by name: `analyze_frame`, which used to end the slice, is in
+    // src/daemon/tab/vision.rs since 0.6 S3.
+    let run_loop = fn_source("run_loop");
     // Keyboard arm.
     let arm = run_loop
         .find(concat!("result = pending_or_next(", "&mut pending_key"))

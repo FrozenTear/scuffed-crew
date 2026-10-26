@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 /// joined by a newline. Read from disk once per test run, so a new daemon
 /// file is never left out. Dot files (editor locks and swap files) are
 /// skipped, as the GUI build id's walk skips them.
-pub(super) fn daemon_source() -> &'static str {
+pub(crate) fn daemon_source() -> &'static str {
     static SOURCE: OnceLock<String> = OnceLock::new();
     SOURCE.get_or_init(|| {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -56,7 +56,7 @@ pub(super) fn daemon_source() -> &'static str {
 /// Panics unless exactly one such function exists, so a renamed or doubled
 /// function fails the test that names it instead of letting it pass on
 /// other text.
-pub(super) fn fn_source(name: &str) -> &'static str {
+pub(crate) fn fn_source(name: &str) -> &'static str {
     let src = daemon_source();
     let mut starts = Vec::new();
     let mut at = 0;

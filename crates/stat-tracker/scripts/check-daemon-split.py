@@ -33,6 +33,12 @@ base revision:
    sits right after `use tracing_subscriber::EnvFilter;` (when the base
    already has the scaffold, the head keeps it where it is). An item is cut with
    the blank line before it (or, failing that, the one after it).
+   One exception: a test in `main.rs` named in `TEXT_CHECK_TESTS` reads the
+   daemon's source as text (MAIN-14), and a step may repoint that check.
+   Such a test must stay a top-level `#[cfg(test)] #[test]` fn, once, in
+   the same place. Its text may differ only when the step names it with
+   `--repointed NAME`, and the script then says so; a named test that did
+   not change fails too, so the flag cannot be left on by habit.
 6. Every daemon file is reached from `mod daemon;` through `mod x;` header
    lines, and each `pub(crate) use x::*;` re-exports a child declared there.
 7. Moved items use no logging form the pin check does not cover (`event!`,
@@ -47,6 +53,7 @@ Usage (from anywhere in the repo):
 
     python3 -I crates/stat-tracker/scripts/check-daemon-split.py --base origin/wip/0.6
     python3 -I crates/stat-tracker/scripts/check-daemon-split.py --base REV --write-cut OUT
+    python3 -I crates/stat-tracker/scripts/check-daemon-split.py --base REV --repointed NAME
 
 `--write-cut OUT` writes the expected head `main.rs` (step 5) to OUT and exits;
 the split author uses it to make the cut. Exit status 0 means the move is
@@ -73,6 +80,10 @@ HEADER_LINE = re.compile(
 )
 
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+
+# Tests left in main.rs that read the daemon's source as text. A split step
+# may repoint such a check (step 5).
+TEXT_CHECK_TESTS = ("reused_frame_is_not_a_confirm_and_a_new_pair_is",)
 
 
 def blank(text):
@@ -386,10 +397,37 @@ def split_header(text):
     return lines[:n], "\n".join(lines[n:])
 
 
+def mask_text_checks(text, errors, where):
+    """`text` with each `TEXT_CHECK_TESTS` fn replaced by a stub, and the
+    names of those fns, with their texts."""
+    found = {}
+    for it in items(text):
+        if it["name"] not in TEXT_CHECK_TESTS:
+            continue
+        if it["kind"] != "fn" or not it["text"].startswith("#[cfg(test)]\n#[test]\nfn "):
+            errors.append(f"{where}: {it['name']} must stay a top-level #[cfg(test)] #[test] fn")
+        if it["name"] in found:
+            errors.append(f"{where}: {it['name']} is there more than once")
+        found[it["name"]] = it["text"]
+        text = text.replace(it["text"], f"#[cfg(test)]\n#[test]\nfn {it['name']}() {{}}", 1)
+    for name in TEXT_CHECK_TESTS:
+        if name not in found:
+            errors.append(f"{where}: {name} is missing")
+    return text, found
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--base", required=True, help="base revision, e.g. origin/wip/0.6")
     ap.add_argument("--write-cut", metavar="OUT", help="write the expected head main.rs and exit")
+    ap.add_argument(
+        "--repointed",
+        metavar="NAME",
+        action="append",
+        default=[],
+        choices=TEXT_CHECK_TESTS,
+        help="a TEXT_CHECK_TESTS test in main.rs whose source-text check this step repoints",
+    )
     args = ap.parse_args()
 
     here = pathlib.Path(__file__).resolve().parent
@@ -521,6 +559,15 @@ def main():
         print(f"wrote {args.write_cut}: {len(moved)} items cut")
         return
     head_text = (root / REL_MAIN).read_text()
+    # A repointed source-text test may differ; nothing else around it may.
+    head_text, head_checks = mask_text_checks(head_text, errors, f"{REL_MAIN} (head)")
+    expected, base_checks = mask_text_checks(expected, errors, f"{REL_MAIN} (base)")
+    changed_checks = [n for n in TEXT_CHECK_TESTS if head_checks.get(n) != base_checks.get(n)]
+    for name in TEXT_CHECK_TESTS:
+        if name in changed_checks and name not in args.repointed:
+            errors.append(f"{REL_MAIN}: {name} changed; pass --repointed {name} if this step repoints it")
+        elif name in args.repointed and name not in changed_checks:
+            errors.append(f"{REL_MAIN}: --repointed {name}, but it is unchanged")
     if has_scaffold:
         if head_text != expected:
             a, b = head_text.split("\n"), expected.split("\n")
@@ -549,6 +596,8 @@ def main():
         print(f"reflowed declaration (rustfmt after pub(crate)): {line}")
     for line in rewrapped:
         print(f"match arm put in a block (rustfmt after the target pin): {line}")
+    for name in changed_checks:
+        print(f"source-text test in main.rs changed (MAIN-14 repoint, review its diff): {name}")
     print(f"moved: {len(moved)} items, {sum(i['end'] - i['start'] + 1 for i in moved)} base lines")
     if base_daemon:
         print(f"kept: {kept_total} items already under src/daemon/ in the base, byte for byte")
