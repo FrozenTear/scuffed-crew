@@ -178,6 +178,16 @@ pub fn pluralize(n: usize, singular: &str, plural: &str) -> String {
     }
 }
 
+/// Compact win, loss, draw record: `5W-2L-1D`, or `5W-2L` when there are no
+/// draws. Plain hyphens with no spaces, used everywhere a record is shown.
+pub fn record_label(wins: u32, losses: u32, draws: u32) -> String {
+    if draws > 0 {
+        format!("{wins}W-{losses}L-{draws}D")
+    } else {
+        format!("{wins}W-{losses}L")
+    }
+}
+
 /// Percent-encode a query-parameter value so values with spaces or non-ASCII
 /// (e.g. "Soldier: 76", "Lúcio", nostr pubkeys/timestamps) survive the URL.
 /// Keeps the RFC 3986 unreserved set literal (`A-Za-z0-9-_.~`); everything else
@@ -761,5 +771,14 @@ mod tests {
         assert!(matches!(empty, Some(Ok(rows)) if rows.is_empty()));
         let rows: Option<Result<Vec<i32>, String>> = Some(Ok(vec![1, 2]));
         assert_eq!(classify_fetch(rows.as_ref()), FetchClass::Ready);
+    }
+
+    #[test]
+    fn record_label_is_compact() {
+        assert_eq!(record_label(5, 2, 1), "5W-2L-1D");
+        assert_eq!(record_label(5, 2, 0), "5W-2L");
+        assert_eq!(record_label(0, 0, 0), "0W-0L");
+        assert_eq!(record_label(12, 0, 3), "12W-0L-3D");
+        assert!(!record_label(5, 2, 1).contains(' '));
     }
 }
