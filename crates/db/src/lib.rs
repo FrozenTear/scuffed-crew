@@ -47,6 +47,14 @@ pub enum DbError {
     /// HTTP 409 `{"error":"display_name_taken"}`.
     #[error("display_name_taken")]
     DisplayNameTaken,
+    /// A startup migration step failed. `step` names it (for example the DB7
+    /// roster dedupe), so a boot panic does not read like a connect failure.
+    #[error("{step} failed after {attempts} attempt(s): {source}")]
+    Migration {
+        step: &'static str,
+        attempts: u32,
+        source: Box<DbError>,
+    },
 }
 
 pub type DbResult<T> = Result<T, DbError>;
