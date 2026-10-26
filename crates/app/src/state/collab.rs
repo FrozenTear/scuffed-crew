@@ -82,7 +82,7 @@ fn reconnect_delay(attempt: u32) -> u32 {
 /// Shared state for the WS connection, accessible from JS closures.
 ///
 /// This is `Rc`-wrapped so that `wasm_bindgen::Closure` callbacks can capture it.
-/// No Dioxus signals — state changes are communicated via the `on_state_change`
+/// No Dioxus signals: state changes are communicated via the `on_state_change`
 /// and `on_message` callbacks.
 struct SharedWsState {
     socket: RefCell<Option<WebSocket>>,

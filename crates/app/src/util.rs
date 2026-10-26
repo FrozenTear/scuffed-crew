@@ -152,7 +152,7 @@ pub fn stored_http_url(url: &str) -> Option<StoredUrl<'_>> {
 }
 
 /// How a `use_resource` slot that stores `Result` should be shown.
-/// Loading, failure, and a successful payload stay distinct — an error is not
+/// Loading, failure, and a successful payload stay distinct: an error is not
 /// "still loading" and an empty payload is not a failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchClass {
@@ -402,7 +402,7 @@ pub fn encode_query(value: &str) -> String {
 }
 
 /// Append `season=<id>` to an API path (`?` or `&` as needed). `None` = all
-/// time, path returned unchanged — the server treats a missing/blank season
+/// time, path returned unchanged; the server treats a missing/blank season
 /// as "total".
 pub fn season_url(path: &str, season: Option<&str>) -> String {
     match season {
@@ -425,7 +425,7 @@ mod tests {
         assert_eq!(truncate_chars("abcdefgh", 8), "abcdefgh");
         assert_eq!(truncate_chars("abcdefghi", 8), "abcdefgh");
         assert_eq!(truncate_chars("hello", 0), "");
-        // 9 scalars, 2 bytes each — a byte slice of 8 would split a scalar.
+        // 9 scalars, 2 bytes each; a byte slice of 8 would split a scalar.
         let multibyte = "ééééééééé";
         let short = truncate_chars(multibyte, 8);
         assert_eq!(short.chars().count(), 8);

@@ -21,7 +21,7 @@ fn wr_value_class(matches: u32) -> &'static str {
 }
 
 /// Tracker outcomes are `victory` / `defeat` / `draw` (`win`/`loss` accepted
-/// as aliases) — same contract as history's `outcome_class`.
+/// as aliases): same contract as history's `outcome_class`.
 fn outcome_chip_class(outcome: &str) -> &'static str {
     match outcome.to_lowercase().as_str() {
         "victory" | "win" => "form-chip win",

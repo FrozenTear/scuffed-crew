@@ -1,4 +1,4 @@
-//! Team chat page — mounts the previously unmounted ChatWidget against F-API-003/004.
+//! Team chat page: mounts the previously unmounted ChatWidget against F-API-003/004.
 
 use dioxus::prelude::*;
 use scuffed_types::{Team, TeamChannel};

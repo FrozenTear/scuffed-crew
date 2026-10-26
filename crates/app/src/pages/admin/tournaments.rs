@@ -79,7 +79,7 @@ struct Member {
 }
 
 const FORMATS: [&str; 4] = ["single_elim", "double_elim", "round_robin", "swiss"];
-/// Must match server `TournamentStatus` (no "active" — use `in_progress`).
+/// Must match server `TournamentStatus` (no "active"; use `in_progress`).
 const STATUS_FILTERS: [&str; 6] = [
     "all",
     "draft",
@@ -205,7 +205,7 @@ pub fn AdminTournaments() -> Element {
         };
         let date = form_date().trim().to_string();
         let time = form_time().trim().to_string();
-        // Server deserializes starts_at as DateTime<Utc> — need full RFC3339.
+        // Server deserializes starts_at as DateTime<Utc>: need full RFC3339.
         let starts_at = if date.is_empty() {
             None
         } else if time.is_empty() {
@@ -256,7 +256,7 @@ pub fn AdminTournaments() -> Element {
         delete_modal.show(t);
     };
 
-    // Server has no DELETE route — archive via status transition.
+    // Server has no DELETE route; archive via status transition.
     let on_delete_confirm = move |_| {
         if let Some(t) = delete_modal.get_target() {
             let id = t.id.clone();

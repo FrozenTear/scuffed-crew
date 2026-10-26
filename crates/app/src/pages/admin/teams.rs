@@ -11,7 +11,7 @@ use scuffed_types::api::{AddRosterMemberRequest, CreateTeamRequest, UpdateRoster
 use scuffed_types::{OrgRole, SiteSettings};
 
 /// Settings slot for the officer team-edit gate.
-/// `Loading` is in flight — officers must not see edit controls yet.
+/// `Loading` is in flight; officers must not see edit controls yet.
 /// `Loaded(false)` is the default and a failed load.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OfficersEditFlag {
@@ -31,7 +31,7 @@ fn team_edit_allowed(role: Option<OrgRole>, flag: OfficersEditFlag) -> bool {
 }
 
 /// Outer `None`: `GET /api/settings` still in flight.
-/// Inner `None`: settled with no payload — treat the flag as off.
+/// Inner `None`: settled with no payload; treat the flag as off.
 fn officers_edit_flag(slot: Option<Option<bool>>) -> OfficersEditFlag {
     match slot {
         None => OfficersEditFlag::Loading,

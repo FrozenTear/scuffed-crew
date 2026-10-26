@@ -143,7 +143,7 @@ fn DmPageInner(selected_peer: Option<String>) -> Element {
         }
         load_state.set(LoadState::Loading);
 
-        // Sync hits the relay and can hang. Do not await it before the list —
+        // Sync hits the relay and can hang. Do not await it before the list;
         // a stuck sync used to leave the inbox on the empty/in-flight state forever.
         spawn(async move {
             let _ = ApiClient::web()

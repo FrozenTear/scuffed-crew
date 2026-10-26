@@ -7,7 +7,7 @@ use super::{MatchPage, format_date, load_error_state};
 
 /// The tracker stores outcomes as `victory` / `defeat` / `draw` (see the
 /// upload filter in site-server routes/stats.rs); `win` / `loss` are accepted
-/// as aliases. DEFEAT must land on the serious/danger class — before this
+/// as aliases. DEFEAT must land on the serious/danger class; before this
 /// matched only `win`/`loss`, every card fell through to the draw class and
 /// DEFEAT rendered gold.
 fn outcome_class(outcome: &str) -> &'static str {

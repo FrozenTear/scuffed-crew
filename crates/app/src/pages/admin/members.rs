@@ -60,7 +60,7 @@ struct UpdateAvatarBody {
 
 const ROLES: [&str; 4] = ["recruit", "member", "officer", "admin"];
 
-/// Active-only list — any org member. Do not put `include_inactive` here.
+/// Active-only list: any org member. Do not put `include_inactive` here.
 const ADMIN_MEMBERS_ACTIVE_ONLY: &str = "/api/members";
 /// Officer+ list. Recruit/member requests get 403 and fall back to active-only.
 const ADMIN_MEMBERS_INCLUDE_INACTIVE: &str = "/api/members?include_inactive=true";
@@ -241,7 +241,7 @@ pub fn AdminMembers() -> Element {
     // Delete game account confirm
     let mut del_acct_modal = ModalController::<GameAccount>::new();
 
-    // Local password reset modal (admin recovery path — local accounts have no email)
+    // Local password reset modal (admin recovery path; local accounts have no email)
     let mut pw_modal = ModalController::<Member>::new();
     let mut pw_new = use_signal(String::new);
 
@@ -317,7 +317,7 @@ pub fn AdminMembers() -> Element {
 
     let on_role_submit = move |_| {
         if let Some(member) = role_modal.get_target() {
-            // Selection unchanged — nothing to do (the server rejects same-role changes).
+            // Selection unchanged: nothing to do (the server rejects same-role changes).
             if role_value() == member.org_role {
                 role_modal.close();
                 return;
