@@ -144,7 +144,8 @@ fn status_strip(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         .installed_version
         .clone()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-    let running = app.daemon.running();
+    // Demo mode shows the sample tracker as running, like the top bar.
+    let running = app.daemon.running() || demo;
     let mut strip = Row::new()
         .spacing(16)
         .align_y(Alignment::Center)
@@ -194,7 +195,7 @@ fn status_strip(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         unsaved,
         (!demo).then_some(Message::SaveSettings),
     ));
-    container(strip.wrap())
+    container(strip)
         .padding(PAD_INNER)
         .width(Fill)
         .style(theme::surface_panel)
@@ -262,7 +263,6 @@ fn setup_and_legend(demo: bool) -> Element<'static, Message> {
                 .spacing(6)
                 .align_y(Alignment::Center),
         )
-        .wrap()
         .into()
 }
 

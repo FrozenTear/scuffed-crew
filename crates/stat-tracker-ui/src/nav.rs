@@ -258,10 +258,32 @@ fn tab_icon(screen: Screen, selected: bool) -> Element<'static, Message> {
         (Screen::Settings, false) => include_bytes!("../assets/tab-icons/settings-dim.png"),
         (Screen::Settings, true) => include_bytes!("../assets/tab-icons/settings-on.png"),
     };
-    image(image::Handle::from_bytes(bytes))
+    image(icon_handle(screen, selected, bytes))
         .width(16)
         .height(16)
         .into()
+}
+
+/// Decoded once and kept, so every frame reuses the same handle. The
+/// PNGs are decoded here because iced's own decoder has no codecs in
+/// this build.
+fn icon_handle(screen: Screen, selected: bool, bytes: &'static [u8]) -> image::Handle {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<(u8, bool), image::Handle>>> = OnceLock::new();
+    let key = (screen as u8, selected);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .entry(key)
+        .or_insert_with(|| match ::image::load_from_memory(bytes) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                image::Handle::from_rgba(rgba.width(), rgba.height(), rgba.into_raw())
+            }
+            Err(_) => image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
+        })
+        .clone()
 }
 
 fn tab_button(tab: &Tab, icons: bool) -> Element<'static, Message> {
@@ -495,6 +517,20 @@ mod tests {
         // The spec keeps one line at 1000 and 1024.
         assert_eq!(bar_lines(1000.0), 1);
         assert_eq!(bar_lines(960.0), 1);
+    }
+
+    #[test]
+    fn tab_icons_decode() {
+        for name in ["overview", "games", "heroes", "maps", "seasons", "settings"] {
+            for tone in ["dim", "on"] {
+                let path = format!(
+                    "{}/assets/tab-icons/{name}-{tone}.png",
+                    env!("CARGO_MANIFEST_DIR")
+                );
+                let img = ::image::open(&path).unwrap();
+                assert_eq!((img.width(), img.height()), (32, 32), "{path}");
+            }
+        }
     }
 
     #[test]
