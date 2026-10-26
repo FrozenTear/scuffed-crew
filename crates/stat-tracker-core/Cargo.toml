@@ -5,7 +5,7 @@ name = "scuffed-stat-tracker-core"
 # `version::USER_AGENT` are built here from CARGO_PKG_VERSION. A guard test
 # in scuffed-stat-tracker (src/tests_release_pins.rs) and
 # dist/check-tag-version.sh both fail when the two differ.
-version = "0.5.0-rc.9"
+version = "0.5.0"
 edition = "2024"
 description = "Bottom layer of the Scuffed Crew stat tracker: config, text parsing, shared model types, perf and host probes."
 
