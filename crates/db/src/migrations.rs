@@ -128,6 +128,9 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- lookup on a traffic-bearing public endpoint is an edge-table scan.
         DEFINE INDEX IF NOT EXISTS plays_on_in_idx ON plays_on COLUMNS in;
         DEFINE INDEX IF NOT EXISTS plays_on_out_idx ON plays_on COLUMNS out;
+        -- One edge per (member, team) is enforced by plays_on_member_team_idx
+        -- (UNIQUE in, out). It is defined by migrate_plays_on_pair_index after
+        -- older duplicate edges are collapsed, so it is not in this script.
 
         -- ================================================
         -- Events (schedule)
@@ -878,6 +881,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     // When that UNIQUE index is already installed this is an INFO FOR TABLE
     // check only — it does not read personal_match.
     crate::queries::personal_stats::migrate_personal_match_session_index(client).await?;
+
+    // DB7: collapse duplicate plays_on edges, then UNIQUE (in, out). Fails
+    // startup if uniqueness cannot be enforced; a no-op once the index exists.
+    crate::queries::roster::migrate_plays_on_pair_index(client).await?;
 
     // DB4: move pack-key heroes (`ana`, `wrecking-ball`) from 0.5.0-alpha.1
     // and alpha.2 uploads onto the canonical display name and table role.
