@@ -4,7 +4,7 @@ name = "scuffed-stat-tracker"
 # Bump crates/stat-tracker-core/Cargo.toml with this line: APP_VERSION and
 # USER_AGENT are built there. the_version_constants_are_this_release
 # (src/tests_release_pins.rs) and dist/check-tag-version.sh fail otherwise.
-version = "0.5.0-rc.9"
+version = "0.5.0"
 edition = "2024"
 default-run = "scuffed-stat-tracker"
 
