@@ -177,11 +177,11 @@ fn contrast(la: f64, lb: f64) -> f64 {
     (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
 }
 
-/// Relative luminance of white, the light initials colour.
+/// Relative luminance of white. Only a fallback for a label token that is not
+/// `#rrggbb`, since both label tokens parse.
 const WHITE_LUMINANCE: f64 = 1.0;
 
-/// Relative luminance of a label colour token. White is 1.0, and the dark
-/// token is read from its hex.
+/// Relative luminance of a label colour token, read from its hex.
 fn label_luminance(label: &str) -> f64 {
     parse_hex(label).map_or(WHITE_LUMINANCE, relative_luminance)
 }
@@ -195,7 +195,7 @@ pub(super) fn label_color(fill: &str) -> &'static str {
     };
     let lum = relative_luminance(rgb);
     let dark = contrast(lum, label_luminance(CANVAS_CHIP_RING_DARK));
-    if dark > contrast(lum, WHITE_LUMINANCE) {
+    if dark > contrast(lum, label_luminance(CANVAS_WHITE)) {
         CANVAS_CHIP_RING_DARK
     } else {
         CANVAS_WHITE
@@ -364,6 +364,45 @@ mod tests {
         // Exact ids take the fast path and are never cached.
         assert!(roster_hero("tracer").is_some());
         assert!(ALIAS_CACHE.with(|cache| !cache.borrow().contains_key("tracer")));
+    }
+
+    #[test]
+    fn a_full_alias_cache_clears_and_keeps_working() {
+        let cache_len = || ALIAS_CACHE.with(|cache| cache.borrow().len());
+        ALIAS_CACHE.with(|cache| cache.borrow_mut().clear());
+        assert_eq!(
+            roster_hero("soldier_76").map(|hero| hero.id.as_str()),
+            Some("soldier-76")
+        );
+        // Distinct made up ids, none of them exact roster ids, fill the cache.
+        for n in 1..ALIAS_CACHE_CAP {
+            assert!(roster_hero(&format!("made_up_{n}")).is_none());
+        }
+        assert_eq!(cache_len(), ALIAS_CACHE_CAP);
+        // One more miss clears the full cache before it is stored.
+        assert!(roster_hero("made_up_overflow").is_none());
+        assert_eq!(cache_len(), 1);
+        assert!(ALIAS_CACHE.with(|cache| !cache.borrow().contains_key("soldier_76")));
+        // Lookups still resolve and refill the cache.
+        assert_eq!(
+            roster_hero("soldier_76").map(|hero| hero.id.as_str()),
+            Some("soldier-76")
+        );
+        assert_eq!(
+            roster_hero("d_va").map(|hero| hero.id.as_str()),
+            Some("dva")
+        );
+        assert!(roster_hero("made_up_overflow").is_none());
+        assert_eq!(cache_len(), 3);
+    }
+
+    #[test]
+    fn the_white_token_parses_as_white() {
+        assert_eq!(parse_hex(CANVAS_WHITE), Some((255, 255, 255)));
+        assert!((label_luminance(CANVAS_WHITE) - WHITE_LUMINANCE).abs() < 1e-9);
+        assert!(parse_hex(CANVAS_CHIP_RING_DARK).is_some());
+        // A label token that does not parse still reads as white.
+        assert_eq!(label_luminance("white"), WHITE_LUMINANCE);
     }
 
     #[test]

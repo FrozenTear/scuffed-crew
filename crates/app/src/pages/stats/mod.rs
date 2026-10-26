@@ -102,7 +102,7 @@ fn winrate_pct(wins: u32, total: u32) -> f64 {
     }
 }
 
-/// Class for win-rate TEXT values. Plain text tokens — never a traffic light.
+/// Class for win-rate TEXT values. Plain text tokens, never a traffic light.
 /// Polarity is carried by the bar against the 50% reference hairline; the only
 /// text distinction is sample-size honesty: fewer than `MIN_GAMES` games mutes
 /// the value so a 1-game 100% never shouts.
@@ -119,7 +119,7 @@ pub(super) fn wr_text_class(matches: u32) -> &'static str {
 ///   tokens, never status colors)
 /// - exactly 50.0% (`wins * 2 == matches`, integer-exact) → neutral midpoint:
 ///   a dead-even record has no polarity, and a diverging scale is two hues +
-///   a neutral midpoint — painting an even record blue would claim a lead
+///   a neutral midpoint; painting an even record blue would claim a lead
 ///   that isn't there
 /// - below the min-games gate → neutral too, so a muted low-sample row never
 ///   claims a pole (muting overrides polarity; the row also renders at
@@ -323,7 +323,7 @@ const STATS_CSS: &str = r#"
         border-bottom-color: var(--accent);
     }
     /* Win-rate text values: plain text tokens, muted below the min-games gate.
-       No traffic light — polarity lives in the bar vs the 50% hairline. */
+       No traffic light; polarity lives in the bar vs the 50% hairline. */
     .my-stats .stats-wr {
         display: inline-block;
         font-size: 0.8rem;
@@ -1183,7 +1183,7 @@ pub fn Stats() -> Element {
         };
         member_stats_url(&auth(), season.fetch_path(&base))
     });
-    // Overview form strip — same endpoint, limit=10, no new backend (Q3).
+    // Overview form strip: same endpoint, limit=10, no new backend (Q3).
     let form_matches = use_api_with::<MatchPage>(move || {
         member_stats_url(&auth(), season.fetch_path("/api/stats/me/matches?limit=10"))
     });
@@ -1196,7 +1196,7 @@ pub fn Stats() -> Element {
 
     // Progressive disclosure: once the member has tracked matches, the setup
     // chrome collapses to one slim row. Zero-match members keep the full
-    // onboarding cards — that's their primary UI. While the summary is still
+    // onboarding cards; that's their primary UI. While the summary is still
     // loading (or failed) we show the slim row rather than flashing onboarding.
     let has_matches = stats
         .data
@@ -1371,9 +1371,9 @@ pub fn Stats() -> Element {
                     },
                     Some(s) => {
                         let wr = winrate_pct(s.wins, s.total_matches);
-                        let mut record = format!("{}W–{}L", s.wins, s.losses);
+                        let mut record = format!("{}W-{}L", s.wins, s.losses);
                         if s.draws > 0 {
-                            record.push_str(&format!("–{}D", s.draws));
+                            record.push_str(&format!("-{}D", s.draws));
                         }
                         rsx! {
                             div { class: "stats-summary",
@@ -1750,11 +1750,11 @@ mod tracker_platform_copy_tests {
         assert!(TRACKER_PLATFORM_COPY.contains("Wayland"));
         assert!(TRACKER_PLATFORM_COPY.contains("X11"));
         assert!(
-            !TRACKER_PLATFORM_COPY.contains('—'),
+            !TRACKER_PLATFORM_COPY.contains('\u{2014}'),
             "{TRACKER_PLATFORM_COPY}"
         );
         assert!(
-            !TRACKER_PLATFORM_COPY.contains('–'),
+            !TRACKER_PLATFORM_COPY.contains('\u{2013}'),
             "{TRACKER_PLATFORM_COPY}"
         );
 
@@ -1770,7 +1770,7 @@ mod tracker_platform_copy_tests {
             !blurb.contains(&wayland_only),
             "the /stats install blurb still limits the tracker to one display server: {blurb}"
         );
-        assert!(!blurb.contains('—'), "{blurb}");
+        assert!(!blurb.contains('\u{2014}'), "{blurb}");
         assert!(
             !src.contains(&wayland_only),
             "crates/app stats page still limits the tracker to one display server"

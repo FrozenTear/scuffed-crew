@@ -295,7 +295,7 @@ pub fn AdminSettings() -> Element {
                 }
             }
 
-            // —— Identity pack ——
+            // Identity pack
             div { class: "form-section",
                 h2 { "Homepage identity" }
                 p { class: "form-section-lead",

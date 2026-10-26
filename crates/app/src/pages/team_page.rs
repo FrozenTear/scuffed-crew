@@ -21,7 +21,7 @@ struct TeamRecord {
     draws: u32,
 }
 
-/// Public match row. Intentionally omits `notes` / `recorded_by` — the public
+/// Public match row. Intentionally omits `notes` / `recorded_by`; the public
 /// projection is being narrowed and those fields must not be depended on.
 #[derive(Debug, Clone, Deserialize)]
 struct TeamMatch {
@@ -453,9 +453,9 @@ fn render_header(t: &TeamDetailData) -> Element {
                 }
                 p { class: "team-page-record",
                     strong { "{t.record.wins}W" }
-                    " – "
+                    " - "
                     strong { "{t.record.losses}L" }
-                    " – "
+                    " - "
                     strong { "{t.record.draws}D" }
                 }
             }
@@ -506,7 +506,7 @@ fn render_match_row(m: &TeamMatch) -> Element {
                 std::cmp::Ordering::Less => "loss",
                 std::cmp::Ordering::Equal => "draw",
             };
-            (format!("{us}–{them}"), class)
+            (format!("{us}-{them}"), class)
         }
         _ => ("-".to_string(), "draw"),
     };

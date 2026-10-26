@@ -22,7 +22,7 @@ struct StrategySummary {
     updated_at: String,
 }
 
-/// `{ "data": [...] }` envelope — same unwrap as Browse (`StrategyListResponse`).
+/// `{ "data": [...] }` envelope: same unwrap as Browse (`StrategyListResponse`).
 /// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
 #[derive(Debug, Clone, Deserialize)]
 struct ListResponse {

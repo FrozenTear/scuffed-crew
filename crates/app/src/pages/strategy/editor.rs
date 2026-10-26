@@ -1,4 +1,4 @@
-//! Strategy editor page — main composition layer for the strategy editor.
+//! Strategy editor page: main composition layer for the strategy editor.
 //!
 //! Composes all editor sub-components (canvas, toolbar, panels, timeline)
 //! and manages top-level editor state using Dioxus signals.
@@ -488,7 +488,7 @@ pub fn StrategyEditor(id: String) -> Element {
 }
 
 // =============================================================================
-// EditorLayout — main composition component
+// EditorLayout: main composition component
 // =============================================================================
 
 #[component]
@@ -521,7 +521,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let mut right_open = use_signal(|| true);
     let mut bottom_open = use_signal(|| false);
 
-    // Map picker modal — open when creating (or a loaded strategy has no map).
+    // Map picker modal: open when creating (or a loaded strategy has no map).
     let mut show_map_picker = use_signal(|| {
         initial_strategy
             .as_ref()
@@ -535,7 +535,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let toast = use_toast();
     let navigator = use_navigator();
 
-    // Personal winrates per hero from /api/strategy/meta — fetched once on mount.
+    // Personal winrates per hero from /api/strategy/meta: fetched once on mount.
     // None while loading or when the user is not an authed org member.
     let hero_winrates = use_resource(|| async {
         let resp = ApiClient::web()
@@ -1145,7 +1145,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         }
                     }
 
-                    // Bottom panel — element list
+                    // Bottom panel: element list
                     div {
                         class: if bottom_collapsed { "element-list-wrapper collapsed" } else { "element-list-wrapper" },
 
