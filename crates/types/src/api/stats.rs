@@ -269,7 +269,7 @@ pub const STATS_UPLOAD_MAX_DAMAGE: u32 = 100_000;
 ///
 /// Wider than [`PLAUSIBLE_ELIMS_MAX`] (the tracker's read gate and the
 /// averages filter) so a long game or an older tracker's row is stored, not
-/// skipped. It still stops a `u32::MAX` row from topping an elims board.
+/// rejected. It still stops a `u32::MAX` row from topping an elims board.
 pub const STATS_UPLOAD_MAX_ELIMS: u32 = 999;
 /// Same ceiling as [`STATS_UPLOAD_MAX_ELIMS`], for assists.
 pub const STATS_UPLOAD_MAX_ASSISTS: u32 = 999;
@@ -307,9 +307,8 @@ fn string_too_long(value: &str) -> bool {
 ///   no later than `now` plus [`STATS_UPLOAD_PLAYED_AT_MAX_FUTURE_SECS`].
 ///
 /// `outcome` keeps its existing rule (the handler skips a value the schema
-/// cannot store); only its length is checked here. Returns the reason the
-/// upload route reports for a skipped row in
-/// [`StatsUploadResponse::rejected`].
+/// cannot store); only its length is checked here. Returns the message for
+/// HTTP 400 without the `matches[n]: ` prefix.
 pub fn validate_upload_entry(entry: &StatsUploadEntry, now: DateTime<Utc>) -> Result<(), String> {
     for (name, value) in [
         ("session_id", &entry.session_id),
@@ -326,7 +325,7 @@ pub fn validate_upload_entry(entry: &StatsUploadEntry, now: DateTime<Utc>) -> Re
         }
     }
     if !is_upload_hero_unknown(&entry.hero) && crate::hero_key_to_name(&entry.hero).is_none() {
-        return Err("hero must be a known hero".to_string());
+        return Err("hero must be a known hero or Unknown".to_string());
     }
     for (name, value, max) in [
         ("elims", entry.elims, STATS_UPLOAD_MAX_ELIMS),
@@ -456,22 +455,6 @@ pub struct StatsUploadResponse {
     /// tolerate older servers that don't report it.
     #[serde(default)]
     pub deleted: u32,
-    /// Matches the server did not store because they failed
-    /// [`validate_upload_entry`], by index into the request's `matches`.
-    /// Omitted when empty and defaulted, so 0.5.0 trackers (which do not know
-    /// the field) and older servers (which never send it) both still parse.
-    /// These rows are also counted in `skipped`.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub rejected: Vec<StatsUploadRejected>,
-}
-
-/// One match the upload route skipped, with the reason.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StatsUploadRejected {
-    /// Index into the request's `matches` array.
-    pub index: usize,
-    /// Why the row was skipped, such as `hero must be a known hero`.
-    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -624,7 +607,7 @@ mod tests {
             e.hero = hero.into();
             assert_eq!(
                 validate_upload_entry(&e, fixed_now()),
-                Err("hero must be a known hero".to_string()),
+                Err("hero must be a known hero or Unknown".to_string()),
                 "{hero:?}"
             );
         }
@@ -659,35 +642,16 @@ mod tests {
             e.hero = (*hero).into();
             assert_eq!(validate_upload_entry(&e, fixed_now()), Ok(()), "{hero:?}");
         }
-    }
-
-    #[test]
-    fn upload_response_without_rejected_still_parses() {
-        let old: StatsUploadResponse =
-            serde_json::from_str(r#"{"inserted":1,"skipped":0,"deleted":0}"#).unwrap();
-        assert!(old.rejected.is_empty());
-        let none = serde_json::to_value(StatsUploadResponse {
-            inserted: 1,
-            skipped: 0,
-            deleted: 0,
-            rejected: Vec::new(),
-        })
-        .unwrap();
-        assert!(none.get("rejected").is_none(), "empty list is omitted");
-        let some = serde_json::to_value(StatsUploadResponse {
-            inserted: 1,
-            skipped: 1,
-            deleted: 0,
-            rejected: vec![StatsUploadRejected {
-                index: 1,
-                reason: "hero must be a known hero".into(),
-            }],
-        })
-        .unwrap();
-        assert_eq!(
-            some["rejected"],
-            serde_json::json!([{ "index": 1, "reason": "hero must be a known hero" }])
-        );
+        for hero in crate::HERO_NAMES {
+            let mut e = valid_entry();
+            e.hero = hero.display.into();
+            assert_eq!(
+                validate_upload_entry(&e, fixed_now()),
+                Ok(()),
+                "{:?}",
+                hero.display
+            );
+        }
     }
 
     #[test]

@@ -13,8 +13,8 @@ use scuffed_db::{
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
     MemberSettingsResponse, NAME_RECOGNIZER_ID_ERROR, PaginationParams, RECOGNIZER_ID_ERROR,
-    SUSPECT_FIELDS_ERROR, SeasonQuery, StatsUploadBody, StatsUploadRejected, StatsUploadResponse,
-    TokenCheckResponse, UPLOAD_HERO_UNKNOWN, UpdateMemberSettingsRequest, is_upload_hero_unknown,
+    SUSPECT_FIELDS_ERROR, SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
+    UPLOAD_HERO_UNKNOWN, UpdateMemberSettingsRequest, is_upload_hero_unknown,
     resolve_name_recognizer, resolve_recognizer, resolve_suspect_fields, validate_deleted_session,
     validate_upload_entry,
 };
@@ -101,7 +101,6 @@ pub(crate) async fn upload_stats(
             inserted: 0,
             skipped: 0,
             deleted: 0,
-            rejected: Vec::new(),
         }));
     }
 
@@ -111,13 +110,12 @@ pub(crate) async fn upload_stats(
     // deleted_sessions is not applied either.
     // `recognizer` is checked first. A match that fails both reports that error.
     //
-    // Each match is also checked by `validate_upload_entry` (API-3, DB19):
-    // 64-character strings, a known hero or `Unknown`, a played_at window,
-    // and numeric ceilings. A row that fails is skipped, not a 400: 0.5.0
-    // trackers do not split a rejected batch, so one bad row would block
-    // their sync for good. The valid rows are stored and the response lists
-    // each skipped row as `rejected: [{index, reason}]`. A long
-    // deleted_sessions entry is still a 400 for the whole request.
+    // After those, each match must pass `validate_upload_entry` (API-3,
+    // DB19): 64-character strings, a known hero or `Unknown`, a played_at
+    // window, and
+    // numeric ceilings. The message keeps the `matches[n]: ` prefix so the
+    // tracker can isolate the one bad row. A long deleted_sessions entry is
+    // a 400 for the whole request.
     for (i, session_id) in body.deleted_sessions.iter().enumerate() {
         if let Err(message) = validate_deleted_session(session_id) {
             return Err(bad_request(format!("deleted_sessions[{i}]: {message}")));
@@ -127,8 +125,6 @@ pub(crate) async fn upload_stats(
     let mut recognizers = Vec::with_capacity(body.matches.len());
     let mut name_recognizers = Vec::with_capacity(body.matches.len());
     let mut suspect_lists = Vec::with_capacity(body.matches.len());
-    let mut valid = Vec::with_capacity(body.matches.len());
-    let mut rejected = Vec::new();
     for (i, entry) in body.matches.iter().enumerate() {
         match resolve_recognizer(&entry.recognizer) {
             Ok(id) => recognizers.push(id),
@@ -166,20 +162,9 @@ pub(crate) async fn upload_stats(
                     .into());
             }
         }
-        match validate_upload_entry(&entry.entry, now) {
-            Ok(()) => valid.push(true),
-            Err(reason) => {
-                valid.push(false);
-                rejected.push(StatsUploadRejected { index: i, reason });
-            }
+        if let Err(message) = validate_upload_entry(&entry.entry, now) {
+            return Err(bad_request(format!("matches[{i}]: {message}")));
         }
-    }
-    if !rejected.is_empty() {
-        tracing::warn!(
-            member_id = %daemon.member.id,
-            rejected = rejected.len(),
-            "stats upload contained entries that failed validation, skipped"
-        );
     }
 
     let total = body.matches.len() as u32;
@@ -194,13 +179,9 @@ pub(crate) async fn upload_stats(
         .zip(recognizers)
         .zip(name_recognizers)
         .zip(suspect_lists)
-        .zip(valid)
-        .filter(|(_, ok)| *ok)
-        .map(
-            |((((entry, recognizer), name_recognizer), suspect_fields), _)| {
-                (entry, recognizer, name_recognizer, suspect_fields)
-            },
-        )
+        .map(|(((entry, recognizer), name_recognizer), suspect_fields)| {
+            (entry, recognizer, name_recognizer, suspect_fields)
+        })
         .filter(|(e, _, _, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
         .map(|(e, recognizer, name_recognizer, suspect_fields)| {
             let e = e.entry;
@@ -229,7 +210,7 @@ pub(crate) async fn upload_stats(
             }
         })
         .collect();
-    let dropped = total - rejected.len() as u32 - stub_matches.len() as u32;
+    let dropped = total - stub_matches.len() as u32;
     if dropped > 0 {
         tracing::warn!(
             member_id = %daemon.member.id,
@@ -284,7 +265,6 @@ pub(crate) async fn upload_stats(
         inserted,
         skipped: total - inserted,
         deleted,
-        rejected,
     }))
 }
 
@@ -1098,10 +1078,8 @@ mod tests {
         assert_eq!(rows.len(), 1);
     }
 
-    /// Post `bad` after a valid sibling and assert a 200 that stores only
-    /// the sibling and reports `matches[1]` as rejected with `message`.
-    /// 0.5.0 trackers do not split a 400'd batch, so a bad row must not
-    /// block the good ones.
+    /// Post `bad` after a valid sibling and assert a 400 naming `matches[1]`
+    /// with `message`, and that neither row was stored.
     async fn assert_entry_rejected(bad: serde_json::Value, message: &str) {
         let (state, member_id, token) = daemon().await;
         let (status, parsed) = post_raw(
@@ -1110,27 +1088,20 @@ mod tests {
             serde_json::json!({ "matches": [match_object("sess-ok", 3), bad] }),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{parsed}");
-        assert_eq!(parsed["inserted"], 1, "{parsed}");
-        assert_eq!(parsed["skipped"], 1, "{parsed}");
-        assert_eq!(
-            parsed["rejected"],
-            serde_json::json!([{ "index": 1, "reason": message }]),
-            "{parsed}"
-        );
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{parsed}");
+        assert_eq!(parsed["error"], format!("matches[1]: {message}"));
         let rows = state
             .db
             .list_personal_matches(&member_id, 10, 0)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 1, "only the valid sibling is stored");
-        assert_eq!(rows[0].session_id, "sess-ok");
+        assert!(rows.is_empty(), "rejected batch must store nothing");
     }
 
     const PLAYED_AT_ERROR: &str = "played_at must be on or after 2022-10-04T00:00:00Z and no more than 24 hours after server time";
 
     #[tokio::test]
-    async fn upload_future_played_at_row_is_skipped() {
+    async fn upload_future_played_at_is_400_and_stores_nothing() {
         let mut bad = match_object("sess-future", 1);
         bad["played_at"] = serde_json::json!("2099-01-01T00:00:00Z");
         assert_entry_rejected(bad, PLAYED_AT_ERROR).await;
@@ -1142,18 +1113,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_played_at_before_overwatch_2_row_is_skipped() {
+    async fn upload_played_at_before_overwatch_2_is_400() {
         let mut bad = match_object("sess-old", 1);
         bad["played_at"] = serde_json::json!("2022-10-03T23:59:59Z");
         assert_entry_rejected(bad, PLAYED_AT_ERROR).await;
     }
 
     #[tokio::test]
-    async fn upload_non_hero_row_is_skipped() {
+    async fn upload_non_hero_is_400() {
         for hero in ["Totally Real Hero", "Unknown Hero", ""] {
             let mut bad = match_object("sess-hero", 1);
             bad["hero"] = serde_json::json!(hero);
-            assert_entry_rejected(bad, "hero must be a known hero").await;
+            assert_entry_rejected(bad, "hero must be a known hero or Unknown").await;
         }
     }
 
@@ -1175,7 +1146,6 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK, "{parsed}");
         assert_eq!(parsed["inserted"], 2, "{parsed}");
-        assert!(parsed.get("rejected").is_none(), "{parsed}");
         let rows = state
             .db
             .list_personal_matches(&member_id, 10, 0)
@@ -1207,52 +1177,8 @@ mod tests {
         assert_eq!(rows[0].hero, "Doctrine");
     }
 
-    /// Several bad rows mixed with good ones: every good row is stored and
-    /// each bad one is listed by its own index.
     #[tokio::test]
-    async fn upload_mixed_batch_stores_good_rows_and_lists_rejected() {
-        let (state, member_id, token) = daemon().await;
-        let mut bad_hero = match_object("sess-bad-hero", 1);
-        bad_hero["hero"] = serde_json::json!("Not A Hero");
-        let mut bad_damage = match_object("sess-bad-dmg", 1);
-        bad_damage["damage"] = serde_json::json!(u32::MAX);
-        let (status, parsed) = post_raw(
-            create_router(state.clone()),
-            &token,
-            serde_json::json!({
-                "matches": [
-                    bad_hero,
-                    match_object("sess-good-1", 2),
-                    bad_damage,
-                    match_object("sess-good-2", 3),
-                ],
-            }),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{parsed}");
-        assert_eq!(parsed["inserted"], 2, "{parsed}");
-        assert_eq!(parsed["skipped"], 2, "{parsed}");
-        assert_eq!(
-            parsed["rejected"],
-            serde_json::json!([
-                { "index": 0, "reason": "hero must be a known hero" },
-                { "index": 2, "reason": "damage must be at most 100000" },
-            ])
-        );
-        let mut sessions: Vec<String> = state
-            .db
-            .list_personal_matches(&member_id, 10, 0)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|r| r.session_id)
-            .collect();
-        sessions.sort();
-        assert_eq!(sessions, ["sess-good-1", "sess-good-2"]);
-    }
-
-    #[tokio::test]
-    async fn upload_huge_counters_row_is_skipped() {
+    async fn upload_huge_damage_and_healing_are_400() {
         for (field, max) in [
             ("damage", 100_000u32),
             ("healing", 100_000),
@@ -1271,7 +1197,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upload_strings_over_64_characters_row_is_skipped() {
+    async fn upload_strings_over_64_characters_are_400() {
         let long = "x".repeat(65);
         for field in ["session_id", "map_name", "game_mode", "role", "outcome"] {
             let mut bad = match_object("sess-long", 1);

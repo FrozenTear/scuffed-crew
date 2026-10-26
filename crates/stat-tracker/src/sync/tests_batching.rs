@@ -32,7 +32,6 @@ async fn one_bad_row_uploads_the_rest_of_the_batch() {
                         inserted: 1,
                         skipped: 0,
                         deleted: 0,
-                        rejected: Vec::new(),
                     })
                 }
             }
@@ -113,7 +112,6 @@ async fn mixed_batch_quarantines_only_the_refused_rows() {
                     inserted,
                     skipped: 0,
                     deleted: 0,
-                    rejected: Vec::new(),
                 })
             }
         }
@@ -189,7 +187,6 @@ async fn nonspecific_400_blames_only_the_failed_row() {
                     inserted: 1,
                     skipped: 0,
                     deleted: 0,
-                    rejected: Vec::new(),
                 })
             }
         }
@@ -223,7 +220,6 @@ async fn nonspecific_400_still_uploads_a_row_that_succeeds_alone() {
                     inserted: 1,
                     skipped: 0,
                     deleted: 0,
-                    rejected: Vec::new(),
                 })
             }
         }
@@ -321,7 +317,6 @@ async fn one_bad_row_in_eight_uploads_seven() {
                     inserted,
                     skipped: 0,
                     deleted: 0,
-                    rejected: Vec::new(),
                 })
             }
         }
@@ -357,7 +352,6 @@ async fn bad_rows_in_both_halves_still_upload_the_rest() {
                     inserted: 1,
                     skipped: 0,
                     deleted: 0,
-                    rejected: Vec::new(),
                 })
             }
         }
@@ -392,7 +386,6 @@ async fn server_error_mid_split_keeps_the_accepted_half_and_retry_after() {
                     inserted: len as u32,
                     skipped: 0,
                     deleted: 0,
-                    rejected: Vec::new(),
                 })
             } else if len == 4 {
                 Err(payload_reject(422))
@@ -495,7 +488,6 @@ async fn isolate_case(n: usize, bad: &[usize]) -> UploadIsolation {
                     inserted,
                     skipped: 0,
                     deleted: 0,
-                    rejected: Vec::new(),
                 })
             }
         }
