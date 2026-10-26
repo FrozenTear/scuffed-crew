@@ -92,7 +92,7 @@ pub const ROLE_DAMAGE: Color = Color::from_rgb(
 );
 pub const ROLE_SUPPORT: Color = OK;
 
-/// Card radius, documented product exception (Nirify 16–20 range).
+/// Card radius, documented product exception (Nirify 16-20 range).
 pub const RADIUS_CARD: f32 = 16.0;
 /// Inner blocks / stat boxes.
 pub const RADIUS_INNER: f32 = 12.0;

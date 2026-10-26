@@ -1,6 +1,6 @@
 //! Settings form + screen. Writes today's `Config` fields via `Config::save`.
 //!
-//! Layout: masonry in 1–4 columns by width (Maps density tokens, G4),
+//! Layout: masonry in 1-4 columns by width (Maps density tokens, G4),
 //! Stored data spanning the pane, Save as a full-width footer strip.
 //! `capture_route` chooses the screen stream or the older screenshot portal.
 //! `data_dir`, `ocr_threads`, and `finished_game_close_secs` are preserved

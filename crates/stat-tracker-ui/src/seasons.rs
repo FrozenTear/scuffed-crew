@@ -270,7 +270,7 @@ pub fn apply_fetched_seasons(existing: Vec<Season>, fetched: Vec<Season>) -> Vec
 
 pub fn format_window(starts_at: DateTime<Utc>, ends_at: DateTime<Utc>) -> String {
     format!(
-        "{} – {}",
+        "{} - {}",
         starts_at.format("%d %b %Y"),
         ends_at.format("%d %b %Y")
     )
@@ -707,7 +707,7 @@ mod tests {
     fn format_window_utc_dates() {
         assert_eq!(
             format_window(ts(2026, 6, 24, 0), ts(2026, 9, 1, 0)),
-            "24 Jun 2026 – 01 Sep 2026"
+            "24 Jun 2026 - 01 Sep 2026"
         );
     }
 

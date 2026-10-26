@@ -15,7 +15,7 @@ Native **Iced 0.14** (wgpu) tracker GUI for the Scuffed Crew stat tracker.
 
 Design: `docs/notes/stat-tracker-gui-redesign-2026-09-02.md` rev 2 tokens + rev 3 responsive layout (branch `docs/tracker-gui-redesign`). Tokens: `radius-card` 16, `radius-inner` 12, page pad 24/32, Urbanist, role tints, `border` / `text-3` / `ok` / `danger`.
 
-P0–P5 are on `main` (PRs #56–#61). **v0.4.0** is the first Iced-only tracker
+P0-P5 are on `main` (PRs #56-#61). **v0.4.0** is the first Iced-only tracker
 release (Overview / Games / Heroes / Maps / Seasons / Settings + companion
 overlay; Dioxus GUI removed). Binary name stays `stat-tracker-gui`.
 
@@ -51,7 +51,7 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 
 ### Seasons
 
-- **Screen:** sidebar **Seasons** lists each server season (name, UTC window, current marker) plus an **All time** row, each with games / W–L–D / win rate. Selecting a row sets the header season switch. Read-only, no admin CRUD in the desktop app (`/admin/seasons` on the website).
+- **Screen:** sidebar **Seasons** lists each server season (name, UTC window, current marker) plus an **All time** row, each with games / W-L-D / win rate. Selecting a row sets the header season switch. Read-only, no admin CRUD in the desktop app (`/admin/seasons` on the website).
 - **Fetch:** live mode GETs `/api/public/seasons` on launch and every 30 minutes. Written to `<data_dir>/seasons.json`. Offline uses that cache and shows **Last refreshed … · cached** on the Seasons screen.
 - **Selection:** default = the season marked `is_current`, else all time. Persisted in `<data_dir>/ui_state.json`. No seasons → picker hidden (same as the website).
 - **Window:** `starts_at <= played_at < ends_at` (UTC), matching `crates/db/src/queries/personal_stats.rs` (`played_at >= $season_start AND played_at < $season_end`).
@@ -158,7 +158,7 @@ Layer-shell surface (`iced_layershell` 0.19, pinned with Iced 0.14): `Layer::Ove
 
 **Show / hide shortcut:** Settings → **Companion**. Default **Super+Shift+C**, on. The overlay cannot receive keys (`KeyboardInteractivity::None`), so the main GUI process reads `/dev/input` (same evdev path as Tab capture, not X11 `XGrabKey`). Same `input` group / seat `uaccess` as the daemon. Add it with `sudo usermod -aG input "$USER"`, then log out and back in, a new terminal does not pick up the group. The shortcut is an explicit user action: it toggles visibility **now** through the same OverlayHold as the tray button. Hide sticks until the game ends; pressing it again mid-session shows the overlay. The current bind is a one-line footer on the overlay when the shortcut is on. Bind is stored in `<data_dir>/ui_state.json` (`overlay_hotkey`, `overlay_hotkey_enabled`).
 
-Bind format: `Super+Shift+C` (modifiers joined with `+`, then one key). Super aliases: `Meta`, `Win`. Also `Ctrl`, `Alt`, `Shift`. Key: `A`–`Z`, `0`–`9`, `F1`–`F12`, `Tab`, `Space`, `Esc`, `Enter`. At least one modifier is required. Empty field saves as Super+Shift+C.
+Bind format: `Super+Shift+C` (modifiers joined with `+`, then one key). Super aliases: `Meta`, `Win`. Also `Ctrl`, `Alt`, `Shift`. Key: `A` to `Z`, `0` to `9`, `F1` to `F12`, `Tab`, `Space`, `Esc`, `Enter`. At least one modifier is required. Empty field saves as Super+Shift+C.
 
 **Why not the GlobalShortcuts portal?** niri (FrozenTear’s CachyOS / AerynOS) has no xdg-desktop-portal GlobalShortcuts backend. A portal bind would not fire there. This path does not prompt for a portal permission.
 

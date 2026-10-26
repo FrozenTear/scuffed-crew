@@ -251,9 +251,11 @@ pub fn classify_header_status(input: HeaderStatusInput) -> HeaderStatus {
 
 pub fn header_status_color(status: HeaderStatus) -> Color {
     match status {
-        HeaderStatus::Capturing => theme::OK,
-        // Waiting/idle is amber. Token rejection reuses that warning colour.
-        HeaderStatus::Waiting | HeaderStatus::TokenRejected => theme::WARN,
+        // Running is green, whether a game is being read or the tracker is
+        // idle and ready ("Tracker running" / "Ready"). The label says which.
+        HeaderStatus::Capturing | HeaderStatus::Waiting => theme::OK,
+        // Amber is kept for real warnings only.
+        HeaderStatus::TokenRejected => theme::WARN,
         HeaderStatus::Down => theme::DANGER,
     }
 }
@@ -1261,7 +1263,7 @@ fn format_stat(n: u32) -> String {
     }
 }
 
-/// Fill / rest portions for a 0–1 win rate. Portions go on the *containers*
+/// Fill / rest portions for a 0-1 win rate. Portions go on the *containers*
 /// (not Shrink-wrapped `space()` children) or the bar stays ~50/50.
 pub fn win_bar_portions(rate: f32) -> (u16, u16) {
     let fill = (rate.clamp(0.0, 1.0) * 100.0).round() as u16;
@@ -1269,7 +1271,7 @@ pub fn win_bar_portions(rate: f32) -> (u16, u16) {
     (fill, rest)
 }
 
-/// Public so the Seasons screen can reuse the same 4–8 px bar.
+/// Public so the Seasons screen can reuse the same 4-8 px bar.
 pub fn win_bar_for(rate: f32) -> Element<'static, Message> {
     win_bar(rate)
 }
@@ -1403,7 +1405,11 @@ mod tests {
             HeaderStatus::Waiting,
             "demo mode is not a live capture, even though the fixture reports a game"
         );
-        assert_eq!(header_status_color(HeaderStatus::Waiting), theme::WARN);
+        assert_eq!(
+            header_status_color(HeaderStatus::Waiting),
+            theme::OK,
+            "running and idle (\"Tracker running\" / \"Ready\") is green"
+        );
 
         assert_eq!(
             classify_header_status(input(false, false, false, false)),
@@ -1427,8 +1433,13 @@ mod tests {
         );
         assert_ne!(
             header_status_color(HeaderStatus::Waiting),
+            theme::WARN,
+            "amber is only for warnings, not a running tracker"
+        );
+        assert_ne!(
+            header_status_color(HeaderStatus::Down),
             theme::OK,
-            "idle must not stay the old always-mint dot"
+            "a stopped tracker must not look running"
         );
     }
 
