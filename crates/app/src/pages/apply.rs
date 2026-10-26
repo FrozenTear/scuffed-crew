@@ -180,7 +180,7 @@ pub fn Apply() -> Element {
                                 p { class: "apply-card-desc", "You need to sign in before submitting an application." }
                                 div { class: "apply-auth-buttons",
                                     Link { to: Route::Login {}, class: "ui-btn ui-btn--primary ui-btn--md", "Sign in" }
-                                    // Only in debug builds — route is not registered in production
+                                    // Only in debug builds: route is not registered in production
                                     if cfg!(debug_assertions) {
                                         a {
                                             href: "/api/dev/login",

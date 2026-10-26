@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 /// 403 is membership (OrgMember), not the 412 server-managed identity case.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DmLoadFailure {
-    /// 412 — server-managed identity missing or not enabled.
+    /// 412: server-managed identity missing or not enabled.
     IdentitySettings,
-    /// 403 — signed in, but not an active org member.
+    /// 403: signed in, but not an active org member.
     Membership,
-    /// 503 — relay URL is not configured.
+    /// 503: relay URL is not configured.
     RelayConfig,
     /// Any other failure; `message` is the client error string.
     Other(String),

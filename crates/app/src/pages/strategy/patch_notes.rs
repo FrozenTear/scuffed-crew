@@ -7,7 +7,7 @@ use crate::hooks::use_api;
 
 // --- Types ---
 
-/// `{ "data": [...] }` envelope — same unwrap as Browse (`StrategyListResponse`).
+/// `{ "data": [...] }` envelope: same unwrap as Browse (`StrategyListResponse`).
 /// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
 #[derive(Debug, Clone, Deserialize)]
 struct ListResponse {
@@ -1093,7 +1093,7 @@ const PAGE_CSS: &str = r#"
 
 // --- Component ---
 
-/// Shared Patch Notes UI — used by `/patch-notes` (PublicLayout) and
+/// Shared Patch Notes UI: used by `/patch-notes` (PublicLayout) and
 /// `/strategy/patch-notes` (StrategyLayout). Same fetch + unwrap.
 #[component]
 pub fn PatchNotesPage() -> Element {
