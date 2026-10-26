@@ -72,13 +72,41 @@ impl ToastState {
     }
 }
 
-/// ARIA role for one toast. Errors interrupt (`alert`); the rest wait their
-/// turn (`status`). The container is `aria-live="polite"` so every save,
-/// delete and error reaches screen readers (APP6).
-fn toast_role(level: ToastLevel) -> &'static str {
+/// Whether a toast goes in the assertive live region. Errors interrupt; the
+/// rest wait their turn in the polite one. Each toast sits in exactly one
+/// region and carries no role of its own, so it is announced once (APP6).
+fn is_assertive(level: ToastLevel) -> bool {
     match level {
-        ToastLevel::Error => "alert",
-        ToastLevel::Info | ToastLevel::Success | ToastLevel::Warning => "status",
+        ToastLevel::Error => true,
+        ToastLevel::Info | ToastLevel::Success | ToastLevel::Warning => false,
+    }
+}
+
+/// One toast. `order` is its place in the full list, so the flex layout keeps
+/// the original top to bottom order across both live regions.
+fn toast_item(state: ToastState, order: usize, toast: &Toast) -> Element {
+    let id = toast.id;
+    let level_class = match toast.level {
+        ToastLevel::Success => "toast toast-success",
+        ToastLevel::Error => "toast toast-error",
+        ToastLevel::Warning => "toast toast-warning",
+        ToastLevel::Info => "toast toast-info",
+    };
+    let msg = toast.message.clone();
+    rsx! {
+        div { class: "{level_class}", key: "{id}", style: "order: {order}",
+            span { "{msg}" }
+            button {
+                class: "toast-dismiss",
+                r#type: "button",
+                aria_label: "Dismiss",
+                onclick: move |_| {
+                    let mut s = state;
+                    s.dismiss(id);
+                },
+                "\u{00d7}"
+            }
+        }
     }
 }
 
@@ -138,35 +166,28 @@ pub fn ToastProvider(children: Element) -> Element {
     let state = ToastState { toasts, next_id };
     use_context_provider(|| state);
 
+    let (assertive, polite): (Vec<_>, Vec<_>) = toasts
+        .read()
+        .iter()
+        .cloned()
+        .enumerate()
+        .partition(|(_, t)| is_assertive(t.level));
+
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-components-toast-toast-css", css: TOAST_CSS }
         {children}
-        div { class: "toast-container", aria_live: "polite",
-            for toast in toasts.read().iter() {
-                { let id = toast.id;
-                  let level_class = match toast.level {
-                      ToastLevel::Success => "toast toast-success",
-                      ToastLevel::Error => "toast toast-error",
-                      ToastLevel::Warning => "toast toast-warning",
-                      ToastLevel::Info => "toast toast-info",
-                  };
-                  let role = toast_role(toast.level);
-                  let msg = toast.message.clone();
-                  rsx! {
-                      div { class: "{level_class}", key: "{id}", role: "{role}",
-                          span { "{msg}" }
-                          button {
-                              class: "toast-dismiss",
-                              r#type: "button",
-                              aria_label: "Dismiss",
-                              onclick: move |_| {
-                                  let mut s = state;
-                                  s.dismiss(id);
-                              },
-                              "\u{00d7}"
-                          }
-                      }
-                  }
+        // The live regions are always present, so the first toast added to
+        // either one is announced. `display: contents` keeps the toasts as
+        // direct flex items of the container, so the layout is unchanged.
+        div { class: "toast-container",
+            div { role: "status", aria_live: "polite", style: "display: contents",
+                for (order, toast) in polite {
+                    {toast_item(state, order, &toast)}
+                }
+            }
+            div { role: "alert", aria_live: "assertive", style: "display: contents",
+                for (order, toast) in assertive {
+                    {toast_item(state, order, &toast)}
                 }
             }
         }
@@ -179,14 +200,16 @@ mod tests {
 
     #[test]
     fn errors_alert_and_the_rest_are_status() {
-        assert_eq!(toast_role(ToastLevel::Error), "alert");
+        assert!(is_assertive(ToastLevel::Error));
         for level in [ToastLevel::Info, ToastLevel::Success, ToastLevel::Warning] {
-            assert_eq!(toast_role(level), "status");
+            assert!(!is_assertive(level));
         }
     }
 
-    /// APP6: the container is a polite live region, an error toast is an
-    /// alert, and the dismiss button has a name.
+    /// APP6: the container itself is not live. It holds one polite region and
+    /// one assertive region, the error toast sits only in the assertive one,
+    /// the success toast only in the polite one, and each dismiss button has a
+    /// name.
     #[test]
     fn toasts_announce_to_screen_readers() {
         #[component]
@@ -216,18 +239,17 @@ mod tests {
             dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
         }
         let html = dioxus_ssr::render(&dom);
-        assert!(
-            html.contains("class=\"toast-container\" aria-live=\"polite\""),
-            "{html}"
-        );
-        assert!(
-            html.contains("class=\"toast toast-success\" role=\"status\""),
-            "{html}"
-        );
-        assert!(
-            html.contains("class=\"toast toast-error\" role=\"alert\""),
-            "{html}"
-        );
+        assert!(html.contains("class=\"toast-container\">"), "{html}");
+        assert_eq!(html.matches("aria-live=\"polite\"").count(), 1, "{html}");
+        assert_eq!(html.matches("aria-live=\"assertive\"").count(), 1, "{html}");
+        assert_eq!(html.matches("role=").count(), 2, "{html}");
+        let polite_at = html.find("aria-live=\"polite\"").unwrap();
+        let assertive_at = html.find("aria-live=\"assertive\"").unwrap();
+        assert!(polite_at < assertive_at, "{html}");
+        let ok_at = html.find("class=\"toast toast-success\"").unwrap();
+        let err_at = html.find("class=\"toast toast-error\"").unwrap();
+        assert!(polite_at < ok_at && ok_at < assertive_at, "{html}");
+        assert!(assertive_at < err_at, "{html}");
         assert_eq!(html.matches("aria-label=\"Dismiss\"").count(), 2, "{html}");
         assert!(html.contains("Failed to save settings: offline"), "{html}");
     }
