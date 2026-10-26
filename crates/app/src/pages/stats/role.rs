@@ -7,7 +7,7 @@
 //! [`scuffed_types::role_for_hero_name`], and only an unknown hero stays
 //! Unknown. Overview and the member page read `GET /api/stats/me/roles` and
 //! `GET /api/stats/member/{id}/roles`. The server now fills an empty or
-//! unrecognized stored role from the game's hero at read time (API #502), so
+//! unrecognized stored role from the game's hero at read time (API PR 502), so
 //! those rows only come back Unknown for heroes not on the shared list. The
 //! heroes filter is the current roster role, because `/heroes` does not
 //! return the role captured with each game.
@@ -162,7 +162,7 @@ fn bucket_index(role: &str) -> usize {
 
 /// Overview totals from `/roles`. A recognized stored role is kept. The
 /// server fills an empty or unrecognized role from the hero at read time
-/// (API #502), so a row still Unknown here is a hero not on the shared list.
+/// (API PR 502), so a row still Unknown here is a hero not on the shared list.
 pub(crate) fn role_aggs_from_rows(rows: &[RoleStats]) -> Vec<RoleAgg> {
     let mut buckets = fresh_buckets();
     for row in rows {

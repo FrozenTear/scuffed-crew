@@ -16,7 +16,7 @@ struct Hero {
     #[serde(deserialize_with = "lowercase_role")]
     role: String,
     portrait_url: String,
-    // `/api/strategy/heroes` (API #502) sends only id, name, role and
+    // `/api/strategy/heroes` (API PR 502) sends only id, name, role and
     // portrait_url, so the detail fields fall back to empty or zero.
     #[serde(default)]
     abilities: Vec<Ability>,
@@ -513,7 +513,8 @@ mod tests {
 
     #[test]
     fn four_field_hero_from_shared_list_decodes() {
-        let body = r#"{"data":[{"id":"doctrine","name":"Doctrine","role":"support","portrait_url":""}]}"#;
+        let body =
+            r#"{"data":[{"id":"doctrine","name":"Doctrine","role":"support","portrait_url":""}]}"#;
         let list: ListResponse = serde_json::from_str(body).unwrap();
         assert_eq!(
             list.data,
