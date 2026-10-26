@@ -2,7 +2,7 @@ use dioxus::prelude::*;
 
 use crate::hooks::ApiResource;
 
-use super::role::{history_row_matches_role, stored_role_label};
+use super::role::{game_role_label, history_row_matches_role};
 use super::{MatchPage, format_date, load_error_state};
 
 /// The tracker stores outcomes as `victory` / `defeat` / `draw` (see the
@@ -162,7 +162,7 @@ pub(super) fn history_tab(
                         }
                         _ => m.outcome.eq_ignore_ascii_case(of),
                     };
-                    let r_ok = history_row_matches_role(&m.role, rf);
+                    let r_ok = history_row_matches_role(&m.role, &m.hero, rf);
                     o_ok && r_ok
                 })
                 .collect();
@@ -230,7 +230,7 @@ pub(super) fn history_tab(
                                     } else {
                                         m.map_name.clone()
                                     };
-                                    let role_label = stored_role_label(&m.role);
+                                    let role_label = game_role_label(&m.role, &m.hero);
                                     let fields = m.suspect_fields.as_deref().unwrap_or(&[]);
                                     let map_unsure = cell_is_unsure(fields, "map");
                                     let mode_unsure = cell_is_unsure(fields, "mode");
