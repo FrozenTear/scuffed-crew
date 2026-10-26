@@ -1,4 +1,4 @@
-//! Admin › Patch Notes — officer CRUD for the Strategy catalog.
+//! Admin › Patch Notes: officer CRUD for the Strategy catalog.
 //!
 //! Frozen write contract: Contabo `6cf6260` / #92. Do not invent routes or
 //! fields. Public `GET /api/strategy/patch-notes` (`{ "data": [PatchNote] }`)

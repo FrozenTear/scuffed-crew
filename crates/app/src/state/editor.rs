@@ -1,6 +1,6 @@
 //! Editor state management for the strategy editor.
 //!
-//! These are plain Rust structs — no Dioxus signals here. The component layer
+//! These are plain Rust structs: no Dioxus signals here. The component layer
 //! wraps them in `Signal<T>` as needed.
 
 use scuffed_types::strategy::{
@@ -13,7 +13,7 @@ use uuid::Uuid;
 // Canvas State
 // =============================================================================
 
-/// Canvas/viewport state — zoom, pan, floor, map display settings.
+/// Canvas/viewport state: zoom, pan, floor, map display settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CanvasState {
     /// Canvas zoom level (1.0 = 100%).
@@ -76,7 +76,7 @@ fn nonempty_id(s: &str) -> Option<String> {
 // Drawing State
 // =============================================================================
 
-/// Drawing tool state — active tool, drawing in progress, colors.
+/// Drawing tool state: active tool, drawing in progress, colors.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DrawingState {
     /// Active drawing tool.
@@ -110,7 +110,7 @@ impl Default for DrawingState {
 // Strategy State
 // =============================================================================
 
-/// Core strategy data — the document being edited.
+/// Core strategy data: the document being edited.
 #[derive(Debug, Clone, PartialEq)]
 pub struct StrategyState {
     /// Strategy ID (None for new unsaved strategies).
@@ -131,7 +131,7 @@ pub struct StrategyState {
     pub selected_element: Option<Uuid>,
     /// Team format (5v5 or 6v6).
     pub team_format: TeamFormat,
-    /// Team composition — hero assignments per slot.
+    /// Team composition: hero assignments per slot.
     pub team_composition: Vec<HeroSelection>,
     /// Timeline playback state.
     pub playback_state: PlaybackState,
@@ -332,7 +332,7 @@ impl StrategyState {
                     .copied()
             }
             TeamFormat::SixVSix => {
-                // Open queue for 6v6 — check tank limit.
+                // Open queue for 6v6: check tank limit.
                 if role == HeroRole::Tank {
                     let tank_count = self
                         .team_composition
@@ -567,7 +567,7 @@ mod tests {
         state.next_phase();
         assert_eq!(state.selected_phase, Some(p3));
 
-        // Already at last — stays.
+        // Already at last: stays.
         state.next_phase();
         assert_eq!(state.selected_phase, Some(p3));
 
@@ -577,7 +577,7 @@ mod tests {
         state.prev_phase();
         assert_eq!(state.selected_phase, Some(p1));
 
-        // Already at first — stays.
+        // Already at first: stays.
         state.prev_phase();
         assert_eq!(state.selected_phase, Some(p1));
     }
@@ -669,7 +669,7 @@ mod tests {
             ..Default::default()
         };
 
-        // Click on the midpoint of the first segment — should select the route.
+        // Click on the midpoint of the first segment: should select the route.
         let found = state.select_at(Position::new(50.0, 2.0), 10.0);
         assert_eq!(found, Some(route_id));
 
@@ -677,7 +677,7 @@ mod tests {
         let found = state.select_at(Position::new(102.0, 50.0), 10.0);
         assert_eq!(found, Some(route_id));
 
-        // Click far away — no match.
+        // Click far away: no match.
         let found = state.select_at(Position::new(200.0, 200.0), 10.0);
         assert!(found.is_none());
     }
