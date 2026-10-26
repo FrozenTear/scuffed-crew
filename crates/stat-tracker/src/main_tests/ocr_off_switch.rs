@@ -437,12 +437,8 @@ async fn a_stop_during_the_startup_pack_wait_ends_it_cleanly() {
     reader_packs_arrive(limit, recv, &config).await;
 
     // The order in `run`, by its source.
-    let src = include_str!("../main.rs");
-    let at = src.find("\nasync fn run(").expect("run");
-    let body = &src[at..];
-    let body = &body[..body
-        .find("\nasync fn stopped_while_waiting")
-        .expect("the helper")];
+    // In src/daemon/lifecycle.rs since 0.6 S6: found by name, wherever it lives.
+    let body = fn_source("run");
     let wait = body.find("stopped_while_waiting(").expect("the wait");
     let handler = body
         .find("tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())")
