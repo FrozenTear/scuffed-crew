@@ -1391,7 +1391,7 @@ fn draw_element(
             ctx.stroke();
 
             if let Some(ref chip) = chip {
-                ctx.set_fill_style_str(CANVAS_WHITE);
+                ctx.set_fill_style_str(chip.label_color);
                 ctx.set_font("bold 13px sans-serif");
                 ctx.set_text_align("center");
                 let _ = ctx.fill_text(&chip.label, x, y + 5.0);
