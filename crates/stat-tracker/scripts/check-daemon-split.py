@@ -14,7 +14,8 @@ base revision:
    The base has neither, so undoing them cannot hide a change.
    rustfmt may also put a match arm whose pinned log call grew past the
    line width into a block (`=> {` newline, the call, newline, `}`); that is
-   undone too, and each such item is listed.
+   undone too, and each such item is listed. A block the base already has
+   is kept: each choice of blocks to undo is tried.
    One more difference is allowed, because `pub(crate) ` can push a
    declaration past rustfmt's width: the declaration head (from the item's
    keyword line to the `{` that opens its body, or the whole item when it
@@ -230,15 +231,19 @@ ARM_BLOCK = re.compile(
 )
 
 
-def unwrap_arms(text):
+def unwrap_arms(text, which=None):
     """Undo rustfmt wrapping a match arm in a block because its pinned log
     call grew past the line width: `=> {\n    tracing::x!(target: .., ..)\n}`
-    back to `=> tracing::x!(target: .., ..),`. The base has no pinned call, so
-    only the move can make this shape. Returns (text, how many)."""
+    back to `=> tracing::x!(target: .., ..),`. The base may already have
+    such a block (its call was long before the pin), so `which` picks the
+    blocks to undo by index; None undoes all. Returns (text, how many)."""
     code = blank(text)
-    out, last, n = [], 0, 0
+    out, last, n, k = [], 0, 0, -1
     for m in ARM_BLOCK.finditer(text):
         if code[m.start():m.start() + 4] != "=> {" or code[m.end() - 1] != "}":
+            continue
+        k += 1
+        if which is not None and k not in which:
             continue
         out.append(text[last:m.start()] + "=> " + m.group(1) + ",")
         last = m.end()
@@ -247,11 +252,25 @@ def unwrap_arms(text):
     return "".join(out), n
 
 
-def unpin(text):
+def unpin_variants(text):
+    """(unpinned text, blocks undone) for every choice of arm blocks to undo
+    (see `unwrap_arms`), fewest first. A moved item matches the base when
+    one of them does."""
+    _, n = unwrap_arms(text)
+    if n > 8:
+        sys.exit(f"{n} arm blocks in one item; extend unpin_variants")
+    subsets = sorted(range(1 << n), key=lambda s: bin(s).count("1"))
+    return [
+        (unpin(text, {k for k in range(n) if s >> k & 1}), bin(s).count("1")) for s in subsets
+    ]
+
+
+def unpin(text, which=None):
     """Undo the edits a move may make (see the module docs). Matches are
     found in code only (not in comments or string literals), then cut from
-    the text at the same offsets."""
-    text, _ = unwrap_arms(text)
+    the text at the same offsets. `which`: the arm blocks to undo, as in
+    `unwrap_arms`."""
+    text, _ = unwrap_arms(text, which)
     code = blank(text)
     spans = [m.span(1) for m in re.finditer(r"(?m)^\s*(pub\(crate\) )", code)]
     for m in re.finditer(r"tracing::" + LEVELS + r"!\((" + PIN_CODE + " )", code):
@@ -513,20 +532,26 @@ def main():
                 errors.append(f"{rel}: {it['name']}: tracing call without the target pin (item line {line})")
             for line in other_log_forms(it["text"]):
                 errors.append(f"{rel}: {it['name']}: logging form the pin check does not cover (item line {line})")
-            want = unpin(it["text"])
-            if unwrap_arms(it["text"])[1]:
-                rewrapped.append(f"{rel}: {it['name']} ({unwrap_arms(it['text'])[1]})")
-            hits = [i for i in by_text.get(want, []) if i not in moved_idx]
-            if not hits:
-                hits = [
-                    i
-                    for i, b in enumerate(base_items)
-                    if i not in moved_idx
-                    and b["name"] == it["name"]
-                    and same_but_reflowed(b["text"], want)
-                ]
+            variants = unpin_variants(it["text"])
+            hits, arms = [], 0
+            for want, arms in variants:
+                hits = [i for i in by_text.get(want, []) if i not in moved_idx]
                 if hits:
-                    reflowed.append(f"{rel}: {it['name']}")
+                    break
+            if not hits:
+                for want, arms in variants:
+                    hits = [
+                        i
+                        for i, b in enumerate(base_items)
+                        if i not in moved_idx
+                        and b["name"] == it["name"]
+                        and same_but_reflowed(b["text"], want)
+                    ]
+                    if hits:
+                        reflowed.append(f"{rel}: {it['name']}")
+                        break
+            if hits and arms:
+                rewrapped.append(f"{rel}: {it['name']} ({arms})")
             if not hits:
                 label = it["name"] if it["kind"] == "impl" else f"{it['kind']} {it['name']}"
                 errors.append(f"{rel}: {label}: not a byte-identical base item")
