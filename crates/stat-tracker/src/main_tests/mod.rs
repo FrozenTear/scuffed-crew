@@ -291,6 +291,7 @@ fn upload_ok() -> scuffed_types::api::StatsUploadResponse {
         inserted: 1,
         skipped: 0,
         deleted: 0,
+        rejected: Vec::new(),
     }
 }
 

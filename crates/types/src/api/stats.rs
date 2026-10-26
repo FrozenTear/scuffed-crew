@@ -171,9 +171,9 @@ pub const SUSPECT_FIELD_NAMES: &[&str] = &[
 /// A larger value is a damage or timer digit in the elims column. The tracker
 /// gate (`parse::MAX_ELIMS`) is this constant, and hero/role averages use it
 /// so a row stored before that check existed does not move the mean. The
-/// value itself is included. The upload route rejects a larger value (see
-/// [`validate_upload_entry`]); damage, healing and mitigation have their own,
-/// wider upload ceilings.
+/// value itself is included. The upload route has its own, wider ceiling
+/// ([`STATS_UPLOAD_MAX_ELIMS`], see [`validate_upload_entry`]), so a row past
+/// this is still stored and only left out of the averages.
 pub const PLAUSIBLE_ELIMS_MAX: u32 = 99;
 /// Largest assists count the tracker accepts as a real scoreboard cell.
 ///
@@ -265,10 +265,27 @@ pub const STATS_UPLOAD_PLAYED_AT_MAX_FUTURE_SECS: i64 = 24 * 60 * 60;
 /// Long overtime games stay well under this. It exists so a row cannot carry
 /// `u32::MAX` and top a damage or healing board.
 pub const STATS_UPLOAD_MAX_DAMAGE: u32 = 100_000;
+/// Largest per-match elims an upload may carry.
+///
+/// Wider than [`PLAUSIBLE_ELIMS_MAX`] (the tracker's read gate and the
+/// averages filter) so a long game or an older tracker's row is stored, not
+/// skipped. It still stops a `u32::MAX` row from topping an elims board.
+pub const STATS_UPLOAD_MAX_ELIMS: u32 = 999;
+/// Same ceiling as [`STATS_UPLOAD_MAX_ELIMS`], for assists.
+pub const STATS_UPLOAD_MAX_ASSISTS: u32 = 999;
 /// Same ceiling as [`STATS_UPLOAD_MAX_DAMAGE`], for healing.
 pub const STATS_UPLOAD_MAX_HEALING: u32 = 100_000;
 /// Same ceiling as [`STATS_UPLOAD_MAX_DAMAGE`], for mitigation.
 pub const STATS_UPLOAD_MAX_MITIGATION: u32 = 100_000;
+
+/// Hero name 0.4.x and 0.5.0 trackers upload when no hero was read. Live
+/// data has rows with it, so the upload check accepts it in any case.
+pub const UPLOAD_HERO_UNKNOWN: &str = "Unknown";
+
+/// True when `hero` is [`UPLOAD_HERO_UNKNOWN`], ignoring ASCII case.
+pub fn is_upload_hero_unknown(hero: &str) -> bool {
+    hero.eq_ignore_ascii_case(UPLOAD_HERO_UNKNOWN)
+}
 
 fn string_too_long(value: &str) -> bool {
     value.chars().count() > STATS_UPLOAD_STRING_MAX_CHARS
@@ -279,9 +296,10 @@ fn string_too_long(value: &str) -> bool {
 /// - every string field is at most [`STATS_UPLOAD_STRING_MAX_CHARS`]
 ///   characters;
 /// - `hero` is a known hero (display name or pack key, see
-///   [`crate::hero_key_to_name`]);
-/// - `elims` and `assists` are at most [`PLAUSIBLE_ELIMS_MAX`] and
-///   [`PLAUSIBLE_ASSISTS_MAX`], `deaths` at most [`PLAUSIBLE_DEATHS_MAX`];
+///   [`crate::hero_key_to_name`]) or [`UPLOAD_HERO_UNKNOWN`] in any case,
+///   which 0.4.x and 0.5.0 trackers send when no hero was read;
+/// - `elims` and `assists` are at most [`STATS_UPLOAD_MAX_ELIMS`] and
+///   [`STATS_UPLOAD_MAX_ASSISTS`], `deaths` at most [`PLAUSIBLE_DEATHS_MAX`];
 /// - `damage`, `healing`, `mitigation` are at most
 ///   [`STATS_UPLOAD_MAX_DAMAGE`], [`STATS_UPLOAD_MAX_HEALING`],
 ///   [`STATS_UPLOAD_MAX_MITIGATION`];
@@ -289,8 +307,9 @@ fn string_too_long(value: &str) -> bool {
 ///   no later than `now` plus [`STATS_UPLOAD_PLAYED_AT_MAX_FUTURE_SECS`].
 ///
 /// `outcome` keeps its existing rule (the handler skips a value the schema
-/// cannot store); only its length is checked here. Returns the message for
-/// HTTP 400 without the `matches[n]: ` prefix.
+/// cannot store); only its length is checked here. Returns the reason the
+/// upload route reports for a skipped row in
+/// [`StatsUploadResponse::rejected`].
 pub fn validate_upload_entry(entry: &StatsUploadEntry, now: DateTime<Utc>) -> Result<(), String> {
     for (name, value) in [
         ("session_id", &entry.session_id),
@@ -306,12 +325,12 @@ pub fn validate_upload_entry(entry: &StatsUploadEntry, now: DateTime<Utc>) -> Re
             ));
         }
     }
-    if crate::hero_key_to_name(&entry.hero).is_none() {
+    if !is_upload_hero_unknown(&entry.hero) && crate::hero_key_to_name(&entry.hero).is_none() {
         return Err("hero must be a known hero".to_string());
     }
     for (name, value, max) in [
-        ("elims", entry.elims, PLAUSIBLE_ELIMS_MAX),
-        ("assists", entry.assists, PLAUSIBLE_ASSISTS_MAX),
+        ("elims", entry.elims, STATS_UPLOAD_MAX_ELIMS),
+        ("assists", entry.assists, STATS_UPLOAD_MAX_ASSISTS),
         ("deaths", entry.deaths, PLAUSIBLE_DEATHS_MAX),
         ("damage", entry.damage, STATS_UPLOAD_MAX_DAMAGE),
         ("healing", entry.healing, STATS_UPLOAD_MAX_HEALING),
@@ -437,6 +456,22 @@ pub struct StatsUploadResponse {
     /// tolerate older servers that don't report it.
     #[serde(default)]
     pub deleted: u32,
+    /// Matches the server did not store because they failed
+    /// [`validate_upload_entry`], by index into the request's `matches`.
+    /// Omitted when empty and defaulted, so 0.5.0 trackers (which do not know
+    /// the field) and older servers (which never send it) both still parse.
+    /// These rows are also counted in `skipped`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rejected: Vec<StatsUploadRejected>,
+}
+
+/// One match the upload route skipped, with the reason.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatsUploadRejected {
+    /// Index into the request's `matches` array.
+    pub index: usize,
+    /// Why the row was skipped, such as `hero must be a known hero`.
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -583,8 +618,8 @@ mod tests {
     }
 
     #[test]
-    fn upload_entry_unknown_hero_rejected() {
-        for hero in ["Unknown", "", "Not A Hero"] {
+    fn upload_entry_non_hero_rejected() {
+        for hero in ["", "Not A Hero", "Unknown Hero", "Unknownn", "unknown "] {
             let mut e = valid_entry();
             e.hero = hero.into();
             assert_eq!(
@@ -595,12 +630,72 @@ mod tests {
         }
     }
 
+    /// Regression: 0.4.x and 0.5.0 trackers send `Unknown` when no hero was
+    /// read, and live data has such rows. It must pass in any case.
+    #[test]
+    fn upload_entry_unknown_hero_accepted_any_case() {
+        for hero in ["Unknown", "unknown", "UNKNOWN", "uNkNoWn"] {
+            let mut e = valid_entry();
+            e.hero = hero.into();
+            assert_eq!(validate_upload_entry(&e, fixed_now()), Ok(()), "{hero:?}");
+        }
+    }
+
+    #[test]
+    fn upload_entry_doctrine_accepted() {
+        for hero in ["Doctrine", "doctrine", "DOCTRINE"] {
+            let mut e = valid_entry();
+            e.hero = hero.into();
+            assert_eq!(validate_upload_entry(&e, fixed_now()), Ok(()), "{hero:?}");
+        }
+    }
+
+    /// Every hero in the shared list must pass the upload check, so a new
+    /// hero added to `heroes.rs` cannot be rejected by the server.
+    #[test]
+    fn upload_entry_every_listed_hero_accepted() {
+        for hero in crate::HEROES {
+            let mut e = valid_entry();
+            e.hero = (*hero).into();
+            assert_eq!(validate_upload_entry(&e, fixed_now()), Ok(()), "{hero:?}");
+        }
+    }
+
+    #[test]
+    fn upload_response_without_rejected_still_parses() {
+        let old: StatsUploadResponse =
+            serde_json::from_str(r#"{"inserted":1,"skipped":0,"deleted":0}"#).unwrap();
+        assert!(old.rejected.is_empty());
+        let none = serde_json::to_value(StatsUploadResponse {
+            inserted: 1,
+            skipped: 0,
+            deleted: 0,
+            rejected: Vec::new(),
+        })
+        .unwrap();
+        assert!(none.get("rejected").is_none(), "empty list is omitted");
+        let some = serde_json::to_value(StatsUploadResponse {
+            inserted: 1,
+            skipped: 1,
+            deleted: 0,
+            rejected: vec![StatsUploadRejected {
+                index: 1,
+                reason: "hero must be a known hero".into(),
+            }],
+        })
+        .unwrap();
+        assert_eq!(
+            some["rejected"],
+            serde_json::json!([{ "index": 1, "reason": "hero must be a known hero" }])
+        );
+    }
+
     #[test]
     fn upload_entry_numeric_ceilings() {
         type Set = fn(&mut StatsUploadEntry, u32);
         let cases: [(&str, u32, Set); 6] = [
-            ("elims", 99, |e, v| e.elims = v),
-            ("assists", 99, |e, v| e.assists = v),
+            ("elims", 999, |e, v| e.elims = v),
+            ("assists", 999, |e, v| e.assists = v),
             ("deaths", 50, |e, v| e.deaths = v),
             ("damage", 100_000, |e, v| e.damage = v),
             ("healing", 100_000, |e, v| e.healing = v),
