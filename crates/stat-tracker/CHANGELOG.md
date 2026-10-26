@@ -15,6 +15,27 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.5.0
+
+0.5.0 is the first stable release since 0.4.24 and brings together everything from the 0.5.0 alphas and release candidates. The tracker now reads scoreboards with its own reader by default, with player names from the downloaded `names-v1` pack, and reads a board with classic OCR when its own reader finds nothing. Screen capture works on KDE Plasma and GNOME on Wayland, and you can report a game the tracker got wrong straight from the app.
+
+### Highlights
+
+- On KDE Plasma the screen is shared once with the cursor hidden, the stream pauses between grabs, and Plasma 6.8 or newer can use KDE direct with no share dialog. With two monitors on KDE you pick which one the tracker watches.
+- The result comes only from the VICTORY or DEFEAT word on the end screens, a Tab is timed from the moment you press it, and a game you crash out of and rejoin stays one game.
+- Sync sends a big backlog in smaller batches, a game the site refuses is set aside with a Retry button while the rest still upload, and a game you delete in the app is removed from the site right away.
+- The first launch opens a setup guide. An update installed from the app switches over after the current game is saved, and AUR or other package installs are told to update with the package manager.
+
+The tracker code in 0.5.0 is the same as in 0.5.0-rc.9; only the version number changed. The notes for each step are in the 0.5.0-alpha.1 to 0.5.0-rc.9 sections below. If you stayed on the stable channel, this is the first 0.5.0 build the app and bootstrap.sh offer you, and the new reader, the name pack and the capture changes all arrive with it.
+
+### Install
+
+```sh
+curl --proto '=https' -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/stat-tracker-v0.5.0/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_TAG=stat-tracker-v0.5.0 bash
+```
+
+Or extract the tarball and run `./install.sh`.
+
 ## 0.5.0-rc.9
 
 A red flash on screen during a match, such as Vendetta's effects, could be taken for the DEFEAT screen, and the game was then split in two. The tracker no longer reads a win or loss from screen colour at all: it reads the result word on the end screens, and a Tab that shows the same game still going on keeps it as one game.
