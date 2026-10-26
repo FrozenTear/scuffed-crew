@@ -33,6 +33,10 @@ mod tests_layering;
 #[cfg(test)]
 mod tests_release_pins;
 
+/// No tracker source file grows past its size cap (0.6 G1).
+#[cfg(test)]
+mod tests_file_size;
+
 /// The README's `config.toml` examples load as written.
 #[cfg(test)]
 mod tests_readme_config;
