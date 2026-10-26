@@ -427,10 +427,10 @@ fn capture_reading_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut reading = column![].spacing(4);
     let lines = ocr_hint_lines(&stat_tracker::ocr_switch::Read::needing_ocr());
     reading = reading.push(hint(lines.hint));
+    // Both restart notes say the same thing, so show the line once.
     if lines.restart_and_packs {
         reading = reading.push(hint(CLASSIC_OCR_RESTART));
-    }
-    if choice.new_reader() {
+    } else if choice.new_reader() {
         reading = reading.push(hint(NEW_READER_RESTART));
     }
     if let Some((problem, dismissable)) = card_problem(

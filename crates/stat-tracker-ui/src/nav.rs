@@ -8,7 +8,7 @@
 //! it can be tested without a window.
 
 use iced::widget::{Row, button, column, container, row, space, text};
-use iced::{Alignment, Background, Border, Element, Fill, Padding, Shadow, Theme};
+use iced::{Alignment, Background, Border, Element, Fill, Length, Padding, Shadow, Theme};
 
 use crate::app::{Message, TrackerApp};
 use crate::model::{Game, Screen};
@@ -195,7 +195,9 @@ fn tab_button(tab: &Tab) -> Element<'static, Message> {
     }
     let selected = tab.selected;
     // Fill in a shrink column takes the width of the label, so the
-    // underline is exactly as wide as the tab.
+    // underline is exactly as wide as the tab. The column and the button
+    // are set back to Shrink after the push: a Fill child would otherwise
+    // make them Fill and every tab would get an equal slot.
     let underline = container(space().height(UNDERLINE))
         .width(Fill)
         .height(UNDERLINE)
@@ -213,8 +215,10 @@ fn tab_button(tab: &Tab) -> Element<'static, Message> {
             }),
             underline,
         ]
-        .spacing(0),
+        .spacing(0)
+        .width(Length::Shrink),
     )
+    .width(Length::Shrink)
     .padding(0)
     .style(tab_style)
     .on_press(Message::Navigate(tab.screen))
