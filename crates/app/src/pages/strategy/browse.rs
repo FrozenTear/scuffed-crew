@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 use serde::Deserialize;
 
 use crate::routes::Route;
+use crate::util::encode_query;
 use scuffed_api_client::ApiClient;
 
 // --- Types ---
@@ -216,6 +217,25 @@ const PAGE_CSS: &str = r#"
 
 // --- Component ---
 
+/// `GET /api/strategy/strategies` with the search box and mode filter.
+/// Both values are percent-encoded, so `&`, `#`, `+` and spaces in a search
+/// stay part of it instead of splitting or cutting the query (APP10, FC-9).
+fn strategy_list_path(search: &str, mode: &str) -> String {
+    let mut path = String::from("/api/strategy/strategies");
+    let mut params: Vec<String> = Vec::new();
+    if !search.is_empty() {
+        params.push(format!("search={}", encode_query(search)));
+    }
+    if mode != "All" {
+        params.push(format!("game_mode={}", encode_query(mode)));
+    }
+    if !params.is_empty() {
+        path.push('?');
+        path.push_str(&params.join("&"));
+    }
+    path
+}
+
 #[component]
 pub fn StrategyBrowse() -> Element {
     // Saving needs an org membership; non-members would draw and then get 403.
@@ -247,18 +267,7 @@ pub fn StrategyBrowse() -> Element {
         let search = debounced_search();
         let mode = selected_mode();
         async move {
-            let mut path = String::from("/api/strategy/strategies");
-            let mut params: Vec<String> = Vec::new();
-            if !search.is_empty() {
-                params.push(format!("search={search}"));
-            }
-            if mode != "All" {
-                params.push(format!("game_mode={mode}"));
-            }
-            if !params.is_empty() {
-                path.push('?');
-                path.push_str(&params.join("&"));
-            }
+            let path = strategy_list_path(&search, &mode);
             ApiClient::web()
                 .fetch::<ListResponse>(&path)
                 .await
@@ -375,5 +384,46 @@ fn render_strategy_card(s: &StrategySummary) -> Element {
                 span { "{updated_short}" }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_filters_is_the_bare_list() {
+        assert_eq!(strategy_list_path("", "All"), "/api/strategy/strategies");
+    }
+
+    #[test]
+    fn search_is_url_encoded() {
+        assert_eq!(
+            strategy_list_path("dive & poke", "All"),
+            "/api/strategy/strategies?search=dive%20%26%20poke"
+        );
+        assert_eq!(
+            strategy_list_path("C# rush", "All"),
+            "/api/strategy/strategies?search=C%23%20rush"
+        );
+        assert_eq!(
+            strategy_list_path("2+2", "All"),
+            "/api/strategy/strategies?search=2%2B2"
+        );
+        assert_eq!(
+            strategy_list_path("Lúcio speed", "All"),
+            "/api/strategy/strategies?search=L%C3%BAcio%20speed"
+        );
+    }
+
+    #[test]
+    fn a_search_cannot_add_or_cut_parameters() {
+        let path = strategy_list_path("a&game_mode=Push#x", "Control");
+        assert_eq!(
+            path,
+            "/api/strategy/strategies?search=a%26game_mode%3DPush%23x&game_mode=Control"
+        );
+        assert_eq!(path.matches('&').count(), 1);
+        assert!(!path.contains('#'));
     }
 }
