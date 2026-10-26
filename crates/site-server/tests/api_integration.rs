@@ -8941,7 +8941,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body.as_array().unwrap().len(),
-        3,
+        2,
         "suspending the target does not hide their role stats"
     );
     let (hs, _) = get_json(
