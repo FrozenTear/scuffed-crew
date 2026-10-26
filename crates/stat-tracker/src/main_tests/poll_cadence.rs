@@ -129,7 +129,11 @@ fn the_poll_arm_passes_its_outcome_only_flag() {
 /// #433 review: shutdown flushes perf.log, bounded by the deadline.
 #[test]
 fn shutdown_flushes_perf_log_within_the_deadline() {
-    let shutdown = squashed_fn(concat!("async ", "fn shutdown_from_signal"));
+    // In src/daemon/shutdown.rs since 0.6 S7: found by name, wherever it
+    // lives, then squashed as `squashed_fn` does.
+    let shutdown: String = fn_source("shutdown_from_signal")
+        .split_whitespace()
+        .collect();
     assert!(
         shutdown
             .contains("letwait=shutdown_flush_wait(stat_tracker::replace::shutdown_time_left());")
