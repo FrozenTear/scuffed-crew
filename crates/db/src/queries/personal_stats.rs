@@ -3666,7 +3666,7 @@ mod tests {
             avg_damage: 0.0,
             avg_healing: 0.0,
         };
-        let mut direct = vec![
+        let mut direct = [
             stat("zed", 1),
             stat("Bob", 1),
             stat("Zed", 1),
