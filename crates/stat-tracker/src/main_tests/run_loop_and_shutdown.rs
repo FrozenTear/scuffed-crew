@@ -9,15 +9,23 @@ use super::*;
 /// after the vacuum exit.
 #[test]
 fn startup_takes_the_pid_guard_before_the_site_and_always_starts_the_pack_keeper() {
-    let src = include_str!("../main.rs");
-    let begin = src
+    // `run` is in src/daemon/lifecycle.rs since 0.6 S6: found by name, and
+    // startup runs from the umask to the end of `run`. The pack-wait
+    // helpers `run` calls come after it, as they did in main.rs, so each
+    // needle is still counted once across them too.
+    let run = fn_source("run");
+    let begin = run
         .find("    lock_down_umask();\n")
         .expect("startup begins");
-    let body = &src[begin..];
-    let end = body
-        .find("\nfn handle_preinit_flags()")
-        .expect("startup ends before handle_preinit_flags");
-    let body = &body[..end];
+    let body = [
+        &run[begin..],
+        fn_source("reload_names_after_install"),
+        fn_source("stopped_while_waiting"),
+        fn_source("keep_waiting_for_packs"),
+        fn_source("reader_packs_arrive"),
+    ]
+    .join("\n");
+    let body = body.as_str();
     let at = |needle: &str| {
         assert_eq!(body.matches(needle).count(), 1, "{needle} once in startup");
         body.find(needle).expect("counted above")

@@ -6,11 +6,13 @@
 //! `main.rs` and `main_tests` name them as before.
 
 mod debug_dumps;
+mod lifecycle;
 mod poll;
 mod sync_sched;
 mod tab;
 
 pub(crate) use debug_dumps::*;
+pub(crate) use lifecycle::*;
 pub(crate) use poll::*;
 pub(crate) use sync_sched::*;
 pub(crate) use tab::*;
