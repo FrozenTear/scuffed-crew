@@ -2,7 +2,7 @@
 //!
 //! `use_api*` stores failures as `None` data + `error`. Pages that only match
 //! `None => "Loading…"` then hang forever on 401/403. Gate on auth first, and
-//! treat 401 as sign-in / 403 as apply-or-inactive — never infinite Loading.
+//! treat 401 as sign-in / 403 as apply-or-inactive; never infinite Loading.
 
 use dioxus::prelude::*;
 
@@ -89,7 +89,7 @@ fn inactive_panel(what: &str) -> Element {
 }
 
 /// Pending UI for a member-only `use_api*` whose `data` is still `None`.
-/// Call from the `None` arm only — do not re-read `resource.data` here
+/// Call from the `None` arm only; do not re-read `resource.data` here
 /// (callers already hold that guard).
 pub fn member_pending<T: 'static>(
     auth: &AuthState,

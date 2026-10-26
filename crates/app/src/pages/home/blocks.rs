@@ -1,4 +1,4 @@
-//! Presentational homepage blocks. No network hooks — data is passed in.
+//! Presentational homepage blocks. No network hooks: data is passed in.
 
 use std::collections::HashMap;
 
@@ -390,7 +390,7 @@ fn ResultsTicker(results: Vec<RecentResult>) -> Element {
                 for r in results.iter() {
                     {
                         let score = match (r.score_us, r.score_them) {
-                            (Some(u), Some(t)) => format!("{u}–{t}"),
+                            (Some(u), Some(t)) => format!("{u}-{t}"),
                             _ => "-".into(),
                         };
                         let outcome_class = format!("ticker-chip {}", r.outcome);
@@ -441,7 +441,7 @@ pub fn TeamsBlock(
                                         span { "Game" }
                                         span { "Roster" }
                                         span { "Division" }
-                                        span { "W–L" }
+                                        span { "W-L" }
                                     }
                                     for team in data.teams.iter() {
                                         {render_team_row(team, &game_map)}
@@ -492,7 +492,7 @@ fn render_team_row(team: &OverviewTeam, game_map: &HashMap<String, String>) -> E
     let wl = if team.record.wins == 0 && team.record.losses == 0 {
         "-".to_string()
     } else {
-        format!("{}–{}", team.record.wins, team.record.losses)
+        format!("{}-{}", team.record.wins, team.record.losses)
     };
     let division = team.division.clone().unwrap_or_else(|| "Internal".into());
     let lore = team.lore_quote.clone().unwrap_or_default();
@@ -557,7 +557,7 @@ fn render_team_card(team: &OverviewTeam, game_map: &HashMap<String, String>) -> 
     let wl = if team.record.wins == 0 && team.record.losses == 0 {
         String::new()
     } else {
-        format!(" · {}–{}", team.record.wins, team.record.losses)
+        format!(" · {}-{}", team.record.wins, team.record.losses)
     };
     rsx! {
         Link {

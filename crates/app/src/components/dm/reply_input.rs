@@ -90,7 +90,7 @@ pub fn ReplyInput(
     /// The most recent gift_wrap_id in the thread, used as `reply_to_event_id`
     /// when the user sends. None for a brand-new conversation.
     reply_to_event_id: Option<String>,
-    /// Fired when a send succeeds — the parent appends the message to its
+    /// Fired when a send succeeds; the parent appends the message to its
     /// thread cache for optimistic UI. The DmMessage uses the returned
     /// gift_wrap_id as both `id` and `gift_wrap_id`; the next dm/sync will
     /// reconcile against the server's row.

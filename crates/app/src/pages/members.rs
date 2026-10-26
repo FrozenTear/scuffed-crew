@@ -19,7 +19,7 @@ struct PublicMember {
     #[serde(default)]
     main_role: Option<String>,
     /// Hero-scoped performance, only present when the roster was fetched with a
-    /// `?hero=` filter (contract Q2). A nested block — NOT sibling fields.
+    /// `?hero=` filter (contract Q2). A nested block, NOT sibling fields.
     /// Absent for members who have not played the selected hero (or when no
     /// hero filter is active), so it stays optional and serde-defaults to None.
     #[serde(default)]
@@ -27,7 +27,7 @@ struct PublicMember {
 }
 
 /// Nested per-hero stat block attached to a [`PublicMember`] when the roster is
-/// fetched with `?hero=`. `winrate` is a 0.0–1.0 fraction (multiply by 100 for
+/// fetched with `?hero=`. `winrate` is a 0.0 to 1.0 fraction (multiply by 100 for
 /// display).
 #[derive(Debug, Clone, Deserialize)]
 struct HeroScoped {
@@ -198,7 +198,7 @@ pub fn Members() -> Element {
         let hero = hero();
         async move {
             // Unfiltered: first page (unchanged). Hero filter: cursor-walk the
-            // full org (up to HERO_FILTER_MAX_PAGES) then client-filter/sort —
+            // full org (up to HERO_FILTER_MAX_PAGES) then client-filter/sort;
             // single-page limit=100 still missed mains past offset 100 (FE-1).
             fetch_roster_members(hero.as_deref()).await
         }
@@ -295,7 +295,7 @@ fn render_member_card(m: &PublicMember, hero: Option<&str>) -> Element {
     let bio = m.bio.clone().unwrap_or_default();
 
     // Hero-scoped stat line, only when a hero is selected AND this member has
-    // played it (contract Q2 nested block present). winrate is a 0.0–1.0
+    // played it (contract Q2 nested block present). winrate is a 0.0 to 1.0
     // fraction, shown as a whole-number percent to match other pages.
     let hero_stat = match (hero, m.hero_scoped.as_ref()) {
         (Some(h), Some(hs)) => Some(format!(

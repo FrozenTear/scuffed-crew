@@ -34,7 +34,7 @@ struct GameAccount {
 
 // Mirrors the backend `HeroAgg` returned by
 // `GET /api/public/members/{id}/heroes` (public, no auth). `winrate` is a
-// ready-made 0.0–1.0 ratio; `avg_elims`/`avg_deaths` are unused in this view
+// ready-made 0.0 to 1.0 ratio; `avg_elims`/`avg_deaths` are unused in this view
 // but kept so the shape matches the endpoint exactly.
 #[derive(Debug, Clone, Deserialize)]
 struct HeroAgg {
