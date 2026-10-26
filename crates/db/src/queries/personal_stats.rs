@@ -374,8 +374,18 @@ fn fold_hero_case(rows: Vec<HeroSumRow>) -> Vec<HeroStats> {
             }
         })
         .collect();
-    out.sort_by(|a, b| b.matches.cmp(&a.matches).then_with(|| a.hero.cmp(&b.hero)));
+    out.sort_by(hero_stats_order);
     out
+}
+
+/// Display order for hero stats: most matches first, then the name
+/// case-insensitively (Unicode lowercase), then the raw string so the order
+/// is total and stable across runs.
+fn hero_stats_order(a: &HeroStats, b: &HeroStats) -> std::cmp::Ordering {
+    b.matches
+        .cmp(&a.matches)
+        .then_with(|| a.hero.to_lowercase().cmp(&b.hero.to_lowercase()))
+        .then_with(|| a.hero.cmp(&b.hero))
 }
 
 fn bind_stat_caps(q: surrealdb::method::Query<'_, Any>) -> surrealdb::method::Query<'_, Any> {
@@ -3597,6 +3607,76 @@ mod tests {
             "MYSTERY"
         );
         assert_eq!(super::hero_group_label(&v(&[("b", 1), ("B", 1)])), "B");
+    }
+
+    /// Ties on matches sort by the lowercased name, not raw bytes, so
+    /// `alpha` no longer lands after `Zeta`. Raw string breaks a full tie.
+    #[test]
+    fn hero_stats_ties_sort_case_insensitively() {
+        let row = |hero: &str, matches: u32| super::HeroSumRow {
+            hero: hero.to_string(),
+            matches,
+            wins: 0,
+            losses: 0,
+            sum_elims: 0.0,
+            n_elims: 0,
+            sum_deaths: 0.0,
+            n_deaths: 0,
+            sum_damage: 0.0,
+            n_damage: 0,
+            sum_healing: 0.0,
+            n_healing: 0,
+        };
+        let folded = super::fold_hero_case(vec![
+            row("Zeta", 2),
+            row("beta", 2),
+            row("ALPHA", 2),
+            row("gamma", 2),
+            row("Delta", 2),
+            row("omega", 5),
+            row("Echo", 1),
+            row("alpha", 1),
+        ]);
+        let names: Vec<(&str, u32)> = folded
+            .iter()
+            .map(|h| (h.hero.as_str(), h.matches))
+            .collect();
+        // ALPHA and alpha fold into one 3-match hero labelled ALPHA.
+        assert_eq!(
+            names,
+            [
+                ("omega", 5),
+                ("ALPHA", 3),
+                ("beta", 2),
+                ("Delta", 2),
+                ("gamma", 2),
+                ("Zeta", 2),
+                ("Echo", 1),
+            ]
+        );
+
+        let stat = |hero: &str, matches: u32| super::HeroStats {
+            hero: hero.to_string(),
+            matches,
+            wins: 0,
+            losses: 0,
+            draws: 0,
+            avg_elims: 0.0,
+            avg_deaths: 0.0,
+            avg_damage: 0.0,
+            avg_healing: 0.0,
+        };
+        let mut direct = [
+            stat("zed", 1),
+            stat("Bob", 1),
+            stat("Zed", 1),
+            stat("ann", 1),
+            stat("ZED", 1),
+            stat("Ann", 4),
+        ];
+        direct.sort_by(super::hero_stats_order);
+        let order: Vec<&str> = direct.iter().map(|h| h.hero.as_str()).collect();
+        assert_eq!(order, ["Ann", "ann", "Bob", "ZED", "Zed", "zed"]);
     }
 
     /// Hero stats fold case variants into one hero at read time. Counts add,
