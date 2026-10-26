@@ -1134,6 +1134,12 @@ fn section_columns<'a>(columns: Vec<Vec<Element<'a, Message>>>) -> Element<'a, M
 }
 
 fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let body = column![service_body(app, demo), updates_body(app, demo)].spacing(6);
+    settings_card("Tracker service", body.into())
+}
+
+/// Status, pid and the start, stop and login buttons.
+pub(crate) fn service_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let d = &app.daemon;
     let mut actions = row![].spacing(8).align_y(Alignment::Center);
     if !demo && !app.daemon_busy {
@@ -1210,7 +1216,12 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         );
     }
     body = body.push(actions);
+    body.into()
+}
 
+/// How this install updates, the copy button and the pre-release switch.
+pub(crate) fn updates_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let mut body = column![].spacing(6);
     let install = install_row(
         app.package_probe(),
         app.update.as_ref().map(|i| i.latest.as_str()),
@@ -1232,11 +1243,14 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         body = body.push(action_btn("Copy command", false, Message::CopyUpdateCmd));
     }
     body = body.push(prerelease_updates_block(app));
-
-    settings_card("Tracker service", body.into())
+    body.into()
 }
 
 fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    settings_card("Capture", capture_body(app, demo))
+}
+
+pub(crate) fn capture_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let route = app.settings.capture_route;
     let session = app.session;
     let mut route_chips = row![].spacing(8);
@@ -1381,10 +1395,14 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         );
     }
 
-    settings_card("Capture", body.into())
+    body.into()
 }
 
 fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    settings_card("Companion", companion_body(app, demo))
+}
+
+pub(crate) fn companion_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![
         checkbox(app.settings.overlay_hotkey_enabled)
             .label("Keyboard shortcut to hide or show the overlay")
@@ -1408,11 +1426,11 @@ fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         ));
     }
 
-    settings_card("Companion", body.into())
+    body.into()
 }
 
 /// In-game name and session window, side by side.
-fn player_fields_row<'a>(
+pub(crate) fn player_fields_row<'a>(
     player_name: &'a str,
     session_window_secs: &'a str,
     demo: bool,
@@ -1461,6 +1479,10 @@ fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 }
 
 fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    settings_card("Auto-detect", auto_detect_body(app, demo))
+}
+
+pub(crate) fn auto_detect_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![
         checkbox(app.settings.auto_detect_enabled)
             .label("Watch for match start and end")
@@ -1495,10 +1517,14 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         body = body.push(hint(POLL_INTERVAL_HELP));
     }
 
-    settings_card("Auto-detect", body.into())
+    body.into()
 }
 
 fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    settings_card("Website sync", sync_body(app, demo))
+}
+
+pub(crate) fn sync_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![field_input(
         "Website URL",
         "https://your-site.com",
@@ -1526,7 +1552,7 @@ fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         demo,
         Some("Both needed to upload. Blank either to turn sync off."),
     ));
-    settings_card("Website sync", body.into())
+    body.into()
 }
 
 fn ocr_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -1597,7 +1623,7 @@ pub(crate) const READING_MODEL_HINT: &str = "\
 Install puts back the game-font model that ships with the tracker. It does not \
 train one on this computer.";
 
-fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+pub(crate) fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let installed = reading_model_status(app.tessdata_installed);
     let mut actions = row![].spacing(8);
     if !demo && !app.tessdata_busy {
@@ -1631,7 +1657,7 @@ fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     body.into()
 }
 
-fn prerelease_updates_block(app: &TrackerApp) -> Element<'_, Message> {
+pub(crate) fn prerelease_updates_block(app: &TrackerApp) -> Element<'_, Message> {
     column![
         checkbox(app.settings.prerelease_updates)
             .label(PRERELEASE_UPDATES_LABEL)
@@ -1661,7 +1687,7 @@ fn new_reader_block(app: &TrackerApp) -> Element<'_, Message> {
     .into()
 }
 
-fn shadow_reader_block(app: &TrackerApp) -> Element<'_, Message> {
+pub(crate) fn shadow_reader_block(app: &TrackerApp) -> Element<'_, Message> {
     let mut toggle = checkbox(app.settings.displayed_reader().file_flag())
         .label(SHADOW_READER_LABEL)
         .size(16)
@@ -1696,7 +1722,11 @@ const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4
 /// show and where they stay.
 const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture, so leave it off unless diagnosing.";
 
-fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
+fn diagnostics_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    settings_card("Diagnostics", diagnostics_body(app, demo))
+}
+
+pub(crate) fn diagnostics_body(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
     let body = column![
         checkbox(app.settings.debug_ocr)
             .label("Save debug images from each capture")
@@ -1707,10 +1737,14 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
         hint(DEBUG_IMAGES_HELP),
     ]
     .spacing(6);
-    settings_card("Diagnostics", body.into())
+    body.into()
 }
 
 fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    settings_card("Stored data", data_body(app, demo))
+}
+
+pub(crate) fn data_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let running = app.daemon.running();
     let mut copy = column![hint(
         "Compact rewrites the store and keeps one backup. Delete removes local matches and the saved screen-share permission, not the website. The next screen share asks for permission again."
@@ -1782,7 +1816,7 @@ fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     if show_actions {
         body = body.push(actions.wrap());
     }
-    settings_card("Stored data", body.into())
+    body.into()
 }
 
 /// A "text … button" row in a card that spans the pane: left-aligned and no
@@ -1882,7 +1916,7 @@ fn settings_card<'a>(title: &'static str, body: Element<'a, Message>) -> Element
     .into()
 }
 
-fn field_caption(label: &'static str) -> text::Text<'static> {
+pub(crate) fn field_caption(label: &'static str) -> text::Text<'static> {
     text(label)
         .size(SIZE_META)
         .font(FONT_SEMIBOLD)
@@ -1890,7 +1924,7 @@ fn field_caption(label: &'static str) -> text::Text<'static> {
 }
 
 /// Help copy. Wraps at [`HELP_MEASURE`] even in a wider card.
-fn hint(copy: impl Into<String>) -> Element<'static, Message> {
+pub(crate) fn hint(copy: impl Into<String>) -> Element<'static, Message> {
     container(
         text(copy.into())
             .size(SIZE_LABEL)
@@ -1923,7 +1957,7 @@ fn compact_row<'a>(
     r.into()
 }
 
-fn field_input<'a>(
+pub(crate) fn field_input<'a>(
     label: &'static str,
     placeholder: &'static str,
     value: &'a str,
@@ -1954,7 +1988,7 @@ fn field_input<'a>(
         .into()
 }
 
-fn output_chip(
+pub(crate) fn output_chip(
     label: impl Into<String>,
     selected: bool,
     msg: Message,
@@ -1962,7 +1996,11 @@ fn output_chip(
     widgets::filter_chip(label.into(), selected, msg)
 }
 
-fn action_btn(label: &'static str, primary: bool, msg: Message) -> Element<'static, Message> {
+pub(crate) fn action_btn(
+    label: &'static str,
+    primary: bool,
+    msg: Message,
+) -> Element<'static, Message> {
     let label = text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT);
     if primary {
         button(label)
@@ -1979,7 +2017,7 @@ fn action_btn(label: &'static str, primary: bool, msg: Message) -> Element<'stat
     }
 }
 
-fn checkbox_style(
+pub(crate) fn checkbox_style(
     _theme: &iced::Theme,
     status: iced::widget::checkbox::Status,
 ) -> iced::widget::checkbox::Style {

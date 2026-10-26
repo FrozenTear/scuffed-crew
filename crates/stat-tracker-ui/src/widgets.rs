@@ -258,7 +258,7 @@ pub fn header_status_color(status: HeaderStatus) -> Color {
     }
 }
 
-fn header_status_for(app: &TrackerApp) -> HeaderStatus {
+pub(crate) fn header_status_for(app: &TrackerApp) -> HeaderStatus {
     let sync_token_rejected = app.saved_config.sync.as_ref().is_some_and(|sync| {
         stat_tracker::sync::auth_pause_matches(&app.data_dir, &sync.server_url, &sync.token)
     });

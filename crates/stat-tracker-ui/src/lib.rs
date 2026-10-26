@@ -30,6 +30,7 @@ pub mod instance;
 pub mod layout;
 pub mod maps;
 pub mod model;
+pub mod nav;
 pub mod notes;
 pub mod overlay;
 #[cfg(feature = "companion")]
@@ -39,6 +40,8 @@ pub mod report;
 pub mod restart_prompt;
 pub mod seasons;
 pub mod settings;
+pub mod settings_model;
+pub mod settings_page;
 pub mod setup_guide;
 pub mod snapshot;
 pub mod theme;

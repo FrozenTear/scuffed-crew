@@ -340,6 +340,10 @@ pub enum Message {
     ShowOlderReleases(notes::NotesSurface),
     Setup(crate::setup_guide::SetupMessage),
     Report(crate::report::ReportMessage),
+    /// Open or close one ADVANCED row on the 0.6 Settings page.
+    ToggleAdvanced(crate::settings_model::AdvancedSection),
+    /// Reading radio on the 0.6 Settings page. Sets both reader switches.
+    PickReader(crate::settings_model::ReaderChoice),
 }
 
 struct NotesDialog {
@@ -539,6 +543,10 @@ pub struct TrackerApp {
     /// Puts text on the system clipboard ([`crate::clipboard::copy_text`]).
     /// Tests swap it so they never reach the real clipboard.
     copy_text: fn(&str) -> Result<crate::clipboard::ClipboardBackend, String>,
+    /// Top tabs (0.6 default) or the 0.5 sidebar, from `SCUFFED_TRACKER_LAYOUT`.
+    pub nav_style: crate::nav::NavStyle,
+    /// Open ADVANCED rows on the 0.6 Settings page. All closed at start.
+    pub advanced_open: crate::settings_model::AdvancedOpen,
 }
 
 impl TrackerApp {
@@ -758,6 +766,8 @@ impl TrackerApp {
             own_exe,
             restart_watch,
             copy_text: crate::clipboard::copy_text,
+            nav_style: crate::nav::NavStyle::from_env(),
+            advanced_open: crate::settings_model::AdvancedOpen::default(),
         };
         app.refresh_kit_sessions();
 
@@ -1150,6 +1160,23 @@ impl TrackerApp {
             }
             Message::SettingsToggle(SettingsToggle::ClassicOcr, want_classic) => {
                 self.toggle_classic_ocr(want_classic)
+            }
+            Message::ToggleAdvanced(section) => {
+                self.advanced_open.toggle(section);
+                Task::none()
+            }
+            Message::PickReader(choice) => {
+                self.settings.new_reader = choice.new_reader();
+                if choice.classic_ocr() == self.settings.classic_ocr {
+                    // Same OCR switch: no pack check, and a refusal from an
+                    // earlier click no longer applies.
+                    if choice.classic_ocr() {
+                        self.ocr_switch.refusal = None;
+                    }
+                    Task::none()
+                } else {
+                    self.toggle_classic_ocr(choice.classic_ocr())
+                }
             }
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
@@ -2821,6 +2848,60 @@ impl TrackerApp {
     }
 
     pub fn view(&self, _window: window::Id) -> Element<'_, Message> {
+        let chrome = match self.nav_style {
+            crate::nav::NavStyle::TopTabs => self.top_tabs_chrome(),
+            crate::nav::NavStyle::ClassicSidebar => self.sidebar_chrome(),
+        };
+
+        let page = container(chrome)
+            .width(Fill)
+            .height(Fill)
+            .style(theme::page_background);
+
+        let with_notes = if let Some(dialog) = &self.notes_dialog {
+            // `notes::dialog` includes the backdrop and is opaque, so a press
+            // on the scrim or the card does not reach Update now underneath.
+            stack![
+                page,
+                notes::dialog(&dialog.subtitle, &dialog.sections, self.dialog_notes_ui())
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into()
+        } else {
+            page.into()
+        };
+        let with_guide = if self.setup.open {
+            stack![with_notes, crate::setup_guide::view(&self.setup)]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else {
+            with_notes
+        };
+        let with_uninstall = if let Some(dialog) = &self.uninstall_dialog {
+            stack![
+                with_guide,
+                crate::uninstall::view(dialog, self.uninstall_busy)
+            ]
+            .width(Fill)
+            .height(Fill)
+            .into()
+        } else {
+            with_guide
+        };
+        if let Some(report) = &self.report {
+            stack![with_uninstall, crate::report::view(report)]
+                .width(Fill)
+                .height(Fill)
+                .into()
+        } else {
+            with_uninstall
+        }
+    }
+
+    /// 0.5 layout: sidebar on the left, header and old Settings cards.
+    fn sidebar_chrome(&self) -> Element<'_, Message> {
         let header = widgets::app_header(self);
         let nav = widgets::sidebar(self.screen);
         let settings_screen = self.screen == Screen::Settings;
@@ -2898,52 +2979,68 @@ impl TrackerApp {
         .spacing(0)
         .width(Fill)
         .height(Fill);
+        chrome.into()
+    }
 
-        let page = container(chrome)
+    /// 0.6 layout: tabs across the top, page controls under them on the
+    /// stats screens, and the new Settings page.
+    fn top_tabs_chrome(&self) -> Element<'_, Message> {
+        let settings_screen = self.screen == Screen::Settings;
+        let page_height = if settings_screen {
+            Fill
+        } else {
+            Length::Shrink
+        };
+        let bar = responsive(|size| crate::nav::top_bar(self, size.width))
             .width(Fill)
-            .height(Fill)
-            .style(theme::page_background);
+            .height(Length::Shrink);
 
-        let with_notes = if let Some(dialog) = &self.notes_dialog {
-            // `notes::dialog` includes the backdrop and is opaque, so a press
-            // on the scrim or the card does not reach Update now underneath.
-            stack![
-                page,
-                notes::dialog(&dialog.subtitle, &dialog.sections, self.dialog_notes_ui())
-            ]
-            .width(Fill)
-            .height(Fill)
-            .into()
-        } else {
-            page.into()
-        };
-        let with_guide = if self.setup.open {
-            stack![with_notes, crate::setup_guide::view(&self.setup)]
-                .width(Fill)
-                .height(Fill)
-                .into()
-        } else {
-            with_notes
-        };
-        let with_uninstall = if let Some(dialog) = &self.uninstall_dialog {
-            stack![
-                with_guide,
-                crate::uninstall::view(dialog, self.uninstall_busy)
-            ]
-            .width(Fill)
-            .height(Fill)
-            .into()
-        } else {
-            with_guide
-        };
-        if let Some(report) = &self.report {
-            stack![with_uninstall, crate::report::view(report)]
-                .width(Fill)
-                .height(Fill)
-                .into()
-        } else {
-            with_uninstall
+        let mut content = column![].spacing(16).width(Fill).height(page_height);
+        if !settings_screen {
+            content = content.push(crate::nav::page_controls(self));
         }
+        if let Some(t) = &self.toast {
+            content = content.push(widgets::toast_bar(t, self.toast_action.clone()));
+        }
+        if self.restart_bar_visible() {
+            content = content.push(restart_prompt::bar());
+        }
+        content = content.push(
+            responsive(|size| match self.screen {
+                Screen::Overview => crate::overview::view(self, size.width),
+                Screen::Games => crate::games::view(self, size.width),
+                Screen::Heroes => crate::heroes::view(self, size.width),
+                Screen::Maps => crate::maps::view(self, size.width),
+                Screen::Seasons => crate::seasons::view(self, size.width),
+                Screen::Settings => crate::settings_page::view(self, size.width),
+            })
+            .width(Fill)
+            .height(page_height),
+        );
+
+        let main = container(content)
+            .width(Fill)
+            .height(page_height)
+            .padding(Padding {
+                top: PAGE_PAD_Y,
+                bottom: PAGE_PAD_Y,
+                left: PAGE_PAD_X,
+                right: PAGE_PAD_X,
+            });
+        let page_body: Element<'_, Message> = if settings_screen {
+            container(main).width(Fill).height(Fill).into()
+        } else {
+            iced::widget::scrollable(main)
+                .width(Fill)
+                .height(Fill)
+                .into()
+        };
+
+        column![bar, page_body]
+            .spacing(0)
+            .width(Fill)
+            .height(Fill)
+            .into()
     }
 
     pub fn update_notes_ui(&self) -> notes::NotesUi<'_> {
