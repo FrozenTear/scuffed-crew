@@ -795,9 +795,10 @@ deleted edge is logged at info. Later boots see the index and skip the pass.
    `SURREALDB_BOOTSTRAP=0` never run migrations, so they never run DB7. The
    container that bootstraps (or the `SURREALDB_MIGRATE_ONLY=1` job) has to
    be on the new image.
-5. **After boot:** expect the info log `plays_on is UNIQUE on (in, out)` with
-   `duplicate_pairs` and `deleted` matching the count from step 2, and re-run
-   that query: 0 rows.
+5. **After boot:** expect the info log `plays_on is UNIQUE on (in, out)`.
+   Its `duplicate_pairs` equals the number of rows the step 2 query returned
+   (one row per duplicate group). Its `deleted` is the number of extra edges,
+   the sum of `n - 1` over those rows. Re-run the step 2 query: 0 rows.
 
 Two servers that boot against one database at the same moment can hit
 `Transaction conflict: Resource busy ... can be retried` in a startup

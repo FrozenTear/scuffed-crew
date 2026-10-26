@@ -44,7 +44,12 @@ async fn main() {
         }
         Database::bootstrap_from_env()
             .await
-            .expect("SURREALDB_MIGRATE_ONLY: bootstrap failed");
+            .unwrap_or_else(|e| match e {
+                scuffed_db::DbError::Migration { .. } => {
+                    panic!("SURREALDB_MIGRATE_ONLY: SurrealDB startup migration failed: {e}")
+                }
+                e => panic!("SURREALDB_MIGRATE_ONLY: Failed to connect to SurrealDB: {e}"),
+            });
         tracing::info!("SURREALDB_MIGRATE_ONLY complete — exiting");
         return;
     }
