@@ -344,6 +344,12 @@ pub enum Message {
     ToggleAdvanced(crate::settings_model::AdvancedSection),
     /// Reading radio on the 0.6 Settings page. Sets both reader switches.
     PickReader(crate::settings_model::ReaderChoice),
+    /// Open (`Some`), edit, or close (`None`) a chip list's "+ Add" input.
+    ChipDraft(crate::settings_model::ChipList, Option<String>),
+    /// Add the open draft as a chip.
+    ChipAdd,
+    /// Remove chip `index` from a list.
+    ChipRemove(crate::settings_model::ChipList, usize),
 }
 
 struct NotesDialog {
@@ -547,6 +553,14 @@ pub struct TrackerApp {
     pub nav_style: crate::nav::NavStyle,
     /// Open ADVANCED rows on the 0.6 Settings page. All closed at start.
     pub advanced_open: crate::settings_model::AdvancedOpen,
+    /// The config the running tracker started with, as far as the GUI
+    /// knows: the saved config at launch, then again after each Restart or
+    /// Start it ran. Settings counts the changes waiting against it.
+    pub restart_baseline: Config,
+    /// A Restart or Start is running; when it succeeds the baseline moves.
+    restart_pending: bool,
+    /// The chip input that is open on the Settings page, and its text.
+    pub chip_draft: Option<(crate::settings_model::ChipList, String)>,
 }
 
 impl TrackerApp {
@@ -768,7 +782,11 @@ impl TrackerApp {
             copy_text: crate::clipboard::copy_text,
             nav_style: crate::nav::NavStyle::from_env(),
             advanced_open: crate::settings_model::AdvancedOpen::default(),
+            restart_baseline: Config::default(),
+            restart_pending: false,
+            chip_draft: None,
         };
+        app.restart_baseline = app.saved_config.clone();
         app.refresh_kit_sessions();
 
         if let Some(err) = overlay::reconcile_companion(
@@ -1165,6 +1183,43 @@ impl TrackerApp {
                 self.advanced_open.toggle(section);
                 Task::none()
             }
+            Message::ChipDraft(list, draft) => {
+                self.chip_draft = draft.map(|text| (list, text));
+                Task::none()
+            }
+            Message::ChipAdd => {
+                if let Some((list, draft)) = self.chip_draft.take() {
+                    use crate::settings_model::{ChipList, with_chip};
+                    match list {
+                        // Config holds one name, so a new one replaces it.
+                        ChipList::Names => {
+                            let name = draft.trim();
+                            if !name.is_empty() {
+                                self.settings
+                                    .set_text(SettingsField::PlayerName, name.to_string());
+                            }
+                        }
+                        ChipList::Processes => {
+                            let next = with_chip(&self.settings.game_process_names, &draft);
+                            self.settings.set_text(SettingsField::ProcessNames, next);
+                        }
+                    }
+                }
+                Task::none()
+            }
+            Message::ChipRemove(list, index) => {
+                use crate::settings_model::{ChipList, without_chip};
+                match list {
+                    ChipList::Names => self
+                        .settings
+                        .set_text(SettingsField::PlayerName, String::new()),
+                    ChipList::Processes => {
+                        let next = without_chip(&self.settings.game_process_names, index);
+                        self.settings.set_text(SettingsField::ProcessNames, next);
+                    }
+                }
+                Task::none()
+            }
             Message::PickReader(choice) => {
                 self.settings.new_reader = choice.new_reader();
                 if choice.classic_ocr() == self.settings.classic_ocr {
@@ -1349,6 +1404,7 @@ impl TrackerApp {
                             // Same path as the Restart button, so the unit or
                             // the spawned tracker is restarted the usual way.
                             self.daemon_busy = true;
+                            self.restart_pending = true;
                             tasks.push(Task::perform(
                                 daemon::run_verb(
                                     self.data_dir.clone(),
@@ -1385,6 +1441,7 @@ impl TrackerApp {
                     return Task::none();
                 }
                 self.daemon_busy = true;
+                self.restart_pending = matches!(verb, DaemonVerb::Restart | DaemonVerb::Start);
                 let data_dir = self.data_dir.clone();
                 let installed = self.daemon.service_installed;
                 Task::perform(
@@ -1394,6 +1451,10 @@ impl TrackerApp {
             }
             Message::DaemonDone(result) => {
                 self.daemon_busy = false;
+                if std::mem::take(&mut self.restart_pending) && result.is_ok() {
+                    // The tracker now runs with what is saved.
+                    self.restart_baseline = self.saved_config.clone();
+                }
                 self.replace_toast(match result {
                     Ok(m) => m,
                     Err(e) => e,
@@ -3064,6 +3125,16 @@ impl TrackerApp {
     }
 
     /// Site sync has a URL and a token saved.
+    /// Settings that differ from what the running tracker started with,
+    /// counting edits not saved yet. Shown as "N changes waiting" next to
+    /// Restart tracker.
+    pub fn changes_waiting(&self) -> usize {
+        crate::settings_model::changes_waiting(
+            &self.restart_baseline,
+            &self.settings.to_config(&self.saved_config),
+        )
+    }
+
     pub fn sync_on(&self) -> bool {
         sync_on_for(&self.saved_config)
     }
@@ -3737,6 +3808,32 @@ token = \"secret-token-must-stay\"
         let _ = app.update(super::Message::DaemonDone(Ok("restarted".into())));
         assert_eq!(app.toast.as_deref(), Some("restarted"));
         assert!(app.toast_action.is_none());
+    }
+
+    #[test]
+    fn a_restart_clears_the_changes_waiting() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cli = crate::cli::Cli {
+            data_dir: tmp.path().to_path_buf(),
+            fixture: Some(crate::cli::FixtureKind::Empty),
+            seasons_url: None,
+            companion: false,
+            help: false,
+            version: false,
+            replace: false,
+        };
+        let (mut app, _open) = super::TrackerApp::new(cli);
+        app.settings.session_window_secs = "10800".into();
+        app.saved_config = app.settings.to_config(&app.saved_config);
+        assert_eq!(app.changes_waiting(), 1);
+        // A failed restart keeps the change waiting.
+        app.restart_pending = true;
+        let _ = app.update(super::Message::DaemonDone(Err("no".into())));
+        assert_eq!(app.changes_waiting(), 1);
+        app.restart_pending = true;
+        let _ = app.update(super::Message::DaemonDone(Ok("restarted".into())));
+        assert_eq!(app.changes_waiting(), 0);
+        assert!(!app.restart_pending);
     }
 
     fn aur_owner() -> crate::uninstall::PackageOwner {

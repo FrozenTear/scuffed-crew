@@ -7,7 +7,7 @@
 //! The tab model ([`tabs`], [`needs_look_count`], [`bar_lines`]) is pure so
 //! it can be tested without a window.
 
-use iced::widget::{Row, button, column, container, row, space, text};
+use iced::widget::{Row, button, column, container, image, row, space, text};
 use iced::{Alignment, Background, Border, Element, Fill, Length, Padding, Shadow, Theme};
 
 use crate::app::{Message, TrackerApp};
@@ -15,7 +15,7 @@ use crate::model::{Game, Screen};
 use crate::settings_model::needs_look_label;
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_SEMIBOLD, PAGE_PAD_X, SIZE_BODY,
-    SIZE_LABEL, SIZE_META, SIZE_TITLE, TEXT, TEXT_2, WARN,
+    SIZE_LABEL, SIZE_META, TEXT, TEXT_2, WARN,
 };
 use crate::widgets;
 
@@ -23,8 +23,21 @@ use crate::widgets;
 pub const LAYOUT_ENV: &str = "SCUFFED_TRACKER_LAYOUT";
 
 /// Window content width where the top bar fits on one line. Below it the
-/// title and status take the first line and the tabs the second.
-pub const ONE_LINE_MIN: f32 = 1080.0;
+/// title and status take the first line and the tabs the second. The spec
+/// keeps one line down to its smallest window; this is the floor where the
+/// labels (without icons) still fit.
+pub const ONE_LINE_MIN: f32 = 860.0;
+
+/// From this width the status says the most ("Tracker ready · last game").
+pub const STATUS_LONG_MIN: f32 = 1440.0;
+/// From this width the status is "Tracker running · 23:14"; below it only
+/// a short word such as "Ready".
+pub const STATUS_MEDIUM_MIN: f32 = 1100.0;
+/// Below this width the tab icons drop so the labels stay readable.
+pub const TAB_ICONS_MIN: f32 = 960.0;
+
+/// Brand size in the top bar (spec: 16 px, extra bold).
+const SIZE_BRAND: f32 = 17.0;
 
 /// Height of the selected tab underline.
 pub const UNDERLINE: f32 = 2.0;
@@ -96,30 +109,78 @@ pub fn bar_lines(width: f32) -> u8 {
     }
 }
 
+/// Whether the tabs draw their icons at `width`.
+pub fn tab_icons(width: f32) -> bool {
+    width.is_finite() && width >= TAB_ICONS_MIN
+}
+
+/// The status text in the top bar at `width`. Wide windows say what the
+/// tracker is doing and when the last game was; below
+/// [`STATUS_MEDIUM_MIN`] it is one word.
+pub fn bar_status(status: widgets::HeaderStatus, last_game: Option<&str>, width: f32) -> String {
+    use widgets::HeaderStatus;
+    let wide = width.is_finite() && width >= STATUS_LONG_MIN;
+    let medium = width.is_finite() && width >= STATUS_MEDIUM_MIN;
+    if !medium {
+        return match status {
+            HeaderStatus::Capturing => "Capturing",
+            HeaderStatus::Waiting => "Ready",
+            HeaderStatus::Down => "Stopped",
+            HeaderStatus::TokenRejected => "Token rejected",
+        }
+        .to_string();
+    }
+    let (long, short) = match status {
+        HeaderStatus::Capturing => ("Tracker capturing", "Tracker capturing"),
+        HeaderStatus::Waiting => ("Tracker ready", "Tracker running"),
+        HeaderStatus::Down => ("Tracker stopped", "Tracker stopped"),
+        HeaderStatus::TokenRejected => ("Website token rejected", "Token rejected"),
+    };
+    match (last_game, wide) {
+        (Some(at), true) => format!("{long} · last game {at}"),
+        (Some(at), false) => format!("{short} · {at}"),
+        (None, true) => long.to_string(),
+        (None, false) => short.to_string(),
+    }
+}
+
 /// Top bar: title, tabs, capture status and the needs-a-look chip.
 pub fn top_bar(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     let count = needs_look_count(&app.games);
+    let wide = width.is_finite() && width >= STATUS_LONG_MIN;
     let title = text("Scuffed Tracker")
-        .size(SIZE_TITLE)
+        .size(SIZE_BRAND)
         .font(FONT_EXTRABOLD)
         .color(TEXT);
-    let strip = tab_strip(&tabs(app.screen, count));
+    let strip = tab_strip(&tabs(app.screen, count), tab_icons(width));
 
-    let mut status = Row::new().spacing(12).align_y(Alignment::Center);
+    let header = widgets::header_status_for(app);
+    let last_game = app
+        .games
+        .first()
+        .map(|g| crate::model::local_hm(g.played_at));
+    let mut status = Row::new().spacing(16).align_y(Alignment::Center);
     status = status.push(widgets::status_stub(
-        &app.live_status,
-        widgets::header_status_color(widgets::header_status_for(app)),
+        bar_status(header, last_game.as_deref(), width),
+        widgets::header_status_color(header),
     ));
     if count > 0 {
         status = status.push(needs_look_chip(count));
     }
+    let pad_x = if wide { PAGE_PAD_X } else { 24.0 };
 
     let body: Element<'_, Message> = if bar_lines(width) == 1 {
-        row![title, strip, space().width(Fill), status]
-            .spacing(24)
-            .align_y(Alignment::Center)
-            .width(Fill)
-            .into()
+        row![
+            title,
+            space().width(if wide { 20 } else { 8 }),
+            strip,
+            space().width(Fill),
+            status
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center)
+        .width(Fill)
+        .into()
     } else {
         column![
             row![title, space().width(Fill), status]
@@ -135,10 +196,10 @@ pub fn top_bar(app: &TrackerApp, width: f32) -> Element<'_, Message> {
 
     column![
         container(body).width(Fill).padding(Padding {
-            top: 12.0,
+            top: if bar_lines(width) == 1 { 0.0 } else { 12.0 },
             bottom: 0.0,
-            left: PAGE_PAD_X,
-            right: PAGE_PAD_X,
+            left: pad_x,
+            right: pad_x,
         }),
         container(space().height(1))
             .width(Fill)
@@ -172,15 +233,38 @@ pub fn page_controls(app: &TrackerApp) -> Element<'_, Message> {
     controls.wrap().into()
 }
 
-fn tab_strip(tabs: &[Tab]) -> Element<'static, Message> {
+fn tab_strip(tabs: &[Tab], icons: bool) -> Element<'static, Message> {
     let mut strip = Row::new().spacing(4).align_y(Alignment::End);
     for tab in tabs {
-        strip = strip.push(tab_button(tab));
+        strip = strip.push(tab_button(tab, icons));
     }
     strip.into()
 }
 
-fn tab_button(tab: &Tab) -> Element<'static, Message> {
+/// 16 px stroke icon for a tab, drawn from the spec's SVG paths at 2x.
+/// Two colours, so the selected tab's icon is as bright as its label.
+fn tab_icon(screen: Screen, selected: bool) -> Element<'static, Message> {
+    let bytes: &'static [u8] = match (screen, selected) {
+        (Screen::Overview, false) => include_bytes!("../assets/tab-icons/overview-dim.png"),
+        (Screen::Overview, true) => include_bytes!("../assets/tab-icons/overview-on.png"),
+        (Screen::Games, false) => include_bytes!("../assets/tab-icons/games-dim.png"),
+        (Screen::Games, true) => include_bytes!("../assets/tab-icons/games-on.png"),
+        (Screen::Heroes, false) => include_bytes!("../assets/tab-icons/heroes-dim.png"),
+        (Screen::Heroes, true) => include_bytes!("../assets/tab-icons/heroes-on.png"),
+        (Screen::Maps, false) => include_bytes!("../assets/tab-icons/maps-dim.png"),
+        (Screen::Maps, true) => include_bytes!("../assets/tab-icons/maps-on.png"),
+        (Screen::Seasons, false) => include_bytes!("../assets/tab-icons/seasons-dim.png"),
+        (Screen::Seasons, true) => include_bytes!("../assets/tab-icons/seasons-on.png"),
+        (Screen::Settings, false) => include_bytes!("../assets/tab-icons/settings-dim.png"),
+        (Screen::Settings, true) => include_bytes!("../assets/tab-icons/settings-on.png"),
+    };
+    image(image::Handle::from_bytes(bytes))
+        .width(16)
+        .height(16)
+        .into()
+}
+
+fn tab_button(tab: &Tab, icons: bool) -> Element<'static, Message> {
     let label = text(tab.label)
         .size(SIZE_BODY)
         .font(if tab.selected {
@@ -189,7 +273,11 @@ fn tab_button(tab: &Tab) -> Element<'static, Message> {
             FONT_SEMIBOLD
         })
         .color(if tab.selected { TEXT } else { TEXT_2 });
-    let mut inner = Row::new().spacing(8).align_y(Alignment::Center).push(label);
+    let mut inner = Row::new().spacing(8).align_y(Alignment::Center);
+    if icons {
+        inner = inner.push(tab_icon(tab.screen, tab.selected));
+    }
+    inner = inner.push(label);
     if let Some(n) = tab.badge {
         inner = inner.push(count_badge(n));
     }
@@ -208,10 +296,10 @@ fn tab_button(tab: &Tab) -> Element<'static, Message> {
     button(
         column![
             container(inner).padding(Padding {
-                top: 12.0,
-                bottom: 10.0,
-                left: 12.0,
-                right: 12.0,
+                top: 18.0,
+                bottom: 16.0,
+                left: if icons { 12.0 } else { 8.0 },
+                right: if icons { 12.0 } else { 8.0 },
             }),
             underline,
         ]
@@ -379,6 +467,34 @@ mod tests {
         );
         assert_eq!(needs_look_count(&[ready]), 0);
         assert_eq!(needs_look_count(&[]), 0);
+    }
+
+    #[test]
+    fn status_shortens_and_icons_drop_with_width() {
+        use widgets::HeaderStatus;
+        assert_eq!(
+            bar_status(HeaderStatus::Waiting, Some("00:40"), 1600.0),
+            "Tracker ready · last game 00:40"
+        );
+        assert_eq!(
+            bar_status(HeaderStatus::Waiting, Some("00:40"), 1366.0),
+            "Tracker running · 00:40"
+        );
+        assert_eq!(
+            bar_status(HeaderStatus::Waiting, Some("00:40"), 1099.0),
+            "Ready"
+        );
+        assert_eq!(bar_status(HeaderStatus::Down, None, 1000.0), "Stopped");
+        assert_eq!(
+            bar_status(HeaderStatus::Down, None, 1200.0),
+            "Tracker stopped"
+        );
+        assert!(tab_icons(1000.0));
+        assert!(tab_icons(TAB_ICONS_MIN));
+        assert!(!tab_icons(959.0));
+        // The spec keeps one line at 1000 and 1024.
+        assert_eq!(bar_lines(1000.0), 1);
+        assert_eq!(bar_lines(960.0), 1);
     }
 
     #[test]

@@ -30,17 +30,16 @@ pub fn columns_for(content: f32) -> usize {
 pub enum EverydaySection {
     PlayerSessions,
     Companion,
+    /// Holds the Sharing rows too (spec: inside the account card).
     WebsiteAccount,
-    Sharing,
     Updates,
 }
 
 impl EverydaySection {
-    pub const ALL: [EverydaySection; 5] = [
+    pub const ALL: [EverydaySection; 4] = [
         EverydaySection::PlayerSessions,
         EverydaySection::Companion,
         EverydaySection::WebsiteAccount,
-        EverydaySection::Sharing,
         EverydaySection::Updates,
     ];
 
@@ -49,7 +48,6 @@ impl EverydaySection {
             EverydaySection::PlayerSessions => "Player and sessions",
             EverydaySection::Companion => "Companion",
             EverydaySection::WebsiteAccount => "Website account",
-            EverydaySection::Sharing => "Sharing",
             EverydaySection::Updates => "Updates",
         }
     }
@@ -84,16 +82,50 @@ impl AdvancedSection {
         }
     }
 
-    /// One line under the closed row, so the row says what is inside.
-    pub fn summary(self) -> &'static str {
+    /// One line under the row: the current values, so a closed row says
+    /// how it is set without opening it.
+    pub fn summary(self, v: &AdvancedValues) -> String {
         match self {
-            AdvancedSection::CaptureReading => "Capture method, monitor, reader, OCR",
-            AdvancedSection::TrackerService => "Start on login, match watching, waits",
-            AdvancedSection::StoredData => "Compact or delete local games",
-            AdvancedSection::WebsiteConnection => "Manual server and token",
-            AdvancedSection::Troubleshooting => {
-                "Debug images, reader log, report a problem, uninstall"
+            AdvancedSection::CaptureReading => format!(
+                "{} capture on {}, {}, report pictures off",
+                v.route,
+                v.monitor,
+                lower_first(v.reader.label())
+            ),
+            AdvancedSection::TrackerService => {
+                let login = if v.autostart {
+                    "Starts on login"
+                } else {
+                    "Does not start on login"
+                };
+                let watch = if v.auto_detect {
+                    "watches for match start and end"
+                } else {
+                    "match watching off"
+                };
+                format!(
+                    "{login}, {watch}, checks every {}, waits {} s after a match, closes a finished game after {} s",
+                    seconds_line(v.poll_ms),
+                    v.cooldown_secs,
+                    v.finished_close_secs
+                )
             }
+            AdvancedSection::StoredData => format!(
+                "{} on this computer. Compact, Delete, older undecided games",
+                games_line(v.games)
+            ),
+            AdvancedSection::WebsiteConnection => {
+                let state = if v.sync_on { "on" } else { "off" };
+                format!("Upload {state}. Manual server and token, has its own Apply")
+            }
+            AdvancedSection::Troubleshooting => format!(
+                "Debug images {}, KDE compare frames {}, reader comparisons in the log {}, Report pictures limit {} games or {} MB, report a problem, uninstall",
+                on_off(v.debug_images),
+                on_off(v.compare_frames),
+                on_off(v.reader_log),
+                v.report_max_games,
+                v.report_max_mb
+            ),
         }
     }
 
@@ -110,6 +142,56 @@ impl AdvancedSection {
             AdvancedSection::WebsiteConnection => 1 << 3,
             AdvancedSection::Troubleshooting => 1 << 4,
         }
+    }
+}
+
+/// Values the closed Advanced rows summarise. Built from the form and the
+/// app, so a change shows in the summary before Save.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AdvancedValues {
+    pub route: &'static str,
+    pub monitor: String,
+    pub reader: ReaderChoice,
+    pub autostart: bool,
+    pub auto_detect: bool,
+    pub poll_ms: u64,
+    pub cooldown_secs: u64,
+    pub finished_close_secs: u64,
+    pub games: usize,
+    pub sync_on: bool,
+    pub debug_images: bool,
+    pub compare_frames: bool,
+    pub reader_log: bool,
+    pub report_max_games: usize,
+    pub report_max_mb: u64,
+}
+
+fn lower_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_lowercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+fn on_off(v: bool) -> &'static str {
+    if v { "on" } else { "off" }
+}
+
+/// `1.5 s`, `4 s`.
+pub fn seconds_line(ms: u64) -> String {
+    if ms.is_multiple_of(1000) {
+        format!("{} s", ms / 1000)
+    } else {
+        format!("{:.1} s", ms as f64 / 1000.0)
+    }
+}
+
+fn games_line(n: usize) -> String {
+    if n == 1 {
+        "1 game".to_string()
+    } else {
+        format!("{n} games")
     }
 }
 
@@ -175,6 +257,135 @@ impl ReaderChoice {
     /// pack check, which can refuse.
     pub fn classic_ocr(self) -> bool {
         !matches!(self, ReaderChoice::NewOnly)
+    }
+}
+
+/// Session window presets for the dropdown, in seconds. The config still
+/// stores seconds, so any value saved before (or typed in config.toml)
+/// keeps working; one that is not a preset shows as its own entry.
+pub const SESSION_WINDOW_PRESETS: [u64; 6] = [900, 1800, 3600, 7200, 10_800, 21_600];
+
+/// One entry in the Session window dropdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionWindow(pub u64);
+
+impl std::fmt::Display for SessionWindow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let secs = self.0;
+        if secs >= 3600 && secs.is_multiple_of(3600) {
+            let h = secs / 3600;
+            if h == 1 {
+                write!(f, "1 hour")
+            } else {
+                write!(f, "{h} hours")
+            }
+        } else if secs >= 60 && secs.is_multiple_of(60) {
+            write!(f, "{} min", secs / 60)
+        } else {
+            write!(f, "{secs} s")
+        }
+    }
+}
+
+/// The dropdown entries: the presets, plus the stored value when it is not
+/// one, in order.
+pub fn session_window_options(current: Option<u64>) -> Vec<SessionWindow> {
+    let mut all: Vec<u64> = SESSION_WINDOW_PRESETS.to_vec();
+    if let Some(c) = current
+        && c > 0
+        && !all.contains(&c)
+    {
+        all.push(c);
+        all.sort_unstable();
+    }
+    all.into_iter().map(SessionWindow).collect()
+}
+
+/// The chip lists on the Settings page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChipList {
+    /// In-game names. Config holds one (`player_name`).
+    Names,
+    /// Game processes (`game_process_names`).
+    Processes,
+}
+
+/// Chips from the form's comma text.
+pub fn chips_from(raw: &str) -> Vec<String> {
+    crate::settings::parse_process_names(raw)
+}
+
+/// The form text after removing chip `index`.
+pub fn without_chip(raw: &str, index: usize) -> String {
+    let mut chips = chips_from(raw);
+    if index < chips.len() {
+        chips.remove(index);
+    }
+    chips.join(", ")
+}
+
+/// The form text after adding `chip`. Blank and repeated chips are ignored.
+pub fn with_chip(raw: &str, chip: &str) -> String {
+    let mut chips = chips_from(raw);
+    let chip = chip.trim().trim_matches(',').trim();
+    if !chip.is_empty() && !chips.iter().any(|c| c.eq_ignore_ascii_case(chip)) {
+        chips.push(chip.to_string());
+    }
+    chips.join(", ")
+}
+
+/// Config keys that never wait for a tracker restart: the GUI reads them
+/// itself, or they only mark setup as done.
+const NOT_FOR_TRACKER: [&str; 2] = ["update_channel", "setup_completed"];
+
+/// How many settings differ between `running` (what the tracker started
+/// with) and `now` (the form as it stands). Each changed value counts once,
+/// so "1 change waiting" means one setting.
+pub fn changes_waiting(
+    running: &stat_tracker::config::Config,
+    now: &stat_tracker::config::Config,
+) -> usize {
+    let (Ok(a), Ok(b)) = (serde_json::to_value(running), serde_json::to_value(now)) else {
+        return usize::from(running != now);
+    };
+    match (a, b) {
+        (serde_json::Value::Object(mut a), serde_json::Value::Object(mut b)) => {
+            for key in NOT_FOR_TRACKER {
+                a.remove(key);
+                b.remove(key);
+            }
+            leaf_diffs(&serde_json::Value::Object(a), &serde_json::Value::Object(b))
+        }
+        (a, b) => usize::from(a != b),
+    }
+}
+
+fn leaf_diffs(a: &serde_json::Value, b: &serde_json::Value) -> usize {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Object(x), Value::Object(y)) => {
+            let mut keys: Vec<&String> = x.keys().chain(y.keys()).collect();
+            keys.sort();
+            keys.dedup();
+            keys.into_iter()
+                .map(|k| {
+                    leaf_diffs(
+                        x.get(k).unwrap_or(&Value::Null),
+                        y.get(k).unwrap_or(&Value::Null),
+                    )
+                })
+                .sum()
+        }
+        (x, y) => usize::from(x != y),
+    }
+}
+
+/// "1 change waiting", "3 changes waiting".
+pub fn changes_waiting_label(n: usize) -> String {
+    if n == 1 {
+        "1 change waiting".to_string()
+    } else {
+        format!("{n} changes waiting")
     }
 }
 
@@ -252,7 +463,6 @@ mod tests {
                 "Player and sessions",
                 "Companion",
                 "Website account",
-                "Sharing",
                 "Updates"
             ]
         );
@@ -342,6 +552,99 @@ mod tests {
         assert!(ocr_workers_locked(Some("2")));
     }
 
+    fn values() -> AdvancedValues {
+        AdvancedValues {
+            route: "Automatic",
+            monitor: "DP-3".into(),
+            reader: ReaderChoice::NewWithOcrBackup,
+            autostart: true,
+            auto_detect: true,
+            poll_ms: 1500,
+            cooldown_secs: 120,
+            finished_close_secs: 180,
+            games: 857,
+            sync_on: true,
+            debug_images: false,
+            compare_frames: false,
+            reader_log: false,
+            report_max_games: 50,
+            report_max_mb: 500,
+        }
+    }
+
+    #[test]
+    fn advanced_summaries_show_values() {
+        let v = values();
+        assert_eq!(
+            AdvancedSection::CaptureReading.summary(&v),
+            "Automatic capture on DP-3, new reader with OCR backup, report pictures off"
+        );
+        assert_eq!(
+            AdvancedSection::TrackerService.summary(&v),
+            "Starts on login, watches for match start and end, checks every 1.5 s, waits 120 s after a match, closes a finished game after 180 s"
+        );
+        assert!(
+            AdvancedSection::StoredData
+                .summary(&v)
+                .starts_with("857 games on this computer")
+        );
+        assert!(
+            AdvancedSection::Troubleshooting
+                .summary(&v)
+                .contains("Report pictures limit 50 games or 500 MB")
+        );
+        assert_eq!(seconds_line(4000), "4 s");
+    }
+
+    #[test]
+    fn session_window_keeps_any_stored_value() {
+        let opts = session_window_options(Some(1800));
+        assert_eq!(opts.len(), SESSION_WINDOW_PRESETS.len());
+        assert!(
+            opts.iter()
+                .any(|o| o.to_string() == "3 hours" && o.0 == 10_800)
+        );
+        assert_eq!(SessionWindow(1800).to_string(), "30 min");
+        assert_eq!(SessionWindow(3600).to_string(), "1 hour");
+        let odd = session_window_options(Some(2700));
+        assert_eq!(odd.len(), SESSION_WINDOW_PRESETS.len() + 1);
+        assert!(odd.contains(&SessionWindow(2700)));
+        assert!(odd.windows(2).all(|w| w[0].0 < w[1].0));
+        assert_eq!(SessionWindow(45).to_string(), "45 s");
+    }
+
+    #[test]
+    fn chips_round_trip_the_comma_text() {
+        assert_eq!(
+            chips_from("Overwatch.exe, ow.exe"),
+            ["Overwatch.exe", "ow.exe"]
+        );
+        assert_eq!(without_chip("Overwatch.exe, ow.exe", 0), "ow.exe");
+        assert_eq!(without_chip("Overwatch.exe", 5), "Overwatch.exe");
+        assert_eq!(
+            with_chip("Overwatch.exe", " ow.exe "),
+            "Overwatch.exe, ow.exe"
+        );
+        assert_eq!(with_chip("Overwatch.exe", "overwatch.EXE"), "Overwatch.exe");
+        assert_eq!(with_chip("", "  "), "");
+    }
+
+    #[test]
+    fn changes_waiting_counts_each_setting() {
+        let base = stat_tracker::config::Config::default();
+        assert_eq!(changes_waiting(&base, &base), 0);
+        let mut now = base.clone();
+        now.session_window_secs += 60;
+        assert_eq!(changes_waiting(&base, &now), 1);
+        now.auto_detect.cooldown_secs += 1;
+        assert_eq!(changes_waiting(&base, &now), 2);
+        let mut channel = base.clone();
+        channel.update_channel = "alpha".into();
+        assert_eq!(changes_waiting(&base, &channel), 0);
+        assert_eq!(changes_waiting_label(1), "1 change waiting");
+        assert_eq!(changes_waiting_label(3), "3 changes waiting");
+    }
+
     #[test]
     fn needs_look_copy_counts() {
         assert_eq!(needs_look_label(1), "1 needs a look");
@@ -354,7 +657,7 @@ mod tests {
         all.extend(EverydaySection::ALL.iter().map(|s| s.title().to_string()));
         for s in AdvancedSection::ALL {
             all.push(s.title().into());
-            all.push(s.summary().into());
+            all.push(s.summary(&values()));
         }
         all.extend(ReaderChoice::ALL.iter().map(|c| c.label().to_string()));
         all.push(WAITS_FOR_S11.into());

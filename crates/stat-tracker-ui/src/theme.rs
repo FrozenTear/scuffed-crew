@@ -109,7 +109,7 @@ pub const HEIGHT_COMPACT: f32 = 180.0;
 /// Open game on the Games tab: label, two stat rows, and the not-final note.
 pub const HEIGHT_IN_PROGRESS: f32 = 292.0;
 pub const HEIGHT_HERO: f32 = 160.0;
-/// Maps screen compact card, name, featured WR, games · W–L, win bar.
+/// Maps screen compact card, name, featured WR, games · W-L, win bar.
 pub const HEIGHT_MAP: f32 = 148.0;
 /// Fixed sidebar; the content pane flexes (rev 3, no left-pinned 1400 cap).
 pub const SIDEBAR_WIDTH: f32 = 168.0;

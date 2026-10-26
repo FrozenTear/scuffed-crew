@@ -274,7 +274,10 @@ pub(crate) fn header_status_for(app: &TrackerApp) -> HeaderStatus {
 
 /// Read-only capture indicator. Dot + text, no button chrome and no hover.
 /// The text is unchanged; only the dot colour follows [`HeaderStatus`].
-pub fn status_stub<'a>(live: &'a str, dot: Color) -> Element<'a, Message> {
+pub fn status_stub<'a>(
+    live: impl iced::widget::text::IntoFragment<'a>,
+    dot: Color,
+) -> Element<'a, Message> {
     row![
         container(space().width(8).height(8))
             .width(8)
@@ -492,7 +495,7 @@ pub fn season_panel(
                 .font(FONT_EXTRABOLD)
                 .color(TEXT),
             text(format!(
-                "{}–{}–{}",
+                "{}-{}-{}",
                 record.wins, record.losses, record.draws
             ))
             .size(SIZE_BODY)
@@ -564,7 +567,7 @@ pub fn map_row(m: &MapAgg) -> Element<'static, Message> {
 
 /// Compact Maps-screen card. Surface + 4 px WR stripe (no role tint, a map
 /// is not a single role). Same hierarchy as [`hero_card`]: title, featured WR,
-/// games · W–L, FillPortion win bar.
+/// games · W-L, FillPortion win bar.
 pub fn map_card(m: &MapAgg) -> Element<'static, Message> {
     let wr = format!("{:.0}%", m.record.win_rate_pct());
     let body = column![

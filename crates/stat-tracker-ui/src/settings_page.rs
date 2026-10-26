@@ -21,13 +21,15 @@ use crate::daemon::DaemonVerb;
 use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SCROLL_GUTTER};
 use crate::settings::{
     self, CLASSIC_OCR_RESTART, DISMISS_REFUSAL_LABEL, NEW_READER_IMPLIED, NEW_READER_RESTART,
-    SAVE_LABEL, SettingsField, action_btn, card_problem, checkbox_style, field_caption,
-    field_input, hint, ocr_card_blocks, ocr_hint_lines, output_chip, pack_status_line,
+    SAVE_LABEL, action_btn, card_problem, checkbox_style, field_caption, hint, ocr_card_blocks,
+    ocr_hint_lines, output_chip, pack_status_line,
 };
 use crate::settings_model::{
-    AdvancedSection, EverydaySection, OCR_THREADS_ENV, ReaderChoice, SINGLE_COLUMN_MAX,
-    WAITS_FOR_S11, columns_for, frame_rate_line, ocr_workers_line, ocr_workers_locked, pause_line,
+    AdvancedSection, AdvancedValues, EverydaySection, OCR_THREADS_ENV, ReaderChoice,
+    SINGLE_COLUMN_MAX, WAITS_FOR_S11, changes_waiting, changes_waiting_label, columns_for,
+    frame_rate_line, ocr_workers_line, ocr_workers_locked, pause_line,
 };
+use crate::settings_rows;
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
     SIZE_LABEL, SIZE_META, TEXT, TEXT_2, TEXT_3,
@@ -40,19 +42,36 @@ pub(crate) const REPORT_PICTURES_HELP: &str = "Stat-area crops in misread report
 pub(crate) const CAPTURE_READING_FOOTER: &str = "Only choices that work on this desktop are shown. Opening this page never captures; only Capture now does.";
 /// Help under "Only capture while Overwatch is on screen".
 pub(crate) const FOCUS_GATE_HELP: &str =
-    "Skips grabs while another window covers the game, so nothing else on screen is read.";
+    "Skips grabs when the game is not visible on this monitor, so no other window is captured.";
+/// Help under the Reader choice (spec wording).
+pub(crate) const READER_HELP: &str = "New reader only never starts classic OCR.";
+/// Help under Name reader.
+pub(crate) const NAME_READER_HELP: &str =
+    "Reads your own name from the names pack. Off uses classic OCR.";
+/// Help under Pause between grabs.
+pub(crate) const PAUSE_HELP: &str = "Screen stream only.";
+/// Help under Stream frame rate.
+pub(crate) const FRAME_RATE_HELP: &str = "Screen stream only. Lower costs less. Default 4.";
 /// Copy under the Website account summary.
 pub(crate) const WEBSITE_ACCOUNT_HINT: &str =
     "Server address and token are under Advanced, Website connection.";
-/// Copy under the two Sharing rows.
-pub(crate) const SHARING_HINT: &str = "Both start Off and only share what you pick.";
-/// Copy for the legend under the status strip.
-pub(crate) const LEGEND_CHANGED: &str = "Changed from default";
-pub(crate) const LEGEND_RESTART: &str = "Used after the tracker restarts";
+/// Sub-heading of the Sharing rows inside Website account.
+pub(crate) const SHARING_HEADING: &str = "Sharing · both start off";
+/// "Read my rank after Comp games" help.
+pub(crate) const RANK_HELP: &str =
+    "Saves rank, rank change and its label. Applies from the next game.";
+/// "Share stat pictures" help.
+pub(crate) const STAT_PICTURES_HELP: &str = "Uploads the grayscale stat area after each game to help train the reader. No names. Kept 30 days. Report pictures are a separate setting in Capture and reading.";
+/// Link under the Sharing rows. The page it opens is not built yet.
+pub(crate) const WHAT_LEAVES_LABEL: &str = "What leaves your PC ›";
+/// Copy for the legend under the status strip. The spec line says changes
+/// apply as you make them; this page still has Save, so it says that.
+pub(crate) const LEGEND_APPLY: &str =
+    "Changes apply when you save, except those tagged After restart.";
+pub(crate) const LEGEND_CHANGED: &str = "changed from default";
 pub(crate) const AFTER_RESTART_TAG: &str = "After restart";
 pub(crate) const NEW_TAG: &str = "New in 0.6";
 pub(crate) const RUN_SETUP_LABEL: &str = "Run setup again";
-pub(crate) const SAVE_HINT: &str = "Writes config and the companion shortcut.";
 pub(crate) const DEMO_NOTE: &str =
     "Demo mode: settings, the tracker service, and stored data are not changed.";
 
@@ -78,7 +97,9 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     if demo {
         page = page.push(widgets::empty_surface(DEMO_NOTE));
     }
-    page = page.push(status_strip(app, demo)).push(setup_and_legend());
+    page = page
+        .push(status_strip(app, demo))
+        .push(setup_and_legend(demo));
 
     if two_columns {
         page = page.push(
@@ -93,10 +114,14 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             .push(advanced_column(app, demo));
     }
 
-    let page = if two_columns {
-        page
+    // The one-column page is no wider than SINGLE_COLUMN_MAX and centred.
+    let page: Element<'_, Message> = if two_columns {
+        page.into()
     } else {
-        page.max_width(SINGLE_COLUMN_MAX)
+        container(page.max_width(SINGLE_COLUMN_MAX))
+            .width(Fill)
+            .center_x(Fill)
+            .into()
     };
     scrollable(container(page).width(Fill).padding(Padding {
         right: SETTINGS_SCROLL_GUTTER,
@@ -112,17 +137,19 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     .into()
 }
 
-/// Tracker status, version, Restart tracker and Save.
+/// Tracker status and version on the left; on the right the changes
+/// waiting for a restart, Restart tracker and Save.
 fn status_strip(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let version = app
         .installed_version
         .clone()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+    let running = app.daemon.running();
     let mut strip = Row::new()
-        .spacing(GRID_GAP)
+        .spacing(16)
         .align_y(Alignment::Center)
         .push(widgets::status_stub(
-            if app.daemon.running() {
+            if running {
                 "Tracker running"
             } else {
                 "Tracker stopped"
@@ -130,20 +157,43 @@ fn status_strip(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             widgets::header_status_color(widgets::header_status_for(app)),
         ))
         .push(meta(format!("Version {version}")));
+    if let Some(game) = app.games.first() {
+        strip = strip.push(meta(format!(
+            "Last game {}",
+            crate::model::local_hm(game.played_at)
+        )));
+    }
+    strip = strip.push(space().width(Fill));
     if app.daemon_busy {
         strip = strip.push(meta("Working…"));
     }
-    if !demo {
-        strip = strip.push(space().width(Fill)).push(meta(SAVE_HINT));
-        if app.daemon.running() && !app.daemon_busy {
-            strip = strip.push(action_btn(
-                "Restart tracker",
-                false,
-                Message::Daemon(DaemonVerb::Restart),
-            ));
-        }
-        strip = strip.push(action_btn(SAVE_LABEL, true, Message::SaveSettings));
+    let waiting = app.changes_waiting();
+    if waiting > 0 {
+        strip = strip
+            .push(tag(AFTER_RESTART_TAG))
+            .push(meta(changes_waiting_label(waiting)));
     }
+    // Restart runs Start when the tracker is stopped, so the one button
+    // always gets it running with the saved config.
+    let verb = if running {
+        DaemonVerb::Restart
+    } else {
+        DaemonVerb::Start
+    };
+    strip = strip.push(strip_btn(
+        "Restart tracker",
+        waiting > 0,
+        (!demo && !app.daemon_busy).then_some(Message::Daemon(verb)),
+    ));
+    let unsaved = changes_waiting(
+        &app.saved_config,
+        &app.settings.to_config(&app.saved_config),
+    ) > 0;
+    strip = strip.push(strip_btn(
+        SAVE_LABEL,
+        unsaved,
+        (!demo).then_some(Message::SaveSettings),
+    ));
     container(strip.wrap())
         .padding(PAD_INNER)
         .width(Fill)
@@ -151,23 +201,64 @@ fn status_strip(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         .into()
 }
 
-fn setup_and_legend() -> Element<'static, Message> {
+/// A strip button. Without a message it is drawn but does nothing (demo).
+fn strip_btn(
+    label: &'static str,
+    primary: bool,
+    msg: Option<Message>,
+) -> Element<'static, Message> {
+    let mut b = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
+        .padding(Padding::from([8, 16]));
+    b = if primary {
+        b.style(primary_btn)
+    } else {
+        b.style(theme::ghost_btn())
+    };
+    if let Some(msg) = msg {
+        b = b.on_press(msg);
+    }
+    b.into()
+}
+
+/// Filled accent button. Same look when disabled, so the demo shows it.
+fn primary_btn(_theme: &Theme, status: button::Status) -> button::Style {
+    button::Style {
+        background: Some(Background::Color(match status {
+            button::Status::Hovered | button::Status::Pressed => iced::Color { a: 0.85, ..ACCENT },
+            _ => ACCENT,
+        })),
+        text_color: TEXT,
+        border: Border {
+            color: ACCENT,
+            width: 1.0,
+            radius: theme::RADIUS_CHIP.into(),
+        },
+        shadow: Shadow::default(),
+        snap: false,
+    }
+}
+
+/// "Run setup again" on the left, the legend on the right.
+fn setup_and_legend(demo: bool) -> Element<'static, Message> {
+    let mut setup = button(
+        text(RUN_SETUP_LABEL)
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(ACCENT),
+    )
+    .padding(0)
+    .style(fold_style);
+    if !demo {
+        setup = setup.on_press(Message::Setup(crate::setup_guide::SetupMessage::Open));
+    }
     Row::new()
         .spacing(GRID_GAP)
         .align_y(Alignment::Center)
-        .push(action_btn(
-            RUN_SETUP_LABEL,
-            false,
-            Message::Setup(crate::setup_guide::SetupMessage::Open),
-        ))
+        .push(setup)
         .push(space().width(Fill))
+        .push(meta(LEGEND_APPLY))
         .push(
             row![changed_dot(), meta(LEGEND_CHANGED)]
-                .spacing(6)
-                .align_y(Alignment::Center),
-        )
-        .push(
-            row![tag(AFTER_RESTART_TAG), meta(LEGEND_RESTART)]
                 .spacing(6)
                 .align_y(Alignment::Center),
         )
@@ -179,11 +270,12 @@ fn everyday_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut col = column![].spacing(GRID_GAP).width(Fill);
     for section in EverydaySection::ALL {
         let body = match section {
-            EverydaySection::PlayerSessions => settings::player_fields_row(
-                &app.settings.player_name,
-                &app.settings.session_window_secs,
-                demo,
-            ),
+            EverydaySection::PlayerSessions => column![
+                settings_rows::names_row(app, demo),
+                settings_rows::session_window_row(app),
+            ]
+            .spacing(14)
+            .into(),
             EverydaySection::Companion => column![
                 widgets::overlay_toggle(app.overlay_showing(), app.game_running),
                 settings::companion_body(app, demo),
@@ -191,13 +283,6 @@ fn everyday_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             .spacing(8)
             .into(),
             EverydaySection::WebsiteAccount => website_account(app),
-            EverydaySection::Sharing => column![
-                stub_row("Read my rank after Competitive games", None, false),
-                stub_row("Share stat pictures", None, false),
-                hint(SHARING_HINT),
-            ]
-            .spacing(8)
-            .into(),
             EverydaySection::Updates => settings::updates_body(app, demo),
         };
         col = col.push(card(section.title(), body));
@@ -214,6 +299,15 @@ fn website_account(app: &TrackerApp) -> Element<'_, Message> {
         text(line).size(SIZE_BODY).font(FONT_MEDIUM).color(TEXT),
         stub_row("Upload games after each match", None, false),
         hint(WEBSITE_ACCOUNT_HINT),
+        space().height(4),
+        sub_heading(SHARING_HEADING),
+        stub_row("Read my rank after Comp games", Some(RANK_HELP), false),
+        stub_row("Share stat pictures", Some(STAT_PICTURES_HELP), false),
+        // The page this opens is not built yet (PLAN-0.6 carry-over).
+        text(WHAT_LEAVES_LABEL)
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(ACCENT),
     ]
     .spacing(8)
     .into()
@@ -228,9 +322,12 @@ fn advanced_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     ]
     .spacing(8)
     .width(Fill);
+    let values = advanced_values(app);
     for section in AdvancedSection::ALL {
         let open = app.advanced_open.is_open(section);
-        let mut fold = column![fold_header(section, open)].spacing(0).width(Fill);
+        let mut fold = column![fold_header(section, open, &values)]
+            .spacing(0)
+            .width(Fill);
         if open {
             fold = fold.push(
                 container(advanced_body(section, app, demo))
@@ -248,7 +345,44 @@ fn advanced_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     col.into()
 }
 
-fn fold_header(section: AdvancedSection, open: bool) -> Element<'static, Message> {
+/// What the closed Advanced rows summarise, from the form as it stands.
+fn advanced_values(app: &TrackerApp) -> AdvancedValues {
+    let config = app.settings.to_config(&app.saved_config);
+    let reader = ReaderChoice::from_switches(app.settings.new_reader, app.settings.classic_ocr);
+    let monitor = settings::nonempty(&app.settings.capture_output).unwrap_or_else(|| {
+        app.outputs
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "first monitor".to_string())
+    });
+    let retention = config.report_kit_retention();
+    AdvancedValues {
+        route: settings_rows::route_label(config.capture_route),
+        monitor,
+        reader,
+        autostart: app.daemon.autostart,
+        auto_detect: config.auto_detect.enabled,
+        poll_ms: config
+            .auto_detect
+            .poll_interval(reader.new_reader())
+            .as_millis() as u64,
+        cooldown_secs: config.auto_detect.cooldown_secs,
+        finished_close_secs: config.finished_game_close_secs,
+        games: app.games.len(),
+        sync_on: crate::app::sync_on_for(&config),
+        debug_images: config.debug_ocr,
+        compare_frames: config.debug_portal_frames,
+        reader_log: config.shadow_recognizer,
+        report_max_games: retention.max_games,
+        report_max_mb: retention.max_bytes / (1024 * 1024),
+    }
+}
+
+fn fold_header(
+    section: AdvancedSection,
+    open: bool,
+    values: &AdvancedValues,
+) -> Element<'static, Message> {
     let mut title = Row::new().spacing(8).align_y(Alignment::Center).push(
         text(section.title())
             .size(SIZE_BODY)
@@ -262,15 +396,15 @@ fn fold_header(section: AdvancedSection, open: bool) -> Element<'static, Message
         row![
             column![
                 title,
-                text(section.summary())
+                text(section.summary(values))
                     .size(SIZE_META)
                     .font(FONT_MEDIUM)
                     .color(TEXT_3),
             ]
             .spacing(4)
             .width(Fill),
-            text(if open { "Hide" } else { "Show" })
-                .size(SIZE_META)
+            text(if open { "⌄" } else { "›" })
+                .size(18)
                 .font(FONT_SEMIBOLD)
                 .color(TEXT_2),
         ]
@@ -367,7 +501,7 @@ fn capture_reading_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 "Capture",
                 format!(
                     "{} on {monitor}",
-                    settings::capture_route_label(app.settings.capture_route)
+                    settings_rows::route_label(app.settings.capture_route)
                 ),
             ),
             summary_line("Reading", choice.label().to_string()),
@@ -382,34 +516,24 @@ fn capture_reading_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![
         summary,
         sub_heading("Capture"),
-        settings::capture_body(app, demo)
+        settings_rows::capture_rows(app, demo)
     ]
     .spacing(GRID_GAP)
     .width(Fill);
-
-    body = body.push(field_input(
-        "Game process names",
-        "Overwatch.exe",
-        &app.settings.game_process_names,
-        SettingsField::ProcessNames,
-        false,
-        demo,
-        Some("Comma-separated. Empty = always allow capture."),
-    ));
 
     let (pause, pause_changed) = pause_line(config.screencast_pause_override());
     body = body.push(read_only_row(
         "Pause between grabs",
         pause.to_string(),
         pause_changed,
-        None,
+        Some(PAUSE_HELP),
     ));
     let (fps, fps_changed) = frame_rate_line(config.screencast_max_fps());
     body = body.push(read_only_row(
         "Stream frame rate",
         fps,
         fps_changed,
-        Some("Screen-share grabs per second, 1 to 5."),
+        Some(FRAME_RATE_HELP),
     ));
     body = body.push(stub_row(
         "Only capture while Overwatch is on screen",
@@ -422,11 +546,17 @@ fn capture_reading_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     for c in ReaderChoice::ALL {
         chips = chips.push(output_chip(c.label(), c == choice, Message::PickReader(c)));
     }
-    body = body.push(chips.wrap());
+    body = body.push(
+        column![
+            settings_rows::row_title("Reader"),
+            hint(READER_HELP),
+            chips.wrap()
+        ]
+        .spacing(6),
+    );
 
     let mut reading = column![].spacing(4);
     let lines = ocr_hint_lines(&stat_tracker::ocr_switch::Read::needing_ocr());
-    reading = reading.push(hint(lines.hint));
     // Both restart notes say the same thing, so show the line once.
     if lines.restart_and_packs {
         reading = reading.push(hint(CLASSIC_OCR_RESTART));
@@ -469,7 +599,7 @@ fn capture_reading_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         }
         .to_string(),
         !config.name_reader,
-        None,
+        Some(NAME_READER_HELP),
     ));
 
     let env_threads = std::env::var(OCR_THREADS_ENV).ok();
@@ -695,18 +825,60 @@ mod tests {
             REPORT_PICTURES_HELP,
             CAPTURE_READING_FOOTER,
             FOCUS_GATE_HELP,
+            READER_HELP,
+            NAME_READER_HELP,
+            PAUSE_HELP,
+            FRAME_RATE_HELP,
             WEBSITE_ACCOUNT_HINT,
-            SHARING_HINT,
+            SHARING_HEADING,
+            RANK_HELP,
+            STAT_PICTURES_HELP,
+            WHAT_LEAVES_LABEL,
+            LEGEND_APPLY,
             LEGEND_CHANGED,
-            LEGEND_RESTART,
             AFTER_RESTART_TAG,
             NEW_TAG,
             RUN_SETUP_LABEL,
-            SAVE_HINT,
             DEMO_NOTE,
         ] {
             assert!(!line.contains('\u{2014}'), "{line}");
         }
+    }
+
+    #[test]
+    fn reader_help_uses_the_spec_wording() {
+        assert_eq!(READER_HELP, "New reader only never starts classic OCR.");
+        assert!(!READER_HELP.contains("Tesseract"));
+    }
+
+    #[test]
+    fn edits_count_as_changes_waiting_until_a_restart() {
+        let (_dir, mut app) = app();
+        assert_eq!(
+            app.changes_waiting(),
+            0,
+            "an untouched form waits for nothing"
+        );
+        let _ = app.update(Message::SettingsText(
+            crate::settings::SettingsField::SessionWindow,
+            "10800".into(),
+        ));
+        assert_eq!(app.changes_waiting(), 1);
+        let _ = app.update(Message::ChipDraft(
+            crate::settings_model::ChipList::Processes,
+            Some("ow2.exe".into()),
+        ));
+        let _ = app.update(Message::ChipAdd);
+        assert!(app.settings.game_process_names.contains("ow2.exe"));
+        assert!(app.chip_draft.is_none());
+        assert_eq!(app.changes_waiting(), 2);
+        let _ = app.update(Message::ChipRemove(
+            crate::settings_model::ChipList::Names,
+            0,
+        ));
+        assert!(app.settings.player_name.is_empty());
+        let _ = view(&app, 640.0);
+        let _ = view(&app, 1600.0);
     }
 
     #[test]

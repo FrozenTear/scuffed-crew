@@ -42,6 +42,7 @@ pub mod seasons;
 pub mod settings;
 pub mod settings_model;
 pub mod settings_page;
+pub mod settings_rows;
 pub mod setup_guide;
 pub mod snapshot;
 pub mod theme;

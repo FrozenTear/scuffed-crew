@@ -354,7 +354,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     col.into()
 }
 
-/// Maps grammar: name, featured WR, `N games · W–L`, muted window, win bar.
+/// Maps grammar: name, featured WR, `N games · W-L`, muted window, win bar.
 /// Undecided is appended only when some games have no outcome.
 pub fn season_card_line(record: &Record) -> String {
     let base = format!("{} · {}", record.games_label(), record.wl_label());
@@ -719,7 +719,7 @@ mod tests {
             losses: 1,
             draws: 0,
         };
-        assert_eq!(season_card_line(&decided), "4 games · 3–1");
+        assert_eq!(season_card_line(&decided), "4 games · 3-1");
 
         let draws = Record {
             games: 5,
@@ -727,7 +727,7 @@ mod tests {
             losses: 2,
             draws: 1,
         };
-        assert_eq!(season_card_line(&draws), "5 games · 2–2–1");
+        assert_eq!(season_card_line(&draws), "5 games · 2-2-1");
 
         let mixed = Record {
             games: 62,
@@ -735,7 +735,7 @@ mod tests {
             losses: 15,
             draws: 0,
         };
-        assert_eq!(season_card_line(&mixed), "62 games · 10–15 · 37 undecided");
+        assert_eq!(season_card_line(&mixed), "62 games · 10-15 · 37 undecided");
     }
 
     #[test]
