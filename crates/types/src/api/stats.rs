@@ -389,9 +389,12 @@ pub struct TokenCheckResponse {
 /// or named in that row's `suspect_fields` (`e`, `d`, `dmg`, `h`). Damage and
 /// healing have no numeric ceiling. A group with no included value for a
 /// counter averages to 0.
-/// Rows are grouped by the role the tracker uploaded: its manual correction
-/// if made, else the detected role.
-/// `""` is its own row. Order is matches descending, then role ascending.
+/// Rows are grouped by the role the tracker uploaded (its manual correction
+/// if made, else the detected role), filled at read time by
+/// [`crate::filled_role_label`]: a recognized stored role is kept, an empty or
+/// unrecognized one takes the hero's current role. Only games whose hero is
+/// not on the list stay in the `""` row. Stored rows are never changed.
+/// Order is matches descending, then role ascending.
 /// Defined here so the WASM app can deserialize the response; `scuffed_db`
 /// re-exports it next to `HeroStats`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
