@@ -28,6 +28,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
 
+use super::load_error::strategy_load_error;
+
 use scuffed_api_client::ApiClient;
 use scuffed_types::strategy::{
     Color, ElementType, HeroId, PlaybackState, Position, Strategy, StrategyElement, TeamFormat,
@@ -435,14 +437,16 @@ pub fn StrategyEditorNew() -> Element {
 /// Editor page for editing an existing strategy (loaded by ID).
 #[component]
 pub fn StrategyEditor(id: String) -> Element {
+    let mut refresh = use_signal(|| 0u32);
     let id_clone = id.clone();
     let strategy_resource = use_resource(move || {
         let id = id_clone.clone();
+        let _ = refresh();
         async move {
             ApiClient::web()
                 .fetch::<Strategy>(&format!("/api/strategy/strategies/{id}"))
                 .await
-                .ok()
+                .map_err(|e| e.to_string())
         }
     });
 
@@ -454,13 +458,25 @@ pub fn StrategyEditor(id: String) -> Element {
                 "Loading strategy..."
             }
         },
-        Some(None) => rsx! {
-            div {
-                style: "display: flex; align-items: center; justify-content: center; height: 100vh; color: var(--danger);",
-                "Strategy not found or access denied."
+        Some(Err(err)) => {
+            let shown = strategy_load_error(err);
+            rsx! {
+                div {
+                    style: "display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; height: 100vh; color: var(--danger);",
+                    role: "alert",
+                    "{shown.message}"
+                    if shown.retry {
+                        button {
+                            r#type: "button",
+                            class: "fetch-error__retry is-compact",
+                            onclick: move |_| refresh += 1,
+                            "Retry"
+                        }
+                    }
+                }
             }
-        },
-        Some(Some(strategy)) => rsx! {
+        }
+        Some(Ok(strategy)) => rsx! {
             EditorLayout { initial_strategy: Some(strategy.clone()) }
         },
     }

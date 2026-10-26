@@ -1,6 +1,7 @@
 mod browse;
 mod editor;
 mod heroes;
+mod load_error;
 mod meta;
 mod my_strategies;
 mod patch_notes;
