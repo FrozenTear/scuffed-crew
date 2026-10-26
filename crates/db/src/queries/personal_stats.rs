@@ -15,6 +15,9 @@ use crate::types::{
 };
 use crate::{with_timeout, Database, DbError, DbResult};
 
+/// Per-role aggregates with the read-time role fill.
+mod role_fill;
+
 /// Minimum games required for rate metrics (winrate / kd) on public boards.
 pub use crate::types::LEADERBOARD_MIN_GAMES;
 

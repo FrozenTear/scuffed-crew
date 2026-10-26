@@ -8469,7 +8469,9 @@ fn role_row<'a>(rows: &'a [Value], role: &str) -> &'a Value {
         .unwrap_or_else(|| panic!("missing role {role:?} in {rows:?}"))
 }
 
-/// Stored-role aggregates, plus the same session denials as `/heroes`.
+/// Role aggregates with the read-time role fill, plus the same session
+/// denials as `/heroes`. A recognized stored role is kept (Sombra stored as
+/// Support stays Support); the empty Reaper role reads as Damage.
 ///
 /// `/heroes` has no per-member privacy flag: any active org member may read
 /// any member id (including a suspended target). Anonymous and non-session
@@ -8697,7 +8699,8 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
         rows.iter()
             .map(|r| r["role"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["Support", "Damage", ""]
+        vec!["Damage", "Support"],
+        "matches desc, then role asc; no empty row once Reaper is filled"
     );
     let support = role_row(rows, "Support");
     assert_eq!(support["matches"], 3);
@@ -8707,15 +8710,34 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     // 4 + 2 + 20 elims across the three Support games.
     approx_stat(&support["avg_elims"], 26.0 / 3.0);
     let damage = role_row(rows, "Damage");
-    assert_eq!(damage["matches"], 2, "Sombra Support is not Damage");
+    assert_eq!(
+        damage["matches"], 3,
+        "two Sombra Damage games plus the filled Reaper game; Sombra Support is not Damage"
+    );
     assert_eq!(damage["wins"], 1);
-    assert_eq!(damage["losses"], 1);
+    assert_eq!(damage["losses"], 2);
     assert_eq!(damage["draws"], 0);
-    let empty = role_row(rows, "");
-    assert_eq!(empty["matches"], 1);
-    assert_eq!(empty["wins"], 0);
-    assert_eq!(empty["losses"], 1);
-    assert_eq!(empty["draws"], 0);
+    assert!(
+        rows.iter().all(|r| r["role"] != ""),
+        "empty stored role is filled from the hero: {rows:?}"
+    );
+
+    // The fill is read-only: the stored rows keep their roles.
+    let stored = state
+        .db
+        .list_personal_matches("membermember", 20, 0)
+        .await
+        .unwrap();
+    let stored_role = |sid: &str| {
+        stored
+            .iter()
+            .find(|m| m.session_id == sid)
+            .map(|m| m.role.clone())
+            .unwrap()
+    };
+    assert_eq!(stored_role("e1"), "");
+    assert_eq!(stored_role("s1"), "Support");
+    assert_eq!(stored_role("d1"), "Damage");
 
     // Another active member sees the same rows. Own roles stay separate.
     let (status, seen) = get_json(
@@ -8756,7 +8778,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
             .iter()
             .map(|r| r["role"].as_str().unwrap())
             .collect::<Vec<_>>(),
-        vec!["Damage", "Support", ""]
+        vec!["Damage", "Support"]
     );
     let s_support = role_row(season_rows, "Support");
     assert_eq!(s_support["matches"], 2);
@@ -8768,10 +8790,12 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     approx_stat(&s_support["avg_damage"], 1500.0);
     approx_stat(&s_support["avg_healing"], 7000.0);
     let s_damage = role_row(season_rows, "Damage");
-    approx_stat(&s_damage["avg_elims"], 8.0);
+    assert_eq!(s_damage["matches"], 3);
+    // d1, d2, and the filled Reaper game e1.
+    approx_stat(&s_damage["avg_elims"], 17.0 / 3.0);
     approx_stat(&s_damage["avg_deaths"], 6.0);
-    approx_stat(&s_damage["avg_damage"], 6000.0);
-    approx_stat(&s_damage["avg_healing"], 50.0);
+    approx_stat(&s_damage["avg_damage"], 12500.0 / 3.0);
+    approx_stat(&s_damage["avg_healing"], 100.0 / 3.0);
 
     let (status, seen_season) = get_json(
         &state,
@@ -8786,7 +8810,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         blank.as_array().unwrap().len(),
-        3,
+        2,
         "blank season is all time"
     );
 
@@ -8917,7 +8941,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         body.as_array().unwrap().len(),
-        3,
+        2,
         "suspending the target does not hide their role stats"
     );
     let (hs, _) = get_json(

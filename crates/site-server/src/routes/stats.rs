@@ -291,6 +291,11 @@ pub async fn my_stats(
 }
 
 /// GET /api/stats/me/matches — personal match history (session auth, paginated)
+///
+/// Each item's `role` is filled at read time with
+/// [`scuffed_types::filled_role_label`]: a recognized stored role is kept, an
+/// empty or unrecognized one takes the hero's current role, and a hero not on
+/// the list keeps `""`. The stored row is not changed.
 pub async fn my_matches(
     State(state): State<AppState>,
     member: OrgMember,
@@ -299,7 +304,7 @@ pub async fn my_matches(
 ) -> Result<Json<CursorResponse<PersonalMatch>>, (StatusCode, Json<ErrorResponse>)> {
     let (limit, offset) = pagination.resolve();
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
-    let items = state
+    let mut items = state
         .db
         .list_personal_matches_in(&member.member.id, limit, offset, season)
         .await
@@ -311,6 +316,10 @@ pub async fn my_matches(
                 }),
             )
         })?;
+    // Read-time role fill only: the stored row keeps its role.
+    for m in &mut items {
+        m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    }
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
@@ -336,15 +345,17 @@ pub async fn my_hero_stats(
         })
 }
 
-/// GET /api/stats/me/roles — per-role stats from the stored match role (session auth).
+/// GET /api/stats/me/roles: per-role stats from the stored match role, filled at read time (session auth).
 ///
 /// Query: `?season=<id>`, the same window as [`my_hero_stats`] (omitted or blank
 /// is all time; an unknown id is 404). No other filters.
 ///
 /// Response: a JSON array of [`RoleStats`] (`role`, `matches`, `wins`, `losses`,
 /// `draws`, `avg_elims`, `avg_deaths`, `avg_damage`, `avg_healing`). Grouped by
-/// the `personal_match.role` column only — never derived from the hero name.
-/// An empty stored role is its own row (`"role": ""`). Ordered by `matches`
+/// the `personal_match.role` column, filled at read time: a recognized stored
+/// role is kept, an empty or unrecognized one takes the hero's current role
+/// (`scuffed_types::filled_role_label`). Only games with a hero not on the list
+/// stay in the `""` row. Stored roles are never rewritten. Ordered by `matches`
 /// descending, then `role` ascending.
 ///
 /// Auth matches [`my_hero_stats`]: a session is required (401 when anonymous or
@@ -357,7 +368,7 @@ pub async fn my_role_stats(
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_role_stats_in(&member.member.id, season)
+        .get_filled_role_stats_in(&member.member.id, season)
         .await
         .map(Json)
         .map_err(|_e| {
@@ -453,7 +464,7 @@ pub async fn member_role_stats(
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
-        .get_role_stats_in(&member_id, season)
+        .get_filled_role_stats_in(&member_id, season)
         .await
         .map(Json)
         .map_err(|_e| {
@@ -1539,6 +1550,65 @@ mod tests {
 
         let stats = state.db.get_personal_stats(&member_id).await.unwrap();
         assert_eq!(stats.wins, 3);
+    }
+
+    /// `/me/matches` fills an empty or unrecognized role from the hero at read
+    /// time, keeps a recognized one, and never changes the stored row.
+    #[tokio::test]
+    async fn me_matches_fill_role_at_read_time_only() {
+        let (state, member_id, _daemon_token, session_token) = member_reader().await;
+        let game = |sid: &str, hero: &str, role: &str| scuffed_db::PersonalMatch {
+            id: String::new(),
+            member_id: member_id.clone(),
+            session_id: sid.into(),
+            hero: hero.into(),
+            map_name: "Oasis".into(),
+            game_mode: "control".into(),
+            role: role.into(),
+            outcome: "victory".into(),
+            elims: 1,
+            deaths: 1,
+            assists: 0,
+            damage: 0,
+            healing: 0,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+            edited: false,
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+            name_recognizer: None,
+            suspect_fields: Vec::new(),
+        };
+        let seeded = [
+            ("kept", "Ana", "Damage", "Damage"),
+            ("empty", "Reaper", "", "Damage"),
+            ("garbage", "Reinhardt", "dps", "Tank"),
+            ("unknown", "Unknown", "", ""),
+            ("sombra", "Sombra", "Support", "Support"),
+        ];
+        let rows: Vec<_> = seeded
+            .iter()
+            .map(|(sid, hero, role, _)| game(sid, hero, role))
+            .collect();
+        state
+            .db
+            .upsert_personal_matches(&member_id, &rows)
+            .await
+            .unwrap();
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        for (sid, _, _, filled) in seeded {
+            assert_eq!(row_by_session(&page, sid)["role"], filled, "{sid}");
+        }
+        let stored = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        for (sid, _, role, _) in seeded {
+            let row = stored.iter().find(|m| m.session_id == sid).unwrap();
+            assert_eq!(row.role, role, "stored role for {sid} must not change");
+        }
     }
 
     #[tokio::test]
