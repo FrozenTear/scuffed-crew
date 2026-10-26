@@ -3,6 +3,8 @@ pub mod connection_status;
 #[cfg(feature = "desktop")]
 pub mod desktop_map_canvas;
 mod hero_catalog;
+#[cfg(feature = "web")]
+mod hero_chip;
 pub mod hero_picker;
 #[cfg(feature = "web")]
 pub mod map_canvas;
