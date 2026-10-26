@@ -1,11 +1,15 @@
 //! Stored per-game role.
 //!
-//! History reads the `role` string uploaded with each game. Overview and the
-//! member page read `GET /api/stats/me/roles` and
-//! `GET /api/stats/member/{id}/roles`, which group by that same stored role.
-//! An empty or unrecognized stored role is Unknown. The heroes filter is the
-//! current roster role from [`scuffed_types::role_for_hero_name`], because
-//! `/heroes` does not return the role captured with each game.
+//! History reads the `role` string uploaded with each game. A recognized
+//! stored role always wins, so an old Sombra game stored as Damage stays
+//! Damage. When the stored role is empty or unrecognized, History falls back
+//! to the current roster role for that game's hero from
+//! [`scuffed_types::role_for_hero_name`], and only an unknown hero stays
+//! Unknown. Overview and the member page read `GET /api/stats/me/roles` and
+//! `GET /api/stats/member/{id}/roles`, which group by the stored role with no
+//! hero name, so an empty or unrecognized role there is still Unknown. The
+//! heroes filter is the current roster role, because `/heroes` does not
+//! return the role captured with each game.
 
 use scuffed_types::{HeroRole, RoleStats, role_for_hero_name};
 
@@ -104,15 +108,21 @@ pub(super) fn known_role(stored: &str) -> Option<&'static str> {
     }
 }
 
-/// Label for a stored role. Empty or unrecognized stays Unknown.
-pub(super) fn stored_role_label(stored: &str) -> &'static str {
-    known_role(stored).unwrap_or("Unknown")
+/// Role label for one game. A recognized stored role is kept as is, even when
+/// the hero has since moved (an old Sombra game stored as Damage stays
+/// Damage). An empty or unrecognized stored role falls back to the current
+/// roster role for `hero`. Unknown only when the hero is not on the shared
+/// list either.
+pub(super) fn game_role_label(stored: &str, hero: &str) -> &'static str {
+    known_role(stored)
+        .or_else(|| current_role_label(hero))
+        .unwrap_or("Unknown")
 }
 
-/// History filter. Uses the stored role only, so an old Sombra game stays
-/// Damage and a missing role stays Unknown.
-pub(super) fn history_row_matches_role(stored: &str, filter: &str) -> bool {
-    filter.eq_ignore_ascii_case("all") || stored_role_label(stored).eq_ignore_ascii_case(filter)
+/// History filter. Matches on [`game_role_label`], so a recognized stored
+/// role wins and a missing one is filled from the hero.
+pub(super) fn history_row_matches_role(stored: &str, hero: &str, filter: &str) -> bool {
+    filter.eq_ignore_ascii_case("all") || game_role_label(stored, hero).eq_ignore_ascii_case(filter)
 }
 
 /// Current roster role. `None` when the name is not on the shared list, so
@@ -248,24 +258,60 @@ mod tests {
         let aggs = role_aggs_from_rows(&[row("", 2, 1, 1.0), row("flex", 1, 0, 1.0)]);
         assert_eq!(matches_of(&aggs, "Unknown"), 3);
         assert_eq!(matches_of(&aggs, "Damage"), 0);
-        assert_eq!(stored_role_label(""), "Unknown");
-        assert_eq!(stored_role_label("not-a-role"), "Unknown");
+        assert_eq!(known_role(""), None);
+        assert_eq!(known_role("not-a-role"), None);
     }
 
     #[test]
-    fn history_keeps_the_stored_role() {
-        assert!(history_row_matches_role("Damage", "damage"));
-        assert!(!history_row_matches_role("Damage", "support"));
-        assert!(history_row_matches_role("Support", "support"));
-        assert!(history_row_matches_role("Damage", "all"));
-        assert_eq!(stored_role_label("Damage"), "Damage");
-        assert_eq!(stored_role_label("Support"), "Support");
-        // A missing role is not filled in from the hero, even for Sombra.
-        assert_eq!(stored_role_label(""), "Unknown");
-        assert!(!history_row_matches_role("", "support"));
-        assert!(!history_row_matches_role("", "damage"));
-        assert!(history_row_matches_role("", "all"));
-        assert!(!history_row_matches_role("not-a-role", "tank"));
+    fn history_keeps_a_recognized_stored_role() {
+        assert!(history_row_matches_role("Damage", "Sombra", "damage"));
+        assert!(!history_row_matches_role("Damage", "Sombra", "support"));
+        assert!(history_row_matches_role("Support", "Sombra", "support"));
+        assert!(history_row_matches_role("Damage", "Sombra", "all"));
+        assert_eq!(game_role_label("Damage", "Sombra"), "Damage");
+        assert_eq!(game_role_label(" damage ", "Sombra"), "Damage");
+        assert_eq!(game_role_label("Support", "Sombra"), "Support");
+        assert_eq!(game_role_label("TANK", "Doctrine"), "Tank");
+    }
+
+    #[test]
+    fn empty_role_is_filled_from_the_hero() {
+        assert_eq!(game_role_label("", "Doctrine"), "Support");
+        assert_eq!(game_role_label("   ", "Doctrine"), "Support");
+        assert!(history_row_matches_role("", "Doctrine", "support"));
+        assert!(!history_row_matches_role("", "Doctrine", "damage"));
+        assert_eq!(game_role_label("", "D.Mon"), "Tank");
+    }
+
+    #[test]
+    fn unrecognized_role_is_filled_from_the_hero() {
+        assert_eq!(game_role_label("flex", "Sombra"), "Support");
+        assert_eq!(game_role_label("not-a-role", "Sombra"), "Support");
+        assert!(history_row_matches_role("garbage", "Sombra", "support"));
+        assert!(!history_row_matches_role("garbage", "Sombra", "damage"));
+    }
+
+    #[test]
+    fn unknown_hero_with_no_role_stays_unknown() {
+        assert_eq!(game_role_label("", "NotAHero"), "Unknown");
+        assert_eq!(game_role_label("flex", "NotAHero"), "Unknown");
+        assert_eq!(game_role_label("", ""), "Unknown");
+        assert_eq!(game_role_label("", "   "), "Unknown");
+        assert!(!history_row_matches_role("", "NotAHero", "support"));
+        assert!(!history_row_matches_role("", "NotAHero", "damage"));
+        assert!(history_row_matches_role("", "NotAHero", "unknown"));
+        assert!(history_row_matches_role("", "NotAHero", "all"));
+    }
+
+    #[test]
+    fn hero_name_fallback_folds_case_space_and_accents() {
+        assert_eq!(game_role_label("", "SOMBRA"), "Support");
+        assert_eq!(game_role_label("", "  sombra "), "Support");
+        assert_eq!(game_role_label("", "doctrine"), "Support");
+        assert_eq!(game_role_label("", "Lucio"), "Support");
+        assert_eq!(game_role_label("", "Lúcio"), "Support");
+        assert_eq!(game_role_label("", "soldier-76"), "Damage");
+        assert_eq!(game_role_label("", "wrecking-ball"), "Tank");
     }
 
     #[test]
