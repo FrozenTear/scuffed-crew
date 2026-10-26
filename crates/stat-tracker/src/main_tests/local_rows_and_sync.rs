@@ -220,7 +220,9 @@ async fn shadow_flag_on_and_off_store_and_upload_identical_rows() {
 /// row commit never sees shadow state.
 #[test]
 fn shadow_hook_only_borrows_and_stays_out_of_the_commit() {
-    let src = include_str!("../main.rs");
+    // The accept path is `handle_capture`, in src/daemon/tab/grab.rs since
+    // 0.6 S10: found by name, wherever it lives.
+    let src = fn_source("handle_capture");
     let hook = src
         .find("worker.try_submit(shadow::worker::ShadowJob::new(")
         .expect("shadow hand-off in the accept path");

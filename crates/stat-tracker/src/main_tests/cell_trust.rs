@@ -71,7 +71,6 @@ fn the_board_is_read_only_under_the_new_reader() {
 #[test]
 fn the_cell_ocr_sites_go_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let src = include_str!("../main.rs");
     // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
     let body = norm(fn_source("analyze_frame"));
     assert!(body.contains(
@@ -81,10 +80,8 @@ fn the_cell_ocr_sites_go_through_the_reader_switch() {
     assert!(body.contains("let ocr = full_board_text( use_new_reader, || {"));
     assert!(body.contains("|| ocr::recognize(&img), );"));
     assert_eq!(body.matches("ocr::recognize(").count(), 1);
-    let hc = src
-        .find("\nasync fn handle_capture(")
-        .expect("handle_capture");
-    let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/grab.rs since 0.6 S10: found by name, wherever it lives.
+    let hc_body = norm(fn_source("handle_capture"));
     assert!(hc_body.contains(
         "let looks_like_scoreboard = match &new_board { Some(_) => board_refusal.is_none(), None => parse::looks_like_scoreboard(&rows), };"
     ));

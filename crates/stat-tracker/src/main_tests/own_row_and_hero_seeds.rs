@@ -490,10 +490,8 @@ fn the_own_row_goes_through_the_reader_switch() {
     assert!(an_body.contains(
         "if own_row_suspect { reader_apply::mark_own_row_suspect(&mut parsed.suspect_fields); }"
     ));
-    let hc = src
-        .find("\nasync fn handle_capture(")
-        .expect("handle_capture");
-    let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/grab.rs since 0.6 S10: found by name, wherever it lives.
+    let hc_body = norm(fn_source("handle_capture"));
     assert!(hc_body.contains("text_fallback_name(board_reader, player_row_idx, player_name),"));
     assert!(hc_body.contains(
         "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, seed_session).await;"
