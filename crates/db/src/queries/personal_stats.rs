@@ -18,6 +18,10 @@ use crate::{with_timeout, Database, DbError, DbResult};
 /// Per-role aggregates with the read-time role fill.
 mod role_fill;
 
+/// DB4: boot backfill of stored hero keys onto canonical display names.
+mod hero_backfill;
+pub(crate) use hero_backfill::backfill_personal_match_hero_keys;
+
 /// Minimum games required for rate metrics (winrate / kd) on public boards.
 pub use crate::types::LEADERBOARD_MIN_GAMES;
 

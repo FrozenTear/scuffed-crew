@@ -3,6 +3,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
+use super::load_error::meta_load_error;
+use crate::components::fetch_error;
+
 // --- Types ---
 
 #[derive(Debug, Clone, Deserialize)]
@@ -348,11 +351,15 @@ const PAGE_CSS: &str = r#"
 
 #[component]
 pub fn StrategyMeta() -> Element {
-    let meta_data = use_resource(|| async {
-        ApiClient::web()
-            .fetch::<MetaResponse>("/api/strategy/meta")
-            .await
-            .ok()
+    let refresh = use_signal(|| 0u32);
+    let meta_data = use_resource(move || {
+        let _ = refresh();
+        async {
+            ApiClient::web()
+                .fetch::<MetaResponse>("/api/strategy/meta")
+                .await
+                .map_err(|e| e.to_string())
+        }
     });
 
     let mut role_filter = use_signal(|| "All".to_string());
@@ -367,14 +374,15 @@ pub fn StrategyMeta() -> Element {
 
             {
                 let data = meta_data.read();
-                let data = data.as_ref().and_then(|d| d.as_ref());
+                let data = data.as_ref().map(|d| d.as_ref());
 
                 match data {
                     None => rsx! { p { class: "meta-loading", "Loading meta data..." } },
-                    Some(resp) if resp.heroes.is_empty() => rsx! {
+                    Some(Err(err)) => fetch_error(&meta_load_error(err).message, refresh),
+                    Some(Ok(resp)) if resp.heroes.is_empty() => rsx! {
                         p { class: "meta-empty", "No hero data available." }
                     },
-                    Some(resp) => {
+                    Some(Ok(resp)) => {
                         let summaries = compute_role_summaries(&resp.heroes);
                         let current_filter = (role_filter)();
                         let filtered: Vec<HeroMeta> = if current_filter == "All" {

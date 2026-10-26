@@ -856,6 +856,13 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE expires_at ON stat_report TYPE option<datetime>;
         DEFINE INDEX IF NOT EXISTS stat_report_member_created_idx ON stat_report COLUMNS member_id, created_at;
         DEFINE INDEX IF NOT EXISTS stat_report_expires_idx ON stat_report COLUMNS expires_at;
+
+        -- One row per finished one-shot data pass (DB4 hero keys first), so
+        -- later boots can skip a full table scan.
+        DEFINE TABLE IF NOT EXISTS data_migration SCHEMAFULL;
+        DEFINE FIELD OVERWRITE completed_at ON data_migration TYPE datetime;
+        DEFINE FIELD OVERWRITE scanned ON data_migration TYPE int DEFAULT 0;
+        DEFINE FIELD OVERWRITE updated ON data_migration TYPE int DEFAULT 0;
     "#,
         )
         .await?
@@ -871,6 +878,16 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     // When that UNIQUE index is already installed this is an INFO FOR TABLE
     // check only — it does not read personal_match.
     crate::queries::personal_stats::migrate_personal_match_session_index(client).await?;
+
+    // DB4: move pack-key heroes (`ana`, `wrecking-ball`) from 0.5.0-alpha.1
+    // and alpha.2 uploads onto the canonical display name and table role.
+    // Canonical rows, unknown heroes and every Sombra row stay as stored.
+    // Paged and idempotent, so a failure here is retried on the next boot.
+    // A finished pass is recorded in data_migration and later boots skip it.
+    if let Err(e) = crate::queries::personal_stats::backfill_personal_match_hero_keys(client).await
+    {
+        tracing::warn!("personal_match hero key backfill: {e}");
+    }
 
     // Seed default category/board tree and migrate legacy thread.category strings.
     if let Err(e) = crate::queries::forum::ensure_forum_hierarchy(client).await {
