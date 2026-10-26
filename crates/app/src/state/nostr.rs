@@ -862,7 +862,7 @@ impl NostrRelayManager {
         self.connect(&url);
     }
 
-    /// Disconnect from the relay (intentional — no reconnection).
+    /// Disconnect from the relay (intentional, no reconnection).
     pub fn disconnect(&self) {
         *self.shared.intentional_disconnect.borrow_mut() = true;
         self.cancel_reconnect_timer();

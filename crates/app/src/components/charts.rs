@@ -88,7 +88,7 @@ const CHARTS_CSS: &str = r#"
         transition: width 0.3s ease;
         min-width: 2px;
     }
-    /* Reference hairline (e.g. the 50% winrate mark) — recessive, one shade
+    /* Reference hairline (e.g. the 50% winrate mark): recessive, one shade
        off the track surface, drawn across the full track height. */
     .hbar-ref {
         position: absolute;

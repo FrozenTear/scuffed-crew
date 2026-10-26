@@ -37,7 +37,7 @@ struct AccountPrefill {
     role: Option<String>,
 }
 
-/// PUT /api/members/:id — plain `Option`s serialize as `null` when empty,
+/// PUT /api/members/:id. Plain `Option`s serialize as `null` when empty,
 /// which the server's double-Option reads as an explicit clear.
 #[derive(Serialize)]
 struct UpdateProfileBody {

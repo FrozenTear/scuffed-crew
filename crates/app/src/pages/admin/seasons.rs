@@ -1,4 +1,4 @@
-//! Admin › Seasons — define the windows that "per season" stats are cut by.
+//! Admin › Seasons: define the windows that "per season" stats are cut by.
 //!
 //! A season is a half-open `[starts_at, ends_at)` range over `played_at`, in
 //! UTC. Games are never tagged with a season; deleting or editing one only

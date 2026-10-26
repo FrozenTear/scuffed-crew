@@ -1,6 +1,6 @@
 //! Undo/redo system using the command pattern.
 //!
-//! Plain Rust struct — no Dioxus signals. The component layer wraps
+//! Plain Rust struct: no Dioxus signals. The component layer wraps
 //! `UndoManager` in a `Signal` and calls `undo()`/`redo()` from event handlers.
 
 use std::collections::VecDeque;
@@ -308,7 +308,7 @@ mod tests {
             element: sample_element(),
         });
 
-        // Undo one, then push a new action — redo should be empty.
+        // Undo one, then push a new action: redo should be empty.
         mgr.undo();
         assert!(mgr.can_redo());
 

@@ -228,9 +228,9 @@ pub fn StatsMember(id: String) -> Element {
                     },
                     Some(s) => {
                         let wr = winrate_pct(s.wins, s.total_matches);
-                        let mut record = format!("{}W–{}L", s.wins, s.losses);
+                        let mut record = format!("{}W-{}L", s.wins, s.losses);
                         if s.draws > 0 {
-                            record.push_str(&format!("–{}D", s.draws));
+                            record.push_str(&format!("-{}D", s.draws));
                         }
                         rsx! {
                             div { class: "stats-summary",

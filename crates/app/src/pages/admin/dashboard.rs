@@ -87,7 +87,7 @@ fn pending_card_class(kind: KpiDisplay) -> &'static str {
 }
 
 /// Real counts render as numbers. `None` data is loading or error via
-/// `admin_pending` — never a fake zero.
+/// `admin_pending`, never a fake zero.
 fn stat_card<T: 'static>(
     resource: &ApiResource<Vec<T>>,
     label: &'static str,
@@ -122,7 +122,7 @@ enum HealthView {
 }
 
 fn relay_chip(h: &RelayHealth) -> Option<(&'static str, &'static str)> {
-    // Local forum + no/offline relay is normal for small installs —
+    // Local forum + no/offline relay is normal for small installs:
     // soft "optional" chip, not an alarm.
     let forum_local = h.forum_backend.eq_ignore_ascii_case("local") || h.forum_backend.is_empty();
     if !h.configured || (forum_local && !h.reachable) {
