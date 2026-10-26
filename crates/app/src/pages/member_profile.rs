@@ -497,12 +497,45 @@ fn render_hero_card(h: &HeroAgg) -> Element {
     } else {
         "-".to_string()
     };
+    let record = hero_record(h);
     rsx! {
         Card {
             div { class: "profile-hero-name", "{h.hero}" }
             div { class: "profile-hero-meta",
-                "{h.games} games · {winrate} WR · {h.wins}-{h.losses}-{h.draws}"
+                "{h.games} games · {winrate} WR · {record}"
             }
         }
+    }
+}
+
+// Per-hero record in the shared compact form, e.g. `5W-2L-1D`, or `5W-2L`
+// when there are no draws.
+fn hero_record(h: &HeroAgg) -> String {
+    crate::util::record_label(h.wins, h.losses, h.draws)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hero(wins: u32, losses: u32, draws: u32) -> HeroAgg {
+        HeroAgg {
+            hero: "Ana".to_string(),
+            games: wins + losses + draws,
+            wins,
+            losses,
+            draws,
+            winrate: 0.0,
+            avg_elims: 0.0,
+            avg_deaths: 0.0,
+        }
+    }
+
+    #[test]
+    fn hero_records_use_the_shared_record_label() {
+        assert_eq!(hero_record(&hero(5, 2, 1)), "5W-2L-1D");
+        assert_eq!(hero_record(&hero(5, 2, 0)), "5W-2L");
+        assert_eq!(hero_record(&hero(0, 0, 0)), "0W-0L");
+        assert_eq!(hero_record(&hero(0, 0, 2)), "0W-0L-2D");
     }
 }
