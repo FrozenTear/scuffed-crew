@@ -76,7 +76,6 @@ fn startup_takes_the_pid_guard_before_the_site_and_always_starts_the_pack_keeper
 /// this test even if a lookalike helper is left behind.
 #[test]
 fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
-    let src = include_str!("../main.rs");
     // Bound the slice to `run_loop` itself, by name. The night harness and
     // this test both mention the same names elsewhere; an unbounded search
     // would match those and stay green after the timer was deleted.
@@ -158,10 +157,8 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         shutdown_body.contains("close_session_on_shutdown("),
         "each signal handler closes the session before the final upload"
     );
-    let startup_fn = src
-        .find("fn begin_daemon_session(")
-        .expect("startup helper");
-    let startup_body = src[startup_fn..].split("\nasync fn ").next().unwrap();
+    // In src/daemon/session/active_game.rs since 0.6 S8: found by name.
+    let startup_body = fn_source("begin_daemon_session");
     assert!(
         startup_body.contains("dropped.clone()"),
         "a stale skeleton on the next start must settle that session's unknown rows"
@@ -184,13 +181,9 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         settle_body.contains("schedule_store_sync("),
         "the command tick must schedule the settle"
     );
-    let commands_fn = src
-        .find("async fn apply_queued_commands(")
-        .expect("command tick body");
-    let commands_body = src[commands_fn..]
-        .split("\nasync fn begin_daemon_session(")
-        .next()
-        .unwrap();
+    // Bounded by name: `begin_daemon_session`, which used to end the
+    // slice, is in src/daemon/session/active_game.rs since 0.6 S8.
+    let commands_body = fn_source("apply_queued_commands");
     let set_at = commands_body
         .find("StoreCommand::SetOutcome {")
         .expect("SetOutcome arm");
