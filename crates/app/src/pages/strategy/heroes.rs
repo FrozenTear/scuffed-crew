@@ -11,12 +11,28 @@ use scuffed_api_client::ApiClient;
 struct Hero {
     id: String,
     name: String,
-    role: String, // "tank", "damage", "support"
+    /// "tank", "damage" or "support". Lowercased on decode so "Support"
+    /// from an older payload groups the same as "support".
+    #[serde(deserialize_with = "lowercase_role")]
+    role: String,
     portrait_url: String,
+    // `/api/strategy/heroes` (API #502) sends only id, name, role and
+    // portrait_url, so the detail fields fall back to empty or zero.
+    #[serde(default)]
     abilities: Vec<Ability>,
+    #[serde(default)]
     health: u32,
+    #[serde(default)]
     armor: u32,
+    #[serde(default)]
     shields: u32,
+}
+
+fn lowercase_role<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(|role| role.trim().to_ascii_lowercase())
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -28,7 +44,7 @@ struct Ability {
     icon_url: Option<String>,
 }
 
-/// `{ "data": [...] }` envelope — same unwrap as Browse / My Strategies.
+/// `{ "data": [...] }` envelope, same unwrap as Browse / My Strategies.
 /// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
 #[derive(Debug, Clone, Deserialize)]
 struct ListResponse {
@@ -493,6 +509,64 @@ mod tests {
             bare_empty.is_err(),
             "GET /api/strategy/heroes is the list envelope, not a bare Vec"
         );
+    }
+
+    #[test]
+    fn four_field_hero_from_shared_list_decodes() {
+        let body = r#"{"data":[{"id":"doctrine","name":"Doctrine","role":"support","portrait_url":""}]}"#;
+        let list: ListResponse = serde_json::from_str(body).unwrap();
+        assert_eq!(
+            list.data,
+            vec![Hero {
+                id: "doctrine".into(),
+                name: "Doctrine".into(),
+                role: "support".into(),
+                portrait_url: String::new(),
+                abilities: Vec::new(),
+                health: 0,
+                armor: 0,
+                shields: 0,
+            }]
+        );
+        assert_eq!(list.data[0].role_label(), "Support");
+        assert_eq!(list.data[0].total_hp(), 0);
+    }
+
+    #[test]
+    fn full_hero_shape_still_decodes() {
+        let body = r#"{
+            "id": "ana",
+            "name": "Ana",
+            "role": "support",
+            "portrait_url": "/img/ana.png",
+            "abilities": [{
+                "name": "Sleep Dart",
+                "key": "Shift",
+                "description": "Puts an enemy to sleep.",
+                "cooldown": 14.0,
+                "icon_url": null
+            }],
+            "health": 250,
+            "armor": 0,
+            "shields": 0
+        }"#;
+        let hero: Hero = serde_json::from_str(body).unwrap();
+        assert_eq!(hero.id, "ana");
+        assert_eq!(hero.role, "support");
+        assert_eq!(hero.portrait_url, "/img/ana.png");
+        assert_eq!(hero.abilities.len(), 1);
+        assert_eq!(hero.abilities[0].key, "Shift");
+        assert_eq!(hero.abilities[0].cooldown, Some(14.0));
+        assert_eq!(hero.health, 250);
+        assert_eq!(hero.total_hp(), 250);
+    }
+
+    #[test]
+    fn capitalised_role_is_lowercased() {
+        let body = r#"{"id":"reinhardt","name":"Reinhardt","role":"Tank","portrait_url":""}"#;
+        let hero: Hero = serde_json::from_str(body).unwrap();
+        assert_eq!(hero.role, "tank");
+        assert_eq!(hero.role_label(), "Tank");
     }
 
     #[test]
