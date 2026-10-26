@@ -217,7 +217,7 @@ pub async fn apply(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    // Disable the legacy XSS filter — modern browsers ignore it and it can
+    // Disable the legacy XSS filter. Modern browsers ignore it and it can
     // introduce vulnerabilities in older ones.
     headers.insert(
         HeaderName::from_static("x-xss-protection"),
