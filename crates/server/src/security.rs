@@ -542,6 +542,25 @@ mod tests {
         );
     }
 
+    fn assert_header_once(
+        response: &axum::response::Response,
+        name: &str,
+        expected: &str,
+        label: &str,
+    ) {
+        let values: Vec<_> = response
+            .headers()
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            values,
+            [expected],
+            "{label}: {name} must appear exactly once, got {values:?}"
+        );
+    }
+
     fn test_policy(enforce: bool) -> SecurityPolicy {
         SecurityPolicy::from_config(SecurityConfig {
             enforce,
@@ -989,6 +1008,13 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_nosniff_once(&response, "html shell");
+        assert_header_once(&response, "x-frame-options", "DENY", "html shell");
+        assert_header_once(
+            &response,
+            "referrer-policy",
+            "strict-origin-when-cross-origin",
+            "html shell",
+        );
         let csp = response
             .headers()
             .get(CSP_REPORT_ONLY_HEADER)
