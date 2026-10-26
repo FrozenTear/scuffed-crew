@@ -227,11 +227,12 @@ fn shadow_hook_only_borrows_and_stays_out_of_the_commit() {
     let call = &src[hook..hook + 300];
     assert!(call.contains("&rows,"), "{call}");
     assert!(call.contains("&staged.target_session,"), "{call}");
-    let commit = src
-        .find("async fn commit_capture_rows(")
-        .expect("commit_capture_rows");
-    let body = src[commit..].split("\nasync fn ").next().unwrap();
-    let body = body.split("\nfn ").next().unwrap();
+    // In src/daemon/tab/commit.rs since 0.6 S4: found by name, wherever it lives.
+    let body = fn_source("commit_capture_rows");
+    assert!(
+        body.contains("insert_match("),
+        "the slice is the commit itself"
+    );
     assert!(
         !body.contains("shadow"),
         "commit_capture_rows must not read shadow state"

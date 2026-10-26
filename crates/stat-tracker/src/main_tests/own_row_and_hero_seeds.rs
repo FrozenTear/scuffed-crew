@@ -483,10 +483,8 @@ fn the_own_row_goes_through_the_reader_switch() {
         "highlight, tab_heroes .as_ref() .and_then(detect::own_row::career_hero_row), !own_seeds.is_empty(), );"
     ));
     assert!(body.contains("player_row_idx: row_idx, name_match, own_row,"));
-    let an = src
-        .find("\nfn apply_new_reader(")
-        .expect("apply_new_reader");
-    let an_body = norm(src[an..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/cells.rs since 0.6 S4: found by name, wherever it lives.
+    let an_body = norm(fn_source("apply_new_reader"));
     assert!(!an_body.contains("find_player_row_by_name"));
     assert!(!an_body.contains("player_name"));
     assert!(an_body.contains(

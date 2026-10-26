@@ -1038,10 +1038,12 @@ fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
     // the stored report carries the text-fallback replacement
     assert!(hc_body.contains("map_replaces_text_fallback: staged.replaced_text_fallback,"));
     // apply_new_reader reads nothing off the frame: it has no frame
-    let an = src
-        .find("\nfn apply_new_reader(")
-        .expect("apply_new_reader");
-    let an_body = norm(src[an..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/cells.rs since 0.6 S4: found by name, wherever it lives.
+    let an_body = norm(fn_source("apply_new_reader"));
+    assert!(
+        an_body.contains("reader_apply::merge_saved_with_authority("),
+        "the slice is the new reader's save"
+    );
     assert_eq!(an_body.matches("shadow::read_").count(), 0);
     assert_eq!(an_body.matches("ocr::").count(), 0);
 }
