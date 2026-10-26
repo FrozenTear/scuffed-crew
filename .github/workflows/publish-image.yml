@@ -208,9 +208,17 @@ jobs:
           # /api/health returns this SHA (body git_sha, header x-scuffed-git-sha).
           build-args: |
             SCUFFED_GIT_SHA=${{ steps.pick.outputs.sha }}
-          # GHA cache: subsequent publishes reuse cargo/dx layers when possible
-          cache-from: type=gha,scope=site-server
-          cache-to: type=gha,mode=max,scope=site-server
+          # Build cache lives in GHCR as the :buildcache tag of this package,
+          # not in the Actions cache (its 10 GB cap is shared with the
+          # tracker's Rust caches, and this image's mode=max blobs took 3.7
+          # GB of it). mode=max keeps the builder-stage layers, above all the
+          # `cargo install dioxus-cli` one. Every run reads the cache; only
+          # main runs write it, so a manual run on another ref cannot
+          # overwrite main's cache. ignore-error: a failed cache export
+          # warns instead of failing a publish whose image is already pushed.
+          # Nothing deploys :buildcache; prod pulls :main.
+          cache-from: type=registry,ref=${{ env.IMAGE_NAME }}:buildcache
+          cache-to: ${{ steps.pick.outputs.main == 'true' && format('type=registry,ref={0}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true,ignore-error=true', env.IMAGE_NAME) || '' }}
 
       - name: Summary
         if: always()
