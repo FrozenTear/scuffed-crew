@@ -54,7 +54,7 @@ fn the_own_name_seeds_open_exactly_when_the_new_reader_is_in_effect() {
     // the daemon takes the capture path, the reader packs and the seed
     // store from that one answer
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let source = norm(include_str!("../main.rs"));
+    let source = norm(daemon_source());
     // Each needle is written in two pieces, so this test's own text is
     // not what it finds.
     for pinned in [
@@ -68,6 +68,7 @@ fn the_own_name_seeds_open_exactly_when_the_new_reader_is_in_effect() {
         ),
     ] {
         assert_eq!(source.matches(pinned).count(), 1, "{pinned}");
+        assert!(norm(fn_source("run")).contains(pinned), "{pinned} in run");
     }
 }
 
@@ -447,7 +448,7 @@ fn the_text_fallback_gets_no_name_when_the_new_reader_has_no_own_row() {
 #[test]
 fn the_own_row_goes_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let src = include_str!("../main.rs");
+    let src = daemon_source();
     let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
     let body = norm(src[at..].split("\n}\n").next().unwrap());
     // the per-cell pass (names and stat cells) is ocr-v1's only: the new
@@ -472,6 +473,7 @@ fn the_own_row_goes_through_the_reader_switch() {
             .count(),
         1
     );
+    assert!(fn_source("own_row_name_fallback").contains("recognize_scoreboard_names_pre_cropped("));
     assert_eq!(body.matches("detect::own_row::read_own_row(").count(), 1);
     assert_eq!(body.matches("detect::own_row::seed_gate(").count(), 1);
     // the career hero's row comes from the one icon read, in the seed
