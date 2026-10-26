@@ -63,6 +63,8 @@ pub struct OverviewTeam {
 pub struct TeamRecord {
     pub wins: u32,
     pub losses: u32,
+    #[serde(default)]
+    pub draws: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
