@@ -114,8 +114,122 @@ jobs:
             --all-targets \
             -- -D warnings
 
+  # Decides whether the site jobs run. Do not switch this workflow to
+  # pull_request paths or paths-ignore: a workflow that never starts leaves
+  # required checks pending. A job skipped by `if:` still reports, and GitHub
+  # treats that skip as success.
+  #
+  # pull_request: run the site jobs unless every changed path is tracker-only.
+  # Tracker-only paths:
+  #   crates/stat-tracker/**, crates/stat-tracker-core/**,
+  #   crates/stat-tracker-ui/**,
+  #   docs/notes/stat-tracker-*, docs/superpowers/plans/*stat-tracker*
+  # Anything else runs the site jobs, including workspace Cargo.toml,
+  # Cargo.lock, crates/types, the app, db, server crates, .github/**,
+  # deploy files, rust-toolchain, and docs that also describe the site
+  # (docs/tracker-packs.md, the stats UI notes).
+  # push and every event that is not pull_request always run the site jobs.
+  # If this job fails, the site jobs still run.
+  changes:
+    name: Site changes
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      site: ${{ steps.gate.outputs.site }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether site jobs run
+        id: gate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+
+          site_true() {
+            echo "site=true" >> "$GITHUB_OUTPUT"
+            echo "site=true ($1)"
+          }
+
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            site_true "event is ${EVENT_NAME}"
+            exit 0
+          fi
+
+          if ! printf '%s' "$BASE_SHA" | grep -Eq '^[0-9a-f]{40}$'; then
+            site_true "pull request base sha missing"
+            exit 0
+          fi
+
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            site_true "base commit not in clone"
+            exit 0
+          fi
+
+          tracker_only() {
+            case "$1" in
+              crates/stat-tracker/*|\
+              crates/stat-tracker-core/*|\
+              crates/stat-tracker-ui/*|\
+              docs/notes/stat-tracker-*|\
+              docs/superpowers/plans/*stat-tracker*)
+                return 0
+                ;;
+              *)
+                return 1
+                ;;
+            esac
+          }
+
+          diff_file="$(mktemp)"
+          if ! git diff -z --name-status --find-renames "${BASE_SHA}...HEAD" > "$diff_file"; then
+            site_true "git diff failed"
+            exit 0
+          fi
+
+          site=false
+          saw=false
+          while IFS= read -r -d '' status; do
+            saw=true
+            case "$status" in
+              R*|C*)
+                IFS= read -r -d '' path1 || true
+                IFS= read -r -d '' path2 || true
+                pair=("$path1" "$path2")
+                ;;
+              *)
+                IFS= read -r -d '' path1 || true
+                pair=("$path1")
+                ;;
+            esac
+            for p in "${pair[@]}"; do
+              [ -n "$p" ] || continue
+              if tracker_only "$p"; then
+                printf 'tracker-only: %s\n' "$p"
+              else
+                site=true
+                printf 'site-relevant: %s\n' "$p"
+              fi
+            done
+          done < "$diff_file"
+
+          if [ "$saw" != true ]; then
+            site_true "empty diff"
+            exit 0
+          fi
+
+          echo "site=${site}" >> "$GITHUB_OUTPUT"
+          echo "site=${site}"
+
   build-and-test:
     name: Build & Test
+    needs: changes
+    # Skipped when a pull request is tracker-only. A failed changes job
+    # still runs this job. Cancellation still skips it.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.site == 'true') }}
     runs-on: ubuntu-latest
     # +15 min over the old cap: on a crawling mirror a cache miss may spend
     # up to ~30 min in apt (update 2 x 300 s, install 2 x 600 s).
@@ -186,6 +300,9 @@ jobs:
 
   app-build:
     name: App Build (Dioxus)
+    needs: changes
+    # Same gate as Build & Test: skip only a tracker-only pull request.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.site == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
