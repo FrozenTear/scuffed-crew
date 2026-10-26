@@ -477,10 +477,8 @@ fn the_poll_tick_chooses_the_accolade_map_with_the_reader_switch() {
     );
     assert!(body.contains("let use_new_reader = ctx.use_new_reader;"));
     assert!(body.contains("start_screen, now, new_game_debounce, use_new_reader, ) .await;"));
-    let tick = src
-        .find("\nasync fn apply_poll_tick(")
-        .expect("apply_poll_tick");
-    let tick_body = norm(src[tick..].split("\n}\n").next().unwrap());
+    // In src/daemon/poll/outcome.rs since 0.6 S9: found by name, wherever it lives.
+    let tick_body = norm(fn_source("apply_poll_tick"));
     assert!(
         tick_body
             .contains("apply_poll_decision(st, store, data_dir, decision, now, use_new_reader)")
