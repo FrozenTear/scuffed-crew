@@ -493,6 +493,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-family: var(--font-mono);
         font-weight: 700;
         color: var(--text-2);
+        white-space: nowrap;
     }
     .ticker-chip .ticker-date {
         font-family: var(--font-mono);

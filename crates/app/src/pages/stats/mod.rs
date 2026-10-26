@@ -572,6 +572,7 @@ const STATS_CSS: &str = r#"
         font-size: 0.9rem;
         color: var(--text-2);
         margin-top: 0.4rem;
+        white-space: nowrap;
     }
 
     /* Load error + retry */
@@ -1371,10 +1372,7 @@ pub fn Stats() -> Element {
                     },
                     Some(s) => {
                         let wr = winrate_pct(s.wins, s.total_matches);
-                        let mut record = format!("{}W-{}L", s.wins, s.losses);
-                        if s.draws > 0 {
-                            record.push_str(&format!("-{}D", s.draws));
-                        }
+                        let record = crate::util::record_label(s.wins, s.losses, s.draws);
                         rsx! {
                             div { class: "stats-summary",
                                 div { class: "stat-tile stat-tile-hero",
