@@ -171,8 +171,9 @@ pub const SUSPECT_FIELD_NAMES: &[&str] = &[
 /// A larger value is a damage or timer digit in the elims column. The tracker
 /// gate (`parse::MAX_ELIMS`) is this constant, and hero/role averages use it
 /// so a row stored before that check existed does not move the mean. The
-/// value itself is included. Damage and healing have no ceiling here: a clean
-/// wide column is not capped on upload.
+/// value itself is included. The upload route has its own, wider ceiling
+/// ([`STATS_UPLOAD_MAX_ELIMS`], see [`validate_upload_entry`]), so a row past
+/// this is still stored and only left out of the averages.
 pub const PLAUSIBLE_ELIMS_MAX: u32 = 99;
 /// Largest assists count the tracker accepts as a real scoreboard cell.
 ///
@@ -240,6 +241,126 @@ pub fn resolve_suspect_fields(input: &SuspectFieldsInput) -> Result<Vec<String>,
         | SuspectFieldsInput::NotAnArray
         | SuspectFieldsInput::NonStringEntry => Err(SUSPECT_FIELDS_ERROR),
     }
+}
+
+/// Max characters (not bytes) in each string field of one uploaded match
+/// (`session_id`, `hero`, `map_name`, `game_mode`, `role`, `outcome`) and in
+/// each `deleted_sessions` entry. Tracker session ids are 16 hex characters
+/// and server legacy ids are 23; hero, map, mode and role names are well
+/// under this.
+pub const STATS_UPLOAD_STRING_MAX_CHARS: usize = 64;
+
+/// Earliest `played_at` an upload may carry: 2022-10-04T00:00:00Z, the day
+/// Overwatch 2 launched. The tracker reads the Overwatch 2 scoreboard, so an
+/// earlier date is a bad clock or a made-up row.
+pub const STATS_UPLOAD_PLAYED_AT_MIN_UNIX: i64 = 1_664_841_600;
+
+/// How far past the server clock `played_at` may be. Covers a client clock
+/// that is a few hours fast (or a local time sent as UTC) without letting a
+/// row sit in a later season or pin itself to the top of a recent list.
+pub const STATS_UPLOAD_PLAYED_AT_MAX_FUTURE_SECS: i64 = 24 * 60 * 60;
+
+/// Largest per-match damage, healing, or mitigation an upload may carry.
+///
+/// Long overtime and Stadium games, tank mitigation included, stay under
+/// this. It exists so a row cannot carry `u32::MAX` and top a damage or
+/// healing board.
+pub const STATS_UPLOAD_MAX_DAMAGE: u32 = 200_000;
+/// Largest per-match elims an upload may carry.
+///
+/// Wider than [`PLAUSIBLE_ELIMS_MAX`] (the tracker's read gate and the
+/// averages filter) so a long game or an older tracker's row is stored, not
+/// rejected. It still stops a `u32::MAX` row from topping an elims board.
+pub const STATS_UPLOAD_MAX_ELIMS: u32 = 999;
+/// Same ceiling as [`STATS_UPLOAD_MAX_ELIMS`], for assists.
+pub const STATS_UPLOAD_MAX_ASSISTS: u32 = 999;
+/// Same ceiling as [`STATS_UPLOAD_MAX_DAMAGE`], for healing.
+pub const STATS_UPLOAD_MAX_HEALING: u32 = 200_000;
+/// Same ceiling as [`STATS_UPLOAD_MAX_DAMAGE`], for mitigation.
+pub const STATS_UPLOAD_MAX_MITIGATION: u32 = 200_000;
+
+/// Hero name 0.4.x and 0.5.0 trackers upload when no hero was read. Live
+/// data has rows with it, so the upload check accepts it in any case.
+pub const UPLOAD_HERO_UNKNOWN: &str = "Unknown";
+
+/// True when `hero` is [`UPLOAD_HERO_UNKNOWN`], ignoring ASCII case.
+pub fn is_upload_hero_unknown(hero: &str) -> bool {
+    hero.eq_ignore_ascii_case(UPLOAD_HERO_UNKNOWN)
+}
+
+fn string_too_long(value: &str) -> bool {
+    value.chars().count() > STATS_UPLOAD_STRING_MAX_CHARS
+}
+
+/// Check one uploaded match beyond the reader ids and suspect fields.
+///
+/// - every string field is at most [`STATS_UPLOAD_STRING_MAX_CHARS`]
+///   characters;
+/// - `hero` is a known hero (display name or pack key, see
+///   [`crate::hero_key_to_name`]) or [`UPLOAD_HERO_UNKNOWN`] in any case,
+///   which 0.4.x and 0.5.0 trackers send when no hero was read;
+/// - `elims` and `assists` are at most [`STATS_UPLOAD_MAX_ELIMS`] and
+///   [`STATS_UPLOAD_MAX_ASSISTS`], `deaths` at most [`PLAUSIBLE_DEATHS_MAX`];
+/// - `damage`, `healing`, `mitigation` are at most
+///   [`STATS_UPLOAD_MAX_DAMAGE`], [`STATS_UPLOAD_MAX_HEALING`],
+///   [`STATS_UPLOAD_MAX_MITIGATION`];
+/// - `played_at` is no earlier than [`STATS_UPLOAD_PLAYED_AT_MIN_UNIX`] and
+///   no later than `now` plus [`STATS_UPLOAD_PLAYED_AT_MAX_FUTURE_SECS`].
+///
+/// `outcome` keeps its existing rule (the handler skips a value the schema
+/// cannot store); only its length is checked here. Returns the message for
+/// HTTP 400 without the `matches[n]: ` prefix.
+pub fn validate_upload_entry(entry: &StatsUploadEntry, now: DateTime<Utc>) -> Result<(), String> {
+    for (name, value) in [
+        ("session_id", &entry.session_id),
+        ("hero", &entry.hero),
+        ("map_name", &entry.map_name),
+        ("game_mode", &entry.game_mode),
+        ("role", &entry.role),
+        ("outcome", &entry.outcome),
+    ] {
+        if string_too_long(value) {
+            return Err(format!(
+                "{name} must be at most {STATS_UPLOAD_STRING_MAX_CHARS} characters"
+            ));
+        }
+    }
+    if !is_upload_hero_unknown(&entry.hero) && crate::hero_key_to_name(&entry.hero).is_none() {
+        return Err("hero must be a known hero or Unknown".to_string());
+    }
+    for (name, value, max) in [
+        ("elims", entry.elims, STATS_UPLOAD_MAX_ELIMS),
+        ("assists", entry.assists, STATS_UPLOAD_MAX_ASSISTS),
+        ("deaths", entry.deaths, PLAUSIBLE_DEATHS_MAX),
+        ("damage", entry.damage, STATS_UPLOAD_MAX_DAMAGE),
+        ("healing", entry.healing, STATS_UPLOAD_MAX_HEALING),
+        ("mitigation", entry.mitigation, STATS_UPLOAD_MAX_MITIGATION),
+    ] {
+        if value > max {
+            return Err(format!("{name} must be at most {max}"));
+        }
+    }
+    let earliest = DateTime::<Utc>::from_timestamp(STATS_UPLOAD_PLAYED_AT_MIN_UNIX, 0)
+        .expect("constant timestamp is in range");
+    let latest = now + chrono::Duration::seconds(STATS_UPLOAD_PLAYED_AT_MAX_FUTURE_SECS);
+    if entry.played_at < earliest || entry.played_at > latest {
+        return Err(
+            "played_at must be on or after 2022-10-04T00:00:00Z and no more than 24 hours after server time"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// Check one `deleted_sessions` entry. Returns the message for HTTP 400
+/// without the `deleted_sessions[n]: ` prefix.
+pub fn validate_deleted_session(session_id: &str) -> Result<(), String> {
+    if string_too_long(session_id) {
+        return Err(format!(
+            "session id must be at most {STATS_UPLOAD_STRING_MAX_CHARS} characters"
+        ));
+    }
+    Ok(())
 }
 
 /// `POST /api/stats/upload` as the server reads it.
@@ -410,6 +531,197 @@ pub struct RoleStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_entry() -> StatsUploadEntry {
+        StatsUploadEntry {
+            session_id: "0123456789abcdef".into(),
+            hero: "Ana".into(),
+            map_name: "Oasis".into(),
+            game_mode: "Control".into(),
+            role: "Support".into(),
+            outcome: "victory".into(),
+            elims: 4,
+            deaths: 1,
+            assists: 2,
+            damage: 1000,
+            healing: 4000,
+            mitigation: 0,
+            played_at: DateTime::parse_from_rfc3339("2026-07-01T20:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            edited: false,
+            recognizer: None,
+            suspect_fields: Vec::new(),
+            name_recognizer: None,
+        }
+    }
+
+    fn fixed_now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-10-26T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    #[test]
+    fn upload_entry_valid_row_passes() {
+        assert_eq!(validate_upload_entry(&valid_entry(), fixed_now()), Ok(()));
+        let mut key = valid_entry();
+        key.hero = "wrecking-ball".into();
+        assert_eq!(validate_upload_entry(&key, fixed_now()), Ok(()));
+    }
+
+    #[test]
+    fn upload_entry_strings_capped_at_64_characters() {
+        let at_cap = "\u{e9}".repeat(STATS_UPLOAD_STRING_MAX_CHARS);
+        let over = "a".repeat(STATS_UPLOAD_STRING_MAX_CHARS + 1);
+        type SetStr = fn(&mut StatsUploadEntry, String);
+        let setters: [(&str, SetStr); 5] = [
+            ("session_id", |e, v| e.session_id = v),
+            ("map_name", |e, v| e.map_name = v),
+            ("game_mode", |e, v| e.game_mode = v),
+            ("role", |e, v| e.role = v),
+            ("outcome", |e, v| e.outcome = v),
+        ];
+        for (name, set) in setters {
+            let mut ok = valid_entry();
+            set(&mut ok, at_cap.clone());
+            assert_eq!(validate_upload_entry(&ok, fixed_now()), Ok(()), "{name}");
+            let mut bad = valid_entry();
+            set(&mut bad, over.clone());
+            assert_eq!(
+                validate_upload_entry(&bad, fixed_now()),
+                Err(format!("{name} must be at most 64 characters"))
+            );
+        }
+        let mut hero = valid_entry();
+        hero.hero = over;
+        assert_eq!(
+            validate_upload_entry(&hero, fixed_now()),
+            Err("hero must be at most 64 characters".to_string())
+        );
+    }
+
+    #[test]
+    fn upload_entry_non_hero_rejected() {
+        for hero in ["", "Not A Hero", "Unknown Hero", "Unknownn", "unknown "] {
+            let mut e = valid_entry();
+            e.hero = hero.into();
+            assert_eq!(
+                validate_upload_entry(&e, fixed_now()),
+                Err("hero must be a known hero or Unknown".to_string()),
+                "{hero:?}"
+            );
+        }
+    }
+
+    /// Regression: 0.4.x and 0.5.0 trackers send `Unknown` when no hero was
+    /// read, and live data has such rows. It must pass in any case.
+    #[test]
+    fn upload_entry_unknown_hero_accepted_any_case() {
+        for hero in ["Unknown", "unknown", "UNKNOWN", "uNkNoWn"] {
+            let mut e = valid_entry();
+            e.hero = hero.into();
+            assert_eq!(validate_upload_entry(&e, fixed_now()), Ok(()), "{hero:?}");
+        }
+    }
+
+    #[test]
+    fn upload_entry_doctrine_accepted() {
+        for hero in ["Doctrine", "doctrine", "DOCTRINE"] {
+            let mut e = valid_entry();
+            e.hero = hero.into();
+            assert_eq!(validate_upload_entry(&e, fixed_now()), Ok(()), "{hero:?}");
+        }
+    }
+
+    /// Every hero in the shared list must pass the upload check, so a new
+    /// hero added to `heroes.rs` cannot be rejected by the server.
+    #[test]
+    fn upload_entry_every_listed_hero_accepted() {
+        for hero in crate::HEROES {
+            let mut e = valid_entry();
+            e.hero = (*hero).into();
+            assert_eq!(validate_upload_entry(&e, fixed_now()), Ok(()), "{hero:?}");
+        }
+        for hero in crate::HERO_NAMES {
+            let mut e = valid_entry();
+            e.hero = hero.display.into();
+            assert_eq!(
+                validate_upload_entry(&e, fixed_now()),
+                Ok(()),
+                "{:?}",
+                hero.display
+            );
+        }
+    }
+
+    #[test]
+    fn upload_entry_numeric_ceilings() {
+        type Set = fn(&mut StatsUploadEntry, u32);
+        let cases: [(&str, u32, Set); 6] = [
+            ("elims", 999, |e, v| e.elims = v),
+            ("assists", 999, |e, v| e.assists = v),
+            ("deaths", 50, |e, v| e.deaths = v),
+            ("damage", 200_000, |e, v| e.damage = v),
+            ("healing", 200_000, |e, v| e.healing = v),
+            ("mitigation", 200_000, |e, v| e.mitigation = v),
+        ];
+        for (name, max, set) in cases {
+            let mut ok = valid_entry();
+            set(&mut ok, max);
+            assert_eq!(validate_upload_entry(&ok, fixed_now()), Ok(()), "{name}");
+            for bad_value in [max + 1, u32::MAX] {
+                let mut bad = valid_entry();
+                set(&mut bad, bad_value);
+                assert_eq!(
+                    validate_upload_entry(&bad, fixed_now()),
+                    Err(format!("{name} must be at most {max}"))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn upload_entry_played_at_window() {
+        let now = fixed_now();
+        let err = Err(
+            "played_at must be on or after 2022-10-04T00:00:00Z and no more than 24 hours after server time"
+                .to_string(),
+        );
+        let floor = DateTime::parse_from_rfc3339("2022-10-04T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let cases = [
+            (floor, Ok(())),
+            (floor - chrono::Duration::seconds(1), err.clone()),
+            (now + chrono::Duration::hours(24), Ok(())),
+            (
+                now + chrono::Duration::hours(24) + chrono::Duration::seconds(1),
+                err.clone(),
+            ),
+            (
+                DateTime::parse_from_rfc3339("2099-01-01T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                err.clone(),
+            ),
+            (DateTime::<Utc>::UNIX_EPOCH, err),
+        ];
+        for (played_at, expected) in cases {
+            let mut e = valid_entry();
+            e.played_at = played_at;
+            assert_eq!(validate_upload_entry(&e, now), expected, "{played_at}");
+        }
+    }
+
+    #[test]
+    fn deleted_session_capped_at_64_characters() {
+        assert_eq!(validate_deleted_session(&"a".repeat(64)), Ok(()));
+        assert_eq!(
+            validate_deleted_session(&"a".repeat(65)),
+            Err("session id must be at most 64 characters".to_string())
+        );
+    }
 
     fn sample_request() -> StatsUploadRequest {
         StatsUploadRequest {

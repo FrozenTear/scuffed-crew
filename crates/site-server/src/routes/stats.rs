@@ -14,8 +14,9 @@ use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
     MemberSettingsResponse, NAME_RECOGNIZER_ID_ERROR, PaginationParams, RECOGNIZER_ID_ERROR,
     SUSPECT_FIELDS_ERROR, SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
-    UpdateMemberSettingsRequest, resolve_name_recognizer, resolve_recognizer,
-    resolve_suspect_fields,
+    UPLOAD_HERO_UNKNOWN, UpdateMemberSettingsRequest, is_upload_hero_unknown,
+    resolve_name_recognizer, resolve_recognizer, resolve_suspect_fields, validate_deleted_session,
+    validate_upload_entry,
 };
 use scuffed_types::{
     STATS_UPLOAD_MAX_DELETED_SESSIONS, STATS_UPLOAD_MAX_MATCHES, hero_key_to_name,
@@ -33,9 +34,12 @@ use crate::state::AppState;
 /// 0.5.0-alpha.1 and alpha.2 trackers on the new reader send the pack key
 /// (`wrecking-ball`, `ana`) as the hero and guess the role from it, which
 /// gives Damage for hyphenated tanks and supports. Leaderboards and hero
-/// stats group on the exact string, so `ana` and `Ana` split. A name that is
-/// not a known hero (including `Unknown`) is stored as sent.
+/// stats group on the exact string, so `ana` and `Ana` split. `Unknown` in
+/// any case is stored as `Unknown`, matching the rows already in live data.
 fn normalize_hero(hero: String, role: String) -> (String, String) {
+    if is_upload_hero_unknown(&hero) {
+        return (UPLOAD_HERO_UNKNOWN.to_string(), role);
+    }
     let Some(display) = hero_key_to_name(&hero) else {
         return (hero, role);
     };
@@ -57,6 +61,10 @@ impl IntoResponse for UploadReject {
     fn into_response(self) -> Response {
         *self.0
     }
+}
+
+fn bad_request(error: String) -> UploadReject {
+    (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into()
 }
 
 fn batch_over_cap(body: &StatsUploadBody) -> bool {
@@ -101,6 +109,19 @@ pub(crate) async fn upload_stats(
     // and a later entry must not leave the earlier ones committed.
     // deleted_sessions is not applied either.
     // `recognizer` is checked first. A match that fails both reports that error.
+    //
+    // After those, each match must pass `validate_upload_entry` (API-3,
+    // DB19): 64-character strings, a known hero or `Unknown`, a played_at
+    // window, and
+    // numeric ceilings. The message keeps the `matches[n]: ` prefix so the
+    // tracker can isolate the one bad row. A long deleted_sessions entry is
+    // a 400 for the whole request.
+    for (i, session_id) in body.deleted_sessions.iter().enumerate() {
+        if let Err(message) = validate_deleted_session(session_id) {
+            return Err(bad_request(format!("deleted_sessions[{i}]: {message}")));
+        }
+    }
+    let now = chrono::Utc::now();
     let mut recognizers = Vec::with_capacity(body.matches.len());
     let mut name_recognizers = Vec::with_capacity(body.matches.len());
     let mut suspect_lists = Vec::with_capacity(body.matches.len());
@@ -140,6 +161,9 @@ pub(crate) async fn upload_stats(
                 )
                     .into());
             }
+        }
+        if let Err(message) = validate_upload_entry(&entry.entry, now) {
+            return Err(bad_request(format!("matches[{i}]: {message}")));
         }
     }
 
@@ -1052,6 +1076,208 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(rows.len(), 1);
+    }
+
+    /// Post `bad` after a valid sibling and assert a 400 naming `matches[1]`
+    /// with `message`, and that neither row was stored.
+    async fn assert_entry_rejected(bad: serde_json::Value, message: &str) {
+        let (state, member_id, token) = daemon().await;
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-ok", 3), bad] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{parsed}");
+        assert_eq!(parsed["error"], format!("matches[1]: {message}"));
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "rejected batch must store nothing");
+    }
+
+    const PLAYED_AT_ERROR: &str = "played_at must be on or after 2022-10-04T00:00:00Z and no more than 24 hours after server time";
+
+    #[tokio::test]
+    async fn upload_future_played_at_is_400_and_stores_nothing() {
+        let mut bad = match_object("sess-future", 1);
+        bad["played_at"] = serde_json::json!("2099-01-01T00:00:00Z");
+        assert_entry_rejected(bad, PLAYED_AT_ERROR).await;
+
+        let mut tomorrow_plus = match_object("sess-future2", 1);
+        tomorrow_plus["played_at"] =
+            serde_json::json!((Utc::now() + chrono::Duration::hours(25)).to_rfc3339());
+        assert_entry_rejected(tomorrow_plus, PLAYED_AT_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn upload_played_at_before_overwatch_2_is_400() {
+        let mut bad = match_object("sess-old", 1);
+        bad["played_at"] = serde_json::json!("2022-10-03T23:59:59Z");
+        assert_entry_rejected(bad, PLAYED_AT_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn upload_non_hero_is_400() {
+        for hero in ["Totally Real Hero", "Unknown Hero", ""] {
+            let mut bad = match_object("sess-hero", 1);
+            bad["hero"] = serde_json::json!(hero);
+            assert_entry_rejected(bad, "hero must be a known hero or Unknown").await;
+        }
+    }
+
+    /// Regression: 0.4.x and 0.5.0 trackers send `Unknown` when no hero was
+    /// read. Those rows are stored (as `Unknown`, whatever the case), not
+    /// rejected.
+    #[tokio::test]
+    async fn upload_with_hero_unknown_is_stored() {
+        let (state, member_id, token) = daemon().await;
+        let mut upper = match_object("sess-unknown", 2);
+        upper["hero"] = serde_json::json!("Unknown");
+        let mut lower = match_object("sess-unknown-lower", 2);
+        lower["hero"] = serde_json::json!("unknown");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [upper, lower] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 2, "{parsed}");
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.hero == "Unknown"), "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_with_hero_doctrine_is_stored() {
+        let (state, member_id, token) = daemon().await;
+        let mut row = match_object("sess-doctrine", 2);
+        row["hero"] = serde_json::json!("doctrine");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [row] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 1, "{parsed}");
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hero, "Doctrine");
+    }
+
+    #[tokio::test]
+    async fn upload_huge_damage_and_healing_are_400() {
+        for (field, max) in [
+            ("damage", 200_000u32),
+            ("healing", 200_000),
+            ("mitigation", 200_000),
+            ("elims", 999),
+            ("assists", 999),
+            ("deaths", 50),
+        ] {
+            let mut bad = match_object("sess-num", 1);
+            bad[field] = serde_json::json!(u32::MAX);
+            assert_entry_rejected(bad, &format!("{field} must be at most {max}")).await;
+            let mut over = match_object("sess-num", 1);
+            over[field] = serde_json::json!(max + 1);
+            assert_entry_rejected(over, &format!("{field} must be at most {max}")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_strings_over_64_characters_are_400() {
+        let long = "x".repeat(65);
+        for field in ["session_id", "map_name", "game_mode", "role", "outcome"] {
+            let mut bad = match_object("sess-long", 1);
+            bad[field] = serde_json::json!(long);
+            assert_entry_rejected(bad, &format!("{field} must be at most 64 characters")).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_long_deleted_session_is_400_and_keeps_rows() {
+        let (state, member_id, token) = daemon().await;
+        let (status, _) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-keep", 4)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({
+                "matches": [match_object("sess-new", 1)],
+                "deleted_sessions": ["sess-keep", "y".repeat(65)],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(
+            parsed["error"],
+            "deleted_sessions[1]: session id must be at most 64 characters"
+        );
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "nothing deleted or inserted");
+        assert_eq!(rows[0].session_id, "sess-keep");
+    }
+
+    #[tokio::test]
+    async fn upload_values_at_the_limits_are_stored() {
+        let (state, member_id, token) = daemon().await;
+        let mut edge = match_object(&"s".repeat(64), 999);
+        edge["map_name"] = serde_json::json!("\u{e9}".repeat(64));
+        edge["hero"] = serde_json::json!("wrecking-ball");
+        edge["assists"] = serde_json::json!(999);
+        edge["deaths"] = serde_json::json!(50);
+        edge["damage"] = serde_json::json!(200_000);
+        edge["healing"] = serde_json::json!(200_000);
+        edge["mitigation"] = serde_json::json!(200_000);
+        edge["played_at"] =
+            serde_json::json!((Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
+        let mut floor = match_object("sess-floor", 1);
+        floor["played_at"] = serde_json::json!("2022-10-04T00:00:00Z");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({
+                "matches": [edge, floor],
+                "deleted_sessions": ["d".repeat(64)],
+            }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 2);
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        let edge_row = rows
+            .iter()
+            .find(|r| r.session_id == "s".repeat(64))
+            .unwrap();
+        assert_eq!(edge_row.damage, 200_000);
+        assert_eq!(edge_row.hero, "Wrecking Ball");
     }
 
     #[tokio::test]
