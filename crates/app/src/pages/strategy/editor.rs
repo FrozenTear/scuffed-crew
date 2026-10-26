@@ -28,7 +28,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
 
-use super::load_error::strategy_load_error;
+use super::load_error::{is_retrying, strategy_load_error};
+use crate::components::retry_label;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::strategy::{
@@ -460,17 +461,21 @@ pub fn StrategyEditor(id: String) -> Element {
         },
         Some(Err(err)) => {
             let shown = strategy_load_error(err);
+            let retrying = is_retrying(*strategy_resource.state().read());
+            let label = retry_label(retrying);
             rsx! {
                 div {
                     style: "display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; height: 100vh; color: var(--danger);",
                     role: "alert",
+                    aria_busy: if retrying { "true" },
                     "{shown.message}"
                     if shown.retry {
                         button {
                             r#type: "button",
                             class: "fetch-error__retry is-compact",
+                            disabled: retrying,
                             onclick: move |_| refresh += 1,
-                            "Retry"
+                            "{label}"
                         }
                     }
                 }
