@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 
 use crate::components::{AccessDenied, Toast, use_toast};
+use crate::state::site_settings::SiteSettingsState;
 use crate::state::use_auth;
 use crate::theme::tokens::{BG_DARK, BRAND_ACCENT_DARK, BRAND_ACCENT_LIGHT};
 use scuffed_api_client::ApiClient;
@@ -62,6 +63,9 @@ pub fn AdminSettings() -> Element {
     let mut loaded = use_signal(|| false);
     let mut load_error = use_signal(|| Option::<String>::None);
     let mut reload_tick = use_signal(|| 0u32);
+    // APP3: the shared settings context feeds nav, brand accent, org name and
+    // the strategies gate. `try_` so a mount without `App` still renders.
+    let site_settings = try_use_context::<SiteSettingsState>();
 
     let mut org_name = use_signal(String::new);
     let mut site_description = use_signal(String::new);
@@ -177,6 +181,9 @@ pub fn AdminSettings() -> Element {
             {
                 Ok(s) => {
                     let committed = toggles_from_settings(&s);
+                    if let Some(site_settings) = site_settings {
+                        site_settings.apply_saved(s.clone());
+                    }
                     // Keep UI in sync with what the server actually stored.
                     public_layout.set(s.public_layout);
                     home_shell.set(s.home_shell);
@@ -1087,6 +1094,22 @@ mod tests {
                 hits.push(rel.display().to_string().replace('\\', "/"));
             }
         }
+    }
+
+    /// APP3: without this the public nav, accent, org name and the strategies
+    /// gate keep the old values until a reload.
+    #[test]
+    fn a_successful_save_updates_the_shared_settings() {
+        let src = include_str!("settings.rs");
+        let save = src
+            .split(".put_json::<_, SiteSettings>(\"/api/settings\", &body)")
+            .nth(1)
+            .expect("settings PUT");
+        let ok_arm = &save[..save.find("Err(e) =>").expect("error arm")];
+        assert!(
+            ok_arm.contains("site_settings.apply_saved(s.clone())"),
+            "a successful save must write the saved settings into the context"
+        );
     }
 
     #[test]
