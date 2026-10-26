@@ -15,9 +15,16 @@
 //!   row that resolves to Sombra is changed, so old Sombra games keep the
 //!   role they were played under.
 //! - Paged by record id and idempotent. A second pass writes nothing.
+//! - Rewrites go out in batches of [`HERO_BACKFILL_WRITE_BATCH`] rows, one
+//!   transaction per batch, instead of one query per row. Rows that share a
+//!   target `(hero, role)` share one `UPDATE` over their record ids.
 //! - A finished pass records `data_migration:db4_hero_keys`, so later boots
 //!   read that one record and never scan `personal_match` again. Uploads
 //!   have been normalized since #222, so no new pack-key rows can appear.
+
+#[cfg(test)]
+use std::cell::Cell;
+use std::fmt::Write as _;
 
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
@@ -35,6 +42,100 @@ const NEVER_RESTAMP_HERO: &str = "Sombra";
 
 /// Record key in `data_migration` written once the pass has finished.
 pub(super) const DB4_MARKER: &str = "db4_hero_keys";
+
+/// Rows rewritten per write transaction. A page of
+/// [`super::migration_batch_size`] rows is written in chunks of this size.
+const HERO_BACKFILL_WRITE_BATCH: usize = 250;
+
+#[cfg(test)]
+thread_local! {
+    static WRITE_BATCH_OVERRIDE: Cell<Option<usize>> = const { Cell::new(None) };
+    static WRITE_BATCHES: Cell<u64> = const { Cell::new(0) };
+}
+
+fn write_batch_size() -> usize {
+    #[cfg(test)]
+    {
+        if let Some(n) = WRITE_BATCH_OVERRIDE.with(|c| c.get()) {
+            return n.max(1);
+        }
+    }
+    HERO_BACKFILL_WRITE_BATCH
+}
+
+#[cfg(test)]
+struct WriteBatchGuard;
+
+#[cfg(test)]
+impl Drop for WriteBatchGuard {
+    fn drop(&mut self) {
+        WRITE_BATCH_OVERRIDE.with(|c| c.set(None));
+    }
+}
+
+#[cfg(test)]
+fn set_write_batch_size(n: usize) -> WriteBatchGuard {
+    WRITE_BATCH_OVERRIDE.with(|c| c.set(Some(n)));
+    WriteBatchGuard
+}
+
+#[cfg(test)]
+fn reset_write_batches() {
+    WRITE_BATCHES.with(|n| n.set(0));
+}
+
+#[cfg(test)]
+fn write_batches() -> u64 {
+    WRITE_BATCHES.with(|n| n.get())
+}
+
+/// One row to rewrite: its record id and the new `(hero, role)`.
+struct Rewrite {
+    rid: RecordId,
+    hero: &'static str,
+    role: String,
+}
+
+/// Writes one batch of rewrites in a single transaction.
+///
+/// Rows are grouped by target `(hero, role)` in first-seen order and each
+/// group is one `UPDATE $rids SET hero, role`. `UPDATE` never creates a
+/// record, so a row deleted since the page was read stays deleted, the same
+/// as the old per-row `UPDATE $rid`.
+async fn write_rewrites(client: &Surreal<Any>, batch: &[Rewrite]) -> DbResult<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let mut groups: Vec<(&'static str, &str, Vec<RecordId>)> = Vec::new();
+    for r in batch {
+        match groups
+            .iter_mut()
+            .find(|(hero, role, _)| *hero == r.hero && *role == r.role)
+        {
+            Some((_, _, rids)) => rids.push(r.rid.clone()),
+            None => groups.push((r.hero, r.role.as_str(), vec![r.rid.clone()])),
+        }
+    }
+    let mut sql = String::from("BEGIN TRANSACTION;\n");
+    for i in 0..groups.len() {
+        let _ = writeln!(
+            sql,
+            "UPDATE $rids_{i} SET hero = $hero_{i}, role = $role_{i};"
+        );
+    }
+    sql.push_str("COMMIT TRANSACTION;");
+    let mut query = client.query(sql);
+    for (i, (hero, role, rids)) in groups.into_iter().enumerate() {
+        query = query
+            .bind((format!("rids_{i}"), rids))
+            .bind((format!("hero_{i}"), hero.to_string()))
+            .bind((format!("role_{i}"), role.to_string()));
+    }
+    query.await?.check()?;
+    #[cfg(test)]
+    WRITE_BATCHES.with(|n| n.set(n.get().saturating_add(1)));
+    Ok(())
+}
 
 #[derive(Debug, serde::Deserialize, SurrealValue)]
 struct HeroRow {
@@ -83,7 +184,7 @@ pub(crate) async fn backfill_personal_match_hero_keys(
         .check()?;
     let done: Vec<RecordId> = res.take(0)?;
     if !done.is_empty() {
-        tracing::debug!("personal_match hero key backfill already done; skipping");
+        tracing::info!("personal_match hero key backfill already done; skipping");
         return Ok((0, 0));
     }
     let (scanned, updated) = hero_backfill_pass(client).await?;
@@ -136,19 +237,21 @@ pub(super) async fn hero_backfill_pass(client: &Surreal<Any>) -> DbResult<(u64, 
                 ));
             }
         }
+        let mut pending: Vec<Rewrite> = Vec::new();
         for row in rows {
             scanned += 1;
             let Some((hero, role)) = backfill_target(&row.hero, &row.role) else {
                 continue;
             };
-            client
-                .query("UPDATE $rid SET hero = $hero, role = $role")
-                .bind(("rid", row.id))
-                .bind(("hero", hero.to_string()))
-                .bind(("role", role))
-                .await?
-                .check()?;
-            updated += 1;
+            pending.push(Rewrite {
+                rid: row.id,
+                hero,
+                role,
+            });
+        }
+        for chunk in pending.chunks(write_batch_size()) {
+            write_rewrites(client, chunk).await?;
+            updated += chunk.len() as u64;
         }
         after = Some(last_id);
     }
@@ -162,7 +265,10 @@ pub(super) async fn hero_backfill_pass(client: &Surreal<Any>) -> DbResult<(u64, 
 
 #[cfg(test)]
 mod tests {
-    use super::{backfill_personal_match_hero_keys, backfill_target, DB4_MARKER};
+    use super::{
+        backfill_personal_match_hero_keys, backfill_target, reset_write_batches,
+        set_write_batch_size, write_batches, DB4_MARKER,
+    };
     use crate::migrations::run_migrations;
     use crate::queries::personal_stats::{
         data_pass_selects, reset_data_pass_selects, set_migration_batch_size,
@@ -397,5 +503,176 @@ mod tests {
         assert_eq!(data_pass_selects(), 0);
         let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
         assert_eq!(by_session(&rows, "s1"), pair("ana", "Damage"));
+    }
+
+    /// Records `(level, message)` of every event while installed.
+    type Events = std::sync::Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>;
+
+    #[derive(Clone, Default)]
+    struct Capture(Events);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            struct Message(String);
+            impl tracing::field::Visit for Message {
+                fn record_debug(
+                    &mut self,
+                    field: &tracing::field::Field,
+                    value: &dyn std::fmt::Debug,
+                ) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut msg = Message(String::new());
+            event.record(&mut msg);
+            self.0
+                .lock()
+                .unwrap()
+                .push((*event.metadata().level(), msg.0));
+        }
+    }
+
+    #[tokio::test]
+    async fn marker_skip_logs_at_info() {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let db = test_db().await;
+        assert_eq!(marker_count(&db).await, 1);
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        let (scanned, updated) = {
+            let _guard = tracing::subscriber::set_default(subscriber);
+            backfill_personal_match_hero_keys(&db.client).await.unwrap()
+        };
+        assert_eq!((scanned, updated), (0, 0));
+        let events = capture.0.lock().unwrap().clone();
+        let skip: Vec<_> = events
+            .iter()
+            .filter(|(_, m)| m.contains("hero key backfill already done"))
+            .collect();
+        assert_eq!(skip.len(), 1, "{events:?}");
+        assert_eq!(skip[0].0, tracing::Level::INFO, "{events:?}");
+    }
+
+    /// Rewrites go out in write batches. The last batch may be short and an
+    /// exact multiple leaves no empty trailing batch. Every row is rewritten
+    /// with the table role whichever batch it lands in.
+    #[tokio::test]
+    async fn rewrites_are_batched_across_write_and_page_boundaries() {
+        let keys = [
+            ("ana", "Ana", "Support"),
+            ("wrecking-ball", "Wrecking Ball", "Tank"),
+            ("dva", "D.Va", "Tank"),
+            ("soldier-76", "Soldier: 76", "Damage"),
+        ];
+        // (rows, write batch, page size, expected write batches)
+        for (n, write, page, expected_batches) in [
+            (5usize, 3usize, 2_000u32, 2u64),
+            (6, 3, 2_000, 2),
+            (7, 3, 2_000, 3),
+            (1, 3, 2_000, 1),
+            (7, 1, 2_000, 7),
+            // Pages of 4 split 7 rows into 4 + 3: batches of 3 give 2 + 1.
+            (7, 3, 4, 3),
+        ] {
+            let db = test_db().await;
+            let rows: Vec<_> = (0..n)
+                .map(|i| {
+                    let (key, _, _) = keys[i % keys.len()];
+                    row(&format!("s{i:02}"), key, "Damage")
+                })
+                .collect();
+            db.upsert_personal_matches("m1", &rows).await.unwrap();
+            forget_marker(&db).await;
+            let _write = set_write_batch_size(write);
+            let _page = set_migration_batch_size(page);
+            reset_write_batches();
+            let (scanned, updated) = backfill_personal_match_hero_keys(&db.client).await.unwrap();
+            let case = format!("n={n} write={write} page={page}");
+            assert_eq!((scanned, updated), (n as u64, n as u64), "{case}");
+            assert_eq!(write_batches(), expected_batches, "{case}");
+
+            let stored = db.list_personal_matches("m1", 50, 0).await.unwrap();
+            assert_eq!(stored.len(), n, "{case}");
+            for i in 0..n {
+                let (_, display, role) = keys[i % keys.len()];
+                assert_eq!(
+                    by_session(&stored, &format!("s{i:02}")),
+                    pair(display, role),
+                    "{case} s{i:02}"
+                );
+            }
+
+            // A second pass writes nothing.
+            reset_write_batches();
+            let again = super::hero_backfill_pass(&db.client).await.unwrap();
+            assert_eq!(again, (0, 0), "{case}");
+            assert_eq!(write_batches(), 0, "{case}");
+        }
+    }
+
+    /// Every Sombra spelling is scanned but never written: the stored record
+    /// is identical before and after, every field included, while the pack
+    /// keys around it are rewritten in the same batches.
+    #[tokio::test]
+    async fn sombra_rows_are_byte_for_byte_untouched() {
+        let db = test_db().await;
+        let sombras = [
+            ("so-1", "sombra", "Damage"),
+            ("so-2", "Sombra", "Support"),
+            ("so-3", "SOMBRA", ""),
+            ("so-4", " Sombra ", "Tank"),
+            ("so-5", "sombra.png", "Damage"),
+            ("so-6", "Sombra", "Damage"),
+        ];
+        let mut rows = Vec::new();
+        for (i, (sid, hero, role)) in sombras.iter().enumerate() {
+            rows.push(row(sid, hero, role));
+            rows.push(row(&format!("ana-{i}"), "ana", "Damage"));
+        }
+        db.upsert_personal_matches("m1", &rows).await.unwrap();
+        let sids: Vec<String> = sombras.iter().map(|(s, _, _)| s.to_string()).collect();
+
+        async fn snapshot(db: &Database, sids: &[String]) -> surrealdb::types::Value {
+            let mut res = db
+                .client
+                .query("SELECT * FROM personal_match WHERE session_id IN $sids ORDER BY id")
+                .bind(("sids", sids.to_vec()))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            res.take(0).unwrap()
+        }
+        let before = snapshot(&db, &sids).await;
+
+        forget_marker(&db).await;
+        // Small pages and batches so Sombra rows sit on both sides of each
+        // boundary.
+        let _write = set_write_batch_size(2);
+        let _page = set_migration_batch_size(3);
+        let (scanned, updated) = backfill_personal_match_hero_keys(&db.client).await.unwrap();
+        assert_eq!(updated, 6, "the six ana rows only");
+        // "Sombra" itself is canonical and skipped by the SELECT.
+        assert_eq!(scanned, 6 + 4);
+
+        let after = snapshot(&db, &sids).await;
+        assert_eq!(before, after);
+        let stored = db.list_personal_matches("m1", 50, 0).await.unwrap();
+        for (sid, hero, role) in sombras {
+            assert_eq!(by_session(&stored, sid), pair(hero, role), "{sid}");
+        }
+        for i in 0..6 {
+            assert_eq!(
+                by_session(&stored, &format!("ana-{i}")),
+                pair("Ana", "Support")
+            );
+        }
     }
 }

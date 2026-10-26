@@ -237,6 +237,147 @@ fn stat_averages_sql() -> String {
     .join(", ")
 }
 
+/// Sums and included counts behind each mean in [`stat_averages_sql`], same
+/// predicates. Hero stats fold case variants together before dividing, so
+/// they need the parts rather than the per-group mean.
+fn stat_sums_sql() -> String {
+    fn one(name: &str, column: &str, predicate: &str) -> String {
+        format!(
+            "<float>math::sum(IF {predicate} THEN {column} ELSE 0 END) AS sum_{name}, \
+             math::sum(IF {predicate} THEN 1 ELSE 0 END) AS n_{name}"
+        )
+    }
+    [
+        one("elims", "elims", ELIMS_PLAUSIBLE_SQL),
+        one("deaths", "deaths", DEATHS_PLAUSIBLE_SQL),
+        one(
+            "damage",
+            "damage",
+            "suspect_fields IS NONE OR NOT (suspect_fields CONTAINS 'dmg')",
+        ),
+        one(
+            "healing",
+            "healing",
+            "suspect_fields IS NONE OR NOT (suspect_fields CONTAINS 'h')",
+        ),
+    ]
+    .join(",\n")
+}
+
+/// One stored hero spelling from [`Database::get_hero_stats_in`].
+#[derive(Debug, Clone, Deserialize, SurrealValue)]
+struct HeroSumRow {
+    hero: String,
+    matches: u32,
+    wins: u32,
+    losses: u32,
+    sum_elims: f64,
+    n_elims: u32,
+    sum_deaths: f64,
+    n_deaths: u32,
+    sum_damage: f64,
+    n_damage: u32,
+    sum_healing: f64,
+    n_healing: u32,
+}
+
+/// Read-time key for grouping hero spellings: Unicode lowercase only.
+/// Whitespace, punctuation and pack keys (`wrecking-ball`) are not folded.
+fn hero_case_key(hero: &str) -> String {
+    hero.to_lowercase()
+}
+
+/// Name shown for a group of case variants. A canonical display name
+/// ([`scuffed_types::HERO_NAMES`] or `Unknown`) in the group wins. Otherwise
+/// the spelling with the most matches, ties to the smallest string.
+fn hero_group_label(variants: &[(String, u32)]) -> String {
+    let canonical = variants.iter().find(|(hero, _)| {
+        scuffed_types::HERO_NAMES
+            .iter()
+            .any(|h| h.display == hero.as_str())
+            || hero == scuffed_types::UPLOAD_HERO_UNKNOWN
+    });
+    if let Some((hero, _)) = canonical {
+        return hero.clone();
+    }
+    variants
+        .iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .map(|(hero, _)| hero.clone())
+        .unwrap_or_default()
+}
+
+/// Folds per-spelling rows into one [`HeroStats`] per case-insensitive hero.
+///
+/// Counts add up. Each mean is the folded sum over the folded included
+/// count, so a merged hero averages exactly as if its rows had one spelling.
+/// An empty included set is 0. Draws stay `matches - wins - losses`.
+fn fold_hero_case(rows: Vec<HeroSumRow>) -> Vec<HeroStats> {
+    struct Group {
+        variants: Vec<(String, u32)>,
+        total: HeroSumRow,
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Group> = HashMap::new();
+    for row in rows {
+        let key = hero_case_key(&row.hero);
+        match groups.get_mut(&key) {
+            Some(g) => {
+                g.variants.push((row.hero.clone(), row.matches));
+                let t = &mut g.total;
+                t.matches = t.matches.saturating_add(row.matches);
+                t.wins = t.wins.saturating_add(row.wins);
+                t.losses = t.losses.saturating_add(row.losses);
+                t.sum_elims += row.sum_elims;
+                t.n_elims = t.n_elims.saturating_add(row.n_elims);
+                t.sum_deaths += row.sum_deaths;
+                t.n_deaths = t.n_deaths.saturating_add(row.n_deaths);
+                t.sum_damage += row.sum_damage;
+                t.n_damage = t.n_damage.saturating_add(row.n_damage);
+                t.sum_healing += row.sum_healing;
+                t.n_healing = t.n_healing.saturating_add(row.n_healing);
+            }
+            None => {
+                order.push(key.clone());
+                groups.insert(
+                    key,
+                    Group {
+                        variants: vec![(row.hero.clone(), row.matches)],
+                        total: row,
+                    },
+                );
+            }
+        }
+    }
+    fn mean(sum: f64, n: u32) -> f64 {
+        if n == 0 {
+            0.0
+        } else {
+            sum / f64::from(n)
+        }
+    }
+    let mut out: Vec<HeroStats> = order
+        .into_iter()
+        .filter_map(|key| groups.remove(&key))
+        .map(|g| {
+            let t = g.total;
+            HeroStats {
+                hero: hero_group_label(&g.variants),
+                matches: t.matches,
+                wins: t.wins,
+                losses: t.losses,
+                draws: t.matches.saturating_sub(t.wins).saturating_sub(t.losses),
+                avg_elims: mean(t.sum_elims, t.n_elims),
+                avg_deaths: mean(t.sum_deaths, t.n_deaths),
+                avg_damage: mean(t.sum_damage, t.n_damage),
+                avg_healing: mean(t.sum_healing, t.n_healing),
+            }
+        })
+        .collect();
+    out.sort_by(|a, b| b.matches.cmp(&a.matches).then_with(|| a.hero.cmp(&b.hero)));
+    out
+}
+
 fn bind_stat_caps(q: surrealdb::method::Query<'_, Any>) -> surrealdb::method::Query<'_, Any> {
     q.bind(("max_elims", scuffed_types::PLAUSIBLE_ELIMS_MAX))
         .bind(("max_deaths", scuffed_types::PLAUSIBLE_DEATHS_MAX))
@@ -523,32 +664,22 @@ impl Database {
     /// Per-hero aggregates, optionally restricted to a season window.
     ///
     /// Match and win/loss/draw counts include every row in the window. The
-    /// averages use [`stat_averages_sql`]: elims above
+    /// averages use the same filters as [`stat_averages_sql`]: elims above
     /// [`scuffed_types::PLAUSIBLE_ELIMS_MAX`] and deaths above
     /// [`scuffed_types::PLAUSIBLE_DEATHS_MAX`] are left out, and so is any
     /// counter named in `suspect_fields`. Stored rows are not updated.
+    ///
+    /// Heroes are grouped case-insensitively at read time (see
+    /// [`fold_hero_case`]), so `sombra` and `Sombra` are one entry. Stored
+    /// hero strings are left exactly as uploaded. Order: `matches`
+    /// descending, then `hero` ascending.
     pub async fn get_hero_stats_in(
         &self,
         member_id: &str,
         season: Option<SeasonWindow>,
     ) -> DbResult<Vec<HeroStats>> {
         with_timeout(async {
-            #[derive(Deserialize, SurrealValue)]
-            struct HeroRow {
-                hero: String,
-                matches: u32,
-                wins: u32,
-                avg_elims: f64,
-                avg_deaths: f64,
-                avg_damage: f64,
-                avg_healing: f64,
-            }
-            #[derive(Deserialize, SurrealValue)]
-            struct Cnt {
-                count: u32,
-            }
-
-            let averages = stat_averages_sql();
+            let sums = stat_sums_sql();
             let mut q = self
                 .client
                 .query(format!(
@@ -557,11 +688,11 @@ impl Database {
                         hero,
                         count() AS matches,
                         math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
-                        {averages}
+                        math::sum(IF outcome = 'defeat' THEN 1 ELSE 0 END) AS losses,
+                        {sums}
                     FROM personal_match
                     WHERE member_id = $mid{}
                     GROUP BY hero
-                    ORDER BY matches DESC
                 "#,
                     season_filter(season)
                 ))
@@ -573,42 +704,8 @@ impl Database {
                     .bind(("season_end", SurrealDatetime::from(end)));
             }
             let mut result = q.await?;
-            let rows: Vec<HeroRow> = result.take(0)?;
-
-            let mut hero_stats = Vec::with_capacity(rows.len());
-            for row in rows {
-                let mut lq = self
-                    .client
-                    .query(format!(
-                        "SELECT count() FROM personal_match WHERE member_id = $mid AND hero = $hero AND outcome = 'defeat'{} GROUP ALL",
-                        season_filter(season)
-                    ))
-                    .bind(("mid", member_id.to_string()))
-                    .bind(("hero", row.hero.clone()));
-                if let Some((start, end)) = season {
-                    lq = lq
-                        .bind(("season_start", SurrealDatetime::from(start)))
-                        .bind(("season_end", SurrealDatetime::from(end)));
-                }
-                let mut losses_result = lq.await?;
-                let losses_vec: Vec<Cnt> = losses_result.take(0)?;
-                let losses = losses_vec.first().map(|c| c.count).unwrap_or(0);
-                let draws = row.matches.saturating_sub(row.wins).saturating_sub(losses);
-
-                hero_stats.push(HeroStats {
-                    hero: row.hero,
-                    matches: row.matches,
-                    wins: row.wins,
-                    losses,
-                    draws,
-                    avg_elims: row.avg_elims,
-                    avg_deaths: row.avg_deaths,
-                    avg_damage: row.avg_damage,
-                    avg_healing: row.avg_healing,
-                });
-            }
-
-            Ok(hero_stats)
+            let rows: Vec<HeroSumRow> = result.take(0)?;
+            Ok(fold_hero_case(rows))
         })
         .await
     }
@@ -3480,5 +3577,106 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(winrate.len(), 2);
+    }
+
+    #[test]
+    fn hero_group_label_prefers_canonical_then_most_played() {
+        let v = |xs: &[(&str, u32)]| -> Vec<(String, u32)> {
+            xs.iter().map(|(h, n)| (h.to_string(), *n)).collect()
+        };
+        assert_eq!(
+            super::hero_group_label(&v(&[("sombra", 5), ("Sombra", 1), ("SOMBRA", 2)])),
+            "Sombra"
+        );
+        assert_eq!(
+            super::hero_group_label(&v(&[("unknown", 4), ("Unknown", 1)])),
+            "Unknown"
+        );
+        assert_eq!(
+            super::hero_group_label(&v(&[("mystery", 1), ("MYSTERY", 2)])),
+            "MYSTERY"
+        );
+        assert_eq!(super::hero_group_label(&v(&[("b", 1), ("B", 1)])), "B");
+    }
+
+    /// Hero stats fold case variants into one hero at read time. Counts add,
+    /// means are taken over the merged included rows, and the stored hero
+    /// strings stay exactly as uploaded.
+    #[tokio::test]
+    async fn hero_stats_group_case_variants_without_touching_rows() {
+        let db = test_db().await;
+        let mid = "case-m";
+        let mut rows = Vec::new();
+        let mut push = |sid: &str, hero: &str, outcome: &str, elims: u32, suspect: &[&str]| {
+            let mut m = entry(sid, outcome, elims);
+            m.member_id = mid.into();
+            m.hero = hero.into();
+            m.role = "Damage".into();
+            m.suspect_fields = suspect.iter().map(|s| s.to_string()).collect();
+            rows.push(m);
+        };
+        push("c1", "Sombra", "victory", 10, &[]);
+        push("c2", "sombra", "defeat", 20, &["e"]);
+        push("c3", "SOMBRA", "draw", 30, &[]);
+        push("c4", "Ana", "victory", 5, &[]);
+        push("c5", "ana", "defeat", 7, &[]);
+        push("c6", "mystery", "victory", 1, &[]);
+        push("c7", "MYSTERY", "victory", 3, &[]);
+        push("c8", "MYSTERY", "defeat", 5, &[]);
+        push("c9", "wrecking-ball", "victory", 2, &[]);
+        push("c10", "Wrecking Ball", "victory", 4, &[]);
+        db.upsert_personal_matches(mid, &rows).await.unwrap();
+        let before = db.list_personal_matches(mid, 50, 0).await.unwrap();
+
+        let heroes = db.get_hero_stats(mid).await.unwrap();
+        let names: Vec<&str> = heroes.iter().map(|h| h.hero.as_str()).collect();
+        assert_eq!(
+            names,
+            ["MYSTERY", "Sombra", "Ana", "Wrecking Ball", "wrecking-ball"],
+            "matches desc, then name; only case variants merge"
+        );
+        assert_eq!(heroes.iter().map(|h| h.matches).sum::<u32>(), 10);
+
+        let sombra = &heroes[1];
+        assert_eq!(
+            (sombra.matches, sombra.wins, sombra.losses, sombra.draws),
+            (3, 1, 1, 1)
+        );
+        // elims 10 and 30. 20 is suspect `e` on the lowercase row.
+        close(sombra.avg_elims, 20.0);
+        close(sombra.avg_deaths, 2.0);
+        close(sombra.avg_damage, 3000.0);
+
+        let mystery = &heroes[0];
+        assert_eq!(
+            (mystery.matches, mystery.wins, mystery.losses, mystery.draws),
+            (3, 2, 1, 0)
+        );
+        close(mystery.avg_elims, 3.0);
+
+        let ana = &heroes[2];
+        assert_eq!((ana.matches, ana.wins, ana.losses), (2, 1, 1));
+        close(ana.avg_elims, 6.0);
+
+        // Same answer through the season-window path.
+        let window = Some((
+            Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2027, 1, 1, 0, 0, 0).unwrap(),
+        ));
+        let in_season = db.get_hero_stats_in(mid, window).await.unwrap();
+        assert_eq!(in_season.len(), heroes.len());
+        assert_eq!(in_season[1].hero, "Sombra");
+        assert_eq!(in_season[1].matches, 3);
+
+        // Read-time only: every stored spelling is unchanged.
+        let after = db.list_personal_matches(mid, 50, 0).await.unwrap();
+        assert_eq!(before.len(), after.len());
+        for b in &before {
+            let a = after.iter().find(|a| a.session_id == b.session_id).unwrap();
+            assert_eq!((&a.hero, &a.role), (&b.hero, &b.role), "{}", b.session_id);
+        }
+        let mut stored: Vec<&str> = after.iter().map(|m| m.hero.as_str()).collect();
+        stored.sort_unstable();
+        assert!(stored.contains(&"sombra") && stored.contains(&"SOMBRA"));
     }
 }
