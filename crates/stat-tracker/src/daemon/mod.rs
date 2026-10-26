@@ -7,6 +7,8 @@
 
 mod debug_dumps;
 mod poll;
+mod sync_sched;
 
 pub(crate) use debug_dumps::*;
 pub(crate) use poll::*;
+pub(crate) use sync_sched::*;

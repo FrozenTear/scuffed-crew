@@ -174,13 +174,12 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         run_loop.contains("apply_queued_commands("),
         "the command tick must run the extracted command body"
     );
-    let settle_fn = src
-        .find("fn schedule_settled_unknown(")
-        .expect("settle helper");
-    let settle_body = src[settle_fn..]
-        .split("\nasync fn apply_queued_commands(")
-        .next()
-        .unwrap();
+    // In src/daemon/sync_sched.rs since 0.6 S2: found by name, wherever it lives.
+    let settle_body = fn_source("schedule_settled_unknown");
+    assert!(
+        !settle_body.contains("\nfn ") && !settle_body.contains("\nasync fn "),
+        "settle helper: the slice is that one function"
+    );
     assert!(
         settle_body.contains("settle_closed_unknown.take()"),
         "the command tick must consume the closed session id"

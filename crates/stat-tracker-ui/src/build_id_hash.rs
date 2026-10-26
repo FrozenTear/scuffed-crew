@@ -66,9 +66,9 @@ pub struct BuildId {
 /// workspace crate the GUI links must be listed here: [`compute`] refuses a
 /// lock walk that reaches an unlisted one.
 ///
-/// The stat-tracker lib leaves out `src/main.rs`, its test modules
-/// (`src/main_tests/`, `src/ocr_bench.rs`) and `src/bin`: those are the
-/// daemon binary, which the GUI does not link. Its embedded assets
+/// The stat-tracker lib leaves out `src/main.rs` and its modules under
+/// `src/daemon/`, its test modules (`src/main_tests/`, `src/ocr_bench.rs`)
+/// and `src/bin`: those are the daemon binary, which the GUI does not link. Its embedded assets
 /// (portraits, digit and letter templates) and `dist/install-paths.sh` (which
 /// the GUI embeds for uninstall) are in. Its changelog is out: every release
 /// edits it, and a GUI that keeps running only misses the newest entry in
@@ -781,6 +781,9 @@ axum = "0.8"
                 .unwrap_or_else(|| panic!("{package} is listed"));
             for rel in [
                 "src/main.rs",
+                "src/daemon/mod.rs",
+                "src/daemon/sync_sched.rs",
+                "src/daemon/poll/cadence.rs",
                 "src/main_tests/mod.rs",
                 "src/main_tests/poll_cadence.rs",
                 "src/ocr_bench.rs",
@@ -790,6 +793,7 @@ axum = "0.8"
             }
             for rel in [
                 "src/lib.rs",
+                "src/daemon_shared.rs",
                 "src/main_tests_helper.rs",
                 "src/ocr/mod.rs",
                 "src/config.rs",
