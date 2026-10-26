@@ -1061,14 +1061,14 @@ fn prefer_personal_match_keeper(
         || (uploaded_at == best_uploaded_at && record_key > best_record_key)
 }
 
-fn sql_token(word: &str) -> &str {
+pub(crate) fn sql_token(word: &str) -> &str {
     word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_')
 }
 
 /// Column names after `FIELDS` / `COLUMNS`, stopping at `UNIQUE`.
 /// The index name `pm_session_idx` contains the letters of `session_id`, so
 /// a substring search is not a column check.
-fn define_column_names(define: &str) -> Vec<String> {
+pub(crate) fn define_column_names(define: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut in_columns = false;
     for word in define.split_whitespace() {
