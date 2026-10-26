@@ -9,6 +9,9 @@
 //! `wrecking_ball`). Those fold onto the roster in `scuffed_types::HEROES`
 //! for the chip only. The stored id is never rewritten.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use scuffed_types::strategy::Color;
 
 use super::hero_catalog::{CatalogHero, hero_by_id, hero_id};
@@ -79,13 +82,40 @@ fn fold_hero_key(raw: &str) -> String {
     out
 }
 
+/// Most alias lookups kept. Saved strategies hold a handful of ids, so this
+/// is only a guard against a board full of made up ids.
+const ALIAS_CACHE_CAP: usize = 256;
+
+thread_local! {
+    /// Alias results by raw id, so an older id does not rescan the roster on
+    /// every redraw. The web build is single threaded.
+    static ALIAS_CACHE: RefCell<HashMap<String, Option<&'static CatalogHero>>> =
+        RefCell::new(HashMap::new());
+}
+
 /// Roster entry for a saved hero id. The current kebab id matches directly.
 /// An older form (`soldier_76`, `d_va`, `DVA`, `Lúcio`) folds and matches a
-/// roster name or id in `scuffed_types::HEROES`.
+/// roster name or id in `scuffed_types::HEROES`, once per raw id.
 pub(super) fn roster_hero(raw: &str) -> Option<&'static CatalogHero> {
     if let Some(hero) = hero_by_id(raw) {
         return Some(hero);
     }
+    if let Some(cached) = ALIAS_CACHE.with(|cache| cache.borrow().get(raw).copied()) {
+        return cached;
+    }
+    let found = fold_alias(raw);
+    ALIAS_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= ALIAS_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(raw.to_string(), found);
+    });
+    found
+}
+
+/// The uncached roster scan behind [`roster_hero`].
+fn fold_alias(raw: &str) -> Option<&'static CatalogHero> {
     let key = fold_hero_key(raw);
     if key.is_empty() {
         return None;
@@ -129,6 +159,49 @@ pub(super) fn ring_color(team: &Color, fill: &str) -> String {
     ring.to_string()
 }
 
+/// WCAG relative luminance of a `#rrggbb` colour.
+fn relative_luminance((r, g, b): (u8, u8, u8)) -> f64 {
+    let linear = |channel: u8| {
+        let c = f64::from(channel) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(r) + 0.7152 * linear(g) + 0.0722 * linear(b)
+}
+
+/// WCAG contrast ratio between two relative luminances.
+fn contrast(la: f64, lb: f64) -> f64 {
+    (la.max(lb) + 0.05) / (la.min(lb) + 0.05)
+}
+
+/// Relative luminance of white, the light initials colour.
+const WHITE_LUMINANCE: f64 = 1.0;
+
+/// Relative luminance of a label colour token. White is 1.0, and the dark
+/// token is read from its hex.
+fn label_luminance(label: &str) -> f64 {
+    parse_hex(label).map_or(WHITE_LUMINANCE, relative_luminance)
+}
+
+/// Initials colour for a fill: whichever of white or the dark ring colour
+/// contrasts more. Tank, Support and Damage get dark initials, the unknown
+/// grey keeps white.
+pub(super) fn label_color(fill: &str) -> &'static str {
+    let Some(rgb) = parse_hex(fill) else {
+        return CANVAS_WHITE;
+    };
+    let lum = relative_luminance(rgb);
+    let dark = contrast(lum, label_luminance(CANVAS_CHIP_RING_DARK));
+    if dark > contrast(lum, WHITE_LUMINANCE) {
+        CANVAS_CHIP_RING_DARK
+    } else {
+        CANVAS_WHITE
+    }
+}
+
 /// What a hero marker shows while its portrait is not drawable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HeroChip {
@@ -140,6 +213,8 @@ pub(super) struct HeroChip {
     /// Team colour, or a contrasting ring when the team colour matches the
     /// fill.
     pub ring: String,
+    /// Initials colour picked from the fill's luminance.
+    pub label_color: &'static str,
 }
 
 pub(super) fn hero_chip(raw: &str, team: &Color) -> HeroChip {
@@ -154,6 +229,7 @@ pub(super) fn hero_chip(raw: &str, team: &Color) -> HeroChip {
         label,
         fill,
         ring: ring_color(team, fill),
+        label_color: label_color(fill),
     }
 }
 
@@ -258,6 +334,62 @@ mod tests {
         assert_eq!(
             hero_chip("lucio", &BLUE).fill,
             HeroRole::Support.color_hex()
+        );
+    }
+
+    #[test]
+    fn repeated_alias_lookups_hit_the_cache() {
+        for raw in ["soldier_76", "d_va", "d_mon", "no_such_hero"] {
+            let first = roster_hero(raw).map(|hero| hero.id.as_str());
+            let cached = ALIAS_CACHE.with(|cache| cache.borrow().get(raw).copied());
+            assert_eq!(
+                cached.map(|hit| hit.map(|hero| hero.id.as_str())),
+                Some(first)
+            );
+            assert_eq!(
+                roster_hero(raw).map(|hero| hero.id.as_str()),
+                first,
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            roster_hero("d_va").map(|hero| hero.id.as_str()),
+            Some("dva")
+        );
+        assert_eq!(
+            roster_hero("d_mon").map(|hero| hero.id.as_str()),
+            Some("dmon")
+        );
+        assert!(roster_hero("no_such_hero").is_none());
+        // Exact ids take the fast path and are never cached.
+        assert!(roster_hero("tracer").is_some());
+        assert!(ALIAS_CACHE.with(|cache| !cache.borrow().contains_key("tracer")));
+    }
+
+    #[test]
+    fn initials_contrast_with_every_fill() {
+        let fills = HeroRole::ALL
+            .iter()
+            .map(|role| role.color_hex())
+            .chain([CANVAS_UNKNOWN_HERO_FILL]);
+        for fill in fills {
+            let label = label_color(fill);
+            let lum = relative_luminance(parse_hex(fill).unwrap());
+            let ratio = contrast(lum, label_luminance(label));
+            assert!(ratio >= 4.5, "{fill} on {label} is {ratio:.2}");
+        }
+        assert_eq!(
+            label_color(HeroRole::Tank.color_hex()),
+            CANVAS_CHIP_RING_DARK
+        );
+        assert_eq!(
+            label_color(HeroRole::Support.color_hex()),
+            CANVAS_CHIP_RING_DARK
+        );
+        assert_eq!(label_color(CANVAS_UNKNOWN_HERO_FILL), CANVAS_WHITE);
+        assert_eq!(
+            hero_chip("soldier_76", &BLUE).label_color,
+            CANVAS_CHIP_RING_DARK
         );
     }
 
