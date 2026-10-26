@@ -1265,7 +1265,6 @@ pub fn Stats() -> Element {
                         if dens == "compact" { "Density: Compact" } else { "Density: Comfortable" }
                     }
                     Link { to: Route::Leaderboards {}, "Leaderboards" }
-                    Link { to: Route::StatsTokens {}, "Daemon Tokens" }
                 }
             }
 

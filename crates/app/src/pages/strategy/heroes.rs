@@ -57,6 +57,16 @@ impl Hero {
         self.health + self.armor + self.shields
     }
 
+    /// The shared hero list (API PR 502) has no health, armor or shields yet,
+    /// so the HP bar is only drawn when at least one of them is set.
+    fn has_hp_detail(&self) -> bool {
+        self.total_hp() > 0
+    }
+
+    fn has_abilities(&self) -> bool {
+        !self.abilities.is_empty()
+    }
+
     fn role_label(&self) -> &str {
         match self.role.as_str() {
             "tank" => "Tank",
@@ -152,6 +162,7 @@ const PAGE_CSS: &str = r#"
 .hero-hp-dot { width:8px; height:8px; border-radius:2px; display:inline-block; }
 
 /* Abilities */
+.hero-detail-pending { font-size:0.8rem; color:var(--text-3); }
 .hero-abilities-title { font-family:var(--font-head); font-size:0.9rem; font-weight:700; text-transform:uppercase; letter-spacing:0.06em; color:var(--text); margin-bottom:0.75rem; padding-bottom:0.4rem; border-bottom:1px solid var(--border); }
 .hero-abilities-list { display:flex; flex-direction:column; gap:0.75rem; }
 .ability-card { display:flex; gap:0.75rem; padding:0.85rem 1rem; background:var(--surface-2); border:1px solid var(--border); border-radius:8px; transition:border-color 0.15s; }
@@ -406,60 +417,66 @@ fn render_hero_detail(hero: &Hero) -> Element {
             }
         }
 
-        // HP breakdown
-        div { class: "hero-hp-section",
-            div { class: "hero-hp-label", "Hit Points - {total}" }
-            div { class: "hero-hp-bar",
-                if hero.health > 0 {
-                    div {
-                        class: "hero-hp-segment",
-                        style: "width:{health_pct:.1}%; background:var(--text-2);",
-                        "{hero.health}"
+        // HP breakdown, skipped when the list sends no HP numbers
+        if hero.has_hp_detail() {
+            div { class: "hero-hp-section",
+                div { class: "hero-hp-label", "Hit Points - {total}" }
+                div { class: "hero-hp-bar",
+                    if hero.health > 0 {
+                        div {
+                            class: "hero-hp-segment",
+                            style: "width:{health_pct:.1}%; background:var(--text-2);",
+                            "{hero.health}"
+                        }
+                    }
+                    if hero.armor > 0 {
+                        div {
+                            class: "hero-hp-segment",
+                            style: "width:{armor_pct:.1}%; background:var(--warn);",
+                            "{hero.armor}"
+                        }
+                    }
+                    if hero.shields > 0 {
+                        div {
+                            class: "hero-hp-segment",
+                            style: "width:{shields_pct:.1}%; background:var(--chart-5);",
+                            "{hero.shields}"
+                        }
                     }
                 }
-                if hero.armor > 0 {
-                    div {
-                        class: "hero-hp-segment",
-                        style: "width:{armor_pct:.1}%; background:var(--warn);",
-                        "{hero.armor}"
+                div { class: "hero-hp-legend",
+                    if hero.health > 0 {
+                        span {
+                            span { class: "hero-hp-dot", style: "background:var(--text-2);" }
+                            "Health {hero.health}"
+                        }
                     }
-                }
-                if hero.shields > 0 {
-                    div {
-                        class: "hero-hp-segment",
-                        style: "width:{shields_pct:.1}%; background:var(--chart-5);",
-                        "{hero.shields}"
+                    if hero.armor > 0 {
+                        span {
+                            span { class: "hero-hp-dot", style: "background:var(--warn);" }
+                            "Armor {hero.armor}"
+                        }
                     }
-                }
-            }
-            div { class: "hero-hp-legend",
-                if hero.health > 0 {
-                    span {
-                        span { class: "hero-hp-dot", style: "background:var(--text-2);" }
-                        "Health {hero.health}"
-                    }
-                }
-                if hero.armor > 0 {
-                    span {
-                        span { class: "hero-hp-dot", style: "background:var(--warn);" }
-                        "Armor {hero.armor}"
-                    }
-                }
-                if hero.shields > 0 {
-                    span {
-                        span { class: "hero-hp-dot", style: "background:var(--chart-5);" }
-                        "Shields {hero.shields}"
+                    if hero.shields > 0 {
+                        span {
+                            span { class: "hero-hp-dot", style: "background:var(--chart-5);" }
+                            "Shields {hero.shields}"
+                        }
                     }
                 }
             }
         }
 
-        // Abilities
-        div { class: "hero-abilities-title", "Abilities" }
-        div { class: "hero-abilities-list",
-            for ability in hero.abilities.iter() {
-                {render_ability_card(ability)}
+        // Abilities, skipped when the list sends none
+        if hero.has_abilities() {
+            div { class: "hero-abilities-title", "Abilities" }
+            div { class: "hero-abilities-list",
+                for ability in hero.abilities.iter() {
+                    {render_ability_card(ability)}
+                }
             }
+        } else if !hero.has_hp_detail() {
+            p { class: "hero-detail-pending", "Ability details coming later." }
         }
     }
 }
@@ -531,6 +548,21 @@ mod tests {
         );
         assert_eq!(list.data[0].role_label(), "Support");
         assert_eq!(list.data[0].total_hp(), 0);
+        assert!(
+            !list.data[0].has_hp_detail(),
+            "no HP bar for a list-only hero"
+        );
+        assert!(!list.data[0].has_abilities(), "no Abilities heading either");
+    }
+
+    #[test]
+    fn any_hp_field_shows_the_hp_bar() {
+        for field in ["health", "armor", "shields"] {
+            let body =
+                format!(r#"{{"id":"x","name":"X","role":"tank","portrait_url":"","{field}":100}}"#);
+            let hero: Hero = serde_json::from_str(&body).unwrap();
+            assert!(hero.has_hp_detail(), "{field}");
+        }
     }
 
     #[test]
@@ -560,6 +592,8 @@ mod tests {
         assert_eq!(hero.abilities[0].cooldown, Some(14.0));
         assert_eq!(hero.health, 250);
         assert_eq!(hero.total_hp(), 250);
+        assert!(hero.has_hp_detail());
+        assert!(hero.has_abilities());
     }
 
     #[test]
