@@ -203,8 +203,46 @@ jobs:
           # save and every run rebuilds (v0 -> v1: dev line-tables-only).
           prefix-key: v1-rust
 
+      - name: Detect cached dioxus-cli
+        id: dx_cache
+        run: |
+          if dx --version 2>/dev/null | grep -Eq '(^|[^0-9])0\.7\.9([^0-9]|$)'; then
+            echo "hit=true" >> "$GITHUB_OUTPUT"
+            echo "dx 0.7.9 already installed"
+          else
+            echo "hit=false" >> "$GITHUB_OUTPUT"
+            echo "dx 0.7.9 is not installed"
+          fi
+
+      # Skipped when dx 0.7.9 is already on PATH. continue-on-error so a
+      # binstall bootstrap failure still reaches the source-compile fallback.
+      - name: Install cargo-binstall
+        if: steps.dx_cache.outputs.hit != 'true'
+        continue-on-error: true
+        uses: cargo-bins/cargo-binstall@main
+
       - name: Install dioxus-cli
-        run: cargo install --locked dioxus-cli@0.7.9
+        run: |
+          if dx --version 2>/dev/null | grep -Eq '(^|[^0-9])0\.7\.9([^0-9]|$)'; then
+            echo "dx 0.7.9 already installed; skipping binstall and cargo install"
+            exit 0
+          fi
+          # Prebuilt binary. Compile from source only if binstall fails.
+          # --force covers a rust-cache restore that records the crate as
+          # installed while leaving the dx binary off PATH.
+          if ! cargo binstall --no-confirm --locked --force dioxus-cli@0.7.9; then
+            echo "binstall failed; compiling dioxus-cli 0.7.9 from source"
+            cargo install --locked dioxus-cli@0.7.9
+          fi
+
+      - name: Confirm dioxus-cli version
+        run: |
+          ver="$(dx --version 2>&1)"
+          printf '%s\n' "$ver"
+          if ! printf '%s\n' "$ver" | grep -Eq '(^|[^0-9])0\.7\.9([^0-9]|$)'; then
+            echo "expected dx 0.7.9" >&2
+            exit 1
+          fi
 
       - name: Build app
         working-directory: crates/app

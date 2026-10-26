@@ -1,7 +1,79 @@
 use surrealdb::engine::any::Any;
 use surrealdb::Surreal;
 
-use crate::DbResult;
+use std::future::Future;
+use std::time::Duration;
+
+use crate::{DbError, DbResult};
+
+/// Tries per fatal startup step. Two servers booting against one database at
+/// once can hit "Transaction conflict: Resource busy ... can be retried" on
+/// the same rows; each step is idempotent, so it is safe to run it again.
+const MIGRATION_ATTEMPTS: u32 = 4;
+
+/// First backoff after a conflict; doubles each try (250, 500, 1000 ms plus
+/// up to 100 ms jitter so two servers do not retry in lockstep).
+const MIGRATION_BACKOFF_MS: u64 = if cfg!(test) { 1 } else { 250 };
+
+pub(crate) const STEP_SCHEMA: &str = "schema script";
+pub(crate) const STEP_DISPLAY_NAME: &str = "display_name key backfill/unique index";
+pub(crate) const STEP_PERSONAL_MATCH: &str = "personal_match session dedupe/unique index";
+pub(crate) const STEP_DB7: &str = "DB7 roster dedupe/unique index";
+
+/// True for SurrealDB's optimistic transaction conflict, which it reports as
+/// retryable. Unique-index rejections and other errors are not retried.
+fn text_is_transaction_conflict(text: &str) -> bool {
+    let msg = text.to_ascii_lowercase();
+    msg.contains("transaction conflict")
+        || msg.contains("resource busy")
+        || msg.contains("can be retried")
+}
+
+fn is_transaction_conflict(err: &DbError) -> bool {
+    match err {
+        DbError::Surreal(e) => text_is_transaction_conflict(&e.to_string()),
+        _ => false,
+    }
+}
+
+/// Run one fatal startup migration step. A transaction conflict is retried
+/// with a short backoff, up to [`MIGRATION_ATTEMPTS`] tries in total. Any
+/// final error is wrapped in [`DbError::Migration`] naming `step`.
+pub(crate) async fn run_migration_step<T, F, Fut>(step: &'static str, mut f: F) -> DbResult<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = DbResult<T>>,
+{
+    let mut attempt = 1;
+    loop {
+        match f().await {
+            Ok(value) => return Ok(value),
+            Err(e) if attempt < MIGRATION_ATTEMPTS && is_transaction_conflict(&e) => {
+                let jitter = if cfg!(test) {
+                    0
+                } else {
+                    rand::random::<u64>() % 100
+                };
+                let wait_ms = (MIGRATION_BACKOFF_MS << (attempt - 1)) + jitter;
+                tracing::warn!(
+                    step,
+                    attempt,
+                    wait_ms,
+                    "startup migration hit a transaction conflict; retrying: {e}"
+                );
+                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+                attempt += 1;
+            }
+            Err(e) => {
+                return Err(DbError::Migration {
+                    step,
+                    attempts: attempt,
+                    source: Box::new(e),
+                })
+            }
+        }
+    }
+}
 
 /// Write `officers_can_edit_teams = false` on site_settings rows that omit it.
 ///
@@ -20,9 +92,10 @@ pub(crate) async fn backfill_officers_can_edit_teams(client: &Surreal<Any>) -> D
 pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     tracing::info!("Running database migrations...");
 
-    client
-        .query(
-            r#"
+    run_migration_step(STEP_SCHEMA, || async move {
+        client
+            .query(
+                r#"
         -- ================================================
         -- Users (OAuth accounts, shared with auth crate)
         -- ================================================
@@ -867,24 +940,38 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE scanned ON data_migration TYPE int DEFAULT 0;
         DEFINE FIELD OVERWRITE updated ON data_migration TYPE int DEFAULT 0;
     "#,
-        )
-        .await?
-        .check()?;
+            )
+            .await?
+            .check()?;
+        Ok::<(), DbError>(())
+    })
+    .await?;
 
     // Key every display name and install the UNIQUE index. A clash or an
     // unkeyable stored name fails startup and does not rewrite display_name.
-    crate::display_name::backfill_display_name_keys(client).await?;
+    run_migration_step(STEP_DISPLAY_NAME, || {
+        crate::display_name::backfill_display_name_keys(client)
+    })
+    .await?;
 
     // Dedupe (member_id, session_id), rewrite blank legacy ids, then replace
     // pm_session_idx with a UNIQUE index. Must run after the schema statement
     // above and must fail startup if uniqueness cannot be enforced.
     // When that UNIQUE index is already installed this is an INFO FOR TABLE
     // check only — it does not read personal_match.
-    crate::queries::personal_stats::migrate_personal_match_session_index(client).await?;
+    run_migration_step(STEP_PERSONAL_MATCH, || {
+        crate::queries::personal_stats::migrate_personal_match_session_index(client)
+    })
+    .await?;
 
     // DB7: collapse duplicate plays_on edges, then UNIQUE (in, out). Fails
     // startup if uniqueness cannot be enforced; a no-op once the index exists.
-    crate::queries::roster::migrate_plays_on_pair_index(client).await?;
+    // These fatal steps retry a transaction conflict (two servers booting at
+    // once) and name themselves in the error; see run_migration_step.
+    run_migration_step(STEP_DB7, || {
+        crate::queries::roster::migrate_plays_on_pair_index(client)
+    })
+    .await?;
 
     // DB4: move pack-key heroes (`ana`, `wrecking-ball`) from 0.5.0-alpha.1
     // and alpha.2 uploads onto the canonical display name and table role.
@@ -921,4 +1008,111 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
 
     tracing::info!("Database migrations complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Database;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// A real SurrealDB error carrying `msg` (THROW from the embedded engine).
+    async fn surreal_error(db: &Database, msg: &str) -> DbError {
+        let err = db
+            .client
+            .query(format!("THROW '{msg}'"))
+            .await
+            .expect("query sent")
+            .check()
+            .expect_err("THROW fails");
+        DbError::Surreal(err)
+    }
+
+    const CONFLICT: &str = "Transaction conflict: Resource busy. This transaction can be retried";
+
+    #[test]
+    fn conflict_text_matches_surreal_messages() {
+        assert!(text_is_transaction_conflict(CONFLICT));
+        assert!(text_is_transaction_conflict(
+            "Transaction conflict: Write conflict. This transaction can be retried"
+        ));
+        assert!(!text_is_transaction_conflict(
+            "Database index `plays_on_member_team_idx` already contains [member:a, team:t]"
+        ));
+        assert!(!is_transaction_conflict(&DbError::Timeout));
+    }
+
+    #[tokio::test]
+    async fn step_retries_a_conflict_then_succeeds() {
+        let db = Database::connect_memory().await.expect("mem db");
+        let calls = AtomicU32::new(0);
+        let (db, calls) = (&db, &calls);
+        let out = run_migration_step(STEP_DB7, || async move {
+            let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n < 3 {
+                Err(surreal_error(db, CONFLICT).await)
+            } else {
+                Ok(n)
+            }
+        })
+        .await
+        .expect("third try succeeds");
+        assert_eq!(out, 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn step_gives_up_after_the_bound_and_names_the_step() {
+        let db = Database::connect_memory().await.expect("mem db");
+        let calls = AtomicU32::new(0);
+        let (db, calls) = (&db, &calls);
+        let err = run_migration_step(STEP_DB7, || async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(surreal_error(db, CONFLICT).await)
+        })
+        .await
+        .expect_err("always conflicts");
+        assert_eq!(calls.load(Ordering::SeqCst), MIGRATION_ATTEMPTS);
+        assert!(matches!(
+            err,
+            DbError::Migration {
+                step: STEP_DB7,
+                attempts: MIGRATION_ATTEMPTS,
+                ..
+            }
+        ));
+        let text = err.to_string();
+        assert!(
+            text.starts_with("DB7 roster dedupe/unique index failed after 4 attempt(s): "),
+            "{text}"
+        );
+        assert!(text.contains("Resource busy"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn step_does_not_retry_other_errors() {
+        let db = Database::connect_memory().await.expect("mem db");
+        let calls = AtomicU32::new(0);
+        let (db, calls) = (&db, &calls);
+        let err = run_migration_step(STEP_DB7, || async move {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Err::<(), _>(
+                surreal_error(
+                    db,
+                    "Database index `plays_on_member_team_idx` already contains x",
+                )
+                .await,
+            )
+        })
+        .await
+        .expect_err("fails");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "a unique rejection is not retried"
+        );
+        assert!(err
+            .to_string()
+            .starts_with("DB7 roster dedupe/unique index failed after 1 attempt(s): "));
+    }
 }

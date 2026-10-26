@@ -149,6 +149,7 @@ const MEMBER_STATS_CSS: &str = r#"
         font-size: 0.9rem;
         color: var(--text-2);
         margin-top: 0.4rem;
+        white-space: nowrap;
     }
     .member-stats .stats-wr { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
     .member-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
@@ -228,10 +229,7 @@ pub fn StatsMember(id: String) -> Element {
                     },
                     Some(s) => {
                         let wr = winrate_pct(s.wins, s.total_matches);
-                        let mut record = format!("{}W-{}L", s.wins, s.losses);
-                        if s.draws > 0 {
-                            record.push_str(&format!("-{}D", s.draws));
-                        }
+                        let record = crate::util::record_label(s.wins, s.losses, s.draws);
                         rsx! {
                             div { class: "stats-summary",
                                 div { class: "stat-tile stat-tile-hero",
