@@ -91,6 +91,11 @@ pub const HP_LARGE_FILL: &str = "#ff9800";
 pub const HP_LARGE_STROKE: &str = "#f57c00";
 pub const HP_GLOW: &str = "rgba(255,255,255,0.5)";
 pub const CANVAS_MARKER_BORDER: &str = "#fff";
+/// Hero chip fill for an id that is not on the roster. A neutral grey, so the
+/// team ring around it stays visible.
+pub const CANVAS_UNKNOWN_HERO_FILL: &str = "#6b7280";
+/// Hero chip ring on a light fill when the team colour matches the fill.
+pub const CANVAS_CHIP_RING_DARK: &str = "#111827";
 
 /// Dark-theme page background (matches `[data-theme="dark"] --bg`).
 pub const BG_DARK: &str = "#17171d";

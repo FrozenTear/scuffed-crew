@@ -1342,7 +1342,7 @@ fn draw_element(
                     } else {
                         // Loading or failed. A failed image stays cached, so
                         // it is not requested again.
-                        chip = Some(hero_chip(hero_id));
+                        chip = Some(hero_chip(hero_id, &element.color));
                     }
                 } else {
                     // Image not in cache: start loading once
@@ -1361,21 +1361,25 @@ fn draw_element(
                     onload.forget();
 
                     img.set_src(&format!("/assets/heroes/{}.png", hero_id_clone));
-                    chip = Some(hero_chip(hero_id));
+                    chip = Some(hero_chip(hero_id, &element.color));
                 }
             }
 
             // Role chip, or the plain coloured circle
             if !drew_portrait {
-                let fill = chip.as_ref().and_then(|c| c.fill).unwrap_or(color.as_str());
+                let fill = chip.as_ref().map_or(color.as_str(), |c| c.fill);
                 ctx.set_fill_style_str(fill);
                 ctx.begin_path();
                 let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
                 ctx.fill();
             }
 
-            // Border: team colour around a portrait or chip
-            if drew_portrait || chip.is_some() {
+            // Border: team colour around a portrait. A chip ring swaps to a
+            // contrasting colour when the team colour matches its fill.
+            if let Some(ref chip) = chip {
+                ctx.set_stroke_style_str(&chip.ring);
+                ctx.set_line_width(3.0);
+            } else if drew_portrait {
                 ctx.set_stroke_style_str(&color);
                 ctx.set_line_width(3.0);
             } else {
