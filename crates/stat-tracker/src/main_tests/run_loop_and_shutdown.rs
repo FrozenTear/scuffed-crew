@@ -109,10 +109,9 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         startup < loop_at,
         "startup sync is scheduled before the loop"
     );
-    let restore = src
-        .find("async fn recover_or_sync_active_game")
-        .expect("startup restore");
-    let restore_body = src[restore..].split("\nasync fn ").next().unwrap();
+    // Bounded by name: the next async fn, which used to end the slice,
+    // is in src/daemon/tab/plan.rs since 0.6 S5.
+    let restore_body = fn_source("recover_or_sync_active_game");
     assert!(
         restore_body.contains("startup_session(data_dir)"),
         "startup sync must restore through startup_session"
