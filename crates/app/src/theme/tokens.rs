@@ -79,8 +79,8 @@ html, body {{
 /// Concrete colors for the strategy canvas (2D context needs literal strings, not CSS vars).
 pub const CANVAS_BG: &str = "#14141c";
 pub const CANVAS_TILE_PLACEHOLDER: &str = "#2a2a3e";
-pub const CANVAS_GRID_LOADING: &str = "#333";
-pub const CANVAS_TEXT_LOADING: &str = "#666";
+pub const CANVAS_GRID_LOADING: &str = "#333333";
+pub const CANVAS_TEXT_LOADING: &str = "#666666";
 pub const STRATEGY_ACCENT: &str = "#ff7a1a";
 pub const CANVAS_SELECTION_COLOR: &str = "#00ff00";
 pub const CANVAS_BADGE_BG: &str = "rgba(0,0,0,0.7)";
@@ -90,7 +90,7 @@ pub const HP_SMALL_STROKE: &str = "#ffc107";
 pub const HP_LARGE_FILL: &str = "#ff9800";
 pub const HP_LARGE_STROKE: &str = "#f57c00";
 pub const HP_GLOW: &str = "rgba(255,255,255,0.5)";
-pub const CANVAS_MARKER_BORDER: &str = "#fff";
+pub const CANVAS_MARKER_BORDER: &str = "#ffffff";
 /// Hero chip fill for an id that is not on the roster. A neutral grey, so the
 /// team ring around it stays visible.
 pub const CANVAS_UNKNOWN_HERO_FILL: &str = "#6b7280";

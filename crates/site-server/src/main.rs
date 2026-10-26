@@ -44,7 +44,12 @@ async fn main() {
         }
         Database::bootstrap_from_env()
             .await
-            .expect("SURREALDB_MIGRATE_ONLY: bootstrap failed");
+            .unwrap_or_else(|e| match e {
+                scuffed_db::DbError::Migration { .. } => {
+                    panic!("SURREALDB_MIGRATE_ONLY: SurrealDB startup migration failed: {e}")
+                }
+                e => panic!("SURREALDB_MIGRATE_ONLY: Failed to connect to SurrealDB: {e}"),
+            });
         tracing::info!("SURREALDB_MIGRATE_ONLY complete — exiting");
         return;
     }
@@ -65,9 +70,16 @@ async fn main() {
             .expect("Failed to run database migrations");
         db
     } else {
+        // A failed startup migration names its step (DbError::Migration), so
+        // the panic does not claim a connect failure for, say, DB7.
         Database::connect_from_env()
             .await
-            .expect("Failed to connect to SurrealDB")
+            .unwrap_or_else(|e| match e {
+                scuffed_db::DbError::Migration { .. } => {
+                    panic!("SurrealDB startup migration failed: {e}")
+                }
+                e => panic!("Failed to connect to SurrealDB: {e}"),
+            })
     };
     if is_dev {
         use scuffed_auth::crypto::hash_session_token;

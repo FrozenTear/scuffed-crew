@@ -770,6 +770,50 @@ If `PACKS_DIR` is unset, the directory cannot be read, or it has no valid
 `packs-data` is not in `scripts/backup.sh`. The copy of record is the build
 folder on the operator's machine.
 
+## 0.6 first boot: roster dedupe (DB7)
+
+The first start of a 0.6 build collapses duplicate `plays_on` roster edges
+(one member on one team more than once), then installs the UNIQUE index
+`plays_on_member_team_idx` on (in, out). The deletes are permanent and every
+deleted edge is logged at info. Later boots see the index and skip the pass.
+
+1. **Back up first.** `scripts/update.sh` has no backup step. Run
+   `scripts/backup.sh` (or snapshot the volume) before rollout.
+2. **Run the read-only duplicate count first** and note it:
+   ```surql
+   SELECT * FROM (SELECT in, out, count() AS n FROM plays_on GROUP BY in, out) WHERE n > 1;
+   ```
+   The dedupe runs inside startup migrations, before `/api/health` answers.
+   It handles about 74 duplicate groups per second (1783 groups took about
+   23 s in QA), so a large count means a longer wait before health is green.
+   Raise the health or start timeout if needed rather than restarting.
+3. **Stop the old site-server first.** During a rolling deploy an old
+   container that still adds roster entries can create a duplicate between
+   the dedupe and the index, which blocks the new container from starting
+   until the old one stops. Bring the old one down, then start the new one.
+4. **The migrating container must run the new build.** Containers with
+   `SURREALDB_BOOTSTRAP=0` never run migrations, so they never run DB7. The
+   container that bootstraps (or the `SURREALDB_MIGRATE_ONLY=1` job) has to
+   be on the new image.
+5. **After boot:** expect the info log `plays_on is UNIQUE on (in, out)`.
+   Its `duplicate_pairs` equals the number of rows the step 2 query returned
+   (one row per duplicate group). Its `deleted` is the number of extra edges,
+   the sum of `n - 1` over those rows. Re-run the step 2 query: 0 rows.
+
+Two servers that boot against one database at the same moment can hit
+`Transaction conflict: Resource busy ... can be retried` in a startup
+migration. Each fatal migration step retries that error up to 4 times with
+a short backoff (about 2 s in total) before it gives up. A failed step names
+itself in the startup panic, for example
+`SurrealDB startup migration failed: DB7 roster dedupe/unique index failed after 1 attempt(s): ...`.
+A panic that starts with `Failed to connect to SurrealDB` is a connection or
+login problem, not a migration.
+
+**Rollback to a pre-0.6 build:** that build relates a new edge on every add,
+which the index rejects (500 on re-add or double click). Run
+`REMOVE INDEX plays_on_member_team_idx ON plays_on` as root, or accept that.
+Deleted duplicates come back only from the backup.
+
 ## Upgrading the SurrealDB server
 
 `compose.yml` pins the server image to an exact tag equal to the `surrealdb`

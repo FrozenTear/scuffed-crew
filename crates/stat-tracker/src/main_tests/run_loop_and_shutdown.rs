@@ -95,10 +95,8 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         !window.contains("finish_sync_on_shutdown("),
         "the command tick must not await the shutdown upload"
     );
-    let def = src
-        .find("async fn close_quiet_session_and_sync")
-        .expect("quiet-close timer");
-    let fn_body = src[def..].split("\nasync fn ").next().unwrap();
+    // In src/daemon/session/transitions.rs since 0.6 S7: found by name.
+    let fn_body = fn_source("close_quiet_session_and_sync");
     assert!(
         fn_body.contains("sync_now().await"),
         "deleting the sync call inside the quiet-close timer must fail"
@@ -154,10 +152,8 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         run_loop[sigterm..].contains("shutdown_from_signal("),
         "SIGTERM must close the session through shutdown_from_signal"
     );
-    let shutdown_fn = src
-        .find("async fn shutdown_from_signal(")
-        .expect("shutdown helper");
-    let shutdown_body = src[shutdown_fn..].split("\nasync fn ").next().unwrap();
+    // In src/daemon/shutdown.rs since 0.6 S7: found by name.
+    let shutdown_body = fn_source("shutdown_from_signal");
     assert!(
         shutdown_body.contains("close_session_on_shutdown("),
         "each signal handler closes the session before the final upload"
