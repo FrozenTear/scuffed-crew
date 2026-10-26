@@ -19,7 +19,7 @@
 //!
 //! The four middle crates do not use each other. The test reads the `src/`
 //! of every crate the split has made so far ([`PHYSICAL`]: the lib only,
-//! not `main.rs`, `main_tests/` or `ocr_bench.rs`), follows every
+//! not `main.rs`, `daemon/`, `main_tests/` or `ocr_bench.rs`), follows every
 //! `crate::`, `super::` and `self::` path (and every path through an
 //! extracted crate's name, such as `stat_tracker_core::`) in `use` trees
 //! and in code, and fails on any path from a module to a crate it may not
@@ -1230,7 +1230,10 @@ fn every_module_has_a_crate() {
                 // the bin and its tests
                 .filter(|n| {
                     dir != "stat-tracker"
-                        || (n != "main.rs" && n != "ocr_bench.rs" && !n.starts_with("main_tests/"))
+                        || (n != "main.rs"
+                            && n != "ocr_bench.rs"
+                            && !n.starts_with("daemon/")
+                            && !n.starts_with("main_tests/"))
                 })
                 .map(|n| format!("{dir}/src/{n}")),
         );
@@ -1884,16 +1887,16 @@ fn compat_aliases_are_not_named_in_the_lib() {
     );
 }
 
-/// Each [`COMPAT_REEXPORTS`] alias is still named by main.rs or main_tests
+/// Each [`COMPAT_REEXPORTS`] alias is still named by main.rs, `daemon/` or main_tests
 /// (comments and strings do not count). When none is left, the re-export
 /// has no user and goes.
 #[test]
 fn compat_old_paths_are_still_used_by_the_bin() {
     let src = crates_dir().join("stat-tracker").join("src");
     let mut files = vec![src.join("main.rs")];
-    let mut todo = vec![src.join("main_tests")];
+    let mut todo = vec![src.join("daemon"), src.join("main_tests")];
     while let Some(dir) = todo.pop() {
-        for entry in std::fs::read_dir(&dir).expect("read main_tests") {
+        for entry in std::fs::read_dir(&dir).expect("read daemon or main_tests") {
             let path = entry.expect("dir entry").path();
             if path.is_dir() {
                 todo.push(path);

@@ -273,7 +273,7 @@ fn a_panicking_banner_reader_falls_back_to_the_ocr_label() {
 #[test]
 fn the_outcome_reads_take_the_final_score_source_from_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let full = include_str!("../main.rs");
+    let full = daemon_source();
     let src = full.split("\nmod tests {").next().unwrap();
     let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
     let body = norm(src[at..].split("\n}\n").next().unwrap());
@@ -289,6 +289,10 @@ fn the_outcome_reads_take_the_final_score_source_from_the_reader_switch() {
     assert_eq!(body.matches("detect::match_end::detect_outcome").count(), 2);
     let all = norm(src);
     assert!(all.contains(
+        "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \
+         detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, &words, );"
+    ));
+    assert!(norm(fn_source("run_loop")).contains(
         "detect::match_end::detect_outcome_signal_polled( &img, &rgb, &mut stability, \
          detect::match_end::FinalScoreSource::for_reader(use_new_reader), &titles, &words, );"
     ));
@@ -693,7 +697,7 @@ async fn the_accolade_map_is_written_when_no_member_chose_the_map() {
 #[test]
 fn the_end_titles_go_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let full = include_str!("../main.rs");
+    let full = daemon_source();
     let src = full.split("\nmod tests {").next().unwrap();
     let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
     let body = norm(src[at..].split("\n}\n").next().unwrap());
@@ -735,6 +739,10 @@ fn the_end_titles_go_through_the_reader_switch() {
     ];
     let broken: Vec<&str> = checks.iter().filter(|c| !c.1).map(|c| c.0).collect();
     assert!(broken.is_empty(), "{broken:?}");
+    assert!(
+        norm(fn_source("run_loop"))
+            .contains("let titles = detect::match_end::Titles::for_rgb(use_new_reader, &rgb);")
+    );
 }
 
 /// The accolade and rank-screen result words (P1, P2) go through the
@@ -746,7 +754,7 @@ fn the_end_titles_go_through_the_reader_switch() {
 #[test]
 fn the_result_words_go_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let full = include_str!("../main.rs");
+    let full = daemon_source();
     let src = full.split("\nmod tests {").next().unwrap();
     let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
     let body = norm(src[at..].split("\n}\n").next().unwrap());
@@ -795,6 +803,7 @@ fn the_result_words_go_through_the_reader_switch() {
     ];
     let broken: Vec<&str> = checks.iter().filter(|c| !c.1).map(|c| c.0).collect();
     assert!(broken.is_empty(), "{broken:?}");
+    assert!(norm(fn_source("run_loop")).contains("let result_read = tick_result_read("));
 }
 
 /// One words-pack read per poll tick: the read the signal detection took
@@ -859,8 +868,12 @@ fn a_result_word_tick_still_starts_the_accolade_map_read() {
     // The tick's own signal, made with the reader switch's result
     // words, is what the map read is keyed on. Whitespace is ignored.
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let full = include_str!("../main.rs");
+    let full = daemon_source();
     let all = norm(full.split("\nmod tests {").next().unwrap());
+    assert!(
+        norm(fn_source("run_loop"))
+            .contains("let signal = detect::match_end::detect_outcome_signal_polled(")
+    );
     let signal_at = all
         .find("let signal = detect::match_end::detect_outcome_signal_polled(")
         .expect("the poll tick's signal");
@@ -959,7 +972,11 @@ fn a_sure_end_title_is_a_word_on_its_second_poll_and_confirms_on_its_third() {
 #[test]
 fn the_poll_tick_takes_the_phase_source_from_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let full = include_str!("../main.rs");
+    let full = daemon_source();
+    assert!(norm(fn_source("run_loop")).contains(
+        "detect::match_start::detect_phase_polled( &img, &rgb, &mut stability, \
+         detect::match_start::PhaseSource::for_reader(use_new_reader), )"
+    ));
     let src = norm(full.split("\nmod tests {").next().unwrap());
     assert!(src.contains(
         "detect::match_start::detect_phase_polled( &img, &rgb, &mut stability, \

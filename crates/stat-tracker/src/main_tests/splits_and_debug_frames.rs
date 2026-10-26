@@ -332,8 +332,11 @@ async fn accepted_and_rejected_rings_write_with_debug_on() {
 #[tokio::test]
 async fn accepted_debug_board_saves_the_unpadded_crop() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let src = include_str!("../main.rs");
+    let src = daemon_source();
     let prod = norm(src.split("\nmod tests {").next().unwrap());
+    assert!(norm(fn_source("handle_capture")).contains(
+        "save_accepted_frame(ctx.debug_ocr, data_dir, debug_accepted_board(&frame_img))"
+    ));
     assert!(
         prod.contains(
             "save_accepted_frame(ctx.debug_ocr, data_dir, debug_accepted_board(&frame_img))"

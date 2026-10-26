@@ -346,7 +346,8 @@ fn the_run_loop_keeps_the_preempt_bridge_until_the_keyboard_arm() {
 /// next to the backend probe, not before it.
 #[test]
 fn the_pause_decision_runs_alongside_the_backend_probe() {
-    let src = include_str!("../main.rs");
+    let src = daemon_source();
+    assert!(fn_source("run").contains(concat!("tokio::", "join!(")));
     let join = src.find(concat!("tokio::", "join!(")).expect("join");
     let call = &src[join..];
     let call = &call[..call.find(");").expect("join end")];

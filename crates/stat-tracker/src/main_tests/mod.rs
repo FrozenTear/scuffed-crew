@@ -9,6 +9,8 @@ use super::*;
 
 use std::time::Duration;
 
+use source_text::{daemon_source, fn_source};
+
 struct ScriptedWaiter {
     events: Vec<KeyboardWait>,
 }
@@ -2243,6 +2245,7 @@ mod reader_switch_maps;
 mod run_loop_and_shutdown;
 mod session_recovery;
 mod shutdown_and_restart;
+mod source_text;
 mod splits_and_debug_frames;
 mod tab_keyboard_pid;
 mod unread_columns;

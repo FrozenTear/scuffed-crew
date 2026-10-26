@@ -123,10 +123,11 @@ pub fn workspace_inputs(gui_manifest_dir: &Path) -> Inputs {
 }
 
 /// Paths the stat-tracker crates leave out of the build id: the daemon
-/// binary (`src/main.rs`), its test modules and any other binary. The GUI
-/// does not link them.
+/// binary (`src/main.rs` and its modules under `src/daemon/`), its test
+/// modules and any other binary. The GUI does not link them.
 pub const DAEMON_ONLY: &[&str] = &[
     "src/main.rs",
+    "src/daemon",
     "src/main_tests",
     "src/ocr_bench.rs",
     "src/bin",
@@ -540,6 +541,8 @@ axum = "0.8"
             );
             tree.write("crates/lib/src/lib.rs", "pub fn shared() -> u32 { 1 }\n");
             tree.write("crates/lib/src/main.rs", "fn main() { daemon(); }\n");
+            tree.write("crates/lib/src/daemon/mod.rs", "mod poll;\n");
+            tree.write("crates/lib/src/daemon/poll/mod.rs", "fn tick() {}\n");
             tree.write("crates/lib/src/bin/tool.rs", "fn main() {}\n");
             tree.write("crates/lib/src/main_tests/mod.rs", "mod area;\n");
             tree.write("crates/lib/src/main_tests/area.rs", "#[test]\nfn t() {}\n");
@@ -581,7 +584,7 @@ axum = "0.8"
                         package: "lib".into(),
                         dir: self.path("crates/lib"),
                         include: strings(&["Cargo.toml", "src", "assets"]),
-                        exclude: strings(&["src/main.rs", "src/main_tests", "src/bin"]),
+                        exclude: strings(DAEMON_ONLY),
                     },
                 ],
             }
@@ -638,6 +641,12 @@ axum = "0.8"
         tree.edit("crates/lib/src/main.rs", "daemon();", "daemon(); retry();");
         tree.write("crates/lib/src/bin/tool.rs", "fn main() { other(); }\n");
         tree.edit("crates/lib/src/main_tests/area.rs", "fn t()", "fn t2()");
+        tree.edit(
+            "crates/lib/src/daemon/poll/mod.rs",
+            "fn tick()",
+            "fn tick2()",
+        );
+        tree.write("crates/lib/src/daemon/new_area.rs", "fn n() {}\n");
         tree.write(
             "crates/lib/src/main_tests/new_area.rs",
             "#[test]\nfn n() {}\n",
