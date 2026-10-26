@@ -150,7 +150,7 @@ const TRACKER_PLATFORM_COPY: &str =
 /// Stat-tracker build named in the install note on `/stats` when health
 /// does not send `tracker_latest`. One constant, so the banner tracks the
 /// current build instead of an older alpha.
-const TRACKER_RELEASE: &str = "rc.9";
+const TRACKER_RELEASE: &str = "0.5.0";
 
 /// `true` when `core` is `MAJOR.MINOR.PATCH` with numeric components.
 fn is_release_core(core: &str) -> bool {
@@ -1341,7 +1341,7 @@ pub fn Stats() -> Element {
                     }
                     p { "On other distros, or without an AUR helper, use the install script:" }
                     code { class: "tracker-install",
-                        "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | STAT_TRACKER_CHANNEL=prerelease bash"
+                        "curl -fsSL https://raw.githubusercontent.com/FrozenTear/scuffed-crew/main/crates/stat-tracker/dist/bootstrap.sh | bash"
                     }
                     p {
                         "After installing, start the GUI, then paste this server's URL and a "
@@ -1780,7 +1780,7 @@ mod tracker_platform_copy_tests {
 
     #[test]
     fn release_notice_names_the_current_tracker_build() {
-        assert_eq!(TRACKER_RELEASE, "rc.9");
+        assert_eq!(TRACKER_RELEASE, "0.5.0");
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
             pinned,
@@ -1803,6 +1803,7 @@ mod tracker_platform_copy_tests {
             ["rc", "6"],
             ["rc", "7"],
             ["rc", "8"],
+            ["rc", "9"],
         ] {
             let label = previous.join(".");
             assert!(
@@ -1812,7 +1813,7 @@ mod tracker_platform_copy_tests {
         }
         let prod = src.split("mod tracker_platform_copy_tests").next().unwrap();
         assert_eq!(
-            prod.matches("rc.9").count(),
+            prod.matches("\"0.5.0\"").count(),
             1,
             "the build name lives only on TRACKER_RELEASE"
         );
@@ -1846,16 +1847,20 @@ mod tracker_platform_copy_tests {
     }
 
     #[test]
-    fn install_script_command_installs_the_prerelease_the_note_names() {
+    fn install_script_command_installs_the_stable_release_the_note_names() {
         let src = include_str!("mod.rs");
         let prod = src.split("mod tracker_platform_copy_tests").next().unwrap();
         let script = "crates/stat-tracker/dist/bootstrap.sh";
         let at = prod.find(script).expect("install script command");
         let line = prod[at..].lines().next().unwrap();
-        // The channel is assigned on bash, not curl, so bootstrap.sh sees it.
+        // No channel means stable, so 0.6 test builds are not offered here.
         assert!(
-            line.contains("| STAT_TRACKER_CHANNEL=prerelease bash"),
-            "the install script must take the prerelease channel the note names: {line}"
+            line.ends_with("bootstrap.sh | bash\""),
+            "the install script must install the stable release the note names: {line}"
+        );
+        assert!(
+            !prod.contains("STAT_TRACKER_CHANNEL=prerelease"),
+            "the /stats install command must not opt members into prereleases"
         );
     }
 
@@ -1878,9 +1883,9 @@ mod tracker_platform_copy_tests {
     fn release_notice_formats_tracker_latest_like_the_pinned_fallback() {
         let pinned = tracker_release_notice_text(None);
         assert_eq!(
-            tracker_release_notice_text(Some("0.5.0-rc.9")),
+            tracker_release_notice_text(Some("0.5.0")),
             pinned,
-            "the current bare version reads the same as the pin"
+            "the current stable version reads the same as the pin"
         );
         assert_eq!(
             tracker_release_notice_text(Some("  0.5.0-alpha.11  ")),
@@ -1889,7 +1894,11 @@ mod tracker_platform_copy_tests {
         assert_eq!(tracker_release_notice_text(Some("")), pinned);
         assert_eq!(tracker_release_notice_text(Some("   ")), pinned);
         assert_eq!(tracker_release_notice_text(Some("\n")), pinned);
-        let shown = tracker_release_notice_text(Some("0.5.0-rc.9"));
+        assert_eq!(
+            tracker_release_notice_text(Some("0.6.0-alpha.1")),
+            "Install alpha.1 between games, not during one."
+        );
+        let shown = tracker_release_notice_text(Some("0.5.0"));
         assert!(!shown.contains("0.5.0-"));
         assert!(!shown.contains("stat-tracker-v"));
         assert!(!shown.contains('\u{2014}'));
