@@ -22,6 +22,7 @@ use scuffed_types::strategy::{
     Color, ElementType, HealthPack, HealthPackSize, MapMetadata, Position, StrategyElement, Tool,
 };
 
+use super::hero_chip::{HeroChip, hero_chip, portrait_ready};
 use crate::canvas::tile_manager::{SharedTileManager, create_tile_manager};
 use crate::theme::tokens::{
     CANVAS_BADGE_BG, CANVAS_BG, CANVAS_GRID_LOADING, CANVAS_MARKER_BORDER, CANVAS_SELECTION_COLOR,
@@ -1316,28 +1317,35 @@ fn draw_element(
             let y = element.position.y;
 
             let mut drew_portrait = false;
+            let mut chip: Option<HeroChip> = None;
             if let Some(ref hero_id) = element.hero_id {
                 let cache = hero_cache.borrow();
                 if let Some(img) = cache.get(hero_id) {
-                    // Circular clipping path for hero portrait
-                    ctx.save();
-                    ctx.begin_path();
-                    let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
-                    ctx.clip();
+                    if portrait_ready(img.complete(), img.natural_width()) {
+                        // Circular clipping path for hero portrait
+                        ctx.save();
+                        ctx.begin_path();
+                        let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
+                        ctx.clip();
 
-                    let img_size = radius * 2.0;
-                    let _ = ctx.draw_image_with_html_image_element_and_dw_and_dh(
-                        img,
-                        x - radius,
-                        y - radius,
-                        img_size,
-                        img_size,
-                    );
+                        let img_size = radius * 2.0;
+                        let _ = ctx.draw_image_with_html_image_element_and_dw_and_dh(
+                            img,
+                            x - radius,
+                            y - radius,
+                            img_size,
+                            img_size,
+                        );
 
-                    ctx.restore();
-                    drew_portrait = true;
+                        ctx.restore();
+                        drew_portrait = true;
+                    } else {
+                        // Loading or failed. A failed image stays cached, so
+                        // it is not requested again.
+                        chip = Some(hero_chip(hero_id));
+                    }
                 } else {
-                    // Image not in cache — start loading
+                    // Image not in cache: start loading once
                     drop(cache);
                     let img = HtmlImageElement::new().expect("failed to create image");
                     let hero_id_clone = hero_id.clone();
@@ -1353,19 +1361,21 @@ fn draw_element(
                     onload.forget();
 
                     img.set_src(&format!("/assets/heroes/{}.png", hero_id_clone));
+                    chip = Some(hero_chip(hero_id));
                 }
             }
 
-            // Colored circle fallback or border
+            // Role chip, or the plain coloured circle
             if !drew_portrait {
-                ctx.set_fill_style_str(&color);
+                let fill = chip.as_ref().and_then(|c| c.fill).unwrap_or(color.as_str());
+                ctx.set_fill_style_str(fill);
                 ctx.begin_path();
                 let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
                 ctx.fill();
             }
 
-            // Border
-            if drew_portrait {
+            // Border: team colour around a portrait or chip
+            if drew_portrait || chip.is_some() {
                 ctx.set_stroke_style_str(&color);
                 ctx.set_line_width(3.0);
             } else {
@@ -1376,8 +1386,13 @@ fn draw_element(
             let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
             ctx.stroke();
 
-            // Label (only for plain markers)
-            if !drew_portrait && let Some(ref label) = element.label {
+            if let Some(ref chip) = chip {
+                ctx.set_fill_style_str(CANVAS_WHITE);
+                ctx.set_font("bold 13px sans-serif");
+                ctx.set_text_align("center");
+                let _ = ctx.fill_text(&chip.label, x, y + 5.0);
+            } else if !drew_portrait && let Some(ref label) = element.label {
+                // Label (only for plain markers)
                 ctx.set_fill_style_str(CANVAS_WHITE);
                 ctx.set_font("14px sans-serif");
                 ctx.set_text_align("center");
