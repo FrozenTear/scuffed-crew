@@ -555,7 +555,8 @@ mod tests {
     fn upload_entry_strings_capped_at_64_characters() {
         let at_cap = "\u{e9}".repeat(STATS_UPLOAD_STRING_MAX_CHARS);
         let over = "a".repeat(STATS_UPLOAD_STRING_MAX_CHARS + 1);
-        let setters: [(&str, fn(&mut StatsUploadEntry, String)); 5] = [
+        type SetStr = fn(&mut StatsUploadEntry, String);
+        let setters: [(&str, SetStr); 5] = [
             ("session_id", |e, v| e.session_id = v),
             ("map_name", |e, v| e.map_name = v),
             ("game_mode", |e, v| e.game_mode = v),
