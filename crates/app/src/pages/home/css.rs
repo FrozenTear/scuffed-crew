@@ -493,7 +493,6 @@ pub const HOME_SHARED_CSS: &str = r#"
         font-family: var(--font-mono);
         font-weight: 700;
         color: var(--text-2);
-        white-space: nowrap;
     }
     .ticker-chip .ticker-date {
         font-family: var(--font-mono);
@@ -509,7 +508,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         margin-top: 1.1rem;
         border-top: 1px solid var(--border);
         /* name | game | roster | division | record */
-        --tm-cols: minmax(0, 1.4fr) minmax(7.5rem, 0.9fr) 5.5rem 6.5rem 3.25rem;
+        --tm-cols: minmax(0, 1.4fr) minmax(7.5rem, 0.9fr) 5.5rem 6.5rem 4.75rem;
     }
     .team-head,
     .team-row {
