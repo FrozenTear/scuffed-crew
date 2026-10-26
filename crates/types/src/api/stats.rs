@@ -262,9 +262,10 @@ pub const STATS_UPLOAD_PLAYED_AT_MAX_FUTURE_SECS: i64 = 24 * 60 * 60;
 
 /// Largest per-match damage, healing, or mitigation an upload may carry.
 ///
-/// Long overtime games stay well under this. It exists so a row cannot carry
-/// `u32::MAX` and top a damage or healing board.
-pub const STATS_UPLOAD_MAX_DAMAGE: u32 = 100_000;
+/// Long overtime and Stadium games, tank mitigation included, stay under
+/// this. It exists so a row cannot carry `u32::MAX` and top a damage or
+/// healing board.
+pub const STATS_UPLOAD_MAX_DAMAGE: u32 = 200_000;
 /// Largest per-match elims an upload may carry.
 ///
 /// Wider than [`PLAUSIBLE_ELIMS_MAX`] (the tracker's read gate and the
@@ -274,9 +275,9 @@ pub const STATS_UPLOAD_MAX_ELIMS: u32 = 999;
 /// Same ceiling as [`STATS_UPLOAD_MAX_ELIMS`], for assists.
 pub const STATS_UPLOAD_MAX_ASSISTS: u32 = 999;
 /// Same ceiling as [`STATS_UPLOAD_MAX_DAMAGE`], for healing.
-pub const STATS_UPLOAD_MAX_HEALING: u32 = 100_000;
+pub const STATS_UPLOAD_MAX_HEALING: u32 = 200_000;
 /// Same ceiling as [`STATS_UPLOAD_MAX_DAMAGE`], for mitigation.
-pub const STATS_UPLOAD_MAX_MITIGATION: u32 = 100_000;
+pub const STATS_UPLOAD_MAX_MITIGATION: u32 = 200_000;
 
 /// Hero name 0.4.x and 0.5.0 trackers upload when no hero was read. Live
 /// data has rows with it, so the upload check accepts it in any case.
@@ -661,9 +662,9 @@ mod tests {
             ("elims", 999, |e, v| e.elims = v),
             ("assists", 999, |e, v| e.assists = v),
             ("deaths", 50, |e, v| e.deaths = v),
-            ("damage", 100_000, |e, v| e.damage = v),
-            ("healing", 100_000, |e, v| e.healing = v),
-            ("mitigation", 100_000, |e, v| e.mitigation = v),
+            ("damage", 200_000, |e, v| e.damage = v),
+            ("healing", 200_000, |e, v| e.healing = v),
+            ("mitigation", 200_000, |e, v| e.mitigation = v),
         ];
         for (name, max, set) in cases {
             let mut ok = valid_entry();

@@ -1180,9 +1180,9 @@ mod tests {
     #[tokio::test]
     async fn upload_huge_damage_and_healing_are_400() {
         for (field, max) in [
-            ("damage", 100_000u32),
-            ("healing", 100_000),
-            ("mitigation", 100_000),
+            ("damage", 200_000u32),
+            ("healing", 200_000),
+            ("mitigation", 200_000),
             ("elims", 999),
             ("assists", 999),
             ("deaths", 50),
@@ -1248,9 +1248,9 @@ mod tests {
         edge["hero"] = serde_json::json!("wrecking-ball");
         edge["assists"] = serde_json::json!(999);
         edge["deaths"] = serde_json::json!(50);
-        edge["damage"] = serde_json::json!(100_000);
-        edge["healing"] = serde_json::json!(100_000);
-        edge["mitigation"] = serde_json::json!(100_000);
+        edge["damage"] = serde_json::json!(200_000);
+        edge["healing"] = serde_json::json!(200_000);
+        edge["mitigation"] = serde_json::json!(200_000);
         edge["played_at"] =
             serde_json::json!((Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
         let mut floor = match_object("sess-floor", 1);
@@ -1276,7 +1276,7 @@ mod tests {
             .iter()
             .find(|r| r.session_id == "s".repeat(64))
             .unwrap();
-        assert_eq!(edge_row.damage, 100_000);
+        assert_eq!(edge_row.damage, 200_000);
         assert_eq!(edge_row.hero, "Wrecking Ball");
     }
 
