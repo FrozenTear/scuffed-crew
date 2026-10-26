@@ -461,9 +461,8 @@ fn a_panicking_accolade_reader_is_no_map() {
 #[test]
 fn the_poll_tick_chooses_the_accolade_map_with_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let src = include_str!("../main.rs");
-    let at = src.find("\nasync fn run_loop(").expect("run_loop");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/event_loop.rs since 0.6 S11: found by name, wherever it lives.
+    let body = norm(fn_source("run_loop"));
     assert!(
         body.contains(
             "choose_accolade_map( use_new_reader, outcome_only, signal.map(|(_, source)| source), || shadow::read_accolade_map(&rgb), || detect::match_end::read_accolade_map(&img), );"
