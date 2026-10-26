@@ -336,7 +336,7 @@ jobs:
       - name: Install cargo-binstall
         if: steps.dx_cache.outputs.hit != 'true'
         continue-on-error: true
-        uses: cargo-bins/cargo-binstall@main
+        uses: cargo-bins/cargo-binstall@81df5c23b0dc775b009efdfc9895c5965b7a4e40 # v1.26.1
 
       - name: Install dioxus-cli
         run: |
