@@ -4,14 +4,9 @@ use super::*;
 
 #[tokio::test]
 async fn commit_capture_rows_writes_the_current_row_then_the_carried_board() {
-    let src = include_str!("../main.rs");
-    let at = src
-        .find("async fn commit_capture_rows(")
-        .expect("commit helper");
-    let body = src[at..]
-        .split("\nasync fn handle_capture(")
-        .next()
-        .unwrap();
+    // Bounded by name: the items that used to sit between this fn and
+    // `handle_capture` start moving out of main.rs in 0.6 S3.
+    let body = fn_source("commit_capture_rows");
     let insert = body.find("insert_match(").expect("insert");
     let carried = body
         .find("write_carried_after_current(")

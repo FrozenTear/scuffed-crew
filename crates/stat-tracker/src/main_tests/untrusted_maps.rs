@@ -291,10 +291,8 @@ fn only_a_sure_adlersbrunn_banner_read_becomes_the_raw_label() {
 #[test]
 fn the_vision_pass_takes_the_raw_label_from_the_banner_read() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let full = include_str!("../main.rs");
-    let src = full.split("\nmod tests {").next().unwrap();
-    let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
+    let body = norm(fn_source("analyze_frame"));
     let call = "let map_panel_raw = top_bar_raw_label(top_bar.banner.as_ref(), map_panel_raw);";
     assert_eq!(body.matches(call).count(), 1);
     let chosen = body.find("let top_bar = choose_top_bar_map(").unwrap();

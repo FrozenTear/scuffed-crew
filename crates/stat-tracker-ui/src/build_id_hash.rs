@@ -68,11 +68,11 @@ pub struct BuildId {
 ///
 /// The stat-tracker lib leaves out `src/main.rs` and its modules under
 /// `src/daemon/`, its test modules (`src/main_tests/`, `src/ocr_bench.rs`)
-/// and `src/bin`: those are the daemon binary, which the GUI does not link. Its embedded assets
-/// (portraits, digit and letter templates) and `dist/install-paths.sh` (which
-/// the GUI embeds for uninstall) are in. Its changelog is out: every release
-/// edits it, and a GUI that keeps running only misses the newest entry in
-/// What's new until its next start.
+/// and `src/bin`: those are the daemon binary, which the GUI does not link.
+/// Its embedded assets (portraits, digit and letter templates) and
+/// `dist/install-paths.sh` (which the GUI embeds for uninstall) are in. Its
+/// changelog is out: every release edits it, and a GUI that keeps running
+/// only misses the newest entry in What's new until its next start.
 ///
 /// The crates split out of the stat-tracker lib (0.6 N4: today
 /// `stat-tracker-core`) are listed the same way: `Cargo.toml` and `src`,

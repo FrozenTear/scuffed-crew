@@ -9,7 +9,7 @@ use super::*;
 
 use std::time::Duration;
 
-use source_text::{daemon_source, fn_source};
+pub(crate) use source_text::{daemon_source, fn_source};
 
 struct ScriptedWaiter {
     events: Vec<KeyboardWait>,

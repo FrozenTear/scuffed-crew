@@ -72,8 +72,8 @@ fn the_board_is_read_only_under_the_new_reader() {
 fn the_cell_ocr_sites_go_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let src = include_str!("../main.rs");
-    let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
+    let body = norm(fn_source("analyze_frame"));
     assert!(body.contains(
         "let read_cells = || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size); let mut rows = read_tab_rows(use_new_reader, read_cells, || ocr::unread_rows(team_size));"
     ));

@@ -275,8 +275,8 @@ fn the_outcome_reads_take_the_final_score_source_from_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let full = daemon_source();
     let src = full.split("\nmod tests {").next().unwrap();
-    let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
+    let body = norm(fn_source("analyze_frame"));
     assert!(
         body.contains("let p4 = detect::match_end::FinalScoreSource::for_reader(use_new_reader);")
     );
@@ -699,8 +699,8 @@ fn the_end_titles_go_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let full = daemon_source();
     let src = full.split("\nmod tests {").next().unwrap();
-    let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
+    let body = norm(fn_source("analyze_frame"));
     let all = norm(src);
     let checks = [
         (
@@ -756,8 +756,8 @@ fn the_result_words_go_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let full = daemon_source();
     let src = full.split("\nmod tests {").next().unwrap();
-    let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
+    let body = norm(fn_source("analyze_frame"));
     let all = norm(src);
     // everything but the Tab pass
     let rest = all.replacen(body.as_str(), "", 1);
@@ -999,8 +999,8 @@ fn the_poll_tick_takes_the_phase_source_from_the_reader_switch() {
 fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let src = include_str!("../main.rs");
-    let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
+    let body = norm(fn_source("analyze_frame"));
     assert!(
         body.contains("choose_top_bar_map( use_new_reader, || shadow::read_banner(&img),"),
         "the top-bar map goes through choose_top_bar_map with the switch"
@@ -1054,8 +1054,8 @@ fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
 fn the_hero_authority_goes_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
     let src = include_str!("../main.rs");
-    let at = src.find("\nfn analyze_frame(").expect("analyze_frame");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
+    let body = norm(fn_source("analyze_frame"));
     assert!(body.contains("} = read_own_hero( use_new_reader, || {"));
     assert_eq!(
         body.matches("crop_career_hero").count(),
