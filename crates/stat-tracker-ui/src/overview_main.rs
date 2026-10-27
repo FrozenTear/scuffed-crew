@@ -153,13 +153,12 @@ pub fn record_line(record: &crate::aggregate::Record) -> String {
     }
 }
 
-/// "2 stats unsure", or `None`.
-pub fn unsure_label(g: &Game) -> Option<String> {
-    match crate::stat_tiles::still_unsure(g).len() {
-        0 => None,
-        1 => Some("1 stat unsure".to_string()),
-        n => Some(format!("{n} stats unsure")),
-    }
+/// The unsure cue Games shows for a game: "2 stats unsure" for the six
+/// stats, else "Map unsure" and the like for a map, hero or result read,
+/// so a game unsure only there still gets a cue.
+fn unsure_cue(g: &Game, playing: bool) -> Option<String> {
+    g.unsure_label()
+        .or_else(|| crate::games_rows::items_label(&crate::games_rows::unsure_items(g, playing)))
 }
 
 fn newest_card(g: &Game, playing: bool) -> Element<'static, Message> {
@@ -195,7 +194,7 @@ fn newest_card(g: &Game, playing: bool) -> Element<'static, Message> {
 
     let mut result = Row::new().spacing(10).align_y(Alignment::Center);
     result = result.push(result_word(g.outcome, playing));
-    if let Some(label) = unsure_label(g) {
+    if let Some(label) = unsure_cue(g, playing) {
         result = result.push(
             button(warn_chip(format!("{label} · Check")))
                 .padding(0)
@@ -392,7 +391,7 @@ fn earlier_rows(games: &[Game], live: Option<&str>) -> Element<'static, Message>
             map = map.push(chip(mode.to_string(), TEXT_2, BORDER));
         }
         let mut marks = Row::new();
-        if let Some(label) = unsure_label(g) {
+        if let Some(label) = unsure_cue(g, playing) {
             marks = marks.push(warn_chip(label));
         }
         let stripe_color = if playing {
@@ -537,12 +536,40 @@ mod tests {
     #[test]
     fn unsure_marks_follow_hand_edits() {
         let mut g = sample().remove(0);
-        g.suspect_fields = vec!["dmg".into(), "r2.h".into()];
+        g.suspect_fields = vec!["dmg".into(), "h".into()];
         g.edited_fields.clear();
-        assert_eq!(unsure_label(&g).as_deref(), Some("2 stats unsure"));
+        assert_eq!(g.unsure_label().as_deref(), Some("2 stats unsure"));
         g.edited_fields = vec!["damage".into()];
         assert!(!crate::stat_tiles::unsure_now(&g, "damage"));
-        assert_eq!(unsure_label(&g).as_deref(), Some("1 stat unsure"));
+        assert_eq!(g.unsure_label().as_deref(), Some("1 stat unsure"));
+    }
+
+    /// The Overview counts unsure stats with `Game::unsure_label`, as the
+    /// Games tab does: an unsure map, mode, hero or result is not a stat.
+    #[test]
+    fn only_stats_count_as_stats_unsure() {
+        let mut g = sample().remove(0);
+        g.suspect_fields = ["map", "mode", "hero", "result", "dmg"]
+            .map(String::from)
+            .to_vec();
+        g.edited_fields.clear();
+        assert_eq!(crate::stat_tiles::still_unsure(&g).len(), 5);
+        assert_eq!(g.unsure_label().as_deref(), Some("1 stat unsure"));
+    }
+
+    /// A game whose only unsure read is the map, hero or result keeps a
+    /// cue on the Overview, worded as Games words it.
+    #[test]
+    fn a_map_only_unsure_game_still_shows_a_cue() {
+        let mut g = sample().remove(0);
+        g.suspect_fields = vec!["map".into()];
+        g.edited_fields.clear();
+        assert_eq!(g.unsure_label(), None);
+        assert_eq!(unsure_cue(&g, false).as_deref(), Some("Map unsure"));
+        g.suspect_fields = vec!["dmg".into(), "map".into()];
+        assert_eq!(unsure_cue(&g, false).as_deref(), Some("1 stat unsure"));
+        g.suspect_fields.clear();
+        assert_eq!(unsure_cue(&g, false), None);
     }
 
     #[test]

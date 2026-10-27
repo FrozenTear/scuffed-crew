@@ -81,11 +81,11 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
-        // Settings has none; Overview, Maps and Seasons draw the spec's
-        // filter chips themselves.
+        // Settings has none; Overview, Games, Maps and Seasons draw the
+        // spec's filter chips themselves.
         if !matches!(
             app.screen,
-            Screen::Settings | Screen::Overview | Screen::Maps | Screen::Seasons
+            Screen::Settings | Screen::Overview | Screen::Games | Screen::Maps | Screen::Seasons
         ) {
             content = content.push(widgets::header_controls(app));
         }
@@ -188,7 +188,7 @@ fn page_body<'a>(
     content = content.push(
         responsive(move |size| match app.screen {
             Screen::Overview => crate::overview::view(app, size.width),
-            Screen::Games => crate::games::view(app, size.width),
+            Screen::Games => crate::games::view(app, size.width, size.width + 2.0 * pad_x),
             Screen::Heroes => crate::heroes::view(app, size.width),
             // The 0.6 pages under the top tabs, the 0.5 cards in the sidebar.
             Screen::Maps if app.nav_style == NavStyle::TopTabs => {

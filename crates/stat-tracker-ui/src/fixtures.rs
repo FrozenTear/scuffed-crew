@@ -11,23 +11,10 @@ use crate::cli::FixtureKind;
 
 pub fn snapshot(kind: FixtureKind) -> Snapshot {
     match kind {
-        FixtureKind::Empty => Snapshot {
-            matches: Vec::new(),
-            sessions: Vec::new(),
-        },
+        FixtureKind::Empty => Snapshot::default(),
         FixtureKind::Sample => sample_snapshot(),
+        FixtureKind::Games => crate::fixtures_games::snapshot(),
         FixtureKind::Full => crate::fixtures_full::snapshot(),
-    }
-}
-
-/// The clock a window on `fixture` starts at: the newest game for the
-/// fixtures with games, so "today" and "days left" read as in the spec
-/// shots. Live data starts at now.
-pub fn clock(fixture: Option<FixtureKind>, games: &[crate::model::Game]) -> chrono::DateTime<Utc> {
-    if matches!(fixture, Some(FixtureKind::Sample | FixtureKind::Full)) {
-        games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
-    } else {
-        Utc::now()
     }
 }
 
@@ -35,7 +22,7 @@ pub fn clock(fixture: Option<FixtureKind>, games: &[crate::model::Game]) -> chro
 pub fn seasons_json(kind: FixtureKind) -> Option<&'static str> {
     match kind {
         FixtureKind::Empty => None,
-        FixtureKind::Sample => Some(sample_seasons_json()),
+        FixtureKind::Sample | FixtureKind::Games => Some(sample_seasons_json()),
         FixtureKind::Full => Some(crate::fixtures_full::seasons_json()),
     }
 }
@@ -68,6 +55,16 @@ pub(crate) fn test_app() -> (tempfile::TempDir, crate::app::TrackerApp) {
     (dir, app)
 }
 
+/// The demo clock: the newest game's time on a fixture with games.
+pub fn clock(fixture: Option<FixtureKind>, games: &[crate::model::Game]) -> chrono::DateTime<Utc> {
+    match fixture {
+        Some(FixtureKind::Sample | FixtureKind::Games | FixtureKind::Full) => {
+            games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
+        }
+        _ => Utc::now(),
+    }
+}
+
 pub fn sample_seasons_json() -> &'static str {
     r#"[
   {
@@ -87,7 +84,7 @@ pub fn sample_seasons_json() -> &'static str {
 ]"#
 }
 
-fn dt(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> SurrealDatetime {
+pub(crate) fn dt(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> SurrealDatetime {
     SurrealDatetime::from(Utc.with_ymd_and_hms(y, m, d, hh, mm, 0).unwrap())
 }
 
@@ -269,5 +266,9 @@ fn sample_snapshot() -> Snapshot {
             final_outcome: "victory".into(),
         },
     ];
-    Snapshot { matches, sessions }
+    Snapshot {
+        matches,
+        sessions,
+        ..Snapshot::default()
+    }
 }

@@ -6,8 +6,24 @@ use stat_tracker::config::Config;
 pub enum FixtureKind {
     Empty,
     Sample,
+    /// The Games tab's open-row states (UX Spec v2): a corrected game, an
+    /// unsure one with a swap, and an undecided one, with Wrecking Ball
+    /// history for the averages.
+    Games,
     /// 857 games over three seasons (the 0.6 Maps and Seasons spec numbers).
     Full,
+}
+
+impl FixtureKind {
+    /// The `--fixture` value.
+    pub fn name(self) -> &'static str {
+        match self {
+            FixtureKind::Empty => "empty",
+            FixtureKind::Sample => "sample",
+            FixtureKind::Games => "games",
+            FixtureKind::Full => "full",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +45,13 @@ pub struct Cli {
 /// whether an update changed the app. It wins over every other flag.
 pub fn wants_build_id(args: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
     args.into_iter().any(|arg| arg.as_ref() == "--build-id")
+}
+
+/// The dir a `--fixture` run uses when no `--data-dir` is given: one per
+/// kind under the temp dir. Only this dir starts each run with no queued
+/// commands; a `--data-dir` the user passed keeps them.
+pub fn default_fixture_dir(kind: FixtureKind) -> PathBuf {
+    std::env::temp_dir().join(format!("scuffed-stat-tracker-ui-fixture-{}", kind.name()))
 }
 
 impl Cli {
@@ -64,9 +87,10 @@ impl Cli {
                         fixture = match v.as_str() {
                             "empty" => Some(FixtureKind::Empty),
                             "sample" => Some(FixtureKind::Sample),
+                            "games" => Some(FixtureKind::Games),
                             "full" => Some(FixtureKind::Full),
                             other => {
-                                eprintln!("unknown --fixture {other:?} (empty|sample|full)");
+                                eprintln!("unknown --fixture {other:?} (empty|sample|games|full)");
                                 None
                             }
                         };
@@ -90,8 +114,10 @@ impl Cli {
 
         let config = Config::load().unwrap_or_default();
         let data_dir = data_dir.unwrap_or_else(|| {
-            if fixture.is_some() {
-                std::env::temp_dir().join("scuffed-stat-tracker-ui-fixture")
+            // One dir per kind, so the games kit pictures never show up
+            // in a later sample run.
+            if let Some(kind) = fixture {
+                default_fixture_dir(kind)
             } else {
                 config.data_dir.clone()
             }
@@ -136,7 +162,7 @@ USAGE:
 
 OPTIONS:
   --data-dir PATH       Daemon data dir (default: config / XDG, or a temp dir with --fixture)
-  --fixture empty|sample|full
+  --fixture empty|sample|games|full
                         Install a demo live_snapshot.json and read it back via storage::read_snapshot
   --companion           Run the layer-shell overlay only (no main window / tray).
                         Needs a Wayland compositor with wlr-layer-shell (niri).

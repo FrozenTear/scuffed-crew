@@ -3,8 +3,8 @@
 //! a value the reader was not sure of and no hand edit has fixed since.
 //!
 //! One shared component for the Games expanded row and the Overview's
-//! newest game. Callers use [`row`] only, so Tracker's shared tiles from
-//! the Games PR can replace this module whole.
+//! newest game. The Overview calls [`row`]; the Games panel calls
+//! [`tile_with`] with [`TileExtras`] for its badge and extra lines.
 
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, column, container, image, text};
@@ -36,8 +36,7 @@ pub fn row(g: &Game) -> Element<'static, Message> {
 }
 
 /// The flat suspect names still standing on `g`, once each: every stored
-/// name (`dmg`, or an older row's `r3.dmg`) flattened by
-/// [`flat_suspect_name`], less the ones a hand edit settled
+/// name run through [`flat_suspect_name`], less the ones a hand edit settled
 /// ([`suspect_names_for_edit`] of each edited field).
 pub fn still_unsure(g: &Game) -> Vec<&str> {
     let settled: Vec<&str> = g

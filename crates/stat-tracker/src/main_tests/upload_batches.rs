@@ -1244,3 +1244,97 @@ async fn one_bad_row_in_the_first_chunk_still_uploads_the_next_chunk() {
     );
     assert!(store.get_unsynced().await.unwrap().is_empty());
 }
+
+/// Delete game while the server is down: the game is gone here at once,
+/// its tombstone waits, and the next sync that reaches the site sends it.
+#[tokio::test]
+async fn a_delete_while_offline_sends_its_tombstone_on_the_next_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    store
+        .insert_match(test_match("offline", "victory"))
+        .await
+        .unwrap();
+    let claims = storage::SyncClaim::capture(&store.get_unsynced().await.unwrap());
+    store.mark_synced(&claims).await.unwrap();
+    store.delete_session("offline").await.unwrap();
+    assert_eq!(store.match_count().await.unwrap(), 0);
+
+    let down = try_sync_with(&store, dir.path(), None, |_m, tombstones| async move {
+        assert_eq!(tombstones, vec!["offline".to_string()]);
+        Err(sync::SyncUploadError::plain("connection refused"))
+    })
+    .await;
+    assert!(!matches!(down, sync::SyncAttempt::Uploaded));
+    assert_eq!(
+        store.get_pending_tombstones().await.unwrap(),
+        vec!["offline".to_string()],
+        "the tombstone waits for the site"
+    );
+
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sent_pass = std::sync::Arc::clone(&sent);
+    let back = try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
+        let sent_pass = std::sync::Arc::clone(&sent_pass);
+        async move {
+            assert!(matches.is_empty());
+            sent_pass.lock().unwrap().extend(tombstones);
+            Ok(upload_ok())
+        }
+    })
+    .await;
+    assert!(matches!(back, sync::SyncAttempt::Uploaded));
+    assert_eq!(*sent.lock().unwrap(), vec!["offline".to_string()]);
+    assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+    assert_eq!(store.match_count().await.unwrap(), 0);
+}
+
+/// Delete game while that game's upload is in flight: the upload's
+/// success does not bring the row back, and the tombstone, queued after
+/// the batch was read, goes on the next sync and removes it from the site.
+#[tokio::test]
+async fn a_delete_during_its_upload_queues_the_tombstone_for_the_next_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    store
+        .insert_match(test_match("mid", "victory"))
+        .await
+        .unwrap();
+
+    let gui = store.clone();
+    let first = try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
+        let gui = gui.clone();
+        async move {
+            assert!(matches.iter().any(|m| m.session_id == "mid"));
+            assert!(tombstones.is_empty());
+            // The GUI's DeleteSession lands while the request is out.
+            gui.delete_session("mid").await.unwrap();
+            Ok(upload_ok())
+        }
+    })
+    .await;
+    assert!(matches!(first, sync::SyncAttempt::Uploaded));
+    assert_eq!(
+        store.match_count().await.unwrap(),
+        0,
+        "the acknowledged upload does not resurrect the deleted game"
+    );
+    assert_eq!(
+        store.get_pending_tombstones().await.unwrap(),
+        vec!["mid".to_string()]
+    );
+
+    let sent = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sent_pass = std::sync::Arc::clone(&sent);
+    try_sync_with(&store, dir.path(), None, move |matches, tombstones| {
+        let sent_pass = std::sync::Arc::clone(&sent_pass);
+        async move {
+            assert!(matches.is_empty(), "the deleted game is not uploaded again");
+            sent_pass.lock().unwrap().extend(tombstones);
+            Ok(upload_ok())
+        }
+    })
+    .await;
+    assert_eq!(*sent.lock().unwrap(), vec!["mid".to_string()]);
+    assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+}

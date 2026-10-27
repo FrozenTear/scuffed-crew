@@ -188,7 +188,7 @@ pub fn snapshot() -> Snapshot {
     matches.reverse();
     Snapshot {
         matches,
-        sessions: Vec::new(),
+        ..Snapshot::default()
     }
 }
 

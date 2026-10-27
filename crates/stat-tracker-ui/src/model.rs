@@ -192,6 +192,9 @@ pub struct SegmentView {
     pub confirmed: bool,
     pub dismissed: bool,
     pub resolution: Option<String>,
+    /// First and last Tab read of this run, to the second.
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
 }
 
 impl SegmentView {
@@ -204,6 +207,8 @@ impl SegmentView {
             confirmed: seg.confirmed,
             dismissed: seg.is_dismissed(),
             resolution: seg.resolution.clone(),
+            first_seen: seg.first_seen.into(),
+            last_seen: seg.last_seen.into(),
         }
     }
 
@@ -246,7 +251,12 @@ pub struct Game {
     /// True when this row has already been uploaded. A blank map on a
     /// synced row was stored by an older build. It is not a local hold.
     pub synced: bool,
+    /// The reader that read the scoreboard, e.g. "cv-v1" or "ocr-v1".
+    pub recognizer: String,
 }
+
+/// The six stats a "N stats unsure" count covers, as flat names.
+const STAT_FLATS: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
 
 /// Label for a game the server refused. The detail line is the server message.
 pub const UPLOAD_REJECTED_LABEL: &str = "Upload rejected";
@@ -289,11 +299,72 @@ impl Game {
             upload_reject: m.upload_rejection().map(str::to_string),
             suspect_fields: stat_tracker::reader_apply::upload_suspect_fields(&m.suspect_fields),
             synced: m.synced,
+            recognizer: m.stored_recognizer().to_string(),
         }
     }
 
+    /// A field the reader was unsure of that no hand edit has fixed since.
+    /// `name` is a flat name (`e`, `dmg`, `map`). Same as [`Game::unsure_now`].
     pub fn field_unsure(&self, name: &str) -> bool {
-        self.suspect_fields.iter().any(|field| field == name)
+        self.unsure_now(name)
+    }
+
+    /// A field the reader was unsure of that no hand edit has fixed since.
+    /// `field` is a flat name (`e`, `dmg`) or an edit name (`elims`,
+    /// `damage`); both map through `stat_tracker::suspect`, the rules the
+    /// store and uploader apply. The names are flat already: `Game::from`
+    /// keeps only flat names (`r3.dmg` is stored as `dmg`).
+    pub fn unsure_now(&self, field: &str) -> bool {
+        let flats: &[&str] = match stat_tracker::suspect::suspect_names_for_edit(field) {
+            [] => &[field],
+            names => names,
+        };
+        flats.iter().any(|flat| self.flat_unsure_now(flat))
+    }
+
+    fn flat_unsure_now(&self, flat: &str) -> bool {
+        self.suspect_fields.iter().any(|s| s == flat)
+            && !self
+                .edited_fields
+                .iter()
+                .any(|e| stat_tracker::suspect::suspect_names_for_edit(e).contains(&flat))
+    }
+
+    /// How many of the six stats (E, D, A, DMG, HEAL, MIT) are still
+    /// unsure. Hero, map and result are not stats and never count here.
+    pub fn unsure_stats(&self) -> usize {
+        STAT_FLATS
+            .iter()
+            .filter(|f| self.flat_unsure_now(f))
+            .count()
+    }
+
+    /// "2 stats unsure", or `None` when no stat is unsure.
+    pub fn unsure_label(&self) -> Option<String> {
+        match self.unsure_stats() {
+            0 => None,
+            1 => Some("1 stat unsure".to_string()),
+            n => Some(format!("{n} stats unsure")),
+        }
+    }
+
+    /// When the game started: the first Tab read of its hero runs, or
+    /// `played_at` for a row with none. `played_at` is the last Tab read.
+    pub fn started_at(&self) -> DateTime<Utc> {
+        self.segments
+            .iter()
+            .map(|s| s.first_seen)
+            .min()
+            .map_or(self.played_at, |first| first.min(self.played_at))
+    }
+
+    /// When the game ended, as far as the tracker saw: the last Tab read.
+    pub fn ended_at(&self) -> DateTime<Utc> {
+        self.segments
+            .iter()
+            .map(|s| s.last_seen)
+            .max()
+            .map_or(self.played_at, |last| last.max(self.played_at))
     }
 
     pub fn display_hero(&self) -> String {
@@ -543,6 +614,7 @@ mod tests {
             upload_reject: None,
             suspect_fields: vec!["dmg".into(), "hero".into()],
             synced: false,
+            recognizer: String::new(),
         };
         assert!(game.field_unsure("dmg"));
         assert!(game.field_unsure("hero"));
@@ -575,6 +647,7 @@ mod tests {
             upload_reject: None,
             suspect_fields: Vec::new(),
             synced: false,
+            recognizer: String::new(),
         };
         for field in [
             "hero", "result", "map", "mode", "e", "a", "d", "dmg", "h", "mit",
@@ -610,6 +683,7 @@ mod review_tests {
             upload_reject: None,
             suspect_fields: Vec::new(),
             synced: false,
+            recognizer: String::new(),
         }
     }
 
