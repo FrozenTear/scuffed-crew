@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that a 0.6 set A PR (daemon tests move next to their modules) only renamed tests.
+"""Check that a 0.6 set A PR (daemon tests move next to their modules) kept every test name.
 
 Compares two `cargo test -p scuffed-stat-tracker --bin scuffed-stat-tracker -- --list`
 outputs, base and head, through a rename map of old to new module prefixes. Where the
@@ -19,7 +19,25 @@ The check passes only when:
 5. head has no test that is not accounted for by 3 or 4.
 
 So the leaf names, the count and every unmoved path are identical, and the only
-difference is the documented prefix swap.
+difference is the documented prefix swap. It reads names only, not test bodies:
+`check-test-moves.py` checks that each moved file's text is unchanged.
+
+How the set A scripts run together, for each set A PR (BASE is the PR's
+base, for example origin/wip/0.6; BASE_DIR is a scratch directory; MAP has
+one `old -> new` line per moved file):
+
+    git worktree add --detach BASE_DIR BASE
+    python3 -I crates/stat-tracker/scripts/list-bin-tests.py \\
+        --src BASE_DIR/crates/stat-tracker/src > base-list.txt
+    python3 -I crates/stat-tracker/scripts/list-bin-tests.py > head-list.txt
+    python3 -I crates/stat-tracker/scripts/check-test-renames.py \\
+        base-list.txt head-list.txt MAP
+    python3 -I crates/stat-tracker/scripts/check-test-moves.py --base BASE MAP
+    python3 -I crates/stat-tracker/scripts/check-daemon-split.py --base BASE
+    git worktree remove BASE_DIR
+
+All three checks must print OK. The full account of what each proves is in
+`check-test-moves.py`.
 
 Usage (from anywhere in the repo):
 
@@ -69,7 +87,7 @@ def rename_map(path):
 
 def main():
     if len(sys.argv) != 4:
-        sys.exit(__doc__.split("Usage:")[1].split("MAP has")[0].strip())
+        sys.exit("usage: " + __doc__.split("Usage (from anywhere in the repo):")[1].split("MAP has")[0].strip())
     base, head = tests(sys.argv[1]), tests(sys.argv[2])
     pairs = rename_map(sys.argv[3])
     errors = []

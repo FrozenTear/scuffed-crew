@@ -53,7 +53,25 @@ base revision:
 Test files under `src/daemon/` (named `tests_*.rs`, moved there from
 `src/main_tests/` by 0.6 set A) are not moved items: checks 1 to 4 skip
 them, here and in the base, and only check 6 looks at them.
-`check-test-renames.py` checks the tests they hold.
+`check-test-renames.py` checks the names of the tests they hold, and
+`check-test-moves.py` checks their text against the base files.
+
+How the set A scripts run together, for each set A PR (BASE is the PR's
+base, for example origin/wip/0.6; BASE_DIR is a scratch directory; MAP has
+one `old -> new` line per moved file):
+
+    git worktree add --detach BASE_DIR BASE
+    python3 -I crates/stat-tracker/scripts/list-bin-tests.py \\
+        --src BASE_DIR/crates/stat-tracker/src > base-list.txt
+    python3 -I crates/stat-tracker/scripts/list-bin-tests.py > head-list.txt
+    python3 -I crates/stat-tracker/scripts/check-test-renames.py \\
+        base-list.txt head-list.txt MAP
+    python3 -I crates/stat-tracker/scripts/check-test-moves.py --base BASE MAP
+    python3 -I crates/stat-tracker/scripts/check-daemon-split.py --base BASE
+    git worktree remove BASE_DIR
+
+All three checks must print OK. The full account of what each proves is in
+`check-test-moves.py`.
 
 It proves the move is pure text; it does not prove the tree compiles (a
 moved type's private field read from outside its new module, for one).
