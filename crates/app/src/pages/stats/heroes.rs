@@ -146,7 +146,7 @@ pub(super) fn heroes_tab(
                         }
                     }
                     if other_count > 0 {
-                        tr { key: "other-heroes", class: "stats-row-muted", title: "{other_names}",
+                        tr { key: "{OTHER_HEROES}", class: "stats-row-muted", title: "{other_names}",
                             td { "{OTHER_HEROES} ({other_count})" }
                             td { "{other.games}" }
                             td { span { class: "{other_cls}", "{other_label}" } }
