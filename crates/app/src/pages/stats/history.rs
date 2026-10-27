@@ -3,7 +3,10 @@ use dioxus::prelude::*;
 use crate::hooks::ApiResource;
 
 use super::game::{match_path, open_match};
-use super::role::{game_role_label, history_row_matches_role};
+use super::history_filter::{
+    ALL, HISTORY_CSS, UNKNOWN_MAP, filter_rows, map_rows, map_table, mode_label, page_modes,
+};
+use super::role::game_role_label;
 use super::{MatchPage, format_date, load_error_state};
 
 /// The tracker stores outcomes as `victory` / `defeat` / `draw` (see the
@@ -124,6 +127,7 @@ pub(super) fn history_tab(
     mut cursor_history: Signal<Vec<Option<String>>>,
     mut outcome_filter: Signal<&'static str>,
     mut role_filter: Signal<&'static str>,
+    mut mode_filter: Signal<String>,
 ) -> Element {
     let err = matches.error.read().clone();
     let data = matches.data.read();
@@ -141,34 +145,16 @@ pub(super) fn history_tab(
             let of = outcome_filter();
             let rf = role_filter();
 
-            let rows: Vec<_> = page
-                .data
-                .iter()
-                .filter(|m| {
-                    let o_ok = match of {
-                        "all" => true,
-                        "win" => {
-                            m.outcome.eq_ignore_ascii_case("win")
-                                || m.outcome.eq_ignore_ascii_case("victory")
-                        }
-                        "loss" => {
-                            m.outcome.eq_ignore_ascii_case("loss")
-                                || m.outcome.eq_ignore_ascii_case("defeat")
-                        }
-                        "draw" => {
-                            !m.outcome.eq_ignore_ascii_case("win")
-                                && !m.outcome.eq_ignore_ascii_case("victory")
-                                && !m.outcome.eq_ignore_ascii_case("loss")
-                                && !m.outcome.eq_ignore_ascii_case("defeat")
-                        }
-                        _ => m.outcome.eq_ignore_ascii_case(of),
-                    };
-                    let r_ok = history_row_matches_role(&m.role, &m.hero, rf);
-                    o_ok && r_ok
-                })
-                .collect();
+            let mf = mode_filter();
+
+            let rows = filter_rows(&page.data, of, rf, &mf);
+            let modes = page_modes(&page.data, &mf);
+            // Map results ignore the outcome chip: filtering to wins would
+            // make every map read 100%.
+            let maps = map_rows(filter_rows(&page.data, ALL, rf, &mf));
 
             rsx! {
+                crate::styles::StyleOnce { id: "stats-history-p2", css: HISTORY_CSS }
                 div { class: "stats-filters",
                     div { class: "filter-group",
                         span { class: "filter-label", "Outcome" }
@@ -197,6 +183,29 @@ pub(super) fn history_tab(
                                 }
                             }
                         })}
+                    }
+                    div { class: "filter-group",
+                        span { class: "filter-label", "Mode" }
+                        button {
+                            key: "{ALL}",
+                            class: if mf == ALL { "filter-chip active" } else { "filter-chip" },
+                            onclick: move |_| mode_filter.set(ALL.to_string()),
+                            "All"
+                        }
+                        for mode in modes {
+                            {
+                                let active = mf.eq_ignore_ascii_case(&mode);
+                                let pick = mode.clone();
+                                rsx! {
+                                    button {
+                                        key: "{mode}",
+                                        class: if active { "filter-chip active" } else { "filter-chip" },
+                                        onclick: move |_| mode_filter.set(pick.clone()),
+                                        "{mode}"
+                                    }
+                                }
+                            }
+                        }
                     }
                     p { class: "filter-hint", "Filters apply to loaded rows (this page)." }
                 }
@@ -227,7 +236,7 @@ pub(super) fn history_tab(
                                     let date = format_date(&m.played_at);
                                     let abs = m.played_at.format("%Y-%m-%d %H:%M UTC").to_string();
                                     let map_label = if m.map_name.trim().is_empty() {
-                                        "Unknown map".to_string()
+                                        UNKNOWN_MAP.to_string()
                                     } else {
                                         m.map_name.clone()
                                     };
@@ -240,13 +249,13 @@ pub(super) fn history_tab(
                                     let mit_unsure = cell_is_unsure(fields, "mit");
                                     let new_reader =
                                         show_new_reader_badge(m.recognizer.as_deref().unwrap_or(""));
-                                    let mode_text = m.game_mode.clone();
+                                    let mode_text = mode_label(&m.game_mode, &m.map_name);
                                     let mit_text = format!("MIT {}", m.mitigation);
                                     let href = match_path(&m.id);
                                     let target_id = m.id.clone();
                                     rsx! {
                                         a {
-                                            class: "match-card match-card-link",
+                                            class: "match-card match-card-link match-row-compact",
                                             key: "{m.id}",
                                             href: "{href}",
                                             onclick: move |evt: MouseEvent| open_match(evt, target_id.clone()),
@@ -257,7 +266,7 @@ pub(super) fn history_tab(
                                                 false,
                                                 result_unsure,
                                             )}
-                                            div { class: "match-identity",
+                                            div { class: "match-identity match-identity-compact",
                                                 div { class: "match-hero-line",
                                                     {marked_value("match-hero", &m.hero, "Hero", false, hero_unsure)}
                                                     if new_reader {
@@ -271,10 +280,8 @@ pub(super) fn history_tab(
                                                 }
                                                 div { class: "match-map",
                                                     {marked_value("match-map-name", &map_label, "Map", false, map_unsure)}
-                                                    if mode_unsure {
-                                                        span { class: "match-map-sep", " · " }
-                                                        {marked_value("stat-flagged", &mode_text, "Mode", false, true)}
-                                                    }
+                                                    span { class: "match-map-sep", " · " }
+                                                    {marked_value("match-mode", &mode_text, "Mode", false, mode_unsure)}
                                                     span { class: "match-map-sep", " · " }
                                                     "{role_label}"
                                                     if mit_unsure {
@@ -355,6 +362,7 @@ pub(super) fn history_tab(
                         "Next"
                     }
                 }
+                {map_table(&maps)}
             }
         }
     }
@@ -484,7 +492,8 @@ mod tests {
             let cursor_history = use_signal(|| vec![None::<String>]);
             let outcome = use_signal(|| "all");
             let role = use_signal(|| "all");
-            history_tab(matches, page_cursor, cursor_history, outcome, role)
+            let mode = use_signal(|| "all".to_string());
+            history_tab(matches, page_cursor, cursor_history, outcome, role, mode)
         }
 
         let mut dom = VirtualDom::new(view);
@@ -520,14 +529,29 @@ mod tests {
         );
         assert!(html.contains("Reinhardt"), "{html}");
         assert!(
-            !html.contains("control"),
-            "an unflagged mode stays off the row: {html}"
+            html.contains("class=\"match-mode\"><span class=\"stat-value-text\">Control<"),
+            "a compact row always shows its mode, written the usual way: {html}"
         );
         assert!(
-            !html.contains("flashpoint"),
+            html.contains("class=\"match-mode\"><span class=\"stat-value-text\">Flashpoint<"),
             "an empty recognizer does not flag the row: {html}"
         );
-        assert!(html.contains("push"), "{html}");
+        assert!(
+            html.contains("class=\"match-mode stat-unsure\""),
+            "a flagged mode keeps its mark: {html}"
+        );
+        assert!(html.contains("Push"), "{html}");
+        assert!(
+            html.contains("match-identity match-identity-compact"),
+            "{html}"
+        );
+        for chip in ["Push", "Control", "Flashpoint"] {
+            assert!(
+                html.contains(&format!("class=\"filter-chip\">{chip}<")),
+                "mode chip for {chip}: {html}"
+            );
+        }
+        assert!(html.contains("class=\"history-maps\""), "{html}");
         assert!(html.contains("6666"), "{html}");
         assert!(
             !html.contains(">6<") && !html.contains(">MIT 6<"),
