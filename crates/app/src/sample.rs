@@ -1,8 +1,11 @@
 //! Small-sample rule for win rates (FrozenTear, Oct 20; same rule as the tracker).
 //!
 //! - Under 3 games a hero folds away under "Other heroes".
-//! - From 3 to 9 games only the record shows, e.g. `2W-1L`.
-//! - From 10 games the win rate shows.
+//! - From 3 games on, under 10 decided games (win, loss or draw) only the
+//!   record shows, e.g. `2W-1L`, and the result reads "Too few games".
+//!   Undecided games never count toward the 10 (ux.md section 17), so 12
+//!   games with 9 decided still read "Too few games".
+//! - From 10 decided games the win rate shows.
 //! - An empty map, mode or season shows "No games", never 0%.
 //! - The pooled "Other heroes" row always shows its record, never a win
 //!   rate, because it mixes several heroes.
@@ -16,25 +19,29 @@ use crate::util::record_label;
 
 /// Fewer games than this and a hero folds into "Other heroes".
 pub const RECORD_MIN_GAMES: u32 = 3;
-/// From this many games a win rate shows instead of the record.
-pub const RATE_MIN_GAMES: u32 = 10;
+/// From this many decided games (win, loss or draw) a win rate shows
+/// instead of the record. Undecided games never count.
+pub const RATE_MIN_DECIDED: u32 = 10;
 
 /// Group name for heroes under [`RECORD_MIN_GAMES`].
 pub const OTHER_HEROES: &str = "Other heroes";
 /// Shown for an empty map, mode or season instead of 0%.
 pub const NO_GAMES: &str = "No games";
+/// The one wording for a result under [`RATE_MIN_DECIDED`] decided games.
+pub const TOO_FEW_GAMES: &str = "Too few games";
 
 /// Text class for the pooled "Other heroes" result: always muted.
 pub const OTHER_RESULT_CLASS: &str = "stats-wr muted";
 
 /// Caption for hero lists that follow the rule.
-pub const HERO_RULE_NOTE: &str =
-    "Win rate from 10 games, record from 3. Heroes with fewer fold into Other heroes.";
+pub const HERO_RULE_NOTE: &str = "Win rate from 10 decided games. Fewer is Too few games, with the record. Heroes under 3 games fold into Other heroes.";
 /// Caption for map lists that follow the rule.
-pub const MAP_RULE_NOTE: &str = "Win rate from 10 games, record below that.";
+pub const MAP_RULE_NOTE: &str =
+    "Win rate from 10 decided games. Fewer is Too few games, with the record.";
 
 /// Caption for the members list and leaderboards.
-pub const LIST_RULE_NOTE: &str = "Win rate from 10 games, record below that.";
+pub const LIST_RULE_NOTE: &str =
+    "Win rate from 10 decided games. Fewer is Too few games, with the record.";
 
 /// Games and results for one hero, map, mode or season.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -60,9 +67,19 @@ impl Tally {
         self.games < RECORD_MIN_GAMES
     }
 
-    /// At least [`RATE_MIN_GAMES`]: a win rate may show.
+    /// Wins, losses and draws. Undecided games are the rest of `games`.
+    pub fn decided(&self) -> u32 {
+        self.wins + self.losses + self.draws
+    }
+
+    /// At least [`RATE_MIN_DECIDED`] decided games: a win rate may show.
     pub fn has_win_rate(&self) -> bool {
-        self.games >= RATE_MIN_GAMES
+        self.decided() >= RATE_MIN_DECIDED
+    }
+
+    /// Some games but under [`RATE_MIN_DECIDED`] decided: "Too few games".
+    pub fn too_few(&self) -> bool {
+        self.games > 0 && !self.has_win_rate()
     }
 
     /// Win rate in percent, only once the sample is big enough.
@@ -101,7 +118,7 @@ impl Tally {
 }
 
 /// Result text for the pooled "Other heroes" row or card: the record, or
-/// "No games" for an empty pool. Never a win rate, even from 10 games,
+/// "No games" for an empty pool. Never a win rate, even from 10 decided games,
 /// because the pool mixes several heroes.
 pub fn other_label(pool: Tally) -> String {
     if pool.games == 0 {
@@ -116,7 +133,7 @@ pub fn other_label(pool: Tally) -> String {
 pub struct ListResult {
     /// "No games", the record such as `5W-3L-1D`, or a whole percent.
     pub text: String,
-    /// True once the win rate shows (10 or more games).
+    /// True once the win rate shows (10 or more decided games).
     pub is_rate: bool,
     /// True under [`RECORD_MIN_GAMES`]: show it muted.
     pub muted: bool,
@@ -128,7 +145,8 @@ pub struct ListResult {
 /// Older servers send only `games` and `winrate`, so the three counts
 /// default to 0. In that case the win count is rebuilt from the rate (wins
 /// over games) and shows alone, such as `5W`, because losses and draws
-/// cannot be told apart.
+/// cannot be told apart, and every game counts as decided (see
+/// [`list_decided`]).
 pub fn list_result(games: u32, wins: u32, losses: u32, draws: u32, winrate: f32) -> ListResult {
     let has_record = wins + losses + draws > 0;
     let tally = if has_record || games == 0 {
@@ -137,7 +155,7 @@ pub fn list_result(games: u32, wins: u32, losses: u32, draws: u32, winrate: f32)
         let rebuilt = (f64::from(winrate) * f64::from(games))
             .round()
             .clamp(0.0, f64::from(games)) as u32;
-        Tally::new(games, rebuilt, 0, 0)
+        Tally::new(games, rebuilt, games - rebuilt, 0)
     };
     let muted = tally.folds_away();
     let (text, is_rate) = if games == 0 {
@@ -153,6 +171,16 @@ pub fn list_result(games: u32, wins: u32, losses: u32, draws: u32, winrate: f32)
         text,
         is_rate,
         muted,
+    }
+}
+
+/// Decided games for a list row: wins, losses and draws. An older server
+/// sends no counts, so all of `games` counts as decided there, which keeps
+/// the old 10 game floor for those rows.
+pub fn list_decided(games: u32, wins: u32, losses: u32, draws: u32) -> u32 {
+    match wins + losses + draws {
+        0 => games,
+        decided => decided,
     }
 }
 
@@ -181,14 +209,14 @@ pub fn fold_small<T: Copy>(items: &[T], tally: impl Fn(T) -> Tally) -> (Vec<T>, 
 }
 
 /// Season summary tile: the win rate with the record under it from 10
-/// games, only the record below that. An empty season never reaches here;
+/// decided games, below that the record labelled "Too few games". An empty season never reaches here;
 /// the pages show their own empty state.
 pub fn season_tile(season: Tally) -> Element {
     let value = season.label();
     let (label, record) = if season.has_win_rate() {
         ("Win Rate", Some(season.record()))
     } else {
-        ("Record", None)
+        (TOO_FEW_GAMES, None)
     };
     rsx! {
         div { class: "stat-tile stat-tile-hero",
@@ -245,6 +273,49 @@ mod tests {
     }
 
     #[test]
+    fn nine_decided_is_too_few_and_ten_decided_gets_a_win_rate() {
+        let nine = Tally::new(9, 6, 2, 1);
+        assert_eq!(nine.decided(), 9);
+        assert!(!nine.has_win_rate() && nine.too_few());
+        assert_eq!(nine.label(), "6W-2L-1D");
+
+        let ten = Tally::new(10, 6, 2, 2);
+        assert_eq!(ten.decided(), 10);
+        assert!(ten.has_win_rate() && !ten.too_few());
+        assert_eq!(ten.label(), "60.0%");
+    }
+
+    #[test]
+    fn ten_plus_games_with_nine_decided_is_too_few() {
+        let t = Tally::new(14, 6, 3, 0);
+        assert!(!t.folds_away());
+        assert_eq!(t.decided(), 9);
+        assert!(!t.has_win_rate());
+        assert!(t.too_few());
+        assert_eq!(t.win_rate_pct(), None);
+        assert_eq!(t.label(), "6W-3L");
+
+        let r = list_result(14, 6, 3, 0, 6.0 / 14.0);
+        assert_eq!(r.text, "6W-3L");
+        assert!(!r.is_rate && !r.muted);
+    }
+
+    #[test]
+    fn fold_counts_all_games_not_decided() {
+        assert!(Tally::new(2, 0, 0, 0).folds_away());
+        assert!(!Tally::new(3, 0, 0, 0).folds_away());
+        assert!(Tally::new(3, 0, 0, 0).too_few());
+        assert!(!Tally::default().too_few());
+    }
+
+    #[test]
+    fn list_decided_falls_back_to_games_for_an_older_server() {
+        assert_eq!(list_decided(12, 6, 3, 0), 9);
+        assert_eq!(list_decided(12, 0, 0, 0), 12);
+        assert_eq!(list_decided(0, 0, 0, 0), 0);
+    }
+
+    #[test]
     fn ten_games_gets_a_win_rate() {
         let t = Tally::new(10, 7, 3, 0);
         assert!(!t.folds_away());
@@ -266,6 +337,7 @@ mod tests {
     fn other_heroes_pool_of_ten_plus_shows_the_record() {
         let pool = Tally::sum([games(2), games(2), games(2), games(2), games(2), games(1)]);
         assert_eq!(pool.games, 11);
+        assert_eq!(pool.decided(), 11);
         assert!(pool.has_win_rate());
         let text = other_label(pool);
         assert_eq!(text, "6W-5L");
@@ -315,6 +387,10 @@ mod tests {
         let ten = list_result(10, 7, 2, 1, 0.7);
         assert_eq!(ten.text, "70%");
         assert!(!ten.muted && ten.is_rate);
+
+        let undecided = list_result(11, 5, 3, 1, 5.0 / 11.0);
+        assert_eq!(undecided.text, "5W-3L-1D");
+        assert!(!undecided.muted && !undecided.is_rate);
     }
 
     #[test]
@@ -348,12 +424,18 @@ mod tests {
         fn ten() -> Element {
             season_tile(Tally::new(10, 6, 4, 0))
         }
+        fn undecided() -> Element {
+            season_tile(Tally::new(12, 6, 3, 0))
+        }
         let small = render(nine);
         assert!(
-            small.contains("6W-3L") && small.contains("Record"),
+            small.contains("6W-3L") && small.contains("Too few games"),
             "{small}"
         );
         assert!(!small.contains('%'), "{small}");
+        let open = render(undecided);
+        assert!(open.contains("Too few games"), "{open}");
+        assert!(!open.contains('%'), "{open}");
         let big = render(ten);
         assert!(big.contains("60.0%") && big.contains("Win Rate"), "{big}");
         assert!(big.contains("6W-4L"), "{big}");
@@ -361,7 +443,7 @@ mod tests {
 
     #[test]
     fn notes_have_no_long_dashes() {
-        for note in [HERO_RULE_NOTE, MAP_RULE_NOTE, LIST_RULE_NOTE] {
+        for note in [HERO_RULE_NOTE, MAP_RULE_NOTE, LIST_RULE_NOTE, TOO_FEW_GAMES] {
             assert!(!note.contains('\u{2014}') && !note.contains('\u{2013}'));
         }
     }
