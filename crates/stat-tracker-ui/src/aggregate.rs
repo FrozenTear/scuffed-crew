@@ -342,11 +342,20 @@ fn bump_outcome(r: &mut Record, outcome: Outcome) {
 /// The name a hero's games count under: the catalog spelling, so
 /// "soldier_76" and "Soldier: 76" are one hero. An unknown or blank name
 /// stays as stored.
+///
+/// This runs for every game on every redraw, so a name already in the
+/// catalog (almost every stored name) skips [`canonical_hero`]'s
+/// allocating scan of the hero table.
+///
+/// [`canonical_hero`]: stat_tracker::parse::canonical_hero
 pub fn hero_key(name: &str) -> String {
-    if stat_tracker::parse::hero_is_unknown_label(name) {
+    let t = name.trim();
+    if let Some(known) = stat_tracker::parse::HEROES.iter().find(|h| **h == t) {
+        known.to_string()
+    } else if stat_tracker::parse::hero_is_unknown_label(name) {
         name.to_string()
     } else {
-        stat_tracker::parse::canonical_hero(name.trim())
+        stat_tracker::parse::canonical_hero(t)
     }
 }
 
@@ -439,6 +448,20 @@ mod tests {
 
     fn ts_h(y: i32, m: u32, d: u32, hh: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, hh, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn hero_key_keeps_catalog_names_and_folds_other_spellings() {
+        assert_eq!(hero_key("Ana"), "Ana");
+        assert_eq!(hero_key(" Soldier: 76 "), "Soldier: 76");
+        assert_eq!(hero_key("soldier_76"), "Soldier: 76");
+        assert_eq!(hero_key("wrecking-ball"), "Wrecking Ball");
+        assert_eq!(
+            hero_key("Unknown"),
+            "Unknown",
+            "an unknown hero stays as stored"
+        );
+        assert_eq!(hero_key(""), "");
     }
 
     #[test]
