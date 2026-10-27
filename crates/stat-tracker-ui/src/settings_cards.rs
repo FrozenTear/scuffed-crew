@@ -17,10 +17,9 @@ use crate::settings::{
     self, DEBUG_IMAGES_HELP, FIELD_SHORT, POLL_INTERVAL_HELP, PRERELEASE_UPDATES_LABEL,
     SHADOW_READER_ENV_NOTE, SHADOW_READER_HINT, SHADOW_READER_LABEL, SettingsField, SettingsToggle,
 };
-use crate::settings_model::{upload_row, url_host};
+use crate::settings_model::url_host;
 use crate::settings_rows::{
-    coming_later_row, divided, link, page_field, row_title, setting_row, sub_heading, switch,
-    title_line,
+    divided, link, page_field, row_title, setting_row, sub_heading, switch, title_line,
 };
 use crate::settings_save::Commit;
 use crate::settings_update::{Msg, apply, apply_with};
@@ -72,7 +71,7 @@ pub(crate) fn check_icon(size: f32) -> Element<'static, Message> {
 /// Player and sessions.
 pub(crate) fn player(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     divided(vec![
-        crate::settings_rows::names_row(app, demo),
+        crate::settings_keys::names_row(app, demo),
         crate::settings_rows::session_window_row(app),
     ])
 }
@@ -187,22 +186,16 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
 
     // One pointer to Website connection: the refusal line names it, else
     // the Upload row's note does.
-    let upload = upload_row(sync_on);
-    let mut upload_help = vec![hint(UPLOAD_HELP)];
-    if !rejected {
-        upload_help.push(hint(upload.note));
-    }
-    let uploads = setting_row(
-        row_title("Upload games after each match"),
-        upload_help,
-        switch(upload.on, None),
-    );
+    let demo = app.fixture.is_some();
+    let uploads = crate::settings_keys::upload_row(app, demo, UPLOAD_HELP, !rejected);
     let sharing = column![
         sub_heading(SHARING_HEADING),
-        divided(vec![
-            coming_later_row("Read my rank after Comp games", RANK_HELP, &[], false),
-            coming_later_row("Share stat pictures", STAT_PICTURES_HELP, &[], false),
-        ]),
+        divided(crate::settings_keys::sharing_rows(
+            app,
+            demo,
+            RANK_HELP,
+            STAT_PICTURES_HELP
+        )),
         crate::account_card::what_leaves_link(),
     ]
     .spacing(12);

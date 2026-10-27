@@ -376,11 +376,12 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             let Some((list, draft)) = app.page_state.chip_draft.take() else {
                 return Task::none();
             };
+            let mut edit = None;
             let changed = match list {
-                // Config holds one name, so a new one replaces it.
+                // The first name fills player_name, the rest player_names.
                 ChipList::Names => match name_chip(&draft) {
                     Some(name) => {
-                        app.settings.set_text(SettingsField::PlayerName, name);
+                        edit = crate::settings_keys::name_added(app, name);
                         true
                     }
                     None => {
@@ -397,20 +398,19 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
                 }
             };
             if changed {
-                return page_save(app, Commit::Control, None);
+                return page_save(app, Commit::Control, edit);
             }
         }
         Msg::ChipRemove(list, index) => {
-            match list {
-                ChipList::Names => app
-                    .settings
-                    .set_text(SettingsField::PlayerName, String::new()),
+            let edit = match list {
+                ChipList::Names => crate::settings_keys::name_removed(app, index),
                 ChipList::Processes => {
                     let next = without_chip(&app.settings.game_process_names, index);
                     app.settings.set_text(SettingsField::ProcessNames, next);
+                    None
                 }
-            }
-            return page_save(app, Commit::Control, None);
+            };
+            return page_save(app, Commit::Control, edit);
         }
         Msg::CompanionDuringGames(on) => {
             // The switch follows what is stored, so it never shows a value

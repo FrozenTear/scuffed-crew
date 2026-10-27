@@ -762,7 +762,7 @@ server_url = \"https://crew.example\"
                 &snapshot,
                 EnvOverlay::default(),
                 &form,
-                edit,
+                edit.clone(),
                 || Ok(()),
             )
             .expect("writes");

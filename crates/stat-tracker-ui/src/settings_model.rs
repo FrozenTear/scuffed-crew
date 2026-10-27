@@ -146,6 +146,8 @@ impl AdvancedSection {
                 "ocr",
                 "name_reader",
                 "ocr_threads",
+                "share_report_pictures",
+                "capture_only_on_screen",
             ],
             AdvancedSection::TrackerService => &["auto_detect"],
             AdvancedSection::StoredData => &[],
@@ -160,10 +162,11 @@ impl AdvancedSection {
     pub fn summary(self, v: &AdvancedValues) -> String {
         match self {
             AdvancedSection::CaptureReading => format!(
-                "{} capture on {}, {}, report pictures off",
+                "{} capture on {}, {}, report pictures {}",
                 v.route,
                 v.monitor,
-                lower_first(v.reader.label())
+                lower_first(v.reader.label()),
+                on_off(v.report_pictures)
             ),
             AdvancedSection::TrackerService => {
                 let login = if v.autostart {
@@ -252,6 +255,8 @@ pub struct AdvancedValues {
     /// KDE compare frames, on KDE only (`None` elsewhere).
     pub compare_frames: Option<bool>,
     pub extra_reader: bool,
+    /// Report pictures (`share_report_pictures`).
+    pub report_pictures: bool,
 }
 
 fn lower_first(s: &str) -> String {
@@ -528,10 +533,24 @@ pub fn changes_waiting_words(n: usize) -> (String, &'static str) {
 }
 
 /// A setting the 0.6 page applies straight to config.toml. The rest go
-/// through the shared form ([`crate::settings::SettingsForm`]); these
-/// four have no form field, and the classic page keeps them as they are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// through the shared form ([`crate::settings::SettingsForm`]); these have
+/// no form field, and the classic page keeps them as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigEdit {
+    /// Upload games after each match (`live_upload`).
+    LiveUpload(bool),
+    /// Read my rank after Comp games (`rank_reader`).
+    RankReader(bool),
+    /// Share stat pictures (`share_stat_pictures`).
+    ShareStatPictures(bool),
+    /// Report pictures (`share_report_pictures`).
+    ShareReportPictures(bool),
+    /// Only capture while Overwatch is on screen: Auto (`true`) or Off.
+    CaptureOnlyOnScreen(bool),
+    /// Another in-game name, kept in `player_names`.
+    AddPlayerName(String),
+    /// Drop a name from `player_names` (ignoring case).
+    RemovePlayerName(String),
     /// Stream frame rate. `None` is the default.
     FrameRate(Option<u32>),
     /// Pause between grabs. On leaves the choice to the tracker per desktop.
@@ -559,6 +578,26 @@ impl ConfigEdit {
                 };
             }
             ConfigEdit::NameReader(on) => config.name_reader = on,
+            ConfigEdit::LiveUpload(on) => config.live_upload = on,
+            ConfigEdit::RankReader(on) => config.rank_reader = on,
+            ConfigEdit::ShareStatPictures(on) => config.share_stat_pictures = on,
+            ConfigEdit::ShareReportPictures(on) => config.share_report_pictures = on,
+            ConfigEdit::CaptureOnlyOnScreen(on) => config.capture_only_on_screen = on,
+            ConfigEdit::AddPlayerName(name) => {
+                let name = name.trim().to_string();
+                let known = config
+                    .own_player_names()
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(&name));
+                if !name.is_empty() && !known {
+                    config.player_names.push(name);
+                }
+            }
+            ConfigEdit::RemovePlayerName(name) => {
+                config
+                    .player_names
+                    .retain(|n| !n.trim().eq_ignore_ascii_case(name.trim()));
+            }
             ConfigEdit::OcrWorkers(n) => {
                 config.ocr_threads = n.map(|n| n.clamp(1, OCR_WORKERS_MAX));
             }
@@ -709,29 +748,6 @@ pub fn ocr_workers_help(resolved: usize, auto: bool) -> String {
         format!("About {OCR_WORKER_MB} MB each. Auto uses {resolved} on this computer.")
     } else {
         format!("About {OCR_WORKER_MB} MB each.")
-    }
-}
-
-/// What the tracker is still waiting for, on rows the 0.6 spec shows but
-/// the tracker cannot store yet. Each is drawn off and disabled.
-pub const COMING_LATER: &str = "Comes in a later update.";
-
-/// The Upload games row: on while a server and token are saved. It is
-/// read-only here; Website connection sets or clears the token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UploadRow {
-    pub on: bool,
-    pub note: &'static str,
-}
-
-pub fn upload_row(sync_on: bool) -> UploadRow {
-    UploadRow {
-        on: sync_on,
-        note: if sync_on {
-            "To stop uploads, clear the token under Advanced, Website connection."
-        } else {
-            "Add the website URL and token under Advanced, Website connection."
-        },
     }
 }
 
@@ -974,6 +990,7 @@ mod tests {
             debug_images: false,
             compare_frames: None,
             extra_reader: false,
+            report_pictures: false,
         }
     }
 
@@ -1255,14 +1272,6 @@ mod tests {
     }
 
     #[test]
-    fn upload_row_follows_sync() {
-        assert!(upload_row(true).on);
-        assert!(!upload_row(false).on);
-        assert!(upload_row(true).note.contains("clear the token"));
-        assert_ne!(upload_row(true).note, upload_row(false).note);
-    }
-
-    #[test]
     fn auto_monitor_follows_the_tracker_rule() {
         let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
@@ -1365,9 +1374,6 @@ mod tests {
             all.push(s.summary(&values()));
         }
         all.extend(ReaderChoice::ALL.iter().map(|c| c.label().to_string()));
-        all.push(COMING_LATER.into());
-        all.push(upload_row(true).note.into());
-        all.push(upload_row(false).note.into());
         for line in all {
             assert!(!line.contains("S11"), "{line}");
         }

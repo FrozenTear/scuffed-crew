@@ -27,8 +27,8 @@ use crate::settings_model::{
     stream_rows_apply,
 };
 use crate::settings_rows::{
-    self, Segment, Tag, coming_later_row, divided, dropdown, hairline, link, radio_list, row_title,
-    segmented, setting_row, sub_heading, switch, title_line,
+    self, Segment, Tag, divided, dropdown, hairline, link, radio_list, row_title, segmented,
+    setting_row, sub_heading, switch, title_line,
 };
 use crate::settings_update::{Msg, apply};
 use crate::theme::{
@@ -424,30 +424,10 @@ fn capture_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
     ];
     rows.extend(stream_rows(app, demo));
 
-    // Only capture while Overwatch is on screen: not stored yet; the spec
-    // default is Auto.
-    rows.push(setting_row(
-        title_line(
-            "Only capture while Overwatch is on screen",
-            false,
-            &[Tag::New],
-        ),
-        vec![
-            hint(FOCUS_GATE_HELP),
-            hint(crate::settings_model::COMING_LATER),
-        ],
-        segmented(vec![
-            Segment {
-                label: "Auto",
-                selected: true,
-                msg: None,
-            },
-            Segment {
-                label: "Off",
-                selected: false,
-                msg: None,
-            },
-        ]),
+    rows.push(crate::settings_keys::focus_gate_row(
+        app,
+        demo,
+        FOCUS_GATE_HELP,
     ));
     rows
 }
@@ -575,11 +555,10 @@ fn reading_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
         rows.push(reading_model_row(app, demo));
     }
     rows.push(ocr_workers_row(app, demo));
-    rows.push(coming_later_row(
-        "Report pictures",
+    rows.push(crate::settings_keys::report_pictures_row(
+        app,
+        demo,
         REPORT_PICTURES_HELP,
-        &[Tag::New, Tag::AfterRestart],
-        false,
     ));
     rows
 }
