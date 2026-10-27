@@ -35,7 +35,11 @@ the check passes only when, for every entry:
    followed by `mod tests_<x>;` for each file mapped into it, and nothing
    else;
 5. `src/main_tests/mod.rs` is the base one minus exactly the `mod <name>;`
-   line of each mapped file, and nothing else.
+   line of each mapped file, and nothing else;
+6. no other file under `crates/stat-tracker` changed or appeared: unmoved
+   tests, tests an earlier set A PR moved, `ocr_bench.rs`, `main.rs` and the
+   daemon sources stay byte-identical to the base. A change to these scripts
+   is only noted: run the base's copies (`git show BASE:path`) then.
 
 At head, no string literal in a `.rs` file under `crates/stat-tracker/src`,
 and no line in `.github/workflows`, may still name a test under a mapped old
@@ -291,6 +295,26 @@ def main():
             errors.extend(diff(rest, head_lines, f"base {hub_rel} minus them", f"head {hub_rel}"))
         elif ok:
             report.append(f"  {hub_rel}: - " + ", ".join(f"mod {m[0]};" for m in moves))
+
+    # 6: nothing else under the package changed. A set A PR only moves
+    # test files, so every other file (unmoved tests, tests an earlier set A
+    # PR moved, ocr_bench.rs, main.rs, daemon sources) must be byte-identical
+    # to the base, and no unmapped file may appear. A change to these scripts
+    # is noted, not failed: run the base's copies (`git show BASE:path`) when
+    # a PR touches them.
+    allowed = {hub_rel}
+    for _, old_rel, new_rel, parent_rel, _ in moves:
+        allowed.update((old_rel, new_rel, parent_rel))
+    pkg = REL_SRC.rsplit("/", 1)[0]
+    changed = set(git("diff", "--name-only", args.base, "--", pkg, cwd=root).stdout.split())
+    changed |= set(
+        git("ls-files", "-o", "--exclude-standard", "--", pkg, cwd=root).stdout.split()
+    )
+    for rel in sorted(changed - allowed):
+        if rel.startswith(f"{pkg}/scripts/"):
+            notes.append(f"{rel}: changed at head; run the base's copy of the scripts")
+        else:
+            errors.append(f"{rel}: changed, but a set A PR changes only the mapped move")
 
     # Stale references at head.
     listed = git(

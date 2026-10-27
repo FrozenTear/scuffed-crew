@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+
+Known limit: a test attribute is recognised as `#[test]`, `#[tokio::test]`
+or `#[tokio::test(...)]`. Path forms such as `#[core::prelude::v1::test]`
+and a renamed import (`use core::prelude::v1::test as check;`) are not
+recognised. This crate uses neither, and in a set A PR check-test-moves.py
+keeps every test file byte-identical apart from the move, so none can
+appear there unnoticed.
 """List the daemon binary's tests without building it (0.6 set A).
 
 Prints the same test lines as
