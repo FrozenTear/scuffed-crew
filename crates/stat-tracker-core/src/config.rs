@@ -241,15 +241,21 @@ fn is_true(on: &bool) -> bool {
 /// to 12 characters.
 pub const MIN_OWN_NAME_CHARS: usize = 3;
 
-/// `raw` trimmed, without a trailing `#` and digits (the BattleTag number).
-fn without_battletag(raw: &str) -> &str {
+/// `raw` as one of this member's in-game names: trimmed, without a trailing
+/// `#` and digits (the BattleTag number, which the scoreboard never shows).
+/// `None` when fewer than [`MIN_OWN_NAME_CHARS`] characters are left, so a
+/// stray letter can never claim a stranger's row. The Settings name input
+/// and [`Config::own_player_names`] both use this, so they agree on what a
+/// name is.
+pub fn own_name(raw: &str) -> Option<&str> {
     let raw = raw.trim();
-    match raw.rsplit_once('#') {
+    let name = match raw.rsplit_once('#') {
         Some((name, tag)) if !tag.is_empty() && tag.chars().all(|c| c.is_ascii_digit()) => {
             name.trim()
         }
         _ => raw,
-    }
+    };
+    (name.chars().count() >= MIN_OWN_NAME_CHARS).then_some(name)
 }
 
 fn default_session_window_secs() -> u64 {
@@ -270,18 +276,18 @@ fn default_game_process_names() -> Vec<String> {
 
 impl Config {
     /// Every saved in-game name of this member: [`Self::player_name`] first,
-    /// then [`Self::player_names`] in file order. Each name is trimmed and
-    /// loses a trailing `#1234` tag (the scoreboard never shows it). A name
-    /// shorter than [`MIN_OWN_NAME_CHARS`] is dropped, so a stray letter can
-    /// never claim a stranger's row. A repeat (ignoring case, any script:
+    /// then [`Self::player_names`] in file order, each through [`own_name`]
+    /// (trimmed, no `#1234` tag, names too short dropped). A repeat (ignoring case, any script:
     /// `Ö` and `ö` are one name, as in the name matcher) is kept once.
     pub fn own_player_names(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
         for name in self.player_name.iter().chain(self.player_names.iter()) {
-            let name = without_battletag(name);
+            let Some(name) = own_name(name) else {
+                continue;
+            };
             let key = name.to_lowercase();
-            if name.chars().count() >= MIN_OWN_NAME_CHARS && !seen.contains(&key) {
+            if !seen.contains(&key) {
                 seen.push(key);
                 out.push(name.to_string());
             }
