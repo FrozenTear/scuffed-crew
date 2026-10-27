@@ -10,6 +10,9 @@ pub(crate) async fn run_loop(
     early_sigterm: Option<tokio::signal::unix::Signal>,
     // Left with the caller, which settles it before the store's close.
     sync_task: &mut Option<tokio::task::JoinHandle<()>>,
+    // Set when the binary on disk was replaced: `run` restarts into it
+    // after the store's close.
+    restart_to: &mut Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     // Ergonomic locals over the shared context; spawned tasks clone the Arc.
     let backend = &ctx.backend;
@@ -812,6 +815,17 @@ pub(crate) async fn run_loop(
                                 target: "scuffed_stat_tracker",
                                 "tracker binary on disk was replaced; waiting after a failed re-exec"
                             );
+                        } else if let Err(err) =
+                            stat_tracker::replace::restart_preflight(&path)
+                        {
+                            // Checked while the store is still open: this
+                            // process keeps running and tries again later.
+                            tracing::error!(
+                                target: "scuffed_stat_tracker",
+                                error = %err,
+                                "cannot start the new tracker; keeping this process"
+                            );
+                            exec_failed_at = Some(std::time::Instant::now());
                         } else {
                             shutdown_from_signal(
                                 &mut st,
@@ -824,31 +838,9 @@ pub(crate) async fn run_loop(
                                 data_dir,
                             )
                             .await;
-                            let marker =
-                                stat_tracker::report::marker::release_run_marker(data_dir);
-                            let released_pid =
-                                stat_tracker::replace::release_own_pid_file(data_dir);
-                            if let Err(err) =
-                                stat_tracker::replace::restart_for_replaced_binary(&path)
-                            {
-                                // A failed re-exec keeps this process. The
-                                // systemd path exits and does not return.
-                                tracing::error!(
-                                    target: "scuffed_stat_tracker",
-                                    error = %err,
-                                    "could not re-exec the new tracker; keeping this process"
-                                );
-                                exec_failed_at = Some(std::time::Instant::now());
-                                if released_pid {
-                                    stat_tracker::replace::restore_own_pid_file(data_dir);
-                                }
-                                let _ = stat_tracker::report::marker::restore_run_marker(
-                                    data_dir,
-                                    marker.as_ref(),
-                                );
-                            } else {
-                                return Ok(());
-                            }
+                            // `run` closes the store, then exits or execs.
+                            *restart_to = Some(path);
+                            return Ok(());
                         }
                     } else {
                         logged_binary_wait = false;

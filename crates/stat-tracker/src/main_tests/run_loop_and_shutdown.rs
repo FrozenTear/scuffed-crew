@@ -52,8 +52,20 @@ fn startup_takes_the_pid_guard_before_the_site_and_always_starts_the_pack_keeper
     let run_loop = at(RUN_LOOP);
     let call = body[run_loop..].split(';').next().expect("a statement");
     assert!(call.ends_with(".await"), "{call}");
-    // The sync task's store clone is settled before the store's close.
-    assert!(at("finish_or_abort_sync(") < at("close_store_before_exit(ctx)"));
+    // The sync task's store clone is settled before either store close
+    // (a stop, and the update restart).
+    let settle = at("finish_or_abort_sync(");
+    let closes: Vec<_> = body.match_indices("close_store_before_exit(ctx)").collect();
+    assert_eq!(
+        closes.len(),
+        2,
+        "a close for a stop and one for the restart"
+    );
+    assert!(closes.iter().all(|(i, _)| settle < *i));
+    // The update restart runs after its close, from `run`, not the loop.
+    let restart = at("restart_after_close(&data_dir, &path)");
+    assert!(closes[0].0 < restart);
+    assert!(!fn_source("run_loop").contains("restart_for_replaced_binary("));
     assert!(at("maybe_vacuum(") < at("marker::start_run("));
     // S5-CAP-8: perf.log starts after the guard and the vacuum exit.
     assert!(guard < at("perf_log::init("));
@@ -648,4 +660,58 @@ async fn a_shutdown_during_retire_still_persists_the_sealed_outcome() {
         .await
         .unwrap();
     assert_eq!(snaps[0].outcome, "defeat");
+}
+
+/// The sole owner's close finishes: the store opens again at once, with no
+/// retry, and the row is there.
+#[tokio::test]
+async fn close_store_within_closes_a_sole_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = std::sync::Arc::new(o8_ctx(dir.path(), false).await);
+    ctx.store
+        .insert_match(test_match("s1", "victory"))
+        .await
+        .unwrap();
+    assert_eq!(
+        close_store_within(ctx, Duration::from_secs(5)).await,
+        StoreClose::Closed
+    );
+    let reopened = storage::LocalStore::open(dir.path())
+        .await
+        .expect("open on the first try");
+    assert_eq!(reopened.match_count().await.unwrap(), 1);
+}
+
+/// A task that still holds the context: no close starts and no wait runs.
+#[tokio::test]
+async fn close_store_within_leaves_a_shared_context_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = std::sync::Arc::new(o8_ctx(dir.path(), false).await);
+    let held = std::sync::Arc::clone(&ctx);
+    let started = std::time::Instant::now();
+    assert_eq!(
+        close_store_within(ctx, Duration::from_secs(5)).await,
+        StoreClose::Shared
+    );
+    assert!(started.elapsed() < Duration::from_secs(1), "no wait");
+    assert!(
+        !storage::wait_for_engine_close(dir.path(), Duration::ZERO).await,
+        "the store is still open"
+    );
+    drop(held);
+}
+
+/// A store clone outside the context (a sync task's) keeps SurrealKV open:
+/// the wait runs out and says so.
+#[tokio::test]
+async fn close_store_within_runs_out_while_a_store_clone_lives() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = std::sync::Arc::new(o8_ctx(dir.path(), false).await);
+    let clone = ctx.store.clone();
+    assert_eq!(
+        close_store_within(ctx, Duration::from_millis(50)).await,
+        StoreClose::NotClosed
+    );
+    drop(clone);
+    assert!(storage::wait_for_engine_close(dir.path(), Duration::from_secs(5)).await);
 }

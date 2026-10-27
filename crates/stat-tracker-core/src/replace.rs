@@ -559,6 +559,34 @@ pub fn pid_binary_replaced(pid: u32) -> Option<bool> {
     Some(binary_replaced(running, disk))
 }
 
+/// Whether [`restart_for_replaced_binary`] can be expected to work, checked
+/// before the daemon gives up its store. Under systemd it only exits. A
+/// re-exec needs `path` to be an executable file; one that is missing or
+/// not executable yet (an update still being written) is an error, and the
+/// caller keeps running and checks again later.
+pub fn restart_preflight(path: &Path) -> anyhow::Result<()> {
+    if restart_how(under_systemd()) == RestartHow::SystemdExit {
+        return Ok(());
+    }
+    exec_preflight(path)
+}
+
+fn exec_preflight(path: &Path) -> anyhow::Result<()> {
+    let meta = std::fs::metadata(path)
+        .map_err(|err| anyhow::anyhow!("cannot read {}: {err}", path.display()))?;
+    if !meta.is_file() {
+        anyhow::bail!("{} is not a file", path.display());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 == 0 {
+            anyhow::bail!("{} is not executable", path.display());
+        }
+    }
+    Ok(())
+}
+
 /// Log one line and either exit for systemd or re-exec the on-disk binary.
 /// Does not return on success.
 pub fn restart_for_replaced_binary(path: &Path) -> anyhow::Result<()> {
@@ -599,6 +627,21 @@ pub fn restart_for_replaced_binary(path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_preflight_wants_an_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("scuffed-stat-tracker");
+        assert!(exec_preflight(&bin).is_err(), "missing");
+        assert!(exec_preflight(dir.path()).is_err(), "a directory");
+        std::fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(exec_preflight(&bin).is_err(), "not executable yet");
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(exec_preflight(&bin).is_ok());
+    }
 
     fn candidate(
         image_ok: bool,

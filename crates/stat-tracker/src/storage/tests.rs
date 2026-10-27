@@ -139,14 +139,46 @@ async fn wait_for_engine_close_sees_surrealkv_finish_its_close() {
         !wait_for_engine_close(dir.path(), short).await,
         "an open store keeps SurrealKV's LOCK"
     );
+    assert!(
+        wal_bytes(dir.path()) > 0,
+        "an open store has the insert in its WAL"
+    );
     drop(store);
     let long = std::time::Duration::from_secs(5);
     assert!(
         wait_for_engine_close(dir.path(), long).await,
         "the close finishes inside the runtime once the last handle drops"
     );
+    // A clean close flushes the memtable and deletes the WAL it covered, so
+    // the next open has nothing to replay. LOCK freed with records still in
+    // the WAL would be a close that did not finish.
+    assert_eq!(
+        wal_bytes(dir.path()),
+        0,
+        "the close left WAL records to replay"
+    );
     let reopened = LocalStore::open(dir.path())
         .await
         .expect("reopen after close");
     assert_eq!(reopened.match_count().await.expect("count"), 1);
+}
+
+/// Bytes in SurrealKV's WAL segments under `data_dir`'s store.
+fn wal_bytes(data_dir: &std::path::Path) -> u64 {
+    fn walk(dir: &std::path::Path, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, total);
+            } else if path.extension().is_some_and(|e| e == "wal") {
+                *total += entry.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    let mut total = 0;
+    walk(&data_dir.join("stats.surrealkv"), &mut total);
+    total
 }

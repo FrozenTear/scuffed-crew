@@ -31,6 +31,10 @@ pub const DAEMON_LOG_MAX_BYTES: u64 = 32 * 1024 * 1024;
 /// Keep this many newest `pre-vacuum-*` backups; delete the rest.
 pub const PRE_VACUUM_BACKUPS_KEEP: usize = 1;
 
+/// Longest wait for each store's close in `vacuum`. A close takes well
+/// under a second; the old fixed sleep was 2 s.
+const VACUUM_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
 /// Best-effort recursive size of a file or directory tree.
 pub fn dir_size(path: &Path) -> u64 {
     let Ok(meta) = std::fs::metadata(path) else {
@@ -228,13 +232,20 @@ impl LocalStore {
             fresh.insert_tombstone(t).await?;
         }
         drop(fresh);
-        // Dropping the handle only SIGNALS engine shutdown — the memtable
-        // flush runs detached (engine/local/native.rs router loop), and there
-        // is no awaitable close in the SDK. Renaming the directory mid-flush
-        // makes the flush ENOENT. Every commit is WAL-synced so nothing can
-        // be lost either way, but give the flush time to land at the stable
-        // path so the store swaps in fully compacted and error-free.
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        // Dropping a handle only starts SurrealKV's close: the memtable flush
+        // runs on the SDK's router task. Renaming a directory mid-flush makes
+        // the flush ENOENT. Every commit is WAL-synced, so nothing is lost
+        // either way, but waiting for both closes swaps the store in fully
+        // flushed and error-free. `old` was dropped at the end of its block.
+        for dir in [fresh_dir.as_path(), data_dir] {
+            if !super::wait_for_engine_close(dir, VACUUM_CLOSE_WAIT).await {
+                return Err(format!(
+                    "store in {} did not finish closing; nothing was swapped",
+                    dir.display()
+                )
+                .into());
+            }
+        }
 
         let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         let backup = data_dir.join(format!("stats.surrealkv.pre-vacuum-{stamp}"));

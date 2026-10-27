@@ -464,10 +464,17 @@ async fn a_stop_during_the_startup_pack_wait_ends_it_cleanly() {
         stop_branch.contains("guard.finish();") && stop_branch.contains("return Ok(());"),
         "a stop during the wait finishes the run marker and returns Ok"
     );
+    let run_loop = body
+        .find("let result = run_loop(")
+        .expect("the same handler goes on to the run loop");
+    let settle = body.find("finish_or_abort_sync(").expect("the sync settle");
+    let finish = body.rfind("guard.finish();").expect("the marker finish");
+    let close = body
+        .rfind("close_store_before_exit(ctx).await")
+        .expect("the store close");
     assert!(
-        body.contains("run_loop(Arc::clone(&ctx), early_sigterm, &mut sync_task)")
-            && body.contains("close_store_before_exit(ctx).await"),
-        "the same handler goes on to the run loop"
+        run_loop < settle && settle < finish && finish < close,
+        "after the run loop: settle the sync task, finish the run marker, then close the store"
     );
 }
 

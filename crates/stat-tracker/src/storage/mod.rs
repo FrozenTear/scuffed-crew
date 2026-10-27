@@ -187,20 +187,34 @@ impl LocalStore {
 /// once the close is done. Our own writer lock is on the directory, not on
 /// `LOCK`, and stays held until exit. Returns `false` when the close did not
 /// finish in time.
+///
+/// Read against surrealkv 0.21.2 (`Tree::close` in lsm.rs releases the lock
+/// after the flush, WAL close and cleanup). Recheck that order when
+/// Cargo.lock moves surrealkv; the storage test
+/// `wait_for_engine_close_sees_surrealkv_finish_its_close` fails if a close
+/// that frees `LOCK` leaves WAL records to replay.
 pub async fn wait_for_engine_close(data_dir: &Path, within: std::time::Duration) -> bool {
     let lock = data_dir.join("stats.surrealkv").join("LOCK");
     let until = tokio::time::Instant::now() + within;
     loop {
-        match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lock)
-        {
+        // flock needs no write access.
+        match std::fs::File::open(&lock) {
             // Locked and dropped at once: nothing opens the store after this.
-            Ok(file) if file.try_lock().is_ok() => return true,
-            Ok(_) => {}
+            Ok(file) => match file.try_lock() {
+                Ok(()) => return true,
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::Error(err)) => {
+                    // Waiting cannot tell more. At exit, going on is right.
+                    tracing::warn!(error = %err, "cannot test the store's LOCK; not waiting for its close");
+                    return true;
+                }
+            },
             // No LOCK file: no engine to wait for.
-            Err(_) => return true,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(err) => {
+                tracing::warn!(error = %err, "cannot open the store's LOCK; not waiting for its close");
+                return true;
+            }
         }
         if tokio::time::Instant::now() >= until {
             return false;
