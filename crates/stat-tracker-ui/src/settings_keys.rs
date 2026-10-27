@@ -1,21 +1,24 @@
-//! The 0.6 Settings rows that write the config keys added for 0.6 (#554):
-//! In-game names as a list (`player_name` first, then `player_names`),
-//! Upload games after each match (`live_upload`), the two Sharing
-//! switches (`rank_reader`, `share_stat_pictures`), Report pictures
+//! The 0.6 Settings rows that write the config keys added for 0.6: In-game
+//! names as a list (`player_name` first, then `player_names`), Upload
+//! games after each match (`live_upload`), the two Sharing switches
+//! (`rank_reader`, `share_stat_pictures`), Report pictures
 //! (`share_report_pictures`) and Only capture while Overwatch is on screen
-//! (`capture_only_on_screen`). Each applies at once. The tracker reads
+//! (`capture_only_on_screen`). Each applies at once. The tracker will read
 //! them when it starts, so each is tagged After restart, except Report
-//! pictures, which only this app reads.
+//! pictures, which only this app will read.
 //!
-//! Four rows are not shown yet ([`HIDDEN_ROWS`]): nothing behind them
-//! exists in the tracker. Their keys still load and save as before.
+//! Rows whose key nothing reads yet are not shown
+//! ([`crate::settings_model::HIDDEN_KEYS`]): their keys still load and save
+//! as before, and In-game names keeps one name while `player_names` is
+//! hidden.
 
 use iced::Element;
 use iced::widget::Row;
 
 use crate::app::{Message, TrackerApp};
 use crate::form_widgets::hint;
-use crate::settings_model::{ChipList, ConfigEdit};
+use crate::settings::SettingsField;
+use crate::settings_model::{ChipList, ConfigEdit, row_shown, same_name};
 use crate::settings_rows::{
     Segment, Tag, add_chip, chip, chip_control, segmented, setting_row, switch, title_line,
 };
@@ -27,21 +30,6 @@ const NAMES_HELP: &str = "As shown in-game, without the #1234.";
 const UPLOAD_OFF_NOTE: &str = "Games stay on this computer and upload once this is on again.";
 /// Under Upload games while no website is set.
 const UPLOAD_NO_SITE: &str = "Add the website URL and token under Advanced, Website connection.";
-
-/// Rows the page does not show until the tracker has something behind
-/// them: the rank reader, stat picture upload, report pictures and the
-/// on-screen capture check. Upload games after each match stays.
-pub(crate) const HIDDEN_ROWS: [&str; 4] = [
-    "rank_reader",
-    "share_stat_pictures",
-    "share_report_pictures",
-    "capture_only_on_screen",
-];
-
-/// Whether the row for config key `key` is shown.
-pub(crate) fn row_shown(key: &str) -> bool {
-    !HIDDEN_ROWS.contains(&key)
-}
 
 /// A switch that writes `edit(on)`, or a disabled one in a demo.
 fn edit_switch<'a>(on: bool, demo: bool, edit: fn(bool) -> ConfigEdit) -> Element<'a, Message> {
@@ -55,28 +43,31 @@ fn edit_switch<'a>(on: bool, demo: bool, edit: fn(bool) -> ConfigEdit) -> Elemen
 }
 
 /// The names the In-game names row shows: the form's `player_name`
-/// first, then each saved `player_names` entry it does not repeat.
+/// first, then (while that row is shown) each saved `player_names` entry
+/// that is not the same name ([`same_name`]: any case, Unicode too).
 pub(crate) fn shown_names(app: &TrackerApp) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let primary = app.settings.player_name.trim();
     if !primary.is_empty() {
         out.push(primary.to_string());
     }
-    for name in &app.saved_config.player_names {
-        let name = name.trim();
-        if !name.is_empty() && !out.iter().any(|n| n.eq_ignore_ascii_case(name)) {
-            out.push(name.to_string());
+    if row_shown("player_names") {
+        for name in &app.saved_config.player_names {
+            let name = name.trim();
+            if !name.is_empty() && !out.iter().any(|n| same_name(n, name)) {
+                out.push(name.to_string());
+            }
         }
     }
     out
 }
 
-/// "+ Add name" took `name`: it fills an empty `player_name` (the name the
-/// website lookup and the Tab reader use), else it joins `player_names`.
+/// "+ Add name" took `name`. It fills an empty `player_name` (the name the
+/// website lookup and the Tab reader use). Otherwise it joins
+/// `player_names`, or replaces `player_name` while extra names are hidden.
 pub(crate) fn name_added(app: &mut TrackerApp, name: String) -> Option<ConfigEdit> {
-    if app.settings.player_name.trim().is_empty() {
-        app.settings
-            .set_text(crate::settings::SettingsField::PlayerName, name);
+    if app.settings.player_name.trim().is_empty() || !row_shown("player_names") {
+        app.settings.set_text(SettingsField::PlayerName, name);
         None
     } else {
         Some(ConfigEdit::AddPlayerName(name))
@@ -85,20 +76,30 @@ pub(crate) fn name_added(app: &mut TrackerApp, name: String) -> Option<ConfigEdi
 
 /// The "×" on name `index` of [`shown_names`]. Removing the first name
 /// moves the next one into `player_name`, so it is never left empty while
-/// other names remain.
+/// other names remain, and drops every saved spelling of the removed name
+/// so none of them comes back as a chip.
 pub(crate) fn name_removed(app: &mut TrackerApp, index: usize) -> Option<ConfigEdit> {
-    use crate::settings::SettingsField::PlayerName;
     let names = shown_names(app);
     let name = names.get(index)?.clone();
     let primary = !app.settings.player_name.trim().is_empty();
     if index == 0 && primary {
         let next = names.get(1).cloned();
         app.settings
-            .set_text(PlayerName, next.clone().unwrap_or_default());
-        next.map(ConfigEdit::RemovePlayerName)
+            .set_text(SettingsField::PlayerName, next.clone().unwrap_or_default());
+        let mut gone = vec![name];
+        gone.extend(next);
+        Some(ConfigEdit::RemovePlayerNames(gone))
     } else {
-        Some(ConfigEdit::RemovePlayerName(name))
+        Some(ConfigEdit::RemovePlayerNames(vec![name]))
     }
+}
+
+/// Whether "+ Add name" shows: always while extra names are shown, else
+/// only while there is no name (or its input is open).
+pub(crate) fn add_name_shown(app: &TrackerApp) -> bool {
+    row_shown("player_names")
+        || app.settings.player_name.trim().is_empty()
+        || matches!(app.page_state.chip_draft(), Some((ChipList::Names, _)))
 }
 
 /// In-game names: one chip per name with "×", and "+ Add name" after them
@@ -111,7 +112,9 @@ pub(crate) fn names_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             (!demo).then_some(Message::SettingsPage(Msg::ChipRemove(ChipList::Names, i))),
         ));
     }
-    chips = chips.push(add_chip(app, ChipList::Names, "+ Add name", "Name", demo));
+    if add_name_shown(app) {
+        chips = chips.push(add_chip(app, ChipList::Names, "+ Add name", "Name", demo));
+    }
     setting_row(
         title_line("In-game names", false, &[Tag::AfterRestart]),
         vec![hint(NAMES_HELP)],
@@ -119,38 +122,62 @@ pub(crate) fn names_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     )
 }
 
-/// Upload games after each match: live while a website and token are
-/// saved, off and disabled without one.
+/// How Upload games after each match is drawn: on or off, whether the
+/// switch can be used, and the note under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UploadState {
+    pub on: bool,
+    pub enabled: bool,
+    pub note: Option<&'static str>,
+}
+
+/// [`UploadState`]: live while a website and token are saved (and not in a
+/// demo), off and disabled without one.
+pub(crate) fn upload_state(app: &TrackerApp, demo: bool) -> UploadState {
+    let site = app.sync_on();
+    let on = site && app.saved_config.live_upload;
+    UploadState {
+        on,
+        enabled: site && !demo,
+        note: if !site {
+            Some(UPLOAD_NO_SITE)
+        } else if !on {
+            Some(UPLOAD_OFF_NOTE)
+        } else {
+            None
+        },
+    }
+}
+
+/// Upload games after each match, or `None` while hidden.
 pub(crate) fn upload_row<'a>(
     app: &'a TrackerApp,
     demo: bool,
     help: &'static str,
     show_note: bool,
-) -> Element<'a, Message> {
-    let site = app.sync_on();
-    let on = site && app.saved_config.live_upload;
-    let mut lines = vec![hint(help)];
-    if show_note {
-        if !site {
-            lines.push(hint(UPLOAD_NO_SITE));
-        } else if !on {
-            lines.push(hint(UPLOAD_OFF_NOTE));
-        }
+) -> Option<Element<'a, Message>> {
+    if !row_shown("live_upload") {
+        return None;
     }
-    let control = if site {
-        edit_switch(on, demo, ConfigEdit::LiveUpload)
+    let state = upload_state(app, demo);
+    let mut lines = vec![hint(help)];
+    if let Some(note) = state.note.filter(|_| show_note) {
+        lines.push(hint(note));
+    }
+    let control = if state.enabled {
+        edit_switch(state.on, false, ConfigEdit::LiveUpload)
     } else {
-        switch(false, None)
+        switch(state.on, None)
     };
-    setting_row(
+    Some(setting_row(
         title_line("Upload games after each match", false, &[Tag::AfterRestart]),
         lines,
         control,
-    )
+    ))
 }
 
 /// The two Sharing switches under Website account, both starting off,
-/// less the ones [`HIDDEN_ROWS`] holds back. Empty while both are hidden.
+/// less the hidden ones. Empty while both are hidden.
 pub(crate) fn sharing_rows<'a>(
     app: &'a TrackerApp,
     demo: bool,
@@ -177,7 +204,7 @@ pub(crate) fn sharing_rows<'a>(
 }
 
 /// Report pictures under READING (spec p7), or `None` while hidden. Only
-/// this app reads it, so it has no After restart tag.
+/// this app will read it, so it has no After restart tag.
 pub(crate) fn report_pictures_row<'a>(
     app: &'a TrackerApp,
     demo: bool,
@@ -237,51 +264,106 @@ pub(crate) fn focus_gate_row<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings_model::HIDDEN_KEYS;
+    use stat_tracker::config::{Config, SyncConfig};
 
-    #[test]
-    fn names_list_the_form_name_first_without_repeats() {
-        let (_dir, mut app) = crate::fixtures::test_app();
-        app.settings.player_name = "FrozenTear".into();
-        app.saved_config.player_names = vec!["frozentear".into(), "Alt".into(), " ".into()];
-        assert_eq!(shown_names(&app), ["FrozenTear", "Alt"]);
-        app.settings.player_name.clear();
-        assert_eq!(shown_names(&app), ["frozentear", "Alt"]);
+    /// A live (not demo) app whose page writes `config.toml` in a temp
+    /// dir, as `settings_update`'s tests set it up.
+    fn live_app() -> (tempfile::TempDir, TrackerApp) {
+        let (dir, mut app) = crate::fixtures::test_app();
+        app.fixture = None;
+        let path = dir.path().join("config.toml");
+        app.saved_config.save_at(&path).unwrap();
+        app.saved_config = Config::read_at(&path).unwrap();
+        app.saved_file = app.saved_config.clone();
+        app.settings = crate::settings::SettingsForm::from_config(&app.saved_config);
+        app.page_state =
+            crate::settings_update::PageState::new(app.saved_config.clone(), None, true);
+        app.page_state.config_path = Some(path);
+        (dir, app)
+    }
+
+    fn on_disk(dir: &tempfile::TempDir) -> Config {
+        Config::read_at(&dir.path().join("config.toml")).unwrap()
+    }
+
+    fn page(msg: Msg) -> Message {
+        Message::SettingsPage(msg)
     }
 
     #[test]
-    fn adding_fills_the_first_name_then_the_list() {
-        let (_dir, mut app) = crate::fixtures::test_app();
-        app.settings.player_name.clear();
-        assert_eq!(name_added(&mut app, "Main".into()), None);
-        assert_eq!(app.settings.player_name, "Main");
-        assert_eq!(
-            name_added(&mut app, "Alt".into()),
-            Some(ConfigEdit::AddPlayerName("Alt".into()))
-        );
+    fn rows_nothing_reads_yet_are_hidden() {
+        for key in [
+            "rank_reader",
+            "share_stat_pictures",
+            "share_report_pictures",
+            "capture_only_on_screen",
+            "live_upload",
+            "player_names",
+        ] {
+            assert!(HIDDEN_KEYS.contains(&key), "{key}");
+            assert!(!row_shown(key), "{key}");
+        }
+        let (_dir, app) = crate::fixtures::test_app();
+        assert!(upload_row(&app, false, "help", true).is_none());
+        assert!(sharing_rows(&app, false, "a", "b").is_empty());
+        assert!(report_pictures_row(&app, false, "c").is_none());
+        assert!(focus_gate_row(&app, false, "d").is_none());
     }
 
     #[test]
-    fn removing_the_first_name_promotes_the_next() {
+    fn hidden_extra_names_never_show_and_one_name_is_kept() {
         let (_dir, mut app) = crate::fixtures::test_app();
         app.settings.player_name = "Main".into();
-        app.saved_config.player_names = vec!["Alt".into(), "Third".into()];
+        app.saved_config.player_names = vec!["Alt".into()];
+        assert_eq!(shown_names(&app), ["Main"], "player_names is hidden");
+        assert!(
+            !add_name_shown(&app),
+            "one name: + Add name waits for an empty slot"
+        );
+        assert_eq!(name_added(&mut app, "Other".into()), None);
+        assert_eq!(app.settings.player_name, "Other", "a new name replaces it");
+        app.settings.player_name.clear();
+        assert!(add_name_shown(&app));
+    }
+
+    #[test]
+    fn names_match_in_any_case_unicode_too() {
+        assert!(same_name("Öster", "öster"));
+        assert!(same_name("FrozenTear", "frozentear#1234"));
+        assert!(!same_name("Main", "Alt"));
+        let mut c = Config {
+            player_name: Some("Öster".into()),
+            ..Config::default()
+        };
+        ConfigEdit::AddPlayerName("öster".into()).apply(&mut c);
+        ConfigEdit::AddPlayerName(" ÖSTER ".into()).apply(&mut c);
+        assert!(c.player_names.is_empty(), "{:?}", c.player_names);
+        c.player_names = vec!["ÄLT".into(), "Third".into()];
+        ConfigEdit::RemovePlayerNames(vec!["ält".into()]).apply(&mut c);
+        assert_eq!(c.player_names, ["Third"]);
+    }
+
+    #[test]
+    fn removing_the_first_name_also_drops_its_other_spellings() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.settings.player_name = "Main".into();
+        app.saved_config.player_names = vec!["main".into()];
+        // The only name: cleared, and "main" goes with it.
         assert_eq!(
             name_removed(&mut app, 0),
-            Some(ConfigEdit::RemovePlayerName("Alt".into()))
+            Some(ConfigEdit::RemovePlayerNames(vec!["Main".into()]))
         );
-        assert_eq!(app.settings.player_name, "Alt");
-        // Now [Alt, Third]: "Alt" moved up, so "Third" is second.
-        assert_eq!(shown_names(&app), ["Alt", "Third"]);
-        assert_eq!(
-            name_removed(&mut app, 1),
-            Some(ConfigEdit::RemovePlayerName("Third".into()))
-        );
-        assert_eq!(name_removed(&mut app, 9), None);
+        assert_eq!(app.settings.player_name, "");
+        let mut c = app.saved_config.clone();
+        ConfigEdit::RemovePlayerNames(vec!["Main".into()]).apply(&mut c);
+        assert!(c.player_names.is_empty());
+        assert_eq!(name_removed(&mut app, 0), None, "no names left to remove");
     }
 
     #[test]
     fn new_key_edits_write_their_fields() {
-        let mut c = stat_tracker::config::Config::default();
+        let mut c = Config::default();
         ConfigEdit::LiveUpload(false).apply(&mut c);
         ConfigEdit::RankReader(true).apply(&mut c);
         ConfigEdit::ShareStatPictures(true).apply(&mut c);
@@ -294,27 +376,49 @@ mod tests {
         ConfigEdit::AddPlayerName("main".into()).apply(&mut c);
         ConfigEdit::AddPlayerName(" alt ".into()).apply(&mut c);
         assert_eq!(c.player_names, ["Alt"]);
-        ConfigEdit::RemovePlayerName("ALT".into()).apply(&mut c);
-        assert!(c.player_names.is_empty());
     }
 
     #[test]
-    fn the_rows_draw_in_a_demo() {
-        let (_dir, app) = crate::fixtures::test_app();
-        let _ = names_row(&app, true);
-        let _ = upload_row(&app, true, "help", true);
+    fn upload_needs_a_site_and_a_live_app() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.saved_config.sync = None;
+        assert_eq!(
+            upload_state(&app, false),
+            UploadState {
+                on: false,
+                enabled: false,
+                note: Some(UPLOAD_NO_SITE),
+            }
+        );
+        app.saved_config.sync = Some(SyncConfig {
+            server_url: "https://crew.example".into(),
+            token: "tok".into(),
+        });
+        assert_eq!(upload_state(&app, false).note, None);
+        assert!(upload_state(&app, false).enabled);
+        assert!(!upload_state(&app, true).enabled, "a demo changes nothing");
+        app.saved_config.live_upload = false;
+        assert_eq!(upload_state(&app, false).note, Some(UPLOAD_OFF_NOTE));
     }
 
     #[test]
-    fn the_rows_with_nothing_behind_them_are_hidden() {
-        let (_dir, app) = crate::fixtures::test_app();
-        for key in HIDDEN_ROWS {
-            assert!(!row_shown(key), "{key}");
-        }
-        assert!(row_shown("live_upload"));
-        assert!(sharing_rows(&app, false, "a", "b").is_empty());
-        assert!(report_pictures_row(&app, false, "c").is_none());
-        assert!(focus_gate_row(&app, false, "d").is_none());
-        let _ = upload_row(&app, false, "help", true);
+    fn adding_and_removing_names_writes_the_file() {
+        let (dir, mut app) = live_app();
+        app.settings.player_name.clear();
+        let _ = app.update(page(Msg::ChipDraft(
+            ChipList::Names,
+            Some("Main#2112".into()),
+        )));
+        let _ = app.update(page(Msg::ChipAdd));
+        assert_eq!(on_disk(&dir).player_name.as_deref(), Some("Main"));
+        // Extra names are hidden, so another name replaces it.
+        let _ = app.update(page(Msg::ChipDraft(ChipList::Names, Some("Other".into()))));
+        let _ = app.update(page(Msg::ChipAdd));
+        let saved = on_disk(&dir);
+        assert_eq!(saved.player_name.as_deref(), Some("Other"));
+        assert!(saved.player_names.is_empty());
+        // Removing the only name clears it.
+        let _ = app.update(page(Msg::ChipRemove(ChipList::Names, 0)));
+        assert_eq!(on_disk(&dir).player_name, None);
     }
 }

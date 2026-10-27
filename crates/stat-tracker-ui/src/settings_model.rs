@@ -61,9 +61,9 @@ pub fn page_width(content: f32) -> f32 {
 /// Config keys only this app reads, so a change to one never waits for a
 /// tracker restart: the update channel, the setup flag, the session
 /// window (Overview and Companion grouping), the reader pack address
-/// (not used yet) and Report pictures (the app's misread report reads it,
-/// the tracker never does). The waiting count, the After restart tags and
-/// the legend all come from this list.
+/// (not used yet) and Report pictures (the app's misread report will read
+/// it; nothing reads it yet, and the tracker never will). The waiting
+/// count, the After restart tags and the legend all come from this list.
 pub const APP_ONLY_KEYS: [&str; 5] = [
     "update_channel",
     "setup_completed",
@@ -71,6 +71,37 @@ pub const APP_ONLY_KEYS: [&str; 5] = [
     "reader_pack_url",
     "share_report_pictures",
 ];
+
+/// Config keys whose Settings row is not shown because nothing reads the
+/// key yet: the rank reader, stat picture upload, report pictures, the
+/// on-screen capture check, the upload switch and extra in-game names.
+/// The keys still load and save as before, and a hand-edited value never
+/// shows in a summary, an After restart tag or the waiting count.
+pub const HIDDEN_KEYS: [&str; 6] = [
+    "rank_reader",
+    "share_stat_pictures",
+    "share_report_pictures",
+    "capture_only_on_screen",
+    "live_upload",
+    "player_names",
+];
+
+/// Whether the Settings row for config key `key` is shown.
+pub fn row_shown(key: &str) -> bool {
+    !HIDDEN_KEYS.contains(&key)
+}
+
+/// `a` and `b` are the same in-game name: the same after the core's name
+/// rule ([`stat_tracker::config::own_name`], which drops a `#1234` tag)
+/// and Unicode lowercasing, as `Config::own_player_names` compares them.
+pub fn same_name(a: &str, b: &str) -> bool {
+    let key = |s: &str| {
+        stat_tracker::config::own_name(s)
+            .unwrap_or(s.trim())
+            .to_lowercase()
+    };
+    key(a) == key(b)
+}
 
 /// True when `key` reaches the tracker only after it restarts: the tracker
 /// reads config.toml once, at start.
@@ -163,13 +194,18 @@ impl AdvancedSection {
     /// holds.
     pub fn summary(self, v: &AdvancedValues) -> String {
         match self {
-            AdvancedSection::CaptureReading => format!(
-                "{} capture on {}, {}, report pictures {}",
-                v.route,
-                v.monitor,
-                lower_first(v.reader.label()),
-                on_off(v.report_pictures)
-            ),
+            AdvancedSection::CaptureReading => {
+                let mut line = format!(
+                    "{} capture on {}, {}",
+                    v.route,
+                    v.monitor,
+                    lower_first(v.reader.label())
+                );
+                if row_shown("share_report_pictures") {
+                    line.push_str(&format!(", report pictures {}", on_off(v.report_pictures)));
+                }
+                line
+            }
             AdvancedSection::TrackerService => {
                 let login = if v.autostart {
                     "Starts on login"
@@ -223,7 +259,9 @@ impl AdvancedSection {
     /// tracker reads once at start, and an untagged row there would say its
     /// change applies at once when it does not.
     pub fn after_restart(self) -> bool {
-        self.keys().iter().any(|key| needs_restart(key))
+        self.keys()
+            .iter()
+            .any(|key| needs_restart(key) && row_shown(key))
     }
 
     fn bit(self) -> u8 {
@@ -489,7 +527,11 @@ pub fn changes_waiting(running: &Config, saved: &Config) -> usize {
     };
     match (a, b) {
         (serde_json::Value::Object(mut a), serde_json::Value::Object(mut b)) => {
-            for key in APP_ONLY_KEYS.iter().chain(&["reader", "ocr"]) {
+            for key in APP_ONLY_KEYS
+                .iter()
+                .chain(&HIDDEN_KEYS)
+                .chain(&["reader", "ocr"])
+            {
                 a.remove(*key);
                 b.remove(*key);
             }
@@ -548,8 +590,9 @@ pub enum ConfigEdit {
     CaptureOnlyOnScreen(bool),
     /// Another in-game name, kept in `player_names`.
     AddPlayerName(String),
-    /// Drop a name from `player_names` (ignoring case).
-    RemovePlayerName(String),
+    /// Drop these names from `player_names`, every spelling of each
+    /// ([`same_name`]).
+    RemovePlayerNames(Vec<String>),
     /// Stream frame rate. `None` is the default.
     FrameRate(Option<u32>),
     /// Pause between grabs. On leaves the choice to the tracker per desktop.
@@ -587,15 +630,15 @@ impl ConfigEdit {
                 let known = config
                     .own_player_names()
                     .iter()
-                    .any(|n| n.eq_ignore_ascii_case(&name));
+                    .any(|n| same_name(n, &name));
                 if !name.is_empty() && !known {
                     config.player_names.push(name);
                 }
             }
-            ConfigEdit::RemovePlayerName(name) => {
+            ConfigEdit::RemovePlayerNames(names) => {
                 config
                     .player_names
-                    .retain(|n| !n.trim().eq_ignore_ascii_case(name.trim()));
+                    .retain(|n| !names.iter().any(|gone| same_name(n, gone)));
             }
             ConfigEdit::OcrWorkers(n) => {
                 config.ocr_threads = n.map(|n| n.clamp(1, OCR_WORKERS_MAX));
@@ -995,12 +1038,39 @@ mod tests {
         }
     }
 
+    /// A hidden row's key (report pictures, the on-screen capture check)
+    /// is inert: a hand-edited value shows in no summary, tag or count.
+    #[test]
+    fn hidden_keys_never_show_in_summaries_tags_or_counts() {
+        let mut v = values();
+        v.report_pictures = true;
+        assert!(
+            !AdvancedSection::CaptureReading
+                .summary(&v)
+                .contains("report pictures")
+        );
+        let running = Config::default();
+        let mut saved = running.clone();
+        saved.capture_only_on_screen = false;
+        saved.share_report_pictures = true;
+        saved.live_upload = false;
+        saved.player_names = vec!["Alt".into()];
+        saved.rank_reader = true;
+        saved.share_stat_pictures = true;
+        assert_eq!(changes_waiting(&running, &saved), 0);
+        for key in HIDDEN_KEYS {
+            assert!(!row_shown(key), "{key}");
+        }
+        // Capture and reading keeps its tag from the keys it shows.
+        assert!(AdvancedSection::CaptureReading.after_restart());
+    }
+
     #[test]
     fn advanced_summaries_name_only_what_the_rows_hold() {
         let mut v = values();
         assert_eq!(
             AdvancedSection::CaptureReading.summary(&v),
-            "Automatic capture on DP-3, new reader with OCR backup, report pictures off"
+            "Automatic capture on DP-3, new reader with OCR backup"
         );
         assert_eq!(
             AdvancedSection::TrackerService.summary(&v),

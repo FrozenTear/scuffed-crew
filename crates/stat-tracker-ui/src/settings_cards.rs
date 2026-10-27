@@ -197,7 +197,10 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
             .push(divided(shared));
     }
     let sharing = sharing.push(crate::account_card::what_leaves_link());
-    divided(vec![connection.into(), uploads, sharing.into()])
+    let mut rows = vec![connection.into()];
+    rows.extend(uploads);
+    rows.push(sharing.into());
+    divided(rows)
 }
 
 /// Updates: the version and Check now, then the alpha switch.
