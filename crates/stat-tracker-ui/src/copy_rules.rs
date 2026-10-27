@@ -18,6 +18,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("seasons.rs", include_str!("seasons.rs")),
     ("settings_cards.rs", include_str!("settings_cards.rs")),
     ("settings_env.rs", include_str!("settings_env.rs")),
+    ("settings_keys.rs", include_str!("settings_keys.rs")),
     ("settings_fixed.rs", include_str!("settings_fixed.rs")),
     ("settings_model.rs", include_str!("settings_model.rs")),
     ("settings_open.rs", include_str!("settings_open.rs")),
