@@ -1771,10 +1771,21 @@ mod tests {
     #[tokio::test]
     async fn me_match_missing_and_malformed_ids_are_404() {
         let (state, session_token, _mine, _theirs) = two_members_one_game_each().await;
-        for id in ["pm00000000deadbeef", "not-a-key", "12345", "a%3Ab"] {
+        let (missing_status, missing_text) = get_my_match(
+            create_router(state.clone()),
+            Some(&session_token),
+            "pm00000000deadbeef",
+        )
+        .await;
+        assert_eq!(missing_status, StatusCode::NOT_FOUND, "{missing_text}");
+        for id in ["not-a-key", "12345", "a%3Ab"] {
             let (status, text) =
                 get_my_match(create_router(state.clone()), Some(&session_token), id).await;
             assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {text}");
+            assert_eq!(
+                text, missing_text,
+                "{id}: a malformed id must get the same 404 body as a missing one"
+            );
         }
     }
 
