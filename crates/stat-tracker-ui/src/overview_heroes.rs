@@ -71,9 +71,7 @@ pub fn view<'a>(app: &'a TrackerApp, settled: &[&Game], width: f32) -> Element<'
     let col = Column::new().spacing(8).push(header);
     if cards.is_empty() {
         return col
-            .push(widgets::empty_surface(&format!(
-                "No hero has {CARD_MIN} or more games in these filters yet."
-            )))
+            .push(widgets::empty_surface(&empty_text(app.games.is_empty())))
             .into();
     }
     let across = if width >= WIDE_FROM { 4 } else { 2 };
@@ -153,6 +151,16 @@ pub fn too_few_line(r: &crate::aggregate::Record) -> String {
     format!("{} · Too few games", r.games_label())
 }
 
+/// The strip with no card: before the first game there is no filter row
+/// (ux.md section 17), so that line names no filters.
+pub fn empty_text(no_games: bool) -> String {
+    if no_games {
+        "No heroes yet. They show here once the tracker saves a game.".to_string()
+    } else {
+        format!("No hero has {CARD_MIN} or more games in these filters yet.")
+    }
+}
+
 /// One dash per decided game out of ten: those in grey, the rest faint.
 fn dashes(decided: usize) -> Element<'static, Message> {
     let mut r = Row::new().spacing(4).width(Fill).align_y(Alignment::Center);
@@ -209,6 +217,12 @@ mod tests {
             "10 games · Too few games"
         );
         assert_eq!(rate(&hero("A", 88, 45, 41).record), Some(52));
+    }
+
+    #[test]
+    fn the_empty_line_names_filters_only_when_there_are_games() {
+        assert!(!empty_text(true).contains("filter"));
+        assert!(empty_text(false).contains("filters"));
     }
 
     #[test]

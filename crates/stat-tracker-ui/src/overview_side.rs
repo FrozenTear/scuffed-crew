@@ -89,6 +89,27 @@ pub fn headline(r: &Record) -> String {
     rate(r).map_or_else(|| r.wl_label(), |p| format!("{p}%"))
 }
 
+/// The season card's big line and its colour (small-sample rule): "No
+/// games" at 0, the rate from 10 decided games, else the record, muted
+/// under 3 games.
+pub fn season_headline(r: &Record) -> (String, iced::Color) {
+    match r.games {
+        0 => ("No games".to_string(), TEXT_3),
+        n if rate(r).is_none() && n < crate::overview_heroes::CARD_MIN => (headline(r), TEXT_3),
+        _ => (headline(r), TEXT),
+    }
+}
+
+/// The line beside it: "110 games", "7 games · Too few games" without a
+/// rate, nothing at 0 games (the headline says it).
+pub fn season_games_line(r: &Record) -> String {
+    match (r.games, rate(r)) {
+        (0, _) => String::new(),
+        (_, Some(_)) => r.games_label(),
+        (_, None) => format!("{} · Too few games", r.games_label()),
+    }
+}
+
 /// The newest [`LAST_N`] decided games, newest first.
 pub fn last_n<'a>(shown: &[&'a Game]) -> Vec<&'a Game> {
     shown
@@ -182,13 +203,11 @@ fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message>
     let mut col = Column::new()
         .spacing(8)
         .push(widgets::label_text(&scope_label(app)));
+    let (big, big_color) = season_headline(&season);
     col = col.push(
         row![
-            text(headline(&season))
-                .size(32)
-                .font(FONT_EXTRABOLD)
-                .color(TEXT),
-            text(season.games_label())
+            text(big).size(32).font(FONT_EXTRABOLD).color(big_color),
+            text(season_games_line(&season))
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -406,6 +425,29 @@ mod tests {
             losses: l,
             draws: d,
         }
+    }
+
+    #[test]
+    fn the_season_card_follows_the_small_sample_rule() {
+        assert_eq!(
+            season_headline(&rec(0, 0, 0, 0)),
+            ("No games".to_string(), TEXT_3)
+        );
+        assert_eq!(season_games_line(&rec(0, 0, 0, 0)), "");
+        assert_eq!(
+            season_headline(&rec(1, 1, 0, 2)),
+            ("1-1".to_string(), TEXT_3)
+        );
+        assert_eq!(season_headline(&rec(4, 3, 0, 7)), ("4-3".to_string(), TEXT));
+        assert_eq!(
+            season_games_line(&rec(4, 3, 0, 7)),
+            "7 games · Too few games"
+        );
+        assert_eq!(
+            season_headline(&rec(52, 55, 0, 110)),
+            ("49%".to_string(), TEXT)
+        );
+        assert_eq!(season_games_line(&rec(52, 55, 0, 110)), "110 games");
     }
 
     #[test]
