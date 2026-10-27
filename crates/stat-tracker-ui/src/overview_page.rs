@@ -1,8 +1,9 @@
 //! The 0.6 Overview (spec p1, and p8 at about 1024): the filter chips, then
 //! the main column (the latest session, its newest game, the games before
 //! it, the heroes) beside the right panel (season, Needs a look,
-//! Companion). Below [`COLLAPSE_BELOW`] of page it is
-//! one column and the chips fold into "Filters (n)". The 0.5 sidebar
+//! Companion). Below [`COLLAPSE_BELOW`] of page it is one column; below
+//! a 1440 px window the chips fold into "Filters (n)" (spec r1.1, as on
+//! Heroes, [`chips_fold`]). The 0.5 sidebar
 //! layout keeps its own Overview ([`crate::overview`]).
 //!
 //! Rank, queue, length and crew are spec example data for fields the
@@ -62,13 +63,34 @@ pub fn filter(app: &TrackerApp) -> GameFilter {
     app.games_filter()
 }
 
-/// Page width below which the chips fold behind "Filters (n)" (spec p8,
-/// about 1024 of window).
+/// Page width below which the Overview is one column (spec p8, about 1024
+/// of window).
 pub const COLLAPSE_BELOW: f32 = 1000.0;
 
-/// The chip row: on a wide page every chip; below [`COLLAPSE_BELOW`]
-/// "Filters (n)" and the chips that filter, the rest while it is open.
-fn chip_row<'a>(
+/// Window width from which every chip shows (spec r1.1: all chips at
+/// 1600, "Filters (n)" at 1366 and 1024).
+const CHIPS_OPEN_FROM: f32 = 1440.0;
+
+/// The window a page `content` px wide sits in: the page gutter is wider
+/// from [`theme::WIDE_GUTTER_MIN`] up.
+pub fn window_for(content: f32) -> f32 {
+    let wide = content + 2.0 * theme::PAGE_PAD_X;
+    if wide >= theme::WIDE_GUTTER_MIN {
+        wide
+    } else {
+        content + 2.0 * theme::PAGE_PAD_X_NARROW
+    }
+}
+
+/// Whether a page `content` px wide folds its chips behind "Filters (n)".
+pub fn chips_fold(content: f32) -> bool {
+    content.is_finite() && window_for(content) < CHIPS_OPEN_FROM
+}
+
+/// The chip row: every chip when there is room; otherwise "Filters (n)"
+/// and the chips that filter, the rest while it is open. Heroes uses it
+/// too.
+pub(crate) fn chip_row<'a>(
     app: &'a TrackerApp,
     heroes: &[String],
     maps: &[String],
@@ -159,7 +181,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             app.package_probe(),
         ));
     }
-    page = page.push(chip_row(app, &heroes, &maps, narrow));
+    page = page.push(chip_row(app, &heroes, &maps, chips_fold(content_width)));
 
     let main_w = if narrow {
         content_width
@@ -204,6 +226,13 @@ mod tests {
         );
         let _ = app.update(Message::OverviewPage(Msg::PickRole(None)));
         assert!(app.roles.unrestricted());
+    }
+
+    #[test]
+    fn chips_fold_below_a_1440_window() {
+        assert!(!chips_fold(1600.0 - 64.0));
+        assert!(chips_fold(1366.0 - 48.0));
+        assert!(chips_fold(1024.0 - 48.0));
     }
 
     #[test]
