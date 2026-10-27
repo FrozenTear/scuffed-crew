@@ -187,7 +187,8 @@ pub struct Config {
     /// each match"). On (also when missing) and not written while on. Only
     /// matters when `[sync]` has a token; off keeps games local and queued.
     ///
-    /// TODO(0.6): not wired yet; the sync worker does not read this.
+    /// The daemon reads it at start: off leaves it with no upload client
+    /// (`daemon::live_upload`), so no path sends a game.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub live_upload: bool,
     /// Opt-in rank reader ("Read my rank after Comp games"): saves rank, rank
