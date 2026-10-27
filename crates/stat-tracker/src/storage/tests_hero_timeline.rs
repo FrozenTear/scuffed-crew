@@ -368,7 +368,7 @@ async fn apply_command_resolves_hero_segment() {
     let undo = StoreCommand::ResolveSegment {
         session_id: "s1".into(),
         segment: 1,
-        action: "clear".into(),
+        action: SEGMENT_CLEAR.into(),
     };
     store.apply_command(&undo).await.unwrap();
     let rows = store.get_session_snapshots("s1").await.unwrap();

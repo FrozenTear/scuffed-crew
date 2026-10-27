@@ -33,11 +33,9 @@ pub enum StoreCommand {
     /// [`SEGMENT_CONFIRM`]: super::SEGMENT_CONFIRM
     /// [`SEGMENT_DISMISS`]: super::SEGMENT_DISMISS
     /// [`SEGMENT_CLEAR`]: super::SEGMENT_CLEAR
-    // HS-1 follow-up: the daemon-side command path (queue -> apply ->
-    // resolve_hero_segment) is wired and tested, but the tracker GUI does not
-    // yet render the per-segment confirm/dismiss buttons that would emit this
-    // command. Until then a resolution can only be driven by dropping a
-    // `resolve_segment` command file into <data_dir>/commands/.
+    // The app's hero timeline queues this from its Confirm, Dismiss and
+    // Undo buttons; a `resolve_segment` file dropped into
+    // <data_dir>/commands/ is applied the same way.
     ResolveSegment {
         session_id: String,
         segment: u32,
