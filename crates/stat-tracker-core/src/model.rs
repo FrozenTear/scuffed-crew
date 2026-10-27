@@ -276,6 +276,10 @@ pub const SEGMENT_CONFIRM: &str = "confirm";
 /// Mark a hero segment as a misread: excluded from display and from the
 /// majority vote. The raw snapshots stay untouched.
 pub const SEGMENT_DISMISS: &str = "dismiss";
+/// Undo a confirm or dismiss: the store keeps only [`SEGMENT_CONFIRM`] and
+/// [`SEGMENT_DISMISS`], so any other action, this one by name, drops the
+/// segment's resolution and it reads as derived again.
+pub const SEGMENT_CLEAR: &str = "clear";
 
 /// One consecutive run of the same hero across a session's snapshots, in
 /// capture-time order.
