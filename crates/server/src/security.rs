@@ -217,7 +217,7 @@ pub async fn apply(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    // Disable the legacy XSS filter — modern browsers ignore it and it can
+    // Disable the legacy XSS filter. Modern browsers ignore it and it can
     // introduce vulnerabilities in older ones.
     headers.insert(
         HeaderName::from_static("x-xss-protection"),
@@ -539,6 +539,25 @@ mod tests {
             values,
             ["nosniff"],
             "{label}: X-Content-Type-Options nosniff must appear exactly once, got {values:?}"
+        );
+    }
+
+    fn assert_header_once(
+        response: &axum::response::Response,
+        name: &str,
+        expected: &str,
+        label: &str,
+    ) {
+        let values: Vec<_> = response
+            .headers()
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            values,
+            [expected],
+            "{label}: {name} must appear exactly once, got {values:?}"
         );
     }
 
@@ -989,6 +1008,13 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_nosniff_once(&response, "html shell");
+        assert_header_once(&response, "x-frame-options", "DENY", "html shell");
+        assert_header_once(
+            &response,
+            "referrer-policy",
+            "strict-origin-when-cross-origin",
+            "html shell",
+        );
         let csp = response
             .headers()
             .get(CSP_REPORT_ONLY_HEADER)
