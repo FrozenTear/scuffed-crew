@@ -1,19 +1,19 @@
-//! The 0.6 filter chips under a page heading (spec p1 and p2): Season,
-//! roles, Hero and Map. A chip that filters reads as an accent outline
-//! with its value and "×" to clear it ("Season 5 ×"). One that does not
-//! is a dropdown ("Hero ▾"). Overview draws them; Games and Heroes take
-//! the same row. Below [`COLLAPSE_BELOW`] of page the row folds into
-//! "Filters (n) ▾" plus the chips that filter (spec p8).
+//! The 0.6 filter chips (spec p1 and p2), the same file as #556's, which
+//! replaces this one when it lands (only the role chip's message differs):
+//! Season, queues, roles, Crew, Hero and Map. A chip that filters reads as
+//! an accent outline with its value and "×" to clear it ("Season 5 ×").
+//! One that does not is a dropdown ("Hero ▾"). Behind "Filters (n)" only
+//! the chips that filter show; opening it shows the dropdowns too.
 //!
-//! The spec's "All queues" and "Crew: anyone" chips are left out until
-//! the tracker stores a queue and a crew for each game.
+//! "All queues" and "Crew: anyone" are drawn disabled until the tracker
+//! stores a queue and a crew for each game.
 
-use iced::widget::{Row, button, pick_list, row, text};
+use iced::widget::{Row, button, container, pick_list, row, text};
 use iced::{Alignment, Background, Border, Element, Padding, Theme};
 
 use crate::app::{Message, TrackerApp};
 use crate::model::{Role, RoleFilter, SeasonSel};
-use crate::theme::{self, ACCENT, BORDER, FONT_SEMIBOLD, SIZE_META, SURFACE, TEXT, TEXT_2};
+use crate::theme::{self, ACCENT, BORDER, FONT_SEMIBOLD, SIZE_META, SURFACE, TEXT, TEXT_2, TEXT_3};
 
 /// A season the Season dropdown offers.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,141 +53,93 @@ pub fn single_role(roles: RoleFilter) -> Option<Role> {
     }
 }
 
-/// Page width below which the row folds (spec p8, about 1024 of window).
-pub const COLLAPSE_BELOW: f32 = 1000.0;
-
-/// How the row is drawn: every chip, or folded behind "Filters (n) ▾"
-/// with the fold open or shut. `toggle` opens or shuts it.
-#[derive(Debug, Clone)]
-pub enum Fold {
-    Wide,
-    Narrow { open: bool, toggle: Message },
-}
-
-impl Fold {
-    /// The fold for a page `content` px wide.
-    pub fn for_width(content: f32, open: bool, toggle: Message) -> Self {
-        if content.is_finite() && content < COLLAPSE_BELOW {
-            Fold::Narrow { open, toggle }
-        } else {
-            Fold::Wide
-        }
-    }
-}
-
-/// How many filters are on: the "n" of "Filters (n)".
+/// Filters that are on: each is a "×" chip.
 pub fn active_count(app: &TrackerApp) -> usize {
-    [
-        app.needs_look_filter && app.screen == crate::model::Screen::Games,
-        matches!(app.season, SeasonSel::Season(_))
-            && crate::seasons::show_season_picker(&app.seasons.seasons),
-        !app.roles.unrestricted(),
-        app.filter_hero.is_some(),
-        app.filter_map.is_some(),
-    ]
-    .into_iter()
-    .filter(|on| *on)
-    .count()
+    usize::from(app.needs_look_filter)
+        + usize::from(
+            matches!(app.season, SeasonSel::Season(_))
+                && crate::seasons::show_season_picker(&app.seasons.seasons),
+        )
+        + usize::from(!app.roles.unrestricted())
+        + usize::from(app.filter_hero.is_some())
+        + usize::from(app.filter_map.is_some())
+        + usize::from(app.filter_outcome.is_some())
 }
 
 /// The chip row. `heroes` and `maps` are the values the current season and
-/// role leave, so a dropdown never offers a choice with no games. The row
-/// also holds "Needs a look ×" while the top bar's filter is on.
+/// role leave, so a dropdown never offers a choice with no games. With
+/// `open` false only the chips that filter show. The row also holds
+/// "Needs a look ×" while the top bar's filter is on.
 pub fn bar<'a>(
     app: &'a TrackerApp,
     heroes: &[String],
     maps: &[String],
-    fold: Fold,
+    open: bool,
 ) -> Element<'a, Message> {
-    // Each chip with whether it filters now.
-    let mut chips: Vec<(bool, Element<'a, Message>)> = Vec::new();
-    // "Needs a look" filters Games only.
-    if app.needs_look_filter && app.screen == crate::model::Screen::Games {
-        chips.push((
-            true,
-            set_chip(
-                "Needs a look".to_string(),
-                Message::Nav(crate::nav::Msg::ClearNeedsLook),
-            ),
+    let mut chips = Row::new().spacing(8).align_y(Alignment::Center);
+    if app.needs_look_filter {
+        chips = chips.push(set_chip(
+            "Needs a look".to_string(),
+            Message::Nav(crate::nav::Msg::ClearNeedsLook),
         ));
     }
-    if crate::seasons::show_season_picker(&app.seasons.seasons) {
-        chips.push((matches!(app.season, SeasonSel::Season(_)), season_chip(app)));
+    let season_set = matches!(app.season, SeasonSel::Season(_));
+    if crate::seasons::show_season_picker(&app.seasons.seasons) && (open || season_set) {
+        chips = chips.push(season_chip(app));
     }
-    chips.push((!app.roles.unrestricted(), role_chip(app.roles)));
-    chips.push((
-        app.filter_hero.is_some(),
-        value_chip(
+    if open {
+        chips = chips.push(disabled_chip("All queues ▾"));
+    }
+    if open || !app.roles.unrestricted() {
+        chips = chips.push(role_chip(app.roles));
+    }
+    if open {
+        chips = chips.push(disabled_chip("Crew: anyone ▾"));
+    }
+    if open || app.filter_hero.is_some() {
+        chips = chips.push(value_chip(
             "Hero",
             app.filter_hero.as_deref(),
             heroes,
             crate::model::display_hero_name,
             Message::FilterHero,
-        ),
-    ));
-    chips.push((
-        app.filter_map.is_some(),
-        value_chip(
+        ));
+    }
+    if open || app.filter_map.is_some() {
+        chips = chips.push(value_chip(
             "Map",
             app.filter_map.as_deref(),
             maps,
             |m: &str| m.to_string(),
             Message::FilterMap,
-        ),
-    ));
-    let mut row = Row::new().spacing(8).align_y(Alignment::Center);
-    match fold {
-        Fold::Wide => {
-            for (_, chip) in chips {
-                row = row.push(chip);
-            }
-        }
-        Fold::Narrow { open, toggle } => {
-            row = row.push(fold_chip(active_count(app), open, toggle));
-            for (on, chip) in chips {
-                if on || open {
-                    row = row.push(chip);
-                }
-            }
-        }
+        ));
     }
-    row.wrap().into()
+    if let Some(outcome) = app.filter_outcome {
+        chips = chips.push(set_chip(
+            outcome.label().to_string(),
+            Message::FilterOutcome(None),
+        ));
+    }
+    chips.wrap().into()
 }
 
-/// "Filters (1) ▾": opens or shuts the folded chips.
-fn fold_chip(count: usize, open: bool, toggle: Message) -> Element<'static, Message> {
-    button(
-        row![
-            text(format!("Filters ({count})"))
-                .size(SIZE_META)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT),
-            text(if open { "↑" } else { "↓" })
-                .size(SIZE_META)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT_2),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center),
+/// A filter the tracker has no data for yet: greyed, does nothing.
+fn disabled_chip(label: &'static str) -> Element<'static, Message> {
+    container(
+        text(label)
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_3),
     )
     .padding(Padding::from([5, 12]))
-    .style(|_: &Theme, status| button::Style {
-        background: Some(Background::Color(
-            if matches!(status, button::Status::Hovered) {
-                BORDER
-            } else {
-                SURFACE
-            },
-        )),
-        text_color: TEXT,
+    .style(|_: &Theme| container::Style {
         border: Border {
             color: BORDER,
             width: 1.0,
             radius: theme::RADIUS_CHIP.into(),
         },
-        ..button::Style::default()
+        ..container::Style::default()
     })
-    .on_press(toggle)
     .into()
 }
 
@@ -348,30 +300,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_fold_starts_below_the_spec_width() {
-        let toggle = Message::Tick;
-        assert!(matches!(
-            Fold::for_width(1200.0, false, toggle.clone()),
-            Fold::Wide
-        ));
-        assert!(matches!(
-            Fold::for_width(976.0, true, toggle),
-            Fold::Narrow { open: true, .. }
-        ));
-    }
-
-    #[test]
-    fn the_count_names_only_filters_that_are_on() {
-        let (_dir, mut app) = crate::fixtures::test_app();
-        assert_eq!(active_count(&app), 0);
-        app.filter_hero = Some("Ana".into());
-        app.needs_look_filter = true;
-        assert_eq!(active_count(&app), 1, "Needs a look filters Games only");
-        app.screen = crate::model::Screen::Games;
-        assert_eq!(active_count(&app), 2);
-    }
 
     #[test]
     fn one_role_on_is_a_single_role() {

@@ -1,20 +1,22 @@
 //! The 0.6 Overview (spec p1, and p8 at about 1024): the filter chips, then
 //! the main column (the latest session, its newest game, the games before
 //! it, the heroes) beside the right panel (season, Needs a look,
-//! Companion). Below [`crate::filter_chips::COLLAPSE_BELOW`] of page it is
+//! Companion). Below [`COLLAPSE_BELOW`] of page it is
 //! one column and the chips fold into "Filters (n)". The 0.5 sidebar
 //! layout keeps its own Overview ([`crate::overview`]).
 //!
 //! Rank, queue, length and crew are spec example data for fields the
 //! tracker does not store yet, so they are not drawn.
 
-use iced::widget::{Column, Row, column};
+use iced::widget::{Column, Row, button, column, row, text};
+use iced::{Alignment, Background, Border, Padding, Theme};
 use iced::{Element, Fill, Task};
 
 use crate::aggregate::{GameFilter, SessionGroup, filter_games, group_by_session_gap};
 use crate::app::{Message, TrackerApp};
-use crate::filter_chips::{self, Fold};
+use crate::filter_chips;
 use crate::model::{Game, Role, RoleFilter, Screen};
+use crate::theme::{self, BORDER, FONT_SEMIBOLD, SIZE_META, SURFACE, TEXT, TEXT_2};
 
 /// Width of the right panel (spec about 300).
 pub const SIDE_W: f32 = 300.0;
@@ -53,13 +55,76 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
     Task::none()
 }
 
-/// The games the Overview counts: the season, role, hero and map chips.
-/// The Games-only outcome and "Needs a look" filters do not apply here.
+/// The games the Overview counts: every chip the filter row shows (season,
+/// role, hero, map and a result chip set on Games). "Needs a look" filters
+/// Games only.
 pub fn filter(app: &TrackerApp) -> GameFilter {
-    GameFilter {
-        outcome: None,
-        ..app.games_filter()
+    app.games_filter()
+}
+
+/// Page width below which the chips fold behind "Filters (n)" (spec p8,
+/// about 1024 of window).
+pub const COLLAPSE_BELOW: f32 = 1000.0;
+
+/// The chip row: on a wide page every chip; below [`COLLAPSE_BELOW`]
+/// "Filters (n)" and the chips that filter, the rest while it is open.
+fn chip_row<'a>(
+    app: &'a TrackerApp,
+    heroes: &[String],
+    maps: &[String],
+    narrow: bool,
+) -> Element<'a, Message> {
+    if !narrow {
+        return filter_chips::bar(app, heroes, maps, true);
     }
+    let open = app.overview_page.filters_open;
+    Row::new()
+        .spacing(8)
+        .align_y(Alignment::Start)
+        .push(fold_chip(
+            filter_chips::active_count(app),
+            open,
+            Message::OverviewPage(Msg::ToggleFilters),
+        ))
+        .push(filter_chips::bar(app, heroes, maps, open))
+        .into()
+}
+
+/// "Filters (1) ▾": opens or shuts the folded chips.
+fn fold_chip(count: usize, open: bool, toggle: Message) -> Element<'static, Message> {
+    button(
+        row![
+            text(format!("Filters ({count})"))
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT),
+            text(if open { "↑" } else { "↓" })
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_2),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
+    )
+    .padding(Padding::from([5, 12]))
+    .style(|_: &Theme, status| button::Style {
+        background: Some(Background::Color(
+            if matches!(status, button::Status::Hovered) {
+                BORDER
+            } else {
+                SURFACE
+            },
+        )),
+        text_color: TEXT,
+        border: Border {
+            color: BORDER,
+            width: 1.0,
+            radius: theme::RADIUS_CHIP.into(),
+        },
+        ..button::Style::default()
+    })
+    .on_press(toggle)
+    .into()
 }
 
 /// The latest session of `games` (newest first), split by the Session
@@ -77,12 +142,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let pool = filter_games(&app.games, &app.header_filter());
     let heroes = crate::aggregate::distinct_heroes(&pool);
     let maps = crate::aggregate::distinct_maps(&pool);
-    let fold = Fold::for_width(
-        content_width,
-        app.overview_page.filters_open,
-        Message::OverviewPage(Msg::ToggleFilters),
-    );
-    let narrow = matches!(fold, Fold::Narrow { .. });
+    let narrow = content_width.is_finite() && content_width < COLLAPSE_BELOW;
 
     let mut page = Column::new().spacing(GAP).width(Fill);
     if let Some(info) = &app.update
@@ -99,7 +159,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             app.package_probe(),
         ));
     }
-    page = page.push(filter_chips::bar(app, &heroes, &maps, fold));
+    page = page.push(chip_row(app, &heroes, &maps, narrow));
 
     let main_w = if narrow {
         content_width
@@ -155,10 +215,10 @@ mod tests {
     }
 
     #[test]
-    fn the_overview_ignores_the_games_only_filters() {
+    fn the_overview_follows_the_chips_it_shows() {
         let (_dir, mut app) = crate::fixtures::test_app();
         app.filter_outcome = Some(crate::model::Outcome::Win);
-        assert_eq!(filter(&app).outcome, None);
+        assert_eq!(filter(&app).outcome, Some(crate::model::Outcome::Win));
         let _ = view(&app, 1300.0);
         let _ = view(&app, 900.0);
     }
