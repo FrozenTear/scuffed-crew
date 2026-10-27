@@ -143,7 +143,7 @@ pub fn form(games: &[&Game], season_pct: Option<u32>) -> Option<Form> {
         .copied()
         .filter(|g| g.outcome != Outcome::Unknown)
         .collect();
-    decided.sort_by(|a, b| b.played_at.cmp(&a.played_at));
+    decided.sort_by_key(|g| std::cmp::Reverse(g.played_at));
     decided.truncate(LAST_N);
     if decided.len() < wr_bar::MIN_GAMES {
         return None;
@@ -182,7 +182,7 @@ pub fn needs_lines(games: &[Game], seasons: &[Season], live: Option<&str>) -> Ve
             map += 1;
         }
     }
-    by_season.sort_by(|a, b| b.1.cmp(&a.1));
+    by_season.sort_by_key(|s| std::cmp::Reverse(s.1));
     let mut out: Vec<NeedLine> = by_season
         .into_iter()
         .map(|(scope, _, count)| NeedLine {
@@ -219,7 +219,7 @@ pub fn model(
     let base = GameFilter::from_header(None, roles);
     let all = filter_games(games, &base);
     let mut ordered: Vec<&Season> = seasons.iter().collect();
-    ordered.sort_by(|a, b| b.starts_at.cmp(&a.starts_at));
+    ordered.sort_by_key(|s| std::cmp::Reverse(s.starts_at));
 
     let mut lines = Vec::new();
     let mut empty = Vec::new();
