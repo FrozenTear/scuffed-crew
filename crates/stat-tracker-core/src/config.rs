@@ -237,16 +237,17 @@ fn is_true(on: &bool) -> bool {
     *on
 }
 
-/// Shortest name [`Config::own_player_names`] keeps. BattleTag names are 3
-/// to 12 characters.
+/// Shortest name [`own_name`] accepts, so the shortest one
+/// [`Config::own_player_names`] keeps. BattleTag names are 3 to 12
+/// characters.
 pub const MIN_OWN_NAME_CHARS: usize = 3;
 
 /// `raw` as one of this member's in-game names: trimmed, without a trailing
 /// `#` and digits (the BattleTag number, which the scoreboard never shows).
 /// `None` when fewer than [`MIN_OWN_NAME_CHARS`] characters are left, so a
-/// stray letter can never claim a stranger's row. The Settings name input
-/// and [`Config::own_player_names`] both use this, so they agree on what a
-/// name is.
+/// stray letter can never claim a stranger's row. The 0.6 Settings name
+/// chip and [`Config::own_player_names`] both use this, so they agree on
+/// what a name is.
 pub fn own_name(raw: &str) -> Option<&str> {
     let raw = raw.trim();
     let name = match raw.rsplit_once('#') {
@@ -277,8 +278,9 @@ fn default_game_process_names() -> Vec<String> {
 impl Config {
     /// Every saved in-game name of this member: [`Self::player_name`] first,
     /// then [`Self::player_names`] in file order, each through [`own_name`]
-    /// (trimmed, no `#1234` tag, names too short dropped). A repeat (ignoring case, any script:
-    /// `Ö` and `ö` are one name, as in the name matcher) is kept once.
+    /// (trimmed, no `#1234` tag, names too short dropped). A repeat
+    /// (ignoring case, any script: `Ö` and `ö` are one name, as in the name
+    /// matcher) is kept once.
     pub fn own_player_names(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut seen: Vec<String> = Vec::new();

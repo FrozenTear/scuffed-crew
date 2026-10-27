@@ -503,8 +503,8 @@ fn hero_tally(h: &HeroAgg) -> Tally {
     Tally::new(h.games, h.wins, h.losses, h.draws)
 }
 
-/// Card meta line: `12 games · 58.3% WR · 7W-5L` from 10 games, and
-/// `4 games · 3W-1L` from 3 to 9 games (no win rate yet).
+/// Card meta line: `12 games · 58.3% WR · 7W-5L` from 10 decided games,
+/// and `4 games · 3W-1L` below that (Too few games, no win rate yet).
 fn hero_meta(t: Tally) -> String {
     let games = t.games;
     let record = t.record();

@@ -453,7 +453,7 @@ pub fn with_chip(raw: &str, draft: &str) -> String {
 /// trimmed and without a `#1234` tag (the help says to leave it out, and the
 /// scoreboard never shows it). `None` when fewer than
 /// [`stat_tracker::config::MIN_OWN_NAME_CHARS`] characters are left, the
-/// same names the tracker ignores.
+/// names `own_player_names` drops.
 pub fn name_chip(raw: &str) -> Option<String> {
     stat_tracker::config::own_name(raw).map(str::to_string)
 }
