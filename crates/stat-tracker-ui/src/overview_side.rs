@@ -138,7 +138,11 @@ fn scope_label(app: &TrackerApp) -> String {
 
 fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message> {
     let season = record_of(shown.iter().copied());
-    let recent = last_n(shown);
+    // The Last line only while it is a part of the season, not all of it.
+    let mut recent = last_n(shown);
+    if recent.len() >= decided(&season) {
+        recent.clear();
+    }
     let last = record_of(recent.iter().copied());
     let mut col = Column::new()
         .spacing(8)
@@ -443,5 +447,13 @@ mod tests {
         assert!(companion_line(&app).len() > 3);
         let _ = view(&app, &[]);
         assert_eq!(needs_look_parts(&app), "");
+    }
+
+    #[test]
+    fn the_counted_line_leaves_out_an_empty_last() {
+        assert_eq!(
+            counted_line(&rec(2, 1, 0, 3), &rec(0, 0, 0, 0)),
+            "Win rate counts decided games: 2-1."
+        );
     }
 }
