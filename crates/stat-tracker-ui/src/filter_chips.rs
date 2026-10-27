@@ -122,7 +122,7 @@ pub fn bar<'a>(
             app.filter_hero.as_deref(),
             heroes,
             crate::model::display_hero_name,
-            |v| Message::FilterHero(v),
+            Message::FilterHero,
         ),
     ));
     chips.push((
@@ -132,7 +132,7 @@ pub fn bar<'a>(
             app.filter_map.as_deref(),
             maps,
             |m: &str| m.to_string(),
-            |v| Message::FilterMap(v),
+            Message::FilterMap,
         ),
     ));
     let mut row = Row::new().spacing(8).align_y(Alignment::Center);
