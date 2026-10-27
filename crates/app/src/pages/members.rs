@@ -352,7 +352,7 @@ struct HeroStatLine {
     class: &'static str,
 }
 
-/// Small-sample rule on the hero stat line: the win rate from 10 games, the
+/// Small-sample rule on the hero stat line: the win rate from 10 decided games, the
 /// record below that, muted under 3 games. `winrate` is a 0.0 to 1.0
 /// fraction.
 fn hero_stat_line(hero: &str, hs: &HeroScoped) -> HeroStatLine {

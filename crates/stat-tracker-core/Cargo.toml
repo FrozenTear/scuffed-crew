@@ -7,6 +7,9 @@ name = "scuffed-stat-tracker-core"
 # dist/check-tag-version.sh both fail when the two differ.
 version = "0.5.0"
 edition = "2024"
+# Kept equal to crates/stat-tracker/Cargo.toml, whose locked dependencies
+# need 1.90 (roaring, through surrealdb). Core uses neither crate.
+rust-version = "1.90"
 description = "Bottom layer of the Scuffed Crew stat tracker: config, text parsing, shared model types, perf and host probes."
 
 # The tracker's lowest crate (0.6 N4). It uses no other tracker crate, and

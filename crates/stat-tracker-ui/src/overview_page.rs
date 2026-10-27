@@ -187,6 +187,33 @@ pub fn session_gap(window_secs: u64) -> chrono::TimeDelta {
         .unwrap_or(chrono::TimeDelta::MAX)
 }
 
+/// `games` less the one still being played: its result is not in, so the
+/// season card and the heroes strip leave it out instead of counting it
+/// as undecided. The session card counts it as Playing
+/// ([`crate::overview_main::session_title`]) and the newest-game card
+/// shows it as Playing.
+pub fn settled<'a>(app: &TrackerApp, games: &[&'a Game]) -> Vec<&'a Game> {
+    settled_of(games.iter().copied(), app.live_game_session.as_deref())
+}
+
+/// [`settled`] for any games, given the session being played.
+pub fn settled_of<'a>(
+    games: impl IntoIterator<Item = &'a Game>,
+    live: Option<&str>,
+) -> Vec<&'a Game> {
+    games
+        .into_iter()
+        .filter(|g| !crate::model::game_card_in_progress(&g.session_id, g.outcome, live))
+        .collect()
+}
+
+/// Whether the filter row shows: not before the first game (ux.md
+/// section 17), when there is nothing to filter, and not while the game
+/// list is still loading ([`crate::games_state::loading`]).
+pub fn shows_filters(app: &TrackerApp) -> bool {
+    !crate::games_state::loading(app) && !app.games.is_empty()
+}
+
 /// The latest session of `games` (newest first), split by [`session_gap`].
 pub fn latest_session(app: &TrackerApp, games: &[&Game]) -> Option<SessionGroup> {
     group_by_session_gap(games, session_gap(app.saved_config.session_window_secs))
@@ -217,7 +244,10 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             app.package_probe(),
         ));
     }
-    page = page.push(chip_row(app, &heroes, &maps, chips_fold(content_width)));
+    // No filter row before the first game (ux.md section 17).
+    if shows_filters(app) {
+        page = page.push(chip_row(app, &heroes, &maps, chips_fold(content_width)));
+    }
 
     let main_w = if narrow {
         content_width
@@ -225,13 +255,14 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         content_width - SIDE_W - GAP
     };
     let session = latest_session(app, &shown);
+    let settled_games = settled(app, &shown);
     let main = column![
         crate::overview_main::view(app, session.as_ref()),
-        crate::overview_heroes::view(app, main_w),
+        crate::overview_heroes::view(app, &settled_games, main_w),
     ]
     .spacing(GAP)
     .width(Fill);
-    let side = crate::overview_side::view(app, &shown);
+    let side = crate::overview_side::view(app, &settled_games);
     if narrow {
         page = page.push(main).push(side);
     } else {
@@ -265,6 +296,26 @@ mod tests {
     }
 
     #[test]
+    fn the_game_being_played_is_left_out_of_the_counts() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let mut games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        games[0].outcome = crate::model::Outcome::Unknown;
+        app.live_game_session = Some(games[0].session_id.clone());
+        let refs: Vec<&Game> = games.iter().collect();
+        let kept = settled(&app, &refs);
+        assert_eq!(kept.len(), games.len() - 1);
+        assert!(kept.iter().all(|g| g.session_id != games[0].session_id));
+        app.live_game_session = None;
+        assert_eq!(
+            settled(&app, &refs).len(),
+            games.len(),
+            "a closed game counts"
+        );
+    }
+
+    #[test]
     fn a_huge_session_window_never_panics() {
         assert_eq!(session_gap(u64::MAX), chrono::TimeDelta::MAX);
         assert_eq!(session_gap(i64::MAX as u64), chrono::TimeDelta::MAX);
@@ -292,9 +343,28 @@ mod tests {
     #[test]
     fn the_overview_follows_the_chips_it_shows() {
         let (_dir, mut app) = crate::fixtures::test_app();
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
         app.filter_outcome = Some(crate::model::Outcome::Win);
         assert_eq!(filter(&app).outcome, Some(crate::model::Outcome::Win));
-        let _ = view(&app, 1300.0);
-        let _ = view(&app, 900.0);
+        assert!(shows_filters(&app));
+        // Folded at 1300 px of page, open at 1600, and one column at 900.
+        assert!(chips_fold(1300.0));
+        assert!(!chips_fold(1600.0));
+        for width in [1300.0, 1600.0, 900.0] {
+            let _ = view(&app, width);
+        }
+    }
+
+    #[test]
+    fn the_filter_row_waits_for_the_first_game() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        assert!(app.games.is_empty());
+        assert!(!shows_filters(&app));
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        assert!(shows_filters(&app));
     }
 }

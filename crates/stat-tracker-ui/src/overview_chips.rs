@@ -1,11 +1,23 @@
-//! The Overview's copy of the 0.6 filter chips (spec p1 and p2). The Games
-//! PR owns the shared filter_chips.rs; this file has the same public
-//! functions, so the Overview switches to that module by a plain swap when
-//! it lands (only the role chip's message differs):
-//! Season, queues, roles, Crew, Hero and Map. A chip that filters reads as
-//! an accent outline with its value and "×" to clear it ("Season 5 ×").
-//! One that does not is a dropdown ("Hero ▾"). Behind "Filters (n)" only
-//! the chips that filter show; opening it shows the dropdowns too.
+//! The Overview's copy of the 0.6 filter chips (spec p1 and p2). The
+//! chips: Season, queues, one role, Crew, Hero and Map. A chip that
+//! filters reads as an accent outline with its value and "×" to clear it
+//! ("Season 5 ×"). One that does not is a dropdown ("Hero ▾"). Behind
+//! "Filters (n)" only the chips that filter show; opening it shows the
+//! dropdowns too.
+//!
+//! The Games PR owns the shared filter_chips.rs, which has moved on from
+//! this copy:
+//! - Its roles are multi-select (`roles_to_add`, `Message::ToggleRole`);
+//!   here one role is picked through the page (`single_role`,
+//!   `Msg::PickRole`).
+//! - It offers an "Any result" dropdown; here a result only shows as a
+//!   set chip, cleared with "×".
+//! - It shows and counts Needs a look on every page; here only on Games,
+//!   so the Overview never counts a filter it does not apply.
+//!
+//! The Overview can switch to filter_chips.rs once that module shows
+//! Needs a look on Games only; the role and result changes then come
+//! with it.
 //!
 //! "All queues" and "Crew: anyone" are drawn disabled until the tracker
 //! stores a queue and a crew for each game.
@@ -55,6 +67,12 @@ pub fn single_role(roles: RoleFilter) -> Option<Role> {
     }
 }
 
+/// "Needs a look" filters Games only: elsewhere it is neither shown nor
+/// counted, though it stays on for when Games opens again.
+fn needs_look_here(app: &TrackerApp) -> bool {
+    app.needs_look_filter && app.screen == crate::model::Screen::Games
+}
+
 /// Chips a page leaves out because it does not apply that filter, so a
 /// chip never shows (or counts in "Filters (n)") without doing anything.
 /// The default hides none.
@@ -65,13 +83,12 @@ pub struct Hidden {
     pub map: bool,
     /// The result chip a Games filter leaves on ("Win ×").
     pub result: bool,
-    pub needs_look: bool,
 }
 
 /// Filters that are on, less the chips `hide` leaves out: each is a "×"
 /// chip.
 pub fn active_count_except(app: &TrackerApp, hide: Hidden) -> usize {
-    usize::from(!hide.needs_look && app.needs_look_filter)
+    usize::from(needs_look_here(app))
         + usize::from(
             !hide.season
                 && matches!(app.season, SeasonSel::Season(_))
@@ -96,7 +113,7 @@ pub fn bar_except<'a>(
     hide: Hidden,
 ) -> Element<'a, Message> {
     let mut chips = Row::new().spacing(8).align_y(Alignment::Center);
-    if !hide.needs_look && app.needs_look_filter {
+    if needs_look_here(app) {
         chips = chips.push(set_chip(
             "Needs a look".to_string(),
             Message::Nav(crate::nav::Msg::ClearNeedsLook),
@@ -110,13 +127,13 @@ pub fn bar_except<'a>(
         chips = chips.push(season_chip(app));
     }
     if open {
-        chips = chips.push(disabled_chip("All queues ▾"));
+        chips = chips.push(disabled_chip("All queues"));
     }
     if open || !app.roles.unrestricted() {
         chips = chips.push(role_chip(app.roles));
     }
     if open {
-        chips = chips.push(disabled_chip("Crew: anyone ▾"));
+        chips = chips.push(disabled_chip("Crew: anyone"));
     }
     if !hide.hero && (open || app.filter_hero.is_some()) {
         chips = chips.push(value_chip(
@@ -146,12 +163,20 @@ pub fn bar_except<'a>(
 }
 
 /// A filter the tracker has no data for yet: greyed, does nothing.
+/// Its "▾" is iced's icon arrow: the page font has no "▾".
 fn disabled_chip(label: &'static str) -> Element<'static, Message> {
     container(
-        text(label)
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT_3),
+        row![
+            text(label)
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_3),
+            crate::overview_page::glyph('▾')
+                .size(SIZE_META)
+                .color(TEXT_3),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .padding(Padding::from([5, 12]))
     .style(|_: &Theme| container::Style {
@@ -322,6 +347,23 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn needs_a_look_is_shown_and_counted_on_games_only() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.needs_look_filter = true;
+        for screen in [crate::model::Screen::Overview, crate::model::Screen::Heroes] {
+            app.screen = screen;
+            assert_eq!(
+                active_count_except(&app, Hidden::default()),
+                0,
+                "{screen:?}"
+            );
+            assert!(!needs_look_here(&app));
+        }
+        app.screen = crate::model::Screen::Games;
+        assert_eq!(active_count_except(&app, Hidden::default()), 1);
+    }
 
     #[test]
     fn one_role_on_is_a_single_role() {

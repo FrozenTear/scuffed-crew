@@ -297,13 +297,12 @@ const PCT_W: f32 = 48.0;
 
 /// The chips Maps leaves out of its filter row, because [`maps_games`]
 /// does not apply them: a map filter would leave one row, a result filter
-/// would show every map at 100%, and Needs a look filters Games only.
+/// would show every map at 100%. Needs a look shows on Games only.
 pub const HIDDEN: Hidden = Hidden {
     season: false,
     hero: false,
     map: true,
     result: true,
-    needs_look: true,
 };
 
 /// The games the Maps stats count: the season, role and hero filters, the
@@ -315,10 +314,7 @@ pub fn maps_games(app: &TrackerApp) -> Vec<&Game> {
         map: None,
         ..app.games_filter()
     };
-    games_state::settled(
-        filter_games(&app.games, &filter),
-        app.live_game_session.as_deref(),
-    )
+    crate::overview_page::settled(app, &filter_games(&app.games, &filter))
 }
 
 pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
@@ -342,7 +338,7 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
             .push(empty_card(games_state::LOADING, games_state::LOADING_LINE))
             .into();
     }
-    if games_state::shows_filters(app) {
+    if crate::overview_page::shows_filters(app) {
         let pool = filter_games(&app.games, &app.header_filter());
         page = page.push(crate::overview_page::chip_row_except(
             app,
@@ -939,6 +935,7 @@ mod tests {
         app.filter_map = Some("Ilios".into());
         app.filter_outcome = Some(Outcome::Win);
         app.needs_look_filter = true;
+        app.screen = crate::model::Screen::Maps;
         assert_eq!(
             maps_games(&app).len(),
             2,
@@ -951,7 +948,7 @@ mod tests {
         );
         assert_eq!(
             active_count_except(&app, crate::overview_chips::Hidden::default()),
-            3
+            2
         );
         app.filter_hero = Some("Nobody".into());
         assert!(maps_games(&app).is_empty(), "hero applies");

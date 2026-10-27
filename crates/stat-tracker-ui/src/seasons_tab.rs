@@ -220,7 +220,7 @@ pub fn model(
     now: DateTime<Utc>,
 ) -> Model {
     let base = GameFilter::from_header(None, roles);
-    let all = crate::games_state::settled(filter_games(games, &base), live);
+    let all = crate::overview_page::settled_of(filter_games(games, &base), live);
     let mut ordered: Vec<&Season> = seasons.iter().collect();
     ordered.sort_by_key(|s| std::cmp::Reverse(s.starts_at));
 
@@ -332,14 +332,13 @@ fn cols(width: f32) -> Cols {
 const PCT_W: f32 = 48.0;
 
 /// The chips Seasons leaves out: the page lists every season and counts
-/// by role only, so the season, hero, map, result and Needs a look chips
-/// would show without filtering anything.
+/// by role only, so the season, hero, map and result chips would show
+/// without filtering anything. Needs a look shows on Games only.
 pub const HIDDEN: crate::overview_chips::Hidden = crate::overview_chips::Hidden {
     season: true,
     hero: true,
     map: true,
     result: true,
-    needs_look: true,
 };
 
 pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
@@ -352,7 +351,7 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     );
     let c = cols(width);
     let mut page = Column::new().spacing(24).width(Fill);
-    if crate::games_state::shows_filters(app) {
+    if crate::overview_page::shows_filters(app) {
         page = page.push(crate::overview_page::chip_row_except(
             app,
             &[],
@@ -1077,6 +1076,7 @@ mod tests {
         app.filter_map = Some("Ilios".into());
         app.filter_outcome = Some(Outcome::Win);
         app.needs_look_filter = true;
+        app.screen = crate::model::Screen::Seasons;
         assert_eq!(active_count_except(&app, HIDDEN), 0);
         app.roles = RoleFilter::default().toggle(crate::model::Role::Tank);
         assert_eq!(active_count_except(&app, HIDDEN), 1);

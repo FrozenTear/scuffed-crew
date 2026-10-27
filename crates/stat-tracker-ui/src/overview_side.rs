@@ -3,7 +3,7 @@
 //! sparkline, then how the rate is counted), "Needs a look · all seasons"
 //! with Review games, and the Companion card with its switch.
 //!
-//! Small-sample rule: a win rate shows only from 10 games; fewer
+//! Small-sample rule: a win rate shows only from 10 decided games; fewer
 //! show the record instead. Rank now and Peak wait for the rank reader.
 
 use iced::widget::{Column, Row, button, column, container, row, text, toggler};
@@ -19,14 +19,17 @@ use crate::theme::{
 };
 use crate::widgets;
 
-/// Fewest games a win rate is shown for (small-sample rule).
+/// Fewest decided games (win, loss or draw) a win rate is shown for
+/// (small-sample rule).
 pub const RATE_MIN: usize = 10;
 /// The "Last 20" window.
 pub const LAST_N: usize = 20;
 
-pub fn view<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message> {
+/// The panel for `settled`: the filtered games less one still being played
+/// ([`crate::overview_page::settled`]).
+pub fn view<'a>(app: &'a TrackerApp, settled: &[&Game]) -> Element<'a, Message> {
     column![
-        season_card(app, shown),
+        season_card(app, settled),
         needs_look_card(app),
         companion_card(app)
     ]
@@ -76,15 +79,37 @@ fn decided(r: &Record) -> usize {
     r.wins + r.losses + r.draws
 }
 
-/// The rate as a whole percent, only from [`RATE_MIN`] games (spec r1.1:
-/// "Win rate only from 10 games") with at least one decided.
+/// The rate as a whole percent, only from [`RATE_MIN`] decided games (a
+/// win, loss or draw), as UX Spec rules (ux.md section 17). Fewer show the
+/// record and "Too few games".
 pub fn rate(r: &Record) -> Option<i64> {
-    (r.games >= RATE_MIN && decided(r) > 0).then(|| (r.win_rate() * 100.0).round() as i64)
+    (decided(r) >= RATE_MIN).then(|| (r.win_rate() * 100.0).round() as i64)
 }
 
 /// The rate, or the record when the sample is small.
 pub fn headline(r: &Record) -> String {
     rate(r).map_or_else(|| r.wl_label(), |p| format!("{p}%"))
+}
+
+/// The season card's big line and its colour (small-sample rule): "No
+/// games" at 0, the rate from 10 decided games, else the record, muted
+/// under 3 games.
+pub fn season_headline(r: &Record) -> (String, iced::Color) {
+    match r.games {
+        0 => ("No games".to_string(), TEXT_3),
+        n if rate(r).is_none() && n < crate::overview_heroes::CARD_MIN => (headline(r), TEXT_3),
+        _ => (headline(r), TEXT),
+    }
+}
+
+/// The line beside it: "110 games", "7 games · Too few games" without a
+/// rate, nothing at 0 games (the headline says it).
+pub fn season_games_line(r: &Record) -> String {
+    match (r.games, rate(r)) {
+        (0, _) => String::new(),
+        (_, Some(_)) => r.games_label(),
+        (_, None) => crate::overview_heroes::too_few_line(r),
+    }
 }
 
 /// The newest [`LAST_N`] decided games, newest first.
@@ -140,6 +165,12 @@ fn versus_text(vs: &str) -> Element<'static, Message> {
     }
 }
 
+/// Whether [`counted_line`] shows: not at 0 games, where the headline
+/// already says "No games".
+pub fn shows_counted(season: &Record) -> bool {
+    season.games > 0
+}
+
 /// How the numbers are counted, under the card.
 pub fn counted_line(season: &Record, last: &Record) -> String {
     let mut line = format!("Win rate counts decided games: {}", season.wl_label());
@@ -169,10 +200,10 @@ fn scope_label(app: &TrackerApp) -> String {
     }
 }
 
-fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message> {
-    let season = record_of(shown.iter().copied());
+fn season_card<'a>(app: &'a TrackerApp, settled: &[&Game]) -> Element<'a, Message> {
+    let season = record_of(settled.iter().copied());
     // The Last line only while it is a part of the season, not all of it.
-    let mut recent = last_n(shown);
+    let mut recent = last_n(settled);
     if recent.len() >= decided(&season) {
         recent.clear();
     }
@@ -180,13 +211,11 @@ fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message>
     let mut col = Column::new()
         .spacing(8)
         .push(widgets::label_text(&scope_label(app)));
+    let (big, big_color) = season_headline(&season);
     col = col.push(
         row![
-            text(headline(&season))
-                .size(32)
-                .font(FONT_EXTRABOLD)
-                .color(TEXT),
-            text(season.games_label())
+            text(big).size(32).font(FONT_EXTRABOLD).color(big_color),
+            text(season_games_line(&season))
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -229,12 +258,14 @@ fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message>
         }
         col = col.push(line).push(sparkline(recent.iter().rev().copied()));
     }
-    col = col.push(
-        text(counted_line(&season, &last))
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
-    );
+    if shows_counted(&season) {
+        col = col.push(
+            text(counted_line(&season, &last))
+                .size(SIZE_LABEL)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+    }
     panel(col.into(), false)
 }
 
@@ -407,10 +438,34 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_needs_ten_games() {
+    fn the_season_card_follows_the_small_sample_rule() {
+        assert_eq!(
+            season_headline(&rec(0, 0, 0, 0)),
+            ("No games".to_string(), TEXT_3)
+        );
+        assert_eq!(season_games_line(&rec(0, 0, 0, 0)), "");
+        assert_eq!(
+            season_headline(&rec(1, 1, 0, 2)),
+            ("1-1".to_string(), TEXT_3)
+        );
+        assert_eq!(season_headline(&rec(4, 3, 0, 7)), ("4-3".to_string(), TEXT));
+        assert_eq!(
+            season_games_line(&rec(4, 3, 0, 7)),
+            "7 games · Too few games"
+        );
+        assert_eq!(
+            season_headline(&rec(52, 55, 0, 110)),
+            ("49%".to_string(), TEXT)
+        );
+        assert_eq!(season_games_line(&rec(52, 55, 0, 110)), "110 games");
+    }
+
+    #[test]
+    fn a_rate_needs_ten_decided_games() {
         assert_eq!(headline(&rec(2, 5, 0, 7)), "2-5");
         assert_eq!(rate(&rec(5, 4, 0, 9)), None, "9 games");
-        assert_eq!(rate(&rec(5, 4, 0, 12)), Some(56), "12 games, 9 decided");
+        assert_eq!(rate(&rec(5, 4, 0, 12)), None, "12 games, 9 decided");
+        assert_eq!(rate(&rec(5, 4, 1, 12)), Some(50), "10 decided with a draw");
         assert_eq!(rate(&rec(0, 0, 0, 12)), None, "none decided");
         assert_eq!(headline(&rec(52, 55, 0, 110)), "49%");
     }
@@ -450,6 +505,12 @@ mod tests {
         assert!(companion_line(&app).len() > 3);
         let _ = view(&app, &[]);
         assert_eq!(needs_look_parts(&app), "");
+    }
+
+    #[test]
+    fn the_counted_line_waits_for_the_first_game() {
+        assert!(!shows_counted(&rec(0, 0, 0, 0)));
+        assert!(shows_counted(&rec(0, 0, 0, 1)));
     }
 
     #[test]
