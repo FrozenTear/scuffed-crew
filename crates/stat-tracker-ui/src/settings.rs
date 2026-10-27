@@ -823,10 +823,8 @@ impl SettingsForm {
         }
     }
 
-    /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, the report kit caps,
-    /// `finished_game_close_secs`, `setup_completed`, `reader_pack_url`,
-    /// `debug_portal_frames`, the stream keys, and `name_reader` (the 0.6
-    /// page sets those through [`crate::settings_model::ConfigEdit`]).
+    /// Map the form onto `base`. Every key the form has no field for is kept
+    /// as in `base`.
     /// `shadow_recognizer` comes from the form's persisted reader (the file
     /// value). An env lock never writes true by itself. `update_channel`
     /// keeps the file's value (unset stays unset) unless the checkbox was
@@ -871,7 +869,7 @@ impl SettingsForm {
             } else {
                 OcrSetting::Off
             },
-            // Every key the form has no field for stays as loaded.
+            // Every key the form has no field for is kept as in `base`.
             ..base.clone()
         }
     }
