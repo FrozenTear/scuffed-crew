@@ -29,6 +29,7 @@ pub mod companion_gate;
 #[cfg(test)]
 mod copy_rules;
 pub mod daemon;
+mod filter_chips;
 pub mod fixtures;
 mod form_widgets;
 pub mod games;
@@ -48,9 +49,14 @@ pub mod overlay;
 #[cfg(feature = "companion")]
 pub mod overlay_shell;
 pub mod overview;
+mod overview_heroes;
+mod overview_main;
+mod overview_page;
+mod overview_side;
 pub mod report;
 pub mod restart_prompt;
 pub mod seasons;
+mod session_bits;
 pub mod settings;
 pub mod settings_cards;
 mod settings_env;
