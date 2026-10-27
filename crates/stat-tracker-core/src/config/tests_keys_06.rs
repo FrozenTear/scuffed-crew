@@ -70,9 +70,12 @@ fn defaults_are_not_written() {
     }
 }
 
+/// A line the saved file must hold, and the edit that should write it.
+type KeyEdit = (&'static str, fn(&mut Config));
+
 #[test]
 fn each_key_round_trips_off_its_default() {
-    let edits: [(&str, fn(&mut Config)); 6] = [
+    let edits: [KeyEdit; 6] = [
         ("player_names", |c| {
             c.player_names = vec!["FrozenAlt".into()]
         }),
