@@ -3,8 +3,8 @@
 //! a value the reader was not sure of and no hand edit has fixed since.
 //!
 //! One shared component for the Games expanded row and the Overview's
-//! newest game. Callers use [`row`] only, so Tracker's shared tiles from
-//! the Games PR can replace this module whole.
+//! newest game. The Overview calls [`row`]; the Games panel calls
+//! [`tile_with`] with [`TileExtras`] for its badge and extra lines.
 
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, column, container, image, text};
