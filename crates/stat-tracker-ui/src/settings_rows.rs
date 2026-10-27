@@ -18,7 +18,7 @@ use crate::app::{Message, TrackerApp};
 use crate::form_widgets::hint;
 use crate::settings::SettingsField;
 use crate::settings_model::{
-    COMING_LATER, ChipList, DefaultRow, SessionWindow, differs_from_default, parse_process_names,
+    ChipList, DefaultRow, SessionWindow, differs_from_default, parse_process_names,
     session_window_options,
 };
 use crate::settings_save::Commit;
@@ -42,8 +42,6 @@ const GAME_PROCESSES_HELP: &str =
     "Capture runs only while one is running. An empty list turns the check off.";
 /// Shown under Game processes once the list is empty.
 const NO_PROCESSES_NOTE: &str = "No processes listed, so the tracker captures whenever it runs.";
-/// Help under In-game names.
-const NAMES_HELP: &str = "As shown in-game, without the #1234.";
 /// Help under Session window: what this app uses it for. Games groups its
 /// list by a fixed gap, so the help does not promise that.
 const SESSION_WINDOW_HELP: &str = "How long a game still counts as live after its last capture, for the Companion and the game in progress.";
@@ -323,23 +321,8 @@ fn radio_style(_: &Theme, status: iced::widget::radio::Status) -> iced::widget::
     }
 }
 
-/// A switch row the 0.6 spec shows that the tracker cannot store yet:
-/// drawn at the spec default, disabled, with [`COMING_LATER`].
-pub(crate) fn coming_later_row(
-    label: &'static str,
-    help: &'static str,
-    tags: &[Tag],
-    spec_default_on: bool,
-) -> Element<'static, Message> {
-    setting_row(
-        title_line(label, false, tags),
-        vec![hint(help), hint(COMING_LATER)],
-        switch(spec_default_on, None),
-    )
-}
-
 /// A removable chip: label and a × with room around it to hit.
-fn chip(label: String, on_remove: Option<Message>) -> Element<'static, Message> {
+pub(crate) fn chip(label: String, on_remove: Option<Message>) -> Element<'static, Message> {
     let mut x = button(text("×").size(SIZE_BODY).font(FONT_SEMIBOLD).color(TEXT_2))
         .padding(Padding::from([0, 4]))
         .style(|_: &Theme, status| button::Style {
@@ -401,7 +384,7 @@ pub(crate) fn link(label: impl Into<String>, msg: Option<Message>) -> Element<'s
 }
 
 /// The "+ Add" link, or the open input with Add and Cancel.
-fn add_chip<'a>(
+pub(crate) fn add_chip<'a>(
     app: &'a TrackerApp,
     list: ChipList,
     label: &'static str,
@@ -440,31 +423,10 @@ fn add_chip<'a>(
 }
 
 /// A chip list beside its title, wrapping within [`CHIPS_MAX`].
-fn chip_control<'a>(chips: Row<'a, Message>) -> Element<'a, Message> {
+pub(crate) fn chip_control<'a>(chips: Row<'a, Message>) -> Element<'a, Message> {
     container(chips.spacing(6).align_y(Alignment::Center).wrap())
         .max_width(CHIPS_MAX)
         .into()
-}
-
-/// In-game names as chips. The config stores one name, so "+ Add name"
-/// shows only while it is empty, and a new name replaces it.
-pub(crate) fn names_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let mut chips = Row::new();
-    let name = app.settings.player_name.trim();
-    if !name.is_empty() {
-        chips = chips.push(chip(
-            name.to_string(),
-            (!demo).then_some(Message::SettingsPage(Msg::ChipRemove(ChipList::Names, 0))),
-        ));
-    }
-    if name.is_empty() || matches!(app.page_state.chip_draft(), Some((ChipList::Names, _))) {
-        chips = chips.push(add_chip(app, ChipList::Names, "+ Add name", "Name", demo));
-    }
-    setting_row(
-        title_line("In-game names", false, &[Tag::AfterRestart]),
-        vec![hint(NAMES_HELP)],
-        chip_control(chips),
-    )
 }
 
 /// Session window dropdown. Writes seconds, as before.
