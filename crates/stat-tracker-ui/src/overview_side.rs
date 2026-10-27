@@ -6,7 +6,7 @@
 //! Small-sample rule: a win rate shows only from 10 decided games; fewer
 //! show the record instead. Rank now and Peak wait for the rank reader.
 
-use iced::widget::{Column, Row, button, column, container, row, space, text, toggler};
+use iced::widget::{Column, Row, button, column, container, row, text, toggler};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};
 
 use crate::aggregate::Record;
@@ -76,9 +76,10 @@ fn decided(r: &Record) -> usize {
     r.wins + r.losses + r.draws
 }
 
-/// The rate as a whole percent, only from [`RATE_MIN`] decided games.
+/// The rate as a whole percent, only from [`RATE_MIN`] games (spec r1.1:
+/// "Win rate only from 10 games") with at least one decided.
 pub fn rate(r: &Record) -> Option<i64> {
-    (decided(r) >= RATE_MIN).then(|| (r.win_rate() * 100.0).round() as i64)
+    (r.games >= RATE_MIN && decided(r) > 0).then(|| (r.win_rate() * 100.0).round() as i64)
 }
 
 /// The rate, or the record when the sample is small.
@@ -162,7 +163,7 @@ fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message>
         .align_y(Alignment::End),
     );
     if let Some(p) = rate(&season) {
-        col = col.push(rate_bar(p));
+        col = col.push(crate::winrate_bar::bar(p as f32));
     }
     if last.games > 0 {
         let mut line = Row::new()
@@ -203,38 +204,6 @@ fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message>
             .color(TEXT_3),
     );
     panel(col.into(), false)
-}
-
-/// A thin track with the rate marked on it.
-fn rate_bar(percent: i64) -> Element<'static, Message> {
-    let at = percent.clamp(0, 100) as u16;
-    let track = |portion: u16| {
-        container(space().height(4))
-            .width(iced::Length::FillPortion(portion.max(1)))
-            .height(4)
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(BORDER)),
-                ..container::Style::default()
-            })
-    };
-    row![
-        track(at),
-        container(space().width(3).height(10))
-            .width(3)
-            .height(10)
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(theme::DANGER)),
-                border: Border {
-                    radius: 1.0.into(),
-                    ..Border::default()
-                },
-                ..container::Style::default()
-            }),
-        track(100 - at),
-    ]
-    .align_y(Alignment::Center)
-    .width(Fill)
-    .into()
 }
 
 /// What the count is made of: "150 without an outcome (3 of them in
@@ -408,7 +377,9 @@ mod tests {
     #[test]
     fn a_rate_needs_ten_decided_games() {
         assert_eq!(headline(&rec(2, 5, 0, 7)), "2-5");
-        assert_eq!(rate(&rec(5, 4, 0, 12)), None, "9 decided, 3 undecided");
+        assert_eq!(rate(&rec(5, 4, 0, 9)), None, "9 games");
+        assert_eq!(rate(&rec(5, 4, 0, 12)), Some(56), "12 games, 9 decided");
+        assert_eq!(rate(&rec(0, 0, 0, 12)), None, "none decided");
         assert_eq!(headline(&rec(52, 55, 0, 110)), "49%");
     }
 

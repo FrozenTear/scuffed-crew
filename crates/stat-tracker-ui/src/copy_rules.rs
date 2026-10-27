@@ -34,6 +34,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("settings_update.rs", include_str!("settings_update.rs")),
     ("tracker_status.rs", include_str!("tracker_status.rs")),
     ("update_check.rs", include_str!("update_check.rs")),
+    ("winrate_bar.rs", include_str!("winrate_bar.rs")),
     ("what_leaves.rs", include_str!("what_leaves.rs")),
     ("README.md", include_str!("../README.md")),
     (

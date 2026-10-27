@@ -78,6 +78,7 @@ pub mod update;
 mod update_check;
 mod what_leaves;
 pub mod widgets;
+mod winrate_bar;
 
 pub use aggregate::{Aggregates, SeasonWindow, aggregate};
 pub use cli::{Cli, FixtureKind};

@@ -1,8 +1,8 @@
 //! The Overview's heroes strip (spec p1): "HEROES · SEASON 5 · 3 OR MORE
 //! GAMES", up to four cards, and "+ 3 under 3 games · All heroes ›".
 //!
-//! Small-sample rule: a hero shows its win rate with a marked bar only
-//! from 10 decided games. From 3 to 9 games it shows its record ("2-5")
+//! Small-sample rule: a hero shows its win rate with the shared bar
+//! ([`crate::winrate_bar`]) only from 10 games. From 3 to 9 games it shows its record ("2-5")
 //! with one dash per game out of ten. Under 3 games it is not shown, only
 //! counted in the link.
 
@@ -105,7 +105,7 @@ fn card(h: &HeroAgg) -> Element<'static, Message> {
             .color(TEXT),
     );
     let (big, meter): (String, Element<'static, Message>) = match rate(&h.record) {
-        Some(p) => (format!("{p}%"), marked_bar(p)),
+        Some(p) => (format!("{p}%"), crate::winrate_bar::bar(p as f32)),
         None => (h.record.wl_label(), dashes(h.record.games)),
     };
     container(
@@ -141,19 +141,6 @@ fn block(color: iced::Color, width: iced::Length, height: f32) -> Element<'stati
             ..container::Style::default()
         })
         .into()
-}
-
-/// A track with the win rate marked in mint.
-fn marked_bar(percent: i64) -> Element<'static, Message> {
-    let at = percent.clamp(0, 100) as u16;
-    row![
-        block(BORDER, iced::Length::FillPortion(at.max(1)), 4.0),
-        block(theme::OK, iced::Length::Fixed(3.0), 10.0),
-        block(BORDER, iced::Length::FillPortion((100 - at).max(1)), 4.0),
-    ]
-    .align_y(Alignment::Center)
-    .width(Fill)
-    .into()
 }
 
 /// One dash per game out of ten: played dashes in grey, the rest faint.
@@ -205,6 +192,7 @@ mod tests {
     #[test]
     fn rates_start_at_ten_decided_games() {
         assert_eq!(rate(&hero("A", 9, 5, 4).record), None);
+        assert_eq!(rate(&hero("A", 10, 5, 4).record), Some(56));
         assert_eq!(rate(&hero("A", 88, 45, 41).record), Some(52));
     }
 
