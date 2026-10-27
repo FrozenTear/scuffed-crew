@@ -57,9 +57,15 @@ pub mod overlay;
 #[cfg(feature = "companion")]
 pub mod overlay_shell;
 pub mod overview;
+mod overview_chips;
+mod overview_heroes;
+mod overview_main;
+mod overview_page;
+mod overview_side;
 pub mod report;
 pub mod restart_prompt;
 pub mod seasons;
+mod session_bits;
 pub mod settings;
 pub mod settings_cards;
 mod settings_env;
@@ -73,8 +79,6 @@ pub mod settings_save;
 pub mod settings_update;
 pub mod setup_guide;
 pub mod snapshot;
-// TODO(#557): a shim of #557's module, replaced by #557's copy when it
-// lands (see the module doc).
 mod stat_tiles;
 pub mod theme;
 pub mod tracker_status;
@@ -84,6 +88,7 @@ pub mod update;
 mod update_check;
 mod what_leaves;
 pub mod widgets;
+mod winrate_bar;
 
 #[cfg(test)]
 mod tests_settings_to_config;

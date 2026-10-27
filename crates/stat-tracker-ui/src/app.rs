@@ -223,6 +223,8 @@ pub enum Message {
     Nav(crate::nav::Msg),
     /// Games tab controls (grouping, time sort, compact rows, filters).
     Games(crate::games_table::Msg),
+    /// A message from the 0.6 Overview ([`crate::overview_page::update`]).
+    OverviewPage(crate::overview_page::Msg),
 }
 
 struct NotesDialog {
@@ -337,6 +339,8 @@ pub struct TrackerApp {
     pub filter_outcome: Option<Outcome>,
     /// Games shows only games that need a look (the top bar chip).
     pub needs_look_filter: bool,
+    /// The 0.6 Overview's own state ([`crate::overview_page`]).
+    pub overview_page: crate::overview_page::OverviewPage,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
     pub(crate) toast_action: Option<Message>,
@@ -595,6 +599,7 @@ impl TrackerApp {
             filter_map: None,
             filter_outcome: None,
             needs_look_filter: false,
+            overview_page: Default::default(),
             toast: None,
             toast_action: None,
             sessions_with_kit: HashSet::new(),
@@ -1074,6 +1079,7 @@ impl TrackerApp {
             Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
             Message::Nav(msg) => crate::nav::update(self, msg),
             Message::Games(msg) => crate::games_table::update(self, msg),
+            Message::OverviewPage(msg) => crate::overview_page::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()
@@ -2947,7 +2953,6 @@ fn health_status_for(
 mod tests {
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
-    use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
@@ -3432,22 +3437,6 @@ mod tests {
             "Hero names need site sync. Your stats still track normally."
         );
         assert!(!super::HERO_PACK_SYNC_HINT.contains('\u{2014}'));
-    }
-
-    #[test]
-    fn sync_counts_as_on_only_with_a_url_and_a_token() {
-        use stat_tracker::config::SyncConfig;
-        let with = |url: &str, token: &str| Config {
-            sync: Some(SyncConfig {
-                server_url: url.into(),
-                token: token.into(),
-            }),
-            ..Config::default()
-        };
-        assert!(!super::sync_on_for(&Config::default()));
-        assert!(!super::sync_on_for(&with("", "tok")));
-        assert!(!super::sync_on_for(&with("https://crew.example", "  ")));
-        assert!(super::sync_on_for(&with("https://crew.example", "tok")));
     }
 
     #[test]

@@ -962,4 +962,22 @@ mod tests {
             vec![(1, "Mei run dismissed".to_string())]
         );
     }
+
+    /// Site sync is on only with both a URL and a token.
+    #[test]
+    fn sync_counts_as_on_only_with_a_url_and_a_token() {
+        use crate::app::sync_on_for;
+        use stat_tracker::config::{Config, SyncConfig};
+        let with = |url: &str, token: &str| Config {
+            sync: Some(SyncConfig {
+                server_url: url.into(),
+                token: token.into(),
+            }),
+            ..Config::default()
+        };
+        assert!(!sync_on_for(&Config::default()));
+        assert!(!sync_on_for(&with("", "tok")));
+        assert!(!sync_on_for(&with("https://crew.example", "  ")));
+        assert!(sync_on_for(&with("https://crew.example", "tok")));
+    }
 }

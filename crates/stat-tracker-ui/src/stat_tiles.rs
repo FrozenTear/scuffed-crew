@@ -3,22 +3,18 @@
 //! a value the reader was not sure of and no hand edit has fixed since.
 //!
 //! One shared component for the Games expanded row and the Overview's
-//! newest game.
-//!
-//! TODO(#557): a local shim of #557's `stat_tiles.rs` (head 47d8d0fa), so
-//! the Games panel builds on the same API before #557 lands. #557 owns the
-//! module. When it lands, take its copy and keep only the two changes
-//! marked SHIM below: [`unsure_now`] reads the reader's flat and row names
-//! ("dmg", "r3.dmg") through `stat_tracker::suspect`, and [`tile_with`] /
-//! [`TileExtras`] add the lines the Games v2 panel puts in a tile. [`row`] and the tile look are #557's, unchanged.
+//! newest game. Callers use [`row`] only, so Tracker's shared tiles from
+//! the Games PR can replace this module whole.
 
-use iced::widget::{Column, Row, column, container, image, text};
+use iced::widget::text::Wrapping;
+use iced::widget::{Row, column, container, image, text};
 use iced::{Alignment, Background, Border, Color, Element, Fill, Padding, Theme};
 
 use crate::app::Message;
 use crate::icons::{self, Icon};
 use crate::model::Game;
-use crate::theme::{self, BORDER, FONT_BOLD, SIZE_LABEL, TEXT, TEXT_3};
+use crate::theme::{self, BORDER, FONT_BOLD, FONT_MEDIUM, SIZE_LABEL, TEXT, TEXT_2, TEXT_3};
+use stat_tracker::suspect::{flat_suspect_name, suspect_names_for_edit};
 
 /// The six stat tiles: label, the field the reader marks, and the value.
 const TILES: [(&str, &str); 6] = [
@@ -30,9 +26,7 @@ const TILES: [(&str, &str); 6] = [
     ("MIT", "mitigation"),
 ];
 
-/// The six tiles for `g`, wrapping on a narrow page. #557's Overview
-/// calls it; this PR uses only [`tile_with`].
-#[allow(dead_code)]
+/// The six tiles for `g`, wrapping on a narrow page.
 pub fn row(g: &Game) -> Element<'static, Message> {
     let mut tiles = Row::new().spacing(8);
     for (label, field) in TILES {
@@ -41,15 +35,33 @@ pub fn row(g: &Game) -> Element<'static, Message> {
     tiles.wrap().into()
 }
 
-/// A field the reader was unsure of that no hand edit has fixed since.
-///
-/// SHIM: the reader stores flat names in `suspect_fields` ("dmg", "h", or
-/// a row name like "r3.dmg" on older rows), while `field` here is the edit
-/// name ("damage"). [`Game::unsure_now`] maps both through
-/// `stat_tracker::suspect`. #557's copy checks only `field` and misses a
-/// real "dmg".
-pub fn unsure_now(g: &Game, field: &str) -> bool {
-    g.unsure_now(field)
+/// The flat suspect names still standing on `g`, once each: every stored
+/// name (`dmg`, or an older row's `r3.dmg`) flattened by
+/// [`flat_suspect_name`], less the ones a hand edit settled
+/// ([`suspect_names_for_edit`] of each edited field).
+pub fn still_unsure(g: &Game) -> Vec<&str> {
+    let settled: Vec<&str> = g
+        .edited_fields
+        .iter()
+        .flat_map(|e| suspect_names_for_edit(e).iter().copied())
+        .collect();
+    let mut out: Vec<&str> = Vec::new();
+    for name in &g.suspect_fields {
+        if let Some(flat) = flat_suspect_name(name)
+            && !settled.contains(&flat)
+            && !out.contains(&flat)
+        {
+            out.push(flat);
+        }
+    }
+    out
+}
+
+/// The stored field `storage_field` (`damage`, `elims`, `map_name`, ...)
+/// is still unsure: the reader marked it and no hand edit has settled it.
+pub fn unsure_now(g: &Game, storage_field: &str) -> bool {
+    let names = suspect_names_for_edit(storage_field);
+    still_unsure(g).iter().any(|n| names.contains(n))
 }
 
 fn stat(g: &Game, field: &str) -> u32 {
@@ -72,15 +84,14 @@ pub fn short_num(n: u32) -> String {
     }
 }
 
-/// SHIM: what the Games v2 panel adds to a tile. The default adds nothing,
-/// so `tile_with(.., TileExtras::default())` is the plain tile.
-#[derive(Default)]
+/// What a tile can carry besides its label and value: a small badge in
+/// its head (`"EDITED"`), extra one-line notes under the value in their
+/// own colours (they never wrap), and `fill` to take the row's width
+/// instead of hugging the value.
+#[derive(Debug, Clone, Default)]
 pub struct TileExtras {
-    /// A badge in the label line, e.g. "EDITED" (accent outline, text).
     pub badge: Option<&'static str>,
-    /// Lines under the value, e.g. "Read 22, you set 24" and "+6 vs avg".
     pub lines: Vec<(String, Color)>,
-    /// Fill the width the parent gives (equal tiles in a grid).
     pub fill: bool,
 }
 
@@ -89,7 +100,8 @@ fn tile(label: &'static str, value: u32, unsure: bool) -> Element<'static, Messa
     tile_with(label, short_num(value), unsure, TileExtras::default())
 }
 
-/// SHIM: [`tile`] with a badge, lines under the value, and an equal width.
+/// A stat tile with `extras` ([`TileExtras`]). The Games expanded row and
+/// the Overview's newest game both draw their tiles with this.
 pub fn tile_with(
     label: &'static str,
     value: String,
@@ -114,29 +126,29 @@ pub fn tile_with(
     }
     if let Some(badge) = extras.badge {
         head = head.push(
-            container(text(badge).size(11).font(FONT_BOLD).color(TEXT))
-                .padding(Padding::from([0, 4]))
+            container(text(badge).size(SIZE_LABEL).font(FONT_BOLD).color(TEXT_2))
+                .padding(Padding::from([0, 6]))
                 .style(|_: &Theme| container::Style {
                     border: Border {
-                        color: theme::ACCENT,
+                        color: BORDER,
                         width: 1.0,
-                        radius: 3.0.into(),
+                        radius: theme::RADIUS_CHIP.into(),
                     },
                     ..container::Style::default()
                 }),
         );
     }
-    let mut body: Column<'static, Message> =
-        column![head, text(value).size(22).font(FONT_BOLD).color(TEXT)].spacing(4);
+    let mut body = column![head, text(value).size(22).font(FONT_BOLD).color(TEXT)].spacing(4);
     for (line, color) in extras.lines {
         body = body.push(
             text(line)
-                .size(12)
+                .size(SIZE_LABEL)
+                .font(FONT_MEDIUM)
                 .color(color)
-                .wrapping(iced::widget::text::Wrapping::None),
+                .wrapping(Wrapping::None),
         );
     }
-    let mut c = container(body)
+    let mut tile = container(body)
         .padding(Padding::from([10, 14]))
         .style(move |_: &Theme| container::Style {
             background: Some(Background::Color(theme::BG)),
@@ -148,14 +160,30 @@ pub fn tile_with(
             ..container::Style::default()
         });
     if extras.fill {
-        c = c.width(Fill);
+        tile = tile.width(Fill);
     }
-    c.into()
+    tile.into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extras_default_to_a_plain_tile() {
+        let plain = TileExtras::default();
+        assert!(plain.badge.is_none() && plain.lines.is_empty() && !plain.fill);
+        let _ = tile_with(
+            "DMG",
+            "8.9k".into(),
+            true,
+            TileExtras {
+                badge: Some("EDITED"),
+                lines: vec![("OCR 8,912 → 9,912".into(), theme::WARN)],
+                fill: true,
+            },
+        );
+    }
 
     #[test]
     fn numbers_shorten_from_a_thousand() {
@@ -169,28 +197,20 @@ mod tests {
             crate::cli::FixtureKind::Sample,
         ))
         .remove(0);
-        // SHIM: the reader stores "dmg", never the edit name "damage".
-        g.suspect_fields = vec!["dmg".into()];
-        g.edited_fields.clear();
-        assert!(unsure_now(&g, "damage"));
-        g.edited_fields = vec!["damage".into()];
-        assert!(!unsure_now(&g, "damage"));
-        let _ = row(&g);
-    }
-
-    /// SHIM: the reader writes flat names, so a real "dmg" reads unsure.
-    #[test]
-    fn the_readers_flat_names_read_unsure() {
-        let mut g = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
-            crate::cli::FixtureKind::Sample,
-        ))
-        .remove(0);
-        g.suspect_fields = vec!["dmg".into(), "h".into()];
+        // The reader stores short names, and older rows a row prefix.
+        g.suspect_fields = vec!["dmg".into(), "r3.h".into(), "r3.dmg".into(), "bogus".into()];
         g.edited_fields.clear();
         assert!(unsure_now(&g, "damage"));
         assert!(unsure_now(&g, "healing"));
         assert!(!unsure_now(&g, "elims"));
+        assert_eq!(
+            still_unsure(&g),
+            ["dmg", "h"],
+            "once each, unknown names dropped"
+        );
         g.edited_fields = vec!["damage".into()];
         assert!(!unsure_now(&g, "damage"));
+        assert_eq!(still_unsure(&g), ["h"]);
+        let _ = row(&g);
     }
 }

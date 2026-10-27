@@ -80,9 +80,12 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
-        // Settings has none; Games draws the spec's filter chips itself
-        // (ported from #555).
-        if !matches!(app.screen, Screen::Settings | Screen::Games) {
+        // Settings has none; Overview and Games draw the spec's filter
+        // chips themselves (Games ported from #555).
+        if !matches!(
+            app.screen,
+            Screen::Settings | Screen::Overview | Screen::Games
+        ) {
             content = content.push(widgets::header_controls(app));
         }
         let gutter = theme::page_gutter(size.width);
