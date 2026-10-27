@@ -107,10 +107,13 @@ pub fn other_label(pool: Tally) -> String {
     }
 }
 
+/// One ranked entry and its win rate in percent.
+pub type Ranked<T> = (T, f64);
+
 /// Best and worst entry from `ranked`, sorted best first by win rate.
 /// Worst is `None` when it would show the same rounded % as Best, which
 /// also covers a single ranked entry.
-pub fn best_and_worst<T: Copy>(ranked: &[(T, f64)]) -> (Option<(T, f64)>, Option<(T, f64)>) {
+pub fn best_and_worst<T: Copy>(ranked: &[Ranked<T>]) -> (Option<Ranked<T>>, Option<Ranked<T>>) {
     let best = ranked.first().copied();
     let worst = ranked.last().copied().filter(|&(_, worst_wr)| match best {
         Some((_, best_wr)) => format!("{best_wr:.0}") != format!("{worst_wr:.0}"),
