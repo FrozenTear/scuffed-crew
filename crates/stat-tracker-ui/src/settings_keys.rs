@@ -124,6 +124,13 @@ pub(crate) fn names_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     )
 }
 
+/// The note under "Not connected": where to add the website, while the
+/// Upload row that says it is hidden. A refused token's line already
+/// names the place, so then there is none (one pointer only).
+pub(crate) fn not_connected_note(rejected: bool) -> Option<&'static str> {
+    (!rejected && !row_shown("live_upload")).then_some(UPLOAD_NO_SITE)
+}
+
 /// How Upload games after each match is drawn: on or off, whether the
 /// switch can be used, and the note under it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -397,6 +404,16 @@ mod tests {
         ConfigEdit::AddPlayerName("ALT#99".into()).apply(&mut c);
         ConfigEdit::AddPlayerName("main#4321".into()).apply(&mut c);
         assert_eq!(c.player_names, ["Alt"]);
+    }
+
+    #[test]
+    fn not_connected_points_to_website_connection_once() {
+        assert_eq!(not_connected_note(false), Some(UPLOAD_NO_SITE));
+        assert_eq!(
+            not_connected_note(true),
+            None,
+            "the refusal line points there"
+        );
     }
 
     #[test]

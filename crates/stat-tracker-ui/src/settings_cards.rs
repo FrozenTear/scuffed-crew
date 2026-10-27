@@ -171,8 +171,8 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
                     .color(TEXT),
             );
             // Where to connect, while the Upload row that says it is hidden.
-            if !crate::settings_model::row_shown("live_upload") {
-                connection = connection.push(hint(crate::settings_keys::UPLOAD_NO_SITE));
+            if let Some(note) = crate::settings_keys::not_connected_note(rejected) {
+                connection = connection.push(hint(note));
             }
         }
     }
