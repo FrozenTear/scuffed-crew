@@ -39,7 +39,7 @@ const CAPS: &[(&str, usize)] = &[
     ("stat-tracker/src/detect/own_row.rs", 1880),
     ("stat-tracker/src/detect/own_row_tests.rs", 2446),
     ("stat-tracker/src/detect/tests_match_end.rs", 1994),
-    ("stat-tracker/src/main_tests/mod.rs", 2238),
+    ("stat-tracker/src/main_tests/mod.rs", 2236),
     ("stat-tracker/src/main_tests/shutdown_and_restart.rs", 1502),
     ("stat-tracker/src/ocr/mod.rs", 2755),
     ("stat-tracker/src/ocr/preprocess.rs", 2336),

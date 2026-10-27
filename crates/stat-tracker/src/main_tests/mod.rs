@@ -2226,8 +2226,6 @@ mod night_replays_quiet_close;
 mod night_sessions;
 mod ocr_off_switch;
 mod own_row_and_hero_seeds;
-mod poll_cadence;
-mod reader_switch_maps;
 mod run_loop_and_shutdown;
 mod session_recovery;
 mod shutdown_and_restart;
