@@ -512,7 +512,7 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     let ctx = Arc::new(DaemonCtx {
         backend,
         store,
-        sync_client,
+        sync_client: upload_client(sync_client, config.live_upload),
         player_name: config.player_name.clone(),
         capture_output: config.capture_output.clone(),
         auto_detect: config.auto_detect,

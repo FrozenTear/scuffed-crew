@@ -209,7 +209,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `setup_completed` | Set when the first-run guide is finished or skipped. Missing or false shows the guide on launch. |
 | `reader_pack_url` | Not used. Reader packs come from the signed-in site, and the setup guide always shows its reader pack step. Older files that still set it load fine. |
 | `player_names` | More in-game names that are all yours (alts, a renamed account). A `#1234` tag is dropped and names under 3 characters are ignored. Empty by default and not written while empty. Not read by this build yet: your row is still found with `player_name` only |
-| `live_upload` | Upload each game to the site after it closes. On by default and not written while on; `false` is meant to keep games on this computer, queued. Not read by this build yet: games still upload as before |
+| `live_upload` | Upload each game to the site after it closes. On by default and not written while on; `false` keeps games on this computer, queued (read when the tracker starts) |
 | `rank_reader` | Read your rank after Comp games. Off by default and not written while off. Not read by this build yet |
 | `share_stat_pictures` | Upload the grayscale stat area after each game to help train the reader (no names, kept 30 days on the server). Off by default and not written while off. Not read by this build yet: nothing is uploaded |
 | `share_report_pictures` | Whether the stat-area pictures on a misread report start ticked. Off by default and not written while off. Not read by this build yet: reports send pictures as before |
