@@ -117,9 +117,8 @@ fn every_config_key_is_owned_by_the_form_or_kept_from_the_file() {
         auto_detect.cooldown_secs,
         defaults.auto_detect.cooldown_secs
     );
-    assert_ne!(
-        auto_detect.poll_interval_secs,
-        Some(8),
+    assert_eq!(
+        auto_detect.poll_interval_secs, defaults.auto_detect.poll_interval_secs,
         "the form's poll wins"
     );
     assert_eq!(
