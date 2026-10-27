@@ -456,16 +456,13 @@ pub fn with_chip(raw: &str, draft: &str) -> String {
     chips.join(", ")
 }
 
-/// An in-game name as typed, without a `#1234` tag (the help says to leave
-/// it out, and the scoreboard never shows it). `None` when nothing is left.
+/// An in-game name as typed, through [`stat_tracker::config::own_name`]:
+/// trimmed and without a `#1234` tag (the help says to leave it out, and the
+/// scoreboard never shows it). `None` when fewer than
+/// [`stat_tracker::config::MIN_OWN_NAME_CHARS`] characters are left, the
+/// same names the tracker ignores.
 pub fn name_chip(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    let name = match raw.rsplit_once('#') {
-        Some((name, tag)) if !tag.is_empty() && tag.chars().all(|c| c.is_ascii_digit()) => name,
-        _ => raw,
-    };
-    let name = name.trim();
-    (!name.is_empty()).then(|| name.to_string())
+    stat_tracker::config::own_name(raw).map(str::to_string)
 }
 
 /// `config` as the Settings form would write it back. A hand-edited value
@@ -1097,6 +1094,8 @@ mod tests {
         assert_eq!(name_chip("A#B").as_deref(), Some("A#B"));
         assert_eq!(name_chip("#1234"), None);
         assert_eq!(name_chip("  "), None);
+        assert_eq!(name_chip("Ab#1234"), None, "too short to match");
+        assert_eq!(name_chip("Öst").as_deref(), Some("Öst"));
     }
 
     #[test]
