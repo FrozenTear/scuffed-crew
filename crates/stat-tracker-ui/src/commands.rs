@@ -104,13 +104,29 @@ pub fn save_edit(
     let map = edit.map_name.as_deref().unwrap_or(&game.map_name);
     let hero = edit.hero.as_deref().unwrap_or(&game.hero);
     let held = !stat_tracker::parse::review_suspect_fields(map, "", hero).is_empty();
+    let was_held =
+        !stat_tracker::parse::review_suspect_fields(&game.map_name, "", &game.hero).is_empty();
+    let stats = [
+        edit.elims,
+        edit.deaths,
+        edit.assists,
+        edit.damage,
+        edit.healing,
+        edit.mitigation,
+    ];
+    let stats_changed = stats.iter().any(Option::is_some);
     edit_match(data_dir, &game.session_id, edit)?;
     Ok(if held {
         "Saved. A map or hero is still missing, so this game stays on this computer."
+    } else if was_held && !stats_changed {
+        RELEASED
     } else {
         "Stats corrected"
     })
 }
+
+/// A save that set the missing map or hero and changed no stat.
+pub const RELEASED: &str = "Saved. Nothing is missing now.";
 
 /// The stored name of the hero a typed name means. Case, punctuation and
 /// accents fold the way the reader's keys do
@@ -245,12 +261,25 @@ mod tests {
         assert!(g.needs_review());
         let mut form = EditForm::from_game(&g);
         form.map_name = "kings row".into();
-        assert_eq!(save_edit(&dir, &g, &form).unwrap(), "Stats corrected");
+        // No stat changed, so no "Stats corrected".
+        assert_eq!(save_edit(&dir, &g, &form).unwrap(), RELEASED);
         let edit = queued_edit(&dir);
         assert_eq!(edit.map_name.as_deref(), Some("King's Row"));
         let mut after = g.clone();
         after.map_name = edit.map_name.unwrap();
         assert!(!after.needs_review());
+    }
+
+    /// Releasing a hold with a stat fixed too still says the stats were
+    /// corrected.
+    #[test]
+    fn a_released_hold_with_a_stat_fix_says_stats_corrected() {
+        let dir = tmp();
+        let g = held_game();
+        let mut form = EditForm::from_game(&g);
+        form.map_name = "Ilios".into();
+        form.elims = "15".into();
+        assert_eq!(save_edit(&dir, &g, &form).unwrap(), "Stats corrected");
     }
 
     #[test]
