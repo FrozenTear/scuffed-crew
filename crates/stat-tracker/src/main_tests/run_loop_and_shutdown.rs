@@ -52,6 +52,8 @@ fn startup_takes_the_pid_guard_before_the_site_and_always_starts_the_pack_keeper
     let run_loop = at(RUN_LOOP);
     let call = body[run_loop..].split(';').next().expect("a statement");
     assert!(call.ends_with(".await"), "{call}");
+    // The sync task's store clone is settled before the store's close.
+    assert!(at("finish_or_abort_sync(") < at("close_store_before_exit(ctx)"));
     assert!(at("maybe_vacuum(") < at("marker::start_run("));
     // S5-CAP-8: perf.log starts after the guard and the vacuum exit.
     assert!(guard < at("perf_log::init("));

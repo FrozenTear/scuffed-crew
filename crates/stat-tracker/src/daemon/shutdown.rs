@@ -247,9 +247,14 @@ pub(crate) async fn shutdown_from_signal(
                     }
                     ShutdownStage::ScreencastClose => close_screencast_on_shutdown().await,
                     ShutdownStage::FinalUpload => {
-                        let task = sync_task.take();
-                        finish_sync_on_shutdown(sync_client, sync_backoff, task, store, data_dir)
-                            .await;
+                        finish_sync_on_shutdown(
+                            sync_client,
+                            sync_backoff,
+                            sync_task,
+                            store,
+                            data_dir,
+                        )
+                        .await;
                     }
                     ShutdownStage::SnapshotExport => {
                         flush_snapshot_if_dirty(store, data_dir).await;
@@ -291,7 +296,7 @@ pub(crate) async fn shutdown_from_signal(
 pub(crate) async fn finish_sync_on_shutdown(
     client: Option<&sync::SyncClient>,
     backoff: &std::sync::Mutex<sync::SyncBackoff>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: &mut Option<tokio::task::JoinHandle<()>>,
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
 ) {

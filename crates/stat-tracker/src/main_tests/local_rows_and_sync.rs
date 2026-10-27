@@ -370,7 +370,7 @@ async fn shutdown_joins_inflight_sync_before_marking() {
         let in_upload = in_upload.clone();
         let overlapped = overlapped.clone();
         async move {
-            drain_sync_then(Some(inflight), || {
+            drain_sync_then(&mut Some(inflight), || {
                 let store = store.clone();
                 let dir = dir.clone();
                 let uploads = uploads.clone();
@@ -425,6 +425,66 @@ async fn shutdown_joins_inflight_sync_before_marking() {
     );
     let rows = store.get_all_matches().await.unwrap();
     assert!(rows.iter().all(|m| m.synced));
+}
+
+/// A sync still uploading at exit is stopped before the store's close. Its
+/// store clone goes with it, and with the one queued behind it, so
+/// SurrealKV closes. The row it was sending is still queued on the next
+/// start.
+#[tokio::test]
+async fn a_sync_stopped_at_exit_frees_the_store_and_keeps_its_rows_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    store
+        .insert_match(test_match("s1", "victory"))
+        .await
+        .unwrap();
+    assert!(finish_or_abort_sync(None, Duration::ZERO).await);
+
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let inflight = tokio::spawn({
+        let store = store.clone();
+        let dir = dir.path().to_path_buf();
+        let entered = entered.clone();
+        async move {
+            try_sync_with(&store, &dir, None, move |_matches, _tombstones| {
+                let entered = entered.clone();
+                async move {
+                    entered.notify_one();
+                    // The server never answers.
+                    std::future::pending::<()>().await;
+                    Ok(upload_ok())
+                }
+            })
+            .await;
+        }
+    });
+    entered.notified().await;
+    // A second sync waits on the first, as `schedule_store_sync` chains them.
+    let chained = spawn_after_previous(Some(inflight), {
+        let store = store.clone();
+        move || async move {
+            let _ = store.match_count().await;
+        }
+    });
+    assert!(
+        !finish_or_abort_sync(Some(chained), Duration::from_millis(50)).await,
+        "a hung upload is stopped, not waited out"
+    );
+    drop(store);
+    assert!(
+        storage::wait_for_engine_close(dir.path(), Duration::from_secs(5)).await,
+        "no sync task still holds the store"
+    );
+
+    let reopened = storage::LocalStore::open(dir.path()).await.unwrap();
+    let queued = reopened.get_unsynced().await.unwrap();
+    assert_eq!(
+        queued.len(),
+        1,
+        "the stopped upload's row goes up next start"
+    );
+    assert_eq!(queued[0].session_id, "s1");
 }
 
 #[test]

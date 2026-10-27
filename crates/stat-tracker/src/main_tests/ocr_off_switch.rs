@@ -465,7 +465,7 @@ async fn a_stop_during_the_startup_pack_wait_ends_it_cleanly() {
         "a stop during the wait finishes the run marker and returns Ok"
     );
     assert!(
-        body.contains("run_loop(Arc::clone(&ctx), early_sigterm)")
+        body.contains("run_loop(Arc::clone(&ctx), early_sigterm, &mut sync_task)")
             && body.contains("close_store_before_exit(ctx).await"),
         "the same handler goes on to the run loop"
     );

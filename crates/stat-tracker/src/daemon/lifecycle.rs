@@ -540,7 +540,12 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     if let Some(extras) = extra_packs {
         tokio::spawn(extras.run());
     }
-    let result = run_loop(Arc::clone(&ctx), early_sigterm).await;
+    let mut sync_task = None;
+    let result = run_loop(Arc::clone(&ctx), early_sigterm, &mut sync_task).await;
+    // The sync task holds a store clone: settle it first, leaving the
+    // store's close its own share of the deadline.
+    let within = stat_tracker::replace::shutdown_time_left().saturating_sub(STORE_CLOSE_WAIT);
+    finish_or_abort_sync(sync_task.take(), within).await;
     close_store_before_exit(ctx).await;
     // The status file's counters as they stand when the run ends.
     ocr_switch.lock().unwrap_or_else(|e| e.into_inner()).check();
@@ -561,8 +566,9 @@ const STORE_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 /// router task runs it), so returning straight to `shutdown_timeout`
 /// raced it: the runtime cancelled SurrealKV's background tasks mid-close
 /// and it logged `Error shutting down task: JoinError::Cancelled`.
-/// A task that still holds the context (an abandoned capture) keeps the
-/// store open. The runtime drops it at exit and the WAL replays it on the
+/// The sync task is settled before this ([`finish_or_abort_sync`]). A task
+/// that still holds the context (an abandoned capture) keeps the store
+/// open. The runtime drops it at exit and the WAL replays it on the
 /// next start, as in 0.5.0.
 async fn close_store_before_exit(ctx: Arc<DaemonCtx>) {
     let data_dir = ctx.data_dir.clone();

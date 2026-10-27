@@ -22,13 +22,15 @@ pub(crate) static SYNC_DRAIN_WAITING: std::sync::atomic::AtomicUsize =
 /// not start a second upload while the first still holds ids from its read:
 /// both would mark those ids, and the older HTTP body can land on the server
 /// after the newer one. Aborting the task would drop it between the response
-/// and `mark_synced`, so the join waits instead.
-pub(crate) async fn drain_sync_then<F, Fut>(task: Option<tokio::task::JoinHandle<()>>, then: F)
+/// and `mark_synced`, so the join waits instead. The handle stays in `task`
+/// until the join is done: a deadline that drops this future leaves it there
+/// for [`finish_or_abort_sync`].
+pub(crate) async fn drain_sync_then<F, Fut>(task: &mut Option<tokio::task::JoinHandle<()>>, then: F)
 where
     F: FnOnce() -> Fut,
     Fut: std::future::Future,
 {
-    if let Some(t) = task {
+    if let Some(t) = task.as_mut() {
         if !t.is_finished() {
             tracing::info!(target: "scuffed_stat_tracker", "waiting for in-flight sync to finish before final upload");
         }
@@ -37,6 +39,7 @@ where
         let _ = t.await;
         #[cfg(test)]
         SYNC_DRAIN_WAITING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        *task = None;
     }
     then().await;
 }
@@ -341,10 +344,54 @@ where
 {
     tokio::spawn(async move {
         if let Some(previous) = previous {
-            let _ = previous.await;
+            // Held so an abort of this task (at exit) reaches the one it
+            // waits on too: dropping a plain handle would leave that one
+            // running with its own store clone.
+            let mut previous = AbortOnDrop(previous);
+            let _ = (&mut previous.0).await;
         }
         task().await;
     })
+}
+
+/// Aborts the task when dropped. After the task finished it does nothing.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Longest wait for an aborted sync task to be dropped. The abort lands at
+/// the task's next await, which an upload reaches at once.
+const SYNC_ABORT_JOIN: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Let the sync task left at exit finish within `within`, then abort it.
+/// Its store clone keeps SurrealKV open, so this runs before the store's
+/// close. An abort mid-upload loses nothing: rows are marked synced and
+/// tombstones cleared only after the server's 2xx, so whatever was not
+/// marked stays queued and goes up on the next start. A chunk the server
+/// took but that was not yet marked is sent again; the server keeps one
+/// row per session and replaces it. Returns true when the task finished
+/// by itself.
+pub(crate) async fn finish_or_abort_sync(
+    task: Option<tokio::task::JoinHandle<()>>,
+    within: std::time::Duration,
+) -> bool {
+    let Some(mut task) = task else {
+        return true;
+    };
+    if tokio::time::timeout(within, &mut task).await.is_ok() {
+        return true;
+    }
+    task.abort();
+    let _ = tokio::time::timeout(SYNC_ABORT_JOIN, task).await;
+    tracing::warn!(
+        target: "scuffed_stat_tracker",
+        "sync still running at exit; stopped it, unsent games go up on the next start"
+    );
+    false
 }
 
 /// Queue an upload on the single-flight sync task. The previous handle is
