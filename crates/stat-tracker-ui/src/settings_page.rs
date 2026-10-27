@@ -5,8 +5,8 @@
 //! setup again" and the legend, then the everyday cards on the left and
 //! the ADVANCED rows in one panel on the right. Below
 //! [`crate::settings_model::TWO_COLUMN_MIN`] the page is one column of at
-//! most [`crate::settings_model::SINGLE_COLUMN_MAX`], left-aligned on the
-//! page gutter, and the strip puts its right group on a second line.
+//! most [`crate::settings_model::SINGLE_COLUMN_MAX`], centred between the
+//! page gutters, and the strip puts its right group on a second line.
 //!
 //! There is no Save: every change applies as it is made
 //! ([`crate::settings_update`]). The old card layout with its Save stays in
@@ -90,12 +90,15 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             .push(advanced_column(app, demo));
     }
 
-    // Left-aligned on the gutter in both modes (spec p9), capped so the
-    // controls stay near their labels.
-    container(page.max_width(page_width(content_width)))
-        .width(Fill)
-        .align_left(Fill)
-        .into()
+    // Capped so the controls stay near their labels. Two columns sit on
+    // the gutter; one column is centred in the space it leaves (Robert's
+    // call for narrow windows), so the gutter stays the least margin.
+    let page = container(page.max_width(page_width(content_width))).width(Fill);
+    if two_columns {
+        page.align_left(Fill).into()
+    } else {
+        page.center_x(Fill).into()
+    }
 }
 
 /// The strip's left group: the status with its check, Version (which
@@ -567,19 +570,38 @@ mod tests {
         );
     }
 
-    /// Render fix 2 (spec p9): at 1024 the one column starts at the
-    /// gutter and stops at its cap; it is not centred.
+    /// Render fix 2 (spec p9): at 1024 the one column stops at its cap,
+    /// and the two-column page starts at the gutter.
     #[test]
-    fn the_one_column_page_is_left_aligned_and_capped() {
+    fn the_one_column_page_is_capped_and_two_columns_left_aligned() {
         let (_dir, app) = app();
         let node = lay_out(view(&app, 976.0), 976.0);
         let page = &node.children()[0];
-        assert!(page.bounds().x.abs() < 0.5, "{:?}", page.bounds());
         assert!((page.bounds().width - SINGLE_COLUMN_MAX).abs() < 0.5);
         let wide = lay_out(view(&app, 3400.0), 3400.0);
         let page = &wide.children()[0];
         assert!(page.bounds().x.abs() < 0.5);
         assert!((page.bounds().width - crate::settings_model::PAGE_MAX).abs() < 0.5);
+    }
+
+    /// Robert's call: on a narrow window (1024, so 976 inside the 24 px
+    /// gutters) the one column is centred, with equal space each side.
+    /// Narrower than the cap it fills, so the gutter is the least margin.
+    #[test]
+    fn the_one_column_page_is_centred_at_1024() {
+        let (_dir, app) = app();
+        let window = 1024.0;
+        let gutter = theme::page_gutter(window);
+        let content = window - 2.0 * gutter;
+        let node = lay_out(view(&app, content), content);
+        let page = node.children()[0].bounds();
+        let left = gutter + page.x;
+        let right = window - (gutter + page.x + page.width);
+        assert!((left - right).abs() <= 1.0, "{left} vs {right}");
+        assert!(left > gutter, "{page:?}");
+        let narrow = lay_out(view(&app, 700.0), 700.0);
+        let page = narrow.children()[0].bounds();
+        assert!(page.x.abs() < 0.5 && (page.width - 700.0).abs() < 0.5);
     }
 
     /// M9: with a change waiting, the one-column strip puts its actions on

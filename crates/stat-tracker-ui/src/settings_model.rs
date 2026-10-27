@@ -2,8 +2,8 @@
 //!
 //! Everyday sections sit in the left column and the Advanced rows in the
 //! right one from [`TWO_COLUMN_MIN`] px of page width. Below that the page
-//! is one column, no wider than [`SINGLE_COLUMN_MAX`] and left-aligned on
-//! the gutter. Advanced rows fold; [`AdvancedOpen`] remembers which are
+//! is one column, no wider than [`SINGLE_COLUMN_MAX`] and centred between
+//! the gutters. Advanced rows fold; [`AdvancedOpen`] remembers which are
 //! open. Changes apply as they are made, so the page counts what waits for
 //! a tracker restart ([`changes_waiting`]) against one list of keys only
 //! this app reads ([`APP_ONLY_KEYS`]). Nothing here draws.
@@ -26,7 +26,7 @@ pub const SINGLE_COLUMN_MAX: f32 = 760.0;
 /// Gap between the two columns (spec 24 px).
 pub const COLUMN_GAP: f32 = 24.0;
 /// Widest the two-column page gets, so controls stay near their labels on
-/// an ultrawide window. Left-aligned like the one-column page.
+/// an ultrawide window. Left-aligned on the gutter (one column centres).
 pub const PAGE_MAX: f32 = 2.0 * SINGLE_COLUMN_MAX + COLUMN_GAP;
 /// Memory each OCR worker holds (one Tesseract instance with its model).
 pub const OCR_WORKER_MB: usize = 23;
