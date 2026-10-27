@@ -14,6 +14,7 @@ use crate::app::Message;
 use crate::icons::{self, Icon};
 use crate::model::Game;
 use crate::theme::{self, BORDER, FONT_BOLD, FONT_MEDIUM, SIZE_LABEL, TEXT, TEXT_2, TEXT_3};
+use stat_tracker::suspect::{flat_suspect_name, suspect_names_for_edit};
 
 /// The six stat tiles: label, the field the reader marks, and the value.
 const TILES: [(&str, &str); 6] = [
@@ -34,9 +35,33 @@ pub fn row(g: &Game) -> Element<'static, Message> {
     tiles.wrap().into()
 }
 
-/// A field the reader was unsure of that no hand edit has fixed since.
-pub fn unsure_now(g: &Game, field: &str) -> bool {
-    g.field_unsure(field) && !g.edited_fields.iter().any(|e| e == field)
+/// The flat suspect names still standing on `g`, once each: every stored
+/// name (`dmg`, or an older row's `r3.dmg`) flattened by
+/// [`flat_suspect_name`], less the ones a hand edit settled
+/// ([`suspect_names_for_edit`] of each edited field).
+pub fn still_unsure(g: &Game) -> Vec<&str> {
+    let settled: Vec<&str> = g
+        .edited_fields
+        .iter()
+        .flat_map(|e| suspect_names_for_edit(e).iter().copied())
+        .collect();
+    let mut out: Vec<&str> = Vec::new();
+    for name in &g.suspect_fields {
+        if let Some(flat) = flat_suspect_name(name)
+            && !settled.contains(&flat)
+            && !out.contains(&flat)
+        {
+            out.push(flat);
+        }
+    }
+    out
+}
+
+/// The stored field `storage_field` (`damage`, `elims`, `map_name`, ...)
+/// is still unsure: the reader marked it and no hand edit has settled it.
+pub fn unsure_now(g: &Game, storage_field: &str) -> bool {
+    let names = suspect_names_for_edit(storage_field);
+    still_unsure(g).iter().any(|n| names.contains(n))
 }
 
 fn stat(g: &Game, field: &str) -> u32 {
@@ -172,11 +197,20 @@ mod tests {
             crate::cli::FixtureKind::Sample,
         ))
         .remove(0);
-        g.suspect_fields = vec!["damage".into()];
+        // The reader stores short names, and older rows a row prefix.
+        g.suspect_fields = vec!["dmg".into(), "r3.h".into(), "r3.dmg".into(), "bogus".into()];
         g.edited_fields.clear();
         assert!(unsure_now(&g, "damage"));
+        assert!(unsure_now(&g, "healing"));
+        assert!(!unsure_now(&g, "elims"));
+        assert_eq!(
+            still_unsure(&g),
+            ["dmg", "h"],
+            "once each, unknown names dropped"
+        );
         g.edited_fields = vec!["damage".into()];
         assert!(!unsure_now(&g, "damage"));
+        assert_eq!(still_unsure(&g), ["h"]);
         let _ = row(&g);
     }
 }

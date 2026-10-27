@@ -16,7 +16,6 @@ use crate::icons::{self, Icon};
 use crate::model::{Game, Outcome, Role, Screen, game_card_in_progress};
 use crate::overview_page::Msg;
 use crate::session_bits::{day_part, span_line, sparkline};
-use crate::stat_tiles::unsure_now;
 use crate::theme::{
     self, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_LABEL,
     SIZE_META, TEXT, TEXT_2, TEXT_3,
@@ -131,7 +130,7 @@ pub fn record_line(record: &crate::aggregate::Record) -> String {
 
 /// "2 stats unsure", or `None`.
 pub fn unsure_label(g: &Game) -> Option<String> {
-    match g.suspect_fields.iter().filter(|f| unsure_now(g, f)).count() {
+    match crate::stat_tiles::still_unsure(g).len() {
         0 => None,
         1 => Some("1 stat unsure".to_string()),
         n => Some(format!("{n} stats unsure")),
@@ -475,11 +474,11 @@ mod tests {
     #[test]
     fn unsure_marks_follow_hand_edits() {
         let mut g = sample().remove(0);
-        g.suspect_fields = vec!["damage".into(), "healing".into()];
+        g.suspect_fields = vec!["dmg".into(), "r2.h".into()];
         g.edited_fields.clear();
         assert_eq!(unsure_label(&g).as_deref(), Some("2 stats unsure"));
         g.edited_fields = vec!["damage".into()];
-        assert!(!unsure_now(&g, "damage"));
+        assert!(!crate::stat_tiles::unsure_now(&g, "damage"));
         assert_eq!(unsure_label(&g).as_deref(), Some("1 stat unsure"));
     }
 
