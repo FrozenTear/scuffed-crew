@@ -69,7 +69,7 @@ pub use polls::Polls;
 pub use profile_settings::ProfileSettings;
 pub use scrims::Scrims;
 pub use setup::Setup;
-pub use stats::Stats;
+pub use stats::{Stats, StatsMatch};
 pub use stats_member::StatsMember;
 pub use stats_tokens::StatsTokens;
 pub use team_page::TeamPage;
