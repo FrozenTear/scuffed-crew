@@ -610,6 +610,12 @@ pub struct MemberLeaderboardRow {
     pub member_id: String,
     pub display_name: String,
     pub games: u32,
+    /// Victories counted in `games`. `wins + losses + draws == games`.
+    pub wins: u32,
+    /// Defeats counted in `games`.
+    pub losses: u32,
+    /// Draws counted in `games`.
+    pub draws: u32,
     pub winrate: f32,
     pub kd: f64,
 }
@@ -624,6 +630,10 @@ pub struct LeaderboardHeroAgg {
     pub display_name: String,
     pub games: u32,
     pub wins: u32,
+    /// Defeats in `games`. `wins + losses + draws == games`.
+    pub losses: u32,
+    /// Draws in `games`.
+    pub draws: u32,
     pub elims: u32,
     pub deaths: u32,
     /// Games whose elims and deaths both passed the plausibility check, i.e.
@@ -699,6 +709,9 @@ impl LeaderboardSnapshot {
                 member_id: agg.member_id.clone(),
                 display_name: agg.display_name.clone(),
                 games: agg.games,
+                wins: agg.wins,
+                losses: agg.losses,
+                draws: agg.draws,
                 winrate: agg.wins as f32 / agg.games as f32,
                 kd: agg.elims as f64 / (agg.deaths.max(1) as f64),
             });
@@ -746,6 +759,8 @@ mod snapshot_project_tests {
             display_name: id.into(),
             games,
             wins,
+            losses: games - wins,
+            draws: 0,
             elims: wins,
             deaths: 1,
             kd_games: games,
@@ -784,12 +799,51 @@ mod snapshot_project_tests {
         assert_eq!(both.len(), 2);
     }
 
+    #[test]
+    fn record_counts_roll_up_and_sum_to_games() {
+        let wld = |id: &str, wins: u32, losses: u32, draws: u32| LeaderboardHeroAgg {
+            member_id: id.into(),
+            display_name: id.into(),
+            games: wins + losses + draws,
+            wins,
+            losses,
+            draws,
+            elims: wins,
+            deaths: 1,
+            kd_games: wins + losses + draws,
+        };
+        let snap = LeaderboardSnapshot::from_rows(vec![
+            ("Ana".into(), wld("a", 3, 1, 1)),
+            ("Genji".into(), wld("a", 1, 2, 1)),
+            ("Genji".into(), wld("b", 0, 1, 0)),
+        ]);
+
+        let all = snap.project("games", "", 10);
+        let a = all.iter().find(|r| r.member_id == "a").unwrap();
+        assert_eq!((a.games, a.wins, a.losses, a.draws), (9, 4, 3, 2));
+        let b = all.iter().find(|r| r.member_id == "b").unwrap();
+        assert_eq!((b.games, b.wins, b.losses, b.draws), (1, 0, 1, 0));
+
+        let ana = snap.project("winrate", "Ana", 10);
+        assert_eq!(ana.len(), 1);
+        assert_eq!(
+            (ana[0].games, ana[0].wins, ana[0].losses, ana[0].draws),
+            (5, 3, 1, 1)
+        );
+
+        for row in all.iter().chain(ana.iter()) {
+            assert_eq!(row.wins + row.losses + row.draws, row.games, "{row:?}");
+        }
+    }
+
     fn tied(id: &str) -> LeaderboardHeroAgg {
         LeaderboardHeroAgg {
             member_id: id.into(),
             display_name: id.into(),
             games: 8,
             wins: 4,
+            losses: 3,
+            draws: 1,
             elims: 10,
             deaths: 2,
             kd_games: 8,
@@ -839,6 +893,8 @@ fn merge_agg_one(
         .and_modify(|existing| {
             existing.games = existing.games.saturating_add(agg.games);
             existing.wins = existing.wins.saturating_add(agg.wins);
+            existing.losses = existing.losses.saturating_add(agg.losses);
+            existing.draws = existing.draws.saturating_add(agg.draws);
             existing.elims = existing.elims.saturating_add(agg.elims);
             existing.deaths = existing.deaths.saturating_add(agg.deaths);
             existing.kd_games = existing.kd_games.saturating_add(agg.kd_games);
@@ -852,6 +908,12 @@ fn merge_agg_one(
 pub struct MemberHeroScopedAgg {
     pub member_id: String,
     pub games: u32,
+    /// Victories in `games`. `wins + losses + draws == games`.
+    pub wins: u32,
+    /// Defeats in `games`.
+    pub losses: u32,
+    /// Draws in `games`.
+    pub draws: u32,
     pub winrate: f32,
 }
 

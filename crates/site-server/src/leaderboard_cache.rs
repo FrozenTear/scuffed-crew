@@ -917,6 +917,9 @@ mod tests {
             member_id: id.to_string(),
             display_name: id.to_string(),
             games,
+            wins: games,
+            losses: 0,
+            draws: 0,
             winrate: 1.0,
             kd: games as f64,
         }
@@ -2345,6 +2348,8 @@ mod tests {
             display_name: id.to_string(),
             games,
             wins,
+            losses: games - wins,
+            draws: 0,
             elims: wins,
             deaths: 1,
             kd_games: games,
