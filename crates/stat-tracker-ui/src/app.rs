@@ -223,6 +223,8 @@ pub enum Message {
     Nav(crate::nav::Msg),
     /// A message from the 0.6 Overview ([`crate::overview_page::update`]).
     OverviewPage(crate::overview_page::Msg),
+    /// A message from the 0.6 Heroes page ([`crate::heroes_page::update`]).
+    HeroesPage(crate::heroes_page::Msg),
 }
 
 struct NotesDialog {
@@ -339,6 +341,8 @@ pub struct TrackerApp {
     pub needs_look_filter: bool,
     /// The 0.6 Overview's own state ([`crate::overview_page`]).
     pub overview_page: crate::overview_page::OverviewPage,
+    /// The 0.6 Heroes page's sort, view and fold ([`crate::heroes_page`]).
+    pub heroes_page: crate::heroes_page::HeroesPage,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
     pub(crate) toast_action: Option<Message>,
@@ -596,6 +600,7 @@ impl TrackerApp {
             filter_outcome: None,
             needs_look_filter: false,
             overview_page: Default::default(),
+            heroes_page: Default::default(),
             toast: None,
             toast_action: None,
             sessions_with_kit: HashSet::new(),
@@ -1072,6 +1077,7 @@ impl TrackerApp {
             Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
             Message::Nav(msg) => crate::nav::update(self, msg),
             Message::OverviewPage(msg) => crate::overview_page::update(self, msg),
+            Message::HeroesPage(msg) => crate::heroes_page::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()
@@ -2711,7 +2717,6 @@ fn check_reader_packs(data_dir: PathBuf, turn_off: bool) -> Task<Message> {
         move |packs| Message::ReaderPacksChecked { packs, turn_off },
     )
 }
-
 
 /// Site sync is set up in `config`: a URL and a token, neither blank.
 pub fn sync_on_for(config: &Config) -> bool {

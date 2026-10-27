@@ -33,14 +33,25 @@ mod tests {
             crate::hero_pack_hint::hero_pack_hint(false, Some(&none)),
             Some(crate::hero_pack_hint::HERO_PACK_SYNC_HINT)
         );
-        assert_eq!(crate::hero_pack_hint::hero_pack_hint(true, Some(&none)), None, "sync on");
+        assert_eq!(
+            crate::hero_pack_hint::hero_pack_hint(true, Some(&none)),
+            None,
+            "sync on"
+        );
         assert_eq!(
             crate::hero_pack_hint::hero_pack_hint(false, Some(&heroes)),
             None,
             "pack there"
         );
-        assert_eq!(crate::hero_pack_hint::hero_pack_hint(true, Some(&heroes)), None);
-        assert_eq!(crate::hero_pack_hint::hero_pack_hint(false, None), None, "not checked yet");
+        assert_eq!(
+            crate::hero_pack_hint::hero_pack_hint(true, Some(&heroes)),
+            None
+        );
+        assert_eq!(
+            crate::hero_pack_hint::hero_pack_hint(false, None),
+            None,
+            "not checked yet"
+        );
         assert_eq!(
             crate::hero_pack_hint::HERO_PACK_SYNC_HINT,
             "Hero names need site sync. Your stats still track normally."

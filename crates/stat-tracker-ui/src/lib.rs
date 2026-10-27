@@ -33,8 +33,9 @@ mod filter_chips;
 pub mod fixtures;
 mod form_widgets;
 pub mod games;
-pub mod heroes;
 mod hero_pack_hint;
+pub mod heroes;
+mod heroes_page;
 pub mod hotkey;
 pub mod icons;
 #[cfg(test)]

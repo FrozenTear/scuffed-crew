@@ -13,6 +13,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("cli.rs", include_str!("cli.rs")),
     ("filter_chips.rs", include_str!("filter_chips.rs")),
     ("form_widgets.rs", include_str!("form_widgets.rs")),
+    ("hero_pack_hint.rs", include_str!("hero_pack_hint.rs")),
+    ("heroes_page.rs", include_str!("heroes_page.rs")),
     ("icons.rs", include_str!("icons.rs")),
     ("nav.rs", include_str!("nav.rs")),
     ("nav_fit.rs", include_str!("nav_fit.rs")),

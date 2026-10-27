@@ -144,7 +144,7 @@ fn block(color: iced::Color, width: iced::Length, height: f32) -> Element<'stati
 }
 
 /// One dash per game out of ten: played dashes in grey, the rest faint.
-fn dashes(games: usize) -> Element<'static, Message> {
+pub(crate) fn dashes(games: usize) -> Element<'static, Message> {
     let mut r = Row::new().spacing(4).width(Fill).align_y(Alignment::Center);
     for i in 0..DASHES {
         let color = if i < games {
