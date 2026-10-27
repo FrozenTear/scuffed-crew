@@ -30,10 +30,9 @@ const WIDE_FROM: f32 = 760.0;
 /// Heroes with a card, and how many are left out for having too few
 /// games. Unknown heroes never get a card.
 pub fn split(heroes: &[HeroAgg]) -> (Vec<&HeroAgg>, usize) {
-    let known = heroes.iter().filter(|h| {
-        let n = h.hero.trim();
-        !n.is_empty() && !n.eq_ignore_ascii_case("unknown")
-    });
+    let known = heroes
+        .iter()
+        .filter(|h| !stat_tracker::parse::hero_is_unknown_label(&h.hero));
     let (cards, small): (Vec<&HeroAgg>, Vec<&HeroAgg>) =
         known.partition(|h| h.record.games >= CARD_MIN);
     (cards, small.len())

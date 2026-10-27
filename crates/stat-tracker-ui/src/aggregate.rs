@@ -324,8 +324,20 @@ fn bump_outcome(r: &mut Record, outcome: Outcome) {
     }
 }
 
+/// The name a hero's games count under: the catalog spelling, so
+/// "soldier_76" and "Soldier: 76" are one hero. An unknown or blank name
+/// stays as stored.
+pub fn hero_key(name: &str) -> String {
+    if stat_tracker::parse::hero_is_unknown_label(name) {
+        name.to_string()
+    } else {
+        stat_tracker::parse::canonical_hero(name.trim())
+    }
+}
+
 fn bump_hero(rows: &mut Vec<(String, Role, Record)>, g: &Game) {
-    if let Some((_, _, rec)) = rows.iter_mut().find(|(h, _, _)| h == &g.hero) {
+    let key = hero_key(&g.hero);
+    if let Some((_, _, rec)) = rows.iter_mut().find(|(h, _, _)| h == &key) {
         rec.games += 1;
         bump_outcome(rec, g.outcome);
     } else {
@@ -336,7 +348,7 @@ fn bump_hero(rows: &mut Vec<(String, Role, Record)>, g: &Game) {
             draws: 0,
         };
         bump_outcome(&mut rec, g.outcome);
-        rows.push((g.hero.clone(), g.role, rec));
+        rows.push((key, g.role, rec));
     }
 }
 
