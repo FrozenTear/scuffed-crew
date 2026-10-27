@@ -33,6 +33,9 @@ mod filter_chips;
 pub mod fixtures;
 mod form_widgets;
 pub mod games;
+// Drawn by the expanded row panel in the next change.
+#[allow(dead_code)]
+mod games_detail;
 mod games_rows;
 mod games_table;
 pub mod heroes;

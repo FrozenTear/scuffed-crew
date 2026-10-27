@@ -192,6 +192,9 @@ pub struct SegmentView {
     pub confirmed: bool,
     pub dismissed: bool,
     pub resolution: Option<String>,
+    /// First and last Tab read of this run, to the second.
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
 }
 
 impl SegmentView {
@@ -204,6 +207,8 @@ impl SegmentView {
             confirmed: seg.confirmed,
             dismissed: seg.is_dismissed(),
             resolution: seg.resolution.clone(),
+            first_seen: seg.first_seen.clone().into(),
+            last_seen: seg.last_seen.clone().into(),
         }
     }
 
@@ -246,6 +251,8 @@ pub struct Game {
     /// True when this row has already been uploaded. A blank map on a
     /// synced row was stored by an older build. It is not a local hold.
     pub synced: bool,
+    /// The reader that read the scoreboard, e.g. "cv-v1" or "ocr-v1".
+    pub recognizer: String,
 }
 
 /// Label for a game the server refused. The detail line is the server message.
@@ -289,6 +296,7 @@ impl Game {
             upload_reject: m.upload_rejection().map(str::to_string),
             suspect_fields: stat_tracker::reader_apply::upload_suspect_fields(&m.suspect_fields),
             synced: m.synced,
+            recognizer: m.stored_recognizer().to_string(),
         }
     }
 
@@ -543,6 +551,7 @@ mod tests {
             upload_reject: None,
             suspect_fields: vec!["dmg".into(), "hero".into()],
             synced: false,
+            recognizer: String::new(),
         };
         assert!(game.field_unsure("dmg"));
         assert!(game.field_unsure("hero"));
@@ -575,6 +584,7 @@ mod tests {
             upload_reject: None,
             suspect_fields: Vec::new(),
             synced: false,
+            recognizer: String::new(),
         };
         for field in [
             "hero", "result", "map", "mode", "e", "a", "d", "dmg", "h", "mit",
@@ -610,6 +620,7 @@ mod review_tests {
             upload_reject: None,
             suspect_fields: Vec::new(),
             synced: false,
+            recognizer: String::new(),
         }
     }
 
