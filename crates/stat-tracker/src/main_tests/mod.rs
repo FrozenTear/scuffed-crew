@@ -2232,7 +2232,6 @@ mod run_loop_and_shutdown;
 mod session_recovery;
 mod shutdown_and_restart;
 mod source_text;
-mod splits_and_debug_frames;
 mod tab_keyboard_pid;
 mod unread_columns;
 mod untrusted_maps;
