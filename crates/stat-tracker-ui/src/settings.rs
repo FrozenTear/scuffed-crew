@@ -872,6 +872,13 @@ impl SettingsForm {
             setup_completed: base.setup_completed,
             reader_pack_url: base.reader_pack_url.clone(),
             name_reader: base.name_reader,
+            // 0.6 keys with no Settings row yet: kept as loaded.
+            player_names: base.player_names.clone(),
+            live_upload: base.live_upload,
+            rank_reader: base.rank_reader,
+            share_stat_pictures: base.share_stat_pictures,
+            share_report_pictures: base.share_report_pictures,
+            capture_only_on_screen: base.capture_only_on_screen,
             reader: if self.new_reader {
                 stat_tracker::config::ReaderSetting::New
             } else {
