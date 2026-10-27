@@ -6,6 +6,8 @@ name = "scuffed-stat-tracker"
 # (src/tests_release_pins.rs) and dist/check-tag-version.sh fail otherwise.
 version = "0.5.0"
 edition = "2024"
+# The oldest toolchain the locked dependencies build on (roaring needs 1.90).
+rust-version = "1.90"
 default-run = "scuffed-stat-tracker"
 
 [dependencies]
