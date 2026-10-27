@@ -2712,9 +2712,6 @@ fn check_reader_packs(data_dir: PathBuf, turn_off: bool) -> Task<Message> {
     )
 }
 
-/// Shown under Tracker health when no hero pack is installed and site sync
-/// is off: the hero pack comes from the site, so heroes read as unknown.
-pub const HERO_PACK_SYNC_HINT: &str = "Hero names need site sync. Your stats still track normally.";
 
 /// Site sync is set up in `config`: a URL and a token, neither blank.
 pub fn sync_on_for(config: &Config) -> bool {
@@ -2724,19 +2721,7 @@ pub fn sync_on_for(config: &Config) -> bool {
         .is_some_and(|s| !s.server_url.trim().is_empty() && !s.token.trim().is_empty())
 }
 
-/// [`HERO_PACK_SYNC_HINT`] when site sync is off and the last pack check
-/// found no hero pack. `None` before the first check (and in demo mode,
-/// which never checks), and whenever sync is on: with sync on the tracker
-/// downloads the pack itself.
-pub fn hero_pack_hint(
-    sync_on: bool,
-    packs: Option<&stat_tracker::ocr_switch::PackReadiness>,
-) -> Option<&'static str> {
-    match packs {
-        Some(p) if !sync_on && !p.heroes => Some(HERO_PACK_SYNC_HINT),
-        _ => None,
-    }
-}
+pub use crate::hero_pack_hint::{HERO_PACK_SYNC_HINT, hero_pack_hint};
 
 const HEALTH_READY: &str = "Ready";
 const HEALTH_WAITING: &str = "Waiting for a capture";
@@ -3411,33 +3396,6 @@ mod tests {
         let id = window::Id::unique();
         assert_eq!(tray_show_op(None), TrayWindowOp::Open);
         assert_eq!(tray_show_op(Some(id)), TrayWindowOp::Focus(id));
-    }
-
-    #[test]
-    fn hero_pack_hint_shows_only_without_sync_and_without_a_hero_pack() {
-        use stat_tracker::ocr_switch::PackReadiness;
-        let none = PackReadiness::default();
-        let heroes = PackReadiness {
-            heroes: true,
-            ..PackReadiness::default()
-        };
-        assert_eq!(
-            super::hero_pack_hint(false, Some(&none)),
-            Some(super::HERO_PACK_SYNC_HINT)
-        );
-        assert_eq!(super::hero_pack_hint(true, Some(&none)), None, "sync on");
-        assert_eq!(
-            super::hero_pack_hint(false, Some(&heroes)),
-            None,
-            "pack there"
-        );
-        assert_eq!(super::hero_pack_hint(true, Some(&heroes)), None);
-        assert_eq!(super::hero_pack_hint(false, None), None, "not checked yet");
-        assert_eq!(
-            super::HERO_PACK_SYNC_HINT,
-            "Hero names need site sync. Your stats still track normally."
-        );
-        assert!(!super::HERO_PACK_SYNC_HINT.contains('\u{2014}'));
     }
 
     #[test]

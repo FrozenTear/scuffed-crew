@@ -34,6 +34,7 @@ pub mod fixtures;
 mod form_widgets;
 pub mod games;
 pub mod heroes;
+mod hero_pack_hint;
 pub mod hotkey;
 pub mod icons;
 #[cfg(test)]
