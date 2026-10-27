@@ -17,6 +17,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("games_delete.rs", include_str!("games_delete.rs")),
     ("games_detail.rs", include_str!("games_detail.rs")),
     ("games_panel.rs", include_str!("games_panel.rs")),
+    ("games_picker.rs", include_str!("games_picker.rs")),
+    ("games_retry.rs", include_str!("games_retry.rs")),
     ("games_rows.rs", include_str!("games_rows.rs")),
     ("games_table.rs", include_str!("games_table.rs")),
     ("icons.rs", include_str!("icons.rs")),
@@ -42,8 +44,8 @@ const SOURCES: &[(&str, &str)] = &[
     ("stat_tiles.rs", include_str!("stat_tiles.rs")),
     ("tracker_status.rs", include_str!("tracker_status.rs")),
     ("update_check.rs", include_str!("update_check.rs")),
-    ("winrate_bar.rs", include_str!("winrate_bar.rs")),
     ("what_leaves.rs", include_str!("what_leaves.rs")),
+    ("winrate_bar.rs", include_str!("winrate_bar.rs")),
     ("README.md", include_str!("../README.md")),
     (
         "assets/draw_icons.py",
