@@ -330,7 +330,11 @@ where
         format!("{wins}-{losses}")
     };
     let n = group.games.len();
-    let games = if n == 1 { "1 game".to_string() } else { format!("{n} games") };
+    let games = if n == 1 {
+        "1 game".to_string()
+    } else {
+        format!("{n} games")
+    };
     SessionHead {
         title,
         summary: format!(
@@ -349,7 +353,11 @@ pub fn split_note(gap_secs: u64) -> String {
     let mins = gap_secs / 60;
     let span = if mins >= 60 && mins % 60 == 0 {
         let h = mins / 60;
-        if h == 1 { "1 hour".to_string() } else { format!("{h} hours") }
+        if h == 1 {
+            "1 hour".to_string()
+        } else {
+            format!("{h} hours")
+        }
     } else if mins == 1 {
         "1 minute".to_string()
     } else {
@@ -377,7 +385,9 @@ mod tests {
     use chrono::{FixedOffset, TimeDelta};
 
     fn game(outcome: Outcome, at: &str, suspect: &[&str]) -> Game {
-        let played_at = DateTime::parse_from_rfc3339(at).unwrap().with_timezone(&Utc);
+        let played_at = DateTime::parse_from_rfc3339(at)
+            .unwrap()
+            .with_timezone(&Utc);
         Game {
             session_id: at.to_string(),
             hero: "Wrecking Ball".into(),
@@ -418,7 +428,14 @@ mod tests {
         }
         assert_eq!(
             cols,
-            [Col::Stripe, Col::Result, Col::Map, Col::Rank, Col::Time, Col::Unsure]
+            [
+                Col::Stripe,
+                Col::Result,
+                Col::Map,
+                Col::Rank,
+                Col::Time,
+                Col::Unsure
+            ]
         );
         assert_eq!(columns(Grid::Mid).len(), 10);
         assert_eq!(columns(Grid::Wide).len(), 10);
@@ -504,7 +521,10 @@ mod tests {
         let groups = group_by_session_gap(&refs, TimeDelta::hours(3));
         let head = session_head_in(&groups[0], &FixedOffset::east_opt(0).unwrap());
         assert_eq!(head.summary, "3 games · 1-1-1 · 1 h 41 min");
-        assert_eq!(form_ticks(&groups[0].games), [Tick::Down, Tick::Mid, Tick::Up]);
+        assert_eq!(
+            form_ticks(&groups[0].games),
+            [Tick::Down, Tick::Mid, Tick::Up]
+        );
     }
 
     #[test]

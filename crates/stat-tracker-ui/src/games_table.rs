@@ -4,7 +4,9 @@
 //! live in [`crate::games_rows`]; this module only draws them.
 
 use iced::widget::{button, column, container, mouse_area, row, rule, space, text};
-use iced::{Alignment, Background, Border, Color, Element, Fill, FillPortion, Length, Padding, Theme};
+use iced::{
+    Alignment, Background, Border, Color, Element, Fill, FillPortion, Length, Padding, Theme,
+};
 
 use crate::aggregate::group_by_session_gap;
 use crate::app::{Message, TrackerApp};
@@ -95,10 +97,7 @@ pub fn view<'a>(
             }
             for group in groups {
                 let head = games_rows::session_head(&group);
-                col = col.push(session_header(
-                    head,
-                    games_rows::form_ticks(&group.games),
-                ));
+                col = col.push(session_header(head, games_rows::form_ticks(&group.games)));
                 let refs: Vec<&Game> = group.games.iter().collect();
                 let ordered = games_rows::sorted(&refs, state.sort);
                 col = col.push(table(app, &ordered, grid, state));
@@ -135,9 +134,15 @@ fn controls(app: &TrackerApp, state: TabState) -> Element<'static, Message> {
             .style(theme::filter_segment(ACCENT, state.grouping == g))
             .on_press(games_msg(Msg::SetGrouping(g)))
     };
-    let segmented = container(row![seg("Sessions", Grouping::Sessions), seg("Flat list", Grouping::Flat)].spacing(2))
-        .padding(2)
-        .style(pill_box(BORDER));
+    let segmented = container(
+        row![
+            seg("Sessions", Grouping::Sessions),
+            seg("Flat list", Grouping::Flat)
+        ]
+        .spacing(2),
+    )
+    .padding(2)
+    .style(pill_box(BORDER));
     row![filters, space().width(Fill), compact, segmented]
         .spacing(8)
         .align_y(Alignment::Center)
@@ -171,7 +176,10 @@ fn form_strip(ticks: &[Tick]) -> Element<'static, Message> {
         r = r.push(
             column![
                 space().height(top),
-                container(space()).width(4).height(h).style(theme::stripe_color(color)),
+                container(space())
+                    .width(4)
+                    .height(h)
+                    .style(theme::stripe_color(color)),
             ]
             .width(4)
             .height(24),
@@ -187,7 +195,12 @@ fn cell_len(w: Width) -> Length {
     }
 }
 
-fn table<'a>(app: &'a TrackerApp, games: &[&Game], grid: Grid, state: TabState) -> Element<'a, Message> {
+fn table<'a>(
+    app: &'a TrackerApp,
+    games: &[&Game],
+    grid: Grid,
+    state: TabState,
+) -> Element<'a, Message> {
     let cols = games_rows::columns(grid);
     let live = app.live_game_session.as_deref();
     let mut body = column![header_row(&cols, state)].width(Fill);
@@ -197,15 +210,17 @@ fn table<'a>(app: &'a TrackerApp, games: &[&Game], grid: Grid, state: TabState) 
         if app.expanded.as_deref() == Some(g.session_id.as_str()) {
             let confirm = app.confirm_delete.as_deref() == Some(g.session_id.as_str());
             let in_progress = game_card_in_progress(&g.session_id, g.outcome, live);
-            body = body.push(container(widgets::expanded_game_card(
-                g,
-                app.editing && app.edit.session_id == g.session_id,
-                &app.edit,
-                confirm,
-                in_progress,
-                app.sessions_with_kit.contains(&g.session_id),
-            ))
-            .padding(12));
+            body = body.push(
+                container(widgets::expanded_game_card(
+                    g,
+                    app.editing && app.edit.session_id == g.session_id,
+                    &app.edit,
+                    confirm,
+                    in_progress,
+                    app.sessions_with_kit.contains(&g.session_id),
+                ))
+                .padding(12),
+            );
         }
     }
     container(body)
@@ -227,7 +242,10 @@ fn line() -> Element<'static, Message> {
 }
 
 fn header_row(cols: &[(Col, Width)], state: TabState) -> Element<'static, Message> {
-    let mut r = row![].spacing(12).height(games_rows::HEADER_H).align_y(Alignment::Center);
+    let mut r = row![]
+        .spacing(12)
+        .height(games_rows::HEADER_H)
+        .align_y(Alignment::Center);
     for &(c, w) in cols {
         let cell: Element<'static, Message> = match c {
             Col::Time => button(
@@ -248,7 +266,12 @@ fn header_row(cols: &[(Col, Width)], state: TabState) -> Element<'static, Messag
         };
         r = r.push(container(cell).width(cell_len(w)));
     }
-    container(r).padding(Padding { right: 12.0, ..Padding::ZERO }).into()
+    container(r)
+        .padding(Padding {
+            right: 12.0,
+            ..Padding::ZERO
+        })
+        .into()
 }
 
 fn role_letter(role: Role) -> &'static str {
@@ -301,9 +324,15 @@ fn game_row(g: &Game, cols: &[(Col, Width)], state: TabState) -> Element<'static
             .spacing(6)
             .align_y(Alignment::Center)
             .into(),
-            Col::Eda => text(games_rows::eda(g)).size(SIZE_META).color(TEXT_2).into(),
+            Col::Eda => text(games_rows::eda(g))
+                .size(SIZE_META)
+                .color(TEXT_2)
+                .into(),
             Col::Rank | Col::Length | Col::Crew => text("-").size(SIZE_META).color(TEXT_3).into(),
-            Col::Time => text(local_hm(g.played_at)).size(SIZE_META).color(TEXT_2).into(),
+            Col::Time => text(local_hm(g.played_at))
+                .size(SIZE_META)
+                .color(TEXT_2)
+                .into(),
             Col::Unsure => match games_rows::unsure(g) {
                 Some(u) => {
                     let chip = small_chip_owned(u.label(), WARN, WARN);
@@ -320,9 +349,12 @@ fn game_row(g: &Game, cols: &[(Col, Width)], state: TabState) -> Element<'static
         };
         r = r.push(container(cell).width(cell_len(w)).clip(true));
     }
-    mouse_area(container(r).padding(Padding { right: 12.0, ..Padding::ZERO }))
-        .on_press(Message::ToggleGame(g.session_id.clone()))
-        .into()
+    mouse_area(container(r).padding(Padding {
+        right: 12.0,
+        ..Padding::ZERO
+    }))
+    .on_press(Message::ToggleGame(g.session_id.clone()))
+    .into()
 }
 
 fn pill_box(border: Color) -> impl Fn(&Theme) -> container::Style {
@@ -342,15 +374,20 @@ fn small_chip(label: &'static str, color: Color, border: Color) -> Element<'stat
 }
 
 fn small_chip_owned(label: String, color: Color, border: Color) -> Element<'static, Message> {
-    container(text(label).size(SIZE_LABEL).font(FONT_SEMIBOLD).color(color))
-        .padding(Padding::from([1, 8]))
-        .style(move |_: &Theme| container::Style {
-            border: Border {
-                color: border,
-                width: 1.0,
-                radius: theme::RADIUS_CHIP.into(),
-            },
-            ..container::Style::default()
-        })
-        .into()
+    container(
+        text(label)
+            .size(SIZE_LABEL)
+            .font(FONT_SEMIBOLD)
+            .color(color),
+    )
+    .padding(Padding::from([1, 8]))
+    .style(move |_: &Theme| container::Style {
+        border: Border {
+            color: border,
+            width: 1.0,
+            radius: theme::RADIUS_CHIP.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
 }
