@@ -833,12 +833,8 @@ impl SettingsForm {
     /// flipped, then it becomes `prerelease` or `stable`.
     pub fn to_config(&self, base: &Config) -> Config {
         Config {
-            data_dir: base.data_dir.clone(),
             capture_output: nonempty(&self.capture_output),
             capture_route: self.capture_route,
-            debug_portal_frames: base.debug_portal_frames,
-            screencast_max_fps: base.screencast_max_fps,
-            screencast_pause_between_grabs: base.screencast_pause_between_grabs,
             player_name: nonempty(&self.player_name),
             sync: sync_from_fields(&self.sync_url, &self.sync_token),
             auto_detect: AutoDetectConfig {
@@ -857,28 +853,14 @@ impl SettingsForm {
                 cooldown_secs: parse_u64(&self.cooldown_secs, 120),
             },
             session_window_secs: parse_u64(&self.session_window_secs, 1800),
-            finished_game_close_secs: base.finished_game_close_secs,
             game_process_names: parse_process_names(&self.game_process_names),
             debug_ocr: self.debug_ocr,
-            report_kit_max_games: base.report_kit_max_games,
-            report_kit_max_mb: base.report_kit_max_mb,
-            ocr_threads: base.ocr_threads,
             shadow_recognizer: self.persisted_reader().file_flag(),
             update_channel: update_channel_for(
                 base,
                 self.prerelease_updates_shown,
                 self.prerelease_updates,
             ),
-            setup_completed: base.setup_completed,
-            reader_pack_url: base.reader_pack_url.clone(),
-            name_reader: base.name_reader,
-            // 0.6 keys with no Settings row yet: kept as loaded.
-            player_names: base.player_names.clone(),
-            live_upload: base.live_upload,
-            rank_reader: base.rank_reader,
-            share_stat_pictures: base.share_stat_pictures,
-            share_report_pictures: base.share_report_pictures,
-            capture_only_on_screen: base.capture_only_on_screen,
             reader: if self.new_reader {
                 stat_tracker::config::ReaderSetting::New
             } else {
@@ -889,6 +871,8 @@ impl SettingsForm {
             } else {
                 OcrSetting::Off
             },
+            // Every key the form has no field for stays as loaded.
+            ..base.clone()
         }
     }
 }
