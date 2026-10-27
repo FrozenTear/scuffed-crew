@@ -1,6 +1,6 @@
-//! What the 0.6 stats pages (Overview, Heroes, Maps and Seasons) show
-//! before the tracker has written its game list (a neutral waiting card,
-//! not an empty state), and the "now" their dates count from. The open
+//! What a 0.6 stats page can show before the tracker has written its
+//! game list (a neutral waiting card, not an empty state), and the "now"
+//! its dates count from. The open
 //! game and the filter row use
 //! [`crate::overview_page::settled_of`] and
 //! [`crate::overview_page::shows_filters`].
