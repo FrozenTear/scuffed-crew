@@ -13,8 +13,10 @@
 //! that is now `None`, or a default the format leaves out) is removed with
 //! its own line, a comment at the end of that line included. The comment
 //! lines directly above it move onto the key or table header that follows
-//! it in the same table. Only when no such line follows (it was the last
-//! entry, or the next is a dotted key) do they go with it.
+//! it in the same table. They go with it only when nothing there can take
+//! them: it was the last entry of its table, or the next entry is a dotted
+//! key (`a.b = 1`), an implicit table (`[foo.bar]` with no `[foo]` header)
+//! or an array of tables (`[[foo]]`).
 
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
@@ -79,6 +81,8 @@ fn remove_known(doc: &mut dyn TableLike, key: &str, old: &toml::Value) {
 
 /// Remove `key` from `doc` and put the comment lines above it in front of
 /// the next key or table header of `doc`, so they stay where they were.
+/// With no next entry, or one with no line of its own to carry them (a
+/// dotted key, an implicit table, an array of tables), they are dropped.
 fn remove_keeping_comments(doc: &mut dyn TableLike, key: &str) {
     let above = leading(doc, key).filter(|text| text.contains('#'));
     let next = doc
