@@ -170,6 +170,10 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
                     .font(FONT_SEMIBOLD)
                     .color(TEXT),
             );
+            // Where to connect, while the Upload row that says it is hidden.
+            if !crate::settings_model::row_shown("live_upload") {
+                connection = connection.push(hint(crate::settings_keys::UPLOAD_NO_SITE));
+            }
         }
     }
     if rejected {
@@ -184,8 +188,9 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
         connection = connection.push(crate::capture_reading::lock_line(vars));
     }
 
-    // One pointer to Website connection: the refusal line names it, else
-    // the Upload row's note does.
+    // One pointer to Website connection: the refusal line names it; else,
+    // with no website, the note under "Not connected" (while the Upload row
+    // is hidden) or the Upload row's own note does.
     let demo = app.fixture.is_some();
     let uploads = crate::settings_keys::upload_row(app, demo, UPLOAD_HELP, !rejected);
     // The Sharing heading only while a sharing row shows.

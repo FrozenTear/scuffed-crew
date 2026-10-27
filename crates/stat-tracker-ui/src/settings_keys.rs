@@ -28,8 +28,10 @@ use crate::settings_update::Msg;
 const NAMES_HELP: &str = "As shown in-game, without the #1234.";
 /// Under Upload games while it is off.
 const UPLOAD_OFF_NOTE: &str = "Games stay on this computer and upload once this is on again.";
-/// Under Upload games while no website is set.
-const UPLOAD_NO_SITE: &str = "Add the website URL and token under Advanced, Website connection.";
+/// Under Upload games while no website is set, and under "Not connected"
+/// while that row is hidden.
+pub(crate) const UPLOAD_NO_SITE: &str =
+    "Add the website URL and token under Advanced, Website connection.";
 
 /// A switch that writes `edit(on)`, or a disabled one in a demo.
 fn edit_switch<'a>(on: bool, demo: bool, edit: fn(bool) -> ConfigEdit) -> Element<'a, Message> {
