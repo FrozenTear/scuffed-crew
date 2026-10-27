@@ -10,6 +10,7 @@ use chrono::{DateTime, Local, TimeZone, Timelike, Utc};
 
 use crate::aggregate::SessionGroup;
 use crate::model::{Game, Outcome};
+use stat_tracker::suspect;
 
 /// Content width (the page minus its side padding) from which the wide
 /// grid applies. The spec switches at a 1440 px window; the page pads
@@ -262,25 +263,32 @@ pub fn sort_games(games: &mut [&Game], sort: Sort) {
     });
 }
 
-/// The tracker's edit name for a flat suspect name (`e` is `elims`).
-fn edit_name(flat: &str) -> &str {
-    match flat {
-        "e" => "elims",
-        "d" => "deaths",
-        "a" => "assists",
-        "dmg" => "damage",
-        "h" => "healing",
-        "mit" => "mitigation",
-        "map" | "mode" => "map_name",
-        "result" => "outcome",
-        other => other,
+/// The flat suspect names `field` stands for: an edit name (`damage`)
+/// maps through stat-tracker-core's table, a flat name (`dmg`) is itself.
+fn flats_for(field: &str) -> Vec<&str> {
+    match suspect::suspect_names_for_edit(field) {
+        [] => suspect::flat_suspect_name(field).into_iter().collect(),
+        names => names.to_vec(),
     }
 }
 
-/// A field the reader was unsure of (flat name, `e` or `dmg`) that no hand
-/// edit has fixed since.
+/// A flat name the reader stored (as `dmg` or a row name like `r3.dmg`)
+/// that no hand edit has fixed since. Both sides use
+/// `stat_tracker::suspect`, the rules the store and uploader apply.
+fn flat_unsure_now(g: &Game, flat: &str) -> bool {
+    g.suspect_fields
+        .iter()
+        .any(|s| suspect::flat_suspect_name(s) == Some(flat))
+        && !g
+            .edited_fields
+            .iter()
+            .any(|e| suspect::suspect_names_for_edit(e).contains(&flat))
+}
+
+/// A field the reader was unsure of that no hand edit has fixed since.
+/// `field` is a flat name (`e`, `dmg`) or an edit name (`elims`, `damage`).
 pub fn unsure_now(g: &Game, field: &str) -> bool {
-    g.field_unsure(field) && !g.edited_fields.iter().any(|e| e == edit_name(field))
+    flats_for(field).into_iter().any(|f| flat_unsure_now(g, f))
 }
 
 /// Elims, deaths or assists still unsure: E/D/A reads amber.
@@ -290,7 +298,16 @@ pub fn eda_unsure(g: &Game) -> bool {
 
 /// "2 stats unsure": the fields still unsure. `None` when there are none.
 pub fn unsure_label(g: &Game) -> Option<String> {
-    let n = g.suspect_fields.iter().filter(|f| unsure_now(g, f)).count();
+    // Distinct flat names, so `dmg` and a leftover `r3.dmg` count once.
+    let mut flats: Vec<&str> = g
+        .suspect_fields
+        .iter()
+        .filter_map(|s| suspect::flat_suspect_name(s))
+        .filter(|f| flat_unsure_now(g, f))
+        .collect();
+    flats.sort_unstable();
+    flats.dedup();
+    let n = flats.len();
     match n {
         0 => None,
         1 => Some("1 stat unsure".to_string()),
@@ -344,6 +361,9 @@ impl Mark {
 
 /// The row's marks: what still needs a look, then an upload the website
 /// refused. A game in progress has no outcome yet, so no outcome mark.
+/// The rejected upload shows only when nothing else does: the spec's row
+/// has one marker column (r1.1 draws the rejected undecided game with
+/// "No outcome · Set" alone), and the open panel always says why.
 pub fn marks(g: &Game, in_progress: bool) -> Vec<Mark> {
     let mut out = Vec::new();
     if g.outcome == Outcome::Unknown && !in_progress {
@@ -354,7 +374,7 @@ pub fn marks(g: &Game, in_progress: bool) -> Vec<Mark> {
     if let Some(label) = unsure_label(g) {
         out.push(Mark::Unsure(label));
     }
-    if g.upload_reject.is_some() {
+    if g.upload_reject.is_some() && out.is_empty() {
         out.push(Mark::UploadRejected);
     }
     out
@@ -621,6 +641,9 @@ mod tests {
         g.upload_reject = Some("bad".into());
         assert_eq!(marks(&g, false), [Mark::UploadRejected]);
         assert!(!Mark::UploadRejected.is_warning());
+        // Beside another mark it would not fit the column; the panel says it.
+        g.outcome = Outcome::Unknown;
+        assert_eq!(marks(&g, false), [Mark::NoOutcome]);
     }
 
     /// Ported from #555; the store's flat names (`dmg`, `h`) against the
@@ -633,6 +656,25 @@ mod tests {
         assert_eq!(unsure_label(&g).as_deref(), Some("1 stat unsure"));
         g.edited_fields.push("healing".into());
         assert_eq!(unsure_label(&g), None);
+    }
+
+    /// Older rows store row-prefixed names; `r3.dmg` is damage unsure.
+    #[test]
+    fn a_row_prefixed_name_counts_as_its_stat() {
+        let mut g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["r3.dmg"]);
+        assert!(unsure_now(&g, "dmg"));
+        assert!(unsure_now(&g, "damage"));
+        assert!(!unsure_now(&g, "h"));
+        assert_eq!(unsure_label(&g).as_deref(), Some("1 stat unsure"));
+        g.suspect_fields.push("dmg".into());
+        assert_eq!(unsure_label(&g).as_deref(), Some("1 stat unsure"));
+        assert!(crate::stat_tiles::unsure_now(&g, "damage"));
+        g.edited_fields = vec!["damage".into()];
+        assert!(!unsure_now(&g, "dmg"));
+        assert_eq!(unsure_label(&g), None);
+        // Not a row name: left alone, as the store does.
+        let g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["x3.dmg"]);
+        assert!(!unsure_now(&g, "dmg"));
     }
 
     #[test]

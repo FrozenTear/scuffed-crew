@@ -9,9 +9,9 @@
 //! TODO(#557): a local shim of #557's `stat_tiles.rs` (head 47d8d0fa), so
 //! the Games panel builds on the same API before #557 lands. #557 owns the
 //! module. When it lands, take its copy and keep only the two changes
-//! marked SHIM below: [`unsure_now`] also reads the reader's flat names
-//! ("dmg"), and [`tile_with`] / [`TileExtras`] add the lines the Games v2
-//! panel puts in a tile. [`row`] and the tile look are #557's, unchanged.
+//! marked SHIM below: [`unsure_now`] reads the reader's flat and row names
+//! ("dmg", "r3.dmg") through `stat_tracker::suspect`, and [`tile_with`] /
+//! [`TileExtras`] add the lines the Games v2 panel puts in a tile. [`row`] and the tile look are #557's, unchanged.
 
 use iced::widget::{Column, Row, column, container, image, text};
 use iced::{Alignment, Background, Border, Color, Element, Fill, Padding, Theme};
@@ -42,25 +42,13 @@ pub fn row(g: &Game) -> Element<'static, Message> {
 
 /// A field the reader was unsure of that no hand edit has fixed since.
 ///
-/// SHIM: the reader stores flat names in `suspect_fields` ("dmg", "h"),
-/// while `field` here is the edit name ("damage"), so both are checked.
-/// #557's copy checks only `field` and misses a real "dmg".
+/// SHIM: the reader stores flat names in `suspect_fields` ("dmg", "h", or
+/// a row name like "r3.dmg" on older rows), while `field` here is the edit
+/// name ("damage"). [`crate::games_rows::unsure_now`] maps both through
+/// `stat_tracker::suspect`. #557's copy checks only `field` and misses a
+/// real "dmg".
 pub fn unsure_now(g: &Game, field: &str) -> bool {
-    (g.field_unsure(field) || g.field_unsure(flat_name(field)))
-        && !g.edited_fields.iter().any(|e| e == field)
-}
-
-/// SHIM: the reader's flat name for an edit name.
-fn flat_name(field: &str) -> &str {
-    match field {
-        "elims" => "e",
-        "deaths" => "d",
-        "assists" => "a",
-        "damage" => "dmg",
-        "healing" => "h",
-        "mitigation" => "mit",
-        other => other,
-    }
+    crate::games_rows::unsure_now(g, field)
 }
 
 fn stat(g: &Game, field: &str) -> u32 {
@@ -180,7 +168,8 @@ mod tests {
             crate::cli::FixtureKind::Sample,
         ))
         .remove(0);
-        g.suspect_fields = vec!["damage".into()];
+        // SHIM: the reader stores "dmg", never the edit name "damage".
+        g.suspect_fields = vec!["dmg".into()];
         g.edited_fields.clear();
         assert!(unsure_now(&g, "damage"));
         g.edited_fields = vec!["damage".into()];

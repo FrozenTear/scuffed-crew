@@ -78,7 +78,9 @@ pub fn view<'a>(
     if state.filters_open || crate::filter_chips::active_count(app) > 0 {
         col = col.push(chips);
     }
-    if app.games.iter().any(|game| game.upload_reject.is_some()) {
+    // The spec does not place "Retry rejected uploads" (UX Spec v2 open
+    // question 5), so it waits under Filters instead of above the table.
+    if state.filters_open && app.games.iter().any(|game| game.upload_reject.is_some()) {
         col = col.push(crate::games::retry_rejected_uploads_button());
     }
     if shown.is_empty() {
