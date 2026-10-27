@@ -132,6 +132,16 @@ pub(crate) fn companion(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     divided(vec![show, shortcut.into()])
 }
 
+/// The line under a refused token. Under `SCUFFED_TOKEN` the Website
+/// connection fields are locked, so it points to the variable instead.
+fn rejected_token_line(token_from_env: bool) -> &'static str {
+    if token_from_env {
+        "The website refused the token from SCUFFED_TOKEN. Set a new one there, then start the app again."
+    } else {
+        "The website refused the token. Paste a new one under Advanced, Website connection."
+    }
+}
+
 /// Website account: the connection, uploads, and the Sharing rows.
 pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
     let sync_on = app.sync_on();
@@ -169,15 +179,16 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
             );
         }
     }
+    let env_vars = crate::settings_env::sync_env(app.env_overlay());
     if rejected {
         connection = connection.push(
-            text("The website refused the token. Paste a new one under Advanced, Website connection.")
+            text(rejected_token_line(env_vars.is_some()))
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(theme::WARN),
         );
     }
-    if let Some(vars) = crate::settings_env::sync_env(app.env_overlay()) {
+    if let Some(vars) = env_vars {
         connection = connection.push(crate::capture_reading::lock_line(vars));
     }
 
@@ -543,5 +554,21 @@ mod tests {
             assert!(!line.contains("S11"), "{line}");
         }
         assert!(!WHAT_LEAVES_LABEL.contains('›'));
+    }
+
+    /// Under SCUFFED_TOKEN the Website connection fields are locked, so
+    /// the refused-token line names the variable, not the fields.
+    #[test]
+    fn a_refused_outside_token_points_to_the_variable() {
+        let env = rejected_token_line(true);
+        assert!(env.contains("SCUFFED_TOKEN"), "{env}");
+        assert!(!env.contains("Website connection"), "{env}");
+        assert!(rejected_token_line(false).contains("Website connection"));
+        for line in [env, rejected_token_line(false)] {
+            assert!(
+                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
+                "{line}"
+            );
+        }
     }
 }
