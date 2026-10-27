@@ -3,6 +3,7 @@ use serde::Deserialize;
 
 use crate::components::ui::{EmptyState, HeroSelect, Pill, PillTone};
 use crate::routes::Route;
+use crate::sample::{LIST_RULE_NOTE, list_result};
 use crate::util::encode_query;
 use scuffed_api_client::ApiClient;
 
@@ -32,6 +33,15 @@ struct PublicMember {
 #[derive(Debug, Clone, Deserialize)]
 struct HeroScoped {
     games: u32,
+    /// Victories in `games`. Older servers omit the three counts.
+    #[serde(default)]
+    wins: u32,
+    /// Defeats in `games`.
+    #[serde(default)]
+    losses: u32,
+    /// Draws in `games`.
+    #[serde(default)]
+    draws: u32,
     winrate: f32,
 }
 
@@ -166,6 +176,14 @@ const PAGE_CSS: &str = r#"
         color: var(--accent);
         letter-spacing: 0.5px;
     }
+    .member-hero-stat.muted {
+        color: var(--text-3);
+    }
+    .members-rule-note {
+        color: var(--text-3);
+        font-size: 0.8rem;
+        margin: 0 0 1rem;
+    }
     .member-main-role {
         margin-top: 0.4rem;
         font-size: 0.75rem;
@@ -265,6 +283,7 @@ pub fn Members() -> Element {
                             }
                         } else {
                             rsx! {
+                                p { class: "members-rule-note", "{LIST_RULE_NOTE}" }
                                 div { class: "members-grid",
                                     for m in filtered {
                                         {render_member_card(m, Some(h.as_str()))}
@@ -295,17 +314,10 @@ fn render_member_card(m: &PublicMember, hero: Option<&str>) -> Element {
     let bio = m.bio.clone().unwrap_or_default();
 
     // Hero-scoped stat line, only when a hero is selected AND this member has
-    // played it (contract Q2 nested block present). winrate is a 0.0 to 1.0
-    // fraction, shown as a whole-number percent to match other pages.
-    let hero_stat = match (hero, m.hero_scoped.as_ref()) {
-        (Some(h), Some(hs)) => Some(format!(
-            "{} games · {:.0}% WR on {}",
-            hs.games,
-            hs.winrate * 100.0,
-            h
-        )),
-        _ => None,
-    };
+    // played it (contract Q2 nested block present).
+    let hero_stat = hero
+        .zip(m.hero_scoped.as_ref())
+        .map(|(h, hs)| hero_stat_line(h, hs));
 
     rsx! {
         Link { to: Route::MemberProfile { id: m.id.clone() }, class: "member-card",
@@ -327,8 +339,81 @@ fn render_member_card(m: &PublicMember, hero: Option<&str>) -> Element {
                 p { class: "member-bio", "{bio}" }
             }
             if let Some(stat) = &hero_stat {
-                p { class: "member-hero-stat", "{stat}" }
+                p { class: stat.class, "{stat.text}" }
             }
         }
+    }
+}
+
+/// Hero stat line on a member card under the hero filter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HeroStatLine {
+    text: String,
+    class: &'static str,
+}
+
+/// Small-sample rule on the hero stat line: the win rate from 10 games, the
+/// record below that, muted under 3 games. `winrate` is a 0.0 to 1.0
+/// fraction.
+fn hero_stat_line(hero: &str, hs: &HeroScoped) -> HeroStatLine {
+    let result = list_result(hs.games, hs.wins, hs.losses, hs.draws, hs.winrate);
+    let games = hs.games;
+    let text = if result.is_rate {
+        format!("{games} games · {} WR on {hero}", result.text)
+    } else {
+        format!("{games} games · {} on {hero}", result.text)
+    };
+    let class = if result.muted {
+        "member-hero-stat muted"
+    } else {
+        "member-hero-stat"
+    };
+    HeroStatLine { text, class }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(games: u32, wins: u32, losses: u32, draws: u32, winrate: f32) -> HeroStatLine {
+        let hs = HeroScoped {
+            games,
+            wins,
+            losses,
+            draws,
+            winrate,
+        };
+        hero_stat_line("Ana", &hs)
+    }
+
+    #[test]
+    fn hero_stat_line_follows_the_small_sample_rule() {
+        let two = line(2, 1, 1, 0, 0.5);
+        assert_eq!(two.text, "2 games · 1W-1L on Ana");
+        assert_eq!(two.class, "member-hero-stat muted");
+
+        let nine = line(9, 5, 3, 1, 5.0 / 9.0);
+        assert_eq!(nine.text, "9 games · 5W-3L-1D on Ana");
+        assert_eq!(nine.class, "member-hero-stat");
+        assert!(!nine.text.contains('%'), "{}", nine.text);
+
+        let ten = line(10, 6, 4, 0, 0.6);
+        assert_eq!(ten.text, "10 games · 60% WR on Ana");
+        assert_eq!(ten.class, "member-hero-stat");
+    }
+
+    #[test]
+    fn hero_scoped_reads_the_record_and_older_blocks() {
+        let new: HeroScoped =
+            serde_json::from_str(r#"{"games":5,"wins":3,"losses":1,"draws":1,"winrate":0.6}"#)
+                .unwrap();
+        assert_eq!(
+            hero_stat_line("Ana", &new).text,
+            "5 games · 3W-1L-1D on Ana"
+        );
+
+        let old: HeroScoped = serde_json::from_str(r#"{"games":5,"winrate":0.6}"#).unwrap();
+        assert_eq!((old.wins, old.losses, old.draws), (0, 0, 0));
+        assert_eq!(hero_stat_line("Ana", &old).text, "5 games · 3W on Ana");
     }
 }
