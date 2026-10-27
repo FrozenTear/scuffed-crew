@@ -1777,7 +1777,7 @@ impl TrackerApp {
         ))
     }
 
-    fn refresh_kit_sessions(&mut self) {
+    pub(crate) fn refresh_kit_sessions(&mut self) {
         self.sessions_with_kit = self
             .games
             .iter()

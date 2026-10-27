@@ -415,6 +415,22 @@ mod tests {
         assert!(app.games_tab.deleted_note.is_none());
     }
 
+    /// Opening a row with Enter or the Delete key refreshes the kit set
+    /// as a click does: a stale entry goes.
+    #[test]
+    fn opening_a_row_by_key_refreshes_the_kits() {
+        for key in [Msg::Enter, Msg::DeleteKey] {
+            let (_dir, mut app) = app();
+            let sid = crate::fixtures_games::UNSURE.to_string();
+            app.expanded = None;
+            app.games_tab.focus = Focus::Row(sid.clone());
+            app.sessions_with_kit.insert("stale".into());
+            send(&mut app, key);
+            assert_eq!(app.expanded.as_deref(), Some(sid.as_str()));
+            assert!(app.sessions_with_kit.is_empty());
+        }
+    }
+
     /// Nothing open or focused, or the edit form up: Delete does nothing.
     #[test]
     fn the_delete_key_does_nothing_without_a_row_or_over_the_form() {

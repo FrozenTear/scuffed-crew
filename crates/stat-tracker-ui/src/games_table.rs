@@ -154,6 +154,9 @@ fn press_focused(app: &mut TrackerApp) -> bool {
             app.games_tab.deleted_note = None;
             app.expanded = Some(sid);
             app.editing = false;
+            // As a click (`ToggleGame`): a kit written since the last
+            // snapshot shows in the panel.
+            app.refresh_kit_sessions();
         }
         _ => return false,
     }
@@ -174,6 +177,7 @@ fn delete_key(app: &mut TrackerApp) {
     if app.expanded.is_none() {
         app.games_tab.deleted_note = None;
         app.expanded = Some(sid.clone());
+        app.refresh_kit_sessions();
     }
     app.games_tab.picker = None;
     app.confirm_delete = Some(sid);
