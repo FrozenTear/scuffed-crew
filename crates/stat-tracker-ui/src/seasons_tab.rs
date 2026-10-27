@@ -152,8 +152,8 @@ fn line(
     }
 }
 
-/// The form over the newest decided games in `games`, if there are at
-/// least [`RATE_MIN`] of them.
+/// The form over the newest [`LAST_N`] decided games in `games`, if there
+/// are more than [`LAST_N`] of them.
 pub fn form(games: &[&Game], season_pct: Option<u32>) -> Option<Form> {
     let mut decided: Vec<&Game> = games
         .iter()
