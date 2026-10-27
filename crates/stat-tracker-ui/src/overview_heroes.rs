@@ -106,7 +106,10 @@ fn card(h: &HeroAgg) -> Element<'static, Message> {
     );
     let (big, meter): (String, Element<'static, Message>) = match rate(&h.record) {
         Some(p) => (format!("{p}%"), crate::winrate_bar::bar(p as f32)),
-        None => (h.record.wl_label(), dashes(h.record.games)),
+        None => (
+            h.record.wl_label(),
+            dashes(crate::small_sample::decided(&h.record)),
+        ),
     };
     container(
         column![

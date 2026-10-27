@@ -32,6 +32,7 @@ pub mod daemon;
 pub mod fixtures;
 mod form_widgets;
 pub mod games;
+mod games_state;
 mod hero_pack_hint;
 pub mod heroes;
 mod heroes_page;

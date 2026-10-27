@@ -4,7 +4,8 @@
 //! with Review games, and the Companion card with its switch.
 //!
 //! Small-sample rule ([`crate::small_sample`]): a win rate shows only
-//! from 10 decided games; fewer show the record instead. Rank now and Peak wait for the rank reader.
+//! from 10 decided games; fewer show the record instead. Rank now and
+//! Peak wait for the rank reader.
 
 use iced::widget::{Column, Row, button, column, container, row, text, toggler};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};

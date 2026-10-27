@@ -410,7 +410,7 @@ pub struct TrackerApp {
     /// the classic OCR switch.
     pub ocr_switch: settings::OcrSwitchView,
     pub vacuum_busy: bool,
-    snapshot_mtime: Option<SystemTime>,
+    pub(crate) snapshot_mtime: Option<SystemTime>,
     seasons_url: Option<String>,
     last_seasons_attempt: Option<DateTime<Utc>>,
     /// Last update check started (GUI-7). `None` in fixture mode.

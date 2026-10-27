@@ -171,17 +171,26 @@ pub fn filter_games<'a>(games: &'a [Game], filter: &GameFilter) -> Vec<&'a Game>
         .iter()
         .filter(|g| filter.window.is_none_or(|w| w.contains(g.played_at)))
         .filter(|g| filter.roles.is_empty() || filter.roles.contains(&g.role))
-        .filter(|g| filter.hero.as_ref().is_none_or(|h| &g.hero == h))
+        .filter(|g| {
+            filter
+                .hero
+                .as_ref()
+                .is_none_or(|h| hero_key(&g.hero) == hero_key(h))
+        })
         .filter(|g| filter.map.as_ref().is_none_or(|m| &g.map_name == m))
         .filter(|g| filter.outcome.is_none_or(|o| g.outcome == o))
         .collect()
 }
 
+/// The heroes the Hero dropdown offers, once each under the name the
+/// stats use ([`hero_key`]), so "soldier_76" and "Soldier: 76" are one
+/// choice and picking it matches both.
 pub fn distinct_heroes(games: &[&Game]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for g in games {
-        if !g.hero.is_empty() && !out.iter().any(|h| h == &g.hero) {
-            out.push(g.hero.clone());
+        let key = hero_key(&g.hero);
+        if !g.hero.is_empty() && !out.contains(&key) {
+            out.push(key);
         }
     }
     out.sort();

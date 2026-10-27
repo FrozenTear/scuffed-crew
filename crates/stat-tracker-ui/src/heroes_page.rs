@@ -1,12 +1,15 @@
 //! The 0.6 Heroes page (spec r1.1, png/A-heroes-*): the filter row, then
-//! "ALL TIME · 17 HEROES WITH 3 OR MORE GAMES · WIN RATE FROM 10 GAMES"
-//! with Sort (Games, Win rate, Recent) and Cards | List on the right.
-//! Cards: heroes with 10 or more games show their win rate on the shared
-//! bar ([`crate::winrate_bar`]); under "3 TO 9 GAMES · RECORD ONLY" the
-//! rest show their record, one dash per game out of ten and how many more
-//! a win rate needs; heroes under 3 games fold into "Other heroes", with
-//! the games whose hero is unknown marked as in Needs a look. List is the
-//! same heroes as a table. Five cards across, two below a 1100 px window.
+//! "ALL TIME · 17 HEROES WITH 3 OR MORE GAMES · WIN RATE FROM 10 DECIDED
+//! GAMES" with Sort (Games, Win rate, Recent) and Cards | List on the
+//! right. The small-sample rule is [`crate::small_sample`]: heroes with 10
+//! or more decided games show their win rate on the shared bar
+//! ([`crate::winrate_bar`]); under "TOO FEW GAMES" the rest show their
+//! record and one dash per decided game out of ten; heroes under 3 games
+//! fold into "Other heroes" (muted when shown), with the games whose hero
+//! is unknown marked as in Needs a look. List is the same heroes as a
+//! table. Five cards across, two below a 1100 px window. Nothing but the
+//! loading line shows before the tracker's game list, and no filter row or
+//! header with no games at all. The open game waits for its result.
 //! The 0.5 sidebar layout keeps its own Heroes page ([`crate::heroes`]).
 
 use std::collections::HashMap;
@@ -203,8 +206,41 @@ pub fn header_line(scope: &str, carded: usize) -> String {
     )
 }
 
+/// The chips Heroes leaves out of its filter row, because
+/// [`stats_filter`] does not apply them (Needs a look filters Games only).
+pub const HIDDEN: crate::overview_chips::Hidden = crate::overview_chips::Hidden {
+    season: false,
+    hero: true,
+    map: false,
+    result: true,
+    needs_look: true,
+};
+
+/// The games the Heroes stats count: [`stats_filter`] less the open game.
+pub fn shown_games(app: &TrackerApp) -> Vec<&Game> {
+    crate::games_state::settled(
+        filter_games(&app.games, &stats_filter(app)),
+        app.live_game_session.as_deref(),
+    )
+}
+
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
-    let shown = filter_games(&app.games, &stats_filter(app));
+    let mut col = Column::new().spacing(16).width(Fill);
+    if crate::games_state::loading(app) {
+        return col
+            .push(widgets::empty_surface(&format!(
+                "{}. {}",
+                crate::games_state::LOADING,
+                crate::games_state::LOADING_LINE
+            )))
+            .into();
+    }
+    if !crate::games_state::shows_filters(app) {
+        return col
+            .push(widgets::empty_surface(empty_copy(&app.games)))
+            .into();
+    }
+    let shown = shown_games(app);
     let stats = aggregate_games(&shown);
     let last = last_played(&shown);
     let page = app.heroes_page;
@@ -214,14 +250,13 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let roomy = crate::overview_page::window_for(content_width) >= ROOMY_FROM;
 
     let pool = filter_games(&app.games, &app.header_filter());
-    let heroes = crate::aggregate::distinct_heroes(&pool);
     let maps = crate::aggregate::distinct_maps(&pool);
-    let mut col = Column::new().spacing(16).width(Fill);
-    col = col.push(crate::overview_page::chip_row(
+    col = col.push(crate::overview_page::chip_row_except(
         app,
-        &heroes,
+        &[],
         &maps,
         crate::overview_page::chips_fold(content_width),
+        HIDDEN,
     ));
     let carded = t.rated.len() + t.record.len();
     col = col.push(
@@ -310,7 +345,7 @@ fn view_switch(view: HeroView) -> Element<'static, Message> {
     ])
 }
 
-/// "3 TO 9 GAMES · RECORD ONLY" with a rule to the edge.
+/// "TOO FEW GAMES" with a rule to the edge.
 fn divider(label: &str) -> Element<'static, Message> {
     row![
         widgets::label_text(label),
@@ -336,6 +371,16 @@ fn grid(heroes: &[&HeroAgg], across: usize, roomy: bool) -> Element<'static, Mes
     col.into()
 }
 
+/// Text colours for a hero: muted under 3 games ("Other heroes" opened
+/// with Show), so it never reads like a counted card.
+fn ink(h: &HeroAgg) -> (iced::Color, iced::Color) {
+    if sample(&h.record) == Sample::Fold {
+        (TEXT_3, TEXT_3)
+    } else {
+        (TEXT, TEXT_2)
+    }
+}
+
 fn head(h: &HeroAgg, size: f32) -> Element<'static, Message> {
     let mut names = column![].spacing(2);
     if let Some(label) = role_label(h.role) {
@@ -350,7 +395,7 @@ fn head(h: &HeroAgg, size: f32) -> Element<'static, Message> {
         text(display_hero_name(&h.hero))
             .size(15)
             .font(FONT_BOLD)
-            .color(TEXT),
+            .color(ink(h).0),
     );
     row![portrait(size), names]
         .spacing(12)
@@ -358,8 +403,8 @@ fn head(h: &HeroAgg, size: f32) -> Element<'static, Message> {
         .into()
 }
 
-/// A hero card: its rate on the shared bar from 10 games, else its record
-/// with one dash per game out of ten.
+/// A hero card: its rate on the shared bar from 10 decided games, else
+/// its record with one dash per decided game out of ten.
 fn card(h: &HeroAgg, roomy: bool) -> Element<'static, Message> {
     let (portrait_px, pad) = card_metrics(roomy);
     let (value, meter, sub) = match rate(&h.record) {
@@ -370,14 +415,14 @@ fn card(h: &HeroAgg, roomy: bool) -> Element<'static, Message> {
         ),
         None => (
             h.record.wl_label(),
-            crate::overview_heroes::dashes(h.record.games),
+            crate::overview_heroes::dashes(crate::small_sample::decided(&h.record)),
             record_sub(h),
         ),
     };
     container(
         column![
             head(h, portrait_px),
-            text(value).size(24).font(FONT_EXTRABOLD).color(TEXT),
+            text(value).size(24).font(FONT_EXTRABOLD).color(ink(h).0),
             meter,
             text(sub).size(SIZE_LABEL).font(FONT_MEDIUM).color(TEXT_3),
         ]
@@ -437,14 +482,14 @@ fn others_row(others: &[&HeroAgg], unknown: usize, open: bool) -> Element<'stati
         .into()
 }
 
-/// The List view's groups: "10 or more games · win rate" and "Too few
-/// games", the same tiers as the cards. Heroes under 3 games stay folded
+/// The List view's groups: "10 or more decided games · win rate" and
+/// "Too few games", the same tiers as the cards. Heroes under 3 games stay folded
 /// under the "Other heroes" row.
 pub fn list_groups<'a>(t: &Tiers<'a>) -> Vec<(String, Vec<&'a HeroAgg>)> {
     let mut groups = Vec::new();
     if !t.rated.is_empty() {
         groups.push((
-            format!("{RATE_MIN} or more games · win rate"),
+            format!("{RATE_MIN} or more decided games · win rate"),
             t.rated.clone(),
         ));
     }
@@ -455,7 +500,7 @@ pub fn list_groups<'a>(t: &Tiers<'a>) -> Vec<(String, Vec<&'a HeroAgg>)> {
 }
 
 /// The List view: one row per hero with its role, games, record, win rate
-/// (the shared bar, or "Too few games" under 10) and when it was last
+/// (the shared bar, or "Too few games" under 10 decided) and when it was last
 /// played, under a group row per tier (`label` empty for none).
 fn list(
     groups: &[(String, Vec<&HeroAgg>)],
@@ -521,6 +566,7 @@ fn list_row(
         .get(&h.hero)
         .map(|at| played_label(*at, now))
         .unwrap_or_default();
+    let (strong, soft) = ink(h);
     container(
         row![
             container(head(h, 28.0)).width(iced::Length::FillPortion(3)),
@@ -528,18 +574,18 @@ fn list_row(
                 text(h.record.games.to_string())
                     .size(SIZE_META)
                     .font(FONT_SEMIBOLD)
-                    .color(TEXT)
+                    .color(strong)
             )
             .width(70),
             container(
                 text(h.record.wl_label())
                     .size(SIZE_META)
                     .font(FONT_SEMIBOLD)
-                    .color(TEXT)
+                    .color(strong)
             )
             .width(90),
             container(rate_cell).width(iced::Length::FillPortion(2)),
-            container(text(when).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2)).width(110),
+            container(text(when).size(SIZE_META).font(FONT_MEDIUM).color(soft)).width(110),
         ]
         .spacing(12)
         .align_y(Alignment::Center),
@@ -573,7 +619,7 @@ mod tests {
     }
 
     #[test]
-    fn heroes_split_at_ten_and_three_games() {
+    fn heroes_split_at_ten_decided_and_three_games() {
         let heroes = vec![
             hero("Wrecking Ball", 624, 330, 290),
             hero("Zarya", 12, 0, 12),
@@ -645,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn the_rate_starts_at_exactly_ten_games() {
+    fn the_rate_starts_at_exactly_ten_decided_games() {
         let nine = hero("Sierra", 9, 5, 4);
         let ten = hero("Kiriko", 10, 6, 4);
         let even = hero("Juno", 10, 5, 5);
@@ -697,6 +743,86 @@ mod tests {
     }
 
     #[test]
+    fn hidden_chips_are_the_filters_heroes_ignores() {
+        use crate::overview_chips::active_count_except;
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        let all = shown_games(&app).len();
+        app.filter_hero = Some("Nobody".into());
+        app.filter_outcome = Some(crate::model::Outcome::Win);
+        app.needs_look_filter = true;
+        assert_eq!(
+            shown_games(&app).len(),
+            all,
+            "hero, result and Needs a look ignored"
+        );
+        assert_eq!(
+            active_count_except(&app, HIDDEN),
+            0,
+            "so none of them shows"
+        );
+        app.filter_map = Some("Nowhere".into());
+        assert!(shown_games(&app).is_empty(), "map applies");
+        assert_eq!(active_count_except(&app, HIDDEN), 1, "and shows");
+    }
+
+    #[test]
+    fn the_open_game_is_not_an_undecided_hero_game() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        let all = shown_games(&app).len();
+        app.games[0].outcome = crate::model::Outcome::Unknown;
+        app.live_game_session = Some(app.games[0].session_id.clone());
+        assert_eq!(shown_games(&app).len(), all - 1);
+        app.live_game_session = None;
+        assert_eq!(shown_games(&app).len(), all);
+    }
+
+    #[test]
+    fn small_heroes_draw_muted_and_dashes_count_decided_games() {
+        assert_eq!(ink(&hero("Orisa", 2, 1, 1)), (TEXT_3, TEXT_3));
+        assert_eq!(ink(&hero("Sierra", 8, 3, 4)), (TEXT, TEXT_2));
+        let h = hero("Sierra", 8, 3, 4);
+        assert_eq!(
+            crate::small_sample::decided(&h.record),
+            7,
+            "one dash per decided game"
+        );
+    }
+
+    #[test]
+    fn the_hero_dropdown_offers_one_name_per_hero() {
+        let mut games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        games.truncate(2);
+        games[0].hero = "Soldier: 76".into();
+        games[1].hero = "soldier_76".into();
+        let refs: Vec<&Game> = games.iter().collect();
+        assert_eq!(crate::aggregate::distinct_heroes(&refs), ["Soldier: 76"]);
+        let picked = crate::aggregate::GameFilter {
+            hero: Some("Soldier: 76".into()),
+            ..crate::aggregate::GameFilter::default()
+        };
+        assert_eq!(filter_games(&games, &picked).len(), 2);
+    }
+
+    #[test]
+    fn nothing_but_the_empty_line_with_no_games() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        assert!(!crate::games_state::shows_filters(&app));
+        let _ = view(&app, 1300.0);
+        app.fixture = None;
+        app.snapshot_mtime = None;
+        assert!(crate::games_state::loading(&app));
+        let _ = view(&app, 1300.0);
+    }
+
+    #[test]
     fn empty_page_says_why() {
         assert_eq!(
             empty_copy(&[]),
@@ -725,7 +851,7 @@ mod tests {
             flat,
             [
                 (
-                    "10 or more games · win rate".to_string(),
+                    "10 or more decided games · win rate".to_string(),
                     vec!["Wrecking Ball".to_string()]
                 ),
                 ("Too few games".to_string(), vec!["Sierra".to_string()]),
