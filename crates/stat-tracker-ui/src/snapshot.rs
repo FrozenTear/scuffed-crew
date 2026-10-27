@@ -91,11 +91,8 @@ fn install_fixture_in(
     let snap = fixtures::snapshot(kind);
     let bytes = serde_json::to_vec_pretty(&snap)?;
     std::fs::write(data_dir.join("live_snapshot.json"), bytes)?;
-    if kind.has_games() {
-        std::fs::write(
-            data_dir.join("seasons.json"),
-            fixtures::sample_seasons_json(),
-        )?;
+    if let Some(json) = fixtures::seasons_json(kind) {
+        std::fs::write(data_dir.join("seasons.json"), json)?;
     } else {
         let _ = std::fs::remove_file(data_dir.join("seasons.json"));
     }

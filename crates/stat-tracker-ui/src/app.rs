@@ -227,6 +227,8 @@ pub enum Message {
     OverviewPage(crate::overview_page::Msg),
     /// A message from the 0.6 Heroes page ([`crate::heroes_page::update`]).
     HeroesPage(crate::heroes_page::Msg),
+    /// A message from the 0.6 Maps and Seasons tabs ([`crate::tab_bits::update`]).
+    Pages(crate::tab_bits::PageMsg),
 }
 
 struct NotesDialog {
@@ -345,6 +347,8 @@ pub struct TrackerApp {
     pub overview_page: crate::overview_page::OverviewPage,
     /// The 0.6 Heroes page's sort, view and fold ([`crate::heroes_page`]).
     pub heroes_page: crate::heroes_page::HeroesPage,
+    /// The 0.6 Maps tab's sort and Show row ([`crate::maps_tab`]).
+    pub maps_ui: crate::maps_tab::MapsUi,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
     pub(crate) toast_action: Option<Message>,
@@ -460,8 +464,8 @@ impl TrackerApp {
         let games = games_from_snapshot(&snap);
         let mut seasons = seasons::load_cache(&cli.data_dir);
         if seasons.seasons.is_empty()
-            && cli.fixture.is_some_and(FixtureKind::has_games)
-            && let Ok(list) = serde_json::from_str(crate::fixtures::sample_seasons_json())
+            && let Some(json) = cli.fixture.and_then(crate::fixtures::seasons_json)
+            && let Ok(list) = serde_json::from_str(json)
         {
             seasons.seasons = list;
         }
@@ -605,6 +609,7 @@ impl TrackerApp {
             needs_look_filter: false,
             overview_page: Default::default(),
             heroes_page: Default::default(),
+            maps_ui: Default::default(),
             toast: None,
             toast_action: None,
             sessions_with_kit: HashSet::new(),
@@ -861,9 +866,7 @@ impl TrackerApp {
             }
             Message::SelectSeason(sel) => {
                 self.season = sel;
-                if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
-                    tracing::warn!(error = %e, "failed to write ui_state.json");
-                }
+                seasons::persist_selection(&self.data_dir, &self.season);
                 Task::none()
             }
             Message::ToggleRole(role) => {
@@ -895,9 +898,7 @@ impl TrackerApp {
                             .is_some_and(|id| !self.seasons.seasons.iter().any(|s| s.id == id))
                         {
                             self.season = seasons::default_selection(&self.seasons.seasons);
-                            if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
-                                tracing::warn!(error = %e, "failed to write ui_state.json");
-                            }
+                            seasons::persist_selection(&self.data_dir, &self.season);
                         }
                         self.refresh_health();
                     }
@@ -1078,6 +1079,7 @@ impl TrackerApp {
             Message::Games(msg) => crate::games_table::update(self, msg),
             Message::OverviewPage(msg) => crate::overview_page::update(self, msg),
             Message::HeroesPage(msg) => crate::heroes_page::update(self, msg),
+            Message::Pages(msg) => crate::tab_bits::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()

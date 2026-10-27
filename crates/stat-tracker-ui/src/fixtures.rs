@@ -14,6 +14,16 @@ pub fn snapshot(kind: FixtureKind) -> Snapshot {
         FixtureKind::Empty => Snapshot::default(),
         FixtureKind::Sample => sample_snapshot(),
         FixtureKind::Games => crate::fixtures_games::snapshot(),
+        FixtureKind::Full => crate::fixtures_full::snapshot(),
+    }
+}
+
+/// The season list a fixture starts with, when it has one.
+pub fn seasons_json(kind: FixtureKind) -> Option<&'static str> {
+    match kind {
+        FixtureKind::Empty => None,
+        FixtureKind::Sample | FixtureKind::Games => Some(sample_seasons_json()),
+        FixtureKind::Full => Some(crate::fixtures_full::seasons_json()),
     }
 }
 
@@ -48,7 +58,7 @@ pub(crate) fn test_app() -> (tempfile::TempDir, crate::app::TrackerApp) {
 /// The demo clock: the newest game's time on a fixture with games.
 pub fn clock(fixture: Option<FixtureKind>, games: &[crate::model::Game]) -> chrono::DateTime<Utc> {
     match fixture {
-        Some(FixtureKind::Sample | FixtureKind::Games) => {
+        Some(FixtureKind::Sample | FixtureKind::Games | FixtureKind::Full) => {
             games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
         }
         _ => Utc::now(),
