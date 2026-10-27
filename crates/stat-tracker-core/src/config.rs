@@ -185,8 +185,8 @@ pub struct Config {
     /// Upload each game to the site after it closes ("Upload games after
     /// each match"). On (also when missing) and not written while on. Only
     /// matters when `[sync]` has a token; off keeps games local and queued.
-    ///
-    /// TODO(0.6): the sync worker does not read this yet.
+    /// The daemon reads it at start: off leaves it with no upload client
+    /// (`daemon::live_upload`), so no path sends a game.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub live_upload: bool,
     /// Opt-in rank reader ("Read my rank after Comp games"): saves rank, rank
@@ -259,12 +259,16 @@ fn default_game_process_names() -> Vec<String> {
 impl Config {
     /// Every saved in-game name of this member: [`Self::player_name`] first,
     /// then [`Self::player_names`] in file order. Names are trimmed, blanks
-    /// are dropped and a repeat (ignoring case) is kept once.
+    /// are dropped and a repeat (ignoring case, any script: `Ö` and `ö` are
+    /// one name) is kept once.
     pub fn own_player_names(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
         for name in self.player_name.iter().chain(self.player_names.iter()) {
             let name = name.trim();
-            if !name.is_empty() && !out.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            let key = name.to_lowercase();
+            if !name.is_empty() && !seen.contains(&key) {
+                seen.push(key);
                 out.push(name.to_string());
             }
         }

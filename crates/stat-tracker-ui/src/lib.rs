@@ -73,6 +73,9 @@ mod update_check;
 mod what_leaves;
 pub mod widgets;
 
+#[cfg(test)]
+mod tests_settings_to_config;
+
 pub use aggregate::{Aggregates, SeasonWindow, aggregate};
 pub use cli::{Cli, FixtureKind};
 pub use model::{Game, Role, SeasonSel};
