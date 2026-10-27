@@ -15,9 +15,18 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
-## Unreleased (0.6)
+## 0.6.0-alpha.1
 
-Not released yet. Notes for the 0.6 line collect here and move under its version heading when it is cut. The app and the release workflow only read sections headed by a version, so they skip this one.
+This is the first alpha of the 0.6 line. The desktop app has a new look with new Overview, Games, Heroes, Maps and Seasons tabs, and a Settings page rebuilt around the new config keys. It is an alpha: it installs on the alpha channel, and the stable channel keeps offering 0.5.x.
+
+### Highlights
+
+- New Overview tab with your session, newest game, season and top heroes, with filter chips to narrow them down.
+- New Games tab with a table of your games, filter chips and a row you can expand for the full board.
+- New Heroes, Maps and Seasons tabs, with win rates that wait for enough games before they claim anything.
+- An alpha install is never offered a 0.5.x build, and Settings shows "No limit" under a Session window too big to matter.
+
+Technical detail. The tab pages live in `stat-tracker-ui`. Update checks keep an alpha install on the alpha channel and compare prerelease versions by semver, so `0.6.0-alpha.1` is newer than every 0.5.x and the next alpha is offered. A package install (for example the `scuffed-stat-tracker-alpha-bin` AUR package) is told to update with its package manager. The Session window hint shows "No limit" from one year (31536000 s) up. The notes below this line were collected for the 0.6 line before this version was cut.
 
 ### Fixes
 

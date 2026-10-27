@@ -5,7 +5,7 @@ name = "scuffed-stat-tracker-core"
 # `version::USER_AGENT` are built here from CARGO_PKG_VERSION. A guard test
 # in scuffed-stat-tracker (src/tests_release_pins.rs) and
 # dist/check-tag-version.sh both fail when the two differ.
-version = "0.5.0"
+version = "0.6.0-alpha.1"
 edition = "2024"
 # Kept equal to crates/stat-tracker/Cargo.toml, whose locked dependencies
 # need 1.90 (roaring, through surrealdb). Core uses neither crate.

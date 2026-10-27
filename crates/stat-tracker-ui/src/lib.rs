@@ -72,6 +72,7 @@ pub mod restart_prompt;
 pub mod seasons;
 pub mod seasons_tab;
 mod session_bits;
+mod session_window;
 pub mod settings;
 pub mod settings_cards;
 mod settings_env;
@@ -94,6 +95,8 @@ pub mod tray;
 pub mod uninstall;
 pub mod update;
 mod update_check;
+#[cfg(test)]
+mod update_pretag06_tests;
 mod what_leaves;
 pub mod widgets;
 mod winrate_bar;

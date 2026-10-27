@@ -1399,7 +1399,7 @@ fn player_fields_row<'a>(
             SettingsField::SessionWindow,
             false,
             demo,
-            Some("Nearby games count as one session."),
+            Some(crate::session_window::hint(session_window_secs)),
         )),
     )
 }
