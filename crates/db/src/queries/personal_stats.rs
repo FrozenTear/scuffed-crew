@@ -605,6 +605,32 @@ impl Database {
         .await
     }
 
+    /// One of `member_id`'s games by its record key (the `id` on the match
+    /// list). `None` when no row has that key or the row belongs to another
+    /// member, so callers can answer both the same way. Read-only.
+    ///
+    /// The lookup is by string record key only: `id` is always bound as a
+    /// string key of `personal_match`, never parsed as a number or a full
+    /// record id. The ownership check is part of the query, so another
+    /// member's row never leaves the database.
+    pub async fn get_personal_match_for_member(
+        &self,
+        member_id: &str,
+        id: &str,
+    ) -> DbResult<Option<PersonalMatch>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT * FROM $rid WHERE member_id = $mid")
+                .bind(("rid", RecordId::new("personal_match", id)))
+                .bind(("mid", member_id.to_string()))
+                .await?;
+            let rows: Vec<DbPersonalMatch> = result.take(0)?;
+            Ok(rows.into_iter().next().map(db_to_personal_match))
+        })
+        .await
+    }
+
     /// `SELECT count() FROM personal_match WHERE member_id = $mid {extra} {season}`.
     /// `extra` is a fixed fragment chosen by the caller (never user input);
     /// the season window is bound.
