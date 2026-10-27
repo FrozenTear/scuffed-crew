@@ -20,7 +20,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         box-sizing: border-box;
     }
 
-    /* ——— HERO: full viewport bleed, content rail constrained ——— */
+    /* --- HERO: full viewport bleed, content rail constrained --- */
     .home-hero {
         position: relative;
         width: 100%;
@@ -63,7 +63,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         pointer-events: none;
         z-index: 3;
     }
-    /* Decorative org initials — fills the empty right half of wide viewports */
+    /* Decorative org initials: fills the empty right half of wide viewports */
     .home-hero-mark {
         position: absolute;
         right: max(2%, calc((100% - var(--home-max)) / 2 + 4%));
@@ -247,7 +247,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         .home-hero-rail { padding-top: 2.5rem; padding-bottom: 2.5rem; }
     }
 
-    /* ——— Sections (quieter than hero; denser rhythm) ——— */
+    /* --- Sections (quieter than hero; denser rhythm) --- */
     .home-block {
         padding: 2rem 0;
         border-bottom: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
@@ -274,7 +274,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         text-transform: none;
         line-height: 1.25;
     }
-    /* Underlines only on hero — sections stay quiet */
+    /* Underlines only on hero; sections stay quiet */
     .home-heading::after {
         content: none;
     }
@@ -286,7 +286,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         margin: 0.4rem 0 0;
     }
 
-    /* Numbered rules — punchy 2×2 board */
+    /* Numbered rules: punchy 2×2 board */
     .rules {
         list-style: none;
         margin: 1.25rem 0 0;
@@ -327,7 +327,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         opacity: 0.95;
     }
 
-    /* Live board — one column when only one side has data */
+    /* Live board: one column when only one side has data */
     .live-grid {
         display: grid;
         grid-template-columns: 1fr 1fr;
@@ -418,7 +418,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         border-bottom-color: var(--warn);
     }
 
-    /* #2 — next match card + results ticker */
+    /* Section 2: next match card + results ticker */
     .live-panel.next-match::before {
         background: linear-gradient(90deg, var(--accent), transparent 75%);
     }
@@ -503,12 +503,12 @@ pub const HOME_SHARED_CSS: &str = r#"
     .ticker-chip.loss .ticker-score { color: var(--danger); }
     .ticker-chip.draw .ticker-score { color: var(--warn); }
 
-    /* Team rows — shared fixed tracks so every column lines up across rows */
+    /* Team rows: shared fixed tracks so every column lines up across rows */
     .team-rows {
         margin-top: 1.1rem;
         border-top: 1px solid var(--border);
         /* name | game | roster | division | record */
-        --tm-cols: minmax(0, 1.4fr) minmax(7.5rem, 0.9fr) 5.5rem 6.5rem 3.25rem;
+        --tm-cols: minmax(0, 1.4fr) minmax(7.5rem, 0.9fr) 5.5rem 6.5rem 4.75rem;
     }
     .team-head,
     .team-row {
@@ -830,7 +830,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         color: var(--text-3);
     }
 
-    /* ——— Alignment: Center = hero only; body always left ——— */
+    /* --- Alignment: Center = hero only; body always left --- */
     .home-wrap:has(.home.align-center) .home-hero-inner {
         margin-left: auto;
         margin-right: auto;
@@ -862,7 +862,7 @@ pub const HOME_SHARED_CSS: &str = r#"
         transform: translateX(50%);
         opacity: 0.35;
     }
-    /* Body blocks intentionally stay left — no mixed centered headers over left lists */
+    /* Body blocks intentionally stay left; no mixed centered headers over left lists */
     .home.align-center .home-block {
         text-align: left;
     }

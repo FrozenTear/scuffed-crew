@@ -72,7 +72,7 @@ pub fn DesktopMapCanvas(
     let mut arrow_end = use_signal(|| Option::<Position>::None);
     let mut local_pan = use_signal(|| Position::new(0.0, 0.0));
 
-    // Canvas rect for mouse coordinate conversion — updated on mount
+    // Canvas rect for mouse coordinate conversion: updated on mount
     let mut canvas_rect = use_signal(|| (0.0f64, 0.0f64, 1920.0f64, 1080.0f64));
 
     // Track current map for JS init

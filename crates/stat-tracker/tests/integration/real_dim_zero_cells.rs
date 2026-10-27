@@ -12,6 +12,8 @@
 use image::DynamicImage;
 use stat_tracker::ocr::{self, preprocess};
 
+use crate::tess_engine::{known_variant, tesseract_version};
+
 struct Cell {
     file: &'static str,
     expect: &'static str,
@@ -137,7 +139,8 @@ fn real_dorado_cells_read_their_digits() {
             );
             eprintln!("{line}");
             lines.push(line.clone());
-            if read.value != cell.expect {
+            let cell_name = format!("{} trim {px}", cell.file);
+            if read.value != cell.expect && !known_variant(&cell_name, &read.value) {
                 failures.push(format!("want {:?}: {line}", cell.expect));
             }
             if cell.dim_zero && dim.is_none() {
@@ -150,7 +153,8 @@ fn real_dorado_cells_read_their_digits() {
     }
     assert!(
         failures.is_empty(),
-        "real cells:\n{}\n\nall:\n{}",
+        "real cells on Tesseract {}:\n{}\n\nall:\n{}",
+        tesseract_version(),
         failures.join("\n"),
         lines.join("\n")
     );

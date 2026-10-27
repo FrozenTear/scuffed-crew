@@ -391,14 +391,14 @@ pub fn MapCanvas(
     on_element_drag_end: EventHandler<(Uuid, Position, Position)>,
 ) -> Element {
     // =========================================================================
-    // Canvas element refs — stored as signals so effects can read them
+    // Canvas element refs: stored as signals so effects can read them
     // =========================================================================
     let mut bg_canvas: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
     let mut el_canvas: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
     let mut ov_canvas: Signal<Option<Rc<MountedData>>> = use_signal(|| None);
 
     // =========================================================================
-    // Local interaction state — kept local for smooth 60fps panning
+    // Local interaction state: kept local for smooth 60fps panning
     // =========================================================================
     let mut is_panning = use_signal(|| false);
     let mut is_dragging = use_signal(|| false);
@@ -408,11 +408,11 @@ pub fn MapCanvas(
     let mut arrow_start = use_signal(|| Option::<Position>::None);
     let mut arrow_end = use_signal(|| Option::<Position>::None);
 
-    // Local pan offset for smooth dragging — only syncs to parent on mouseup.
+    // Local pan offset for smooth dragging; only syncs to parent on mouseup.
     // This prevents 60+ signal propagation cycles per second during panning.
     let mut local_pan = use_signal(|| Position::new(0.0, 0.0));
 
-    // Image version counter — incremented when map image or tiles load.
+    // Image version counter: incremented when map image or tiles load.
     // Subscribing to this in effects triggers redraws.
     let image_version = use_signal(|| 0u32);
 
@@ -458,7 +458,7 @@ pub fn MapCanvas(
     let current_map_id_rsx = current_map_id;
 
     // =========================================================================
-    // Map loading effect — runs when current_map_id changes
+    // Map loading effect: runs when current_map_id changes
     // =========================================================================
     {
         let tile_manager = tile_manager.clone();
@@ -494,7 +494,7 @@ pub fn MapCanvas(
 
                 start_map_image_load(&map_load, &map_image, image_version, &id, token);
             } else {
-                // No map selected — clear
+                // No map selected: clear
                 tile_manager.borrow_mut().clear();
             }
         });
@@ -829,7 +829,7 @@ pub fn MapCanvas(
     rsx! {
         div { class: "map-canvas-wrapper",
 
-            // Layer 1 (bottom): Background — map tiles, health packs
+            // Layer 1 (bottom): Background (map tiles, health packs)
             canvas {
                 width: "1920",
                 height: "1080",
@@ -839,7 +839,7 @@ pub fn MapCanvas(
                 },
             }
 
-            // Layer 2 (middle): Elements — routes, markers, areas
+            // Layer 2 (middle): Elements (routes, markers, areas)
             canvas {
                 width: "1920",
                 height: "1080",
@@ -849,7 +849,7 @@ pub fn MapCanvas(
                 },
             }
 
-            // Layer 3 (top): Overlay — cursors, selection, drawing preview
+            // Layer 3 (top): Overlay (cursors, selection, drawing preview)
             // This canvas captures all mouse/keyboard events
             canvas {
                 width: "1920",
@@ -1022,7 +1022,7 @@ pub fn MapCanvas(
                     let zoom = *zoom_sig.read();
                     let pan_offset = *pan_sig.read();
 
-                    // Zoom towards mouse position — extract delta_y from WheelDelta enum
+                    // Zoom towards mouse position: extract delta_y from WheelDelta enum
                     let delta_y = match evt.data().delta() {
                         dioxus::html::geometry::WheelDelta::Pixels(v) => v.y,
                         dioxus::html::geometry::WheelDelta::Lines(v) => v.y * 20.0,
@@ -1342,7 +1342,7 @@ fn draw_element(
                     } else {
                         // Loading or failed. A failed image stays cached, so
                         // it is not requested again.
-                        chip = Some(hero_chip(hero_id));
+                        chip = Some(hero_chip(hero_id, &element.color));
                     }
                 } else {
                     // Image not in cache: start loading once
@@ -1361,21 +1361,25 @@ fn draw_element(
                     onload.forget();
 
                     img.set_src(&format!("/assets/heroes/{}.png", hero_id_clone));
-                    chip = Some(hero_chip(hero_id));
+                    chip = Some(hero_chip(hero_id, &element.color));
                 }
             }
 
             // Role chip, or the plain coloured circle
             if !drew_portrait {
-                let fill = chip.as_ref().and_then(|c| c.fill).unwrap_or(color.as_str());
+                let fill = chip.as_ref().map_or(color.as_str(), |c| c.fill);
                 ctx.set_fill_style_str(fill);
                 ctx.begin_path();
                 let _ = ctx.arc(x, y, radius, 0.0, std::f64::consts::PI * 2.0);
                 ctx.fill();
             }
 
-            // Border: team colour around a portrait or chip
-            if drew_portrait || chip.is_some() {
+            // Border: team colour around a portrait. A chip ring swaps to a
+            // contrasting colour when the team colour matches its fill.
+            if let Some(ref chip) = chip {
+                ctx.set_stroke_style_str(&chip.ring);
+                ctx.set_line_width(3.0);
+            } else if drew_portrait {
                 ctx.set_stroke_style_str(&color);
                 ctx.set_line_width(3.0);
             } else {
@@ -1387,7 +1391,7 @@ fn draw_element(
             ctx.stroke();
 
             if let Some(ref chip) = chip {
-                ctx.set_fill_style_str(CANVAS_WHITE);
+                ctx.set_fill_style_str(chip.label_color);
                 ctx.set_font("bold 13px sans-serif");
                 ctx.set_text_align("center");
                 let _ = ctx.fill_text(&chip.label, x, y + 5.0);

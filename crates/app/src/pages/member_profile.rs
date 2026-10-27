@@ -6,6 +6,7 @@ use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 
 use super::public_fetch::{PublicFetch, fetch_public};
+use crate::sample::{OTHER_HEROES, Tally, fold_small, other_label};
 
 #[derive(Debug, Clone, Deserialize)]
 struct MemberTeamInfo {
@@ -34,8 +35,9 @@ struct GameAccount {
 
 // Mirrors the backend `HeroAgg` returned by
 // `GET /api/public/members/{id}/heroes` (public, no auth). `winrate` is a
-// ready-made 0.0–1.0 ratio; `avg_elims`/`avg_deaths` are unused in this view
-// but kept so the shape matches the endpoint exactly.
+// ready-made 0.0 to 1.0 ratio used only for sorting; the card text follows the
+// small-sample rule in `crate::sample`. `avg_elims`/`avg_deaths` are unused in
+// this view but kept so the shape matches the endpoint exactly.
 #[derive(Debug, Clone, Deserialize)]
 struct HeroAgg {
     hero: String,
@@ -425,7 +427,10 @@ pub fn MemberProfile(id: String) -> Element {
                                                 .unwrap_or(std::cmp::Ordering::Equal)
                                         })
                                 });
-                                let total = hero_list.len();
+                                // Under 3 games a hero folds into one "Other heroes" card.
+                                let all: Vec<&HeroAgg> = hero_list.iter().collect();
+                                let (kept, folded) = fold_small(&all, hero_tally);
+                                let total = kept.len();
                                 let expanded = show_all_heroes();
                                 let visible = if !expanded && total > 6 { 6 } else { total };
                                 rsx! {
@@ -433,8 +438,11 @@ pub fn MemberProfile(id: String) -> Element {
                                         div { class: "profile-section",
                                             h2 { "Heroes" }
                                             div { class: "profile-heroes",
-                                                for h in hero_list.iter().take(visible) {
+                                                for h in kept.iter().take(visible) {
                                                     {render_hero_card(h)}
+                                                }
+                                                if !folded.is_empty() {
+                                                    {render_other_heroes_card(&folded)}
                                                 }
                                             }
                                             if total > 6 && !expanded {
@@ -491,18 +499,111 @@ fn render_account_card(a: &GameAccount) -> Element {
     }
 }
 
+fn hero_tally(h: &HeroAgg) -> Tally {
+    Tally::new(h.games, h.wins, h.losses, h.draws)
+}
+
+/// Card meta line: `12 games · 58.3% WR · 7W-5L` from 10 games, and
+/// `4 games · 3W-1L` from 3 to 9 games (no win rate yet).
+fn hero_meta(t: Tally) -> String {
+    let games = t.games;
+    let record = t.record();
+    match t.win_rate_pct() {
+        Some(pct) => format!("{games} games · {pct:.1}% WR · {record}"),
+        None => format!("{games} games · {record}"),
+    }
+}
+
 fn render_hero_card(h: &HeroAgg) -> Element {
-    let winrate = if h.games > 0 {
-        format!("{:.0}%", h.winrate * 100.0)
-    } else {
-        "-".to_string()
-    };
+    let meta = hero_meta(hero_tally(h));
     rsx! {
         Card {
             div { class: "profile-hero-name", "{h.hero}" }
-            div { class: "profile-hero-meta",
-                "{h.games} games · {winrate} WR · {h.wins}-{h.losses}-{h.draws}"
-            }
+            div { class: "profile-hero-meta", "{meta}" }
         }
+    }
+}
+
+/// Meta line for the pooled "Other heroes" card: `4 games · 3W-1L`. Always
+/// the record, never a win rate, because the pool mixes several heroes.
+fn other_meta(pool: Tally) -> String {
+    format!("{} games · {}", pool.games, other_label(pool))
+}
+
+/// One card for every hero under 3 games, with their combined games.
+fn render_other_heroes_card(folded: &[&HeroAgg]) -> Element {
+    let names = folded
+        .iter()
+        .map(|h| h.hero.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let count = folded.len();
+    let meta = other_meta(Tally::sum(folded.iter().copied().map(hero_tally)));
+    rsx! {
+        Card {
+            div { class: "profile-hero-name", "{OTHER_HEROES} ({count})" }
+            div { class: "profile-hero-meta", "{names}" }
+            div { class: "profile-hero-meta", "{meta}" }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hero(wins: u32, losses: u32, draws: u32) -> HeroAgg {
+        HeroAgg {
+            hero: "Ana".to_string(),
+            games: wins + losses + draws,
+            wins,
+            losses,
+            draws,
+            winrate: 0.0,
+            avg_elims: 0.0,
+            avg_deaths: 0.0,
+        }
+    }
+
+    #[test]
+    fn hero_cards_follow_the_small_sample_rule() {
+        let few = hero(2, 1, 0);
+        assert_eq!(hero_meta(hero_tally(&few)), "3 games · 2W-1L");
+        let many = hero(6, 4, 0);
+        assert_eq!(hero_meta(hero_tally(&many)), "10 games · 60.0% WR · 6W-4L");
+
+        let list = [hero(1, 1, 0), hero(6, 4, 0), hero(0, 0, 1)];
+        let refs: Vec<&HeroAgg> = list.iter().collect();
+        let (kept, folded) = fold_small(&refs, hero_tally);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(folded.len(), 2);
+    }
+
+    #[test]
+    fn other_card_pool_of_ten_plus_shows_the_record() {
+        let pool = Tally::sum(
+            [
+                hero(1, 1, 0),
+                hero(2, 0, 0),
+                hero(1, 1, 0),
+                hero(2, 0, 0),
+                hero(1, 1, 0),
+            ]
+            .iter()
+            .map(hero_tally),
+        );
+        assert_eq!(pool.games, 10);
+        let meta = other_meta(pool);
+        assert_eq!(meta, "10 games · 7W-3L");
+        assert!(!meta.contains('%'), "{meta}");
+    }
+
+    #[test]
+    fn hero_records_use_the_shared_record_label() {
+        let record = |h: HeroAgg| hero_tally(&h).record();
+        assert_eq!(record(hero(5, 2, 1)), "5W-2L-1D");
+        assert_eq!(record(hero(5, 2, 0)), "5W-2L");
+        assert_eq!(record(hero(0, 0, 0)), "0W-0L");
+        assert_eq!(record(hero(0, 0, 2)), "0W-0L-2D");
     }
 }

@@ -1,4 +1,4 @@
-//! Presentational homepage blocks. No network hooks — data is passed in.
+//! Presentational homepage blocks. No network hooks: data is passed in.
 
 use std::collections::HashMap;
 
@@ -6,8 +6,8 @@ use dioxus::prelude::*;
 use scuffed_types::{HomeSectionId, HomepageContent, TeamsPresentation};
 
 use super::data::{
-    Announcement, Event, HomeTournament, Overview, OverviewTeam, RecentResult, UpcomingMatch,
-    day_name,
+    Announcement, Event, HomeTournament, Overview, OverviewTeam, RecentResult, TeamRecord,
+    UpcomingMatch, day_name,
 };
 use crate::routes::Route;
 
@@ -390,7 +390,7 @@ fn ResultsTicker(results: Vec<RecentResult>) -> Element {
                 for r in results.iter() {
                     {
                         let score = match (r.score_us, r.score_them) {
-                            (Some(u), Some(t)) => format!("{u}–{t}"),
+                            (Some(u), Some(t)) => format!("{u}-{t}"),
                             _ => "-".into(),
                         };
                         let outcome_class = format!("ticker-chip {}", r.outcome);
@@ -441,7 +441,7 @@ pub fn TeamsBlock(
                                         span { "Game" }
                                         span { "Roster" }
                                         span { "Division" }
-                                        span { "W–L" }
+                                        span { "Record" }
                                     }
                                     for team in data.teams.iter() {
                                         {render_team_row(team, &game_map)}
@@ -483,17 +483,41 @@ pub fn TeamsBlock(
     }
 }
 
+/// True once a team has a finished match of any outcome.
+fn has_played(record: &TeamRecord) -> bool {
+    record.wins + record.losses + record.draws > 0
+}
+
+/// Record column in the teams table: `5W-2L` or `5W-2L-1D`, or `-` before
+/// the first finished match.
+fn row_record(record: &TeamRecord) -> String {
+    if has_played(record) {
+        crate::util::record_label(record.wins, record.losses, record.draws)
+    } else {
+        "-".to_string()
+    }
+}
+
+/// Record suffix on a team card's meta line, empty before the first finished
+/// match.
+fn card_record(record: &TeamRecord) -> String {
+    if has_played(record) {
+        format!(
+            " · {}",
+            crate::util::record_label(record.wins, record.losses, record.draws)
+        )
+    } else {
+        String::new()
+    }
+}
+
 fn render_team_row(team: &OverviewTeam, game_map: &HashMap<String, String>) -> Element {
     let game_name = game_map
         .get(&team.game_id)
         .cloned()
         .unwrap_or_else(|| team.game_id.clone());
     let forming = team.roster_count == 0;
-    let wl = if team.record.wins == 0 && team.record.losses == 0 {
-        "-".to_string()
-    } else {
-        format!("{}–{}", team.record.wins, team.record.losses)
-    };
+    let wl = row_record(&team.record);
     let division = team.division.clone().unwrap_or_else(|| "Internal".into());
     let lore = team.lore_quote.clone().unwrap_or_default();
     let roster_n = team.roster_count;
@@ -554,11 +578,7 @@ fn render_team_card(team: &OverviewTeam, game_map: &HashMap<String, String>) -> 
     } else {
         crate::util::pluralize(team.roster_count, "player", "players")
     };
-    let wl = if team.record.wins == 0 && team.record.losses == 0 {
-        String::new()
-    } else {
-        format!(" · {}–{}", team.record.wins, team.record.losses)
-    };
+    let wl = card_record(&team.record);
     rsx! {
         Link {
             to: Route::TeamPage {
@@ -740,6 +760,22 @@ mod tests {
             upcoming_matches: vec![],
             recent_results: vec![],
         }
+    }
+
+    #[test]
+    fn home_records_use_the_shared_record_label() {
+        let rec = |wins, losses, draws| TeamRecord {
+            wins,
+            losses,
+            draws,
+        };
+        assert_eq!(row_record(&rec(5, 2, 0)), "5W-2L");
+        assert_eq!(row_record(&rec(5, 2, 1)), "5W-2L-1D");
+        assert_eq!(row_record(&rec(0, 0, 0)), "-");
+        assert_eq!(row_record(&rec(0, 0, 2)), "0W-0L-2D");
+        assert_eq!(card_record(&rec(5, 2, 1)), " · 5W-2L-1D");
+        assert_eq!(card_record(&rec(3, 0, 0)), " · 3W-0L");
+        assert_eq!(card_record(&rec(0, 0, 0)), "");
     }
 
     #[test]

@@ -483,19 +483,15 @@ fn the_own_row_goes_through_the_reader_switch() {
         "highlight, tab_heroes .as_ref() .and_then(detect::own_row::career_hero_row), !own_seeds.is_empty(), );"
     ));
     assert!(body.contains("player_row_idx: row_idx, name_match, own_row,"));
-    let an = src
-        .find("\nfn apply_new_reader(")
-        .expect("apply_new_reader");
-    let an_body = norm(src[an..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/cells.rs since 0.6 S4: found by name, wherever it lives.
+    let an_body = norm(fn_source("apply_new_reader"));
     assert!(!an_body.contains("find_player_row_by_name"));
     assert!(!an_body.contains("player_name"));
     assert!(an_body.contains(
         "if own_row_suspect { reader_apply::mark_own_row_suspect(&mut parsed.suspect_fields); }"
     ));
-    let hc = src
-        .find("\nasync fn handle_capture(")
-        .expect("handle_capture");
-    let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/grab.rs since 0.6 S10: found by name, wherever it lives.
+    let hc_body = norm(fn_source("handle_capture"));
     assert!(hc_body.contains("text_fallback_name(board_reader, player_row_idx, player_name),"));
     assert!(hc_body.contains(
         "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, seed_session).await;"

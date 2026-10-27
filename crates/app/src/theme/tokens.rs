@@ -27,13 +27,13 @@ pub fn theme_css(brand: &BrandConfig) -> String {
   --overlay: rgba(0,0,0,0.6);
 
   /* Chart palette (dark values; light scope overrides). CVD-validated against
-     the dark surface (#1f1f27) — see docs/notes/stats-ui-w2-validation.md.
+     the dark surface (--surface). See docs/notes/stats-ui-w2-validation.md.
      Snap-tuned to the dark lightness band; re-run the validator if edited. */
   --chart-1: #8f73ff; --chart-2: #15ac7d; --chart-3: #b98a02; --chart-4: #ca474c; --chart-5: #089fd7; --chart-6: #984ab2;
   /* Winrate bars: two-pole diverging encoding (W5a). Cool up-pole (> 50%),
      warm down-pole (< 50%); exactly-50% and sub-min-games rows take the
      neutral --text-3 midpoint. Chart poles, NOT status tokens. Pair
-     CVD-validated vs both surfaces — see docs/notes/stats-ui-w2-validation.md
+     CVD-validated vs both surfaces. See docs/notes/stats-ui-w2-validation.md
      (W5a section); re-run the validator if edited. */
   --chart-wr-up: #089fd7; --chart-wr-down: #aa5000;
 }}
@@ -50,7 +50,7 @@ pub fn theme_css(brand: &BrandConfig) -> String {
   --text: #16161c; --text-2: #545462; --text-3: #696975;
   --accent: {accent_l}; --accent-fg: #ffffff; --accent-soft: {soft_l};
   --ok: #087a50; --warn: #c2830a; --danger: #d63031;
-  /* CVD-validated against #ffffff — see docs/notes/stats-ui-w2-validation.md. */
+  /* CVD-validated against #ffffff. See docs/notes/stats-ui-w2-validation.md. */
   --chart-1: #6d4aff; --chart-2: #0ea66e; --chart-3: #c2830a; --chart-4: #d63031; --chart-5: #0284c7; --chart-6: #7405c3;
   --chart-wr-up: #0284c7; --chart-wr-down: #843900;
 }}
@@ -79,18 +79,23 @@ html, body {{
 /// Concrete colors for the strategy canvas (2D context needs literal strings, not CSS vars).
 pub const CANVAS_BG: &str = "#14141c";
 pub const CANVAS_TILE_PLACEHOLDER: &str = "#2a2a3e";
-pub const CANVAS_GRID_LOADING: &str = "#333";
-pub const CANVAS_TEXT_LOADING: &str = "#666";
+pub const CANVAS_GRID_LOADING: &str = "#333333";
+pub const CANVAS_TEXT_LOADING: &str = "#666666";
 pub const STRATEGY_ACCENT: &str = "#ff7a1a";
 pub const CANVAS_SELECTION_COLOR: &str = "#00ff00";
 pub const CANVAS_BADGE_BG: &str = "rgba(0,0,0,0.7)";
-pub const CANVAS_WHITE: &str = "#fff";
+pub const CANVAS_WHITE: &str = "#ffffff";
 pub const HP_SMALL_FILL: &str = "#ffeb3b";
 pub const HP_SMALL_STROKE: &str = "#ffc107";
 pub const HP_LARGE_FILL: &str = "#ff9800";
 pub const HP_LARGE_STROKE: &str = "#f57c00";
 pub const HP_GLOW: &str = "rgba(255,255,255,0.5)";
-pub const CANVAS_MARKER_BORDER: &str = "#fff";
+pub const CANVAS_MARKER_BORDER: &str = "#ffffff";
+/// Hero chip fill for an id that is not on the roster. A neutral grey, so the
+/// team ring around it stays visible.
+pub const CANVAS_UNKNOWN_HERO_FILL: &str = "#6b7280";
+/// Hero chip ring on a light fill when the team colour matches the fill.
+pub const CANVAS_CHIP_RING_DARK: &str = "#111827";
 
 /// Dark-theme page background (matches `[data-theme="dark"] --bg`).
 pub const BG_DARK: &str = "#17171d";

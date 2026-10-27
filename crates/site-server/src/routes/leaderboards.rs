@@ -43,6 +43,9 @@ fn map_lb_row(r: MemberLeaderboardRow) -> TypesMemberRow {
         member_id: r.member_id,
         display_name: r.display_name,
         games: r.games,
+        wins: r.wins,
+        losses: r.losses,
+        draws: r.draws,
         winrate: r.winrate,
         kd: r.kd,
     }

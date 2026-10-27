@@ -13,6 +13,7 @@ mod keybindings;
 mod layouts;
 mod pages;
 mod routes;
+mod sample;
 mod state;
 mod styles;
 mod theme;

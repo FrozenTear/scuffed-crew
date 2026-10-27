@@ -220,18 +220,21 @@ async fn shadow_flag_on_and_off_store_and_upload_identical_rows() {
 /// row commit never sees shadow state.
 #[test]
 fn shadow_hook_only_borrows_and_stays_out_of_the_commit() {
-    let src = include_str!("../main.rs");
+    // The accept path is `handle_capture`, in src/daemon/tab/grab.rs since
+    // 0.6 S10: found by name, wherever it lives.
+    let src = fn_source("handle_capture");
     let hook = src
         .find("worker.try_submit(shadow::worker::ShadowJob::new(")
         .expect("shadow hand-off in the accept path");
     let call = &src[hook..hook + 300];
     assert!(call.contains("&rows,"), "{call}");
     assert!(call.contains("&staged.target_session,"), "{call}");
-    let commit = src
-        .find("async fn commit_capture_rows(")
-        .expect("commit_capture_rows");
-    let body = src[commit..].split("\nasync fn ").next().unwrap();
-    let body = body.split("\nfn ").next().unwrap();
+    // In src/daemon/tab/commit.rs since 0.6 S4: found by name, wherever it lives.
+    let body = fn_source("commit_capture_rows");
+    assert!(
+        body.contains("insert_match("),
+        "the slice is the commit itself"
+    );
     assert!(
         !body.contains("shadow"),
         "commit_capture_rows must not read shadow state"

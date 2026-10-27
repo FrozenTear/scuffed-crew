@@ -9,15 +9,23 @@ use super::*;
 /// after the vacuum exit.
 #[test]
 fn startup_takes_the_pid_guard_before_the_site_and_always_starts_the_pack_keeper() {
-    let src = include_str!("../main.rs");
-    let begin = src
+    // `run` is in src/daemon/lifecycle.rs since 0.6 S6: found by name, and
+    // startup runs from the umask to the end of `run`. The pack-wait
+    // helpers `run` calls come after it, as they did in main.rs, so each
+    // needle is still counted once across them too.
+    let run = fn_source("run");
+    let begin = run
         .find("    lock_down_umask();\n")
         .expect("startup begins");
-    let body = &src[begin..];
-    let end = body
-        .find("\nfn handle_preinit_flags()")
-        .expect("startup ends before handle_preinit_flags");
-    let body = &body[..end];
+    let body = [
+        &run[begin..],
+        fn_source("reload_names_after_install"),
+        fn_source("stopped_while_waiting"),
+        fn_source("keep_waiting_for_packs"),
+        fn_source("reader_packs_arrive"),
+    ]
+    .join("\n");
+    let body = body.as_str();
     let at = |needle: &str| {
         assert_eq!(body.matches(needle).count(), 1, "{needle} once in startup");
         body.find(needle).expect("counted above")
@@ -68,7 +76,6 @@ fn startup_takes_the_pid_guard_before_the_site_and_always_starts_the_pack_keeper
 /// this test even if a lookalike helper is left behind.
 #[test]
 fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
-    let src = include_str!("../main.rs");
     // Bound the slice to `run_loop` itself, by name. The night harness and
     // this test both mention the same names elsewhere; an unbounded search
     // would match those and stay green after the timer was deleted.
@@ -87,10 +94,8 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         !window.contains("finish_sync_on_shutdown("),
         "the command tick must not await the shutdown upload"
     );
-    let def = src
-        .find("async fn close_quiet_session_and_sync")
-        .expect("quiet-close timer");
-    let fn_body = src[def..].split("\nasync fn ").next().unwrap();
+    // In src/daemon/session/transitions.rs since 0.6 S7: found by name.
+    let fn_body = fn_source("close_quiet_session_and_sync");
     assert!(
         fn_body.contains("sync_now().await"),
         "deleting the sync call inside the quiet-close timer must fail"
@@ -109,10 +114,9 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         startup < loop_at,
         "startup sync is scheduled before the loop"
     );
-    let restore = src
-        .find("async fn recover_or_sync_active_game")
-        .expect("startup restore");
-    let restore_body = src[restore..].split("\nasync fn ").next().unwrap();
+    // Bounded by name: the next async fn, which used to end the slice,
+    // is in src/daemon/tab/plan.rs since 0.6 S5.
+    let restore_body = fn_source("recover_or_sync_active_game");
     assert!(
         restore_body.contains("startup_session(data_dir)"),
         "startup sync must restore through startup_session"
@@ -132,11 +136,15 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         !after_suspend[..adopt_at].contains("finish_sync_on_shutdown("),
         "resume must not await the upload"
     );
+    // The log lines carry the bin's pinned target since `run_loop` moved to
+    // src/daemon/event_loop.rs (0.6 S11), so the needles name it too.
     let ctrl_c = run_loop
-        .find("tracing::info!(\"shutting down\")")
+        .find("tracing::info!(target: \"scuffed_stat_tracker\", \"shutting down\")")
         .expect("ctrl-c shutdown");
     let sigterm = run_loop
-        .find("tracing::info!(\"SIGTERM received, shutting down\")")
+        .find(
+            "tracing::info!(target: \"scuffed_stat_tracker\", \"SIGTERM received, shutting down\")",
+        )
         .expect("sigterm shutdown");
     assert!(ctrl_c < sigterm, "ctrl-c is registered before sigterm");
     assert!(
@@ -147,18 +155,14 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         run_loop[sigterm..].contains("shutdown_from_signal("),
         "SIGTERM must close the session through shutdown_from_signal"
     );
-    let shutdown_fn = src
-        .find("async fn shutdown_from_signal(")
-        .expect("shutdown helper");
-    let shutdown_body = src[shutdown_fn..].split("\nasync fn ").next().unwrap();
+    // In src/daemon/shutdown.rs since 0.6 S7: found by name.
+    let shutdown_body = fn_source("shutdown_from_signal");
     assert!(
         shutdown_body.contains("close_session_on_shutdown("),
         "each signal handler closes the session before the final upload"
     );
-    let startup_fn = src
-        .find("fn begin_daemon_session(")
-        .expect("startup helper");
-    let startup_body = src[startup_fn..].split("\nasync fn ").next().unwrap();
+    // In src/daemon/session/active_game.rs since 0.6 S8: found by name.
+    let startup_body = fn_source("begin_daemon_session");
     assert!(
         startup_body.contains("dropped.clone()"),
         "a stale skeleton on the next start must settle that session's unknown rows"
@@ -181,13 +185,9 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         settle_body.contains("schedule_store_sync("),
         "the command tick must schedule the settle"
     );
-    let commands_fn = src
-        .find("async fn apply_queued_commands(")
-        .expect("command tick body");
-    let commands_body = src[commands_fn..]
-        .split("\nasync fn begin_daemon_session(")
-        .next()
-        .unwrap();
+    // Bounded by name: `begin_daemon_session`, which used to end the
+    // slice, is in src/daemon/session/active_game.rs since 0.6 S8.
+    let commands_body = fn_source("apply_queued_commands");
     let set_at = commands_body
         .find("StoreCommand::SetOutcome {")
         .expect("SetOutcome arm");

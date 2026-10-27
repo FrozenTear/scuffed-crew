@@ -1,7 +1,7 @@
 /// Styles specific to admin pages: data tables, row actions, toolbar,
 /// form modals, form fields, pagination, summary cards, etc.
 pub const CSS: &str = r#"
-    /* Data Table — scroll wrapper keeps layout width while columns stay readable */
+    /* Data Table: scroll wrapper keeps layout width while columns stay readable */
     .data-table-scroll {
         width: 100%;
         overflow-x: auto;

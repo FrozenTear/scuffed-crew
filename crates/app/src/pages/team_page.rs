@@ -21,7 +21,7 @@ struct TeamRecord {
     draws: u32,
 }
 
-/// Public match row. Intentionally omits `notes` / `recorded_by` — the public
+/// Public match row. Intentionally omits `notes` / `recorded_by`; the public
 /// projection is being narrowed and those fields must not be depended on.
 #[derive(Debug, Clone, Deserialize)]
 struct TeamMatch {
@@ -161,6 +161,7 @@ const PAGE_CSS: &str = r#"
         font-size: 0.85rem;
         color: var(--text-2);
         font-variant-numeric: tabular-nums;
+        white-space: nowrap;
         margin: 0;
     }
     .team-page-record strong {
@@ -428,6 +429,7 @@ fn render_header(t: &TeamDetailData) -> Element {
         .as_ref()
         .map(|c| format!("border-color: {c};"))
         .unwrap_or_default();
+    let record = crate::util::record_label(t.record.wins, t.record.losses, t.record.draws);
 
     rsx! {
         div { class: "team-page-header",
@@ -452,11 +454,7 @@ fn render_header(t: &TeamDetailData) -> Element {
                     p { class: "team-page-lore", "“{lore}”" }
                 }
                 p { class: "team-page-record",
-                    strong { "{t.record.wins}W" }
-                    " – "
-                    strong { "{t.record.losses}L" }
-                    " – "
-                    strong { "{t.record.draws}D" }
+                    strong { "{record}" }
                 }
             }
         }
@@ -506,7 +504,7 @@ fn render_match_row(m: &TeamMatch) -> Element {
                 std::cmp::Ordering::Less => "loss",
                 std::cmp::Ordering::Equal => "draw",
             };
-            (format!("{us}–{them}"), class)
+            (format!("{us}-{them}"), class)
         }
         _ => ("-".to_string(), "draw"),
     };

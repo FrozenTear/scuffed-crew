@@ -241,6 +241,12 @@ pub async fn overview(
 #[derive(Debug, Clone, Serialize)]
 pub struct HeroScoped {
     pub games: u32,
+    /// Victories in `games`. `wins + losses + draws == games`.
+    pub wins: u32,
+    /// Defeats in `games`.
+    pub losses: u32,
+    /// Draws in `games`.
+    pub draws: u32,
     pub winrate: f32,
 }
 
@@ -315,7 +321,7 @@ fn resolve_members_hero(raw: Option<&str>) -> Result<Option<&'static str>, ()> {
 
 /// GET /api/public/members — public member list (cursor-paginated).
 ///
-/// Optional `?hero=<name>` (hero-stats W3 B3): attaches `hero_scoped{games,winrate}`
+/// Optional `?hero=<name>` (hero-stats W3 B3): attaches `hero_scoped{games,wins,losses,draws,winrate}`
 /// for members who have played that hero. Unknown hero → 400.
 ///
 /// HS-DR P1: hero attach is **page-scoped** (`hero_scoped_for_members` over the
@@ -374,6 +380,9 @@ pub async fn public_members(
                     r.member_id,
                     HeroScoped {
                         games: r.games,
+                        wins: r.wins,
+                        losses: r.losses,
+                        draws: r.draws,
                         winrate: r.winrate,
                     },
                 )
@@ -910,12 +919,41 @@ mod visibility_tests {
             )
             .await
             .expect("scrim");
+        // One public official draw counts. A public scrim draw and a private
+        // official draw stay off the public record.
+        for (opponent, score, match_type, is_public) in [
+            ("Public draw", 1, MatchType::Official, true),
+            ("Scrim draw", 2, MatchType::Scrim, true),
+            ("Private draw", 3, MatchType::Official, false),
+        ] {
+            state
+                .db
+                .record_match(
+                    &team.id,
+                    opponent,
+                    Some(score),
+                    Some(score),
+                    None,
+                    None,
+                    match_type,
+                    played,
+                    None,
+                    "rec",
+                    None,
+                    is_public,
+                    None,
+                    None,
+                )
+                .await
+                .expect(opponent);
+        }
 
         let Json(overview) = must_ok(overview(State(state.clone())).await, "overview");
         assert_eq!(overview.teams.len(), 1);
         assert_eq!(overview.teams[0].roster_count, 1);
         assert_eq!(overview.teams[0].record.wins, 1);
         assert_eq!(overview.teams[0].record.losses, 0);
+        assert_eq!(overview.teams[0].record.draws, 1);
 
         let Json(detail) = must_ok(
             public_team_detail(State(state.clone()), Path(team.id.clone())).await,
@@ -925,6 +963,7 @@ mod visibility_tests {
         assert_eq!(detail.roster[0].member_id, active.id);
         assert_eq!(detail.record.wins, 1);
         assert_eq!(detail.record.losses, 0);
+        assert_eq!(detail.record.draws, 1);
 
         let full = state.db.get_team_record(&team.id).await.expect("full");
         assert_eq!(full.wins, 1);
@@ -932,6 +971,7 @@ mod visibility_tests {
             full.losses, 1,
             "member-facing record still counts the scrim"
         );
+        assert_eq!(full.draws, 3, "member-facing record counts every draw");
 
         deactivate_team(&state, &team.id).await;
         let (status, body) = must_err(

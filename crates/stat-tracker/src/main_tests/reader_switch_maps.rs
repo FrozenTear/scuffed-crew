@@ -461,9 +461,8 @@ fn a_panicking_accolade_reader_is_no_map() {
 #[test]
 fn the_poll_tick_chooses_the_accolade_map_with_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let src = include_str!("../main.rs");
-    let at = src.find("\nasync fn run_loop(").expect("run_loop");
-    let body = norm(src[at..].split("\n}\n").next().unwrap());
+    // In src/daemon/event_loop.rs since 0.6 S11: found by name, wherever it lives.
+    let body = norm(fn_source("run_loop"));
     assert!(
         body.contains(
             "choose_accolade_map( use_new_reader, outcome_only, signal.map(|(_, source)| source), || shadow::read_accolade_map(&rgb), || detect::match_end::read_accolade_map(&img), );"
@@ -477,10 +476,8 @@ fn the_poll_tick_chooses_the_accolade_map_with_the_reader_switch() {
     );
     assert!(body.contains("let use_new_reader = ctx.use_new_reader;"));
     assert!(body.contains("start_screen, now, new_game_debounce, use_new_reader, ) .await;"));
-    let tick = src
-        .find("\nasync fn apply_poll_tick(")
-        .expect("apply_poll_tick");
-    let tick_body = norm(src[tick..].split("\n}\n").next().unwrap());
+    // In src/daemon/poll/outcome.rs since 0.6 S9: found by name, wherever it lives.
+    let tick_body = norm(fn_source("apply_poll_tick"));
     assert!(
         tick_body
             .contains("apply_poll_decision(st, store, data_dir, decision, now, use_new_reader)")
@@ -998,7 +995,6 @@ fn the_poll_tick_takes_the_phase_source_from_the_reader_switch() {
 #[test]
 fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let src = include_str!("../main.rs");
     // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
     let body = norm(fn_source("analyze_frame"));
     assert!(
@@ -1022,10 +1018,8 @@ fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
     ));
     assert_eq!(body.matches("shadow::read_").count(), 3);
     assert!(body.contains("map_from_banner: top_bar.from_banner,"));
-    let hc = src
-        .find("\nasync fn handle_capture(")
-        .expect("handle_capture");
-    let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/grab.rs since 0.6 S10: found by name, wherever it lives.
+    let hc_body = norm(fn_source("handle_capture"));
     assert!(hc_body.contains("use_new_reader: ctx.use_new_reader,"));
     assert!(hc_body.contains(
         "if ctx.use_new_reader { req.member_map_edit = session_has_member_map_edit(&ctx.store, &req).await; }"
@@ -1038,10 +1032,12 @@ fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
     // the stored report carries the text-fallback replacement
     assert!(hc_body.contains("map_replaces_text_fallback: staged.replaced_text_fallback,"));
     // apply_new_reader reads nothing off the frame: it has no frame
-    let an = src
-        .find("\nfn apply_new_reader(")
-        .expect("apply_new_reader");
-    let an_body = norm(src[an..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/cells.rs since 0.6 S4: found by name, wherever it lives.
+    let an_body = norm(fn_source("apply_new_reader"));
+    assert!(
+        an_body.contains("reader_apply::merge_saved_with_authority("),
+        "the slice is the new reader's save"
+    );
     assert_eq!(an_body.matches("shadow::read_").count(), 0);
     assert_eq!(an_body.matches("ocr::").count(), 0);
 }
@@ -1053,7 +1049,6 @@ fn the_vision_pass_chooses_the_top_bar_map_with_the_reader_switch() {
 #[test]
 fn the_hero_authority_goes_through_the_reader_switch() {
     let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
-    let src = include_str!("../main.rs");
     // In src/daemon/tab/vision.rs since 0.6 S3: found by name, wherever it lives.
     let body = norm(fn_source("analyze_frame"));
     assert!(body.contains("} = read_own_hero( use_new_reader, || {"));
@@ -1075,10 +1070,8 @@ fn the_hero_authority_goes_through_the_reader_switch() {
         "the icons are read before the own row"
     );
     assert!(body.contains("career_hero, pack_hero, tab_heroes,"));
-    let hc = src
-        .find("\nasync fn handle_capture(")
-        .expect("handle_capture");
-    let hc_body = norm(src[hc..].split("\n}\n").next().unwrap());
+    // In src/daemon/tab/grab.rs since 0.6 S10: found by name, wherever it lives.
+    let hc_body = norm(fn_source("handle_capture"));
     assert!(hc_body.contains(
         "if ctx.use_new_reader { hero_auth::resolve_hero_new_reader( pack_hero.as_deref(), portrait, &hero_auth, parse::canonical_hero, ) } else { hero_auth::resolve_hero( career_hero.as_deref(), portrait, &parsed.hero, &hero_auth, parse::canonical_hero, ) };"
     ));

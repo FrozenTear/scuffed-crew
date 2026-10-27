@@ -3,8 +3,8 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
-use super::load_error::meta_load_error;
-use crate::components::fetch_error;
+use super::load_error::{is_retrying, meta_load_error};
+use crate::components::fetch_error_state;
 
 // --- Types ---
 
@@ -378,7 +378,11 @@ pub fn StrategyMeta() -> Element {
 
                 match data {
                     None => rsx! { p { class: "meta-loading", "Loading meta data..." } },
-                    Some(Err(err)) => fetch_error(&meta_load_error(err).message, refresh),
+                    Some(Err(err)) => {
+                        let shown = meta_load_error(err);
+                        let retrying = is_retrying(*meta_data.state().read());
+                        fetch_error_state(&shown.message, shown.retry.then_some(refresh), retrying)
+                    }
                     Some(Ok(resp)) if resp.heroes.is_empty() => rsx! {
                         p { class: "meta-empty", "No hero data available." }
                     },

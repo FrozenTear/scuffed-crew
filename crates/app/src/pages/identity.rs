@@ -309,7 +309,7 @@ pub fn IdentitySettings() -> Element {
             return;
         }
         // Importing links an *external* key and replaces any currently linked
-        // identity — confirm before the mode change (DR1-NOSTR-003).
+        // identity, so confirm before the mode change (DR1-NOSTR-003).
         let confirmed = web_sys::window()
             .and_then(|w| {
                 w.confirm_with_message(
@@ -365,7 +365,7 @@ pub fn IdentitySettings() -> Element {
     let member = me_ok.and_then(|me| me.member.as_ref());
 
     // Server-computed: `None` when the deploy has no valid public NIP-05
-    // domain. Never rebuild this client-side — the client cannot know which
+    // domain. Never rebuild this client-side; the client cannot know which
     // domain serves `/.well-known/nostr.json`, and guessing is what published
     // identities pointing at a domain we do not own.
     let nip05 = me_ok.and_then(|me| me.nip05.clone());

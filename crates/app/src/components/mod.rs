@@ -14,9 +14,9 @@ pub mod toast;
 pub mod ui;
 
 pub use admin_shared::*;
-pub use fetch_state::fetch_error;
+pub use fetch_state::{fetch_error, fetch_error_state, retry_label};
 pub use member_gate::{is_http_status, member_pending};
-// Currently unreferenced (home.rs moved to settings-driven sections) — kept
+// Currently unreferenced (home.rs moved to settings-driven sections), kept
 // per the pending-wiring convention for other pages to adopt.
 #[allow(unused_imports)]
 pub use section_header::SectionHeader;

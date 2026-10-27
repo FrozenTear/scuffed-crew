@@ -6,9 +6,8 @@ use crate::components::charts::{DonutChart, DonutSegment};
 use crate::hooks::ApiResource;
 
 use super::role::{RolePanel, role_aggs_from_rows, role_panel};
-use super::{
-    HeroStats, MIN_GAMES, MapStats, MatchPage, load_error_state, map_game_mode, winrate_pct,
-};
+use super::{HeroStats, MIN_GAMES, MapStats, MatchPage, load_error_state, map_game_mode};
+use crate::sample::Tally;
 
 /// Role-card win-rate text: plain text tokens (no traffic light); low-sample
 /// roles render muted.
@@ -21,7 +20,7 @@ fn wr_value_class(matches: u32) -> &'static str {
 }
 
 /// Tracker outcomes are `victory` / `defeat` / `draw` (`win`/`loss` accepted
-/// as aliases) — same contract as history's `outcome_class`.
+/// as aliases): same contract as history's `outcome_class`.
 fn outcome_chip_class(outcome: &str) -> &'static str {
     match outcome.to_lowercase().as_str() {
         "victory" | "win" => "form-chip win",
@@ -30,30 +29,28 @@ fn outcome_chip_class(outcome: &str) -> &'static str {
     }
 }
 
-/// Mode WR aggregate for overview chips.
+/// Mode aggregate for overview chips. `result` follows the small-sample
+/// rule: the win rate from 10 games, the record below that.
 struct ModeChip {
     name: &'static str,
     matches: u32,
-    wr: f64,
+    result: String,
 }
 
 fn mode_chips(maps: &[MapStats]) -> Vec<ModeChip> {
     const ORDER: &[&str] = &["Escort", "Hybrid", "Control", "Push", "Flashpoint", "Clash"];
     let mut out = Vec::new();
     for &mode in ORDER {
-        let mut m = 0u32;
-        let mut w = 0u32;
-        for map in maps {
-            if map_game_mode(&map.map_name) == mode {
-                m += map.matches;
-                w += map.wins;
-            }
-        }
-        if m > 0 {
+        let total = Tally::sum(
+            maps.iter()
+                .filter(|map| map_game_mode(&map.map_name) == mode)
+                .map(|map| map.tally()),
+        );
+        if total.games > 0 {
             out.push(ModeChip {
                 name: mode,
-                matches: m,
-                wr: winrate_pct(w, m),
+                matches: total.games,
+                result: total.label(),
             });
         }
     }
@@ -88,14 +85,14 @@ pub(super) fn overview_tab(
     let h_err = heroes.error.read().clone();
     let h_data = heroes.data.read();
     let h_list = h_data.as_ref().and_then(|d| d.as_ref());
-    let top5: Vec<_> = h_list
+    // Ranking needs a win rate, so only heroes with 10+ games.
+    let top5: Vec<(&HeroStats, f64)> = h_list
         .map(|list| {
-            let mut by_wr: Vec<_> = list.iter().filter(|h| h.matches >= MIN_GAMES).collect();
-            by_wr.sort_by(|a, b| {
-                let wa = winrate_pct(a.wins, a.matches);
-                let wb = winrate_pct(b.wins, b.matches);
-                wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            let mut by_wr: Vec<_> = list
+                .iter()
+                .filter_map(|h| h.tally().win_rate_pct().map(|wr| (h, wr)))
+                .collect();
+            by_wr.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             by_wr.into_iter().take(5).collect()
         })
         .unwrap_or_default();
@@ -176,19 +173,18 @@ pub(super) fn overview_tab(
                 }
             }
             div { class: "overview-section",
-                h3 { "Top Heroes (3+ matches)" }
+                h3 { "Top Heroes (10+ games)" }
                 if h_err.is_some() {
                     {load_error_state("hero rankings", heroes.refresh)}
                 } else if h_list.is_none() {
                     p { class: "loading-state", "Loading hero rankings..." }
                 } else if top5.is_empty() {
-                    p { class: "empty-state", "Need 3+ games on a hero for rankings." }
+                    p { class: "empty-state", "Need 10+ games on a hero for rankings." }
                 } else {
                     div { class: "mini-hero-list",
                         {
                             top5.iter()
-                                .map(|h| {
-                                    let wr = winrate_pct(h.wins, h.matches);
+                                .map(|&(h, wr)| {
                                     let name = h.hero.clone();
                                     let m = h.matches;
                                     rsx! {
@@ -220,12 +216,12 @@ pub(super) fn overview_tab(
                                 .iter()
                                 .map(|c| {
                                     let name = c.name;
-                                    let wr = c.wr;
+                                    let result = c.result.clone();
                                     let m = c.matches;
                                     rsx! {
                                         div { class: "mode-chip", key: "{name}",
                                             span { class: "mode-chip-name", "{name}" }
-                                            span { class: "mode-chip-wr", "{wr:.0}%" }
+                                            span { class: "mode-chip-wr", "{result}" }
                                             span { class: "mode-chip-n", "{m}g" }
                                         }
                                     }

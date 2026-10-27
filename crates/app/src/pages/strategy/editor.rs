@@ -1,4 +1,4 @@
-//! Strategy editor page — main composition layer for the strategy editor.
+//! Strategy editor page: main composition layer for the strategy editor.
 //!
 //! Composes all editor sub-components (canvas, toolbar, panels, timeline)
 //! and manages top-level editor state using Dioxus signals.
@@ -28,7 +28,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use wasm_bindgen::JsCast;
 
-use super::load_error::strategy_load_error;
+use super::load_error::{is_retrying, strategy_load_error};
+use crate::components::retry_label;
 
 use scuffed_api_client::ApiClient;
 use scuffed_types::strategy::{
@@ -460,17 +461,21 @@ pub fn StrategyEditor(id: String) -> Element {
         },
         Some(Err(err)) => {
             let shown = strategy_load_error(err);
+            let retrying = is_retrying(*strategy_resource.state().read());
+            let label = retry_label(retrying);
             rsx! {
                 div {
                     style: "display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.75rem; height: 100vh; color: var(--danger);",
                     role: "alert",
+                    aria_busy: if retrying { "true" },
                     "{shown.message}"
                     if shown.retry {
                         button {
                             r#type: "button",
                             class: "fetch-error__retry is-compact",
+                            disabled: retrying,
                             onclick: move |_| refresh += 1,
-                            "Retry"
+                            "{label}"
                         }
                     }
                 }
@@ -483,7 +488,7 @@ pub fn StrategyEditor(id: String) -> Element {
 }
 
 // =============================================================================
-// EditorLayout — main composition component
+// EditorLayout: main composition component
 // =============================================================================
 
 #[component]
@@ -516,7 +521,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let mut right_open = use_signal(|| true);
     let mut bottom_open = use_signal(|| false);
 
-    // Map picker modal — open when creating (or a loaded strategy has no map).
+    // Map picker modal: open when creating (or a loaded strategy has no map).
     let mut show_map_picker = use_signal(|| {
         initial_strategy
             .as_ref()
@@ -530,7 +535,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
     let toast = use_toast();
     let navigator = use_navigator();
 
-    // Personal winrates per hero from /api/strategy/meta — fetched once on mount.
+    // Personal winrates per hero from /api/strategy/meta: fetched once on mount.
     // None while loading or when the user is not an authed org member.
     let hero_winrates = use_resource(|| async {
         let resp = ApiClient::web()
@@ -1140,7 +1145,7 @@ fn EditorLayout(initial_strategy: Option<Strategy>) -> Element {
                         }
                     }
 
-                    // Bottom panel — element list
+                    // Bottom panel: element list
                     div {
                         class: if bottom_collapsed { "element-list-wrapper collapsed" } else { "element-list-wrapper" },
 

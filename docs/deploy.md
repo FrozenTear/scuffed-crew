@@ -141,7 +141,7 @@ This `up -d` creates the database container on the image `compose.yml` names. If
 
 ### SurrealDB: `is unhealthy` but logs show “Started web server”
 
-The database is fine; an old probe had a 5 s timeout, shorter than the time the `surreal` CLI waits before it exits. Current `compose.yml` probes with `/surreal is-ready` and a 20 s timeout. The probe belongs to the database container, so a fix only takes effect when that container is recreated, and `./scripts/update.sh` never does that. If `compose.yml` names the image the container already runs (`podman inspect <surreal container> --format '{{.ImageName}}'`), stop site-server, then `podman compose --env-file data/secrets.env up -d --no-deps surrealdb` recreates it on the same image and volume, then `./scripts/update.sh`. If the images differ, that is a database upgrade: follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server).
+The database is fine; an old probe had a 5 s timeout, shorter than the time the `surreal` CLI waits before it exits. Current `compose.yml` has a Surreal healthcheck: `/surreal is-ready --endpoint http://127.0.0.1:8000` every 30 s, with a 20 s timeout, 3 retries and a 20 s start period. `site-server` still only waits for the database container to start, not for it to be healthy. The probe belongs to the database container, so a fix only takes effect when that container is recreated, and `./scripts/update.sh` never does that. If `compose.yml` names the image the container already runs (`podman inspect <surreal container> --format '{{.ImageName}}'`), stop site-server, then `podman compose --env-file data/secrets.env up -d --no-deps surrealdb` recreates it on the same image and volume, then `./scripts/update.sh`. If the images differ, that is a database upgrade: follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server).
 
 ### SurrealDB: duplicate container (`_` vs `-`) and site-server stuck Created / public 502
 
@@ -241,10 +241,13 @@ Wait until `dig +short ow.scuffedcrew.no` returns the VPS.
 ```caddy
 ow.scuffedcrew.no {
 	encode zstd gzip
-	header X-Frame-Options "DENY"
-	header Referrer-Policy "strict-origin-when-cross-origin"
 	# Same-origin Nostr relay. See "Optional Nostr relay" below and deploy/Caddyfile.
 	handle /relay* {
+		header X-Frame-Options "DENY"
+		header Referrer-Policy "strict-origin-when-cross-origin"
+		header X-Content-Type-Options "nosniff"
+		header Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
 		uri strip_prefix /relay
 		reverse_proxy 127.0.0.1:7777
 	}
@@ -254,7 +257,7 @@ ow.scuffedcrew.no {
 }
 ```
 
-`X-Content-Type-Options: nosniff` is set by scuffed-server. Do not add `header X-Content-Type-Options "nosniff"` in Caddy. A second line is sent beside the origin header. If the live host file still has that line, delete it and reload Caddy.
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: strict-origin-when-cross-origin` are set by scuffed-server on every response it serves. Do not add them for the site in Caddy. A second line is sent beside the origin header. Only the `/relay*` block sets these headers in Caddy, because strfry answers that path: the three above plus `Permissions-Policy` and the production `Strict-Transport-Security` value, all copied from `crates/server/src/security.rs`. If the live host file still has site-wide `header X-Content-Type-Options`, `header X-Frame-Options` or `header Referrer-Policy` lines, move or delete them as above and reload Caddy.
 
 Do not add a Caddy `Cache-Control` header for `*.wasm` / `*.js` / `*.css`. The origin is the only cache policy (`cache_control_value` in `crates/site-server`): Dioxus `dxh`-hashed assets are `public, max-age=31536000, immutable`, unhashed `.js` / `.css` / `.wasm` are `no-cache`, other static files are one day, and the HTML shell is `no-cache`. A matcher on every `.js` / `.css` / `.wasm` path also covers unhashed files and the HTML fallback, and Caddy emits a second `Cache-Control` beside the origin's.
 
@@ -769,6 +772,50 @@ If `PACKS_DIR` is unset, the directory cannot be read, or it has no valid
 `GET /api/tracker/packs/{name}` return 503 `{"error":"packs_disabled"}`.
 `packs-data` is not in `scripts/backup.sh`. The copy of record is the build
 folder on the operator's machine.
+
+## 0.6 first boot: roster dedupe (DB7)
+
+The first start of a 0.6 build collapses duplicate `plays_on` roster edges
+(one member on one team more than once), then installs the UNIQUE index
+`plays_on_member_team_idx` on (in, out). The deletes are permanent and every
+deleted edge is logged at info. Later boots see the index and skip the pass.
+
+1. **Back up first.** `scripts/update.sh` has no backup step. Run
+   `scripts/backup.sh` (or snapshot the volume) before rollout.
+2. **Run the read-only duplicate count first** and note it:
+   ```surql
+   SELECT * FROM (SELECT in, out, count() AS n FROM plays_on GROUP BY in, out) WHERE n > 1;
+   ```
+   The dedupe runs inside startup migrations, before `/api/health` answers.
+   It handles about 74 duplicate groups per second (1783 groups took about
+   23 s in QA), so a large count means a longer wait before health is green.
+   Raise the health or start timeout if needed rather than restarting.
+3. **Stop the old site-server first.** During a rolling deploy an old
+   container that still adds roster entries can create a duplicate between
+   the dedupe and the index, which blocks the new container from starting
+   until the old one stops. Bring the old one down, then start the new one.
+4. **The migrating container must run the new build.** Containers with
+   `SURREALDB_BOOTSTRAP=0` never run migrations, so they never run DB7. The
+   container that bootstraps (or the `SURREALDB_MIGRATE_ONLY=1` job) has to
+   be on the new image.
+5. **After boot:** expect the info log `plays_on is UNIQUE on (in, out)`.
+   Its `duplicate_pairs` equals the number of rows the step 2 query returned
+   (one row per duplicate group). Its `deleted` is the number of extra edges,
+   the sum of `n - 1` over those rows. Re-run the step 2 query: 0 rows.
+
+Two servers that boot against one database at the same moment can hit
+`Transaction conflict: Resource busy ... can be retried` in a startup
+migration. Each fatal migration step retries that error up to 4 times with
+a short backoff (about 2 s in total) before it gives up. A failed step names
+itself in the startup panic, for example
+`SurrealDB startup migration failed: DB7 roster dedupe/unique index failed after 1 attempt(s): ...`.
+A panic that starts with `Failed to connect to SurrealDB` is a connection or
+login problem, not a migration.
+
+**Rollback to a pre-0.6 build:** that build relates a new edge on every add,
+which the index rejects (500 on re-add or double click). Run
+`REMOVE INDEX plays_on_member_team_idx ON plays_on` as root, or accept that.
+Deleted duplicates come back only from the backup.
 
 ## Upgrading the SurrealDB server
 

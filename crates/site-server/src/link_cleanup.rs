@@ -42,6 +42,7 @@ fn cleanup_error_kind(error: &scuffed_db::DbError) -> &'static str {
         scuffed_db::DbError::Crypto(_) => "crypto",
         scuffed_db::DbError::DisplayNameInvalid => "display_name_invalid",
         scuffed_db::DbError::DisplayNameTaken => "display_name_taken",
+        scuffed_db::DbError::Migration { .. } => "migration",
     }
 }
 

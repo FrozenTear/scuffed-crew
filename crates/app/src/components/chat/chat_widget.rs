@@ -1,4 +1,4 @@
-//! Main expandable chat widget — sidebar/panel layout.
+//! Main expandable chat widget: sidebar/panel layout.
 //!
 //! Wires F-API-003/004: discovered `TeamChannel` group_ids, team (public)
 //! sends via `POST /api/chat/send-public`, and send-encrypted / decrypt on

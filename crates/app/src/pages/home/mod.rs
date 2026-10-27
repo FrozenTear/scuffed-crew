@@ -1,4 +1,4 @@
-//! Public homepage — shell/skin driven composition of shared presentational blocks.
+//! Public homepage: shell/skin driven composition of shared presentational blocks.
 
 mod blocks;
 mod css;

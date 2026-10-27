@@ -152,7 +152,7 @@ pub fn stored_http_url(url: &str) -> Option<StoredUrl<'_>> {
 }
 
 /// How a `use_resource` slot that stores `Result` should be shown.
-/// Loading, failure, and a successful payload stay distinct — an error is not
+/// Loading, failure, and a successful payload stay distinct: an error is not
 /// "still loading" and an empty payload is not a failure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FetchClass {
@@ -175,6 +175,16 @@ pub fn pluralize(n: usize, singular: &str, plural: &str) -> String {
         format!("1 {singular}")
     } else {
         format!("{n} {plural}")
+    }
+}
+
+/// Compact win, loss, draw record: `5W-2L-1D`, or `5W-2L` when there are no
+/// draws. Plain hyphens with no spaces, used everywhere a record is shown.
+pub fn record_label(wins: u32, losses: u32, draws: u32) -> String {
+    if draws > 0 {
+        format!("{wins}W-{losses}L-{draws}D")
+    } else {
+        format!("{wins}W-{losses}L")
     }
 }
 
@@ -402,7 +412,7 @@ pub fn encode_query(value: &str) -> String {
 }
 
 /// Append `season=<id>` to an API path (`?` or `&` as needed). `None` = all
-/// time, path returned unchanged — the server treats a missing/blank season
+/// time, path returned unchanged; the server treats a missing/blank season
 /// as "total".
 pub fn season_url(path: &str, season: Option<&str>) -> String {
     match season {
@@ -425,7 +435,7 @@ mod tests {
         assert_eq!(truncate_chars("abcdefgh", 8), "abcdefgh");
         assert_eq!(truncate_chars("abcdefghi", 8), "abcdefgh");
         assert_eq!(truncate_chars("hello", 0), "");
-        // 9 scalars, 2 bytes each — a byte slice of 8 would split a scalar.
+        // 9 scalars, 2 bytes each; a byte slice of 8 would split a scalar.
         let multibyte = "ééééééééé";
         let short = truncate_chars(multibyte, 8);
         assert_eq!(short.chars().count(), 8);
@@ -761,5 +771,14 @@ mod tests {
         assert!(matches!(empty, Some(Ok(rows)) if rows.is_empty()));
         let rows: Option<Result<Vec<i32>, String>> = Some(Ok(vec![1, 2]));
         assert_eq!(classify_fetch(rows.as_ref()), FetchClass::Ready);
+    }
+
+    #[test]
+    fn record_label_is_compact() {
+        assert_eq!(record_label(5, 2, 1), "5W-2L-1D");
+        assert_eq!(record_label(5, 2, 0), "5W-2L");
+        assert_eq!(record_label(0, 0, 0), "0W-0L");
+        assert_eq!(record_label(12, 0, 3), "12W-0L-3D");
+        assert!(!record_label(5, 2, 1).contains(' '));
     }
 }

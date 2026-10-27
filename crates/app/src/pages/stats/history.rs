@@ -2,15 +2,16 @@ use dioxus::prelude::*;
 
 use crate::hooks::ApiResource;
 
+use super::game::{match_path, open_match};
 use super::role::{game_role_label, history_row_matches_role};
 use super::{MatchPage, format_date, load_error_state};
 
 /// The tracker stores outcomes as `victory` / `defeat` / `draw` (see the
 /// upload filter in site-server routes/stats.rs); `win` / `loss` are accepted
-/// as aliases. DEFEAT must land on the serious/danger class — before this
+/// as aliases. DEFEAT must land on the serious/danger class; before this
 /// matched only `win`/`loss`, every card fell through to the draw class and
 /// DEFEAT rendered gold.
-fn outcome_class(outcome: &str) -> &'static str {
+pub(super) fn outcome_class(outcome: &str) -> &'static str {
     match outcome.to_lowercase().as_str() {
         "victory" | "win" => "outcome-win",
         "defeat" | "loss" => "outcome-loss",
@@ -55,7 +56,7 @@ fn unsure_note() -> Element {
 
 /// One match-row value. An unsure cell gets a question mark, hidden "(unsure)"
 /// text, and [`unsure_title`]. A sure numeric cell keeps the stat name as its title.
-fn marked_value(
+pub(super) fn marked_value(
     class: &str,
     text: &str,
     stat_name: &str,
@@ -241,8 +242,14 @@ pub(super) fn history_tab(
                                         show_new_reader_badge(m.recognizer.as_deref().unwrap_or(""));
                                     let mode_text = m.game_mode.clone();
                                     let mit_text = format!("MIT {}", m.mitigation);
+                                    let href = match_path(&m.id);
+                                    let target_id = m.id.clone();
                                     rsx! {
-                                        div { class: "match-card", key: "{m.id}",
+                                        a {
+                                            class: "match-card match-card-link",
+                                            key: "{m.id}",
+                                            href: "{href}",
+                                            onclick: move |evt: MouseEvent| open_match(evt, target_id.clone()),
                                             {marked_value(
                                                 &format!("match-outcome {oc}"),
                                                 &m.outcome,
@@ -486,6 +493,12 @@ mod tests {
         let html = dioxus_ssr::render(&dom);
 
         assert_eq!(html.matches(NEW_READER_BADGE).count(), 1, "{html}");
+        for id in ["new", "old", "blank"] {
+            assert!(
+                html.contains(&format!("href=\"/stats/match/{id}\"")),
+                "every row links to its game page: {html}"
+            );
+        }
         assert!(
             html.contains("class=\"tracker-badge reader-badge\""),
             "badge uses the existing tracker badge style: {html}"

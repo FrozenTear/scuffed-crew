@@ -1,6 +1,6 @@
 //! NIP-44 encrypted chat support for officer/private channels.
 //!
-//! For server-managed keys, encryption happens server-side — the frontend sends
+//! For server-managed keys, encryption happens server-side: the frontend sends
 //! plaintext to Axum, which encrypts + signs + publishes. Decryption is also
 //! server-side: the frontend fetches decrypted messages via API.
 //!
@@ -59,11 +59,11 @@ const ENCRYPTED_CHAT_CSS: &str = r#"
 /// Key mode for the current user.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum KeyMode {
-    /// Server manages the keypair — encryption/decryption happens server-side.
+    /// Server manages the keypair: encryption/decryption happens server-side.
     ServerManaged,
     /// User has their own Nostr key (NIP-07 extension or imported).
     External,
-    /// No key available — cannot participate in encrypted channels.
+    /// No key available: cannot participate in encrypted channels.
     None,
 }
 

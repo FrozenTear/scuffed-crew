@@ -1,4 +1,4 @@
-//! Public match detail page — VOD / replay / scores for a single fixture.
+//! Public match detail page: VOD / replay / scores for a single fixture.
 
 use dioxus::prelude::*;
 use serde::Deserialize;
@@ -77,6 +77,7 @@ const PAGE_CSS: &str = r#"
         font-weight: 700;
         letter-spacing: 0.04em;
         margin: 0.5rem 0 0;
+        white-space: nowrap;
     }
     .match-score.win { color: var(--ok); }
     .match-score.loss { color: var(--danger); }
@@ -185,7 +186,7 @@ fn render_match(m: &MatchDetailData) -> Element {
                 std::cmp::Ordering::Less => "loss",
                 std::cmp::Ordering::Equal => "draw",
             };
-            (format!("{u}–{t}"), class)
+            (format!("{u}-{t}"), class)
         }
         _ => ("Scheduled".into(), "pending"),
     };
