@@ -148,12 +148,13 @@ pub struct Averages {
 /// hero, so an old game is not compared with games played after it. Per
 /// stat, a value still unsure or past [`Stat::plausible_max`] is left out.
 pub fn averages(game: &Game, all: &[Game]) -> Averages {
-    let hero = main_hero(game);
+    // Grouped as the hero rows are, so older "Lucio" games count for Lúcio.
+    let hero = crate::aggregate::hero_name(&main_hero(game)).to_string();
     let start = game.started_at();
     let mut others: Vec<&Game> = all
         .iter()
         .filter(|g| g.session_id != game.session_id && g.started_at() < start)
-        .filter(|g| g.display_hero().eq_ignore_ascii_case(&hero))
+        .filter(|g| crate::aggregate::hero_name(&g.display_hero()).eq_ignore_ascii_case(&hero))
         .collect();
     others.sort_by_key(|g| std::cmp::Reverse(g.started_at()));
     let games = others.len() + 1;
@@ -690,6 +691,30 @@ mod tests {
         let avg = averages(&g, &all);
         assert_eq!((avg.games, avg.window), (31, 20));
         assert_eq!(avg.means.unwrap()[0], Some(18.0));
+    }
+
+    /// Older "Lucio" and "Torbjorn" games count toward Lúcio and Torbjörn,
+    /// as in the hero rows, and the reverse.
+    #[test]
+    fn averages_group_older_hero_spellings() {
+        for (old, now) in [("Lucio", "Lúcio"), ("Torbjorn", "Torbjörn")] {
+            let all: Vec<Game> = (0..12)
+                .map(|i| {
+                    let hero = if i % 2 == 0 { old } else { now };
+                    game(&format!("h{i}"), hero, 18, 9200, at(10, i as u32, 0))
+                })
+                .collect();
+            for hero in [old, now] {
+                let g = game("g", hero, 20, 9000, at(23, 0, 0));
+                let avg = averages(&g, &all);
+                assert_eq!((avg.games, avg.window), (13, 12), "{hero}");
+                assert_eq!(avg.hero, now);
+                assert_eq!(
+                    avg.caption(),
+                    format!("vs avg: your average on {now}, last 12 games")
+                );
+            }
+        }
     }
 
     /// The mean leaves out newer games, other games' unsure values and

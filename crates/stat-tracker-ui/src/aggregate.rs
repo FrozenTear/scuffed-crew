@@ -188,8 +188,27 @@ pub fn filter_games<'a>(games: &'a [Game], filter: &GameFilter) -> Vec<&'a Game>
 /// The name one hero is grouped under: the reader's name, so a row an
 /// older picker saved as "Lucio" or "Torbjorn" joins Lúcio or Torbjörn.
 /// A name that is not a known hero stays as it is.
+///
+/// It runs for every game on each Games and Overview redraw, so a name
+/// already in the reader's form returns at once, and any other name is
+/// looked up once per thread and cached.
 pub fn hero_name(name: &str) -> &str {
-    scuffed_types::hero_key_to_name(name).unwrap_or(name)
+    if scuffed_types::HERO_NAMES.iter().any(|h| h.display == name) {
+        return name;
+    }
+    thread_local! {
+        static SEEN: std::cell::RefCell<std::collections::HashMap<String, Option<&'static str>>> =
+            Default::default();
+    }
+    let known = SEEN.with_borrow_mut(|seen| match seen.get(name) {
+        Some(known) => *known,
+        None => {
+            let known = scuffed_types::hero_key_to_name(name);
+            seen.insert(name.to_string(), known);
+            known
+        }
+    });
+    known.unwrap_or(name)
 }
 
 pub fn distinct_heroes(games: &[&Game]) -> Vec<String> {
@@ -459,6 +478,26 @@ mod tests {
             "win rate {}",
             agg.record.win_rate()
         );
+    }
+
+    /// The fast path and the cache give what the reader's lookup gives.
+    #[test]
+    fn hero_name_matches_the_reader_lookup() {
+        let names = scuffed_types::HERO_NAMES.iter().map(|h| h.display);
+        let extra = [
+            "Lucio",
+            "lucio",
+            "Torbjorn",
+            "soldier 76",
+            "",
+            "Unknown",
+            "Nobody",
+        ];
+        for name in names.chain(extra) {
+            let want = scuffed_types::hero_key_to_name(name).unwrap_or(name);
+            assert_eq!(hero_name(name), want, "{name}");
+            assert_eq!(hero_name(name), want, "{name} cached");
+        }
     }
 
     /// A row an older picker saved as "Lucio" or "Torbjorn" counts with
