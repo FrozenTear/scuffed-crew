@@ -510,8 +510,8 @@ impl TrackerApp {
             && !self.daemon_busy
             && capture_output_changed(&self.saved_file, &config);
         let restart_for_route = classic && daemon_up && !self.daemon_busy && route_changed;
-        let env_overrides_route = std::env::var(stat_tracker::config::CAPTURE_ENV)
-            .ok()
+        let env_overrides_route = self
+            .outside_var(stat_tracker::config::CAPTURE_ENV)
             .is_some_and(|value| !value.trim().is_empty());
         let recheck =
             update_channel_switched(&self.saved_file, &config, self.installed_version.as_deref());

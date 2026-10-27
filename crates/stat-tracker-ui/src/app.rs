@@ -315,6 +315,9 @@ fn live_game_session_now(
 pub struct TrackerApp {
     pub data_dir: PathBuf,
     pub fixture: Option<FixtureKind>,
+    /// Outside values in place of the host's CLI and environment, for the
+    /// Settings pages (tests). `None` reads this process's.
+    pub(crate) outside_env: Option<crate::settings_env::OutsideEnv>,
     pub games: Vec<Game>,
     pub seasons: SeasonCache,
     pub season: SeasonSel,
@@ -569,6 +572,7 @@ impl TrackerApp {
         )
         .with_unknown_baseline(config_unreadable);
         let mut app = Self {
+            outside_env: crate::settings_env::OutsideEnv::for_build(),
             live_status,
             health_status,
             data_dir: cli.data_dir,
@@ -2324,7 +2328,7 @@ impl TrackerApp {
         };
         match Config::apply_setup_patch(&path, &patch) {
             Ok(fresh) => {
-                let shown = crate::settings_env::shown_from_file(&fresh, &path);
+                let shown = self.shown_for(&fresh, &path);
                 if patch.setup_completed.is_some() {
                     self.saved_file.setup_completed = fresh.setup_completed;
                     self.saved_config.setup_completed = fresh.setup_completed;

@@ -12,9 +12,28 @@
 
 use std::path::Path;
 
-use stat_tracker::config::{Config, EnvOverlay};
+use stat_tracker::config::{CAPTURE_ENV, Config, EnvOverlay, OCR_ENV, OcrControl};
 
 use crate::app::TrackerApp;
+
+/// Outside values the Settings pages use in place of this process's CLI
+/// and environment. Every test app holds one (empty unless the test fills
+/// it), so no test reads the host's environment; a real run holds none.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OutsideEnv {
+    /// What the CLI / env overlay of `Config::load` sets.
+    pub overlay: EnvOverlay,
+    /// Raw variables by name, such as `STAT_TRACKER_OCR`.
+    pub vars: Vec<(&'static str, String)>,
+}
+
+impl OutsideEnv {
+    /// What a [`TrackerApp`] starts with: none in a real run, an empty one
+    /// in a test.
+    pub(crate) fn for_build() -> Option<Self> {
+        cfg!(test).then(Self::default)
+    }
+}
 
 /// What the GUI loads at launch.
 pub(crate) struct Loaded {
@@ -130,12 +149,54 @@ pub(crate) fn sync_env(overlay: EnvOverlay) -> Option<&'static str> {
 impl TrackerApp {
     /// What this process's CLI / env overlay sets, for the lock lines. A
     /// fixture (demo or test) shows none, as [`load`] never reads the
-    /// host's environment for one.
+    /// host's environment for one. A test app uses its [`OutsideEnv`].
     pub(crate) fn env_overlay(&self) -> EnvOverlay {
         if self.fixture.is_some() {
-            EnvOverlay::default()
+            return EnvOverlay::default();
+        }
+        match &self.outside_env {
+            Some(outside) => outside.overlay,
+            None => Config::env_overlay(),
+        }
+    }
+
+    /// The variable `name` as the Settings pages see it: never set for a
+    /// fixture, the [`OutsideEnv`] value in a test, else this process's.
+    pub(crate) fn outside_var(&self, name: &str) -> Option<String> {
+        if self.fixture.is_some() {
+            return None;
+        }
+        match &self.outside_env {
+            Some(outside) => outside
+                .vars
+                .iter()
+                .find(|(var, _)| *var == name)
+                .map(|(_, value)| value.clone()),
+            None => std::env::var(name).ok(),
+        }
+    }
+
+    /// The note when `STAT_TRACKER_CAPTURE` overrides the chosen method.
+    /// Only a real run reads the environment.d files.
+    pub(crate) fn capture_env_note(&self) -> Option<String> {
+        if self.fixture.is_none() && self.outside_env.is_none() {
+            return crate::capture_shared::capture_env_note();
+        }
+        Config::capture_env_note(self.outside_var(CAPTURE_ENV).as_deref(), &[])
+    }
+
+    /// The saved `ocr` value and the `STAT_TRACKER_OCR` override.
+    pub(crate) fn ocr_control(&self) -> OcrControl {
+        Config::ocr_control_from(self.saved_config.ocr, self.outside_var(OCR_ENV).as_deref())
+    }
+
+    /// The config in effect for `file` at `path`. A test app shows the
+    /// file as it is, so the host's overlay never reaches it.
+    pub(crate) fn shown_for(&self, file: &Config, path: &Path) -> Config {
+        if self.outside_env.is_some() {
+            file.clone()
         } else {
-            Config::env_overlay()
+            shown_from_file(file, path)
         }
     }
 
@@ -148,7 +209,7 @@ impl TrackerApp {
 
     /// Take in `file`, now what config.toml holds at `path`.
     pub(crate) fn take_saved_file(&mut self, file: Config, path: &Path) {
-        self.saved_config = shown_from_file(&file, path);
+        self.saved_config = self.shown_for(&file, path);
         self.saved_file = file;
     }
 }
@@ -212,6 +273,11 @@ mod tests {
         ocr_threads: None,
     };
 
+    const BOTH: EnvOverlay = EnvOverlay {
+        server: true,
+        ..TOKEN_ONLY
+    };
+
     #[test]
     fn an_outside_token_left_as_shown_goes_back_to_the_file_token() {
         let (file, shown) = file_and_shown(Some("T_file"), ("https://crew.example", "T_env"));
@@ -255,12 +321,38 @@ mod tests {
         assert_eq!((url.as_str(), token.as_str()), (" https://typed ", "typed"));
     }
 
+    /// An overlay with values, injected as if the host set it: a fixture
+    /// ignores it, and a live app shows it.
     #[test]
     fn a_fixture_shows_no_outside_values() {
-        let (_dir, app) = crate::fixtures::test_app();
+        let (_dir, mut app) = crate::fixtures::test_app();
         assert!(app.fixture.is_some());
+        let set = EnvOverlay {
+            debug_ocr: true,
+            ocr_threads: Some(2),
+            ..BOTH
+        };
+        app.outside_env = Some(OutsideEnv {
+            overlay: set,
+            vars: vec![(OCR_ENV, "off".into())],
+        });
         assert_eq!(app.env_overlay(), EnvOverlay::default());
         assert!(!app.sync_locked());
+        assert_eq!(app.outside_var(OCR_ENV), None);
+        app.fixture = None;
+        assert_eq!(app.env_overlay(), set);
+        assert!(app.sync_locked());
+        assert_eq!(app.outside_var(OCR_ENV).as_deref(), Some("off"));
+    }
+
+    /// Every test app has its own outside values, so none reads the host.
+    #[test]
+    fn a_test_app_never_reads_the_host_env() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.fixture = None;
+        assert_eq!(app.outside_env, Some(OutsideEnv::default()));
+        assert_eq!(app.env_overlay(), EnvOverlay::default());
+        assert_eq!(app.outside_var("PATH"), None);
     }
 
     #[test]

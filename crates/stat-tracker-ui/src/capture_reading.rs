@@ -131,8 +131,8 @@ pub(crate) fn reader_options(
 fn pause_now(app: &TrackerApp) -> PauseRow {
     pause_with(
         app,
-        std::env::var(SCREENCAST_PAUSE_ENV).ok().as_deref(),
-        std::env::var("KDE_SESSION_VERSION").ok().as_deref(),
+        app.outside_var(SCREENCAST_PAUSE_ENV).as_deref(),
+        app.outside_var("KDE_SESSION_VERSION").as_deref(),
     )
 }
 
@@ -156,16 +156,16 @@ fn pause_with(
 /// What the environment fixes outside the app, for the summary.
 fn env_locks(app: &TrackerApp, pause: PauseRow) -> Vec<&'static str> {
     let mut locks = Vec::new();
-    if capture_shared::capture_env_note().is_some() {
+    if app.capture_env_note().is_some() {
         locks.push("Capture method, by STAT_TRACKER_CAPTURE");
     }
     if pause.locked {
         locks.push("Pause between grabs, by STAT_TRACKER_SCREENCAST_PAUSE");
     }
-    if app.saved_config.ocr_control().env.is_some() {
+    if app.ocr_control().env.is_some() {
         locks.push("Classic OCR, by STAT_TRACKER_OCR");
     }
-    if ocr_env_lock(std::env::var(OCR_THREADS_ENV).ok().as_deref()).is_some() {
+    if ocr_env_lock(app.outside_var(OCR_THREADS_ENV).as_deref()).is_some() {
         locks.push("OCR workers, by STAT_TRACKER_OCR_THREADS");
     }
     locks
@@ -193,7 +193,7 @@ fn summary_rows_with(
         capture.push_str(" Paused between grabs.");
     }
     let mut in_effect = config.clone();
-    in_effect.ocr = config.ocr_control().requested();
+    in_effect.ocr = app.ocr_control().requested();
     let reading = match ReaderChoice::of(&in_effect) {
         ReaderChoice::NewOnly => "New reader saves stats. Classic OCR never starts.",
         ReaderChoice::NewWithOcrBackup => "New reader saves stats. Classic OCR is the backup.",
@@ -283,7 +283,7 @@ fn capture_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
     // Capture method.
     // STAT_TRACKER_CAPTURE wins over the choice, so the chips lock like
     // the other rows the environment fixes.
-    let env_route = capture_shared::capture_env_note();
+    let env_route = app.capture_env_note();
     let segments = capture_route_chips(&app.desktop, app.session, route)
         .into_iter()
         .map(|choice| Segment {
@@ -519,7 +519,7 @@ fn reading_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
     }));
     // STAT_TRACKER_OCR turns classic OCR on or off for the tracker it
     // starts, whatever is picked here.
-    if config.ocr_control().env.is_some() {
+    if app.ocr_control().env.is_some() {
         help.push(lock_line(OCR_ENV));
         help.push(hint(SERVICE_MAY_DIFFER));
     }
@@ -608,7 +608,7 @@ fn reading_model_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
 /// OCR workers: Auto or 1 to 8, locked when the environment sets it.
 fn ocr_workers_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let config = &app.saved_config;
-    let env = std::env::var(OCR_THREADS_ENV).ok();
+    let env = app.outside_var(OCR_THREADS_ENV);
     let lock = ocr_env_lock(env.as_deref());
     let resolved = config.ocr_threads_resolved();
     // One rule for the dot: an explicit count, from the file or the
@@ -786,5 +786,37 @@ mod tests {
         assert!(!x11[0].1.contains("Paused"), "{x11:?}");
         assert!(capture_shared::preview_error(&app).is_some());
         let _ = body(&app, false);
+    }
+
+    /// A demo shows no lock from outside, whatever the environment sets.
+    /// A live app shows each one it sets. Neither reads the host's.
+    #[test]
+    fn only_a_live_app_shows_the_environment_locks() {
+        let (_dir, mut app) = demo_app();
+        app.outside_env = Some(crate::settings_env::OutsideEnv {
+            vars: vec![
+                (CAPTURE_ENV, "screenshot".into()),
+                (OCR_ENV, "off".into()),
+                (OCR_THREADS_ENV, "2".into()),
+            ],
+            ..Default::default()
+        });
+        assert!(env_locks(&app, pause_now(&app)).is_empty());
+        assert_eq!(summary_rows(&app).len(), 3, "no outside row in a demo");
+        assert_eq!(app.ocr_control().env, None);
+        let _ = body(&app, true);
+        app.fixture = None;
+        assert_eq!(
+            env_locks(&app, pause_now(&app)),
+            [
+                "Capture method, by STAT_TRACKER_CAPTURE",
+                "Classic OCR, by STAT_TRACKER_OCR",
+                "OCR workers, by STAT_TRACKER_OCR_THREADS",
+            ]
+        );
+        assert_eq!(
+            app.ocr_control().env,
+            Some(stat_tracker::config::OcrSetting::Off)
+        );
     }
 }

@@ -1313,7 +1313,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         .color(TEXT_3),
     );
 
-    if let Some(note) = capture_shared::capture_env_note() {
+    if let Some(note) = app.capture_env_note() {
         body = body.push(
             text(note)
                 .size(SIZE_META)
