@@ -626,13 +626,18 @@ impl ConfigEdit {
             ConfigEdit::ShareReportPictures(on) => config.share_report_pictures = on,
             ConfigEdit::CaptureOnlyOnScreen(on) => config.capture_only_on_screen = on,
             ConfigEdit::AddPlayerName(name) => {
-                let name = name.trim().to_string();
+                // The core's rule: trimmed, no #1234 tag, at least 3
+                // characters. Anything else is not a name.
+                let Some(name) = stat_tracker::config::own_name(&name) else {
+                    return;
+                };
                 let known = config
-                    .own_player_names()
+                    .player_name
                     .iter()
-                    .any(|n| same_name(n, &name));
-                if !name.is_empty() && !known {
-                    config.player_names.push(name);
+                    .chain(config.player_names.iter())
+                    .any(|n| same_name(n, name));
+                if !known {
+                    config.player_names.push(name.to_string());
                 }
             }
             ConfigEdit::RemovePlayerNames(names) => {

@@ -379,6 +379,25 @@ mod tests {
     }
 
     #[test]
+    fn an_added_name_is_cleaned_by_the_core_rule() {
+        let mut c = Config {
+            player_name: Some("Main".into()),
+            ..Config::default()
+        };
+        // Under 3 characters, or only a tag: not a name.
+        ConfigEdit::AddPlayerName("Ab".into()).apply(&mut c);
+        ConfigEdit::AddPlayerName(" #2112 ".into()).apply(&mut c);
+        assert!(c.player_names.is_empty(), "{:?}", c.player_names);
+        // A BattleTag suffix is dropped before it is saved.
+        ConfigEdit::AddPlayerName("Alt#1234".into()).apply(&mut c);
+        assert_eq!(c.player_names, ["Alt"]);
+        // The same name with another tag or case is a repeat.
+        ConfigEdit::AddPlayerName("ALT#99".into()).apply(&mut c);
+        ConfigEdit::AddPlayerName("main#4321".into()).apply(&mut c);
+        assert_eq!(c.player_names, ["Alt"]);
+    }
+
+    #[test]
     fn upload_needs_a_site_and_a_live_app() {
         let (_dir, mut app) = crate::fixtures::test_app();
         app.saved_config.sync = None;
