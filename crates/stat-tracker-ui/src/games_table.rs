@@ -31,6 +31,10 @@ pub enum Msg {
     PickRole(Option<Role>),
     ToggleCompact,
     ToggleFilters,
+    /// Esc, or Enter: close the open row.
+    CloseOpen,
+    /// Open a game's saved scoreboard picture.
+    OpenScoreboard(String),
 }
 
 pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
@@ -43,6 +47,12 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
         }
         Msg::ToggleCompact => s.compact = !s.compact,
         Msg::ToggleFilters => s.filters_open = !s.filters_open,
+        Msg::CloseOpen => {
+            app.expanded = None;
+            app.editing = false;
+            app.confirm_delete = None;
+        }
+        Msg::OpenScoreboard(sid) => crate::games_panel::open_scoreboard(&app.data_dir, &sid),
     }
     iced::Task::none()
 }
@@ -86,7 +96,7 @@ pub fn view<'a>(
         Grouping::Sessions => {
             // Grouping walks newest first; the sort only orders rows inside.
             let mut newest = shown.clone();
-            newest.sort_by(|a, b| b.played_at.cmp(&a.played_at));
+            newest.sort_by_key(|g| std::cmp::Reverse(g.played_at));
             let gap = chrono::TimeDelta::seconds(gap_secs.max(1) as i64);
             let mut groups = group_by_session_gap(&newest, gap);
             if state.sort.oldest_first() {
@@ -206,21 +216,15 @@ fn table<'a>(
     for g in games {
         body = body.push(line());
         let in_progress = game_card_in_progress(&g.session_id, g.outcome, live);
-        body = body.push(game_row(g, &cols, state, in_progress));
-        if app.expanded.as_deref() == Some(g.session_id.as_str()) {
-            let confirm = app.confirm_delete.as_deref() == Some(g.session_id.as_str());
-            let in_progress = game_card_in_progress(&g.session_id, g.outcome, live);
-            body = body.push(
-                container(widgets::expanded_game_card(
-                    g,
-                    app.editing && app.edit.session_id == g.session_id,
-                    &app.edit,
-                    confirm,
-                    in_progress,
-                    app.sessions_with_kit.contains(&g.session_id),
-                ))
-                .padding(12),
-            );
+        let open = app.expanded.as_deref() == Some(g.session_id.as_str());
+        body = body.push(game_row(g, &cols, state, in_progress, open));
+        if open {
+            body = body.push(crate::games_panel::panel(
+                app,
+                g,
+                grid == Grid::Narrow,
+                in_progress,
+            ));
         }
     }
     container(body)
@@ -273,6 +277,8 @@ fn header_row(cols: &[(Col, Width)], state: TabState) -> Element<'static, Messag
         };
         r = r.push(container(cell).width(cell_len(w)));
     }
+    // The chevron column.
+    r = r.push(space().width(CHEVRON));
     container(r)
         .padding(Padding {
             right: 16.0,
@@ -290,11 +296,16 @@ fn role_letter(role: Role) -> &'static str {
     }
 }
 
+/// The chevron's column at the row's end.
+const CHEVRON: f32 = 14.0;
+
+/// One game row; the open one has an accent outline and a down chevron.
 fn game_row(
     g: &Game,
     cols: &[(Col, Width)],
     state: TabState,
     in_progress: bool,
+    open: bool,
 ) -> Element<'static, Message> {
     let h = state.row_height();
     let undecided = g.outcome == Outcome::Unknown && !in_progress;
@@ -344,10 +355,31 @@ fn game_row(
         };
         r = r.push(container(cell).width(cell_len(w)).clip(true));
     }
-    mouse_area(container(r).padding(Padding {
-        right: 16.0,
-        ..Padding::ZERO
-    }))
+    r = r.push(
+        image(icons::handle(if open {
+            Icon::FoldOpen
+        } else {
+            Icon::FoldClosed
+        }))
+        .width(CHEVRON)
+        .height(CHEVRON),
+    );
+    let outline = if open { ACCENT } else { Color::TRANSPARENT };
+    mouse_area(
+        container(r)
+            .padding(Padding {
+                right: 16.0,
+                ..Padding::ZERO
+            })
+            .style(move |_: &Theme| container::Style {
+                border: Border {
+                    color: outline,
+                    width: 1.0,
+                    radius: 0.0.into(),
+                },
+                ..container::Style::default()
+            }),
+    )
     .on_press(Message::ToggleGame(g.session_id.clone()))
     .into()
 }
@@ -371,24 +403,8 @@ fn result_cell(g: &Game, in_progress: bool) -> Element<'static, Message> {
 /// A grey silhouette for the portrait (no Blizzard art is shipped), the
 /// hero, and the role's letter in its colour.
 fn hero_cell(g: &Game) -> Element<'static, Message> {
-    let portrait = container(
-        image(icons::handle(Icon::Tab(Screen::Heroes, false)))
-            .width(14)
-            .height(14),
-    )
-    .width(20)
-    .height(20)
-    .center(20)
-    .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(BORDER)),
-        border: Border {
-            radius: 5.0.into(),
-            ..Border::default()
-        },
-        ..container::Style::default()
-    });
     row![
-        portrait,
+        portrait(20.0, 14.0),
         text(g.display_hero()).size(SIZE_META).color(TEXT_2),
         text(role_letter(g.role))
             .size(SIZE_LABEL)
@@ -397,6 +413,27 @@ fn hero_cell(g: &Game) -> Element<'static, Message> {
     ]
     .spacing(6)
     .align_y(Alignment::Center)
+    .into()
+}
+
+/// The grey placeholder portrait: a `size` square with a silhouette.
+pub(crate) fn portrait(size: f32, icon: f32) -> Element<'static, Message> {
+    container(
+        image(icons::handle(Icon::Tab(Screen::Heroes, false)))
+            .width(icon)
+            .height(icon),
+    )
+    .width(size)
+    .height(size)
+    .center(size)
+    .style(move |_: &Theme| container::Style {
+        background: Some(Background::Color(BORDER)),
+        border: Border {
+            radius: (size / 4.0).into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    })
     .into()
 }
 
@@ -422,7 +459,7 @@ fn marks_cell(g: &Game, in_progress: bool) -> Element<'static, Message> {
 }
 
 /// An amber outline chip with the warning sign.
-fn warn_chip(label: String) -> Element<'static, Message> {
+pub(crate) fn warn_chip(label: String) -> Element<'static, Message> {
     container(
         row![
             image(icons::handle(Icon::Warn)).width(11).height(11),
@@ -443,7 +480,7 @@ fn warn_chip(label: String) -> Element<'static, Message> {
     .into()
 }
 
-fn pill_box(border: Color) -> impl Fn(&Theme) -> container::Style {
+pub(crate) fn pill_box(border: Color) -> impl Fn(&Theme) -> container::Style {
     move |_| container::Style {
         background: Some(Background::Color(theme::BG)),
         border: Border {
@@ -455,7 +492,11 @@ fn pill_box(border: Color) -> impl Fn(&Theme) -> container::Style {
     }
 }
 
-fn small_chip(label: &'static str, color: Color, border: Color) -> Element<'static, Message> {
+pub(crate) fn small_chip(
+    label: &'static str,
+    color: Color,
+    border: Color,
+) -> Element<'static, Message> {
     small_chip_owned(label.to_string(), color, border)
 }
 

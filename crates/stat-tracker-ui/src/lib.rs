@@ -31,11 +31,12 @@ mod copy_rules;
 pub mod daemon;
 mod filter_chips;
 pub mod fixtures;
+mod fixtures_games;
 mod form_widgets;
 pub mod games;
 // Drawn by the expanded row panel in the next change.
-#[allow(dead_code)]
 mod games_detail;
+mod games_panel;
 mod games_rows;
 mod games_table;
 pub mod heroes;
@@ -69,6 +70,10 @@ pub mod settings_save;
 pub mod settings_update;
 pub mod setup_guide;
 pub mod snapshot;
+// TODO(#557): a shim of #557's module, deleted when #557 lands. `row` is
+// the Overview's.
+#[allow(dead_code)]
+mod stat_tiles;
 pub mod theme;
 pub mod tracker_status;
 pub mod tray;

@@ -886,7 +886,7 @@ fn segment_list(game: &Game) -> Element<'static, Message> {
     col.into()
 }
 
-fn edit_form<'a>(form: &'a EditForm, _sid: &str) -> Element<'a, Message> {
+pub(crate) fn edit_form<'a>(form: &'a EditForm, _sid: &str) -> Element<'a, Message> {
     column![
         label_text("Correct stats (blank / unchanged fields keep the OCR read)"),
         row![

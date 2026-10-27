@@ -6,6 +6,17 @@ use stat_tracker::config::Config;
 pub enum FixtureKind {
     Empty,
     Sample,
+    /// The Games tab's open-row states (UX Spec v2): a corrected game, an
+    /// unsure one with a swap, and an undecided one, with Wrecking Ball
+    /// history for the averages.
+    Games,
+}
+
+impl FixtureKind {
+    /// A fixture with games and the sample season list.
+    pub fn has_games(self) -> bool {
+        self != FixtureKind::Empty
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -62,8 +73,9 @@ impl Cli {
                         fixture = match v.as_str() {
                             "empty" => Some(FixtureKind::Empty),
                             "sample" => Some(FixtureKind::Sample),
+                            "games" => Some(FixtureKind::Games),
                             other => {
-                                eprintln!("unknown --fixture {other:?} (empty|sample)");
+                                eprintln!("unknown --fixture {other:?} (empty|sample|games)");
                                 None
                             }
                         };
@@ -132,7 +144,7 @@ USAGE:
 
 OPTIONS:
   --data-dir PATH       Daemon data dir (default: config / XDG, or a temp dir with --fixture)
-  --fixture empty|sample
+  --fixture empty|sample|games
                         Install a demo live_snapshot.json and read it back via storage::read_snapshot
   --companion           Run the layer-shell overlay only (no main window / tray).
                         Needs a Wayland compositor with wlr-layer-shell (niri).

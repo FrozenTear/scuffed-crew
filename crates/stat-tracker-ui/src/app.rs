@@ -452,14 +452,14 @@ impl TrackerApp {
         let games = games_from_snapshot(&snap);
         let mut seasons = seasons::load_cache(&cli.data_dir);
         if seasons.seasons.is_empty()
-            && cli.fixture == Some(FixtureKind::Sample)
+            && cli.fixture.is_some_and(FixtureKind::has_games)
             && let Ok(list) = serde_json::from_str(crate::fixtures::sample_seasons_json())
         {
             seasons.seasons = list;
         }
         let persisted = seasons::load_ui_state(&cli.data_dir);
         let season = seasons::resolve_selection(persisted, &seasons.seasons);
-        let clock = fixture_clock(cli.fixture, &games);
+        let clock = crate::fixtures::clock(cli.fixture, &games);
         let seasons_url = cli.seasons_url.clone();
         let now = Utc::now();
         let (fetch, last_seasons_attempt) =
@@ -770,6 +770,8 @@ impl TrackerApp {
             subs.push(iced::event::listen_with(
                 crate::settings_update::chip_escape,
             ));
+        } else if self.screen == Screen::Games && self.expanded.is_some() && !self.editing {
+            subs.push(iced::event::listen_with(crate::games_panel::close_keys));
         }
         Subscription::batch(subs)
     }
@@ -2750,14 +2752,6 @@ fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
         None => base,
         Some(notice) if base == HEALTH_READY || base == HEALTH_WAITING => notice.to_string(),
         Some(notice) => format!("{base} {notice}"),
-    }
-}
-
-fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> {
-    if fixture == Some(FixtureKind::Sample) {
-        games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
-    } else {
-        Utc::now()
     }
 }
 

@@ -207,8 +207,8 @@ impl SegmentView {
             confirmed: seg.confirmed,
             dismissed: seg.is_dismissed(),
             resolution: seg.resolution.clone(),
-            first_seen: seg.first_seen.clone().into(),
-            last_seen: seg.last_seen.clone().into(),
+            first_seen: seg.first_seen.into(),
+            last_seen: seg.last_seen.into(),
         }
     }
 

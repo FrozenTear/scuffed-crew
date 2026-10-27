@@ -136,7 +136,7 @@ pub fn averages(game: &Game, all: &[Game]) -> Averages {
         .filter(|g| g.session_id != game.session_id)
         .filter(same)
         .collect();
-    others.sort_by(|a, b| b.played_at.cmp(&a.played_at));
+    others.sort_by_key(|g| std::cmp::Reverse(g.played_at));
     let games = others.len() + 1;
     others.truncate(AVG_WINDOW);
     let window = others.len();
