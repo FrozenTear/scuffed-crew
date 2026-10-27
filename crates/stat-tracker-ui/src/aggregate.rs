@@ -156,7 +156,8 @@ pub fn aggregate(games: &[Game], window: Option<SeasonWindow>, role: Option<Role
     )
 }
 
-/// [`Aggregates`] of games already picked (no filter of its own).
+/// [`aggregate_filtered`] for games already filtered, so a page that
+/// needs both the games and their totals filters once.
 pub fn aggregate_games(games: &[&Game]) -> Aggregates {
     aggregate_rows(games)
 }

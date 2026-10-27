@@ -22,8 +22,16 @@ use crate::theme::{
 };
 use crate::widgets;
 
-/// No game in the filters at all.
+/// No game stored at all.
 pub const EMPTY: &str = "No games yet. Press Tab in-game to capture the scoreboard.";
+/// Games stored, none left by the filters (as Games says it).
+pub const EMPTY_FILTERED: &str = "No games match these filters.";
+
+/// The main column's line with no session: the first-run line only
+/// before the first game, else the filters' line.
+pub fn empty_text(no_games: bool) -> &'static str {
+    if no_games { EMPTY } else { EMPTY_FILTERED }
+}
 
 /// The session started this evening (or after midnight of it): its
 /// oldest game is on the same evening as `now` ([`day_part`]).
@@ -60,11 +68,11 @@ pub fn since_line(group: &SessionGroup) -> String {
 
 pub fn view<'a>(app: &'a TrackerApp, session: Option<&SessionGroup>) -> Element<'a, Message> {
     let Some(group) = session else {
-        return widgets::empty_surface(EMPTY);
+        return widgets::empty_surface(empty_text(app.games.is_empty()));
     };
     let live = app.live_game_session.as_deref();
     let mut col = Column::new().spacing(crate::overview_page::GAP).width(Fill);
-    col = col.push(session_card(group, app.clock));
+    col = col.push(session_card(group, app.clock, live));
     if let Some(newest) = group.games.first() {
         let playing = game_card_in_progress(&newest.session_id, newest.outcome, live);
         col = col.push(newest_card(newest, playing));
@@ -93,22 +101,43 @@ fn panel(content: Element<'_, Message>) -> container::Container<'_, Message> {
         .style(theme::surface_panel)
 }
 
+/// The session card's title: every game of the session, then the record
+/// of the settled ones, so the game being played is "Playing", not an
+/// undecided game ("5 games · 4-0 · Playing").
+pub fn session_title(group: &SessionGroup, live: Option<&str>) -> String {
+    let settled: Vec<&Game> = group
+        .games
+        .iter()
+        .filter(|g| !game_card_in_progress(&g.session_id, g.outcome, live))
+        .collect();
+    let record = crate::overview_side::record_of(settled.iter().copied());
+    let mut title = format!("{} · {}", group.record.games_label(), record_line(&record));
+    if settled.len() < group.games.len() {
+        title.push_str(" · Playing");
+    }
+    title
+}
+
 fn session_card(
     group: &SessionGroup,
     now: chrono::DateTime<chrono::Utc>,
+    live: Option<&str>,
 ) -> Element<'static, Message> {
-    let title = format!(
-        "{} · {}",
-        group.record.games_label(),
-        record_line(&group.record)
-    );
+    let title = session_title(group, live);
+    // The sparkline draws results only; the game being played has none.
+    let settled: Vec<&Game> = group
+        .games
+        .iter()
+        .rev()
+        .filter(|g| !game_card_in_progress(&g.session_id, g.outcome, live))
+        .collect();
     panel(
         column![
             widgets::label_text(&session_label(group, now)),
             row![
                 text(title).size(20).font(FONT_BOLD).color(TEXT),
                 space().width(24),
-                sparkline(group.games.iter().rev()),
+                sparkline(settled.iter().copied()),
             ]
             .align_y(Alignment::Center),
             text(since_line(group))
@@ -446,6 +475,29 @@ mod tests {
         crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
             crate::cli::FixtureKind::Sample,
         ))
+    }
+
+    #[test]
+    fn the_game_being_played_is_playing_not_undecided() {
+        let mut games = sample();
+        games[0].outcome = Outcome::Unknown;
+        let live = games[0].session_id.clone();
+        let refs: Vec<&Game> = games.iter().collect();
+        let group =
+            crate::aggregate::group_by_session_gap(&refs, chrono::TimeDelta::hours(3)).remove(0);
+        let with_live = session_title(&group, Some(&live));
+        assert!(with_live.ends_with(" · Playing"), "{with_live}");
+        assert!(!with_live.contains("undecided"), "{with_live}");
+        // Once its game closes without a result it is undecided.
+        let closed = session_title(&group, None);
+        assert!(closed.contains("1 undecided"), "{closed}");
+        assert!(!closed.contains("Playing"), "{closed}");
+    }
+
+    #[test]
+    fn the_empty_column_says_first_run_only_before_any_game() {
+        assert_eq!(empty_text(true), EMPTY);
+        assert_eq!(empty_text(false), EMPTY_FILTERED);
     }
 
     #[test]

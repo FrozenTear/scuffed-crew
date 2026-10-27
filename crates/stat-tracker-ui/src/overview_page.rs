@@ -177,7 +177,9 @@ pub fn session_gap(window_secs: u64) -> chrono::TimeDelta {
 
 /// `games` less the one still being played: its result is not in, so the
 /// season card and the heroes strip leave it out instead of counting it
-/// as undecided. The session card still shows it, as Playing.
+/// as undecided. The session card counts it as Playing
+/// ([`crate::overview_main::session_title`]) and the newest-game card
+/// shows it as Playing.
 pub fn settled<'a>(app: &TrackerApp, games: &[&'a Game]) -> Vec<&'a Game> {
     let live = app.live_game_session.as_deref();
     games
@@ -185,6 +187,12 @@ pub fn settled<'a>(app: &TrackerApp, games: &[&'a Game]) -> Vec<&'a Game> {
         .copied()
         .filter(|g| !crate::model::game_card_in_progress(&g.session_id, g.outcome, live))
         .collect()
+}
+
+/// Whether the filter row shows: not before the first game (ux.md
+/// section 17), when there is nothing to filter.
+pub fn shows_filters(app: &TrackerApp) -> bool {
+    !app.games.is_empty()
 }
 
 /// The latest session of `games` (newest first), split by [`session_gap`].
@@ -218,7 +226,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         ));
     }
     // No filter row before the first game (ux.md section 17).
-    if !app.games.is_empty() {
+    if shows_filters(app) {
         page = page.push(chip_row(app, &heroes, &maps, chips_fold(content_width)));
     }
 
@@ -316,9 +324,28 @@ mod tests {
     #[test]
     fn the_overview_follows_the_chips_it_shows() {
         let (_dir, mut app) = crate::fixtures::test_app();
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
         app.filter_outcome = Some(crate::model::Outcome::Win);
         assert_eq!(filter(&app).outcome, Some(crate::model::Outcome::Win));
-        let _ = view(&app, 1300.0);
-        let _ = view(&app, 900.0);
+        assert!(shows_filters(&app));
+        // Folded at 1300 px of page, open at 1600, and one column at 900.
+        assert!(chips_fold(1300.0));
+        assert!(!chips_fold(1600.0));
+        for width in [1300.0, 1600.0, 900.0] {
+            let _ = view(&app, width);
+        }
+    }
+
+    #[test]
+    fn the_filter_row_waits_for_the_first_game() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        assert!(app.games.is_empty());
+        assert!(!shows_filters(&app));
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        assert!(shows_filters(&app));
     }
 }

@@ -25,9 +25,11 @@ pub const RATE_MIN: usize = 10;
 /// The "Last 20" window.
 pub const LAST_N: usize = 20;
 
-pub fn view<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message> {
+/// The panel for `settled`: the filtered games less one still being played
+/// ([`crate::overview_page::settled`]).
+pub fn view<'a>(app: &'a TrackerApp, settled: &[&Game]) -> Element<'a, Message> {
     column![
-        season_card(app, shown),
+        season_card(app, settled),
         needs_look_card(app),
         companion_card(app)
     ]
@@ -192,10 +194,10 @@ fn scope_label(app: &TrackerApp) -> String {
     }
 }
 
-fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message> {
-    let season = record_of(shown.iter().copied());
+fn season_card<'a>(app: &'a TrackerApp, settled: &[&Game]) -> Element<'a, Message> {
+    let season = record_of(settled.iter().copied());
     // The Last line only while it is a part of the season, not all of it.
-    let mut recent = last_n(shown);
+    let mut recent = last_n(settled);
     if recent.len() >= decided(&season) {
         recent.clear();
     }
