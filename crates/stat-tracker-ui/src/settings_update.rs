@@ -32,9 +32,11 @@ use crate::update_check::CheckFailed;
 /// Toast for a control used in demo mode.
 pub(crate) const DEMO_REFUSED: &str = "Demo mode: nothing is changed.";
 
-/// Toast when "+ Add name" holds only a #tag or spaces. The input stays
-/// open with the text.
-const NAME_CHIP_EMPTY: &str = "Type the name before the #. The #1234 tag is left out.";
+/// Toast when "+ Add name" holds no name of at least 3 characters (only a
+/// #tag, spaces, or a name too short to match). The input stays open with
+/// the text.
+const NAME_CHIP_EMPTY: &str =
+    "Type the name before the #, at least 3 characters. The #1234 tag is left out.";
 
 /// Looks (about one a second, on the tick) that our own Restart or Start
 /// may go without a new pid before its run is taken as gone. A systemd
