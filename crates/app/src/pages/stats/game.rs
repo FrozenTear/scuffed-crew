@@ -178,9 +178,20 @@ pub(super) fn open_match(evt: MouseEvent, id: String) {
     }
 }
 
-/// API path for one of the member's own games.
-fn game_path(id: &str) -> String {
-    format!("{MY_MATCHES_PATH}/{}", encode_query(id))
+/// True for an id the URL parser would read as a dot segment ("", ".", "..").
+/// Encoding does not help, since "%2E%2E" is a dot segment too.
+fn is_dot_segment(id: &str) -> bool {
+    id.chars().all(|c| c == '.')
+}
+
+/// API path for one of the member's own games, or None for an id that would
+/// not stay one path segment. Those ids never fetch and show as missing.
+fn game_path(id: &str) -> Option<String> {
+    if is_dot_segment(id) {
+        None
+    } else {
+        Some(format!("{MY_MATCHES_PATH}/{}", encode_query(id)))
+    }
 }
 
 /// What the page shows for the current fetch.
@@ -193,7 +204,10 @@ enum GameView<'a> {
     Pending,
 }
 
-fn game_view<'a>(row: Option<&'a GameRow>, error: Option<&str>) -> GameView<'a> {
+fn game_view<'a>(id: &str, row: Option<&'a GameRow>, error: Option<&str>) -> GameView<'a> {
+    if game_path(id).is_none() {
+        return GameView::Missing;
+    }
     match (row, error) {
         (Some(row), _) => GameView::Found(row),
         (None, Some(err)) if is_http_status(err, 404) => GameView::Missing,
@@ -335,12 +349,18 @@ fn game_detail(row: &GameRow) -> Element {
 #[component]
 pub fn StatsMatch(id: String) -> Element {
     let auth = use_auth();
-    let game = use_api_with::<GameRow>(move || member_stats_url(&auth(), game_path(&id)));
+    let route_id = id.clone();
+    // An empty URL means no fetch, same as while signed out.
+    let game = use_api_with::<GameRow>(move || {
+        game_path(&id)
+            .map(|path| member_stats_url(&auth(), path))
+            .unwrap_or_default()
+    });
     let data = game.data.read();
     let row = data.as_ref().and_then(|d| d.as_ref());
     let error = game.error.read().clone();
 
-    let body = match game_view(row, error.as_deref()) {
+    let body = match game_view(&route_id, row, error.as_deref()) {
         GameView::Found(row) => game_detail(row),
         GameView::Missing => rsx! {
             p { class: "empty-state", "{MISSING_TEXT}" }
@@ -405,16 +425,42 @@ mod tests {
 
     #[test]
     fn game_path_encodes_the_id_as_one_segment() {
-        assert_eq!(game_path("abc123"), "/api/stats/me/matches/abc123");
-        assert_eq!(game_path("a/b c"), "/api/stats/me/matches/a%2Fb%20c");
+        assert_eq!(
+            game_path("abc123").as_deref(),
+            Some("/api/stats/me/matches/abc123")
+        );
+        assert_eq!(
+            game_path("a/b c").as_deref(),
+            Some("/api/stats/me/matches/a%2Fb%20c")
+        );
+        assert_eq!(
+            game_path("a.b").as_deref(),
+            Some("/api/stats/me/matches/a.b")
+        );
+    }
+
+    #[test]
+    fn dot_segment_ids_never_fetch_and_show_missing() {
+        for id in ["", ".", "..", "..."] {
+            assert!(is_dot_segment(id), "{id:?}");
+            assert_eq!(game_path(id), None, "{id:?}");
+            assert_eq!(game_view(id, None, None), GameView::Missing, "{id:?}");
+            assert_eq!(
+                game_view(id, None, Some("HTTP error 401: Unauthorized")),
+                GameView::Missing,
+                "{id:?}"
+            );
+        }
+        assert!(!is_dot_segment("abc123"));
+        assert_eq!(game_view("abc123", None, None), GameView::Pending);
     }
 
     #[test]
     fn only_404_maps_to_missing() {
         let game = row("a", &[]);
-        assert_eq!(game_view(Some(&game), None), GameView::Found(&game));
+        assert_eq!(game_view("a", Some(&game), None), GameView::Found(&game));
         assert_eq!(
-            game_view(None, Some("HTTP error 404: Match not found")),
+            game_view("a", None, Some("HTTP error 404: Match not found")),
             GameView::Missing
         );
         for err in [
@@ -423,9 +469,9 @@ mod tests {
             "HTTP error 500: Internal error",
             "Network error: offline",
         ] {
-            assert_eq!(game_view(None, Some(err)), GameView::Pending, "{err}");
+            assert_eq!(game_view("a", None, Some(err)), GameView::Pending, "{err}");
         }
-        assert_eq!(game_view(None, None), GameView::Pending);
+        assert_eq!(game_view("a", None, None), GameView::Pending);
     }
 
     #[test]
