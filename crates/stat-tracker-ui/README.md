@@ -39,6 +39,9 @@ cargo run -p scuffed-stat-tracker-ui -- --fixture empty
 
 # Sample matches + seasons (picker stays; defaults to the current season)
 cargo run -p scuffed-stat-tracker-ui -- --fixture sample
+
+# 857 games over three seasons, for the 0.6 Maps and Seasons shots
+cargo run -p scuffed-stat-tracker-ui -- --fixture full
 ```
 
 `--fixture` never fetches `GET /api/public/seasons`. It writes a demo `live_snapshot.json` (and sample `seasons.json`) under a temp dir, then reads it back through `storage::read_snapshot`.
@@ -121,7 +124,7 @@ Fixture mode still writes those files (under the fixture `--data-dir`); there is
 | Flag | Meaning |
 |------|---------|
 | `--data-dir PATH` | Daemon data dir (default: config / XDG; temp dir when `--fixture` is set) |
-| `--fixture empty\|sample\|games` | Write a demo `live_snapshot.json` and read it back through `storage::read_snapshot`. `games` is the Games tab set: every row and panel state, with scoreboard pictures. |
+| `--fixture empty\|sample\|games\|full` | Write a demo `live_snapshot.json` and read it back through `storage::read_snapshot`. `games` is the Games tab set: every row and panel state, with scoreboard pictures. `full`: 857 games for the Maps and Seasons shots. |
 | `--companion` | Run the layer-shell overlay only (needs niri / wlr-layer-shell). |
 | `--seasons-url URL` | `GET /api/public/seasons`; cached to `<data_dir>/seasons.json`. Ignored with `--fixture`. |
 

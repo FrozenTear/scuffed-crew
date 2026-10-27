@@ -3,11 +3,10 @@
 //! right in the win colour, below 50% to the left in the loss colour. Half
 //! the track is 25 points (25% to 75%, capped beyond), any rate other than
 //! 50% gets at least 12 px in its direction, and exactly 50% is the bare
-//! midline. The Overview uses it; the other 0.6 pages (Heroes, Maps,
-//! Seasons) are meant to share it.
+//! midline. Every 0.6 stats page that shows a win rate uses it.
 //!
 //! Callers draw it only from 10 decided games, a win, loss or draw
-//! (small-sample rule).
+//! ([`crate::small_sample`]).
 
 use iced::widget::{container, responsive, row, space, stack};
 use iced::{Background, Border, Element, Fill, Length, Theme};

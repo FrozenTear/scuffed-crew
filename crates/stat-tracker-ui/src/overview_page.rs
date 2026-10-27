@@ -96,19 +96,31 @@ pub(crate) fn chip_row<'a>(
     maps: &[String],
     narrow: bool,
 ) -> Element<'a, Message> {
+    chip_row_except(app, heroes, maps, narrow, overview_chips::Hidden::default())
+}
+
+/// [`chip_row`] without the chips a page does not apply (`hide`), so none
+/// shows or counts in "Filters (n)" without filtering anything.
+pub(crate) fn chip_row_except<'a>(
+    app: &'a TrackerApp,
+    heroes: &[String],
+    maps: &[String],
+    narrow: bool,
+    hide: overview_chips::Hidden,
+) -> Element<'a, Message> {
     if !narrow {
-        return overview_chips::bar(app, heroes, maps, true);
+        return overview_chips::bar_except(app, heroes, maps, true, hide);
     }
     let open = app.overview_page.filters_open;
     Row::new()
         .spacing(8)
         .align_y(Alignment::Start)
         .push(fold_chip(
-            overview_chips::active_count(app),
+            overview_chips::active_count_except(app, hide),
             open,
             Message::OverviewPage(Msg::ToggleFilters),
         ))
-        .push(overview_chips::bar(app, heroes, maps, open))
+        .push(overview_chips::bar_except(app, heroes, maps, open, hide))
         .into()
 }
 
@@ -196,9 +208,10 @@ pub fn settled_of<'a>(
 }
 
 /// Whether the filter row shows: not before the first game (ux.md
-/// section 17), when there is nothing to filter.
+/// section 17), when there is nothing to filter, and not while the game
+/// list is still loading ([`crate::games_state::loading`]).
 pub fn shows_filters(app: &TrackerApp) -> bool {
-    !app.games.is_empty()
+    !crate::games_state::loading(app) && !app.games.is_empty()
 }
 
 /// The latest session of `games` (newest first), split by [`session_gap`].

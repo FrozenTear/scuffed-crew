@@ -14,15 +14,15 @@ use crate::aggregate::{HeroAgg, aggregate_games};
 use crate::app::{Message, TrackerApp};
 use crate::model::{Game, Screen};
 use crate::overview_main::{portrait, role_label};
-use crate::overview_side::{RATE_MIN, rate};
+use crate::small_sample::{RATE_MIN, TOO_FEW, decided, rate};
 use crate::theme::{
     self, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META,
     TEXT, TEXT_2, TEXT_3,
 };
 use crate::widgets;
 
-/// Fewest games a hero needs for a card.
-pub const CARD_MIN: usize = 3;
+/// Fewest games a hero needs for a card ([`crate::small_sample`]).
+pub const CARD_MIN: usize = crate::small_sample::FOLD_UNDER;
 /// Dashes on a record card: one per decided game, out of [`RATE_MIN`].
 const DASHES: usize = RATE_MIN;
 /// Cards across: four on a wide page, two on a narrow one.
@@ -31,21 +31,18 @@ const WIDE_FROM: f32 = 760.0;
 /// Heroes with a card, and how many are left out for having too few
 /// games. Unknown heroes never get a card.
 pub fn split(heroes: &[HeroAgg]) -> (Vec<&HeroAgg>, usize) {
-    let known = heroes.iter().filter(|h| {
-        let n = h.hero.trim();
-        !n.is_empty() && !n.eq_ignore_ascii_case("unknown")
-    });
+    let known = heroes
+        .iter()
+        .filter(|h| !stat_tracker::parse::hero_is_unknown_label(&h.hero));
     let (cards, small): (Vec<&HeroAgg>, Vec<&HeroAgg>) =
         known.partition(|h| h.record.games >= CARD_MIN);
     (cards, small.len())
 }
 
-/// The strip for `settled`: the filtered games less one still being played
-/// ([`crate::overview_page::settled`]).
-pub fn view<'a>(app: &'a TrackerApp, settled: &[&Game], width: f32) -> Element<'a, Message> {
-    let stats = aggregate_games(settled);
-    let (cards, small) = split(&stats.heroes);
-    let scope = match &app.season {
+/// "All time", or the picked season's name: the scope the Overview and
+/// Heroes headers and the season card name.
+pub fn scope(app: &TrackerApp) -> String {
+    match &app.season {
         crate::model::SeasonSel::AllTime => "All time".to_string(),
         crate::model::SeasonSel::Season(id) => app
             .seasons
@@ -53,7 +50,15 @@ pub fn view<'a>(app: &'a TrackerApp, settled: &[&Game], width: f32) -> Element<'
             .iter()
             .find(|s| &s.id == id)
             .map_or_else(|| "Season".to_string(), |s| s.name.clone()),
-    };
+    }
+}
+
+/// The strip for `settled`: the filtered games less one still being played
+/// ([`crate::overview_page::settled`]).
+pub fn view<'a>(app: &'a TrackerApp, settled: &[&Game], width: f32) -> Element<'a, Message> {
+    let stats = aggregate_games(settled);
+    let (cards, small) = split(&stats.heroes);
+    let scope = scope(app);
     let mut link = String::new();
     if small > 0 {
         link.push_str(&format!("+ {small} under {CARD_MIN} games · "));
@@ -108,11 +113,7 @@ fn card(h: &HeroAgg) -> Element<'static, Message> {
             crate::winrate_bar::bar(p as f32),
             r.games_label(),
         ),
-        None => (
-            r.wl_label(),
-            dashes(r.wins + r.losses + r.draws),
-            too_few_line(r),
-        ),
+        None => (r.wl_label(), dashes(decided(r)), too_few_line(r)),
     };
     container(
         column![
@@ -146,9 +147,9 @@ fn block(color: iced::Color, width: iced::Length, height: f32) -> Element<'stati
         .into()
 }
 
-/// "7 games · Too few games" under a record card.
+/// "Too few games · 7 games" under a record card, in the order Heroes uses.
 pub fn too_few_line(r: &crate::aggregate::Record) -> String {
-    format!("{} · Too few games", r.games_label())
+    format!("{TOO_FEW} · {}", r.games_label())
 }
 
 /// The strip with no card: before the first game there is no filter row
@@ -162,7 +163,7 @@ pub fn empty_text(no_games: bool) -> String {
 }
 
 /// One dash per decided game out of ten: those in grey, the rest faint.
-fn dashes(decided: usize) -> Element<'static, Message> {
+pub(crate) fn dashes(decided: usize) -> Element<'static, Message> {
     let mut r = Row::new().spacing(4).width(Fill).align_y(Alignment::Center);
     for i in 0..DASHES {
         let color = if i < decided {
@@ -214,7 +215,7 @@ mod tests {
         assert_eq!(rate(&hero("A", 12, 6, 4).record), Some(60), "10 decided");
         assert_eq!(
             too_few_line(&hero("A", 10, 5, 4).record),
-            "10 games · Too few games"
+            "Too few games · 10 games"
         );
         assert_eq!(rate(&hero("A", 88, 45, 41).record), Some(52));
     }
