@@ -275,6 +275,7 @@ capture_output = \"DP-1\"
 
 [auto_detect]
 enabled = true
+cooldown_secs = 120
 ";
     let (text, _) = save(last, |c| c.capture_output = None);
     assert!(!text.contains("capture_output"), "{text}");
