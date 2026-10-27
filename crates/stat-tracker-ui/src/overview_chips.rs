@@ -1,8 +1,9 @@
 //! The Overview's copy of the 0.6 filter chips (spec p1 and p2). The Games
 //! PR owns the shared filter_chips.rs; this file has the same public
 //! functions, so the Overview switches to that module by a plain swap when
-//! it lands (only the role chip's message differs):
-//! Season, queues, roles, Crew, Hero and Map. A chip that filters reads as
+//! it lands (the role chip's message differs, and the disabled chips draw
+//! the icon arrow, as the Games PR's do). The chips: Season, queues,
+//! roles, Crew, Hero and Map. A chip that filters reads as
 //! an accent outline with its value and "×" to clear it ("Season 5 ×").
 //! One that does not is a dropdown ("Hero ▾"). Behind "Filters (n)" only
 //! the chips that filter show; opening it shows the dropdowns too.
@@ -96,13 +97,13 @@ pub fn bar<'a>(
         chips = chips.push(season_chip(app));
     }
     if open {
-        chips = chips.push(disabled_chip("All queues ▾"));
+        chips = chips.push(disabled_chip("All queues"));
     }
     if open || !app.roles.unrestricted() {
         chips = chips.push(role_chip(app.roles));
     }
     if open {
-        chips = chips.push(disabled_chip("Crew: anyone ▾"));
+        chips = chips.push(disabled_chip("Crew: anyone"));
     }
     if open || app.filter_hero.is_some() {
         chips = chips.push(value_chip(
@@ -132,12 +133,20 @@ pub fn bar<'a>(
 }
 
 /// A filter the tracker has no data for yet: greyed, does nothing.
+/// Its "▾" is iced's icon arrow: the page font has no "▾".
 fn disabled_chip(label: &'static str) -> Element<'static, Message> {
     container(
-        text(label)
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT_3),
+        row![
+            text(label)
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_3),
+            crate::overview_page::glyph('▾')
+                .size(SIZE_META)
+                .color(TEXT_3),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .padding(Padding::from([5, 12]))
     .style(|_: &Theme| container::Style {

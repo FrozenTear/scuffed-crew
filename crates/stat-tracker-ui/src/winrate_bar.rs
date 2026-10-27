@@ -6,7 +6,8 @@
 //! midline. The Overview uses it; the other 0.6 pages (Heroes, Maps,
 //! Seasons) are meant to share it.
 //!
-//! Callers draw it only from 10 games (small-sample rule).
+//! Callers draw it only from 10 decided games, a win, loss or draw
+//! (small-sample rule).
 
 use iced::widget::{container, responsive, row, space, stack};
 use iced::{Background, Border, Element, Fill, Length, Theme};

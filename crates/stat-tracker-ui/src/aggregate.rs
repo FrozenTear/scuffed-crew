@@ -156,6 +156,11 @@ pub fn aggregate(games: &[Game], window: Option<SeasonWindow>, role: Option<Role
     )
 }
 
+/// [`Aggregates`] of games already picked (no filter of its own).
+pub fn aggregate_games(games: &[&Game]) -> Aggregates {
+    aggregate_rows(games)
+}
+
 pub fn aggregate_filtered(games: &[Game], filter: &GameFilter) -> Aggregates {
     aggregate_rows(&filter_games(games, filter))
 }

@@ -175,6 +175,18 @@ pub fn session_gap(window_secs: u64) -> chrono::TimeDelta {
         .unwrap_or(chrono::TimeDelta::MAX)
 }
 
+/// `games` less the one still being played: its result is not in, so the
+/// season card and the heroes strip leave it out instead of counting it
+/// as undecided. The session card still shows it, as Playing.
+pub fn settled<'a>(app: &TrackerApp, games: &[&'a Game]) -> Vec<&'a Game> {
+    let live = app.live_game_session.as_deref();
+    games
+        .iter()
+        .copied()
+        .filter(|g| !crate::model::game_card_in_progress(&g.session_id, g.outcome, live))
+        .collect()
+}
+
 /// The latest session of `games` (newest first), split by [`session_gap`].
 pub fn latest_session(app: &TrackerApp, games: &[&Game]) -> Option<SessionGroup> {
     group_by_session_gap(games, session_gap(app.saved_config.session_window_secs))
@@ -205,7 +217,10 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             app.package_probe(),
         ));
     }
-    page = page.push(chip_row(app, &heroes, &maps, chips_fold(content_width)));
+    // No filter row before the first game (ux.md section 17).
+    if !app.games.is_empty() {
+        page = page.push(chip_row(app, &heroes, &maps, chips_fold(content_width)));
+    }
 
     let main_w = if narrow {
         content_width
@@ -213,13 +228,14 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         content_width - SIDE_W - GAP
     };
     let session = latest_session(app, &shown);
+    let settled_games = settled(app, &shown);
     let main = column![
         crate::overview_main::view(app, session.as_ref()),
-        crate::overview_heroes::view(app, main_w),
+        crate::overview_heroes::view(app, &settled_games, main_w),
     ]
     .spacing(GAP)
     .width(Fill);
-    let side = crate::overview_side::view(app, &shown);
+    let side = crate::overview_side::view(app, &settled_games);
     if narrow {
         page = page.push(main).push(side);
     } else {
@@ -250,6 +266,26 @@ mod tests {
         );
         let _ = app.update(Message::OverviewPage(Msg::PickRole(None)));
         assert!(app.roles.unrestricted());
+    }
+
+    #[test]
+    fn the_game_being_played_is_left_out_of_the_counts() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let mut games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        games[0].outcome = crate::model::Outcome::Unknown;
+        app.live_game_session = Some(games[0].session_id.clone());
+        let refs: Vec<&Game> = games.iter().collect();
+        let kept = settled(&app, &refs);
+        assert_eq!(kept.len(), games.len() - 1);
+        assert!(kept.iter().all(|g| g.session_id != games[0].session_id));
+        app.live_game_session = None;
+        assert_eq!(
+            settled(&app, &refs).len(),
+            games.len(),
+            "a closed game counts"
+        );
     }
 
     #[test]

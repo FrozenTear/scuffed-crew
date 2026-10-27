@@ -10,9 +10,9 @@
 use iced::widget::{Column, Row, button, column, container, row, space, text};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};
 
-use crate::aggregate::{HeroAgg, aggregate_filtered};
+use crate::aggregate::{HeroAgg, aggregate_games};
 use crate::app::{Message, TrackerApp};
-use crate::model::Screen;
+use crate::model::{Game, Screen};
 use crate::overview_main::{portrait, role_label};
 use crate::overview_side::{RATE_MIN, rate};
 use crate::theme::{
@@ -40,8 +40,10 @@ pub fn split(heroes: &[HeroAgg]) -> (Vec<&HeroAgg>, usize) {
     (cards, small.len())
 }
 
-pub fn view<'a>(app: &'a TrackerApp, width: f32) -> Element<'a, Message> {
-    let stats = aggregate_filtered(&app.games, &crate::overview_page::filter(app));
+/// The strip for `settled`: the filtered games less one still being played
+/// ([`crate::overview_page::settled`]).
+pub fn view<'a>(app: &'a TrackerApp, settled: &[&Game], width: f32) -> Element<'a, Message> {
+    let stats = aggregate_games(settled);
     let (cards, small) = split(&stats.heroes);
     let scope = match &app.season {
         crate::model::SeasonSel::AllTime => "All time".to_string(),
@@ -212,6 +214,6 @@ mod tests {
     #[test]
     fn the_strip_draws_on_an_empty_demo() {
         let (_dir, app) = crate::fixtures::test_app();
-        let _ = view(&app, 900.0);
+        let _ = view(&app, &[], 900.0);
     }
 }
