@@ -934,6 +934,8 @@ mod tests {
         config.debug_ocr = true;
         config.reader = stat_tracker::config::ReaderSetting::OcrV1;
         config.ocr = stat_tracker::config::OcrSetting::Off;
+        config.share_report_pictures = true;
+        config.capture_only_on_screen = false;
         // Keys left out while they hold their default are set above.
         let serde_json::Value::Object(map) = serde_json::to_value(&config).unwrap() else {
             panic!("config is a table");

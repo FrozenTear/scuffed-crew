@@ -239,8 +239,10 @@ mod tests {
             Some(ConfigEdit::RemovePlayerName("Alt".into()))
         );
         assert_eq!(app.settings.player_name, "Alt");
+        // Now [Alt, Third]: "Alt" moved up, so "Third" is second.
+        assert_eq!(shown_names(&app), ["Alt", "Third"]);
         assert_eq!(
-            name_removed(&mut app, 2),
+            name_removed(&mut app, 1),
             Some(ConfigEdit::RemovePlayerName("Third".into()))
         );
         assert_eq!(name_removed(&mut app, 9), None);
