@@ -27,11 +27,8 @@ pub fn install_fixture(data_dir: &Path, kind: FixtureKind) -> anyhow::Result<Sna
     let snap = fixtures::snapshot(kind);
     let bytes = serde_json::to_vec_pretty(&snap)?;
     std::fs::write(data_dir.join("live_snapshot.json"), bytes)?;
-    if kind == FixtureKind::Sample {
-        std::fs::write(
-            data_dir.join("seasons.json"),
-            fixtures::sample_seasons_json(),
-        )?;
+    if let Some(json) = fixtures::seasons_json(kind) {
+        std::fs::write(data_dir.join("seasons.json"), json)?;
     } else {
         let _ = std::fs::remove_file(data_dir.join("seasons.json"));
     }

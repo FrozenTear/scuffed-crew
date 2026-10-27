@@ -6,6 +6,8 @@ use stat_tracker::config::Config;
 pub enum FixtureKind {
     Empty,
     Sample,
+    /// 857 games over three seasons (the 0.6 Maps and Seasons spec numbers).
+    Full,
 }
 
 #[derive(Debug, Clone)]
@@ -62,8 +64,9 @@ impl Cli {
                         fixture = match v.as_str() {
                             "empty" => Some(FixtureKind::Empty),
                             "sample" => Some(FixtureKind::Sample),
+                            "full" => Some(FixtureKind::Full),
                             other => {
-                                eprintln!("unknown --fixture {other:?} (empty|sample)");
+                                eprintln!("unknown --fixture {other:?} (empty|sample|full)");
                                 None
                             }
                         };
@@ -128,11 +131,12 @@ USAGE:
   stat-tracker-gui [OPTIONS]
   stat-tracker-gui --fixture sample
   stat-tracker-gui --fixture empty
+  stat-tracker-gui --fixture full
   stat-tracker-gui --companion --fixture sample
 
 OPTIONS:
   --data-dir PATH       Daemon data dir (default: config / XDG, or a temp dir with --fixture)
-  --fixture empty|sample
+  --fixture empty|sample|full
                         Install a demo live_snapshot.json and read it back via storage::read_snapshot
   --companion           Run the layer-shell overlay only (no main window / tray).
                         Needs a Wayland compositor with wlr-layer-shell (niri).

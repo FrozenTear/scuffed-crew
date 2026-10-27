@@ -116,9 +116,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             app.roles = RoleFilter::default();
             if app.season != SeasonSel::AllTime {
                 app.season = SeasonSel::AllTime;
-                if let Err(e) = crate::seasons::save_ui_state(&app.data_dir, &app.season) {
-                    tracing::warn!(error = %e, "failed to write ui_state.json");
-                }
+                crate::seasons::persist_selection(&app.data_dir, &app.season);
             }
             app.needs_look_filter = true;
             app.update(Message::Navigate(Screen::Games))

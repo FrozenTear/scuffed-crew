@@ -16,6 +16,16 @@ pub fn snapshot(kind: FixtureKind) -> Snapshot {
             sessions: Vec::new(),
         },
         FixtureKind::Sample => sample_snapshot(),
+        FixtureKind::Full => crate::fixtures_full::snapshot(),
+    }
+}
+
+/// The season list a fixture starts with, when it has one.
+pub fn seasons_json(kind: FixtureKind) -> Option<&'static str> {
+    match kind {
+        FixtureKind::Empty => None,
+        FixtureKind::Sample => Some(sample_seasons_json()),
+        FixtureKind::Full => Some(crate::fixtures_full::seasons_json()),
     }
 }
 
@@ -71,7 +81,7 @@ fn dt(y: i32, m: u32, d: u32, hh: u32, mm: u32) -> SurrealDatetime {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn pm(
+pub(crate) fn pm(
     session_id: &str,
     hero: &str,
     map: &str,

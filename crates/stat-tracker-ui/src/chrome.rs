@@ -80,8 +80,12 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
-        if app.screen != Screen::Settings {
-            content = content.push(widgets::header_controls(app));
+        // Seasons lists every season, so it draws its row without the
+        // season switch ([`crate::seasons_tab::filter_row`]).
+        match app.screen {
+            Screen::Settings => {}
+            Screen::Seasons => content = content.push(crate::seasons_tab::filter_row(app)),
+            _ => content = content.push(widgets::header_controls(app)),
         }
         let gutter = theme::page_gutter(size.width);
         let window = column![
@@ -184,7 +188,14 @@ fn page_body<'a>(
             Screen::Overview => crate::overview::view(app, size.width),
             Screen::Games => crate::games::view(app, size.width),
             Screen::Heroes => crate::heroes::view(app, size.width),
+            // The 0.6 pages under the top tabs, the 0.5 cards in the sidebar.
+            Screen::Maps if app.nav_style == NavStyle::TopTabs => {
+                crate::maps_tab::view(app, size.width)
+            }
             Screen::Maps => crate::maps::view(app, size.width),
+            Screen::Seasons if app.nav_style == NavStyle::TopTabs => {
+                crate::seasons_tab::view(app, size.width)
+            }
             Screen::Seasons => crate::seasons::view(app, size.width),
             Screen::Settings => settings(app, size.width),
         })

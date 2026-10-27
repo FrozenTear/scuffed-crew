@@ -132,6 +132,14 @@ pub fn save_ui_state(data_dir: &Path, sel: &SeasonSel) -> std::io::Result<()> {
     write_ui_state_file(data_dir, &file)
 }
 
+/// [`save_ui_state`], logging a failure instead of returning it: the
+/// choice still applies for this run.
+pub fn persist_selection(data_dir: &Path, sel: &SeasonSel) {
+    if let Err(e) = save_ui_state(data_dir, sel) {
+        tracing::warn!(error = %e, "failed to write ui_state.json");
+    }
+}
+
 /// Missing file / missing field → Auto (show while the game is running).
 pub fn load_overlay_hidden_key(data_dir: &Path) -> Option<String> {
     read_ui_state_file(data_dir).and_then(|f| f.overlay_hidden_key)

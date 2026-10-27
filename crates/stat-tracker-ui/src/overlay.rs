@@ -474,6 +474,7 @@ pub fn spawn_companion(
         cmd.arg("--fixture").arg(match kind {
             FixtureKind::Empty => "empty",
             FixtureKind::Sample => "sample",
+            FixtureKind::Full => "full",
         });
     }
     let child = cmd.spawn()?;

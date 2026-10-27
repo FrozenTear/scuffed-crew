@@ -221,6 +221,7 @@ pub enum Message {
     SettingsPage(crate::settings_update::Msg),
     /// A message from the 0.6 top bar ([`crate::nav::update`]).
     Nav(crate::nav::Msg),
+    Pages(crate::tab_bits::PageMsg),
 }
 
 struct NotesDialog {
@@ -335,6 +336,7 @@ pub struct TrackerApp {
     pub filter_outcome: Option<Outcome>,
     /// Games shows only games that need a look (the top bar chip).
     pub needs_look_filter: bool,
+    pub maps_ui: crate::maps_tab::MapsUi,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
     pub(crate) toast_action: Option<Message>,
@@ -448,8 +450,8 @@ impl TrackerApp {
         let games = games_from_snapshot(&snap);
         let mut seasons = seasons::load_cache(&cli.data_dir);
         if seasons.seasons.is_empty()
-            && cli.fixture == Some(FixtureKind::Sample)
-            && let Ok(list) = serde_json::from_str(crate::fixtures::sample_seasons_json())
+            && let Some(json) = cli.fixture.and_then(crate::fixtures::seasons_json)
+            && let Ok(list) = serde_json::from_str(json)
         {
             seasons.seasons = list;
         }
@@ -591,6 +593,7 @@ impl TrackerApp {
             filter_map: None,
             filter_outcome: None,
             needs_look_filter: false,
+            maps_ui: Default::default(),
             toast: None,
             toast_action: None,
             sessions_with_kit: HashSet::new(),
@@ -843,9 +846,7 @@ impl TrackerApp {
             }
             Message::SelectSeason(sel) => {
                 self.season = sel;
-                if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
-                    tracing::warn!(error = %e, "failed to write ui_state.json");
-                }
+                seasons::persist_selection(&self.data_dir, &self.season);
                 Task::none()
             }
             Message::ToggleRole(role) => {
@@ -877,9 +878,7 @@ impl TrackerApp {
                             .is_some_and(|id| !self.seasons.seasons.iter().any(|s| s.id == id))
                         {
                             self.season = seasons::default_selection(&self.seasons.seasons);
-                            if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
-                                tracing::warn!(error = %e, "failed to write ui_state.json");
-                            }
+                            seasons::persist_selection(&self.data_dir, &self.season);
                         }
                         self.refresh_health();
                     }
@@ -1066,6 +1065,7 @@ impl TrackerApp {
             }
             Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
             Message::Nav(msg) => crate::nav::update(self, msg),
+            Message::Pages(msg) => crate::tab_bits::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()
@@ -2748,7 +2748,7 @@ fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
 }
 
 fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> {
-    if fixture == Some(FixtureKind::Sample) {
+    if matches!(fixture, Some(FixtureKind::Sample | FixtureKind::Full)) {
         games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
     } else {
         Utc::now()
