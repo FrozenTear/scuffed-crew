@@ -165,10 +165,7 @@ pub struct Config {
     /// Letter-template names (the `names-v1` pack) for the player's own row: on
     /// unless the file says `false`, with either [`Self::reader`]. Not written
     /// while on.
-    #[serde(
-        default = "default_name_reader",
-        skip_serializing_if = "name_reader_is_on"
-    )]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub name_reader: bool,
     /// More in-game names that are all this member's (alts, a renamed
     /// account), as shown in-game without the `#1234`. Every entry counts as
@@ -176,17 +173,21 @@ pub struct Config {
     /// when missing, so a 0.5.0 file loads unchanged) and not written while
     /// empty. [`Self::own_player_names`] is the merged list.
     ///
-    /// TODO(0.6): the Tab reader still matches only `player_name`. Feed
-    /// [`Self::own_player_names`] to the name fallback, and when two rows
-    /// match a saved name, take the highlighted row whose hero matches the
-    /// hero panel.
+    /// TODO(0.6): nothing reads this yet. Before the Tab reader matches
+    /// these names:
+    /// - feed [`Self::own_player_names`] to the name fallback, and when two
+    ///   rows match a saved name, take the highlighted row whose hero
+    ///   matches the hero panel;
+    /// - feed the same list to the report scrubber
+    ///   (`report::scrub::ScrubContext::from_config`, which takes only
+    ///   `player_name` today), so an alt in the log never reaches a report.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub player_names: Vec<String>,
     /// Upload each game to the site after it closes ("Upload games after
     /// each match"). On (also when missing) and not written while on. Only
     /// matters when `[sync]` has a token; off keeps games local and queued.
-    /// The daemon reads it at start: off leaves it with no upload client
-    /// (`daemon::live_upload`), so no path sends a game.
+    ///
+    /// TODO(0.6): not wired yet; the sync worker does not read this.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub live_upload: bool,
     /// Opt-in rank reader ("Read my rank after Comp games"): saves rank, rank
@@ -217,6 +218,9 @@ pub struct Config {
     /// window is not visible on the captured output, so no other window is
     /// captured. On ("Auto" in Settings, also when missing) and not written
     /// while on; `false` captures whenever a game process runs, as in 0.5.
+    /// When the tracker cannot tell whether the window is visible (most
+    /// Wayland compositors do not say), Auto captures as `false` does: it
+    /// never stops capture on an unknown.
     ///
     /// TODO(0.6): capture does not check window visibility yet. The flag is
     /// read by nothing, so `true` behaves like 0.5 until the check lands.
@@ -232,12 +236,19 @@ fn is_true(on: &bool) -> bool {
     *on
 }
 
-fn default_name_reader() -> bool {
-    true
-}
+/// Shortest name [`Config::own_player_names`] keeps. BattleTag names are 3
+/// to 12 characters.
+pub const MIN_OWN_NAME_CHARS: usize = 3;
 
-fn name_reader_is_on(on: &bool) -> bool {
-    *on
+/// `raw` trimmed, without a trailing `#` and digits (the BattleTag number).
+fn without_battletag(raw: &str) -> &str {
+    let raw = raw.trim();
+    match raw.rsplit_once('#') {
+        Some((name, tag)) if !tag.is_empty() && tag.chars().all(|c| c.is_ascii_digit()) => {
+            name.trim()
+        }
+        _ => raw,
+    }
 }
 
 fn default_session_window_secs() -> u64 {
@@ -258,16 +269,18 @@ fn default_game_process_names() -> Vec<String> {
 
 impl Config {
     /// Every saved in-game name of this member: [`Self::player_name`] first,
-    /// then [`Self::player_names`] in file order. Names are trimmed, blanks
-    /// are dropped and a repeat (ignoring case, any script: `Ö` and `ö` are
-    /// one name) is kept once.
+    /// then [`Self::player_names`] in file order. Each name is trimmed and
+    /// loses a trailing `#1234` tag (the scoreboard never shows it). A name
+    /// shorter than [`MIN_OWN_NAME_CHARS`] is dropped, so a stray letter can
+    /// never claim a stranger's row. A repeat (ignoring case, any script:
+    /// `Ö` and `ö` are one name, as in the name matcher) is kept once.
     pub fn own_player_names(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
         let mut seen: Vec<String> = Vec::new();
         for name in self.player_name.iter().chain(self.player_names.iter()) {
-            let name = name.trim();
+            let name = without_battletag(name);
             let key = name.to_lowercase();
-            if !name.is_empty() && !seen.contains(&key) {
+            if name.chars().count() >= MIN_OWN_NAME_CHARS && !seen.contains(&key) {
                 seen.push(key);
                 out.push(name.to_string());
             }
@@ -344,9 +357,6 @@ mod tests_format;
 mod tests_merge;
 
 #[cfg(test)]
-mod tests_keys_06;
-
-#[cfg(test)]
 mod tests_overlay;
 
 #[cfg(test)]
@@ -354,6 +364,9 @@ mod tests_parse_error;
 
 #[cfg(test)]
 mod tests_pins;
+
+#[cfg(test)]
+mod tests_settings_keys;
 
 #[cfg(test)]
 mod tests_sync_off;

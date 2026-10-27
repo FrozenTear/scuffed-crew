@@ -55,19 +55,26 @@ fn old_config_saves_back_unchanged() {
     assert_eq!(text, V050);
 }
 
+/// A real edit goes past `text_for_save`'s nothing-changed return: the
+/// edited line is the only one that changes, and no 0.6 key is written.
 #[test]
-fn defaults_are_not_written() {
-    let text = toml::to_string(&Config::default()).expect("serializes");
-    for key in [
-        "player_names",
-        "live_upload",
-        "rank_reader",
-        "share_stat_pictures",
-        "share_report_pictures",
-        "capture_only_on_screen",
-    ] {
-        assert!(!text.contains(key), "{key} written at its default:\n{text}");
-    }
+fn old_config_edit_changes_only_the_edited_line() {
+    let (text, _) = save(V050, |c| c.player_name = Some("FrozenAlt".into()));
+    let changed: Vec<(&str, &str)> = V050
+        .lines()
+        .zip(text.lines())
+        .filter(|(a, b)| a != b)
+        .collect();
+    assert_eq!(
+        changed,
+        vec![(
+            "player_name = \"FrozenTear\"",
+            "player_name = \"FrozenAlt\""
+        )]
+    );
+    assert_eq!(text.lines().count(), V050.lines().count(), "no line added");
+    assert!(text.starts_with("# my tracker\n"), "comment kept");
+    assert!(text.contains("from_a_newer_build = 1"), "unknown key kept");
 }
 
 /// A line the saved file must hold, and the edit that should write it.
@@ -149,4 +156,24 @@ fn own_player_names_dedupes_past_ascii() {
         ..Config::default()
     };
     assert_eq!(c.own_player_names(), vec!["Öster", "ÉCLAIR", "Østen"]);
+}
+
+#[test]
+fn own_player_names_drop_the_battletag_number() {
+    let c = Config {
+        player_name: Some("QXSelf#24680".into()),
+        player_names: vec!["QXSelf".into(), "Alt#12".into(), "Tag#x1".into()],
+        ..Config::default()
+    };
+    assert_eq!(c.own_player_names(), vec!["QXSelf", "Alt", "Tag#x1"]);
+}
+
+#[test]
+fn own_player_names_drop_names_too_short_to_match() {
+    let c = Config {
+        player_name: Some("Ab".into()),
+        player_names: vec!["x".into(), "Öst".into(), "Zo#1234".into()],
+        ..Config::default()
+    };
+    assert_eq!(c.own_player_names(), vec!["Öst"]);
 }
