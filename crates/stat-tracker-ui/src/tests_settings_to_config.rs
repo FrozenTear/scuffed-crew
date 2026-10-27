@@ -155,3 +155,43 @@ fn every_config_key_is_owned_by_the_form_or_kept_from_the_file() {
     assert_eq!(share_report_pictures, file.share_report_pictures);
     assert_eq!(capture_only_on_screen, file.capture_only_on_screen);
 }
+
+/// A form loaded from a file and saved over it keeps that file: the six 0.6
+/// keys off their defaults and the other keys with no form field come back
+/// as they were, in the value and in the saved text.
+#[test]
+fn a_form_saved_over_its_own_file_keeps_every_key() {
+    let file = every_key_set();
+    let control = ShadowRecognizerControl {
+        file_on: file.shadow_recognizer,
+        locked: false,
+    };
+    let mut form = SettingsForm::from_config_and_shadow(&file, control);
+    assert_eq!(form.to_config(&file), file);
+
+    let text = Config::text_for_save(None, &file).expect("first save");
+    let again = Config::text_for_save(Some(&text), &form.to_config(&file)).expect("resave");
+    assert_eq!(again, text, "an unchanged form writes the same bytes");
+
+    form.player_name = "FrozenAlt".to_string();
+    let edited = Config::text_for_save(Some(&text), &form.to_config(&file)).expect("edit");
+    for line in [
+        "player_names = [",
+        "live_upload = false",
+        "rank_reader = true",
+        "share_stat_pictures = true",
+        "share_report_pictures = true",
+        "capture_only_on_screen = false",
+        "name_reader = false",
+        "finished_game_close_secs = 240",
+        "setup_completed = true",
+    ] {
+        assert!(edited.contains(line), "{line} lost on save:\n{edited}");
+    }
+    let back = Config::parse_file_contents(&edited).expect("saved text parses");
+    let want = Config {
+        player_name: Some("FrozenAlt".to_string()),
+        ..file.clone()
+    };
+    assert_eq!(back, want, "only the edited key changed");
+}
