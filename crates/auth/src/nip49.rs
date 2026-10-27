@@ -32,7 +32,7 @@ pub enum Nip49Error {
     UnsupportedVersion(u8),
     #[error("unsupported log_n: {0} (allowed range 16..=20)")]
     UnsupportedLogN(u8),
-    #[error("decryption failed — wrong password or corrupted data")]
+    #[error("decryption failed: wrong password or corrupted data")]
     DecryptionFailed,
     #[error("scrypt KDF failed: {0}")]
     KdfFailed(String),

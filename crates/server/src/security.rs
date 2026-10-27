@@ -217,7 +217,7 @@ pub async fn apply(
         HeaderValue::from_static("nosniff"),
     );
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    // Disable the legacy XSS filter — modern browsers ignore it and it can
+    // Disable the legacy XSS filter. Modern browsers ignore it and it can
     // introduce vulnerabilities in older ones.
     headers.insert(
         HeaderName::from_static("x-xss-protection"),
@@ -276,7 +276,7 @@ fn bundled_script_hashes() -> Vec<String> {
 /// SHA-256 CSP hashes of inline `<script>` bodies (no `src`).
 ///
 /// Dioxus 0.7's CLI (`inject_loading_scripts`) inserts
-/// `<script type="module" async src="/…/*.js">` — an external same-origin
+/// `<script type="module" async src="/…/*.js">`, an external same-origin
 /// module, covered by `'self'`, not an inline script. The wasm glue that
 /// compiles the module lives in that JS file and needs `'wasm-unsafe-eval'`.
 /// `crates/app/index.html` also has its own inline boot-skeleton script; that
@@ -375,7 +375,7 @@ fn csp_host_source(raw: &str) -> Option<String> {
     Some(format!("{scheme}://{hostport}"))
 }
 
-/// WebSocket origin for `NOSTR_RELAY_URL` (`ws`/`wss` only — the browser client
+/// WebSocket origin for `NOSTR_RELAY_URL` (`ws`/`wss` only, since the browser client
 /// connects only when the channel URL starts with those schemes).
 fn csp_websocket_source(raw: &str) -> Option<String> {
     let source = csp_host_source(raw)?;
@@ -539,6 +539,25 @@ mod tests {
             values,
             ["nosniff"],
             "{label}: X-Content-Type-Options nosniff must appear exactly once, got {values:?}"
+        );
+    }
+
+    fn assert_header_once(
+        response: &axum::response::Response,
+        name: &str,
+        expected: &str,
+        label: &str,
+    ) {
+        let values: Vec<_> = response
+            .headers()
+            .get_all(name)
+            .iter()
+            .map(|value| value.to_str().unwrap_or(""))
+            .collect();
+        assert_eq!(
+            values,
+            [expected],
+            "{label}: {name} must appear exactly once, got {values:?}"
         );
     }
 
@@ -989,6 +1008,13 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_nosniff_once(&response, "html shell");
+        assert_header_once(&response, "x-frame-options", "DENY", "html shell");
+        assert_header_once(
+            &response,
+            "referrer-policy",
+            "strict-origin-when-cross-origin",
+            "html shell",
+        );
         let csp = response
             .headers()
             .get(CSP_REPORT_ONLY_HEADER)
