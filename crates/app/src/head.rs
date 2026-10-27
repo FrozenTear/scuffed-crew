@@ -348,6 +348,7 @@ fn page_label(route: &Route) -> PageLabel {
         Route::Stats {} => named("Stats"),
         Route::StatsTokens {} => named("Stats tokens"),
         Route::StatsMember { id } => named(format!("Player stats | {id}")),
+        Route::StatsMatch { .. } => named("Match stats"),
         Route::PatchNotes {} => named("Patch notes"),
         Route::AdminDashboard {} => named("Admin dashboard"),
         Route::AdminMembers {} => named("Admin members"),
