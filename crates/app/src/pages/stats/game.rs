@@ -1,34 +1,34 @@
 //! One personal game: result, map, mode, hero, and every stat with its unsure
 //! mark.
 //!
-//! There is no single-game endpoint. The page reads the member's own match
-//! list (all time, newest first, the same rows History shows) and picks the
-//! row by id. When the id is past the loaded pages, "Look further back" raises
-//! the page budget instead of guessing.
+//! The page reads one game from `GET /api/stats/me/matches/{id}`. The server
+//! answers 404 for an id that is missing, malformed, or another member's, so
+//! the page shows "not in your match history" for that and leaves sign in,
+//! inactive and other errors to the member gate.
 
 use chrono::{DateTime, Utc};
 use dioxus::html::input_data::MouseButton;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::member_pending;
-use crate::hooks::{LIST_MAX_PAGES, use_api_list_with};
+use crate::components::{is_http_status, member_pending};
+use crate::hooks::use_api_with;
 use crate::routes::Route;
 use crate::state::use_auth;
+use crate::util::encode_query;
 
 use super::history::{cell_is_unsure, marked_value, outcome_class, show_new_reader_badge};
 use super::role::game_role_label;
 use super::{format_date, map_game_mode, member_stats_url};
 
-/// The member's own match list. No season, so every game is in reach.
+/// One of the member's own games. The id goes in as one encoded path segment.
 const MY_MATCHES_PATH: &str = "/api/stats/me/matches";
 
 const EDITED_BADGE: &str = "Edited";
 const EDITED_TITLE: &str = "Corrected by hand in the tracker";
 const NEW_READER_BADGE: &str = "New reader";
 const NEW_READER_TITLE: &str = "Read by the new stat reader";
-const LOOK_FURTHER_LABEL: &str = "Look further back";
-const LOOKING_FURTHER_LABEL: &str = "Loading…";
+const MISSING_TEXT: &str = "This game is not in your match history. It may have been deleted.";
 
 const GAME_CSS: &str = r#"
     .game-page.stats-page {
@@ -118,7 +118,8 @@ const GAME_CSS: &str = r#"
     }
 "#;
 
-/// One row of `GET /api/stats/me/matches`, with the fields this page shows.
+/// The bare `PersonalMatch` from `GET /api/stats/me/matches/{id}` (the same
+/// shape as one History row), with the fields this page shows.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub(super) struct GameRow {
     id: String,
@@ -177,21 +178,26 @@ pub(super) fn open_match(evt: MouseEvent, id: String) {
     }
 }
 
-/// Where the lookup stands for the loaded rows.
-#[derive(Debug, PartialEq)]
-enum Lookup<'a> {
-    Found(&'a GameRow),
-    /// Not in the loaded rows, but more pages are left.
-    LookFurther,
-    /// Not in the member's match list at all.
-    Missing,
+/// API path for one of the member's own games.
+fn game_path(id: &str) -> String {
+    format!("{MY_MATCHES_PATH}/{}", encode_query(id))
 }
 
-fn lookup<'a>(rows: &'a [GameRow], id: &str, truncated: bool) -> Lookup<'a> {
-    match rows.iter().find(|row| row.id == id) {
-        Some(row) => Lookup::Found(row),
-        None if truncated => Lookup::LookFurther,
-        None => Lookup::Missing,
+/// What the page shows for the current fetch.
+#[derive(Debug, PartialEq)]
+enum GameView<'a> {
+    Found(&'a GameRow),
+    /// 404: missing, malformed, or another member's id.
+    Missing,
+    /// Loading, sign in, inactive, or another error: the member gate decides.
+    Pending,
+}
+
+fn game_view<'a>(row: Option<&'a GameRow>, error: Option<&str>) -> GameView<'a> {
+    match (row, error) {
+        (Some(row), _) => GameView::Found(row),
+        (None, Some(err)) if is_http_status(err, 404) => GameView::Missing,
+        _ => GameView::Pending,
     }
 }
 
@@ -263,15 +269,6 @@ fn mode_label(game_mode: &str, map_name: &str) -> String {
     }
 }
 
-/// Look further back label: busy while the extra pages load.
-fn look_further_label(busy: bool) -> &'static str {
-    if busy {
-        LOOKING_FURTHER_LABEL
-    } else {
-        LOOK_FURTHER_LABEL
-    }
-}
-
 /// The game body. No Link inside, so tests can render it without a router.
 fn game_detail(row: &GameRow) -> Element {
     let fields = row.fields();
@@ -338,55 +335,17 @@ fn game_detail(row: &GameRow) -> Element {
 #[component]
 pub fn StatsMatch(id: String) -> Element {
     let auth = use_auth();
-    let games = use_api_list_with::<GameRow>(move || {
-        member_stats_url(&auth(), MY_MATCHES_PATH.to_string())
-    });
-    let truncated = *games.truncated.read();
-    let shown = *games.shown.read();
-    let mut budget = games.page_budget;
-    let resource = games.data;
-    // Set on click, cleared once the reload settles (rows or an error), so
-    // the button cannot fire a second fetch while one is running.
-    let mut looking_further = use_signal(|| false);
-    use_effect(move || {
-        let settled = *resource.state().read() != UseResourceState::Pending;
-        if settled && *looking_further.peek() {
-            looking_further.set(false);
-        }
-    });
-    let busy = looking_further() || *resource.state().read() == UseResourceState::Pending;
-    let further_label = look_further_label(busy);
-    let data = games.data.read();
-    let rows = data.as_ref().and_then(|d| d.as_ref());
+    let game = use_api_with::<GameRow>(move || member_stats_url(&auth(), game_path(&id)));
+    let data = game.data.read();
+    let row = data.as_ref().and_then(|d| d.as_ref());
+    let error = game.error.read().clone();
 
-    let body = match rows {
-        None => member_pending(&auth(), &games, "this game"),
-        Some(rows) => match lookup(rows, &id, truncated) {
-            Lookup::Found(row) => game_detail(row),
-            Lookup::LookFurther => rsx! {
-                div { class: "empty-state",
-                    p { "This game is not in your latest {shown} games." }
-                    button {
-                        class: "ui-btn ui-btn--md",
-                        disabled: busy,
-                        aria_busy: busy,
-                        onclick: move |_| {
-                            if *looking_further.peek() {
-                                return;
-                            }
-                            looking_further.set(true);
-                            budget += LIST_MAX_PAGES;
-                        },
-                        "{further_label}"
-                    }
-                }
-            },
-            Lookup::Missing => rsx! {
-                p { class: "empty-state",
-                    "This game is not in your match history. It may have been deleted."
-                }
-            },
+    let body = match game_view(row, error.as_deref()) {
+        GameView::Found(row) => game_detail(row),
+        GameView::Missing => rsx! {
+            p { class: "empty-state", "{MISSING_TEXT}" }
         },
+        GameView::Pending => member_pending(&auth(), &game, "this game"),
     };
 
     rsx! {
@@ -445,19 +404,28 @@ mod tests {
     }
 
     #[test]
-    fn lookup_finds_by_id_and_knows_when_to_look_further() {
-        let rows = vec![row("a", &[]), row("b", &[])];
-        assert_eq!(lookup(&rows, "b", false), Lookup::Found(&rows[1]));
-        assert_eq!(lookup(&rows, "b", true), Lookup::Found(&rows[1]));
-        assert_eq!(lookup(&rows, "z", true), Lookup::LookFurther);
-        assert_eq!(lookup(&rows, "z", false), Lookup::Missing);
-        assert_eq!(lookup(&[], "a", false), Lookup::Missing);
+    fn game_path_encodes_the_id_as_one_segment() {
+        assert_eq!(game_path("abc123"), "/api/stats/me/matches/abc123");
+        assert_eq!(game_path("a/b c"), "/api/stats/me/matches/a%2Fb%20c");
     }
 
     #[test]
-    fn look_further_label_reads_loading_while_busy() {
-        assert_eq!(look_further_label(false), "Look further back");
-        assert_eq!(look_further_label(true), "Loading…");
+    fn only_404_maps_to_missing() {
+        let game = row("a", &[]);
+        assert_eq!(game_view(Some(&game), None), GameView::Found(&game));
+        assert_eq!(
+            game_view(None, Some("HTTP error 404: Match not found")),
+            GameView::Missing
+        );
+        for err in [
+            "HTTP error 401: Unauthorized",
+            "HTTP error 403: Membership inactive",
+            "HTTP error 500: Internal error",
+            "Network error: offline",
+        ] {
+            assert_eq!(game_view(None, Some(err)), GameView::Pending, "{err}");
+        }
+        assert_eq!(game_view(None, None), GameView::Pending);
     }
 
     #[test]
