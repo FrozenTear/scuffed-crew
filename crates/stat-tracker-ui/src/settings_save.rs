@@ -37,6 +37,10 @@ const SETTINGS_SAVED_ROUTE: &str =
 
 const SETTINGS_SAVED_ROUTE_ENV: &str = "Settings saved. STAT_TRACKER_CAPTURE in the environment overrides this choice, so the tracker keeps that route. Edit the file under .config/environment.d, then log out and back in.";
 
+/// Classic Save under an outside token, when the website URL or token
+/// typed there could not be stored.
+const SETTINGS_SAVED_SYNC_ENV: &str = "Settings saved, except the website URL and token: SCUFFED_TOKEN in the environment sets the token, so what you typed there was not stored. Unset it to save your own.";
+
 /// Which page saves, and what goes with the change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SaveFrom {
@@ -455,7 +459,7 @@ impl TrackerApp {
     }
 
     /// The form for what is saved, with the stored shortcut.
-    fn form_from_saved(&self) -> SettingsForm {
+    pub(crate) fn form_from_saved(&self) -> SettingsForm {
         let mut form = SettingsForm::from_config(&self.saved_config)
             .with_installed_version(&self.saved_config, self.installed_version.as_deref());
         form.overlay_hotkey = self.overlay_hotkey.bind.clone();
@@ -515,6 +519,12 @@ impl TrackerApp {
             .is_some_and(|value| !value.trim().is_empty());
         let recheck =
             update_channel_switched(&self.saved_file, &config, self.installed_version.as_deref());
+        let sync_dropped = classic && self.sync_locked() && {
+            let shown = self.saved_config.sync.as_ref();
+            let typed_sync = (typed.sync_url.trim(), typed.sync_token.trim());
+            let was = shown.map_or(("", ""), |s| (s.server_url.as_str(), s.token.as_str()));
+            typed_sync != was && config.sync == self.saved_file.sync
+        };
         self.take_saved_file(config, path);
         self.config_unreadable = false;
         self.refresh_health();
@@ -523,7 +533,11 @@ impl TrackerApp {
         if let SaveFrom::Page(commit) = from {
             keep_uncommitted(&mut self.settings, typed, commit);
         } else {
-            self.replace_toast(if restart_for_route && env_overrides_route {
+            // Typed input that was not stored is said first: the other
+            // toasts would claim it saved.
+            self.replace_toast(if sync_dropped {
+                SETTINGS_SAVED_SYNC_ENV
+            } else if restart_for_route && env_overrides_route {
                 SETTINGS_SAVED_ROUTE_ENV
             } else if restart_for_screen {
                 SETTINGS_SAVED_RESTARTING
@@ -592,6 +606,7 @@ mod tests {
             SETTINGS_SAVED_RESTARTING,
             SETTINGS_SAVED_ROUTE,
             SETTINGS_SAVED_ROUTE_ENV,
+            SETTINGS_SAVED_SYNC_ENV,
             "Settings saved",
         ] {
             assert!(!copy.contains('\u{2014}'), "{copy}");

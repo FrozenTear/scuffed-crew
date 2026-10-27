@@ -898,6 +898,76 @@ mod tests {
         );
     }
 
+    /// A live app with `SCUFFED_TOKEN` set, injected, and the outside
+    /// token shown over a file whose `[sync]` is `file_sync`.
+    fn app_under_an_outside_token(
+        file_sync: Option<stat_tracker::config::SyncConfig>,
+    ) -> (tempfile::TempDir, TrackerApp) {
+        let (dir, mut app) = live_app();
+        let mut file = on_disk(&dir);
+        file.sync = file_sync;
+        file.save_at(&dir.path().join("config.toml")).unwrap();
+        app.saved_file = on_disk(&dir);
+        app.saved_config = app.saved_file.clone();
+        app.outside_env = Some(crate::settings_env::OutsideEnv {
+            overlay: stat_tracker::config::EnvOverlay {
+                token: true,
+                ..Default::default()
+            },
+            vars: Vec::new(),
+        });
+        let url = app.saved_file.sync.as_ref().map(|s| s.server_url.clone());
+        app.saved_config.sync = Some(stat_tracker::config::SyncConfig {
+            server_url: url.unwrap_or_else(|| "https://env.example".into()),
+            token: "T_env".into(),
+        });
+        app.settings = app.form_from_saved();
+        (dir, app)
+    }
+
+    /// Classic Save under an outside token: a URL typed with no token in
+    /// the file cannot be stored, and the toast says so, not "saved".
+    #[test]
+    fn classic_save_says_when_typed_sync_cannot_be_stored() {
+        let (dir, mut app) = app_under_an_outside_token(None);
+        let _ = app.update(Message::SettingsText(
+            SettingsField::SyncUrl,
+            "https://typed.example".into(),
+        ));
+        let _ = app.update(Message::SaveSettings);
+        assert_eq!(on_disk(&dir).sync, None);
+        let toast = app.toast.clone().unwrap_or_default();
+        assert!(toast.contains("SCUFFED_TOKEN"), "{toast}");
+        assert!(toast.contains("not stored"), "{toast}");
+
+        // A save that leaves the website fields alone says plain saved.
+        let (dir, mut app) = app_under_an_outside_token(None);
+        app.settings.debug_ocr = true;
+        let _ = app.update(Message::SaveSettings);
+        assert!(on_disk(&dir).debug_ocr);
+        let toast = app.toast.clone().unwrap_or_default();
+        assert!(!toast.contains("SCUFFED_TOKEN"), "{toast}");
+    }
+
+    /// The 0.6 page under an injected outside token never commits the
+    /// website fields, whatever the host's environment holds. Unlocked,
+    /// this commit would write the typed URL with the file's token.
+    #[test]
+    fn an_outside_token_keeps_the_page_from_committing_sync() {
+        let file_sync = stat_tracker::config::SyncConfig {
+            server_url: "https://file.example".into(),
+            token: "T_file".into(),
+        };
+        let (dir, mut app) = app_under_an_outside_token(Some(file_sync.clone()));
+        assert!(app.sync_locked());
+        let _ = app.update(Message::SettingsText(
+            SettingsField::SyncUrl,
+            "https://typed.example".into(),
+        ));
+        let _ = app.update(page(Msg::Commit(Commit::Sync)));
+        assert_eq!(on_disk(&dir).sync, Some(file_sync));
+    }
+
     #[test]
     fn typed_timings_that_do_not_parse_are_refused_and_kept() {
         let (dir, mut app) = live_app();
