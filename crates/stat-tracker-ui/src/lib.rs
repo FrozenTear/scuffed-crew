@@ -43,7 +43,9 @@ mod games_retry;
 mod games_rows;
 mod games_state;
 mod games_table;
+mod hero_pack_hint;
 pub mod heroes;
+mod heroes_page;
 pub mod hotkey;
 pub mod icons;
 #[cfg(test)]

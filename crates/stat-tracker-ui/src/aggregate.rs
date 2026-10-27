@@ -184,7 +184,7 @@ pub fn filter_games<'a>(games: &'a [Game], filter: &GameFilter) -> Vec<&'a Game>
             filter
                 .hero
                 .as_ref()
-                .is_none_or(|h| hero_name(&g.hero) == hero_name(h))
+                .is_none_or(|h| hero_key(&g.hero) == hero_key(h))
         })
         .filter(|g| filter.map.as_ref().is_none_or(|m| &g.map_name == m))
         .filter(|g| filter.outcome.is_none_or(|o| g.outcome == o))
@@ -217,12 +217,15 @@ pub fn hero_name(name: &str) -> &str {
     known.unwrap_or(name)
 }
 
+/// The heroes the Hero dropdown offers, once each under the name the
+/// stats use ([`hero_key`]), so "soldier_76" and "Soldier: 76" are one
+/// choice and picking it matches both.
 pub fn distinct_heroes(games: &[&Game]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for g in games {
-        let hero = hero_name(&g.hero);
-        if !hero.is_empty() && !out.iter().any(|h| h == hero) {
-            out.push(hero.to_string());
+        let key = hero_key(&g.hero);
+        if !g.hero.is_empty() && !out.contains(&key) {
+            out.push(key);
         }
     }
     out.sort();
@@ -371,9 +374,31 @@ fn bump_outcome(r: &mut Record, outcome: Outcome) {
     }
 }
 
+/// The name a hero's games count under: the catalog spelling, so
+/// "soldier_76" and "Soldier: 76" are one hero. An unknown or blank name
+/// stays as stored.
+///
+/// This runs for every game on every redraw, so a name that is already a
+/// display name [`canonical_hero`] returns (almost every stored name)
+/// skips its allocating scan of the hero table. The fast path checks
+/// `HERO_NAMES`, not `HEROES`: `HEROES` spells "Lucio" and "Torbjorn",
+/// which `canonical_hero` turns into "Lúcio" and "Torbjörn".
+///
+/// [`canonical_hero`]: stat_tracker::parse::canonical_hero
+pub fn hero_key(name: &str) -> String {
+    let t = name.trim();
+    if let Some(known) = scuffed_types::HERO_NAMES.iter().find(|h| h.display == t) {
+        known.display.to_string()
+    } else if stat_tracker::parse::hero_is_unknown_label(name) {
+        name.to_string()
+    } else {
+        stat_tracker::parse::canonical_hero(t)
+    }
+}
+
 fn bump_hero(rows: &mut Vec<(String, Role, Record)>, g: &Game) {
-    let hero = hero_name(&g.hero);
-    if let Some((_, _, rec)) = rows.iter_mut().find(|(h, _, _)| h == hero) {
+    let key = hero_key(&g.hero);
+    if let Some((_, _, rec)) = rows.iter_mut().find(|(h, _, _)| h == &key) {
         rec.games += 1;
         bump_outcome(rec, g.outcome);
     } else {
@@ -384,7 +409,7 @@ fn bump_hero(rows: &mut Vec<(String, Role, Record)>, g: &Game) {
             draws: 0,
         };
         bump_outcome(&mut rec, g.outcome);
-        rows.push((hero.to_string(), g.role, rec));
+        rows.push((key, g.role, rec));
     }
 }
 
@@ -461,6 +486,34 @@ mod tests {
 
     fn ts_h(y: i32, m: u32, d: u32, hh: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(y, m, d, hh, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn hero_key_keeps_catalog_names_and_folds_other_spellings() {
+        assert_eq!(hero_key("Ana"), "Ana");
+        assert_eq!(hero_key(" Soldier: 76 "), "Soldier: 76");
+        assert_eq!(hero_key("soldier_76"), "Soldier: 76");
+        assert_eq!(hero_key("wrecking-ball"), "Wrecking Ball");
+        assert_eq!(
+            hero_key("Unknown"),
+            "Unknown",
+            "an unknown hero stays as stored"
+        );
+        assert_eq!(hero_key(""), "");
+    }
+
+    #[test]
+    fn hero_key_matches_canonical_hero_for_every_catalog_name() {
+        use stat_tracker::parse::canonical_hero;
+        let names = scuffed_types::HEROES
+            .iter()
+            .copied()
+            .chain(scuffed_types::HERO_NAMES.iter().map(|h| h.display));
+        for n in names {
+            assert_eq!(hero_key(n), canonical_hero(n), "{n}");
+        }
+        assert_eq!(hero_key("Lucio"), hero_key("Lúcio"));
+        assert_eq!(hero_key("Torbjorn"), hero_key("Torbjörn"));
     }
 
     #[test]

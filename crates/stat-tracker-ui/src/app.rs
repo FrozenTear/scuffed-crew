@@ -225,6 +225,8 @@ pub enum Message {
     Games(crate::games_table::Msg),
     /// A message from the 0.6 Overview ([`crate::overview_page::update`]).
     OverviewPage(crate::overview_page::Msg),
+    /// A message from the 0.6 Heroes page ([`crate::heroes_page::update`]).
+    HeroesPage(crate::heroes_page::Msg),
     /// A message from the 0.6 Maps and Seasons tabs ([`crate::tab_bits::update`]).
     Pages(crate::tab_bits::PageMsg),
 }
@@ -343,6 +345,8 @@ pub struct TrackerApp {
     pub needs_look_filter: bool,
     /// The 0.6 Overview's own state ([`crate::overview_page`]).
     pub overview_page: crate::overview_page::OverviewPage,
+    /// The 0.6 Heroes page's sort, view and fold ([`crate::heroes_page`]).
+    pub heroes_page: crate::heroes_page::HeroesPage,
     /// The 0.6 Maps tab's sort and Show row ([`crate::maps_tab`]).
     pub maps_ui: crate::maps_tab::MapsUi,
     pub toast: Option<String>,
@@ -604,6 +608,7 @@ impl TrackerApp {
             filter_outcome: None,
             needs_look_filter: false,
             overview_page: Default::default(),
+            heroes_page: Default::default(),
             maps_ui: Default::default(),
             toast: None,
             toast_action: None,
@@ -1073,6 +1078,7 @@ impl TrackerApp {
             Message::Nav(msg) => crate::nav::update(self, msg),
             Message::Games(msg) => crate::games_table::update(self, msg),
             Message::OverviewPage(msg) => crate::overview_page::update(self, msg),
+            Message::HeroesPage(msg) => crate::heroes_page::update(self, msg),
             Message::Pages(msg) => crate::tab_bits::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
@@ -2714,10 +2720,6 @@ fn check_reader_packs(data_dir: PathBuf, turn_off: bool) -> Task<Message> {
     )
 }
 
-/// Shown under Tracker health when no hero pack is installed and site sync
-/// is off: the hero pack comes from the site, so heroes read as unknown.
-pub const HERO_PACK_SYNC_HINT: &str = "Hero names need site sync. Your stats still track normally.";
-
 /// Site sync is set up in `config`: a URL and a token, neither blank.
 pub fn sync_on_for(config: &Config) -> bool {
     config
@@ -2726,19 +2728,7 @@ pub fn sync_on_for(config: &Config) -> bool {
         .is_some_and(|s| !s.server_url.trim().is_empty() && !s.token.trim().is_empty())
 }
 
-/// [`HERO_PACK_SYNC_HINT`] when site sync is off and the last pack check
-/// found no hero pack. `None` before the first check (and in demo mode,
-/// which never checks), and whenever sync is on: with sync on the tracker
-/// downloads the pack itself.
-pub fn hero_pack_hint(
-    sync_on: bool,
-    packs: Option<&stat_tracker::ocr_switch::PackReadiness>,
-) -> Option<&'static str> {
-    match packs {
-        Some(p) if !sync_on && !p.heroes => Some(HERO_PACK_SYNC_HINT),
-        _ => None,
-    }
-}
+pub use crate::hero_pack_hint::hero_pack_hint;
 
 const HEALTH_READY: &str = "Ready";
 const HEALTH_WAITING: &str = "Waiting for a capture";
@@ -2947,6 +2937,7 @@ fn health_status_for(
 mod tests {
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
+    use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
@@ -3407,30 +3398,19 @@ mod tests {
     }
 
     #[test]
-    fn hero_pack_hint_shows_only_without_sync_and_without_a_hero_pack() {
-        use stat_tracker::ocr_switch::PackReadiness;
-        let none = PackReadiness::default();
-        let heroes = PackReadiness {
-            heroes: true,
-            ..PackReadiness::default()
+    fn sync_counts_as_on_only_with_a_url_and_a_token() {
+        use stat_tracker::config::SyncConfig;
+        let with = |url: &str, token: &str| Config {
+            sync: Some(SyncConfig {
+                server_url: url.into(),
+                token: token.into(),
+            }),
+            ..Config::default()
         };
-        assert_eq!(
-            super::hero_pack_hint(false, Some(&none)),
-            Some(super::HERO_PACK_SYNC_HINT)
-        );
-        assert_eq!(super::hero_pack_hint(true, Some(&none)), None, "sync on");
-        assert_eq!(
-            super::hero_pack_hint(false, Some(&heroes)),
-            None,
-            "pack there"
-        );
-        assert_eq!(super::hero_pack_hint(true, Some(&heroes)), None);
-        assert_eq!(super::hero_pack_hint(false, None), None, "not checked yet");
-        assert_eq!(
-            super::HERO_PACK_SYNC_HINT,
-            "Hero names need site sync. Your stats still track normally."
-        );
-        assert!(!super::HERO_PACK_SYNC_HINT.contains('\u{2014}'));
+        assert!(!super::sync_on_for(&Config::default()));
+        assert!(!super::sync_on_for(&with("", "tok")));
+        assert!(!super::sync_on_for(&with("https://crew.example", "  ")));
+        assert!(super::sync_on_for(&with("https://crew.example", "tok")));
     }
 
     #[test]

@@ -81,11 +81,16 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
-        // Settings has none; Overview, Games, Maps and Seasons draw the
-        // spec's filter chips themselves.
+        // Settings has none; Overview, Games, Heroes, Maps and Seasons draw
+        // the spec's filter chips themselves.
         if !matches!(
             app.screen,
-            Screen::Settings | Screen::Overview | Screen::Games | Screen::Maps | Screen::Seasons
+            Screen::Settings
+                | Screen::Overview
+                | Screen::Games
+                | Screen::Heroes
+                | Screen::Maps
+                | Screen::Seasons
         ) {
             content = content.push(widgets::header_controls(app));
         }
