@@ -1,6 +1,7 @@
 mod game;
 mod heroes;
 mod history;
+mod history_filter;
 mod maps;
 mod overview;
 pub(crate) mod role;
@@ -1210,6 +1211,7 @@ pub fn Stats() -> Element {
     let hero_sort = use_signal(|| "matches");
     let hist_outcome = use_signal(|| "all");
     let hist_role = use_signal(|| "all");
+    let hist_mode = use_signal(|| history_filter::ALL.to_string());
 
     // Progressive disclosure: once the member has tracked matches, the setup
     // chrome collapses to one slim row. Zero-match members keep the full
@@ -1235,6 +1237,7 @@ pub fn Stats() -> Element {
             cursor_history,
             hist_outcome,
             hist_role,
+            hist_mode,
         ),
     };
 
