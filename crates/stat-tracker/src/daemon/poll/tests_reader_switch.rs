@@ -1,6 +1,6 @@
-//! Daemon tests: reader_switch_maps. See `mod.rs`.
+//! Tests for the poll tick's reader switch and maps, next to `outcome.rs`.
 
-use super::*;
+use crate::{main_tests::*, *};
 
 #[test]
 fn a_skipped_capture_report_uses_the_plan_outcome_and_the_callers_career_flag() {

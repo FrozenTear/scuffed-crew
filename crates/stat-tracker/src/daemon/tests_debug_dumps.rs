@@ -1,6 +1,6 @@
-//! Daemon tests: splits_and_debug_frames. See `mod.rs`.
+//! Tests for the debug dumps and the session splits, next to `debug_dumps.rs`.
 
-use super::*;
+use crate::{main_tests::*, *};
 
 #[test]
 fn stat_regression_detects_real_game_boundaries() {

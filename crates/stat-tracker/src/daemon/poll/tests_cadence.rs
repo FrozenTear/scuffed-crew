@@ -1,6 +1,6 @@
-//! Daemon tests: poll_cadence. See `mod.rs`.
+//! Tests for the poll cadence and its stack-size guard, next to `cadence.rs`.
 
-use super::*;
+use crate::{main_tests::*, *};
 
 #[test]
 fn slow_mode_only_for_mature_unfinished_game() {
