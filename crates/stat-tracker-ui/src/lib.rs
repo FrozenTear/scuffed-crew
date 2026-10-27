@@ -70,6 +70,7 @@ mod settings_rows;
 pub mod settings_save;
 pub mod settings_update;
 pub mod setup_guide;
+mod small_sample;
 pub mod snapshot;
 mod stat_tiles;
 pub mod theme;

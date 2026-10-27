@@ -3,8 +3,8 @@
 //! sparkline, then how the rate is counted), "Needs a look · all seasons"
 //! with Review games, and the Companion card with its switch.
 //!
-//! Small-sample rule: a win rate shows only from 10 games; fewer
-//! show the record instead. Rank now and Peak wait for the rank reader.
+//! Small-sample rule ([`crate::small_sample`]): a win rate shows only
+//! from 10 decided games; fewer show the record instead. Rank now and Peak wait for the rank reader.
 
 use iced::widget::{Column, Row, button, column, container, row, text, toggler};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};
@@ -19,8 +19,7 @@ use crate::theme::{
 };
 use crate::widgets;
 
-/// Fewest games a win rate is shown for (small-sample rule).
-pub const RATE_MIN: usize = 10;
+use crate::small_sample::{decided, rate};
 /// The "Last 20" window.
 pub const LAST_N: usize = 20;
 
@@ -70,16 +69,6 @@ pub fn record_of<'a>(games: impl IntoIterator<Item = &'a Game>) -> Record {
         }
     }
     r
-}
-
-fn decided(r: &Record) -> usize {
-    r.wins + r.losses + r.draws
-}
-
-/// The rate as a whole percent, only from [`RATE_MIN`] games (spec r1.1:
-/// "Win rate only from 10 games") with at least one decided.
-pub fn rate(r: &Record) -> Option<i64> {
-    (r.games >= RATE_MIN && decided(r) > 0).then(|| (r.win_rate() * 100.0).round() as i64)
 }
 
 /// The rate, or the record when the sample is small.
@@ -407,10 +396,11 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_needs_ten_games() {
+    fn a_rate_needs_ten_decided_games() {
         assert_eq!(headline(&rec(2, 5, 0, 7)), "2-5");
         assert_eq!(rate(&rec(5, 4, 0, 9)), None, "9 games");
-        assert_eq!(rate(&rec(5, 4, 0, 12)), Some(56), "12 games, 9 decided");
+        assert_eq!(rate(&rec(5, 4, 0, 12)), None, "12 games, 9 decided");
+        assert_eq!(rate(&rec(5, 4, 1, 12)), Some(50), "12 games, 10 decided");
         assert_eq!(rate(&rec(0, 0, 0, 12)), None, "none decided");
         assert_eq!(headline(&rec(52, 55, 0, 110)), "49%");
     }

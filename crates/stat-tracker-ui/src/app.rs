@@ -2726,7 +2726,7 @@ pub fn sync_on_for(config: &Config) -> bool {
         .is_some_and(|s| !s.server_url.trim().is_empty() && !s.token.trim().is_empty())
 }
 
-pub use crate::hero_pack_hint::{HERO_PACK_SYNC_HINT, hero_pack_hint};
+pub use crate::hero_pack_hint::hero_pack_hint;
 
 const HEALTH_READY: &str = "Ready";
 const HEALTH_WAITING: &str = "Waiting for a capture";

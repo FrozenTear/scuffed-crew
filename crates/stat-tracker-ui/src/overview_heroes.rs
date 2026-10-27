@@ -13,15 +13,15 @@ use crate::aggregate::{HeroAgg, aggregate_filtered};
 use crate::app::{Message, TrackerApp};
 use crate::model::Screen;
 use crate::overview_main::{portrait, role_label};
-use crate::overview_side::{RATE_MIN, rate};
+use crate::small_sample::{RATE_MIN, rate};
 use crate::theme::{
     self, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META,
     TEXT, TEXT_2, TEXT_3,
 };
 use crate::widgets;
 
-/// Fewest games a hero needs for a card.
-pub const CARD_MIN: usize = 3;
+/// Fewest games a hero needs for a card ([`crate::small_sample`]).
+pub const CARD_MIN: usize = crate::small_sample::FOLD_UNDER;
 /// Dashes on a record card: one per game, out of [`RATE_MIN`].
 const DASHES: usize = RATE_MIN;
 /// Cards across: four on a wide page, two on a narrow one.
@@ -38,10 +38,9 @@ pub fn split(heroes: &[HeroAgg]) -> (Vec<&HeroAgg>, usize) {
     (cards, small.len())
 }
 
-pub fn view<'a>(app: &'a TrackerApp, width: f32) -> Element<'a, Message> {
-    let stats = aggregate_filtered(&app.games, &crate::overview_page::filter(app));
-    let (cards, small) = split(&stats.heroes);
-    let scope = match &app.season {
+/// "All time", or the picked season's name: the heroes headers' scope.
+pub fn scope(app: &TrackerApp) -> String {
+    match &app.season {
         crate::model::SeasonSel::AllTime => "All time".to_string(),
         crate::model::SeasonSel::Season(id) => app
             .seasons
@@ -49,7 +48,13 @@ pub fn view<'a>(app: &'a TrackerApp, width: f32) -> Element<'a, Message> {
             .iter()
             .find(|s| &s.id == id)
             .map_or_else(|| "Season".to_string(), |s| s.name.clone()),
-    };
+    }
+}
+
+pub fn view<'a>(app: &'a TrackerApp, width: f32) -> Element<'a, Message> {
+    let stats = aggregate_filtered(&app.games, &crate::overview_page::filter(app));
+    let (cards, small) = split(&stats.heroes);
+    let scope = scope(app);
     let mut link = String::new();
     if small > 0 {
         link.push_str(&format!("+ {small} under {CARD_MIN} games · "));
@@ -185,9 +190,10 @@ mod tests {
     }
 
     #[test]
-    fn rates_start_at_ten_games() {
+    fn rates_start_at_ten_decided_games() {
         assert_eq!(rate(&hero("A", 9, 5, 4).record), None);
-        assert_eq!(rate(&hero("A", 10, 5, 4).record), Some(56));
+        assert_eq!(rate(&hero("A", 10, 5, 4).record), None, "9 decided");
+        assert_eq!(rate(&hero("A", 10, 6, 4).record), Some(60));
         assert_eq!(rate(&hero("A", 88, 45, 41).record), Some(52));
     }
 

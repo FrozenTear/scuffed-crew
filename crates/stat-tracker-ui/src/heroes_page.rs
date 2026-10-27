@@ -15,12 +15,12 @@ use chrono::{DateTime, Datelike, Local, Utc};
 use iced::widget::{Column, Row, button, column, container, row, space, text};
 use iced::{Alignment, Element, Fill, Padding, Task, Theme};
 
-use crate::aggregate::{GameFilter, HeroAgg, aggregate_filtered, filter_games, hero_key};
+use crate::aggregate::{GameFilter, HeroAgg, aggregate_games, filter_games, hero_key};
 use crate::app::{Message, TrackerApp};
 use crate::model::{Game, display_hero_name};
 use crate::overview_main::{portrait, role_label, warn_chip};
-use crate::overview_side::{RATE_MIN, rate};
 use crate::settings_rows::{Segment, hairline, segmented};
+use crate::small_sample::{RATE_MIN, Sample, TOO_FEW, rate, sample};
 use crate::theme::{
     self, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META, TEXT,
     TEXT_2, TEXT_3,
@@ -44,12 +44,19 @@ pub enum HeroSort {
     Recent,
 }
 
+/// Cards or List.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HeroView {
+    #[default]
+    Cards,
+    List,
+}
+
 /// A message from the Heroes page.
 #[derive(Debug, Clone)]
 pub enum Msg {
     Sort(HeroSort),
-    /// Cards (`false`) or List (`true`).
-    List(bool),
+    View(HeroView),
     /// Show or hide the heroes under 3 games.
     ToggleOthers,
 }
@@ -58,7 +65,7 @@ pub enum Msg {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct HeroesPage {
     pub sort: HeroSort,
-    pub list: bool,
+    pub view: HeroView,
     pub show_others: bool,
 }
 
@@ -66,7 +73,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
     let page = &mut app.heroes_page;
     match msg {
         Msg::Sort(sort) => page.sort = sort,
-        Msg::List(list) => page.list = list,
+        Msg::View(view) => page.view = view,
         Msg::ToggleOthers => page.show_others = !page.show_others,
     }
     Task::none()
@@ -112,9 +119,9 @@ pub fn played_label(at: DateTime<Utc>, now: DateTime<Utc>) -> String {
     }
 }
 
-/// The heroes split by sample size, each tier sorted: win rate shown (10
-/// or more games), record only (3 to 9, or 10 with none decided), and
-/// under 3 games.
+/// The heroes split by [`crate::small_sample`], each tier sorted: win
+/// rate (10 or more decided games), "Too few games" (3 or more games,
+/// under 10 decided), and under 3 games in total.
 pub struct Tiers<'a> {
     pub rated: Vec<&'a HeroAgg>,
     pub record: Vec<&'a HeroAgg>,
@@ -165,12 +172,10 @@ pub fn tiers<'a>(
         others: Vec::new(),
     };
     for h in heroes.iter().filter(|h| known(&h.hero)) {
-        if rate(&h.record).is_some() {
-            t.rated.push(h);
-        } else if h.record.games >= CARD_MIN {
-            t.record.push(h);
-        } else {
-            t.others.push(h);
+        match sample(&h.record) {
+            Sample::Rated(_) => t.rated.push(h),
+            Sample::TooFew => t.record.push(h),
+            Sample::Fold => t.others.push(h),
         }
     }
     for tier in [&mut t.rated, &mut t.record, &mut t.others] {
@@ -179,35 +184,28 @@ pub fn tiers<'a>(
     t
 }
 
-/// "8 games · 1 undecided · 8 of 10 for a win rate".
+/// The sub-line under a record card's W-L: "Too few games · 8 games ·
+/// 1 undecided", the one wording every page uses below 10 decided games.
 pub fn record_sub(h: &HeroAgg) -> String {
     let r = &h.record;
-    let mut line = r.games_label();
+    let mut line = format!("{TOO_FEW} · {}", r.games_label());
     if r.undecided() > 0 {
         line.push_str(&format!(" · {} undecided", r.undecided()));
-    }
-    if r.games < RATE_MIN {
-        line.push_str(&format!(" · {} of {RATE_MIN} for a win rate", r.games));
     }
     line
 }
 
-fn scope(app: &TrackerApp) -> String {
-    match &app.season {
-        crate::model::SeasonSel::AllTime => "All time".to_string(),
-        crate::model::SeasonSel::Season(id) => app
-            .seasons
-            .seasons
-            .iter()
-            .find(|s| &s.id == id)
-            .map_or_else(|| "Season".to_string(), |s| s.name.clone()),
-    }
+/// "ALL TIME · 1 HERO WITH 3 OR MORE GAMES · WIN RATE FROM 10 DECIDED GAMES".
+pub fn header_line(scope: &str, carded: usize) -> String {
+    let heroes = if carded == 1 { "hero" } else { "heroes" };
+    format!(
+        "{scope} · {carded} {heroes} with {CARD_MIN} or more games · win rate from {RATE_MIN} decided games"
+    )
 }
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
-    let filter = stats_filter(app);
-    let shown = filter_games(&app.games, &filter);
-    let stats = aggregate_filtered(&app.games, &filter);
+    let shown = filter_games(&app.games, &stats_filter(app));
+    let stats = aggregate_games(&shown);
     let last = last_played(&shown);
     let page = app.heroes_page;
     let t = tiers(&stats.heroes, page.sort, &last);
@@ -230,21 +228,23 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         Row::new()
             .spacing(12)
             .align_y(Alignment::Center)
-            .push(container(widgets::label_text(&format!(
-                "{} · {carded} heroes with {CARD_MIN} or more games · win rate from {RATE_MIN} games",
-                scope(app)
-            )))
-            .width(Fill))
+            .push(
+                container(widgets::label_text(&header_line(
+                    &crate::overview_heroes::scope(app),
+                    carded,
+                )))
+                .width(Fill),
+            )
             .push(text("Sort").size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2))
             .push(sort_switch(page.sort))
-            .push(view_switch(page.list))
+            .push(view_switch(page.view)),
     );
     if shown.is_empty() {
         return col
             .push(widgets::empty_surface(empty_copy(&app.games)))
             .into();
     }
-    if page.list {
+    if page.view == HeroView::List {
         let now = Utc::now();
         col = col.push(list(&list_groups(&t), &last, now));
         if !t.others.is_empty() || unknown > 0 {
@@ -263,10 +263,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             col = col.push(grid(&t.rated, across, roomy));
         }
         if !t.record.is_empty() {
-            col = col.push(divider(&format!(
-                "{CARD_MIN} to {} games · record only",
-                RATE_MIN - 1
-            )));
+            col = col.push(divider(TOO_FEW));
             col = col.push(grid(&t.record, across, roomy));
         }
         if !t.others.is_empty() || unknown > 0 {
@@ -301,18 +298,15 @@ fn sort_switch(sort: HeroSort) -> Element<'static, Message> {
     ])
 }
 
-fn view_switch(list: bool) -> Element<'static, Message> {
+fn view_switch(view: HeroView) -> Element<'static, Message> {
+    let seg = |label, v| Segment {
+        label,
+        selected: view == v,
+        msg: Some(Message::HeroesPage(Msg::View(v))),
+    };
     segmented(vec![
-        Segment {
-            label: "Cards",
-            selected: !list,
-            msg: Some(Message::HeroesPage(Msg::List(false))),
-        },
-        Segment {
-            label: "List",
-            selected: list,
-            msg: Some(Message::HeroesPage(Msg::List(true))),
-        },
+        seg("Cards", HeroView::Cards),
+        seg("List", HeroView::List),
     ])
 }
 
@@ -443,9 +437,9 @@ fn others_row(others: &[&HeroAgg], unknown: usize, open: bool) -> Element<'stati
         .into()
 }
 
-/// The List view's groups: "10 or more games · win rate" and "3 to 9
-/// games · record only", the same tiers as the cards. Heroes under 3
-/// games stay folded under the "Other heroes" row.
+/// The List view's groups: "10 or more games · win rate" and "Too few
+/// games", the same tiers as the cards. Heroes under 3 games stay folded
+/// under the "Other heroes" row.
 pub fn list_groups<'a>(t: &Tiers<'a>) -> Vec<(String, Vec<&'a HeroAgg>)> {
     let mut groups = Vec::new();
     if !t.rated.is_empty() {
@@ -455,10 +449,7 @@ pub fn list_groups<'a>(t: &Tiers<'a>) -> Vec<(String, Vec<&'a HeroAgg>)> {
         ));
     }
     if !t.record.is_empty() {
-        groups.push((
-            format!("{CARD_MIN} to {} games · record only", RATE_MIN - 1),
-            t.record.clone(),
-        ));
+        groups.push((TOO_FEW.to_string(), t.record.clone()));
     }
     groups
 }
@@ -520,7 +511,7 @@ fn list_row(
         .spacing(10)
         .align_y(Alignment::Center)
         .into(),
-        None => text("Too few games")
+        None => text(TOO_FEW)
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3)
@@ -599,14 +590,40 @@ mod tests {
     }
 
     #[test]
-    fn record_cards_say_how_many_more_games_a_rate_needs() {
+    fn record_cards_say_too_few_games_with_count_and_undecided() {
         let mut h = hero("Sierra", 8, 3, 4);
-        assert_eq!(
-            record_sub(&h),
-            "8 games · 1 undecided · 8 of 10 for a win rate"
-        );
+        assert_eq!(record_sub(&h), "Too few games · 8 games · 1 undecided");
         h.record.wins = 4;
-        assert_eq!(record_sub(&h), "8 games · 8 of 10 for a win rate");
+        assert_eq!(record_sub(&h), "Too few games · 8 games");
+        assert_eq!(h.record.wl_label(), "4-4", "the card's W-L");
+    }
+
+    #[test]
+    fn a_rate_needs_ten_decided_games_and_folding_counts_every_game() {
+        let heroes = vec![
+            hero("Wrecking Ball", 40, 5, 4),
+            hero("Sierra", 12, 5, 4),
+            hero("Domina", 3, 0, 0),
+            hero("Kiriko", 11, 6, 4),
+            hero("Orisa", 2, 2, 0),
+        ];
+        let t = tiers(&heroes, HeroSort::Games, &HashMap::new());
+        assert_eq!(names(&t.rated), ["Kiriko"], "10 decided of 11");
+        assert_eq!(
+            names(&t.record),
+            ["Wrecking Ball", "Sierra", "Domina"],
+            "under 10 decided, by games"
+        );
+        assert_eq!(
+            names(&t.others),
+            ["Orisa"],
+            "2 games fold even when decided"
+        );
+        assert_eq!(
+            header_line("All time", 1),
+            "All time · 1 hero with 3 or more games · win rate from 10 decided games"
+        );
+        assert!(header_line("Season 5", 3).contains("3 heroes"));
     }
 
     #[test]
@@ -633,7 +650,7 @@ mod tests {
         let ten = hero("Kiriko", 10, 6, 4);
         let even = hero("Juno", 10, 5, 5);
         assert_eq!(rate(&nine.record), None);
-        assert_eq!(record_sub(&nine), "9 games · 9 of 10 for a win rate");
+        assert_eq!(record_sub(&nine), "Too few games · 9 games");
         assert_eq!(rate(&ten.record), Some(60));
         assert_eq!(rate(&even.record), Some(50));
         assert_eq!(
@@ -711,10 +728,7 @@ mod tests {
                     "10 or more games · win rate".to_string(),
                     vec!["Wrecking Ball".to_string()]
                 ),
-                (
-                    "3 to 9 games · record only".to_string(),
-                    vec!["Sierra".to_string()]
-                ),
+                ("Too few games".to_string(), vec!["Sierra".to_string()]),
             ],
             "Orisa stays under Other heroes"
         );
@@ -735,13 +749,29 @@ mod tests {
     fn page_state_follows_its_messages() {
         let (_dir, mut app) = crate::fixtures::test_app();
         let _ = app.update(Message::HeroesPage(Msg::Sort(HeroSort::Recent)));
-        let _ = app.update(Message::HeroesPage(Msg::List(true)));
+        let _ = app.update(Message::HeroesPage(Msg::View(HeroView::List)));
         let _ = app.update(Message::HeroesPage(Msg::ToggleOthers));
         assert_eq!(app.heroes_page.sort, HeroSort::Recent);
-        assert!(app.heroes_page.list && app.heroes_page.show_others);
-        let _ = view(&app, 1300.0);
-        let _ = view(&app, 900.0);
-        let _ = app.update(Message::HeroesPage(Msg::List(false)));
-        let _ = view(&app, 1500.0);
+        assert_eq!(app.heroes_page.view, HeroView::List);
+        assert!(app.heroes_page.show_others);
+    }
+
+    #[test]
+    fn cards_and_list_draw_sample_games_at_both_widths() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        let shown = filter_games(&app.games, &stats_filter(&app));
+        assert!(!shown.is_empty(), "past the empty state");
+        assert!(!aggregate_games(&shown).heroes.is_empty());
+        for view_kind in [HeroView::Cards, HeroView::List] {
+            let _ = app.update(Message::HeroesPage(Msg::View(view_kind)));
+            for others in [false, true] {
+                app.heroes_page.show_others = others;
+                let _ = view(&app, 1300.0);
+                let _ = view(&app, 900.0);
+            }
+        }
     }
 }
