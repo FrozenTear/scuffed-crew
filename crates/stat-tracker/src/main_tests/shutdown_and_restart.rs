@@ -163,8 +163,8 @@ fn shutdown_saves_the_game_before_the_portal_and_the_upload() {
     assert!(!line.contains("screencast"), "{line}");
 }
 
-/// MAIN-3: an upload that does not finish does not cost the save, and
-/// the deadline is reported against the upload.
+/// MAIN-3: an upload in flight that never returns does not cost the save,
+/// and it is stopped instead of waited out to the deadline.
 #[tokio::test]
 async fn a_hung_upload_at_shutdown_still_saves_the_game_and_is_named() {
     let dir = tempfile::tempdir().unwrap();
@@ -178,7 +178,6 @@ async fn a_hung_upload_at_shutdown_still_saves_the_game_and_is_named() {
     g.session_id = "slow-network".into();
     g.map = Some("Busan".into());
     let mut st = session(Some(g), now);
-    // An upload already in flight that never returns.
     let mut sync_task = Some(tokio::spawn(std::future::pending::<()>()));
     let stopped = shutdown_from_signal(
         &mut st,
@@ -191,7 +190,8 @@ async fn a_hung_upload_at_shutdown_still_saves_the_game_and_is_named() {
         dir.path(),
     )
     .await;
-    assert_eq!(stopped, Some(ShutdownStage::FinalUpload));
+    assert_eq!(stopped, None, "the hung upload is stopped, not waited out");
+    assert!(sync_task.is_none(), "nothing is left to settle at exit");
     let restored = startup_session(dir.path());
     assert_eq!(
         restored.active_game.map(|g| g.session_id),

@@ -30,7 +30,7 @@ fn outcome_chip_class(outcome: &str) -> &'static str {
 }
 
 /// Mode aggregate for overview chips. `result` follows the small-sample
-/// rule: the win rate from 10 games, the record below that.
+/// rule: the win rate from 10 decided games, the record below that.
 struct ModeChip {
     name: &'static str,
     matches: u32,

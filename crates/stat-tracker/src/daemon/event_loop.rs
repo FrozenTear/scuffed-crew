@@ -8,6 +8,11 @@ use crate::*;
 pub(crate) async fn run_loop(
     ctx: Arc<DaemonCtx>,
     early_sigterm: Option<tokio::signal::unix::Signal>,
+    // Left with the caller, which settles it before the store's close.
+    sync_task: &mut Option<tokio::task::JoinHandle<()>>,
+    // Set when the binary on disk was replaced: `run` restarts into it
+    // after the store's close.
+    restart_to: &mut Option<std::path::PathBuf>,
 ) -> anyhow::Result<()> {
     // Ergonomic locals over the shared context; spawned tasks clone the Arc.
     let backend = &ctx.backend;
@@ -79,7 +84,6 @@ pub(crate) async fn run_loop(
     // `sync_backoff` (exponential, capped, reset on success). Shutdown does
     // not consult that clock, it still joins the in-flight task, then uploads
     // once. `sync_rev` compare-and-swap stays inside `try_sync_with`.
-    let mut sync_task: Option<tokio::task::JoinHandle<()>> = None;
     let sync_backoff = Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
     if let Some(client) = sync_client {
         let creds = client.credentials();
@@ -114,8 +118,7 @@ pub(crate) async fn run_loop(
     // It does not await HTTP. `last_game_open` still comes from
     // `startup_session`, so the debounce survives the restart. SIGTERM waits
     // on `finish_sync_on_shutdown`.
-    let mut st =
-        begin_daemon_session(data_dir, &mut sync_task, &sync_backoff, store, sync_client).await;
+    let mut st = begin_daemon_session(data_dir, sync_task, &sync_backoff, store, sync_client).await;
     if let Some(g) = &st.active_game {
         tracing::info!(
             target: "scuffed_stat_tracker",
@@ -175,7 +178,7 @@ pub(crate) async fn run_loop(
                     &mut st,
                     &mut capture_task,
                     &mut capture_rx,
-                    &mut sync_task,
+                    sync_task,
                     sync_client,
                     &sync_backoff,
                     store,
@@ -191,7 +194,7 @@ pub(crate) async fn run_loop(
                     &mut st,
                     &mut capture_task,
                     &mut capture_rx,
-                    &mut sync_task,
+                    sync_task,
                     sync_client,
                     &sync_backoff,
                     store,
@@ -208,7 +211,7 @@ pub(crate) async fn run_loop(
                     &mut st,
                     &mut capture_task,
                     &mut capture_rx,
-                    &mut sync_task,
+                    sync_task,
                     sync_client,
                     &sync_backoff,
                     store,
@@ -262,7 +265,7 @@ pub(crate) async fn run_loop(
                             let (task, flight) = start_tab_capture(
                                 &mut st,
                                 &ctx,
-                                &mut sync_task,
+                                sync_task,
                                 &sync_backoff,
                                 &capture_tx,
                                 press,
@@ -288,11 +291,10 @@ pub(crate) async fn run_loop(
                             Err(e2) => {
                                 tracing::error!(target: "scuffed_stat_tracker", error = %e2, "failed to reopen keyboard: exiting");
                                 drain_capture(capture_task.take()).await;
-                                let task = sync_task.take();
                                 if let Some(client) = sync_client {
-                                    drain_sync_then(task, || try_sync(store, client, data_dir, None)).await;
+                                    drain_sync_then(sync_task, || try_sync(store, client, data_dir, None)).await;
                                 } else {
-                                    drain_sync_then(task, || std::future::ready(())).await;
+                                    drain_sync_then(sync_task, || std::future::ready(())).await;
                                 }
                                 // Exit non-zero so Restart=on-failure starts a
                                 // new process once a device is readable again.
@@ -310,7 +312,7 @@ pub(crate) async fn run_loop(
                 // A Tab past the grace window of a finished game: its board
                 // picked the session (R9-2).
                 let sid = settle_tab_probe(&mut st, store, data_dir, sid, &result, Instant::now(), || {
-                    schedule_store_sync(&mut sync_task, &sync_backoff, store, sync_client, data_dir, None);
+                    schedule_store_sync(sync_task, &sync_backoff, store, sync_client, data_dir, None);
                     std::future::ready(())
                 })
                 .await;
@@ -319,7 +321,7 @@ pub(crate) async fn run_loop(
                 if apply_capture_report(&mut st, store, data_dir, &sid, result, Instant::now()).await {
                     st.capture_count += 1;
                     maybe_spawn_periodic_sync(
-                        &mut sync_task,
+                        sync_task,
                         &sync_backoff,
                         store,
                         sync_client,
@@ -337,7 +339,7 @@ pub(crate) async fn run_loop(
                     let (task, flight) = start_tab_capture(
                         &mut st,
                         &ctx,
-                        &mut sync_task,
+                        sync_task,
                         &sync_backoff,
                         &capture_tx,
                         press,
@@ -442,7 +444,7 @@ pub(crate) async fn run_loop(
                             &mut st,
                             &mut capture_task,
                             &mut capture_rx,
-                            &mut sync_task,
+                            sync_task,
                             sync_client,
                             &sync_backoff,
                             store,
@@ -621,7 +623,7 @@ pub(crate) async fn run_loop(
                                     &mut st,
                                     &mut capture_task,
                                     &mut capture_rx,
-                                    &mut sync_task,
+                                    sync_task,
                                     sync_client,
                                     &sync_backoff,
                                     store,
@@ -639,7 +641,7 @@ pub(crate) async fn run_loop(
                                 &mut st,
                                 &mut capture_task,
                                 &mut capture_rx,
-                                &mut sync_task,
+                                sync_task,
                                 sync_client,
                                 &sync_backoff,
                                 store,
@@ -745,7 +747,7 @@ pub(crate) async fn run_loop(
                                 &mut st,
                                 &mut capture_task,
                                 &mut capture_rx,
-                                &mut sync_task,
+                                sync_task,
                                 sync_client,
                                 &sync_backoff,
                                 store,
@@ -811,45 +813,34 @@ pub(crate) async fn run_loop(
                         ) {
                             tracing::debug!(
                                 target: "scuffed_stat_tracker",
-                                "tracker binary on disk was replaced; waiting after a failed re-exec"
+                                "tracker binary on disk was replaced; waiting to recheck it after it failed the start check"
                             );
+                        } else if let Err(err) =
+                            stat_tracker::replace::restart_preflight(&path)
+                        {
+                            // Checked while the store is still open: this
+                            // process keeps running and tries again later.
+                            tracing::error!(
+                                target: "scuffed_stat_tracker",
+                                error = %err,
+                                "cannot start the new tracker; keeping this process"
+                            );
+                            exec_failed_at = Some(std::time::Instant::now());
                         } else {
                             shutdown_from_signal(
                                 &mut st,
                                 &mut capture_task,
                                 &mut capture_rx,
-                                &mut sync_task,
+                                sync_task,
                                 sync_client,
                                 &sync_backoff,
                                 store,
                                 data_dir,
                             )
                             .await;
-                            let marker =
-                                stat_tracker::report::marker::release_run_marker(data_dir);
-                            let released_pid =
-                                stat_tracker::replace::release_own_pid_file(data_dir);
-                            if let Err(err) =
-                                stat_tracker::replace::restart_for_replaced_binary(&path)
-                            {
-                                // A failed re-exec keeps this process. The
-                                // systemd path exits and does not return.
-                                tracing::error!(
-                                    target: "scuffed_stat_tracker",
-                                    error = %err,
-                                    "could not re-exec the new tracker; keeping this process"
-                                );
-                                exec_failed_at = Some(std::time::Instant::now());
-                                if released_pid {
-                                    stat_tracker::replace::restore_own_pid_file(data_dir);
-                                }
-                                let _ = stat_tracker::report::marker::restore_run_marker(
-                                    data_dir,
-                                    marker.as_ref(),
-                                );
-                            } else {
-                                return Ok(());
-                            }
+                            // `run` closes the store, then exits or execs.
+                            *restart_to = Some(path);
+                            return Ok(());
                         }
                     } else {
                         logged_binary_wait = false;
@@ -867,7 +858,7 @@ pub(crate) async fn run_loop(
                     finished_close,
                     || {
                         schedule_store_sync(
-                            &mut sync_task,
+                            sync_task,
                             &sync_backoff,
                             store,
                             sync_client,
@@ -880,7 +871,7 @@ pub(crate) async fn run_loop(
                 .await;
                 schedule_settled_unknown(
                     &mut st,
-                    &mut sync_task,
+                    sync_task,
                     &sync_backoff,
                     store,
                     sync_client,
@@ -908,7 +899,7 @@ pub(crate) async fn run_loop(
                     // not run on this tick.
                     let restored = begin_daemon_session(
                         data_dir,
-                        &mut sync_task,
+                        sync_task,
                         &sync_backoff,
                         store,
                         sync_client,
@@ -922,13 +913,13 @@ pub(crate) async fn run_loop(
                     &mut st,
                     store,
                     data_dir,
-                    &mut sync_task,
+                    sync_task,
                     &sync_backoff,
                     sync_client,
                 )
                 .await;
                 maybe_spawn_idle_sync(
-                    &mut sync_task,
+                    sync_task,
                     &sync_backoff,
                     store,
                     sync_client,

@@ -370,7 +370,7 @@ async fn shutdown_joins_inflight_sync_before_marking() {
         let in_upload = in_upload.clone();
         let overlapped = overlapped.clone();
         async move {
-            drain_sync_then(Some(inflight), || {
+            drain_sync_then(&mut Some(inflight), || {
                 let store = store.clone();
                 let dir = dir.clone();
                 let uploads = uploads.clone();
@@ -425,6 +425,200 @@ async fn shutdown_joins_inflight_sync_before_marking() {
     );
     let rows = store.get_all_matches().await.unwrap();
     assert!(rows.iter().all(|m| m.synced));
+}
+
+/// A sync still uploading at exit is stopped before the store's close. Its
+/// store clone goes with it, and with the one queued behind it, so
+/// SurrealKV closes. The row it was sending is still queued on the next
+/// start.
+#[tokio::test]
+async fn a_sync_stopped_at_exit_frees_the_store_and_keeps_its_rows_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    store
+        .insert_match(test_match("s1", "victory"))
+        .await
+        .unwrap();
+    assert!(finish_or_abort_sync(None, Duration::ZERO).await);
+
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let inflight = tokio::spawn({
+        let store = store.clone();
+        let dir = dir.path().to_path_buf();
+        let entered = entered.clone();
+        async move {
+            try_sync_with(&store, &dir, None, move |_matches, _tombstones| {
+                let entered = entered.clone();
+                async move {
+                    entered.notify_one();
+                    // The server never answers.
+                    std::future::pending::<()>().await;
+                    Ok(upload_ok())
+                }
+            })
+            .await;
+        }
+    });
+    entered.notified().await;
+    // A second sync waits on the first, as `schedule_store_sync` chains them.
+    let chained = spawn_after_previous(Some(inflight), {
+        let store = store.clone();
+        move || async move {
+            let _ = store.match_count().await;
+        }
+    });
+    assert!(
+        !finish_or_abort_sync(Some(chained), Duration::from_millis(50)).await,
+        "a hung upload is stopped, not waited out"
+    );
+    drop(store);
+    assert!(
+        storage::wait_for_engine_close(dir.path(), Duration::from_secs(5)).await,
+        "no sync task still holds the store"
+    );
+
+    let reopened = storage::LocalStore::open(dir.path()).await.unwrap();
+    let queued = reopened.get_unsynced().await.unwrap();
+    assert_eq!(
+        queued.len(),
+        1,
+        "the stopped upload's row goes up next start"
+    );
+    assert_eq!(queued[0].session_id, "s1");
+}
+
+/// QA's KDE "stop during a sync": the server holds the upload, and a stop
+/// waited it out until the 5 s deadline, leaving the store unclosed. The
+/// stop now aborts it after a short grace, tries no final upload, and the
+/// store closes, all within 2 s. The row and the tombstone stay queued.
+#[tokio::test]
+async fn stop_during_a_slow_upload_closes_the_store_within_2s_and_keeps_the_queue() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    store
+        .insert_match(test_match("s1", "victory"))
+        .await
+        .unwrap();
+    store.queue_tombstones(&["gone".to_string()]).await.unwrap();
+
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let inflight = tokio::spawn({
+        let store = store.clone();
+        let dir = dir.path().to_path_buf();
+        let entered = entered.clone();
+        async move {
+            try_sync_with(&store, &dir, None, move |_matches, _tombstones| {
+                let entered = entered.clone();
+                async move {
+                    entered.notify_one();
+                    // The server holds the upload for a minute.
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    Ok(upload_ok())
+                }
+            })
+            .await;
+        }
+    });
+    entered.notified().await;
+
+    let stop = std::time::Instant::now();
+    let finals = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut task = Some(inflight);
+    let ended = settle_sync_on_shutdown(
+        &mut task,
+        final_upload_budget(stat_tracker::replace::SHUTDOWN_DEADLINE),
+        {
+            let finals = finals.clone();
+            move || async move {
+                finals.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        },
+    )
+    .await;
+    assert_eq!(ended, ShutdownSync::InFlightStopped);
+    assert!(task.is_none(), "nothing is left for the exit to settle");
+    assert_eq!(
+        finals.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "no final upload to a server that is holding one already"
+    );
+    assert!(finish_or_abort_sync(task.take(), Duration::ZERO).await);
+    drop(store);
+    assert!(
+        storage::wait_for_engine_close(dir.path(), STORE_CLOSE_WAIT).await,
+        "the store closes, so its WAL has nothing to replay"
+    );
+    let took = stop.elapsed();
+    assert!(took < Duration::from_secs(2), "stop took {took:?}");
+
+    let reopened = storage::LocalStore::open(dir.path()).await.unwrap();
+    let queued = reopened.get_unsynced().await.unwrap();
+    assert_eq!(queued.len(), 1, "the held row goes up next start");
+    assert_eq!(queued[0].session_id, "s1");
+    assert_eq!(
+        reopened.get_pending_tombstones().await.unwrap(),
+        ["gone"],
+        "the delete goes up next start"
+    );
+}
+
+/// With no sync in flight, a final upload the server holds is stopped
+/// within the stage's budget, which leaves the store close its share.
+#[tokio::test]
+async fn a_held_final_upload_is_stopped_within_its_budget() {
+    assert_eq!(
+        final_upload_budget(stat_tracker::replace::SHUTDOWN_DEADLINE),
+        FINAL_UPLOAD_CAP
+    );
+    assert_eq!(
+        final_upload_budget(STORE_CLOSE_WAIT + Duration::from_millis(400)),
+        Duration::from_millis(400),
+        "the store close keeps its reserve"
+    );
+    assert_eq!(final_upload_budget(STORE_CLOSE_WAIT), Duration::ZERO);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    store
+        .insert_match(test_match("s1", "victory"))
+        .await
+        .unwrap();
+    let stop = std::time::Instant::now();
+    let ended = settle_sync_on_shutdown(&mut None, Duration::from_millis(300), || {
+        let store = store.clone();
+        let dir = dir.path().to_path_buf();
+        async move {
+            try_sync_with(&store, &dir, None, |_matches, _tombstones| async {
+                std::future::pending::<()>().await;
+                Ok(upload_ok())
+            })
+            .await;
+        }
+    })
+    .await;
+    assert_eq!(ended, ShutdownSync::FinalCutOff);
+    assert!(stop.elapsed() < Duration::from_secs(1));
+    assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+}
+
+/// A sync that gets its answer within the grace keeps it, and the final
+/// upload still runs.
+#[tokio::test]
+async fn an_inflight_sync_that_ends_within_the_grace_is_kept() {
+    let mut task = Some(tokio::spawn(async {
+        tokio::time::sleep(SHUTDOWN_SYNC_GRACE / 4).await;
+    }));
+    let ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ended = settle_sync_on_shutdown(&mut task, FINAL_UPLOAD_CAP, {
+        let ran = ran.clone();
+        move || async move {
+            ran.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    })
+    .await;
+    assert_eq!(ended, ShutdownSync::Uploaded);
+    assert!(task.is_none());
+    assert!(ran.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 #[test]

@@ -7,7 +7,9 @@ use scuffed_api_client::ApiClient;
 
 use crate::components::ui::{Card, HeroSelect, Pill, PillTone, SeasonSelect, use_stats_season};
 use crate::routes::Route;
-use crate::sample::{LIST_RULE_NOTE, ListResult, RATE_MIN_GAMES, list_result};
+use crate::sample::{
+    LIST_RULE_NOTE, ListResult, RATE_MIN_DECIDED, TOO_FEW_GAMES, list_decided, list_result,
+};
 use crate::util::encode_query;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -213,26 +215,27 @@ fn leaderboard_message(
     }
 }
 
-/// WR cell under the small-sample rule: the win rate from 10 games, the
+/// WR cell under the small-sample rule: the win rate from 10 decided games, the
 /// record below that, muted under 3 games. Display only: the row order
 /// is whatever the server sent.
 fn wr_cell(row: &LeaderboardRow) -> ListResult {
     list_result(row.games, row.wins, row.losses, row.draws, row.winrate)
 }
 
-/// Fewest games to be ranked on the Win rate board. The server still
-/// sends rows from `LEADERBOARD_MIN_GAMES` (5); rows below this floor move
-/// to the unranked list. The K/D and Games boards are not split.
-const WINRATE_RANK_MIN_GAMES: u32 = RATE_MIN_GAMES;
+/// Fewest decided games (win, loss or draw) to be ranked on the Win rate
+/// board, the same floor as [`wr_cell`]. The server still sends rows from
+/// `LEADERBOARD_MIN_GAMES` (5 games); rows below this floor move to the
+/// unranked list. The K/D and Games boards are not split.
+const WINRATE_RANK_MIN_DECIDED: u32 = RATE_MIN_DECIDED;
 
 /// Caption under the ranked Win rate table.
-const WINRATE_BOARD_NOTE: &str = "Ranked by win rate from 10 games.";
-/// Status line when the Win rate board has rows but none with 10 games.
-const WINRATE_NONE_RANKED: &str = "Nobody has 10 games yet.";
+const WINRATE_BOARD_NOTE: &str = "Ranked by win rate from 10 decided games.";
+/// Status line when the Win rate board has rows but none with 10 decided games.
+const WINRATE_NONE_RANKED: &str = "Nobody has 10 decided games yet.";
 /// Heading of the unranked list under the Win rate board.
-const UNRANKED_TITLE: &str = "Not enough games yet";
+const UNRANKED_TITLE: &str = TOO_FEW_GAMES;
 /// Caption under the unranked heading.
-const UNRANKED_NOTE: &str = "Record so far. Players join the win rate ranking at 10 games.";
+const UNRANKED_NOTE: &str = "Record so far. Players join the win rate ranking at 10 decided games.";
 
 /// Rows for one board: `ranked` in the server's order, and `unranked`
 /// for the list under the Win rate board.
@@ -243,7 +246,7 @@ struct BoardSplit {
 }
 
 /// Split a board's rows. On the Win rate board, rows with fewer than
-/// [`WINRATE_RANK_MIN_GAMES`] games leave the ranking and go to
+/// [`WINRATE_RANK_MIN_DECIDED`] decided games leave the ranking and go to
 /// `unranked`, most games first, then by name. Ranked rows keep the
 /// server's order (by win rate). Other boards keep every row ranked.
 fn board_split(metric: &str, rows: &[LeaderboardRow]) -> BoardSplit {
@@ -253,10 +256,9 @@ fn board_split(metric: &str, rows: &[LeaderboardRow]) -> BoardSplit {
             unranked: Vec::new(),
         };
     }
-    let (ranked, mut unranked): (Vec<_>, Vec<_>) = rows
-        .iter()
-        .cloned()
-        .partition(|r| r.games >= WINRATE_RANK_MIN_GAMES);
+    let (ranked, mut unranked): (Vec<_>, Vec<_>) = rows.iter().cloned().partition(|r| {
+        list_decided(r.games, r.wins, r.losses, r.draws) >= WINRATE_RANK_MIN_DECIDED
+    });
     unranked.sort_by(|a, b| {
         b.games
             .cmp(&a.games)
@@ -681,6 +683,28 @@ mod tests {
         assert_eq!(ids(&split.unranked), vec!["nine"]);
         assert_eq!(wr_cell(&split.ranked[0]).text, "60%");
         assert_eq!(wr_cell(&split.unranked[0]).text, "9W-0L");
+    }
+
+    #[test]
+    fn winrate_board_ranks_by_decided_games() {
+        let mut open = named("open", "Open", 14, 6, 6.0 / 14.0);
+        open.losses = 3;
+        let mut ten = named("ten", "Ten", 12, 6, 0.5);
+        ten.losses = 3;
+        ten.draws = 1;
+        let old: LeaderboardRow = serde_json::from_str(
+            r#"{"member_id":"old","display_name":"Old","games":10,"winrate":0.6,"kd":1.0}"#,
+        )
+        .unwrap();
+        let split = board_split("winrate", &[open, ten, old]);
+        assert_eq!(ids(&split.ranked), vec!["ten", "old"]);
+        assert_eq!(ids(&split.unranked), vec!["open"]);
+        assert_eq!(wr_cell(&split.unranked[0]).text, "6W-3L");
+        assert!(!wr_cell(&split.unranked[0]).is_rate);
+        assert_eq!(wr_cell(&split.ranked[0]).text, "50%");
+        assert_eq!(wr_cell(&split.ranked[1]).text, "60%");
+        assert!(split.ranked.iter().all(|r| wr_cell(r).is_rate));
+        assert_eq!(UNRANKED_TITLE, "Too few games");
     }
 
     #[test]
