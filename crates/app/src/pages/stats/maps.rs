@@ -3,10 +3,27 @@ use dioxus::prelude::*;
 use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
-use super::{
-    MIN_GAMES, MIN_GAMES_NOTE, MapStats, load_error_state, map_game_mode, winrate_pct,
-    wr_bar_color, wr_text_class,
-};
+use super::{MapStats, load_error_state, map_game_mode, wr_bar_color, wr_text_class};
+use crate::sample::{MAP_RULE_NOTE, Tally};
+
+/// One map bar: the win rate from 10 games; below that an empty bar with the
+/// record, or "No games" for an empty map.
+fn map_bar(m: &MapStats) -> BarEntry {
+    let tally = m.tally();
+    let rate = tally.win_rate_pct();
+    let display = match rate {
+        Some(wr) => format!("{wr:.1}% ({} games)", m.matches),
+        None if m.matches == 0 => tally.label(),
+        None => format!("{} ({} games)", tally.label(), m.matches),
+    };
+    BarEntry {
+        label: m.map_name.clone(),
+        value: rate.unwrap_or(0.0),
+        color: wr_bar_color(m.wins, m.matches).to_string(),
+        display,
+        muted: rate.is_none(),
+    }
+}
 
 const MODE_ORDER: &[&str] = &[
     "Escort",
@@ -42,13 +59,12 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
             p { class: "empty-state", "No map stats yet." }
         },
         Some(list) => {
-            let mut ranked: Vec<&MapStats> =
-                list.iter().filter(|m| m.matches >= MIN_GAMES).collect();
-            ranked.sort_by(|a, b| {
-                let wa = winrate_pct(a.wins, a.matches);
-                let wb = winrate_pct(b.wins, b.matches);
-                wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            // Best and worst need a win rate, so only maps with 10+ games.
+            let mut ranked: Vec<(&MapStats, f64)> = list
+                .iter()
+                .filter_map(|m| m.tally().win_rate_pct().map(|wr| (m, wr)))
+                .collect();
+            ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let best = ranked.first().copied();
             let worst = ranked.last().copied().filter(|_| ranked.len() > 1);
 
@@ -65,13 +81,12 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                 .collect();
 
             rsx! {
-                p { class: "stats-gate-note", {MIN_GAMES_NOTE} }
+                p { class: "stats-gate-note", {MAP_RULE_NOTE} }
 
                 if best.is_some() || worst.is_some() {
                     div { class: "map-callouts",
-                        if let Some(b) = best {
+                        if let Some((b, wr)) = best {
                             {
-                                let wr = winrate_pct(b.wins, b.matches);
                                 rsx! {
                                     div { class: "map-callout best",
                                         span { class: "map-callout-label", "Best" }
@@ -81,9 +96,8 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                                 }
                             }
                         }
-                        if let Some(w) = worst {
+                        if let Some((w, wr)) = worst {
                             {
-                                let wr = winrate_pct(w.wins, w.matches);
                                 rsx! {
                                     div { class: "map-callout worst",
                                         span { class: "map-callout-label", "Worst" }
@@ -98,25 +112,16 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
 
                 {ordered_modes.iter().map(|&&mode| {
                     let maps_in_mode = &groups[mode];
-                    let total_m: u32 = maps_in_mode.iter().map(|m| m.matches).sum();
-                    let total_w: u32 = maps_in_mode.iter().map(|m| m.wins).sum();
-                    let mode_wr = winrate_pct(total_w, total_m);
-                    let mode_wr_cls = wr_text_class(total_m);
+                    let mode_total = Tally::sum(maps_in_mode.iter().map(|m| m.tally()));
+                    let total_m = mode_total.games;
+                    let mode_result = mode_total.label();
+                    let mode_wr_cls = wr_text_class(mode_total);
                     let mc = mode_label_color(mode);
 
                     let mut sorted_maps: Vec<&&MapStats> = maps_in_mode.iter().collect();
                     sorted_maps.sort_by_key(|b| std::cmp::Reverse(b.matches));
 
-                    let bar_entries: Vec<BarEntry> = sorted_maps.iter().map(|m| {
-                        let wr = winrate_pct(m.wins, m.matches);
-                        BarEntry {
-                            label: m.map_name.clone(),
-                            value: wr,
-                            color: wr_bar_color(m.wins, m.matches).to_string(),
-                            display: format!("{wr:.1}% ({} games)", m.matches),
-                            muted: m.matches < MIN_GAMES,
-                        }
-                    }).collect();
+                    let bar_entries: Vec<BarEntry> = sorted_maps.iter().map(|&&m| map_bar(m)).collect();
 
                     rsx! {
                         div { class: "map-mode-group", key: "{mode}",
@@ -128,7 +133,7 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                                 }
                                 span { class: "map-mode-agg",
                                     "{total_m} matches · "
-                                    span { class: "{mode_wr_cls}", "{mode_wr:.1}%" }
+                                    span { class: "{mode_wr_cls}", "{mode_result}" }
                                 }
                             }
                             HBarChart {
@@ -141,5 +146,38 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                 })}
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(matches: u32, wins: u32) -> MapStats {
+        MapStats {
+            map_name: "Ilios".to_string(),
+            matches,
+            wins,
+            losses: matches - wins,
+            draws: 0,
+        }
+    }
+
+    #[test]
+    fn map_bars_follow_the_small_sample_rule() {
+        let empty = map_bar(&map(0, 0));
+        assert_eq!(empty.display, "No games");
+        assert_eq!(empty.value, 0.0);
+        assert!(empty.muted);
+
+        let few = map_bar(&map(9, 6));
+        assert_eq!(few.display, "6W-3L (9 games)");
+        assert_eq!(few.value, 0.0);
+        assert!(few.muted);
+
+        let enough = map_bar(&map(10, 6));
+        assert_eq!(enough.display, "60.0% (10 games)");
+        assert_eq!(enough.value, 60.0);
+        assert!(!enough.muted);
     }
 }

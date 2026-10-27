@@ -5,10 +5,15 @@ use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
 use super::role::hero_row_matches_filter;
-use super::{
-    HeroStats, MIN_GAMES, MIN_GAMES_NOTE, load_error_state, winrate_pct, wr_bar_color,
-    wr_text_class,
-};
+use super::{HeroStats, load_error_state, wr_bar_color, wr_text_class};
+use crate::sample::{HERO_RULE_NOTE, OTHER_HEROES, Tally, fold_small};
+
+/// Sort key for the "Win %" sort: heroes with a win rate first (highest
+/// first), then record-only heroes by games played.
+fn wr_sort_key(h: &HeroStats) -> (bool, f64, u32) {
+    let rate = h.tally().win_rate_pct();
+    (rate.is_some(), rate.unwrap_or(0.0), h.matches)
+}
 
 pub(super) fn heroes_tab(
     heroes: ApiResource<Vec<HeroStats>>,
@@ -33,12 +38,24 @@ pub(super) fn heroes_tab(
                 .filter(|h| hero_row_matches_filter(&h.hero, role))
                 .collect();
 
-            let mut sorted = filtered.clone();
+            // Under 3 games a hero folds into one "Other heroes" row.
+            let (kept, folded) = fold_small(&filtered, |h| h.tally());
+            let other = Tally::sum(folded.iter().map(|h| h.tally()));
+            let other_names = folded
+                .iter()
+                .map(|h| h.hero.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            let other_count = folded.len();
+            let other_label = other.label();
+            let other_cls = wr_text_class(other);
+
+            let mut sorted = kept.clone();
             match sort {
                 "wr" => sorted.sort_by(|a, b| {
-                    let wa = winrate_pct(a.wins, a.matches);
-                    let wb = winrate_pct(b.wins, b.matches);
-                    wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
+                    wr_sort_key(b)
+                        .partial_cmp(&wr_sort_key(a))
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 }),
                 "elims" => sorted.sort_by(|a, b| {
                     b.avg_elims
@@ -48,28 +65,20 @@ pub(super) fn heroes_tab(
                 _ => sorted.sort_by_key(|b| std::cmp::Reverse(b.matches)),
             }
 
-            let mut by_wr: Vec<_> = filtered
+            let mut by_wr: Vec<(&HeroStats, f64)> = kept
                 .iter()
-                .copied()
-                .filter(|h| h.matches >= MIN_GAMES)
+                .filter_map(|h| h.tally().win_rate_pct().map(|wr| (*h, wr)))
                 .collect();
-            by_wr.sort_by(|a, b| {
-                let wa = winrate_pct(a.wins, a.matches);
-                let wb = winrate_pct(b.wins, b.matches);
-                wb.partial_cmp(&wa).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            by_wr.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let top_heroes: Vec<BarEntry> = by_wr
                 .iter()
                 .take(8)
-                .map(|h| {
-                    let wr = winrate_pct(h.wins, h.matches);
-                    BarEntry {
-                        label: h.hero.clone(),
-                        value: wr,
-                        color: wr_bar_color(h.wins, h.matches).to_string(),
-                        display: format!("{wr:.1}% ({} games)", h.matches),
-                        muted: false,
-                    }
+                .map(|&(h, wr)| BarEntry {
+                    label: h.hero.clone(),
+                    value: wr,
+                    color: wr_bar_color(h.wins, h.matches).to_string(),
+                    display: format!("{wr:.1}% ({} games)", h.matches),
+                    muted: false,
                 })
                 .collect();
 
@@ -107,7 +116,7 @@ pub(super) fn heroes_tab(
 
                 if !top_heroes.is_empty() {
                     div { class: "heroes-chart-section",
-                        div { class: "section-title", "Top Heroes by Win Rate (3+ matches)" }
+                        div { class: "section-title", "Top Heroes by Win Rate (10+ games)" }
                         HBarChart {
                             entries: top_heroes,
                             max: Some(100.0),
@@ -116,25 +125,35 @@ pub(super) fn heroes_tab(
                     }
                 }
 
-                p { class: "stats-gate-note", {MIN_GAMES_NOTE} }
+                p { class: "stats-gate-note", {HERO_RULE_NOTE} }
                 DataTable { headers: vec!["Hero", "Matches", "Win %", "Avg Elims", "Avg Deaths", "Avg Dmg", "Avg Heal"],
                     for hero in sorted.iter() {
                         {
-                            let wr = winrate_pct(hero.wins, hero.matches);
-                            let wr_cls = wr_text_class(hero.matches);
-                            let low_n = hero.matches < MIN_GAMES;
-                            let row_cls = if low_n { "stats-row-muted" } else { "" };
+                            let tally = hero.tally();
+                            let result = tally.label();
+                            let wr_cls = wr_text_class(tally);
                             rsx! {
-                                tr { key: "{hero.hero}", class: "{row_cls}",
+                                tr { key: "{hero.hero}",
                                     td { "{hero.hero}" }
                                     td { "{hero.matches}" }
-                                    td { span { class: "{wr_cls}", "{wr:.1}%" } }
+                                    td { span { class: "{wr_cls}", "{result}" } }
                                     td { "{hero.avg_elims:.1}" }
                                     td { "{hero.avg_deaths:.1}" }
                                     td { "{hero.avg_damage:.0}" }
                                     td { "{hero.avg_healing:.0}" }
                                 }
                             }
+                        }
+                    }
+                    if other_count > 0 {
+                        tr { key: "other-heroes", class: "stats-row-muted", title: "{other_names}",
+                            td { "{OTHER_HEROES} ({other_count})" }
+                            td { "{other.games}" }
+                            td { span { class: "{other_cls}", "{other_label}" } }
+                            td { "-" }
+                            td { "-" }
+                            td { "-" }
+                            td { "-" }
                         }
                     }
                 }
