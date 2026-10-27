@@ -25,9 +25,9 @@ use crate::theme::{
     ACCENT, BORDER, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, SIZE_BODY, SIZE_LABEL,
     SIZE_META, TEXT, TEXT_2, TEXT_3, WARN,
 };
-use crate::wr_bar::{self, MIN_GAMES, SURFACE_2, TOO_FEW};
+use crate::wr_bar::{self, SURFACE_2, TOO_FEW};
 
-/// Fold the maps under [`MIN_GAMES`] into a "Show" row once this many
+/// Fold the maps under [`wr_bar::MIN_GAMES`] into a "Show" row once this many
 /// maps have a win rate. A newer player sees every map instead.
 pub const FOLD_FROM_RATED: usize = 10;
 
@@ -89,7 +89,7 @@ pub struct MapRow {
     pub name: String,
     pub record: Record,
     pub last_played: DateTime<Utc>,
-    /// The printed win rate, `None` under [`MIN_GAMES`] games.
+    /// The printed win rate, `None` under [`wr_bar::MIN_GAMES`] games.
     pub pct: Option<u32>,
 }
 
@@ -175,7 +175,7 @@ pub fn sort_rows(rows: &mut [MapRow], key: SortKey, ascending: bool) {
 }
 
 /// Rows shown, and rows folded into the "Show" row: the maps under
-/// [`MIN_GAMES`] once [`FOLD_FROM_RATED`] maps have a rate.
+/// [`wr_bar::MIN_GAMES`] once [`FOLD_FROM_RATED`] maps have a rate.
 pub fn split_fold(rows: Vec<MapRow>) -> (Vec<MapRow>, Vec<MapRow>) {
     let rated = rows.iter().filter(|r| r.pct.is_some()).count();
     if rated < FOLD_FROM_RATED {
