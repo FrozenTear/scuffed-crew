@@ -323,6 +323,44 @@ pub async fn my_matches(
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
 
+/// GET /api/stats/me/matches/{id}: one of the caller's own games (session auth).
+///
+/// `id` is the `id` of a row on [`my_matches`]. The body is that same row
+/// (same fields, including `edited`, `recognizer` and `suspect_fields`), with
+/// `role` filled at read time the same way. A key that does not exist, a
+/// malformed key and another member's game are all the same 404, so the
+/// route does not reveal whether someone else's game exists. Auth matches
+/// [`my_matches`]: 401 without a session, 403 for inactive members.
+pub async fn my_match(
+    State(state): State<AppState>,
+    member: OrgMember,
+    Path(id): Path<String>,
+) -> Result<Json<PersonalMatch>, (StatusCode, Json<ErrorResponse>)> {
+    let found = state
+        .db
+        .get_personal_match_for_member(&member.member.id, &id)
+        .await
+        .map_err(|_e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal error".into(),
+                }),
+            )
+        })?;
+    let mut m = found.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Match not found".into(),
+            }),
+        )
+    })?;
+    // Read-time role fill only, as on the list: the stored row keeps its role.
+    m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    Ok(Json(m))
+}
+
 /// GET /api/stats/me/heroes — per-hero stats (session auth)
 pub async fn my_hero_stats(
     State(state): State<AppState>,
@@ -1609,6 +1647,144 @@ mod tests {
             let row = stored.iter().find(|m| m.session_id == sid).unwrap();
             assert_eq!(row.role, role, "stored role for {sid} must not change");
         }
+    }
+
+    async fn get_my_match(
+        app: axum::Router,
+        token: Option<&str>,
+        id: &str,
+    ) -> (StatusCode, String) {
+        let mut req = Request::builder()
+            .method("GET")
+            .uri(format!("/api/stats/me/matches/{id}"));
+        if let Some(token) = token {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let resp = app.oneshot(req.body(Body::empty()).unwrap()).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    fn single_game(member_id: &str, sid: &str) -> scuffed_db::PersonalMatch {
+        scuffed_db::PersonalMatch {
+            id: String::new(),
+            member_id: member_id.into(),
+            session_id: sid.into(),
+            hero: "Reaper".into(),
+            map_name: "Oasis".into(),
+            game_mode: "control".into(),
+            role: String::new(),
+            outcome: "victory".into(),
+            elims: 12,
+            deaths: 3,
+            assists: 4,
+            damage: 9000,
+            healing: 500,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, 2, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+            edited: true,
+            recognizer: "cv-v1".into(),
+            name_recognizer: Some("names-v1".into()),
+            suspect_fields: vec!["dmg".into(), "map".into()],
+        }
+    }
+
+    /// Two members, each with one game. Returns the state, the first
+    /// member's session, and both games' ids as listed on `/me/matches`.
+    async fn two_members_one_game_each() -> (crate::state::AppState, String, String, String) {
+        let (state, member_id, _daemon_token, session_token) = member_reader().await;
+        crate::test_support::seed_user(&state, "otherplayer", "otherplayer").await;
+        let other = state
+            .db
+            .create_member("otherplayer", "otherplayer", OrgRole::Member)
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_personal_matches(&member_id, &[single_game(&member_id, "mine-1")])
+            .await
+            .unwrap();
+        state
+            .db
+            .upsert_personal_matches(&other.id, &[single_game(&other.id, "theirs-1")])
+            .await
+            .unwrap();
+        let mine = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        let theirs = state
+            .db
+            .list_personal_matches(&other.id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(theirs.len(), 1);
+        (
+            state,
+            session_token,
+            mine[0].id.clone(),
+            theirs[0].id.clone(),
+        )
+    }
+
+    #[tokio::test]
+    async fn me_match_returns_own_game_same_shape_as_list_row() {
+        let (state, session_token, mine, _theirs) = two_members_one_game_each().await;
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let listed = row_by_session(&page, "mine-1").clone();
+        assert_eq!(listed["id"], mine.as_str());
+
+        let (status, text) = get_my_match(create_router(state), Some(&session_token), &mine).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let single: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(single, listed, "single game must match its list row");
+        assert_eq!(single["edited"], true);
+        assert_eq!(single["recognizer"], "cv-v1");
+        assert_eq!(single["suspect_fields"], serde_json::json!(["dmg", "map"]));
+        assert_eq!(single["role"], "Damage", "role is filled at read time");
+    }
+
+    #[tokio::test]
+    async fn me_match_other_members_game_is_the_same_404_as_missing() {
+        let (state, session_token, _mine, theirs) = two_members_one_game_each().await;
+        let (other_status, other_text) =
+            get_my_match(create_router(state.clone()), Some(&session_token), &theirs).await;
+        assert_eq!(other_status, StatusCode::NOT_FOUND, "{other_text}");
+
+        let (missing_status, missing_text) = get_my_match(
+            create_router(state),
+            Some(&session_token),
+            "pm00000000deadbeef",
+        )
+        .await;
+        assert_eq!(missing_status, StatusCode::NOT_FOUND, "{missing_text}");
+        assert_eq!(
+            other_text, missing_text,
+            "another member's game must not be told apart from a missing one"
+        );
+    }
+
+    #[tokio::test]
+    async fn me_match_missing_and_malformed_ids_are_404() {
+        let (state, session_token, _mine, _theirs) = two_members_one_game_each().await;
+        for id in ["pm00000000deadbeef", "not-a-key", "12345", "a%3Ab"] {
+            let (status, text) =
+                get_my_match(create_router(state.clone()), Some(&session_token), id).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{id}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn me_match_without_a_session_is_401() {
+        let (state, _session_token, mine, _theirs) = two_members_one_game_each().await;
+        let (status, text) = get_my_match(create_router(state.clone()), None, &mine).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
+        let (status, text) = get_my_match(create_router(state), Some("not-a-session"), &mine).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{text}");
     }
 
     #[tokio::test]

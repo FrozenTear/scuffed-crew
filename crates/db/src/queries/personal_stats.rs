@@ -605,6 +605,23 @@ impl Database {
         .await
     }
 
+    /// One of `member_id`'s games by its record key (the `id` on the match
+    /// list). `None` when no row has that key or the row belongs to another
+    /// member, so callers can answer both the same way. Read-only.
+    pub async fn get_personal_match_for_member(
+        &self,
+        member_id: &str,
+        id: &str,
+    ) -> DbResult<Option<PersonalMatch>> {
+        with_timeout(async {
+            let row: Option<DbPersonalMatch> = self.client.select(("personal_match", id)).await?;
+            Ok(row
+                .filter(|m| m.member_id == member_id)
+                .map(db_to_personal_match))
+        })
+        .await
+    }
+
     /// `SELECT count() FROM personal_match WHERE member_id = $mid {extra} {season}`.
     /// `extra` is a fixed fragment chosen by the caller (never user input);
     /// the season window is bound.
