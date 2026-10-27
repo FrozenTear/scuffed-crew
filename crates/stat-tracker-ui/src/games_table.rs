@@ -1,9 +1,9 @@
 //! The 0.6 Games tab under the top tabs (variant A): session headers with a
 //! form strip and summary, then one table per session (or one flat table),
 //! with columns that fold away on narrow windows. Layout rules and labels
-//! live in [`crate::games_rows`]; this module only draws them. The filter
-//! chips, the sortable headers and the row cells (amber E/D/A, portrait
-//! and role letter, Playing, the marks) are ported from #555.
+//! live in [`crate::games_rows`]; this module only draws them: the sortable
+//! headers and the row cells (amber E/D/A, portrait and role letter,
+//! Playing, the marks). The filter chips live in [`crate::filter_chips`].
 
 use iced::widget::{button, column, container, image, mouse_area, row, rule, space, text};
 use iced::{

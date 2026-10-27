@@ -81,7 +81,7 @@ fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
         // Settings has none; Overview and Games draw the spec's filter
-        // chips themselves (Games ported from #555).
+        // chips themselves.
         if !matches!(
             app.screen,
             Screen::Settings | Screen::Overview | Screen::Games

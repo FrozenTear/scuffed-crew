@@ -1,4 +1,4 @@
-//! The 0.6 filter chips on the Games tab (spec p2), ported from #555:
+//! The 0.6 filter chips on the Games tab (spec p2):
 //! Season, queues, roles, Crew, Hero and Map. A chip that filters reads as
 //! an accent outline with its value and "×" to clear it ("Season 5 ×").
 //! One that does not is a dropdown ("Hero" and its arrow). Roles are

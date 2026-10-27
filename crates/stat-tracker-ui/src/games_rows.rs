@@ -1,7 +1,7 @@
 //! Pure layout and labels for the 0.6 Games table (variant A, top tabs):
 //! which columns fit, the sections (sessions with their headers, or one
-//! flat list), the form strip, result labels and row marks, and the sort
-//! (ported from #555). No iced types here, so every rule has a unit test;
+//! flat list), the form strip, result labels and row marks, and the sort.
+//! No iced types here, so every rule has a unit test;
 //! [`crate::games_table`] draws it.
 
 use std::cmp::Ordering;
@@ -756,7 +756,7 @@ pub const EMPTY_NONE: &str = "No games yet. A game shows here once the tracker s
 pub const EMPTY_FILTERED: &str = "No games match these filters.";
 
 /// "Sessions split after 3 hours without a game." from the Session window
-/// setting, which the grouping follows (ported from #555).
+/// setting, which the grouping follows.
 pub fn split_note(window_secs: u64) -> String {
     if window_secs == 0 {
         return format!("Session window is off, so each game is its own session. {SORT_NOTE}");
@@ -921,7 +921,7 @@ mod tests {
         assert_eq!(mark(&g, false), Some(Mark::NeedsLook));
     }
 
-    /// Ported from #555; the store's flat names (`dmg`, `h`) against the
+    /// The store's flat names (`dmg`, `h`) against the
     /// edit names (`damage`, `healing`).
     #[test]
     fn unsure_count_skips_fixed_fields() {
@@ -1271,7 +1271,7 @@ mod tests {
         assert!(Sort::default().clicked(Col::Time).oldest_first());
     }
 
-    /// Ported from #555.
+    /// Unsure and empty values sort after the rest, up or down.
     #[test]
     fn unsure_and_empty_values_sort_last_both_ways() {
         let with = |at: &str, outcome, elims, suspect: &[&str]| {

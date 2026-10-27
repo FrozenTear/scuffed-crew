@@ -311,29 +311,36 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
                 }
             }
         }
-        // A click also moves the highlight to the clicked row, so Enter,
-        // Up and Down go on from the name that was picked, and hands the
-        // focus back to the search box, so typing filters again.
         Msg::Pick(name) => {
-            let at = open_with_game(app).and_then(|(p, g)| {
-                candidates(p.field, &p.query, read(&g, p.field))
-                    .iter()
-                    .position(|n| *n == name)
-            });
-            if let Some(p) = &mut app.games_tab.picker
-                && known(p.field).contains(&name.as_str())
-            {
-                p.picked = Some(name);
-                if let Some(at) = at {
-                    p.active = at;
-                }
-                return iced::widget::operation::focus(input_id());
+            if let Some(id) = pick(app, name) {
+                return iced::widget::operation::focus(id);
             }
         }
         Msg::Cancel => app.games_tab.picker = None,
         Msg::Save => save(app),
     }
     iced::Task::none()
+}
+
+/// Pick `name` in the open picker; the widget to focus after it, if any.
+/// A click also moves the highlight to the clicked row, so Enter, Up and
+/// Down go on from the name that was picked, and hands the focus back to
+/// the search box, so typing filters again.
+fn pick(app: &mut TrackerApp, name: String) -> Option<iced::widget::Id> {
+    let at = open_with_game(app).and_then(|(p, g)| {
+        candidates(p.field, &p.query, read(&g, p.field))
+            .iter()
+            .position(|n| *n == name)
+    });
+    let p = app.games_tab.picker.as_mut()?;
+    if !known(p.field).contains(&name.as_str()) {
+        return None;
+    }
+    p.picked = Some(name);
+    if let Some(at) = at {
+        p.active = at;
+    }
+    Some(input_id())
 }
 
 /// The open picker and its game.
@@ -1001,15 +1008,19 @@ mod tests {
     }
 
     /// A click pick gives the search box its focus back; with no picker
-    /// open a pick does nothing.
+    /// open, or a name it doesn't know, a pick focuses nothing. iced tasks
+    /// can't be looked into, so this checks the id `update` focuses, and
+    /// that `update` turns it into one task.
     #[test]
     fn a_click_pick_refocuses_the_search_box() {
         use crate::games_table::Msg as T;
         let (_dir, mut app) = app();
-        let pick = || T::Picker(Msg::Pick("Ilios".into()));
-        assert_eq!(crate::games_table::update(&mut app, pick()).units(), 0);
+        assert_eq!(pick(&mut app, "Ilios".into()), None);
         open(&mut app, Field::Map);
-        assert_eq!(crate::games_table::update(&mut app, pick()).units(), 1);
+        assert_eq!(pick(&mut app, "Nowhere".into()), None);
+        assert_eq!(pick(&mut app, "Ilios".into()), Some(input_id()));
+        let task = crate::games_table::update(&mut app, T::Picker(Msg::Pick("Ilios".into())));
+        assert_eq!(task.units(), 1);
         let p = app.games_tab.picker.as_ref().unwrap();
         assert_eq!(p.picked.as_deref(), Some("Ilios"));
     }
