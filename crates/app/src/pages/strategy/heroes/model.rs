@@ -161,19 +161,53 @@ impl Hero {
     pub(super) fn has_abilities(&self) -> bool {
         !self.abilities.is_empty()
     }
+
+    /// True when the list sent abilities or stats for this hero.
+    pub(super) fn has_details(&self) -> bool {
+        self.has_abilities() || self.has_hp_detail()
+    }
 }
 
-/// Heroes whose name contains `query` (case-insensitive), grouped by role in
+/// Lowercase `text` and fold common Latin accents to plain ASCII so a search
+/// for "lucio" finds "Lúcio" and "torbjorn" finds "Torbjörn".
+pub(super) fn fold_for_search(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars().flat_map(char::to_lowercase) {
+        match c {
+            'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => out.push('a'),
+            'æ' => out.push_str("ae"),
+            'ç' | 'ć' | 'č' => out.push('c'),
+            'ď' | 'đ' | 'ð' => out.push('d'),
+            'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ė' | 'ę' | 'ě' => out.push('e'),
+            'ì' | 'í' | 'î' | 'ï' | 'ī' | 'į' | 'ı' => out.push('i'),
+            'ł' | 'ľ' | 'ĺ' => out.push('l'),
+            'ñ' | 'ń' | 'ň' => out.push('n'),
+            'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ő' => out.push('o'),
+            'œ' => out.push_str("oe"),
+            'ř' | 'ŕ' => out.push('r'),
+            'ś' | 'š' | 'ş' => out.push('s'),
+            'ß' => out.push_str("ss"),
+            'ť' | 'ţ' => out.push('t'),
+            'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' | 'ű' | 'ų' => out.push('u'),
+            'ý' | 'ÿ' => out.push('y'),
+            'ź' | 'ż' | 'ž' => out.push('z'),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Heroes whose name contains `query` (ignoring case and accents), grouped by role in
 /// [`RoleGroup::ORDER`] and sorted by name. Empty groups are left out.
 pub(super) fn group_heroes<'a>(heroes: &'a [Hero], query: &str) -> Vec<(RoleGroup, Vec<&'a Hero>)> {
-    let query = query.trim().to_lowercase();
+    let query = fold_for_search(query.trim());
     RoleGroup::ORDER
         .into_iter()
         .filter_map(|group| {
             let mut members: Vec<&Hero> = heroes
                 .iter()
                 .filter(|h| h.group() == group)
-                .filter(|h| query.is_empty() || h.name.to_lowercase().contains(&query))
+                .filter(|h| query.is_empty() || fold_for_search(&h.name).contains(&query))
                 .collect();
             members.sort_by_key(|h| h.name.to_lowercase());
             (!members.is_empty()).then_some((group, members))
@@ -320,6 +354,26 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, RoleGroup::Support);
         assert!(group_heroes(&heroes, "zzz").is_empty());
+    }
+
+    #[test]
+    fn search_ignores_accents_both_ways() {
+        let heroes = vec![
+            hero("lucio", "Lúcio", "support"),
+            hero("torbjorn", "Torbjörn", "damage"),
+            hero("ana", "Ana", "support"),
+        ];
+        let names = |q: &str| -> Vec<String> {
+            group_heroes(&heroes, q)
+                .into_iter()
+                .flat_map(|(_, members)| members.into_iter().map(|h| h.name.clone()))
+                .collect()
+        };
+        assert_eq!(names("lucio"), vec!["Lúcio"]);
+        assert_eq!(names("LÚCIO"), vec!["Lúcio"]);
+        assert_eq!(names("torbjorn"), vec!["Torbjörn"]);
+        assert_eq!(names("Torbjö"), vec!["Torbjörn"]);
+        assert_eq!(fold_for_search("Ægir Straße"), "aegir strasse");
     }
 
     #[test]

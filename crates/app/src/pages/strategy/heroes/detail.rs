@@ -1,7 +1,8 @@
 //! Right panel: one hero's details.
 //!
 //! The header (portrait, name, role) always shows. The HP bar and the
-//! Abilities list only show when the hero list sends them.
+//! Abilities list only show when the hero list sends them; a short muted
+//! note shows only when the list sent neither.
 
 use dioxus::prelude::*;
 
@@ -45,8 +46,10 @@ pub(super) fn render_hero_detail(hero: &Hero) -> Element {
                     {render_ability_card(ability)}
                 }
             }
-        } else if !hero.has_hp_detail() {
-            p { class: "hero-detail-pending", "Ability details coming later." }
+        }
+
+        if !hero.has_details() {
+            p { class: "hero-detail-pending", "More details soon." }
         }
     }
 }
@@ -175,7 +178,7 @@ mod tests {
         assert!(html.contains("hero-detail-portrait-initial"), "{html}");
         assert!(!html.contains("Abilities"), "{html}");
         assert!(!html.contains("Hit Points"), "{html}");
-        assert!(html.contains("Ability details coming later."), "{html}");
+        assert!(html.contains("More details soon."), "{html}");
     }
 
     #[test]
@@ -194,7 +197,39 @@ mod tests {
             !html.contains("ability-desc"),
             "empty description is skipped: {html}"
         );
-        assert!(!html.contains("coming later"), "{html}");
+        assert!(!html.contains("More details soon."), "{html}");
+    }
+
+    #[component]
+    fn HpOnly() -> Element {
+        render_hero_detail(&decode(
+            r#"{"id":"rein","name":"Reinhardt","role":"tank","portrait_url":"","armor":300}"#,
+        ))
+    }
+
+    #[component]
+    fn AbilitiesOnly() -> Element {
+        render_hero_detail(&decode(
+            r#"{"id":"mercy","name":"Mercy","role":"support","portrait_url":"",
+            "abilities":[{"name":"Guardian Angel"}]}"#,
+        ))
+    }
+
+    #[test]
+    fn pending_note_needs_no_abilities_and_no_stats() {
+        let hp_only = render(HpOnly);
+        assert!(hp_only.contains("Hit Points 300"), "{hp_only}");
+        assert!(!hp_only.contains("More details soon."), "{hp_only}");
+
+        let abilities_only = render(AbilitiesOnly);
+        assert!(
+            abilities_only.contains("Guardian Angel"),
+            "{abilities_only}"
+        );
+        assert!(
+            !abilities_only.contains("More details soon."),
+            "{abilities_only}"
+        );
     }
 
     #[test]

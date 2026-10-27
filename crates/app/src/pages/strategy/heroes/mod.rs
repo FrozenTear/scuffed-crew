@@ -24,12 +24,15 @@ use styles::PAGE_CSS;
 
 #[component]
 pub fn StrategyHeroes() -> Element {
-    let selected_hero: Signal<Option<Hero>> = use_signal(|| None);
+    let mut selected_hero: Signal<Option<Hero>> = use_signal(|| None);
     let mut search_filter: Signal<String> = use_signal(String::new);
     let refresh = use_signal(|| 0u32);
 
     let heroes = use_resource(move || {
-        let _ = refresh();
+        // A Retry bumps `refresh`; drop the old pick so it can't go stale.
+        if refresh() > 0 {
+            selected_hero.set(None);
+        }
         async {
             ApiClient::web()
                 .fetch::<ListResponse>("/api/strategy/heroes")
@@ -38,6 +41,8 @@ pub fn StrategyHeroes() -> Element {
                 .map_err(|e| e.to_string())
         }
     });
+
+    let load_failed = matches!(heroes.read().as_ref(), Some(Err(_)));
 
     let left_panel = {
         let data = heroes.read();
@@ -60,24 +65,28 @@ pub fn StrategyHeroes() -> Element {
 
         div { class: "heroes-page",
             div { class: "heroes-left",
-                input {
-                    id: "strategy-hero-search",
-                    name: "strategy-hero-search",
-                    class: "heroes-search",
-                    r#type: "search",
-                    placeholder: "Search heroes...",
-                    aria_label: "Search heroes",
-                    value: "{search_filter}",
-                    oninput: move |e| search_filter.set(e.value()),
+                if !load_failed {
+                    input {
+                        id: "strategy-hero-search",
+                        name: "strategy-hero-search",
+                        class: "heroes-search",
+                        r#type: "search",
+                        placeholder: "Search heroes...",
+                        aria_label: "Search heroes",
+                        value: "{search_filter}",
+                        oninput: move |e| search_filter.set(e.value()),
+                    }
                 }
                 {left_panel}
             }
 
-            div { class: "heroes-right",
-                if let Some(hero) = selected_hero() {
-                    {render_hero_detail(&hero)}
-                } else {
-                    div { class: "heroes-placeholder", "Select a hero to view details" }
+            if !load_failed {
+                div { class: "heroes-right",
+                    if let Some(hero) = selected_hero() {
+                        {render_hero_detail(&hero)}
+                    } else {
+                        div { class: "heroes-placeholder", "Select a hero to view details" }
+                    }
                 }
             }
         }
