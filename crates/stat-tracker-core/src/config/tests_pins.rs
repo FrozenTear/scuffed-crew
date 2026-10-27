@@ -113,6 +113,12 @@ fn every_field_set() -> Config {
         reader: ReaderSetting::OcrV1,
         ocr: OcrSetting::Off,
         name_reader: false,
+        player_names: vec!["FrozenAlt".to_string(), "TearSmurf".to_string()],
+        live_upload: false,
+        rank_reader: true,
+        share_stat_pictures: true,
+        share_report_pictures: true,
+        capture_only_on_screen: false,
     }
 }
 
@@ -154,6 +160,15 @@ reader_pack_url = \"https://crew.example/packs/reader.zip\"
 reader = \"ocr-v1\"
 ocr = \"off\"
 name_reader = false
+player_names = [
+    \"FrozenAlt\",
+    \"TearSmurf\",
+]
+live_upload = false
+rank_reader = true
+share_stat_pictures = true
+share_report_pictures = true
+capture_only_on_screen = false
 
 [sync]
 server_url = \"https://crew.example\"
@@ -256,6 +271,12 @@ fn pin_key_order() {
             "reader",
             "ocr",
             "name_reader",
+            "player_names",
+            "live_upload",
+            "rank_reader",
+            "share_stat_pictures",
+            "share_report_pictures",
+            "capture_only_on_screen",
             "[sync]",
             "server_url",
             "token",

@@ -138,13 +138,13 @@ pub(super) fn wr_text_class(tally: Tally) -> &'static str {
 ///   a dead-even record has no polarity, and a diverging scale is two hues +
 ///   a neutral midpoint; painting an even record blue would claim a lead
 ///   that isn't there
-/// - no win rate yet (under 10 games) → neutral too, so a muted row never
+/// - no win rate yet (under 10 decided games) → neutral too, so a muted row never
 ///   claims a pole (muting overrides polarity; the row also renders at
 ///   reduced opacity via the existing `muted` treatment)
-pub(super) fn wr_bar_color(wins: u32, matches: u32) -> &'static str {
-    let wins2 = u64::from(wins) * 2;
-    let total = u64::from(matches);
-    if !Tally::new(matches, wins, 0, 0).has_win_rate() || wins2 == total {
+pub(super) fn wr_bar_color(tally: Tally) -> &'static str {
+    let wins2 = u64::from(tally.wins) * 2;
+    let total = u64::from(tally.games);
+    if !tally.has_win_rate() || wins2 == total {
         "var(--text-3)"
     } else if wins2 > total {
         "var(--chart-wr-up)"

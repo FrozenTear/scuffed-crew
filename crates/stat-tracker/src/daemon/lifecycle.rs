@@ -540,15 +540,109 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     if let Some(extras) = extra_packs {
         tokio::spawn(extras.run());
     }
-    let result = run_loop(ctx, early_sigterm).await;
+    let mut sync_task = None;
+    let mut restart_to = None;
+    let result = run_loop(
+        Arc::clone(&ctx),
+        early_sigterm,
+        &mut sync_task,
+        &mut restart_to,
+    )
+    .await;
+    // The sync task holds a store clone: settle it first, leaving the
+    // store's close its own share of the deadline.
+    let within = stat_tracker::replace::shutdown_time_left().saturating_sub(STORE_CLOSE_WAIT);
+    finish_or_abort_sync(sync_task.take(), within).await;
     // The status file's counters as they stand when the run ends.
     ocr_switch.lock().unwrap_or_else(|e| e.into_inner()).check();
+    if let Some(path) = restart_to {
+        let data_dir = ctx.data_dir.clone();
+        close_store_before_exit(ctx).await;
+        return restart_after_close(&data_dir, &path);
+    }
+    // Before the close's wait: a kill during it is a clean stop, not a
+    // crash to report. The WAL replays what the close did not finish.
     if result.is_ok()
         && let Some(guard) = run_marker
     {
         guard.finish();
     }
+    close_store_before_exit(ctx).await;
     result
+}
+
+/// The update restart, once the store is closed: exit for systemd or exec
+/// the new binary. The run marker and pid file go first, so the new process
+/// does not read this one as a crash or as a live daemon. A failed exec
+/// puts both back and ends this process with an error: the store is closed,
+/// so it cannot go on. [`stat_tracker::replace::restart_preflight`] already
+/// passed, so that takes an exec error the file checks cannot see.
+fn restart_after_close(data_dir: &std::path::Path, path: &std::path::Path) -> anyhow::Result<()> {
+    let marker = stat_tracker::report::marker::release_run_marker(data_dir);
+    let released_pid = stat_tracker::replace::release_own_pid_file(data_dir);
+    let Err(err) = stat_tracker::replace::restart_for_replaced_binary(path) else {
+        return Ok(());
+    };
+    if released_pid {
+        stat_tracker::replace::restore_own_pid_file(data_dir);
+    }
+    let _ = stat_tracker::report::marker::restore_run_marker(data_dir, marker.as_ref());
+    Err(err.context("could not start the new tracker after closing the store"))
+}
+
+/// Longest wait for SurrealKV's close at exit. A clean close took about
+/// 130 ms in the KDE soak; the rest of the deadline stays with the runtime.
+pub(crate) const STORE_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Drop the last store handle and wait for SurrealKV's close while the
+/// runtime still runs. Dropping the handle only starts the close (the SDK
+/// router task runs it), so returning straight to `shutdown_timeout`
+/// raced it: the runtime cancelled SurrealKV's background tasks mid-close
+/// and it logged `Error shutting down task: JoinError::Cancelled`.
+/// Two kinds of task can keep the store open. The sync task holds its own
+/// store clone; it is settled before this ([`finish_or_abort_sync`]), and
+/// one that still holds a clone makes the wait run out. A task that holds
+/// the context (an abandoned capture) keeps it shared. Either way the
+/// runtime drops the store at exit and the WAL replays it on the next
+/// start, as in 0.5.0.
+async fn close_store_before_exit(ctx: Arc<DaemonCtx>) -> StoreClose {
+    let within = stat_tracker::replace::shutdown_time_left().min(STORE_CLOSE_WAIT);
+    close_store_within(ctx, within).await
+}
+
+/// How [`close_store_before_exit`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum StoreClose {
+    /// SurrealKV finished its close: nothing to replay on the next start.
+    Closed,
+    /// Another task still holds the context; no close was started.
+    Shared,
+    /// The last context handle dropped, but the close did not finish in
+    /// time (a store clone still alive, or a slow flush).
+    NotClosed,
+}
+
+pub(crate) async fn close_store_within(
+    ctx: Arc<DaemonCtx>,
+    within: std::time::Duration,
+) -> StoreClose {
+    let data_dir = ctx.data_dir.clone();
+    let Some(ctx) = Arc::into_inner(ctx) else {
+        tracing::info!(
+            target: "scuffed_stat_tracker",
+            "store still in use by a stopped task at exit; its WAL is replayed on the next start"
+        );
+        return StoreClose::Shared;
+    };
+    drop(ctx);
+    if storage::wait_for_engine_close(&data_dir, within).await {
+        return StoreClose::Closed;
+    }
+    tracing::warn!(
+        target: "scuffed_stat_tracker",
+        "store not closed at exit; its WAL is replayed on the next start"
+    );
+    StoreClose::NotClosed
 }
 
 /// The pack keeper's install hook: a names-v1 install reloads the name
