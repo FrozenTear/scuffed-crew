@@ -6,13 +6,14 @@
 //! newest game. Callers use [`row`] only, so Tracker's shared tiles from
 //! #556 can replace this module whole.
 
+use iced::widget::text::Wrapping;
 use iced::widget::{Row, column, container, image, text};
-use iced::{Alignment, Background, Border, Element, Padding, Theme};
+use iced::{Alignment, Background, Border, Color, Element, Fill, Padding, Theme};
 
 use crate::app::Message;
 use crate::icons::{self, Icon};
 use crate::model::Game;
-use crate::theme::{self, BORDER, FONT_BOLD, SIZE_LABEL, TEXT, TEXT_3};
+use crate::theme::{self, BORDER, FONT_BOLD, FONT_MEDIUM, SIZE_LABEL, TEXT, TEXT_2, TEXT_3};
 
 /// The six stat tiles: label, the field the reader marks, and the value.
 const TILES: [(&str, &str); 6] = [
@@ -58,8 +59,30 @@ pub fn short_num(n: u32) -> String {
     }
 }
 
+/// What a tile can carry besides its label and value: a small badge in
+/// its head (`"EDITED"`), extra one-line notes under the value in their
+/// own colours (they never wrap), and `fill` to take the row's width
+/// instead of hugging the value.
+#[derive(Debug, Clone, Default)]
+pub struct TileExtras {
+    pub badge: Option<&'static str>,
+    pub lines: Vec<(String, Color)>,
+    pub fill: bool,
+}
+
 /// A stat tile; an unsure one has an amber outline and "⚠ UNSURE".
 fn tile(label: &'static str, value: u32, unsure: bool) -> Element<'static, Message> {
+    tile_with(label, short_num(value), unsure, TileExtras::default())
+}
+
+/// A stat tile with `extras` ([`TileExtras`]). The Games expanded row and
+/// the Overview's newest game both draw their tiles with this.
+pub fn tile_with(
+    label: &'static str,
+    value: String,
+    unsure: bool,
+    extras: TileExtras,
+) -> Element<'static, Message> {
     let mut head = Row::new().spacing(4).align_y(Alignment::Center).push(
         text(label)
             .size(SIZE_LABEL)
@@ -76,29 +99,66 @@ fn tile(label: &'static str, value: u32, unsure: bool) -> Element<'static, Messa
                     .color(theme::WARN),
             );
     }
-    container(
-        column![
-            head,
-            text(short_num(value)).size(22).font(FONT_BOLD).color(TEXT)
-        ]
-        .spacing(4),
-    )
-    .padding(Padding::from([10, 14]))
-    .style(move |_: &Theme| container::Style {
-        background: Some(Background::Color(theme::BG)),
-        border: Border {
-            color: if unsure { theme::WARN } else { BORDER },
-            width: 1.0,
-            radius: 10.0.into(),
-        },
-        ..container::Style::default()
-    })
-    .into()
+    if let Some(badge) = extras.badge {
+        head = head.push(
+            container(text(badge).size(SIZE_LABEL).font(FONT_BOLD).color(TEXT_2))
+                .padding(Padding::from([0, 6]))
+                .style(|_: &Theme| container::Style {
+                    border: Border {
+                        color: BORDER,
+                        width: 1.0,
+                        radius: theme::RADIUS_CHIP.into(),
+                    },
+                    ..container::Style::default()
+                }),
+        );
+    }
+    let mut body = column![head, text(value).size(22).font(FONT_BOLD).color(TEXT)].spacing(4);
+    for (line, color) in extras.lines {
+        body = body.push(
+            text(line)
+                .size(SIZE_LABEL)
+                .font(FONT_MEDIUM)
+                .color(color)
+                .wrapping(Wrapping::None),
+        );
+    }
+    let mut tile = container(body)
+        .padding(Padding::from([10, 14]))
+        .style(move |_: &Theme| container::Style {
+            background: Some(Background::Color(theme::BG)),
+            border: Border {
+                color: if unsure { theme::WARN } else { BORDER },
+                width: 1.0,
+                radius: 10.0.into(),
+            },
+            ..container::Style::default()
+        });
+    if extras.fill {
+        tile = tile.width(Fill);
+    }
+    tile.into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn extras_default_to_a_plain_tile() {
+        let plain = TileExtras::default();
+        assert!(plain.badge.is_none() && plain.lines.is_empty() && !plain.fill);
+        let _ = tile_with(
+            "DMG",
+            "8.9k".into(),
+            true,
+            TileExtras {
+                badge: Some("EDITED"),
+                lines: vec![("OCR 8,912 → 9,912".into(), theme::WARN)],
+                fill: true,
+            },
+        );
+    }
 
     #[test]
     fn numbers_shorten_from_a_thousand() {
