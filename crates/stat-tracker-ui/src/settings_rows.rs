@@ -44,7 +44,7 @@ const GAME_PROCESSES_HELP: &str =
 const NO_PROCESSES_NOTE: &str = "No processes listed, so the tracker captures whenever it runs.";
 /// Help under Session window: what the setting does. Games and Overview
 /// group by it, and the live game check uses it.
-const SESSION_WINDOW_HELP: &str = "Games played within this time of each other are grouped into one session. A game with no result yet also stays live in the Companion for this long after its last activity.";
+const SESSION_WINDOW_HELP: &str = "Games played within this time of each other are grouped into one session. A game with no result yet also counts as live (Playing on Games, and in the Companion) for this long after its last activity.";
 
 /// A tag after a row title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
