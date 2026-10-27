@@ -32,9 +32,11 @@ use crate::update_check::CheckFailed;
 /// Toast for a control used in demo mode.
 pub(crate) const DEMO_REFUSED: &str = "Demo mode: nothing is changed.";
 
-/// Toast when "+ Add name" holds only a #tag or spaces. The input stays
-/// open with the text.
-const NAME_CHIP_EMPTY: &str = "Type the name before the #. The #1234 tag is left out.";
+/// Toast when "+ Add name" holds no name of at least 3 characters (only a
+/// #tag, spaces, or a name too short to match). The input stays open with
+/// the text.
+const NAME_CHIP_EMPTY: &str =
+    "Type the name before the #, at least 3 characters. The #1234 tag is left out.";
 
 /// Looks (about one a second, on the tick) that our own Restart or Start
 /// may go without a new pid before its run is taken as gone. A systemd
@@ -376,11 +378,12 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             let Some((list, draft)) = app.page_state.chip_draft.take() else {
                 return Task::none();
             };
+            let mut edit = None;
             let changed = match list {
-                // Config holds one name, so a new one replaces it.
+                // The first name fills player_name, the rest player_names.
                 ChipList::Names => match name_chip(&draft) {
                     Some(name) => {
-                        app.settings.set_text(SettingsField::PlayerName, name);
+                        edit = crate::settings_keys::name_added(app, name);
                         true
                     }
                     None => {
@@ -397,20 +400,19 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
                 }
             };
             if changed {
-                return page_save(app, Commit::Control, None);
+                return page_save(app, Commit::Control, edit);
             }
         }
         Msg::ChipRemove(list, index) => {
-            match list {
-                ChipList::Names => app
-                    .settings
-                    .set_text(SettingsField::PlayerName, String::new()),
+            let edit = match list {
+                ChipList::Names => crate::settings_keys::name_removed(app, index),
                 ChipList::Processes => {
                     let next = without_chip(&app.settings.game_process_names, index);
                     app.settings.set_text(SettingsField::ProcessNames, next);
+                    None
                 }
-            }
-            return page_save(app, Commit::Control, None);
+            };
+            return page_save(app, Commit::Control, edit);
         }
         Msg::CompanionDuringGames(on) => {
             // The switch follows what is stored, so it never shows a value
@@ -1078,6 +1080,13 @@ mod tests {
             Some(&(ChipList::Names, "#2112".to_string()))
         );
         assert_eq!(app.toast.as_deref(), Some(NAME_CHIP_EMPTY));
+        assert!(
+            NAME_CHIP_EMPTY.contains(&format!(
+                "at least {} characters",
+                stat_tracker::config::MIN_OWN_NAME_CHARS
+            )),
+            "the toast names the core's minimum"
+        );
         assert_eq!(on_disk(&dir).player_name, None);
     }
 

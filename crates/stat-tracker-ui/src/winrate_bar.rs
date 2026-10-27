@@ -5,7 +5,8 @@
 //! 50% gets at least 12 px in its direction, and exactly 50% is the bare
 //! midline. Overview, Heroes, Maps and Seasons all use it.
 //!
-//! Callers draw it only from 10 decided games ([`crate::small_sample`]).
+//! Callers draw it only from 10 decided games, a win, loss or draw
+//! ([`crate::small_sample`]).
 
 use iced::widget::{container, responsive, row, space, stack};
 use iced::{Background, Border, Element, Fill, Length, Theme};

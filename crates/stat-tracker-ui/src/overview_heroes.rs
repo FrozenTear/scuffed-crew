@@ -2,18 +2,19 @@
 //! GAMES", up to four cards, and "+ 3 under 3 games · All heroes ›".
 //!
 //! Small-sample rule: a hero shows its win rate with the shared bar
-//! ([`crate::winrate_bar`]) only from 10 games. From 3 to 9 games it shows
-//! its record ("2-5") with one dash per game out of ten. Under 3 games it
+//! ([`crate::winrate_bar`]) only from 10 decided games (a win, loss or
+//! draw). From 3 games with fewer decided it shows its record ("2-5"), one
+//! dash per decided game out of ten and "Too few games". Under 3 games it
 //! is not shown, only counted in the link.
 
 use iced::widget::{Column, Row, button, column, container, row, space, text};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};
 
-use crate::aggregate::{HeroAgg, aggregate_filtered};
+use crate::aggregate::{HeroAgg, aggregate_games};
 use crate::app::{Message, TrackerApp};
-use crate::model::Screen;
+use crate::model::{Game, Screen};
 use crate::overview_main::{portrait, role_label};
-use crate::small_sample::{RATE_MIN, rate};
+use crate::small_sample::{RATE_MIN, decided, rate};
 use crate::theme::{
     self, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META,
     TEXT, TEXT_2, TEXT_3,
@@ -22,7 +23,7 @@ use crate::widgets;
 
 /// Fewest games a hero needs for a card ([`crate::small_sample`]).
 pub const CARD_MIN: usize = crate::small_sample::FOLD_UNDER;
-/// Dashes on a record card: one per game, out of [`RATE_MIN`].
+/// Dashes on a record card: one per decided game, out of [`RATE_MIN`].
 const DASHES: usize = RATE_MIN;
 /// Cards across: four on a wide page, two on a narrow one.
 const WIDE_FROM: f32 = 760.0;
@@ -38,7 +39,8 @@ pub fn split(heroes: &[HeroAgg]) -> (Vec<&HeroAgg>, usize) {
     (cards, small.len())
 }
 
-/// "All time", or the picked season's name: the heroes headers' scope.
+/// "All time", or the picked season's name: the scope the Overview and
+/// Heroes headers and the season card name.
 pub fn scope(app: &TrackerApp) -> String {
     match &app.season {
         crate::model::SeasonSel::AllTime => "All time".to_string(),
@@ -51,8 +53,10 @@ pub fn scope(app: &TrackerApp) -> String {
     }
 }
 
-pub fn view<'a>(app: &'a TrackerApp, width: f32) -> Element<'a, Message> {
-    let stats = aggregate_filtered(&app.games, &crate::overview_page::filter(app));
+/// The strip for `settled`: the filtered games less one still being played
+/// ([`crate::overview_page::settled`]).
+pub fn view<'a>(app: &'a TrackerApp, settled: &[&Game], width: f32) -> Element<'a, Message> {
+    let stats = aggregate_games(settled);
     let (cards, small) = split(&stats.heroes);
     let scope = scope(app);
     let mut link = String::new();
@@ -72,9 +76,7 @@ pub fn view<'a>(app: &'a TrackerApp, width: f32) -> Element<'a, Message> {
     let col = Column::new().spacing(8).push(header);
     if cards.is_empty() {
         return col
-            .push(widgets::empty_surface(&format!(
-                "No hero has {CARD_MIN} or more games in these filters yet."
-            )))
+            .push(widgets::empty_surface(&empty_text(app.games.is_empty())))
             .into();
     }
     let across = if width >= WIDE_FROM { 4 } else { 2 };
@@ -104,12 +106,14 @@ fn card(h: &HeroAgg) -> Element<'static, Message> {
             .font(FONT_BOLD)
             .color(TEXT),
     );
-    let (big, meter): (String, Element<'static, Message>) = match rate(&h.record) {
-        Some(p) => (format!("{p}%"), crate::winrate_bar::bar(p as f32)),
-        None => (
-            h.record.wl_label(),
-            dashes(crate::small_sample::decided(&h.record)),
+    let r = &h.record;
+    let (big, meter, sub): (String, Element<'static, Message>, String) = match rate(r) {
+        Some(p) => (
+            format!("{p}%"),
+            crate::winrate_bar::bar(p as f32),
+            r.games_label(),
         ),
+        None => (r.wl_label(), dashes(decided(r)), too_few_line(r)),
     };
     container(
         column![
@@ -118,10 +122,7 @@ fn card(h: &HeroAgg) -> Element<'static, Message> {
                 .align_y(Alignment::Center),
             text(big).size(24).font(FONT_EXTRABOLD).color(TEXT),
             meter,
-            text(h.record.games_label())
-                .size(SIZE_LABEL)
-                .font(FONT_MEDIUM)
-                .color(TEXT_3),
+            text(sub).size(SIZE_LABEL).font(FONT_MEDIUM).color(TEXT_3),
         ]
         .spacing(8),
     )
@@ -146,11 +147,26 @@ fn block(color: iced::Color, width: iced::Length, height: f32) -> Element<'stati
         .into()
 }
 
-/// One dash per game out of ten: played dashes in grey, the rest faint.
-pub(crate) fn dashes(games: usize) -> Element<'static, Message> {
+/// "7 games · Too few games" under a record card.
+pub fn too_few_line(r: &crate::aggregate::Record) -> String {
+    format!("{} · Too few games", r.games_label())
+}
+
+/// The strip with no card: before the first game there is no filter row
+/// (ux.md section 17), so that line names no filters.
+pub fn empty_text(no_games: bool) -> String {
+    if no_games {
+        "No heroes yet. They show here once the tracker saves a game.".to_string()
+    } else {
+        format!("No hero has {CARD_MIN} or more games in these filters yet.")
+    }
+}
+
+/// One dash per decided game out of ten: those in grey, the rest faint.
+pub(crate) fn dashes(decided: usize) -> Element<'static, Message> {
     let mut r = Row::new().spacing(4).width(Fill).align_y(Alignment::Center);
     for i in 0..DASHES {
-        let color = if i < games {
+        let color = if i < decided {
             TEXT_3
         } else {
             iced::Color { a: 0.5, ..BORDER }
@@ -196,13 +212,23 @@ mod tests {
     fn rates_start_at_ten_decided_games() {
         assert_eq!(rate(&hero("A", 9, 5, 4).record), None);
         assert_eq!(rate(&hero("A", 10, 5, 4).record), None, "9 decided");
-        assert_eq!(rate(&hero("A", 10, 6, 4).record), Some(60));
+        assert_eq!(rate(&hero("A", 12, 6, 4).record), Some(60), "10 decided");
+        assert_eq!(
+            too_few_line(&hero("A", 10, 5, 4).record),
+            "10 games · Too few games"
+        );
         assert_eq!(rate(&hero("A", 88, 45, 41).record), Some(52));
+    }
+
+    #[test]
+    fn the_empty_line_names_filters_only_when_there_are_games() {
+        assert!(!empty_text(true).contains("filter"));
+        assert!(empty_text(false).contains("filters"));
     }
 
     #[test]
     fn the_strip_draws_on_an_empty_demo() {
         let (_dir, app) = crate::fixtures::test_app();
-        let _ = view(&app, 900.0);
+        let _ = view(&app, &[], 900.0);
     }
 }

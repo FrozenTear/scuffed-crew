@@ -108,6 +108,16 @@ fn sample(full: bool) -> Config {
         // On is the default and is left out of the file. The full sample
         // sets the explicit off so the round trip keeps that line.
         name_reader: !full,
+        player_names: if full {
+            vec!["FrozenAlt".into()]
+        } else {
+            Vec::new()
+        },
+        live_upload: !full,
+        rank_reader: full,
+        share_stat_pictures: full,
+        share_report_pictures: full,
+        capture_only_on_screen: !full,
     }
 }
 

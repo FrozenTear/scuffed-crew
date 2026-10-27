@@ -207,21 +207,17 @@ pub fn header_line(scope: &str, carded: usize) -> String {
 }
 
 /// The chips Heroes leaves out of its filter row, because
-/// [`stats_filter`] does not apply them (Needs a look filters Games only).
+/// [`stats_filter`] does not apply them. Needs a look shows on Games only.
 pub const HIDDEN: crate::overview_chips::Hidden = crate::overview_chips::Hidden {
     season: false,
     hero: true,
     map: false,
     result: true,
-    needs_look: true,
 };
 
 /// The games the Heroes stats count: [`stats_filter`] less the open game.
 pub fn shown_games(app: &TrackerApp) -> Vec<&Game> {
-    crate::games_state::settled(
-        filter_games(&app.games, &stats_filter(app)),
-        app.live_game_session.as_deref(),
-    )
+    crate::overview_page::settled(app, &filter_games(&app.games, &stats_filter(app)))
 }
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
@@ -235,7 +231,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             )))
             .into();
     }
-    if !crate::games_state::shows_filters(app) {
+    if !crate::overview_page::shows_filters(app) {
         return col
             .push(widgets::empty_surface(empty_copy(&app.games)))
             .into();
@@ -279,21 +275,21 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             .push(widgets::empty_surface(empty_copy(&app.games)))
             .into();
     }
-    if page.view == HeroView::List {
-        let now = Utc::now();
-        col = col.push(list(&list_groups(&t), &last, now));
-        if !t.others.is_empty() || unknown > 0 {
-            col = col.push(others_row(&t.others, unknown, page.show_others));
-            if page.show_others && !t.others.is_empty() {
-                col = col.push(list(&[(String::new(), t.others.clone())], &last, now));
-            }
-        }
+    let now = crate::games_state::now(app);
+    let across = if crate::overview_page::window_for(content_width) < TWO_ACROSS_BELOW {
+        2
     } else {
-        let across = if crate::overview_page::window_for(content_width) < TWO_ACROSS_BELOW {
-            2
-        } else {
-            5
-        };
+        5
+    };
+    if carded == 0 {
+        // No hero with 3 or more games: the Overview strip's line, not a
+        // bare List header or nothing at all.
+        col = col.push(widgets::empty_surface(&crate::overview_heroes::empty_text(
+            false,
+        )));
+    } else if page.view == HeroView::List {
+        col = col.push(list(&list_groups(&t), &last, now));
+    } else {
         if !t.rated.is_empty() {
             col = col.push(grid(&t.rated, across, roomy));
         }
@@ -301,11 +297,14 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             col = col.push(divider(TOO_FEW));
             col = col.push(grid(&t.record, across, roomy));
         }
-        if !t.others.is_empty() || unknown > 0 {
-            col = col.push(others_row(&t.others, unknown, page.show_others));
-            if page.show_others && !t.others.is_empty() {
-                col = col.push(grid(&t.others, across, roomy));
-            }
+    }
+    if !t.others.is_empty() || unknown > 0 {
+        col = col.push(others_row(&t.others, unknown, page.show_others));
+        if page.show_others && !t.others.is_empty() {
+            col = col.push(match page.view {
+                HeroView::List => list(&[(String::new(), t.others.clone())], &last, now),
+                HeroView::Cards => grid(&t.others, across, roomy),
+            });
         }
     }
     col.into()
@@ -814,7 +813,7 @@ mod tests {
     #[test]
     fn nothing_but_the_empty_line_with_no_games() {
         let (_dir, mut app) = crate::fixtures::test_app();
-        assert!(!crate::games_state::shows_filters(&app));
+        assert!(!crate::overview_page::shows_filters(&app));
         let _ = view(&app, 1300.0);
         app.fixture = None;
         app.snapshot_mtime = None;
@@ -864,9 +863,11 @@ mod tests {
     fn cards_shrink_below_1440_and_old_dates_carry_the_year() {
         assert_eq!(card_metrics(true), (48.0, Padding::from(16)));
         assert_eq!(card_metrics(false), (40.0, Padding::from([12, 16])));
-        let now = Utc.with_ymd_and_hms(2026, 10, 27, 12, 0, 0).unwrap();
-        let this_year = Utc.with_ymd_and_hms(2026, 6, 15, 12, 0, 0).unwrap();
-        let last_year = Utc.with_ymd_and_hms(2025, 6, 15, 12, 0, 0).unwrap();
+        // Built in local time, so the day holds in any time zone.
+        let local = |y, m, d| Local.with_ymd_and_hms(y, m, d, 12, 0, 0).unwrap().to_utc();
+        let now = local(2026, 10, 27);
+        let this_year = local(2026, 6, 15);
+        let last_year = local(2025, 6, 15);
         assert_eq!(played_label(this_year, now), "Jun 15");
         assert_eq!(played_label(last_year, now), "Jun 15, 2025");
     }
@@ -898,6 +899,28 @@ mod tests {
                 let _ = view(&app, 1300.0);
                 let _ = view(&app, 900.0);
             }
+        }
+    }
+
+    #[test]
+    fn no_hero_with_a_card_draws_the_strip_line_in_both_views() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        app.games.truncate(2);
+        let shown = shown_games(&app);
+        let stats = aggregate_games(&shown);
+        let t = tiers(&stats.heroes, HeroSort::Games, &last_played(&shown));
+        assert_eq!(
+            t.rated.len() + t.record.len(),
+            0,
+            "every hero under 3 games"
+        );
+        assert!(!t.others.is_empty());
+        for view_kind in [HeroView::Cards, HeroView::List] {
+            app.heroes_page.view = view_kind;
+            let _ = view(&app, 1300.0);
         }
     }
 }

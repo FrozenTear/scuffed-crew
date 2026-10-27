@@ -4,15 +4,15 @@
 //! with Review games, and the Companion card with its switch.
 //!
 //! Small-sample rule ([`crate::small_sample`]): a win rate shows only
-//! from 10 decided games; fewer show the record instead. Rank now and
-//! Peak wait for the rank reader.
+//! from 10 decided games; fewer show the record and "Too few games".
+//! Rank now and Peak wait for the rank reader.
 
 use iced::widget::{Column, Row, button, column, container, row, text, toggler};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};
 
 use crate::aggregate::Record;
 use crate::app::{Message, TrackerApp};
-use crate::model::{Game, Outcome, SeasonSel, game_card_in_progress};
+use crate::model::{Game, Outcome, game_card_in_progress};
 use crate::session_bits::sparkline;
 use crate::theme::{
     self, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_LABEL,
@@ -24,9 +24,11 @@ use crate::small_sample::{decided, rate};
 /// The "Last 20" window.
 pub const LAST_N: usize = 20;
 
-pub fn view<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message> {
+/// The panel for `settled`: the filtered games less one still being played
+/// ([`crate::overview_page::settled`]).
+pub fn view<'a>(app: &'a TrackerApp, settled: &[&Game]) -> Element<'a, Message> {
     column![
-        season_card(app, shown),
+        season_card(app, settled),
         needs_look_card(app),
         companion_card(app)
     ]
@@ -75,6 +77,27 @@ pub fn record_of<'a>(games: impl IntoIterator<Item = &'a Game>) -> Record {
 /// The rate, or the record when the sample is small.
 pub fn headline(r: &Record) -> String {
     rate(r).map_or_else(|| r.wl_label(), |p| format!("{p}%"))
+}
+
+/// The season card's big line and its colour (small-sample rule): "No
+/// games" at 0, the rate from 10 decided games, else the record, muted
+/// under 3 games.
+pub fn season_headline(r: &Record) -> (String, iced::Color) {
+    match r.games {
+        0 => ("No games".to_string(), TEXT_3),
+        n if rate(r).is_none() && n < crate::overview_heroes::CARD_MIN => (headline(r), TEXT_3),
+        _ => (headline(r), TEXT),
+    }
+}
+
+/// The line beside it: "110 games", "7 games · Too few games" without a
+/// rate, nothing at 0 games (the headline says it).
+pub fn season_games_line(r: &Record) -> String {
+    match (r.games, rate(r)) {
+        (0, _) => String::new(),
+        (_, Some(_)) => r.games_label(),
+        (_, None) => crate::overview_heroes::too_few_line(r),
+    }
 }
 
 /// The newest [`LAST_N`] decided games, newest first.
@@ -130,6 +153,12 @@ fn versus_text(vs: &str) -> Element<'static, Message> {
     }
 }
 
+/// Whether [`counted_line`] shows: not at 0 games, where the headline
+/// already says "No games".
+pub fn shows_counted(season: &Record) -> bool {
+    season.games > 0
+}
+
 /// How the numbers are counted, under the card.
 pub fn counted_line(season: &Record, last: &Record) -> String {
     let mut line = format!("Win rate counts decided games: {}", season.wl_label());
@@ -147,36 +176,22 @@ pub fn counted_line(season: &Record, last: &Record) -> String {
     line
 }
 
-fn scope_label(app: &TrackerApp) -> String {
-    match &app.season {
-        SeasonSel::Season(id) => app
-            .seasons
-            .seasons
-            .iter()
-            .find(|s| &s.id == id)
-            .map_or_else(|| "Season".to_string(), |s| s.name.clone()),
-        SeasonSel::AllTime => "All time".to_string(),
-    }
-}
-
-fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message> {
-    let season = record_of(shown.iter().copied());
+fn season_card<'a>(app: &'a TrackerApp, settled: &[&Game]) -> Element<'a, Message> {
+    let season = record_of(settled.iter().copied());
     // The Last line only while it is a part of the season, not all of it.
-    let mut recent = last_n(shown);
+    let mut recent = last_n(settled);
     if recent.len() >= decided(&season) {
         recent.clear();
     }
     let last = record_of(recent.iter().copied());
     let mut col = Column::new()
         .spacing(8)
-        .push(widgets::label_text(&scope_label(app)));
+        .push(widgets::label_text(&crate::overview_heroes::scope(app)));
+    let (big, big_color) = season_headline(&season);
     col = col.push(
         row![
-            text(headline(&season))
-                .size(32)
-                .font(FONT_EXTRABOLD)
-                .color(TEXT),
-            text(season.games_label())
+            text(big).size(32).font(FONT_EXTRABOLD).color(big_color),
+            text(season_games_line(&season))
                 .size(SIZE_META)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -219,12 +234,14 @@ fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message>
         }
         col = col.push(line).push(sparkline(recent.iter().rev().copied()));
     }
-    col = col.push(
-        text(counted_line(&season, &last))
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
-    );
+    if shows_counted(&season) {
+        col = col.push(
+            text(counted_line(&season, &last))
+                .size(SIZE_LABEL)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+    }
     panel(col.into(), false)
 }
 
@@ -261,7 +278,7 @@ pub fn needs_look_parts(app: &TrackerApp) -> String {
         if window.is_some() {
             p.push_str(&format!(
                 " ({no_outcome_here} of them in {})",
-                scope_label(app)
+                crate::overview_heroes::scope(app)
             ));
         }
         parts.push(p);
@@ -397,11 +414,34 @@ mod tests {
     }
 
     #[test]
+    fn the_season_card_follows_the_small_sample_rule() {
+        assert_eq!(
+            season_headline(&rec(0, 0, 0, 0)),
+            ("No games".to_string(), TEXT_3)
+        );
+        assert_eq!(season_games_line(&rec(0, 0, 0, 0)), "");
+        assert_eq!(
+            season_headline(&rec(1, 1, 0, 2)),
+            ("1-1".to_string(), TEXT_3)
+        );
+        assert_eq!(season_headline(&rec(4, 3, 0, 7)), ("4-3".to_string(), TEXT));
+        assert_eq!(
+            season_games_line(&rec(4, 3, 0, 7)),
+            "7 games · Too few games"
+        );
+        assert_eq!(
+            season_headline(&rec(52, 55, 0, 110)),
+            ("49%".to_string(), TEXT)
+        );
+        assert_eq!(season_games_line(&rec(52, 55, 0, 110)), "110 games");
+    }
+
+    #[test]
     fn a_rate_needs_ten_decided_games() {
         assert_eq!(headline(&rec(2, 5, 0, 7)), "2-5");
         assert_eq!(rate(&rec(5, 4, 0, 9)), None, "9 games");
         assert_eq!(rate(&rec(5, 4, 0, 12)), None, "12 games, 9 decided");
-        assert_eq!(rate(&rec(5, 4, 1, 12)), Some(50), "12 games, 10 decided");
+        assert_eq!(rate(&rec(5, 4, 1, 12)), Some(50), "10 decided with a draw");
         assert_eq!(rate(&rec(0, 0, 0, 12)), None, "none decided");
         assert_eq!(headline(&rec(52, 55, 0, 110)), "49%");
     }
@@ -441,6 +481,12 @@ mod tests {
         assert!(companion_line(&app).len() > 3);
         let _ = view(&app, &[]);
         assert_eq!(needs_look_parts(&app), "");
+    }
+
+    #[test]
+    fn the_counted_line_waits_for_the_first_game() {
+        assert!(!shows_counted(&rec(0, 0, 0, 0)));
+        assert!(shows_counted(&rec(0, 0, 0, 1)));
     }
 
     #[test]

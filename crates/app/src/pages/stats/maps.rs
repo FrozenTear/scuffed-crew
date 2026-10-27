@@ -4,22 +4,22 @@ use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
 use super::{MapStats, load_error_state, map_game_mode, wr_bar_color, wr_text_class};
-use crate::sample::{MAP_RULE_NOTE, Tally, best_and_worst};
+use crate::sample::{MAP_RULE_NOTE, TOO_FEW_GAMES, Tally, best_and_worst};
 
-/// One map bar: the win rate from 10 games; below that an empty bar with the
-/// record, or "No games" for an empty map.
+/// One map bar: the win rate from 10 decided games; below that an empty bar
+/// with "Too few games" and the record, or "No games" for an empty map.
 fn map_bar(m: &MapStats) -> BarEntry {
     let tally = m.tally();
     let rate = tally.win_rate_pct();
     let display = match rate {
         Some(wr) => format!("{wr:.1}% ({} games)", m.matches),
         None if m.matches == 0 => tally.label(),
-        None => format!("{} ({} games)", tally.label(), m.matches),
+        None => format!("{TOO_FEW_GAMES}, {} ({} games)", tally.label(), m.matches),
     };
     BarEntry {
         label: m.map_name.clone(),
         value: rate.unwrap_or(0.0),
-        color: wr_bar_color(m.wins, m.matches).to_string(),
+        color: wr_bar_color(tally).to_string(),
         display,
         muted: rate.is_none(),
     }
@@ -171,9 +171,15 @@ mod tests {
         assert!(empty.muted);
 
         let few = map_bar(&map(9, 6));
-        assert_eq!(few.display, "6W-3L (9 games)");
+        assert_eq!(few.display, "Too few games, 6W-3L (9 games)");
         assert_eq!(few.value, 0.0);
         assert!(few.muted);
+
+        let mut open = map(12, 6);
+        open.losses = 3;
+        let open = map_bar(&open);
+        assert_eq!(open.display, "Too few games, 6W-3L (12 games)");
+        assert!(open.muted);
 
         let enough = map_bar(&map(10, 6));
         assert_eq!(enough.display, "60.0% (10 games)");

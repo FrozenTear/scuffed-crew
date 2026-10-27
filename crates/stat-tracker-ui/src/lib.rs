@@ -64,6 +64,7 @@ pub mod settings;
 pub mod settings_cards;
 mod settings_env;
 mod settings_fixed;
+mod settings_keys;
 pub mod settings_model;
 mod settings_open;
 pub mod settings_page;
@@ -83,6 +84,9 @@ mod update_check;
 mod what_leaves;
 pub mod widgets;
 mod winrate_bar;
+
+#[cfg(test)]
+mod tests_settings_to_config;
 
 pub use aggregate::{Aggregates, SeasonWindow, aggregate};
 pub use cli::{Cli, FixtureKind};

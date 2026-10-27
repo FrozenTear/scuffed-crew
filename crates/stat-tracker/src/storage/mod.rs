@@ -178,6 +178,61 @@ impl LocalStore {
     }
 }
 
+/// Wait until SurrealKV has closed the store in `data_dir`, for at most
+/// `within`. Call it after the last [`LocalStore`] handle is dropped.
+///
+/// SurrealKV takes an flock on `stats.surrealkv/LOCK` at open and releases
+/// it as the last step of its close, after the memtable flush and the WAL
+/// cleanup. flock is per open file, so this process can take it on a new fd
+/// once the close is done. Our own writer lock is on the directory, not on
+/// `LOCK`, and stays held until exit. Returns `false` when the close did not
+/// finish in time.
+///
+/// Read against surrealkv 0.21.2 (`Tree::close` in lsm.rs releases the lock
+/// after the flush, WAL close and cleanup). Recheck that order when
+/// Cargo.lock moves surrealkv; the storage test
+/// `wait_for_engine_close_sees_surrealkv_finish_its_close` fails if a close
+/// that frees `LOCK` leaves WAL records to replay.
+pub async fn wait_for_engine_close(data_dir: &Path, within: std::time::Duration) -> bool {
+    match lock_released_within(data_dir, within).await {
+        Ok(closed) => closed,
+        Err(err) => {
+            // Waiting cannot tell more. At exit, going on is right.
+            tracing::warn!(error = %err, "cannot check the store's LOCK; not waiting for its close");
+            true
+        }
+    }
+}
+
+/// [`wait_for_engine_close`] without its exit-time choice: `Err` when the
+/// `LOCK` file cannot be opened (other than missing) or flock-tested. Vacuum
+/// treats that as not closed, so it never swaps a store it could not check.
+async fn lock_released_within(
+    data_dir: &Path,
+    within: std::time::Duration,
+) -> std::io::Result<bool> {
+    let lock = data_dir.join("stats.surrealkv").join("LOCK");
+    let until = tokio::time::Instant::now() + within;
+    loop {
+        // flock needs no write access.
+        match std::fs::File::open(&lock) {
+            // Locked and dropped at once: nothing opens the store after this.
+            Ok(file) => match file.try_lock() {
+                Ok(()) => return Ok(true),
+                Err(std::fs::TryLockError::WouldBlock) => {}
+                Err(std::fs::TryLockError::Error(err)) => return Err(err),
+            },
+            // No LOCK file: no engine to wait for.
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(err) => return Err(err),
+        }
+        if tokio::time::Instant::now() >= until {
+            return Ok(false);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

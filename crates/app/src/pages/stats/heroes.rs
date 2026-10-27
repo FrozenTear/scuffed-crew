@@ -78,7 +78,7 @@ pub(super) fn heroes_tab(
                 .map(|&(h, wr)| BarEntry {
                     label: h.hero.clone(),
                     value: wr,
-                    color: wr_bar_color(h.wins, h.matches).to_string(),
+                    color: wr_bar_color(h.tally()).to_string(),
                     display: format!("{wr:.1}% ({} games)", h.matches),
                     muted: false,
                 })
