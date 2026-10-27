@@ -770,7 +770,7 @@ impl TrackerApp {
             subs.push(iced::event::listen_with(
                 crate::settings_update::chip_escape,
             ));
-        } else if self.screen == Screen::Games && self.expanded.is_some() && !self.editing {
+        } else if self.screen == Screen::Games && crate::games_panel::listens(self) {
             subs.push(iced::event::listen_with(crate::games_panel::close_keys));
         }
         Subscription::batch(subs)
@@ -988,8 +988,8 @@ impl TrackerApp {
                 });
                 if let Some(sid) = sid {
                     match saved {
-                        Some(Ok(())) => {
-                            self.replace_toast("Stats corrected");
+                        Some(Ok(msg)) => {
+                            self.replace_toast(msg);
                             self.arm_training_toast(&sid, crate::report::GameCategory::WrongStats);
                         }
                         Some(Err(e)) => self.replace_toast(e),

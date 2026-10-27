@@ -3,8 +3,7 @@
 //! a value the reader was not sure of and no hand edit has fixed since.
 //!
 //! One shared component for the Games expanded row and the Overview's
-//! newest game. Callers use [`row`] only, so Tracker's shared tiles from
-//! #556 can replace this module whole.
+//! newest game.
 //!
 //! TODO(#557): a local shim of #557's `stat_tiles.rs` (head 47d8d0fa), so
 //! the Games panel builds on the same API before #557 lands. #557 owns the
@@ -31,7 +30,9 @@ const TILES: [(&str, &str); 6] = [
     ("MIT", "mitigation"),
 ];
 
-/// The six tiles for `g`, wrapping on a narrow page.
+/// The six tiles for `g`, wrapping on a narrow page. #557's Overview
+/// calls it; this PR uses only [`tile_with`].
+#[allow(dead_code)]
 pub fn row(g: &Game) -> Element<'static, Message> {
     let mut tiles = Row::new().spacing(8);
     for (label, field) in TILES {
@@ -44,11 +45,11 @@ pub fn row(g: &Game) -> Element<'static, Message> {
 ///
 /// SHIM: the reader stores flat names in `suspect_fields` ("dmg", "h", or
 /// a row name like "r3.dmg" on older rows), while `field` here is the edit
-/// name ("damage"). [`crate::games_rows::unsure_now`] maps both through
+/// name ("damage"). [`Game::unsure_now`] maps both through
 /// `stat_tracker::suspect`. #557's copy checks only `field` and misses a
 /// real "dmg".
 pub fn unsure_now(g: &Game, field: &str) -> bool {
-    crate::games_rows::unsure_now(g, field)
+    g.unsure_now(field)
 }
 
 fn stat(g: &Game, field: &str) -> u32 {

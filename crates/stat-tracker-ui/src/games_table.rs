@@ -10,11 +10,10 @@ use iced::{
     Alignment, Background, Border, Color, Element, Fill, FillPortion, Length, Padding, Theme,
 };
 
-use crate::aggregate::group_by_session_gap;
 use crate::app::{Message, TrackerApp};
-use crate::games_rows::{self, Col, Grid, Grouping, Mark, TabState, Tick, Width};
+use crate::games_rows::{self, Col, Grid, Mark, TabState, Tick, UnsureItem, Width};
 use crate::icons::{self, Icon};
-use crate::model::{Game, Outcome, Role, RoleFilter, Screen, game_card_in_progress, local_hm};
+use crate::model::{Game, Outcome, Role, Screen, game_card_in_progress};
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META, TEXT,
     TEXT_2, TEXT_3, WARN,
@@ -24,15 +23,17 @@ use crate::widgets;
 /// Games tab messages.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
-    SetGrouping(Grouping),
+    SetGrouping(games_rows::Grouping),
     /// A column header: sort by it, or flip its direction.
     SortBy(Col),
-    /// The role chip: one role, or all (`None`).
-    PickRole(Option<Role>),
     ToggleCompact,
     ToggleFilters,
-    /// Esc, or Enter: close the open row.
-    CloseOpen,
+    /// Open a game (a mark that asks for something); an open one stays open.
+    Open(String),
+    /// Esc no widget took: cancel the edit, else close the open row.
+    Escape,
+    /// Enter no widget took: close the open row unless the edit form is up.
+    Enter,
     /// Open a game's saved scoreboard picture.
     OpenScoreboard(String),
 }
@@ -42,17 +43,25 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
     match msg {
         Msg::SetGrouping(g) => s.grouping = g,
         Msg::SortBy(col) => s.sort = s.sort.clicked(col),
-        Msg::PickRole(role) => {
-            app.roles = role.map_or_else(RoleFilter::default, |r| RoleFilter::default().toggle(r));
-        }
         Msg::ToggleCompact => s.compact = !s.compact,
         Msg::ToggleFilters => s.filters_open = !s.filters_open,
-        Msg::CloseOpen => {
+        Msg::Open(sid) => {
+            if app.expanded.as_deref() != Some(sid.as_str()) {
+                return iced::Task::done(Message::ToggleGame(sid));
+            }
+        }
+        Msg::Escape if app.editing => app.editing = false,
+        Msg::Enter if app.editing => {}
+        Msg::Escape | Msg::Enter => {
             app.expanded = None;
             app.editing = false;
             app.confirm_delete = None;
         }
-        Msg::OpenScoreboard(sid) => crate::games_panel::open_scoreboard(&app.data_dir, &sid),
+        Msg::OpenScoreboard(sid) => {
+            if let Err(e) = crate::games_panel::open_scoreboard(&app.data_dir, &sid) {
+                app.replace_toast(e);
+            }
+        }
     }
     iced::Task::none()
 }
@@ -61,16 +70,17 @@ fn games_msg(m: Msg) -> Message {
     Message::Games(m)
 }
 
+/// The tab at `window_width` (the grid follows the window, as the spec's
+/// breakpoints do; the gutter changes at 1440 too).
 pub fn view<'a>(
     app: &'a TrackerApp,
-    content_width: f32,
+    window_width: f32,
     heroes: &[String],
     maps: &[String],
 ) -> Element<'a, Message> {
     let state = app.games_tab;
-    let grid = Grid::for_width(content_width);
-    let mut shown = crate::games::shown_games(app);
-    games_rows::sort_games(&mut shown, state.sort);
+    let grid = Grid::for_window(window_width);
+    let shown = crate::games::shown_games(app);
 
     let mut col = column![].spacing(16).width(Fill);
     col = col.push(controls(app, state));
@@ -78,9 +88,9 @@ pub fn view<'a>(
     if state.filters_open || crate::filter_chips::active_count(app) > 0 {
         col = col.push(chips);
     }
-    // The spec does not place "Retry rejected uploads" (UX Spec v2 open
-    // question 5), so it waits under Filters instead of above the table.
-    if state.filters_open && app.games.iter().any(|game| game.upload_reject.is_some()) {
+    // UX Spec v2 open question 5 does not place it yet; above the table it
+    // is seen, where under Filters it was not.
+    if app.games.iter().any(|game| game.upload_reject.is_some()) {
         col = col.push(crate::games::retry_rejected_uploads_button());
     }
     if shown.is_empty() {
@@ -94,30 +104,19 @@ pub fn view<'a>(
     }
 
     let gap_secs = app.saved_config.session_window_secs;
-    match state.grouping {
-        Grouping::Sessions => {
-            // Grouping walks newest first; the sort only orders rows inside.
-            let mut newest = shown.clone();
-            newest.sort_by_key(|g| std::cmp::Reverse(g.played_at));
-            let gap = chrono::TimeDelta::seconds(gap_secs.max(1) as i64);
-            let mut groups = group_by_session_gap(&newest, gap);
-            if state.sort.oldest_first() {
-                groups.reverse();
-            }
-            for group in groups {
-                let head = games_rows::session_head(&group);
-                col = col.push(session_header(head, games_rows::form_ticks(&group.games)));
-                let mut ordered: Vec<&Game> = group.games.iter().collect();
-                games_rows::sort_games(&mut ordered, state.sort);
-                col = col.push(table(app, &ordered, grid, state));
-            }
+    let live = app.live_game_session.as_deref();
+    let layout = games_rows::layout(&app.games, &shown, state, grid, gap_secs, live);
+    for section in layout.sections {
+        if let Some(head) = section.head {
+            col = col.push(session_header(head, section.ticks));
         }
-        Grouping::Flat => {
-            col = col.push(table(app, &shown, grid, state));
-        }
+        col = col.push(table(app, &section.rows, grid, state));
+    }
+    if let Some(note) = games_rows::cap_note(layout.hidden) {
+        col = col.push(text(note).size(SIZE_META).color(TEXT_2));
     }
     col = col.push(
-        text(games_rows::split_note(gap_secs))
+        text(games_rows::list_note(state.grouping, gap_secs))
             .size(SIZE_LABEL)
             .color(TEXT_3),
     );
@@ -126,11 +125,16 @@ pub fn view<'a>(
 
 fn controls(app: &TrackerApp, state: TabState) -> Element<'static, Message> {
     let filters = button(
-        text(games_rows::filters_label(
-            crate::filter_chips::active_count(app),
-        ))
-        .size(SIZE_META)
-        .font(FONT_SEMIBOLD),
+        row![
+            text(games_rows::filters_label(
+                crate::filter_chips::active_count(app),
+            ))
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD),
+            crate::settings_fixed::arrow().size(SIZE_META),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .padding(Padding::from([6, 14]))
     .style(theme::chip(state.filters_open))
@@ -139,7 +143,7 @@ fn controls(app: &TrackerApp, state: TabState) -> Element<'static, Message> {
         .padding(Padding::from([6, 14]))
         .style(theme::chip(state.compact))
         .on_press(games_msg(Msg::ToggleCompact));
-    let seg = |label: &'static str, g: Grouping| {
+    let seg = |label: &'static str, g: games_rows::Grouping| {
         button(text(label).size(SIZE_META).font(FONT_SEMIBOLD))
             .padding(Padding::from([5, 12]))
             .style(theme::filter_segment(ACCENT, state.grouping == g))
@@ -147,18 +151,24 @@ fn controls(app: &TrackerApp, state: TabState) -> Element<'static, Message> {
     };
     let segmented = container(
         row![
-            seg("Sessions", Grouping::Sessions),
-            seg("Flat list", Grouping::Flat)
+            seg("Sessions", games_rows::Grouping::Sessions),
+            seg("Flat list", games_rows::Grouping::Flat)
         ]
         .spacing(2),
     )
     .padding(2)
     .style(pill_box(BORDER));
-    row![filters, space().width(Fill), compact, segmented]
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .width(Fill)
-        .into()
+    row![
+        filters,
+        space().width(Fill),
+        widgets::overlay_toggle(app.companion_chip()),
+        compact,
+        segmented
+    ]
+    .spacing(8)
+    .align_y(Alignment::Center)
+    .width(Fill)
+    .into()
 }
 
 fn session_header(head: games_rows::SessionHead, ticks: Vec<Tick>) -> Element<'static, Message> {
@@ -214,7 +224,7 @@ fn table<'a>(
 ) -> Element<'a, Message> {
     let cols = games_rows::columns(grid);
     let live = app.live_game_session.as_deref();
-    let mut body = column![header_row(&cols, state)].width(Fill);
+    let mut body = column![header_row(&cols, state, grid)].width(Fill);
     for g in games {
         body = body.push(line());
         let in_progress = game_card_in_progress(&g.session_id, g.outcome, live);
@@ -247,29 +257,36 @@ fn line() -> Element<'static, Message> {
         .into()
 }
 
-fn header_row(cols: &[(Col, Width)], state: TabState) -> Element<'static, Message> {
+fn header_row(cols: &[(Col, Width)], state: TabState, grid: Grid) -> Element<'static, Message> {
+    let sort = state.sort.visible_in(grid);
     let mut r = row![]
         .spacing(12)
         .height(games_rows::HEADER_H)
         .align_y(Alignment::Center);
     for &(c, w) in cols {
         let cell: Element<'static, Message> = if c.sortable() {
-            let active = state.sort.col == c;
-            let label = if active {
-                format!("{} {}", c.label(), state.sort.arrow())
-            } else {
-                c.label().to_string()
-            };
-            button(
-                text(label)
+            let active = sort.col == c;
+            let color = if active { ACCENT } else { TEXT_3 };
+            let mut label = row![
+                text(c.label())
                     .size(SIZE_LABEL)
                     .font(FONT_BOLD)
-                    .color(if active { ACCENT } else { TEXT_3 }),
-            )
-            .padding(0)
-            .style(|_: &Theme, _| button::Style::default())
-            .on_press(games_msg(Msg::SortBy(c)))
-            .into()
+                    .color(color)
+            ]
+            .spacing(4)
+            .align_y(Alignment::Center);
+            if active {
+                label = label.push(
+                    crate::settings_fixed::sort_arrow(sort.desc)
+                        .size(SIZE_LABEL)
+                        .color(color),
+                );
+            }
+            button(label)
+                .padding(0)
+                .style(|_: &Theme, _| button::Style::default())
+                .on_press(games_msg(Msg::SortBy(c)))
+                .into()
         } else {
             text(c.label())
                 .size(SIZE_LABEL)
@@ -312,6 +329,8 @@ fn game_row(
     let h = state.row_height();
     let undecided = g.outcome == Outcome::Unknown && !in_progress;
     let main = if undecided { TEXT_3 } else { TEXT };
+    let items = games_rows::unsure_items(g, in_progress);
+    let unsure = |item| items.contains(&item);
     let mut r = row![].spacing(12).height(h).align_y(Alignment::Center);
     for &(c, w) in cols {
         let cell: Element<'static, Message> = match c {
@@ -324,22 +343,27 @@ fn game_row(
                     theme::outcome_color(g.outcome)
                 }))
                 .into(),
-            Col::Result => result_cell(g, in_progress),
+            Col::Result => result_cell(g, in_progress, unsure(UnsureItem::Result)),
             Col::Map => {
                 let name = if g.map_name.trim().is_empty() {
                     "No map".to_string()
                 } else {
                     g.map_name.clone()
                 };
-                let mut m = row![text(name).size(SIZE_META).font(FONT_BOLD).color(main)]
-                    .spacing(8)
-                    .align_y(Alignment::Center);
+                let doubt = unsure(UnsureItem::Map);
+                let mut m = row![text(name).size(SIZE_META).font(FONT_BOLD).color(if doubt {
+                    WARN
+                } else {
+                    main
+                })]
+                .spacing(8)
+                .align_y(Alignment::Center);
                 if let Some(mode) = games_rows::mode_chip(&g.map_name) {
                     m = m.push(small_chip(mode, TEXT_2, BORDER));
                 }
-                m.into()
+                with_warn(m.into(), doubt)
             }
-            Col::Hero => hero_cell(g),
+            Col::Hero => hero_cell(g, unsure(UnsureItem::Hero)),
             Col::Eda => text(games_rows::eda(g))
                 .size(SIZE_META)
                 .color(if games_rows::eda_unsure(g) {
@@ -349,10 +373,14 @@ fn game_row(
                 })
                 .into(),
             Col::Rank | Col::Length | Col::Crew => text("-").size(SIZE_META).color(TEXT_3).into(),
-            Col::Time => text(local_hm(g.played_at))
-                .size(SIZE_META)
-                .color(TEXT_2)
-                .into(),
+            Col::Time => {
+                let (date, hm) = games_rows::time_cell_in(g, state.grouping, &chrono::Local);
+                let hm = text(hm).size(SIZE_META).color(TEXT_2);
+                match date {
+                    Some(d) => column![text(d).size(SIZE_LABEL).color(TEXT_3), hm].into(),
+                    None => hm.into(),
+                }
+            }
             Col::Unsure => marks_cell(g, in_progress),
         };
         r = r.push(container(cell).width(cell_len(w)).clip(true));
@@ -388,34 +416,52 @@ fn game_row(
 
 /// WIN, LOSS, DRAW, Undecided, or "Playing" in the accent while the game is
 /// still on.
-fn result_cell(g: &Game, in_progress: bool) -> Element<'static, Message> {
+/// The result read in doubt keeps its colour and gets the warning sign.
+fn result_cell(g: &Game, in_progress: bool, unsure: bool) -> Element<'static, Message> {
     let color = if in_progress {
         ACCENT
     } else {
         theme::outcome_color(g.outcome)
     };
     let undecided = g.outcome == Outcome::Unknown && !in_progress;
-    text(games_rows::result_text(g.outcome, in_progress))
-        .size(SIZE_META)
-        .font(if undecided { FONT_SEMIBOLD } else { FONT_BOLD })
-        .color(color)
+    with_warn(
+        text(games_rows::result_text(g.outcome, in_progress))
+            .size(SIZE_META)
+            .font(if undecided { FONT_SEMIBOLD } else { FONT_BOLD })
+            .color(color)
+            .into(),
+        unsure,
+    )
+}
+
+/// `cell` with the amber warning sign after it when its read is unsure
+/// (the reason a row sorts last on that column).
+fn with_warn(cell: Element<'static, Message>, unsure: bool) -> Element<'static, Message> {
+    if !unsure {
+        return cell;
+    }
+    row![cell, image(icons::handle(Icon::Warn)).width(12).height(12)]
+        .spacing(6)
+        .align_y(Alignment::Center)
         .into()
 }
 
 /// A grey silhouette for the portrait (no Blizzard art is shipped), the
-/// hero, and the role's letter in its colour.
-fn hero_cell(g: &Game) -> Element<'static, Message> {
-    row![
+/// hero, and the role's letter in its colour. An unsure hero is amber.
+fn hero_cell(g: &Game, unsure: bool) -> Element<'static, Message> {
+    let r = row![
         portrait(20.0, 14.0),
-        text(g.display_hero()).size(SIZE_META).color(TEXT_2),
+        text(g.display_hero())
+            .size(SIZE_META)
+            .color(if unsure { WARN } else { TEXT_2 }),
         text(role_letter(g.role))
             .size(SIZE_LABEL)
             .font(FONT_BOLD)
             .color(theme::role_color(g.role)),
     ]
     .spacing(6)
-    .align_y(Alignment::Center)
-    .into()
+    .align_y(Alignment::Center);
+    with_warn(r.into(), unsure)
 }
 
 /// The grey placeholder portrait: a `size` square with a silhouette.
@@ -439,25 +485,24 @@ pub(crate) fn portrait(size: f32, icon: f32) -> Element<'static, Message> {
     .into()
 }
 
-/// The row's marks: amber warning chips, then the red upload chip. The
-/// no-outcome chip opens the game to set one.
+/// The row's one mark ([`games_rows::mark`]). The no-outcome chip opens
+/// the game to set one; on an open row it does nothing more.
 fn marks_cell(g: &Game, in_progress: bool) -> Element<'static, Message> {
-    let mut r = row![].spacing(6).align_y(Alignment::Center);
-    for mark in games_rows::marks(g, in_progress) {
-        let chip = if mark.is_warning() {
-            warn_chip(mark.label())
-        } else {
-            small_chip_owned(mark.label(), theme::DANGER, theme::DANGER)
-        };
-        r = r.push(if mark == Mark::NoOutcome {
-            mouse_area(chip)
-                .on_press(Message::ToggleGame(g.session_id.clone()))
-                .into()
-        } else {
-            chip
-        });
+    let Some(mark) = games_rows::mark(g, in_progress) else {
+        return space().into();
+    };
+    let chip = if mark.is_warning() {
+        warn_chip(mark.label())
+    } else {
+        small_chip_owned(mark.label(), theme::DANGER, theme::DANGER)
+    };
+    if mark == Mark::NoOutcome {
+        mouse_area(chip)
+            .on_press(games_msg(Msg::Open(g.session_id.clone())))
+            .into()
+    } else {
+        chip
     }
-    r.into()
 }
 
 /// An amber outline chip with the warning sign.

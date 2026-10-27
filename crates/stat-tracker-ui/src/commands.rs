@@ -78,12 +78,40 @@ pub fn resolve_segment(
     )
 }
 
+/// Queue the Edit form's changes and say what they did. A typed map goes
+/// through [`stat_tracker::parse::canonical_map`] ("kings row" is King's
+/// Row) and must be a known map, and a typed hero must be on the hero list
+/// in any case, so the store holds the names the reader and the website
+/// use. A game held back for a missing map or hero uploads once both are
+/// set; the message says when one is still missing.
 pub fn save_edit(
     data_dir: &Path,
     game: &Game,
     form: &crate::model::EditForm,
-) -> Result<(), String> {
-    edit_match(data_dir, &game.session_id, form.diff(game))
+) -> Result<&'static str, String> {
+    let mut edit = form.diff(game);
+    if let Some(typed) = edit.map_name.take() {
+        let map = stat_tracker::parse::canonical_map(&typed)
+            .filter(|m| stat_tracker::parse::map_is_known(m))
+            .ok_or_else(|| format!("Map not found: {typed}. Type a map name like King's Row"))?;
+        edit.map_name = (map != game.map_name).then_some(map);
+    }
+    if let Some(typed) = edit.hero.take() {
+        let hero = scuffed_types::HEROES
+            .iter()
+            .find(|h| h.eq_ignore_ascii_case(typed.trim()))
+            .ok_or_else(|| format!("Hero not found: {typed}. Type a hero name like Ana"))?;
+        edit.hero = (*hero != game.hero).then(|| hero.to_string());
+    }
+    let map = edit.map_name.as_deref().unwrap_or(&game.map_name);
+    let hero = edit.hero.as_deref().unwrap_or(&game.hero);
+    let held = !stat_tracker::parse::review_suspect_fields(map, "", hero).is_empty();
+    edit_match(data_dir, &game.session_id, edit)?;
+    Ok(if held {
+        "Saved. A map or hero is still missing, so this game stays on this computer."
+    } else {
+        "Stats corrected"
+    })
 }
 
 /// Queue a map picked from [`stat_tracker::parse::known_map_names`].
@@ -167,6 +195,78 @@ mod tests {
             synced: false,
             recognizer: String::new(),
         }
+    }
+
+    fn held_game() -> Game {
+        let mut g = sample_game();
+        g.map_name = String::new();
+        g
+    }
+
+    fn queued_edit(dir: &Path) -> MatchEdit {
+        match queued(dir).pop() {
+            Some(StoreCommand::EditMatch { edit, .. }) => edit,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A hand-typed map is stored as the reader and the site name it, and
+    /// a known map releases a game held back for a missing one.
+    #[test]
+    fn a_typed_map_is_canonical_and_releases_the_hold() {
+        let dir = tmp();
+        let g = held_game();
+        assert!(g.needs_review());
+        let mut form = EditForm::from_game(&g);
+        form.map_name = "kings row".into();
+        assert_eq!(save_edit(&dir, &g, &form).unwrap(), "Stats corrected");
+        let edit = queued_edit(&dir);
+        assert_eq!(edit.map_name.as_deref(), Some("King's Row"));
+        let mut after = g.clone();
+        after.map_name = edit.map_name.unwrap();
+        assert!(!after.needs_review());
+    }
+
+    #[test]
+    fn an_unknown_map_is_refused_and_nothing_is_queued() {
+        let dir = tmp();
+        let g = held_game();
+        let mut form = EditForm::from_game(&g);
+        form.map_name = "Not A Real Place".into();
+        let err = save_edit(&dir, &g, &form).unwrap_err();
+        assert_eq!(
+            err,
+            "Map not found: Not A Real Place. Type a map name like King's Row"
+        );
+        assert!(queued(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_hero_matches_the_list_in_any_case() {
+        let dir = tmp();
+        let g = sample_game();
+        let mut form = EditForm::from_game(&g);
+        form.hero = "kiriko".into();
+        save_edit(&dir, &g, &form).unwrap();
+        assert_eq!(queued_edit(&dir).hero.as_deref(), Some("Kiriko"));
+        form.hero = "Nobody".into();
+        assert!(
+            save_edit(&dir, &g, &form)
+                .unwrap_err()
+                .starts_with("Hero not found")
+        );
+    }
+
+    /// A stat edit on a held game saves, and says the game stays local.
+    #[test]
+    fn a_stat_edit_on_a_held_game_says_it_stays_local() {
+        let dir = tmp();
+        let g = held_game();
+        let mut form = EditForm::from_game(&g);
+        form.elims = "20".into();
+        let msg = save_edit(&dir, &g, &form).unwrap();
+        assert!(msg.contains("stays on this computer"), "{msg}");
+        assert_eq!(queued_edit(&dir).elims, Some(20));
     }
 
     #[test]

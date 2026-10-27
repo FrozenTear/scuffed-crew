@@ -144,6 +144,15 @@ pub struct SessionGroup {
 /// Matches `Config::session_window_secs` default (30 minutes).
 pub const DEFAULT_SESSION_GAP: chrono::TimeDelta = chrono::TimeDelta::seconds(1800);
 
+/// A window or gap of `secs` seconds as a `TimeDelta`. A value too big for
+/// one (a hand-edited config) saturates instead of panicking.
+pub fn secs_delta(secs: u64) -> chrono::TimeDelta {
+    i64::try_from(secs)
+        .ok()
+        .and_then(chrono::TimeDelta::try_seconds)
+        .unwrap_or(chrono::TimeDelta::MAX)
+}
+
 /// Filter + aggregate. `window = None` is all time. `role = None` keeps every role.
 pub fn aggregate(games: &[Game], window: Option<SeasonWindow>, role: Option<Role>) -> Aggregates {
     aggregate_filtered(

@@ -1,8 +1,11 @@
 //! The 0.6 filter chips on the Games tab (spec p2), ported from #555:
 //! Season, queues, roles, Crew, Hero and Map. A chip that filters reads as
 //! an accent outline with its value and "×" to clear it ("Season 5 ×").
-//! One that does not is a dropdown ("Hero ▾"). Behind "Filters (n)" only
-//! the chips that filter show; opening it shows the dropdowns too.
+//! One that does not is a dropdown ("Hero" and its arrow). Roles are
+//! multi-select: each role on is its own chip, and the dropdown adds
+//! another. Behind "Filters (n)" only the chips that filter show; opening
+//! it shows the dropdowns too. The messages are the app's own, so any tab
+//! can use the chips.
 //!
 //! "All queues" and "Crew: anyone" are drawn disabled until the tracker
 //! stores a queue and a crew for each game.
@@ -11,8 +14,7 @@ use iced::widget::{Row, button, container, pick_list, row, text};
 use iced::{Alignment, Background, Border, Element, Padding, Theme};
 
 use crate::app::{Message, TrackerApp};
-use crate::games_table::Msg;
-use crate::model::{Role, RoleFilter, SeasonSel};
+use crate::model::{Outcome, Role, RoleFilter, SeasonSel};
 use crate::theme::{self, ACCENT, BORDER, FONT_SEMIBOLD, SIZE_META, SURFACE, TEXT, TEXT_2, TEXT_3};
 
 /// A season the Season dropdown offers.
@@ -41,16 +43,12 @@ impl std::fmt::Display for Pick {
     }
 }
 
-/// The role a single-role filter holds, if it holds exactly one.
-pub fn single_role(roles: RoleFilter) -> Option<Role> {
-    let on: Vec<Role> = [Role::Tank, Role::Damage, Role::Support]
+/// The roles the dropdown can still add, in the usual order.
+pub fn roles_to_add(roles: RoleFilter) -> Vec<Role> {
+    Role::all_playable()
         .into_iter()
-        .filter(|r| roles.is_on(*r))
-        .collect();
-    match on.as_slice() {
-        [one] => Some(*one),
-        _ => None,
-    }
+        .filter(|r| !roles.is_on(*r))
+        .collect()
 }
 
 /// Filters that are on: each is a "×" chip.
@@ -60,7 +58,7 @@ pub fn active_count(app: &TrackerApp) -> usize {
             matches!(app.season, SeasonSel::Season(_))
                 && crate::seasons::show_season_picker(&app.seasons.seasons),
         )
-        + usize::from(!app.roles.unrestricted())
+        + app.roles.selected_roles().len()
         + usize::from(app.filter_hero.is_some())
         + usize::from(app.filter_map.is_some())
         + usize::from(app.filter_outcome.is_some())
@@ -88,13 +86,28 @@ pub fn bar<'a>(
         chips = chips.push(season_chip(app));
     }
     if open {
-        chips = chips.push(disabled_chip("All queues ▾"));
+        chips = chips.push(disabled_chip("All queues"));
     }
-    if open || !app.roles.unrestricted() {
-        chips = chips.push(role_chip(app.roles));
+    for role in app.roles.selected_roles() {
+        chips = chips.push(set_chip(
+            role.label().to_string(),
+            Message::ToggleRole(role),
+        ));
+    }
+    let add = roles_to_add(app.roles);
+    if open && !add.is_empty() {
+        let label = if app.roles.unrestricted() {
+            "All roles"
+        } else {
+            "Add role"
+        };
+        let picks = add.into_iter().map(RolePick).collect();
+        chips = chips.push(dropdown_chip(picks, label, |r: RolePick| {
+            Message::ToggleRole(r.0)
+        }));
     }
     if open {
-        chips = chips.push(disabled_chip("Crew: anyone ▾"));
+        chips = chips.push(disabled_chip("Crew: anyone"));
     }
     if open || app.filter_hero.is_some() {
         chips = chips.push(value_chip(
@@ -119,17 +132,31 @@ pub fn bar<'a>(
             outcome.label().to_string(),
             Message::FilterOutcome(None),
         ));
+    } else if open {
+        let picks = [Outcome::Win, Outcome::Loss, Outcome::Draw]
+            .into_iter()
+            .map(OutcomePick)
+            .collect();
+        chips = chips.push(dropdown_chip(picks, "Any result", |o: OutcomePick| {
+            Message::FilterOutcome(Some(o.0))
+        }));
     }
     chips.wrap().into()
 }
 
-/// A filter the tracker has no data for yet: greyed, does nothing.
+/// A filter the tracker has no data for yet: greyed, does nothing. The
+/// arrow is the icon font's, as the page font has no "▾".
 fn disabled_chip(label: &'static str) -> Element<'static, Message> {
     container(
-        text(label)
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT_3),
+        row![
+            text(label)
+                .size(SIZE_META)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_3),
+            crate::settings_fixed::arrow().size(SIZE_META).color(TEXT_3),
+        ]
+        .spacing(6)
+        .align_y(Alignment::Center),
     )
     .padding(Padding::from([5, 12]))
     .style(|_: &Theme| container::Style {
@@ -171,32 +198,19 @@ fn season_chip(app: &TrackerApp) -> Element<'_, Message> {
     })
 }
 
-fn role_chip(roles: RoleFilter) -> Element<'static, Message> {
-    match single_role(roles) {
-        Some(role) => set_chip(
-            role.label().to_string(),
-            Message::Games(Msg::PickRole(None)),
-        ),
-        None if !roles.unrestricted() => set_chip(
-            "Some roles".to_string(),
-            Message::Games(Msg::PickRole(None)),
-        ),
-        None => dropdown_chip(
-            vec![
-                RolePick(Role::Tank),
-                RolePick(Role::Damage),
-                RolePick(Role::Support),
-            ],
-            "All roles",
-            |r: RolePick| Message::Games(Msg::PickRole(Some(r.0))),
-        ),
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RolePick(Role);
 
 impl std::fmt::Display for RolePick {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.0.label())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OutcomePick(Outcome);
+
+impl std::fmt::Display for OutcomePick {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.0.label())
     }
@@ -302,11 +316,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn one_role_on_is_a_single_role() {
+    fn the_role_dropdown_adds_the_roles_not_on() {
         let none = RoleFilter::default();
-        assert_eq!(single_role(none), None);
+        assert_eq!(roles_to_add(none), Role::all_playable().to_vec());
         let tank = none.toggle(Role::Tank);
-        assert_eq!(single_role(tank), Some(Role::Tank));
-        assert_eq!(single_role(tank.toggle(Role::Support)), None);
+        assert_eq!(roles_to_add(tank), vec![Role::Damage, Role::Support]);
+        let all = tank.toggle(Role::Damage).toggle(Role::Support);
+        assert!(roles_to_add(all).is_empty());
     }
 }

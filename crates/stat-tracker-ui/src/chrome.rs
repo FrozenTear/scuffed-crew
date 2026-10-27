@@ -184,7 +184,7 @@ fn page_body<'a>(
     content = content.push(
         responsive(move |size| match app.screen {
             Screen::Overview => crate::overview::view(app, size.width),
-            Screen::Games => crate::games::view(app, size.width),
+            Screen::Games => crate::games::view(app, size.width, size.width + 2.0 * pad_x),
             Screen::Heroes => crate::heroes::view(app, size.width),
             Screen::Maps => crate::maps::view(app, size.width),
             Screen::Seasons => crate::seasons::view(app, size.width),

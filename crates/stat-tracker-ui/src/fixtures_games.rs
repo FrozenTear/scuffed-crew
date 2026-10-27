@@ -298,7 +298,7 @@ mod tests {
         let n = game(&all, NORMAL);
         assert_eq!(games_detail::read_vs_set(n, Stat::E), Some((22, 24)));
         assert_eq!(games_detail::tracked(n), Tracked::Span(554));
-        assert_eq!(games_detail::upload(n), Upload::Uploaded);
+        assert_eq!(games_detail::upload(n, false, true), Upload::Uploaded);
         let avg = games_detail::averages(n, &all);
         assert_eq!(avg.window, 20);
         let deltas: Vec<_> = Stat::ALL
@@ -323,13 +323,13 @@ mod tests {
             games_detail::hero_split(u).line(),
             "Wrecking Ball 92% · Sigma 8% unconfirmed"
         );
-        assert_eq!(games_detail::upload(u), Upload::Waiting);
+        assert_eq!(games_detail::upload(u, false, true), Upload::Waiting);
 
         let d = game(&all, UNDECIDED);
         assert_eq!(d.outcome, Outcome::Unknown);
         assert_eq!(games_detail::tracked(d), Tracked::OneRead);
         assert!(games_detail::averages(d, &all).means.is_none());
-        assert!(games_detail::upload(d).rejected());
+        assert!(games_detail::upload(d, false, true).rejected());
     }
 
     #[test]

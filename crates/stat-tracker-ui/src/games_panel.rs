@@ -41,9 +41,10 @@ pub fn panel<'a>(
     // At 1024 the left column takes what the 420px tile column leaves.
     let left =
         container(left_column(g, in_progress)).width(if narrow { Fill } else { LEFT_W.into() });
-    let stats = stats_column(app, g, narrow);
-    let status = status_box(g);
-    let buttons = actions(g, has_kit, narrow);
+    let editing = app.editing && app.edit.session_id == g.session_id;
+    let stats = stats_column(app, g, narrow, in_progress);
+    let status = status_box(g, in_progress, app.sync_on());
+    let buttons = actions(g, has_kit, narrow, editing, in_progress);
     let mut body = if narrow {
         // "Only on this computer" ends the action row, after the buttons.
         let mut actions_row = row![container(status).width(Fill), buttons]
@@ -75,7 +76,7 @@ pub fn panel<'a>(
         ]
         .spacing(16)
     };
-    if app.editing && app.edit.session_id == g.session_id {
+    if editing {
         body = body.push(widgets::edit_form(&app.edit, &g.session_id));
     }
     body = body.push(footer(app.fixture.is_some()));
@@ -102,7 +103,7 @@ fn left_column(g: &Game, in_progress: bool) -> Element<'static, Message> {
     let unsure = |item| items.contains(&item);
     column![
         block("MAP", unsure(UnsureItem::Map), map_line(g)),
-        block("HEROES", unsure(UnsureItem::Hero), heroes(g)),
+        block("HEROES", unsure(UnsureItem::Hero), heroes(g, in_progress)),
         block("RESULT", unsure(UnsureItem::Result), result(g, in_progress)),
         block("TIME", false, time(g)),
     ]
@@ -144,12 +145,26 @@ fn map_line(g: &Game) -> Element<'static, Message> {
     if let Some(mode) = games_rows::mode_chip(&g.map_name) {
         r = r.push(small_chip(mode, TEXT_2, BORDER));
     }
-    r.into()
+    with_correction(r.into(), detail::read_vs_set_name(g, "map_name"))
 }
 
-/// The main hero, the 8px timeline bar, the split, and a prompt under
-/// each unconfirmed one-snapshot swap.
-fn heroes(g: &Game) -> Element<'static, Message> {
+/// `line` with "Read X, you set Y" under it for a hand fix.
+fn with_correction(
+    line: Element<'static, Message>,
+    correction: Option<String>,
+) -> Element<'static, Message> {
+    match correction {
+        Some(c) => column![line, text(c).size(SMALL).color(TEXT_2)]
+            .spacing(4)
+            .into(),
+        None => line,
+    }
+}
+
+/// The main hero, the 8px timeline bar, the split, a prompt under each
+/// unconfirmed one-snapshot swap, and an Undo for each dismissed run. No
+/// prompts while the game is still on: the runs are not final.
+fn heroes(g: &Game, in_progress: bool) -> Element<'static, Message> {
     let split = detail::hero_split(g);
     let head = row![
         portrait(24.0, 16.0),
@@ -201,25 +216,46 @@ fn heroes(g: &Game) -> Element<'static, Message> {
             .style(pill_box(BORDER)),
         iced::widget::tooltip::Position::Bottom,
     );
-    let mut col = column![head, bar, legend].spacing(8);
+    let mut col = column![
+        with_correction(head.into(), detail::read_vs_set_name(g, "hero")),
+        bar,
+        legend
+    ]
+    .spacing(8);
+    if in_progress {
+        return col.into();
+    }
+    let small_btn = |label: &'static str, index: u32, confirm: bool| {
+        button(text(label).size(SMALL).font(FONT_SEMIBOLD).color(TEXT))
+            .padding(Padding::from([3, 10]))
+            .style(theme::quiet_btn(6.0))
+            .on_press(Message::ResolveSegment {
+                session_id: g.session_id.clone(),
+                segment: index,
+                confirm,
+            })
+    };
     for (index, prompt) in split.swaps() {
-        let sid = g.session_id.clone();
-        let small_btn = |label: &'static str, confirm: bool| {
-            button(text(label).size(SMALL).font(FONT_SEMIBOLD).color(TEXT))
-                .padding(Padding::from([3, 10]))
-                .style(theme::quiet_btn(6.0))
-                .on_press(Message::ResolveSegment {
-                    session_id: sid.clone(),
-                    segment: index,
-                    confirm,
-                })
-        };
         col = col.push(
             column![
                 text(prompt).size(SMALL).color(TEXT_2),
-                row![small_btn("Confirm", true), small_btn("Dismiss", false)].spacing(4),
+                row![
+                    small_btn("Confirm", index, true),
+                    small_btn("Dismiss", index, false)
+                ]
+                .spacing(4),
             ]
             .spacing(4),
+        );
+    }
+    for (index, line) in detail::dismissed_runs(g) {
+        col = col.push(
+            row![
+                text(line).size(SMALL).color(TEXT_3),
+                small_btn("Undo", index, true)
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
         );
     }
     col.into()
@@ -366,12 +402,22 @@ fn time(g: &Game) -> Element<'static, Message> {
     col.into()
 }
 
-/// STATS with the unsure chip, the six tiles, and the one caption.
-fn stats_column<'a>(app: &'a TrackerApp, g: &Game, narrow: bool) -> Element<'a, Message> {
+/// STATS with the edited and unsure chips, the six tiles, and the one
+/// caption. While the game is on the tiles are the latest read, so the
+/// caption says that instead of comparing with the averages.
+fn stats_column<'a>(
+    app: &'a TrackerApp,
+    g: &Game,
+    narrow: bool,
+    in_progress: bool,
+) -> Element<'a, Message> {
     let mut head = row![section_label("STATS")]
         .spacing(10)
         .align_y(Alignment::Center);
-    if let Some(label) = games_rows::unsure_label(g) {
+    if g.edited {
+        head = head.push(small_chip("Edited", theme::WARN, theme::WARN));
+    }
+    if let Some(label) = g.unsure_label() {
         head = head.push(
             button(warn_chip(format!("{label} · Check")))
                 .padding(0)
@@ -379,11 +425,25 @@ fn stats_column<'a>(app: &'a TrackerApp, g: &Game, narrow: bool) -> Element<'a, 
                 .on_press(Message::ToggleEdit),
         );
     }
-    let avg = detail::averages(g, &app.games);
+    let avg = if in_progress {
+        detail::Averages {
+            hero: g.hero.clone(),
+            games: 0,
+            window: 0,
+            means: None,
+        }
+    } else {
+        detail::averages(g, &app.games)
+    };
     let tiles: Vec<Element<'static, Message>> = Stat::ALL
         .iter()
         .map(|&s| tile(g, s, &avg, narrow))
         .collect();
+    let caption = if in_progress {
+        crate::model::NOT_FINAL_NOTE.to_string()
+    } else {
+        avg.caption()
+    };
     let grid: Element<'static, Message> = if narrow {
         let mut it = tiles.into_iter();
         let mut rows = column![].spacing(8);
@@ -398,7 +458,7 @@ fn stats_column<'a>(app: &'a TrackerApp, g: &Game, narrow: bool) -> Element<'a, 
     } else {
         Row::with_children(tiles).spacing(8).width(Fill).into()
     };
-    column![head, grid, text(avg.caption()).size(SMALL).color(TEXT_3),]
+    column![head, grid, text(caption).size(SMALL).color(TEXT_3),]
         .spacing(10)
         .into()
 }
@@ -406,7 +466,7 @@ fn stats_column<'a>(app: &'a TrackerApp, g: &Game, narrow: bool) -> Element<'a, 
 /// One tile: the corrected value, an EDITED badge and "Read 22, you set
 /// 24" for a hand fix, then the delta or "Check first".
 fn tile(g: &Game, stat: Stat, avg: &detail::Averages, narrow: bool) -> Element<'static, Message> {
-    let unsure = games_rows::unsure_now(g, stat.flat());
+    let unsure = g.unsure_now(stat.flat());
     let mut extras = TileExtras {
         fill: true,
         ..TileExtras::default()
@@ -439,13 +499,15 @@ fn tile(g: &Game, stat: Stat, avg: &detail::Averages, narrow: bool) -> Element<'
 }
 
 /// The upload and reader status box. Only a rejected upload is coloured,
-/// always with the sign and the words.
-fn status_box(g: &Game) -> Element<'static, Message> {
-    let up = detail::upload(g);
+/// always with the sign and the words, and it has its own Retry. A game
+/// held for a missing map or hero reads "Needs a look" in amber.
+fn status_box(g: &Game, in_progress: bool, sync_on: bool) -> Element<'static, Message> {
+    let up = detail::upload(g, in_progress, sync_on);
     let rejected = up.rejected();
     let (icon, title_color) = match up {
         Upload::Uploaded => (Icon::Upload, TEXT),
-        Upload::Waiting => (Icon::Clock, TEXT),
+        Upload::Waiting | Upload::InProgress | Upload::SyncOff => (Icon::Clock, TEXT),
+        Upload::Held(_) => (Icon::Warn, theme::WARN),
         Upload::Rejected(_) => (Icon::WarnLoss, theme::DANGER),
     };
     let title = text(up.title())
@@ -459,11 +521,21 @@ fn status_box(g: &Game) -> Element<'static, Message> {
             .spacing(6)
             .align_y(Alignment::Center)
             .into(),
+        Upload::Rejected(_) => column![
+            title,
+            detail_line,
+            button(text("Retry").size(SMALL).font(FONT_SEMIBOLD).color(TEXT))
+                .padding(Padding::from([3, 10]))
+                .style(theme::quiet_btn(6.0))
+                .on_press(Message::RetryUpload(g.session_id.clone())),
+        ]
+        .spacing(6)
+        .into(),
         _ => column![title, detail_line].spacing(2).into(),
     };
     let border = if rejected { theme::DANGER } else { BORDER };
     container(
-        row![image(icons::handle(icon)).width(14).height(14), body]
+        row![image(icons::handle(icon)).width(12).height(12), body]
             .spacing(8)
             .align_y(Alignment::Start),
     )
@@ -482,16 +554,18 @@ fn status_box(g: &Game) -> Element<'static, Message> {
 
 /// An outlined button with an icon: full width in the right column, sized
 /// to its label in the 1024 action row.
+/// `msg` None draws it disabled.
 fn outline_btn(
     icon: Icon,
     label: &'static str,
     full: bool,
-    msg: Message,
+    msg: Option<Message>,
 ) -> Element<'static, Message> {
+    let color = if msg.is_some() { TEXT } else { TEXT_3 };
     let b = button(
         row![
-            image(icons::handle(icon)).width(14).height(14),
-            text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT),
+            image(icons::handle(icon)).width(12).height(12),
+            text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(color),
         ]
         .spacing(8)
         .align_y(Alignment::Center),
@@ -507,34 +581,41 @@ fn outline_btn(
         },
         ..button::Style::default()
     })
-    .on_press(msg);
+    .on_press_maybe(msg);
     if full { b.width(Fill).into() } else { b.into() }
 }
 
-/// Edit, Report misread, and Scoreboard picture only when one is saved.
-fn actions(g: &Game, has_kit: bool, narrow: bool) -> Element<'static, Message> {
+/// Edit ("Editing" while the form is open; pressing it closes the form),
+/// Report misread, and Scoreboard picture only when one is saved. Report
+/// waits for a saved picture while the game is on, as the classic card did.
+fn actions(
+    g: &Game,
+    has_kit: bool,
+    narrow: bool,
+    editing: bool,
+    in_progress: bool,
+) -> Element<'static, Message> {
     let sid = g.session_id.clone();
     let full = !narrow;
+    let report = (!in_progress || has_kit).then(|| {
+        Message::Report(ReportMessage::OpenGame {
+            session_id: Some(sid.clone()),
+            category: None,
+            training: false,
+            choices: Vec::new(),
+        })
+    });
+    let edit = if editing { "Editing" } else { "Edit" };
     let mut items = vec![
-        outline_btn(Icon::Pencil, "Edit", full, Message::ToggleEdit),
-        outline_btn(
-            Icon::Flag,
-            "Report misread",
-            full,
-            Message::Report(ReportMessage::OpenGame {
-                session_id: Some(sid.clone()),
-                category: None,
-                training: false,
-                choices: Vec::new(),
-            }),
-        ),
+        outline_btn(Icon::Pencil, edit, full, Some(Message::ToggleEdit)),
+        outline_btn(Icon::Flag, "Report misread", full, report),
     ];
     if has_kit {
         items.push(outline_btn(
             Icon::Picture,
             "Scoreboard picture",
             full,
-            Message::Games(Msg::OpenScoreboard(sid)),
+            Some(Message::Games(Msg::OpenScoreboard(sid))),
         ));
     }
     if narrow {
@@ -593,7 +674,14 @@ fn key_cap(label: &'static str) -> Element<'static, Message> {
         .into()
 }
 
-/// Esc, or an Enter no widget took, closes the open row.
+/// Whether Esc and Enter go to the open row: only under the top tabs,
+/// where the row opens this panel (the classic card has its own keys).
+pub fn listens(app: &TrackerApp) -> bool {
+    app.expanded.is_some() && app.nav_style == crate::nav::NavStyle::TopTabs
+}
+
+/// Esc or Enter that no widget took: Esc cancels an edit or closes the
+/// row, Enter closes it ([`crate::games_table::update`]).
 pub fn close_keys(
     event: iced::Event,
     status: iced::event::Status,
@@ -602,26 +690,34 @@ pub fn close_keys(
     let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
         return None;
     };
-    closes(&key, status).then_some(Message::Games(Msg::CloseOpen))
+    key_msg(&key, status).map(Message::Games)
 }
 
-fn closes(key: &iced::keyboard::Key, status: iced::event::Status) -> bool {
+fn key_msg(key: &iced::keyboard::Key, status: iced::event::Status) -> Option<Msg> {
     use iced::keyboard::{Key, key::Named};
+    if status != iced::event::Status::Ignored {
+        return None;
+    }
     match key {
-        Key::Named(Named::Escape) => true,
-        Key::Named(Named::Enter) => status == iced::event::Status::Ignored,
-        _ => false,
+        Key::Named(Named::Escape) => Some(Msg::Escape),
+        Key::Named(Named::Enter) => Some(Msg::Enter),
+        _ => None,
     }
 }
 
 /// The kit's scoreboard picture, opened in the desktop's image viewer.
-pub fn open_scoreboard(data_dir: &std::path::Path, sid: &str) {
+/// The error is the toast's words.
+pub fn open_scoreboard(data_dir: &std::path::Path, sid: &str) -> Result<(), String> {
     use stat_tracker::report::kit::{SCOREBOARD_PNG, session_dir};
-    if let Some(dir) = session_dir(data_dir, sid) {
-        let _ = std::process::Command::new("xdg-open")
-            .arg(dir.join(SCOREBOARD_PNG))
-            .spawn();
-    }
+    let path = session_dir(data_dir, sid)
+        .map(|dir| dir.join(SCOREBOARD_PNG))
+        .filter(|p| p.is_file())
+        .ok_or_else(|| "No scoreboard picture saved for this game".to_string())?;
+    std::process::Command::new("xdg-open")
+        .arg(&path)
+        .spawn()
+        .map(drop)
+        .map_err(|e| format!("Could not open the scoreboard picture: {e}"))
 }
 
 #[cfg(test)]
@@ -631,14 +727,49 @@ mod tests {
     use iced::keyboard::{Key, key::Named};
 
     #[test]
-    fn esc_closes_and_enter_only_when_nothing_took_it() {
+    fn esc_and_enter_count_only_when_nothing_took_them() {
         let esc = Key::Named(Named::Escape);
         let enter = Key::Named(Named::Enter);
-        assert!(closes(&esc, Status::Ignored));
-        assert!(closes(&esc, Status::Captured));
-        assert!(closes(&enter, Status::Ignored));
-        assert!(!closes(&enter, Status::Captured));
-        assert!(!closes(&Key::Named(Named::Tab), Status::Ignored));
+        assert_eq!(key_msg(&esc, Status::Ignored), Some(Msg::Escape));
+        assert_eq!(key_msg(&esc, Status::Captured), None);
+        assert_eq!(key_msg(&enter, Status::Ignored), Some(Msg::Enter));
+        assert_eq!(key_msg(&enter, Status::Captured), None);
+        assert_eq!(key_msg(&Key::Named(Named::Tab), Status::Ignored), None);
+    }
+
+    /// Esc cancels the edit first, then closes; Enter never closes over
+    /// the form; the classic layout keeps its own keys.
+    #[test]
+    fn esc_cancels_the_edit_before_closing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = crate::fixtures::test_cli(dir.path());
+        cli.fixture = Some(crate::cli::FixtureKind::Games);
+        let mut app = crate::app::TrackerApp::new(cli).0;
+        app.nav_style = crate::nav::NavStyle::TopTabs;
+        app.expanded = Some(crate::fixtures_games::NORMAL.into());
+        app.editing = true;
+        assert!(listens(&app));
+        let _ = crate::games_table::update(&mut app, Msg::Enter);
+        assert!(app.editing && app.expanded.is_some());
+        let _ = crate::games_table::update(&mut app, Msg::Escape);
+        assert!(!app.editing && app.expanded.is_some());
+        let _ = crate::games_table::update(&mut app, Msg::Escape);
+        assert_eq!(app.expanded, None);
+        app.expanded = Some(crate::fixtures_games::NORMAL.into());
+        let _ = crate::games_table::update(&mut app, Msg::Enter);
+        assert_eq!(app.expanded, None);
+        app.expanded = Some(crate::fixtures_games::NORMAL.into());
+        app.nav_style = crate::nav::NavStyle::ClassicSidebar;
+        assert!(!listens(&app));
+    }
+
+    #[test]
+    fn a_missing_scoreboard_picture_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            open_scoreboard(dir.path(), "nope"),
+            Err("No scoreboard picture saved for this game".into())
+        );
     }
 
     #[test]
@@ -659,7 +790,9 @@ mod tests {
         ] {
             let g = games.iter().find(|g| g.session_id == sid).unwrap();
             for narrow in [false, true] {
-                let _ = panel(&app, g, narrow, false);
+                for in_progress in [false, true] {
+                    let _ = panel(&app, g, narrow, in_progress);
+                }
             }
         }
     }

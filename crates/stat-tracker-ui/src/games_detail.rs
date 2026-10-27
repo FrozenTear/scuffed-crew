@@ -3,7 +3,6 @@
 //! corrected values and the upload and reader status. No iced here; the
 //! panel module draws it.
 
-use crate::games_rows::unsure_now;
 use crate::model::{Game, SegmentView};
 
 /// Per-tile deltas start at this many games on the hero (the spec's one
@@ -58,6 +57,20 @@ impl Stat {
             Stat::Dmg => "damage",
             Stat::Heal => "healing",
             Stat::Mit => "mitigation",
+        }
+    }
+
+    /// The largest value the averages trust, from the site's limits
+    /// (`scuffed_types`): a bigger count is a misread digit, so it stays
+    /// out of the mean as it does on the website.
+    pub fn plausible_max(self) -> u32 {
+        match self {
+            Stat::E => scuffed_types::PLAUSIBLE_ELIMS_MAX,
+            Stat::D => scuffed_types::PLAUSIBLE_DEATHS_MAX,
+            Stat::A => scuffed_types::PLAUSIBLE_ASSISTS_MAX,
+            Stat::Dmg => scuffed_types::STATS_UPLOAD_MAX_DAMAGE,
+            Stat::Heal => scuffed_types::STATS_UPLOAD_MAX_HEALING,
+            Stat::Mit => scuffed_types::STATS_UPLOAD_MAX_MITIGATION,
         }
     }
 
@@ -119,34 +132,39 @@ pub fn read_vs_set_line(stat: Stat, read: u32, set: u32) -> String {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Averages {
     pub hero: String,
-    /// Games on the hero, this one included.
+    /// Games on the hero up to this one, this one included.
     pub games: usize,
-    /// Other games the mean is taken over (at most [`AVG_WINDOW`]).
+    /// Earlier games the mean is taken over (at most [`AVG_WINDOW`]).
     pub window: usize,
-    /// Mean per stat in [`Stat::ALL`] order. `None` under [`AVG_MIN_GAMES`].
-    pub means: Option<[f64; 6]>,
+    /// Mean per stat in [`Stat::ALL`] order. `None` under [`AVG_MIN_GAMES`];
+    /// a stat with no trusted value in the window has no mean.
+    pub means: Option<[Option<f64>; 6]>,
 }
 
-/// Averages on `game`'s main hero over the newest other games on that hero.
+/// Averages on `game`'s main hero over the newest earlier games on that
+/// hero, so an old game is not compared with games played after it. Per
+/// stat, a value still unsure or past [`Stat::plausible_max`] is left out.
 pub fn averages(game: &Game, all: &[Game]) -> Averages {
     let hero = main_hero(game);
-    let same = |g: &&Game| g.display_hero().eq_ignore_ascii_case(&hero);
+    let start = game.started_at();
     let mut others: Vec<&Game> = all
         .iter()
-        .filter(|g| g.session_id != game.session_id)
-        .filter(same)
+        .filter(|g| g.session_id != game.session_id && g.started_at() < start)
+        .filter(|g| g.display_hero().eq_ignore_ascii_case(&hero))
         .collect();
-    others.sort_by_key(|g| std::cmp::Reverse(g.played_at));
+    others.sort_by_key(|g| std::cmp::Reverse(g.started_at()));
     let games = others.len() + 1;
     others.truncate(AVG_WINDOW);
     let window = others.len();
     let means = (games >= AVG_MIN_GAMES && window > 0).then(|| {
-        let mut m = [0.0; 6];
-        for (i, stat) in Stat::ALL.iter().enumerate() {
-            let sum: f64 = others.iter().map(|g| stat.value(g) as f64).sum();
-            m[i] = sum / window as f64;
-        }
-        m
+        Stat::ALL.map(|stat| {
+            let vals: Vec<f64> = others
+                .iter()
+                .filter(|g| !g.unsure_now(stat.flat()) && stat.value(g) <= stat.plausible_max())
+                .map(|g| f64::from(stat.value(g)))
+                .collect();
+            (!vals.is_empty()).then(|| vals.iter().sum::<f64>() / vals.len() as f64)
+        })
     });
     Averages {
         hero,
@@ -198,14 +216,14 @@ impl DeltaLine {
 
 /// The delta line for one tile. It uses the corrected value.
 pub fn delta_line(g: &Game, stat: Stat, avg: &Averages) -> DeltaLine {
-    if unsure_now(g, stat.flat()) {
+    if g.unsure_now(stat.flat()) {
         return DeltaLine::CheckFirst;
     }
-    let Some(means) = avg.means else {
-        return DeltaLine::None;
-    };
     let i = Stat::ALL.iter().position(|s| *s == stat).unwrap_or(0);
-    DeltaLine::Delta(format_delta(stat, stat.value(g) as f64 - means[i]))
+    match avg.means.and_then(|m| m[i]) {
+        Some(mean) => DeltaLine::Delta(format_delta(stat, f64::from(stat.value(g)) - mean)),
+        None => DeltaLine::None,
+    }
 }
 
 /// Signed delta with the sign always shown. U+2212 for minus.
@@ -421,19 +439,75 @@ impl HeroSplit {
     }
 }
 
+/// "Read Ilios, you set Lijiang Tower" for a map or hero set by hand
+/// (`field` is the store's edited name: "map_name" or "hero").
+pub fn read_vs_set_name(g: &Game, field: &str) -> Option<String> {
+    let (read, set, none) = match field {
+        "map_name" => (&g.ocr.map_name, &g.map_name, "no map"),
+        "hero" => (&g.ocr.hero, &g.hero, "no hero"),
+        _ => return None,
+    };
+    if !g.edited_fields.iter().any(|f| f == field) || read.eq_ignore_ascii_case(set) {
+        return None;
+    }
+    let read = read.trim();
+    let read = if read.is_empty() || read.eq_ignore_ascii_case("unknown") {
+        none
+    } else {
+        read
+    };
+    Some(format!("Read {read}, you set {set}"))
+}
+
+/// Dismissed runs, as (segment index, line), each with an Undo that
+/// confirms the run again.
+pub fn dismissed_runs(g: &Game) -> Vec<(u32, String)> {
+    g.segments
+        .iter()
+        .filter(|s| s.dismissed)
+        .map(|s| (s.index, format!("{} run dismissed", s.hero)))
+        .collect()
+}
+
 /// Upload and reader status.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Upload {
     Uploaded,
     Waiting,
     Rejected(String),
+    /// A map or hero is missing, so the uploader keeps the game back
+    /// (`sync::row_needs_review`). The names are what is missing.
+    Held(&'static str),
+    /// Still being played: it sends once the game ends.
+    InProgress,
+    /// No website linked: games stay on this computer.
+    SyncOff,
 }
 
-pub fn upload(g: &Game) -> Upload {
-    match g.upload_reject.as_deref() {
-        Some(msg) => Upload::Rejected(msg.to_string()),
-        None if g.synced => Upload::Uploaded,
-        None => Upload::Waiting,
+/// The game's upload state. `in_progress` is the open session, and
+/// `sync_on` whether a website is linked ([`crate::app::TrackerApp::sync_on`]).
+pub fn upload(g: &Game, in_progress: bool, sync_on: bool) -> Upload {
+    if let Some(msg) = g.upload_reject.as_deref() {
+        return Upload::Rejected(msg.to_string());
+    }
+    if g.synced {
+        return Upload::Uploaded;
+    }
+    let missing = g.review_fields();
+    let (map, hero) = (missing.contains(&"map"), missing.contains(&"hero"));
+    if map || hero {
+        return Upload::Held(match (map, hero) {
+            (true, true) => "map and hero",
+            (true, false) => "map",
+            _ => "hero",
+        });
+    }
+    if in_progress {
+        Upload::InProgress
+    } else if !sync_on {
+        Upload::SyncOff
+    } else {
+        Upload::Waiting
     }
 }
 
@@ -443,6 +517,9 @@ impl Upload {
             Upload::Uploaded => "Uploaded",
             Upload::Waiting => "Waiting to upload",
             Upload::Rejected(_) => "Upload rejected:",
+            Upload::Held(_) => "Needs a look",
+            Upload::InProgress => "Game in progress",
+            Upload::SyncOff => "Not uploading",
         }
     }
 
@@ -452,6 +529,15 @@ impl Upload {
             Upload::Uploaded => format!("Read by {recognizer}"),
             Upload::Waiting => format!("Read by {recognizer} · sends when the server answers"),
             Upload::Rejected(msg) => format!("Server: {msg}"),
+            Upload::Held(what) => {
+                format!(
+                    "The {what} is missing. This game stays on this computer until you set it with Edit."
+                )
+            }
+            Upload::InProgress => format!("Read by {recognizer} · sends after the game ends"),
+            Upload::SyncOff => {
+                "Only on this computer · sign in to the website in Settings to upload".into()
+            }
         }
     }
 
@@ -557,6 +643,13 @@ mod tests {
         all.push(game("h9", "Wrecking Ball", 18, 9200, at(11, 0, 0)));
         let ok = averages(&g, &all);
         assert_eq!((ok.games, ok.window), (10, 9));
+        assert!(
+            averages(&g, &all)
+                .means
+                .unwrap()
+                .iter()
+                .all(Option::is_some)
+        );
         assert_eq!(delta_line(&g, Stat::E, &ok).text().unwrap(), "+6 vs avg");
         assert_eq!(
             delta_line(&g, Stat::Dmg, &ok).text().unwrap(),
@@ -577,7 +670,30 @@ mod tests {
         all[0].elims = 100; // the oldest, outside the window
         let avg = averages(&g, &all);
         assert_eq!((avg.games, avg.window), (31, 20));
-        assert_eq!(avg.means.unwrap()[0], 18.0);
+        assert_eq!(avg.means.unwrap()[0], Some(18.0));
+    }
+
+    /// The mean leaves out newer games, other games' unsure values and
+    /// values past the site's limits.
+    #[test]
+    fn averages_skip_newer_unsure_and_implausible_values() {
+        let g = game("g", "Wrecking Ball", 20, 9000, at(23, 0, 0));
+        let mut all = history(12);
+        all[11].elims = 500;
+        all[10].suspect_fields = vec!["e".into()];
+        all[10].elims = 90;
+        all.push(game("new", "Wrecking Ball", 80, 9000, at(23, 30, 0)));
+        let avg = averages(&g, &all);
+        assert_eq!((avg.games, avg.window), (13, 12));
+        assert_eq!(avg.means.unwrap()[0], Some(18.0));
+        // Only implausible values: no mean, no delta line.
+        let mut all = history(12);
+        for h in &mut all {
+            h.deaths = 60;
+        }
+        let avg = averages(&g, &all);
+        assert_eq!(avg.means.unwrap()[1], None);
+        assert_eq!(delta_line(&g, Stat::D, &avg), DeltaLine::None);
     }
 
     #[test]
@@ -672,21 +788,97 @@ mod tests {
     #[test]
     fn upload_status_lines() {
         let mut g = game("g", "Wrecking Ball", 24, 1, at(20, 0, 0));
-        assert_eq!(upload(&g), Upload::Waiting);
+        assert_eq!(upload(&g, false, true), Upload::Waiting);
         assert_eq!(
-            upload(&g).detail(&g.recognizer),
+            upload(&g, false, true).detail(&g.recognizer),
             "Read by cv-v1 · sends when the server answers"
         );
+        assert_eq!(upload(&g, true, true), Upload::InProgress);
+        assert_eq!(
+            upload(&g, true, true).detail(&g.recognizer),
+            "Read by cv-v1 · sends after the game ends"
+        );
+        assert_eq!(upload(&g, false, false), Upload::SyncOff);
+        assert!(
+            upload(&g, false, false)
+                .detail("")
+                .contains("sign in to the website in Settings")
+        );
         g.synced = true;
-        assert_eq!(upload(&g).title(), "Uploaded");
-        assert_eq!(upload(&g).detail(&g.recognizer), "Read by cv-v1");
+        assert_eq!(upload(&g, false, true).title(), "Uploaded");
+        assert_eq!(
+            upload(&g, false, true).detail(&g.recognizer),
+            "Read by cv-v1"
+        );
+        g.synced = false;
         g.upload_reject = Some("reader version cv-v0 is no longer accepted.".into());
-        let u = upload(&g);
+        let u = upload(&g, false, true);
         assert!(u.rejected());
         assert_eq!(u.title(), "Upload rejected:");
         assert_eq!(
             u.detail(&g.recognizer),
             "Server: reader version cv-v0 is no longer accepted."
+        );
+    }
+
+    /// A game the uploader keeps back says so instead of "Waiting".
+    #[test]
+    fn a_held_game_needs_a_look_not_waiting() {
+        let mut g = game("g", "Wrecking Ball", 24, 1, at(20, 0, 0));
+        g.map_name.clear();
+        let u = upload(&g, false, true);
+        assert_eq!(u, Upload::Held("map"));
+        assert_eq!(u.title(), "Needs a look");
+        assert_eq!(
+            u.detail(""),
+            "The map is missing. This game stays on this computer until you set it with Edit."
+        );
+        g.hero = "Unknown".into();
+        assert_eq!(upload(&g, false, false), Upload::Held("map and hero"));
+        g.map_name = "Ilios".into();
+        assert_eq!(upload(&g, true, true), Upload::Held("hero"));
+        g.hero = "Mei".into();
+        assert_eq!(upload(&g, false, true), Upload::Waiting);
+    }
+
+    /// A hand-set map or hero shows what was read; an untouched one does not.
+    #[test]
+    fn hand_set_map_and_hero_say_what_was_read() {
+        let mut g = game("g", "Wrecking Ball", 24, 1, at(20, 0, 0));
+        g.ocr.map_name = String::new();
+        g.ocr.hero = "Unknown".into();
+        assert_eq!(read_vs_set_name(&g, "map_name"), None);
+        g.edited_fields = vec!["map_name".into(), "hero".into()];
+        assert_eq!(
+            read_vs_set_name(&g, "map_name").as_deref(),
+            Some("Read no map, you set Ilios")
+        );
+        assert_eq!(
+            read_vs_set_name(&g, "hero").as_deref(),
+            Some("Read no hero, you set Wrecking Ball")
+        );
+        g.ocr.map_name = "Lijiang Tower".into();
+        assert_eq!(
+            read_vs_set_name(&g, "map_name").as_deref(),
+            Some("Read Lijiang Tower, you set Ilios")
+        );
+        g.ocr.map_name = "ilios".into();
+        assert_eq!(read_vs_set_name(&g, "map_name"), None);
+        assert_eq!(read_vs_set_name(&g, "e"), None);
+    }
+
+    #[test]
+    fn dismissed_runs_offer_an_undo() {
+        let mut g = game("g", "Wrecking Ball", 24, 1, at(20, 0, 0));
+        g.segments = vec![
+            seg(0, "Wrecking Ball", 20, true, at(20, 0, 0), at(20, 9, 0)),
+            seg(1, "Mei", 1, false, at(20, 9, 0), at(20, 9, 30)),
+        ];
+        assert!(dismissed_runs(&g).is_empty());
+        g.segments[1].dismissed = true;
+        assert_eq!(
+            dismissed_runs(&g),
+            vec![(1, "Mei run dismissed".to_string())]
         );
     }
 }

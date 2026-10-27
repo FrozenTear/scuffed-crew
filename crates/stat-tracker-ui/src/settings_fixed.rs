@@ -15,9 +15,20 @@ use crate::theme::{
 
 /// The arrow a dropdown draws: iced's own icon font, as `pick_list` uses
 /// (the page font may have no "▾").
-fn arrow() -> iced::widget::Text<'static> {
+pub(crate) fn arrow() -> iced::widget::Text<'static> {
     use iced::advanced::text::Renderer as _;
     text(iced::Renderer::ARROW_DOWN_ICON.to_string()).font(iced::Renderer::ICON_FONT)
+}
+
+/// A sort header's arrow, from the same icon font: down when descending.
+pub(crate) fn sort_arrow(desc: bool) -> iced::widget::Text<'static> {
+    use iced::advanced::text::Renderer as _;
+    let icon = if desc {
+        iced::Renderer::SCROLL_DOWN_ICON
+    } else {
+        iced::Renderer::SCROLL_UP_ICON
+    };
+    text(icon.to_string()).font(iced::Renderer::ICON_FONT)
 }
 
 /// A dropdown that cannot be opened, showing `value`.
