@@ -21,6 +21,8 @@ pub fn hero_pack_hint(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn hero_pack_hint_shows_only_without_sync_and_without_a_hero_pack() {
         use stat_tracker::ocr_switch::PackReadiness;
@@ -30,32 +32,17 @@ mod tests {
             ..PackReadiness::default()
         };
         assert_eq!(
-            crate::hero_pack_hint::hero_pack_hint(false, Some(&none)),
-            Some(crate::hero_pack_hint::HERO_PACK_SYNC_HINT)
+            hero_pack_hint(false, Some(&none)),
+            Some(HERO_PACK_SYNC_HINT)
         );
+        assert_eq!(hero_pack_hint(true, Some(&none)), None, "sync on");
+        assert_eq!(hero_pack_hint(false, Some(&heroes)), None, "pack there");
+        assert_eq!(hero_pack_hint(true, Some(&heroes)), None);
+        assert_eq!(hero_pack_hint(false, None), None, "not checked yet");
         assert_eq!(
-            crate::hero_pack_hint::hero_pack_hint(true, Some(&none)),
-            None,
-            "sync on"
-        );
-        assert_eq!(
-            crate::hero_pack_hint::hero_pack_hint(false, Some(&heroes)),
-            None,
-            "pack there"
-        );
-        assert_eq!(
-            crate::hero_pack_hint::hero_pack_hint(true, Some(&heroes)),
-            None
-        );
-        assert_eq!(
-            crate::hero_pack_hint::hero_pack_hint(false, None),
-            None,
-            "not checked yet"
-        );
-        assert_eq!(
-            crate::hero_pack_hint::HERO_PACK_SYNC_HINT,
+            HERO_PACK_SYNC_HINT,
             "Hero names need site sync. Your stats still track normally."
         );
-        assert!(!crate::hero_pack_hint::HERO_PACK_SYNC_HINT.contains('\u{2014}'));
+        assert!(!HERO_PACK_SYNC_HINT.contains('\u{2014}'));
     }
 }
