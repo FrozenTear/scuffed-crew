@@ -281,8 +281,11 @@ fn ghost_btn(enabled: bool) -> impl Fn(&Theme, button::Status) -> button::Style 
     }
 }
 
-/// "Run setup again" on the left, the legend on the right.
+/// "Run setup again" on the left, the legend on the right. The legend
+/// words take the room left and wrap, right-aligned; the changed-dot key
+/// stays on one line, so the row never runs past the column (spec p9).
 fn setup_and_legend(demo: bool) -> Element<'static, Message> {
+    use iced::widget::text::{Alignment as TextAlign, Wrapping};
     Row::new()
         .spacing(16)
         .align_y(Alignment::Center)
@@ -290,22 +293,26 @@ fn setup_and_legend(demo: bool) -> Element<'static, Message> {
             RUN_SETUP_LABEL,
             (!demo).then_some(Message::Setup(crate::setup_guide::SetupMessage::Open)),
         ))
-        .push(space().width(Fill))
         .push(
             row![
                 text(LEGEND_APPLY)
                     .size(SIZE_LABEL)
                     .font(FONT_MEDIUM)
-                    .color(TEXT_3),
+                    .color(TEXT_3)
+                    .width(Fill)
+                    .align_x(TextAlign::Right),
                 changed_dot(),
                 text(LEGEND_CHANGED)
                     .size(SIZE_LABEL)
                     .font(FONT_MEDIUM)
-                    .color(TEXT_3),
+                    .color(TEXT_3)
+                    .wrapping(Wrapping::None),
             ]
             .spacing(LEGEND_DOT_GAP)
-            .align_y(Alignment::Center),
+            .align_y(Alignment::Center)
+            .width(Fill),
         )
+        .width(Fill)
         .into()
 }
 
@@ -592,6 +599,23 @@ mod tests {
         let right_edge = lines[1].bounds().x + actions.bounds().x + actions.bounds().width;
         assert!(right_edge <= inner.bounds().width + 0.5, "{right_edge}");
         assert!(actions.bounds().x > 0.0, "end-aligned");
+    }
+
+    /// Render fix (spec p9): at 1024 the legend wraps its words inside
+    /// the column and keeps the changed-dot key on one line.
+    #[test]
+    fn the_one_column_legend_stays_inside_the_column() {
+        let (_dir, app) = app();
+        let node = lay_out(view(&app, 976.0), 976.0);
+        let page = &node.children()[0];
+        // Demo note, the strip, then "Run setup again" and the legend.
+        let legend = &page.children()[2];
+        let words = &legend.children()[1];
+        let right = legend.bounds().x + words.bounds().x + words.bounds().width;
+        assert!(right <= page.bounds().width + 0.5, "{right}");
+        // The changed-dot key is one line, not squeezed into a stack.
+        let key = &words.children()[2];
+        assert!(key.bounds().height < 20.0, "{:?}", key.bounds());
     }
 
     #[test]
