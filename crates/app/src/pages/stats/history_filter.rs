@@ -361,7 +361,7 @@ mod tests {
 
     #[test]
     fn map_rows_count_results_and_sort_by_games() {
-        let rows = vec![
+        let rows = [
             row("Ilios", "Control", "Support", "Ana", "victory"),
             row("Havana", "Escort", "Tank", "Reinhardt", "defeat"),
             row("ilios", "Control", "Support", "Ana", "defeat"),
