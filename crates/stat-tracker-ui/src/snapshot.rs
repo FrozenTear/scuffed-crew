@@ -81,10 +81,10 @@ mod tests {
                 .as_nanos()
         ));
         let snap = install_fixture(&dir, FixtureKind::Sample).expect("install");
-        assert_eq!(snap.matches.len(), 7);
+        assert_eq!(snap.matches.len(), 5);
         assert_eq!(snap.sessions.len(), 2);
         let games = games_from_snapshot(&snap);
-        assert_eq!(games.len(), 7);
+        assert_eq!(games.len(), 5);
         assert_eq!(games[0].hero, "Junker Queen");
         assert_eq!(games[0].map_name, "King's Row");
         assert!(

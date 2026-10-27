@@ -13,6 +13,15 @@ pub enum FixtureKind {
 }
 
 impl FixtureKind {
+    /// The `--fixture` value.
+    pub fn name(self) -> &'static str {
+        match self {
+            FixtureKind::Empty => "empty",
+            FixtureKind::Sample => "sample",
+            FixtureKind::Games => "games",
+        }
+    }
+
     /// A fixture with games and the sample season list.
     pub fn has_games(self) -> bool {
         self != FixtureKind::Empty
@@ -99,8 +108,11 @@ impl Cli {
 
         let config = Config::load().unwrap_or_default();
         let data_dir = data_dir.unwrap_or_else(|| {
-            if fixture.is_some() {
-                std::env::temp_dir().join("scuffed-stat-tracker-ui-fixture")
+            // One dir per kind, so the games kit pictures never show up
+            // in a later sample run.
+            if let Some(kind) = fixture {
+                std::env::temp_dir()
+                    .join(format!("scuffed-stat-tracker-ui-fixture-{}", kind.name()))
             } else {
                 config.data_dir.clone()
             }

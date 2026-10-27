@@ -93,11 +93,11 @@ Acceptance: for a **synced** account, season totals on this screen equal My Stat
 
 1. Start the tracker daemon as usual (`stat-tracker` / systemd unit). It owns SurrealKV and polls `<data_dir>/commands/`.
 2. Start this GUI against the same `--data-dir` (or the config/XDG default).
-3. Open **Games**, click a card so it expands, then:
-   - **Victory / Defeat / Draw** → `StoreCommand::SetOutcome`
-   - **Edit stats** → change a field → **Save corrections** → `StoreCommand::EditMatch`
-   - **Delete session** (click twice) → `StoreCommand::DeleteSession`
-   - Hero timeline **Confirm / Dismiss** → `StoreCommand::ResolveSegment` (`confirm` / `dismiss`)
+3. Open **Games** and click a row so it opens, then:
+   - Result **Win / Loss / Draw** → `StoreCommand::SetOutcome`
+   - **Edit** → change a field → **Save corrections** → `StoreCommand::EditMatch` (the map must be one the reader knows; a missing map or hero holds the upload until it is set)
+   - Hero timeline **Confirm / Dismiss**, and **Undo** on a dismissed run → `StoreCommand::ResolveSegment` (`confirm` / `dismiss`)
+   - The 0.6 top tabs have no Delete yet. Under the classic sidebar layout the card still has **Victory / Defeat / Draw** and **Delete session** (click twice) → `StoreCommand::DeleteSession`.
 4. The GUI writes `cmd_<nanos>_<pid>.json` via `storage::queue_command` (tmp + rename).
 5. The daemon applies the file, deletes it, and rewrites `live_snapshot.json`. The GUI polls mtime at 1 Hz and refreshes.
 
@@ -121,7 +121,7 @@ Fixture mode still writes those files (under the fixture `--data-dir`); there is
 | Flag | Meaning |
 |------|---------|
 | `--data-dir PATH` | Daemon data dir (default: config / XDG; temp dir when `--fixture` is set) |
-| `--fixture empty\|sample` | Write a demo `live_snapshot.json` and read it back through `storage::read_snapshot` |
+| `--fixture empty\|sample\|games` | Write a demo `live_snapshot.json` and read it back through `storage::read_snapshot`. `games` is the Games tab set: every row and panel state, with scoreboard pictures. |
 | `--companion` | Run the layer-shell overlay only (needs niri / wlr-layer-shell). |
 | `--seasons-url URL` | `GET /api/public/seasons`; cached to `<data_dir>/seasons.json`. Ignored with `--fixture`. |
 

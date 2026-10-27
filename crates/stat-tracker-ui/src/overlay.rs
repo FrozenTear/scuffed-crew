@@ -162,7 +162,7 @@ pub fn live_active_game_key(
     }
     let last = parse_last_activity(&v)?;
     let age = now.signed_duration_since(last);
-    if age < TimeDelta::zero() || age > TimeDelta::seconds(window_secs as i64) {
+    if age < TimeDelta::zero() || age > crate::aggregate::secs_delta(window_secs) {
         return None;
     }
     Some(id.to_string())
@@ -471,11 +471,7 @@ pub fn spawn_companion(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     if let Some(kind) = fixture {
-        cmd.arg("--fixture").arg(match kind {
-            FixtureKind::Empty => "empty",
-            FixtureKind::Sample => "sample",
-            FixtureKind::Games => "games",
-        });
+        cmd.arg("--fixture").arg(kind.name());
     }
     let child = cmd.spawn()?;
     let _ = std::fs::write(companion_pid_path(data_dir), child.id().to_string());
@@ -1146,17 +1142,15 @@ mod tests {
             true,
         );
         assert_eq!(model.season_label, "Season 17");
-        // Tonight's 2-1 plus the 1 Sep Lúcio win; the undecided Mei game
-        // has no outcome to count.
-        assert_eq!(model.record.wins, 3);
+        assert_eq!(model.record.wins, 2);
         assert_eq!(model.record.losses, 1);
         assert!(
-            model.win_rate_line().contains("75%"),
+            model.win_rate_line().contains("67%"),
             "{}",
             model.win_rate_line()
         );
         assert!(
-            model.win_rate_line().contains("3-1"),
+            model.win_rate_line().contains("2-1"),
             "{}",
             model.win_rate_line()
         );

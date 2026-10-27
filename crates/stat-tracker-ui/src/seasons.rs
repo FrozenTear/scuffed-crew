@@ -714,25 +714,24 @@ mod tests {
             serde_json::from_str(fixtures::sample_seasons_json()).expect("sample seasons");
         let rows = season_rows(&games, &seasons);
         assert_eq!(rows.len(), 3);
-        assert_eq!(rows[0].record.games, 7);
+        assert_eq!(rows[0].record.games, 5);
         assert_eq!(
             (
                 rows[0].record.wins,
                 rows[0].record.losses,
                 rows[0].record.draws
             ),
-            (4, 2, 0)
+            (3, 2, 0)
         );
         // S16: Rein win + Soldier loss (18 Aug).
         assert_eq!(rows[1].name, "Season 16");
         assert_eq!(rows[1].record.games, 2);
         assert_eq!((rows[1].record.wins, rows[1].record.losses), (1, 1));
-        // S17 (current): JQ win, Ashe loss, Ana win (2 Sep); Lúcio win
-        // and Mei undecided (1 Sep).
+        // S17 (current): JQ win, Ashe loss, Ana win (2 Sep).
         assert_eq!(rows[2].name, "Season 17");
         assert!(rows[2].is_current);
-        assert_eq!(rows[2].record.games, 5);
-        assert_eq!((rows[2].record.wins, rows[2].record.losses), (3, 1));
+        assert_eq!(rows[2].record.games, 3);
+        assert_eq!((rows[2].record.wins, rows[2].record.losses), (2, 1));
         assert_eq!(
             default_selection(&seasons),
             SeasonSel::Season("season-17".into())
