@@ -78,6 +78,10 @@ impl Tally {
     }
 
     /// Some games but under [`RATE_MIN_DECIDED`] decided: "Too few games".
+    ///
+    /// This is also true for 1 or 2 games, so check [`Tally::folds_away`]
+    /// first: under [`RECORD_MIN_GAMES`] the hero folds or the row mutes,
+    /// and only the rest reads "Too few games".
     pub fn too_few(&self) -> bool {
         self.games > 0 && !self.has_win_rate()
     }
