@@ -225,3 +225,53 @@ fn turning_sync_off_removes_only_the_keys_settings_wrote() {
     assert!(!text.contains("token = \"tok\""), "{text}");
     assert_kept(&text, &["[sync]", "note = \"mine\""]);
 }
+
+#[test]
+fn a_removed_key_leaves_the_comments_above_it() {
+    // A root key: its comment moves onto the next key.
+    let (text, _) = save(HAND, |c| c.player_name = None);
+    assert!(!text.contains("player_name"), "{text}");
+    assert_kept(
+        &text,
+        &["\n# who you are\ncapture_output = \"DP-1\" # main screen\n"],
+    );
+
+    // The first key of the file: the head comment stays at the top.
+    let head = "# top\nplayer_name = \"Ada\"\ndata_dir = \"/merge/data\"\n";
+    let (text, _) = save(head, |c| c.player_name = None);
+    assert!(
+        text.starts_with("# top\ndata_dir = \"/merge/data\"\n"),
+        "{text}"
+    );
+
+    // A key inside a table.
+    let table = "\
+data_dir = \"/merge/data\"
+
+[auto_detect]
+enabled = true
+# how often
+poll_interval_secs = 4
+cooldown_secs = 120
+";
+    let (text, next) = save(table, |c| c.auto_detect.poll_interval_secs = None);
+    assert_eq!(next.auto_detect.poll_interval_secs, None);
+    assert!(!text.contains("poll_interval_secs"), "{text}");
+    assert_kept(
+        &text,
+        &["enabled = true\n# how often\ncooldown_secs = 120\n"],
+    );
+
+    // The last root key: the comment goes onto the table header after it.
+    let last = "\
+data_dir = \"/merge/data\"
+# the screen
+capture_output = \"DP-1\"
+
+[auto_detect]
+enabled = true
+";
+    let (text, _) = save(last, |c| c.capture_output = None);
+    assert!(!text.contains("capture_output"), "{text}");
+    assert_kept(&text, &["# the screen\n\n[auto_detect]"]);
+}

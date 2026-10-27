@@ -10,8 +10,11 @@
 //! A changed key keeps its own comments: the value is replaced and its
 //! decoration (spacing and a trailing comment) is copied over. A new key goes
 //! at the end of its table. A key the struct no longer writes (an `Option`
-//! that is now `None`, or a default the format leaves out) is removed, with
-//! the comment lines directly above it.
+//! that is now `None`, or a default the format leaves out) is removed with
+//! its own line, a comment at the end of that line included. The comment
+//! lines directly above it move onto the key or table header that follows
+//! it in the same table. Only when no such line follows (it was the last
+//! entry, or the next is a dotted key) do they go with it.
 
 use toml_edit::{DocumentMut, Item, Table, TableLike};
 
@@ -71,7 +74,51 @@ fn remove_known(doc: &mut dyn TableLike, key: &str, old: &toml::Value) {
             return;
         }
     }
+    remove_keeping_comments(doc, key);
+}
+
+/// Remove `key` from `doc` and put the comment lines above it in front of
+/// the next key or table header of `doc`, so they stay where they were.
+fn remove_keeping_comments(doc: &mut dyn TableLike, key: &str) {
+    let above = leading(doc, key).filter(|text| text.contains('#'));
+    let next = doc
+        .iter()
+        .map(|(k, _)| k)
+        .skip_while(|k| *k != key)
+        .nth(1)
+        .map(str::to_owned);
     doc.remove(key);
+    if let (Some(above), Some(next)) = (above, next) {
+        let below = leading(doc, &next).unwrap_or_default();
+        set_leading(doc, &next, format!("{above}{below}"));
+    }
+}
+
+/// The text before `key`'s line: a table's header decor, else the key's.
+fn leading(doc: &dyn TableLike, key: &str) -> Option<String> {
+    let decor = match doc.get(key)? {
+        Item::Table(table) => table.decor(),
+        Item::Value(_) => doc.key(key)?.leaf_decor(),
+        _ => return None,
+    };
+    decor.prefix()?.as_str().map(str::to_owned)
+}
+
+/// Set the text before `key`'s line, where [`leading`] reads it. A table
+/// that is not written as its own header (dotted or implicit) has no such
+/// text, so it is left alone.
+fn set_leading(doc: &mut dyn TableLike, key: &str, text: String) {
+    match doc.get_mut(key) {
+        Some(Item::Table(table)) if !table.is_implicit() && !table.is_dotted() => {
+            table.decor_mut().set_prefix(text);
+        }
+        Some(Item::Value(_)) => {
+            if let Some(mut k) = doc.key_mut(key) {
+                k.leaf_decor_mut().set_prefix(text);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn set_key(

@@ -1,6 +1,8 @@
 //! In-place edits of `config.toml`: [`Config::text_for_save`] and the
 //! first-run guide's [`Config::apply_setup_patch`]. A hand-edited file keeps
-//! its comments, order and unknown keys whatever a save changes.
+//! its comments, order and unknown keys whatever a save changes. A key a
+//! save removes takes only its own line (a comment at the end of it
+//! included); the comment lines above it stay (`merge`).
 
 use super::file::{atomic_write_600, unreadable_config};
 use super::parse_error::{TomlFailure, describe};
