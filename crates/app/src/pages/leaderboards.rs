@@ -1,4 +1,4 @@
-//! Public leaderboards page (#6).
+//! Public leaderboards page.
 
 use dioxus::prelude::*;
 use serde::Deserialize;
@@ -7,7 +7,7 @@ use scuffed_api_client::ApiClient;
 
 use crate::components::ui::{Card, HeroSelect, Pill, PillTone, SeasonSelect, use_stats_season};
 use crate::routes::Route;
-use crate::sample::{LIST_RULE_NOTE, ListResult, list_result};
+use crate::sample::{LIST_RULE_NOTE, ListResult, RATE_MIN_GAMES, list_result};
 use crate::util::encode_query;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -111,6 +111,20 @@ const PAGE_CSS: &str = r#"
         font-size: 0.8rem;
         margin: 0.75rem 0 0;
     }
+    .lb-unranked {
+        margin-top: 1.5rem;
+    }
+    .lb-unranked h2 {
+        font-family: var(--font-head);
+        font-size: 1.1rem;
+        margin: 0 0 0.25rem;
+        color: var(--text);
+    }
+    .lb-unranked-sub {
+        color: var(--text-3);
+        font-size: 0.8rem;
+        margin: 0 0 0.75rem;
+    }
     .lb-num {
         font-family: var(--font-mono);
         font-variant-numeric: tabular-nums;
@@ -206,6 +220,65 @@ fn wr_cell(row: &LeaderboardRow) -> ListResult {
     list_result(row.games, row.wins, row.losses, row.draws, row.winrate)
 }
 
+/// Fewest games to be ranked on the Win rate board. The server still
+/// sends rows from `LEADERBOARD_MIN_GAMES` (5); rows below this floor move
+/// to the unranked list. The K/D and Games boards are not split.
+const WINRATE_RANK_MIN_GAMES: u32 = RATE_MIN_GAMES;
+
+/// Caption under the ranked Win rate table.
+const WINRATE_BOARD_NOTE: &str = "Ranked by win rate from 10 games.";
+/// Status line when the Win rate board has rows but none with 10 games.
+const WINRATE_NONE_RANKED: &str = "Nobody has 10 games yet.";
+/// Heading of the unranked list under the Win rate board.
+const UNRANKED_TITLE: &str = "Not enough games yet";
+/// Caption under the unranked heading.
+const UNRANKED_NOTE: &str = "Record so far. Players join the win rate ranking at 10 games.";
+
+/// Rows for one board: `ranked` in the server's order, and `unranked`
+/// for the list under the Win rate board.
+#[derive(Debug, Clone, PartialEq)]
+struct BoardSplit {
+    ranked: Vec<LeaderboardRow>,
+    unranked: Vec<LeaderboardRow>,
+}
+
+/// Split a board's rows. On the Win rate board, rows with fewer than
+/// [`WINRATE_RANK_MIN_GAMES`] games leave the ranking and go to
+/// `unranked`, most games first, then by name. Ranked rows keep the
+/// server's order (by win rate). Other boards keep every row ranked.
+fn board_split(metric: &str, rows: &[LeaderboardRow]) -> BoardSplit {
+    if metric != "winrate" {
+        return BoardSplit {
+            ranked: rows.to_vec(),
+            unranked: Vec::new(),
+        };
+    }
+    let (ranked, mut unranked): (Vec<_>, Vec<_>) = rows
+        .iter()
+        .cloned()
+        .partition(|r| r.games >= WINRATE_RANK_MIN_GAMES);
+    unranked.sort_by(|a, b| {
+        b.games
+            .cmp(&a.games)
+            .then_with(|| {
+                a.display_name
+                    .to_lowercase()
+                    .cmp(&b.display_name.to_lowercase())
+            })
+            .then_with(|| a.member_id.cmp(&b.member_id))
+    });
+    BoardSplit { ranked, unranked }
+}
+
+/// Caption under a board's ranked table.
+fn board_note(metric: &str) -> &'static str {
+    if metric == "winrate" {
+        WINRATE_BOARD_NOTE
+    } else {
+        LIST_RULE_NOTE
+    }
+}
+
 /// Accent pill for a win rate, neutral pill for a record.
 fn wr_tone(wr: &ListResult) -> PillTone {
     if wr.is_rate {
@@ -252,10 +325,12 @@ pub fn Leaderboards() -> Element {
         // Empty while a saved season is unresolved. Do not send it raw.
         let url = season.fetch_path(&url);
         async move {
+            // The board travels with its rows, so a tab switch never splits
+            // the previous board's rows by the new board's rule.
             if let Some(held) = leaderboard_hold(&url) {
-                return held;
+                return (m, held);
             }
-            match ApiClient::web().fetch::<LeaderboardPayload>(&url).await {
+            let load = match ApiClient::web().fetch::<LeaderboardPayload>(&url).await {
                 Ok(payload) => {
                     shown_at.set(parse_cached_at(payload.cached_at.as_deref()));
                     LeaderboardLoad::Rows(payload.rows)
@@ -264,9 +339,27 @@ pub fn Leaderboards() -> Element {
                     shown_at.set(None);
                     LeaderboardLoad::Failed
                 }
-            }
+            };
+            (m, load)
         }
     });
+    let (message, split, note) = {
+        let snapshot = rows.read();
+        let message =
+            leaderboard_message(snapshot.as_ref().map(|(_, load)| load), hero().is_some());
+        let (split, note) = match snapshot.as_ref() {
+            Some((board, LeaderboardLoad::Rows(list))) => {
+                (Some(board_split(board, list)), board_note(board))
+            }
+            _ => (None, LIST_RULE_NOTE),
+        };
+        (message, split, note)
+    };
+    // Only a rendered board has an unranked list.
+    let unranked = match (message, split.as_ref()) {
+        (None, Some(split)) => split.unranked.clone(),
+        _ => Vec::new(),
+    };
     let _tick = label_tick();
     let updated = match shown_at() {
         Some(at) => updated_label(at, chrono::Utc::now()),
@@ -325,58 +418,99 @@ pub fn Leaderboards() -> Element {
             }
 
             Card {
-                {
-                    let snapshot = rows.read();
-                    let filtered = hero().is_some();
-                    match (
-                        leaderboard_message(snapshot.as_ref(), filtered),
-                        snapshot.as_ref(),
-                    ) {
-                        (Some(message), _) => rsx! { p { class: "lb-status", "{message}" } },
-                        (None, Some(LeaderboardLoad::Rows(list))) => rsx! {
-                            table { class: "lb-table",
-                                thead {
-                                    tr {
-                                        th { "#" }
-                                        th { "Player" }
-                                        th { "Games" }
-                                        th { "WR" }
-                                        th { "K/D" }
-                                    }
+                if let Some(message) = message {
+                    p { class: "lb-status", "{message}" }
+                } else if let Some(split) = split.as_ref() {
+                    if split.ranked.is_empty() {
+                        p { class: "lb-status", "{WINRATE_NONE_RANKED}" }
+                    } else {
+                        table { class: "lb-table",
+                            thead {
+                                tr {
+                                    th { "#" }
+                                    th { "Player" }
+                                    th { "Games" }
+                                    th { "WR" }
+                                    th { "K/D" }
                                 }
-                                tbody {
-                                    for (i, r) in list.iter().enumerate() {
-                                        {
-                                            let rank = i + 1;
-                                            let wr = wr_cell(r);
-                                            let kd = format!("{:.2}", r.kd);
-                                            rsx! {
-                                                tr { key: "{r.member_id}",
-                                                    td { class: "lb-rank", "{rank}" }
-                                                    td {
-                                                        Link {
-                                                            to: Route::MemberProfile { id: r.member_id.clone() },
-                                                            "{r.display_name}"
-                                                        }
+                            }
+                            tbody {
+                                for (i, r) in split.ranked.iter().enumerate() {
+                                    {
+                                        let rank = i + 1;
+                                        let wr = wr_cell(r);
+                                        let kd = format!("{:.2}", r.kd);
+                                        rsx! {
+                                            tr { key: "{r.member_id}",
+                                                td { class: "lb-rank", "{rank}" }
+                                                td {
+                                                    Link {
+                                                        to: Route::MemberProfile { id: r.member_id.clone() },
+                                                        "{r.display_name}"
                                                     }
-                                                    td { class: "lb-num", "{r.games}" }
-                                                    td { class: "lb-num",
-                                                        if wr.muted {
-                                                            span { class: "lb-wr-muted", "{wr.text}" }
-                                                        } else {
-                                                            Pill { tone: wr_tone(&wr), "{wr.text}" }
-                                                        }
-                                                    }
-                                                    td { class: "lb-num", "{kd}" }
                                                 }
+                                                td { class: "lb-num", "{r.games}" }
+                                                td { class: "lb-num",
+                                                    if wr.muted {
+                                                        span { class: "lb-wr-muted", "{wr.text}" }
+                                                    } else {
+                                                        Pill { tone: wr_tone(&wr), "{wr.text}" }
+                                                    }
+                                                }
+                                                td { class: "lb-num", "{kd}" }
                                             }
                                         }
                                     }
                                 }
                             }
-                            p { class: "lb-rule-note", "{LIST_RULE_NOTE}" }
-                        },
-                        _ => rsx! {},
+                        }
+                        p { class: "lb-rule-note", "{note}" }
+                    }
+                }
+            }
+
+            if !unranked.is_empty() {
+                section { class: "lb-unranked",
+                    Card {
+                        h2 { "{UNRANKED_TITLE}" }
+                        p { class: "lb-unranked-sub", "{UNRANKED_NOTE}" }
+                        table { class: "lb-table",
+                            thead {
+                                tr {
+                                    th { "Player" }
+                                    th { "Games" }
+                                    th { "Record" }
+                                    th { "K/D" }
+                                }
+                            }
+                            tbody {
+                                for r in unranked.iter() {
+                                    {
+                                        let record = wr_cell(r);
+                                        let kd = format!("{:.2}", r.kd);
+                                        rsx! {
+                                            tr { key: "{r.member_id}",
+                                                td {
+                                                    Link {
+                                                        to: Route::MemberProfile { id: r.member_id.clone() },
+                                                        "{r.display_name}"
+                                                    }
+                                                }
+                                                td { class: "lb-num", "{r.games}" }
+                                                td { class: "lb-num",
+                                                    if record.muted {
+                                                        span { class: "lb-wr-muted", "{record.text}" }
+                                                    } else {
+                                                        Pill { tone: wr_tone(&record), "{record.text}" }
+                                                    }
+                                                }
+                                                td { class: "lb-num", "{kd}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -514,6 +648,114 @@ mod tests {
         .unwrap();
         assert_eq!((old.wins, old.losses, old.draws), (0, 0, 0));
         assert_eq!(wr_cell(&old).text, "3W");
+    }
+
+    fn named(id: &str, name: &str, games: u32, wins: u32, winrate: f32) -> LeaderboardRow {
+        LeaderboardRow {
+            member_id: id.into(),
+            display_name: name.into(),
+            games,
+            wins,
+            losses: games - wins,
+            draws: 0,
+            winrate,
+            kd: 1.0,
+        }
+    }
+
+    fn ids(rows: &[LeaderboardRow]) -> Vec<&str> {
+        rows.iter().map(|r| r.member_id.as_str()).collect()
+    }
+
+    #[test]
+    fn winrate_board_ranks_from_ten_games_only() {
+        let rows = vec![
+            named("nine", "Nine", 9, 9, 1.0),
+            named("ten", "Ten", 10, 6, 0.6),
+        ];
+        let split = board_split("winrate", &rows);
+        assert_eq!(ids(&split.ranked), vec!["ten"]);
+        assert_eq!(ids(&split.unranked), vec!["nine"]);
+        assert_eq!(wr_cell(&split.ranked[0]).text, "60%");
+        assert_eq!(wr_cell(&split.unranked[0]).text, "9W-0L");
+    }
+
+    #[test]
+    fn winrate_board_keeps_server_order_for_ranked_rows() {
+        let rows = vec![
+            named("a", "A", 12, 9, 0.75),
+            named("short", "Short", 5, 5, 1.0),
+            named("b", "B", 20, 12, 0.6),
+            named("c", "C", 10, 5, 0.5),
+        ];
+        let split = board_split("winrate", &rows);
+        assert_eq!(ids(&split.ranked), vec!["a", "b", "c"]);
+        assert_eq!(ids(&split.unranked), vec!["short"]);
+    }
+
+    #[test]
+    fn winrate_board_with_ten_plus_only_has_an_empty_unranked_list() {
+        let rows = vec![named("a", "A", 10, 7, 0.7), named("b", "B", 31, 15, 0.48)];
+        let split = board_split("winrate", &rows);
+        assert_eq!(ids(&split.ranked), vec!["a", "b"]);
+        assert!(split.unranked.is_empty());
+        assert!(board_split("winrate", &[]).unranked.is_empty());
+    }
+
+    #[test]
+    fn unranked_list_sorts_by_games_then_name() {
+        let rows = vec![
+            named("m1", "zed", 6, 3, 0.5),
+            named("m2", "Amy", 9, 4, 0.44),
+            named("m3", "bob", 6, 2, 0.33),
+            named("m4", "Cat", 5, 5, 1.0),
+            named("m5", "Ann", 9, 6, 0.67),
+        ];
+        let split = board_split("winrate", &rows);
+        assert!(split.ranked.is_empty());
+        assert_eq!(ids(&split.unranked), vec!["m2", "m5", "m3", "m1", "m4"]);
+    }
+
+    #[test]
+    fn unranked_rows_show_the_record_or_wins_from_an_older_server() {
+        let mut drawn = named("d", "D", 9, 5, 5.0 / 9.0);
+        drawn.losses = 3;
+        drawn.draws = 1;
+        let old: LeaderboardRow = serde_json::from_str(
+            r#"{"member_id":"o","display_name":"O","games":7,"winrate":0.5714286,"kd":1.0}"#,
+        )
+        .unwrap();
+        let split = board_split("winrate", &[drawn, old]);
+        let texts: Vec<String> = split.unranked.iter().map(|r| wr_cell(r).text).collect();
+        assert_eq!(texts, vec!["5W-3L-1D", "4W"]);
+        assert!(split.unranked.iter().all(|r| !wr_cell(r).is_rate));
+    }
+
+    #[test]
+    fn kd_and_games_boards_are_not_split() {
+        let rows = vec![named("a", "A", 5, 3, 0.6), named("b", "B", 12, 6, 0.5)];
+        for metric in ["kd", "games"] {
+            let split = board_split(metric, &rows);
+            assert_eq!(ids(&split.ranked), vec!["a", "b"], "{metric}");
+            assert!(split.unranked.is_empty(), "{metric}");
+            assert_eq!(board_note(metric), LIST_RULE_NOTE);
+        }
+        assert_eq!(board_note("winrate"), WINRATE_BOARD_NOTE);
+    }
+
+    #[test]
+    fn winrate_copy_has_no_long_dashes() {
+        for text in [
+            WINRATE_BOARD_NOTE,
+            WINRATE_NONE_RANKED,
+            UNRANKED_TITLE,
+            UNRANKED_NOTE,
+        ] {
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text}"
+            );
+        }
     }
 
     #[test]
