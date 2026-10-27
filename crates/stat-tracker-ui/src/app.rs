@@ -221,6 +221,8 @@ pub enum Message {
     SettingsPage(crate::settings_update::Msg),
     /// A message from the 0.6 top bar ([`crate::nav::update`]).
     Nav(crate::nav::Msg),
+    /// Games tab controls (grouping, time sort, compact rows, filters).
+    Games(crate::games_table::Msg),
 }
 
 struct NotesDialog {
@@ -431,6 +433,8 @@ pub struct TrackerApp {
     copy_text: fn(&str) -> Result<crate::clipboard::ClipboardBackend, String>,
     /// Top tabs (0.6 default) or the 0.5 sidebar, from `SCUFFED_TRACKER_LAYOUT`.
     pub nav_style: crate::nav::NavStyle,
+    /// Games tab view state (0.6 top tabs).
+    pub games_tab: crate::games_rows::TabState,
     /// The 0.6 Settings page's own state.
     pub(crate) page_state: crate::settings_update::PageState,
 }
@@ -665,6 +669,7 @@ impl TrackerApp {
                 crate::nav::NavStyle::from_env()
             },
             page_state,
+            games_tab: Default::default(),
         };
         app.refresh_token_rejected();
         app.refresh_kit_sessions();
@@ -1066,6 +1071,7 @@ impl TrackerApp {
             }
             Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
             Message::Nav(msg) => crate::nav::update(self, msg),
+            Message::Games(msg) => crate::games_table::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()

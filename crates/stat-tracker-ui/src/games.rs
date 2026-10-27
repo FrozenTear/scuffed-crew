@@ -29,6 +29,10 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let option_pool = filter_games(&app.games, &header_only);
     let heroes = distinct_heroes(&option_pool);
     let maps = distinct_maps(&option_pool);
+    if app.nav_style == crate::nav::NavStyle::TopTabs {
+        let filters = filter_bar(app, &heroes, &maps);
+        return crate::games_table::view(app, content_width, filters);
+    }
     let shown = shown_games(app);
     let groups = group_by_session_gap(&shown, DEFAULT_SESSION_GAP);
     let cols = games_columns(content_width);
@@ -119,7 +123,7 @@ fn flush_compact(
     pair.into()
 }
 
-fn retry_rejected_uploads_button() -> Element<'static, Message> {
+pub(crate) fn retry_rejected_uploads_button() -> Element<'static, Message> {
     button(
         text("Retry rejected uploads")
             .size(SIZE_META)

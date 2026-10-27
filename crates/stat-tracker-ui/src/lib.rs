@@ -32,6 +32,8 @@ pub mod daemon;
 pub mod fixtures;
 mod form_widgets;
 pub mod games;
+mod games_rows;
+mod games_table;
 pub mod heroes;
 pub mod hotkey;
 pub mod icons;
