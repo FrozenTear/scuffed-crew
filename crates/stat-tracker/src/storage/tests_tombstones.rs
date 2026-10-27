@@ -222,3 +222,36 @@ async fn a_pending_tombstone_without_a_delete_does_not_block_rows() {
     );
     assert_eq!(read_match_log(dir.path()).len(), 2);
 }
+
+/// The live snapshot lists the deletes still waiting for the server, so
+/// the GUI can say a deleted game leaves the site on the next sync.
+#[tokio::test]
+async fn the_snapshot_lists_pending_deletes_until_acknowledged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    store.insert_match(snap("s1", 1)).await.unwrap();
+    store.delete_session("s1").await.unwrap();
+    store.export_snapshot(dir.path()).await.unwrap();
+    let read = read_snapshot(dir.path()).expect("snapshot");
+    assert_eq!(read.pending_deletes, vec!["s1".to_string()]);
+    store.clear_tombstones(vec!["s1".into()]).await.unwrap();
+    store.export_snapshot(dir.path()).await.unwrap();
+    assert!(
+        read_snapshot(dir.path())
+            .unwrap()
+            .pending_deletes
+            .is_empty()
+    );
+    // A snapshot written before the field existed still reads.
+    std::fs::write(
+        dir.path().join("live_snapshot.json"),
+        br#"{"matches":[],"sessions":[]}"#,
+    )
+    .unwrap();
+    assert!(
+        read_snapshot(dir.path())
+            .unwrap()
+            .pending_deletes
+            .is_empty()
+    );
+}

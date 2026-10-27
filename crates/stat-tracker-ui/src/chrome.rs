@@ -76,14 +76,15 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 ///
 /// The control row is a stopgap: it is the 0.5 header row, not the spec's
 /// filter chips (Season, queues, roles, Crew, Hero, Map; "Filters (n)" at
-/// 1024), which land with the per-screen redesigns.
+/// 1024), which land with the per-screen redesigns. Games has them already.
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
-        // Settings has none; Overview and Heroes draw the spec's filter chips.
+        // Settings has none; Overview, Games and Heroes draw the spec's
+        // filter chips themselves.
         if !matches!(
             app.screen,
-            Screen::Settings | Screen::Overview | Screen::Heroes
+            Screen::Settings | Screen::Overview | Screen::Games | Screen::Heroes
         ) {
             content = content.push(widgets::header_controls(app));
         }
@@ -186,7 +187,7 @@ fn page_body<'a>(
     content = content.push(
         responsive(move |size| match app.screen {
             Screen::Overview => crate::overview::view(app, size.width),
-            Screen::Games => crate::games::view(app, size.width),
+            Screen::Games => crate::games::view(app, size.width, size.width + 2.0 * pad_x),
             Screen::Heroes => crate::heroes::view(app, size.width),
             Screen::Maps => crate::maps::view(app, size.width),
             Screen::Seasons => crate::seasons::view(app, size.width),

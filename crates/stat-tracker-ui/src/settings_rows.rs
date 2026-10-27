@@ -42,9 +42,9 @@ const GAME_PROCESSES_HELP: &str =
     "Capture runs only while one is running. An empty list turns the check off.";
 /// Shown under Game processes once the list is empty.
 const NO_PROCESSES_NOTE: &str = "No processes listed, so the tracker captures whenever it runs.";
-/// Help under Session window: what this app uses it for. Games groups its
-/// list by a fixed gap, so the help does not promise that.
-const SESSION_WINDOW_HELP: &str = "How long a game still counts as live after its last capture, for the Companion and the game in progress.";
+/// Help under Session window: what the setting does. Games and Overview
+/// group by it, and the live game check uses it.
+const SESSION_WINDOW_HELP: &str = "Games played within this time of each other are grouped into one session. A game with no result yet also counts as live (Playing on Games, and in the Companion) for this long after its last activity.";
 
 /// A tag after a row title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

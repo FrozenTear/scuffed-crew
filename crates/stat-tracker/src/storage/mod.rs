@@ -18,7 +18,7 @@ use surrealdb_types::Datetime as SurrealDatetime;
 use surrealdb_types::SurrealValue;
 
 pub use crate::model::{
-    HeroSegment, PersonalMatch, SEGMENT_CONFIRM, SEGMENT_DISMISS, SegmentResolution,
+    HeroSegment, PersonalMatch, SEGMENT_CLEAR, SEGMENT_CONFIRM, SEGMENT_DISMISS, SegmentResolution,
     primary_hero_role,
 };
 

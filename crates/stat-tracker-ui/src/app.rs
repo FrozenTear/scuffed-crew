@@ -135,7 +135,7 @@ pub enum Message {
     ResolveSegment {
         session_id: String,
         segment: u32,
-        confirm: bool,
+        step: crate::commands::SegmentStep,
     },
     RetryUpload(String),
     RetryRejectedUploads,
@@ -221,6 +221,8 @@ pub enum Message {
     SettingsPage(crate::settings_update::Msg),
     /// A message from the 0.6 top bar ([`crate::nav::update`]).
     Nav(crate::nav::Msg),
+    /// Games tab controls (grouping, time sort, compact rows, filters).
+    Games(crate::games_table::Msg),
     /// A message from the 0.6 Overview ([`crate::overview_page::update`]).
     OverviewPage(crate::overview_page::Msg),
     /// A message from the 0.6 Heroes page ([`crate::heroes_page::update`]).
@@ -439,6 +441,8 @@ pub struct TrackerApp {
     copy_text: fn(&str) -> Result<crate::clipboard::ClipboardBackend, String>,
     /// Top tabs (0.6 default) or the 0.5 sidebar, from `SCUFFED_TRACKER_LAYOUT`.
     pub nav_style: crate::nav::NavStyle,
+    /// Games tab view state (0.6 top tabs).
+    pub games_tab: crate::games_rows::GamesTab,
     /// The 0.6 Settings page's own state.
     pub(crate) page_state: crate::settings_update::PageState,
 }
@@ -456,14 +460,14 @@ impl TrackerApp {
         let games = games_from_snapshot(&snap);
         let mut seasons = seasons::load_cache(&cli.data_dir);
         if seasons.seasons.is_empty()
-            && cli.fixture == Some(FixtureKind::Sample)
+            && cli.fixture.is_some_and(FixtureKind::has_games)
             && let Ok(list) = serde_json::from_str(crate::fixtures::sample_seasons_json())
         {
             seasons.seasons = list;
         }
         let persisted = seasons::load_ui_state(&cli.data_dir);
         let season = seasons::resolve_selection(persisted, &seasons.seasons);
-        let clock = fixture_clock(cli.fixture, &games);
+        let clock = crate::fixtures::clock(cli.fixture, &games);
         let seasons_url = cli.seasons_url.clone();
         let now = Utc::now();
         let (fetch, last_seasons_attempt) =
@@ -675,6 +679,7 @@ impl TrackerApp {
                 crate::nav::NavStyle::from_env()
             },
             page_state,
+            games_tab: Default::default(),
         };
         app.refresh_token_rejected();
         app.refresh_kit_sessions();
@@ -775,6 +780,8 @@ impl TrackerApp {
             subs.push(iced::event::listen_with(
                 crate::settings_update::chip_escape,
             ));
+        } else if self.screen == Screen::Games && crate::games_panel::listens(self) {
+            subs.push(iced::event::listen_with(crate::games_panel::close_keys));
         }
         Subscription::batch(subs)
     }
@@ -841,6 +848,7 @@ impl TrackerApp {
                     self.expanded = None;
                     self.editing = false;
                     self.confirm_delete = None;
+                    self.games_tab.deleted_note = None;
                 }
                 if screen != Screen::Settings {
                     self.confirm_clear = false;
@@ -972,7 +980,7 @@ impl TrackerApp {
                 } else if let Some(sid) = &self.expanded
                     && let Some(g) = self.games.iter().find(|g| &g.session_id == sid)
                 {
-                    self.edit = EditForm::from_game(g);
+                    self.edit = crate::games_picker::edit_form(&mut self.games_tab, g);
                     self.editing = true;
                 }
                 Task::none()
@@ -990,16 +998,13 @@ impl TrackerApp {
                         .map(|g| crate::commands::save_edit(&self.data_dir, g, &self.edit))
                 });
                 if let Some(sid) = sid {
-                    match saved {
-                        Some(Ok(())) => {
-                            self.replace_toast("Stats corrected");
-                            self.arm_training_toast(&sid, crate::report::GameCategory::WrongStats);
-                        }
-                        Some(Err(e)) => self.replace_toast(e),
+                    match &saved {
+                        Some(Ok(saved)) => crate::commands::show_saved(self, &sid, saved),
+                        Some(Err(e)) => self.replace_toast(e.clone()),
                         None => {}
                     }
                 }
-                self.editing = false;
+                self.editing = matches!(saved, Some(Err(_)));
                 Task::none()
             }
             Message::PickMap { session_id, map } => {
@@ -1046,22 +1051,16 @@ impl TrackerApp {
             Message::ResolveSegment {
                 session_id,
                 segment,
-                confirm,
+                step,
             } => {
                 self.replace_toast(
                     match crate::commands::resolve_segment(
                         &self.data_dir,
                         &session_id,
                         segment,
-                        confirm,
+                        step,
                     ) {
-                        Ok(()) => {
-                            if confirm {
-                                "Hero swap confirmed".into()
-                            } else {
-                                "Hero swap dismissed".into()
-                            }
-                        }
+                        Ok(()) => step.toast().into(),
                         Err(e) => format!("Could not update hero swap: {e}"),
                     },
                 );
@@ -1076,6 +1075,7 @@ impl TrackerApp {
             }
             Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
             Message::Nav(msg) => crate::nav::update(self, msg),
+            Message::Games(msg) => crate::games_table::update(self, msg),
             Message::OverviewPage(msg) => crate::overview_page::update(self, msg),
             Message::HeroesPage(msg) => crate::heroes_page::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
@@ -1774,7 +1774,7 @@ impl TrackerApp {
         ))
     }
 
-    fn refresh_kit_sessions(&mut self) {
+    pub(crate) fn refresh_kit_sessions(&mut self) {
         self.sessions_with_kit = self
             .games
             .iter()
@@ -1822,13 +1822,13 @@ impl TrackerApp {
         choices
     }
 
-    fn arm_training_toast(&mut self, session_id: &str, category: crate::report::GameCategory) {
-        if !self.games.iter().any(|g| g.session_id == session_id) {
+    pub(crate) fn arm_training_toast(&mut self, sid: &str, category: crate::report::GameCategory) {
+        if !self.games.iter().any(|g| g.session_id == sid) {
             self.toast_action = None;
             return;
         }
         self.toast_action = Some(Message::Report(crate::report::ReportMessage::OpenGame {
-            session_id: Some(session_id.to_string()),
+            session_id: Some(sid.to_string()),
             category: Some(category),
             training: true,
             choices: Vec::new(),
@@ -2401,7 +2401,7 @@ impl TrackerApp {
             if mtime != self.snapshot_mtime {
                 self.snapshot_mtime = mtime;
                 let snap = snapshot::load_snapshot(&self.data_dir);
-                self.games = games_from_snapshot(&snap);
+                self.games = self.games_tab.games_from(&snap);
                 self.refresh_kit_sessions();
                 self.live_status = crate::tracker_status::classic_live_status(&self.games);
                 self.refresh_health();
@@ -2743,14 +2743,6 @@ fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
     }
 }
 
-fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> {
-    if fixture == Some(FixtureKind::Sample) {
-        games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
-    } else {
-        Utc::now()
-    }
-}
-
 fn report_dialog_escape(
     event: iced::Event,
     _status: iced::event::Status,
@@ -2943,7 +2935,6 @@ fn health_status_for(
 mod tests {
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
-    use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
 
     #[test]

@@ -470,6 +470,7 @@ mod tests {
             upload_reject: None,
             suspect_fields: Vec::new(),
             synced: false,
+            recognizer: String::new(),
         }
     }
 
