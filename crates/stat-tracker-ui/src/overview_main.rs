@@ -25,7 +25,7 @@ use crate::widgets;
 /// No game stored at all.
 pub const EMPTY: &str = "No games yet. Press Tab in-game to capture the scoreboard.";
 /// Games stored, none left by the filters (as Games says it).
-pub const EMPTY_FILTERED: &str = "No games match these filters.";
+pub const EMPTY_FILTERED: &str = "No games match these filters";
 
 /// The main column's line with no session: the first-run line only
 /// before the first game, else the filters' line.
@@ -102,16 +102,15 @@ fn panel(content: Element<'_, Message>) -> container::Container<'_, Message> {
 }
 
 /// The session card's title: every game of the session, then the record
-/// of the settled ones, so the game being played is "Playing", not an
-/// undecided game ("5 games · 4-0 · Playing").
-pub fn session_title(group: &SessionGroup, live: Option<&str>) -> String {
-    let settled: Vec<&Game> = group
-        .games
-        .iter()
-        .filter(|g| !game_card_in_progress(&g.session_id, g.outcome, live))
-        .collect();
-    let record = crate::overview_side::record_of(settled.iter().copied());
-    let mut title = format!("{} · {}", group.record.games_label(), record_line(&record));
+/// of `settled` (its games less the one being played), so that game is
+/// "Playing", not an undecided game ("5 games · 4-0 · Playing"). At the
+/// first game there is no record yet ("1 game · Playing").
+pub fn session_title(group: &SessionGroup, settled: &[&Game]) -> String {
+    let mut title = group.record.games_label();
+    if !settled.is_empty() {
+        let record = crate::overview_side::record_of(settled.iter().copied());
+        title.push_str(&format!(" · {}", record_line(&record)));
+    }
     if settled.len() < group.games.len() {
         title.push_str(" · Playing");
     }
@@ -123,21 +122,16 @@ fn session_card(
     now: chrono::DateTime<chrono::Utc>,
     live: Option<&str>,
 ) -> Element<'static, Message> {
-    let title = session_title(group, live);
-    // The sparkline draws results only; the game being played has none.
-    let settled: Vec<&Game> = group
-        .games
-        .iter()
-        .rev()
-        .filter(|g| !game_card_in_progress(&g.session_id, g.outcome, live))
-        .collect();
+    let settled = crate::overview_page::settled_of(group.games.iter(), live);
+    let title = session_title(group, &settled);
     panel(
         column![
             widgets::label_text(&session_label(group, now)),
             row![
                 text(title).size(20).font(FONT_BOLD).color(TEXT),
                 space().width(24),
-                sparkline(settled.iter().copied()),
+                // Oldest first, leaving out the game being played.
+                sparkline(settled.iter().rev().copied()),
             ]
             .align_y(Alignment::Center),
             text(since_line(group))
@@ -485,13 +479,27 @@ mod tests {
         let refs: Vec<&Game> = games.iter().collect();
         let group =
             crate::aggregate::group_by_session_gap(&refs, chrono::TimeDelta::hours(3)).remove(0);
-        let with_live = session_title(&group, Some(&live));
+        let settled = crate::overview_page::settled_of(group.games.iter(), Some(&live));
+        let with_live = session_title(&group, &settled);
         assert!(with_live.ends_with(" · Playing"), "{with_live}");
         assert!(!with_live.contains("undecided"), "{with_live}");
         // Once its game closes without a result it is undecided.
-        let closed = session_title(&group, None);
+        let all: Vec<&Game> = group.games.iter().collect();
+        let closed = session_title(&group, &all);
         assert!(closed.contains("1 undecided"), "{closed}");
         assert!(!closed.contains("Playing"), "{closed}");
+    }
+
+    #[test]
+    fn the_first_game_being_played_has_no_record_yet() {
+        let mut games = sample();
+        games[0].outcome = Outcome::Unknown;
+        let live = games[0].session_id.clone();
+        let refs: Vec<&Game> = games.iter().take(1).collect();
+        let group =
+            crate::aggregate::group_by_session_gap(&refs, chrono::TimeDelta::hours(3)).remove(0);
+        let settled = crate::overview_page::settled_of(group.games.iter(), Some(&live));
+        assert_eq!(session_title(&group, &settled), "1 game · Playing");
     }
 
     #[test]

@@ -108,7 +108,7 @@ pub fn season_games_line(r: &Record) -> String {
     match (r.games, rate(r)) {
         (0, _) => String::new(),
         (_, Some(_)) => r.games_label(),
-        (_, None) => format!("{} · Too few games", r.games_label()),
+        (_, None) => crate::overview_heroes::too_few_line(r),
     }
 }
 
@@ -163,6 +163,12 @@ fn versus_text(vs: &str) -> Element<'static, Message> {
             .color(TEXT_2)
             .into()
     }
+}
+
+/// Whether [`counted_line`] shows: not at 0 games, where the headline
+/// already says "No games".
+pub fn shows_counted(season: &Record) -> bool {
+    season.games > 0
 }
 
 /// How the numbers are counted, under the card.
@@ -252,12 +258,14 @@ fn season_card<'a>(app: &'a TrackerApp, settled: &[&Game]) -> Element<'a, Messag
         }
         col = col.push(line).push(sparkline(recent.iter().rev().copied()));
     }
-    col = col.push(
-        text(counted_line(&season, &last))
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
-    );
+    if shows_counted(&season) {
+        col = col.push(
+            text(counted_line(&season, &last))
+                .size(SIZE_LABEL)
+                .font(FONT_MEDIUM)
+                .color(TEXT_3),
+        );
+    }
     panel(col.into(), false)
 }
 
@@ -497,6 +505,12 @@ mod tests {
         assert!(companion_line(&app).len() > 3);
         let _ = view(&app, &[]);
         assert_eq!(needs_look_parts(&app), "");
+    }
+
+    #[test]
+    fn the_counted_line_waits_for_the_first_game() {
+        assert!(!shows_counted(&rec(0, 0, 0, 0)));
+        assert!(shows_counted(&rec(0, 0, 0, 1)));
     }
 
     #[test]

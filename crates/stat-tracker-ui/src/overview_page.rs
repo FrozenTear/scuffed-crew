@@ -181,10 +181,16 @@ pub fn session_gap(window_secs: u64) -> chrono::TimeDelta {
 /// ([`crate::overview_main::session_title`]) and the newest-game card
 /// shows it as Playing.
 pub fn settled<'a>(app: &TrackerApp, games: &[&'a Game]) -> Vec<&'a Game> {
-    let live = app.live_game_session.as_deref();
+    settled_of(games.iter().copied(), app.live_game_session.as_deref())
+}
+
+/// [`settled`] for any games, given the session being played.
+pub fn settled_of<'a>(
+    games: impl IntoIterator<Item = &'a Game>,
+    live: Option<&str>,
+) -> Vec<&'a Game> {
     games
-        .iter()
-        .copied()
+        .into_iter()
         .filter(|g| !crate::model::game_card_in_progress(&g.session_id, g.outcome, live))
         .collect()
 }
