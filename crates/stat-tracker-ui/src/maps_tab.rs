@@ -300,20 +300,18 @@ pub fn maps_games(app: &TrackerApp) -> Vec<&Game> {
     crate::overview_page::settled(app, &filter_games(&app.games, &filter))
 }
 
+/// Whether any game has a result yet: the open game alone is not one, so
+/// it shows "No maps yet" rather than the filter copy.
+pub fn has_games(app: &TrackerApp) -> bool {
+    !crate::overview_page::settled_of(&app.games, app.live_game_session.as_deref()).is_empty()
+}
+
 pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     let games = maps_games(app);
     let (mut rows, no_map) = map_rows(&games);
     let ui = app.maps_ui;
     let c = cols(width);
-    let scope = match &app.season {
-        SeasonSel::Season(id) => app
-            .seasons
-            .seasons
-            .iter()
-            .find(|s| &s.id == id)
-            .map_or_else(|| "Season".to_string(), |s| s.name.clone()),
-        SeasonSel::AllTime => "All time".to_string(),
-    };
+    let scope = crate::overview_heroes::scope(app);
 
     let mut page = Column::new().spacing(GRID_GAP).width(Fill);
     if games_state::loading(app) {
@@ -334,8 +332,9 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
             HIDDEN,
         ));
     }
-    if let Some((title, line)) = empty_copy(!app.games.is_empty(), games.len(), no_map) {
-        if !app.games.is_empty() {
+    let has_games = has_games(app);
+    if let Some((title, line)) = empty_copy(has_games, games.len(), no_map) {
+        if has_games {
             page = page.push(sort_line(&scope, 0, games.len(), ui));
         }
         return page.push(empty_card(title, line)).into();
@@ -928,6 +927,23 @@ mod tests {
         assert_eq!(rows[0].record.undecided(), 1);
         app.live_game_session = None;
         assert_eq!(maps_games(&app).len(), 2);
+    }
+
+    #[test]
+    fn the_open_game_alone_is_no_games_yet() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let mut live = game("Ilios", Outcome::Unknown, 20);
+        live.session_id = "live".into();
+        app.games = vec![live];
+        app.live_game_session = Some("live".into());
+        assert!(!has_games(&app));
+        let (rows, no_map) = map_rows(&maps_games(&app));
+        assert_eq!(
+            empty_copy(has_games(&app), rows.len(), no_map).unwrap().0,
+            "No maps yet"
+        );
+        app.live_game_session = None;
+        assert!(has_games(&app));
     }
 
     #[test]
