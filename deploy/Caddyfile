@@ -24,9 +24,14 @@ ow.scuffedcrew.no {
 	# too. A bare reverse_proxy would also claim /relay.
 	handle /relay* {
 		# The relay is strfry, not scuffed-server, so this path gets its
-		# frame and referrer headers from Caddy.
+		# security headers from Caddy. Values match the scuffed-server layer
+		# (crates/server/src/security.rs). HSTS matches what scuffed-server
+		# sends with PRODUCTION set; keep both in step if either changes.
 		header X-Frame-Options "DENY"
 		header Referrer-Policy "strict-origin-when-cross-origin"
+		header X-Content-Type-Options "nosniff"
+		header Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
 		uri strip_prefix /relay
 		reverse_proxy 127.0.0.1:7777
 	}

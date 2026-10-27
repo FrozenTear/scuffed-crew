@@ -276,7 +276,7 @@ fn bundled_script_hashes() -> Vec<String> {
 /// SHA-256 CSP hashes of inline `<script>` bodies (no `src`).
 ///
 /// Dioxus 0.7's CLI (`inject_loading_scripts`) inserts
-/// `<script type="module" async src="/…/*.js">` — an external same-origin
+/// `<script type="module" async src="/…/*.js">`, an external same-origin
 /// module, covered by `'self'`, not an inline script. The wasm glue that
 /// compiles the module lives in that JS file and needs `'wasm-unsafe-eval'`.
 /// `crates/app/index.html` also has its own inline boot-skeleton script; that
@@ -375,7 +375,7 @@ fn csp_host_source(raw: &str) -> Option<String> {
     Some(format!("{scheme}://{hostport}"))
 }
 
-/// WebSocket origin for `NOSTR_RELAY_URL` (`ws`/`wss` only — the browser client
+/// WebSocket origin for `NOSTR_RELAY_URL` (`ws`/`wss` only, since the browser client
 /// connects only when the channel URL starts with those schemes).
 fn csp_websocket_source(raw: &str) -> Option<String> {
     let source = csp_host_source(raw)?;
