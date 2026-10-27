@@ -96,7 +96,7 @@ Acceptance: for a **synced** account, season totals on this screen equal My Stat
 3. Open **Games** and click a row so it opens, then:
    - Result **Win / Loss / Draw** → `StoreCommand::SetOutcome`
    - **Edit** → change a field → **Save corrections** → `StoreCommand::EditMatch` (the map must be one the reader knows; a missing map or hero holds the upload until it is set)
-   - Hero timeline **Confirm / Dismiss**, and **Undo** on a dismissed run → `StoreCommand::ResolveSegment` (`confirm` / `dismiss`)
+   - Hero timeline **Confirm / Dismiss**, and **Undo** on a dismissed run → `StoreCommand::ResolveSegment` (`confirm` / `dismiss`, and `clear` for Undo)
    - Under the 0.6 top tabs the open row ends with **Delete game**, which opens a confirm strip in place of the actions (Cancel first, Esc cancels); deleting writes `StoreCommand::DeleteSession`, and its tombstone goes up on the next sync if the game was uploaded. Under the classic sidebar layout the card still has **Victory / Defeat / Draw** and **Delete session** (click twice) → `StoreCommand::DeleteSession`.
 4. The GUI writes `cmd_<nanos>_<pid>.json` via `storage::queue_command` (tmp + rename).
 5. The daemon applies the file, deletes it, and rewrites `live_snapshot.json`. The GUI polls mtime at 1 Hz and refreshes.

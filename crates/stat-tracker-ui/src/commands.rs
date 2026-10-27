@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use stat_tracker::storage::{
-    self, MatchEdit, SEGMENT_CONFIRM, SEGMENT_DISMISS, StoreCommand, read_commands,
+    self, MatchEdit, SEGMENT_CLEAR, SEGMENT_CONFIRM, SEGMENT_DISMISS, StoreCommand, read_commands,
 };
 
 use crate::model::{Game, Outcome};
@@ -67,10 +67,6 @@ pub enum SegmentStep {
     /// the reader made of it (a one-snapshot swap asks again).
     Undo,
 }
-
-/// The action an Undo queues. The store keeps only confirm and dismiss and
-/// drops any other action's resolution (`resolve_hero_segment`).
-pub const SEGMENT_CLEAR: &str = "clear";
 
 impl SegmentStep {
     fn action(self) -> &'static str {
