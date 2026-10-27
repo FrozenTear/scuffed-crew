@@ -121,7 +121,9 @@ async fn capture_futures_stay_small() {
 /// screenshot lock wait, and only a grab that ran resets the cadence.
 #[test]
 fn the_poll_arm_passes_its_outcome_only_flag() {
-    let run_loop = squashed_fn(concat!("async ", "fn run_loop"));
+    // In src/daemon/event_loop.rs since 0.6 S11: found by name, wherever it
+    // lives, with its whitespace removed.
+    let run_loop: String = fn_source("run_loop").split_whitespace().collect();
     assert!(run_loop.contains("capture::poll_grab(backend,capture_output,outcome_only)"));
     assert!(run_loop.contains("ifpoll_resets_cadence(&grabbed){"));
 }
@@ -130,7 +132,7 @@ fn the_poll_arm_passes_its_outcome_only_flag() {
 #[test]
 fn shutdown_flushes_perf_log_within_the_deadline() {
     // In src/daemon/shutdown.rs since 0.6 S7: found by name, wherever it
-    // lives, then squashed as `squashed_fn` does.
+    // lives, with its whitespace removed.
     let shutdown: String = fn_source("shutdown_from_signal")
         .split_whitespace()
         .collect();

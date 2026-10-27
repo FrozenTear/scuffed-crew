@@ -96,20 +96,6 @@ fn session(active_game: Option<ActiveGame>, now: Instant) -> SessionState {
     }
 }
 
-/// `main.rs` without its tests, whitespace removed, from `start` to the
-/// next top-level item after it.
-fn squashed_fn(start: &str) -> String {
-    let src = include_str!("../main.rs");
-    let code = src.split("\nmod tests {").next().unwrap();
-    let at = code.find(start).unwrap_or_else(|| panic!("{start}"));
-    code[at..]
-        .split("\n}\n")
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .collect()
-}
-
 fn banner_read(key: &str, suspect: bool) -> shadow::banner::MapRead {
     let info = shadow::banner::MAPS.iter().find(|m| m.key == key).unwrap();
     shadow::banner::MapRead {
