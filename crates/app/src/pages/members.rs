@@ -33,6 +33,15 @@ struct PublicMember {
 #[derive(Debug, Clone, Deserialize)]
 struct HeroScoped {
     games: u32,
+    /// Victories in `games`. Older servers omit the three counts.
+    #[serde(default)]
+    wins: u32,
+    /// Defeats in `games`.
+    #[serde(default)]
+    losses: u32,
+    /// Draws in `games`.
+    #[serde(default)]
+    draws: u32,
     winrate: f32,
 }
 
@@ -344,10 +353,10 @@ struct HeroStatLine {
 }
 
 /// Small-sample rule on the hero stat line: the win rate from 10 games, the
-/// win count below that, muted under 3 games. `winrate` is a 0.0 to 1.0
+/// record below that, muted under 3 games. `winrate` is a 0.0 to 1.0
 /// fraction.
 fn hero_stat_line(hero: &str, hs: &HeroScoped) -> HeroStatLine {
-    let result = list_result(hs.games, hs.winrate);
+    let result = list_result(hs.games, hs.wins, hs.losses, hs.draws, hs.winrate);
     let games = hs.games;
     let text = if result.is_rate {
         format!("{games} games · {} WR on {hero}", result.text)
@@ -366,23 +375,45 @@ fn hero_stat_line(hero: &str, hs: &HeroScoped) -> HeroStatLine {
 mod tests {
     use super::*;
 
-    fn line(games: u32, winrate: f32) -> HeroStatLine {
-        hero_stat_line("Ana", &HeroScoped { games, winrate })
+    fn line(games: u32, wins: u32, losses: u32, draws: u32, winrate: f32) -> HeroStatLine {
+        let hs = HeroScoped {
+            games,
+            wins,
+            losses,
+            draws,
+            winrate,
+        };
+        hero_stat_line("Ana", &hs)
     }
 
     #[test]
     fn hero_stat_line_follows_the_small_sample_rule() {
-        let two = line(2, 0.5);
-        assert_eq!(two.text, "2 games · 1W on Ana");
+        let two = line(2, 1, 1, 0, 0.5);
+        assert_eq!(two.text, "2 games · 1W-1L on Ana");
         assert_eq!(two.class, "member-hero-stat muted");
 
-        let nine = line(9, 5.0 / 9.0);
-        assert_eq!(nine.text, "9 games · 5W on Ana");
+        let nine = line(9, 5, 3, 1, 5.0 / 9.0);
+        assert_eq!(nine.text, "9 games · 5W-3L-1D on Ana");
         assert_eq!(nine.class, "member-hero-stat");
         assert!(!nine.text.contains('%'), "{}", nine.text);
 
-        let ten = line(10, 0.6);
+        let ten = line(10, 6, 4, 0, 0.6);
         assert_eq!(ten.text, "10 games · 60% WR on Ana");
         assert_eq!(ten.class, "member-hero-stat");
+    }
+
+    #[test]
+    fn hero_scoped_reads_the_record_and_older_blocks() {
+        let new: HeroScoped =
+            serde_json::from_str(r#"{"games":5,"wins":3,"losses":1,"draws":1,"winrate":0.6}"#)
+                .unwrap();
+        assert_eq!(
+            hero_stat_line("Ana", &new).text,
+            "5 games · 3W-1L-1D on Ana"
+        );
+
+        let old: HeroScoped = serde_json::from_str(r#"{"games":5,"winrate":0.6}"#).unwrap();
+        assert_eq!((old.wins, old.losses, old.draws), (0, 0, 0));
+        assert_eq!(hero_stat_line("Ana", &old).text, "5 games · 3W on Ana");
     }
 }

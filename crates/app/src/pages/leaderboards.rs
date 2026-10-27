@@ -15,6 +15,15 @@ struct LeaderboardRow {
     member_id: String,
     display_name: String,
     games: u32,
+    /// Victories in `games`. Older servers omit the three counts.
+    #[serde(default)]
+    wins: u32,
+    /// Defeats in `games`.
+    #[serde(default)]
+    losses: u32,
+    /// Draws in `games`.
+    #[serde(default)]
+    draws: u32,
     winrate: f32,
     kd: f64,
 }
@@ -191,13 +200,13 @@ fn leaderboard_message(
 }
 
 /// WR cell under the small-sample rule: the win rate from 10 games, the
-/// win count below that, muted under 3 games. Display only: the row order
+/// record below that, muted under 3 games. Display only: the row order
 /// is whatever the server sent.
 fn wr_cell(row: &LeaderboardRow) -> ListResult {
-    list_result(row.games, row.winrate)
+    list_result(row.games, row.wins, row.losses, row.draws, row.winrate)
 }
 
-/// Accent pill for a win rate, neutral pill for a win count.
+/// Accent pill for a win rate, neutral pill for a record.
 fn wr_tone(wr: &ListResult) -> PillTone {
     if wr.is_rate {
         PillTone::Accent
@@ -461,11 +470,14 @@ mod tests {
         );
     }
 
-    fn row(games: u32, winrate: f32) -> LeaderboardRow {
+    fn row(games: u32, wins: u32, losses: u32, draws: u32, winrate: f32) -> LeaderboardRow {
         LeaderboardRow {
             member_id: "m".into(),
             display_name: "M".into(),
             games,
+            wins,
+            losses,
+            draws,
             winrate,
             kd: 1.0,
         }
@@ -473,19 +485,35 @@ mod tests {
 
     #[test]
     fn wr_cell_follows_the_small_sample_rule() {
-        let two = wr_cell(&row(2, 1.0));
-        assert_eq!(two.text, "2W");
+        let two = wr_cell(&row(2, 2, 0, 0, 1.0));
+        assert_eq!(two.text, "2W-0L");
         assert!(two.muted);
 
-        let six = wr_cell(&row(6, 0.5));
-        assert_eq!(six.text, "3W");
+        let six = wr_cell(&row(6, 3, 2, 1, 0.5));
+        assert_eq!(six.text, "3W-2L-1D");
         assert!(!six.muted);
         assert!(matches!(wr_tone(&six), PillTone::Neutral));
 
-        let ten = wr_cell(&row(10, 0.8));
+        let ten = wr_cell(&row(10, 8, 2, 0, 0.8));
         assert_eq!(ten.text, "80%");
         assert!(!ten.muted);
         assert!(matches!(wr_tone(&ten), PillTone::Accent));
+    }
+
+    #[test]
+    fn leaderboard_row_reads_the_record_and_older_rows() {
+        let new: LeaderboardRow = serde_json::from_str(
+            r#"{"member_id":"m","display_name":"M","games":9,"wins":5,"losses":3,"draws":1,"winrate":0.5555556,"kd":1.2}"#,
+        )
+        .unwrap();
+        assert_eq!(wr_cell(&new).text, "5W-3L-1D");
+
+        let old: LeaderboardRow = serde_json::from_str(
+            r#"{"member_id":"m","display_name":"M","games":6,"winrate":0.5,"kd":1.0}"#,
+        )
+        .unwrap();
+        assert_eq!((old.wins, old.losses, old.draws), (0, 0, 0));
+        assert_eq!(wr_cell(&old).text, "3W");
     }
 
     #[test]
