@@ -27,6 +27,8 @@ const EDITED_BADGE: &str = "Edited";
 const EDITED_TITLE: &str = "Corrected by hand in the tracker";
 const NEW_READER_BADGE: &str = "New reader";
 const NEW_READER_TITLE: &str = "Read by the new stat reader";
+const LOOK_FURTHER_LABEL: &str = "Look further back";
+const LOOKING_FURTHER_LABEL: &str = "Loading…";
 
 const GAME_CSS: &str = r#"
     .game-page.stats-page {
@@ -261,6 +263,15 @@ fn mode_label(game_mode: &str, map_name: &str) -> String {
     }
 }
 
+/// Look further back label: busy while the extra pages load.
+fn look_further_label(busy: bool) -> &'static str {
+    if busy {
+        LOOKING_FURTHER_LABEL
+    } else {
+        LOOK_FURTHER_LABEL
+    }
+}
+
 /// The game body. No Link inside, so tests can render it without a router.
 fn game_detail(row: &GameRow) -> Element {
     let fields = row.fields();
@@ -333,6 +344,18 @@ pub fn StatsMatch(id: String) -> Element {
     let truncated = *games.truncated.read();
     let shown = *games.shown.read();
     let mut budget = games.page_budget;
+    let resource = games.data;
+    // Set on click, cleared once the reload settles (rows or an error), so
+    // the button cannot fire a second fetch while one is running.
+    let mut looking_further = use_signal(|| false);
+    use_effect(move || {
+        let settled = *resource.state().read() != UseResourceState::Pending;
+        if settled && *looking_further.peek() {
+            looking_further.set(false);
+        }
+    });
+    let busy = looking_further() || *resource.state().read() == UseResourceState::Pending;
+    let further_label = look_further_label(busy);
     let data = games.data.read();
     let rows = data.as_ref().and_then(|d| d.as_ref());
 
@@ -345,8 +368,16 @@ pub fn StatsMatch(id: String) -> Element {
                     p { "This game is not in your latest {shown} games." }
                     button {
                         class: "ui-btn ui-btn--md",
-                        onclick: move |_| budget += LIST_MAX_PAGES,
-                        "Look further back"
+                        disabled: busy,
+                        aria_busy: busy,
+                        onclick: move |_| {
+                            if *looking_further.peek() {
+                                return;
+                            }
+                            looking_further.set(true);
+                            budget += LIST_MAX_PAGES;
+                        },
+                        "{further_label}"
                     }
                 }
             },
@@ -421,6 +452,12 @@ mod tests {
         assert_eq!(lookup(&rows, "z", true), Lookup::LookFurther);
         assert_eq!(lookup(&rows, "z", false), Lookup::Missing);
         assert_eq!(lookup(&[], "a", false), Lookup::Missing);
+    }
+
+    #[test]
+    fn look_further_label_reads_loading_while_busy() {
+        assert_eq!(look_further_label(false), "Look further back");
+        assert_eq!(look_further_label(true), "Loading…");
     }
 
     #[test]
