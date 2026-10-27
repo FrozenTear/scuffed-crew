@@ -165,19 +165,97 @@ pub struct Config {
     /// Letter-template names (the `names-v1` pack) for the player's own row: on
     /// unless the file says `false`, with either [`Self::reader`]. Not written
     /// while on.
-    #[serde(
-        default = "default_name_reader",
-        skip_serializing_if = "name_reader_is_on"
-    )]
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub name_reader: bool,
+    /// More in-game names that are all this member's (alts, a renamed
+    /// account), as shown in-game without the `#1234`. Every entry counts as
+    /// the member's own name, the same as [`Self::player_name`]. Empty (also
+    /// when missing, so a 0.5.0 file loads unchanged) and not written while
+    /// empty. [`Self::own_player_names`] is the merged list.
+    ///
+    /// TODO(0.6): nothing reads this yet. Before the Tab reader matches
+    /// these names:
+    /// - feed [`Self::own_player_names`] to the name fallback, and when two
+    ///   rows match a saved name, take the highlighted row whose hero
+    ///   matches the hero panel;
+    /// - feed the same list to the report scrubber
+    ///   (`report::scrub::ScrubContext::from_config`, which takes only
+    ///   `player_name` today), so an alt in the log never reaches a report.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub player_names: Vec<String>,
+    /// Upload each game to the site after it closes ("Upload games after
+    /// each match"). On (also when missing) and not written while on. Only
+    /// matters when `[sync]` has a token; off keeps games local and queued.
+    ///
+    /// TODO(0.6): not wired yet; the sync worker does not read this.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub live_upload: bool,
+    /// Opt-in rank reader ("Read my rank after Comp games"): saves rank, rank
+    /// change and its label from the next game. Off (also when missing) and
+    /// not written while off.
+    ///
+    /// TODO(0.6): no rank reader exists yet; nothing reads this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rank_reader: bool,
+    /// Opt-in "Share stat pictures": upload the grayscale stat area after
+    /// each game to help train the reader (no names, kept 30 days on the
+    /// server). Separate from [`Self::share_report_pictures`]. Off (also when
+    /// missing) and not written while off.
+    ///
+    /// TODO(0.6): the upload path does not exist yet; nothing reads this.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub share_stat_pictures: bool,
+    /// "Report pictures" (Settings, Advanced): whether the stat-area crops
+    /// on a misread report start ticked. Off (also when missing): a report
+    /// shows them unticked and sends none unless the member ticks one. Not
+    /// written while off. The zoomed scoreboard on the report is never sent
+    /// either way.
+    ///
+    /// TODO(0.6): the misread report screen does not read this yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub share_report_pictures: bool,
+    /// "Only capture while Overwatch is on screen": skip grabs when the game
+    /// window is not visible on the captured output, so no other window is
+    /// captured. On ("Auto" in Settings, also when missing) and not written
+    /// while on; `false` captures whenever a game process runs, as in 0.5.
+    /// When the tracker cannot tell whether the window is visible (most
+    /// Wayland compositors do not say), Auto captures as `false` does: it
+    /// never stops capture on an unknown.
+    ///
+    /// TODO(0.6): capture does not check window visibility yet. The flag is
+    /// read by nothing, so `true` behaves like 0.5 until the check lands.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub capture_only_on_screen: bool,
 }
 
-fn default_name_reader() -> bool {
+fn default_true() -> bool {
     true
 }
 
-fn name_reader_is_on(on: &bool) -> bool {
+fn is_true(on: &bool) -> bool {
     *on
+}
+
+/// Shortest name [`own_name`] accepts, so the shortest one
+/// [`Config::own_player_names`] keeps. BattleTag names are 3 to 12
+/// characters.
+pub const MIN_OWN_NAME_CHARS: usize = 3;
+
+/// `raw` as one of this member's in-game names: trimmed, without a trailing
+/// `#` and digits (the BattleTag number, which the scoreboard never shows).
+/// `None` when fewer than [`MIN_OWN_NAME_CHARS`] characters are left, so a
+/// stray letter can never claim a stranger's row. The 0.6 Settings name
+/// chip and [`Config::own_player_names`] both use this, so they agree on
+/// what a name is.
+pub fn own_name(raw: &str) -> Option<&str> {
+    let raw = raw.trim();
+    let name = match raw.rsplit_once('#') {
+        Some((name, tag)) if !tag.is_empty() && tag.chars().all(|c| c.is_ascii_digit()) => {
+            name.trim()
+        }
+        _ => raw,
+    };
+    (name.chars().count() >= MIN_OWN_NAME_CHARS).then_some(name)
 }
 
 fn default_session_window_secs() -> u64 {
@@ -197,6 +275,27 @@ fn default_game_process_names() -> Vec<String> {
 }
 
 impl Config {
+    /// Every saved in-game name of this member: [`Self::player_name`] first,
+    /// then [`Self::player_names`] in file order, each through [`own_name`]
+    /// (trimmed, no `#1234` tag, names too short dropped). A repeat
+    /// (ignoring case, any script: `Ö` and `ö` are one name, as in the name
+    /// matcher) is kept once.
+    pub fn own_player_names(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
+        for name in self.player_name.iter().chain(self.player_names.iter()) {
+            let Some(name) = own_name(name) else {
+                continue;
+            };
+            let key = name.to_lowercase();
+            if !seen.contains(&key) {
+                seen.push(key);
+                out.push(name.to_string());
+            }
+        }
+        out
+    }
+
     /// True when `update_channel` is the prerelease opt-in.
     pub fn wants_prerelease_updates(&self) -> bool {
         self.update_channel
@@ -243,6 +342,12 @@ impl Default for Config {
             reader: ReaderSetting::New,
             ocr: OcrSetting::On,
             name_reader: true,
+            player_names: Vec::new(),
+            live_upload: true,
+            rank_reader: false,
+            share_stat_pictures: false,
+            share_report_pictures: false,
+            capture_only_on_screen: true,
         }
     }
 }
@@ -267,6 +372,9 @@ mod tests_parse_error;
 
 #[cfg(test)]
 mod tests_pins;
+
+#[cfg(test)]
+mod tests_settings_keys;
 
 #[cfg(test)]
 mod tests_sync_off;
