@@ -1,6 +1,7 @@
 //! What the 0.6 stats pages (Overview, Heroes, Maps and Seasons) show
-//! before the tracker has written its game list: a neutral waiting card,
-//! not an empty state. The open game and the filter row use
+//! before the tracker has written its game list (a neutral waiting card,
+//! not an empty state), and the "now" their dates count from. The open
+//! game and the filter row use
 //! [`crate::overview_page::settled_of`] and
 //! [`crate::overview_page::shows_filters`].
 
@@ -14,6 +15,18 @@ pub const LOADING_LINE: &str = "They show up here once the tracker has saved its
 /// No game list on disk yet. Fixtures always have one.
 pub fn loading(app: &TrackerApp) -> bool {
     app.fixture.is_none() && app.snapshot_mtime.is_none()
+}
+
+/// "Now" for dates a page draws (days left, a year on old dates): the
+/// fixture's clock in a fixture, so shots match the spec, otherwise the
+/// wall clock. `app.clock` alone only moves when the game list changes,
+/// so an idle window would keep yesterday's "49 days left".
+pub fn now(app: &TrackerApp) -> chrono::DateTime<chrono::Utc> {
+    if app.fixture.is_some() {
+        app.clock
+    } else {
+        chrono::Utc::now()
+    }
 }
 
 #[cfg(test)]
@@ -38,5 +51,14 @@ mod tests {
         app.snapshot_mtime = Some(std::time::SystemTime::now());
         assert!(!loading(&app));
         assert!(crate::overview_page::shows_filters(&app));
+    }
+
+    #[test]
+    fn now_is_the_fixture_clock_only_in_a_fixture() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.clock = chrono::DateTime::UNIX_EPOCH;
+        assert_eq!(now(&app), app.clock);
+        app.fixture = None;
+        assert!(now(&app) > app.clock, "live windows read the wall clock");
     }
 }

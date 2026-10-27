@@ -1,6 +1,7 @@
 //! Small pieces the 0.6 Maps and Seasons tabs share: their one message
-//! type, cards, labels, rules, the amber "N undecided · Review" chip and
-//! the Best and Worst colours. Only these two tabs use it.
+//! type, their two layout breakpoints, and the widgets they both draw
+//! (cards, labels, rules, the amber "N undecided · Review" chip). Only
+//! these two tabs use it; the colours are in [`crate::theme`].
 
 use iced::widget::text::Wrapping;
 use iced::widget::{button, container, image, row, space, text};
@@ -9,17 +10,24 @@ use iced::{Alignment, Background, Border, Color, Element, Padding, Task, Theme};
 use crate::app::{Message, TrackerApp};
 use crate::icons::{self, Icon};
 use crate::model::SeasonSel;
-use crate::theme::{self, ACCENT, BORDER, FONT_BOLD, SIZE_LABEL, SURFACE, TEXT_3, WARN};
+use crate::theme::{self, BORDER, FONT_BOLD, SIZE_LABEL, SURFACE, WARN, WARN_LINE};
 
-/// Spec `--accent-soft`: the accent at 16%.
-pub const ACCENT_SOFT: Color = Color { a: 0.16, ..ACCENT };
+/// The spec's two breakpoints, as window widths: from 1440 px the wider
+/// columns and the 320 px rail, from 1100 px the rail beside the table.
+const WIDE_FROM: f32 = 1440.0;
+const RAIL_FROM: f32 = 1100.0;
 
-/// The amber outline on undecided and need-a-look items (never a fill).
-pub const WARN_LINE: Color = Color { a: 0.45, ..WARN };
+/// From a 1440 px window up. The page only sees its content width, read
+/// back to a window by [`crate::overview_page::window_for`] as the
+/// Overview chips do: a 1424 to 1439 px window has the same content width
+/// as a 1440 one (narrower gutters), so it gets the same layout.
+pub fn wide(content: f32) -> bool {
+    crate::overview_page::window_for(content) >= WIDE_FROM
+}
 
-/// Mint at 50% or above, red below (Best and Worst lists).
-pub fn pct_color(pct: u32) -> Color {
-    if pct >= 50 { theme::OK } else { theme::DANGER }
+/// From a 1100 px window up the rail sits beside the table.
+pub fn has_rail(content: f32) -> bool {
+    crate::overview_page::window_for(content) >= RAIL_FROM
 }
 
 /// What the Maps and Seasons tabs send.
@@ -27,7 +35,9 @@ pub fn pct_color(pct: u32) -> Color {
 pub enum PageMsg {
     Maps(crate::maps_tab::Msg),
     /// "Review" on an undecided chip: Games with the Needs a look filter
-    /// on, in that season (`None` is All time).
+    /// on, in that season (`None` is All time), keeping the role chip the
+    /// count was taken under. Games also lists that season's hero and map
+    /// problems, so it can hold more games than the chip counts.
     Review(Option<String>),
 }
 
@@ -39,7 +49,9 @@ pub fn update(app: &mut TrackerApp, msg: PageMsg) -> Task<Message> {
         }
         PageMsg::Review(season) => {
             // Clears the other filters, picks All time, opens Games.
+            let roles = app.roles;
             let task = crate::nav::update(app, crate::nav::Msg::ShowNeedsLook);
+            app.roles = roles;
             if let Some(id) = season {
                 app.season = SeasonSel::Season(id);
                 crate::seasons::persist_selection(&app.data_dir, &app.season);
@@ -49,13 +61,10 @@ pub fn update(app: &mut TrackerApp, msg: PageMsg) -> Task<Message> {
     }
 }
 
-/// A section label: small, bold, muted capitals.
+/// A section label: the Overview's semibold muted capitals
+/// ([`crate::widgets::label_text`]), on one line.
 pub fn label(s: &str) -> text::Text<'static> {
-    text(s.to_uppercase())
-        .size(SIZE_LABEL)
-        .font(FONT_BOLD)
-        .color(TEXT_3)
-        .wrapping(Wrapping::None)
+    crate::widgets::label_text(s).wrapping(Wrapping::None)
 }
 
 /// A table header that does not sort, `width` px wide.
@@ -174,10 +183,13 @@ mod tests {
     fn review_opens_games_on_that_season() {
         let (_dir, mut app) = crate::fixtures::test_app();
         app.filter_hero = Some("Ana".into());
+        let tank = crate::model::RoleFilter::default().toggle(crate::model::Role::Tank);
+        app.roles = tank;
         let _ = update(&mut app, PageMsg::Review(Some("season-4".into())));
         assert_eq!(app.screen, Screen::Games);
         assert!(app.needs_look_filter);
         assert_eq!(app.filter_hero, None);
+        assert_eq!(app.roles, tank, "the role the count was taken under");
         assert_eq!(app.season, SeasonSel::Season("season-4".into()));
 
         let _ = update(&mut app, PageMsg::Review(None));

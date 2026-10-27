@@ -74,9 +74,10 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 /// screens the season, role and Companion row, then the screen. The bar and
 /// the page share one gutter ([`theme::page_gutter`]).
 ///
-/// The control row is a stopgap: it is the 0.5 header row, not the spec's
-/// filter chips (Season, queues, roles, Crew, Hero, Map; "Filters (n)" at
-/// 1024), which land with the per-screen redesigns.
+/// The control row is the 0.5 header row, kept only on pages that do not
+/// draw the spec's filter chips yet; the redesigned pages draw the chips
+/// themselves (Season, queues, roles, Crew, Hero, Map; "Filters (n)"
+/// below a 1440 px window).
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];

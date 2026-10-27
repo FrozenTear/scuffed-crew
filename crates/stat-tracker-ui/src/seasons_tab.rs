@@ -333,7 +333,7 @@ struct Cols {
 
 fn cols(width: f32) -> Cols {
     let m = crate::maps_tab::cols(width);
-    let wide = crate::maps_tab::wide(width);
+    let wide = tab_bits::wide(width);
     Cols {
         dates: if wide { 136.0 } else { 128.0 },
         games: if wide { 64.0 } else { 56.0 },
@@ -342,7 +342,7 @@ fn cols(width: f32) -> Cols {
         review: if wide { 184.0 } else { 160.0 },
         rail: m.rail,
         gap: m.gap,
-        narrow: !crate::maps_tab::has_rail(width),
+        narrow: !tab_bits::has_rail(width),
     }
 }
 
@@ -364,7 +364,7 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
         &app.seasons.seasons,
         app.roles,
         app.live_game_session.as_deref(),
-        app.clock,
+        crate::games_state::now(app),
     );
     let c = cols(width);
     let mut page = Column::new().spacing(24).width(Fill);
@@ -528,13 +528,23 @@ fn current_card(cur: &Current, narrow: bool, filtered: bool) -> Element<'static,
         }
     };
 
-    let stripe = container(space().width(4))
-        .width(4)
-        .height(Fill)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(ACCENT)),
-            ..container::Style::default()
-        });
+    // Inset by the card's corner radius: iced clips to a plain rectangle,
+    // so a full-height stripe would stick out past the rounded corners.
+    let stripe = container(
+        container(space().width(4))
+            .width(4)
+            .height(Fill)
+            .style(|_: &Theme| container::Style {
+                background: Some(Background::Color(ACCENT)),
+                border: Border {
+                    radius: 2.0.into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            }),
+    )
+    .height(Fill)
+    .padding(Padding::from([crate::theme::RADIUS_CARD, 0.0]));
     container(
         row![
             stripe,
@@ -758,14 +768,12 @@ fn season_row(l: &SeasonLine, c: Cols, total: bool) -> Element<'static, Message>
             .font(FONT_BOLD)
             .color(strong)
             .width(c.games),
-        text(format!(
-            "{}-{}-{}",
-            l.record.wins, l.record.losses, l.record.draws
-        ))
-        .size(SIZE_BODY)
-        .font(FONT_SEMIBOLD)
-        .color(soft)
-        .width(c.wld),
+        // W-L, with draws only when there are any, as on Maps.
+        text(l.record.wl_label())
+            .size(SIZE_BODY)
+            .font(FONT_SEMIBOLD)
+            .color(soft)
+            .width(c.wld),
         container(bar).width(c.bar),
         container(pct)
             .width(PCT_W)
@@ -788,7 +796,7 @@ fn now_chip() -> Element<'static, Message> {
     )
     .padding(Padding::from([1, 8]))
     .style(|_: &Theme| container::Style {
-        background: Some(Background::Color(tab_bits::ACCENT_SOFT)),
+        background: Some(Background::Color(crate::theme::ACCENT_SOFT)),
         border: Border {
             color: iced::Color { a: 0.5, ..ACCENT },
             width: 1.0,

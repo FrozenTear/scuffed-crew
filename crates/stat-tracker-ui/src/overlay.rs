@@ -863,11 +863,7 @@ impl OverlayApp {
         let seasons = seasons::load_cache(&cli.data_dir);
         let persisted = seasons::load_ui_state(&cli.data_dir);
         let season = seasons::resolve_selection(persisted, &seasons.seasons);
-        let clock = if cli.fixture == Some(FixtureKind::Sample) {
-            games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
-        } else {
-            Utc::now()
-        };
+        let clock = crate::fixtures::clock(cli.fixture, &games);
         let config = stat_tracker::config::Config::load().unwrap_or_default();
         let sync_on = config.sync.is_some();
         let mut model = build_model(

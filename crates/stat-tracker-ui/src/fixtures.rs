@@ -20,6 +20,17 @@ pub fn snapshot(kind: FixtureKind) -> Snapshot {
     }
 }
 
+/// The clock a window on `fixture` starts at: the newest game for the
+/// fixtures with games, so "today" and "days left" read as in the spec
+/// shots. Live data starts at now.
+pub fn clock(fixture: Option<FixtureKind>, games: &[crate::model::Game]) -> chrono::DateTime<Utc> {
+    if matches!(fixture, Some(FixtureKind::Sample | FixtureKind::Full)) {
+        games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
+    } else {
+        Utc::now()
+    }
+}
+
 /// The season list a fixture starts with, when it has one.
 pub fn seasons_json(kind: FixtureKind) -> Option<&'static str> {
     match kind {

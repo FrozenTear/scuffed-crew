@@ -251,23 +251,8 @@ pub struct Cols {
     pub gap: f32,
 }
 
-/// Content width of a 1440 px window (32 px gutters) and of a 1100 px one
-/// (24 px gutters): the spec's two breakpoints.
-const WIDE_FROM: f32 = 1376.0;
-const RAIL_FROM: f32 = 1052.0;
-
-/// From the 1440 px window up: the wider columns and the 320 px rail.
-pub fn wide(width: f32) -> bool {
-    width >= WIDE_FROM
-}
-
-/// From the 1100 px window up the rail sits beside the table.
-pub fn has_rail(width: f32) -> bool {
-    width >= RAIL_FROM
-}
-
 pub fn cols(width: f32) -> Cols {
-    if wide(width) {
+    if tab_bits::wide(width) {
         Cols {
             games: 64.0,
             wld: 96.0,
@@ -282,7 +267,7 @@ pub fn cols(width: f32) -> Cols {
             wld: 88.0,
             undecided: 88.0,
             bar: 160.0,
-            rail: has_rail(width).then_some(288.0),
+            rail: tab_bits::has_rail(width).then_some(288.0),
             gap: 16.0,
         }
     }
@@ -447,7 +432,7 @@ fn segment_style(on: bool, status: button::Status) -> button::Style {
     let hot = matches!(status, button::Status::Hovered | button::Status::Pressed);
     button::Style {
         background: if on {
-            Some(Background::Color(tab_bits::ACCENT_SOFT))
+            Some(Background::Color(crate::theme::ACCENT_SOFT))
         } else if hot {
             Some(Background::Color(SURFACE_2))
         } else {
@@ -686,7 +671,7 @@ fn rank_card(best: bool, picks: &[&MapRow], rated: usize) -> Element<'static, Me
                 text(format!("{p}%"))
                     .size(SIZE_META)
                     .font(FONT_BOLD)
-                    .color(tab_bits::pct_color(p)),
+                    .color(crate::theme::pct_color(p)),
             ]
             .align_y(Alignment::Center)
             .height(32),
@@ -1079,7 +1064,9 @@ mod tests {
         assert_eq!(cols(1318.0).rail, Some(288.0));
         assert_eq!(cols(976.0).rail, None);
         assert_eq!(cols(976.0).bar, 160.0);
-        assert!(wide(1536.0) && !wide(1318.0));
-        assert!(has_rail(1318.0) && !has_rail(976.0));
+        assert!(tab_bits::wide(1536.0) && !tab_bits::wide(1318.0));
+        assert!(tab_bits::has_rail(1318.0) && !tab_bits::has_rail(976.0));
+        // A 1100 px window (24 px gutters) has the rail, 1099 px does not.
+        assert!(tab_bits::has_rail(1052.0) && !tab_bits::has_rail(1051.0));
     }
 }

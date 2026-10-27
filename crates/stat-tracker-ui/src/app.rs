@@ -223,6 +223,7 @@ pub enum Message {
     Nav(crate::nav::Msg),
     /// A message from the 0.6 Overview ([`crate::overview_page::update`]).
     OverviewPage(crate::overview_page::Msg),
+    /// A message from the 0.6 Maps and Seasons tabs ([`crate::tab_bits::update`]).
     Pages(crate::tab_bits::PageMsg),
 }
 
@@ -340,6 +341,7 @@ pub struct TrackerApp {
     pub needs_look_filter: bool,
     /// The 0.6 Overview's own state ([`crate::overview_page`]).
     pub overview_page: crate::overview_page::OverviewPage,
+    /// The 0.6 Maps tab's sort and Show row ([`crate::maps_tab`]).
     pub maps_ui: crate::maps_tab::MapsUi,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
@@ -461,7 +463,7 @@ impl TrackerApp {
         }
         let persisted = seasons::load_ui_state(&cli.data_dir);
         let season = seasons::resolve_selection(persisted, &seasons.seasons);
-        let clock = fixture_clock(cli.fixture, &games);
+        let clock = crate::fixtures::clock(cli.fixture, &games);
         let seasons_url = cli.seasons_url.clone();
         let now = Utc::now();
         let (fetch, last_seasons_attempt) =
@@ -2750,14 +2752,6 @@ fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
         None => base,
         Some(notice) if base == HEALTH_READY || base == HEALTH_WAITING => notice.to_string(),
         Some(notice) => format!("{base} {notice}"),
-    }
-}
-
-fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> {
-    if matches!(fixture, Some(FixtureKind::Sample | FixtureKind::Full)) {
-        games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
-    } else {
-        Utc::now()
     }
 }
 
