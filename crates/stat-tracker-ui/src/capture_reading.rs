@@ -129,22 +129,37 @@ pub(crate) fn reader_options(
 
 /// The Pause between grabs row on this desktop.
 fn pause_now(app: &TrackerApp) -> PauseRow {
+    pause_with(
+        app,
+        std::env::var(SCREENCAST_PAUSE_ENV).ok().as_deref(),
+        std::env::var("KDE_SESSION_VERSION").ok().as_deref(),
+    )
+}
+
+/// The Pause between grabs row with `pause_env` as
+/// STAT_TRACKER_SCREENCAST_PAUSE and `kde_session_version` as
+/// KDE_SESSION_VERSION, so a test never reads the host's environment.
+fn pause_with(
+    app: &TrackerApp,
+    pause_env: Option<&str>,
+    kde_session_version: Option<&str>,
+) -> PauseRow {
     pause_row(
-        app.saved_config.screencast_pause_override(),
-        auto_pause(
-            &app.desktop,
-            std::env::var("KDE_SESSION_VERSION").ok().as_deref(),
+        stat_tracker::config::screencast_pause_override(
+            app.saved_config.screencast_pause_between_grabs,
+            pause_env,
         ),
+        auto_pause(&app.desktop, kde_session_version),
     )
 }
 
 /// What the environment fixes outside the app, for the summary.
-fn env_locks(app: &TrackerApp) -> Vec<&'static str> {
+fn env_locks(app: &TrackerApp, pause: PauseRow) -> Vec<&'static str> {
     let mut locks = Vec::new();
     if capture_shared::capture_env_note().is_some() {
         locks.push("Capture method, by STAT_TRACKER_CAPTURE");
     }
-    if pause_now(app).locked {
+    if pause.locked {
         locks.push("Pause between grabs, by STAT_TRACKER_SCREENCAST_PAUSE");
     }
     if app.saved_config.ocr_control().env.is_some() {
@@ -160,10 +175,21 @@ fn env_locks(app: &TrackerApp) -> Vec<&'static str> {
 /// Reading line follows `STAT_TRACKER_OCR` when it is set, as the tracker
 /// asks for it at start (the pack check can still keep classic OCR on).
 pub(crate) fn summary_rows(app: &TrackerApp) -> Vec<(&'static str, String)> {
+    let pause = pause_now(app);
+    summary_rows_with(app, pause, env_locks(app, pause))
+}
+
+/// [`summary_rows`] with the pause row and the environment's locks given,
+/// so a test never reads the host's environment.
+fn summary_rows_with(
+    app: &TrackerApp,
+    pause: PauseRow,
+    locks: Vec<&'static str>,
+) -> Vec<(&'static str, String)> {
     let config = &app.saved_config;
     let monitor = monitor_phrase(config.capture_output.as_deref().unwrap_or(""), &app.outputs);
     let mut capture = format!("{} on {monitor}.", route_label(config.capture_route));
-    if stream_rows_apply(&app.desktop, app.session, config.capture_route) && pause_now(app).pauses {
+    if stream_rows_apply(&app.desktop, app.session, config.capture_route) && pause.pauses {
         capture.push_str(" Paused between grabs.");
     }
     let mut in_effect = config.clone();
@@ -190,7 +216,6 @@ pub(crate) fn summary_rows(app: &TrackerApp) -> Vec<(&'static str, String)> {
         ("Reading", reading.to_string()),
         ("Reader packs", packs),
     ];
-    let locks = env_locks(app);
     if !locks.is_empty() {
         rows.push(("Set outside the app", format!("{}.", locks.join("; "))));
     }
@@ -731,7 +756,7 @@ mod tests {
     #[test]
     fn the_summary_names_each_thing_once() {
         let (_dir, app) = demo_app();
-        let rows = summary_rows(&app);
+        let rows = summary_rows_with(&app, pause_with(&app, None, None), Vec::new());
         let labels: Vec<&str> = rows.iter().map(|(l, _)| *l).collect();
         assert_eq!(labels[..3], ["Capture", "Reading", "Reader packs"]);
         for (label, value) in &rows {
@@ -751,11 +776,13 @@ mod tests {
         app.desktop = "niri".into();
         app.session = SessionKind::Wayland;
         app.saved_config.capture_route = CaptureRoute::Screencast;
-        let wayland = summary_rows(&app);
+        let no_env =
+            |app: &TrackerApp| summary_rows_with(app, pause_with(app, None, None), Vec::new());
+        let wayland = no_env(&app);
         assert!(wayland[0].1.contains("Paused between grabs"), "{wayland:?}");
         app.session = SessionKind::X11;
         app.preview_error = Some("No capture".into());
-        let x11 = summary_rows(&app);
+        let x11 = no_env(&app);
         assert!(!x11[0].1.contains("Paused"), "{x11:?}");
         assert!(capture_shared::preview_error(&app).is_some());
         let _ = body(&app, false);
