@@ -9,10 +9,7 @@ use crate::model::Game;
 
 /// Read the daemon snapshot via the existing lib API. Missing / unreadable → empty.
 pub fn load_snapshot(data_dir: &Path) -> Snapshot {
-    storage::read_snapshot(data_dir).unwrap_or(Snapshot {
-        matches: Vec::new(),
-        sessions: Vec::new(),
-    })
+    storage::read_snapshot(data_dir).unwrap_or_default()
 }
 
 pub fn snapshot_mtime(data_dir: &Path) -> Option<SystemTime> {

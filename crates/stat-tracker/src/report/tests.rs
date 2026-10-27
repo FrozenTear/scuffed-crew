@@ -1444,7 +1444,7 @@ mod game {
                 suspect_fields: Vec::new(),
                 name_recognizer: None,
             }],
-            sessions: Vec::new(),
+            ..crate::storage::Snapshot::default()
         };
         std::fs::write(
             tmp.path().join("live_snapshot.json"),

@@ -281,6 +281,7 @@ impl LocalStore {
         let snapshot = Snapshot {
             matches: self.get_all_matches().await?,
             sessions: self.get_all_sessions().await?,
+            pending_deletes: self.get_pending_tombstones().await?,
         };
         let json = serde_json::to_vec(&snapshot)?;
         let tmp = data_dir.join("live_snapshot.json.tmp");

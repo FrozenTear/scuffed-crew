@@ -9,12 +9,16 @@ use super::{MatchSession, PersonalMatch};
 
 /// The daemon's live export of the full store, for readers (the GUI) that
 /// can't open SurrealKV while the daemon has it locked.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     /// All matches, newest first (mirrors `get_all_matches`).
     pub matches: Vec<PersonalMatch>,
     /// All sessions, most recently captured first (mirrors `get_all_sessions`).
     pub sessions: Vec<MatchSession>,
+    /// Deleted games whose server delete (tombstone) has not synced yet
+    /// (`get_pending_tombstones`). Absent in older snapshots.
+    #[serde(default)]
+    pub pending_deletes: Vec<String>,
 }
 
 pub(super) fn snapshot_path(data_dir: &Path) -> PathBuf {
