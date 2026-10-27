@@ -260,7 +260,7 @@ fn header_row(cols: &[(Col, Width)], state: TabState) -> Element<'static, Messag
             .into(),
             _ => text(c.label())
                 .size(SIZE_LABEL)
-                .font(FONT_SEMIBOLD)
+                .font(FONT_BOLD)
                 .color(TEXT_3)
                 .into(),
         };
@@ -268,7 +268,7 @@ fn header_row(cols: &[(Col, Width)], state: TabState) -> Element<'static, Messag
     }
     container(r)
         .padding(Padding {
-            right: 12.0,
+            right: 16.0,
             ..Padding::ZERO
         })
         .into()
@@ -306,7 +306,7 @@ fn game_row(g: &Game, cols: &[(Col, Width)], state: TabState) -> Element<'static
                 } else {
                     g.map_name.clone()
                 };
-                let mut m = row![text(name).size(SIZE_META).font(FONT_SEMIBOLD).color(main)]
+                let mut m = row![text(name).size(SIZE_META).font(FONT_BOLD).color(main)]
                     .spacing(8)
                     .align_y(Alignment::Center);
                 if let Some(mode) = games_rows::mode_chip(&g.map_name) {
@@ -350,7 +350,7 @@ fn game_row(g: &Game, cols: &[(Col, Width)], state: TabState) -> Element<'static
         r = r.push(container(cell).width(cell_len(w)).clip(true));
     }
     mouse_area(container(r).padding(Padding {
-        right: 12.0,
+        right: 16.0,
         ..Padding::ZERO
     }))
     .on_press(Message::ToggleGame(g.session_id.clone()))

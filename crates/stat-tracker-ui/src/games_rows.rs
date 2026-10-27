@@ -86,7 +86,9 @@ impl Col {
     }
 }
 
-/// The columns at `grid` with their widths (spec r1 `A-games.html`).
+/// The columns at `grid` with their widths (spec r1.1 `A-games.html`).
+/// The header row and every game row draw from this one list, so a column
+/// the rows fold away at 1024 (Hero, E/D/A) is gone from the header too.
 pub fn columns(grid: Grid) -> Vec<(Col, Width)> {
     use Width::{Px, Share};
     match grid {
@@ -441,6 +443,19 @@ mod tests {
         assert_eq!(columns(Grid::Wide).len(), 10);
     }
 
+    /// Spec r1.1: at 1024 the header hides Hero like the rows. The header
+    /// labels come from the same column list, so HERO is not among them.
+    #[test]
+    fn narrow_header_hides_hero_like_the_rows() {
+        let labels = |grid| -> Vec<&'static str> {
+            columns(grid).into_iter().map(|(c, _)| c.label()).collect()
+        };
+        assert!(!labels(Grid::Narrow).contains(&"HERO"));
+        assert!(!labels(Grid::Narrow).contains(&"E/D/A"));
+        assert!(labels(Grid::Mid).contains(&"HERO"));
+        assert!(labels(Grid::Wide).contains(&"HERO"));
+    }
+
     #[test]
     fn unsure_chip_labels() {
         let g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["elims", "deaths"]);
@@ -464,6 +479,7 @@ mod tests {
     #[test]
     fn suravasa_reads_flashpoint() {
         assert_eq!(mode_chip("Suravasa"), Some("Flashpoint"));
+        // Spec r1.1: Circuit Royal's row shows the Escort chip.
         assert_eq!(mode_chip("Circuit Royal"), Some("Escort"));
         assert_eq!(mode_chip(""), None);
     }
