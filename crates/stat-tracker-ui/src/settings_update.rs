@@ -1080,6 +1080,13 @@ mod tests {
             Some(&(ChipList::Names, "#2112".to_string()))
         );
         assert_eq!(app.toast.as_deref(), Some(NAME_CHIP_EMPTY));
+        assert!(
+            NAME_CHIP_EMPTY.contains(&format!(
+                "at least {} characters",
+                stat_tracker::config::MIN_OWN_NAME_CHARS
+            )),
+            "the toast names the core's minimum"
+        );
         assert_eq!(on_disk(&dir).player_name, None);
     }
 
