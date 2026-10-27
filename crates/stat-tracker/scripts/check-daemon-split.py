@@ -24,7 +24,8 @@ base revision:
    is listed as "reflowed" so a reviewer can look at it.
 2. In each daemon file the moved items keep their base order, separated by
    one blank line, below a header of `//!` docs, `use crate::*;`, `mod x;` and
-   `pub(crate) use x::*;` lines only.
+   `pub(crate) use x::*;` lines only. A `mod.rs` header may also declare a
+   test file: a `#[cfg(test)]` line, then `mod tests_x;` on the next line.
 3. Every `tracing::<level>!(` call in a moved item carries the pin, so moved
    log lines keep the `scuffed_stat_tracker` target they had in `main.rs`.
 4. Items that a daemon file already has in the base (an earlier split
@@ -42,9 +43,17 @@ base revision:
    not change fails too, so the flag cannot be left on by habit.
 6. Every daemon file is reached from `mod daemon;` through `mod x;` header
    lines, and each `pub(crate) use x::*;` re-exports a child declared there.
+   A test file `tests_x.rs` is reached through its `#[cfg(test)]` and
+   `mod tests_x;` pair in the `mod.rs` beside it; a `tests_` module declared
+   without `#[cfg(test)]`, or re-exported, fails.
 7. Moved items use no logging form the pin check does not cover (`event!`,
    spans, `#[instrument]`, a bare `info!(`): moving one would change its
    target.
+
+Test files under `src/daemon/` (named `tests_*.rs`, moved there from
+`src/main_tests/` by 0.6 set A) are not moved items: checks 1 to 4 skip
+them, here and in the base, and only check 6 looks at them.
+`check-test-renames.py` checks the tests they hold.
 
 It proves the move is pure text; it does not prove the tree compiles (a
 moved type's private field read from outside its new module, for one).
@@ -79,6 +88,14 @@ LEVELS = r"(?:trace|debug|info|warn|error)"
 HEADER_LINE = re.compile(
     r"^(//!.*|use crate::\*;|mod [a-z_][a-z0-9_]*;|pub\(crate\) use [a-z_][a-z0-9_]*::\*;|)$"
 )
+# A test file in a daemon mod.rs header: this line, then `mod tests_x;`.
+CFG_TEST = "#[cfg(test)]"
+TEST_MOD = re.compile(r"^mod (tests_[a-z0-9_]*);$")
+
+
+def is_test_file(path):
+    """A test file under src/daemon (`tests_*.rs`): not a moved item."""
+    return pathlib.PurePosixPath(str(path)).name.startswith("tests_") and str(path).endswith(".rs")
 
 IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 
@@ -408,12 +425,36 @@ def git(*args, cwd):
 def split_header(text):
     """(header lines, body text) of a daemon file: the header is the leading
     run of `//!`, `use crate::*;`, `mod x;`, `pub(crate) use x::*;` and blank
-    lines; the body is everything after it."""
+    lines, and `#[cfg(test)]` lines each followed by `mod tests_x;`; the body
+    is everything after it."""
     lines = text.split("\n")
     n = 0
-    while n < len(lines) and HEADER_LINE.match(lines[n]):
-        n += 1
+    while n < len(lines):
+        if lines[n] == CFG_TEST and n + 1 < len(lines) and TEST_MOD.match(lines[n + 1]):
+            n += 2
+        elif HEADER_LINE.match(lines[n]):
+            n += 1
+        else:
+            break
     return lines[:n], "\n".join(lines[n:])
+
+
+def header_mods(header):
+    """(child modules, test modules, `tests_` modules without `#[cfg(test)]`)
+    declared in header lines: a test module is a `mod tests_x;` line right
+    after a `#[cfg(test)]` line."""
+    mods, tests, bare = [], [], []
+    for k, line in enumerate(header):
+        m = re.match(r"mod ([a-z_0-9]+);$", line)
+        if not m:
+            continue
+        if TEST_MOD.match(line) and k > 0 and header[k - 1] == CFG_TEST:
+            tests.append(m.group(1))
+        elif m.group(1).startswith("tests_"):
+            bare.append(m.group(1))
+        else:
+            mods.append(m.group(1))
+    return mods, tests, bare
 
 
 def mask_text_checks(text, errors, where):
@@ -462,7 +503,7 @@ def main():
     # items must come through byte for byte, in the same file and order.
     base_daemon = {}
     for rel in git("ls-tree", "-r", "--name-only", args.base, "--", REL_DAEMON, cwd=root).split():
-        if rel.endswith(".rs"):
+        if rel.endswith(".rs") and not is_test_file(rel):
             _, body = split_header(git("show", f"{args.base}:{rel}", cwd=root).rstrip("\n"))
             base_daemon[rel] = [it["text"] for it in items(body)] if body.strip() else []
     has_scaffold = SCAFFOLD.rstrip("\n") + "\n" in base_text
@@ -473,32 +514,49 @@ def main():
     reflowed = []
     rewrapped = []
     daemon_dir = root / REL_DAEMON
-    files = sorted(daemon_dir.rglob("*.rs")) if daemon_dir.is_dir() else []
+    all_files = sorted(daemon_dir.rglob("*.rs")) if daemon_dir.is_dir() else []
+    # Test files are reached (check 6) but hold no moved items (checks 1-4).
+    files = [path for path in all_files if not is_test_file(path)]
     # Every file must be reached from `mod daemon;` through header `mod x;`
     # lines (x.rs beside the declaring mod.rs, or x/mod.rs), and every
     # `pub(crate) use x::*;` must re-export a child declared in that header.
+    # A test file is reached through `#[cfg(test)]` + `mod tests_x;` in the
+    # mod.rs beside it, and is not walked further.
     reached, todo = set(), [daemon_dir / "mod.rs"]
     while todo:
         path = todo.pop()
         if path in reached or not path.is_file():
             continue
         reached.add(path)
+        if is_test_file(path):
+            continue
+        where = path.relative_to(root).as_posix()
         header, _ = split_header(path.read_text().rstrip("\n"))
-        mods = [m.group(1) for line in header for m in [re.match(r"mod ([a-z_0-9]+);$", line)] if m]
+        mods, tests, bare = header_mods(header)
         uses = [m.group(1) for line in header for m in [re.match(r"pub\(crate\) use ([a-z_0-9]+)::\*;$", line)] if m]
         for u in uses:
-            if u not in mods:
-                errors.append(f"{path.relative_to(root).as_posix()}: re-exports {u}, which it does not declare")
-        if path.name != "mod.rs" and mods:
-            errors.append(f"{path.relative_to(root).as_posix()}: only a mod.rs may declare child modules")
+            if u in tests:
+                errors.append(f"{where}: re-exports the test module {u}")
+            elif u not in mods:
+                errors.append(f"{where}: re-exports {u}, which it does not declare")
+        for t in bare:
+            errors.append(f"{where}: mod {t} needs a {CFG_TEST} line right above it")
+        if path.name != "mod.rs" and (mods or tests or bare):
+            errors.append(f"{where}: only a mod.rs may declare child modules")
         for m in mods:
             flat, nested = path.parent / f"{m}.rs", path.parent / m / "mod.rs"
             if flat.is_file() == nested.is_file():
-                errors.append(f"{path.relative_to(root).as_posix()}: mod {m} needs exactly one of {m}.rs or {m}/mod.rs")
+                errors.append(f"{where}: mod {m} needs exactly one of {m}.rs or {m}/mod.rs")
             todo += [flat, nested]
-    for path in files:
+        for t in tests + bare:
+            flat = path.parent / f"{t}.rs"
+            if not flat.is_file() or (path.parent / t).exists():
+                errors.append(f"{where}: test mod {t} needs {t}.rs beside it, and no {t}/ directory")
+            todo.append(flat)
+    for path in all_files:
         if path not in reached:
             errors.append(f"{path.relative_to(root).as_posix()}: not reached from `mod daemon;`")
+    tests_seen = [path.relative_to(root).as_posix() for path in all_files if is_test_file(path)]
     head_rels = {path.relative_to(root).as_posix() for path in files}
     for rel in sorted(set(base_daemon) - head_rels):
         errors.append(f"{rel}: in the base, missing at head")
@@ -624,6 +682,8 @@ def main():
     for name in changed_checks:
         print(f"source-text test in main.rs changed (MAIN-14 repoint, review its diff): {name}")
     print(f"moved: {len(moved)} items, {sum(i['end'] - i['start'] + 1 for i in moved)} base lines")
+    if tests_seen:
+        print(f"test files under src/daemon/ (reached, not item-checked): {len(tests_seen)}")
     if base_daemon:
         print(f"kept: {kept_total} items already under src/daemon/ in the base, byte for byte")
     if errors:
