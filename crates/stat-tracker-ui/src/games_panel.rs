@@ -44,25 +44,68 @@ pub fn panel<'a>(
     let editing = app.editing && app.edit.session_id == g.session_id;
     let stats = stats_column(app, g, narrow, in_progress);
     let status = status_box(g, in_progress, app.sync_on());
-    let buttons = actions(g, has_kit, narrow, editing, in_progress);
+    let up = detail::upload(g, in_progress, app.sync_on());
+    // Delete game's confirm strip replaces the actions; the status stays.
+    let confirming = app.confirm_delete.as_deref() == Some(g.session_id.as_str());
+    let strip = confirming.then(|| {
+        crate::games_delete::strip(&g.session_id, up == Upload::Uploaded, &app.games_tab.focus)
+    });
+    let delete = crate::games_delete::button_for(
+        &g.session_id,
+        app.games_tab.focus == games_rows::Focus::DeleteButton,
+    );
     let mut body = if narrow {
-        // "Only on this computer" ends the action row, after the buttons.
-        let mut actions_row = row![container(status).width(Fill), buttons]
+        let actions_row = match strip {
+            // The status keeps the left, the strip takes the right (1:1.5).
+            Some(strip) => row![
+                container(status).width(FillPortion(2)),
+                container(strip).width(FillPortion(3)),
+            ]
             .spacing(12)
-            .align_y(Alignment::Center);
-        if has_kit {
-            actions_row = actions_row.push(local_only());
-        }
+            .align_y(Alignment::Start),
+            None => {
+                // "Only on this computer" follows the buttons; Delete game
+                // is the last cell, at least 12px plus the gap further on.
+                let mut r = row![
+                    container(status).width(Fill),
+                    actions(g, has_kit, narrow, editing, in_progress),
+                ]
+                .spacing(12)
+                .align_y(Alignment::Center);
+                if has_kit {
+                    r = r.push(local_only());
+                }
+                r.push(container(delete).padding(Padding {
+                    left: 12.0,
+                    ..Padding::ZERO
+                }))
+            }
+        };
         column![
             row![left, container(stats).width(TILES_W_NARROW)].spacing(24),
             actions_row,
         ]
         .spacing(16)
     } else {
-        let mut right = column![status, buttons].spacing(10);
-        // The picture is the only local-only thing, so the note goes with it.
-        if has_kit {
-            right = right.push(local_only());
+        let mut right = column![status].spacing(10);
+        match strip {
+            Some(strip) => right = right.push(strip),
+            None => {
+                right = right.push(actions(g, has_kit, narrow, editing, in_progress));
+                // The picture is the only local-only thing, so the note
+                // goes with it.
+                if has_kit {
+                    right = right.push(local_only());
+                }
+                // Delete game: right-aligned at the bottom, 16px more
+                // than the column's gap above it.
+                right = right.push(
+                    container(row![space().width(Fill), delete]).padding(Padding {
+                        top: 16.0,
+                        ..Padding::ZERO
+                    }),
+                );
+            }
         }
         column![
             row![
@@ -660,7 +703,7 @@ fn footer(example: bool) -> Element<'static, Message> {
         .into()
 }
 
-fn key_cap(label: &'static str) -> Element<'static, Message> {
+pub(crate) fn key_cap(label: &'static str) -> Element<'static, Message> {
     container(text(label).size(SIZE_LABEL).font(FONT_BOLD).color(TEXT_2))
         .padding(Padding::from([1, 6]))
         .style(|_: &Theme| container::Style {
@@ -674,14 +717,18 @@ fn key_cap(label: &'static str) -> Element<'static, Message> {
         .into()
 }
 
-/// Whether Esc and Enter go to the open row: only under the top tabs,
-/// where the row opens this panel (the classic card has its own keys).
+/// Whether Esc, Enter, Tab and Space go to the Games tab: only under the
+/// top tabs, while a row is open or has the focus after a delete (the
+/// classic card has its own keys).
 pub fn listens(app: &TrackerApp) -> bool {
-    app.expanded.is_some() && app.nav_style == crate::nav::NavStyle::TopTabs
+    let row_focus = matches!(app.games_tab.focus, games_rows::Focus::Row(_));
+    (app.expanded.is_some() || row_focus) && app.nav_style == crate::nav::NavStyle::TopTabs
 }
 
-/// Esc or Enter that no widget took: Esc cancels an edit or closes the
-/// row, Enter closes it ([`crate::games_table::update`]).
+/// Esc, Enter, Tab or Space that no widget took: Esc cancels the delete
+/// strip or an edit, else closes the row; Enter and Space press the
+/// focused button; Enter else closes the row
+/// ([`crate::games_table::update`]).
 pub fn close_keys(
     event: iced::Event,
     status: iced::event::Status,
@@ -701,6 +748,8 @@ fn key_msg(key: &iced::keyboard::Key, status: iced::event::Status) -> Option<Msg
     match key {
         Key::Named(Named::Escape) => Some(Msg::Escape),
         Key::Named(Named::Enter) => Some(Msg::Enter),
+        Key::Named(Named::Tab) => Some(Msg::Tab),
+        Key::Named(Named::Space) => Some(Msg::Space),
         _ => None,
     }
 }
@@ -727,14 +776,19 @@ mod tests {
     use iced::keyboard::{Key, key::Named};
 
     #[test]
-    fn esc_and_enter_count_only_when_nothing_took_them() {
+    fn the_keys_count_only_when_nothing_took_them() {
         let esc = Key::Named(Named::Escape);
         let enter = Key::Named(Named::Enter);
         assert_eq!(key_msg(&esc, Status::Ignored), Some(Msg::Escape));
         assert_eq!(key_msg(&esc, Status::Captured), None);
         assert_eq!(key_msg(&enter, Status::Ignored), Some(Msg::Enter));
         assert_eq!(key_msg(&enter, Status::Captured), None);
-        assert_eq!(key_msg(&Key::Named(Named::Tab), Status::Ignored), None);
+        let tab = Key::Named(Named::Tab);
+        assert_eq!(key_msg(&tab, Status::Ignored), Some(Msg::Tab));
+        assert_eq!(key_msg(&tab, Status::Captured), None);
+        let space = Key::Named(Named::Space);
+        assert_eq!(key_msg(&space, Status::Ignored), Some(Msg::Space));
+        assert_eq!(key_msg(&Key::Character("d".into()), Status::Ignored), None);
     }
 
     /// Esc cancels the edit first, then closes; Enter never closes over
@@ -777,7 +831,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut cli = crate::fixtures::test_cli(dir.path());
         cli.fixture = Some(crate::cli::FixtureKind::Games);
-        let app = crate::app::TrackerApp::new(cli).0;
+        let mut app = crate::app::TrackerApp::new(cli).0;
         assert!(
             app.sessions_with_kit
                 .contains(crate::fixtures_games::NORMAL)
@@ -791,6 +845,10 @@ mod tests {
             let g = games.iter().find(|g| g.session_id == sid).unwrap();
             for narrow in [false, true] {
                 for in_progress in [false, true] {
+                    app.confirm_delete = None;
+                    let _ = panel(&app, g, narrow, in_progress);
+                    // The Delete game confirm strip in place of the actions.
+                    app.confirm_delete = Some(sid.into());
                     let _ = panel(&app, g, narrow, in_progress);
                 }
             }

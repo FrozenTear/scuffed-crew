@@ -34,6 +34,7 @@ pub mod fixtures;
 mod fixtures_games;
 mod form_widgets;
 pub mod games;
+mod games_delete;
 mod games_detail;
 mod games_panel;
 mod games_rows;
