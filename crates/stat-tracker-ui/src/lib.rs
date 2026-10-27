@@ -64,6 +64,7 @@ pub mod settings;
 pub mod settings_cards;
 mod settings_env;
 mod settings_fixed;
+mod settings_keys;
 pub mod settings_model;
 mod settings_open;
 pub mod settings_page;

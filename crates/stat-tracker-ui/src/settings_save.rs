@@ -735,6 +735,12 @@ server_url = \"https://crew.example\"
             (Some(ConfigEdit::PauseBetweenGrabs(false)), None),
             (Some(ConfigEdit::NameReader(false)), None),
             (Some(ConfigEdit::OcrWorkers(Some(2))), None),
+            (Some(ConfigEdit::LiveUpload(false)), None),
+            (Some(ConfigEdit::RankReader(true)), None),
+            (Some(ConfigEdit::ShareStatPictures(true)), None),
+            (Some(ConfigEdit::ShareReportPictures(true)), None),
+            (Some(ConfigEdit::CaptureOnlyOnScreen(false)), None),
+            (Some(ConfigEdit::AddPlayerName("Alt".into())), None),
         ];
         for toggle in [SettingsToggle::DebugOcr, SettingsToggle::AutoDetect] {
             edits.push((None, Some(toggle)));
@@ -762,7 +768,7 @@ server_url = \"https://crew.example\"
                 &snapshot,
                 EnvOverlay::default(),
                 &form,
-                edit,
+                edit.clone(),
                 || Ok(()),
             )
             .expect("writes");
@@ -779,6 +785,93 @@ server_url = \"https://crew.example\"
                 assert!(text.contains(kept), "{edit:?} {toggle:?}: {kept:?}\n{text}");
             }
             assert_eq!(Config::read_at(&path).expect("reread"), written);
+        }
+    }
+
+    /// Taking a 0.6 key back to its default removes its line from the file
+    /// and keeps the comment above it, and a token set outside the app
+    /// never reaches the file on the way.
+    #[test]
+    fn removing_a_0_6_key_keeps_its_comment_and_the_outside_token_stays_out() {
+        let raw = "\
+# keep
+data_dir = \"/tmp/sst-edit\"
+player_name = \"Main\"
+# my alts
+player_names = [\"Alt\"]
+# uploads paused
+live_upload = false
+from_a_newer_build = 1
+";
+        let cases = [
+            (
+                ConfigEdit::RemovePlayerNames(vec!["alt".into()]),
+                "player_names",
+                "# my alts",
+            ),
+            (
+                ConfigEdit::LiveUpload(true),
+                "live_upload",
+                "# uploads paused",
+            ),
+        ];
+        for (edit, gone, comment) in cases {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("config.toml");
+            std::fs::write(&path, raw).expect("seed");
+            let snapshot = Config::parse_file_contents(raw).expect("parse");
+            let form = SettingsForm::from_config_and_shadow(
+                &snapshot,
+                Config::shadow_control(snapshot.shadow_recognizer, None),
+            );
+            let saved = save_settings_form(
+                &path,
+                false,
+                &snapshot,
+                &snapshot,
+                EnvOverlay::default(),
+                &form,
+                Some(edit.clone()),
+                || Ok(()),
+            )
+            .expect("writes");
+            assert!(matches!(saved, SettingsFileSave::Saved(_)), "{edit:?}");
+            let text = std::fs::read_to_string(&path).expect("file");
+            assert!(!text.contains(gone), "{edit:?}: {gone} stays\n{text}");
+            for kept in ["# keep\n", comment, "from_a_newer_build = 1"] {
+                assert!(text.contains(kept), "{edit:?}: {kept:?}\n{text}");
+            }
+        }
+
+        // The same edits with a token set outside the app (SCUFFED_TOKEN).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let env = EnvOverlay {
+            token: true,
+            ..EnvOverlay::default()
+        };
+        for edit in [
+            ConfigEdit::AddPlayerName("Alt".into()),
+            ConfigEdit::LiveUpload(false),
+            ConfigEdit::CaptureOnlyOnScreen(false),
+        ] {
+            let (file, shown) = file_with_env_sync(&path, "https://crew.example");
+            let form = SettingsForm::from_config(&shown);
+            save_settings_form(
+                &path,
+                false,
+                &file,
+                &shown,
+                env,
+                &form,
+                Some(edit.clone()),
+                || Ok(()),
+            )
+            .expect("writes");
+            let text = std::fs::read_to_string(&path).expect("file");
+            assert!(!text.contains("T_env"), "{edit:?}\n{text}");
+            let on_disk = Config::read_at(&path).expect("reread");
+            assert_eq!(on_disk.sync, file.sync, "{edit:?}");
         }
     }
 
