@@ -138,13 +138,15 @@ fn own_player_names_merges_trims_and_dedupes() {
 
 #[test]
 fn own_player_names_dedupes_past_ascii() {
-    let mut c = Config::default();
-    c.player_name = Some("Öster".into());
-    c.player_names = vec![
-        "öster".into(),
-        "ÉCLAIR".into(),
-        "éclair".into(),
-        "Østen".into(),
-    ];
+    let c = Config {
+        player_name: Some("Öster".into()),
+        player_names: vec![
+            "öster".into(),
+            "ÉCLAIR".into(),
+            "éclair".into(),
+            "Østen".into(),
+        ],
+        ..Config::default()
+    };
     assert_eq!(c.own_player_names(), vec!["Öster", "ÉCLAIR", "Østen"]);
 }
