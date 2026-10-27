@@ -17,7 +17,7 @@ use crate::settings::{
     self, DEBUG_IMAGES_HELP, FIELD_SHORT, POLL_INTERVAL_HELP, PRERELEASE_UPDATES_LABEL,
     SHADOW_READER_ENV_NOTE, SHADOW_READER_HINT, SHADOW_READER_LABEL, SettingsField, SettingsToggle,
 };
-use crate::settings_model::{COMING_LATER, upload_row, url_host};
+use crate::settings_model::{upload_row, url_host};
 use crate::settings_rows::{
     coming_later_row, divided, link, page_field, row_title, setting_row, sub_heading, switch,
     title_line,
@@ -43,8 +43,6 @@ const SHARING_HEADING: &str = "Sharing · both start off";
 const RANK_HELP: &str = "Saves rank, rank change and its label. Applies from the next game.";
 /// "Share stat pictures" help.
 const STAT_PICTURES_HELP: &str = "Uploads the grayscale stat area after each game to help train the reader. No names. Kept 30 days. Report pictures are a separate setting in Capture and reading.";
-/// The page this link opens is not built yet, so it is drawn muted.
-const WHAT_LEAVES_LABEL: &str = "What leaves your PC";
 /// Help under Get alpha updates (spec).
 const ALPHA_HELP: &str = "Test builds before release. They may have bugs.";
 /// Under the Tracker service timing fields.
@@ -146,6 +144,7 @@ fn rejected_token_line(token_from_env: bool) -> &'static str {
 pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
     let sync_on = app.sync_on();
     let rejected = crate::tracker_status::sync_token_rejected(app);
+    let env_vars = crate::settings_env::sync_env(app.env_overlay());
     let mut connection = column![].spacing(4);
     match app.saved_config.sync.as_ref() {
         Some(sync) if sync_on => {
@@ -158,17 +157,12 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
             } else {
                 check_icon(14.0)
             };
-            connection = connection.push(
-                row![
-                    mark,
-                    text(format!("Connected to {}", url_host(&sync.server_url)))
-                        .size(SIZE_BODY)
-                        .font(FONT_SEMIBOLD)
-                        .color(TEXT),
-                ]
-                .spacing(8)
-                .align_y(Alignment::Center),
-            );
+            connection = connection.push(crate::account_card::signed_in(
+                app,
+                url_host(&sync.server_url),
+                mark,
+                env_vars.is_some(),
+            ));
         }
         _ => {
             connection = connection.push(
@@ -179,7 +173,6 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
             );
         }
     }
-    let env_vars = crate::settings_env::sync_env(app.env_overlay());
     if rejected {
         connection = connection.push(
             text(rejected_token_line(env_vars.is_some()))
@@ -210,15 +203,7 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
             coming_later_row("Read my rank after Comp games", RANK_HELP, &[], false),
             coming_later_row("Share stat pictures", STAT_PICTURES_HELP, &[], false),
         ]),
-        row![
-            text(WHAT_LEAVES_LABEL)
-                .size(SIZE_META)
-                .font(FONT_BOLD)
-                .color(TEXT_3),
-            hint(COMING_LATER),
-        ]
-        .spacing(8)
-        .align_y(Alignment::Center),
+        crate::account_card::what_leaves_link(),
     ]
     .spacing(12);
     divided(vec![connection.into(), uploads, sharing.into()])
@@ -249,10 +234,9 @@ pub(crate) fn updates(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         }
         // After a failed Check now only the failure line shows.
         None if app.page_state.update_check_failed_at.is_some() => {}
-        None => help.push(hint(match &app.page_state.update_checked_at {
-            Some(at) => format!("No newer version found. Checked {at}."),
-            None => "No newer version found since the app started.".to_string(),
-        })),
+        None => help.push(crate::account_card::up_to_date_line(
+            app.page_state.update_checked_at.as_deref(),
+        )),
     }
     if let Some(at) = &app.page_state.update_check_failed_at {
         help.push(
@@ -543,7 +527,7 @@ mod tests {
             SHARING_HEADING,
             RANK_HELP,
             STAT_PICTURES_HELP,
-            WHAT_LEAVES_LABEL,
+            crate::account_card::WHAT_LEAVES_LINK,
             ALPHA_HELP,
             ENTER_TO_APPLY,
             SYNC_HELP,
@@ -553,7 +537,10 @@ mod tests {
         ] {
             assert!(!line.contains("S11"), "{line}");
         }
-        assert!(!WHAT_LEAVES_LABEL.contains('›'));
+        assert!(
+            crate::account_card::WHAT_LEAVES_LINK.ends_with(" ›"),
+            "spec p6"
+        );
     }
 
     /// Under SCUFFED_TOKEN the Website connection fields are locked, so

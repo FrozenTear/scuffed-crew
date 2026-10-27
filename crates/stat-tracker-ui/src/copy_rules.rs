@@ -5,6 +5,7 @@
 
 /// The modules the 0.6 top tabs and Settings page added or rewrote.
 const SOURCES: &[(&str, &str)] = &[
+    ("account_card.rs", include_str!("account_card.rs")),
     ("capture_reading.rs", include_str!("capture_reading.rs")),
     ("capture_shared.rs", include_str!("capture_shared.rs")),
     ("chrome.rs", include_str!("chrome.rs")),
@@ -17,13 +18,16 @@ const SOURCES: &[(&str, &str)] = &[
     ("seasons.rs", include_str!("seasons.rs")),
     ("settings_cards.rs", include_str!("settings_cards.rs")),
     ("settings_env.rs", include_str!("settings_env.rs")),
+    ("settings_fixed.rs", include_str!("settings_fixed.rs")),
     ("settings_model.rs", include_str!("settings_model.rs")),
+    ("settings_open.rs", include_str!("settings_open.rs")),
     ("settings_page.rs", include_str!("settings_page.rs")),
     ("settings_rows.rs", include_str!("settings_rows.rs")),
     ("settings_save.rs", include_str!("settings_save.rs")),
     ("settings_update.rs", include_str!("settings_update.rs")),
     ("tracker_status.rs", include_str!("tracker_status.rs")),
     ("update_check.rs", include_str!("update_check.rs")),
+    ("what_leaves.rs", include_str!("what_leaves.rs")),
     ("README.md", include_str!("../README.md")),
     (
         "assets/draw_icons.py",

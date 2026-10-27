@@ -181,13 +181,20 @@ impl AdvancedSection {
                     format!("{login}, match watching off")
                 }
             }
-            AdvancedSection::StoredData => format!(
-                "{} tracked on this computer. Compact, Delete",
-                games_line(v.games)
-            ),
+            // No size until measured, and none for an empty or missing store.
+            AdvancedSection::StoredData => match v.store_bytes.filter(|b| *b > 0) {
+                Some(bytes) => format!(
+                    "{} on this computer, {}. Compact, Delete",
+                    games_line(v.games),
+                    crate::settings_open::size_line(bytes)
+                ),
+                None => format!("{} on this computer. Compact, Delete", games_line(v.games)),
+            },
             AdvancedSection::WebsiteConnection => match &v.sync_host {
-                Some(host) => format!("Uploads to {host}. Website URL and token, own Apply"),
-                None => "Uploads off. Website URL and token, own Apply".to_string(),
+                Some(host) => {
+                    format!("Uploads to {host}. Manual server and token, has its own Apply")
+                }
+                None => "Uploads off. Manual server and token, has its own Apply".to_string(),
             },
             AdvancedSection::Troubleshooting => {
                 let mut parts = vec![format!("Debug images {}", on_off(v.debug_images))];
@@ -237,6 +244,8 @@ pub struct AdvancedValues {
     pub poll_ms: u64,
     pub cooldown_secs: u64,
     pub games: usize,
+    /// Size of the stored data, once Settings has measured it.
+    pub store_bytes: Option<u64>,
     /// The website's host while uploads are on.
     pub sync_host: Option<String>,
     pub debug_images: bool,
@@ -960,6 +969,7 @@ mod tests {
             poll_ms: 1500,
             cooldown_secs: 120,
             games: 857,
+            store_bytes: Some(38_240_000),
             sync_host: Some("ow.example.no".into()),
             debug_images: false,
             compare_frames: None,
@@ -980,11 +990,11 @@ mod tests {
         );
         assert_eq!(
             AdvancedSection::StoredData.summary(&v),
-            "857 games tracked on this computer. Compact, Delete"
+            "857 games on this computer, 38.2 MB. Compact, Delete"
         );
         assert_eq!(
             AdvancedSection::WebsiteConnection.summary(&v),
-            "Uploads to ow.example.no. Website URL and token, own Apply"
+            "Uploads to ow.example.no. Manual server and token, has its own Apply"
         );
         assert!(!AdvancedSection::Troubleshooting.summary(&v).contains("KDE"));
         v.auto_detect = false;

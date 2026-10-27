@@ -338,24 +338,6 @@ pub(crate) fn coming_later_row(
     )
 }
 
-/// A value shown but not editable here. Dot and title on the left, the
-/// value right-aligned in [`TEXT_2`].
-pub(crate) fn value_row(
-    title: Element<'static, Message>,
-    help: Vec<Element<'static, Message>>,
-    value: impl Into<String>,
-) -> Element<'static, Message> {
-    setting_row(
-        title,
-        help,
-        text(value.into())
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT_2)
-            .into(),
-    )
-}
-
 /// A removable chip: label and a × with room around it to hit.
 fn chip(label: String, on_remove: Option<Message>) -> Element<'static, Message> {
     let mut x = button(text("×").size(SIZE_BODY).font(FONT_SEMIBOLD).color(TEXT_2))

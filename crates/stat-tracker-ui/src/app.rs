@@ -633,7 +633,7 @@ impl TrackerApp {
             report: None,
             confirm_clear: false,
             tessdata_busy: false,
-            tessdata_installed: capture::tessdata_installed(),
+            tessdata_installed: cli.fixture.is_some() || capture::tessdata_installed(),
             ocr_switch: settings::OcrSwitchView::default(),
             vacuum_busy: false,
             snapshot_mtime,
@@ -717,10 +717,9 @@ impl TrackerApp {
                 probe_own_package_owner(),
                 Message::PackageOwnerProbed,
             ));
-            tasks.push(Task::perform(
-                update::check_for_update(),
-                Message::UpdateChecked,
-            ));
+            tasks.push(Task::perform(crate::update_check::check(), |found| {
+                Message::SettingsPage(crate::settings_update::Msg::UpdatesChecked(found))
+            }));
             app.last_update_check = Some(std::time::Instant::now());
             tasks.push(Task::perform(
                 daemon::systemd_enabled(),
@@ -837,10 +836,8 @@ impl TrackerApp {
                     self.confirm_clear = false;
                     self.page_state.left_page();
                 }
-                if screen == Screen::Settings
-                    && let Some(backend) = self.backend
-                {
-                    return Task::perform(capture::list_outputs(backend), Message::OutputsReady);
+                if screen == Screen::Settings {
+                    return crate::settings_open::on_open(self);
                 }
                 Task::none()
             }
@@ -1242,7 +1239,7 @@ impl TrackerApp {
                     Ok(m) => m,
                     Err(e) => e,
                 });
-                Task::none()
+                crate::settings_open::resize(self)
             }
             Message::ConfirmClear => {
                 self.confirm_clear = !self.confirm_clear;
@@ -1268,7 +1265,7 @@ impl TrackerApp {
                     self.games.clear();
                     self.refresh_health();
                 }
-                Task::none()
+                crate::settings_open::resize(self)
             }
             Message::UpdateChecked(info) => {
                 self.update_open_details.clear();

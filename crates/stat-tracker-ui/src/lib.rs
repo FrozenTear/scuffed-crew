@@ -12,6 +12,7 @@
 //! into this binary and shown from the update prompt, once after the
 //! installed version changes, and from About.
 
+mod account_card;
 pub mod aggregate;
 pub mod app;
 /// Shared with build.rs; the lib only compiles it for its tests.
@@ -53,7 +54,9 @@ pub mod seasons;
 pub mod settings;
 pub mod settings_cards;
 mod settings_env;
+mod settings_fixed;
 pub mod settings_model;
+mod settings_open;
 pub mod settings_page;
 mod settings_rows;
 pub mod settings_save;
@@ -66,6 +69,7 @@ pub mod tray;
 pub mod uninstall;
 pub mod update;
 mod update_check;
+mod what_leaves;
 pub mod widgets;
 
 pub use aggregate::{Aggregates, SeasonWindow, aggregate};

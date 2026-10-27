@@ -47,7 +47,7 @@ const BUTTON_RADIUS: f32 = 10.0;
 const LEGEND_DOT_GAP: f32 = 6.0;
 
 /// The legend under the strip (spec p6).
-const LEGEND_APPLY: &str = "Changes apply as you make them: typed values on Enter, Website connection on its Apply. Those tagged After restart wait for a tracker restart.";
+const LEGEND_APPLY: &str = "Changes apply as you make them, except those tagged After restart.";
 const LEGEND_CHANGED: &str = "changed from default";
 const RUN_SETUP_LABEL: &str = "Run setup again";
 
@@ -389,6 +389,7 @@ fn advanced_values(app: &TrackerApp) -> AdvancedValues {
             .as_millis() as u64,
         cooldown_secs: config.auto_detect.cooldown_secs,
         games: app.games.len(),
+        store_bytes: app.page_state.opened.store_bytes,
         sync_host: config
             .sync
             .as_ref()

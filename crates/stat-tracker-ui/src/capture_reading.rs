@@ -19,6 +19,7 @@ use crate::settings::{
     self, CLASSIC_OCR_HINT_NOT_YET, KDE_DIRECT_HELP, NEW_READER_HINT, NoteTone, SessionKind,
     capture_route_chips, capture_route_label, nonempty, ocr_card_blocks, ocr_hint_lines,
 };
+use crate::settings_fixed::{fixed_dropdown, lock_line_with};
 use crate::settings_model::{
     ConfigEdit, DefaultRow, FrameRate, OCR_THREADS_ENV, OCR_WORKERS_MAX, OcrWorkers, PauseRow,
     ReaderChoice, auto_monitor_label, auto_pause, differs_from_default, frame_rate_options,
@@ -26,8 +27,8 @@ use crate::settings_model::{
     stream_rows_apply,
 };
 use crate::settings_rows::{
-    self, Segment, Tag, coming_later_row, divided, dropdown, link, radio_list, row_title,
-    segmented, setting_row, sub_heading, switch, title_line, value_row,
+    self, Segment, Tag, coming_later_row, divided, dropdown, hairline, link, radio_list, row_title,
+    segmented, setting_row, sub_heading, switch, title_line,
 };
 use crate::settings_update::{Msg, apply};
 use crate::theme::{
@@ -59,8 +60,14 @@ const READING_MODEL_HELP: &str = "Needed whenever classic OCR can run.";
 /// Help under the stream rows when the stream runs here, and when not.
 const STREAM_ACTIVE: &str = "Screen stream only. Active on this desktop.";
 const STREAM_NOT_USED: &str = "Screen stream only. Not used with this capture method here.";
-/// Help under Stream frame rate.
-const FRAME_RATE_HELP: &str = "Lower costs less.";
+/// Help under Stream frame rate where the stream runs (spec p7), before
+/// its Reset to default.
+fn frame_rate_help() -> String {
+    format!(
+        "Screen stream only. Lower costs less. Default {}.",
+        stat_tracker::config::SCREENCAST_MAX_FPS_DEFAULT
+    )
+}
 /// The second line under a row the environment fixes.
 pub(crate) const SERVICE_MAY_DIFFER: &str = "The tracker service may differ.";
 
@@ -188,14 +195,30 @@ fn summary_rows_with(
 ) -> Vec<(&'static str, String)> {
     let config = &app.saved_config;
     let monitor = monitor_phrase(config.capture_output.as_deref().unwrap_or(""), &app.outputs);
-    let mut capture = format!("{} on {monitor}.", route_label(config.capture_route));
-    if stream_rows_apply(&app.desktop, app.session, config.capture_route) && pause.pauses {
-        capture.push_str(" Paused between grabs.");
+    // The method in effect (spec p7 "Screen stream on DP-3 (niri)"):
+    // Automatic names what it uses on this desktop.
+    let streams = stream_rows_apply(&app.desktop, app.session, config.capture_route);
+    let method = match config.capture_route {
+        CaptureRoute::Auto if streams => "Screen stream",
+        CaptureRoute::Auto => "Direct capture",
+        route => route_label(route),
+    };
+    let mut capture = format!("{method} on {monitor}");
+    if !app.desktop.trim().is_empty() {
+        capture.push_str(&format!(" ({})", app.desktop.trim()));
     }
+    if streams && pause.pauses {
+        capture.push_str(", paused between grabs");
+    }
+    capture.push('.');
     let mut in_effect = config.clone();
     in_effect.ocr = app.ocr_control().requested();
     let reading = match ReaderChoice::of(&in_effect) {
         ReaderChoice::NewOnly => "New reader saves stats. Classic OCR never starts.",
+        // "Ready" only while the reading model classic OCR needs is there.
+        ReaderChoice::NewWithOcrBackup if app.tessdata_installed => {
+            "New reader saves stats. Classic OCR backup is ready."
+        }
         ReaderChoice::NewWithOcrBackup => "New reader saves stats. Classic OCR is the backup.",
         ReaderChoice::ClassicOnly => "Classic OCR saves stats.",
     };
@@ -465,10 +488,13 @@ fn stream_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
 
     let fps = config.screencast_max_fps();
     let changed = differs_from_default(config, DefaultRow::FrameRate);
-    let mut fps_help = vec![hint(where_line)];
-    let mut tail = row![hint(FRAME_RATE_HELP)]
-        .spacing(4)
-        .align_y(Alignment::Center);
+    let mut tail = row![hint(if applies {
+        frame_rate_help()
+    } else {
+        STREAM_NOT_USED.to_string()
+    })]
+    .spacing(4)
+    .align_y(Alignment::Center);
     if changed && applies {
         tail = tail.push(link(
             "Reset to default",
@@ -477,23 +503,18 @@ fn stream_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
             )))),
         ));
     }
-    fps_help.push(tail.into());
-    let control: Element<'_, Message> = if applies {
+    let control: Element<'_, Message> = if applies && !demo {
         dropdown(
             frame_rate_options(),
             Some(FrameRate(fps)),
             |r: FrameRate| Message::SettingsPage(Msg::Edit(ConfigEdit::FrameRate(Some(r.0)))),
         )
     } else {
-        text(FrameRate(fps).to_string())
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT_3)
-            .into()
+        fixed_dropdown(FrameRate(fps).to_string())
     };
     let fps_el = setting_row(
         title_line("Stream frame rate", changed, &[Tag::AfterRestart]),
-        fps_help,
+        vec![tail.into()],
         control,
     );
     vec![pause_el, fps_el]
@@ -611,21 +632,23 @@ fn ocr_workers_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let env = app.outside_var(OCR_THREADS_ENV);
     let lock = ocr_env_lock(env.as_deref());
     let resolved = config.ocr_threads_resolved();
-    // One rule for the dot: an explicit count, from the file or the
-    // environment (the shown config holds both), whatever Auto is here.
-    let changed = differs_from_default(config, DefaultRow::OcrWorkers) || lock.is_some();
-    let title = title_line("OCR workers", changed, &[]);
+    // The dot follows what is saved, as on every row. A count the
+    // environment sets is shown by the lock line, not the dot (spec p7).
+    let title = title_line(
+        "OCR workers",
+        differs_from_default(&app.saved_file, DefaultRow::OcrWorkers),
+        &[],
+    );
     if let Some(n) = lock {
         // The tracker caps the count at 8 (`ocr_threads_resolved`).
         let runs = n.clamp(1, OCR_WORKERS_MAX);
-        return value_row(
+        return setting_row(
             title,
             vec![
-                lock_line(OCR_THREADS_ENV),
-                hint(ocr_workers_help(runs as usize, false)),
+                lock_line_with(OCR_THREADS_ENV, ocr_workers_help(runs as usize, false)),
                 hint(SERVICE_MAY_DIFFER),
             ],
-            runs.to_string(),
+            fixed_dropdown(runs.to_string()),
         );
     }
     let help = vec![hint(ocr_workers_help(
@@ -633,7 +656,11 @@ fn ocr_workers_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         config.ocr_threads.is_none(),
     ))];
     if demo {
-        return value_row(title, help, OcrWorkers(config.ocr_threads).to_string());
+        return setting_row(
+            title,
+            help,
+            fixed_dropdown(OcrWorkers(config.ocr_threads).to_string()),
+        );
     }
     setting_row(
         title,
@@ -664,11 +691,16 @@ impl std::fmt::Display for MonitorPick {
 
 /// The 0.6 spec's Capture and reading: a summary, then CAPTURE and READING.
 pub(crate) fn body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    // Hairlines above and under each sub-heading (spec p7).
     column![
         summary(app),
+        hairline(),
         sub_heading("Capture"),
+        hairline(),
         divided(capture_rows(app, demo)),
+        hairline(),
         sub_heading("Reading"),
+        hairline(),
         divided(reading_rows(app, demo)),
         hint(CAPTURE_READING_FOOTER),
     ]
@@ -779,11 +811,26 @@ mod tests {
         let no_env =
             |app: &TrackerApp| summary_rows_with(app, pause_with(app, None, None), Vec::new());
         let wayland = no_env(&app);
-        assert!(wayland[0].1.contains("Paused between grabs"), "{wayland:?}");
+        assert_eq!(
+            wayland[0].1,
+            format!(
+                "Screen stream on {} (niri), paused between grabs.",
+                monitor_phrase(
+                    app.saved_config.capture_output.as_deref().unwrap_or(""),
+                    &app.outputs
+                )
+            ),
+            "{wayland:?}"
+        );
         app.session = SessionKind::X11;
         app.preview_error = Some("No capture".into());
         let x11 = no_env(&app);
-        assert!(!x11[0].1.contains("Paused"), "{x11:?}");
+        assert!(!x11[0].1.contains("paused"), "{x11:?}");
+        app.saved_config.capture_route = CaptureRoute::Auto;
+        assert!(
+            no_env(&app)[0].1.starts_with("Direct capture on"),
+            "Auto on X11"
+        );
         assert!(capture_shared::preview_error(&app).is_some());
         let _ = body(&app, false);
     }

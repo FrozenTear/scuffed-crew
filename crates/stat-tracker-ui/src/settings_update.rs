@@ -72,15 +72,21 @@ pub enum Msg {
     /// Check now, under Updates.
     CheckUpdates,
     UpdatesChecked(Result<Option<UpdateInfo>, CheckFailed>),
+    /// What opening the page fetched, Sign out, and the "What leaves your
+    /// PC" dialog ([`crate::settings_open`]).
+    Open(crate::settings_open::OpenMsg),
 }
 
 impl Msg {
     /// True for a message that changes a setting or starts something.
     fn acts(&self) -> bool {
-        !matches!(
-            self,
-            Msg::ToggleAdvanced(_) | Msg::ReaderChecked { .. } | Msg::UpdatesChecked(_)
-        )
+        match self {
+            Msg::Open(open) => open.acts(),
+            _ => !matches!(
+                self,
+                Msg::ToggleAdvanced(_) | Msg::ReaderChecked { .. } | Msg::UpdatesChecked(_)
+            ),
+        }
     }
 }
 
@@ -144,6 +150,8 @@ pub struct PageState {
     /// Whether the website refused the saved token, as last read
     /// ([`crate::tracker_status::sync_token_rejected`]).
     pub(crate) token_rejected: bool,
+    /// What the page fetched when it last opened, and its dialog.
+    pub opened: crate::settings_open::OpenState,
     /// The last changes waiting count with the baseline and saved config it
     /// was counted from, so a frame recounts only after one of them moved.
     waiting_memo: RefCell<Option<(Config, Config, usize)>>,
@@ -169,6 +177,7 @@ impl PageState {
             update_checking: false,
             config_path: None,
             token_rejected: false,
+            opened: crate::settings_open::OpenState::default(),
             waiting_memo: RefCell::new(None),
         }
     }
@@ -332,6 +341,11 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
         Msg::Commit(commit) => return page_save(app, commit, None),
         Msg::Edit(edit) => return page_save(app, Commit::Control, Some(edit)),
         Msg::PickReader(choice) => return pick_reader(app, choice),
+        Msg::Open(open) => {
+            return crate::settings_open::update(app, open, |app| {
+                page_save(app, Commit::Sync, None)
+            });
+        }
         Msg::ReaderChecked { seq, choice, packs } => {
             app.ocr_switch.packs = Some(packs);
             if app.page_state.reader_pending != Some((seq, choice)) {
