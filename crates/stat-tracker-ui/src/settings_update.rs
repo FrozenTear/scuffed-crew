@@ -870,19 +870,13 @@ mod tests {
     #[test]
     fn a_refused_apply_puts_the_control_back() {
         let (dir, mut app) = live_app();
-        let path = dir.path().join("config.toml");
-        // A hand-edited cleartext URL blocks every apply.
-        let mut cleartext = on_disk(&dir);
-        cleartext.sync = Some(stat_tracker::config::SyncConfig {
-            server_url: "http://192.168.1.5:3030".into(),
-            token: "tok".into(),
-        });
-        cleartext.save_at(&path).unwrap();
-        app.saved_file = on_disk(&dir);
-        app.saved_config = app.saved_file.clone();
-        app.settings = crate::settings::SettingsForm::from_config(&app.saved_config);
+        // A stored shortcut that does not parse blocks every apply.
+        app.overlay_hotkey = crate::hotkey::OverlayHotkey {
+            enabled: true,
+            bind: "Ctrl+NotAKey".into(),
+        };
         app.settings.overlay_hotkey = app.overlay_hotkey.bind.clone();
-        app.settings.overlay_hotkey_enabled = app.overlay_hotkey.enabled;
+        app.settings.overlay_hotkey_enabled = true;
 
         let _ = app.update(apply(Message::SettingsToggle(
             SettingsToggle::DebugOcr,
@@ -892,17 +886,16 @@ mod tests {
         assert!(!app.settings.debug_ocr, "the switch shows what is saved");
         assert!(!on_disk(&dir).debug_ocr);
 
-        let _ = app.update(Message::SettingsText(
-            SettingsField::SyncUrl,
-            "https://crew.example".into(),
+        // Turning the shortcut off clears the block.
+        let _ = app.update(apply_with(
+            Message::SettingsToggle(SettingsToggle::OverlayHotkey, false),
+            Commit::Shortcut,
         ));
-        let _ = app.update(page(Msg::Commit(Commit::Sync)));
-        let written = on_disk(&dir);
-        assert_eq!(
-            written.sync.map(|s| s.server_url).as_deref(),
-            Some("https://crew.example")
+        assert!(!app.overlay_hotkey.enabled, "{:?}", app.toast);
+        assert!(
+            !on_disk(&dir).debug_ocr,
+            "the refused switch was never written"
         );
-        assert!(!written.debug_ocr, "the refused switch was never written");
     }
 
     #[test]

@@ -186,8 +186,9 @@ pub(crate) enum SettingsSaveError {
 /// the env overlay `env` on top (`settings_env`). The website URL and token
 /// the form still shows from the overlay go back to the file's first
 /// ([`crate::settings_env::sync_fields_to_write`]). The cleartext URL check
-/// then runs on the URL that will be written, so an outside URL never
-/// blocks a change, and the other checks run in `before_write`. Both come
+/// then runs only when the save writes a new URL, so neither an outside URL
+/// nor one the file already holds and the save leaves alone blocks a
+/// change, and the other checks run in `before_write`. Both come
 /// after the snapshot match, so a reload is not blocked by the empty
 /// defaults a broken startup file leaves in the form. The write is
 /// `form.to_config(shown)` with `edit` on top, and every overlaid value the
@@ -219,10 +220,14 @@ pub(crate) fn save_settings_form(
         snapshot,
         env,
     );
-    // Block the whole save. Writing the form would either store the
-    // cleartext URL or drop the sync block; the file on disk stays as it
-    // is until the URL is https, loopback http, or blank.
-    if let Some(problem) = settings::sync_url_problem(&form.sync_url) {
+    // A save that leaves the file's sync as it is writes no URL, so a
+    // cleartext one the file already holds (a hand edit, perhaps under an
+    // https SCUFFED_SERVER) is not this save's to refuse.
+    let keeps_file_sync = file_sync_kept(&form, snapshot, env);
+    // Otherwise block the whole save. Writing the form would either store
+    // the cleartext URL or drop the sync block; the file on disk stays as
+    // it is until the URL is https, loopback http, or blank.
+    if !keeps_file_sync && let Some(problem) = settings::sync_url_problem(&form.sync_url) {
         return Err(SettingsSaveError::Blocked(problem.to_string()));
     }
     before_write().map_err(SettingsSaveError::Blocked)?;
@@ -231,9 +236,28 @@ pub(crate) fn save_settings_form(
         edit.apply(&mut next);
     }
     crate::settings_env::keep_file_values(&mut next, shown, snapshot);
+    if keeps_file_sync {
+        next.sync.clone_from(&snapshot.sync);
+    }
     next.save_at(path)
         .map_err(|err| SettingsSaveError::Write(err.to_string()))?;
     Ok(SettingsFileSave::Saved(next))
+}
+
+/// The website fields to write (after [`sync_fields_to_write`]) leave the
+/// file's `[sync]` as it is: they are its URL and token, or, with no sync
+/// in the file and the token from outside, the token is blank, so no sync
+/// can be written.
+///
+/// [`sync_fields_to_write`]: crate::settings_env::sync_fields_to_write
+fn file_sync_kept(form: &SettingsForm, file: &Config, env: EnvOverlay) -> bool {
+    match &file.sync {
+        Some(sync) => {
+            form.sync_url.trim() == sync.server_url.trim()
+                && form.sync_token.trim() == sync.token.trim()
+        }
+        None => env.token && form.sync_token.trim().is_empty(),
+    }
 }
 
 /// Form fields from `fresh`, keeping the shortcut the member was editing.
@@ -1061,6 +1085,78 @@ token = \"T_file\"
         typed.sync_url = "http://typed.example".into();
         let before = std::fs::read_to_string(&path).expect("file");
         let blocked = save_settings_form(&path, false, &file, &shown, env, &typed, None, || Ok(()));
+        assert!(
+            matches!(blocked, Err(SettingsSaveError::Blocked(_))),
+            "{blocked:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("file"), before);
+    }
+
+    /// A cleartext URL the file already holds, with an https
+    /// SCUFFED_SERVER shown in its place: a save that leaves the file's
+    /// sync alone goes through and keeps it byte for byte, on both
+    /// layouts. A cleartext URL the save would newly write is refused.
+    #[test]
+    fn a_cleartext_url_already_in_the_file_does_not_block_other_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let raw = "\
+data_dir = \"/tmp/sst-env-sync\"
+
+[sync]
+# hand edited
+server_url = \"http://192.168.1.5:3030\"
+token = \"T_file\"
+";
+        std::fs::write(&path, raw).expect("seed");
+        let file = Config::read_at(&path).expect("parse");
+        assert!(file.sync.is_some(), "the file's cleartext sync reads back");
+        let mut shown = file.clone();
+        shown.sync = Some(stat_tracker::config::SyncConfig {
+            server_url: "https://ok.example".into(),
+            token: "T_env".into(),
+        });
+        let env = EnvOverlay {
+            token: true,
+            server: true,
+            ..EnvOverlay::default()
+        };
+        let mut form = SettingsForm::from_config(&shown);
+        assert_eq!(form.sync_url, "https://ok.example");
+        form.debug_ocr = true;
+        let saved = save_settings_form(&path, false, &file, &shown, env, &form, None, || Ok(()))
+            .expect("not blocked");
+        assert!(matches!(saved, SettingsFileSave::Saved(_)), "{saved:?}");
+        let text = std::fs::read_to_string(&path).expect("file");
+        assert!(text.contains("# hand edited\nserver_url = \"http://192.168.1.5:3030\""));
+        assert!(
+            !text.contains("T_env") && !text.contains("ok.example"),
+            "{text}"
+        );
+        let on_disk = Config::read_at(&path).expect("reread");
+        assert!(on_disk.debug_ocr);
+        assert_eq!(on_disk.sync, file.sync);
+
+        // No overlay at all: the same file still saves other changes.
+        let mut form = SettingsForm::from_config(&on_disk);
+        form.debug_ocr = false;
+        let none = EnvOverlay::default();
+        let saved = save_settings_form(&path, false, &on_disk, &on_disk, none, &form, None, || {
+            Ok(())
+        })
+        .expect("not blocked");
+        assert!(matches!(saved, SettingsFileSave::Saved(_)), "{saved:?}");
+        let on_disk = Config::read_at(&path).expect("reread");
+        assert_eq!(on_disk.sync, file.sync);
+
+        // A new cleartext URL is this save's, so it is refused.
+        let mut typed = SettingsForm::from_config(&on_disk);
+        typed.sync_url = "http://typed.example".into();
+        let before = std::fs::read_to_string(&path).expect("file");
+        let blocked =
+            save_settings_form(&path, false, &on_disk, &on_disk, none, &typed, None, || {
+                Ok(())
+            });
         assert!(
             matches!(blocked, Err(SettingsSaveError::Blocked(_))),
             "{blocked:?}"
