@@ -11,7 +11,7 @@ use iced::{Alignment, Background, Border, Color, Element, Fill, FillPortion, Pad
 
 use crate::app::{Message, TrackerApp};
 use crate::games_detail::{self as detail, DeltaLine, Stat, Upload};
-use crate::games_rows;
+use crate::games_rows::{self, UnsureItem};
 use crate::games_table::{Msg, pill_box, portrait, small_chip, warn_chip};
 use crate::icons::{self, Icon};
 use crate::model::{Game, Outcome};
@@ -95,20 +95,33 @@ pub fn panel<'a>(
     .into()
 }
 
-/// MAP, HEROES, RESULT, TIME.
+/// MAP, HEROES, RESULT, TIME. A map, hero or result read still unsure
+/// gets "⚠ Unsure" beside its label, the detail view's per-item mark.
 fn left_column(g: &Game, in_progress: bool) -> Element<'static, Message> {
+    let items = games_rows::unsure_items(g, in_progress);
+    let unsure = |item| items.contains(&item);
     column![
-        block("MAP", map_line(g)),
-        block("HEROES", heroes(g)),
-        block("RESULT", result(g, in_progress)),
-        block("TIME", time(g)),
+        block("MAP", unsure(UnsureItem::Map), map_line(g)),
+        block("HEROES", unsure(UnsureItem::Hero), heroes(g)),
+        block("RESULT", unsure(UnsureItem::Result), result(g, in_progress)),
+        block("TIME", false, time(g)),
     ]
     .spacing(14)
     .into()
 }
 
-fn block(label: &'static str, body: Element<'static, Message>) -> Element<'static, Message> {
-    column![section_label(label), body].spacing(8).into()
+fn block(
+    label: &'static str,
+    unsure: bool,
+    body: Element<'static, Message>,
+) -> Element<'static, Message> {
+    let mut head = row![section_label(label)]
+        .spacing(8)
+        .align_y(Alignment::Center);
+    if unsure {
+        head = head.push(warn_chip("Unsure".into()));
+    }
+    column![head, body].spacing(8).into()
 }
 
 fn section_label(label: &'static str) -> Element<'static, Message> {

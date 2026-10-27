@@ -296,23 +296,81 @@ pub fn eda_unsure(g: &Game) -> bool {
     ["e", "d", "a"].iter().any(|f| unsure_now(g, f))
 }
 
-/// "2 stats unsure": the fields still unsure. `None` when there are none.
+/// The six stats a "N stats unsure" count covers, as flat names.
+const STAT_FLATS: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
+
+/// "2 stats unsure": how many of the six stats (E, D, A, DMG, HEAL, MIT)
+/// are still unsure. Hero, map and result are not stats and never count
+/// here; see [`unsure_items`]. `None` when no stat is unsure.
 pub fn unsure_label(g: &Game) -> Option<String> {
-    // Distinct flat names, so `dmg` and a leftover `r3.dmg` count once.
-    let mut flats: Vec<&str> = g
-        .suspect_fields
-        .iter()
-        .filter_map(|s| suspect::flat_suspect_name(s))
-        .filter(|f| flat_unsure_now(g, f))
-        .collect();
-    flats.sort_unstable();
-    flats.dedup();
-    let n = flats.len();
+    // Each stat once, so `dmg` and a leftover `r3.dmg` count as one.
+    let n = STAT_FLATS.iter().filter(|f| flat_unsure_now(g, f)).count();
     match n {
         0 => None,
         1 => Some("1 stat unsure".to_string()),
         n => Some(format!("{n} stats unsure")),
     }
+}
+
+/// A read other than the six stats that is still unsure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnsureItem {
+    /// The map or its mode: one item, since an unread map stores both.
+    Map,
+    Hero,
+    Result,
+}
+
+impl UnsureItem {
+    pub fn name(self) -> &'static str {
+        match self {
+            UnsureItem::Map => "Map",
+            UnsureItem::Hero => "Hero",
+            UnsureItem::Result => "Result",
+        }
+    }
+}
+
+/// Map, hero and result reads still unsure that no other mark covers:
+/// a missing map or hero already reads "Needs a look", and an undecided
+/// (or still playing) game has no result to doubt.
+pub fn unsure_items(g: &Game, in_progress: bool) -> Vec<UnsureItem> {
+    let missing = g.review_fields();
+    let mut out = Vec::new();
+    if (unsure_now(g, "map") || unsure_now(g, "mode"))
+        && !missing.contains(&"map")
+        && !missing.contains(&"mode")
+    {
+        out.push(UnsureItem::Map);
+    }
+    if unsure_now(g, "hero") && !missing.contains(&"hero") {
+        out.push(UnsureItem::Hero);
+    }
+    if unsure_now(g, "result") && g.outcome != Outcome::Unknown && !in_progress {
+        out.push(UnsureItem::Result);
+    }
+    out
+}
+
+/// "Map unsure", "Map and hero unsure", "Map, hero and result unsure".
+pub fn items_label(items: &[UnsureItem]) -> Option<String> {
+    let names: Vec<String> = items
+        .iter()
+        .enumerate()
+        .map(|(i, item)| {
+            if i == 0 {
+                item.name().to_string()
+            } else {
+                item.name().to_lowercase()
+            }
+        })
+        .collect();
+    let list = match names.as_slice() {
+        [] => return None,
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    };
+    Some(format!("{list} unsure"))
 }
 
 /// Result column text.
@@ -337,7 +395,7 @@ pub enum Mark {
     NoOutcome,
     /// A map or hero is missing.
     NeedsLook,
-    /// "2 stats unsure".
+    /// "2 stats unsure", or "Map unsure" for a read that is not a stat.
     Unsure(String),
     /// The site refused the upload.
     UploadRejected,
@@ -372,6 +430,9 @@ pub fn marks(g: &Game, in_progress: bool) -> Vec<Mark> {
         out.push(Mark::NeedsLook);
     }
     if let Some(label) = unsure_label(g) {
+        out.push(Mark::Unsure(label));
+    }
+    if let Some(label) = items_label(&unsure_items(g, in_progress)) {
         out.push(Mark::Unsure(label));
     }
     if g.upload_reject.is_some() && out.is_empty() {
@@ -656,6 +717,55 @@ mod tests {
         assert_eq!(unsure_label(&g).as_deref(), Some("1 stat unsure"));
         g.edited_fields.push("healing".into());
         assert_eq!(unsure_label(&g), None);
+    }
+
+    /// An unread map stores both `map` and `mode`: one Map item, and no
+    /// "stats unsure" count, since neither is a stat.
+    #[test]
+    fn an_unread_map_is_one_map_mark_not_two_stats() {
+        let g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["map", "mode"]);
+        assert_eq!(unsure_label(&g), None);
+        assert_eq!(unsure_items(&g, false), [UnsureItem::Map]);
+        assert_eq!(marks(&g, false), [Mark::Unsure("Map unsure".into())]);
+        // Hero and result are their own items, never stats.
+        let g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["hero", "result"]);
+        assert_eq!(unsure_label(&g), None);
+        assert_eq!(
+            marks(&g, false),
+            [Mark::Unsure("Hero and result unsure".into())]
+        );
+        // An undecided game already says No outcome; no Result item.
+        let g = game(Outcome::Unknown, "2026-10-18T22:40:00Z", &["result"]);
+        assert_eq!(marks(&g, false), [Mark::NoOutcome]);
+        // A missing map already reads Needs a look.
+        let mut g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["map", "mode"]);
+        g.map_name.clear();
+        assert_eq!(marks(&g, false), [Mark::NeedsLook]);
+        // A hand edit of the map settles both names.
+        let mut g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["map", "mode"]);
+        g.edited_fields = vec!["map_name".into()];
+        assert!(unsure_items(&g, false).is_empty());
+        assert_eq!(
+            items_label(&[UnsureItem::Map, UnsureItem::Hero, UnsureItem::Result]).as_deref(),
+            Some("Map, hero and result unsure")
+        );
+    }
+
+    #[test]
+    fn row_stat_names_count_once_beside_the_map_mark() {
+        let g = game(
+            Outcome::Win,
+            "2026-10-18T22:40:00Z",
+            &["r3.dmg", "dmg", "map"],
+        );
+        assert_eq!(unsure_label(&g).as_deref(), Some("1 stat unsure"));
+        assert_eq!(
+            marks(&g, false),
+            [
+                Mark::Unsure("1 stat unsure".into()),
+                Mark::Unsure("Map unsure".into())
+            ]
+        );
     }
 
     /// Older rows store row-prefixed names; `r3.dmg` is damage unsure.
