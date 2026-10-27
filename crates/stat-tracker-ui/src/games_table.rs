@@ -50,7 +50,8 @@ pub enum Msg {
     Space,
     /// The status box's Retry upload.
     Retry(String),
-    /// "N games couldn't upload · Retry all" above the table.
+    /// "N games couldn't upload · Retry all" above the table, while any
+    /// game is rejected.
     RetryAll,
     /// Delete no widget took: the open or focused row's delete confirm.
     DeleteKey,

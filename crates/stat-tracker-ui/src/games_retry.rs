@@ -1,8 +1,9 @@
 //! Retry for rejected uploads (UX Spec's answer to open question 5): an
 //! outlined "Retry upload" beside the rejected message in the open row's
 //! status box, and one "N games couldn't upload · Retry all" line above
-//! the table, only when two or more games are rejected. With one rejected
-//! game nothing shows above the table: its row's mark leads to the panel.
+//! the table for as long as any game is rejected. The spec showed that line
+//! only for two or more, which hid it while a game was still rejected once
+//! the others were retried, so it now shows for one too.
 //! A queued retry clears the rejection here at once; the next snapshot
 //! brings it back if the server says no again.
 
@@ -21,9 +22,13 @@ pub fn rejected_count(app: &TrackerApp) -> usize {
         .count()
 }
 
-/// "3 games couldn't upload", only for two or more.
+/// "3 games couldn't upload", or "1 game couldn't upload"; none at zero.
 pub fn retry_all_line(rejected: usize) -> Option<String> {
-    (rejected >= 2).then(|| format!("{rejected} games couldn't upload"))
+    match rejected {
+        0 => None,
+        1 => Some("1 game couldn't upload".into()),
+        n => Some(format!("{n} games couldn't upload")),
+    }
 }
 
 /// The line above the table, when [`retry_all_line`] has one.
@@ -106,9 +111,9 @@ mod tests {
     }
 
     #[test]
-    fn the_line_shows_for_two_or_more_rejected_games() {
+    fn the_line_shows_for_any_rejected_game() {
         assert_eq!(retry_all_line(0), None);
-        assert_eq!(retry_all_line(1), None);
+        assert_eq!(retry_all_line(1).as_deref(), Some("1 game couldn't upload"));
         assert_eq!(
             retry_all_line(2).as_deref(),
             Some("2 games couldn't upload")
@@ -122,31 +127,50 @@ mod tests {
         assert!(above_table(&app).is_none());
     }
 
-    /// One rejected game: nothing above the table; its panel's Retry
-    /// upload queues it and clears the rejection.
+    /// One rejected game: the line shows; its panel's Retry upload queues
+    /// it, clears the rejection, and the line goes.
     #[test]
-    fn one_rejected_game_retries_from_its_panel_only() {
+    fn one_rejected_game_shows_the_line_until_retried() {
         let (_dir, mut app) = app_with(&[UNDECIDED]);
         assert_eq!(rejected_count(&app), 1);
-        assert!(above_table(&app).is_none());
+        assert!(above_table(&app).is_some());
         let _ = crate::games_table::update(&mut app, Msg::Retry(UNDECIDED.into()));
         assert_eq!(rejected_count(&app), 0);
+        assert!(above_table(&app).is_none());
         assert!(matches!(
             crate::commands::queued(&app.data_dir).as_slice(),
             [StoreCommand::RetryUpload { session_id }] if session_id == UNDECIDED
         ));
     }
 
-    /// Two rejected: "2 games couldn't upload · Retry all" queues them
-    /// all; one game's Retry upload leaves the other rejected.
+    /// Two rejected, one retried from its panel: the line stays while the
+    /// other is still rejected, and its Retry all queues that one.
     #[test]
-    fn two_rejected_games_get_retry_all() {
+    fn the_line_stays_while_a_game_is_still_rejected() {
         let (_dir, mut app) = app_with(&[UNDECIDED, UNSURE]);
-        assert_eq!(rejected_count(&app), 2);
         assert!(above_table(&app).is_some());
         let _ = crate::games_table::update(&mut app, Msg::Retry(UNSURE.into()));
         assert_eq!(rejected_count(&app), 1);
+        assert!(game_rejected(&app, UNDECIDED));
+        assert_eq!(
+            retry_all_line(rejected_count(&app)).as_deref(),
+            Some("1 game couldn't upload")
+        );
+        assert!(above_table(&app).is_some());
+        let _ = crate::games_table::update(&mut app, Msg::RetryAll);
+        assert_eq!(rejected_count(&app), 0);
         assert!(above_table(&app).is_none());
+    }
+
+    fn game_rejected(app: &TrackerApp, sid: &str) -> bool {
+        app.games
+            .iter()
+            .any(|g| g.session_id == sid && g.upload_reject.is_some())
+    }
+
+    /// Three rejected: "3 games couldn't upload · Retry all" queues them all.
+    #[test]
+    fn rejected_games_get_retry_all() {
         let (_dir, mut app) = app_with(&[UNDECIDED, UNSURE, NORMAL]);
         assert_eq!(
             retry_all_line(rejected_count(&app)).as_deref(),
