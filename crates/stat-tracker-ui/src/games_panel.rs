@@ -11,6 +11,7 @@ use iced::{Alignment, Background, Border, Color, Element, Fill, FillPortion, Pad
 
 use crate::app::{Message, TrackerApp};
 use crate::games_detail::{self as detail, DeltaLine, Stat, Upload};
+use crate::games_picker::{self, Field, Picker};
 use crate::games_rows::{self, UnsureItem};
 use crate::games_table::{Msg, pill_box, portrait, small_chip, warn_chip};
 use crate::icons::{self, Icon};
@@ -39,16 +40,27 @@ pub fn panel<'a>(
 ) -> Element<'a, Message> {
     let has_kit = app.sessions_with_kit.contains(&g.session_id);
     // At 1024 the left column takes what the 420px tile column leaves.
-    let left =
-        container(left_column(g, in_progress)).width(if narrow { Fill } else { LEFT_W.into() });
+    let picker = (app.games_tab.picker.as_ref()).filter(|p| p.sid == g.session_id);
+    let left = container(left_column(g, in_progress, picker)).width(if narrow {
+        Fill
+    } else {
+        LEFT_W.into()
+    });
     let editing = app.editing && app.edit.session_id == g.session_id;
     let stats = stats_column(app, g, narrow, in_progress);
-    let status = status_box(g, in_progress, app.sync_on());
-    let up = detail::upload(g, in_progress, app.sync_on());
+    // The games fixture stands for a signed-in player: its rows upload,
+    // and some were refused, so its status reads as with sync on.
+    let sync_on = app.sync_on() || app.fixture == Some(crate::cli::FixtureKind::Games);
+    let status = status_box(g, in_progress, sync_on);
+    let up = detail::upload(g, in_progress, sync_on);
     // Delete game's confirm strip replaces the actions; the status stays.
     let confirming = app.confirm_delete.as_deref() == Some(g.session_id.as_str());
     let strip = confirming.then(|| {
-        crate::games_delete::strip(&g.session_id, up == Upload::Uploaded, &app.games_tab.focus)
+        crate::games_delete::strip(
+            &g.session_id,
+            crate::games_delete::reach(&up, sync_on),
+            &app.games_tab.focus,
+        )
     });
     let delete = crate::games_delete::button_for(
         &g.session_id,
@@ -141,12 +153,21 @@ pub fn panel<'a>(
 
 /// MAP, HEROES, RESULT, TIME. A map, hero or result read still unsure
 /// gets "⚠ Unsure" beside its label, the detail view's per-item mark.
-fn left_column(g: &Game, in_progress: bool) -> Element<'static, Message> {
+fn left_column(g: &Game, in_progress: bool, picker: Option<&Picker>) -> Element<'static, Message> {
     let items = games_rows::unsure_items(g, in_progress);
     let unsure = |item| items.contains(&item);
+    let open = |field| picker.filter(|p| p.field == field);
     column![
-        block("MAP", unsure(UnsureItem::Map), map_line(g)),
-        block("HEROES", unsure(UnsureItem::Hero), heroes(g, in_progress)),
+        block(
+            "MAP",
+            unsure(UnsureItem::Map),
+            map_line(g, open(Field::Map))
+        ),
+        block(
+            "HEROES",
+            unsure(UnsureItem::Hero),
+            heroes(g, in_progress, open(Field::Hero))
+        ),
         block("RESULT", unsure(UnsureItem::Result), result(g, in_progress)),
         block("TIME", false, time(g)),
     ]
@@ -176,19 +197,41 @@ fn section_label(label: &'static str) -> Element<'static, Message> {
         .into()
 }
 
-fn map_line(g: &Game) -> Element<'static, Message> {
-    let name = if g.map_name.trim().is_empty() {
-        "No map".to_string()
+/// The map, its mode chip, EDITED when set by hand, and "Set map" (or
+/// the open picker) while the game is held for it.
+fn map_line(g: &Game, picker: Option<&Picker>) -> Element<'static, Message> {
+    if let Some(p) = picker.filter(|p| p.field == Field::Map) {
+        return games_picker::view(g, p);
+    }
+    let (name, known) = games_picker::map_label(g);
+    let (font, color) = if known {
+        (FONT_BOLD, TEXT)
     } else {
-        g.map_name.clone()
+        (iced::Font::DEFAULT, TEXT_2)
     };
-    let mut r = row![text(name).size(SIZE_BODY).font(FONT_BOLD).color(TEXT)]
+    let mut r = row![text(name).size(SIZE_BODY).font(font).color(color)]
         .spacing(8)
         .align_y(Alignment::Center);
+    if edited(g, Field::Map) {
+        r = r.push(games_picker::edited_badge());
+    }
     if let Some(mode) = games_rows::mode_chip(&g.map_name) {
         r = r.push(small_chip(mode, TEXT_2, BORDER));
     }
+    r = with_set(r, g, Field::Map);
     with_correction(r.into(), detail::read_vs_set_name(g, "map_name"))
+}
+
+fn edited(g: &Game, field: Field) -> bool {
+    g.edited_fields.iter().any(|f| f == field.edited_name())
+}
+
+/// "Set map" / "Set hero" on a field the game is held for.
+fn with_set<'a>(r: Row<'a, Message>, g: &Game, field: Field) -> Row<'a, Message> {
+    if games_picker::held_for(g, field) {
+        return r.push(games_picker::set_button(&g.session_id, field));
+    }
+    r
 }
 
 /// `line` with "Read X, you set Y" under it for a hand fix.
@@ -207,21 +250,35 @@ fn with_correction(
 /// The main hero, the 8px timeline bar, the split, a prompt under each
 /// unconfirmed one-snapshot swap, and an Undo for each dismissed run. No
 /// prompts while the game is still on: the runs are not final.
-fn heroes(g: &Game, in_progress: bool) -> Element<'static, Message> {
+fn heroes(g: &Game, in_progress: bool, picker: Option<&Picker>) -> Element<'static, Message> {
     let split = detail::hero_split(g);
-    let head = row![
+    let unknown = is_unknown(&split.main);
+    let mut head = row![
         portrait(24.0, 16.0),
-        text(split.main.clone())
+        text(hero_name(&split.main))
             .size(SIZE_BODY)
-            .font(FONT_BOLD)
-            .color(TEXT),
-        text(g.role.label().to_uppercase())
-            .size(SIZE_LABEL)
-            .font(FONT_BOLD)
-            .color(theme::role_color(g.role)),
+            .font(if unknown {
+                iced::Font::DEFAULT
+            } else {
+                FONT_BOLD
+            })
+            .color(if unknown { TEXT_2 } else { TEXT }),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
+    if edited(g, Field::Hero) {
+        head = head.push(games_picker::edited_badge());
+    }
+    if !unknown {
+        head = head.push(
+            text(g.role.label().to_uppercase())
+                .size(SIZE_LABEL)
+                .font(FONT_BOLD)
+                .color(theme::role_color(g.role)),
+        );
+    }
+    let head = with_set(head, g, Field::Hero);
+    let picker = picker.filter(|p| p.field == Field::Hero);
 
     let mut bar = Row::new().spacing(2).height(8).width(Fill);
     for part in &split.bar {
@@ -232,13 +289,14 @@ fn heroes(g: &Game, in_progress: bool) -> Element<'static, Message> {
     for p in &split.split {
         let bar_part = split.bar.iter().find(|b| b.hero == p.hero);
         let main = bar_part.is_some_and(|b| b.main);
-        let swatch = container(space())
-            .width(8)
-            .height(8)
-            .style(swatch_style(main, p.unconfirmed));
+        let swatch = container(space()).width(8).height(8).style(swatch_style(
+            main,
+            p.unconfirmed,
+            is_unknown(&p.hero),
+        ));
         let mut item = row![
             swatch,
-            text(format!("{} {}%", p.hero, p.percent))
+            text(format!("{} {}%", hero_name(&p.hero), p.percent))
                 .size(SMALL)
                 .font(FONT_SEMIBOLD)
                 .color(TEXT),
@@ -259,11 +317,15 @@ fn heroes(g: &Game, in_progress: bool) -> Element<'static, Message> {
             .style(pill_box(BORDER)),
         iced::widget::tooltip::Position::Bottom,
     );
-    let mut col = column![
-        with_correction(head.into(), detail::read_vs_set_name(g, "hero")),
-        bar,
-        legend
-    ]
+    let mut col = match picker {
+        // The picker takes the hero line's place, under the bar.
+        Some(p) => column![bar, legend, games_picker::view(g, p)],
+        None => column![
+            with_correction(head.into(), detail::read_vs_set_name(g, "hero")),
+            bar,
+            legend
+        ],
+    }
     .spacing(8);
     if in_progress {
         return col.into();
@@ -308,6 +370,14 @@ fn heroes(g: &Game, in_progress: bool) -> Element<'static, Message> {
 /// an unconfirmed swap a muted outline with a dashed centre line.
 fn bar_part(part: &detail::BarPart) -> Element<'static, Message> {
     let portion = FillPortion(part.snapshots.clamp(1, u16::MAX as u32) as u16);
+    if is_unknown(&part.hero) {
+        // No hero read: an amber outline until it is set (spec).
+        return container(space())
+            .width(portion)
+            .height(8)
+            .style(swatch_style(false, false, true))
+            .into();
+    }
     if part.unconfirmed {
         let mut dashes = Row::new().spacing(2).align_y(Alignment::Center);
         for _ in 0..12 {
@@ -352,9 +422,35 @@ fn bar_part(part: &detail::BarPart) -> Element<'static, Message> {
         .into()
 }
 
-fn swatch_style(main: bool, unconfirmed: bool) -> impl Fn(&Theme) -> container::Style {
+fn is_unknown(hero: &str) -> bool {
+    games_picker::hero_unknown(hero)
+}
+
+/// "Unknown" in the panel for a hero not read (spec).
+fn hero_name(hero: &str) -> String {
+    if is_unknown(hero) {
+        "Unknown".into()
+    } else {
+        hero.to_string()
+    }
+}
+
+fn swatch_style(
+    main: bool,
+    unconfirmed: bool,
+    unknown: bool,
+) -> impl Fn(&Theme) -> container::Style {
     move |_| {
-        if unconfirmed {
+        if unknown {
+            container::Style {
+                border: Border {
+                    color: theme::WARN,
+                    width: 1.0,
+                    radius: 2.0.into(),
+                },
+                ..container::Style::default()
+            }
+        } else if unconfirmed {
             container::Style {
                 border: Border {
                     color: TEXT_3,
@@ -468,7 +564,7 @@ fn stats_column<'a>(
                 .on_press(Message::ToggleEdit),
         );
     }
-    let avg = if in_progress {
+    let avg = if in_progress || is_unknown(&g.hero) {
         detail::Averages {
             hero: g.hero.clone(),
             games: 0,
@@ -484,6 +580,8 @@ fn stats_column<'a>(
         .collect();
     let caption = if in_progress {
         crate::model::NOT_FINAL_NOTE.to_string()
+    } else if is_unknown(&g.hero) {
+        detail::AVG_HERO_UNSET.to_string()
     } else {
         avg.caption()
     };
@@ -542,14 +640,16 @@ fn tile(g: &Game, stat: Stat, avg: &detail::Averages, narrow: bool) -> Element<'
 }
 
 /// The upload and reader status box. Only a rejected upload is coloured,
-/// always with the sign and the words, and it has its own Retry. A game
+/// always with the sign and the words, and it has its own Retry upload. A game
 /// held for a missing map or hero reads "Needs a look" in amber.
 fn status_box(g: &Game, in_progress: bool, sync_on: bool) -> Element<'static, Message> {
     let up = detail::upload(g, in_progress, sync_on);
     let rejected = up.rejected();
     let (icon, title_color) = match up {
         Upload::Uploaded => (Icon::Upload, TEXT),
-        Upload::Waiting | Upload::InProgress | Upload::SyncOff => (Icon::Clock, TEXT),
+        Upload::Waiting | Upload::InProgress | Upload::SyncOff | Upload::Undecided => {
+            (Icon::Clock, TEXT)
+        }
         Upload::Held(_) => (Icon::Warn, theme::WARN),
         Upload::Rejected(_) => (Icon::WarnLoss, theme::DANGER),
     };
@@ -564,15 +664,17 @@ fn status_box(g: &Game, in_progress: bool, sync_on: bool) -> Element<'static, Me
             .spacing(6)
             .align_y(Alignment::Center)
             .into(),
+        // The outlined Retry upload beside the server's words.
         Upload::Rejected(_) => column![
             title,
-            detail_line,
-            button(text("Retry").size(SMALL).font(FONT_SEMIBOLD).color(TEXT))
-                .padding(Padding::from([3, 10]))
-                .style(theme::quiet_btn(6.0))
-                .on_press(Message::RetryUpload(g.session_id.clone())),
+            row![
+                container(detail_line).width(Fill),
+                crate::games_retry::retry_button(&g.session_id),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center),
         ]
-        .spacing(6)
+        .spacing(4)
         .into(),
         _ => column![title, detail_line].spacing(2).into(),
     };
@@ -717,7 +819,7 @@ pub(crate) fn key_cap(label: &'static str) -> Element<'static, Message> {
         .into()
 }
 
-/// Whether Esc, Enter, Tab and Space go to the Games tab: only under the
+/// Whether Esc, Enter, Tab, Space and Delete go to the Games tab: only under the
 /// top tabs, while a row is open or has the focus after a delete (the
 /// classic card has its own keys).
 pub fn listens(app: &TrackerApp) -> bool {
@@ -725,10 +827,13 @@ pub fn listens(app: &TrackerApp) -> bool {
     (app.expanded.is_some() || row_focus) && app.nav_style == crate::nav::NavStyle::TopTabs
 }
 
-/// Esc, Enter, Tab or Space that no widget took: Esc cancels the delete
+/// Esc, Enter, Tab, Space, Delete, Up or Down that no widget took (so
+/// never while a text input has the focus; Up and Down move the picker's
+/// highlight): Esc closes the picker, cancels the delete
 /// strip or an edit, else closes the row; Enter and Space press the
-/// focused button; Enter else closes the row
-/// ([`crate::games_table::update`]).
+/// focused button, Enter else closes the row; Delete opens the delete
+/// confirm ([`crate::games_table::update`]). The picker's search box takes
+/// Esc, so a taken Esc cancels the picker (a no-op when none is open).
 pub fn close_keys(
     event: iced::Event,
     status: iced::event::Status,
@@ -743,13 +848,19 @@ pub fn close_keys(
 fn key_msg(key: &iced::keyboard::Key, status: iced::event::Status) -> Option<Msg> {
     use iced::keyboard::{Key, key::Named};
     if status != iced::event::Status::Ignored {
-        return None;
+        return matches!(key, Key::Named(Named::Escape))
+            .then_some(Msg::Picker(crate::games_picker::Msg::Cancel));
     }
     match key {
         Key::Named(Named::Escape) => Some(Msg::Escape),
         Key::Named(Named::Enter) => Some(Msg::Enter),
         Key::Named(Named::Tab) => Some(Msg::Tab),
         Key::Named(Named::Space) => Some(Msg::Space),
+        Key::Named(Named::Delete) => Some(Msg::DeleteKey),
+        // The search box leaves Up and Down: they move the picker's
+        // highlight (a no-op when none is open).
+        Key::Named(Named::ArrowUp) => Some(Msg::Picker(crate::games_picker::Msg::Move(-1))),
+        Key::Named(Named::ArrowDown) => Some(Msg::Picker(crate::games_picker::Msg::Move(1))),
         _ => None,
     }
 }
@@ -780,7 +891,9 @@ mod tests {
         let esc = Key::Named(Named::Escape);
         let enter = Key::Named(Named::Enter);
         assert_eq!(key_msg(&esc, Status::Ignored), Some(Msg::Escape));
-        assert_eq!(key_msg(&esc, Status::Captured), None);
+        // The picker's search box takes Esc: that one cancels the picker.
+        let cancel = Msg::Picker(crate::games_picker::Msg::Cancel);
+        assert_eq!(key_msg(&esc, Status::Captured), Some(cancel));
         assert_eq!(key_msg(&enter, Status::Ignored), Some(Msg::Enter));
         assert_eq!(key_msg(&enter, Status::Captured), None);
         let tab = Key::Named(Named::Tab);
@@ -789,6 +902,10 @@ mod tests {
         let space = Key::Named(Named::Space);
         assert_eq!(key_msg(&space, Status::Ignored), Some(Msg::Space));
         assert_eq!(key_msg(&Key::Character("d".into()), Status::Ignored), None);
+        // A focused text input takes Delete, so it never reaches the tab.
+        let delete = Key::Named(Named::Delete);
+        assert_eq!(key_msg(&delete, Status::Ignored), Some(Msg::DeleteKey));
+        assert_eq!(key_msg(&delete, Status::Captured), None);
     }
 
     /// Esc cancels the edit first, then closes; Enter never closes over

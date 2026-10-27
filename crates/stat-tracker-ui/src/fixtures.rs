@@ -11,10 +11,7 @@ use crate::cli::FixtureKind;
 
 pub fn snapshot(kind: FixtureKind) -> Snapshot {
     match kind {
-        FixtureKind::Empty => Snapshot {
-            matches: Vec::new(),
-            sessions: Vec::new(),
-        },
+        FixtureKind::Empty => Snapshot::default(),
         FixtureKind::Sample => sample_snapshot(),
         FixtureKind::Games => crate::fixtures_games::snapshot(),
     }
@@ -259,5 +256,9 @@ fn sample_snapshot() -> Snapshot {
             final_outcome: "victory".into(),
         },
     ];
-    Snapshot { matches, sessions }
+    Snapshot {
+        matches,
+        sessions,
+        ..Snapshot::default()
+    }
 }

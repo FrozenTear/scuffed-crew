@@ -15,6 +15,12 @@ pub const UNSURE: &str = "sess-g-unsure";
 /// No outcome, one scoreboard read, upload rejected, no kit.
 pub const UNDECIDED: &str = "sess-g-undecided";
 
+/// Held: the map read as "Ilio5" and the hero as Unknown, so both are
+/// missing and the game stays on this computer (the picker's game).
+pub const HELD: &str = "sess-g-held";
+/// A second rejected upload, so the tab offers Retry all.
+pub const REJECTED_2: &str = "sess-g-rejected2";
+
 /// The server message on the rejected sample upload.
 pub const REJECT: &str =
     "reader version cv-v0 is no longer accepted. Update the tracker, then retry.";
@@ -151,7 +157,41 @@ pub fn snapshot() -> Snapshot {
         dts(17, 21, 11, 0),
     )];
 
+    let mut held = pm(
+        HELD,
+        "Unknown",
+        "Ilio5",
+        "Support",
+        "victory",
+        9,
+        5,
+        14,
+        4100,
+        9800,
+        0,
+        dt(2026, 10, 17, 22, 20),
+    );
+    held.recognizer = "cv-v1".into();
+    let mut rejected_2 = pm(
+        REJECTED_2,
+        "Mei",
+        "Lijiang Tower",
+        "Damage",
+        "defeat",
+        15,
+        9,
+        6,
+        11200,
+        0,
+        6100,
+        dt(2026, 10, 16, 22, 10),
+    );
+    rejected_2.recognizer = "cv-v0".into();
+    rejected_2.upload_reject = Some(REJECT.into());
+
     let mut matches = vec![
+        held,
+        rejected_2,
         unsure,
         normal,
         wb(
@@ -238,7 +278,7 @@ pub fn snapshot() -> Snapshot {
     matches.sort_by_key(|m| std::cmp::Reverse(m.played_at));
     Snapshot {
         matches,
-        sessions: Vec::new(),
+        ..Snapshot::default()
     }
 }
 

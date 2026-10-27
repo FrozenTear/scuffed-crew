@@ -236,13 +236,18 @@ pub enum Focus {
     ConfirmDelete,
 }
 
-/// The Games tab's state: the view settings, the focus, and whether the
-/// "Game deleted." line is up.
+/// The Games tab's state: the view settings, the focus, and the game the
+/// "Game deleted." line is up for.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct GamesTab {
     pub view: TabState,
     pub focus: Focus,
-    pub deleted_note: bool,
+    pub deleted_note: Option<crate::games_delete::Deleted>,
+    /// The last snapshot's deletes still waiting for the server; `None`
+    /// until a snapshot is read after a delete.
+    pub pending_deletes: Option<Vec<String>>,
+    /// The held-game picker, when one is open.
+    pub picker: Option<crate::games_picker::Picker>,
     /// The grid last drawn (the view sets it), so a delete from the keys
     /// finds the next row in the order the player sees.
     pub grid: std::cell::Cell<Grid>,

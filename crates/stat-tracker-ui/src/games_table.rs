@@ -48,6 +48,14 @@ pub enum Msg {
     Tab,
     /// Space no widget took: press the focused button.
     Space,
+    /// The status box's Retry upload.
+    Retry(String),
+    /// "N games couldn't upload · Retry all" above the table.
+    RetryAll,
+    /// Delete no widget took: the open or focused row's delete confirm.
+    DeleteKey,
+    /// The held-game picker.
+    Picker(crate::games_picker::Msg),
 }
 
 pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
@@ -63,7 +71,8 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
         }
         Msg::Toggle(sid) => {
             app.games_tab.focus = Focus::None;
-            app.games_tab.deleted_note = false;
+            app.games_tab.picker = None;
+            app.games_tab.deleted_note = None;
             return iced::Task::done(Message::ToggleGame(sid));
         }
         Msg::AskDelete(sid) => {
@@ -84,6 +93,9 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
                 _ => {}
             }
         }
+        Msg::Picker(m) => return crate::games_picker::update(app, m),
+        Msg::Escape if app.games_tab.picker.is_some() => app.games_tab.picker = None,
+        Msg::Enter | Msg::DeleteKey if app.games_tab.picker.is_some() => {}
         Msg::Escape if app.confirm_delete.is_some() => cancel_delete(app),
         Msg::Escape if app.editing => app.editing = false,
         Msg::Enter | Msg::Space if press_focused(app) => {}
@@ -96,6 +108,9 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
             app.confirm_delete = None;
             app.games_tab.focus = Focus::None;
         }
+        Msg::DeleteKey => delete_key(app),
+        Msg::Retry(sid) => crate::games_retry::retry(app, Some(&sid)),
+        Msg::RetryAll => crate::games_retry::retry(app, None),
         Msg::OpenScoreboard(sid) => {
             if let Err(e) = crate::games_panel::open_scoreboard(&app.data_dir, &sid) {
                 app.replace_toast(e);
@@ -120,13 +135,32 @@ fn press_focused(app: &mut TrackerApp) -> bool {
         }
         (Focus::Row(sid), None) => {
             app.games_tab.focus = Focus::None;
-            app.games_tab.deleted_note = false;
+            app.games_tab.deleted_note = None;
             app.expanded = Some(sid);
             app.editing = false;
         }
         _ => return false,
     }
     true
+}
+
+/// Delete on the open row, or on the focused one (opened first): the
+/// inline confirm with Cancel focused. It never deletes by itself, and it
+/// does nothing over the edit form.
+fn delete_key(app: &mut TrackerApp) {
+    if app.editing {
+        return;
+    }
+    let sid = match (&app.expanded, &app.games_tab.focus) {
+        (Some(sid), _) | (None, Focus::Row(sid)) => sid.clone(),
+        _ => return,
+    };
+    if app.expanded.is_none() {
+        app.games_tab.deleted_note = None;
+        app.expanded = Some(sid.clone());
+    }
+    app.confirm_delete = Some(sid);
+    app.games_tab.focus = Focus::Cancel;
 }
 
 fn cancel_delete(app: &mut TrackerApp) {
@@ -138,6 +172,10 @@ fn cancel_delete(app: &mut TrackerApp) {
 /// and move the focus to the row after it, or before it when it was last.
 fn delete(app: &mut TrackerApp, sid: &str) {
     let next = games_rows::neighbour(&row_order(app), sid);
+    let uploaded = app.games.iter().any(|g| {
+        g.session_id == sid
+            && crate::games_detail::upload(g, false, true) == crate::games_detail::Upload::Uploaded
+    });
     match crate::commands::delete_session(&app.data_dir, sid) {
         Ok(()) => {
             app.games.retain(|g| g.session_id != sid);
@@ -145,7 +183,11 @@ fn delete(app: &mut TrackerApp, sid: &str) {
             app.editing = false;
             app.confirm_delete = None;
             app.games_tab.focus = next.map_or(Focus::None, Focus::Row);
-            app.games_tab.deleted_note = true;
+            app.games_tab.deleted_note = Some(crate::games_delete::Deleted {
+                sid: sid.to_string(),
+                uploaded,
+            });
+            app.games_tab.pending_deletes = None;
         }
         Err(e) => app.replace_toast(format!("Could not delete game: {e}")),
     }
@@ -195,10 +237,9 @@ pub fn view<'a>(
     if state.filters_open || crate::filter_chips::active_count(app) > 0 {
         col = col.push(chips);
     }
-    // UX Spec v2 open question 5 does not place it yet; above the table it
-    // is seen, where under Filters it was not.
-    if app.games.iter().any(|game| game.upload_reject.is_some()) {
-        col = col.push(crate::games::retry_rejected_uploads_button());
+    // Two or more rejected games: one Retry all line (UX Spec, OQ5).
+    if let Some(retry_all) = crate::games_retry::above_table(app) {
+        col = col.push(retry_all);
     }
     if shown.is_empty() {
         let copy = if app.games.is_empty() {
@@ -218,13 +259,13 @@ pub fn view<'a>(
         .flat_map(|sec| sec.rows.iter().map(|g| g.session_id.as_str()))
         .collect();
     // "Game deleted." tops the table of the row the focus moved to.
+    let deleted = app.games_tab.deleted_note.is_some();
     let note_at = match &app.games_tab.focus {
-        Focus::Row(sid) if app.games_tab.deleted_note => {
-            order.iter().position(|s| *s == sid.as_str())
-        }
+        Focus::Row(sid) if deleted => order.iter().position(|s| *s == sid.as_str()),
         _ => None,
     }
-    .or(app.games_tab.deleted_note.then_some(0));
+    .or(deleted.then_some(0));
+    let copy = crate::games_delete::deleted_copy(app);
     let mut seen = 0;
     for section in layout.sections {
         let rows = section.rows.len();
@@ -233,7 +274,7 @@ pub fn view<'a>(
         if let Some(head) = section.head {
             col = col.push(session_header(head, section.ticks));
         }
-        col = col.push(table(app, &section.rows, grid, state, note));
+        col = col.push(table(app, &section.rows, grid, state, note.then_some(copy)));
     }
     if let Some(note) = games_rows::cap_note(layout.hidden) {
         col = col.push(text(note).size(SIZE_META).color(TEXT_2));
@@ -344,13 +385,15 @@ fn table<'a>(
     games: &[&Game],
     grid: Grid,
     state: TabState,
-    deleted_note: bool,
+    deleted_note: Option<&'static str>,
 ) -> Element<'a, Message> {
     let cols = games_rows::columns(grid);
     let live = app.live_game_session.as_deref();
     let mut body = column![].width(Fill);
-    if deleted_note {
-        body = body.push(crate::games_delete::deleted_line()).push(line());
+    if let Some(copy) = deleted_note {
+        body = body
+            .push(crate::games_delete::deleted_line(copy))
+            .push(line());
     }
     body = body.push(header_row(&cols, state, grid));
     for g in games {
@@ -475,19 +518,21 @@ fn game_row(
                 .into(),
             Col::Result => result_cell(g, in_progress, unsure(UnsureItem::Result)),
             Col::Map => {
-                let name = if g.map_name.trim().is_empty() {
-                    "No map".to_string()
-                } else {
-                    g.map_name.clone()
-                };
+                let (name, known) = crate::games_picker::map_label(g);
                 let doubt = unsure(UnsureItem::Map);
-                let mut m = row![text(name).size(SIZE_META).font(FONT_BOLD).color(if doubt {
-                    WARN
+                let color = match (doubt, known) {
+                    (true, _) => WARN,
+                    (false, false) => TEXT_2,
+                    _ => main,
+                };
+                let font = if known {
+                    FONT_BOLD
                 } else {
-                    main
-                })]
-                .spacing(8)
-                .align_y(Alignment::Center);
+                    iced::Font::DEFAULT
+                };
+                let mut m = row![text(name).size(SIZE_META).font(font).color(color)]
+                    .spacing(8)
+                    .align_y(Alignment::Center);
                 if let Some(mode) = games_rows::mode_chip(&g.map_name) {
                     m = m.push(small_chip(mode, TEXT_2, BORDER));
                 }
@@ -585,18 +630,29 @@ fn with_warn(cell: Element<'static, Message>, unsure: bool) -> Element<'static, 
 /// A grey silhouette for the portrait (no Blizzard art is shipped), the
 /// hero, and the role's letter in its colour. An unsure hero is amber.
 fn hero_cell(g: &Game, unsure: bool) -> Element<'static, Message> {
-    let r = row![
+    // A hero not read shows "Unknown" with no role letter (spec).
+    let unknown = crate::games_picker::hero_unknown(&g.hero);
+    let name = if unknown {
+        "Unknown".to_string()
+    } else {
+        g.display_hero()
+    };
+    let mut r = row![
         portrait(20.0, 14.0),
-        text(g.display_hero())
+        text(name)
             .size(SIZE_META)
             .color(if unsure { WARN } else { TEXT_2 }),
-        text(role_letter(g.role))
-            .size(SIZE_LABEL)
-            .font(FONT_BOLD)
-            .color(theme::role_color(g.role)),
     ]
     .spacing(6)
     .align_y(Alignment::Center);
+    if !unknown {
+        r = r.push(
+            text(role_letter(g.role))
+                .size(SIZE_LABEL)
+                .font(FONT_BOLD)
+                .color(theme::role_color(g.role)),
+        );
+    }
     with_warn(r.into(), unsure)
 }
 
@@ -627,10 +683,11 @@ fn marks_cell(g: &Game, in_progress: bool) -> Element<'static, Message> {
     let Some(mark) = games_rows::mark(g, in_progress) else {
         return space().into();
     };
+    // "⚠ Upload rejected": the row-chip size, a 1px loss outline, no fill.
     let chip = if mark.is_warning() {
         warn_chip(mark.label())
     } else {
-        small_chip_owned(mark.label(), theme::DANGER, theme::DANGER)
+        icon_chip(mark.label(), Icon::WarnLoss, theme::DANGER)
     };
     if mark == Mark::NoOutcome {
         mouse_area(chip)
@@ -643,10 +700,18 @@ fn marks_cell(g: &Game, in_progress: bool) -> Element<'static, Message> {
 
 /// An amber outline chip with the warning sign.
 pub(crate) fn warn_chip(label: String) -> Element<'static, Message> {
+    icon_chip(label, Icon::Warn, WARN)
+}
+
+/// An outline chip with a sign: label and outline in `color`, no fill.
+fn icon_chip(label: String, icon: Icon, color: Color) -> Element<'static, Message> {
     container(
         row![
-            image(icons::handle(Icon::Warn)).width(11).height(11),
-            text(label).size(SIZE_LABEL).font(FONT_SEMIBOLD).color(WARN),
+            image(icons::handle(icon)).width(11).height(11),
+            text(label)
+                .size(SIZE_LABEL)
+                .font(FONT_SEMIBOLD)
+                .color(color),
         ]
         .spacing(4)
         .align_y(Alignment::Center),
@@ -654,7 +719,7 @@ pub(crate) fn warn_chip(label: String) -> Element<'static, Message> {
     .padding(Padding::from([1, 8]))
     .style(move |_: &Theme| container::Style {
         border: Border {
-            color: WARN,
+            color,
             width: 1.0,
             radius: theme::RADIUS_CHIP.into(),
         },
