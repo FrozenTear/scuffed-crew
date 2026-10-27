@@ -7,6 +7,7 @@ use scuffed_api_client::ApiClient;
 
 use crate::components::ui::{Card, HeroSelect, Pill, PillTone, SeasonSelect, use_stats_season};
 use crate::routes::Route;
+use crate::sample::{LIST_RULE_NOTE, ListResult, list_result};
 use crate::util::encode_query;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -91,6 +92,15 @@ const PAGE_CSS: &str = r#"
         font-family: var(--font-mono);
         color: var(--text-3);
         width: 2.5rem;
+    }
+    .lb-wr-muted {
+        color: var(--text-3);
+        font-size: 0.8rem;
+    }
+    .lb-rule-note {
+        color: var(--text-3);
+        font-size: 0.8rem;
+        margin: 0.75rem 0 0;
     }
     .lb-num {
         font-family: var(--font-mono);
@@ -177,6 +187,22 @@ fn leaderboard_message(
             Some("No ranked matches yet. Upload stats from the tracker.")
         }
         Some(LeaderboardLoad::Rows(_)) => None,
+    }
+}
+
+/// WR cell under the small-sample rule: the win rate from 10 games, the
+/// win count below that, muted under 3 games. Display only: the row order
+/// is whatever the server sent.
+fn wr_cell(row: &LeaderboardRow) -> ListResult {
+    list_result(row.games, row.winrate)
+}
+
+/// Accent pill for a win rate, neutral pill for a win count.
+fn wr_tone(wr: &ListResult) -> PillTone {
+    if wr.is_rate {
+        PillTone::Accent
+    } else {
+        PillTone::Neutral
     }
 }
 
@@ -313,7 +339,7 @@ pub fn Leaderboards() -> Element {
                                     for (i, r) in list.iter().enumerate() {
                                         {
                                             let rank = i + 1;
-                                            let wr = format!("{:.0}%", r.winrate * 100.0);
+                                            let wr = wr_cell(r);
                                             let kd = format!("{:.2}", r.kd);
                                             rsx! {
                                                 tr { key: "{r.member_id}",
@@ -326,7 +352,11 @@ pub fn Leaderboards() -> Element {
                                                     }
                                                     td { class: "lb-num", "{r.games}" }
                                                     td { class: "lb-num",
-                                                        Pill { tone: PillTone::Accent, "{wr}" }
+                                                        if wr.muted {
+                                                            span { class: "lb-wr-muted", "{wr.text}" }
+                                                        } else {
+                                                            Pill { tone: wr_tone(&wr), "{wr.text}" }
+                                                        }
                                                     }
                                                     td { class: "lb-num", "{kd}" }
                                                 }
@@ -335,6 +365,7 @@ pub fn Leaderboards() -> Element {
                                     }
                                 }
                             }
+                            p { class: "lb-rule-note", "{LIST_RULE_NOTE}" }
                         },
                         _ => rsx! {},
                     }
@@ -428,6 +459,33 @@ mod tests {
             leaderboard_hold("/api/public/leaderboards?metric=winrate"),
             None
         );
+    }
+
+    fn row(games: u32, winrate: f32) -> LeaderboardRow {
+        LeaderboardRow {
+            member_id: "m".into(),
+            display_name: "M".into(),
+            games,
+            winrate,
+            kd: 1.0,
+        }
+    }
+
+    #[test]
+    fn wr_cell_follows_the_small_sample_rule() {
+        let two = wr_cell(&row(2, 1.0));
+        assert_eq!(two.text, "2W");
+        assert!(two.muted);
+
+        let six = wr_cell(&row(6, 0.5));
+        assert_eq!(six.text, "3W");
+        assert!(!six.muted);
+        assert!(matches!(wr_tone(&six), PillTone::Neutral));
+
+        let ten = wr_cell(&row(10, 0.8));
+        assert_eq!(ten.text, "80%");
+        assert!(!ten.muted);
+        assert!(matches!(wr_tone(&ten), PillTone::Accent));
     }
 
     #[test]

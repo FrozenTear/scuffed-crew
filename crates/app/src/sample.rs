@@ -7,7 +7,8 @@
 //! - The pooled "Other heroes" row always shows its record, never a win
 //!   rate, because it mixes several heroes.
 //!
-//! Used by My Stats (`/stats`), member stats and member profiles.
+//! Used by My Stats (`/stats`), member stats, member profiles, the members
+//! list hero filter and the leaderboards.
 
 use dioxus::prelude::*;
 
@@ -31,6 +32,10 @@ pub const HERO_RULE_NOTE: &str =
     "Win rate from 10 games, record from 3. Heroes with fewer fold into Other heroes.";
 /// Caption for map lists that follow the rule.
 pub const MAP_RULE_NOTE: &str = "Win rate from 10 games, record below that.";
+
+/// Caption for the members list and leaderboards. Their rows only carry
+/// games and a win rate, so below 10 games the record is the win count.
+pub const LIST_RULE_NOTE: &str = "Win rate from 10 games, wins below that.";
 
 /// Games and results for one hero, map, mode or season.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -104,6 +109,43 @@ pub fn other_label(pool: Tally) -> String {
         NO_GAMES.to_string()
     } else {
         pool.record()
+    }
+}
+
+/// Result text for a list row that only has games and a 0.0 to 1.0 win
+/// rate, as on the members list and the leaderboards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListResult {
+    /// "No games", the win count such as `5W`, or a whole percent.
+    pub text: String,
+    /// True once the win rate shows (10 or more games).
+    pub is_rate: bool,
+    /// True under [`RECORD_MIN_GAMES`]: show it muted.
+    pub muted: bool,
+}
+
+/// Apply the rule to a row with only `games` and a 0.0 to 1.0 `winrate`.
+/// The win count is rebuilt from the rate, which the server computes as
+/// wins over games. Losses and draws are not sent, so below 10 games only
+/// the wins show next to the games count.
+pub fn list_result(games: u32, winrate: f32) -> ListResult {
+    let wins = (f64::from(winrate) * f64::from(games))
+        .round()
+        .clamp(0.0, f64::from(games)) as u32;
+    let tally = Tally::new(games, wins, 0, 0);
+    let muted = tally.folds_away();
+    let (text, is_rate) = if games == 0 {
+        (NO_GAMES.to_string(), false)
+    } else {
+        match tally.win_rate_pct() {
+            Some(pct) => (format!("{pct:.0}%"), true),
+            None => (format!("{wins}W"), false),
+        }
+    };
+    ListResult {
+        text,
+        is_rate,
+        muted,
     }
 }
 
@@ -244,6 +286,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn list_result_follows_the_rule() {
+        let none = list_result(0, 0.0);
+        assert_eq!(none.text, "No games");
+        assert!(none.muted && !none.is_rate);
+
+        let two = list_result(2, 0.5);
+        assert_eq!(two.text, "1W");
+        assert!(two.muted && !two.is_rate);
+
+        let three = list_result(3, 2.0 / 3.0);
+        assert_eq!(three.text, "2W");
+        assert!(!three.muted && !three.is_rate);
+
+        let nine = list_result(9, 5.0 / 9.0);
+        assert_eq!(nine.text, "5W");
+        assert!(!nine.muted && !nine.is_rate);
+        assert!(!nine.text.contains('%'), "{}", nine.text);
+
+        let ten = list_result(10, 0.7);
+        assert_eq!(ten.text, "70%");
+        assert!(!ten.muted && ten.is_rate);
+    }
+
+    #[test]
+    fn list_result_rebuilds_wins_from_the_rate() {
+        assert_eq!(list_result(7, 4.0 / 7.0).text, "4W");
+        assert_eq!(list_result(12, 7.0 / 12.0).text, "58%");
+        assert_eq!(list_result(5, 1.5).text, "5W");
+        assert_eq!(list_result(5, -0.2).text, "0W");
+    }
+
     fn render(app: fn() -> Element) -> String {
         let mut dom = VirtualDom::new(app);
         dom.rebuild_in_place();
@@ -272,7 +346,7 @@ mod tests {
 
     #[test]
     fn notes_have_no_long_dashes() {
-        for note in [HERO_RULE_NOTE, MAP_RULE_NOTE] {
+        for note in [HERO_RULE_NOTE, MAP_RULE_NOTE, LIST_RULE_NOTE] {
             assert!(!note.contains('\u{2014}') && !note.contains('\u{2013}'));
         }
     }
