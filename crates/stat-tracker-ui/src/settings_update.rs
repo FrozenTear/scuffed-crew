@@ -36,6 +36,12 @@ pub(crate) const DEMO_REFUSED: &str = "Demo mode: nothing is changed.";
 /// open with the text.
 const NAME_CHIP_EMPTY: &str = "Type the name before the #. The #1234 tag is left out.";
 
+/// Looks (about one a second, on the tick) that our own Restart or Start
+/// may go without a new pid before its run is taken as gone. A systemd
+/// start returns at fork and the tracker writes its pid file only after it
+/// loads its config, so the first looks often find no tracker yet.
+pub(crate) const OURS_WAIT_LOOKS: u32 = 30;
+
 /// A message from the 0.6 Settings page.
 #[derive(Debug, Clone)]
 pub enum Msg {
@@ -105,11 +111,14 @@ pub struct PageState {
     /// parse at launch. The first read that works replaces it.
     baseline_unknown: bool,
     /// Our own Restart or Start just worked: `Some` holds the pid seen
-    /// when it finished. The first new pid after that is the run's, not a
-    /// restart from elsewhere, so it leaves the baseline alone. If the pid
-    /// goes to none instead, the run ended before its pid was seen, and
-    /// the next pid is not ours.
-    ours_started: Option<Option<u32>>,
+    /// when it finished and the looks left to wait for the run's pid. The
+    /// first new pid after that is the run's, not a restart from
+    /// elsewhere, so it leaves the baseline alone. A look with no new pid
+    /// may only mean the run is not up yet (the unit is Type=simple and
+    /// the tracker writes its pid file late), so the wait ends only after
+    /// [`OURS_WAIT_LOOKS`] such looks, and the next pid after that is not
+    /// ours.
+    ours_started: Option<(Option<u32>, u32)>,
     /// The config saved when a Restart or Start began. It becomes the
     /// baseline when that run succeeds, so a change made while it ran
     /// still counts as waiting.
@@ -205,26 +214,37 @@ impl PageState {
         {
             self.restart_baseline = started;
             self.baseline_unknown = false;
-            self.ours_started = Some(self.seen_pid);
+            self.ours_started = Some((self.seen_pid, OURS_WAIT_LOOKS));
         }
     }
 
     /// The tracker's pid now. A tracker that started without a restart of
     /// ours loaded the saved config. Called after every refresh. The pid
     /// our own run produced moves nothing, whether it shows at once or on a
-    /// later tick, so a change saved while that run started still waits.
-    /// A run of ours that exits before its pid is seen is no longer
-    /// awaited, so a later start from elsewhere moves the baseline.
+    /// later tick, even after looks that found no tracker yet, so a change
+    /// saved while that run started still waits. A run of ours whose pid
+    /// is not seen within [`OURS_WAIT_LOOKS`] looks is taken as gone, so a
+    /// later start from elsewhere moves the baseline.
     pub fn observe_tracker(&mut self, pid: Option<u32>, saved: &Config) {
-        if self.restart_pending.is_some() || pid == self.seen_pid {
+        if self.restart_pending.is_some() {
             return;
         }
+        let new_pid = pid.is_some() && pid != self.seen_pid;
         self.seen_pid = pid;
+        if !new_pid {
+            if let Some((_, left)) = &mut self.ours_started {
+                *left = left.saturating_sub(1);
+                if *left == 0 {
+                    self.ours_started = None;
+                }
+            }
+            return;
+        }
         let ours = self
             .ours_started
             .take()
-            .is_some_and(|at_done| pid.is_some() && pid != at_done);
-        if pid.is_none() || ours {
+            .is_some_and(|(at_done, _)| pid != at_done);
+        if ours {
             return;
         }
         self.restart_baseline = saved.clone();
@@ -780,8 +800,8 @@ mod tests {
     }
 
     /// Through the real messages: our Restart's tracker exits before its
-    /// pid is seen, so the next tracker is a start from elsewhere and
-    /// loads what is saved.
+    /// pid is seen. Once the wait for it runs out, the next tracker is a
+    /// start from elsewhere and loads what is saved.
     #[test]
     fn a_run_of_ours_that_exits_unseen_is_not_awaited() {
         use crate::daemon::DaemonVerb;
@@ -789,12 +809,39 @@ mod tests {
         app.page_state.observe_tracker(Some(7), &app.saved_config);
         let _ = app.update(Message::Daemon(DaemonVerb::Restart));
         let _ = app.update(page(Msg::Edit(ConfigEdit::FrameRate(Some(2)))));
-        // The refresh in DaemonDone finds no tracker: the run is gone.
+        // The refresh in DaemonDone finds no tracker.
         let _ = app.update(Message::DaemonDone(Ok("Tracker restarted".into())));
         assert_eq!(app.daemon.pid, None);
         assert_eq!(app.changes_waiting(), 1);
+        assert!(app.page_state.ours_started.is_some(), "maybe not up yet");
+        // No tracker on every later look either: the run is gone.
+        for _ in 1..OURS_WAIT_LOOKS {
+            app.page_state.observe_tracker(None, &app.saved_config);
+        }
         assert_eq!(app.page_state.ours_started, None);
+        assert_eq!(app.changes_waiting(), 1);
         // A tracker started elsewhere loads the saved change.
+        app.page_state.observe_tracker(Some(9), &app.saved_config);
+        assert_eq!(app.changes_waiting(), 0);
+    }
+
+    /// Through the real messages: the refresh in DaemonDone finds no
+    /// tracker because our run has not written its pid yet. The pid that
+    /// shows on a later tick is still that run's.
+    #[test]
+    fn a_pid_of_ours_that_shows_on_a_later_tick_is_still_ours() {
+        use crate::daemon::DaemonVerb;
+        let (_dir, mut app) = live_app();
+        app.page_state.observe_tracker(Some(7), &app.saved_config);
+        let _ = app.update(Message::Daemon(DaemonVerb::Restart));
+        let _ = app.update(page(Msg::Edit(ConfigEdit::FrameRate(Some(2)))));
+        let _ = app.update(Message::DaemonDone(Ok("Tracker restarted".into())));
+        assert_eq!(app.daemon.pid, None);
+        app.page_state.observe_tracker(None, &app.saved_config);
+        app.page_state.observe_tracker(Some(8), &app.saved_config);
+        assert_eq!(app.changes_waiting(), 1, "our run started without it");
+        assert_eq!(app.page_state.ours_started, None);
+        // A restart from elsewhere after that loads what is saved.
         app.page_state.observe_tracker(Some(9), &app.saved_config);
         assert_eq!(app.changes_waiting(), 0);
     }
