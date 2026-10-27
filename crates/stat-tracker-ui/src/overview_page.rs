@@ -15,8 +15,8 @@ use iced::{Element, Fill, Task};
 
 use crate::aggregate::{GameFilter, SessionGroup, filter_games, group_by_session_gap};
 use crate::app::{Message, TrackerApp};
-use crate::filter_chips;
 use crate::model::{Game, Role, RoleFilter, Screen};
+use crate::overview_chips;
 use crate::theme::{self, BORDER, FONT_SEMIBOLD, SIZE_META, SURFACE, TEXT, TEXT_2};
 
 /// Width of the right panel (spec about 300).
@@ -97,22 +97,38 @@ pub(crate) fn chip_row<'a>(
     narrow: bool,
 ) -> Element<'a, Message> {
     if !narrow {
-        return filter_chips::bar(app, heroes, maps, true);
+        return overview_chips::bar(app, heroes, maps, true);
     }
     let open = app.overview_page.filters_open;
     Row::new()
         .spacing(8)
         .align_y(Alignment::Start)
         .push(fold_chip(
-            filter_chips::active_count(app),
+            overview_chips::active_count(app),
             open,
             Message::OverviewPage(Msg::ToggleFilters),
         ))
-        .push(filter_chips::bar(app, heroes, maps, open))
+        .push(overview_chips::bar(app, heroes, maps, open))
         .into()
 }
 
-/// "Filters (1) ▾": opens or shuts the folded chips.
+/// A spec arrow (▾ ▴ ▲ ▼) in iced's own icon font: the page font has
+/// none of them. Any other character is drawn as it is.
+pub fn glyph(c: char) -> iced::widget::Text<'static> {
+    use iced::advanced::text::Renderer as _;
+    let icon = match c {
+        '▾' => Some(iced::Renderer::ARROW_DOWN_ICON),
+        '▴' | '▲' => Some(iced::Renderer::SCROLL_UP_ICON),
+        '▼' => Some(iced::Renderer::SCROLL_DOWN_ICON),
+        _ => None,
+    };
+    match icon {
+        Some(i) => text(i.to_string()).font(iced::Renderer::ICON_FONT),
+        None => text(c.to_string()),
+    }
+}
+
+/// "Filters (1) ▾": opens or shuts the folded chips (▴ while open).
 fn fold_chip(count: usize, open: bool, toggle: Message) -> Element<'static, Message> {
     button(
         row![
@@ -120,9 +136,8 @@ fn fold_chip(count: usize, open: bool, toggle: Message) -> Element<'static, Mess
                 .size(SIZE_META)
                 .font(FONT_SEMIBOLD)
                 .color(TEXT),
-            text(if open { "↑" } else { "↓" })
+            glyph(if open { '▴' } else { '▾' })
                 .size(SIZE_META)
-                .font(FONT_SEMIBOLD)
                 .color(TEXT_2),
         ]
         .spacing(6)
@@ -149,13 +164,22 @@ fn fold_chip(count: usize, open: bool, toggle: Message) -> Element<'static, Mess
     .into()
 }
 
-/// The latest session of `games` (newest first), split by the Session
-/// window setting as Games does.
+/// The gap that splits sessions: the Session window setting, as the spec's
+/// Games footnote says ("Sessions split after 3 hours without a game").
+/// The 0.5 Games page still splits at a fixed 30 minutes. A value too big
+/// for a duration (the field takes any number) is no limit at all.
+pub fn session_gap(window_secs: u64) -> chrono::TimeDelta {
+    i64::try_from(window_secs)
+        .ok()
+        .and_then(chrono::TimeDelta::try_seconds)
+        .unwrap_or(chrono::TimeDelta::MAX)
+}
+
+/// The latest session of `games` (newest first), split by [`session_gap`].
 pub fn latest_session(app: &TrackerApp, games: &[&Game]) -> Option<SessionGroup> {
-    let gap = chrono::TimeDelta::seconds(
-        i64::try_from(app.saved_config.session_window_secs).unwrap_or(i64::MAX),
-    );
-    group_by_session_gap(games, gap).into_iter().next()
+    group_by_session_gap(games, session_gap(app.saved_config.session_window_secs))
+        .into_iter()
+        .next()
 }
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
@@ -190,8 +214,8 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     };
     let session = latest_session(app, &shown);
     let main = column![
-        crate::overview_main::view(app, session.as_ref(), main_w),
-        crate::overview_heroes::view(app, &shown, main_w),
+        crate::overview_main::view(app, session.as_ref()),
+        crate::overview_heroes::view(app, main_w),
     ]
     .spacing(GAP)
     .width(Fill);
@@ -221,11 +245,21 @@ mod tests {
         assert!(app.overview_page.filters_open);
         let _ = app.update(Message::OverviewPage(Msg::PickRole(Some(Role::Tank))));
         assert_eq!(
-            crate::filter_chips::single_role(app.roles),
+            crate::overview_chips::single_role(app.roles),
             Some(Role::Tank)
         );
         let _ = app.update(Message::OverviewPage(Msg::PickRole(None)));
         assert!(app.roles.unrestricted());
+    }
+
+    #[test]
+    fn a_huge_session_window_never_panics() {
+        assert_eq!(session_gap(u64::MAX), chrono::TimeDelta::MAX);
+        assert_eq!(session_gap(i64::MAX as u64), chrono::TimeDelta::MAX);
+        assert_eq!(session_gap(1800), chrono::TimeDelta::minutes(30));
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.saved_config.session_window_secs = u64::MAX;
+        let _ = view(&app, 1300.0);
     }
 
     #[test]

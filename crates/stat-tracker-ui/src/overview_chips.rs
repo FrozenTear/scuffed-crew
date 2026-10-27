@@ -1,5 +1,7 @@
-//! The 0.6 filter chips (spec p1 and p2), the same file as #556's, which
-//! replaces this one when it lands (only the role chip's message differs):
+//! The Overview's copy of the 0.6 filter chips (spec p1 and p2). The Games
+//! PR owns the shared filter_chips.rs; this file has the same public
+//! functions, so the Overview switches to that module by a plain swap when
+//! it lands (only the role chip's message differs):
 //! Season, queues, roles, Crew, Hero and Map. A chip that filters reads as
 //! an accent outline with its value and "×" to clear it ("Season 5 ×").
 //! One that does not is a dropdown ("Hero ▾"). Behind "Filters (n)" only

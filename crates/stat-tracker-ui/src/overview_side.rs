@@ -1,9 +1,9 @@
 //! The Overview's right panel (spec p1): the season card ("49%" over its
-//! games, a bar with the rate marked, "Last 20 55% ↑ +6 vs season" and its
+//! games, a bar with the rate marked, "Last 20 55% ▲ +6 vs season" and its
 //! sparkline, then how the rate is counted), "Needs a look · all seasons"
 //! with Review games, and the Companion card with its switch.
 //!
-//! Small-sample rule: a win rate shows only from 10 decided games; fewer
+//! Small-sample rule: a win rate shows only from 10 games; fewer
 //! show the record instead. Rank now and Peak wait for the rank reader.
 
 use iced::widget::{Column, Row, button, column, container, row, text, toggler};
@@ -19,7 +19,7 @@ use crate::theme::{
 };
 use crate::widgets;
 
-/// Fewest decided games a win rate is shown for (small-sample rule).
+/// Fewest games a win rate is shown for (small-sample rule).
 pub const RATE_MIN: usize = 10;
 /// The "Last 20" window.
 pub const LAST_N: usize = 20;
@@ -97,15 +97,47 @@ pub fn last_n<'a>(shown: &[&'a Game]) -> Vec<&'a Game> {
         .collect()
 }
 
-/// "↑ +6 vs season" when both rates show.
+/// "▲ +6 vs season" (or "▼ -3 vs season") when both rates show.
 pub fn versus(last: &Record, season: &Record) -> Option<String> {
     let (a, b) = (rate(last)?, rate(season)?);
     let d = a - b;
     Some(match d.signum() {
-        1 => format!("↑ +{d} vs season"),
-        -1 => format!("↓ {d} vs season"),
+        1 => format!("▲ +{d} vs season"),
+        -1 => format!("▼ {d} vs season"),
         _ => "same as season".to_string(),
     })
+}
+
+/// "▲ +6 vs season" with the arrow in the icon font
+/// ([`crate::overview_page::glyph`]).
+fn versus_text(vs: &str) -> Element<'static, Message> {
+    let mut chars = vs.chars();
+    let first = chars.next().unwrap_or(' ');
+    let rest: String = chars.collect();
+    let color = match first {
+        '▲' => theme::OK,
+        '▼' => theme::DANGER,
+        _ => TEXT_2,
+    };
+    if matches!(first, '▲' | '▼') {
+        row![
+            crate::overview_page::glyph(first)
+                .size(SIZE_LABEL)
+                .color(color),
+            text(rest)
+                .size(SIZE_LABEL)
+                .font(FONT_SEMIBOLD)
+                .color(TEXT_2),
+        ]
+        .align_y(Alignment::Center)
+        .into()
+    } else {
+        text(vs.to_string())
+            .size(SIZE_LABEL)
+            .font(FONT_SEMIBOLD)
+            .color(TEXT_2)
+            .into()
+    }
 }
 
 /// How the numbers are counted, under the card.
@@ -183,7 +215,7 @@ fn season_card<'a>(app: &'a TrackerApp, shown: &[&Game]) -> Element<'a, Message>
             );
         if let Some(vs) = versus(&last, &season) {
             line = line.push(
-                container(text(vs).size(SIZE_LABEL).font(FONT_SEMIBOLD).color(TEXT_2))
+                container(versus_text(&vs))
                     .padding(Padding::from([2, 8]))
                     .style(|_: &Theme| container::Style {
                         background: Some(Background::Color(BORDER)),
@@ -375,7 +407,7 @@ mod tests {
     }
 
     #[test]
-    fn a_rate_needs_ten_decided_games() {
+    fn a_rate_needs_ten_games() {
         assert_eq!(headline(&rec(2, 5, 0, 7)), "2-5");
         assert_eq!(rate(&rec(5, 4, 0, 9)), None, "9 games");
         assert_eq!(rate(&rec(5, 4, 0, 12)), Some(56), "12 games, 9 decided");
@@ -387,7 +419,7 @@ mod tests {
     fn last_vs_season_needs_both_rates() {
         assert_eq!(
             versus(&rec(11, 9, 0, 20), &rec(52, 55, 0, 110)).as_deref(),
-            Some("↑ +6 vs season")
+            Some("▲ +6 vs season")
         );
         assert_eq!(versus(&rec(3, 2, 0, 5), &rec(52, 55, 0, 110)), None);
     }

@@ -2,9 +2,9 @@
 //! GAMES", up to four cards, and "+ 3 under 3 games · All heroes ›".
 //!
 //! Small-sample rule: a hero shows its win rate with the shared bar
-//! ([`crate::winrate_bar`]) only from 10 games. From 3 to 9 games it shows its record ("2-5")
-//! with one dash per game out of ten. Under 3 games it is not shown, only
-//! counted in the link.
+//! ([`crate::winrate_bar`]) only from 10 games. From 3 to 9 games it shows
+//! its record ("2-5") with one dash per game out of ten. Under 3 games it
+//! is not shown, only counted in the link.
 
 use iced::widget::{Column, Row, button, column, container, row, space, text};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};
@@ -39,11 +39,7 @@ pub fn split(heroes: &[HeroAgg]) -> (Vec<&HeroAgg>, usize) {
     (cards, small.len())
 }
 
-pub fn view<'a>(
-    app: &'a TrackerApp,
-    _shown: &[&crate::model::Game],
-    width: f32,
-) -> Element<'a, Message> {
+pub fn view<'a>(app: &'a TrackerApp, width: f32) -> Element<'a, Message> {
     let stats = aggregate_filtered(&app.games, &crate::overview_page::filter(app));
     let (cards, small) = split(&stats.heroes);
     let scope = match &app.season {
@@ -72,9 +68,9 @@ pub fn view<'a>(
     let col = Column::new().spacing(8).push(header);
     if cards.is_empty() {
         return col
-            .push(widgets::empty_surface(
-                "No hero has 3 games in these filters yet.",
-            ))
+            .push(widgets::empty_surface(&format!(
+                "No hero has {CARD_MIN} or more games in these filters yet."
+            )))
             .into();
     }
     let across = if width >= WIDE_FROM { 4 } else { 2 };
@@ -190,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn rates_start_at_ten_decided_games() {
+    fn rates_start_at_ten_games() {
         assert_eq!(rate(&hero("A", 9, 5, 4).record), None);
         assert_eq!(rate(&hero("A", 10, 5, 4).record), Some(56));
         assert_eq!(rate(&hero("A", 88, 45, 41).record), Some(52));
@@ -199,6 +195,6 @@ mod tests {
     #[test]
     fn the_strip_draws_on_an_empty_demo() {
         let (_dir, app) = crate::fixtures::test_app();
-        let _ = view(&app, &[], 900.0);
+        let _ = view(&app, 900.0);
     }
 }

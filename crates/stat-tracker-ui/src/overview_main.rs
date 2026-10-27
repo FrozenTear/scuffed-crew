@@ -25,17 +25,23 @@ use crate::widgets;
 /// No game in the filters at all.
 pub const EMPTY: &str = "No games yet. Press Tab in-game to capture the scoreboard.";
 
-/// "TONIGHT" while the session is this evening's, else "LAST SESSION ·
-/// Sunday night".
+/// The session started this evening (or after midnight of it): its
+/// oldest game is on the same evening as `now` ([`day_part`]).
+pub fn is_tonight(group: &SessionGroup, now: chrono::DateTime<chrono::Utc>) -> bool {
+    group.games.last().is_none_or(|oldest| {
+        day_part(oldest.played_at.with_timezone(&Local)).0 == day_part(now.with_timezone(&Local)).0
+    })
+}
+
+/// "TONIGHT" while the session is this evening's ([`is_tonight`]), else
+/// "LAST SESSION · Sunday night".
 pub fn session_label(group: &SessionGroup, now: chrono::DateTime<chrono::Utc>) -> String {
-    let Some(oldest) = group.games.last() else {
-        return "Tonight".to_string();
-    };
-    let start = day_part(oldest.played_at.with_timezone(&Local));
-    if start.0 == day_part(now.with_timezone(&Local)).0 {
-        "Tonight".to_string()
-    } else {
-        format!("Last session · {} {}", start.0.format("%A"), start.1)
+    match group.games.last() {
+        Some(oldest) if !is_tonight(group, now) => {
+            let start = day_part(oldest.played_at.with_timezone(&Local));
+            format!("Last session · {} {}", start.0.format("%A"), start.1)
+        }
+        _ => "Tonight".to_string(),
     }
 }
 
@@ -52,11 +58,7 @@ pub fn since_line(group: &SessionGroup) -> String {
     )
 }
 
-pub fn view<'a>(
-    app: &'a TrackerApp,
-    session: Option<&SessionGroup>,
-    _width: f32,
-) -> Element<'a, Message> {
+pub fn view<'a>(app: &'a TrackerApp, session: Option<&SessionGroup>) -> Element<'a, Message> {
     let Some(group) = session else {
         return widgets::empty_surface(EMPTY);
     };
@@ -68,7 +70,7 @@ pub fn view<'a>(
         col = col.push(newest_card(newest, playing));
     }
     if group.games.len() > 1 {
-        let label = if session_label(group, app.clock) == "Tonight" {
+        let label = if is_tonight(group, app.clock) {
             "Earlier tonight"
         } else {
             "Earlier in this session"
@@ -466,6 +468,7 @@ mod tests {
             crate::aggregate::group_by_session_gap(&refs, chrono::TimeDelta::hours(3)).remove(0);
         let newest = group.games[0].played_at;
         assert_eq!(session_label(&group, newest), "Tonight");
+        assert!(is_tonight(&group, newest));
         let week_later = newest + chrono::TimeDelta::days(7);
         assert!(session_label(&group, week_later).starts_with("Last session · "));
         assert!(since_line(&group).starts_with("Since "));
