@@ -343,15 +343,17 @@ fn bump_outcome(r: &mut Record, outcome: Outcome) {
 /// "soldier_76" and "Soldier: 76" are one hero. An unknown or blank name
 /// stays as stored.
 ///
-/// This runs for every game on every redraw, so a name already in the
-/// catalog (almost every stored name) skips [`canonical_hero`]'s
-/// allocating scan of the hero table.
+/// This runs for every game on every redraw, so a name that is already a
+/// display name [`canonical_hero`] returns (almost every stored name)
+/// skips its allocating scan of the hero table. The fast path checks
+/// `HERO_NAMES`, not `HEROES`: `HEROES` spells "Lucio" and "Torbjorn",
+/// which `canonical_hero` turns into "Lúcio" and "Torbjörn".
 ///
 /// [`canonical_hero`]: stat_tracker::parse::canonical_hero
 pub fn hero_key(name: &str) -> String {
     let t = name.trim();
-    if let Some(known) = stat_tracker::parse::HEROES.iter().find(|h| **h == t) {
-        known.to_string()
+    if let Some(known) = scuffed_types::HERO_NAMES.iter().find(|h| h.display == t) {
+        known.display.to_string()
     } else if stat_tracker::parse::hero_is_unknown_label(name) {
         name.to_string()
     } else {
@@ -462,6 +464,20 @@ mod tests {
             "an unknown hero stays as stored"
         );
         assert_eq!(hero_key(""), "");
+    }
+
+    #[test]
+    fn hero_key_matches_canonical_hero_for_every_catalog_name() {
+        use stat_tracker::parse::canonical_hero;
+        let names = scuffed_types::HEROES
+            .iter()
+            .copied()
+            .chain(scuffed_types::HERO_NAMES.iter().map(|h| h.display));
+        for n in names {
+            assert_eq!(hero_key(n), canonical_hero(n), "{n}");
+        }
+        assert_eq!(hero_key("Lucio"), hero_key("Lúcio"));
+        assert_eq!(hero_key("Torbjorn"), hero_key("Torbjörn"));
     }
 
     #[test]
