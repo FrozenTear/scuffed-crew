@@ -55,9 +55,15 @@ pub fn single_role(roles: RoleFilter) -> Option<Role> {
     }
 }
 
+/// "Needs a look" filters Games only: elsewhere it is neither shown nor
+/// counted, though it stays on for when Games opens again.
+fn needs_look_here(app: &TrackerApp) -> bool {
+    app.needs_look_filter && app.screen == crate::model::Screen::Games
+}
+
 /// Filters that are on: each is a "×" chip.
 pub fn active_count(app: &TrackerApp) -> usize {
-    usize::from(app.needs_look_filter)
+    usize::from(needs_look_here(app))
         + usize::from(
             matches!(app.season, SeasonSel::Season(_))
                 && crate::seasons::show_season_picker(&app.seasons.seasons),
@@ -79,7 +85,7 @@ pub fn bar<'a>(
     open: bool,
 ) -> Element<'a, Message> {
     let mut chips = Row::new().spacing(8).align_y(Alignment::Center);
-    if app.needs_look_filter {
+    if needs_look_here(app) {
         chips = chips.push(set_chip(
             "Needs a look".to_string(),
             Message::Nav(crate::nav::Msg::ClearNeedsLook),
@@ -302,6 +308,19 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn needs_a_look_is_shown_and_counted_on_games_only() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.needs_look_filter = true;
+        for screen in [crate::model::Screen::Overview, crate::model::Screen::Heroes] {
+            app.screen = screen;
+            assert_eq!(active_count(&app), 0, "{screen:?}");
+            assert!(!needs_look_here(&app));
+        }
+        app.screen = crate::model::Screen::Games;
+        assert_eq!(active_count(&app), 1);
+    }
 
     #[test]
     fn one_role_on_is_a_single_role() {
