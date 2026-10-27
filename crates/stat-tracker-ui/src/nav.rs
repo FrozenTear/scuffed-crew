@@ -12,7 +12,6 @@ use iced::{Alignment, Background, Border, Element, Fill, Length, Padding, Shadow
 
 use crate::app::{Message, TrackerApp};
 use crate::model::{Game, Screen};
-use crate::settings_model::needs_look_label;
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_SEMIBOLD, PAGE_PAD_X, SIZE_BODY,
     SIZE_LABEL, SIZE_META, TEXT, TEXT_2, WARN,
@@ -371,6 +370,15 @@ fn count_badge(n: usize) -> Element<'static, Message> {
 }
 
 /// Header chip that opens Games, where the amber rows are.
+/// Copy for the header chip.
+pub fn needs_look_label(count: usize) -> String {
+    if count == 1 {
+        "1 needs a look".to_string()
+    } else {
+        format!("{count} need a look")
+    }
+}
+
 fn needs_look_chip(n: usize) -> Element<'static, Message> {
     button(
         text(needs_look_label(n))
@@ -470,6 +478,12 @@ mod tests {
             }
         }
         assert!(tabs(Screen::Overview, 0).iter().all(|t| t.badge.is_none()));
+    }
+
+    #[test]
+    fn needs_look_copy_counts() {
+        assert_eq!(needs_look_label(1), "1 needs a look");
+        assert_eq!(needs_look_label(159), "159 need a look");
     }
 
     #[test]

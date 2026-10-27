@@ -5,8 +5,7 @@ use std::time::{Duration, SystemTime};
 use chrono::{DateTime, Utc};
 use gtk::gdk::prelude::MonitorExt;
 use iced::widget::image::Handle;
-use iced::widget::{column, container, responsive, row, stack};
-use iced::{Element, Fill, Length, Padding, Subscription, Task, window};
+use iced::{Element, Subscription, Task, window};
 use stat_tracker::capture::CaptureBackend;
 use stat_tracker::config::{Config, ShadowRecognizerControl};
 use stat_tracker::report::LogOnlyCategory;
@@ -25,10 +24,8 @@ use crate::restart_prompt::{self, BinStamp, RestartNeed, RestartWatch};
 use crate::seasons::{self, SeasonCache};
 use crate::settings::{self, SettingsField, SettingsForm, SettingsToggle};
 use crate::snapshot::{self, games_from_snapshot};
-use crate::theme::{self, PAGE_PAD_X, PAGE_PAD_Y, SIDEBAR_WIDTH};
 use crate::tray::{self, TrayAction, TrayHandle};
 use crate::update::{self, UpdateInfo, UpdatePlan, UpdateProgress};
-use crate::widgets;
 
 /// Shown when the tracker service is already running.
 const SETTINGS_SAVED_RESTART: &str =
@@ -340,16 +337,8 @@ pub enum Message {
     ShowOlderReleases(notes::NotesSurface),
     Setup(crate::setup_guide::SetupMessage),
     Report(crate::report::ReportMessage),
-    /// Open or close one ADVANCED row on the 0.6 Settings page.
-    ToggleAdvanced(crate::settings_model::AdvancedSection),
-    /// Reading radio on the 0.6 Settings page. Sets both reader switches.
-    PickReader(crate::settings_model::ReaderChoice),
-    /// Open (`Some`), edit, or close (`None`) a chip list's "+ Add" input.
-    ChipDraft(crate::settings_model::ChipList, Option<String>),
-    /// Add the open draft as a chip.
-    ChipAdd,
-    /// Remove chip `index` from a list.
-    ChipRemove(crate::settings_model::ChipList, usize),
+    /// A message from the 0.6 Settings page ([`crate::settings_update`]).
+    SettingsPage(crate::settings_update::Msg),
 }
 
 struct NotesDialog {
@@ -461,7 +450,7 @@ pub struct TrackerApp {
     pub filter_outcome: Option<Outcome>,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
-    toast_action: Option<Message>,
+    pub(crate) toast_action: Option<Message>,
     /// Sessions whose report kit was present the last time games were loaded.
     pub sessions_with_kit: HashSet<String>,
     /// When the unreadable-config toast was shown. Cleared with the toast.
@@ -551,16 +540,8 @@ pub struct TrackerApp {
     copy_text: fn(&str) -> Result<crate::clipboard::ClipboardBackend, String>,
     /// Top tabs (0.6 default) or the 0.5 sidebar, from `SCUFFED_TRACKER_LAYOUT`.
     pub nav_style: crate::nav::NavStyle,
-    /// Open ADVANCED rows on the 0.6 Settings page. All closed at start.
-    pub advanced_open: crate::settings_model::AdvancedOpen,
-    /// The config the running tracker started with, as far as the GUI
-    /// knows: the saved config at launch, then again after each Restart or
-    /// Start it ran. Settings counts the changes waiting against it.
-    pub restart_baseline: Config,
-    /// A Restart or Start is running; when it succeeds the baseline moves.
-    restart_pending: bool,
-    /// The chip input that is open on the Settings page, and its text.
-    pub chip_draft: Option<(crate::settings_model::ChipList, String)>,
+    /// The 0.6 Settings page's own state.
+    pub(crate) page_state: crate::settings_update::PageState,
 }
 
 impl TrackerApp {
@@ -696,6 +677,7 @@ impl TrackerApp {
             &saved_config,
             installed_version.as_deref(),
         );
+        let page_state = crate::settings_update::PageState::new(saved_config.clone());
         let mut app = Self {
             live_status,
             health_status,
@@ -781,12 +763,8 @@ impl TrackerApp {
             restart_watch,
             copy_text: crate::clipboard::copy_text,
             nav_style: crate::nav::NavStyle::from_env(),
-            advanced_open: crate::settings_model::AdvancedOpen::default(),
-            restart_baseline: Config::default(),
-            restart_pending: false,
-            chip_draft: None,
+            page_state,
         };
-        app.restart_baseline = app.saved_config.clone();
         app.refresh_kit_sessions();
 
         if let Some(err) = overlay::reconcile_companion(
@@ -1179,60 +1157,7 @@ impl TrackerApp {
             Message::SettingsToggle(SettingsToggle::ClassicOcr, want_classic) => {
                 self.toggle_classic_ocr(want_classic)
             }
-            Message::ToggleAdvanced(section) => {
-                self.advanced_open.toggle(section);
-                Task::none()
-            }
-            Message::ChipDraft(list, draft) => {
-                self.chip_draft = draft.map(|text| (list, text));
-                Task::none()
-            }
-            Message::ChipAdd => {
-                if let Some((list, draft)) = self.chip_draft.take() {
-                    use crate::settings_model::{ChipList, with_chip};
-                    match list {
-                        // Config holds one name, so a new one replaces it.
-                        ChipList::Names => {
-                            let name = draft.trim();
-                            if !name.is_empty() {
-                                self.settings
-                                    .set_text(SettingsField::PlayerName, name.to_string());
-                            }
-                        }
-                        ChipList::Processes => {
-                            let next = with_chip(&self.settings.game_process_names, &draft);
-                            self.settings.set_text(SettingsField::ProcessNames, next);
-                        }
-                    }
-                }
-                Task::none()
-            }
-            Message::ChipRemove(list, index) => {
-                use crate::settings_model::{ChipList, without_chip};
-                match list {
-                    ChipList::Names => self
-                        .settings
-                        .set_text(SettingsField::PlayerName, String::new()),
-                    ChipList::Processes => {
-                        let next = without_chip(&self.settings.game_process_names, index);
-                        self.settings.set_text(SettingsField::ProcessNames, next);
-                    }
-                }
-                Task::none()
-            }
-            Message::PickReader(choice) => {
-                self.settings.new_reader = choice.new_reader();
-                if choice.classic_ocr() == self.settings.classic_ocr {
-                    // Same OCR switch: no pack check, and a refusal from an
-                    // earlier click no longer applies.
-                    if choice.classic_ocr() {
-                        self.ocr_switch.refusal = None;
-                    }
-                    Task::none()
-                } else {
-                    self.toggle_classic_ocr(choice.classic_ocr())
-                }
-            }
+            Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()
@@ -1404,7 +1329,7 @@ impl TrackerApp {
                             // Same path as the Restart button, so the unit or
                             // the spawned tracker is restarted the usual way.
                             self.daemon_busy = true;
-                            self.restart_pending = true;
+                            self.page_state.set_restart_pending(true);
                             tasks.push(Task::perform(
                                 daemon::run_verb(
                                     self.data_dir.clone(),
@@ -1441,7 +1366,8 @@ impl TrackerApp {
                     return Task::none();
                 }
                 self.daemon_busy = true;
-                self.restart_pending = matches!(verb, DaemonVerb::Restart | DaemonVerb::Start);
+                let restart = matches!(verb, DaemonVerb::Restart | DaemonVerb::Start);
+                self.page_state.set_restart_pending(restart);
                 let data_dir = self.data_dir.clone();
                 let installed = self.daemon.service_installed;
                 Task::perform(
@@ -1451,10 +1377,8 @@ impl TrackerApp {
             }
             Message::DaemonDone(result) => {
                 self.daemon_busy = false;
-                if std::mem::take(&mut self.restart_pending) && result.is_ok() {
-                    // The tracker now runs with what is saved.
-                    self.restart_baseline = self.saved_config.clone();
-                }
+                self.page_state
+                    .daemon_done(result.is_ok(), &self.saved_config);
                 self.replace_toast(match result {
                     Ok(m) => m,
                     Err(e) => e,
@@ -2909,199 +2833,21 @@ impl TrackerApp {
     }
 
     pub fn view(&self, _window: window::Id) -> Element<'_, Message> {
-        let chrome = match self.nav_style {
-            crate::nav::NavStyle::TopTabs => self.top_tabs_chrome(),
-            crate::nav::NavStyle::ClassicSidebar => self.sidebar_chrome(),
-        };
-
-        let page = container(chrome)
-            .width(Fill)
-            .height(Fill)
-            .style(theme::page_background);
-
-        let with_notes = if let Some(dialog) = &self.notes_dialog {
-            // `notes::dialog` includes the backdrop and is opaque, so a press
-            // on the scrim or the card does not reach Update now underneath.
-            stack![
-                page,
-                notes::dialog(&dialog.subtitle, &dialog.sections, self.dialog_notes_ui())
-            ]
-            .width(Fill)
-            .height(Fill)
-            .into()
-        } else {
-            page.into()
-        };
-        let with_guide = if self.setup.open {
-            stack![with_notes, crate::setup_guide::view(&self.setup)]
-                .width(Fill)
-                .height(Fill)
-                .into()
-        } else {
-            with_notes
-        };
-        let with_uninstall = if let Some(dialog) = &self.uninstall_dialog {
-            stack![
-                with_guide,
-                crate::uninstall::view(dialog, self.uninstall_busy)
-            ]
-            .width(Fill)
-            .height(Fill)
-            .into()
-        } else {
-            with_guide
-        };
-        if let Some(report) = &self.report {
-            stack![with_uninstall, crate::report::view(report)]
-                .width(Fill)
-                .height(Fill)
-                .into()
-        } else {
-            with_uninstall
-        }
-    }
-
-    /// 0.5 layout: sidebar on the left, header and old Settings cards.
-    fn sidebar_chrome(&self) -> Element<'_, Message> {
-        let header = widgets::app_header(self);
-        let nav = widgets::sidebar(self.screen);
-        let settings_screen = self.screen == Screen::Settings;
-
-        // Sidebar is a fixed width. The remaining pane flexes with the window
-        // (rev 3). Header chips live in that pane. Column counts come from
-        // `responsive`. Settings keeps the header and scrolls the form in the
-        // leftover height. Other screens scroll the whole pane.
-        let mut content = column![header]
-            .spacing(16)
-            .width(Fill)
-            .height(if settings_screen {
-                Fill
-            } else {
-                Length::Shrink
-            });
-        if let Some(t) = &self.toast {
-            content = content.push(widgets::toast_bar(t, self.toast_action.clone()));
-        }
-        if self.restart_bar_visible() {
-            content = content.push(restart_prompt::bar());
-        }
-        content = content.push(
-            responsive(|size| match self.screen {
-                Screen::Overview => crate::overview::view(self, size.width),
-                Screen::Games => crate::games::view(self, size.width),
-                Screen::Heroes => crate::heroes::view(self, size.width),
-                Screen::Maps => crate::maps::view(self, size.width),
-                Screen::Seasons => crate::seasons::view(self, size.width),
-                Screen::Settings => crate::settings::view(self, size.width),
-            })
-            .width(Fill)
-            .height(if settings_screen {
-                Fill
-            } else {
-                Length::Shrink
-            }),
-        );
-
-        let main = container(content)
-            .width(Fill)
-            .height(if settings_screen {
-                Fill
-            } else {
-                Length::Shrink
-            })
-            .padding(Padding {
-                top: PAGE_PAD_Y,
-                bottom: PAGE_PAD_Y,
-                left: PAGE_PAD_X,
-                right: PAGE_PAD_X,
-            });
-
-        let page_body: Element<'_, Message> = if settings_screen {
-            container(main).width(Fill).height(Fill).into()
-        } else {
-            iced::widget::scrollable(main)
-                .width(Fill)
-                .height(Fill)
-                .into()
-        };
-
-        let chrome = row![
-            container(nav)
-                .width(SIDEBAR_WIDTH)
-                .height(Fill)
-                .padding(Padding {
-                    top: PAGE_PAD_Y,
-                    bottom: PAGE_PAD_Y,
-                    left: PAGE_PAD_X,
-                    right: 8.0,
-                }),
-            page_body,
-        ]
-        .spacing(0)
-        .width(Fill)
-        .height(Fill);
-        chrome.into()
-    }
-
-    /// 0.6 layout: tabs across the top, page controls under them on the
-    /// stats screens, and the new Settings page.
-    fn top_tabs_chrome(&self) -> Element<'_, Message> {
-        let settings_screen = self.screen == Screen::Settings;
-        let page_height = if settings_screen {
-            Fill
-        } else {
-            Length::Shrink
-        };
-        let bar = responsive(|size| crate::nav::top_bar(self, size.width))
-            .width(Fill)
-            .height(Length::Shrink);
-
-        let mut content = column![].spacing(16).width(Fill).height(page_height);
-        if !settings_screen {
-            content = content.push(crate::nav::page_controls(self));
-        }
-        if let Some(t) = &self.toast {
-            content = content.push(widgets::toast_bar(t, self.toast_action.clone()));
-        }
-        if self.restart_bar_visible() {
-            content = content.push(restart_prompt::bar());
-        }
-        content = content.push(
-            responsive(|size| match self.screen {
-                Screen::Overview => crate::overview::view(self, size.width),
-                Screen::Games => crate::games::view(self, size.width),
-                Screen::Heroes => crate::heroes::view(self, size.width),
-                Screen::Maps => crate::maps::view(self, size.width),
-                Screen::Seasons => crate::seasons::view(self, size.width),
-                Screen::Settings => crate::settings_page::view(self, size.width),
-            })
-            .width(Fill)
-            .height(page_height),
-        );
-
-        let main = container(content)
-            .width(Fill)
-            .height(page_height)
-            .padding(Padding {
-                top: PAGE_PAD_Y,
-                bottom: PAGE_PAD_Y,
-                left: PAGE_PAD_X,
-                right: PAGE_PAD_X,
-            });
-        let page_body: Element<'_, Message> = if settings_screen {
-            container(main).width(Fill).height(Fill).into()
-        } else {
-            iced::widget::scrollable(main)
-                .width(Fill)
-                .height(Fill)
-                .into()
-        };
-
-        column![bar, page_body]
-            .spacing(0)
-            .width(Fill)
-            .height(Fill)
-            .into()
+        // `notes::dialog` includes the backdrop and is opaque, so a press
+        // on the scrim or the card does not reach Update now underneath.
+        let notes = self.notes_dialog.as_ref().map(|dialog| {
+            notes::dialog(&dialog.subtitle, &dialog.sections, self.dialog_notes_ui())
+        });
+        let guide = self
+            .setup
+            .open
+            .then(|| crate::setup_guide::view(&self.setup));
+        let uninstall = self
+            .uninstall_dialog
+            .as_ref()
+            .map(|dialog| crate::uninstall::view(dialog, self.uninstall_busy));
+        let report = self.report.as_ref().map(crate::report::view);
+        crate::chrome::with_layers(self, [notes, guide, uninstall, report])
     }
 
     pub fn update_notes_ui(&self) -> notes::NotesUi<'_> {
@@ -3125,16 +2871,6 @@ impl TrackerApp {
     }
 
     /// Site sync has a URL and a token saved.
-    /// Settings that differ from what the running tracker started with,
-    /// counting edits not saved yet. Shown as "N changes waiting" next to
-    /// Restart tracker.
-    pub fn changes_waiting(&self) -> usize {
-        crate::settings_model::changes_waiting(
-            &self.restart_baseline,
-            &self.settings.to_config(&self.saved_config),
-        )
-    }
-
     pub fn sync_on(&self) -> bool {
         sync_on_for(&self.saved_config)
     }
@@ -3165,7 +2901,7 @@ impl TrackerApp {
     /// ([`Message::ReaderPacksChecked`]). With a pack missing, or a tracker
     /// version that cannot yet, the box stays ticked and the reason is shown
     /// next to it.
-    fn toggle_classic_ocr(&mut self, want_classic: bool) -> Task<Message> {
+    pub(crate) fn toggle_classic_ocr(&mut self, want_classic: bool) -> Task<Message> {
         if self.fixture.is_some() {
             // Demo mode saves nothing and has no packs to look at.
             self.settings.classic_ocr = want_classic;
@@ -3808,32 +3544,6 @@ token = \"secret-token-must-stay\"
         let _ = app.update(super::Message::DaemonDone(Ok("restarted".into())));
         assert_eq!(app.toast.as_deref(), Some("restarted"));
         assert!(app.toast_action.is_none());
-    }
-
-    #[test]
-    fn a_restart_clears_the_changes_waiting() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cli = crate::cli::Cli {
-            data_dir: tmp.path().to_path_buf(),
-            fixture: Some(crate::cli::FixtureKind::Empty),
-            seasons_url: None,
-            companion: false,
-            help: false,
-            version: false,
-            replace: false,
-        };
-        let (mut app, _open) = super::TrackerApp::new(cli);
-        app.settings.session_window_secs = "10800".into();
-        app.saved_config = app.settings.to_config(&app.saved_config);
-        assert_eq!(app.changes_waiting(), 1);
-        // A failed restart keeps the change waiting.
-        app.restart_pending = true;
-        let _ = app.update(super::Message::DaemonDone(Err("no".into())));
-        assert_eq!(app.changes_waiting(), 1);
-        app.restart_pending = true;
-        let _ = app.update(super::Message::DaemonDone(Ok("restarted".into())));
-        assert_eq!(app.changes_waiting(), 0);
-        assert!(!app.restart_pending);
     }
 
     fn aur_owner() -> crate::uninstall::PackageOwner {

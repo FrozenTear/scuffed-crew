@@ -21,7 +21,10 @@ use stat_tracker::ocr_switch::{
 };
 
 use crate::app::{Message, TrackerApp};
+use crate::capture_shared::{self, capture_route_help};
+use crate::form_widgets::{action_btn, checkbox_style, field_caption, hint, output_chip};
 use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SINGLE_MAX, SettingsLayout, settings_layout};
+use crate::settings_model::parse_process_names;
 use crate::theme::{
     self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY, SIZE_LABEL,
     SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
@@ -468,15 +471,6 @@ pub(crate) fn capture_route_label(route: CaptureRoute) -> &'static str {
     }
 }
 
-/// The line under the capture chips that says what Automatic does here.
-pub(crate) fn capture_route_help(session: SessionKind) -> &'static str {
-    if session == SessionKind::X11 {
-        "This is an X11 session. Automatic captures the screen directly with X11. Older screenshot is the previous portal."
-    } else {
-        "Automatic uses the screen stream on KDE and GNOME, and direct capture on other desktops. Screen stream forces that stream. Older screenshot is the previous portal."
-    }
-}
-
 /// Shown on X11 next to the Older screenshot choice.
 pub(crate) const X11_SCREENSHOT_NOTE: &str = "Older screenshot captures the whole desktop on X11 with more than one monitor, so Automatic is recommended.";
 
@@ -917,15 +911,6 @@ pub fn parse_u64(raw: &str, fallback: u64) -> u64 {
     raw.trim().parse().unwrap_or(fallback)
 }
 
-/// Comma or newline list. Empty → empty vec (process gate off, as in Config).
-pub fn parse_process_names(raw: &str) -> Vec<String> {
-    raw.split([',', '\n'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .collect()
-}
-
 pub fn save_config(config: &Config) -> Result<(), String> {
     config.save().map_err(|e| e.to_string())
 }
@@ -1099,13 +1084,13 @@ fn section_card(id: SettingsSection, app: &TrackerApp, demo: bool) -> Element<'_
     match id {
         SettingsSection::Daemon => daemon_card(app, demo),
         SettingsSection::Capture => capture_card(app, demo),
-        SettingsSection::Companion => companion_card(app, demo),
+        SettingsSection::Companion => settings_card("Companion", companion_body(app, demo)),
         SettingsSection::Player => player_card(app, demo),
-        SettingsSection::AutoDetect => auto_detect_card(app, demo),
-        SettingsSection::Sync => sync_card(app, demo),
+        SettingsSection::AutoDetect => settings_card("Auto-detect", auto_detect_body(app, demo)),
+        SettingsSection::Sync => settings_card("Website sync", sync_body(app, demo)),
         SettingsSection::Ocr => ocr_card(app, demo),
-        SettingsSection::Diagnostics => diagnostics_card(app, demo),
-        SettingsSection::Data => data_card(app, demo),
+        SettingsSection::Diagnostics => settings_card("Diagnostics", diagnostics_body(app, demo)),
+        SettingsSection::Data => settings_card("Stored data", data_body(app, demo)),
     }
 }
 
@@ -1247,10 +1232,6 @@ pub(crate) fn updates_body(app: &TrackerApp, demo: bool) -> Element<'_, Message>
 }
 
 fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    settings_card("Capture", capture_body(app, demo))
-}
-
-pub(crate) fn capture_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let route = app.settings.capture_route;
     let session = app.session;
     let mut route_chips = row![].spacing(8);
@@ -1261,8 +1242,6 @@ pub(crate) fn capture_body(app: &TrackerApp, demo: bool) -> Element<'_, Message>
             Message::SelectCaptureRoute(choice),
         ));
     }
-    // KDE direct's help goes with its chip, and only where it can work.
-    let kde_direct = session != SessionKind::X11 && show_kde_direct(&app.desktop, route);
 
     let mut chips = row![output_chip(
         "Auto (first monitor)",
@@ -1278,29 +1257,6 @@ pub(crate) fn capture_body(app: &TrackerApp, demo: bool) -> Element<'_, Message>
         ));
     }
 
-    let backend = match app.backend {
-        None => "Looking for a capture method…",
-        Some(stat_tracker::capture::CaptureBackend::Wayshot) => "Wayland",
-        Some(stat_tracker::capture::CaptureBackend::X11) => "X11",
-        Some(stat_tracker::capture::CaptureBackend::Portal) => "Desktop portal",
-        Some(stat_tracker::capture::CaptureBackend::Kwin) => "KDE direct (KWin)",
-        Some(stat_tracker::capture::CaptureBackend::None) => "None available",
-    };
-
-    let capture_label = if app.backend.is_none() {
-        "Looking for a capture method…"
-    } else if app.capturing {
-        "Capturing…"
-    } else {
-        "Capture now"
-    };
-
-    let env_note = Config::capture_env_note(
-        std::env::var(stat_tracker::config::CAPTURE_ENV)
-            .ok()
-            .as_deref(),
-        &stat_tracker::config::environment_d_capture_files(),
-    );
     let mut body = column![
         field_caption("Capture method"),
         route_chips.wrap(),
@@ -1310,7 +1266,7 @@ pub(crate) fn capture_body(app: &TrackerApp, demo: bool) -> Element<'_, Message>
             .color(TEXT_3),
     ]
     .spacing(6);
-    if kde_direct {
+    if capture_shared::shows_kde_direct_help(app) {
         body = body.push(
             text(KDE_DIRECT_HELP)
                 .size(SIZE_META)
@@ -1318,31 +1274,18 @@ pub(crate) fn capture_body(app: &TrackerApp, demo: bool) -> Element<'_, Message>
                 .color(TEXT_3),
         );
     }
-    for (note, tone) in capture_route_notes(
-        &app.desktop,
-        session,
-        route,
-        app.kde_direct.as_ref(),
-        app.ocr_switch.capture_notice.as_deref(),
-    ) {
-        body = body.push(
-            text(note)
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(match tone {
-                    NoteTone::Info => TEXT_3,
-                    NoteTone::Warn => theme::WARN,
-                }),
-        );
-    }
+    body = capture_shared::push_route_notes(body, app);
     body = body.push(field_caption("Monitor")).push(chips.wrap()).push(
-        text(format!("Detected: {backend}"))
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
+        text(format!(
+            "Detected: {}",
+            capture_shared::backend_label(app.backend)
+        ))
+        .size(SIZE_META)
+        .font(FONT_MEDIUM)
+        .color(TEXT_3),
     );
 
-    if let Some(note) = env_note {
+    if let Some(note) = capture_shared::capture_env_note() {
         body = body.push(
             text(note)
                 .size(SIZE_META)
@@ -1352,27 +1295,18 @@ pub(crate) fn capture_body(app: &TrackerApp, demo: bool) -> Element<'_, Message>
     }
 
     if !demo {
-        let mut btn = button(
-            text(capture_label)
-                .size(SIZE_META)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT),
-        )
-        .padding(Padding::from([8, 16]))
-        .style(theme::chip(true));
-        if app.backend.is_some() && !app.capturing {
+        let label = capture_shared::capture_button_label(app.backend.is_some(), app.capturing);
+        let mut btn = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
+            .padding(Padding::from([8, 16]))
+            .style(theme::chip(true));
+        if capture_shared::can_capture(app) {
             btn = btn.on_press(Message::CaptureNow);
         }
         body = body.push(btn);
     }
 
-    if let Some(err) = &app.preview_error {
-        body = body.push(
-            text(err.clone())
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(theme::DANGER),
-        );
+    if let Some(err) = capture_shared::preview_error(app) {
+        body = body.push(err);
     }
 
     if let Some((handle, when)) = &app.preview {
@@ -1388,18 +1322,14 @@ pub(crate) fn capture_body(app: &TrackerApp, demo: bool) -> Element<'_, Message>
                 .height(iced::Length::Fixed(280.0)),
         );
         body = body.push(
-            text("What the tracker sees. The scoreboard should be visible.")
+            text(capture_shared::PREVIEW_CAPTION)
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
         );
     }
 
-    body.into()
-}
-
-fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    settings_card("Companion", companion_body(app, demo))
+    settings_card("Capture", body.into())
 }
 
 pub(crate) fn companion_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -1430,7 +1360,7 @@ pub(crate) fn companion_body(app: &TrackerApp, demo: bool) -> Element<'_, Messag
 }
 
 /// In-game name and session window, side by side.
-pub(crate) fn player_fields_row<'a>(
+fn player_fields_row<'a>(
     player_name: &'a str,
     session_window_secs: &'a str,
     demo: bool,
@@ -1478,10 +1408,6 @@ fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     settings_card("Player and sessions", body.into())
 }
 
-fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    settings_card("Auto-detect", auto_detect_body(app, demo))
-}
-
 pub(crate) fn auto_detect_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![
         checkbox(app.settings.auto_detect_enabled)
@@ -1518,10 +1444,6 @@ pub(crate) fn auto_detect_body(app: &TrackerApp, demo: bool) -> Element<'_, Mess
     }
 
     body.into()
-}
-
-fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    settings_card("Website sync", sync_body(app, demo))
 }
 
 pub(crate) fn sync_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -1657,7 +1579,7 @@ pub(crate) fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, M
     body.into()
 }
 
-pub(crate) fn prerelease_updates_block(app: &TrackerApp) -> Element<'_, Message> {
+fn prerelease_updates_block(app: &TrackerApp) -> Element<'_, Message> {
     column![
         checkbox(app.settings.prerelease_updates)
             .label(PRERELEASE_UPDATES_LABEL)
@@ -1722,10 +1644,6 @@ const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4
 /// show and where they stay.
 const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture, so leave it off unless diagnosing.";
 
-fn diagnostics_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    settings_card("Diagnostics", diagnostics_body(app, demo))
-}
-
 pub(crate) fn diagnostics_body(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
     let body = column![
         checkbox(app.settings.debug_ocr)
@@ -1738,10 +1656,6 @@ pub(crate) fn diagnostics_body(app: &TrackerApp, _demo: bool) -> Element<'_, Mes
     ]
     .spacing(6);
     body.into()
-}
-
-fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    settings_card("Stored data", data_body(app, demo))
 }
 
 pub(crate) fn data_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -1916,25 +1830,6 @@ fn settings_card<'a>(title: &'static str, body: Element<'a, Message>) -> Element
     .into()
 }
 
-pub(crate) fn field_caption(label: &'static str) -> text::Text<'static> {
-    text(label)
-        .size(SIZE_META)
-        .font(FONT_SEMIBOLD)
-        .color(TEXT_2)
-}
-
-/// Help copy. Wraps at [`HELP_MEASURE`] even in a wider card.
-pub(crate) fn hint(copy: impl Into<String>) -> Element<'static, Message> {
-    container(
-        text(copy.into())
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
-    )
-    .max_width(HELP_MEASURE)
-    .into()
-}
-
 /// One or two compact fields. Each field's column is its share of the row
 /// ([`field_fill_portion`]); the input inside keeps its own cap, so it does
 /// not stretch across an ultrawide card. There is no trailing spacer: it
@@ -1957,7 +1852,7 @@ fn compact_row<'a>(
     r.into()
 }
 
-pub(crate) fn field_input<'a>(
+fn field_input<'a>(
     label: &'static str,
     placeholder: &'static str,
     value: &'a str,
@@ -1986,61 +1881,6 @@ pub(crate) fn field_input<'a>(
     // The input is capped above and the hint by `HELP_MEASURE`.
     col.width(Length::FillPortion(field_fill_portion(field)))
         .into()
-}
-
-pub(crate) fn output_chip(
-    label: impl Into<String>,
-    selected: bool,
-    msg: Message,
-) -> Element<'static, Message> {
-    widgets::filter_chip(label.into(), selected, msg)
-}
-
-pub(crate) fn action_btn(
-    label: &'static str,
-    primary: bool,
-    msg: Message,
-) -> Element<'static, Message> {
-    let label = text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT);
-    if primary {
-        button(label)
-            .padding(Padding::from([8, 16]))
-            .style(theme::chip(true))
-            .on_press(msg)
-            .into()
-    } else {
-        button(label)
-            .padding(Padding::from([8, 16]))
-            .style(theme::ghost_btn())
-            .on_press(msg)
-            .into()
-    }
-}
-
-pub(crate) fn checkbox_style(
-    _theme: &iced::Theme,
-    status: iced::widget::checkbox::Status,
-) -> iced::widget::checkbox::Style {
-    let selected = matches!(
-        status,
-        iced::widget::checkbox::Status::Active { is_checked: true }
-            | iced::widget::checkbox::Status::Hovered { is_checked: true }
-            | iced::widget::checkbox::Status::Disabled { is_checked: true }
-    );
-    iced::widget::checkbox::Style {
-        background: iced::Background::Color(if selected { theme::ACCENT } else { theme::BG }),
-        icon_color: TEXT,
-        border: iced::Border {
-            color: if selected {
-                theme::ACCENT
-            } else {
-                theme::BORDER
-            },
-            width: 1.0,
-            radius: theme::inner_radius(),
-        },
-        text_color: Some(TEXT),
-    }
 }
 
 #[cfg(test)]
@@ -2144,19 +1984,6 @@ mod tests {
             form.to_config(&base()).sync.is_none(),
             "an unsafe URL must not become a saved sync config"
         );
-    }
-
-    #[test]
-    fn process_names_split_comma_and_newline() {
-        assert_eq!(
-            parse_process_names("Overwatch.exe, wine"),
-            vec!["Overwatch.exe", "wine"]
-        );
-        assert_eq!(
-            parse_process_names("Overwatch.exe\nwine\n"),
-            vec!["Overwatch.exe", "wine"]
-        );
-        assert!(parse_process_names("  ,  \n").is_empty());
     }
 
     #[test]

@@ -7,72 +7,48 @@
 //! Save writes the same config either way.
 //!
 //! Rows the tracker cannot store yet are drawn off and greyed with
-//! [`WAITS_FOR_S11`]. Stream frame rate, pause between grabs, name reader
-//! and OCR workers are read-only here until the next GUI milestone.
+//! [`crate::settings_model::WAITS_FOR_S11`]. Capture and reading is drawn
+//! by [`crate::capture_reading`]; the page's state and messages are in
+//! [`crate::settings_update`].
 
 use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{
-    Column, Row, button, checkbox, column, container, row, scrollable, space, text,
-};
+use iced::widget::{Row, button, column, container, row, scrollable, space, text};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Shadow, Theme};
 
 use crate::app::{Message, TrackerApp};
 use crate::daemon::DaemonVerb;
+use crate::form_widgets::{action_btn, hint};
 use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SCROLL_GUTTER};
-use crate::settings::{
-    self, CLASSIC_OCR_RESTART, DISMISS_REFUSAL_LABEL, NEW_READER_IMPLIED, NEW_READER_RESTART,
-    SAVE_LABEL, action_btn, card_problem, checkbox_style, field_caption, hint, ocr_card_blocks,
-    ocr_hint_lines, output_chip, pack_status_line,
-};
+use crate::settings::{self, SAVE_LABEL};
 use crate::settings_model::{
-    AdvancedSection, AdvancedValues, EverydaySection, OCR_THREADS_ENV, ReaderChoice,
-    SINGLE_COLUMN_MAX, WAITS_FOR_S11, changes_waiting, changes_waiting_label, columns_for,
-    frame_rate_line, ocr_workers_line, ocr_workers_locked, pause_line,
+    AdvancedSection, AdvancedValues, EverydaySection, ReaderChoice, SINGLE_COLUMN_MAX,
+    changes_waiting, changes_waiting_label, columns_for,
 };
-use crate::settings_rows;
+use crate::settings_rows::{self, AFTER_RESTART_TAG, changed_dot, stub_row, sub_heading, tag};
+use crate::settings_update::Msg;
 use crate::theme::{
-    self, ACCENT, BORDER, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
+    self, ACCENT, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
     SIZE_LABEL, SIZE_META, TEXT, TEXT_2, TEXT_3,
 };
 use crate::{update, widgets};
 
-/// Help under the Report pictures row.
-pub(crate) const REPORT_PICTURES_HELP: &str = "Stat-area crops in misread reports. Separate from Stat pictures. Default Off: reports show them unticked, so you choose each one. Names are never sent.";
-/// Last line of Capture and reading.
-pub(crate) const CAPTURE_READING_FOOTER: &str = "Only choices that work on this desktop are shown. Opening this page never captures; only Capture now does.";
-/// Help under "Only capture while Overwatch is on screen".
-pub(crate) const FOCUS_GATE_HELP: &str =
-    "Skips grabs when the game is not visible on this monitor, so no other window is captured.";
-/// Help under the Reader choice (spec wording).
-pub(crate) const READER_HELP: &str = "New reader only never starts classic OCR.";
-/// Help under Name reader.
-pub(crate) const NAME_READER_HELP: &str =
-    "Reads your own name from the names pack. Off uses classic OCR.";
-/// Help under Pause between grabs.
-pub(crate) const PAUSE_HELP: &str = "Screen stream only.";
-/// Help under Stream frame rate.
-pub(crate) const FRAME_RATE_HELP: &str = "Screen stream only. Lower costs less. Default 4.";
 /// Copy under the Website account summary.
-pub(crate) const WEBSITE_ACCOUNT_HINT: &str =
+const WEBSITE_ACCOUNT_HINT: &str =
     "Server address and token are under Advanced, Website connection.";
 /// Sub-heading of the Sharing rows inside Website account.
-pub(crate) const SHARING_HEADING: &str = "Sharing · both start off";
+const SHARING_HEADING: &str = "Sharing · both start off";
 /// "Read my rank after Comp games" help.
-pub(crate) const RANK_HELP: &str =
-    "Saves rank, rank change and its label. Applies from the next game.";
+const RANK_HELP: &str = "Saves rank, rank change and its label. Applies from the next game.";
 /// "Share stat pictures" help.
-pub(crate) const STAT_PICTURES_HELP: &str = "Uploads the grayscale stat area after each game to help train the reader. No names. Kept 30 days. Report pictures are a separate setting in Capture and reading.";
+const STAT_PICTURES_HELP: &str = "Uploads the grayscale stat area after each game to help train the reader. No names. Kept 30 days. Report pictures are a separate setting in Capture and reading.";
 /// Link under the Sharing rows. The page it opens is not built yet.
-pub(crate) const WHAT_LEAVES_LABEL: &str = "What leaves your PC ›";
+const WHAT_LEAVES_LABEL: &str = "What leaves your PC ›";
 /// Copy for the legend under the status strip. The spec line says changes
 /// apply as you make them; this page still has Save, so it says that.
-pub(crate) const LEGEND_APPLY: &str =
-    "Changes apply when you save, except those tagged After restart.";
-pub(crate) const LEGEND_CHANGED: &str = "changed from default";
-pub(crate) const AFTER_RESTART_TAG: &str = "After restart";
-pub(crate) const NEW_TAG: &str = "New in 0.6";
-pub(crate) const RUN_SETUP_LABEL: &str = "Run setup again";
-pub(crate) const DEMO_NOTE: &str =
+const LEGEND_APPLY: &str = "Changes apply when you save, except those tagged After restart.";
+const LEGEND_CHANGED: &str = "changed from default";
+const RUN_SETUP_LABEL: &str = "Run setup again";
+const DEMO_NOTE: &str =
     "Demo mode: settings, the tracker service, and stored data are not changed.";
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
@@ -324,7 +300,7 @@ fn advanced_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     .width(Fill);
     let values = advanced_values(app);
     for section in AdvancedSection::ALL {
-        let open = app.advanced_open.is_open(section);
+        let open = app.page_state.is_open(section);
         let mut fold = column![fold_header(section, open, &values)]
             .spacing(0)
             .width(Fill);
@@ -357,7 +333,7 @@ fn advanced_values(app: &TrackerApp) -> AdvancedValues {
     });
     let retention = config.report_kit_retention();
     AdvancedValues {
-        route: settings_rows::route_label(config.capture_route),
+        route: crate::capture_reading::route_label(config.capture_route),
         monitor,
         reader,
         autostart: app.daemon.autostart,
@@ -414,7 +390,7 @@ fn fold_header(
     .padding(PAD_INNER)
     .width(Fill)
     .style(fold_style)
-    .on_press(Message::ToggleAdvanced(section))
+    .on_press(Message::SettingsPage(Msg::ToggleAdvanced(section)))
     .into()
 }
 
@@ -434,7 +410,7 @@ fn advanced_body<'a>(
     demo: bool,
 ) -> Element<'a, Message> {
     match section {
-        AdvancedSection::CaptureReading => capture_reading_body(app, demo),
+        AdvancedSection::CaptureReading => crate::capture_reading::body(app, demo),
         AdvancedSection::TrackerService => column![
             settings::service_body(app, demo),
             sub_heading("Match watching"),
@@ -485,145 +461,6 @@ fn troubleshooting_actions() -> Element<'static, Message> {
     .into()
 }
 
-/// Claude's Capture and reading spec: a summary, then CAPTURE and READING.
-fn capture_reading_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let config = &app.saved_config;
-    let choice = ReaderChoice::from_switches(app.settings.new_reader, app.settings.classic_ocr);
-    let monitor = if app.settings.capture_output.is_empty() {
-        "first monitor".to_string()
-    } else {
-        app.settings.capture_output.clone()
-    };
-
-    let summary = container(
-        column![
-            summary_line(
-                "Capture",
-                format!(
-                    "{} on {monitor}",
-                    settings_rows::route_label(app.settings.capture_route)
-                ),
-            ),
-            summary_line("Reading", choice.label().to_string()),
-            summary_line("Packs", pack_status_line(app.ocr_switch.packs.as_ref())),
-        ]
-        .spacing(4),
-    )
-    .padding(PAD_INNER)
-    .width(Fill)
-    .style(theme::stat_box);
-
-    let mut body = column![
-        summary,
-        sub_heading("Capture"),
-        settings_rows::capture_rows(app, demo)
-    ]
-    .spacing(GRID_GAP)
-    .width(Fill);
-
-    let (pause, pause_changed) = pause_line(config.screencast_pause_override());
-    body = body.push(read_only_row(
-        "Pause between grabs",
-        pause.to_string(),
-        pause_changed,
-        Some(PAUSE_HELP),
-    ));
-    let (fps, fps_changed) = frame_rate_line(config.screencast_max_fps());
-    body = body.push(read_only_row(
-        "Stream frame rate",
-        fps,
-        fps_changed,
-        Some(FRAME_RATE_HELP),
-    ));
-    body = body.push(stub_row(
-        "Only capture while Overwatch is on screen",
-        Some(FOCUS_GATE_HELP),
-        false,
-    ));
-
-    body = body.push(sub_heading("Reading"));
-    let mut chips = Row::new().spacing(8);
-    for c in ReaderChoice::ALL {
-        chips = chips.push(output_chip(c.label(), c == choice, Message::PickReader(c)));
-    }
-    body = body.push(
-        column![
-            settings_rows::row_title("Reader"),
-            hint(READER_HELP),
-            chips.wrap()
-        ]
-        .spacing(6),
-    );
-
-    let mut reading = column![].spacing(4);
-    let lines = ocr_hint_lines(&stat_tracker::ocr_switch::Read::needing_ocr());
-    // Both restart notes say the same thing, so show the line once.
-    if lines.restart_and_packs {
-        reading = reading.push(hint(CLASSIC_OCR_RESTART));
-    } else if choice.new_reader() {
-        reading = reading.push(hint(NEW_READER_RESTART));
-    }
-    if let Some((problem, dismissable)) = card_problem(
-        app.ocr_switch.refusal.as_deref(),
-        app.ocr_switch.notice.as_deref(),
-    ) {
-        reading = reading.push(
-            text(problem.to_string())
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(theme::WARN),
-        );
-        if dismissable {
-            reading = reading.push(action_btn(
-                DISMISS_REFUSAL_LABEL,
-                false,
-                Message::DismissOcrRefusal,
-            ));
-        }
-    }
-    if app.ocr_switch.daemon_off {
-        reading = reading.push(hint(NEW_READER_IMPLIED));
-    }
-    body = body.push(reading);
-
-    if ocr_card_blocks(app.ocr_switch.daemon_off).reading_model {
-        body = body.push(settings::reading_model_block(app, demo));
-    }
-
-    body = body.push(read_only_row(
-        "Name reader",
-        if config.name_reader {
-            "On (default)"
-        } else {
-            "Off"
-        }
-        .to_string(),
-        !config.name_reader,
-        Some(NAME_READER_HELP),
-    ));
-
-    let env_threads = std::env::var(OCR_THREADS_ENV).ok();
-    let locked = ocr_workers_locked(env_threads.as_deref());
-    let workers = match env_threads.as_deref().map(|v| v.trim().parse::<usize>()) {
-        Some(Ok(n)) if locked => n.clamp(1, 8),
-        _ => config.ocr_threads_resolved(),
-    };
-    body = body.push(read_only_row(
-        "OCR workers",
-        ocr_workers_line(workers),
-        locked || config.ocr_threads.is_some(),
-        locked.then_some("Set by STAT_TRACKER_OCR_THREADS."),
-    ));
-
-    body = body.push(stub_row(
-        "Report pictures",
-        Some(REPORT_PICTURES_HELP),
-        true,
-    ));
-    body = body.push(hint(CAPTURE_READING_FOOTER));
-    body.into()
-}
-
 fn card<'a>(title: &'static str, body: Element<'a, Message>) -> Element<'a, Message> {
     container(
         column![
@@ -638,126 +475,11 @@ fn card<'a>(title: &'static str, body: Element<'a, Message>) -> Element<'a, Mess
     .into()
 }
 
-fn sub_heading(label: &'static str) -> Element<'static, Message> {
-    text(label.to_ascii_uppercase())
-        .size(SIZE_LABEL)
-        .font(FONT_SEMIBOLD)
-        .color(TEXT_3)
-        .into()
-}
-
 fn meta(copy: impl Into<String>) -> Element<'static, Message> {
     text(copy.into())
         .size(SIZE_META)
         .font(FONT_MEDIUM)
         .color(TEXT_3)
-        .into()
-}
-
-fn summary_line(label: &'static str, value: String) -> Element<'static, Message> {
-    row![
-        text(label)
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT_2)
-            .width(96),
-        text(value).size(SIZE_META).font(FONT_MEDIUM).color(TEXT),
-    ]
-    .spacing(8)
-    .into()
-}
-
-/// A setting shown but not editable here yet. The accent dot marks a value
-/// that differs from the default.
-fn read_only_row(
-    label: &'static str,
-    value: String,
-    changed: bool,
-    note: Option<&'static str>,
-) -> Element<'static, Message> {
-    let mut caption = Row::new()
-        .spacing(6)
-        .align_y(Alignment::Center)
-        .push(field_caption(label));
-    if changed {
-        caption = caption.push(changed_dot());
-    }
-    let mut col: Column<'static, Message> = column![
-        caption,
-        text(value).size(SIZE_BODY).font(FONT_MEDIUM).color(TEXT),
-    ]
-    .spacing(4);
-    if let Some(note) = note {
-        col = col.push(hint(note));
-    }
-    col.into()
-}
-
-/// A switch the 0.6 spec shows that waits for S11. Drawn off and disabled.
-fn stub_row(
-    label: &'static str,
-    help: Option<&'static str>,
-    after_restart: bool,
-) -> Element<'static, Message> {
-    let mut line = Row::new()
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .push(
-            checkbox(false)
-                .label(label)
-                .size(16)
-                .text_size(SIZE_BODY)
-                .style(checkbox_style),
-        )
-        .push(tag(NEW_TAG));
-    if after_restart {
-        line = line.push(tag(AFTER_RESTART_TAG));
-    }
-    let mut col = column![line.wrap()].spacing(4);
-    if let Some(help) = help {
-        col = col.push(hint(help));
-    }
-    col.push(hint(WAITS_FOR_S11)).into()
-}
-
-/// Small outlined label, neutral colours.
-fn tag(label: &'static str) -> Element<'static, Message> {
-    container(
-        text(label)
-            .size(SIZE_LABEL)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT_2),
-    )
-    .padding(Padding {
-        top: 2.0,
-        bottom: 2.0,
-        left: 8.0,
-        right: 8.0,
-    })
-    .style(|_: &Theme| container::Style {
-        border: Border {
-            color: BORDER,
-            width: 1.0,
-            radius: theme::RADIUS_CHIP.into(),
-        },
-        ..container::Style::default()
-    })
-    .into()
-}
-
-/// Accent dot for "changed from default".
-fn changed_dot() -> Element<'static, Message> {
-    container(space().width(8).height(8))
-        .width(8)
-        .height(8)
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(ACCENT)),
-            border: Border {
-                radius: theme::RADIUS_CHIP.into(),
-                ..Border::default()
-            },
-            ..container::Style::default()
-        })
         .into()
 }
 
@@ -790,7 +512,7 @@ mod tests {
             let _ = view(&app, width);
         }
         for section in AdvancedSection::ALL {
-            app.advanced_open.toggle(section);
+            let _ = app.update(Message::SettingsPage(Msg::ToggleAdvanced(section)));
         }
         for width in [640.0, 1600.0] {
             let _ = view(&app, width);
@@ -798,37 +520,8 @@ mod tests {
     }
 
     #[test]
-    fn reader_pick_sets_both_switches() {
-        let (_dir, mut app) = app();
-        for choice in ReaderChoice::ALL {
-            let _ = app.update(Message::PickReader(choice));
-            assert_eq!(
-                ReaderChoice::from_switches(app.settings.new_reader, app.settings.classic_ocr),
-                choice
-            );
-        }
-    }
-
-    #[test]
-    fn advanced_rows_fold_through_update() {
-        let (_dir, mut app) = app();
-        assert!(!app.advanced_open.any_open());
-        let _ = app.update(Message::ToggleAdvanced(AdvancedSection::StoredData));
-        assert!(app.advanced_open.is_open(AdvancedSection::StoredData));
-        let _ = app.update(Message::ToggleAdvanced(AdvancedSection::StoredData));
-        assert!(!app.advanced_open.any_open());
-    }
-
-    #[test]
     fn copy_has_no_em_dashes() {
         for line in [
-            REPORT_PICTURES_HELP,
-            CAPTURE_READING_FOOTER,
-            FOCUS_GATE_HELP,
-            READER_HELP,
-            NAME_READER_HELP,
-            PAUSE_HELP,
-            FRAME_RATE_HELP,
             WEBSITE_ACCOUNT_HINT,
             SHARING_HEADING,
             RANK_HELP,
@@ -836,56 +529,10 @@ mod tests {
             WHAT_LEAVES_LABEL,
             LEGEND_APPLY,
             LEGEND_CHANGED,
-            AFTER_RESTART_TAG,
-            NEW_TAG,
             RUN_SETUP_LABEL,
             DEMO_NOTE,
         ] {
             assert!(!line.contains('\u{2014}'), "{line}");
         }
-    }
-
-    #[test]
-    fn reader_help_uses_the_spec_wording() {
-        assert_eq!(READER_HELP, "New reader only never starts classic OCR.");
-        assert!(!READER_HELP.contains("Tesseract"));
-    }
-
-    #[test]
-    fn edits_count_as_changes_waiting_until_a_restart() {
-        let (_dir, mut app) = app();
-        assert_eq!(
-            app.changes_waiting(),
-            0,
-            "an untouched form waits for nothing"
-        );
-        let _ = app.update(Message::SettingsText(
-            crate::settings::SettingsField::SessionWindow,
-            "10800".into(),
-        ));
-        assert_eq!(app.changes_waiting(), 1);
-        let _ = app.update(Message::ChipDraft(
-            crate::settings_model::ChipList::Processes,
-            Some("ow2.exe".into()),
-        ));
-        let _ = app.update(Message::ChipAdd);
-        assert!(app.settings.game_process_names.contains("ow2.exe"));
-        assert!(app.chip_draft.is_none());
-        assert_eq!(app.changes_waiting(), 2);
-        let _ = app.update(Message::ChipRemove(
-            crate::settings_model::ChipList::Names,
-            0,
-        ));
-        assert!(app.settings.player_name.is_empty());
-        let _ = view(&app, 640.0);
-        let _ = view(&app, 1600.0);
-    }
-
-    #[test]
-    fn report_pictures_copy_matches_the_spec() {
-        assert_eq!(
-            REPORT_PICTURES_HELP,
-            "Stat-area crops in misread reports. Separate from Stat pictures. Default Off: reports show them unticked, so you choose each one. Names are never sent."
-        );
     }
 }

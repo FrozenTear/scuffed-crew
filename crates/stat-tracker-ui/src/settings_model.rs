@@ -310,9 +310,18 @@ pub enum ChipList {
     Processes,
 }
 
+/// Comma or newline list. Empty → empty vec (process gate off, as in Config).
+pub fn parse_process_names(raw: &str) -> Vec<String> {
+    raw.split([',', '\n'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
 /// Chips from the form's comma text.
 pub fn chips_from(raw: &str) -> Vec<String> {
-    crate::settings::parse_process_names(raw)
+    parse_process_names(raw)
 }
 
 /// The form text after removing chip `index`.
@@ -423,15 +432,6 @@ pub fn ocr_workers_line(workers: usize) -> String {
 /// True when the env var fixes the worker count, so the row is locked.
 pub fn ocr_workers_locked(env: Option<&str>) -> bool {
     env.is_some_and(|v| !v.trim().is_empty())
-}
-
-/// Copy for the header chip and the Games tab badge.
-pub fn needs_look_label(count: usize) -> String {
-    if count == 1 {
-        "1 needs a look".to_string()
-    } else {
-        format!("{count} need a look")
-    }
 }
 
 /// Settings the 0.6 spec shows that the tracker cannot store yet. Each is
@@ -646,9 +646,16 @@ mod tests {
     }
 
     #[test]
-    fn needs_look_copy_counts() {
-        assert_eq!(needs_look_label(1), "1 needs a look");
-        assert_eq!(needs_look_label(159), "159 need a look");
+    fn process_names_split_comma_and_newline() {
+        assert_eq!(
+            parse_process_names("Overwatch.exe, wine"),
+            vec!["Overwatch.exe", "wine"]
+        );
+        assert_eq!(
+            parse_process_names("Overwatch.exe\nwine\n"),
+            vec!["Overwatch.exe", "wine"]
+        );
+        assert!(parse_process_names("  ,  \n").is_empty());
     }
 
     #[test]
