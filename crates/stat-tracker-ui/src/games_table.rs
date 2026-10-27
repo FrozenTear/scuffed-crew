@@ -11,7 +11,7 @@ use iced::{
 };
 
 use crate::app::{Message, TrackerApp};
-use crate::games_rows::{self, Col, Grid, Mark, TabState, Tick, UnsureItem, Width};
+use crate::games_rows::{self, Col, Focus, Grid, Mark, TabState, Tick, UnsureItem, Width};
 use crate::icons::{self, Icon};
 use crate::model::{Game, Outcome, Role, Screen, game_card_in_progress};
 use crate::theme::{
@@ -36,26 +36,65 @@ pub enum Msg {
     Enter,
     /// Open a game's saved scoreboard picture.
     OpenScoreboard(String),
+    /// A row clicked: open it, or close it when it is the open one.
+    Toggle(String),
+    /// Delete game: show the confirm strip, focus on Cancel.
+    AskDelete(String),
+    /// The strip's Cancel: close it, focus back on Delete game.
+    CancelDelete,
+    /// The strip's Delete game.
+    Delete(String),
+    /// Tab no widget took: Cancel and Delete game in the strip.
+    Tab,
+    /// Space no widget took: press the focused button.
+    Space,
 }
 
 pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
-    let s = &mut app.games_tab;
     match msg {
-        Msg::SetGrouping(g) => s.grouping = g,
-        Msg::SortBy(col) => s.sort = s.sort.clicked(col),
-        Msg::ToggleCompact => s.compact = !s.compact,
-        Msg::ToggleFilters => s.filters_open = !s.filters_open,
+        Msg::SetGrouping(g) => app.games_tab.view.grouping = g,
+        Msg::SortBy(col) => app.games_tab.view.sort = app.games_tab.view.sort.clicked(col),
+        Msg::ToggleCompact => app.games_tab.view.compact = !app.games_tab.view.compact,
+        Msg::ToggleFilters => app.games_tab.view.filters_open = !app.games_tab.view.filters_open,
         Msg::Open(sid) => {
             if app.expanded.as_deref() != Some(sid.as_str()) {
-                return iced::Task::done(Message::ToggleGame(sid));
+                return update(app, Msg::Toggle(sid));
             }
         }
+        Msg::Toggle(sid) => {
+            app.games_tab.focus = Focus::None;
+            app.games_tab.deleted_note = false;
+            return iced::Task::done(Message::ToggleGame(sid));
+        }
+        Msg::AskDelete(sid) => {
+            app.games_tab.focus = Focus::Cancel;
+            app.confirm_delete = Some(sid);
+        }
+        Msg::CancelDelete => cancel_delete(app),
+        Msg::Delete(sid) => delete(app, &sid),
+        Msg::Tab => {
+            let focus = &mut app.games_tab.focus;
+            match focus {
+                Focus::Cancel => *focus = Focus::ConfirmDelete,
+                Focus::ConfirmDelete => *focus = Focus::Cancel,
+                // The panel's other controls are iced widgets with no
+                // focus of their own, so Delete game is its one Tab stop.
+                Focus::DeleteButton => *focus = Focus::None,
+                _ if app.expanded.is_some() && !app.editing => *focus = Focus::DeleteButton,
+                _ => {}
+            }
+        }
+        Msg::Escape if app.confirm_delete.is_some() => cancel_delete(app),
         Msg::Escape if app.editing => app.editing = false,
+        Msg::Enter | Msg::Space if press_focused(app) => {}
+        Msg::Space => {}
         Msg::Enter if app.editing => {}
+        Msg::Escape | Msg::Enter if app.expanded.is_none() => app.games_tab.focus = Focus::None,
         Msg::Escape | Msg::Enter => {
             app.expanded = None;
             app.editing = false;
             app.confirm_delete = None;
+            app.games_tab.focus = Focus::None;
         }
         Msg::OpenScoreboard(sid) => {
             if let Err(e) = crate::games_panel::open_scoreboard(&app.data_dir, &sid) {
@@ -64,6 +103,73 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
         }
     }
     iced::Task::none()
+}
+
+/// Enter or Space on the focused button or row. False when nothing that
+/// takes them has the focus.
+fn press_focused(app: &mut TrackerApp) -> bool {
+    let open = app.expanded.clone();
+    match (app.games_tab.focus.clone(), open) {
+        (Focus::Cancel, _) if app.confirm_delete.is_some() => cancel_delete(app),
+        (Focus::ConfirmDelete, _) if let Some(sid) = app.confirm_delete.clone() => {
+            delete(app, &sid);
+        }
+        (Focus::DeleteButton, Some(sid)) => {
+            app.games_tab.focus = Focus::Cancel;
+            app.confirm_delete = Some(sid);
+        }
+        (Focus::Row(sid), None) => {
+            app.games_tab.focus = Focus::None;
+            app.games_tab.deleted_note = false;
+            app.expanded = Some(sid);
+            app.editing = false;
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn cancel_delete(app: &mut TrackerApp) {
+    app.confirm_delete = None;
+    app.games_tab.focus = Focus::DeleteButton;
+}
+
+/// Queue the delete (its tombstone goes on the next sync), drop the row,
+/// and move the focus to the row after it, or before it when it was last.
+fn delete(app: &mut TrackerApp, sid: &str) {
+    let next = games_rows::neighbour(&row_order(app), sid);
+    match crate::commands::delete_session(&app.data_dir, sid) {
+        Ok(()) => {
+            app.games.retain(|g| g.session_id != sid);
+            app.expanded = None;
+            app.editing = false;
+            app.confirm_delete = None;
+            app.games_tab.focus = next.map_or(Focus::None, Focus::Row);
+            app.games_tab.deleted_note = true;
+        }
+        Err(e) => app.replace_toast(format!("Could not delete game: {e}")),
+    }
+}
+
+/// The shown rows' session ids in the order they are drawn.
+fn row_order(app: &TrackerApp) -> Vec<String> {
+    let shown = crate::games::shown_games(app);
+    layout(app, &shown, app.games_tab.grid.get())
+        .sections
+        .iter()
+        .flat_map(|sec| sec.rows.iter().map(|g| g.session_id.clone()))
+        .collect()
+}
+
+fn layout<'g>(app: &'g TrackerApp, shown: &[&'g Game], grid: Grid) -> games_rows::Layout<'g> {
+    games_rows::layout(
+        &app.games,
+        shown,
+        app.games_tab.view,
+        grid,
+        app.saved_config.session_window_secs,
+        app.live_game_session.as_deref(),
+    )
 }
 
 fn games_msg(m: Msg) -> Message {
@@ -78,8 +184,9 @@ pub fn view<'a>(
     heroes: &[String],
     maps: &[String],
 ) -> Element<'a, Message> {
-    let state = app.games_tab;
+    let state = app.games_tab.view;
     let grid = Grid::for_window(window_width);
+    app.games_tab.grid.set(grid);
     let shown = crate::games::shown_games(app);
 
     let mut col = column![].spacing(16).width(Fill);
@@ -104,13 +211,29 @@ pub fn view<'a>(
     }
 
     let gap_secs = app.saved_config.session_window_secs;
-    let live = app.live_game_session.as_deref();
-    let layout = games_rows::layout(&app.games, &shown, state, grid, gap_secs, live);
+    let layout = layout(app, &shown, grid);
+    let order: Vec<&str> = layout
+        .sections
+        .iter()
+        .flat_map(|sec| sec.rows.iter().map(|g| g.session_id.as_str()))
+        .collect();
+    // "Game deleted." tops the table of the row the focus moved to.
+    let note_at = match &app.games_tab.focus {
+        Focus::Row(sid) if app.games_tab.deleted_note => {
+            order.iter().position(|s| *s == sid.as_str())
+        }
+        _ => None,
+    }
+    .or(app.games_tab.deleted_note.then_some(0));
+    let mut seen = 0;
     for section in layout.sections {
+        let rows = section.rows.len();
+        let note = note_at.is_some_and(|i| i >= seen && i < seen + rows);
+        seen += rows;
         if let Some(head) = section.head {
             col = col.push(session_header(head, section.ticks));
         }
-        col = col.push(table(app, &section.rows, grid, state));
+        col = col.push(table(app, &section.rows, grid, state, note));
     }
     if let Some(note) = games_rows::cap_note(layout.hidden) {
         col = col.push(text(note).size(SIZE_META).color(TEXT_2));
@@ -221,15 +344,21 @@ fn table<'a>(
     games: &[&Game],
     grid: Grid,
     state: TabState,
+    deleted_note: bool,
 ) -> Element<'a, Message> {
     let cols = games_rows::columns(grid);
     let live = app.live_game_session.as_deref();
-    let mut body = column![header_row(&cols, state, grid)].width(Fill);
+    let mut body = column![].width(Fill);
+    if deleted_note {
+        body = body.push(crate::games_delete::deleted_line()).push(line());
+    }
+    body = body.push(header_row(&cols, state, grid));
     for g in games {
         body = body.push(line());
         let in_progress = game_card_in_progress(&g.session_id, g.outcome, live);
         let open = app.expanded.as_deref() == Some(g.session_id.as_str());
-        body = body.push(game_row(g, &cols, state, in_progress, open));
+        let focused = app.games_tab.focus == Focus::Row(g.session_id.clone());
+        body = body.push(game_row(g, &cols, state, in_progress, open, focused));
         if open {
             body = body.push(crate::games_panel::panel(
                 app,
@@ -325,6 +454,7 @@ fn game_row(
     state: TabState,
     in_progress: bool,
     open: bool,
+    focused: bool,
 ) -> Element<'static, Message> {
     let h = state.row_height();
     let undecided = g.outcome == Outcome::Unknown && !in_progress;
@@ -394,7 +524,13 @@ fn game_row(
         .width(CHEVRON)
         .height(CHEVRON),
     );
-    let outline = if open { ACCENT } else { Color::TRANSPARENT };
+    let outline = if open || focused {
+        ACCENT
+    } else {
+        Color::TRANSPARENT
+    };
+    // The focus ring after a delete is 2px, the open row's outline 1px.
+    let width = if focused { 2.0 } else { 1.0 };
     mouse_area(
         container(r)
             .padding(Padding {
@@ -404,13 +540,13 @@ fn game_row(
             .style(move |_: &Theme| container::Style {
                 border: Border {
                     color: outline,
-                    width: 1.0,
+                    width,
                     radius: 0.0.into(),
                 },
                 ..container::Style::default()
             }),
     )
-    .on_press(Message::ToggleGame(g.session_id.clone()))
+    .on_press(games_msg(Msg::Toggle(g.session_id.clone())))
     .into()
 }
 

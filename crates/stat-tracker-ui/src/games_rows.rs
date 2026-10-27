@@ -27,9 +27,10 @@ pub const HEADER_H: f32 = 32.0;
 pub const ROW_CAP: usize = 500;
 
 /// Which grid the table uses at a window width.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Grid {
     /// 1440 px windows and up.
+    #[default]
     Wide,
     /// 1100 to 1439 px windows.
     Mid,
@@ -218,6 +219,43 @@ impl TabState {
     pub fn row_height(&self) -> f32 {
         if self.compact { ROW_H_COMPACT } else { ROW_H }
     }
+}
+
+/// Where the Games tab's keyboard focus is. Iced 0.14 buttons take no
+/// focus, so the tab keeps it here and draws the ring itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum Focus {
+    #[default]
+    None,
+    /// A row, after the game above or below it was deleted.
+    Row(String),
+    /// The open row's Delete game button (back here after Cancel).
+    DeleteButton,
+    /// The confirm strip's Cancel (first) and Delete game.
+    Cancel,
+    ConfirmDelete,
+}
+
+/// The Games tab's state: the view settings, the focus, and whether the
+/// "Game deleted." line is up.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct GamesTab {
+    pub view: TabState,
+    pub focus: Focus,
+    pub deleted_note: bool,
+    /// The grid last drawn (the view sets it), so a delete from the keys
+    /// finds the next row in the order the player sees.
+    pub grid: std::cell::Cell<Grid>,
+}
+
+/// The row focus goes to after `sid` is deleted: the next row in `order`
+/// (the rows as drawn), or the previous one when `sid` was the last.
+pub fn neighbour(order: &[String], sid: &str) -> Option<String> {
+    let at = order.iter().position(|s| s == sid)?;
+    order
+        .get(at + 1)
+        .or_else(|| at.checked_sub(1).and_then(|i| order.get(i)))
+        .cloned()
 }
 
 /// A row's sort value. `None` is unsure or empty, and always sorts last.
@@ -1322,5 +1360,15 @@ mod tests {
     fn empty_states() {
         assert!(EMPTY_NONE.starts_with("No games yet."));
         assert_eq!(EMPTY_FILTERED, "No games match these filters.");
+    }
+
+    #[test]
+    fn focus_after_a_delete_goes_to_the_next_row_else_the_previous() {
+        let order: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        assert_eq!(neighbour(&order, "a").as_deref(), Some("b"));
+        assert_eq!(neighbour(&order, "b").as_deref(), Some("c"));
+        assert_eq!(neighbour(&order, "c").as_deref(), Some("b"));
+        assert_eq!(neighbour(&order[..1], "a"), None);
+        assert_eq!(neighbour(&order, "gone"), None);
     }
 }

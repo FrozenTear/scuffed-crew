@@ -434,7 +434,7 @@ pub struct TrackerApp {
     /// Top tabs (0.6 default) or the 0.5 sidebar, from `SCUFFED_TRACKER_LAYOUT`.
     pub nav_style: crate::nav::NavStyle,
     /// Games tab view state (0.6 top tabs).
-    pub games_tab: crate::games_rows::TabState,
+    pub games_tab: crate::games_rows::GamesTab,
     /// The 0.6 Settings page's own state.
     pub(crate) page_state: crate::settings_update::PageState,
 }
