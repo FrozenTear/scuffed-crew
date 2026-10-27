@@ -103,6 +103,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("reader_apply", Crate::Top),
     ("report", Crate::Top),
     ("tab_retry", Crate::Top),
+    ("tests_file_size", Crate::Top),
     ("tests_layering", Crate::Top),
     ("tests_readme_config", Crate::Top),
     ("tests_release_pins", Crate::Top),

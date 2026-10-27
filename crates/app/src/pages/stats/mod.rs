@@ -1,8 +1,11 @@
+mod game;
 mod heroes;
 mod history;
 mod maps;
 mod overview;
 pub(crate) mod role;
+
+pub use game::StatsMatch;
 
 use dioxus::prelude::*;
 
@@ -16,6 +19,7 @@ use crate::components::ui::{SeasonSelect, use_season_change, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::use_api_with;
 use crate::routes::Route;
+use crate::sample::Tally;
 use crate::state::{AuthState, use_auth, use_relay_availability_state};
 
 // -- Shared data models (fetched once here, consumed by the tab modules) --
@@ -50,6 +54,18 @@ struct MapStats {
     wins: u32,
     losses: u32,
     draws: u32,
+}
+
+impl HeroStats {
+    fn tally(&self) -> Tally {
+        Tally::new(self.matches, self.wins, self.losses, self.draws)
+    }
+}
+
+impl MapStats {
+    fn tally(&self) -> Tally {
+        Tally::new(self.matches, self.wins, self.losses, self.draws)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -104,13 +120,13 @@ fn winrate_pct(wins: u32, total: u32) -> f64 {
 
 /// Class for win-rate TEXT values. Plain text tokens, never a traffic light.
 /// Polarity is carried by the bar against the 50% reference hairline; the only
-/// text distinction is sample-size honesty: fewer than `MIN_GAMES` games mutes
-/// the value so a 1-game 100% never shouts.
-pub(super) fn wr_text_class(matches: u32) -> &'static str {
-    if matches < MIN_GAMES {
-        "stats-wr muted"
-    } else {
+/// text distinction is sample-size honesty: a result without a win rate yet
+/// (a record or "No games", see [`crate::sample`]) is muted.
+pub(super) fn wr_text_class(tally: Tally) -> &'static str {
+    if tally.has_win_rate() {
         "stats-wr"
+    } else {
+        "stats-wr muted"
     }
 }
 
@@ -121,13 +137,13 @@ pub(super) fn wr_text_class(matches: u32) -> &'static str {
 ///   a dead-even record has no polarity, and a diverging scale is two hues +
 ///   a neutral midpoint; painting an even record blue would claim a lead
 ///   that isn't there
-/// - below the min-games gate → neutral too, so a muted low-sample row never
+/// - no win rate yet (under 10 games) → neutral too, so a muted row never
 ///   claims a pole (muting overrides polarity; the row also renders at
 ///   reduced opacity via the existing `muted` treatment)
 pub(super) fn wr_bar_color(wins: u32, matches: u32) -> &'static str {
     let wins2 = u64::from(wins) * 2;
     let total = u64::from(matches);
-    if matches < MIN_GAMES || wins2 == total {
+    if !Tally::new(matches, wins, 0, 0).has_win_rate() || wins2 == total {
         "var(--text-3)"
     } else if wins2 > total {
         "var(--chart-wr-up)"
@@ -136,12 +152,9 @@ pub(super) fn wr_bar_color(wins: u32, matches: u32) -> &'static str {
     }
 }
 
-/// Minimum games before a win rate is shown at full weight (charts gate on it,
-/// tables/bars mute below it).
-pub(super) const MIN_GAMES: u32 = 3;
-
-/// Caption shown wherever the min-games gate/muting applies.
-pub(super) const MIN_GAMES_NOTE: &str = "min 3 games. Smaller samples muted.";
+/// Role cards mute under this many games. Heroes, maps and seasons follow
+/// the small-sample rule in [`crate::sample`] instead.
+pub(super) const MIN_GAMES: u32 = crate::sample::RECORD_MIN_GAMES;
 
 /// Platform line on `/stats`. Linux supports Wayland and X11. No other OS builds.
 const TRACKER_PLATFORM_COPY: &str =
@@ -410,6 +423,9 @@ const STATS_CSS: &str = r#"
         transition: background 0.15s;
     }
     .match-card:hover { background: var(--surface-2); }
+    /* History rows open the game page. Keep the row's own colors. */
+    a.match-card-link { color: inherit; text-decoration: none; cursor: pointer; }
+    a.match-card-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .match-cards { display: flex; flex-direction: column; gap: 0.3rem; }
     .match-card .match-outcome {
         font-family: var(--font-head);
@@ -1371,15 +1387,10 @@ pub fn Stats() -> Element {
                         }
                     },
                     Some(s) => {
-                        let wr = winrate_pct(s.wins, s.total_matches);
-                        let record = crate::util::record_label(s.wins, s.losses, s.draws);
+                        let season = Tally::new(s.total_matches, s.wins, s.losses, s.draws);
                         rsx! {
                             div { class: "stats-summary",
-                                div { class: "stat-tile stat-tile-hero",
-                                    div { class: "stat-tile-value", "{wr:.1}%" }
-                                    div { class: "stat-tile-label", "Win Rate" }
-                                    div { class: "stat-tile-record", "{record}" }
-                                }
+                                {crate::sample::season_tile(season)}
                                 div { class: "stat-tile",
                                     div { class: "stat-tile-value", "{s.total_matches}" }
                                     div { class: "stat-tile-label", "Matches" }
@@ -1988,19 +1999,5 @@ mod map_mode_tests {
         assert_eq!(map_game_mode("Watchpoint"), "Escort");
         assert_eq!(map_game_mode("gibraltar"), "Escort");
         assert_eq!(map_game_mode("not a map"), "Other");
-    }
-}
-
-#[cfg(test)]
-mod copy_tests {
-    use super::MIN_GAMES_NOTE;
-
-    #[test]
-    fn min_games_note_has_no_em_or_en_dash() {
-        assert!(
-            !MIN_GAMES_NOTE.contains('\u{2014}') && !MIN_GAMES_NOTE.contains('\u{2013}'),
-            "{MIN_GAMES_NOTE}"
-        );
-        assert_eq!(MIN_GAMES_NOTE, "min 3 games. Smaller samples muted.");
     }
 }

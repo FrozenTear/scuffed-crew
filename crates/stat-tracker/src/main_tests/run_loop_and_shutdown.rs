@@ -136,11 +136,15 @@ fn daemon_loop_runs_the_quiet_close_timer_and_its_sync() {
         !after_suspend[..adopt_at].contains("finish_sync_on_shutdown("),
         "resume must not await the upload"
     );
+    // The log lines carry the bin's pinned target since `run_loop` moved to
+    // src/daemon/event_loop.rs (0.6 S11), so the needles name it too.
     let ctrl_c = run_loop
-        .find("tracing::info!(\"shutting down\")")
+        .find("tracing::info!(target: \"scuffed_stat_tracker\", \"shutting down\")")
         .expect("ctrl-c shutdown");
     let sigterm = run_loop
-        .find("tracing::info!(\"SIGTERM received, shutting down\")")
+        .find(
+            "tracing::info!(target: \"scuffed_stat_tracker\", \"SIGTERM received, shutting down\")",
+        )
         .expect("sigterm shutdown");
     assert!(ctrl_c < sigterm, "ctrl-c is registered before sigterm");
     assert!(
