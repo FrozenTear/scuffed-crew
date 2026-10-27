@@ -42,9 +42,9 @@ const GAME_PROCESSES_HELP: &str =
     "Capture runs only while one is running. An empty list turns the check off.";
 /// Shown under Game processes once the list is empty.
 const NO_PROCESSES_NOTE: &str = "No processes listed, so the tracker captures whenever it runs.";
-/// Help under Session window: the spec line (the 0.6 Games tab groups by
-/// it), then what else this app uses it for. Ported from #555.
-const SESSION_WINDOW_HELP: &str = "Games closer together than this count as one session. It is also how long a game still counts as live for the Companion.";
+/// Help under Session window: what the setting does. Games and Overview
+/// group by it, and the live game check uses it. Ported from #555.
+const SESSION_WINDOW_HELP: &str = "Games played within this time of each other are grouped into one session. A game with no result yet also stays live in the Companion for this long after its last activity.";
 
 /// A tag after a row title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
