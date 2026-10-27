@@ -592,7 +592,7 @@ fn restart_after_close(data_dir: &std::path::Path, path: &std::path::Path) -> an
 
 /// Longest wait for SurrealKV's close at exit. A clean close took about
 /// 130 ms in the KDE soak; the rest of the deadline stays with the runtime.
-const STORE_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+pub(crate) const STORE_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// Drop the last store handle and wait for SurrealKV's close while the
 /// runtime still runs. Dropping the handle only starts the close (the SDK

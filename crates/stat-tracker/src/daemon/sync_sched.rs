@@ -365,7 +365,7 @@ impl Drop for AbortOnDrop {
 
 /// Longest wait for an aborted sync task to be dropped. The abort lands at
 /// the task's next await, which an upload reaches at once.
-const SYNC_ABORT_JOIN: std::time::Duration = std::time::Duration::from_millis(250);
+pub(crate) const SYNC_ABORT_JOIN: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// Let the sync task left at exit finish within `within`, then abort it.
 /// Its store clone keeps SurrealKV open, so this runs before the store's

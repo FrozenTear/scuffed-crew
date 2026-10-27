@@ -112,7 +112,8 @@ pub(crate) enum ShutdownStage {
     SessionSave,
     /// Close the screen share, bounded by [`SCREENCAST_CLOSE_TIMEOUT`].
     ScreencastClose,
-    /// Join the in-flight sync, then the last upload.
+    /// Stop an in-flight sync after a short grace, else the last upload,
+    /// bounded by [`final_upload_budget`].
     FinalUpload,
     /// Write the GUI snapshot.
     SnapshotExport,
@@ -293,6 +294,23 @@ pub(crate) async fn shutdown_from_signal(
     }
 }
 
+/// Longest the final upload stage runs, an in-flight sync included. A stop
+/// is meant to take under 2 s; a server that holds the upload (bad Wi-Fi,
+/// server down) would otherwise take the whole shutdown deadline and leave
+/// the store unclosed.
+pub(crate) const FINAL_UPLOAD_CAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// How long an in-flight sync may still finish at shutdown before it is
+/// stopped. One that is about to get its answer keeps it.
+pub(crate) const SHUTDOWN_SYNC_GRACE: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// The final upload stage's budget out of `left` of the shutdown deadline:
+/// [`STORE_CLOSE_WAIT`] stays with the store's close, and the stage never
+/// runs past [`FINAL_UPLOAD_CAP`].
+pub(crate) fn final_upload_budget(left: std::time::Duration) -> std::time::Duration {
+    left.saturating_sub(STORE_CLOSE_WAIT).min(FINAL_UPLOAD_CAP)
+}
+
 pub(crate) async fn finish_sync_on_shutdown(
     client: Option<&sync::SyncClient>,
     backoff: &std::sync::Mutex<sync::SyncBackoff>,
@@ -300,9 +318,77 @@ pub(crate) async fn finish_sync_on_shutdown(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
 ) {
-    drain_sync_then(task, || async {
+    let budget = final_upload_budget(stat_tracker::replace::shutdown_time_left());
+    settle_sync_on_shutdown(task, budget, || async {
         let outcome = upload_once(client, backoff, store, data_dir, None).await;
         apply_sync_backoff(backoff, outcome);
     })
     .await;
+}
+
+/// How [`settle_sync_on_shutdown`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShutdownSync {
+    /// The final upload ran to its end.
+    Uploaded,
+    /// A sync was still in flight after [`SHUTDOWN_SYNC_GRACE`]: it was
+    /// stopped and no final upload was tried.
+    InFlightStopped,
+    /// The final upload did not finish within the budget and was stopped.
+    FinalCutOff,
+}
+
+/// The final upload stage within `budget`. An in-flight sync gets
+/// [`SHUTDOWN_SYNC_GRACE`]; one still running then is aborted instead of
+/// waited out, and no final upload follows (it would wait on the same
+/// server). Otherwise `final_upload` runs in what is left of `budget`.
+///
+/// Stopping an upload loses nothing: rows are marked synced and tombstones
+/// cleared only after the server's 2xx, so they stay queued for the next
+/// start. A chunk the server took but that was not yet marked is sent
+/// again, and the server keeps one row per member and session. The task
+/// handle stays in `task` until it is aborted, so a deadline that drops
+/// this future leaves it for [`finish_or_abort_sync`].
+pub(crate) async fn settle_sync_on_shutdown<F, Fut>(
+    task: &mut Option<tokio::task::JoinHandle<()>>,
+    budget: std::time::Duration,
+    final_upload: F,
+) -> ShutdownSync
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future,
+{
+    let started = tokio::time::Instant::now();
+    if let Some(inflight) = task.as_mut()
+        && !inflight.is_finished()
+    {
+        let grace = budget.min(SHUTDOWN_SYNC_GRACE);
+        if tokio::time::timeout(grace, &mut *inflight).await.is_err() {
+            if let Some(inflight) = task.take() {
+                inflight.abort();
+                let _ = tokio::time::timeout(SYNC_ABORT_JOIN, inflight).await;
+            }
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                grace_ms = grace.as_millis() as u64,
+                "in-flight sync stopped at shutdown; its games stay queued for the next start"
+            );
+            return ShutdownSync::InFlightStopped;
+        }
+        // Finished within the grace: its handle is spent.
+        *task = None;
+    }
+    let left = budget.saturating_sub(started.elapsed());
+    if tokio::time::timeout(left, drain_sync_then(task, final_upload))
+        .await
+        .is_ok()
+    {
+        return ShutdownSync::Uploaded;
+    }
+    tracing::info!(
+        target: "scuffed_stat_tracker",
+        budget_ms = budget.as_millis() as u64,
+        "final upload stopped at shutdown; unsent games go up on the next start"
+    );
+    ShutdownSync::FinalCutOff
 }
