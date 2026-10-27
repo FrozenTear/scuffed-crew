@@ -605,6 +605,32 @@ impl Database {
         .await
     }
 
+    /// One of `member_id`'s games by its record key (the `id` on the match
+    /// list). `None` when no row has that key or the row belongs to another
+    /// member, so callers can answer both the same way. Read-only.
+    ///
+    /// The lookup is by string record key only: `id` is always bound as a
+    /// string key of `personal_match`, never parsed as a number or a full
+    /// record id. The ownership check is part of the query, so another
+    /// member's row never leaves the database.
+    pub async fn get_personal_match_for_member(
+        &self,
+        member_id: &str,
+        id: &str,
+    ) -> DbResult<Option<PersonalMatch>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT * FROM $rid WHERE member_id = $mid")
+                .bind(("rid", RecordId::new("personal_match", id)))
+                .bind(("mid", member_id.to_string()))
+                .await?;
+            let rows: Vec<DbPersonalMatch> = result.take(0)?;
+            Ok(rows.into_iter().next().map(db_to_personal_match))
+        })
+        .await
+    }
+
     /// `SELECT count() FROM personal_match WHERE member_id = $mid {extra} {season}`.
     /// `extra` is a fixed fragment chosen by the caller (never user input);
     /// the season window is bound.
@@ -845,6 +871,7 @@ impl Database {
     /// truncate with [`LeaderboardSnapshot::project`].
     ///
     /// `games` and `wins` count every row with a victory, defeat, or draw.
+    /// `losses` and `draws` split the rest, so `wins + losses + draws == games`.
     /// The elims and deaths sums that feed K/D include a game only when both
     /// counters pass [`kd_pair_plausible_sql`]: elims at or under
     /// [`scuffed_types::PLAUSIBLE_ELIMS_MAX`], deaths at or under
@@ -863,6 +890,8 @@ impl Database {
                 hero: String,
                 games: u32,
                 wins: u32,
+                losses: u32,
+                draws: u32,
                 elims: u32,
                 deaths: u32,
                 kd_games: u32,
@@ -881,6 +910,8 @@ impl Database {
                         hero,
                         count() AS games,
                         math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
+                        math::sum(IF outcome = 'defeat' THEN 1 ELSE 0 END) AS losses,
+                        math::sum(IF outcome = 'draw' THEN 1 ELSE 0 END) AS draws,
                         math::sum(IF {kd_pair} THEN elims ELSE 0 END) AS elims,
                         math::sum(IF {kd_pair} THEN deaths ELSE 0 END) AS deaths,
                         math::sum(IF {kd_pair} THEN 1 ELSE 0 END) AS kd_games
@@ -939,6 +970,8 @@ impl Database {
                         display_name,
                         games: row.games,
                         wins: row.wins,
+                        losses: row.losses,
+                        draws: row.draws,
                         elims: row.elims,
                         deaths: row.deaths,
                         kd_games: row.kd_games,
@@ -968,6 +1001,8 @@ impl Database {
                 member_id: String,
                 games: u32,
                 wins: u32,
+                losses: u32,
+                draws: u32,
             }
 
             let mut result = self
@@ -977,7 +1012,9 @@ impl Database {
                     SELECT
                         member_id,
                         count() AS games,
-                        math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins
+                        math::sum(IF outcome = 'victory' THEN 1 ELSE 0 END) AS wins,
+                        math::sum(IF outcome = 'defeat' THEN 1 ELSE 0 END) AS losses,
+                        math::sum(IF outcome = 'draw' THEN 1 ELSE 0 END) AS draws
                     FROM personal_match
                     WHERE member_id IN $ids
                       AND hero = $hero
@@ -1001,6 +1038,9 @@ impl Database {
                     MemberHeroScopedAgg {
                         member_id: mid,
                         games: r.games,
+                        wins: r.wins,
+                        losses: r.losses,
+                        draws: r.draws,
                         winrate: r.wins as f32 / r.games as f32,
                     }
                 })

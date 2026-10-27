@@ -6386,6 +6386,158 @@ async fn public_leaderboards_and_member_heroes() {
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
 
+/// Site record display: the leaderboard rows and the members list `hero_scoped`
+/// block carry `wins`, `losses` and `draws`, classified like `games`, so the
+/// three always add up to `games`. Includes a draw on purpose.
+#[tokio::test]
+async fn public_leaderboard_and_hero_scoped_carry_wins_losses_draws() {
+    use chrono::{TimeZone, Utc};
+    use scuffed_db::types::PersonalMatch;
+
+    fn wld_match(
+        member: &str,
+        session: &str,
+        hero: &str,
+        outcome: &str,
+        day: u32,
+    ) -> PersonalMatch {
+        PersonalMatch {
+            id: String::new(),
+            member_id: member.into(),
+            session_id: session.into(),
+            hero: hero.into(),
+            map_name: "Oasis".into(),
+            game_mode: "control".into(),
+            role: "Support".into(),
+            outcome: outcome.into(),
+            elims: 10,
+            deaths: 2,
+            assists: 8,
+            damage: 3000,
+            healing: 9000,
+            mitigation: 0,
+            played_at: Utc.with_ymd_and_hms(2026, 7, day, 20, 0, 0).unwrap(),
+            uploaded_at: Utc::now(),
+            edited: false,
+            recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
+            name_recognizer: None,
+            suspect_fields: Vec::new(),
+        }
+    }
+
+    fn assert_record(row: &serde_json::Value, games: u64, wins: u64, losses: u64, draws: u64) {
+        assert_eq!(row["games"], games, "{row}");
+        assert_eq!(row["wins"], wins, "{row}");
+        assert_eq!(row["losses"], losses, "{row}");
+        assert_eq!(row["draws"], draws, "{row}");
+        let sum = row["wins"].as_u64().unwrap()
+            + row["losses"].as_u64().unwrap()
+            + row["draws"].as_u64().unwrap();
+        assert_eq!(sum, row["games"].as_u64().unwrap(), "{row}");
+    }
+
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+
+    // membermember: 5 Ana games (3W 1L 1D) plus 1 Mercy defeat.
+    state
+        .db
+        .upsert_personal_matches(
+            "membermember",
+            &[
+                wld_match("membermember", "wld-a1", "Ana", "victory", 1),
+                wld_match("membermember", "wld-a2", "Ana", "defeat", 2),
+                wld_match("membermember", "wld-a3", "Ana", "draw", 3),
+                wld_match("membermember", "wld-a4", "Ana", "victory", 4),
+                wld_match("membermember", "wld-a5", "Ana", "victory", 5),
+                wld_match("membermember", "wld-m1", "Mercy", "defeat", 6),
+            ],
+        )
+        .await
+        .unwrap();
+    // officermember: 1 Ana draw only.
+    state
+        .db
+        .upsert_personal_matches(
+            "officermember",
+            &[wld_match("officermember", "wld-o1", "Ana", "draw", 7)],
+        )
+        .await
+        .unwrap();
+
+    // Overall games board: every hero rolled up.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=games&limit=10",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let rows = json["rows"].as_array().expect("leaderboard rows");
+    let mm = rows
+        .iter()
+        .find(|r| r["member_id"] == "membermember")
+        .expect("membermember on games board");
+    assert_record(mm, 6, 3, 2, 1);
+    let om = rows
+        .iter()
+        .find(|r| r["member_id"] == "officermember")
+        .expect("officermember on games board");
+    assert_record(om, 1, 0, 0, 1);
+    for row in rows {
+        assert!(row.get("winrate").is_some() && row.get("kd").is_some());
+    }
+
+    // Hero-filtered winrate board: only the 5 Ana games count.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/leaderboards?metric=winrate&limit=10&hero=ana",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let rows = json["rows"].as_array().expect("leaderboard rows");
+    let mm = rows
+        .iter()
+        .find(|r| r["member_id"] == "membermember")
+        .expect("membermember on Ana winrate board");
+    assert_record(mm, 5, 3, 1, 1);
+    let wr = mm["winrate"].as_f64().expect("winrate f64");
+    assert!((wr - 0.6).abs() < 1e-5, "winrate={wr}");
+
+    // Members list hero_scoped block.
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(unauthed_request(
+            Method::GET,
+            "/api/public/members?limit=50&hero=ana",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    let data = json["data"].as_array().expect("data array");
+    let scoped = |id: &str| {
+        data.iter()
+            .find(|m| m["id"] == id)
+            .unwrap_or_else(|| panic!("{id} on page"))
+            .get("hero_scoped")
+            .cloned()
+            .unwrap_or_else(|| panic!("hero_scoped present for {id}"))
+    };
+    let mm = scoped("membermember");
+    assert_record(&mm, 5, 3, 1, 1);
+    let wr = mm["winrate"].as_f64().expect("winrate f64");
+    assert!((wr - 0.6).abs() < 1e-5, "winrate={wr}");
+    assert_record(&scoped("officermember"), 1, 0, 0, 1);
+}
+
 /// W3 B3 + HS-DR P3: `GET /api/public/members?hero=` attaches optional `hero_scoped`.
 #[tokio::test]
 async fn public_members_hero_scoped_query() {

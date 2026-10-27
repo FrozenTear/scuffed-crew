@@ -241,6 +241,12 @@ pub async fn overview(
 #[derive(Debug, Clone, Serialize)]
 pub struct HeroScoped {
     pub games: u32,
+    /// Victories in `games`. `wins + losses + draws == games`.
+    pub wins: u32,
+    /// Defeats in `games`.
+    pub losses: u32,
+    /// Draws in `games`.
+    pub draws: u32,
     pub winrate: f32,
 }
 
@@ -315,7 +321,7 @@ fn resolve_members_hero(raw: Option<&str>) -> Result<Option<&'static str>, ()> {
 
 /// GET /api/public/members — public member list (cursor-paginated).
 ///
-/// Optional `?hero=<name>` (hero-stats W3 B3): attaches `hero_scoped{games,winrate}`
+/// Optional `?hero=<name>` (hero-stats W3 B3): attaches `hero_scoped{games,wins,losses,draws,winrate}`
 /// for members who have played that hero. Unknown hero → 400.
 ///
 /// HS-DR P1: hero attach is **page-scoped** (`hero_scoped_for_members` over the
@@ -374,6 +380,9 @@ pub async fn public_members(
                     r.member_id,
                     HeroScoped {
                         games: r.games,
+                        wins: r.wins,
+                        losses: r.losses,
+                        draws: r.draws,
                         winrate: r.winrate,
                     },
                 )
