@@ -312,7 +312,8 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
             }
         }
         // A click also moves the highlight to the clicked row, so Enter,
-        // Up and Down go on from the name that was picked.
+        // Up and Down go on from the name that was picked, and hands the
+        // focus back to the search box, so typing filters again.
         Msg::Pick(name) => {
             let at = open_with_game(app).and_then(|(p, g)| {
                 candidates(p.field, &p.query, read(&g, p.field))
@@ -326,6 +327,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
                 if let Some(at) = at {
                     p.active = at;
                 }
+                return iced::widget::operation::focus(input_id());
             }
         }
         Msg::Cancel => app.games_tab.picker = None,
@@ -996,6 +998,20 @@ mod tests {
         assert_eq!(app.games_tab.picker.as_ref().unwrap().active, 4);
         let _ = update(&mut app, Msg::Save);
         assert_eq!(game(&app, HELD).map_name, clicked);
+    }
+
+    /// A click pick gives the search box its focus back; with no picker
+    /// open a pick does nothing.
+    #[test]
+    fn a_click_pick_refocuses_the_search_box() {
+        use crate::games_table::Msg as T;
+        let (_dir, mut app) = app();
+        let pick = || T::Picker(Msg::Pick("Ilios".into()));
+        assert_eq!(crate::games_table::update(&mut app, pick()).units(), 0);
+        open(&mut app, Field::Map);
+        assert_eq!(crate::games_table::update(&mut app, pick()).units(), 1);
+        let p = app.games_tab.picker.as_ref().unwrap();
+        assert_eq!(p.picked.as_deref(), Some("Ilios"));
     }
 
     /// The bold part covers what was typed, accents or not.
