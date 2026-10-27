@@ -10,6 +10,7 @@ use iced::widget::{Row, button, column, container, image, row, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Fill, FillPortion, Padding, Theme};
 
 use crate::app::{Message, TrackerApp};
+use crate::commands::SegmentStep;
 use crate::games_detail::{self as detail, DeltaLine, Stat, Upload};
 use crate::games_picker::{self, Field, Picker};
 use crate::games_rows::{self, UnsureItem};
@@ -347,14 +348,14 @@ fn heroes(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Messa
     if in_progress {
         return col.into();
     }
-    let small_btn = |label: &'static str, index: u32, confirm: bool| {
+    let small_btn = |label: &'static str, index: u32, step: SegmentStep| {
         button(text(label).size(SMALL).font(FONT_SEMIBOLD).color(TEXT))
             .padding(Padding::from([3, 10]))
             .style(theme::quiet_btn(6.0))
             .on_press(Message::ResolveSegment {
                 session_id: g.session_id.clone(),
                 segment: index,
-                confirm,
+                step,
             })
     };
     for (index, prompt) in split.swaps() {
@@ -362,8 +363,8 @@ fn heroes(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Messa
             column![
                 text(prompt).size(SMALL).color(TEXT_2),
                 row![
-                    small_btn("Confirm", index, true),
-                    small_btn("Dismiss", index, false)
+                    small_btn("Confirm", index, SegmentStep::Confirm),
+                    small_btn("Dismiss", index, SegmentStep::Dismiss)
                 ]
                 .spacing(4),
             ]
@@ -374,7 +375,7 @@ fn heroes(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Messa
         col = col.push(
             row![
                 text(line).size(SMALL).color(TEXT_3),
-                small_btn("Undo", index, true)
+                small_btn("Undo", index, SegmentStep::Undo)
             ]
             .spacing(8)
             .align_y(Alignment::Center),

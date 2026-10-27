@@ -362,6 +362,21 @@ async fn apply_command_resolves_hero_segment() {
     let rows = store.get_session_snapshots("s1").await.unwrap();
     assert!(rows.iter().all(|m| m.display_hero() == "Ana"));
     assert!(rows.iter().all(|m| m.heroes_played[1].is_dismissed()));
+
+    // The GUI's Undo sends "clear": the dismiss goes and the lone swap is
+    // unconfirmed again, as before it.
+    let undo = StoreCommand::ResolveSegment {
+        session_id: "s1".into(),
+        segment: 1,
+        action: "clear".into(),
+    };
+    store.apply_command(&undo).await.unwrap();
+    let rows = store.get_session_snapshots("s1").await.unwrap();
+    assert!(rows.iter().all(|m| m.segment_resolutions.is_empty()));
+    assert!(rows.iter().all(|m| {
+        let s = &m.heroes_played[1];
+        !s.is_dismissed() && !s.confirmed && s.resolution.is_none()
+    }));
 }
 
 #[test]

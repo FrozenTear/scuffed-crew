@@ -135,7 +135,7 @@ pub enum Message {
     ResolveSegment {
         session_id: String,
         segment: u32,
-        confirm: bool,
+        step: crate::commands::SegmentStep,
     },
     RetryUpload(String),
     RetryRejectedUploads,
@@ -1049,22 +1049,16 @@ impl TrackerApp {
             Message::ResolveSegment {
                 session_id,
                 segment,
-                confirm,
+                step,
             } => {
                 self.replace_toast(
                     match crate::commands::resolve_segment(
                         &self.data_dir,
                         &session_id,
                         segment,
-                        confirm,
+                        step,
                     ) {
-                        Ok(()) => {
-                            if confirm {
-                                "Hero swap confirmed".into()
-                            } else {
-                                "Hero swap dismissed".into()
-                            }
-                        }
+                        Ok(()) => step.toast().into(),
                         Err(e) => format!("Could not update hero swap: {e}"),
                     },
                 );

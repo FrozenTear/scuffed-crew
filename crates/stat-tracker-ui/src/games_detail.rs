@@ -463,8 +463,8 @@ pub fn read_vs_set_name(g: &Game, field: &str) -> Option<String> {
     Some(format!("Read {read}, you set {set}"))
 }
 
-/// Dismissed runs, as (segment index, line), each with an Undo that
-/// confirms the run again.
+/// Dismissed runs, as (segment index, line), each with an Undo that takes
+/// the Dismiss back.
 pub fn dismissed_runs(g: &Game) -> Vec<(u32, String)> {
     g.segments
         .iter()

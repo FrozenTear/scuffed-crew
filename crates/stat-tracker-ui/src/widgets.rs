@@ -862,7 +862,7 @@ fn segment_list(game: &Game) -> Element<'static, Message> {
                     Message::ResolveSegment {
                         session_id: sid,
                         segment: seg.index,
-                        confirm: true,
+                        step: crate::commands::SegmentStep::Confirm,
                     },
                 ),
                 button(
@@ -876,7 +876,7 @@ fn segment_list(game: &Game) -> Element<'static, Message> {
                 .on_press(Message::ResolveSegment {
                     session_id: sid2,
                     segment: seg.index,
-                    confirm: false,
+                    step: crate::commands::SegmentStep::Dismiss,
                 }),
             ]
             .spacing(8)

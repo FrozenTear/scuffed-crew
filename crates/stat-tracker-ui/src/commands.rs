@@ -58,22 +58,51 @@ pub fn retry_rejected_uploads(data_dir: &Path) -> Result<(), String> {
     queue(data_dir, &StoreCommand::RetryRejectedUploads)
 }
 
+/// What a hero swap button does to its run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentStep {
+    Confirm,
+    Dismiss,
+    /// Take back the run's Confirm or Dismiss: the run goes back to what
+    /// the reader made of it (a one-snapshot swap asks again).
+    Undo,
+}
+
+/// The action an Undo queues. The store keeps only confirm and dismiss and
+/// drops any other action's resolution (`resolve_hero_segment`).
+pub const SEGMENT_CLEAR: &str = "clear";
+
+impl SegmentStep {
+    fn action(self) -> &'static str {
+        match self {
+            SegmentStep::Confirm => SEGMENT_CONFIRM,
+            SegmentStep::Dismiss => SEGMENT_DISMISS,
+            SegmentStep::Undo => SEGMENT_CLEAR,
+        }
+    }
+
+    /// The toast once it is queued.
+    pub fn toast(self) -> &'static str {
+        match self {
+            SegmentStep::Confirm => "Hero swap confirmed",
+            SegmentStep::Dismiss => "Hero swap dismissed",
+            SegmentStep::Undo => "Hero swap undone",
+        }
+    }
+}
+
 pub fn resolve_segment(
     data_dir: &Path,
     session_id: &str,
     segment: u32,
-    confirm: bool,
+    step: SegmentStep,
 ) -> Result<(), String> {
     queue(
         data_dir,
         &StoreCommand::ResolveSegment {
             session_id: session_id.to_string(),
             segment,
-            action: if confirm {
-                SEGMENT_CONFIRM.to_string()
-            } else {
-                SEGMENT_DISMISS.to_string()
-            },
+            action: step.action().to_string(),
         },
     )
 }
@@ -365,6 +394,23 @@ mod tests {
         assert!(pick_hero(&tmp(), "sess-h", "Nobody").is_err());
     }
 
+    /// Undo on a dismissed run queues a clear, not a Confirm, and says so.
+    #[test]
+    fn undo_queues_a_clear_not_a_confirm() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let _ = app.update(crate::app::Message::ResolveSegment {
+            session_id: "sess-u".into(),
+            segment: 2,
+            step: SegmentStep::Undo,
+        });
+        assert!(matches!(
+            queued(&app.data_dir).as_slice(),
+            [StoreCommand::ResolveSegment { session_id, segment: 2, action }]
+                if session_id == "sess-u" && action == SEGMENT_CLEAR
+        ));
+        assert_eq!(app.toast.as_deref(), Some("Hero swap undone"));
+    }
+
     /// A stat edit on a held game saves, and says the game stays local.
     #[test]
     fn a_stat_edit_on_a_held_game_says_it_stays_local() {
@@ -391,8 +437,8 @@ mod tests {
             },
         )
         .unwrap();
-        resolve_segment(&dir, "sess-t1", 1, true).unwrap();
-        resolve_segment(&dir, "sess-t1", 0, false).unwrap();
+        resolve_segment(&dir, "sess-t1", 1, SegmentStep::Confirm).unwrap();
+        resolve_segment(&dir, "sess-t1", 0, SegmentStep::Dismiss).unwrap();
 
         let cmds = queued(&dir);
         assert_eq!(cmds.len(), 5);
