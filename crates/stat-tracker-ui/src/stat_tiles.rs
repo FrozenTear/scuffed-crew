@@ -36,8 +36,7 @@ pub fn row(g: &Game) -> Element<'static, Message> {
 }
 
 /// The flat suspect names still standing on `g`, once each: every stored
-/// name (`dmg`, or an older row's `r3.dmg`) flattened by
-/// [`flat_suspect_name`], less the ones a hand edit settled
+/// name run through [`flat_suspect_name`], less the ones a hand edit settled
 /// ([`suspect_names_for_edit`] of each edited field).
 pub fn still_unsure(g: &Game) -> Vec<&str> {
     let settled: Vec<&str> = g
