@@ -1376,28 +1376,6 @@ pub(crate) fn companion_body(app: &TrackerApp, demo: bool) -> Element<'_, Messag
     body.into()
 }
 
-/// A Session window of a year or more groups every game of a night, week
-/// and month together, so the field says so instead of showing a bare number.
-const SESSION_WINDOW_NO_LIMIT_SECS: u64 = 365 * 24 * 60 * 60;
-
-const SESSION_WINDOW_HINT: &str = "Nearby games count as one session.";
-
-/// The hint under the Session window field: "No limit" for a value so big
-/// that no gap between games is ever longer (a value too big to parse also
-/// reads as no limit, as every digit string that long is past a year).
-fn session_window_hint(raw: &str) -> &'static str {
-    let raw = raw.trim();
-    let huge = match raw.parse::<u64>() {
-        Ok(secs) => secs >= SESSION_WINDOW_NO_LIMIT_SECS,
-        Err(_) => !raw.is_empty() && raw.chars().all(|c| c.is_ascii_digit()),
-    };
-    if huge {
-        "No limit"
-    } else {
-        SESSION_WINDOW_HINT
-    }
-}
-
 /// In-game name and session window, side by side.
 fn player_fields_row<'a>(
     player_name: &'a str,
@@ -1421,7 +1399,7 @@ fn player_fields_row<'a>(
             SettingsField::SessionWindow,
             false,
             demo,
-            Some(session_window_hint(session_window_secs)),
+            Some(crate::session_window::hint(session_window_secs)),
         )),
     )
 }
@@ -1933,29 +1911,6 @@ mod tests {
 
     use super::*;
     use std::path::PathBuf;
-
-    #[test]
-    fn a_huge_session_window_shows_no_limit() {
-        for huge in [
-            "31536000",
-            " 31536000 ",
-            "9223372036854775807",
-            "18446744073709551615",
-            // Past u64: parse_u64 falls back to 1800, but the field still
-            // holds this text.
-            "18446744073709551616",
-            "99999999999999999999999999",
-        ] {
-            assert_eq!(session_window_hint(huge), "No limit", "{huge:?}");
-        }
-        for normal in ["1800", "0", "31535999", "", "oops", "-5", "1.5"] {
-            assert_eq!(
-                session_window_hint(normal),
-                "Nearby games count as one session.",
-                "{normal:?}"
-            );
-        }
-    }
 
     fn base() -> Config {
         Config {
