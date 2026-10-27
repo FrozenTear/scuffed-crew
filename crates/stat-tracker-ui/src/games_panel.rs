@@ -40,17 +40,19 @@ pub fn panel<'a>(
 ) -> Element<'a, Message> {
     let has_kit = app.sessions_with_kit.contains(&g.session_id);
     // At 1024 the left column takes what the 420px tile column leaves.
-    let picker = (app.games_tab.picker.as_ref()).filter(|p| p.sid == g.session_id);
-    let left = container(left_column(g, in_progress, picker)).width(if narrow {
-        Fill
-    } else {
-        LEFT_W.into()
-    });
-    let editing = app.editing && app.edit.session_id == g.session_id;
-    let stats = stats_column(app, g, narrow, in_progress);
+    let picker = games_picker::open_picker(app).filter(|p| p.sid == g.session_id);
     // The games fixture stands for a signed-in player: its rows upload,
     // and some were refused, so its status reads as with sync on.
     let sync_on = app.sync_on() || app.fixture == Some(crate::cli::FixtureKind::Games);
+    let ctx = Ctx {
+        in_progress,
+        sync_on,
+        editing: app.editing,
+    };
+    let left =
+        container(left_column(g, ctx, picker)).width(if narrow { Fill } else { LEFT_W.into() });
+    let editing = app.editing && app.edit.session_id == g.session_id;
+    let stats = stats_column(app, g, narrow, in_progress);
     let status = status_box(g, in_progress, sync_on);
     let up = detail::upload(g, in_progress, sync_on);
     // Delete game's confirm strip replaces the actions; the status stays.
@@ -151,9 +153,19 @@ pub fn panel<'a>(
     .into()
 }
 
+/// What the left column's Set controls and picker read off the app.
+#[derive(Debug, Clone, Copy)]
+struct Ctx {
+    in_progress: bool,
+    sync_on: bool,
+    /// Edit is open: no Set controls, so a click can't drop the form.
+    editing: bool,
+}
+
 /// MAP, HEROES, RESULT, TIME. A map, hero or result read still unsure
 /// gets "⚠ Unsure" beside its label, the detail view's per-item mark.
-fn left_column(g: &Game, in_progress: bool, picker: Option<&Picker>) -> Element<'static, Message> {
+fn left_column(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Message> {
+    let in_progress = ctx.in_progress;
     let items = games_rows::unsure_items(g, in_progress);
     let unsure = |item| items.contains(&item);
     let open = |field| picker.filter(|p| p.field == field);
@@ -161,12 +173,12 @@ fn left_column(g: &Game, in_progress: bool, picker: Option<&Picker>) -> Element<
         block(
             "MAP",
             unsure(UnsureItem::Map),
-            map_line(g, open(Field::Map))
+            map_line(g, ctx, open(Field::Map))
         ),
         block(
             "HEROES",
             unsure(UnsureItem::Hero),
-            heroes(g, in_progress, open(Field::Hero))
+            heroes(g, ctx, open(Field::Hero))
         ),
         block("RESULT", unsure(UnsureItem::Result), result(g, in_progress)),
         block("TIME", false, time(g)),
@@ -199,9 +211,9 @@ fn section_label(label: &'static str) -> Element<'static, Message> {
 
 /// The map, its mode chip, EDITED when set by hand, and "Set map" (or
 /// the open picker) while the game is held for it.
-fn map_line(g: &Game, picker: Option<&Picker>) -> Element<'static, Message> {
+fn map_line(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Message> {
     if let Some(p) = picker.filter(|p| p.field == Field::Map) {
-        return games_picker::view(g, p);
+        return games_picker::view(g, p, ctx.in_progress, ctx.sync_on);
     }
     let (name, known) = games_picker::map_label(g);
     let (font, color) = if known {
@@ -218,7 +230,7 @@ fn map_line(g: &Game, picker: Option<&Picker>) -> Element<'static, Message> {
     if let Some(mode) = games_rows::mode_chip(&g.map_name) {
         r = r.push(small_chip(mode, TEXT_2, BORDER));
     }
-    r = with_set(r, g, Field::Map);
+    r = with_set(r, g, Field::Map, ctx.editing);
     with_correction(r.into(), detail::read_vs_set_name(g, "map_name"))
 }
 
@@ -227,8 +239,8 @@ fn edited(g: &Game, field: Field) -> bool {
 }
 
 /// "Set map" / "Set hero" on a field the game is held for.
-fn with_set<'a>(r: Row<'a, Message>, g: &Game, field: Field) -> Row<'a, Message> {
-    if games_picker::held_for(g, field) {
+fn with_set<'a>(r: Row<'a, Message>, g: &Game, field: Field, editing: bool) -> Row<'a, Message> {
+    if !editing && games_picker::held_for(g, field) {
         return r.push(games_picker::set_button(&g.session_id, field));
     }
     r
@@ -250,7 +262,8 @@ fn with_correction(
 /// The main hero, the 8px timeline bar, the split, a prompt under each
 /// unconfirmed one-snapshot swap, and an Undo for each dismissed run. No
 /// prompts while the game is still on: the runs are not final.
-fn heroes(g: &Game, in_progress: bool, picker: Option<&Picker>) -> Element<'static, Message> {
+fn heroes(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Message> {
+    let in_progress = ctx.in_progress;
     let split = detail::hero_split(g);
     let unknown = is_unknown(&split.main);
     let mut head = row![
@@ -277,7 +290,7 @@ fn heroes(g: &Game, in_progress: bool, picker: Option<&Picker>) -> Element<'stat
                 .color(theme::role_color(g.role)),
         );
     }
-    let head = with_set(head, g, Field::Hero);
+    let head = with_set(head, g, Field::Hero, ctx.editing);
     let picker = picker.filter(|p| p.field == Field::Hero);
 
     let mut bar = Row::new().spacing(2).height(8).width(Fill);
@@ -319,7 +332,11 @@ fn heroes(g: &Game, in_progress: bool, picker: Option<&Picker>) -> Element<'stat
     );
     let mut col = match picker {
         // The picker takes the hero line's place, under the bar.
-        Some(p) => column![bar, legend, games_picker::view(g, p)],
+        Some(p) => column![
+            bar,
+            legend,
+            games_picker::view(g, p, ctx.in_progress, ctx.sync_on)
+        ],
         None => column![
             with_correction(head.into(), detail::read_vs_set_name(g, "hero")),
             bar,

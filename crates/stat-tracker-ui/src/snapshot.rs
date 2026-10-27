@@ -8,29 +8,49 @@ use crate::fixtures;
 use crate::model::Game;
 
 /// Read the daemon snapshot via the existing lib API. Missing / unreadable → empty.
-/// Deleted games are left out, so every tab and total skips them: a delete
-/// still queued in `commands/` (the tracker may be stopped, and the GUI
-/// never applies commands itself) counts as a pending delete, and no row
-/// with a pending delete is kept.
+/// Games the player deleted are left out, so every tab and total skips
+/// them: a `DeleteSession` still queued in `commands/` (the tracker may be
+/// stopped, and the GUI never applies commands itself). The tracker
+/// removes the rows when it applies the delete. A pending tombstone alone
+/// hides nothing (the store keeps some for games it keeps); it only feeds
+/// the "next sync" line, as does a queued delete.
 pub fn load_snapshot(data_dir: &Path) -> Snapshot {
     let mut snap = storage::read_snapshot(data_dir).unwrap_or_default();
-    for (_, cmd) in storage::read_commands(data_dir) {
-        if let storage::StoreCommand::DeleteSession { session_id } = cmd
-            && !snap.pending_deletes.contains(&session_id)
-        {
-            snap.pending_deletes.push(session_id);
+    let queued = queued_deletes(data_dir);
+    for sid in &queued {
+        if !snap.pending_deletes.contains(sid) {
+            snap.pending_deletes.push(sid.clone());
         }
     }
-    drop_deleted(&mut snap);
+    drop_sessions(&mut snap, &queued);
     snap
 }
 
-/// Drop the match and session rows of games with a pending delete.
-pub fn drop_deleted(snap: &mut Snapshot) {
-    if snap.pending_deletes.is_empty() {
+/// Session ids with a `DeleteSession` waiting in `commands/`. A read-only
+/// look: unlike [`storage::read_commands`] it never removes a file it
+/// can't parse, which is the tracker's call.
+pub fn queued_deletes(data_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(data_dir.join("commands")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .filter_map(|p| std::fs::read(p).ok())
+        .filter_map(|b| serde_json::from_slice::<storage::StoreCommand>(&b).ok())
+        .filter_map(|c| match c {
+            storage::StoreCommand::DeleteSession { session_id } => Some(session_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Drop the match and session rows of these games.
+pub fn drop_sessions(snap: &mut Snapshot, gone: &[String]) {
+    if gone.is_empty() {
         return;
     }
-    let gone: std::collections::HashSet<String> = snap.pending_deletes.iter().cloned().collect();
     snap.matches
         .retain(|m| m.session_id.is_empty() || !gone.contains(&m.session_id));
     snap.sessions.retain(|s| !gone.contains(&s.session_id));
@@ -45,6 +65,9 @@ pub fn snapshot_mtime(data_dir: &Path) -> Option<SystemTime> {
 /// Materialize a fixture through `live_snapshot.json` and `read_snapshot`.
 pub fn install_fixture(data_dir: &Path, kind: FixtureKind) -> anyhow::Result<Snapshot> {
     std::fs::create_dir_all(data_dir)?;
+    // Each kind reuses one dir: a fixture starts with no queued commands,
+    // so a game deleted in an earlier run comes back.
+    let _ = std::fs::remove_dir_all(data_dir.join("commands"));
     let snap = fixtures::snapshot(kind);
     let bytes = serde_json::to_vec_pretty(&snap)?;
     std::fs::write(data_dir.join("live_snapshot.json"), bytes)?;
@@ -154,15 +177,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A snapshot that still lists a game with a tombstone leaves it out.
+    /// A pending tombstone alone is not a delete: the store keeps them
+    /// for games it keeps, so the game still shows.
     #[test]
-    fn a_row_with_a_pending_tombstone_is_left_out() {
-        let mut snap = fixtures::snapshot(FixtureKind::Sample);
+    fn a_kept_game_with_a_pending_tombstone_still_shows() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut snap = install_fixture(dir.path(), FixtureKind::Sample).expect("install");
         let sid = snap.matches[0].session_id.clone();
         snap.pending_deletes = vec![sid.clone()];
-        drop_deleted(&mut snap);
-        assert!(snap.matches.iter().all(|m| m.session_id != sid));
-        assert!(snap.sessions.iter().all(|s| s.session_id != sid));
+        std::fs::write(
+            dir.path().join("live_snapshot.json"),
+            serde_json::to_vec(&snap).unwrap(),
+        )
+        .unwrap();
+        let reloaded = load_snapshot(dir.path());
+        assert!(
+            games_from_snapshot(&reloaded)
+                .iter()
+                .any(|g| g.session_id == sid)
+        );
+        assert!(reloaded.sessions.iter().any(|s| s.session_id == sid));
+        assert_eq!(reloaded.pending_deletes, vec![sid]);
+    }
+
+    /// Reading the queue to hide deletes leaves every file in place, even
+    /// one it can't parse: removing those is the tracker's call.
+    #[test]
+    fn the_reload_only_reads_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let cmds = dir.path().join("commands");
+        std::fs::create_dir_all(&cmds).unwrap();
+        std::fs::write(cmds.join("cmd_1_1.json"), b"not json").unwrap();
+        crate::commands::delete_session(dir.path(), "sess-x").unwrap();
+        assert_eq!(queued_deletes(dir.path()), vec!["sess-x".to_string()]);
+        let _ = load_snapshot(dir.path());
+        assert!(cmds.join("cmd_1_1.json").exists());
+        assert_eq!(std::fs::read_dir(&cmds).unwrap().count(), 2);
+    }
+
+    /// Each fixture run starts clean: a delete queued in an earlier run of
+    /// the same kind doesn't hide the game.
+    #[test]
+    fn a_fixture_run_starts_with_no_queued_deletes() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = install_fixture(dir.path(), FixtureKind::Sample).expect("install");
+        let sid = snap.matches[0].session_id.clone();
+        crate::commands::delete_session(dir.path(), &sid).unwrap();
+        let again = install_fixture(dir.path(), FixtureKind::Sample).expect("install");
+        assert!(
+            games_from_snapshot(&again)
+                .iter()
+                .any(|g| g.session_id == sid)
+        );
+        assert!(queued_deletes(dir.path()).is_empty());
     }
 
     #[test]

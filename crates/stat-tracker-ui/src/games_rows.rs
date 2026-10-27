@@ -283,9 +283,11 @@ fn key(g: &Game, col: Col) -> Option<Key> {
                 Outcome::Unknown => None,
             }
         }
+        // Sorted as shown: a map that isn't a known one reads "No map"
+        // and goes with the empty ones.
         Col::Map => {
-            let map = g.map_name.trim();
-            (!map.is_empty() && !g.unsure_now("map")).then(|| Key::Text(map.to_lowercase()))
+            let (map, known) = crate::games_picker::map_label(g);
+            (known && !g.unsure_now("map")).then(|| Key::Text(map.to_lowercase()))
         }
         Col::Hero => {
             let hero = g.hero.trim();
@@ -1230,6 +1232,29 @@ mod tests {
         assert_eq!(hero.visible_in(Grid::Narrow), Sort::default());
         let map = Sort::default().clicked(Col::Map);
         assert_eq!(map.visible_in(Grid::Narrow), map);
+    }
+
+    /// A map that isn't a known one reads "No map", so it sorts with the
+    /// empty maps (last), not by its raw text.
+    #[test]
+    fn a_no_map_row_sorts_with_the_empty_maps() {
+        let mut ilio5 = game(Outcome::Win, "2026-10-18T22:01:00Z", &[]);
+        ilio5.map_name = "Ilio5".into();
+        let mut kings = game(Outcome::Win, "2026-10-18T22:02:00Z", &[]);
+        kings.map_name = "King's Row".into();
+        let mut hana = game(Outcome::Win, "2026-10-18T22:03:00Z", &[]);
+        hana.map_name = "Hanamura".into();
+        for desc in [false, true] {
+            let mut rows = vec![&ilio5, &kings, &hana];
+            sort_games(
+                &mut rows,
+                Sort {
+                    col: Col::Map,
+                    desc,
+                },
+            );
+            assert_eq!(rows[2].session_id, ilio5.session_id, "desc {desc}");
+        }
     }
 
     #[test]

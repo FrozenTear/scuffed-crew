@@ -59,6 +59,13 @@ pub enum Msg {
 }
 
 pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
+    // A picker that Edit, the delete confirm or another row replaced is
+    // gone: it must not keep taking Enter and Delete.
+    if !matches!(msg, Msg::Picker(crate::games_picker::Msg::Open(..)))
+        && crate::games_picker::open_picker(app).is_none()
+    {
+        app.games_tab.picker = None;
+    }
     match msg {
         Msg::SetGrouping(g) => app.games_tab.view.grouping = g,
         Msg::SortBy(col) => app.games_tab.view.sort = app.games_tab.view.sort.clicked(col),
@@ -76,6 +83,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
             return iced::Task::done(Message::ToggleGame(sid));
         }
         Msg::AskDelete(sid) => {
+            app.games_tab.picker = None;
             app.games_tab.focus = Focus::Cancel;
             app.confirm_delete = Some(sid);
         }
@@ -95,7 +103,12 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
         }
         Msg::Picker(m) => return crate::games_picker::update(app, m),
         Msg::Escape if app.games_tab.picker.is_some() => app.games_tab.picker = None,
-        Msg::Enter | Msg::DeleteKey if app.games_tab.picker.is_some() => {}
+        // Enter picks the highlighted name, also once a click took the
+        // focus from the search box; Delete is the search box's.
+        Msg::Enter if app.games_tab.picker.is_some() => {
+            return crate::games_picker::update(app, crate::games_picker::Msg::Submit);
+        }
+        Msg::DeleteKey if app.games_tab.picker.is_some() => {}
         Msg::Escape if app.confirm_delete.is_some() => cancel_delete(app),
         Msg::Escape if app.editing => app.editing = false,
         Msg::Enter | Msg::Space if press_focused(app) => {}
@@ -159,6 +172,7 @@ fn delete_key(app: &mut TrackerApp) {
         app.games_tab.deleted_note = None;
         app.expanded = Some(sid.clone());
     }
+    app.games_tab.picker = None;
     app.confirm_delete = Some(sid);
     app.games_tab.focus = Focus::Cancel;
 }
@@ -179,6 +193,7 @@ fn delete(app: &mut TrackerApp, sid: &str) {
     match crate::commands::delete_session(&app.data_dir, sid) {
         Ok(()) => {
             app.games.retain(|g| g.session_id != sid);
+            app.games_tab.picker = None;
             app.expanded = None;
             app.editing = false;
             app.confirm_delete = None;

@@ -133,7 +133,6 @@ pub const AVG_HERO_UNSET: &str = "vs avg: shown once the hero is set.";
 
 /// The player's averages on one hero.
 #[derive(Debug, Clone, PartialEq)]
-
 pub struct Averages {
     pub hero: String,
     /// Games on the hero up to this one, this one included.

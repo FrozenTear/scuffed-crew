@@ -969,7 +969,7 @@ impl TrackerApp {
                 } else if let Some(sid) = &self.expanded
                     && let Some(g) = self.games.iter().find(|g| &g.session_id == sid)
                 {
-                    self.edit = EditForm::from_game(g);
+                    self.edit = crate::games_picker::edit_form(&mut self.games_tab, g);
                     self.editing = true;
                 }
                 Task::none()

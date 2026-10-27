@@ -112,16 +112,27 @@ pub fn save_edit(
     })
 }
 
-/// The HEROES name a typed hero means. Case, punctuation and accents fold
-/// the way the reader's keys do ([`scuffed_types::hero_key_to_name`]), so
-/// "soldier 76", "dva", "Lúcio" and "Torbjörn" all find their hero.
+/// The stored name of the hero a typed name means. Case, punctuation and
+/// accents fold the way the reader's keys do
+/// ([`scuffed_types::hero_key_to_name`]), so "soldier 76", "dva", "Lucio"
+/// and "Torbjörn" all find their hero. The result is the name the reader
+/// stores (Lúcio, Torbjörn), so one hero never gets two rows.
 fn hero_from_typed(typed: &str) -> Option<&'static str> {
     let typed = typed.trim();
     let want = scuffed_types::hero_key_to_name(typed);
-    scuffed_types::HEROES.iter().copied().find(|h| {
-        h.eq_ignore_ascii_case(typed)
-            || want.is_some_and(|w| scuffed_types::hero_key_to_name(h) == Some(w))
-    })
+    scuffed_types::HEROES
+        .iter()
+        .copied()
+        .find(|h| {
+            h.eq_ignore_ascii_case(typed)
+                || want.is_some_and(|w| scuffed_types::hero_key_to_name(h) == Some(w))
+        })
+        .map(stored_hero)
+}
+
+/// The name the reader stores for a HEROES name.
+fn stored_hero(h: &'static str) -> &'static str {
+    scuffed_types::hero_key_to_name(h).unwrap_or(h)
 }
 
 /// Queue a map picked from [`stat_tracker::parse::known_map_names`].
@@ -143,9 +154,14 @@ pub fn pick_map(data_dir: &Path, session_id: &str, map: &str) -> Result<(), Stri
 /// Queue a hero picked from the canonical hero list.
 /// The daemon derives the role. `Unknown` is not in the list.
 pub fn pick_hero(data_dir: &Path, session_id: &str, hero: &str) -> Result<(), String> {
-    if !scuffed_types::HEROES.contains(&hero) {
+    let Some(hero) = scuffed_types::HEROES
+        .iter()
+        .copied()
+        .find(|h| *h == hero || stored_hero(h) == hero)
+        .map(stored_hero)
+    else {
         return Err("Pick a hero from the list".into());
-    }
+    };
     edit_match(
         data_dir,
         session_id,
@@ -289,21 +305,35 @@ mod tests {
         assert!(!app.editing, "a good save closes the form");
     }
 
-    /// The reader's own spellings find the hero, stored as HEROES has it.
+    /// The reader's own spellings find the hero, stored as the reader
+    /// stores it, so the Heroes tab never splits one hero in two.
     #[test]
     fn a_typed_hero_folds_case_punctuation_and_accents() {
         for (typed, want) in [
             ("soldier 76", "Soldier: 76"),
             ("dva", "D.Va"),
-            ("Lúcio", "Lucio"),
-            ("Torbjörn", "Torbjorn"),
+            ("Lúcio", "Lúcio"),
+            ("lucio", "Lúcio"),
+            ("Torbjorn", "Torbjörn"),
             ("wrecking-ball", "Wrecking Ball"),
         ] {
             let stored = hero_from_typed(typed);
             assert_eq!(stored, Some(want), "{typed}");
-            assert!(scuffed_types::HEROES.contains(&want), "{want}");
+            assert_eq!(stat_tracker::parse::canonical_hero(want), want, "{want}");
         }
         assert_eq!(hero_from_typed("Nobody"), None);
+    }
+
+    /// A picked hero is stored by the reader's name, whichever spelling
+    /// the list gave.
+    #[test]
+    fn a_picked_hero_is_stored_as_the_reader_stores_it() {
+        for picked in ["Lucio", "Lúcio"] {
+            let dir = tmp();
+            pick_hero(&dir, "sess-h", picked).unwrap();
+            assert_eq!(queued_edit(&dir).hero.as_deref(), Some("Lúcio"));
+        }
+        assert!(pick_hero(&tmp(), "sess-h", "Nobody").is_err());
     }
 
     /// A stat edit on a held game saves, and says the game stays local.

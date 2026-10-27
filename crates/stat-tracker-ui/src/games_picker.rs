@@ -13,6 +13,7 @@ use iced::widget::{
 use iced::{Alignment, Border, Color, Element, Fill, Padding, Theme};
 
 use crate::app::{Message, TrackerApp};
+use crate::games_detail::{Upload, upload};
 use crate::games_panel::key_cap;
 use crate::games_table::small_chip;
 use crate::icons::{self, Icon};
@@ -97,9 +98,45 @@ pub fn input_id() -> iced::widget::Id {
     iced::widget::Id::new("games-picker-search")
 }
 
-/// Whether the game is held for this field (Needs a look).
+/// Whether the uploader holds the game for this field (Needs a look).
+/// It follows [`upload`]: an ended game with no result is held too, even
+/// with its row marked synced (the daemon does that without sending it).
 pub fn held_for(g: &Game, field: Field) -> bool {
-    !g.synced && g.upload_reject.is_none() && g.review_fields().contains(&field.review_name())
+    matches!(upload(g, false, true), Upload::Held(_))
+        && g.review_fields().contains(&field.review_name())
+}
+
+/// The picker of the open row, while neither Edit nor the delete confirm
+/// has taken its place. Any other picker is stale.
+pub fn open_picker(app: &TrackerApp) -> Option<&Picker> {
+    app.games_tab.picker.as_ref().filter(|p| {
+        app.expanded.as_deref() == Some(p.sid.as_str())
+            && !app.editing
+            && app.confirm_delete.is_none()
+    })
+}
+
+/// Opening Edit closes the picker; the form starts from the game.
+pub fn edit_form(tab: &mut crate::games_rows::GamesTab, g: &Game) -> crate::model::EditForm {
+    tab.picker = None;
+    crate::model::EditForm::from_game(g)
+}
+
+/// Lower case with the accents of the hero and map names folded, so
+/// "lucio" finds Lúcio and "esperanca" finds Esperança.
+fn fold(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .map(|c| match c {
+            'á' | 'à' | 'â' | 'ä' | 'ã' => 'a',
+            'é' | 'è' | 'ê' | 'ë' => 'e',
+            'í' | 'ì' | 'î' | 'ï' => 'i',
+            'ó' | 'ò' | 'ô' | 'ö' | 'õ' => 'o',
+            'ú' | 'ù' | 'û' | 'ü' => 'u',
+            'ç' => 'c',
+            c => c,
+        })
+        .collect()
 }
 
 /// The map as the row and panel show it: "No map" (and `false`) for a
@@ -139,7 +176,12 @@ fn known(field: Field) -> Vec<&'static str> {
             names.sort_unstable();
             names
         }
-        Field::Hero => scuffed_types::HEROES.to_vec(),
+        // The names the reader stores (Lúcio, Torbjörn), so one hero
+        // never shows under two names.
+        Field::Hero => scuffed_types::HEROES
+            .iter()
+            .map(|h| scuffed_types::hero_key_to_name(h).unwrap_or(h))
+            .collect(),
     }
 }
 
@@ -152,18 +194,20 @@ pub fn best_match(field: Field, read: &str) -> Option<&'static str> {
         Field::Map => stat_tracker::parse::canonical_map(read),
         Field::Hero => stat_tracker::parse::match_hero_in_text(read),
     }?;
-    known(field)
-        .into_iter()
-        .find(|n| n.eq_ignore_ascii_case(&guess))
+    let guess = match field {
+        Field::Hero => scuffed_types::hero_key_to_name(&guess).map_or(guess, str::to_string),
+        Field::Map => guess,
+    };
+    known(field).into_iter().find(|n| fold(n) == fold(&guess))
 }
 
 /// The list for `query`: known names containing it (any case), the read's
 /// best match first.
 pub fn candidates(field: Field, query: &str, read: &str) -> Vec<&'static str> {
-    let q = query.trim().to_lowercase();
+    let q = fold(query.trim());
     let mut names: Vec<_> = known(field)
         .into_iter()
-        .filter(|n| n.to_lowercase().contains(&q))
+        .filter(|n| fold(n).contains(&q))
         .collect();
     if let Some(best) = best_match(field, read)
         && let Some(i) = names.iter().position(|n| *n == best)
@@ -178,28 +222,69 @@ pub fn can_save(p: &Picker) -> bool {
     p.picked.is_some()
 }
 
-/// The line over Save: whether saving lets the game upload.
-pub fn release_line(g: &Game, field: Field) -> String {
-    let still = match field.other() {
-        Field::Map => held_for(g, Field::Map),
-        Field::Hero => held_for(g, Field::Hero),
+/// The line over Save: what [`upload`] says of the game once the pick is
+/// saved. Before a pick, any name the field accepts stands in for it.
+pub fn release_line(
+    g: &Game,
+    field: Field,
+    picked: Option<&str>,
+    in_progress: bool,
+    sync_on: bool,
+) -> String {
+    if field == Field::Map
+        && let Some(map) = picked
+        && !stat_tracker::parse::stats_row_is_tracked(
+            map,
+            &stat_tracker::parse::stored_game_mode(map),
+        )
+    {
+        return "Games on this map stay on this computer: saving takes it off the Games tab."
+            .into();
+    }
+    let mut after = g.clone();
+    let stand_in = match field {
+        Field::Map => "Ilios",
+        Field::Hero => "Ana",
     };
-    if still {
-        let what = match field.other() {
-            Field::Map => "map",
-            Field::Hero => "hero",
-        };
-        format!("Still held after saving: {what} not set.")
-    } else {
-        "Saving releases this game: it uploads when the server answers.".into()
+    apply(&mut after, field, picked.unwrap_or(stand_in));
+    match upload(&after, in_progress, sync_on) {
+        Upload::Held(what) => format!("Still held after saving: {what} not set."),
+        Upload::Waiting => "Saving releases this game: it uploads when the server answers.".into(),
+        Upload::InProgress => "Saving releases this game: it uploads once it ends.".into(),
+        Upload::SyncOff => {
+            "Saving releases this game. It stays on this computer: no website is linked.".into()
+        }
+        Upload::Undecided => {
+            "Saving releases this game: it uploads once you set the result.".into()
+        }
+        Upload::Uploaded | Upload::Rejected(_) => match field.other() {
+            Field::Map => "Saving sets the hero.".into(),
+            Field::Hero => "Saving sets the map.".into(),
+        },
+    }
+}
+
+/// Set the field on the shown game as the daemon will.
+fn apply(g: &mut Game, field: Field, name: &str) {
+    match field {
+        Field::Map => g.map_name = name.to_string(),
+        Field::Hero => {
+            g.hero = name.to_string();
+            g.role = crate::model::Role::parse(&stat_tracker::parse::guess_role_public(name));
+            for s in g.segments.iter_mut().filter(|s| hero_unknown(&s.hero)) {
+                s.hero = name.to_string();
+            }
+        }
     }
 }
 
 pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
     match msg {
+        // The Set buttons are hidden while Edit is open; a stray Open
+        // leaves the form and what was typed alone.
+        Msg::Open(..) if app.editing => {}
         Msg::Open(sid, field) => {
             app.confirm_delete = None;
-            app.editing = false;
             app.games_tab.focus = crate::games_rows::Focus::None;
             app.games_tab.picker = Some(Picker {
                 sid,
@@ -272,21 +357,28 @@ fn save(app: &mut TrackerApp) {
     }
     app.games_tab.picker = None;
     if let Some(g) = app.games.iter_mut().find(|g| g.session_id == p.sid) {
-        match p.field {
-            Field::Map => g.map_name = name.clone(),
-            Field::Hero => {
-                g.hero = name.clone();
-                g.role = crate::model::Role::parse(&stat_tracker::parse::guess_role_public(&name));
-                for s in g.segments.iter_mut().filter(|s| hero_unknown(&s.hero)) {
-                    s.hero = name.clone();
-                }
-            }
-        }
-        // Only the field gets EDITED (spec): no STATS chip, no toast.
+        apply(g, p.field, &name);
+        // Only the field gets EDITED (spec): no STATS chip.
         let f = p.field.edited_name().to_string();
         if !g.edited_fields.contains(&f) {
             g.edited_fields.push(f);
         }
+    }
+    // As the classic picks: a held game is the misread the reader most
+    // needs, so the toast offers a training report.
+    let (saved, category) = match p.field {
+        Field::Map => ("Map saved", crate::report::GameCategory::WrongMap),
+        Field::Hero => ("Hero saved", crate::report::GameCategory::WrongHero),
+    };
+    app.replace_toast(saved);
+    if app.games.iter().any(|g| g.session_id == p.sid) {
+        app.toast_action = Some(Message::Report(crate::report::ReportMessage::OpenGame {
+            session_id: Some(p.sid.clone()),
+            category: Some(category),
+            training: true,
+            choices: Vec::new(),
+        }));
+        app.toast_shown_at = None;
     }
 }
 
@@ -416,7 +508,7 @@ fn name_spans(name: &'static str, query: &str) -> Element<'static, Message> {
 }
 
 /// The open picker in place of its field.
-pub fn view(g: &Game, p: &Picker) -> Element<'static, Message> {
+pub fn view(g: &Game, p: &Picker, in_progress: bool, sync_on: bool) -> Element<'static, Message> {
     let raw = read(g, p.field);
     let current = best_match(p.field, raw);
     let placeholder = match p.field {
@@ -502,7 +594,15 @@ pub fn view(g: &Game, p: &Picker) -> Element<'static, Message> {
             read_spans(read_line(g, p.field)),
             search,
             list,
-            text(release_line(g, p.field)).size(SMALL).color(TEXT_2),
+            text(release_line(
+                g,
+                p.field,
+                p.picked.as_deref(),
+                in_progress,
+                sync_on
+            ))
+            .size(SMALL)
+            .color(TEXT_2),
             row![space().width(Fill), cancel, save]
                 .spacing(8)
                 .align_y(Alignment::Center),
@@ -608,7 +708,6 @@ fn search_style(
 mod tests {
     use super::*;
     use crate::fixtures_games::{HELD, NORMAL};
-    use crate::games_detail::{Upload, upload};
 
     fn app() -> (tempfile::TempDir, TrackerApp) {
         let dir = tempfile::tempdir().unwrap();
@@ -624,7 +723,12 @@ mod tests {
     }
 
     fn open(app: &mut TrackerApp, field: Field) {
+        app.expanded = Some(HELD.into());
         let _ = update(app, Msg::Open(HELD.into(), field));
+    }
+
+    fn table(app: &mut TrackerApp, msg: crate::games_table::Msg) {
+        let _ = crate::games_table::update(app, msg);
     }
 
     #[test]
@@ -648,10 +752,8 @@ mod tests {
         let all = candidates(Field::Map, "", "Ilio5");
         assert_eq!(all.first(), Some(&"Ilios"));
         assert!(all.len() > 20);
-        assert_eq!(
-            candidates(Field::Hero, "", "Unknown"),
-            scuffed_types::HEROES.to_vec()
-        );
+        assert_eq!(candidates(Field::Hero, "", "Unknown"), known(Field::Hero));
+        assert_eq!(candidates(Field::Hero, "lucio", ""), vec!["Lúcio"]);
         assert_eq!(candidates(Field::Hero, "wrec", ""), vec!["Wrecking Ball"]);
         assert_eq!(candidates(Field::Map, "xyz", ""), Vec::<&str>::new());
         assert_eq!(no_match(Field::Map, "xyz "), "No map called 'xyz'");
@@ -697,12 +799,12 @@ mod tests {
         let _ = update(&mut app, Msg::Move(1));
         let _ = update(&mut app, Msg::Submit);
         let p = app.games_tab.picker.clone().unwrap();
-        assert_eq!(p.picked.as_deref(), Some(scuffed_types::HEROES[1]));
+        assert_eq!(p.picked.as_deref(), Some(known(Field::Hero)[1]));
         let _ = update(&mut app, Msg::Query("zzz".into()));
         let _ = update(&mut app, Msg::Submit);
         assert_eq!(
             app.games_tab.picker.as_ref().unwrap().picked.as_deref(),
-            Some(scuffed_types::HEROES[1])
+            Some(known(Field::Hero)[1])
         );
     }
 
@@ -727,7 +829,7 @@ mod tests {
         let (_dir, mut app) = app();
         open(&mut app, Field::Map);
         assert_eq!(
-            release_line(game(&app, HELD), Field::Map),
+            release_line(game(&app, HELD), Field::Map, None, false, true),
             "Still held after saving: hero not set."
         );
         let _ = update(&mut app, Msg::Pick("Ilios".into()));
@@ -749,7 +851,7 @@ mod tests {
         let _ = update(&mut app, Msg::Save);
         open(&mut app, Field::Hero);
         assert_eq!(
-            release_line(game(&app, HELD), Field::Hero),
+            release_line(game(&app, HELD), Field::Hero, None, false, true),
             "Saving releases this game: it uploads when the server answers."
         );
         let _ = update(&mut app, Msg::Pick("Mei".into()));
@@ -760,6 +862,119 @@ mod tests {
         assert!(!g.needs_review());
         assert_eq!(crate::games_rows::mark(g, false), None);
         assert_eq!(upload(g, false, true), Upload::Waiting);
+        assert!(app.games_tab.picker.is_none());
+        // As the classic picks, the toast offers a training report.
+        assert_eq!(app.toast.as_deref(), Some("Hero saved"));
+        assert!(matches!(
+            app.toast_action,
+            Some(Message::Report(crate::report::ReportMessage::OpenGame {
+                category: Some(crate::report::GameCategory::WrongHero),
+                training: true,
+                ..
+            }))
+        ));
+    }
+
+    /// The delete confirm closes the picker, so Enter reaches Cancel; after
+    /// a delete Enter opens the next row; Enter in an open picker picks.
+    #[test]
+    fn a_picker_never_keeps_enter_or_delete_from_the_row() {
+        use crate::games_rows::Focus;
+        use crate::games_table::Msg as T;
+        let (_dir, mut app) = app();
+        open(&mut app, Field::Map);
+        table(&mut app, T::AskDelete(HELD.into()));
+        assert!(app.games_tab.picker.is_none());
+        table(&mut app, T::Enter);
+        assert!(app.confirm_delete.is_none(), "Enter pressed Cancel");
+        assert_eq!(app.games_tab.focus, Focus::DeleteButton);
+
+        open(&mut app, Field::Map);
+        table(&mut app, T::Delete(HELD.into()));
+        assert!(app.games_tab.picker.is_none());
+        let Focus::Row(next) = app.games_tab.focus.clone() else {
+            panic!("{:?}", app.games_tab.focus)
+        };
+        table(&mut app, T::Enter);
+        assert_eq!(app.expanded.as_deref(), Some(next.as_str()));
+
+        // Enter in the picker picks the highlighted name (the read's match),
+        // also with the focus off the search box.
+        let (_dir2, mut app) = super::tests::app();
+        open(&mut app, Field::Map);
+        table(&mut app, T::Enter);
+        let p = app.games_tab.picker.clone().unwrap();
+        assert_eq!(p.picked.as_deref(), Some("Ilios"));
+        table(&mut app, T::DeleteKey);
+        assert!(app.confirm_delete.is_none(), "Delete is the search box's");
+
+        // Opening Edit closes it; one left on another row is dropped by the
+        // next key, and Delete opens the confirm.
+        let _ = app.update(Message::ToggleEdit);
+        assert!(app.games_tab.picker.is_none());
+        let _ = app.update(Message::ToggleEdit);
+        open(&mut app, Field::Map);
+        app.expanded = Some(NORMAL.into());
+        table(&mut app, T::DeleteKey);
+        assert!(app.games_tab.picker.is_none());
+        assert_eq!(app.confirm_delete.as_deref(), Some(NORMAL));
+    }
+
+    /// An ended game with no result that the uploader holds for its map
+    /// or hero gets Set, even with its row marked synced unsent.
+    #[test]
+    fn a_held_game_with_no_result_gets_set() {
+        let (_dir, app) = app();
+        let mut g = game(&app, HELD).clone();
+        g.outcome = crate::model::Outcome::Unknown;
+        g.synced = true;
+        assert!(held_for(&g, Field::Map) && held_for(&g, Field::Hero));
+        g.outcome = crate::model::Outcome::Win;
+        assert!(!held_for(&g, Field::Map), "an uploaded game is not held");
+    }
+
+    /// The release line says what the game does once the pick is saved.
+    #[test]
+    fn the_release_line_follows_the_game_after_the_pick() {
+        let (_dir, app) = app();
+        let mut g = game(&app, HELD).clone();
+        g.hero = "Mei".into();
+        g.outcome = crate::model::Outcome::Win;
+        let line = |g: &Game, picked, live, sync| release_line(g, Field::Map, picked, live, sync);
+        assert_eq!(
+            line(&g, None, false, true),
+            "Saving releases this game: it uploads when the server answers."
+        );
+        assert_eq!(
+            line(&g, Some("Ilios"), false, false),
+            "Saving releases this game. It stays on this computer: no website is linked."
+        );
+        assert_eq!(
+            line(&g, Some("Ilios"), true, true),
+            "Saving releases this game: it uploads once it ends."
+        );
+        assert_eq!(
+            line(&g, Some("Arena Victoriae"), false, true),
+            "Games on this map stay on this computer: saving takes it off the Games tab."
+        );
+        g.outcome = crate::model::Outcome::Unknown;
+        assert_eq!(
+            line(&g, Some("Ilios"), false, true),
+            "Saving releases this game: it uploads once you set the result."
+        );
+    }
+
+    /// Set is hidden while Edit is open, and a stray Open keeps the form
+    /// and what was typed.
+    #[test]
+    fn set_leaves_an_open_edit_form_alone() {
+        let (_dir, mut app) = app();
+        app.expanded = Some(HELD.into());
+        let _ = app.update(Message::ToggleEdit);
+        app.edit.elims = "99".into();
+        let _ = update(&mut app, Msg::Open(HELD.into(), Field::Map));
+        assert!(app.editing);
+        assert_eq!(app.edit.elims, "99");
         assert!(app.games_tab.picker.is_none());
     }
 }
