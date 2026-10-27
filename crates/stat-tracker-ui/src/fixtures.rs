@@ -127,20 +127,25 @@ fn sample_snapshot() -> Snapshot {
     // Newest first, matching `get_all_matches` / live_snapshot.json.
     // Each session_id is one game (latest_per_game). Tonight is the local day.
     let matches = vec![
-        pm(
-            "sess-t1",
-            "Junker Queen",
-            "King's Row",
-            "Tank",
-            "victory",
-            28,
-            7,
-            9,
-            12400,
-            0,
-            18600,
-            dt(2026, 9, 2, 21, 14),
-        ),
+        {
+            let mut m = pm(
+                "sess-t1",
+                "Junker Queen",
+                "King's Row",
+                "Tank",
+                "victory",
+                28,
+                7,
+                9,
+                12400,
+                0,
+                18600,
+                dt(2026, 9, 2, 21, 14),
+            );
+            // The reader was unsure of deaths and assists.
+            m.suspect_fields = vec!["d".into(), "a".into()];
+            m
+        },
         {
             let mut m = pm(
                 "sess-t2",
@@ -197,6 +202,36 @@ fn sample_snapshot() -> Snapshot {
             ];
             m
         },
+        // The day before: a second Season 17 session, its newest game with no
+        // outcome read.
+        pm(
+            "sess-y1",
+            "Mei",
+            "Circuit Royal",
+            "Damage",
+            "",
+            12,
+            6,
+            7,
+            7300,
+            0,
+            2100,
+            dt(2026, 9, 1, 10, 12),
+        ),
+        pm(
+            "sess-y2",
+            "Lúcio",
+            "Suravasa",
+            "Support",
+            "victory",
+            9,
+            4,
+            21,
+            3900,
+            9400,
+            0,
+            dt(2026, 9, 1, 9, 44),
+        ),
         pm(
             "sess-s16-1",
             "Reinhardt",

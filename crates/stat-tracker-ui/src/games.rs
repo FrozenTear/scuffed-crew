@@ -30,8 +30,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let heroes = distinct_heroes(&option_pool);
     let maps = distinct_maps(&option_pool);
     if app.nav_style == crate::nav::NavStyle::TopTabs {
-        let filters = filter_bar(app, &heroes, &maps);
-        return crate::games_table::view(app, content_width, filters);
+        return crate::games_table::view(app, content_width, &heroes, &maps);
     }
     let shown = shown_games(app);
     let groups = group_by_session_gap(&shown, DEFAULT_SESSION_GAP);

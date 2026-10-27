@@ -76,11 +76,13 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 ///
 /// The control row is a stopgap: it is the 0.5 header row, not the spec's
 /// filter chips (Season, queues, roles, Crew, Hero, Map; "Filters (n)" at
-/// 1024), which land with the per-screen redesigns.
+/// 1024), which land with the per-screen redesigns. Games has them already.
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
-        if app.screen != Screen::Settings {
+        // Settings has none; Games draws the spec's filter chips itself
+        // (ported from #555).
+        if !matches!(app.screen, Screen::Settings | Screen::Games) {
             content = content.push(widgets::header_controls(app));
         }
         let gutter = theme::page_gutter(size.width);

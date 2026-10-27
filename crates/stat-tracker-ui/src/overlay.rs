@@ -1149,15 +1149,17 @@ mod tests {
             true,
         );
         assert_eq!(model.season_label, "Season 17");
-        assert_eq!(model.record.wins, 2);
+        // Tonight's 2-1 plus the 1 Sep Lúcio win; the undecided Mei game
+        // has no outcome to count.
+        assert_eq!(model.record.wins, 3);
         assert_eq!(model.record.losses, 1);
         assert!(
-            model.win_rate_line().contains("67%"),
+            model.win_rate_line().contains("75%"),
             "{}",
             model.win_rate_line()
         );
         assert!(
-            model.win_rate_line().contains("2-1"),
+            model.win_rate_line().contains("3-1"),
             "{}",
             model.win_rate_line()
         );

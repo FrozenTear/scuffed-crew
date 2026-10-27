@@ -1,17 +1,20 @@
 //! The 0.6 Games tab under the top tabs (variant A): session headers with a
 //! form strip and summary, then one table per session (or one flat table),
 //! with columns that fold away on narrow windows. Layout rules and labels
-//! live in [`crate::games_rows`]; this module only draws them.
+//! live in [`crate::games_rows`]; this module only draws them. The filter
+//! chips, the sortable headers and the row cells (amber E/D/A, portrait
+//! and role letter, Playing, the marks) are ported from #555.
 
-use iced::widget::{button, column, container, mouse_area, row, rule, space, text};
+use iced::widget::{button, column, container, image, mouse_area, row, rule, space, text};
 use iced::{
     Alignment, Background, Border, Color, Element, Fill, FillPortion, Length, Padding, Theme,
 };
 
 use crate::aggregate::group_by_session_gap;
 use crate::app::{Message, TrackerApp};
-use crate::games_rows::{self, Col, Grid, Grouping, TabState, Tick, Unsure, Width};
-use crate::model::{Game, Outcome, Role, game_card_in_progress, local_hm};
+use crate::games_rows::{self, Col, Grid, Grouping, Mark, TabState, Tick, Width};
+use crate::icons::{self, Icon};
+use crate::model::{Game, Outcome, Role, RoleFilter, Screen, game_card_in_progress, local_hm};
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META, TEXT,
     TEXT_2, TEXT_3, WARN,
@@ -22,7 +25,10 @@ use crate::widgets;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Msg {
     SetGrouping(Grouping),
-    FlipTimeSort,
+    /// A column header: sort by it, or flip its direction.
+    SortBy(Col),
+    /// The role chip: one role, or all (`None`).
+    PickRole(Option<Role>),
     ToggleCompact,
     ToggleFilters,
 }
@@ -31,7 +37,10 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
     let s = &mut app.games_tab;
     match msg {
         Msg::SetGrouping(g) => s.grouping = g,
-        Msg::FlipTimeSort => s.sort = s.sort.flipped(),
+        Msg::SortBy(col) => s.sort = s.sort.clicked(col),
+        Msg::PickRole(role) => {
+            app.roles = role.map_or_else(RoleFilter::default, |r| RoleFilter::default().toggle(r));
+        }
         Msg::ToggleCompact => s.compact = !s.compact,
         Msg::ToggleFilters => s.filters_open = !s.filters_open,
     }
@@ -42,43 +51,31 @@ fn games_msg(m: Msg) -> Message {
     Message::Games(m)
 }
 
-/// Hero, map and outcome filters that are on.
-fn active_filters(app: &TrackerApp) -> usize {
-    usize::from(app.filter_hero.is_some())
-        + usize::from(app.filter_map.is_some())
-        + usize::from(app.filter_outcome.is_some())
-}
-
 pub fn view<'a>(
     app: &'a TrackerApp,
     content_width: f32,
-    filters: Element<'a, Message>,
+    heroes: &[String],
+    maps: &[String],
 ) -> Element<'a, Message> {
     let state = app.games_tab;
     let grid = Grid::for_width(content_width);
-    let shown = crate::games::shown_games(app);
-    let shown = games_rows::sorted(&shown, state.sort);
+    let mut shown = crate::games::shown_games(app);
+    games_rows::sort_games(&mut shown, state.sort);
 
     let mut col = column![].spacing(16).width(Fill);
     col = col.push(controls(app, state));
-    if state.filters_open {
-        col = col.push(filters);
-    }
-    if app.needs_look_filter {
-        col = col.push(row![widgets::filter_chip(
-            crate::games::NEEDS_LOOK_FILTER_LABEL.into(),
-            true,
-            Message::Nav(crate::nav::Msg::ClearNeedsLook),
-        )]);
+    let chips = crate::filter_chips::bar(app, heroes, maps, state.filters_open);
+    if state.filters_open || crate::filter_chips::active_count(app) > 0 {
+        col = col.push(chips);
     }
     if app.games.iter().any(|game| game.upload_reject.is_some()) {
         col = col.push(crate::games::retry_rejected_uploads_button());
     }
     if shown.is_empty() {
         let copy = if app.games.is_empty() {
-            "No games yet. Games show here after the tracker reads a scoreboard."
+            games_rows::EMPTY_NONE
         } else {
-            "No games match these filters"
+            games_rows::EMPTY_FILTERED
         };
         col = col.push(widgets::empty_surface(copy));
         return col.into();
@@ -92,14 +89,14 @@ pub fn view<'a>(
             newest.sort_by(|a, b| b.played_at.cmp(&a.played_at));
             let gap = chrono::TimeDelta::seconds(gap_secs.max(1) as i64);
             let mut groups = group_by_session_gap(&newest, gap);
-            if state.sort == games_rows::TimeSort::OldestFirst {
+            if state.sort.oldest_first() {
                 groups.reverse();
             }
             for group in groups {
                 let head = games_rows::session_head(&group);
                 col = col.push(session_header(head, games_rows::form_ticks(&group.games)));
-                let refs: Vec<&Game> = group.games.iter().collect();
-                let ordered = games_rows::sorted(&refs, state.sort);
+                let mut ordered: Vec<&Game> = group.games.iter().collect();
+                games_rows::sort_games(&mut ordered, state.sort);
                 col = col.push(table(app, &ordered, grid, state));
             }
         }
@@ -117,9 +114,11 @@ pub fn view<'a>(
 
 fn controls(app: &TrackerApp, state: TabState) -> Element<'static, Message> {
     let filters = button(
-        text(games_rows::filters_label(active_filters(app)))
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD),
+        text(games_rows::filters_label(
+            crate::filter_chips::active_count(app),
+        ))
+        .size(SIZE_META)
+        .font(FONT_SEMIBOLD),
     )
     .padding(Padding::from([6, 14]))
     .style(theme::chip(state.filters_open))
@@ -206,7 +205,8 @@ fn table<'a>(
     let mut body = column![header_row(&cols, state)].width(Fill);
     for g in games {
         body = body.push(line());
-        body = body.push(game_row(g, &cols, state));
+        let in_progress = game_card_in_progress(&g.session_id, g.outcome, live);
+        body = body.push(game_row(g, &cols, state, in_progress));
         if app.expanded.as_deref() == Some(g.session_id.as_str()) {
             let confirm = app.confirm_delete.as_deref() == Some(g.session_id.as_str());
             let in_progress = game_card_in_progress(&g.session_id, g.outcome, live);
@@ -247,22 +247,29 @@ fn header_row(cols: &[(Col, Width)], state: TabState) -> Element<'static, Messag
         .height(games_rows::HEADER_H)
         .align_y(Alignment::Center);
     for &(c, w) in cols {
-        let cell: Element<'static, Message> = match c {
-            Col::Time => button(
-                text(format!("TIME {}", state.sort.arrow()))
+        let cell: Element<'static, Message> = if c.sortable() {
+            let active = state.sort.col == c;
+            let label = if active {
+                format!("{} {}", c.label(), state.sort.arrow())
+            } else {
+                c.label().to_string()
+            };
+            button(
+                text(label)
                     .size(SIZE_LABEL)
                     .font(FONT_BOLD)
-                    .color(ACCENT),
+                    .color(if active { ACCENT } else { TEXT_3 }),
             )
             .padding(0)
             .style(|_: &Theme, _| button::Style::default())
-            .on_press(games_msg(Msg::FlipTimeSort))
-            .into(),
-            _ => text(c.label())
+            .on_press(games_msg(Msg::SortBy(c)))
+            .into()
+        } else {
+            text(c.label())
                 .size(SIZE_LABEL)
                 .font(FONT_BOLD)
                 .color(TEXT_3)
-                .into(),
+                .into()
         };
         r = r.push(container(cell).width(cell_len(w)));
     }
@@ -283,9 +290,14 @@ fn role_letter(role: Role) -> &'static str {
     }
 }
 
-fn game_row(g: &Game, cols: &[(Col, Width)], state: TabState) -> Element<'static, Message> {
+fn game_row(
+    g: &Game,
+    cols: &[(Col, Width)],
+    state: TabState,
+    in_progress: bool,
+) -> Element<'static, Message> {
     let h = state.row_height();
-    let undecided = g.outcome == Outcome::Unknown;
+    let undecided = g.outcome == Outcome::Unknown && !in_progress;
     let main = if undecided { TEXT_3 } else { TEXT };
     let mut r = row![].spacing(12).height(h).align_y(Alignment::Center);
     for &(c, w) in cols {
@@ -293,13 +305,13 @@ fn game_row(g: &Game, cols: &[(Col, Width)], state: TabState) -> Element<'static
             Col::Stripe => container(space())
                 .width(4)
                 .height(h - 16.0)
-                .style(theme::stripe(g.outcome))
+                .style(theme::stripe_color(if in_progress {
+                    ACCENT
+                } else {
+                    theme::outcome_color(g.outcome)
+                }))
                 .into(),
-            Col::Result => text(games_rows::result_label(g.outcome))
-                .size(SIZE_META)
-                .font(if undecided { FONT_SEMIBOLD } else { FONT_BOLD })
-                .color(theme::outcome_color(g.outcome))
-                .into(),
+            Col::Result => result_cell(g, in_progress),
             Col::Map => {
                 let name = if g.map_name.trim().is_empty() {
                     "No map".to_string()
@@ -314,38 +326,21 @@ fn game_row(g: &Game, cols: &[(Col, Width)], state: TabState) -> Element<'static
                 }
                 m.into()
             }
-            Col::Hero => row![
-                text(g.display_hero()).size(SIZE_META).color(TEXT_2),
-                text(role_letter(g.role))
-                    .size(SIZE_LABEL)
-                    .font(FONT_BOLD)
-                    .color(theme::role_color(g.role)),
-            ]
-            .spacing(6)
-            .align_y(Alignment::Center)
-            .into(),
+            Col::Hero => hero_cell(g),
             Col::Eda => text(games_rows::eda(g))
                 .size(SIZE_META)
-                .color(TEXT_2)
+                .color(if games_rows::eda_unsure(g) {
+                    WARN
+                } else {
+                    TEXT_2
+                })
                 .into(),
             Col::Rank | Col::Length | Col::Crew => text("-").size(SIZE_META).color(TEXT_3).into(),
             Col::Time => text(local_hm(g.played_at))
                 .size(SIZE_META)
                 .color(TEXT_2)
                 .into(),
-            Col::Unsure => match games_rows::unsure(g) {
-                Some(u) => {
-                    let chip = small_chip_owned(u.label(), WARN, WARN);
-                    if u == Unsure::NoOutcome {
-                        mouse_area(chip)
-                            .on_press(Message::ToggleGame(g.session_id.clone()))
-                            .into()
-                    } else {
-                        chip
-                    }
-                }
-                None => space().into(),
-            },
+            Col::Unsure => marks_cell(g, in_progress),
         };
         r = r.push(container(cell).width(cell_len(w)).clip(true));
     }
@@ -354,6 +349,97 @@ fn game_row(g: &Game, cols: &[(Col, Width)], state: TabState) -> Element<'static
         ..Padding::ZERO
     }))
     .on_press(Message::ToggleGame(g.session_id.clone()))
+    .into()
+}
+
+/// WIN, LOSS, DRAW, Undecided, or "Playing" in the accent while the game is
+/// still on.
+fn result_cell(g: &Game, in_progress: bool) -> Element<'static, Message> {
+    let color = if in_progress {
+        ACCENT
+    } else {
+        theme::outcome_color(g.outcome)
+    };
+    let undecided = g.outcome == Outcome::Unknown && !in_progress;
+    text(games_rows::result_text(g.outcome, in_progress))
+        .size(SIZE_META)
+        .font(if undecided { FONT_SEMIBOLD } else { FONT_BOLD })
+        .color(color)
+        .into()
+}
+
+/// A grey silhouette for the portrait (no Blizzard art is shipped), the
+/// hero, and the role's letter in its colour.
+fn hero_cell(g: &Game) -> Element<'static, Message> {
+    let portrait = container(
+        image(icons::handle(Icon::Tab(Screen::Heroes, false)))
+            .width(14)
+            .height(14),
+    )
+    .width(20)
+    .height(20)
+    .center(20)
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(BORDER)),
+        border: Border {
+            radius: 5.0.into(),
+            ..Border::default()
+        },
+        ..container::Style::default()
+    });
+    row![
+        portrait,
+        text(g.display_hero()).size(SIZE_META).color(TEXT_2),
+        text(role_letter(g.role))
+            .size(SIZE_LABEL)
+            .font(FONT_BOLD)
+            .color(theme::role_color(g.role)),
+    ]
+    .spacing(6)
+    .align_y(Alignment::Center)
+    .into()
+}
+
+/// The row's marks: amber warning chips, then the red upload chip. The
+/// no-outcome chip opens the game to set one.
+fn marks_cell(g: &Game, in_progress: bool) -> Element<'static, Message> {
+    let mut r = row![].spacing(6).align_y(Alignment::Center);
+    for mark in games_rows::marks(g, in_progress) {
+        let chip = if mark.is_warning() {
+            warn_chip(mark.label())
+        } else {
+            small_chip_owned(mark.label(), theme::DANGER, theme::DANGER)
+        };
+        r = r.push(if mark == Mark::NoOutcome {
+            mouse_area(chip)
+                .on_press(Message::ToggleGame(g.session_id.clone()))
+                .into()
+        } else {
+            chip
+        });
+    }
+    r.into()
+}
+
+/// An amber outline chip with the warning sign.
+fn warn_chip(label: String) -> Element<'static, Message> {
+    container(
+        row![
+            image(icons::handle(Icon::Warn)).width(11).height(11),
+            text(label).size(SIZE_LABEL).font(FONT_SEMIBOLD).color(WARN),
+        ]
+        .spacing(4)
+        .align_y(Alignment::Center),
+    )
+    .padding(Padding::from([1, 8]))
+    .style(move |_: &Theme| container::Style {
+        border: Border {
+            color: WARN,
+            width: 1.0,
+            radius: theme::RADIUS_CHIP.into(),
+        },
+        ..container::Style::default()
+    })
     .into()
 }
 

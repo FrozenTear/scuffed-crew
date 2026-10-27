@@ -29,6 +29,7 @@ pub mod companion_gate;
 #[cfg(test)]
 mod copy_rules;
 pub mod daemon;
+mod filter_chips;
 pub mod fixtures;
 mod form_widgets;
 pub mod games;

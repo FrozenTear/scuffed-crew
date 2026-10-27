@@ -1,7 +1,10 @@
 //! Pure layout and labels for the 0.6 Games table (variant A, top tabs):
 //! which columns fit, session headers and their summary line, the form
-//! strip, result and unsure labels, and the row order. No iced types here,
-//! so every rule has a unit test; [`crate::games_table`] draws it.
+//! strip, result labels and row marks, and the sort (ported from #555).
+//! No iced types here, so every rule has a unit test;
+//! [`crate::games_table`] draws it.
+
+use std::cmp::Ordering;
 
 use chrono::{DateTime, Local, TimeZone, Timelike, Utc};
 
@@ -84,6 +87,20 @@ impl Col {
             Col::Crew => "CREW",
         }
     }
+
+    /// Columns whose header sorts. Rank, Length and Crew hold no data yet.
+    pub fn sortable(self) -> bool {
+        matches!(
+            self,
+            Col::Result | Col::Map | Col::Hero | Col::Eda | Col::Time
+        )
+    }
+
+    /// The direction a first click on this header sorts: newest, most
+    /// eliminations and wins first; names A to Z.
+    pub fn first_desc(self) -> bool {
+        matches!(self, Col::Time | Col::Eda | Col::Result)
+    }
 }
 
 /// The columns at `grid` with their widths (spec r1.1 `A-games.html`).
@@ -135,27 +152,46 @@ pub enum Grouping {
     Flat,
 }
 
-/// Order of rows by time. Newest first is the default (`TIME ▼`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum TimeSort {
-    #[default]
-    NewestFirst,
-    OldestFirst,
+/// The sort in effect: a column and its direction. `TIME ▼` by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Sort {
+    pub col: Col,
+    pub desc: bool,
 }
 
-impl TimeSort {
-    pub fn flipped(self) -> Self {
-        match self {
-            TimeSort::NewestFirst => TimeSort::OldestFirst,
-            TimeSort::OldestFirst => TimeSort::NewestFirst,
+impl Default for Sort {
+    fn default() -> Self {
+        Self {
+            col: Col::Time,
+            desc: true,
+        }
+    }
+}
+
+impl Sort {
+    /// A click on `col`'s header: the same column flips, another starts in
+    /// its own first direction.
+    pub fn clicked(self, col: Col) -> Self {
+        if self.col == col {
+            Self {
+                col,
+                desc: !self.desc,
+            }
+        } else {
+            Self {
+                col,
+                desc: col.first_desc(),
+            }
         }
     }
 
     pub fn arrow(self) -> &'static str {
-        match self {
-            TimeSort::NewestFirst => "▼",
-            TimeSort::OldestFirst => "▲",
-        }
+        if self.desc { "▼" } else { "▲" }
+    }
+
+    /// Sessions list oldest first only when the rows run oldest first.
+    pub fn oldest_first(self) -> bool {
+        self.col == Col::Time && !self.desc
     }
 }
 
@@ -163,7 +199,7 @@ impl TimeSort {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TabState {
     pub grouping: Grouping,
-    pub sort: TimeSort,
+    pub sort: Sort,
     pub compact: bool,
     pub filters_open: bool,
 }
@@ -174,14 +210,92 @@ impl TabState {
     }
 }
 
-/// `games` (newest first, as the store lists them) in `sort` order.
-pub fn sorted<'a>(games: &[&'a Game], sort: TimeSort) -> Vec<&'a Game> {
-    let mut out = games.to_vec();
-    match sort {
-        TimeSort::NewestFirst => out.sort_by(|a, b| b.played_at.cmp(&a.played_at)),
-        TimeSort::OldestFirst => out.sort_by(|a, b| a.played_at.cmp(&b.played_at)),
+/// A row's sort value. `None` is unsure or empty, and always sorts last.
+#[derive(Debug, Clone, PartialEq, PartialOrd)]
+enum Key {
+    Num(i64),
+    Text(String),
+}
+
+fn key(g: &Game, col: Col) -> Option<Key> {
+    match col {
+        Col::Result => {
+            if unsure_now(g, "result") {
+                return None;
+            }
+            match g.outcome {
+                Outcome::Win => Some(Key::Num(2)),
+                Outcome::Draw => Some(Key::Num(1)),
+                Outcome::Loss => Some(Key::Num(0)),
+                Outcome::Unknown => None,
+            }
+        }
+        Col::Map => {
+            let map = g.map_name.trim();
+            (!map.is_empty() && !unsure_now(g, "map")).then(|| Key::Text(map.to_lowercase()))
+        }
+        Col::Hero => {
+            let hero = g.hero.trim();
+            (!hero.is_empty() && !hero.eq_ignore_ascii_case("unknown") && !unsure_now(g, "hero"))
+                .then(|| Key::Text(hero.to_lowercase()))
+        }
+        Col::Eda => (!eda_unsure(g)).then_some(Key::Num(i64::from(g.elims))),
+        Col::Time => Some(Key::Num(g.played_at.timestamp())),
+        Col::Stripe | Col::Rank | Col::Length | Col::Crew | Col::Unsure => None,
     }
-    out
+}
+
+/// Sort `games` in place. Unsure and empty values go last in both
+/// directions; ties keep newest first.
+pub fn sort_games(games: &mut [&Game], sort: Sort) {
+    games.sort_by(|a, b| {
+        let order = match (key(a, sort.col), key(b, sort.col)) {
+            (Some(x), Some(y)) => {
+                let o = x.partial_cmp(&y).unwrap_or(Ordering::Equal);
+                if sort.desc { o.reverse() } else { o }
+            }
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        };
+        order.then_with(|| b.played_at.cmp(&a.played_at))
+    });
+}
+
+/// The tracker's edit name for a flat suspect name (`e` is `elims`).
+fn edit_name(flat: &str) -> &str {
+    match flat {
+        "e" => "elims",
+        "d" => "deaths",
+        "a" => "assists",
+        "dmg" => "damage",
+        "h" => "healing",
+        "mit" => "mitigation",
+        "map" | "mode" => "map_name",
+        "result" => "outcome",
+        other => other,
+    }
+}
+
+/// A field the reader was unsure of (flat name, `e` or `dmg`) that no hand
+/// edit has fixed since.
+pub fn unsure_now(g: &Game, field: &str) -> bool {
+    g.field_unsure(field) && !g.edited_fields.iter().any(|e| e == edit_name(field))
+}
+
+/// Elims, deaths or assists still unsure: E/D/A reads amber.
+pub fn eda_unsure(g: &Game) -> bool {
+    ["e", "d", "a"].iter().any(|f| unsure_now(g, f))
+}
+
+/// "2 stats unsure": the fields still unsure. `None` when there are none.
+pub fn unsure_label(g: &Game) -> Option<String> {
+    let n = g.suspect_fields.iter().filter(|f| unsure_now(g, f)).count();
+    match n {
+        0 => None,
+        1 => Some("1 stat unsure".to_string()),
+        n => Some(format!("{n} stats unsure")),
+    }
 }
 
 /// Result column text.
@@ -199,32 +313,60 @@ pub fn eda(game: &Game) -> String {
     format!("{}/{}/{}", game.elims, game.deaths, game.assists)
 }
 
-/// What the unsure chip at the end of a row says.
+/// A mark at the end of a row.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Unsure {
+pub enum Mark {
     /// No outcome read: the chip opens the game to set one.
     NoOutcome,
-    /// This many stats the reader was not sure of.
-    Stats(usize),
+    /// A map or hero is missing.
+    NeedsLook,
+    /// "2 stats unsure".
+    Unsure(String),
+    /// The site refused the upload.
+    UploadRejected,
 }
 
-impl Unsure {
+impl Mark {
     pub fn label(&self) -> String {
         match self {
-            Unsure::NoOutcome => "⚠ No outcome · Set".into(),
-            Unsure::Stats(1) => "⚠ 1 stat unsure".into(),
-            Unsure::Stats(n) => format!("⚠ {n} stats unsure"),
+            Mark::NoOutcome => "No outcome · Set".into(),
+            Mark::NeedsLook => "Needs a look".into(),
+            Mark::Unsure(label) => label.clone(),
+            Mark::UploadRejected => crate::model::UPLOAD_REJECTED_LABEL.into(),
         }
+    }
+
+    /// Amber with the warning sign; the upload mark is red.
+    pub fn is_warning(&self) -> bool {
+        !matches!(self, Mark::UploadRejected)
     }
 }
 
-/// The chip for `game`, if any. A missing outcome wins over unsure stats.
-pub fn unsure(game: &Game) -> Option<Unsure> {
-    if game.outcome == Outcome::Unknown {
-        return Some(Unsure::NoOutcome);
+/// The row's marks: what still needs a look, then an upload the website
+/// refused. A game in progress has no outcome yet, so no outcome mark.
+pub fn marks(g: &Game, in_progress: bool) -> Vec<Mark> {
+    let mut out = Vec::new();
+    if g.outcome == Outcome::Unknown && !in_progress {
+        out.push(Mark::NoOutcome);
+    } else if g.needs_review() {
+        out.push(Mark::NeedsLook);
     }
-    let n = game.suspect_fields.len();
-    (n > 0).then_some(Unsure::Stats(n))
+    if let Some(label) = unsure_label(g) {
+        out.push(Mark::Unsure(label));
+    }
+    if g.upload_reject.is_some() {
+        out.push(Mark::UploadRejected);
+    }
+    out
+}
+
+/// Result column text; a game still being played reads "Playing".
+pub fn result_text(outcome: Outcome, in_progress: bool) -> &'static str {
+    if in_progress {
+        "Playing"
+    } else {
+        result_label(outcome)
+    }
 }
 
 /// The map's mode from the stat-tracker catalog (Suravasa is Flashpoint).
@@ -350,23 +492,22 @@ pub fn session_head(group: &SessionGroup) -> SessionHead {
     session_head_in(group, &Local)
 }
 
-/// "Sessions split after 3 hours without a game." from the session window.
-pub fn split_note(gap_secs: u64) -> String {
-    let mins = gap_secs / 60;
-    let span = if mins >= 60 && mins % 60 == 0 {
-        let h = mins / 60;
-        if h == 1 {
-            "1 hour".to_string()
-        } else {
-            format!("{h} hours")
-        }
-    } else if mins == 1 {
-        "1 minute".to_string()
-    } else {
-        format!("{mins} minutes")
-    };
+/// Under the last table (spec p2), after the split rule.
+const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Rank, queue, length and crew are not recorded yet.";
+/// No games stored at all.
+pub const EMPTY_NONE: &str = "No games yet. A game shows here once the tracker saves it.";
+/// Games stored, none left by the filters.
+pub const EMPTY_FILTERED: &str = "No games match these filters.";
+
+/// "Sessions split after 3 hours without a game." from the Session window
+/// setting, which the grouping follows (ported from #555).
+pub fn split_note(window_secs: u64) -> String {
+    if window_secs == 0 {
+        return format!("Session window is off, so each game is its own session. {SORT_NOTE}");
+    }
     format!(
-        "Sessions split after {span} without a game. Rank, queue, length and crew are not recorded yet."
+        "Sessions split after {} without a game. {SORT_NOTE}",
+        crate::settings_model::SessionWindow(window_secs)
     )
 }
 
@@ -457,15 +598,50 @@ mod tests {
     }
 
     #[test]
-    fn unsure_chip_labels() {
-        let g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["elims", "deaths"]);
-        assert_eq!(unsure(&g).unwrap().label(), "⚠ 2 stats unsure");
-        let g = game(Outcome::Loss, "2026-10-18T22:40:00Z", &["elims"]);
-        assert_eq!(unsure(&g).unwrap().label(), "⚠ 1 stat unsure");
-        let g = game(Outcome::Unknown, "2026-10-18T22:40:00Z", &["elims"]);
-        assert_eq!(unsure(&g).unwrap().label(), "⚠ No outcome · Set");
-        let g = game(Outcome::Win, "2026-10-18T22:40:00Z", &[]);
-        assert_eq!(unsure(&g), None);
+    fn row_marks() {
+        let g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["e", "d"]);
+        assert_eq!(marks(&g, false), [Mark::Unsure("2 stats unsure".into())]);
+        let g = game(Outcome::Loss, "2026-10-18T22:40:00Z", &["e"]);
+        assert_eq!(marks(&g, false)[0].label(), "1 stat unsure");
+        let g = game(Outcome::Unknown, "2026-10-18T22:40:00Z", &["e"]);
+        assert_eq!(
+            marks(&g, false),
+            [Mark::NoOutcome, Mark::Unsure("1 stat unsure".into())]
+        );
+        assert_eq!(Mark::NoOutcome.label(), "No outcome · Set");
+        // Still being played: no outcome yet is not a mark.
+        assert_eq!(marks(&g, true), [Mark::Unsure("1 stat unsure".into())]);
+        assert_eq!(result_text(Outcome::Unknown, true), "Playing");
+        let mut g = game(Outcome::Win, "2026-10-18T22:40:00Z", &[]);
+        assert!(marks(&g, false).is_empty());
+        g.map_name.clear();
+        assert_eq!(marks(&g, false), [Mark::NeedsLook]);
+        g.map_name = "Suravasa".into();
+        g.upload_reject = Some("bad".into());
+        assert_eq!(marks(&g, false), [Mark::UploadRejected]);
+        assert!(!Mark::UploadRejected.is_warning());
+    }
+
+    /// Ported from #555; the store's flat names (`dmg`, `h`) against the
+    /// edit names (`damage`, `healing`).
+    #[test]
+    fn unsure_count_skips_fixed_fields() {
+        let mut g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["dmg", "h"]);
+        assert_eq!(unsure_label(&g).as_deref(), Some("2 stats unsure"));
+        g.edited_fields = vec!["damage".into()];
+        assert_eq!(unsure_label(&g).as_deref(), Some("1 stat unsure"));
+        g.edited_fields.push("healing".into());
+        assert_eq!(unsure_label(&g), None);
+    }
+
+    #[test]
+    fn eda_reads_amber_while_e_d_or_a_is_unsure() {
+        let mut g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["a"]);
+        assert!(eda_unsure(&g));
+        g.edited_fields = vec!["assists".into()];
+        assert!(!eda_unsure(&g));
+        let g = game(Outcome::Win, "2026-10-18T22:40:00Z", &["dmg"]);
+        assert!(!eda_unsure(&g));
     }
 
     #[test]
@@ -481,7 +657,9 @@ mod tests {
         assert_eq!(mode_chip("Suravasa"), Some("Flashpoint"));
         // Spec r1.1: Circuit Royal's row shows the Escort chip.
         assert_eq!(mode_chip("Circuit Royal"), Some("Escort"));
+        assert_eq!(mode_chip("King's Row"), Some("Hybrid"));
         assert_eq!(mode_chip(""), None);
+        assert_eq!(mode_chip("Not A Map"), None);
     }
 
     #[test]
@@ -543,19 +721,99 @@ mod tests {
         );
     }
 
+    fn ids(games: &[&Game]) -> Vec<String> {
+        games.iter().map(|g| g.session_id.clone()).collect()
+    }
+
     #[test]
-    fn time_sort_flips_order() {
-        let games = [
-            game(Outcome::Win, "2026-10-18T00:14:00Z", &[]),
-            game(Outcome::Loss, "2026-10-17T22:33:00Z", &[]),
-        ];
-        let refs: Vec<&Game> = games.iter().collect();
-        let newest = sorted(&refs, TimeSort::NewestFirst);
-        assert_eq!(newest[0].outcome, Outcome::Win);
-        let oldest = sorted(&refs, TimeSort::OldestFirst);
-        assert_eq!(oldest[0].outcome, Outcome::Loss);
-        assert_eq!(TimeSort::NewestFirst.flipped(), TimeSort::OldestFirst);
-        assert_eq!(TimeSort::NewestFirst.arrow(), "▼");
+    fn time_sorts_newest_first_by_default() {
+        let a = game(Outcome::Win, "2026-10-18T22:01:00Z", &[]);
+        let b = game(Outcome::Loss, "2026-10-18T22:03:00Z", &[]);
+        let c = game(Outcome::Win, "2026-10-18T22:02:00Z", &[]);
+        let mut rows = vec![&a, &b, &c];
+        sort_games(&mut rows, Sort::default());
+        assert_eq!(ids(&rows), [&b, &c, &a].map(|g| g.session_id.clone()));
+        sort_games(&mut rows, Sort::default().clicked(Col::Time));
+        assert_eq!(ids(&rows), [&a, &c, &b].map(|g| g.session_id.clone()));
+        assert_eq!(Sort::default().arrow(), "▼");
+        assert!(Sort::default().clicked(Col::Time).oldest_first());
+    }
+
+    /// Ported from #555.
+    #[test]
+    fn unsure_and_empty_values_sort_last_both_ways() {
+        let with = |at: &str, outcome, elims, suspect: &[&str]| {
+            let mut g = game(outcome, at, suspect);
+            g.elims = elims;
+            g
+        };
+        let a = with("2026-10-18T22:01:00Z", Outcome::Win, 30, &[]);
+        let mut b = with("2026-10-18T22:02:00Z", Outcome::Win, 40, &["e"]);
+        let c = with("2026-10-18T22:03:00Z", Outcome::Win, 10, &[]);
+        let undecided = with("2026-10-18T22:04:00Z", Outcome::Unknown, 5, &[]);
+        for desc in [true, false] {
+            let mut rows = vec![&a, &b, &c];
+            sort_games(
+                &mut rows,
+                Sort {
+                    col: Col::Eda,
+                    desc,
+                },
+            );
+            assert_eq!(rows.last().unwrap().session_id, b.session_id, "desc {desc}");
+            let mut rows = vec![&undecided, &a, &b];
+            sort_games(
+                &mut rows,
+                Sort {
+                    col: Col::Result,
+                    desc,
+                },
+            );
+            assert_eq!(
+                rows.last().unwrap().session_id,
+                undecided.session_id,
+                "desc {desc}"
+            );
+        }
+        // A hand edit settles the unsure value.
+        b.edited_fields = vec!["elims".into()];
+        let mut rows = vec![&a, &b, &c];
+        sort_games(
+            &mut rows,
+            Sort {
+                col: Col::Eda,
+                desc: true,
+            },
+        );
+        assert_eq!(ids(&rows), [&b, &a, &c].map(|g| g.session_id.clone()));
+    }
+
+    #[test]
+    fn a_header_click_flips_or_starts_in_the_columns_own_direction() {
+        let s = Sort::default().clicked(Col::Time);
+        assert_eq!(
+            s,
+            Sort {
+                col: Col::Time,
+                desc: false
+            }
+        );
+        assert_eq!(
+            s.clicked(Col::Map),
+            Sort {
+                col: Col::Map,
+                desc: false
+            }
+        );
+        assert_eq!(
+            s.clicked(Col::Eda),
+            Sort {
+                col: Col::Eda,
+                desc: true
+            }
+        );
+        assert!(!Col::Rank.sortable() && !Col::Crew.sortable());
+        assert!(Col::Hero.sortable());
     }
 
     #[test]
@@ -569,10 +827,18 @@ mod tests {
 
     #[test]
     fn split_note_and_filters_label() {
-        assert!(split_note(10800).starts_with("Sessions split after 3 hours without a game."));
-        assert!(split_note(1800).starts_with("Sessions split after 30 minutes"));
+        assert!(split_note(10_800).starts_with("Sessions split after 3 hours without a game."));
+        assert!(split_note(1800).contains("30 min"));
         assert!(split_note(3600).starts_with("Sessions split after 1 hour "));
+        assert!(split_note(0).contains("each game is its own session"));
+        assert!(split_note(0).contains("unsure and empty values always sort last"));
         assert_eq!(filters_label(0), "Filters ▾");
         assert_eq!(filters_label(1), "Filters (1) ▾");
+    }
+
+    #[test]
+    fn empty_states() {
+        assert!(EMPTY_NONE.starts_with("No games yet."));
+        assert_eq!(EMPTY_FILTERED, "No games match these filters.");
     }
 }
