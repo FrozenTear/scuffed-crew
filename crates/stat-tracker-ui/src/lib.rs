@@ -71,6 +71,7 @@ mod settings_rows;
 pub mod settings_save;
 pub mod settings_update;
 pub mod setup_guide;
+mod small_sample;
 pub mod snapshot;
 mod stat_tiles;
 pub mod tab_bits;
@@ -83,7 +84,6 @@ mod update_check;
 mod what_leaves;
 pub mod widgets;
 mod winrate_bar;
-pub mod wr_bar;
 
 pub use aggregate::{Aggregates, SeasonWindow, aggregate};
 pub use cli::{Cli, FixtureKind};

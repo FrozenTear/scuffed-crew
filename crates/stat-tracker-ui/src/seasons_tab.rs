@@ -20,12 +20,13 @@ use scuffed_types::Season;
 use crate::aggregate::{GameFilter, Record, SeasonWindow, filter_games};
 use crate::app::{Message, TrackerApp};
 use crate::model::{Game, Outcome, RoleFilter, game_card_in_progress};
+use crate::small_sample::{RATE_MIN, Sample, TOO_FEW, rate, sample};
 use crate::tab_bits;
+use crate::theme::SURFACE_2;
 use crate::theme::{
     ACCENT, BG, BORDER, DANGER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, OK,
     SIZE_BODY, SIZE_LABEL, SIZE_META, TEXT, TEXT_2, TEXT_3, WARN,
 };
-use crate::wr_bar::{self, SURFACE_2, TOO_FEW};
 
 /// Decided games the form tile looks back over.
 pub const LAST_N: usize = 20;
@@ -40,6 +41,7 @@ pub struct SeasonLine {
     pub is_current: bool,
     pub record: Record,
     pub pct: Option<u32>,
+    pub sample: Sample,
 }
 
 /// The form tile: the last up to [`LAST_N`] decided games.
@@ -130,13 +132,14 @@ fn line(
         name,
         dates,
         is_current: current,
-        pct: wr_bar::shown_pct(&record),
+        pct: rate(&record).map(|p| p as u32),
+        sample: sample(&record),
         record,
     }
 }
 
 /// The form over the newest decided games in `games`, if there are at
-/// least [`wr_bar::MIN_GAMES`] of them.
+/// least [`RATE_MIN`] of them.
 pub fn form(games: &[&Game], season_pct: Option<u32>) -> Option<Form> {
     let mut decided: Vec<&Game> = games
         .iter()
@@ -145,7 +148,7 @@ pub fn form(games: &[&Game], season_pct: Option<u32>) -> Option<Form> {
         .collect();
     decided.sort_by_key(|g| std::cmp::Reverse(g.played_at));
     decided.truncate(LAST_N);
-    if decided.len() < wr_bar::MIN_GAMES {
+    if decided.len() < RATE_MIN {
         return None;
     }
     let wins = decided.iter().filter(|g| g.outcome == Outcome::Win).count();
@@ -208,7 +211,7 @@ pub fn needs_lines(games: &[Game], seasons: &[Season], live: Option<&str>) -> Ve
 }
 
 /// The whole page's numbers. Role-filtered except Needs a look, which is
-/// the top bar's count.
+/// the top bar's count. The open game (`live`) waits for its result.
 pub fn model(
     games: &[Game],
     seasons: &[Season],
@@ -217,7 +220,7 @@ pub fn model(
     now: DateTime<Utc>,
 ) -> Model {
     let base = GameFilter::from_header(None, roles);
-    let all = filter_games(games, &base);
+    let all = crate::tab_bits::settled(filter_games(games, &base), live);
     let mut ordered: Vec<&Season> = seasons.iter().collect();
     ordered.sort_by_key(|s| std::cmp::Reverse(s.starts_at));
 
@@ -313,7 +316,7 @@ struct Cols {
 
 fn cols(width: f32) -> Cols {
     let m = crate::maps_tab::cols(width);
-    let wide = m.rail == Some(320.0);
+    let wide = crate::maps_tab::wide(width);
     Cols {
         dates: if wide { 136.0 } else { 128.0 },
         games: if wide { 64.0 } else { 56.0 },
@@ -322,7 +325,7 @@ fn cols(width: f32) -> Cols {
         review: if wide { 184.0 } else { 160.0 },
         rail: m.rail,
         gap: m.gap,
-        narrow: m.rail.is_none(),
+        narrow: !crate::maps_tab::has_rail(width),
     }
 }
 
@@ -330,7 +333,7 @@ const PCT_W: f32 = 48.0;
 
 /// The role chips and the Companion toggle: the header row without the
 /// season switch, since this page lists every season. Swapped for the
-/// shared filter chips (#556) when they land.
+/// shared filter chips when they are in.
 pub fn filter_row(app: &TrackerApp) -> Element<'_, Message> {
     row![
         crate::widgets::role_chips(app.roles),
@@ -352,6 +355,26 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     );
     let c = cols(width);
     let mut page = Column::new().spacing(24).width(Fill);
+    if tab_bits::loading(app) {
+        return page
+            .push(tab_bits::card(
+                column![
+                    text(tab_bits::LOADING)
+                        .size(SIZE_BODY)
+                        .font(FONT_BOLD)
+                        .color(TEXT),
+                    text(tab_bits::LOADING_LINE)
+                        .size(12)
+                        .font(FONT_MEDIUM)
+                        .color(TEXT_2),
+                ]
+                .spacing(2)
+                .into(),
+                false,
+                16.0,
+            ))
+            .into();
+    }
     if let Some(cur) = &m.current {
         page = page.push(current_card(cur, c.narrow));
     }
@@ -529,19 +552,19 @@ fn note(s: String) -> Element<'static, Message> {
     text(s).size(12).font(FONT_MEDIUM).color(TEXT_3).into()
 }
 
+/// "52-55 · 110 games", with draws when there are any ("4-5-1").
+pub fn rate_tile_note(r: &Record) -> String {
+    format!("{} · {}", r.wl_label(), r.games_label())
+}
+
 fn rate_tile(l: &SeasonLine) -> Element<'static, Message> {
     let mut col = column![tab_bits::label("Win rate")];
-    let rec = format!(
-        "{}-{} · {}",
-        l.record.wins,
-        l.record.losses,
-        l.record.games_label()
-    );
+    let rec = rate_tile_note(&l.record);
     match l.pct {
         Some(p) => {
             col = col
                 .push(big(format!("{p}%")))
-                .push(container(wr_bar::bar(p, 240.0)).width(Fill))
+                .push(container(crate::winrate_bar::bar(p as f32)).width(Fill))
                 .push(note(rec));
         }
         None => {
@@ -680,12 +703,20 @@ fn season_table(m: &Model, c: Cols) -> Element<'static, Message> {
     tab_bits::card(col.into(), false, 0.0)
 }
 
+/// One season. A season under 3 games is muted, so it never reads like a
+/// counted row.
 fn season_row(l: &SeasonLine, c: Cols, total: bool) -> Element<'static, Message> {
+    let muted = l.sample == Sample::Fold;
+    let (strong, soft) = if muted {
+        (TEXT_3, TEXT_3)
+    } else {
+        (TEXT, TEXT_2)
+    };
     let mut name = Row::new().spacing(8).align_y(Alignment::Center).push(
         text(l.name.clone())
             .size(SIZE_BODY)
             .font(if total { FONT_EXTRABOLD } else { FONT_BOLD })
-            .color(TEXT)
+            .color(strong)
             .wrapping(Wrapping::None),
     );
     if l.is_current {
@@ -693,7 +724,7 @@ fn season_row(l: &SeasonLine, c: Cols, total: bool) -> Element<'static, Message>
     }
     let (bar, pct): (Element<'static, Message>, Element<'static, Message>) = match l.pct {
         Some(p) => (
-            wr_bar::bar(p, c.bar),
+            crate::winrate_bar::bar(p as f32),
             text(format!("{p}%"))
                 .size(SIZE_BODY)
                 .font(FONT_BOLD)
@@ -715,13 +746,13 @@ fn season_row(l: &SeasonLine, c: Cols, total: bool) -> Element<'static, Message>
         text(l.dates.clone())
             .size(SIZE_META)
             .font(FONT_MEDIUM)
-            .color(TEXT_2)
+            .color(soft)
             .wrapping(Wrapping::None)
             .width(c.dates),
         text(l.record.games.to_string())
             .size(SIZE_BODY)
             .font(FONT_BOLD)
-            .color(TEXT)
+            .color(strong)
             .width(c.games),
         text(format!(
             "{}-{}-{}",
@@ -729,7 +760,7 @@ fn season_row(l: &SeasonLine, c: Cols, total: bool) -> Element<'static, Message>
         ))
         .size(SIZE_BODY)
         .font(FONT_SEMIBOLD)
-        .color(TEXT_2)
+        .color(soft)
         .width(c.wld),
         container(bar).width(c.bar),
         container(pct)
@@ -967,6 +998,67 @@ mod tests {
         assert_eq!(m.all_time.record.games, 0);
         assert!(m.lines.is_empty());
         assert_eq!(m.current.expect("still shown").line.record.games, 0);
+    }
+
+    #[test]
+    fn seasons_under_three_games_are_muted_and_under_ten_decided_too_few() {
+        let mut games = Vec::new();
+        // Season 5: 9 games. Season 4: 2 games. Season 3: 3 games.
+        for i in 0..9 {
+            games.push(game(Outcome::Win, at(10, 7 + i)));
+        }
+        games.push(game(Outcome::Loss, at(9, 1)));
+        games.push(game(Outcome::Loss, at(9, 2)));
+        for i in 0..3 {
+            games.push(game(Outcome::Win, at(7, 1 + i)));
+        }
+        // Season 2: 1 game.
+        games.push(game(Outcome::Win, at(5, 1)));
+        let m = model(&games, &seasons(), RoleFilter::default(), None, at(10, 20));
+        let by = |n: &str| m.lines.iter().find(|l| l.name == n).expect(n).sample;
+        assert_eq!(by("Season 5"), Sample::TooFew, "9 games");
+        assert_eq!(by("Season 4"), Sample::Fold, "2 games");
+        assert_eq!(by("Season 3"), Sample::TooFew, "3 games");
+        assert_eq!(by("Season 2"), Sample::Fold, "1 game");
+        assert_eq!(m.all_time.sample, Sample::Rated(87), "13 of 15");
+    }
+
+    #[test]
+    fn the_open_game_is_left_out_until_it_has_a_result() {
+        let mut games = vec![
+            game(Outcome::Unknown, at(10, 19)),
+            game(Outcome::Unknown, at(10, 18)),
+        ];
+        games[0].session_id = "live".into();
+        let m = model(
+            &games,
+            &seasons(),
+            RoleFilter::default(),
+            Some("live"),
+            at(10, 20),
+        );
+        assert_eq!(m.all_time.record.games, 1);
+        assert_eq!(m.all_time.record.undecided(), 1);
+        let m = model(&games, &seasons(), RoleFilter::default(), None, at(10, 20));
+        assert_eq!(m.all_time.record.undecided(), 2);
+    }
+
+    #[test]
+    fn the_rate_tile_keeps_draws() {
+        let r = Record {
+            games: 12,
+            wins: 4,
+            losses: 5,
+            draws: 1,
+        };
+        assert_eq!(rate_tile_note(&r), "4-5-1 · 12 games");
+        let r = Record {
+            games: 110,
+            wins: 52,
+            losses: 55,
+            draws: 0,
+        };
+        assert_eq!(rate_tile_note(&r), "52-55 · 110 games");
     }
 
     #[test]

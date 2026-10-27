@@ -3,10 +3,12 @@
 //! One table card (placeholder tile, Map, Games, W-L-D, Undecided, the
 //! win-rate bar and the printed %) and a rail with Best 3, Worst 3 and the
 //! undecided games left out of every rate. Sort by Games (default), Win
-//! rate or Recent, or click a header. Under [`wr_bar::MIN_GAMES`] games a
-//! map shows "Too few games" instead of a rate, sorts last by win rate and
-//! never ranks as best or worst. Best and Worst rank inside the active
-//! filter, so a season filter only counts that season's games.
+//! rate or Recent, or click a header. The small-sample rule is
+//! [`crate::small_sample`]: under 3 games a map folds under "Show", under
+//! 10 decided games it shows its record and "Too few games", sorts after
+//! the rated maps by win rate and never ranks as best or worst. Best and
+//! Worst rank inside the active filter, so a season filter only counts
+//! that season's games. The open game is left out until it has a result.
 //!
 //! Map tiles stay grey placeholders (40x24 px, the Maps icon) until
 //! server-hosted art packs exist. Art is never bundled with the app.
@@ -16,20 +18,17 @@ use iced::widget::text::Wrapping;
 use iced::widget::{Column, Row, button, column, container, image, row, space, text};
 use iced::{Alignment, Background, Border, Color, Element, Fill, Length, Padding, Theme};
 
-use crate::aggregate::{Record, filter_games};
+use crate::aggregate::{GameFilter, Record, filter_games};
 use crate::app::{Message, TrackerApp};
 use crate::icons::{self, Icon};
 use crate::model::{Game, Outcome, Screen, SeasonSel};
+use crate::small_sample::{RATE_MIN, Sample, TOO_FEW, rate, sample};
 use crate::tab_bits::{self, PageMsg};
+use crate::theme::SURFACE_2;
 use crate::theme::{
     ACCENT, BORDER, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, SIZE_BODY, SIZE_LABEL,
     SIZE_META, TEXT, TEXT_2, TEXT_3, WARN,
 };
-use crate::wr_bar::{self, SURFACE_2, TOO_FEW};
-
-/// Fold the maps under [`wr_bar::MIN_GAMES`] into a "Show" row once this many
-/// maps have a win rate. A newer player sees every map instead.
-pub const FOLD_FROM_RATED: usize = 10;
 
 /// What the table sorts by. The segment offers the first three; the
 /// column headers offer every one.
@@ -89,8 +88,9 @@ pub struct MapRow {
     pub name: String,
     pub record: Record,
     pub last_played: DateTime<Utc>,
-    /// The printed win rate, `None` under [`wr_bar::MIN_GAMES`] games.
+    /// The printed win rate, `None` under [`RATE_MIN`] decided games.
     pub pct: Option<u32>,
+    pub sample: Sample,
 }
 
 /// The display name a stored map counts under: the catalog spelling when
@@ -127,6 +127,7 @@ pub fn map_rows(games: &[&Game]) -> (Vec<MapRow>, usize) {
                     },
                     last_played: g.played_at,
                     pct: None,
+                    sample: Sample::Fold,
                 });
                 rows.len() - 1
             }
@@ -142,13 +143,14 @@ pub fn map_rows(games: &[&Game]) -> (Vec<MapRow>, usize) {
         r.last_played = r.last_played.max(g.played_at);
     }
     for r in &mut rows {
-        r.pct = wr_bar::shown_pct(&r.record);
+        r.pct = rate(&r.record).map(|p| p as u32);
+        r.sample = sample(&r.record);
     }
     (rows, no_map)
 }
 
 /// Sort `rows` by `key`. Ties go to more games, then the name. By win
-/// rate the maps with too few games always come last, by games.
+/// rate the maps without one always come after the rated ones, by games.
 pub fn sort_rows(rows: &mut [MapRow], key: SortKey, ascending: bool) {
     use std::cmp::Ordering;
     let tie = |a: &MapRow, b: &MapRow| {
@@ -174,14 +176,10 @@ pub fn sort_rows(rows: &mut [MapRow], key: SortKey, ascending: bool) {
     });
 }
 
-/// Rows shown, and rows folded into the "Show" row: the maps under
-/// [`wr_bar::MIN_GAMES`] once [`FOLD_FROM_RATED`] maps have a rate.
+/// Rows shown, and rows folded into the "Show" row: the maps under 3
+/// games in total ([`Sample::Fold`]).
 pub fn split_fold(rows: Vec<MapRow>) -> (Vec<MapRow>, Vec<MapRow>) {
-    let rated = rows.iter().filter(|r| r.pct.is_some()).count();
-    if rated < FOLD_FROM_RATED {
-        return (rows, Vec::new());
-    }
-    rows.into_iter().partition(|r| r.pct.is_some())
+    rows.into_iter().partition(|r| r.sample != Sample::Fold)
 }
 
 /// Best and Worst: up to three each among the maps with a rate, never the
@@ -204,14 +202,14 @@ pub fn best_worst(rows: &[MapRow]) -> (Vec<&MapRow>, Vec<&MapRow>) {
 /// Copy for an empty Best or Worst card.
 pub fn rank_card_empty(best: bool, rated: usize) -> &'static str {
     match (best, rated) {
-        (_, 0) => "Needs a map with 10 games.",
-        (false, 1) => "Needs a second map with 10 games.",
+        (_, 0) => "Needs a map with 10 decided games.",
+        (false, 1) => "Needs a second map with 10 decided games.",
         _ => "",
     }
 }
 
-/// "All time · 31 maps · 857 games · win rate from 10 games · click a
-/// header to sort", in the label's capitals.
+/// "All time · 31 maps · 857 games · win rate from 10 decided games ·
+/// click a header to sort", in the label's capitals.
 pub fn subtitle(scope: &str, maps: usize, games: usize) -> String {
     let maps = if maps == 1 {
         "1 map".to_string()
@@ -223,17 +221,20 @@ pub fn subtitle(scope: &str, maps: usize, games: usize) -> String {
     } else {
         format!("{games} games")
     };
-    format!("{scope} · {maps} · {games} · win rate from 10 games · click a header to sort")
+    format!(
+        "{scope} · {maps} · {games} · win rate from {RATE_MIN} decided games · click a header to sort"
+    )
 }
 
-/// "3 more maps under 10 games · Junkertown, Numbani, Watchpoint: Grimsvötn".
+/// "3 more maps under 3 games · Junkertown, Numbani, Watchpoint: Grímsvötn".
 pub fn fold_line(folded: &[MapRow]) -> String {
     let names: Vec<&str> = folded.iter().map(|r| r.name.as_str()).collect();
     let n = folded.len();
+    let under = crate::small_sample::FOLD_UNDER;
     let head = if n == 1 {
-        "1 more map under 10 games".to_string()
+        format!("1 more map under {under} games")
     } else {
-        format!("{n} more maps under 10 games")
+        format!("{n} more maps under {under} games")
     };
     format!("{head} · {}", names.join(", "))
 }
@@ -255,8 +256,18 @@ pub struct Cols {
 const WIDE_FROM: f32 = 1376.0;
 const RAIL_FROM: f32 = 1052.0;
 
+/// From the 1440 px window up: the wider columns and the 320 px rail.
+pub fn wide(width: f32) -> bool {
+    width >= WIDE_FROM
+}
+
+/// From the 1100 px window up the rail sits beside the table.
+pub fn has_rail(width: f32) -> bool {
+    width >= RAIL_FROM
+}
+
 pub fn cols(width: f32) -> Cols {
-    if width >= WIDE_FROM {
+    if wide(width) {
         Cols {
             games: 64.0,
             wld: 96.0,
@@ -271,7 +282,7 @@ pub fn cols(width: f32) -> Cols {
             wld: 88.0,
             undecided: 88.0,
             bar: 160.0,
-            rail: (width >= RAIL_FROM).then_some(288.0),
+            rail: has_rail(width).then_some(288.0),
             gap: 16.0,
         }
     }
@@ -282,10 +293,25 @@ const HEAD_H: f32 = 32.0;
 const TILE: (f32, f32) = (40.0, 24.0);
 const PCT_W: f32 = 48.0;
 
+/// The games the Maps stats count: the season, role and hero filters.
+/// The Games tab's outcome and map filters stay on Games: a win-only
+/// filter would show every map at 100%, and a map filter would leave one
+/// row. The open game waits for its result.
+pub fn maps_games(app: &TrackerApp) -> Vec<&Game> {
+    let filter = GameFilter {
+        outcome: None,
+        map: None,
+        ..app.games_filter()
+    };
+    tab_bits::settled(
+        filter_games(&app.games, &filter),
+        app.live_game_session.as_deref(),
+    )
+}
+
 pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
-    let filter = app.header_filter();
-    let games = filter_games(&app.games, &filter);
-    let (mut rows, _no_map) = map_rows(&games);
+    let games = maps_games(app);
+    let (mut rows, no_map) = map_rows(&games);
     let ui = app.maps_ui;
     let c = cols(width);
     let scope = match &app.season {
@@ -298,7 +324,22 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
         SeasonSel::AllTime => "All time".to_string(),
     };
 
-    let mut page = Column::new().spacing(GRID_GAP).width(Fill);
+    let pool = filter_games(&app.games, &app.header_filter());
+    let mut page =
+        Column::new()
+            .spacing(GRID_GAP)
+            .width(Fill)
+            .push(crate::overview_page::chip_row(
+                app,
+                &crate::aggregate::distinct_heroes(&pool),
+                &crate::aggregate::distinct_maps(&pool),
+                crate::overview_page::chips_fold(width),
+            ));
+    if tab_bits::loading(app) {
+        return page
+            .push(empty_card(tab_bits::LOADING, tab_bits::LOADING_LINE))
+            .into();
+    }
     if app.games.is_empty() {
         return page
             .push(empty_card(
@@ -335,7 +376,7 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     let rail_cards = [
         rank_card(true, &best, rated),
         rank_card(false, &worst, rated),
-        not_counted_card(undecided, need),
+        not_counted_card(undecided, no_map, need),
     ];
 
     sort_rows(&mut rows, ui.sort, ui.ascending);
@@ -504,11 +545,18 @@ fn header(ui: MapsUi, c: Cols) -> Element<'static, Message> {
     .into()
 }
 
-/// One map: tile, name, games, record, undecided, bar and %.
+/// One map: tile, name, games, record, undecided, bar and %. A folded
+/// map (under 3 games) is muted so it never reads like a counted row.
 fn map_line(r: &MapRow, c: Cols) -> Element<'static, Message> {
+    let muted = r.sample == Sample::Fold;
+    let (strong, soft) = if muted {
+        (TEXT_3, TEXT_3)
+    } else {
+        (TEXT, TEXT_2)
+    };
     let (bar, pct): (Element<'static, Message>, Element<'static, Message>) = match r.pct {
         Some(p) => (
-            wr_bar::bar(p, c.bar),
+            crate::winrate_bar::bar(p as f32),
             text(format!("{p}%"))
                 .size(SIZE_BODY)
                 .font(FONT_BOLD)
@@ -531,18 +579,18 @@ fn map_line(r: &MapRow, c: Cols) -> Element<'static, Message> {
         text(r.name.clone())
             .size(SIZE_BODY)
             .font(FONT_BOLD)
-            .color(TEXT)
+            .color(strong)
             .wrapping(Wrapping::None)
             .width(Fill),
         text(r.record.games.to_string())
             .size(SIZE_BODY)
             .font(FONT_BOLD)
-            .color(TEXT)
+            .color(strong)
             .width(c.games),
         text(r.record.wl_label())
             .size(SIZE_BODY)
             .font(FONT_SEMIBOLD)
-            .color(TEXT_2)
+            .color(soft)
             .width(c.wld),
         text(undecided.to_string())
             .size(SIZE_BODY)
@@ -588,14 +636,14 @@ fn map_tile() -> Element<'static, Message> {
 fn rank_card(best: bool, picks: &[&MapRow], rated: usize) -> Element<'static, Message> {
     let (title, arrow, sub, color) = if best {
         (
-            "Best maps · 10 or more games",
+            "Best maps · 10 or more decided games",
             "▲",
             "Highest win rate",
             crate::theme::OK,
         )
     } else {
         (
-            "Worst maps · 10 or more games",
+            "Worst maps · 10 or more decided games",
             "▼",
             "Lowest win rate",
             crate::theme::DANGER,
@@ -633,7 +681,7 @@ fn rank_card(best: bool, picks: &[&MapRow], rated: usize) -> Element<'static, Me
                 text(format!("{p}%"))
                     .size(SIZE_META)
                     .font(FONT_BOLD)
-                    .color(wr_bar::pct_color(p)),
+                    .color(tab_bits::pct_color(p)),
             ]
             .align_y(Alignment::Center)
             .height(32),
@@ -642,8 +690,21 @@ fn rank_card(best: bool, picks: &[&MapRow], rated: usize) -> Element<'static, Me
     tab_bits::card(col.push(lines).into(), false, 16.0)
 }
 
-fn not_counted_card(undecided: usize, need: usize) -> Element<'static, Message> {
+/// "N games with no map read are in Needs a look too.", or nothing.
+pub fn no_map_line(no_map: usize) -> Option<String> {
+    match no_map {
+        0 => None,
+        1 => Some("1 game with no map read is in Needs a look too.".into()),
+        n => Some(format!(
+            "{n} games with no map read are in Needs a look too."
+        )),
+    }
+}
+
+fn not_counted_card(undecided: usize, no_map: usize, need: usize) -> Element<'static, Message> {
     let mut col = column![tab_bits::label("Not counted")].spacing(4);
+    let no_map_text =
+        no_map_line(no_map).map(|line| text(line).size(12).font(FONT_MEDIUM).color(TEXT_3));
     if undecided == 0 {
         col = col.push(
             text("Every game on these maps has an outcome.")
@@ -651,7 +712,10 @@ fn not_counted_card(undecided: usize, need: usize) -> Element<'static, Message> 
                 .font(FONT_MEDIUM)
                 .color(TEXT_2),
         );
-        return tab_bits::card(col.into(), false, 16.0);
+        if let Some(line) = no_map_text {
+            col = col.push(line);
+        }
+        return tab_bits::card(col.into(), no_map > 0, 16.0);
     }
     col = col
         .push(
@@ -676,6 +740,9 @@ fn not_counted_card(undecided: usize, need: usize) -> Element<'static, Message> 
             .font(FONT_MEDIUM)
             .color(TEXT_3),
         );
+    if let Some(line) = no_map_text {
+        col = col.push(line);
+    }
     tab_bits::card(col.into(), true, 16.0)
 }
 
@@ -723,7 +790,8 @@ mod tests {
         };
         MapRow {
             name: name.into(),
-            pct: wr_bar::shown_pct(&record),
+            pct: rate(&record).map(|p| p as u32),
+            sample: sample(&record),
             record,
             last_played: Utc.with_ymd_and_hms(2026, 10, 1, 0, 0, 0).unwrap(),
         }
@@ -809,26 +877,55 @@ mod tests {
     }
 
     #[test]
-    fn small_maps_fold_only_once_ten_maps_have_a_rate() {
-        let few: Vec<MapRow> = (0..9)
-            .map(|i| row_of(&format!("m{i}"), 12, 6, 6, 0))
-            .chain([row_of("tiny", 3, 1, 2, 0)])
-            .collect();
-        let (shown, folded) = split_fold(few);
-        assert_eq!((shown.len(), folded.len()), (10, 0));
-
-        let many: Vec<MapRow> = (0..10)
-            .map(|i| row_of(&format!("m{i}"), 12, 6, 6, 0))
-            .chain([
-                row_of("Numbani", 8, 3, 4, 0),
-                row_of("Junkertown", 7, 3, 3, 0),
-            ])
-            .collect();
-        let (shown, folded) = split_fold(many);
-        assert_eq!((shown.len(), folded.len()), (10, 2));
+    fn under_three_games_fold_and_under_ten_decided_say_too_few() {
+        let rows = vec![
+            row_of("King's Row", 12, 6, 6, 0),
+            row_of("Busan", 9, 5, 4, 0),
+            row_of("Ilios", 3, 1, 2, 0),
+            row_of("Numbani", 2, 1, 1, 0),
+            row_of("Junkertown", 1, 1, 0, 0),
+            row_of("Rialto", 30, 5, 4, 0),
+        ];
+        let by = |n: &str| rows.iter().find(|r| r.name == n).expect(n).sample;
+        assert_eq!(by("King's Row"), Sample::Rated(50));
+        assert_eq!(by("Busan"), Sample::TooFew, "9 games");
+        assert_eq!(by("Ilios"), Sample::TooFew, "3 games");
+        assert_eq!(by("Numbani"), Sample::Fold, "2 games");
+        assert_eq!(by("Junkertown"), Sample::Fold, "1 game");
+        assert_eq!(by("Rialto"), Sample::TooFew, "30 games, 9 decided");
+        let (shown, folded) = split_fold(rows);
+        assert_eq!(shown.len(), 4);
         assert_eq!(
             fold_line(&folded),
-            "2 more maps under 10 games · Numbani, Junkertown"
+            "2 more maps under 3 games · Numbani, Junkertown"
+        );
+    }
+
+    #[test]
+    fn the_open_game_is_left_out_until_it_has_a_result() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let mut live = game("Ilios", Outcome::Unknown, 20);
+        live.session_id = "live".into();
+        app.games = vec![live, game("Ilios", Outcome::Unknown, 19)];
+        app.live_game_session = Some("live".into());
+        let shown = maps_games(&app);
+        assert_eq!(shown.len(), 1);
+        let (rows, _) = map_rows(&shown);
+        assert_eq!(rows[0].record.undecided(), 1);
+        app.live_game_session = None;
+        assert_eq!(maps_games(&app).len(), 2);
+    }
+
+    #[test]
+    fn games_with_no_map_are_named_in_not_counted() {
+        assert_eq!(no_map_line(0), None);
+        assert_eq!(
+            no_map_line(1).as_deref(),
+            Some("1 game with no map read is in Needs a look too.")
+        );
+        assert_eq!(
+            no_map_line(26).as_deref(),
+            Some("26 games with no map read are in Needs a look too.")
         );
     }
 
@@ -843,9 +940,12 @@ mod tests {
         assert!(worst.is_empty());
         assert_eq!(
             rank_card_empty(false, 1),
-            "Needs a second map with 10 games."
+            "Needs a second map with 10 decided games."
         );
-        assert_eq!(rank_card_empty(true, 0), "Needs a map with 10 games.");
+        assert_eq!(
+            rank_card_empty(true, 0),
+            "Needs a map with 10 decided games."
+        );
 
         let spec = vec![
             row_of("Antarctic Peninsula", 23, 14, 4, 0),
@@ -866,12 +966,14 @@ mod tests {
     fn subtitle_and_layout_breakpoints() {
         assert_eq!(
             subtitle("All time", 31, 857),
-            "All time · 31 maps · 857 games · win rate from 10 games · click a header to sort"
+            "All time · 31 maps · 857 games · win rate from 10 decided games · click a header to sort"
         );
         // 1600, 1366 and 1024 px windows less their gutters.
         assert_eq!(cols(1536.0).rail, Some(320.0));
         assert_eq!(cols(1318.0).rail, Some(288.0));
         assert_eq!(cols(976.0).rail, None);
         assert_eq!(cols(976.0).bar, 160.0);
+        assert!(wide(1536.0) && !wide(1318.0));
+        assert!(has_rail(1318.0) && !has_rail(976.0));
     }
 }
