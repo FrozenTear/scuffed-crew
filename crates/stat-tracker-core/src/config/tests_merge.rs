@@ -254,12 +254,14 @@ data_dir = \"/merge/data\"
 [auto_detect]
 enabled = true
 # how often
-poll_interval_secs = 4
+poll_interval_ms = 1000
 cooldown_secs = 120
 ";
-    let (text, next) = save(table, |c| c.auto_detect.poll_interval_secs = None);
-    assert_eq!(next.auto_detect.poll_interval_secs, None);
-    assert!(!text.contains("poll_interval_secs"), "{text}");
+    // poll_interval_ms is left out when unset (poll_interval_secs is not:
+    // its unset value is written back as the legacy 4).
+    let (text, next) = save(table, |c| c.auto_detect.poll_interval_ms = None);
+    assert_eq!(next.auto_detect.poll_interval_ms, None);
+    assert!(!text.contains("poll_interval_ms"), "{text}");
     assert_kept(
         &text,
         &["enabled = true\n# how often\ncooldown_secs = 120\n"],
