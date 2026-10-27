@@ -2,10 +2,13 @@
 //! Seasons tabs, built from the spec r1.1 example numbers (the
 //! pre-redesign build's real per-map and per-season totals).
 //!
-//! 857 games: the 28 listed maps, 3 small maps that fold under "Show",
-//! and 26 games with no map. Seasons 3, 4 and 5 hold 366, 381 and 110 of
-//! them with the spec's W-L-D and undecided counts; Seasons 1 and 2 have
-//! none. The newest game is Oct 20 00:40 UTC, 49 days before Season 5
+//! 857 games: the 28 listed maps, 3 small maps that show "Too few
+//! games" (7 to 9 games), 2 tiny maps that fold under "Show" (Hanaoka and
+//! Throne of Anubis, under 3 games), and 23 games with no map. The
+//! spec had 26 with no map and no tiny maps; 3 of those games moved so
+//! the fixture draws the Show row. Seasons 3, 4 and 5 hold 366, 381 and
+//! 110 of them with the spec's W-L-D and undecided counts; Seasons 1 and
+//! 2 have none. The newest game is Oct 20 00:40 UTC, 49 days before Season 5
 //! ends. Which game lands on which day is made up, so per-season map
 //! splits are example data.
 
@@ -46,8 +49,10 @@ const MAPS: &[(&str, u32, u32, u32, u32)] = &[
     ("Watchpoint: Grímsvötn", 9, 3, 5, 0),
     ("Numbani", 8, 3, 4, 0),
     ("Junkertown", 7, 3, 3, 0),
-    // No map read.
-    ("", 26, 2, 14, 0),
+    ("Hanaoka", 2, 1, 0, 0),
+    ("Throne of Anubis", 1, 0, 1, 0),
+    // No map.
+    ("", 23, 1, 13, 0),
 ];
 
 /// Season id, wins, losses, draws, undecided (oldest first).
@@ -235,8 +240,15 @@ mod tests {
         let games = games();
         let refs: Vec<&Game> = games.iter().collect();
         let (rows, no_map) = crate::maps_tab::map_rows(&refs);
-        assert_eq!(no_map, 26);
-        assert_eq!(rows.len(), 31);
+        assert_eq!(no_map, 23);
+        assert_eq!(rows.len(), 33);
+        let (_, folded) = crate::maps_tab::split_fold(rows.clone());
+        assert_eq!(folded.len(), 2, "the Show row is drawn");
+        let too_few = rows
+            .iter()
+            .filter(|r| r.sample == crate::small_sample::Sample::TooFew)
+            .count();
+        assert!(too_few >= 3, "Junkertown, Numbani and Grímsvötn at least");
         let kings = rows.iter().find(|r| r.name == "King's Row").expect("row");
         assert_eq!(kings.record.wl_label(), "28-22-1");
         assert_eq!(kings.pct, Some(55));

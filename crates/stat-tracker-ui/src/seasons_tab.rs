@@ -20,7 +20,7 @@ use scuffed_types::Season;
 use crate::aggregate::{GameFilter, Record, SeasonWindow, filter_games};
 use crate::app::{Message, TrackerApp};
 use crate::model::{Game, Outcome, RoleFilter, game_card_in_progress};
-use crate::small_sample::{RATE_MIN, Sample, TOO_FEW, rate, sample};
+use crate::small_sample::{Sample, TOO_FEW, rate, sample};
 use crate::tab_bits;
 use crate::theme::SURFACE_2;
 use crate::theme::{
@@ -44,7 +44,8 @@ pub struct SeasonLine {
     pub sample: Sample,
 }
 
-/// The form tile: the last up to [`LAST_N`] decided games.
+/// The form tile: the last [`LAST_N`] decided games, shown only while they
+/// are a part of the season, as on the Overview.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Form {
     pub pct: u32,
@@ -77,6 +78,19 @@ pub struct Model {
     pub empty: Vec<String>,
     pub all_time: SeasonLine,
     pub needs: Vec<NeedLine>,
+    /// A role chip is on, so "no games" may only mean none for that role.
+    pub filtered: bool,
+}
+
+/// What a page part with no games says: `unfiltered` with no role chip
+/// on, otherwise that the filters hide them (the same words as Games and
+/// Heroes).
+pub fn none_copy(filtered: bool, unfiltered: &'static str) -> &'static str {
+    if filtered {
+        "No games match these filters"
+    } else {
+        unfiltered
+    }
 }
 
 fn window(s: &Season) -> SeasonWindow {
@@ -146,11 +160,12 @@ pub fn form(games: &[&Game], season_pct: Option<u32>) -> Option<Form> {
         .copied()
         .filter(|g| g.outcome != Outcome::Unknown)
         .collect();
-    decided.sort_by_key(|g| std::cmp::Reverse(g.played_at));
-    decided.truncate(LAST_N);
-    if decided.len() < RATE_MIN {
+    // All of the season would only repeat its own rate.
+    if decided.len() <= LAST_N {
         return None;
     }
+    decided.sort_by_key(|g| std::cmp::Reverse(g.played_at));
+    decided.truncate(LAST_N);
     let wins = decided.iter().filter(|g| g.outcome == Outcome::Win).count();
     let pct = (wins as f32 * 100.0 / decided.len() as f32).round() as u32;
     Some(Form {
@@ -266,6 +281,7 @@ pub fn model(
             &all,
         ),
         needs: needs_lines(games, seasons, live),
+        filtered: !roles.unrestricted(),
     }
 }
 
@@ -278,12 +294,13 @@ pub fn current_sub(c: &Current) -> String {
     }
 }
 
-/// "▲ +6", "▼ -4" or "0", always with the words after it.
-pub fn delta_text(delta: i64) -> (&'static str, String) {
+/// "▲ +6 vs season", "▼ -4 vs season" or "same as season", the
+/// Overview's words ([`crate::overview_side::versus`]).
+pub fn delta_text(delta: i64) -> (Option<char>, String) {
     match delta {
-        d if d > 0 => ("▲", format!("+{d}")),
-        d if d < 0 => ("▼", d.to_string()),
-        _ => ("", "0".into()),
+        d if d > 0 => (Some('▲'), format!("+{d} vs season")),
+        d if d < 0 => (Some('▼'), format!("{d} vs season")),
+        _ => (None, "same as season".into()),
     }
 }
 
@@ -381,16 +398,19 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
             .into();
     }
     if let Some(cur) = &m.current {
-        page = page.push(current_card(cur, c.narrow));
+        page = page.push(current_card(cur, c.narrow, m.filtered));
     }
 
     let mut table = column![tab_bits::label("All seasons")].spacing(8);
     if m.all_time.record.games == 0 {
         table = table.push(
-            text("Older seasons show here once you have games in them.")
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(TEXT_2),
+            text(none_copy(
+                m.filtered,
+                "Older seasons show here once you have games in them.",
+            ))
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(TEXT_2),
         );
     } else {
         table = table.push(season_table(&m, c));
@@ -434,7 +454,7 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     page.push(body).into()
 }
 
-fn current_card(cur: &Current, narrow: bool) -> Element<'static, Message> {
+fn current_card(cur: &Current, narrow: bool, filtered: bool) -> Element<'static, Message> {
     let head = column![
         tab_bits::label("Current season"),
         text(cur.line.name.clone())
@@ -451,14 +471,18 @@ fn current_card(cur: &Current, narrow: bool) -> Element<'static, Message> {
 
     let inner: Element<'static, Message> = if cur.line.record.games == 0 {
         let empty = column![
-            text("No games this season yet")
+            text(none_copy(filtered, "No games this season yet"))
                 .size(SIZE_BODY)
                 .font(FONT_BOLD)
                 .color(TEXT),
-            text("Play a game with the tracker running and it shows up here.")
-                .size(12)
-                .font(FONT_MEDIUM)
-                .color(TEXT_2),
+            text(if filtered {
+                "Clear the role chip to see every game this season."
+            } else {
+                "Play a game with the tracker running and it shows up here."
+            })
+            .size(12)
+            .font(FONT_MEDIUM)
+            .color(TEXT_2),
         ]
         .spacing(2);
         if narrow {
@@ -583,58 +607,33 @@ fn rate_tile(l: &SeasonLine) -> Element<'static, Message> {
 
 /// Last 20: rate, the strip of marks and the change against the season.
 fn form_tile(f: &Form) -> Element<'static, Message> {
-    let mut strip = Row::new().spacing(3).align_y(Alignment::Center);
-    for o in &f.marks {
-        let (color, h, align) = match o {
-            Outcome::Win => (OK, 8.0, iced::alignment::Vertical::Top),
-            Outcome::Loss => (DANGER, 8.0, iced::alignment::Vertical::Bottom),
-            _ => (TEXT_3, 4.0, iced::alignment::Vertical::Center),
-        };
-        strip = strip.push(
-            container(
-                container(space().width(4).height(h))
-                    .width(4)
-                    .height(h)
-                    .style(move |_: &Theme| container::Style {
-                        background: Some(Background::Color(color)),
-                        border: Border {
-                            radius: 1.0.into(),
-                            ..Border::default()
-                        },
-                        ..container::Style::default()
-                    }),
-            )
-            .height(20)
-            .align_y(align),
-        );
-    }
     let mut col = column![
         tab_bits::label(&format!("Last {}", f.marks.len())),
         big(format!("{}%", f.pct)),
-        strip,
+        crate::session_bits::outcome_sparkline(f.marks.iter().copied()),
     ];
     if let Some(d) = f.delta {
-        let (arrow, num) = delta_text(d);
+        let (arrow, words) = delta_text(d);
         let arrow_color = if d > 0 { OK } else { DANGER };
+        let mut chip = Row::new().spacing(4).align_y(Alignment::Center);
+        if let Some(a) = arrow {
+            chip = chip.push(
+                crate::overview_page::glyph(a)
+                    .size(SIZE_LABEL)
+                    .color(arrow_color),
+            );
+        }
         col = col.push(
-            container(
-                row![
-                    text(arrow).size(SIZE_LABEL).color(arrow_color),
-                    text(num).size(12).font(FONT_BOLD).color(TEXT),
-                    text("vs season").size(12).font(FONT_MEDIUM).color(TEXT_2),
-                ]
-                .spacing(4)
-                .align_y(Alignment::Center),
-            )
-            .padding(Padding::from([2, 8]))
-            .style(|_: &Theme| container::Style {
-                background: Some(Background::Color(BG)),
-                border: Border {
-                    radius: crate::theme::RADIUS_CHIP.into(),
-                    ..Border::default()
-                },
-                ..container::Style::default()
-            }),
+            container(chip.push(text(words).size(12).font(FONT_BOLD).color(TEXT)))
+                .padding(Padding::from([2, 8]))
+                .style(|_: &Theme| container::Style {
+                    background: Some(Background::Color(BG)),
+                    border: Border {
+                        radius: crate::theme::RADIUS_CHIP.into(),
+                        ..Border::default()
+                    },
+                    ..container::Style::default()
+                }),
         );
     }
     tile(col)
@@ -687,7 +686,7 @@ fn season_table(m: &Model, c: Cols) -> Element<'static, Message> {
                     .color(TEXT_3)
                     .wrapping(Wrapping::None)
                     .width(Fill),
-                text("No games recorded")
+                text(none_copy(m.filtered, "No games recorded"))
                     .size(SIZE_BODY)
                     .font(FONT_MEDIUM)
                     .color(TEXT_3)
@@ -903,6 +902,30 @@ mod tests {
     }
 
     #[test]
+    fn a_role_chip_that_hides_every_game_says_so() {
+        use crate::model::Role;
+        let mut games = vec![game(Outcome::Win, at(10, 8)), game(Outcome::Loss, at(9, 1))];
+        for g in &mut games {
+            g.role = Role::Support;
+        }
+        let all = model(&games, &seasons(), RoleFilter::default(), None, at(10, 20));
+        assert!(!all.filtered);
+        assert_eq!(
+            none_copy(all.filtered, "No games recorded"),
+            "No games recorded"
+        );
+        let tank = RoleFilter::default().toggle(Role::Tank);
+        let m = model(&games, &seasons(), tank, None, at(10, 20));
+        assert!(m.filtered);
+        assert!(m.lines.is_empty());
+        assert_eq!(m.current.expect("current").line.record.games, 0);
+        assert_eq!(
+            none_copy(m.filtered, "No games this season yet"),
+            "No games match these filters"
+        );
+    }
+
+    #[test]
     fn model_lists_seasons_with_games_and_folds_the_rest() {
         let mut games = Vec::new();
         for i in 0..12 {
@@ -932,10 +955,7 @@ mod tests {
 
         let cur = m.current.expect("current season");
         assert_eq!(current_sub(&cur), "Oct 6 to Dec 8 · 49 days left");
-        let f = cur.form.expect("12 decided games");
-        assert_eq!(f.marks.len(), 12);
-        assert_eq!(f.marks.first(), Some(&Outcome::Win), "oldest first");
-        assert_eq!(f.delta, Some(0));
+        assert_eq!(cur.form, None, "12 decided games are the whole season");
     }
 
     #[test]
@@ -953,10 +973,12 @@ mod tests {
         assert_eq!(f.marks.len(), LAST_N);
         assert_eq!(f.pct, 100);
         assert_eq!(f.delta, Some(51));
-        assert_eq!(form(&refs[..9], None), None, "under 10 decided");
-        assert_eq!(delta_text(6), ("▲", "+6".to_string()));
-        assert_eq!(delta_text(-4), ("▼", "-4".to_string()));
-        assert_eq!(delta_text(0), ("", "0".to_string()));
+        assert_eq!(f.marks.first(), Some(&Outcome::Win), "oldest first");
+        assert_eq!(form(&refs[..20], None), None, "20 decided is all of it");
+        assert!(form(&refs[..21], None).is_some(), "21 decided");
+        assert_eq!(delta_text(6), (Some('▲'), "+6 vs season".to_string()));
+        assert_eq!(delta_text(-4), (Some('▼'), "-4 vs season".to_string()));
+        assert_eq!(delta_text(0), (None, "same as season".to_string()));
     }
 
     #[test]

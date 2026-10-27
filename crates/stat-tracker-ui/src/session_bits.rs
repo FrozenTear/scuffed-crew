@@ -51,9 +51,16 @@ pub fn span_line(minutes: i64) -> String {
 pub fn sparkline<'a>(
     oldest_first: impl IntoIterator<Item = &'a Game>,
 ) -> Element<'static, Message> {
+    outcome_sparkline(oldest_first.into_iter().map(|g| g.outcome))
+}
+
+/// [`sparkline`] from the outcomes alone (the Seasons Last 20 tile).
+pub fn outcome_sparkline(
+    oldest_first: impl IntoIterator<Item = Outcome>,
+) -> Element<'static, Message> {
     let mut bars = Row::new().spacing(BAR_GAP).height(SPARK_H);
-    for g in oldest_first {
-        let (color, height, align) = match g.outcome {
+    for outcome in oldest_first {
+        let (color, height, align) = match outcome {
             Outcome::Win => (theme::OK, BAR_H, Alignment::Start),
             Outcome::Loss => (theme::DANGER, BAR_H, Alignment::End),
             Outcome::Draw | Outcome::Unknown => (TEXT_3, 3.0, Alignment::Center),

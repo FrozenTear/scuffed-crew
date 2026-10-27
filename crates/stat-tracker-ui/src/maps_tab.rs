@@ -95,15 +95,13 @@ pub struct MapRow {
     pub sample: Sample,
 }
 
-/// The display name a stored map counts under: the catalog spelling when
-/// the core matcher knows it, the stored text otherwise, `None` when the
-/// map was never read (those games are in Needs a look instead).
+/// The name a stored map counts under, `None` when it is not a catalog
+/// name. That is the rule Needs a look flags a map by
+/// ([`Game::needs_review`]), so a game is either in a map row or in "N
+/// games with no map", never in both pages' counts at once.
 pub fn map_key(raw: &str) -> Option<String> {
     let t = raw.trim();
-    if t.is_empty() || t.eq_ignore_ascii_case("unknown") {
-        return None;
-    }
-    Some(stat_tracker::parse::canonical_map(t).unwrap_or_else(|| t.to_string()))
+    stat_tracker::parse::map_is_known(t).then(|| t.to_string())
 }
 
 /// Per-map records for `games`, in no set order, plus how many games have
@@ -228,7 +226,7 @@ pub fn subtitle(scope: &str, maps: usize, games: usize) -> String {
     )
 }
 
-/// "3 more maps under 3 games · Junkertown, Numbani, Watchpoint: Grímsvötn".
+/// "2 more maps under 3 games · Hanaoka, Throne of Anubis".
 pub fn fold_line(folded: &[MapRow]) -> String {
     let names: Vec<&str> = folded.iter().map(|r| r.name.as_str()).collect();
     let n = folded.len();
@@ -335,7 +333,10 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     let mut page = Column::new().spacing(GRID_GAP).width(Fill);
     if games_state::loading(app) {
         return page
-            .push(empty_card(games_state::LOADING, games_state::LOADING_LINE))
+            .push(empty_card(
+                games_state::LOADING,
+                games_state::LOADING_LINE.into(),
+            ))
             .into();
     }
     if crate::overview_page::shows_filters(app) {
@@ -348,28 +349,16 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
             HIDDEN,
         ));
     }
-    if app.games.is_empty() {
-        return page
-            .push(empty_card(
-                "No maps yet",
-                "Play a game with the tracker running and your maps show up here.",
-            ))
-            .into();
-    }
-    if rows.is_empty() {
-        return page
-            .push(sort_line(&scope, 0, 0, ui))
-            .push(empty_card(
-                "No maps in this filter",
-                "Games with no map read are in Needs a look.",
-            ))
-            .into();
+    if let Some((title, line)) = empty_copy(!app.games.is_empty(), games.len(), no_map) {
+        if !app.games.is_empty() {
+            page = page.push(sort_line(&scope, 0, games.len(), ui));
+        }
+        return page.push(empty_card(title, line)).into();
     }
 
-    let total_games = rows.iter().map(|r| r.record.games).sum();
     let undecided: usize = rows.iter().map(|r| r.record.undecided()).sum();
     let rated = rows.iter().filter(|r| r.pct.is_some()).count();
-    page = page.push(sort_line(&scope, rows.len(), total_games, ui));
+    page = page.push(sort_line(&scope, rows.len(), games.len(), ui));
     if matches!(app.season, SeasonSel::Season(_)) {
         page = page.push(
             text(format!("Showing {scope} · Needs a look counts all seasons"))
@@ -517,23 +506,29 @@ fn table(shown: &[MapRow], folded: &[MapRow], ui: MapsUi, c: Cols) -> Element<'s
 fn header(ui: MapsUi, c: Cols) -> Element<'static, Message> {
     let head = |label: &'static str, key: SortKey, w: Length| -> Element<'static, Message> {
         let on = ui.sort == key;
-        let arrow = match (on, ui.ascending) {
-            (false, _) => "",
-            (true, true) => " ▲",
-            (true, false) => " ▼",
-        };
-        button(
-            text(format!("{}{arrow}", label.to_uppercase()))
+        let color = if on { ACCENT } else { TEXT_3 };
+        let mut head = Row::new().spacing(4).align_y(Alignment::Center).push(
+            text(label.to_uppercase())
                 .size(SIZE_LABEL)
                 .font(FONT_BOLD)
-                .color(if on { ACCENT } else { TEXT_3 })
+                .color(color)
                 .wrapping(Wrapping::None),
-        )
-        .padding(0)
-        .width(w)
-        .style(|_: &Theme, _| button::Style::default())
-        .on_press(page_msg(Msg::Header(key)))
-        .into()
+        );
+        // The page font has no arrows: iced's icon font draws them.
+        if on {
+            let arrow = if ui.ascending { '▲' } else { '▼' };
+            head = head.push(
+                crate::overview_page::glyph(arrow)
+                    .size(SIZE_LABEL)
+                    .color(color),
+            );
+        }
+        button(head)
+            .padding(0)
+            .width(w)
+            .style(|_: &Theme, _| button::Style::default())
+            .on_press(page_msg(Msg::Header(key)))
+            .into()
     };
     row![
         space().width(TILE.0),
@@ -645,14 +640,14 @@ fn rank_card(best: bool, picks: &[&MapRow], rated: usize) -> Element<'static, Me
     let (title, arrow, sub, color) = if best {
         (
             "Best maps · 10 or more decided games",
-            "▲",
+            '▲',
             "Highest win rate",
             crate::theme::OK,
         )
     } else {
         (
             "Worst maps · 10 or more decided games",
-            "▼",
+            '▼',
             "Lowest win rate",
             crate::theme::DANGER,
         )
@@ -669,7 +664,9 @@ fn rank_card(best: bool, picks: &[&MapRow], rated: usize) -> Element<'static, Me
     }
     col = col.push(
         row![
-            text(arrow).size(SIZE_LABEL).color(color),
+            crate::overview_page::glyph(arrow)
+                .size(SIZE_LABEL)
+                .color(color),
             text(sub).size(12).font(FONT_MEDIUM).color(TEXT_2),
         ]
         .spacing(4)
@@ -698,14 +695,38 @@ fn rank_card(best: bool, picks: &[&MapRow], rated: usize) -> Element<'static, Me
     tab_bits::card(col.push(lines).into(), false, 16.0)
 }
 
-/// "N games with no map read are in Needs a look too.", or nothing.
+/// "N games with no map are in Needs a look too.", or nothing.
 pub fn no_map_line(no_map: usize) -> Option<String> {
-    match no_map {
-        0 => None,
-        1 => Some("1 game with no map read is in Needs a look too.".into()),
-        n => Some(format!(
-            "{n} games with no map read are in Needs a look too."
-        )),
+    (no_map > 0).then(|| format!("{} in Needs a look too.", no_map_are(no_map)))
+}
+
+/// "1 game with no map is", "N games with no map are".
+fn no_map_are(n: usize) -> String {
+    match n {
+        1 => "1 game with no map is".into(),
+        n => format!("{n} games with no map are"),
+    }
+}
+
+/// The card in place of the table, `None` when there are rows: no games
+/// at all, games the filters all hide (`shown` is 0), or `shown` games
+/// that all have no map (`no_map`).
+pub fn empty_copy(has_games: bool, shown: usize, no_map: usize) -> Option<(&'static str, String)> {
+    if !has_games {
+        Some((
+            "No maps yet",
+            "Play a game with the tracker running and your maps show up here.".into(),
+        ))
+    } else if shown == 0 {
+        Some((
+            "No games match these filters",
+            "Clear a chip above to see your maps.".into(),
+        ))
+    } else if no_map == shown {
+        let line = format!("{} in Needs a look.", no_map_are(no_map));
+        Some(("No maps read yet", line))
+    } else {
+        None
     }
 }
 
@@ -754,7 +775,7 @@ fn not_counted_card(undecided: usize, no_map: usize, need: usize) -> Element<'st
     tab_bits::card(col.into(), true, 16.0)
 }
 
-fn empty_card(title: &'static str, line: &'static str) -> Element<'static, Message> {
+fn empty_card(title: &'static str, line: String) -> Element<'static, Message> {
     tab_bits::card(
         row![
             map_tile(),
@@ -808,24 +829,24 @@ mod tests {
     #[test]
     fn rows_group_by_catalog_name_and_skip_missing_maps() {
         let games = [
-            game("Paraíso", Outcome::Win, 1),
-            game("Paraiso", Outcome::Loss, 2),
+            game("Paraiso", Outcome::Win, 1),
+            game(" Paraiso ", Outcome::Loss, 2),
             game("", Outcome::Win, 3),
             game("Unknown", Outcome::Loss, 4),
             game("King's Row", Outcome::Unknown, 5),
+            game("Paraíso", Outcome::Win, 6),
+            game("kings row", Outcome::Win, 7),
         ];
         let refs: Vec<&Game> = games.iter().collect();
         let (rows, no_map) = map_rows(&refs);
-        assert_eq!(no_map, 2, "no map read is Needs a look, not a row");
+        assert_eq!(no_map, 4, "not a catalog name is Needs a look, not a row");
+        let flagged = games.iter().filter(|g| g.review_fields().contains(&"map"));
+        assert_eq!(flagged.count(), no_map, "the same rule as Needs a look");
         assert_eq!(rows.len(), 2);
         let paraiso = rows.iter().find(|r| r.record.games == 2).expect("one row");
+        assert_eq!(paraiso.name, "Paraiso");
         assert_eq!((paraiso.record.wins, paraiso.record.losses), (1, 1));
         assert_eq!(paraiso.last_played.format("%d").to_string(), "02");
-        assert!(
-            stat_tracker::parse::known_map_names().contains(&paraiso.name.as_str()),
-            "{:?} is a catalog name",
-            paraiso.name
-        );
         let kings = rows.iter().find(|r| r.name == "King's Row").expect("row");
         assert_eq!(kings.record.undecided(), 1);
         assert_eq!(kings.pct, None, "under 10 games");
@@ -956,15 +977,61 @@ mod tests {
     }
 
     #[test]
+    fn maps_stats_keep_season_role_and_hero_and_drop_map_and_result() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures_full::snapshot());
+        app.seasons.seasons =
+            serde_json::from_str(crate::fixtures_full::seasons_json()).expect("seasons");
+        assert_eq!(
+            maps_games(&app).len(),
+            857,
+            "the header counts no-map games too"
+        );
+        app.filter_map = Some("King's Row".into());
+        app.filter_outcome = Some(Outcome::Win);
+        assert_eq!(maps_games(&app).len(), 857, "map and result are dropped");
+        app.season = SeasonSel::Season("season-5".into());
+        assert_eq!(maps_games(&app).len(), 110, "season applies");
+        app.roles = crate::model::RoleFilter::default().toggle(crate::model::Role::Support);
+        let support = maps_games(&app);
+        assert!(!support.is_empty() && support.len() < 110, "role applies");
+        assert!(support.iter().all(|g| g.hero == "Ana" || g.hero.is_empty()));
+        app.roles = crate::model::RoleFilter::default();
+        app.filter_hero = Some("Orisa".into());
+        let orisa = maps_games(&app);
+        assert!(
+            !orisa.is_empty() && orisa.iter().all(|g| g.hero == "Orisa"),
+            "hero applies"
+        );
+    }
+
+    #[test]
+    fn empty_copy_follows_why_there_are_no_rows() {
+        assert_eq!(empty_copy(false, 0, 0).unwrap().0, "No maps yet");
+        assert_eq!(
+            empty_copy(true, 0, 0).unwrap().0,
+            "No games match these filters"
+        );
+        assert_eq!(
+            empty_copy(true, 3, 3),
+            Some((
+                "No maps read yet",
+                "3 games with no map are in Needs a look.".to_string()
+            ))
+        );
+        assert_eq!(empty_copy(true, 3, 2), None, "one game has a map");
+    }
+
+    #[test]
     fn games_with_no_map_are_named_in_not_counted() {
         assert_eq!(no_map_line(0), None);
         assert_eq!(
             no_map_line(1).as_deref(),
-            Some("1 game with no map read is in Needs a look too.")
+            Some("1 game with no map is in Needs a look too.")
         );
         assert_eq!(
             no_map_line(26).as_deref(),
-            Some("26 games with no map read are in Needs a look too.")
+            Some("26 games with no map are in Needs a look too.")
         );
     }
 
