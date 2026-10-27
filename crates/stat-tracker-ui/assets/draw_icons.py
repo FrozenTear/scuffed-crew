@@ -11,7 +11,10 @@ It writes tab-icons/overview.png (four rounded squares spanning 14 of the
 12 px) and fold-open.png / fold-closed.png (the ADVANCED row chevrons,
 14 px). For the open Games row it draws upload.png, clock.png, pencil.png,
 flag.png and picture.png (12 px, TEXT_2) and warn-loss.png (the warning
-sign in the loss colour, 12 px). Each is drawn at 2x for a 1x box, from an 8x supersampled mask,
+sign in the loss colour, 12 px). For Delete game it draws trash.png (in
+the loss colour) and trash-ink.png (in BG, for the solid confirm
+button), and tick.png (the "Game deleted." line's tick, TEXT_2), each
+16 px. Each is drawn at 2x for a 1x box, from an 8x supersampled mask,
 so a rerun gives the same files.
 
 The other five tab masks (games, heroes, maps, seasons, settings) are not
@@ -30,6 +33,7 @@ WARN = (245, 184, 74)  # theme WARN
 OK = (70, 216, 164)  # theme OK
 TEXT_3 = (141, 141, 160)  # theme TEXT_3
 DANGER = (255, 92, 122)  # theme DANGER, r1.1 --loss
+INK = (18, 18, 24)  # theme BG, r1.1 --bg: text on the solid loss button
 
 
 def paint(mask, size, colour):
@@ -186,6 +190,37 @@ def picture_mask():
     return mask
 
 
+def _canvas16():
+    """A 16 px box at 2x (32 px) with the spec's 1.5 px stroke."""
+    s = SUPER * 2
+    mask = Image.new("L", (16 * s, 16 * s), 0)
+    return s, mask, ImageDraw.Draw(mask), round(1.5 * s)
+
+
+def trash_mask():
+    """The spec's trash can (M2.5 4.5h11 M6.5 4.5V3h3v1.5 ...), 16 px."""
+    s, mask, draw, stroke = _canvas16()
+    lid = [(2.5 * s, 4.5 * s), (13.5 * s, 4.5 * s)]
+    handle = [(6.5 * s, 4.5 * s), (6.5 * s, 3 * s), (9.5 * s, 3 * s), (9.5 * s, 4.5 * s)]
+    can = [(4 * s, 4.5 * s), (4.7 * s, 13 * s), (11.3 * s, 13 * s), (12 * s, 4.5 * s)]
+    slots = [[(6.8 * s, 7 * s), (6.8 * s, 10.8 * s)], [(9.2 * s, 7 * s), (9.2 * s, 10.8 * s)]]
+    for line in [lid, handle, can] + slots:
+        draw.line(line, fill=255, width=stroke, joint="curve")
+        _caps(draw, [line[0], line[-1]], stroke)
+    _caps(draw, can[1:3] + handle[1:3], stroke)
+    return mask
+
+
+def tick_mask():
+    """The spec's tick (M3.5 8.5l3 3 6-7), 16 px, 1.6 px stroke."""
+    s, mask, draw, _ = _canvas16()
+    stroke = round(1.6 * s)
+    tick = [(3.5 * s, 8.5 * s), (6.5 * s, 11.5 * s), (12.5 * s, 4.5 * s)]
+    draw.line(tick, fill=255, width=stroke, joint="curve")
+    _caps(draw, tick, stroke)
+    return mask
+
+
 def main():
     mask = overview_mask()
     paint(mask, 32, WHITE).save("tab-icons/overview.png", optimize=True)
@@ -200,6 +235,9 @@ def main():
     paint(flag_mask(), 24, TEXT_2).save("flag.png", optimize=True)
     paint(picture_mask(), 24, TEXT_2).save("picture.png", optimize=True)
     paint(warn_mask(), 24, DANGER).save("warn-loss.png", optimize=True)
+    paint(trash_mask(), 32, DANGER).save("trash.png", optimize=True)
+    paint(trash_mask(), 32, INK).save("trash-ink.png", optimize=True)
+    paint(tick_mask(), 32, TEXT_2).save("tick.png", optimize=True)
 
 
 if __name__ == "__main__":
