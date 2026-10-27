@@ -33,6 +33,8 @@ pub mod games;
 pub mod heroes;
 pub mod hotkey;
 pub mod icons;
+#[cfg(test)]
+mod include_tracked;
 pub mod instance;
 pub mod layout;
 pub mod maps;
