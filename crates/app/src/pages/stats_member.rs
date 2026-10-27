@@ -9,6 +9,9 @@ use super::stats::role::{
 use crate::components::ui::{SeasonSelect, use_stats_season};
 use crate::components::{DataTable, member_pending};
 use crate::hooks::use_api_with;
+use crate::sample::{
+    HERO_RULE_NOTE, MAP_RULE_NOTE, OTHER_HEROES, OTHER_RESULT_CLASS, Tally, fold_small, other_label,
+};
 use crate::state::use_auth;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,9 +29,7 @@ struct HeroStats {
     hero: String,
     matches: u32,
     wins: u32,
-    #[allow(dead_code)]
     losses: u32,
-    #[allow(dead_code)]
     draws: u32,
     avg_elims: f64,
     avg_deaths: f64,
@@ -43,6 +44,27 @@ struct MapStats {
     wins: u32,
     losses: u32,
     draws: u32,
+}
+
+impl HeroStats {
+    fn tally(&self) -> Tally {
+        Tally::new(self.matches, self.wins, self.losses, self.draws)
+    }
+}
+
+impl MapStats {
+    fn tally(&self) -> Tally {
+        Tally::new(self.matches, self.wins, self.losses, self.draws)
+    }
+}
+
+/// Text class for a hero or map result: muted until it has a win rate.
+fn result_class(tally: Tally) -> &'static str {
+    if tally.has_win_rate() {
+        "stats-wr"
+    } else {
+        "stats-wr muted"
+    }
 }
 
 fn winrate_pct(wins: u32, total: u32) -> f64 {
@@ -154,6 +176,7 @@ const MEMBER_STATS_CSS: &str = r#"
     .member-stats .stats-wr { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
     .member-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
     .member-stats .stats-row-muted { opacity: 0.55; }
+    .member-stats .stats-gate-note { font-size: 0.7rem; color: var(--text-3); margin: 0 0 0.75rem; }
     .member-stats.stats-page .data-table th:not(:first-child),
     .member-stats.stats-page .data-table td:not(:first-child) {
         text-align: right;
@@ -228,15 +251,10 @@ pub fn StatsMember(id: String) -> Element {
                         p { class: "empty-state", "No matches tracked for this member yet." }
                     },
                     Some(s) => {
-                        let wr = winrate_pct(s.wins, s.total_matches);
-                        let record = crate::util::record_label(s.wins, s.losses, s.draws);
+                        let season = Tally::new(s.total_matches, s.wins, s.losses, s.draws);
                         rsx! {
                             div { class: "stats-summary",
-                                div { class: "stat-tile stat-tile-hero",
-                                    div { class: "stat-tile-value", "{wr:.1}%" }
-                                    div { class: "stat-tile-label", "Win Rate" }
-                                    div { class: "stat-tile-record", "{record}" }
-                                }
+                                {crate::sample::season_tile(season)}
                                 div { class: "stat-tile",
                                     div { class: "stat-tile-value", "{s.total_matches}" }
                                     div { class: "stat-tile-label", "Matches" }
@@ -326,26 +344,49 @@ pub fn StatsMember(id: String) -> Element {
                                 p { class: "empty-state", "No hero stats recorded." }
                             },
                             Some(list) => {
-                                let mut sorted: Vec<_> = list.iter().collect();
+                                let all: Vec<&HeroStats> = list.iter().collect();
+                                // Under 3 games a hero folds into one "Other heroes" row.
+                                let (mut sorted, folded) = fold_small(&all, |h| h.tally());
                                 sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
+                                let other = Tally::sum(folded.iter().map(|h| h.tally()));
+                                let other_count = folded.len();
+                                let other_names = folded
+                                    .iter()
+                                    .map(|h| h.hero.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                // The pool mixes heroes, so it always shows the record, muted.
+                                let other_result = other_label(other);
                                 rsx! {
+                                    p { class: "stats-gate-note", {HERO_RULE_NOTE} }
                                     DataTable { headers: vec!["Hero", "Matches", "Win %", "Avg Elims", "Avg Deaths", "Avg Dmg", "Avg Heal"],
                                         for hero in sorted.iter() {
                                             {
-                                                let wr = winrate_pct(hero.wins, hero.matches);
-                                                let wr_cls = wr_text_class(hero.matches);
-                                                let row_cls = if hero.matches < 3 { "stats-row-muted" } else { "" };
+                                                let tally = hero.tally();
+                                                let result = tally.label();
+                                                let wr_cls = result_class(tally);
                                                 rsx! {
-                                                    tr { key: "{hero.hero}", class: "{row_cls}",
+                                                    tr { key: "{hero.hero}",
                                                         td { "{hero.hero}" }
                                                         td { "{hero.matches}" }
-                                                        td { span { class: "{wr_cls}", "{wr:.1}%" } }
+                                                        td { span { class: "{wr_cls}", "{result}" } }
                                                         td { "{hero.avg_elims:.1}" }
                                                         td { "{hero.avg_deaths:.1}" }
                                                         td { "{hero.avg_damage:.0}" }
                                                         td { "{hero.avg_healing:.0}" }
                                                     }
                                                 }
+                                            }
+                                        }
+                                        if other_count > 0 {
+                                            tr { key: "{OTHER_HEROES}", class: "stats-row-muted", title: "{other_names}",
+                                                td { "{OTHER_HEROES} ({other_count})" }
+                                                td { "{other.games}" }
+                                                td { span { class: "{OTHER_RESULT_CLASS}", "{other_result}" } }
+                                                td { "-" }
+                                                td { "-" }
+                                                td { "-" }
+                                                td { "-" }
                                             }
                                         }
                                     }
@@ -367,17 +408,18 @@ pub fn StatsMember(id: String) -> Element {
                                 let mut sorted: Vec<_> = list.iter().collect();
                                 sorted.sort_by_key(|b| std::cmp::Reverse(b.matches));
                                 rsx! {
+                                    p { class: "stats-gate-note", {MAP_RULE_NOTE} }
                                     DataTable { headers: vec!["Map", "Matches", "Win %", "Wins", "Losses", "Draws"],
                                         for map in sorted.iter() {
                                             {
-                                                let wr = winrate_pct(map.wins, map.matches);
-                                                let wr_cls = wr_text_class(map.matches);
-                                                let row_cls = if map.matches < 3 { "stats-row-muted" } else { "" };
+                                                let tally = map.tally();
+                                                let result = tally.label();
+                                                let wr_cls = result_class(tally);
                                                 rsx! {
-                                                    tr { key: "{map.map_name}", class: "{row_cls}",
+                                                    tr { key: "{map.map_name}",
                                                         td { "{map.map_name}" }
                                                         td { "{map.matches}" }
-                                                        td { span { class: "{wr_cls}", "{wr:.1}%" } }
+                                                        td { span { class: "{wr_cls}", "{result}" } }
                                                         td { "{map.wins}" }
                                                         td { "{map.losses}" }
                                                         td { "{map.draws}" }
