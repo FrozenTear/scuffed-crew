@@ -6,7 +6,9 @@ use crate::hooks::ApiResource;
 
 use super::role::hero_row_matches_filter;
 use super::{HeroStats, load_error_state, wr_bar_color, wr_text_class};
-use crate::sample::{HERO_RULE_NOTE, OTHER_HEROES, Tally, fold_small};
+use crate::sample::{
+    HERO_RULE_NOTE, OTHER_HEROES, OTHER_RESULT_CLASS, Tally, fold_small, other_label,
+};
 
 /// Sort key for the "Win %" sort: heroes with a win rate first (highest
 /// first), then record-only heroes by games played.
@@ -47,8 +49,8 @@ pub(super) fn heroes_tab(
                 .collect::<Vec<_>>()
                 .join(", ");
             let other_count = folded.len();
-            let other_label = other.label();
-            let other_cls = wr_text_class(other);
+            // The pool mixes heroes, so it always shows the record, muted.
+            let other_result = other_label(other);
 
             let mut sorted = kept.clone();
             match sort {
@@ -149,7 +151,7 @@ pub(super) fn heroes_tab(
                         tr { key: "{OTHER_HEROES}", class: "stats-row-muted", title: "{other_names}",
                             td { "{OTHER_HEROES} ({other_count})" }
                             td { "{other.games}" }
-                            td { span { class: "{other_cls}", "{other_label}" } }
+                            td { span { class: "{OTHER_RESULT_CLASS}", "{other_result}" } }
                             td { "-" }
                             td { "-" }
                             td { "-" }

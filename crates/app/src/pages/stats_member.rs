@@ -9,7 +9,9 @@ use super::stats::role::{
 use crate::components::ui::{SeasonSelect, use_stats_season};
 use crate::components::{DataTable, member_pending};
 use crate::hooks::use_api_with;
-use crate::sample::{HERO_RULE_NOTE, MAP_RULE_NOTE, OTHER_HEROES, Tally, fold_small};
+use crate::sample::{
+    HERO_RULE_NOTE, MAP_RULE_NOTE, OTHER_HEROES, OTHER_RESULT_CLASS, Tally, fold_small, other_label,
+};
 use crate::state::use_auth;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -353,8 +355,8 @@ pub fn StatsMember(id: String) -> Element {
                                     .map(|h| h.hero.as_str())
                                     .collect::<Vec<_>>()
                                     .join(", ");
-                                let other_label = other.label();
-                                let other_cls = result_class(other);
+                                // The pool mixes heroes, so it always shows the record, muted.
+                                let other_result = other_label(other);
                                 rsx! {
                                     p { class: "stats-gate-note", {HERO_RULE_NOTE} }
                                     DataTable { headers: vec!["Hero", "Matches", "Win %", "Avg Elims", "Avg Deaths", "Avg Dmg", "Avg Heal"],
@@ -380,7 +382,7 @@ pub fn StatsMember(id: String) -> Element {
                                             tr { key: "{OTHER_HEROES}", class: "stats-row-muted", title: "{other_names}",
                                                 td { "{OTHER_HEROES} ({other_count})" }
                                                 td { "{other.games}" }
-                                                td { span { class: "{other_cls}", "{other_label}" } }
+                                                td { span { class: "{OTHER_RESULT_CLASS}", "{other_result}" } }
                                                 td { "-" }
                                                 td { "-" }
                                                 td { "-" }

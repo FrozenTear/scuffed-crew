@@ -1,9 +1,11 @@
-//! Small-sample rule for win rates (Robert, Oct 20; same rule as the tracker).
+//! Small-sample rule for win rates (FrozenTear, Oct 20; same rule as the tracker).
 //!
 //! - Under 3 games a hero folds away under "Other heroes".
 //! - From 3 to 9 games only the record shows, e.g. `2W-1L`.
 //! - From 10 games the win rate shows.
 //! - An empty map, mode or season shows "No games", never 0%.
+//! - The pooled "Other heroes" row always shows its record, never a win
+//!   rate, because it mixes several heroes.
 //!
 //! Used by My Stats (`/stats`), member stats and member profiles.
 
@@ -20,6 +22,9 @@ pub const RATE_MIN_GAMES: u32 = 10;
 pub const OTHER_HEROES: &str = "Other heroes";
 /// Shown for an empty map, mode or season instead of 0%.
 pub const NO_GAMES: &str = "No games";
+
+/// Text class for the pooled "Other heroes" result: always muted.
+pub const OTHER_RESULT_CLASS: &str = "stats-wr muted";
 
 /// Caption for hero lists that follow the rule.
 pub const HERO_RULE_NOTE: &str =
@@ -89,6 +94,29 @@ impl Tally {
             draws: acc.draws + t.draws,
         })
     }
+}
+
+/// Result text for the pooled "Other heroes" row or card: the record, or
+/// "No games" for an empty pool. Never a win rate, even from 10 games,
+/// because the pool mixes several heroes.
+pub fn other_label(pool: Tally) -> String {
+    if pool.games == 0 {
+        NO_GAMES.to_string()
+    } else {
+        pool.record()
+    }
+}
+
+/// Best and worst entry from `ranked`, sorted best first by win rate.
+/// Worst is `None` when it would show the same rounded % as Best, which
+/// also covers a single ranked entry.
+pub fn best_and_worst<T: Copy>(ranked: &[(T, f64)]) -> (Option<(T, f64)>, Option<(T, f64)>) {
+    let best = ranked.first().copied();
+    let worst = ranked.last().copied().filter(|&(_, worst_wr)| match best {
+        Some((_, best_wr)) => format!("{best_wr:.0}") != format!("{worst_wr:.0}"),
+        None => false,
+    });
+    (best, worst)
 }
 
 /// Split `items` into heroes that keep their own row and heroes that fold
@@ -180,6 +208,37 @@ mod tests {
         assert_eq!(kept, vec![games(12), games(4)]);
         assert_eq!(folded, vec![games(1), games(2)]);
         assert_eq!(Tally::sum(folded), Tally::new(3, 2, 1, 0));
+    }
+
+    #[test]
+    fn other_heroes_pool_of_ten_plus_shows_the_record() {
+        let pool = Tally::sum([games(2), games(2), games(2), games(2), games(2), games(1)]);
+        assert_eq!(pool.games, 11);
+        assert!(pool.has_win_rate());
+        let text = other_label(pool);
+        assert_eq!(text, "6W-5L");
+        assert!(!text.contains('%'), "{text}");
+        assert_eq!(other_label(Tally::new(12, 6, 4, 2)), "6W-4L-2D");
+        assert_eq!(other_label(Tally::default()), "No games");
+        assert!(OTHER_RESULT_CLASS.contains("muted"));
+    }
+
+    #[test]
+    fn worst_hides_when_it_ties_best() {
+        assert_eq!(best_and_worst::<u8>(&[]), (None, None));
+        assert_eq!(best_and_worst(&[(1, 60.0)]), (Some((1, 60.0)), None));
+        assert_eq!(
+            best_and_worst(&[(1, 50.0), (2, 50.0)]),
+            (Some((1, 50.0)), None)
+        );
+        assert_eq!(
+            best_and_worst(&[(1, 50.0), (2, 50.0), (3, 50.0)]),
+            (Some((1, 50.0)), None)
+        );
+        assert_eq!(
+            best_and_worst(&[(1, 70.0), (2, 55.0), (3, 40.0)]),
+            (Some((1, 70.0)), Some((3, 40.0)))
+        );
     }
 
     fn render(app: fn() -> Element) -> String {

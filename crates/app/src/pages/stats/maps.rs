@@ -4,7 +4,7 @@ use crate::components::charts::{BarEntry, HBarChart};
 use crate::hooks::ApiResource;
 
 use super::{MapStats, load_error_state, map_game_mode, wr_bar_color, wr_text_class};
-use crate::sample::{MAP_RULE_NOTE, Tally};
+use crate::sample::{MAP_RULE_NOTE, Tally, best_and_worst};
 
 /// One map bar: the win rate from 10 games; below that an empty bar with the
 /// record, or "No games" for an empty map.
@@ -65,8 +65,8 @@ pub(super) fn maps_tab(maps: ApiResource<Vec<MapStats>>) -> Element {
                 .filter_map(|m| m.tally().win_rate_pct().map(|wr| (m, wr)))
                 .collect();
             ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let best = ranked.first().copied();
-            let worst = ranked.last().copied().filter(|_| ranked.len() > 1);
+            // Worst hides when it shows the same % as Best.
+            let (best, worst) = best_and_worst(&ranked);
 
             let mut groups: std::collections::HashMap<&str, Vec<&MapStats>> =
                 std::collections::HashMap::new();

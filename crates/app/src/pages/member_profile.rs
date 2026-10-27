@@ -6,7 +6,7 @@ use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 
 use super::public_fetch::{PublicFetch, fetch_public};
-use crate::sample::{OTHER_HEROES, Tally, fold_small};
+use crate::sample::{OTHER_HEROES, Tally, fold_small, other_label};
 
 #[derive(Debug, Clone, Deserialize)]
 struct MemberTeamInfo {
@@ -524,6 +524,12 @@ fn render_hero_card(h: &HeroAgg) -> Element {
     }
 }
 
+/// Meta line for the pooled "Other heroes" card: `4 games · 3W-1L`. Always
+/// the record, never a win rate, because the pool mixes several heroes.
+fn other_meta(pool: Tally) -> String {
+    format!("{} games · {}", pool.games, other_label(pool))
+}
+
 /// One card for every hero under 3 games, with their combined games.
 fn render_other_heroes_card(folded: &[&HeroAgg]) -> Element {
     let names = folded
@@ -531,10 +537,11 @@ fn render_other_heroes_card(folded: &[&HeroAgg]) -> Element {
         .map(|h| h.hero.as_str())
         .collect::<Vec<_>>()
         .join(", ");
-    let meta = hero_meta(Tally::sum(folded.iter().copied().map(hero_tally)));
+    let count = folded.len();
+    let meta = other_meta(Tally::sum(folded.iter().copied().map(hero_tally)));
     rsx! {
         Card {
-            div { class: "profile-hero-name", "{OTHER_HEROES}" }
+            div { class: "profile-hero-name", "{OTHER_HEROES} ({count})" }
             div { class: "profile-hero-meta", "{names}" }
             div { class: "profile-hero-meta", "{meta}" }
         }
@@ -570,6 +577,25 @@ mod tests {
         let (kept, folded) = fold_small(&refs, hero_tally);
         assert_eq!(kept.len(), 1);
         assert_eq!(folded.len(), 2);
+    }
+
+    #[test]
+    fn other_card_pool_of_ten_plus_shows_the_record() {
+        let pool = Tally::sum(
+            [
+                hero(1, 1, 0),
+                hero(2, 0, 0),
+                hero(1, 1, 0),
+                hero(2, 0, 0),
+                hero(1, 1, 0),
+            ]
+            .iter()
+            .map(hero_tally),
+        );
+        assert_eq!(pool.games, 10);
+        let meta = other_meta(pool);
+        assert_eq!(meta, "10 games · 7W-3L");
+        assert!(!meta.contains('%'), "{meta}");
     }
 
     #[test]
