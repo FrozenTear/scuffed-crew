@@ -471,10 +471,18 @@ impl TrackerApp {
             .unwrap_or(false);
         // A fixture (demo or test) never reads the host's config.toml, so
         // it shows no real token and tests do not depend on the host.
+        // Otherwise read the file as written, the same parse every save
+        // compares against (`settings_save`). `Config::load` would fold in
+        // env overrides (OCR workers, debug images, token, server), so the
+        // first change would find the file "changed on disk" and reload
+        // instead of applying. Env locks show on their rows instead.
         let loaded = if cli.fixture.is_some() {
             Ok(Config::default())
         } else {
-            Config::load()
+            match Config::config_path() {
+                Ok(path) if path.exists() => Config::read_at(&path),
+                _ => Config::load(),
+            }
         };
         let (saved_config, config_unreadable) = match loaded {
             Ok(config) => (config, false),
