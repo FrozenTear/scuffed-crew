@@ -44,9 +44,9 @@ const GAME_PROCESSES_HELP: &str =
 const NO_PROCESSES_NOTE: &str = "No processes listed, so the tracker captures whenever it runs.";
 /// Help under In-game names.
 const NAMES_HELP: &str = "As shown in-game, without the #1234.";
-/// Help under Session window: what this app uses it for. Games groups its
-/// list by a fixed gap, so the help does not promise that.
-const SESSION_WINDOW_HELP: &str = "How long a game still counts as live after its last capture, for the Companion and the game in progress.";
+/// Help under Session window: the spec line (the 0.6 Games page groups by
+/// it), then what else this app uses it for.
+const SESSION_WINDOW_HELP: &str = "Games closer together than this count as one session. It is also how long a game still counts as live for the Companion.";
 
 /// A tag after a row title.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

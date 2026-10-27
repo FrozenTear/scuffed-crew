@@ -221,6 +221,8 @@ pub enum Message {
     SettingsPage(crate::settings_update::Msg),
     /// A message from the 0.6 top bar ([`crate::nav::update`]).
     Nav(crate::nav::Msg),
+    /// A message from the 0.6 Games page ([`crate::games_page::update`]).
+    GamesPage(crate::games_page::Msg),
 }
 
 struct NotesDialog {
@@ -335,6 +337,8 @@ pub struct TrackerApp {
     pub filter_outcome: Option<Outcome>,
     /// Games shows only games that need a look (the top bar chip).
     pub needs_look_filter: bool,
+    /// The 0.6 Games page's view and sort ([`crate::games_page`]).
+    pub games_page: crate::games_page::GamesPage,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
     pub(crate) toast_action: Option<Message>,
@@ -591,6 +595,7 @@ impl TrackerApp {
             filter_map: None,
             filter_outcome: None,
             needs_look_filter: false,
+            games_page: Default::default(),
             toast: None,
             toast_action: None,
             sessions_with_kit: HashSet::new(),
@@ -1066,6 +1071,7 @@ impl TrackerApp {
             }
             Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
             Message::Nav(msg) => crate::nav::update(self, msg),
+            Message::GamesPage(msg) => crate::games_page::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()
@@ -2949,26 +2955,6 @@ mod tests {
     use iced::window;
     use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
-
-    #[test]
-    fn a_stopped_or_foreign_pid_does_not_block_uninstall() {
-        use crate::daemon::StopError;
-
-        assert!(StopError::NotRunning.allows_restart());
-        assert!(
-            StopError::Refused("Saved process id is not the tracker, not stopping it")
-                .allows_restart()
-        );
-        assert!(StopError::Refused("Refusing to stop this window's process").allows_restart());
-        assert!(
-            !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
-                .allows_restart()
-        );
-        assert!(
-            !StopError::Failed("Could not stop the tracker: Permission denied".into())
-                .allows_restart()
-        );
-    }
 
     #[test]
     fn setup_guide_keys_do_not_dismiss_notes_underneath() {

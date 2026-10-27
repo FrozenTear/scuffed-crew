@@ -25,6 +25,9 @@ pub fn shown_games(app: &TrackerApp) -> Vec<&Game> {
 }
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
+    if app.nav_style == crate::nav::NavStyle::TopTabs {
+        return crate::games_page::view(app, content_width);
+    }
     let header_only = app.header_filter();
     let option_pool = filter_games(&app.games, &header_only);
     let heroes = distinct_heroes(&option_pool);
