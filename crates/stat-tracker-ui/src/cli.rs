@@ -10,6 +10,8 @@ pub enum FixtureKind {
     /// unsure one with a swap, and an undecided one, with Wrecking Ball
     /// history for the averages.
     Games,
+    /// 857 games over three seasons (the 0.6 Maps and Seasons spec numbers).
+    Full,
 }
 
 impl FixtureKind {
@@ -19,12 +21,8 @@ impl FixtureKind {
             FixtureKind::Empty => "empty",
             FixtureKind::Sample => "sample",
             FixtureKind::Games => "games",
+            FixtureKind::Full => "full",
         }
-    }
-
-    /// A fixture with games and the sample season list.
-    pub fn has_games(self) -> bool {
-        self != FixtureKind::Empty
     }
 }
 
@@ -90,8 +88,9 @@ impl Cli {
                             "empty" => Some(FixtureKind::Empty),
                             "sample" => Some(FixtureKind::Sample),
                             "games" => Some(FixtureKind::Games),
+                            "full" => Some(FixtureKind::Full),
                             other => {
-                                eprintln!("unknown --fixture {other:?} (empty|sample|games)");
+                                eprintln!("unknown --fixture {other:?} (empty|sample|games|full)");
                                 None
                             }
                         };
@@ -158,11 +157,12 @@ USAGE:
   stat-tracker-gui [OPTIONS]
   stat-tracker-gui --fixture sample
   stat-tracker-gui --fixture empty
+  stat-tracker-gui --fixture full
   stat-tracker-gui --companion --fixture sample
 
 OPTIONS:
   --data-dir PATH       Daemon data dir (default: config / XDG, or a temp dir with --fixture)
-  --fixture empty|sample|games
+  --fixture empty|sample|games|full
                         Install a demo live_snapshot.json and read it back via storage::read_snapshot
   --companion           Run the layer-shell overlay only (no main window / tray).
                         Needs a Wayland compositor with wlr-layer-shell (niri).

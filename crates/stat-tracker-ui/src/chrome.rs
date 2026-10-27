@@ -74,17 +74,23 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 /// screens the season, role and Companion row, then the screen. The bar and
 /// the page share one gutter ([`theme::page_gutter`]).
 ///
-/// The control row is a stopgap: it is the 0.5 header row, not the spec's
-/// filter chips (Season, queues, roles, Crew, Hero, Map; "Filters (n)" at
-/// 1024), which land with the per-screen redesigns. Games has them already.
+/// The control row is the 0.5 header row, kept only on pages that do not
+/// draw the spec's filter chips yet; the redesigned pages draw the chips
+/// themselves (Season, queues, roles, Crew, Hero, Map; "Filters (n)"
+/// below a 1440 px window).
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
-        // Settings has none; Overview and Games draw the spec's filter
-        // chips themselves.
+        // Settings has none; Overview, Games, Heroes, Maps and Seasons draw
+        // the spec's filter chips themselves.
         if !matches!(
             app.screen,
-            Screen::Settings | Screen::Overview | Screen::Games
+            Screen::Settings
+                | Screen::Overview
+                | Screen::Games
+                | Screen::Heroes
+                | Screen::Maps
+                | Screen::Seasons
         ) {
             content = content.push(widgets::header_controls(app));
         }
@@ -189,7 +195,14 @@ fn page_body<'a>(
             Screen::Overview => crate::overview::view(app, size.width),
             Screen::Games => crate::games::view(app, size.width, size.width + 2.0 * pad_x),
             Screen::Heroes => crate::heroes::view(app, size.width),
+            // The 0.6 pages under the top tabs, the 0.5 cards in the sidebar.
+            Screen::Maps if app.nav_style == NavStyle::TopTabs => {
+                crate::maps_tab::view(app, size.width)
+            }
             Screen::Maps => crate::maps::view(app, size.width),
+            Screen::Seasons if app.nav_style == NavStyle::TopTabs => {
+                crate::seasons_tab::view(app, size.width)
+            }
             Screen::Seasons => crate::seasons::view(app, size.width),
             Screen::Settings => settings(app, size.width),
         })

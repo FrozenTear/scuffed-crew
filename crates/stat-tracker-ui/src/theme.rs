@@ -40,6 +40,12 @@ pub const SURFACE: Color = Color::from_rgb(
     0x1c as f32 / 255.0,
     0x25 as f32 / 255.0,
 );
+/// Inner tiles and tracks on a surface (spec `--surface2`).
+pub const SURFACE_2: Color = Color::from_rgb(
+    0x23 as f32 / 255.0,
+    0x23 as f32 / 255.0,
+    0x2e as f32 / 255.0,
+);
 pub const BORDER: Color = Color::from_rgb(
     0x2a as f32 / 255.0,
     0x2a as f32 / 255.0,
@@ -80,6 +86,16 @@ pub const WARN: Color = Color::from_rgb(
     0xb8 as f32 / 255.0,
     0x4a as f32 / 255.0,
 );
+/// Spec `--accent-soft`: the accent at 16%.
+pub const ACCENT_SOFT: Color = Color { a: 0.16, ..ACCENT };
+/// The amber outline on undecided and need-a-look items (never a fill).
+pub const WARN_LINE: Color = Color { a: 0.45, ..WARN };
+
+/// Mint at 50% or above, red below (Best and Worst lists).
+pub fn pct_color(pct: u32) -> Color {
+    if pct >= 50 { OK } else { DANGER }
+}
+
 pub const ROLE_TANK: Color = Color::from_rgb(
     0x5b as f32 / 255.0,
     0x8d as f32 / 255.0,
