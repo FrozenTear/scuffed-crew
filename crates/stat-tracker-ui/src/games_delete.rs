@@ -382,6 +382,20 @@ mod tests {
         assert_eq!(app.games.len(), before);
     }
 
+    /// Leaving the Games tab takes the "Game deleted." line down.
+    #[test]
+    fn leaving_the_tab_clears_the_deleted_line() {
+        let (_dir, mut app) = app();
+        send(&mut app, Msg::Delete(crate::fixtures_games::NORMAL.into()));
+        assert!(app.games_tab.deleted_note.is_some());
+        let _ = app.update(crate::app::Message::Navigate(crate::model::Screen::Games));
+        assert!(app.games_tab.deleted_note.is_some(), "staying keeps it");
+        let _ = app.update(crate::app::Message::Navigate(
+            crate::model::Screen::Overview,
+        ));
+        assert!(app.games_tab.deleted_note.is_none());
+    }
+
     /// On a focused row Delete opens the row first.
     #[test]
     fn the_delete_key_opens_a_focused_row() {

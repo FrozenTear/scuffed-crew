@@ -843,6 +843,7 @@ impl TrackerApp {
                     self.expanded = None;
                     self.editing = false;
                     self.confirm_delete = None;
+                    self.games_tab.deleted_note = None;
                 }
                 if screen != Screen::Settings {
                     self.confirm_clear = false;
