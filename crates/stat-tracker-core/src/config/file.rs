@@ -17,34 +17,7 @@ impl Config {
         let config_path = config_dir.join("config.toml");
 
         let mut config = Self::read_at(&config_path)?;
-
-        // CLI / env overlay: --token / SCUFFED_TOKEN and --server / SCUFFED_SERVER.
-        // A blank value counts as not given, and a given one is trimmed
-        // (`non_blank`).
-        let cli_token = Self::cli_or_env("--token", "SCUFFED_TOKEN");
-        let cli_server = Self::cli_or_env("--server", "SCUFFED_SERVER");
-
-        // A `[sync]` table without a token loads as sync off. Its URL still
-        // pairs with a token from --token / SCUFFED_TOKEN.
-        let token_less_sync = if config.sync.is_none() {
-            Self::token_less_sync_url(&config_path)
-        } else {
-            None
-        };
-        // Once per process: the desktop app re-reads config.toml (the overlay
-        // does so about once per game), and the file has not changed.
-        if cli_token.is_none() && token_less_sync.is_some() && first_time(&SYNC_OFF_WARNED) {
-            tracing::warn!(
-                "config.toml has a [sync] section without a token, so sync is off. \
-                 Add the token in Settings, or check that the key is spelled `token`."
-            );
-        }
-        config.sync = Self::sync_with_cli(
-            config.sync.take(),
-            token_less_sync.flatten(),
-            cli_token,
-            cli_server,
-        );
+        config.overlay_sync(&config_path);
 
         // Auto-save if we built a usable sync config from CLI args and there was
         // no file yet, avoids requiring flags on every subsequent start.
@@ -61,9 +34,70 @@ impl Config {
             }
         }
 
+        config.overlay_run_env();
+        Ok(config)
+    }
+
+    /// `self`, the file at `config_path` as written, with the CLI / env
+    /// overlay of [`Self::load`] on top: the sync token and server, debug
+    /// images and OCR workers. Unlike `load` it never writes the file. The
+    /// desktop app shows and acts on this config and saves against the file
+    /// as written, so an override is never stored by a save.
+    pub fn with_env_overlay(mut self, config_path: &std::path::Path) -> Self {
+        self.overlay_sync(config_path);
+        self.overlay_run_env();
+        self
+    }
+
+    /// Which settings the CLI / env overlay of [`Self::load`] sets in this
+    /// process, so Settings can mark them as set outside the app.
+    pub fn env_overlay() -> EnvOverlay {
+        EnvOverlay {
+            token: Self::cli_or_env("--token", "SCUFFED_TOKEN").is_some(),
+            server: Self::cli_or_env("--server", "SCUFFED_SERVER").is_some(),
+            debug_ocr: Self::env_truthy("STAT_TRACKER_DEBUG_OCR"),
+            ocr_threads: Self::arg_value("--ocr-threads")
+                .or_else(|| std::env::var(super::reader::OCR_THREADS_ENV).ok())
+                .and_then(|raw| super::reader::ocr_threads_override(&raw)),
+        }
+    }
+
+    /// The `[sync]` part of the overlay: --token / SCUFFED_TOKEN and
+    /// --server / SCUFFED_SERVER.
+    fn overlay_sync(&mut self, config_path: &std::path::Path) {
+        // A blank value counts as not given, and a given one is trimmed
+        // (`non_blank`).
+        let cli_token = Self::cli_or_env("--token", "SCUFFED_TOKEN");
+        let cli_server = Self::cli_or_env("--server", "SCUFFED_SERVER");
+
+        // A `[sync]` table without a token loads as sync off. Its URL still
+        // pairs with a token from --token / SCUFFED_TOKEN.
+        let token_less_sync = if self.sync.is_none() {
+            Self::token_less_sync_url(config_path)
+        } else {
+            None
+        };
+        // Once per process: the desktop app re-reads config.toml (the overlay
+        // does so about once per game), and the file has not changed.
+        if cli_token.is_none() && token_less_sync.is_some() && first_time(&SYNC_OFF_WARNED) {
+            tracing::warn!(
+                "config.toml has a [sync] section without a token, so sync is off. \
+                 Add the token in Settings, or check that the key is spelled `token`."
+            );
+        }
+        self.sync = Self::sync_with_cli(
+            self.sync.take(),
+            token_less_sync.flatten(),
+            cli_token,
+            cli_server,
+        );
+    }
+
+    /// The run-time part of the overlay: debug images and OCR workers.
+    fn overlay_run_env(&mut self) {
         // Env overlay for OCR debug dumps (config flag OR STAT_TRACKER_DEBUG_OCR=1).
         if Self::env_truthy("STAT_TRACKER_DEBUG_OCR") {
-            config.debug_ocr = true;
+            self.debug_ocr = true;
         }
 
         // SCUFFED_SHADOW_RECOGNIZER is read by `shadow_recognizer_control()`,
@@ -74,15 +108,13 @@ impl Config {
             .or_else(|| std::env::var(super::reader::OCR_THREADS_ENV).ok())
         {
             match super::reader::ocr_threads_override(&raw) {
-                Some(n) => config.ocr_threads = Some(n),
+                Some(n) => self.ocr_threads = Some(n),
                 None => tracing::warn!(
                     value = %raw,
                     "STAT_TRACKER_OCR_THREADS / --ocr-threads must be a whole number of 1 or more; ignoring"
                 ),
             }
         }
-
-        Ok(config)
     }
 
     /// `[sync]` after the CLI / env overlay of [`Self::load`].
@@ -229,6 +261,22 @@ impl Config {
         let args: Vec<String> = std::env::args().collect();
         args.windows(2).find(|w| w[0] == key).map(|w| w[1].clone())
     }
+}
+
+/// What [`Config::env_overlay`] found: the settings this process's CLI
+/// arguments or environment override. The tracker service has its own
+/// environment, so this is what the desktop app sees, not the service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EnvOverlay {
+    /// `--token` / `SCUFFED_TOKEN` is set (not blank).
+    pub token: bool,
+    /// `--server` / `SCUFFED_SERVER` is set (not blank). It only counts
+    /// together with a token.
+    pub server: bool,
+    /// `STAT_TRACKER_DEBUG_OCR` turns debug images on.
+    pub debug_ocr: bool,
+    /// The worker count `--ocr-threads` / `STAT_TRACKER_OCR_THREADS` sets.
+    pub ocr_threads: Option<u32>,
 }
 
 /// Set once [`Config::load`] has logged the "sync is off" warning.

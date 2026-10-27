@@ -18,6 +18,7 @@ pub use capture::{
     environment_d_capture_files, screencast_pause_override, winning_env_assignment,
 };
 pub use edit::SetupDiskPatch;
+pub use file::EnvOverlay;
 pub use poll::{
     AutoDetectConfig, CLASSIC_POLL_INTERVAL, LEGACY_DEFAULT_POLL_SECS, NEW_READER_POLL_INTERVAL,
     POLL_INTERVAL_MS_MAX, POLL_INTERVAL_MS_MIN,
