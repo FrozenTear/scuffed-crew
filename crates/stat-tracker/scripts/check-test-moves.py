@@ -17,9 +17,10 @@ the check passes only when, for every entry:
 2. the old file exists at the base and is gone at head, and the new file
    exists at head and not at the base;
 3. the new file equals the base old file byte for byte, except:
-   - its one `use super::*;` line is replaced by exactly the two lines
-     `use crate::*;` and `use crate::main_tests::*;` (so it reaches the
-     crate root and the shared helpers in `main_tests/mod.rs`);
+   - its one `use super::*;` line is replaced by exactly the one line
+     `use crate::{main_tests::*, *};` (rustfmt's form), so it reaches the
+     crate root and the shared helpers in `main_tests/mod.rs` and keeps its
+     exact length (G1 caps some test files by path, and caps never rise);
    - the first line, when it is the generated header (`//! Daemon tests:
      <name>.` and a pointer to `mod.rs`), may be reworded to any one `//!`
      line;
@@ -94,7 +95,9 @@ OLD_PREFIX = re.compile(r"^main_tests::([a-z_][a-z0-9_]*)::$")
 NEW_PREFIX = re.compile(r"^daemon::((?:[a-z_][a-z0-9_]*::)*)(tests_[a-z0-9_]+)::$")
 GENERATED_HEADER = re.compile(r"^//! Daemon tests: [a-z0-9_]+\. See `mod\.rs`\.$")
 OLD_IMPORT = "use super::*;"
-NEW_IMPORT = ["use crate::*;", "use crate::main_tests::*;"]
+# One line, so a moved file keeps its exact length: G1 caps some test files
+# by path at their line count, and caps never rise.
+NEW_IMPORT = ["use crate::{main_tests::*, *};"]
 CFG_TEST = "#[cfg(test)]"
 LITERAL = re.compile(r'"((?:[^"\\\n]|\\.)*)"')
 
@@ -152,6 +155,36 @@ def diff(a, b, a_name, b_name, limit=40):
     if len(out) > limit:
         out = out[:limit] + [f"... ({len(out) - limit} more diff lines)"]
     return ["    " + line for line in out]
+
+
+CAP_ENTRY = re.compile(r'^    \("([^"]+)", (\d+)\),$')
+
+
+def caps_moved_only(base_text, head_text, renames):
+    """None when `head_text` is `base_text` with the `CAPS` entries of moved
+    files renamed (same cap values) and the list still sorted; else why not."""
+    if base_text is None:
+        return "not in the base"
+
+    def split(text):
+        caps, rest = [], []
+        for line in text.split("\n"):
+            m = CAP_ENTRY.match(line)
+            if m:
+                caps.append((m.group(1), int(m.group(2))))
+                rest.append("<cap>")
+            else:
+                rest.append(line)
+        return caps, rest
+
+    base_caps, base_rest = split(base_text)
+    head_caps, head_rest = split(head_text)
+    if base_rest != head_rest:
+        return "changed outside the CAPS entries"
+    want = sorted((renames.get(path, path), cap) for path, cap in base_caps)
+    if head_caps != want:
+        return "CAPS is not the base list with the moved paths renamed, at the same caps, sorted"
+    return None
 
 
 def main():
@@ -310,11 +343,31 @@ def main():
     changed |= set(
         git("ls-files", "-o", "--exclude-standard", "--", pkg, cwd=root).stdout.split()
     )
+    caps_rel = f"{REL_SRC}/tests_file_size.rs"
     for rel in sorted(changed - allowed):
         if rel.startswith(f"{pkg}/scripts/"):
             notes.append(f"{rel}: changed at head; run the base's copy of the scripts")
+        elif rel == caps_rel:
+            pass  # checked below, on every run
         else:
             errors.append(f"{rel}: changed, but a set A PR changes only the mapped move")
+
+    # G1 caps files by path: a moved capped file takes its cap with it, at
+    # the same value, and the list stays sorted. Checked whether or not the
+    # file changed, so a cap left on the old path fails here too.
+    renames = {
+        old_rel.removeprefix("crates/"): new_rel.removeprefix("crates/")
+        for _, old_rel, new_rel, _, _ in moves
+    }
+    problem = caps_moved_only(
+        at_base(root, args.base, caps_rel),
+        (root / caps_rel).read_text(encoding="utf-8"),
+        renames,
+    )
+    if problem:
+        errors.append(f"{caps_rel}: {problem}")
+    elif caps_rel in changed:
+        report.append(f"  {caps_rel}: caps of moved files follow them")
 
     # Stale references at head.
     listed = git(
