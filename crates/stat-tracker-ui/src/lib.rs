@@ -24,6 +24,7 @@ mod chrome;
 pub mod cli;
 pub mod clipboard;
 pub mod commands;
+pub mod companion_gate;
 #[cfg(test)]
 mod copy_rules;
 pub mod daemon;
@@ -51,6 +52,7 @@ pub mod restart_prompt;
 pub mod seasons;
 pub mod settings;
 pub mod settings_cards;
+mod settings_env;
 pub mod settings_model;
 pub mod settings_page;
 mod settings_rows;
@@ -63,6 +65,7 @@ pub mod tracker_status;
 pub mod tray;
 pub mod uninstall;
 pub mod update;
+mod update_check;
 pub mod widgets;
 
 pub use aggregate::{Aggregates, SeasonWindow, aggregate};

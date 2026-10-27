@@ -340,7 +340,11 @@ pub struct TrackerApp {
     /// When the unreadable-config toast was shown. Cleared with the toast.
     pub(crate) toast_shown_at: Option<SystemTime>,
     pub settings: SettingsForm,
+    /// config.toml with the CLI / env overlay on top: what Settings shows
+    /// and the app acts on.
     pub saved_config: Config,
+    /// config.toml as written: what saves compare against and build on.
+    pub(crate) saved_file: Config,
     /// The on-disk config.toml did not parse. Save must not overwrite it.
     pub(crate) config_unreadable: bool,
     pub daemon: DaemonView,
@@ -407,7 +411,7 @@ pub struct TrackerApp {
     tick_count: u64,
     tray: Option<TrayHandle>,
     pub overlay_hold: OverlayHold,
-    overlay_child: Option<CompanionChild>,
+    pub(crate) overlay_child: Option<CompanionChild>,
     overlay_spawn_blocked: bool,
     pub game_running: bool,
     /// Open session shown as the Games in-progress card. `None` once it closes.
@@ -469,31 +473,13 @@ impl TrackerApp {
         let config_existed = Config::config_path()
             .map(|path| path.exists())
             .unwrap_or(false);
-        // A fixture (demo or test) never reads the host's config.toml, so
-        // it shows no real token and tests do not depend on the host.
-        // Otherwise read the file as written, the same parse every save
-        // compares against (`settings_save`). `Config::load` would fold in
-        // env overrides (OCR workers, debug images, token, server), so the
-        // first change would find the file "changed on disk" and reload
-        // instead of applying. Env locks show on their rows instead.
-        let loaded = if cli.fixture.is_some() {
-            Ok(Config::default())
-        } else {
-            match Config::config_path() {
-                Ok(path) if path.exists() => Config::read_at(&path),
-                _ => Config::load(),
-            }
-        };
-        let (saved_config, config_unreadable) = match loaded {
-            Ok(config) => (config, false),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "config.toml did not parse; Settings will not overwrite it"
-                );
-                (Config::default(), true)
-            }
-        };
+        // Shown: the file with the env overlay. Saved against: the file as
+        // written (`settings_env`).
+        let crate::settings_env::Loaded {
+            file: saved_file,
+            shown: saved_config,
+            unreadable: config_unreadable,
+        } = crate::settings_env::load(Config::config_path().ok().as_deref(), cli.fixture.is_some());
         let health_status = health_status_for(
             &cli.data_dir,
             &games,
@@ -580,7 +566,8 @@ impl TrackerApp {
             saved_config.clone(),
             daemon.pid,
             seasons::load_companion_during_games(&cli.data_dir),
-        );
+        )
+        .with_unknown_baseline(config_unreadable);
         let mut app = Self {
             live_status,
             health_status,
@@ -606,6 +593,7 @@ impl TrackerApp {
             toast_shown_at: None,
             settings,
             saved_config,
+            saved_file,
             config_unreadable,
             daemon,
             daemon_busy: false,
@@ -666,15 +654,21 @@ impl TrackerApp {
             own_exe,
             restart_watch,
             copy_text: crate::clipboard::copy_text,
-            nav_style: crate::nav::NavStyle::from_env(),
+            // Tests start on the 0.6 layout whatever the shell exports.
+            nav_style: if cfg!(test) {
+                crate::nav::NavStyle::TopTabs
+            } else {
+                crate::nav::NavStyle::from_env()
+            },
             page_state,
         };
         app.refresh_token_rejected();
         app.refresh_kit_sessions();
 
+        let want_overlay = app.overlay_showing();
         if let Some(err) = overlay::reconcile_companion(
             &mut app.overlay_child,
-            overlay::overlay_visible(&app.overlay_hold, app.game_running),
+            want_overlay,
             &app.data_dir,
             app.fixture,
             &mut app.overlay_spawn_blocked,
@@ -751,6 +745,7 @@ impl TrackerApp {
             window::close_events().map(Message::WindowClosed),
         ];
         if self.overlay_hotkey.enabled
+            && self.companion_enabled()
             && let Ok(bind) = hotkey::parse_bind(&self.overlay_hotkey.bind)
         {
             subs.push(hotkey::subscription(bind));
@@ -779,9 +774,9 @@ impl TrackerApp {
         GameFilter::from_header(self.season_window(), self.roles)
     }
 
+    /// The Companion shows now ([`crate::companion_gate`]).
     pub fn overlay_showing(&self) -> bool {
-        self.page_state.companion_during_games
-            && overlay::overlay_visible(&self.overlay_hold, self.game_running)
+        self.companion_enabled() && overlay::overlay_visible(&self.overlay_hold, self.game_running)
     }
 
     fn apply_overlay_policy(&mut self) {
@@ -2329,12 +2324,15 @@ impl TrackerApp {
         };
         match Config::apply_setup_patch(&path, &patch) {
             Ok(fresh) => {
+                let shown = crate::settings_env::shown_from_file(&fresh, &path);
                 if patch.setup_completed.is_some() {
+                    self.saved_file.setup_completed = fresh.setup_completed;
                     self.saved_config.setup_completed = fresh.setup_completed;
                 }
                 if patch.sync.is_some() {
-                    self.saved_config.sync = fresh.sync.clone();
-                    if let Some(sync) = &fresh.sync {
+                    self.saved_file.sync.clone_from(&fresh.sync);
+                    self.saved_config.sync = shown.sync;
+                    if let Some(sync) = &self.saved_config.sync {
                         self.settings.sync_url = sync.server_url.clone();
                         self.settings.sync_token = sync.token.clone();
                     }
@@ -2561,6 +2559,10 @@ impl TrackerApp {
     }
 
     fn toggle_overlay(&mut self) -> Task<Message> {
+        if !self.companion_enabled() {
+            self.replace_toast(crate::companion_gate::OFF_TOAST);
+            return Task::none();
+        }
         self.apply_overlay_policy();
         let key = overlay::live_session_key(
             &self.data_dir,

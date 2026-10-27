@@ -51,7 +51,7 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
                 left: PAGE_PAD_X,
                 right: 8.0,
             }),
-        page_body(app, content, crate::settings::view, PAGE_PAD_X, true),
+        page_body(app, content, crate::settings::view, PAGE_PAD_X, true, None),
     ]
     .spacing(0)
     .width(Fill)
@@ -73,9 +73,19 @@ fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
             content = content.push(widgets::header_controls(app));
         }
         let gutter = theme::page_gutter(size.width);
+        // On Settings the toast is as wide as the page column below it.
+        let toast_max = (app.screen == Screen::Settings)
+            .then(|| crate::settings_model::page_width(size.width - 2.0 * gutter));
         column![
             crate::nav::top_bar(app, size.width),
-            page_body(app, content, crate::settings_page::view, gutter, false),
+            page_body(
+                app,
+                content,
+                crate::settings_page::view,
+                gutter,
+                false,
+                toast_max
+            ),
         ]
         .spacing(0)
         .width(Fill)
@@ -100,6 +110,7 @@ fn page_body<'a>(
     settings: fn(&'a TrackerApp, f32) -> Element<'a, Message>,
     pad_x: f32,
     settings_scrolls: bool,
+    toast_max: Option<f32>,
 ) -> Element<'a, Message> {
     let settings_screen = settings_scrolls && app.screen == Screen::Settings;
     let height = if settings_screen {
@@ -109,7 +120,11 @@ fn page_body<'a>(
     };
     let mut content = content.spacing(16).width(Fill).height(height);
     if let Some(t) = &app.toast {
-        content = content.push(widgets::toast_bar(t, app.toast_action.clone()));
+        let bar = widgets::toast_bar(t, app.toast_action.clone());
+        content = content.push(match toast_max {
+            Some(max) => container(bar).width(Fill).max_width(max).into(),
+            None => bar,
+        });
     }
     if app.restart_bar_visible() {
         content = content.push(restart_prompt::bar());

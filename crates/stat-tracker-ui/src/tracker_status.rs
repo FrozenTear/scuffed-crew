@@ -1,10 +1,12 @@
 //! What the tracker is doing, as the window shows it.
 //!
-//! One [`HeaderStatus`] feeds the dot and words in the 0.6 top bar, the
-//! dot and words in the 0.6 Settings strip, and the dot in the classic
-//! (0.5) header, so the three cannot disagree about whether the tracker
-//! runs. The classic header keeps its own text ("Last game HH:MM") and its
-//! 0.5 dot colours ([`classic_status_color`]).
+//! One [`HeaderStatus`] feeds the dot and words in the 0.6 top bar and the
+//! dot in the 0.6 Settings strip. The strip and the Tracker service row
+//! say "Tracker running" or "Tracker stopped" from whether it runs
+//! ([`strip_label`]), so a rejected token never hides that. The classic
+//! (0.5) header keeps its own text ("Last game HH:MM"), its 0.5 dot rules
+//! ([`classify_classic_status`]: a capture the app runs is mint, a failed
+//! one red) and its 0.5 dot colours ([`classic_status_color`]).
 
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 use iced::Color;
@@ -73,8 +75,8 @@ pub fn header_status_color(status: HeaderStatus) -> Color {
 }
 
 /// Dot colour in the classic (0.5) header, unchanged from 0.5: mint while
-/// a game is open, amber while idle, so the dot beside "Last game HH:MM"
-/// still tells the two apart.
+/// a game is open or Capture now runs, amber while idle, red when stopped
+/// or after a failed capture ([`classify_classic_status`]).
 pub fn classic_status_color(status: HeaderStatus) -> Color {
     match status {
         HeaderStatus::Capturing => theme::OK,
@@ -103,22 +105,66 @@ pub fn long_label(status: HeaderStatus) -> &'static str {
     }
 }
 
-/// Words in the Settings strip (spec p6: "Tracker running").
-pub fn strip_label(status: HeaderStatus) -> &'static str {
-    match status {
-        HeaderStatus::Capturing | HeaderStatus::Waiting => "Tracker running",
-        HeaderStatus::Down => "Tracker stopped",
-        HeaderStatus::TokenRejected => "Website token rejected",
+/// Words in the Settings strip and the Tracker service row (spec p6:
+/// "Tracker running"): whether the tracker runs, whatever the website
+/// does with the token. A rejected token turns the strip's dot amber, and
+/// the Website account card says why.
+pub fn strip_label(running: bool) -> &'static str {
+    if running {
+        "Tracker running"
+    } else {
+        "Tracker stopped"
     }
 }
 
-pub(crate) fn header_status_for(app: &TrackerApp) -> HeaderStatus {
-    classify_header_status(HeaderStatusInput {
+/// What the classic header dot reads besides [`HeaderStatusInput`].
+#[derive(Debug, Clone, Copy)]
+pub struct ClassicStatusInput {
+    pub shared: HeaderStatusInput,
+    /// Capture now runs.
+    pub capturing: bool,
+    /// The last test capture failed.
+    pub capture_error: bool,
+}
+
+/// The classic header dot, with the 0.5 rules: a rejected token first,
+/// then a failed test capture or a stopped tracker is Down, then a capture
+/// the app runs or a game open is Capturing.
+pub fn classify_classic_status(input: ClassicStatusInput) -> HeaderStatus {
+    let shared = input.shared;
+    if shared.sync_token_rejected {
+        return HeaderStatus::TokenRejected;
+    }
+    if input.capture_error || (!shared.demo && !shared.daemon_running) {
+        return HeaderStatus::Down;
+    }
+    let live = input.capturing || (!shared.demo && shared.daemon_running && shared.game_running);
+    if live {
+        HeaderStatus::Capturing
+    } else {
+        HeaderStatus::Waiting
+    }
+}
+
+pub(crate) fn classic_status_for(app: &TrackerApp) -> HeaderStatus {
+    classify_classic_status(ClassicStatusInput {
+        shared: header_input(app),
+        capturing: app.capturing,
+        capture_error: app.preview_error.is_some(),
+    })
+}
+
+fn header_input(app: &TrackerApp) -> HeaderStatusInput {
+    HeaderStatusInput {
         demo: app.fixture.is_some(),
         daemon_running: app.daemon.running(),
         game_running: app.game_running,
         sync_token_rejected: sync_token_rejected(app),
-    })
+    }
+}
+
+pub(crate) fn header_status_for(app: &TrackerApp) -> HeaderStatus {
+    classify_header_status(header_input(app))
 }
 
 /// The website answered 401 or 403 for the saved token. The top bar, the
@@ -278,20 +324,53 @@ mod tests {
                 stopped,
                 "{status:?}"
             );
-            assert_eq!(
-                strip_label(status) == "Tracker stopped",
-                stopped,
-                "{status:?}"
-            );
             let rejected = status == HeaderStatus::TokenRejected;
             assert_eq!(short_label(status).contains("rejected"), rejected);
             assert_eq!(long_label(status).contains("rejected"), rejected);
-            assert_eq!(strip_label(status).contains("rejected"), rejected);
-            for text in [short_label(status), long_label(status), strip_label(status)] {
+            for text in [short_label(status), long_label(status)] {
                 assert!(!text.is_empty());
                 assert!(!text.chars().any(|c| c.is_ascii_digit()), "no bare time");
             }
         }
+        assert_eq!(strip_label(true), "Tracker running");
+        assert_eq!(strip_label(false), "Tracker stopped");
+    }
+
+    /// The classic dot keeps the 0.5 rules for a capture the app runs and
+    /// one that failed; the 0.6 views leave both out.
+    #[test]
+    fn classic_dot_keeps_the_0_5_capture_rules() {
+        let classic = |shared, capturing, capture_error| {
+            classify_classic_status(ClassicStatusInput {
+                shared,
+                capturing,
+                capture_error,
+            })
+        };
+        let idle = input(false, true, false);
+        assert_eq!(classic(idle, false, false), HeaderStatus::Waiting);
+        assert_eq!(classic(idle, true, false), HeaderStatus::Capturing);
+        assert_eq!(classic(idle, false, true), HeaderStatus::Down);
+        assert_eq!(
+            classic(input(true, false, false), true, false),
+            HeaderStatus::Capturing
+        );
+        assert_eq!(
+            classic(input(true, false, true), false, false),
+            HeaderStatus::Waiting
+        );
+        assert_eq!(
+            classic(input(false, true, true), false, false),
+            HeaderStatus::Capturing
+        );
+        assert_eq!(
+            classic(input(false, false, false), false, false),
+            HeaderStatus::Down
+        );
+        let mut rejected = idle;
+        rejected.sync_token_rejected = true;
+        assert_eq!(classic(rejected, false, true), HeaderStatus::TokenRejected);
+        assert_eq!(classify_header_status(idle), HeaderStatus::Waiting);
     }
 
     #[test]

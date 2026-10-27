@@ -35,8 +35,11 @@ pub(crate) fn test_cli(data_dir: &std::path::Path) -> crate::cli::Cli {
 }
 
 /// A demo app on the empty fixture in a fresh temp dir, for tests. A
-/// fixture never reads the host's config.toml, so it starts from the
-/// default config whatever the host has saved.
+/// fixture never reads the host's config.toml or its env overlay, and a
+/// test app starts on the 0.6 layout whatever `SCUFFED_TRACKER_LAYOUT`
+/// says. It still reads the desktop and session variables, the installed
+/// tracker's version and the systemd unit, so a test must not depend on
+/// those.
 #[cfg(test)]
 pub(crate) fn test_app() -> (tempfile::TempDir, crate::app::TrackerApp) {
     let dir = tempfile::tempdir().expect("tempdir");

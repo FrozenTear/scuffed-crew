@@ -27,9 +27,14 @@ use crate::settings_model::{
 };
 use crate::settings_save::{Commit, SaveFrom};
 use crate::update::UpdateInfo;
+use crate::update_check::CheckFailed;
 
 /// Toast for a control used in demo mode.
 pub(crate) const DEMO_REFUSED: &str = "Demo mode: nothing is changed.";
+
+/// Toast when "+ Add name" holds only a #tag or spaces. The input stays
+/// open with the text.
+const NAME_CHIP_EMPTY: &str = "Type the name before the #. The #1234 tag is left out.";
 
 /// A message from the 0.6 Settings page.
 #[derive(Debug, Clone)]
@@ -60,7 +65,7 @@ pub enum Msg {
     CompanionDuringGames(bool),
     /// Check now, under Updates.
     CheckUpdates,
-    UpdatesChecked(Option<UpdateInfo>),
+    UpdatesChecked(Result<Option<UpdateInfo>, CheckFailed>),
 }
 
 impl Msg {
@@ -92,8 +97,16 @@ pub struct PageState {
     chip_draft: Option<(ChipList, String)>,
     /// The config the running tracker started with, as far as the GUI
     /// knows: the saved config at launch, then again whenever a tracker
-    /// starts. Settings counts the changes waiting against it.
+    /// starts. Settings counts the changes waiting against it. A GUI that
+    /// is relaunched while the tracker runs cannot know what that tracker
+    /// loaded, so it counts from the file as it is at launch.
     restart_baseline: Config,
+    /// The baseline is the default config because config.toml did not
+    /// parse at launch. The first read that works replaces it.
+    baseline_unknown: bool,
+    /// Our own Restart or Start just worked. The next new pid is that
+    /// run's, not a restart from elsewhere, so it leaves the baseline alone.
+    ours_started: bool,
     /// The config saved when a Restart or Start began. It becomes the
     /// baseline when that run succeeds, so a change made while it ran
     /// still counts as waiting.
@@ -111,6 +124,8 @@ pub struct PageState {
     pub companion_during_games: bool,
     /// When Check now last answered (local "HH:MM"), and whether it runs.
     pub update_checked_at: Option<String>,
+    /// The last Check now could not ask GitHub: when (local "HH:MM").
+    pub update_check_failed_at: Option<String>,
     pub update_checking: bool,
     /// Where page applies write instead of the user's config.toml (tests).
     pub(crate) config_path: Option<PathBuf>,
@@ -130,16 +145,33 @@ impl PageState {
             advanced_open: AdvancedOpen::default(),
             chip_draft: None,
             restart_baseline: saved,
+            baseline_unknown: false,
+            ours_started: false,
             restart_pending: None,
             seen_pid: pid,
             reader_pending: None,
             reader_seq: 0,
             companion_during_games,
             update_checked_at: None,
+            update_check_failed_at: None,
             update_checking: false,
             config_path: None,
             token_rejected: false,
             waiting_memo: RefCell::new(None),
+        }
+    }
+
+    /// The config at launch came from a config.toml that did not parse.
+    pub fn with_unknown_baseline(mut self, unknown: bool) -> Self {
+        self.baseline_unknown = unknown;
+        self
+    }
+
+    /// config.toml was read and parsed (a reload): a baseline taken from an
+    /// unreadable file becomes what the file holds.
+    pub fn file_read(&mut self, saved: &Config) {
+        if std::mem::take(&mut self.baseline_unknown) {
+            self.restart_baseline = saved.clone();
         }
     }
 
@@ -162,25 +194,32 @@ impl PageState {
     }
 
     /// A daemon verb finished. After a Restart or Start that worked, the
-    /// tracker runs with what was saved when it began.
+    /// tracker runs with what was saved when it began, and the new pid it
+    /// shows next is that run's.
     pub fn daemon_done(&mut self, ok: bool) {
         if let Some(started) = self.restart_pending.take()
             && ok
         {
             self.restart_baseline = started;
+            self.baseline_unknown = false;
+            self.ours_started = true;
         }
     }
 
     /// The tracker's pid now. A tracker that started without a restart of
-    /// ours running loaded the saved config. Called after every refresh.
+    /// ours loaded the saved config. Called after every refresh. The pid
+    /// our own run produced moves nothing, whether it shows at once or on a
+    /// later tick, so a change saved while that run started still waits.
     pub fn observe_tracker(&mut self, pid: Option<u32>, saved: &Config) {
         if self.restart_pending.is_some() || pid == self.seen_pid {
             return;
         }
-        if pid.is_some() {
-            self.restart_baseline = saved.clone();
-        }
         self.seen_pid = pid;
+        if pid.is_none() || std::mem::take(&mut self.ours_started) {
+            return;
+        }
+        self.restart_baseline = saved.clone();
+        self.baseline_unknown = false;
     }
 
     /// The player left Settings: an open chip input closes.
@@ -301,7 +340,11 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
                         app.settings.set_text(SettingsField::PlayerName, name);
                         true
                     }
-                    None => false,
+                    None => {
+                        app.page_state.chip_draft = Some((list, draft));
+                        app.replace_toast(NAME_CHIP_EMPTY);
+                        false
+                    }
                 },
                 ChipList::Processes => {
                     let next = with_chip(&app.settings.game_process_names, &draft);
@@ -327,9 +370,11 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             return page_save(app, Commit::Control, None);
         }
         Msg::CompanionDuringGames(on) => {
-            app.page_state.companion_during_games = on;
-            if let Err(e) = crate::seasons::save_companion_during_games(&app.data_dir, on) {
-                app.replace_toast(format!("Could not save the Companion setting: {e}"));
+            // The switch follows what is stored, so it never shows a value
+            // the next launch would not have.
+            match crate::seasons::save_companion_during_games(&app.data_dir, on) {
+                Ok(()) => app.page_state.companion_during_games = on,
+                Err(e) => app.replace_toast(format!("Could not save the Companion setting: {e}")),
             }
         }
         Msg::CheckUpdates => {
@@ -338,15 +383,23 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             }
             app.page_state.update_checking = true;
             app.last_update_check = Some(std::time::Instant::now());
-            return Task::perform(crate::update::check_for_update(), |info| {
+            return Task::perform(crate::update_check::check(), |info| {
                 Message::SettingsPage(Msg::UpdatesChecked(info))
             });
         }
-        Msg::UpdatesChecked(info) => {
+        Msg::UpdatesChecked(result) => {
             app.page_state.update_checking = false;
-            app.page_state.update_checked_at =
-                Some(chrono::Local::now().format("%H:%M").to_string());
-            return app.update(Message::UpdateChecked(info));
+            let now = chrono::Local::now().format("%H:%M").to_string();
+            match result {
+                Ok(info) => {
+                    app.page_state.update_checked_at = Some(now);
+                    app.page_state.update_check_failed_at = None;
+                    return app.update(Message::UpdateChecked(info));
+                }
+                // A failed check says so, and keeps an update an earlier
+                // check found.
+                Err(CheckFailed) => app.page_state.update_check_failed_at = Some(now),
+            }
         }
     }
     Task::none()
@@ -399,6 +452,7 @@ mod tests {
         let path = dir.path().join("config.toml");
         app.saved_config.save_at(&path).unwrap();
         app.saved_config = Config::read_at(&path).unwrap();
+        app.saved_file = app.saved_config.clone();
         app.settings = crate::settings::SettingsForm::from_config(&app.saved_config);
         app.settings.overlay_hotkey = app.overlay_hotkey.bind.clone();
         app.settings.overlay_hotkey_enabled = app.overlay_hotkey.enabled;
@@ -570,6 +624,9 @@ mod tests {
         app.page_state.observe_tracker(Some(42), &app.saved_config);
         app.page_state.daemon_done(true);
         assert_eq!(app.changes_waiting(), 1);
+        // Our run's pid, seen after it finished, moves nothing either.
+        app.page_state.observe_tracker(Some(43), &app.saved_config);
+        assert_eq!(app.changes_waiting(), 1);
         // A failed restart moves nothing.
         app.page_state.restart_started(&app.saved_config);
         app.page_state.daemon_done(false);
@@ -692,6 +749,196 @@ mod tests {
         let _ = app.update(escape);
         assert!(app.page_state.chip_draft().is_none());
         assert_eq!(on_disk(&dir).player_name, None);
+    }
+
+    /// Through the real messages: a change saved while our Restart runs
+    /// still waits once DaemonDone and the run's pid arrive.
+    #[test]
+    fn a_change_saved_while_our_restart_runs_still_waits_after_it() {
+        use crate::daemon::DaemonVerb;
+        let (_dir, mut app) = live_app();
+        let _ = app.update(Message::Daemon(DaemonVerb::Restart));
+        assert!(app.daemon_busy);
+        let _ = app.update(page(Msg::Edit(ConfigEdit::FrameRate(Some(2)))));
+        let _ = app.update(Message::DaemonDone(Ok("Tracker restarted".into())));
+        assert_eq!(app.changes_waiting(), 1);
+        // The run's pid shows on a later tick: still our run.
+        app.page_state.observe_tracker(Some(42), &app.saved_config);
+        assert_eq!(app.changes_waiting(), 1);
+        // A restart from elsewhere after that loads what is saved.
+        app.page_state.observe_tracker(Some(43), &app.saved_config);
+        assert_eq!(app.changes_waiting(), 0);
+    }
+
+    #[test]
+    fn a_baseline_from_an_unreadable_file_is_replaced_on_the_first_read() {
+        let (dir, mut app) = live_app();
+        let path = dir.path().join("config.toml");
+        let mut fixed = on_disk(&dir);
+        fixed.debug_ocr = true;
+        fixed.auto_detect.cooldown_secs = 45;
+        fixed.save_at(&path).unwrap();
+        app.page_state = PageState::new(Config::default(), None, true).with_unknown_baseline(true);
+        app.page_state.config_path = Some(path);
+        app.config_unreadable = true;
+        let _ = app.update(apply(Message::SettingsToggle(
+            SettingsToggle::AutoDetect,
+            false,
+        )));
+        assert_eq!(app.saved_config.auto_detect.cooldown_secs, 45, "reloaded");
+        assert_eq!(app.changes_waiting(), 0);
+    }
+
+    /// A refused apply puts the control back, so a later apply of
+    /// something else cannot write it unseen.
+    #[test]
+    fn a_refused_apply_puts_the_control_back() {
+        let (dir, mut app) = live_app();
+        let path = dir.path().join("config.toml");
+        // A hand-edited cleartext URL blocks every apply.
+        let mut cleartext = on_disk(&dir);
+        cleartext.sync = Some(stat_tracker::config::SyncConfig {
+            server_url: "http://192.168.1.5:3030".into(),
+            token: "tok".into(),
+        });
+        cleartext.save_at(&path).unwrap();
+        app.saved_file = on_disk(&dir);
+        app.saved_config = app.saved_file.clone();
+        app.settings = crate::settings::SettingsForm::from_config(&app.saved_config);
+        app.settings.overlay_hotkey = app.overlay_hotkey.bind.clone();
+        app.settings.overlay_hotkey_enabled = app.overlay_hotkey.enabled;
+
+        let _ = app.update(apply(Message::SettingsToggle(
+            SettingsToggle::DebugOcr,
+            true,
+        )));
+        assert!(app.toast.is_some());
+        assert!(!app.settings.debug_ocr, "the switch shows what is saved");
+        assert!(!on_disk(&dir).debug_ocr);
+
+        let _ = app.update(Message::SettingsText(
+            SettingsField::SyncUrl,
+            "https://crew.example".into(),
+        ));
+        let _ = app.update(page(Msg::Commit(Commit::Sync)));
+        let written = on_disk(&dir);
+        assert_eq!(
+            written.sync.map(|s| s.server_url).as_deref(),
+            Some("https://crew.example")
+        );
+        assert!(!written.debug_ocr, "the refused switch was never written");
+    }
+
+    #[test]
+    fn typed_timings_that_do_not_parse_are_refused_and_kept() {
+        let (dir, mut app) = live_app();
+        let before = on_disk(&dir).auto_detect.cooldown_secs;
+        let _ = app.update(Message::SettingsText(SettingsField::Cooldown, "4o".into()));
+        let _ = app.update(page(Msg::Commit(Commit::Timings)));
+        assert_eq!(on_disk(&dir).auto_detect.cooldown_secs, before);
+        assert_eq!(
+            app.settings.cooldown_secs, "4o",
+            "the typed text stays to fix"
+        );
+        assert!(
+            app.toast
+                .as_deref()
+                .is_some_and(|t| t.contains("Wait after detection")),
+            "{:?}",
+            app.toast
+        );
+        let _ = app.update(Message::SettingsText(
+            SettingsField::PollInterval,
+            "0".into(),
+        ));
+        let _ = app.update(Message::SettingsText(SettingsField::Cooldown, "45".into()));
+        let _ = app.update(page(Msg::Commit(Commit::Timings)));
+        assert_eq!(on_disk(&dir).auto_detect.cooldown_secs, before);
+        assert!(
+            app.toast
+                .as_deref()
+                .is_some_and(|t| t.contains("Check every"))
+        );
+    }
+
+    #[test]
+    fn a_reload_keeps_typed_text_that_was_not_committed() {
+        let (dir, mut app) = live_app();
+        let _ = app.update(Message::SettingsText(
+            SettingsField::SyncUrl,
+            "https://typed.example".into(),
+        ));
+        let mut edited = on_disk(&dir);
+        edited.player_name = Some("on disk".into());
+        edited.save_at(&dir.path().join("config.toml")).unwrap();
+        let _ = app.update(apply(Message::SettingsToggle(
+            SettingsToggle::DebugOcr,
+            true,
+        )));
+        assert_eq!(app.saved_config.player_name.as_deref(), Some("on disk"));
+        assert!(!on_disk(&dir).debug_ocr, "the change was not made");
+        assert_eq!(app.settings.sync_url, "https://typed.example");
+    }
+
+    /// Only a shortcut change writes ui_state.json. When that write fails,
+    /// config.toml is still taken in, so the next apply is not refused.
+    #[test]
+    fn ui_state_is_written_only_for_the_shortcut() {
+        let (dir, mut app) = live_app();
+        // A directory in its place makes every ui_state.json write fail.
+        // The launch wrote the file (the Companion hold), so it goes first.
+        let ui_state = crate::seasons::ui_state_path(dir.path());
+        let _ = std::fs::remove_file(&ui_state);
+        std::fs::create_dir(&ui_state).unwrap();
+        let _ = app.update(apply(Message::SettingsToggle(
+            SettingsToggle::DebugOcr,
+            true,
+        )));
+        assert!(app.toast.is_none(), "{:?}", app.toast);
+        assert!(on_disk(&dir).debug_ocr);
+        let _ = app.update(apply_with(
+            Message::SettingsToggle(SettingsToggle::OverlayHotkey, false),
+            Commit::Shortcut,
+        ));
+        assert!(
+            app.toast
+                .as_deref()
+                .is_some_and(|t| t.contains("companion shortcut")),
+            "{:?}",
+            app.toast
+        );
+        assert_eq!(app.saved_file, on_disk(&dir));
+        let _ = app.update(apply(Message::SettingsToggle(
+            SettingsToggle::DebugOcr,
+            false,
+        )));
+        assert!(!on_disk(&dir).debug_ocr, "not refused as changed on disk");
+    }
+
+    #[test]
+    fn a_name_chip_that_is_only_a_tag_keeps_the_input_open() {
+        let (dir, mut app) = live_app();
+        let _ = app.update(page(Msg::ChipDraft(ChipList::Names, Some("#2112".into()))));
+        let _ = app.update(page(Msg::ChipAdd));
+        assert_eq!(
+            app.page_state.chip_draft(),
+            Some(&(ChipList::Names, "#2112".to_string()))
+        );
+        assert_eq!(app.toast.as_deref(), Some(NAME_CHIP_EMPTY));
+        assert_eq!(on_disk(&dir).player_name, None);
+    }
+
+    #[test]
+    fn a_failed_check_says_so_instead_of_no_newer_version() {
+        let (_dir, mut app) = live_app();
+        app.page_state.update_checking = true;
+        let _ = app.update(page(Msg::UpdatesChecked(Err(CheckFailed))));
+        assert!(!app.page_state.update_checking);
+        assert!(app.page_state.update_check_failed_at.is_some());
+        assert!(app.page_state.update_checked_at.is_none());
+        let _ = app.update(page(Msg::UpdatesChecked(Ok(None))));
+        assert!(app.page_state.update_check_failed_at.is_none());
+        assert!(app.page_state.update_checked_at.is_some());
     }
 
     #[test]

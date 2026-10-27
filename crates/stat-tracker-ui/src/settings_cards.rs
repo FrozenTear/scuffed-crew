@@ -30,12 +30,10 @@ use crate::theme::{
 
 /// Help under "Show Companion during games" (spec).
 const COMPANION_HELP: &str = "A small click-through card with your live stats.";
-/// What the switch does not cover.
-const COMPANION_LIVE_NOTE: &str =
-    "The bar, the tray and the shortcut still hide or show it for one game.";
-/// Under the Website account connection line.
-const WEBSITE_ACCOUNT_HINT: &str =
-    "The website URL and token are under Advanced, Website connection.";
+/// What the switch gates ([`crate::companion_gate`]).
+const COMPANION_LIVE_NOTE: &str = "While this is on, the bar, the tray and the shortcut hide or show it for one game. Off turns them off too.";
+/// Under a website token set outside the app.
+const SYNC_ENV_NOTE: &str = "That token is used instead of one saved here.";
 /// Under Upload games after each match (spec).
 const UPLOAD_HELP: &str = "Only your own stats are sent.";
 /// Sub-heading of the Sharing rows inside Website account.
@@ -140,9 +138,18 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
     let mut connection = column![].spacing(4);
     match app.saved_config.sync.as_ref() {
         Some(sync) if sync_on => {
+            // The check only while the website takes the token.
+            let mark: Element<'_, Message> = if rejected {
+                image(crate::icons::handle(crate::icons::Icon::Warn))
+                    .width(14)
+                    .height(14)
+                    .into()
+            } else {
+                check_icon(14.0)
+            };
             connection = connection.push(
                 row![
-                    check_icon(14.0),
+                    mark,
                     text(format!("Connected to {}", url_host(&sync.server_url)))
                         .size(SIZE_BODY)
                         .font(FONT_SEMIBOLD)
@@ -169,12 +176,20 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
                 .color(theme::WARN),
         );
     }
-    connection = connection.push(hint(WEBSITE_ACCOUNT_HINT));
+    if let Some(vars) = crate::settings_env::sync_env(stat_tracker::config::Config::env_overlay()) {
+        connection = connection.push(crate::capture_reading::lock_line(vars));
+    }
 
+    // One pointer to Website connection: the refusal line names it, else
+    // the Upload row's note does.
     let upload = upload_row(sync_on);
+    let mut upload_help = vec![hint(UPLOAD_HELP)];
+    if !rejected {
+        upload_help.push(hint(upload.note));
+    }
     let uploads = setting_row(
         row_title("Upload games after each match"),
-        vec![hint(UPLOAD_HELP), hint(upload.note)],
+        upload_help,
         switch(upload.on, None),
     );
     let sharing = column![
@@ -220,10 +235,23 @@ pub(crate) fn updates(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 help.push(link("Copy command", Some(Message::CopyUpdateCmd)));
             }
         }
+        // After a failed Check now only the failure line shows.
+        None if app.page_state.update_check_failed_at.is_some() => {}
         None => help.push(hint(match &app.page_state.update_checked_at {
             Some(at) => format!("No newer version found. Checked {at}."),
             None => "No newer version found since the app started.".to_string(),
         })),
+    }
+    if let Some(at) = &app.page_state.update_check_failed_at {
+        help.push(
+            text(format!(
+                "Could not check for updates at {at}. Try again later."
+            ))
+            .size(SIZE_LABEL)
+            .font(FONT_MEDIUM)
+            .color(theme::WARN)
+            .into(),
+        );
     }
     let checking = app.page_state.update_checking;
     let mut check = button(
@@ -283,8 +311,7 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
         state_help.push(hint("Working…"));
     }
     // The same words as the strip, so the two never disagree.
-    let status_words =
-        crate::tracker_status::strip_label(crate::tracker_status::header_status_for(app));
+    let status_words = crate::tracker_status::strip_label(d.running() || app.fixture.is_some());
     let state: Element<'_, Message> = if d.running() && !demo && !busy {
         action_btn(
             "Stop",
@@ -381,9 +408,15 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
             demo,
         ),
     );
+    let mut token_help = vec![hint("Paste the token from the website.")];
+    if let Some(vars) = crate::settings_env::sync_env(stat_tracker::config::Config::env_overlay()) {
+        token_help.push(crate::capture_reading::lock_line(vars));
+        token_help.push(hint(SYNC_ENV_NOTE));
+        token_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
+    }
     let token = setting_row(
         row_title("Account token"),
-        vec![hint("Paste the token from the website.")],
+        token_help,
         page_field(
             "token",
             &app.settings.sync_token,
@@ -410,12 +443,22 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
 /// Troubleshooting: debug images, the extra number reader, then Report a
 /// problem, About and Uninstall. Demo draws them without actions.
 pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    // STAT_TRACKER_DEBUG_OCR turns them on whatever the file says, so the
+    // row shows On and locks, as OCR workers does.
+    let env_debug = stat_tracker::config::Config::env_overlay().debug_ocr;
+    let mut debug_help = vec![hint(DEBUG_IMAGES_HELP)];
+    if env_debug {
+        debug_help.push(crate::capture_reading::lock_line(
+            crate::settings_env::DEBUG_OCR_ENV,
+        ));
+        debug_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
+    }
     let debug = setting_row(
         row_title("Save debug images from each capture"),
-        vec![hint(DEBUG_IMAGES_HELP)],
+        debug_help,
         switch(
-            app.settings.debug_ocr,
-            toggle(!demo, |v| {
+            app.settings.debug_ocr || env_debug,
+            toggle(!demo && !env_debug, |v| {
                 apply(Message::SettingsToggle(SettingsToggle::DebugOcr, v))
             }),
         ),
@@ -479,7 +522,7 @@ mod tests {
         for line in [
             COMPANION_HELP,
             COMPANION_LIVE_NOTE,
-            WEBSITE_ACCOUNT_HINT,
+            SYNC_ENV_NOTE,
             UPLOAD_HELP,
             SHARING_HEADING,
             RANK_HELP,

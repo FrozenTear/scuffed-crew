@@ -28,7 +28,7 @@ pub fn app_header(app: &TrackerApp) -> Element<'_, Message> {
         .size(SIZE_FEATURED)
         .font(FONT_EXTRABOLD)
         .color(TEXT);
-    let status = crate::tracker_status::header_status_for(app);
+    let status = crate::tracker_status::classic_status_for(app);
 
     // Status stays on the title line so a read-only indicator is not another
     // control in the row below.
@@ -62,12 +62,9 @@ pub fn header_controls(app: &TrackerApp) -> Element<'_, Message> {
     }
     controls = controls.push(role_chips(app.roles));
     controls = controls.push(
-        row![
-            space().width(8),
-            overlay_toggle(app.overlay_showing(), app.game_running),
-        ]
-        .spacing(0)
-        .align_y(Alignment::Center),
+        row![space().width(8), overlay_toggle(app.companion_chip()),]
+            .spacing(0)
+            .align_y(Alignment::Center),
     );
     controls.wrap().into()
 }
@@ -206,10 +203,11 @@ fn filter_tray<'a>(chips: Element<'a, Message>) -> Element<'a, Message> {
         .into()
 }
 
-pub fn overlay_toggle(showing: bool, game_running: bool) -> Element<'static, Message> {
-    toggler(showing)
-        .label(crate::overlay::companion_copy(showing, game_running))
-        .on_toggle(|_| Message::ToggleOverlay)
+/// The Companion switch, drawn disabled while Settings turns it off.
+pub fn overlay_toggle(chip: crate::companion_gate::CompanionChip) -> Element<'static, Message> {
+    toggler(chip.showing)
+        .label(chip.label())
+        .on_toggle_maybe(chip.enabled.then_some(|_| Message::ToggleOverlay))
         .size(20)
         .text_size(SIZE_META)
         .font(FONT_SEMIBOLD)
@@ -605,8 +603,7 @@ pub fn surface_stat_card(
 pub fn health_panel(
     status: &str,
     hint: Option<&str>,
-    overlay_showing: bool,
-    game_running: bool,
+    companion: crate::companion_gate::CompanionChip,
 ) -> Element<'static, Message> {
     let mut col = column![
         label_text("Tracker health"),
@@ -624,7 +621,7 @@ pub fn health_panel(
                 .color(TEXT_3),
         );
     }
-    container(col.push(overlay_toggle(overlay_showing, game_running)))
+    container(col.push(overlay_toggle(companion)))
         .padding(PAD_INNER)
         .width(Fill)
         .style(theme::surface_panel)
@@ -1009,8 +1006,8 @@ fn role_and_edited(game: &Game, in_progress: bool) -> Element<'static, Message> 
     // label for the map.
     let mut r = row![].spacing(8).align_y(Alignment::Center);
     // One word with the bar's chip: a game held back for a missing map or
-    // hero needs a look too.
-    if game.held_locally() || game.needs_look(in_progress) {
+    // hero needs a look too (`needs_look` covers it).
+    if game.needs_look(in_progress) {
         r = r.push(status_chip(NEEDS_LOOK_MARK, theme::WARN));
     }
     if game.edited {

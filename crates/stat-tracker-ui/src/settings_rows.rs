@@ -409,7 +409,8 @@ pub(crate) fn link(label: impl Into<String>, msg: Option<Message>) -> Element<'s
             .font(FONT_BOLD)
             .color(if enabled { ACCENT } else { TEXT_3 }),
     )
-    .padding(Padding::from([2, 4]))
+    // No side padding, so the words line up with the gutter and the rows.
+    .padding(Padding::from([2, 0]))
     .style(theme::quiet_btn(6.0));
     if let Some(msg) = msg {
         b = b.on_press(msg);
@@ -634,8 +635,6 @@ mod tests {
     fn tags_have_their_own_tone_and_spec_words() {
         assert_eq!(Tag::AfterRestart.label(), "After restart");
         assert_eq!(Tag::New.label(), "New in 0.6");
-        let _ = tag(Tag::AfterRestart);
-        let _ = tag(Tag::New);
     }
 
     #[test]

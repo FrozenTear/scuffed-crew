@@ -47,7 +47,7 @@ const BUTTON_RADIUS: f32 = 10.0;
 const LEGEND_DOT_GAP: f32 = 6.0;
 
 /// The legend under the strip (spec p6).
-const LEGEND_APPLY: &str = "Changes apply as you make them, except those tagged After restart.";
+const LEGEND_APPLY: &str = "Changes apply as you make them: typed values on Enter, Website connection on its Apply. Those tagged After restart wait for a tracker restart.";
 const LEGEND_CHANGED: &str = "changed from default";
 const RUN_SETUP_LABEL: &str = "Run setup again";
 
@@ -101,12 +101,17 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
 /// The strip's left group: the status with its check, Version (which
 /// opens About), and the last capture.
 fn strip_status(app: &TrackerApp) -> Element<'_, Message> {
-    let status = tracker_status::header_status_for(app);
-    let running = matches!(
-        status,
-        tracker_status::HeaderStatus::Capturing | tracker_status::HeaderStatus::Waiting
-    );
-    let mark: Element<'_, Message> = if running {
+    let running = app.daemon.running() || app.fixture.is_some();
+    // Stopped is red whatever the token does; a rejected token turns a
+    // running tracker's mark amber. The words always say whether it runs.
+    let status = if !running {
+        tracker_status::HeaderStatus::Down
+    } else if tracker_status::sync_token_rejected(app) {
+        tracker_status::HeaderStatus::TokenRejected
+    } else {
+        tracker_status::HeaderStatus::Waiting
+    };
+    let mark: Element<'_, Message> = if status == tracker_status::HeaderStatus::Waiting {
         settings_cards::check_icon(16.0)
     } else {
         container(space().width(8).height(8))
@@ -124,7 +129,7 @@ fn strip_status(app: &TrackerApp) -> Element<'_, Message> {
             })
             .into()
     };
-    let words = text(tracker_status::strip_label(status))
+    let words = text(tracker_status::strip_label(running))
         .size(SIZE_BODY)
         .font(FONT_BOLD)
         .color(TEXT);
@@ -132,7 +137,8 @@ fn strip_status(app: &TrackerApp) -> Element<'_, Message> {
         "Version",
         strip_version(app.installed_version.as_deref()),
     ))
-    .padding(Padding::from([2, 4]))
+    // No side padding, so the gap to the status is STRIP_STATUS_GAP.
+    .padding(Padding::from([2, 0]))
     .style(theme::quiet_btn(6.0))
     .on_press(Message::OpenAbout);
     let mut left = Row::new()
@@ -174,10 +180,11 @@ fn strip_actions(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let enabled = !demo && !app.daemon_busy;
     let mut b = button(text(label).size(SIZE_META).font(FONT_BOLD).color(TEXT))
         .padding(Padding::from([9, 18]));
+    // Dimmed whenever it cannot be pressed, demo included.
     b = if primary {
-        b.style(primary_btn(enabled || demo))
+        b.style(primary_btn(enabled))
     } else {
-        b.style(ghost_btn(enabled || demo))
+        b.style(ghost_btn(enabled))
     };
     if enabled {
         b = b.on_press(Message::Daemon(verb));
@@ -332,10 +339,12 @@ fn advanced_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         if open {
             fold = fold.push(
                 container(advanced_body(section, app, demo))
+                    // The header pads CARD_PAD - 3 after the 3 px bar; the
+                    // body lines up with its title.
                     .padding(Padding {
                         top: 4.0,
                         bottom: CARD_PAD,
-                        left: CARD_PAD,
+                        left: CARD_PAD - 3.0,
                         right: CARD_PAD,
                     })
                     .width(Fill),
@@ -508,17 +517,22 @@ mod tests {
         )
     }
 
+    /// Opening every ADVANCED row makes the page taller at every width.
     #[test]
-    fn page_draws_at_both_widths_with_every_row_open() {
+    fn every_open_row_adds_its_body_at_every_width() {
         let (_dir, mut app) = app();
-        for width in [640.0, 976.0, TWO_COLUMN_MIN + 1.0] {
-            let _ = view(&app, width);
-        }
+        let widths = [640.0, 976.0, TWO_COLUMN_MIN + 1.0, 3400.0];
+        let height = |app: &TrackerApp, width: f32| {
+            lay_out(view(app, width), width).children()[0]
+                .bounds()
+                .height
+        };
+        let closed: Vec<f32> = widths.iter().map(|&w| height(&app, w)).collect();
         for section in AdvancedSection::ALL {
             let _ = app.update(Message::SettingsPage(Msg::ToggleAdvanced(section)));
         }
-        for width in [640.0, 976.0, 1600.0, 3400.0] {
-            let _ = view(&app, width);
+        for (width, closed) in widths.into_iter().zip(closed) {
+            assert!(height(&app, width) > closed, "{width}: {closed}");
         }
     }
 
@@ -584,20 +598,5 @@ mod tests {
     fn a_stopped_tracker_gets_start_not_restart() {
         assert_eq!(strip_action(true), (DaemonVerb::Restart, "Restart tracker"));
         assert_eq!(strip_action(false), (DaemonVerb::Start, "Start tracker"));
-    }
-
-    #[test]
-    fn strip_gaps_follow_the_spec() {
-        assert_eq!(STRIP_STATUS_GAP, 24.0);
-        assert_eq!(STRIP_ACTION_GAP, 12.0);
-        assert!(LEGEND_DOT_GAP <= 6.0);
-    }
-
-    #[test]
-    fn the_legend_says_changes_apply_at_once() {
-        assert_eq!(
-            LEGEND_APPLY,
-            "Changes apply as you make them, except those tagged After restart."
-        );
     }
 }

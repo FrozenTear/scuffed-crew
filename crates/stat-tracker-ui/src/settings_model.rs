@@ -203,6 +203,13 @@ impl AdvancedSection {
 
     /// Rows whose changes reach the tracker only after it restarts: any
     /// row with a key the tracker reads.
+    ///
+    /// Interpretation of spec p6 and p7, which tag only Capture and reading
+    /// (and the Stream frame rate and Report pictures rows): the tag follows
+    /// the keys, so Tracker service, Website connection and Troubleshooting
+    /// carry it too, and so does In-game names. Each holds a key the
+    /// tracker reads once at start, and an untagged row there would say its
+    /// change applies at once when it does not.
     pub fn after_restart(self) -> bool {
         self.keys().iter().any(|key| needs_restart(key))
     }
@@ -571,38 +578,91 @@ pub fn frame_rate_options() -> Vec<FrameRate> {
         .collect()
 }
 
-/// The Pause between grabs switch: whether it shows On, and the env var
-/// value that fixes it outside the app (the switch is then locked).
+/// What Automatic pausing does on this desktop, as far as the app can
+/// tell. The tracker decides once at start (`decide` in its capture
+/// stream's `pause` module): on with KWin 6.1 or newer and on niri; off on
+/// GNOME, Plasma 5, older KWin and other compositors. The app cannot read
+/// KWin's version, so Plasma 6 is [`AutoPause::Unknown`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoPause {
+    On,
+    /// Off here, and why, for the line under the switch.
+    Off(&'static str),
+    /// It depends on what only the tracker reads.
+    Unknown(&'static str),
+}
+
+/// [`AutoPause`] from `XDG_CURRENT_DESKTOP` and `KDE_SESSION_VERSION`,
+/// with the tracker's desktop-name rules.
+pub fn auto_pause(desktop: &str, kde_session_version: Option<&str>) -> AutoPause {
+    let has = |names: &[&str]| {
+        desktop.split(':').any(|token| {
+            let token = token.trim().to_ascii_lowercase();
+            names.iter().any(|name| token.contains(name))
+        })
+    };
+    if has(&["kde", "plasma", "kwin"]) {
+        return if kde_session_version.map(str::trim) == Some("5") {
+            AutoPause::Off("Off on Plasma 5 (Automatic).")
+        } else {
+            AutoPause::Unknown("Automatic: on with KWin 6.1 or newer, off on older KWin.")
+        };
+    }
+    if has(&["niri"]) {
+        return AutoPause::On;
+    }
+    if has(&["gnome"]) {
+        return AutoPause::Off("Off on GNOME (Automatic).");
+    }
+    if has(&[
+        "sway", "hyprland", "wayfire", "river", "labwc", "wlroots", "cosmic",
+    ]) {
+        return AutoPause::Off("Off on this desktop (Automatic).");
+    }
+    AutoPause::Unknown("Automatic: the tracker decides from the running compositor.")
+}
+
+/// The Pause between grabs switch: whether it shows On, whether the env
+/// var fixes it outside the app (the switch is then locked), whether it
+/// can be pressed, and the line that says what Automatic does here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PauseRow {
     pub on: bool,
     pub locked: bool,
-    /// Differs from the default (on, decided per desktop).
-    pub changed: bool,
+    /// False where On would change nothing: Automatic is off here.
+    pub can_toggle: bool,
+    pub note: Option<&'static str>,
+    /// The stream pauses here for sure, so the summary may say so.
+    pub pauses: bool,
 }
 
-pub fn pause_row(pause: PauseOverride) -> PauseRow {
-    match pause {
-        PauseOverride::Auto => PauseRow {
-            on: true,
-            locked: false,
-            changed: false,
-        },
-        PauseOverride::ConfigOff => PauseRow {
+pub fn pause_row(pause: PauseOverride, auto: AutoPause) -> PauseRow {
+    let fixed = |on: bool, locked: bool| PauseRow {
+        on,
+        locked,
+        can_toggle: !locked,
+        note: None,
+        pauses: on,
+    };
+    match (pause, auto) {
+        (PauseOverride::Auto, AutoPause::On) => fixed(true, false),
+        (PauseOverride::Auto, AutoPause::Off(why)) => PauseRow {
             on: false,
             locked: false,
-            changed: true,
+            can_toggle: false,
+            note: Some(why),
+            pauses: false,
         },
-        PauseOverride::EnvOn => PauseRow {
+        (PauseOverride::Auto, AutoPause::Unknown(why)) => PauseRow {
             on: true,
-            locked: true,
-            changed: false,
+            locked: false,
+            can_toggle: true,
+            note: Some(why),
+            pauses: false,
         },
-        PauseOverride::EnvOff => PauseRow {
-            on: false,
-            locked: true,
-            changed: true,
-        },
+        (PauseOverride::ConfigOff, _) => fixed(false, false),
+        (PauseOverride::EnvOn, _) => fixed(true, true),
+        (PauseOverride::EnvOff, _) => fixed(false, true),
     }
 }
 
@@ -750,10 +810,16 @@ pub fn differs_from_default(config: &Config, row: DefaultRow) -> bool {
             .as_deref()
             .is_some_and(|o| !o.trim().is_empty()),
         DefaultRow::GameProcesses => config.game_process_names != d.game_process_names,
-        DefaultRow::PauseBetweenGrabs => config.screencast_pause_between_grabs == Some(false),
+        // Off by the file or by the env var; the env var is in effect too.
+        DefaultRow::PauseBetweenGrabs => matches!(
+            config.screencast_pause_override(),
+            PauseOverride::ConfigOff | PauseOverride::EnvOff
+        ),
         DefaultRow::FrameRate => config.screencast_max_fps() != SCREENCAST_MAX_FPS_DEFAULT,
         DefaultRow::Reader => ReaderChoice::of(config) != ReaderChoice::of(&d),
         DefaultRow::NameReader => config.name_reader != d.name_reader,
+        // An explicit count, from the file or the env overlay of the shown
+        // config, whatever this computer's Auto count is.
         DefaultRow::OcrWorkers => config.ocr_threads.is_some(),
     }
 }
@@ -1118,18 +1184,47 @@ mod tests {
 
     #[test]
     fn pause_switch_follows_the_override() {
+        let niri = auto_pause("niri", None);
+        assert_eq!(niri, AutoPause::On);
         assert_eq!(
-            pause_row(PauseOverride::Auto),
+            pause_row(PauseOverride::Auto, niri),
             PauseRow {
                 on: true,
                 locked: false,
-                changed: false
+                can_toggle: true,
+                note: None,
+                pauses: true,
             }
         );
-        assert!(!pause_row(PauseOverride::ConfigOff).on);
-        assert!(pause_row(PauseOverride::ConfigOff).changed);
-        assert!(pause_row(PauseOverride::EnvOn).locked);
-        assert!(!pause_row(PauseOverride::EnvOff).on);
+        assert!(!pause_row(PauseOverride::ConfigOff, niri).on);
+        assert!(pause_row(PauseOverride::ConfigOff, niri).can_toggle);
+        assert!(pause_row(PauseOverride::EnvOn, niri).locked);
+        assert!(pause_row(PauseOverride::EnvOn, niri).pauses);
+        assert!(!pause_row(PauseOverride::EnvOff, niri).on);
+        assert!(!pause_row(PauseOverride::EnvOff, niri).can_toggle);
+    }
+
+    /// Automatic does not pause on GNOME, Plasma 5 or wlroots desktops, so
+    /// the switch does not claim it does there.
+    #[test]
+    fn automatic_pause_shows_what_this_desktop_gets() {
+        for (desktop, version) in [
+            ("GNOME", None),
+            ("ubuntu:GNOME", None),
+            ("KDE", Some("5")),
+            ("sway", None),
+        ] {
+            let row = pause_row(PauseOverride::Auto, auto_pause(desktop, version));
+            assert!(!row.on && !row.pauses && !row.can_toggle, "{desktop}");
+            assert!(
+                row.note.is_some_and(|n| n.starts_with("Off on")),
+                "{desktop}"
+            );
+        }
+        let plasma6 = pause_row(PauseOverride::Auto, auto_pause("KDE", Some("6")));
+        assert!(plasma6.on && !plasma6.pauses, "unknown is not claimed");
+        assert!(plasma6.note.is_some_and(|n| n.contains("KWin 6.1")));
+        assert!(matches!(auto_pause("", None), AutoPause::Unknown(_)));
     }
 
     #[test]

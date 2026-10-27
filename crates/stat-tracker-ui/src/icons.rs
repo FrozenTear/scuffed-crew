@@ -3,10 +3,12 @@
 //! Each tab icon is one white alpha mask (`assets/tab-icons/<tab>.png`),
 //! tinted when it is decoded: TEXT on the selected tab, TEXT_2 on the
 //! others. The other icons are drawn in their colour. `assets/draw_icons.py`
-//! draws the overview mask and the other icons; the five other tab masks
-//! are rasterised at 2x from the 0.6 design spec's SVG paths (see the
-//! README). Iced 0.14 can decode PNG bytes itself; this decodes them once
-//! up front so a tint can be applied and every frame reuses one handle.
+//! draws the overview mask and the other icons. The five other tab masks
+//! were rasterised once at 2x from the 0.6 design spec's SVG paths; the
+//! spec is not in the repository, so they are kept as committed images
+//! (`assets/draw_icons.py` says how to replace one). Iced 0.14 can decode
+//! PNG bytes itself; this decodes them once up front so a tint can be
+//! applied and every frame reuses one handle.
 
 use std::sync::OnceLock;
 

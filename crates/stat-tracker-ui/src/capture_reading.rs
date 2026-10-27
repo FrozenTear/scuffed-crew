@@ -10,7 +10,7 @@
 
 use iced::widget::{Column, button, column, container, image, row, text};
 use iced::{Alignment, Element, Fill, Length, Padding};
-use stat_tracker::config::{CaptureRoute, SCREENCAST_PAUSE_ENV};
+use stat_tracker::config::{CAPTURE_ENV, CaptureRoute, OCR_ENV, SCREENCAST_PAUSE_ENV};
 
 use crate::app::{Message, TrackerApp};
 use crate::capture_shared;
@@ -20,9 +20,10 @@ use crate::settings::{
     capture_route_chips, capture_route_label, nonempty, ocr_card_blocks, ocr_hint_lines,
 };
 use crate::settings_model::{
-    ConfigEdit, DefaultRow, FrameRate, OCR_THREADS_ENV, OcrWorkers, ReaderChoice,
-    auto_monitor_label, differs_from_default, frame_rate_options, monitor_phrase, ocr_env_lock,
-    ocr_worker_options, ocr_workers_help, pause_row, stream_rows_apply,
+    ConfigEdit, DefaultRow, FrameRate, OCR_THREADS_ENV, OCR_WORKERS_MAX, OcrWorkers, PauseRow,
+    ReaderChoice, auto_monitor_label, auto_pause, differs_from_default, frame_rate_options,
+    monitor_phrase, ocr_env_lock, ocr_worker_options, ocr_workers_help, pause_row,
+    stream_rows_apply,
 };
 use crate::settings_rows::{
     self, Segment, Tag, coming_later_row, divided, dropdown, link, radio_list, row_title,
@@ -61,7 +62,7 @@ const STREAM_NOT_USED: &str = "Screen stream only. Not used with this capture me
 /// Help under Stream frame rate.
 const FRAME_RATE_HELP: &str = "Lower costs less.";
 /// The second line under a row the environment fixes.
-const SERVICE_MAY_DIFFER: &str = "The tracker service may differ.";
+pub(crate) const SERVICE_MAY_DIFFER: &str = "The tracker service may differ.";
 
 /// Capture method label on the 0.6 page. The classic page keeps its own.
 pub(crate) fn route_label(route: CaptureRoute) -> &'static str {
@@ -94,10 +95,14 @@ fn page_route_notes(app: &TrackerApp) -> Vec<(String, NoteTone)> {
     .collect()
 }
 
-/// Help lines under the Reader choice: the spec line, then what the
-/// choice costs or does. A build that still needs classic OCR says so.
+/// Help lines under the Reader choice: the spec line (only while New
+/// reader only is offered, see [`reader_options`]), then what the choice
+/// costs or does. A build that still needs classic OCR says so.
 pub(crate) fn reader_hints(choice: ReaderChoice, can_turn_off: bool) -> Vec<&'static str> {
-    let mut lines = vec![READER_HELP];
+    let mut lines = Vec::new();
+    if can_turn_off || choice == ReaderChoice::NewOnly {
+        lines.push(READER_HELP);
+    }
     if !can_turn_off {
         lines.push(CLASSIC_OCR_HINT_NOT_YET);
     }
@@ -122,14 +127,28 @@ pub(crate) fn reader_options(
         .collect()
 }
 
+/// The Pause between grabs row on this desktop.
+fn pause_now(app: &TrackerApp) -> PauseRow {
+    pause_row(
+        app.saved_config.screencast_pause_override(),
+        auto_pause(
+            &app.desktop,
+            std::env::var("KDE_SESSION_VERSION").ok().as_deref(),
+        ),
+    )
+}
+
 /// What the environment fixes outside the app, for the summary.
 fn env_locks(app: &TrackerApp) -> Vec<&'static str> {
     let mut locks = Vec::new();
     if capture_shared::capture_env_note().is_some() {
         locks.push("Capture method, by STAT_TRACKER_CAPTURE");
     }
-    if pause_row(app.saved_config.screencast_pause_override()).locked {
+    if pause_now(app).locked {
         locks.push("Pause between grabs, by STAT_TRACKER_SCREENCAST_PAUSE");
+    }
+    if app.saved_config.ocr_control().env.is_some() {
+        locks.push("Classic OCR, by STAT_TRACKER_OCR");
     }
     if ocr_env_lock(std::env::var(OCR_THREADS_ENV).ok().as_deref()).is_some() {
         locks.push("OCR workers, by STAT_TRACKER_OCR_THREADS");
@@ -137,17 +156,19 @@ fn env_locks(app: &TrackerApp) -> Vec<&'static str> {
     locks
 }
 
-/// The summary box rows: label and value, from what is in effect.
+/// The summary box rows: label and value, from what is in effect. The
+/// Reading line follows `STAT_TRACKER_OCR` when it is set, as the tracker
+/// asks for it at start (the pack check can still keep classic OCR on).
 pub(crate) fn summary_rows(app: &TrackerApp) -> Vec<(&'static str, String)> {
     let config = &app.saved_config;
     let monitor = monitor_phrase(config.capture_output.as_deref().unwrap_or(""), &app.outputs);
     let mut capture = format!("{} on {monitor}.", route_label(config.capture_route));
-    if stream_rows_apply(&app.desktop, app.session, config.capture_route)
-        && pause_row(config.screencast_pause_override()).on
-    {
+    if stream_rows_apply(&app.desktop, app.session, config.capture_route) && pause_now(app).pauses {
         capture.push_str(" Paused between grabs.");
     }
-    let reading = match ReaderChoice::of(config) {
+    let mut in_effect = config.clone();
+    in_effect.ocr = config.ocr_control().requested();
+    let reading = match ReaderChoice::of(&in_effect) {
         ReaderChoice::NewOnly => "New reader saves stats. Classic OCR never starts.",
         ReaderChoice::NewWithOcrBackup => "New reader saves stats. Classic OCR is the backup.",
         ReaderChoice::ClassicOnly => "Classic OCR saves stats.",
@@ -215,7 +236,7 @@ fn note(copy: impl Into<String>, tone: NoteTone) -> Element<'static, Message> {
 }
 
 /// The lock line under a row the environment fixes (spec p7).
-fn lock_line(env: &'static str) -> Element<'static, Message> {
+pub(crate) fn lock_line(env: &'static str) -> Element<'static, Message> {
     row![
         image(crate::icons::handle(crate::icons::Icon::Lock))
             .width(12)
@@ -235,12 +256,15 @@ fn capture_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
     let route = config.capture_route;
 
     // Capture method.
+    // STAT_TRACKER_CAPTURE wins over the choice, so the chips lock like
+    // the other rows the environment fixes.
+    let env_route = capture_shared::capture_env_note();
     let segments = capture_route_chips(&app.desktop, app.session, route)
         .into_iter()
         .map(|choice| Segment {
             label: route_label(choice),
             selected: route == choice,
-            msg: (!demo).then(|| apply(Message::SelectCaptureRoute(choice))),
+            msg: (!demo && env_route.is_none()).then(|| apply(Message::SelectCaptureRoute(choice))),
         })
         .collect();
     let mut help = vec![hint(capture_method_help(app.session))];
@@ -250,7 +274,8 @@ fn capture_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
     for (line, tone) in page_route_notes(app) {
         help.push(note(line, tone));
     }
-    if let Some(env) = capture_shared::capture_env_note() {
+    if let Some(env) = env_route {
+        help.push(lock_line(CAPTURE_ENV));
         help.push(
             text(env)
                 .size(SIZE_LABEL)
@@ -298,18 +323,24 @@ fn capture_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
         ),
         vec![
             hint(MONITOR_HELP),
-            hint(format!(
-                "Detected: {}",
-                capture_shared::backend_label(app.backend)
-            )),
+            // Until a backend is found, "Detected:" has nothing to name.
+            hint(match app.backend {
+                Some(_) => format!("Detected: {}", capture_shared::backend_label(app.backend)),
+                None => "Detected: not yet".to_string(),
+            }),
         ],
         dropdown(options, Some(selected), |m: MonitorPick| {
             apply(Message::SelectOutput(m.name))
         }),
     );
 
-    // Check the picture.
-    let label = capture_shared::capture_button_label(app.backend.is_some(), app.capturing);
+    // Check the picture. While no backend is known the button is drawn
+    // disabled with its usual word; the Monitor row says "not yet".
+    let label = if app.backend.is_some() {
+        capture_shared::capture_button_label(true, app.capturing)
+    } else {
+        "Capture now"
+    };
     let mut capture = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
         .padding(Padding::from([7, 14]))
         .style(theme::ghost_btn());
@@ -383,19 +414,26 @@ fn stream_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
         STREAM_NOT_USED
     };
 
-    let pause = pause_row(config.screencast_pause_override());
+    let pause = pause_now(app);
     let mut pause_help = vec![hint(where_line)];
+    if let Some(note) = pause.note.filter(|_| applies) {
+        pause_help.push(hint(note));
+    }
     if pause.locked {
         pause_help.push(lock_line(SCREENCAST_PAUSE_ENV));
         pause_help.push(hint(SERVICE_MAY_DIFFER));
     }
-    let pause_toggle: Option<Box<dyn Fn(bool) -> Message>> = (!demo && applies && !pause.locked)
+    let pause_toggle: Option<Box<dyn Fn(bool) -> Message>> = (!demo && applies && pause.can_toggle)
         .then(|| {
             Box::new(|on| Message::SettingsPage(Msg::Edit(ConfigEdit::PauseBetweenGrabs(on))))
                 as Box<dyn Fn(bool) -> Message>
         });
     let pause_el = setting_row(
-        title_line("Pause between grabs", pause.changed, &[]),
+        title_line(
+            "Pause between grabs",
+            differs_from_default(config, DefaultRow::PauseBetweenGrabs),
+            &[],
+        ),
         pause_help,
         switch(pause.on, pause_toggle),
     );
@@ -454,6 +492,12 @@ fn reading_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
     help.extend(settings::ocr_problem_lines(app, |problem| {
         note(problem, NoteTone::Warn)
     }));
+    // STAT_TRACKER_OCR turns classic OCR on or off for the tracker it
+    // starts, whatever is picked here.
+    if config.ocr_control().env.is_some() {
+        help.push(lock_line(OCR_ENV));
+        help.push(hint(SERVICE_MAY_DIFFER));
+    }
     let reader = setting_row(
         title_line(
             "Reader",
@@ -542,17 +586,21 @@ fn ocr_workers_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let env = std::env::var(OCR_THREADS_ENV).ok();
     let lock = ocr_env_lock(env.as_deref());
     let resolved = config.ocr_threads_resolved();
-    let changed = resolved != stat_tracker::config::Config::default_ocr_threads();
+    // One rule for the dot: an explicit count, from the file or the
+    // environment (the shown config holds both), whatever Auto is here.
+    let changed = differs_from_default(config, DefaultRow::OcrWorkers) || lock.is_some();
     let title = title_line("OCR workers", changed, &[]);
     if let Some(n) = lock {
+        // The tracker caps the count at 8 (`ocr_threads_resolved`).
+        let runs = n.clamp(1, OCR_WORKERS_MAX);
         return value_row(
             title,
             vec![
                 lock_line(OCR_THREADS_ENV),
-                hint(ocr_workers_help(n as usize, false)),
+                hint(ocr_workers_help(runs as usize, false)),
                 hint(SERVICE_MAY_DIFFER),
             ],
-            n.to_string(),
+            runs.to_string(),
         );
     }
     let help = vec![hint(ocr_workers_help(
@@ -661,7 +709,13 @@ mod tests {
             [READER_HELP, NEW_READER_HINT]
         );
         assert_eq!(reader_hints(ReaderChoice::ClassicOnly, true), [READER_HELP]);
-        assert!(reader_hints(ReaderChoice::ClassicOnly, false).contains(&CLASSIC_OCR_HINT_NOT_YET));
+        let held = reader_hints(ReaderChoice::ClassicOnly, false);
+        assert!(held.contains(&CLASSIC_OCR_HINT_NOT_YET));
+        assert!(
+            !held.contains(&READER_HELP),
+            "no line about an option that is not offered"
+        );
+        assert!(reader_hints(ReaderChoice::NewOnly, false).contains(&READER_HELP));
     }
 
     #[test]
@@ -688,14 +742,22 @@ mod tests {
         }
     }
 
+    /// The summary follows the session: on X11 the stream rows do not
+    /// apply, so it never says the stream pauses, and a failed capture
+    /// has its line.
     #[test]
-    fn the_body_draws_in_every_state() {
+    fn the_summary_and_error_follow_the_state() {
         let (_dir, mut app) = demo_app();
-        let _ = body(&app, true);
-        app.preview_error = Some("No capture".into());
-        app.tessdata_installed = false;
-        app.ocr_switch.refusal = Some("Refused".into());
+        app.desktop = "niri".into();
+        app.session = SessionKind::Wayland;
+        app.saved_config.capture_route = CaptureRoute::Screencast;
+        let wayland = summary_rows(&app);
+        assert!(wayland[0].1.contains("Paused between grabs"), "{wayland:?}");
         app.session = SessionKind::X11;
+        app.preview_error = Some("No capture".into());
+        let x11 = summary_rows(&app);
+        assert!(!x11[0].1.contains("Paused"), "{x11:?}");
+        assert!(capture_shared::preview_error(&app).is_some());
         let _ = body(&app, false);
     }
 }

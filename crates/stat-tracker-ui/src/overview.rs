@@ -38,8 +38,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         widgets::health_panel(
             &app.health_status,
             app.hero_pack_hint(),
-            app.overlay_showing(),
-            app.game_running,
+            app.companion_chip(),
         ),
     ]
     .spacing(GRID_GAP)

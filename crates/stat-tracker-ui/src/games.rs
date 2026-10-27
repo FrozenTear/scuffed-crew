@@ -11,7 +11,7 @@ use crate::theme::{self, FONT_BOLD, FONT_SEMIBOLD, GRID_GAP, SIZE_META, SIZE_TIT
 use crate::widgets;
 
 /// Copy of the clearable chip the top bar's "need a look" chip turns on.
-pub const NEEDS_LOOK_FILTER_LABEL: &str = "Needs a look  ×";
+pub const NEEDS_LOOK_FILTER_LABEL: &str = "Needs a look ×";
 
 /// The games the Games tab lists: the season, role, hero, map and outcome
 /// filters, then the "Needs a look" filter when it is on.
