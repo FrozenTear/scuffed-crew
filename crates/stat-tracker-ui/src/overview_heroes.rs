@@ -14,7 +14,7 @@ use crate::aggregate::{HeroAgg, aggregate_games};
 use crate::app::{Message, TrackerApp};
 use crate::model::{Game, Screen};
 use crate::overview_main::{portrait, role_label};
-use crate::small_sample::{RATE_MIN, decided, rate};
+use crate::small_sample::{RATE_MIN, TOO_FEW, decided, rate};
 use crate::theme::{
     self, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META,
     TEXT, TEXT_2, TEXT_3,
@@ -147,9 +147,9 @@ fn block(color: iced::Color, width: iced::Length, height: f32) -> Element<'stati
         .into()
 }
 
-/// "7 games · Too few games" under a record card.
+/// "Too few games · 7 games" under a record card, in the order Heroes uses.
 pub fn too_few_line(r: &crate::aggregate::Record) -> String {
-    format!("{} · Too few games", r.games_label())
+    format!("{TOO_FEW} · {}", r.games_label())
 }
 
 /// The strip with no card: before the first game there is no filter row
@@ -215,7 +215,7 @@ mod tests {
         assert_eq!(rate(&hero("A", 12, 6, 4).record), Some(60), "10 decided");
         assert_eq!(
             too_few_line(&hero("A", 10, 5, 4).record),
-            "10 games · Too few games"
+            "Too few games · 10 games"
         );
         assert_eq!(rate(&hero("A", 88, 45, 41).record), Some(52));
     }

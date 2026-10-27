@@ -90,7 +90,7 @@ pub fn season_headline(r: &Record) -> (String, iced::Color) {
     }
 }
 
-/// The line beside it: "110 games", "7 games · Too few games" without a
+/// The line beside it: "110 games", "Too few games · 7 games" without a
 /// rate, nothing at 0 games (the headline says it).
 pub fn season_games_line(r: &Record) -> String {
     match (r.games, rate(r)) {
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(season_headline(&rec(4, 3, 0, 7)), ("4-3".to_string(), TEXT));
         assert_eq!(
             season_games_line(&rec(4, 3, 0, 7)),
-            "7 games · Too few games"
+            "Too few games · 7 games"
         );
         assert_eq!(
             season_headline(&rec(52, 55, 0, 110)),
