@@ -80,6 +80,8 @@ pub enum Route {
         StatsTokens {},
         #[route("/stats/member/:id")]
         StatsMember { id: String },
+        #[route("/stats/match/:id")]
+        StatsMatch { id: String },
         #[route("/patch-notes")]
         PatchNotes {},
     #[end_layout]
@@ -183,6 +185,19 @@ mod tests {
             Route::AdminReports {}
         );
         assert_eq!(Route::AdminReports {}.to_string(), "/admin/reports");
+    }
+
+    #[test]
+    fn stats_match_route_parses() {
+        assert_eq!(
+            Route::from_str("/stats/match/m1").unwrap(),
+            Route::StatsMatch { id: "m1".into() }
+        );
+        assert_eq!(
+            Route::StatsMatch { id: "m1".into() }.to_string(),
+            "/stats/match/m1"
+        );
+        assert_eq!(Route::from_str("/stats").unwrap(), Route::Stats {});
     }
 
     #[test]

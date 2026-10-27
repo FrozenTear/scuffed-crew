@@ -1,8 +1,11 @@
+mod game;
 mod heroes;
 mod history;
 mod maps;
 mod overview;
 pub(crate) mod role;
+
+pub use game::StatsMatch;
 
 use dioxus::prelude::*;
 
@@ -410,6 +413,9 @@ const STATS_CSS: &str = r#"
         transition: background 0.15s;
     }
     .match-card:hover { background: var(--surface-2); }
+    /* History rows open the game page. Keep the row's own colors. */
+    a.match-card-link { color: inherit; text-decoration: none; cursor: pointer; }
+    a.match-card-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .match-cards { display: flex; flex-direction: column; gap: 0.3rem; }
     .match-card .match-outcome {
         font-family: var(--font-head);
