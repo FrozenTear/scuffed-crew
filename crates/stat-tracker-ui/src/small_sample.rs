@@ -1,6 +1,7 @@
-//! The one small-sample rule every 0.6 page uses (ux.md section 17), next
-//! to the shared bar ([`crate::winrate_bar`]): Overview, Heroes, Maps and
-//! Seasons all ask this module, so the rule and its words cannot drift.
+//! The one small-sample rule the 0.6 stats pages use (ux.md section 17),
+//! next to the shared bar ([`crate::winrate_bar`]). The pages ask this
+//! module for the rate and the "Too few games" words instead of keeping
+//! their own copy, so the rule cannot drift between them.
 //!
 //! - Under [`FOLD_UNDER`] games in total: folded into "Other".
 //! - Under [`RATE_MIN`] decided games (win, loss or draw; undecided never

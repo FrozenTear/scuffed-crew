@@ -3,15 +3,16 @@
 //! sparkline, then how the rate is counted), "Needs a look · all seasons"
 //! with Review games, and the Companion card with its switch.
 //!
-//! Small-sample rule: a win rate shows only from 10 decided games; fewer
-//! show the record instead. Rank now and Peak wait for the rank reader.
+//! Small-sample rule ([`crate::small_sample`]): a win rate shows only
+//! from 10 decided games; fewer show the record and "Too few games".
+//! Rank now and Peak wait for the rank reader.
 
 use iced::widget::{Column, Row, button, column, container, row, text, toggler};
 use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};
 
 use crate::aggregate::Record;
 use crate::app::{Message, TrackerApp};
-use crate::model::{Game, Outcome, SeasonSel, game_card_in_progress};
+use crate::model::{Game, Outcome, game_card_in_progress};
 use crate::session_bits::sparkline;
 use crate::theme::{
     self, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_LABEL,
@@ -19,9 +20,7 @@ use crate::theme::{
 };
 use crate::widgets;
 
-/// Fewest decided games (win, loss or draw) a win rate is shown for
-/// (small-sample rule).
-pub const RATE_MIN: usize = 10;
+use crate::small_sample::{decided, rate};
 /// The "Last 20" window.
 pub const LAST_N: usize = 20;
 
@@ -73,17 +72,6 @@ pub fn record_of<'a>(games: impl IntoIterator<Item = &'a Game>) -> Record {
         }
     }
     r
-}
-
-fn decided(r: &Record) -> usize {
-    r.wins + r.losses + r.draws
-}
-
-/// The rate as a whole percent, only from [`RATE_MIN`] decided games (a
-/// win, loss or draw), as UX Spec rules (ux.md section 17). Fewer show the
-/// record and "Too few games".
-pub fn rate(r: &Record) -> Option<i64> {
-    (decided(r) >= RATE_MIN).then(|| (r.win_rate() * 100.0).round() as i64)
 }
 
 /// The rate, or the record when the sample is small.
@@ -188,18 +176,6 @@ pub fn counted_line(season: &Record, last: &Record) -> String {
     line
 }
 
-fn scope_label(app: &TrackerApp) -> String {
-    match &app.season {
-        SeasonSel::Season(id) => app
-            .seasons
-            .seasons
-            .iter()
-            .find(|s| &s.id == id)
-            .map_or_else(|| "Season".to_string(), |s| s.name.clone()),
-        SeasonSel::AllTime => "All time".to_string(),
-    }
-}
-
 fn season_card<'a>(app: &'a TrackerApp, settled: &[&Game]) -> Element<'a, Message> {
     let season = record_of(settled.iter().copied());
     // The Last line only while it is a part of the season, not all of it.
@@ -210,7 +186,7 @@ fn season_card<'a>(app: &'a TrackerApp, settled: &[&Game]) -> Element<'a, Messag
     let last = record_of(recent.iter().copied());
     let mut col = Column::new()
         .spacing(8)
-        .push(widgets::label_text(&scope_label(app)));
+        .push(widgets::label_text(&crate::overview_heroes::scope(app)));
     let (big, big_color) = season_headline(&season);
     col = col.push(
         row![
@@ -302,7 +278,7 @@ pub fn needs_look_parts(app: &TrackerApp) -> String {
         if window.is_some() {
             p.push_str(&format!(
                 " ({no_outcome_here} of them in {})",
-                scope_label(app)
+                crate::overview_heroes::scope(app)
             ));
         }
         parts.push(p);
