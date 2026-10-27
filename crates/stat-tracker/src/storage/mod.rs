@@ -194,6 +194,23 @@ impl LocalStore {
 /// `wait_for_engine_close_sees_surrealkv_finish_its_close` fails if a close
 /// that frees `LOCK` leaves WAL records to replay.
 pub async fn wait_for_engine_close(data_dir: &Path, within: std::time::Duration) -> bool {
+    match lock_released_within(data_dir, within).await {
+        Ok(closed) => closed,
+        Err(err) => {
+            // Waiting cannot tell more. At exit, going on is right.
+            tracing::warn!(error = %err, "cannot check the store's LOCK; not waiting for its close");
+            true
+        }
+    }
+}
+
+/// [`wait_for_engine_close`] without its exit-time choice: `Err` when the
+/// `LOCK` file cannot be opened (other than missing) or flock-tested. Vacuum
+/// treats that as not closed, so it never swaps a store it could not check.
+async fn lock_released_within(
+    data_dir: &Path,
+    within: std::time::Duration,
+) -> std::io::Result<bool> {
     let lock = data_dir.join("stats.surrealkv").join("LOCK");
     let until = tokio::time::Instant::now() + within;
     loop {
@@ -201,23 +218,16 @@ pub async fn wait_for_engine_close(data_dir: &Path, within: std::time::Duration)
         match std::fs::File::open(&lock) {
             // Locked and dropped at once: nothing opens the store after this.
             Ok(file) => match file.try_lock() {
-                Ok(()) => return true,
+                Ok(()) => return Ok(true),
                 Err(std::fs::TryLockError::WouldBlock) => {}
-                Err(std::fs::TryLockError::Error(err)) => {
-                    // Waiting cannot tell more. At exit, going on is right.
-                    tracing::warn!(error = %err, "cannot test the store's LOCK; not waiting for its close");
-                    return true;
-                }
+                Err(std::fs::TryLockError::Error(err)) => return Err(err),
             },
             // No LOCK file: no engine to wait for.
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return true,
-            Err(err) => {
-                tracing::warn!(error = %err, "cannot open the store's LOCK; not waiting for its close");
-                return true;
-            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+            Err(err) => return Err(err),
         }
         if tokio::time::Instant::now() >= until {
-            return false;
+            return Ok(false);
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }

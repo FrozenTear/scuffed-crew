@@ -237,13 +237,24 @@ impl LocalStore {
         // the flush ENOENT. Every commit is WAL-synced, so nothing is lost
         // either way, but waiting for both closes swaps the store in fully
         // flushed and error-free. `old` was dropped at the end of its block.
+        // A LOCK that cannot be checked counts as not closed here.
         for dir in [fresh_dir.as_path(), data_dir] {
-            if !super::wait_for_engine_close(dir, VACUUM_CLOSE_WAIT).await {
-                return Err(format!(
-                    "store in {} did not finish closing; nothing was swapped",
-                    dir.display()
-                )
-                .into());
+            match super::lock_released_within(dir, VACUUM_CLOSE_WAIT).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    return Err(format!(
+                        "store in {} did not finish closing; nothing was swapped",
+                        dir.display()
+                    )
+                    .into());
+                }
+                Err(err) => {
+                    return Err(format!(
+                        "cannot check that the store in {} closed ({err}); nothing was swapped",
+                        dir.display()
+                    )
+                    .into());
+                }
             }
         }
 

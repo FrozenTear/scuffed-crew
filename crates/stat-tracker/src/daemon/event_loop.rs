@@ -813,7 +813,7 @@ pub(crate) async fn run_loop(
                         ) {
                             tracing::debug!(
                                 target: "scuffed_stat_tracker",
-                                "tracker binary on disk was replaced; waiting after a failed re-exec"
+                                "tracker binary on disk was replaced; waiting to recheck it after it failed the start check"
                             );
                         } else if let Err(err) =
                             stat_tracker::replace::restart_preflight(&path)

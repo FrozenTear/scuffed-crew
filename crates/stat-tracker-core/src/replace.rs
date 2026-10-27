@@ -412,7 +412,8 @@ pub fn game_wait_should_stop(waited: Duration, max: Duration) -> bool {
     waited >= max
 }
 
-/// After a failed re-exec, wait this long before shutting down to try again.
+/// After the new binary fails the start check, wait this long before
+/// checking it again.
 pub const EXEC_RETRY_BACKOFF: Duration = Duration::from_secs(600);
 
 /// True when a failed re-exec may be tried again. `None` means there has
