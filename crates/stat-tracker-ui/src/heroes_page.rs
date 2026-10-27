@@ -193,15 +193,14 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         Row::new()
             .spacing(12)
             .align_y(Alignment::Center)
-            .push(widgets::label_text(&format!(
+            .push(container(widgets::label_text(&format!(
                 "{} · {carded} heroes with {CARD_MIN} or more games · win rate from {RATE_MIN} games",
                 scope(app)
             )))
-            .push(space().width(Fill))
+            .width(Fill))
             .push(text("Sort").size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2))
             .push(sort_switch(page.sort))
             .push(view_switch(page.list))
-            .wrap(),
     );
     if shown.is_empty() {
         return col
