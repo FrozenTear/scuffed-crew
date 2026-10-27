@@ -16,6 +16,7 @@ use iced::{
 };
 
 use crate::app::{Message, TrackerApp};
+use crate::icons::{self, Icon};
 use crate::model::{Game, RoleFilter, Screen, SeasonSel, game_card_in_progress};
 use crate::nav_fit::{
     BADGE_PAD_X, CHEVRON, CHIP_GAP, CHIP_GLYPH_GAP, CHIP_PAD_X, DOT, DOT_GAP, ICON, ICON_GAP,
@@ -69,8 +70,23 @@ impl NavStyle {
         }
     }
 
+    /// A value that is set but names no layout (`classic`, `tabs`), which
+    /// gives the default with a warning.
+    pub fn is_unknown_value(value: Option<&str>) -> bool {
+        value
+            .map(|v| v.trim().to_ascii_lowercase())
+            .is_some_and(|v| !v.is_empty() && v != "classic" && v != "tabs")
+    }
+
     pub fn from_env() -> Self {
-        Self::from_env_value(std::env::var(LAYOUT_ENV).ok().as_deref())
+        let value = std::env::var(LAYOUT_ENV).ok();
+        if Self::is_unknown_value(value.as_deref()) {
+            tracing::warn!(
+                value = value.as_deref().unwrap_or_default(),
+                "{LAYOUT_ENV} is not classic or tabs; using the top tabs"
+            );
+        }
+        Self::from_env_value(value.as_deref())
     }
 }
 
@@ -118,7 +134,6 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tab {
     pub screen: Screen,
-    pub label: &'static str,
     pub selected: bool,
     /// Count shown beside the label. Only Games has one, and only when
     /// some game needs a look.
@@ -131,7 +146,6 @@ pub fn tabs(current: Screen, needs_look: usize) -> Vec<Tab> {
         .into_iter()
         .map(|screen| Tab {
             screen,
-            label: screen.label(),
             selected: screen == current,
             badge: (screen == Screen::Games && needs_look > 0).then_some(needs_look),
         })
@@ -349,24 +363,10 @@ fn tab_strip(tabs: &[Tab], icons: bool) -> Element<'static, Message> {
     strip.into()
 }
 
-/// 16 px stroke icon for a tab, drawn from the spec's SVG paths at 2x.
-/// Two colours, so the selected tab's icon is as bright as its label.
+/// 16 px stroke icon for a tab, as bright as its label
+/// ([`crate::icons`]).
 fn tab_icon(screen: Screen, selected: bool) -> Element<'static, Message> {
-    let bytes: &'static [u8] = match (screen, selected) {
-        (Screen::Overview, false) => include_bytes!("../assets/tab-icons/overview-dim.png"),
-        (Screen::Overview, true) => include_bytes!("../assets/tab-icons/overview-on.png"),
-        (Screen::Games, false) => include_bytes!("../assets/tab-icons/games-dim.png"),
-        (Screen::Games, true) => include_bytes!("../assets/tab-icons/games-on.png"),
-        (Screen::Heroes, false) => include_bytes!("../assets/tab-icons/heroes-dim.png"),
-        (Screen::Heroes, true) => include_bytes!("../assets/tab-icons/heroes-on.png"),
-        (Screen::Maps, false) => include_bytes!("../assets/tab-icons/maps-dim.png"),
-        (Screen::Maps, true) => include_bytes!("../assets/tab-icons/maps-on.png"),
-        (Screen::Seasons, false) => include_bytes!("../assets/tab-icons/seasons-dim.png"),
-        (Screen::Seasons, true) => include_bytes!("../assets/tab-icons/seasons-on.png"),
-        (Screen::Settings, false) => include_bytes!("../assets/tab-icons/settings-dim.png"),
-        (Screen::Settings, true) => include_bytes!("../assets/tab-icons/settings-on.png"),
-    };
-    image(png_handle((screen as u8, selected), bytes))
+    image(icons::handle(Icon::Tab(screen, selected)))
         .width(ICON)
         .height(ICON)
         .into()
@@ -375,39 +375,10 @@ fn tab_icon(screen: Screen, selected: bool) -> Element<'static, Message> {
 /// The chip's warning sign, drawn at 2x: Urbanist has no "⚠", and a
 /// fallback font would draw it at another size and weight.
 fn warn_icon() -> Element<'static, Message> {
-    let bytes: &'static [u8] = include_bytes!("../assets/warn.png");
-    image(png_handle((u8::MAX, false), bytes))
+    image(icons::handle(Icon::Warn))
         .width(WARN_ICON)
         .height(WARN_ICON)
         .into()
-}
-
-/// Cache keys of the Settings page icons in [`png_handle`] (tab icons use
-/// their index, the chip's warning sign `u8::MAX`).
-pub(crate) const ICON_CHECK: (u8, bool) = (u8::MAX - 1, false);
-pub(crate) const ICON_LOCK: (u8, bool) = (u8::MAX - 2, false);
-pub(crate) const ICON_FOLD_OPEN: (u8, bool) = (u8::MAX - 3, false);
-pub(crate) const ICON_FOLD_CLOSED: (u8, bool) = (u8::MAX - 4, false);
-
-/// Decoded once and kept, so every frame reuses the same handle. The
-/// PNGs are decoded here because iced's own decoder has no codecs in
-/// this build.
-pub(crate) fn png_handle(key: (u8, bool), bytes: &'static [u8]) -> image::Handle {
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-    static CACHE: OnceLock<Mutex<HashMap<(u8, bool), image::Handle>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
-    cache
-        .entry(key)
-        .or_insert_with(|| match ::image::load_from_memory(bytes) {
-            Ok(img) => {
-                let rgba = img.to_rgba8();
-                image::Handle::from_rgba(rgba.width(), rgba.height(), rgba.into_raw())
-            }
-            Err(_) => image::Handle::from_rgba(1, 1, vec![0, 0, 0, 0]),
-        })
-        .clone()
 }
 
 /// A tab. The side padding sits outside the column that holds the content
@@ -420,7 +391,7 @@ fn tab_button(tab: &Tab, icons: bool, first: bool) -> Element<'static, Message> 
     if icons {
         inner = inner.push(tab_icon(tab.screen, tab.selected));
     }
-    inner = inner.push(tab_label(tab.label, tab.selected));
+    inner = inner.push(tab_label(tab.screen.label(), tab.selected));
     if let Some(n) = tab.badge {
         inner = inner.push(count_badge(n));
     }
@@ -594,18 +565,7 @@ mod tests {
     }
 
     fn app() -> (tempfile::TempDir, TrackerApp) {
-        let dir = tempfile::tempdir().unwrap();
-        let cli = crate::cli::Cli {
-            data_dir: dir.path().to_path_buf(),
-            fixture: Some(crate::cli::FixtureKind::Empty),
-            seasons_url: None,
-            companion: false,
-            help: false,
-            version: false,
-            replace: false,
-        };
-        let app = TrackerApp::new(cli).0;
-        (dir, app)
+        crate::fixtures::test_app()
     }
 
     #[test]
@@ -622,6 +582,13 @@ mod tests {
             NavStyle::ClassicSidebar
         );
         assert_eq!(NavStyle::default(), NavStyle::TopTabs);
+        for quiet in [None, Some(""), Some(" "), Some("tabs"), Some("Classic")] {
+            assert!(!NavStyle::is_unknown_value(quiet), "{quiet:?}");
+        }
+        for loud in [Some("sidebar"), Some("classik"), Some("0.5")] {
+            assert!(NavStyle::is_unknown_value(loud), "{loud:?}");
+            assert_eq!(NavStyle::from_env_value(loud), NavStyle::TopTabs);
+        }
     }
 
     #[test]
@@ -636,7 +603,8 @@ mod tests {
         ];
         for (current, _) in spec {
             let list = tabs(current, 0);
-            let got: Vec<(Screen, &str)> = list.iter().map(|t| (t.screen, t.label)).collect();
+            let got: Vec<(Screen, &str)> =
+                list.iter().map(|t| (t.screen, t.screen.label())).collect();
             assert_eq!(got, spec.to_vec());
             assert_eq!(list.iter().filter(|t| t.selected).count(), 1);
             assert_eq!(list.iter().find(|t| t.selected).unwrap().screen, current);
@@ -747,23 +715,6 @@ mod tests {
                 assert_eq!(time.is_some(), long);
             }
         }
-    }
-
-    #[test]
-    fn tab_icons_decode() {
-        for name in ["overview", "games", "heroes", "maps", "seasons", "settings"] {
-            for tone in ["dim", "on"] {
-                let path = format!(
-                    "{}/assets/tab-icons/{name}-{tone}.png",
-                    env!("CARGO_MANIFEST_DIR")
-                );
-                let img = ::image::open(&path).unwrap();
-                assert_eq!((img.width(), img.height()), (32, 32), "{path}");
-            }
-        }
-        let warn =
-            ::image::open(format!("{}/assets/warn.png", env!("CARGO_MANIFEST_DIR"))).unwrap();
-        assert_eq!((warn.width(), warn.height()), (24, 24));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Server seasons: fetch / cache / selection / Seasons screen (design §4.4, §5).
 //!
 //! `GET /api/public/seasons` on launch and every 30 minutes. Cached to
-//! `<data_dir>/seasons.json`. Header selection persists in `<data_dir>/ui_state.json`.
+//! `<data_dir>/seasons.json`. The season choice persists in `<data_dir>/ui_state.json`.
 //! Fixture mode never hits the network. Aggregation is half-open
 //! `starts_at <= played_at < ends_at` (UTC), same as the website.
 
@@ -288,7 +288,7 @@ pub fn apply_fetched_seasons(existing: Vec<Season>, fetched: Vec<Season>) -> Vec
 
 pub fn format_window(starts_at: DateTime<Utc>, ends_at: DateTime<Utc>) -> String {
     format!(
-        "{} - {}",
+        "{} to {}",
         starts_at.format("%d %b %Y"),
         ends_at.format("%d %b %Y")
     )
@@ -741,7 +741,7 @@ mod tests {
     fn format_window_utc_dates() {
         assert_eq!(
             format_window(ts(2026, 6, 24, 0), ts(2026, 9, 1, 0)),
-            "24 Jun 2026 - 01 Sep 2026"
+            "24 Jun 2026 to 01 Sep 2026"
         );
     }
 

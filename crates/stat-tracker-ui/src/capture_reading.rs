@@ -14,11 +14,10 @@ use stat_tracker::config::{CaptureRoute, SCREENCAST_PAUSE_ENV};
 
 use crate::app::{Message, TrackerApp};
 use crate::capture_shared;
-use crate::form_widgets::{action_btn, hint};
+use crate::form_widgets::hint;
 use crate::settings::{
-    self, CLASSIC_OCR_HINT_NOT_YET, DISMISS_REFUSAL_LABEL, KDE_DIRECT_HELP, NEW_READER_HINT,
-    NEW_READER_IMPLIED, NoteTone, SessionKind, capture_route_chips, capture_route_label,
-    card_problem, nonempty, ocr_card_blocks, ocr_hint_lines,
+    self, CLASSIC_OCR_HINT_NOT_YET, KDE_DIRECT_HELP, NEW_READER_HINT, NoteTone, SessionKind,
+    capture_route_chips, capture_route_label, nonempty, ocr_card_blocks, ocr_hint_lines,
 };
 use crate::settings_model::{
     ConfigEdit, DefaultRow, FrameRate, OCR_THREADS_ENV, OcrWorkers, ReaderChoice,
@@ -218,12 +217,9 @@ fn note(copy: impl Into<String>, tone: NoteTone) -> Element<'static, Message> {
 /// The lock line under a row the environment fixes (spec p7).
 fn lock_line(env: &'static str) -> Element<'static, Message> {
     row![
-        image(crate::nav::png_handle(
-            crate::nav::ICON_LOCK,
-            include_bytes!("../assets/lock.png")
-        ))
-        .width(12)
-        .height(12),
+        image(crate::icons::handle(crate::icons::Icon::Lock))
+            .width(12)
+            .height(12),
         text(format!("Set outside the app: {env}"))
             .size(SIZE_LABEL)
             .font(FONT_SEMIBOLD)
@@ -455,22 +451,9 @@ fn reading_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
     if app.page_state.reader_pending().is_some() {
         help.push(note(CHECKING_PACKS, NoteTone::Info));
     }
-    if let Some((problem, dismissable)) = card_problem(
-        app.ocr_switch.refusal.as_deref(),
-        app.ocr_switch.notice.as_deref(),
-    ) {
-        help.push(note(problem, NoteTone::Warn));
-        if dismissable {
-            help.push(action_btn(
-                DISMISS_REFUSAL_LABEL,
-                false,
-                Message::DismissOcrRefusal,
-            ));
-        }
-    }
-    if app.ocr_switch.daemon_off {
-        help.push(hint(NEW_READER_IMPLIED));
-    }
+    help.extend(settings::ocr_problem_lines(app, |problem| {
+        note(problem, NoteTone::Warn)
+    }));
     let reader = setting_row(
         title_line(
             "Reader",
@@ -515,12 +498,9 @@ fn reading_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
 fn reading_model_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let state: Element<'_, Message> = if app.tessdata_installed {
         row![
-            image(crate::nav::png_handle(
-                crate::nav::ICON_CHECK,
-                include_bytes!("../assets/check.png")
-            ))
-            .width(14)
-            .height(14),
+            image(crate::icons::handle(crate::icons::Icon::Check))
+                .width(14)
+                .height(14),
             text("Installed with the app")
                 .size(SIZE_META)
                 .font(FONT_SEMIBOLD)
@@ -629,18 +609,7 @@ mod tests {
     use super::*;
 
     fn demo_app() -> (tempfile::TempDir, TrackerApp) {
-        let dir = tempfile::tempdir().unwrap();
-        let cli = crate::cli::Cli {
-            data_dir: dir.path().to_path_buf(),
-            fixture: Some(crate::cli::FixtureKind::Empty),
-            seasons_url: None,
-            companion: false,
-            help: false,
-            version: false,
-            replace: false,
-        };
-        let app = TrackerApp::new(cli).0;
-        (dir, app)
+        crate::fixtures::test_app()
     }
 
     #[test]
@@ -728,32 +697,5 @@ mod tests {
         app.ocr_switch.refusal = Some("Refused".into());
         app.session = SessionKind::X11;
         let _ = body(&app, false);
-    }
-
-    #[test]
-    fn copy_has_no_dashes() {
-        for line in [
-            CHECK_PICTURE_HELP,
-            MONITOR_HELP,
-            REPORT_PICTURES_HELP,
-            CAPTURE_READING_FOOTER,
-            FOCUS_GATE_HELP,
-            READER_HELP,
-            NEW_ONLY_COST,
-            CHECKING_PACKS,
-            NAME_READER_HELP,
-            READING_MODEL_HELP,
-            STREAM_ACTIVE,
-            STREAM_NOT_USED,
-            FRAME_RATE_HELP,
-            SERVICE_MAY_DIFFER,
-            capture_method_help(SessionKind::X11),
-            capture_method_help(SessionKind::Wayland),
-        ] {
-            assert!(
-                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
-                "{line}"
-            );
-        }
     }
 }

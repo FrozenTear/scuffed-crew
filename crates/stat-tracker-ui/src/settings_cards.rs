@@ -10,7 +10,9 @@ use iced::widget::{Row, button, checkbox, column, container, image, row, space, 
 use iced::{Alignment, Element, Fill, Padding};
 
 use crate::app::{Message, TrackerApp};
-use crate::form_widgets::{action_btn, checkbox_style, field_caption, hint};
+use crate::form_widgets::{
+    REPORT_HINT, action_btn, checkbox_style, field_caption, hint, uninstall_button,
+};
 use crate::settings::{
     self, DEBUG_IMAGES_HELP, FIELD_SHORT, POLL_INTERVAL_HELP, PRERELEASE_UPDATES_LABEL,
     SHADOW_READER_ENV_NOTE, SHADOW_READER_HINT, SHADOW_READER_LABEL, SettingsField, SettingsToggle,
@@ -33,7 +35,7 @@ const COMPANION_LIVE_NOTE: &str =
     "The bar, the tray and the shortcut still hide or show it for one game.";
 /// Under the Website account connection line.
 const WEBSITE_ACCOUNT_HINT: &str =
-    "Server address and token are under Advanced, Website connection.";
+    "The website URL and token are under Advanced, Website connection.";
 /// Under Upload games after each match (spec).
 const UPLOAD_HELP: &str = "Only your own stats are sent.";
 /// Sub-heading of the Sharing rows inside Website account.
@@ -64,13 +66,10 @@ fn toggle<'a>(enabled: bool, f: impl Fn(bool) -> Message + 'a) -> Toggle<'a> {
 
 /// The status strip's check, the Website account's too.
 pub(crate) fn check_icon(size: f32) -> Element<'static, Message> {
-    image(crate::nav::png_handle(
-        crate::nav::ICON_CHECK,
-        include_bytes!("../assets/check.png"),
-    ))
-    .width(size)
-    .height(size)
-    .into()
+    image(crate::icons::handle(crate::icons::Icon::Check))
+        .width(size)
+        .height(size)
+        .into()
 }
 
 /// Player and sessions.
@@ -155,7 +154,7 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
         }
         _ => {
             connection = connection.push(
-                text("Not connected. Games stay on this computer.")
+                text("Not connected. Games stay on your PC.")
                     .size(SIZE_BODY)
                     .font(FONT_SEMIBOLD)
                     .color(TEXT),
@@ -350,7 +349,7 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
     divided(rows)
 }
 
-/// Website connection: server address and token, with their own Apply.
+/// Website connection: website URL and token, with their own Apply.
 pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let saved = app.saved_config.sync.as_ref();
     let typed_differs = saved.map_or(
@@ -371,7 +370,7 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
         );
     }
     let url = setting_row(
-        row_title("Server address"),
+        row_title("Website URL"),
         url_help,
         page_field(
             "https://your-site.com",
@@ -445,19 +444,12 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
         }
         b.into()
     };
-    let mut uninstall = button(
-        text("Uninstall")
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(if demo { TEXT_3 } else { theme::DANGER }),
-    )
-    .padding(Padding::from([7, 14]))
-    .style(theme::danger_btn(false));
-    if !demo {
-        uninstall = uninstall.on_press(Message::OpenUninstall);
-    }
+    let uninstall = uninstall_button(
+        (!demo).then_some(Message::OpenUninstall),
+        Padding::from([7, 14]),
+    );
     let actions = column![
-        hint("Crash, low FPS, or anything else. You see the report before it is sent."),
+        hint(REPORT_HINT),
         Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
@@ -483,7 +475,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn copy_has_no_dashes_and_no_plan_codes() {
+    fn copy_has_no_plan_codes() {
         for line in [
             COMPANION_HELP,
             COMPANION_LIVE_NOTE,
@@ -500,10 +492,6 @@ mod tests {
             SHORTCUT_HELP,
             SHORTCUT_FIELD_HELP,
         ] {
-            assert!(
-                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
-                "{line}"
-            );
             assert!(!line.contains("S11"), "{line}");
         }
         assert!(!WHAT_LEAVES_LABEL.contains('›'));

@@ -186,8 +186,8 @@ impl AdvancedSection {
                 games_line(v.games)
             ),
             AdvancedSection::WebsiteConnection => match &v.sync_host {
-                Some(host) => format!("Uploads to {host}. Server address and token, own Apply"),
-                None => "Uploads off. Server address and token, own Apply".to_string(),
+                Some(host) => format!("Uploads to {host}. Website URL and token, own Apply"),
+                None => "Uploads off. Website URL and token, own Apply".to_string(),
             },
             AdvancedSection::Troubleshooting => {
                 let mut parts = vec![format!("Debug images {}", on_off(v.debug_images))];
@@ -294,6 +294,7 @@ impl AdvancedOpen {
         self.0 ^= section.bit();
     }
 
+    #[cfg(test)]
     pub fn any_open(self) -> bool {
         self.0 != 0
     }
@@ -410,26 +411,24 @@ pub fn parse_process_names(raw: &str) -> Vec<String> {
         .collect()
 }
 
-/// Chips from the form's comma text.
-pub fn chips_from(raw: &str) -> Vec<String> {
-    parse_process_names(raw)
-}
-
 /// The form text after removing chip `index`.
 pub fn without_chip(raw: &str, index: usize) -> String {
-    let mut chips = chips_from(raw);
+    let mut chips = parse_process_names(raw);
     if index < chips.len() {
         chips.remove(index);
     }
     chips.join(", ")
 }
 
-/// The form text after adding `chip`. Blank and repeated chips are ignored.
-pub fn with_chip(raw: &str, chip: &str) -> String {
-    let mut chips = chips_from(raw);
-    let chip = chip.trim().trim_matches(',').trim();
-    if !chip.is_empty() && !chips.iter().any(|c| c.eq_ignore_ascii_case(chip)) {
-        chips.push(chip.to_string());
+/// The form text after adding what was typed. A draft with commas or
+/// line breaks adds each name; blank names and names already listed
+/// (ignoring case) are skipped.
+pub fn with_chip(raw: &str, draft: &str) -> String {
+    let mut chips = parse_process_names(raw);
+    for chip in parse_process_names(draft) {
+        if !chips.iter().any(|c| c.eq_ignore_ascii_case(&chip)) {
+            chips.push(chip);
+        }
     }
     chips.join(", ")
 }
@@ -662,7 +661,7 @@ pub fn upload_row(sync_on: bool) -> UploadRow {
         note: if sync_on {
             "To stop uploads, clear the token under Advanced, Website connection."
         } else {
-            "Add the server address and token under Advanced, Website connection."
+            "Add the website URL and token under Advanced, Website connection."
         },
     }
 }
@@ -919,7 +918,7 @@ mod tests {
         );
         assert_eq!(
             AdvancedSection::WebsiteConnection.summary(&v),
-            "Uploads to ow.example.no. Server address and token, own Apply"
+            "Uploads to ow.example.no. Website URL and token, own Apply"
         );
         assert!(!AdvancedSection::Troubleshooting.summary(&v).contains("KDE"));
         v.auto_detect = false;
@@ -973,13 +972,25 @@ mod tests {
     #[test]
     fn chips_round_trip_the_comma_text() {
         assert_eq!(
-            chips_from("Overwatch.exe, ow.exe"),
+            parse_process_names("Overwatch.exe, ow.exe"),
             ["Overwatch.exe", "ow.exe"]
         );
         assert_eq!(without_chip("Overwatch.exe, ow.exe", 0), "ow.exe");
         assert_eq!(without_chip("Overwatch.exe", 5), "Overwatch.exe");
         assert_eq!(with_chip("Overwatch.exe", "overwatch.EXE"), "Overwatch.exe");
         assert_eq!(with_chip("", "  "), "");
+        assert_eq!(with_chip("", " , ,"), "");
+    }
+
+    #[test]
+    fn a_draft_with_commas_adds_each_name_once() {
+        assert_eq!(
+            with_chip("Overwatch.exe", "foo, Overwatch.exe"),
+            "Overwatch.exe, foo"
+        );
+        assert_eq!(with_chip("", "a.exe, A.EXE\nb.exe"), "a.exe, b.exe");
+        let added = with_chip("Overwatch.exe", "foo, overwatch.EXE");
+        assert_eq!(parse_process_names(&added), ["Overwatch.exe", "foo"]);
     }
 
     #[test]
@@ -1239,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_has_no_dashes() {
+    fn copy_has_no_plan_codes() {
         let mut all: Vec<String> = Vec::new();
         all.extend(EverydaySection::ALL.iter().map(|s| s.title().to_string()));
         for s in AdvancedSection::ALL {
@@ -1251,10 +1262,6 @@ mod tests {
         all.push(upload_row(true).note.into());
         all.push(upload_row(false).note.into());
         for line in all {
-            assert!(
-                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
-                "{line}"
-            );
             assert!(!line.contains("S11"), "{line}");
         }
     }

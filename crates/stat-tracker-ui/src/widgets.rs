@@ -1008,9 +1008,9 @@ fn role_and_edited(game: &Game, in_progress: bool) -> Element<'static, Message> 
     // The role sits next to the hero name below; here it read like a
     // label for the map.
     let mut r = row![].spacing(8).align_y(Alignment::Center);
-    if game.held_locally() {
-        r = r.push(status_chip("needs review", theme::WARN));
-    } else if game.needs_look(in_progress) {
+    // One word with the bar's chip: a game held back for a missing map or
+    // hero needs a look too.
+    if game.held_locally() || game.needs_look(in_progress) {
         r = r.push(status_chip(NEEDS_LOOK_MARK, theme::WARN));
     }
     if game.edited {

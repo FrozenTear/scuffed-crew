@@ -122,11 +122,33 @@ pub(crate) fn header_status_for(app: &TrackerApp) -> HeaderStatus {
 }
 
 /// The website answered 401 or 403 for the saved token. The top bar, the
-/// Settings strip and the Website account card all read this.
+/// Settings strip and the Website account card all read this. It is the
+/// value [`TrackerApp::refresh_token_rejected`] last read, so a frame does
+/// not read `auth_pause.json`.
 pub(crate) fn sync_token_rejected(app: &TrackerApp) -> bool {
+    app.page_state.token_rejected
+}
+
+/// Read `auth_pause.json` for the saved pair.
+fn read_token_rejected(app: &TrackerApp) -> bool {
     app.saved_config.sync.as_ref().is_some_and(|sync| {
         stat_tracker::sync::auth_pause_matches(&app.data_dir, &sync.server_url, &sync.token)
     })
+}
+
+impl TrackerApp {
+    /// Re-read whether the website refused the saved token: at start, once
+    /// a tick and whenever the health line is rebuilt.
+    pub(crate) fn refresh_token_rejected(&mut self) {
+        self.page_state.token_rejected = read_token_rejected(self);
+    }
+
+    /// Rebuild the health line and the token state after something they
+    /// read changed.
+    pub(crate) fn refresh_health(&mut self) {
+        self.health_status = self.health_now();
+        self.refresh_token_rejected();
+    }
 }
 
 /// When the newest game was played, for the top bar and the Settings

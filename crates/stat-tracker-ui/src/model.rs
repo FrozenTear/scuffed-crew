@@ -156,7 +156,7 @@ impl Screen {
         }
     }
 
-    pub fn all() -> [Screen; 6] {
+    pub const fn all() -> [Screen; 6] {
         [
             Screen::Overview,
             Screen::Games,
@@ -327,7 +327,7 @@ impl Game {
     /// reader marked unsure do not count: their "unsure" marks are enough.
     /// The top bar count, its Games filter and the card mark all use this.
     pub fn needs_look(&self, in_progress: bool) -> bool {
-        self.needs_review() || (self.outcome == Outcome::Unknown && !in_progress)
+        (self.outcome == Outcome::Unknown && !in_progress) || self.needs_review()
     }
 
     /// Unsynced and missing a map or hero. The game has not been uploaded.
@@ -337,7 +337,7 @@ impl Game {
 
     /// Banner for a missing map or hero.
     ///
-    /// A game that is still queued says it stays on this machine. A game
+    /// A game that is still queued says it stays on this computer. A game
     /// that already uploaded must not say that. Picking a value re-queues
     /// the row so the site can be corrected.
     pub fn review_notice(&self) -> Option<&'static str> {
@@ -356,7 +356,7 @@ impl Game {
                 _ => "Map and hero are missing. Pick them to fix this game on the site.",
             });
         }
-        Some("Needs review. This game stays on this machine until you pick the missing fields.")
+        Some("Needs a look. This game stays on this computer until you pick the missing fields.")
     }
 
     pub fn has_stat_line(&self) -> bool {
@@ -631,22 +631,22 @@ mod review_tests {
         assert_eq!(
             blank.review_notice(),
             Some(
-                "Needs review. This game stays on this machine until you pick the missing fields."
+                "Needs a look. This game stays on this computer until you pick the missing fields."
             )
         );
         assert!(blank.held_locally());
     }
 
     #[test]
-    fn synced_blank_map_does_not_say_the_game_stays_on_this_machine() {
+    fn synced_blank_map_does_not_say_the_game_stays_on_this_computer() {
         let mut blank = game("Ana", "");
         blank.synced = true;
         let notice = blank
             .review_notice()
             .expect("a synced blank map still offers a pick");
         assert_eq!(notice, "Map is missing. Pick one to fix it on the site.");
-        assert!(!notice.contains("stays on this machine"));
-        assert!(!notice.contains("Needs review"));
+        assert!(!notice.contains("stays on this computer"));
+        assert!(!notice.contains("Needs a look"));
         assert!(!notice.contains('—') && !notice.contains('–'));
         assert!(!blank.held_locally());
         assert!(blank.needs_review());

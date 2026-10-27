@@ -24,12 +24,15 @@ mod chrome;
 pub mod cli;
 pub mod clipboard;
 pub mod commands;
+#[cfg(test)]
+mod copy_rules;
 pub mod daemon;
 pub mod fixtures;
 mod form_widgets;
 pub mod games;
 pub mod heroes;
 pub mod hotkey;
+pub mod icons;
 pub mod instance;
 pub mod layout;
 pub mod maps;

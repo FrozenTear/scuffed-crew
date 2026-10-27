@@ -11,6 +11,33 @@ use crate::settings::HELP_MEASURE;
 use crate::theme::{self, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_LABEL, SIZE_META, TEXT, TEXT_2, TEXT_3};
 use crate::widgets;
 
+/// The demo banner at the top of both Settings pages.
+pub(crate) const DEMO_NOTE: &str =
+    "Demo mode: settings, the tracker service, and stored data are not changed.";
+
+/// Help beside Report a problem on both Settings pages.
+pub(crate) const REPORT_HINT: &str =
+    "Crash, low FPS, or anything else. You see the report before it is sent.";
+
+/// The red Uninstall button both Settings pages draw, with each page's
+/// padding. With no message (demo) it is muted and does nothing.
+pub(crate) fn uninstall_button(
+    on_press: Option<Message>,
+    padding: Padding,
+) -> Element<'static, Message> {
+    let live = on_press.is_some();
+    button(
+        text("Uninstall")
+            .size(SIZE_META)
+            .font(FONT_SEMIBOLD)
+            .color(if live { theme::DANGER } else { TEXT_3 }),
+    )
+    .padding(padding)
+    .style(theme::danger_btn(false))
+    .on_press_maybe(on_press)
+    .into()
+}
+
 pub(crate) fn field_caption(label: &'static str) -> text::Text<'static> {
     text(label)
         .size(SIZE_META)

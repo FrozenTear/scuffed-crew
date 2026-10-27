@@ -4,8 +4,8 @@ Run from this folder with Pillow installed:
 
     python3 draw_icons.py
 
-It writes tab-icons/overview-dim.png and tab-icons/overview-on.png (four
-rounded squares spanning 14 of the 16 px box, as in the spec), warn.png
+It writes tab-icons/overview.png (four rounded squares spanning 14 of the
+16 px box, as in the spec; a white alpha mask the GUI tints), warn.png
 (the chip's warning sign, 12 px), and for the Settings page check.png (the
 status strip's check in a circle, 14 px), lock.png (the env lock, 12 px)
 and fold-open.png / fold-closed.png (the ADVANCED row chevrons, 14 px). Each is drawn at 2x for a 1x box, from an
@@ -15,8 +15,8 @@ and fold-open.png / fold-closed.png (the ADVANCED row chevrons, 14 px). Each is 
 from PIL import Image, ImageDraw
 
 SUPER = 8
-TEXT = (242, 242, 247)  # theme TEXT, selected tab
-TEXT_2 = (201, 201, 214)  # theme TEXT_2, other tabs
+WHITE = (255, 255, 255)  # tab masks; src/icons.rs tints them
+TEXT_2 = (201, 201, 214)  # theme TEXT_2, the chevrons
 WARN = (245, 184, 74)  # theme WARN
 OK = (70, 216, 164)  # theme OK
 TEXT_3 = (141, 141, 160)  # theme TEXT_3
@@ -114,8 +114,7 @@ def chevron_mask(down):
 
 def main():
     mask = overview_mask()
-    paint(mask, 32, TEXT).save("tab-icons/overview-on.png", optimize=True)
-    paint(mask, 32, TEXT_2).save("tab-icons/overview-dim.png", optimize=True)
+    paint(mask, 32, WHITE).save("tab-icons/overview.png", optimize=True)
     paint(warn_mask(), 24, WARN).save("warn.png", optimize=True)
     paint(check_mask(), 28, OK).save("check.png", optimize=True)
     paint(lock_mask(), 24, TEXT_3).save("lock.png", optimize=True)

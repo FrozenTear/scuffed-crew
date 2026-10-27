@@ -130,19 +130,4 @@ mod tests {
         );
         assert_eq!(backend_label(Some(CaptureBackend::None)), "None available");
     }
-
-    #[test]
-    fn copy_has_no_dashes() {
-        for line in [
-            PREVIEW_CAPTION,
-            LOOKING_FOR_BACKEND,
-            capture_route_help(SessionKind::X11),
-            capture_route_help(SessionKind::Wayland),
-        ] {
-            assert!(
-                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
-                "{line}"
-            );
-        }
-    }
 }

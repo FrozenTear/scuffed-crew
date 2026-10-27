@@ -22,7 +22,10 @@ use stat_tracker::ocr_switch::{
 
 use crate::app::{Message, TrackerApp};
 use crate::capture_shared::{self, capture_route_help};
-use crate::form_widgets::{action_btn, checkbox_style, field_caption, hint, output_chip};
+use crate::form_widgets::{
+    DEMO_NOTE, REPORT_HINT, action_btn, checkbox_style, field_caption, hint, output_chip,
+    uninstall_button,
+};
 use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SINGLE_MAX, SettingsLayout, settings_layout};
 use crate::settings_model::parse_process_names;
 use crate::theme::{
@@ -604,6 +607,33 @@ pub(crate) fn card_problem<'a>(
     }
 }
 
+/// What both pages show under the reader controls: the problem line drawn
+/// by `warn` (with OK when it is a refused click), then the "new reader"
+/// hint while the running tracker has classic OCR off.
+pub(crate) fn ocr_problem_lines<'a>(
+    app: &'a TrackerApp,
+    warn: impl Fn(&'a str) -> Element<'a, Message>,
+) -> Vec<Element<'a, Message>> {
+    let mut lines = Vec::new();
+    if let Some((problem, dismissable)) = card_problem(
+        app.ocr_switch.refusal.as_deref(),
+        app.ocr_switch.notice.as_deref(),
+    ) {
+        lines.push(warn(problem));
+        if dismissable {
+            lines.push(action_btn(
+                DISMISS_REFUSAL_LABEL,
+                false,
+                Message::DismissOcrRefusal,
+            ));
+        }
+    }
+    if app.ocr_switch.daemon_off {
+        lines.push(hint(NEW_READER_IMPLIED));
+    }
+    lines
+}
+
 /// "Reader packs ready: 2 of 3", or a placeholder until they were checked.
 pub(crate) fn pack_status_line(packs: Option<&PackReadiness>) -> String {
     packs.map_or_else(
@@ -1032,9 +1062,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     }
 
     if demo {
-        col = col.push(widgets::empty_surface(
-            "Demo mode: settings, the tracker service, and stored data are not changed.",
-        ));
+        col = col.push(widgets::empty_surface(DEMO_NOTE));
     }
 
     col = col.push(action_btn(
@@ -1507,26 +1535,14 @@ fn classic_ocr_block(app: &TrackerApp) -> Element<'_, Message> {
             .push(hint(CLASSIC_OCR_RESTART))
             .push(hint(pack_status_line(app.ocr_switch.packs.as_ref())));
     }
-    if let Some((problem, dismissable)) = card_problem(
-        app.ocr_switch.refusal.as_deref(),
-        app.ocr_switch.notice.as_deref(),
-    ) {
-        body = body.push(
-            text(problem.to_string())
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(theme::WARN),
-        );
-        if dismissable {
-            body = body.push(action_btn(
-                DISMISS_REFUSAL_LABEL,
-                false,
-                Message::DismissOcrRefusal,
-            ));
-        }
-    }
-    if app.ocr_switch.daemon_off {
-        body = body.push(hint(NEW_READER_IMPLIED));
+    for line in ocr_problem_lines(app, |problem| {
+        text(problem.to_string())
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(theme::WARN)
+            .into()
+    }) {
+        body = body.push(line);
     }
     body.into()
 }
@@ -1747,7 +1763,7 @@ fn report_row() -> Element<'static, Message> {
         "Report a problem",
         action_row(
             row![
-                text("Crash, low FPS, or anything else. You see the report before it is sent.")
+                text(REPORT_HINT)
                     .size(SIZE_META)
                     .font(FONT_MEDIUM)
                     .color(TEXT_3)
@@ -1778,15 +1794,7 @@ fn uninstall_row() -> Element<'static, Message> {
                     .font(FONT_MEDIUM)
                     .color(TEXT_3)
                     .width(Fill),
-                button(
-                    text("Uninstall")
-                        .size(SIZE_META)
-                        .font(FONT_SEMIBOLD)
-                        .color(theme::DANGER),
-                )
-                .padding(Padding::from([8, 16]))
-                .style(theme::danger_btn(false))
-                .on_press(Message::OpenUninstall),
+                uninstall_button(Some(Message::OpenUninstall), Padding::from([8, 16])),
             ]
             .align_y(Alignment::Center)
             .spacing(GRID_GAP),

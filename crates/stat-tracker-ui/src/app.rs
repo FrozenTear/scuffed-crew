@@ -469,7 +469,14 @@ impl TrackerApp {
         let config_existed = Config::config_path()
             .map(|path| path.exists())
             .unwrap_or(false);
-        let (saved_config, config_unreadable) = match Config::load() {
+        // A fixture (demo or test) never reads the host's config.toml, so
+        // it shows no real token and tests do not depend on the host.
+        let loaded = if cli.fixture.is_some() {
+            Ok(Config::default())
+        } else {
+            Config::load()
+        };
+        let (saved_config, config_unreadable) = match loaded {
             Ok(config) => (config, false),
             Err(e) => {
                 tracing::warn!(
@@ -654,6 +661,7 @@ impl TrackerApp {
             nav_style: crate::nav::NavStyle::from_env(),
             page_state,
         };
+        app.refresh_token_rejected();
         app.refresh_kit_sessions();
 
         if let Some(err) = overlay::reconcile_companion(
@@ -747,6 +755,10 @@ impl TrackerApp {
             subs.push(iced::event::listen_with(setup_guide_keys));
         } else if self.notes_dialog.is_some() {
             subs.push(iced::event::listen_with(notes_dialog_escape));
+        } else if self.page_state.chip_draft().is_some() {
+            subs.push(iced::event::listen_with(
+                crate::settings_update::chip_escape,
+            ));
         }
         Subscription::batch(subs)
     }
@@ -865,11 +877,11 @@ impl TrackerApp {
                                 tracing::warn!(error = %e, "failed to write ui_state.json");
                             }
                         }
-                        self.health_status = self.health_now();
+                        self.refresh_health();
                     }
                     Err(e) => {
                         tracing::info!(error = %e, "seasons fetch failed; using cache");
-                        self.health_status = self.health_now();
+                        self.refresh_health();
                     }
                 }
                 Task::none()
@@ -1109,7 +1121,7 @@ impl TrackerApp {
                     return Task::none();
                 }
                 self.daemon_busy = true;
-                if matches!(verb, DaemonVerb::Restart | DaemonVerb::Start) {
+                if verb.applies_saved_config() {
                     self.page_state.restart_started(&self.saved_config);
                 }
                 let data_dir = self.data_dir.clone();
@@ -1247,7 +1259,7 @@ impl TrackerApp {
                 });
                 if ok {
                     self.games.clear();
-                    self.health_status = self.health_now();
+                    self.refresh_health();
                 }
                 Task::none()
             }
@@ -2318,7 +2330,7 @@ impl TrackerApp {
                         self.settings.sync_url = sync.server_url.clone();
                         self.settings.sync_token = sync.token.clone();
                     }
-                    self.health_status = self.health_now();
+                    self.refresh_health();
                 }
             }
             Err(_) => {
@@ -2373,12 +2385,13 @@ impl TrackerApp {
                 self.games = games_from_snapshot(&snap);
                 self.refresh_kit_sessions();
                 self.live_status = crate::tracker_status::classic_live_status(&self.games);
-                self.health_status = self.health_now();
+                self.refresh_health();
                 self.clock = Utc::now();
             }
             self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
             self.page_state
                 .observe_tracker(self.daemon.pid, &self.saved_config);
+            self.refresh_token_rejected();
             let status = stat_tracker::ocr_switch::read_status(&self.data_dir);
             self.ocr_switch.daemon_off =
                 settings::daemon_runs_ocr_off(status.as_ref(), self.daemon.pid);
@@ -2386,7 +2399,7 @@ impl TrackerApp {
             let health = settings::daemon_health_notice(status.as_ref(), self.daemon.pid);
             if health != self.ocr_switch.health_notice {
                 self.ocr_switch.health_notice = health;
-                self.health_status = self.health_now();
+                self.refresh_health();
             }
             self.ocr_switch.capture_notice =
                 settings::daemon_capture_notice(status.as_ref(), self.daemon.pid);
@@ -2401,7 +2414,7 @@ impl TrackerApp {
             let share = settings::daemon_share_notice(status.as_ref(), self.daemon.pid);
             if share != self.ocr_switch.share_notice {
                 self.ocr_switch.share_notice = share;
-                self.health_status = self.health_now();
+                self.refresh_health();
             }
         }
 
@@ -3028,16 +3041,7 @@ mod tests {
     #[test]
     fn background_messages_keep_the_training_action() {
         let tmp = tempfile::tempdir().unwrap();
-        let cli = crate::cli::Cli {
-            data_dir: tmp.path().to_path_buf(),
-            fixture: Some(crate::cli::FixtureKind::Empty),
-            seasons_url: None,
-            companion: false,
-            help: false,
-            version: false,
-            replace: false,
-        };
-        let (mut app, _open) = super::TrackerApp::new(cli);
+        let mut app = fixture_app(tmp.path());
         app.toast = Some("Outcome set to Victory".into());
         app.toast_action = Some(super::Message::DismissToast);
         let _ = app.update(super::Message::AutostartReady(true));
@@ -3247,16 +3251,7 @@ mod tests {
     }
 
     fn fixture_app(tmp: &std::path::Path) -> super::TrackerApp {
-        let cli = crate::cli::Cli {
-            data_dir: tmp.to_path_buf(),
-            fixture: Some(crate::cli::FixtureKind::Empty),
-            seasons_url: None,
-            companion: false,
-            help: false,
-            version: false,
-            replace: false,
-        };
-        super::TrackerApp::new(cli).0
+        super::TrackerApp::new(crate::fixtures::test_cli(tmp)).0
     }
 
     /// GUI-2: tray Quit used to call `iced::exit()` mid-update and drop the

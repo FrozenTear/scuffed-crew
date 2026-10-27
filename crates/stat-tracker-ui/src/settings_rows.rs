@@ -18,7 +18,7 @@ use crate::app::{Message, TrackerApp};
 use crate::form_widgets::hint;
 use crate::settings::SettingsField;
 use crate::settings_model::{
-    COMING_LATER, ChipList, DefaultRow, SessionWindow, chips_from, differs_from_default,
+    COMING_LATER, ChipList, DefaultRow, SessionWindow, differs_from_default, parse_process_names,
     session_window_options,
 };
 use crate::settings_save::Commit;
@@ -510,7 +510,7 @@ pub(crate) fn session_window_row(app: &TrackerApp) -> Element<'_, Message> {
 
 /// Game processes as chips with "+ Add".
 pub(crate) fn processes_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let names = chips_from(&app.settings.game_process_names);
+    let names = parse_process_names(&app.settings.game_process_names);
     let empty = names.is_empty();
     let mut chips = Row::new();
     for (i, name) in names.into_iter().enumerate() {
@@ -574,7 +574,8 @@ pub(crate) fn page_field<'a>(
     input.into()
 }
 
-/// Dropdown in the page's style, with a ▾ handle.
+/// Dropdown in the page's style, with iced's default arrow handle in
+/// TEXT_2.
 pub(crate) fn dropdown<'a, T>(
     options: Vec<T>,
     selected: Option<T>,
@@ -646,22 +647,5 @@ mod tests {
             panic!("solid tracks");
         };
         assert!(b.a < a.a);
-    }
-
-    #[test]
-    fn copy_has_no_dashes() {
-        for line in [
-            GAME_PROCESSES_HELP,
-            NO_PROCESSES_NOTE,
-            NAMES_HELP,
-            SESSION_WINDOW_HELP,
-            Tag::AfterRestart.label(),
-            Tag::New.label(),
-        ] {
-            assert!(
-                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
-                "{line}"
-            );
-        }
     }
 }

@@ -12,6 +12,7 @@
 //! `Message::SettingsPage(Msg)`, handled by [`update`]. Demo mode changes
 //! nothing: every message that would is refused here.
 
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 use iced::Task;
@@ -113,6 +114,12 @@ pub struct PageState {
     pub update_checking: bool,
     /// Where page applies write instead of the user's config.toml (tests).
     pub(crate) config_path: Option<PathBuf>,
+    /// Whether the website refused the saved token, as last read
+    /// ([`crate::tracker_status::sync_token_rejected`]).
+    pub(crate) token_rejected: bool,
+    /// The last changes waiting count with the baseline and saved config it
+    /// was counted from, so a frame recounts only after one of them moved.
+    waiting_memo: RefCell<Option<(Config, Config, usize)>>,
 }
 
 impl PageState {
@@ -131,6 +138,8 @@ impl PageState {
             update_checked_at: None,
             update_checking: false,
             config_path: None,
+            token_rejected: false,
+            waiting_memo: RefCell::new(None),
         }
     }
 
@@ -184,10 +193,17 @@ impl TrackerApp {
     /// Saved settings that differ from what the running tracker started
     /// with. Shown as "N changes waiting" next to Restart tracker.
     pub fn changes_waiting(&self) -> usize {
-        crate::settings_model::changes_waiting(
-            &self.page_state.restart_baseline,
-            &self.saved_config,
-        )
+        let baseline = &self.page_state.restart_baseline;
+        let mut memo = self.page_state.waiting_memo.borrow_mut();
+        if let Some((b, s, n)) = memo.as_ref()
+            && b == baseline
+            && s == &self.saved_config
+        {
+            return *n;
+        }
+        let n = crate::settings_model::changes_waiting(baseline, &self.saved_config);
+        *memo = Some((baseline.clone(), self.saved_config.clone(), n));
+        n
     }
 
     /// Where the Settings pages write config.toml.
@@ -197,6 +213,27 @@ impl TrackerApp {
             None => Config::config_path().map_err(|_| ()),
         }
     }
+}
+
+/// Escape closes an open chip input without adding it. The app listens only
+/// while one is open; the input itself takes Escape too, so the status is
+/// not looked at.
+pub(crate) fn chip_escape(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    let iced::Event::Keyboard(iced::keyboard::Event::KeyPressed { key, .. }) = event else {
+        return None;
+    };
+    escape_closes_chip(&key)
+}
+
+/// `ChipDraft(_, None)` closes whichever input is open.
+fn escape_closes_chip(key: &iced::keyboard::Key) -> Option<Message> {
+    use iced::keyboard::{Key, key::Named};
+    matches!(key, Key::Named(Named::Escape))
+        .then_some(Message::SettingsPage(Msg::ChipDraft(ChipList::Names, None)))
 }
 
 /// Id of a chip list's "+ Add" input, so opening it can focus it.
@@ -352,18 +389,7 @@ mod tests {
     use crate::settings::SettingsToggle;
 
     fn demo_app() -> (tempfile::TempDir, TrackerApp) {
-        let dir = tempfile::tempdir().unwrap();
-        let cli = crate::cli::Cli {
-            data_dir: dir.path().to_path_buf(),
-            fixture: Some(crate::cli::FixtureKind::Empty),
-            seasons_url: None,
-            companion: false,
-            help: false,
-            version: false,
-            replace: false,
-        };
-        let app = TrackerApp::new(cli).0;
-        (dir, app)
+        crate::fixtures::test_app()
     }
 
     /// A live (not demo) app whose page writes a config.toml in a temp dir.
@@ -511,6 +537,27 @@ mod tests {
         assert_eq!(app.changes_waiting(), 0);
     }
 
+    /// Through the real messages, in a live (not demo) app: the verb's task
+    /// is returned, not run, so nothing touches the host's tracker.
+    #[test]
+    fn a_restart_that_works_clears_the_changes_waiting() {
+        use crate::daemon::DaemonVerb;
+        let (_dir, mut app) = live_app();
+        let _ = app.update(page(Msg::Edit(ConfigEdit::FrameRate(Some(2)))));
+        assert_eq!(app.changes_waiting(), 1);
+        let _ = app.update(Message::Daemon(DaemonVerb::Stop));
+        let _ = app.update(Message::DaemonDone(Ok("Tracker stopped".into())));
+        assert_eq!(app.changes_waiting(), 1, "a stop loads nothing");
+        let _ = app.update(Message::Daemon(DaemonVerb::Restart));
+        assert!(app.daemon_busy);
+        let _ = app.update(Message::DaemonDone(Err("failed".into())));
+        assert_eq!(app.changes_waiting(), 1, "a failed restart loads nothing");
+        let _ = app.update(Message::Daemon(DaemonVerb::Restart));
+        let _ = app.update(Message::DaemonDone(Ok("Tracker restarted".into())));
+        assert!(!app.daemon_busy);
+        assert_eq!(app.changes_waiting(), 0);
+    }
+
     #[test]
     fn a_change_during_a_restart_still_waits() {
         let (_dir, mut app) = live_app();
@@ -598,6 +645,53 @@ mod tests {
         let _ = app.update(page(Msg::ChipDraft(ChipList::Processes, Some("a".into()))));
         let _ = app.update(Message::Navigate(crate::model::Screen::Overview));
         assert!(app.page_state.chip_draft().is_none());
+    }
+
+    #[test]
+    fn a_chip_is_removed_from_either_list() {
+        let (dir, mut app) = live_app();
+        let _ = app.update(page(Msg::ChipDraft(
+            ChipList::Names,
+            Some("FrozenTear".into()),
+        )));
+        let _ = app.update(page(Msg::ChipAdd));
+        assert_eq!(on_disk(&dir).player_name.as_deref(), Some("FrozenTear"));
+        let _ = app.update(page(Msg::ChipRemove(ChipList::Names, 0)));
+        assert_eq!(on_disk(&dir).player_name, None);
+
+        let _ = app.update(page(Msg::ChipDraft(
+            ChipList::Processes,
+            Some("a.exe, b.exe".into()),
+        )));
+        let _ = app.update(page(Msg::ChipAdd));
+        let names = on_disk(&dir).game_process_names;
+        assert!(names.contains(&"a.exe".into()) && names.contains(&"b.exe".into()));
+        let index = names.iter().position(|n| n == "a.exe").unwrap();
+        let _ = app.update(page(Msg::ChipRemove(ChipList::Processes, index)));
+        let names = on_disk(&dir).game_process_names;
+        assert!(!names.contains(&"a.exe".into()));
+        assert!(names.contains(&"b.exe".into()));
+    }
+
+    #[test]
+    fn cancel_and_escape_close_the_input_and_add_nothing() {
+        use iced::keyboard::{Key, key::Named};
+        let (dir, mut app) = live_app();
+        let before = on_disk(&dir).game_process_names;
+        let _ = app.update(page(Msg::ChipDraft(
+            ChipList::Processes,
+            Some("typed.exe".into()),
+        )));
+        let _ = app.update(page(Msg::ChipDraft(ChipList::Processes, None)));
+        assert!(app.page_state.chip_draft().is_none());
+        assert_eq!(on_disk(&dir).game_process_names, before);
+
+        assert!(escape_closes_chip(&Key::Named(Named::Enter)).is_none());
+        let _ = app.update(page(Msg::ChipDraft(ChipList::Names, Some("x".into()))));
+        let escape = escape_closes_chip(&Key::Named(Named::Escape)).expect("Escape closes");
+        let _ = app.update(escape);
+        assert!(app.page_state.chip_draft().is_none());
+        assert_eq!(on_disk(&dir).player_name, None);
     }
 
     #[test]

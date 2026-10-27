@@ -66,6 +66,10 @@ pub struct BuildId {
 /// workspace crate the GUI links must be listed here: [`compute`] refuses a
 /// lock walk that reaches an unlisted one.
 ///
+/// The GUI's own `assets` folder is in: the tab icons and the other PNGs
+/// there are compiled in with `include_bytes!`, so an icon-only change
+/// gives a new id.
+///
 /// The stat-tracker lib leaves out `src/main.rs` and its modules under
 /// `src/daemon/`, its test modules (`src/main_tests/`, `src/ocr_bench.rs`)
 /// and `src/bin`: those are the daemon binary, which the GUI does not link.
@@ -89,7 +93,7 @@ pub fn workspace_inputs(gui_manifest_dir: &Path) -> Inputs {
             CrateInputs {
                 package: "scuffed-stat-tracker-ui".into(),
                 dir: gui_manifest_dir.to_path_buf(),
-                include: strings(&["Cargo.toml", "build.rs", "src", "fonts"]),
+                include: strings(&["Cargo.toml", "build.rs", "src", "fonts", "assets"]),
                 exclude: Vec::new(),
             },
             CrateInputs {
@@ -806,6 +810,30 @@ axum = "0.8"
                 "{package}"
             );
         }
+    }
+
+    /// The GUI hashes its `assets` folder (the tab icons are
+    /// `include_bytes!`), and an icon-only change gives a new id.
+    #[test]
+    fn workspace_inputs_hash_the_gui_assets() {
+        let inputs = workspace_inputs(Path::new(env!("CARGO_MANIFEST_DIR")));
+        let gui = inputs
+            .crates
+            .iter()
+            .find(|c| c.package == "scuffed-stat-tracker-ui")
+            .expect("the GUI is listed");
+        for want in ["src", "fonts", "assets"] {
+            assert!(gui.include.iter().any(|i| i == want), "{want}");
+        }
+
+        let tree = Tree::new();
+        tree.write("crates/gui/assets/tab.png", "PNG one");
+        let mut inputs = tree.inputs();
+        inputs.crates[0].include.push("assets".into());
+        let before = compute(&inputs).expect("build id").id;
+        tree.write("crates/gui/assets/tab.png", "PNG two");
+        let after = compute(&inputs).expect("build id").id;
+        assert_ne!(before, after);
     }
 
     /// Every `crates/stat-tracker*` crate but the GUI is a lib crate the GUI

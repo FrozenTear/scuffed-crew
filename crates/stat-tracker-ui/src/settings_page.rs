@@ -19,6 +19,7 @@ use iced::{Alignment, Background, Border, Color, Element, Fill, Length, Padding,
 
 use crate::app::{Message, TrackerApp};
 use crate::daemon::DaemonVerb;
+use crate::form_widgets::DEMO_NOTE;
 use crate::settings_cards;
 use crate::settings_model::{
     AdvancedSection, AdvancedValues, COLUMN_GAP, EverydaySection, ReaderChoice,
@@ -49,8 +50,6 @@ const LEGEND_DOT_GAP: f32 = 6.0;
 const LEGEND_APPLY: &str = "Changes apply as you make them, except those tagged After restart.";
 const LEGEND_CHANGED: &str = "changed from default";
 const RUN_SETUP_LABEL: &str = "Run setup again";
-const DEMO_NOTE: &str =
-    "Demo mode: settings, the tracker service, and stored data are not changed.";
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let demo = app.fixture.is_some();
@@ -408,15 +407,9 @@ fn fold_header(
         title = title.push(tag(Tag::AfterRestart));
     }
     let chevron = if open {
-        crate::nav::png_handle(
-            crate::nav::ICON_FOLD_OPEN,
-            include_bytes!("../assets/fold-open.png"),
-        )
+        crate::icons::handle(crate::icons::Icon::FoldOpen)
     } else {
-        crate::nav::png_handle(
-            crate::nav::ICON_FOLD_CLOSED,
-            include_bytes!("../assets/fold-closed.png"),
-        )
+        crate::icons::handle(crate::icons::Icon::FoldClosed)
     };
     button(
         row![
@@ -479,18 +472,7 @@ mod tests {
     use iced::advanced::widget::Tree;
 
     fn app() -> (tempfile::TempDir, TrackerApp) {
-        let dir = tempfile::tempdir().unwrap();
-        let cli = crate::cli::Cli {
-            data_dir: dir.path().to_path_buf(),
-            fixture: Some(crate::cli::FixtureKind::Empty),
-            seasons_url: None,
-            companion: false,
-            help: false,
-            version: false,
-            replace: false,
-        };
-        let app = TrackerApp::new(cli).0;
-        (dir, app)
+        crate::fixtures::test_app()
     }
 
     fn headless() -> iced::Renderer {
@@ -538,6 +520,29 @@ mod tests {
         for width in [640.0, 976.0, 1600.0, 3400.0] {
             let _ = view(&app, width);
         }
+    }
+
+    /// The live page (not demo): live controls and no demo note, so the
+    /// strip comes first, one child less than in demo.
+    #[test]
+    fn the_live_page_draws_with_every_row_open() {
+        let (_dir, mut app) = app();
+        let demo = lay_out(view(&app, 976.0), 976.0);
+        for section in AdvancedSection::ALL {
+            let _ = app.update(Message::SettingsPage(Msg::ToggleAdvanced(section)));
+        }
+        app.fixture = None;
+        for width in [640.0, 976.0, TWO_COLUMN_MIN + 1.0, 3400.0] {
+            let _ = view(&app, width);
+        }
+        for section in AdvancedSection::ALL {
+            let _ = app.update(Message::SettingsPage(Msg::ToggleAdvanced(section)));
+        }
+        let live = lay_out(view(&app, 976.0), 976.0);
+        assert_eq!(
+            live.children()[0].children().len() + 1,
+            demo.children()[0].children().len()
+        );
     }
 
     /// Render fix 2 (spec p9): at 1024 the one column starts at the
@@ -589,13 +594,10 @@ mod tests {
     }
 
     #[test]
-    fn copy_has_no_dashes() {
-        for line in [LEGEND_APPLY, LEGEND_CHANGED, RUN_SETUP_LABEL, DEMO_NOTE] {
-            assert!(
-                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
-                "{line}"
-            );
-        }
-        assert!(LEGEND_APPLY.starts_with("Changes apply as you make them"));
+    fn the_legend_says_changes_apply_at_once() {
+        assert_eq!(
+            LEGEND_APPLY,
+            "Changes apply as you make them, except those tagged After restart."
+        );
     }
 }

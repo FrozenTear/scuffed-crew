@@ -56,7 +56,7 @@ pub enum Commit {
     Control,
     /// Enter in Check every or Wait after detection.
     Timings,
-    /// Apply under Website connection: the server address and token.
+    /// Apply under Website connection: the website URL and token.
     Sync,
     /// The shortcut's box, or Enter in the shortcut field.
     Shortcut,
@@ -318,7 +318,7 @@ impl TrackerApp {
                 .with_installed_version(&fresh, self.installed_version.as_deref());
                 self.saved_config = fresh;
                 self.config_unreadable = false;
-                self.health_status = self.health_now();
+                self.refresh_health();
                 self.replace_toast(match from {
                     SaveFrom::Classic => SETTINGS_RELOADED_FROM_DISK,
                     SaveFrom::Page(_) => PAGE_RELOADED_FROM_DISK,
@@ -375,7 +375,7 @@ impl TrackerApp {
         );
         self.saved_config = config;
         self.config_unreadable = false;
-        self.health_status = self.health_now();
+        self.refresh_health();
         self.overlay_hotkey = hotkey;
         self.settings = SettingsForm::from_config(&self.saved_config)
             .with_installed_version(&self.saved_config, self.installed_version.as_deref());
