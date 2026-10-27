@@ -424,7 +424,7 @@ fn capture_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
     ];
     rows.extend(stream_rows(app, demo));
 
-    rows.push(crate::settings_keys::focus_gate_row(
+    rows.extend(crate::settings_keys::focus_gate_row(
         app,
         demo,
         FOCUS_GATE_HELP,
@@ -555,7 +555,7 @@ fn reading_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
         rows.push(reading_model_row(app, demo));
     }
     rows.push(ocr_workers_row(app, demo));
-    rows.push(crate::settings_keys::report_pictures_row(
+    rows.extend(crate::settings_keys::report_pictures_row(
         app,
         demo,
         REPORT_PICTURES_HELP,

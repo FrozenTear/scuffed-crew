@@ -188,17 +188,15 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
     // the Upload row's note does.
     let demo = app.fixture.is_some();
     let uploads = crate::settings_keys::upload_row(app, demo, UPLOAD_HELP, !rejected);
-    let sharing = column![
-        sub_heading(SHARING_HEADING),
-        divided(crate::settings_keys::sharing_rows(
-            app,
-            demo,
-            RANK_HELP,
-            STAT_PICTURES_HELP
-        )),
-        crate::account_card::what_leaves_link(),
-    ]
-    .spacing(12);
+    // The Sharing heading only while a sharing row shows.
+    let shared = crate::settings_keys::sharing_rows(app, demo, RANK_HELP, STAT_PICTURES_HELP);
+    let mut sharing = column![].spacing(12);
+    if !shared.is_empty() {
+        sharing = sharing
+            .push(sub_heading(SHARING_HEADING))
+            .push(divided(shared));
+    }
+    let sharing = sharing.push(crate::account_card::what_leaves_link());
     divided(vec![connection.into(), uploads, sharing.into()])
 }
 

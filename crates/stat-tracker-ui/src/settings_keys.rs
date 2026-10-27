@@ -3,8 +3,12 @@
 //! Upload games after each match (`live_upload`), the two Sharing
 //! switches (`rank_reader`, `share_stat_pictures`), Report pictures
 //! (`share_report_pictures`) and Only capture while Overwatch is on screen
-//! (`capture_only_on_screen`). Each applies at once and is tagged After
-//! restart, since the tracker reads them when it starts.
+//! (`capture_only_on_screen`). Each applies at once. The tracker reads
+//! them when it starts, so each is tagged After restart, except Report
+//! pictures, which only this app reads.
+//!
+//! Four rows are not shown yet ([`HIDDEN_ROWS`]): nothing behind them
+//! exists in the tracker. Their keys still load and save as before.
 
 use iced::Element;
 use iced::widget::Row;
@@ -23,6 +27,21 @@ const NAMES_HELP: &str = "As shown in-game, without the #1234.";
 const UPLOAD_OFF_NOTE: &str = "Games stay on this computer and upload once this is on again.";
 /// Under Upload games while no website is set.
 const UPLOAD_NO_SITE: &str = "Add the website URL and token under Advanced, Website connection.";
+
+/// Rows the page does not show until the tracker has something behind
+/// them: the rank reader, stat picture upload, report pictures and the
+/// on-screen capture check. Upload games after each match stays.
+pub(crate) const HIDDEN_ROWS: [&str; 4] = [
+    "rank_reader",
+    "share_stat_pictures",
+    "share_report_pictures",
+    "capture_only_on_screen",
+];
+
+/// Whether the row for config key `key` is shown.
+pub(crate) fn row_shown(key: &str) -> bool {
+    !HIDDEN_ROWS.contains(&key)
+}
 
 /// A switch that writes `edit(on)`, or a disabled one in a demo.
 fn edit_switch<'a>(on: bool, demo: bool, edit: fn(bool) -> ConfigEdit) -> Element<'a, Message> {
@@ -130,7 +149,8 @@ pub(crate) fn upload_row<'a>(
     )
 }
 
-/// The two Sharing switches under Website account. Both start off.
+/// The two Sharing switches under Website account, both starting off,
+/// less the ones [`HIDDEN_ROWS`] holds back. Empty while both are hidden.
 pub(crate) fn sharing_rows<'a>(
     app: &'a TrackerApp,
     demo: bool,
@@ -138,50 +158,61 @@ pub(crate) fn sharing_rows<'a>(
     pictures_help: &'static str,
 ) -> Vec<Element<'a, Message>> {
     let c = &app.saved_config;
-    vec![
-        setting_row(
+    let mut rows = Vec::new();
+    if row_shown("rank_reader") {
+        rows.push(setting_row(
             title_line("Read my rank after Comp games", false, &[Tag::AfterRestart]),
             vec![hint(rank_help)],
             edit_switch(c.rank_reader, demo, ConfigEdit::RankReader),
-        ),
-        setting_row(
+        ));
+    }
+    if row_shown("share_stat_pictures") {
+        rows.push(setting_row(
             title_line("Share stat pictures", false, &[Tag::AfterRestart]),
             vec![hint(pictures_help)],
             edit_switch(c.share_stat_pictures, demo, ConfigEdit::ShareStatPictures),
-        ),
-    ]
+        ));
+    }
+    rows
 }
 
-/// Report pictures under READING (spec p7).
+/// Report pictures under READING (spec p7), or `None` while hidden. Only
+/// this app reads it, so it has no After restart tag.
 pub(crate) fn report_pictures_row<'a>(
     app: &'a TrackerApp,
     demo: bool,
     help: &'static str,
-) -> Element<'a, Message> {
-    setting_row(
-        title_line("Report pictures", false, &[Tag::New, Tag::AfterRestart]),
-        vec![hint(help)],
-        edit_switch(
-            app.saved_config.share_report_pictures,
-            demo,
-            ConfigEdit::ShareReportPictures,
-        ),
-    )
+) -> Option<Element<'a, Message>> {
+    row_shown("share_report_pictures").then(|| {
+        setting_row(
+            title_line("Report pictures", false, &[Tag::New]),
+            vec![hint(help)],
+            edit_switch(
+                app.saved_config.share_report_pictures,
+                demo,
+                ConfigEdit::ShareReportPictures,
+            ),
+        )
+    })
 }
 
-/// Only capture while Overwatch is on screen: Auto or Off (spec p7).
+/// Only capture while Overwatch is on screen: Auto or Off (spec p7), or
+/// `None` while hidden.
 pub(crate) fn focus_gate_row<'a>(
     app: &'a TrackerApp,
     demo: bool,
     help: &'static str,
-) -> Element<'a, Message> {
+) -> Option<Element<'a, Message>> {
+    if !row_shown("capture_only_on_screen") {
+        return None;
+    }
     let auto = app.saved_config.capture_only_on_screen;
     let pick = |on: bool| {
         (!demo).then_some(Message::SettingsPage(Msg::Edit(
             ConfigEdit::CaptureOnlyOnScreen(on),
         )))
     };
-    setting_row(
+    Some(setting_row(
         title_line(
             "Only capture while Overwatch is on screen",
             !auto,
@@ -200,7 +231,7 @@ pub(crate) fn focus_gate_row<'a>(
                 msg: pick(false),
             },
         ]),
-    )
+    ))
 }
 
 #[cfg(test)]
@@ -272,8 +303,18 @@ mod tests {
         let (_dir, app) = crate::fixtures::test_app();
         let _ = names_row(&app, true);
         let _ = upload_row(&app, true, "help", true);
-        let _ = sharing_rows(&app, true, "a", "b");
-        let _ = report_pictures_row(&app, true, "c");
-        let _ = focus_gate_row(&app, true, "d");
+    }
+
+    #[test]
+    fn the_rows_with_nothing_behind_them_are_hidden() {
+        let (_dir, app) = crate::fixtures::test_app();
+        for key in HIDDEN_ROWS {
+            assert!(!row_shown(key), "{key}");
+        }
+        assert!(row_shown("live_upload"));
+        assert!(sharing_rows(&app, false, "a", "b").is_empty());
+        assert!(report_pictures_row(&app, false, "c").is_none());
+        assert!(focus_gate_row(&app, false, "d").is_none());
+        let _ = upload_row(&app, false, "help", true);
     }
 }

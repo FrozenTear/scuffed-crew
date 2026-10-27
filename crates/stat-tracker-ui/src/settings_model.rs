@@ -60,14 +60,16 @@ pub fn page_width(content: f32) -> f32 {
 
 /// Config keys only this app reads, so a change to one never waits for a
 /// tracker restart: the update channel, the setup flag, the session
-/// window (Overview and Companion grouping) and the reader pack address
-/// (not used yet). The waiting count, the After restart tags and the
-/// legend all come from this list.
-pub const APP_ONLY_KEYS: [&str; 4] = [
+/// window (Overview and Companion grouping), the reader pack address
+/// (not used yet) and Report pictures (the app's misread report reads it,
+/// the tracker never does). The waiting count, the After restart tags and
+/// the legend all come from this list.
+pub const APP_ONLY_KEYS: [&str; 5] = [
     "update_channel",
     "setup_completed",
     "session_window_secs",
     "reader_pack_url",
+    "share_report_pictures",
 ];
 
 /// True when `key` reaches the tracker only after it restarts: the tracker
