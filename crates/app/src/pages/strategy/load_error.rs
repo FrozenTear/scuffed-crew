@@ -1,7 +1,7 @@
 //! Error text for the strategy loaders (APP9).
 //!
 //! Errors are `ClientError` Display strings, as kept by the resources in
-//! `meta.rs` and `editor.rs`.
+//! `meta.rs`, `editor.rs` and `heroes`.
 
 use dioxus::prelude::UseResourceState;
 
@@ -34,6 +34,22 @@ pub fn meta_load_error(err: &str) -> LoadError {
 /// error) stays in the slot until the refetch resolves.
 pub fn is_retrying(state: UseResourceState) -> bool {
     state == UseResourceState::Pending
+}
+
+/// Heroes page: a 404 means the strategies gate is off, so a Retry cannot
+/// help. Every other failure is shown with a Retry.
+pub fn heroes_load_error(err: &str) -> LoadError {
+    if is_http_status(err, 404) {
+        LoadError {
+            message: "The hero list isn't available right now.".to_string(),
+            retry: false,
+        }
+    } else {
+        LoadError {
+            message: format!("Couldn't load the hero list. {err}"),
+            retry: true,
+        }
+    }
 }
 
 /// Strategy editor: 404 and 403 mean the strategy is gone or private, so a
@@ -121,6 +137,23 @@ mod tests {
         }
         let err = http(500, r#"{"error":"upstream said 404"}"#);
         assert!(meta_load_error(&err).retry);
+    }
+
+    #[test]
+    fn heroes_404_is_unavailable_and_other_failures_retry() {
+        let gone = heroes_load_error(&http(404, r#"{"error":"Not found"}"#));
+        assert!(!gone.retry);
+        assert_eq!(gone.message, "The hero list isn't available right now.");
+
+        for err in [
+            http(500, ""),
+            ClientError::Network("offline".to_string()).to_string(),
+            ClientError::Deserialize("bad json".to_string()).to_string(),
+        ] {
+            let shown = heroes_load_error(&err);
+            assert!(shown.retry, "{err}");
+            assert_eq!(shown.message, format!("Couldn't load the hero list. {err}"));
+        }
     }
 
     #[test]

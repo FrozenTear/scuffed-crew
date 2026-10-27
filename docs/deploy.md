@@ -141,7 +141,7 @@ This `up -d` creates the database container on the image `compose.yml` names. If
 
 ### SurrealDB: `is unhealthy` but logs show “Started web server”
 
-The database is fine; an old probe had a 5 s timeout, shorter than the time the `surreal` CLI waits before it exits. Current `compose.yml` probes with `/surreal is-ready` and a 20 s timeout. The probe belongs to the database container, so a fix only takes effect when that container is recreated, and `./scripts/update.sh` never does that. If `compose.yml` names the image the container already runs (`podman inspect <surreal container> --format '{{.ImageName}}'`), stop site-server, then `podman compose --env-file data/secrets.env up -d --no-deps surrealdb` recreates it on the same image and volume, then `./scripts/update.sh`. If the images differ, that is a database upgrade: follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server).
+The database is fine; an old probe had a 5 s timeout, shorter than the time the `surreal` CLI waits before it exits. Current `compose.yml` has a Surreal healthcheck: `/surreal is-ready --endpoint http://127.0.0.1:8000` every 30 s, with a 20 s timeout, 3 retries and a 20 s start period. `site-server` still only waits for the database container to start, not for it to be healthy. The probe belongs to the database container, so a fix only takes effect when that container is recreated, and `./scripts/update.sh` never does that. If `compose.yml` names the image the container already runs (`podman inspect <surreal container> --format '{{.ImageName}}'`), stop site-server, then `podman compose --env-file data/secrets.env up -d --no-deps surrealdb` recreates it on the same image and volume, then `./scripts/update.sh`. If the images differ, that is a database upgrade: follow [Upgrading the SurrealDB server](#upgrading-the-surrealdb-server).
 
 ### SurrealDB: duplicate container (`_` vs `-`) and site-server stuck Created / public 502
 
@@ -241,10 +241,13 @@ Wait until `dig +short ow.scuffedcrew.no` returns the VPS.
 ```caddy
 ow.scuffedcrew.no {
 	encode zstd gzip
-	header X-Frame-Options "DENY"
-	header Referrer-Policy "strict-origin-when-cross-origin"
 	# Same-origin Nostr relay. See "Optional Nostr relay" below and deploy/Caddyfile.
 	handle /relay* {
+		header X-Frame-Options "DENY"
+		header Referrer-Policy "strict-origin-when-cross-origin"
+		header X-Content-Type-Options "nosniff"
+		header Permissions-Policy "camera=(), microphone=(), geolocation=()"
+		header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
 		uri strip_prefix /relay
 		reverse_proxy 127.0.0.1:7777
 	}
@@ -254,7 +257,7 @@ ow.scuffedcrew.no {
 }
 ```
 
-`X-Content-Type-Options: nosniff` is set by scuffed-server. Do not add `header X-Content-Type-Options "nosniff"` in Caddy. A second line is sent beside the origin header. If the live host file still has that line, delete it and reload Caddy.
+`X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY` and `Referrer-Policy: strict-origin-when-cross-origin` are set by scuffed-server on every response it serves. Do not add them for the site in Caddy. A second line is sent beside the origin header. Only the `/relay*` block sets these headers in Caddy, because strfry answers that path: the three above plus `Permissions-Policy` and the production `Strict-Transport-Security` value, all copied from `crates/server/src/security.rs`. If the live host file still has site-wide `header X-Content-Type-Options`, `header X-Frame-Options` or `header Referrer-Policy` lines, move or delete them as above and reload Caddy.
 
 Do not add a Caddy `Cache-Control` header for `*.wasm` / `*.js` / `*.css`. The origin is the only cache policy (`cache_control_value` in `crates/site-server`): Dioxus `dxh`-hashed assets are `public, max-age=31536000, immutable`, unhashed `.js` / `.css` / `.wasm` are `no-cache`, other static files are one day, and the HTML shell is `no-cache`. A matcher on every `.js` / `.css` / `.wasm` path also covers unhashed files and the HTML fallback, and Caddy emits a second `Cache-Control` beside the origin's.
 
