@@ -1788,6 +1788,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn me_match_inactive_member_is_403() {
+        let (state, member_id, _daemon_token, session_token) = member_reader().await;
+        state
+            .db
+            .upsert_personal_matches(&member_id, &[single_game(&member_id, "mine-1")])
+            .await
+            .unwrap();
+        let mine = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 1);
+        let id = mine[0].id.clone();
+        let (status, text) =
+            get_my_match(create_router(state.clone()), Some(&session_token), &id).await;
+        assert_eq!(status, StatusCode::OK, "{text}");
+
+        state
+            .db
+            .update_member(
+                &member_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(false),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("deactivate member");
+        let (status, text) = get_my_match(create_router(state), Some(&session_token), &id).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{text}");
+        let body: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["error"], "Membership inactive");
+    }
+
+    #[tokio::test]
     async fn upload_missing_and_null_suspect_fields_store_empty() {
         let (state, member_id, token) = daemon().await;
         let missing = match_object("sess-miss", 2);
