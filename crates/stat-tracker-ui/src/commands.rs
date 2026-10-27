@@ -143,6 +143,7 @@ pub fn save_edit(
     let stats_changed = stats.iter().any(Option::is_some);
     let map_changed = edit.map_name.is_some();
     let hero_changed = edit.hero.is_some() || edit.role.is_some();
+    let role_only = edit.hero.is_none() && edit.role.is_some();
     edit_match(data_dir, &game.session_id, edit)?;
     Ok(saved(
         held,
@@ -150,17 +151,21 @@ pub fn save_edit(
         stats_changed,
         map_changed,
         hero_changed,
+        role_only,
     ))
 }
 
 /// What a queued Edit says, from whether the game is still held, was held,
-/// and which kinds of field changed.
+/// and which kinds of field changed. A role-only change reads "Role
+/// corrected" but is still filed as Wrong hero, as there is no role
+/// category.
 fn saved(
     held: bool,
     was_held: bool,
     stats_changed: bool,
     map_changed: bool,
     hero_changed: bool,
+    role_only: bool,
 ) -> Saved {
     // The training report files the fix under what was fixed: a stat fix
     // first, as the stats are what the reader reads most. A save that
@@ -181,11 +186,13 @@ fn saved(
     } else if was_held {
         RELEASED
     } else {
-        match (map_changed, hero_changed) {
-            (true, true) => "Map and hero corrected",
-            (true, false) => "Map corrected",
-            (false, true) => "Hero corrected",
-            (false, false) => "Saved",
+        match (map_changed, hero_changed, role_only) {
+            (true, true, false) => "Map and hero corrected",
+            (true, true, true) => "Map and role corrected",
+            (true, false, _) => "Map corrected",
+            (false, true, false) => "Hero corrected",
+            (false, true, true) => "Role corrected",
+            (false, false, _) => "Saved",
         }
     };
     Saved { toast, category }
@@ -408,6 +415,9 @@ mod tests {
         });
         assert_eq!(both.toast, "Map and hero corrected");
         assert_eq!(both.category, Some(GameCategory::WrongMap));
+        let role = save(&|f| f.role = "Tank".into());
+        assert_eq!(role.toast, "Role corrected");
+        assert_eq!(role.category, Some(GameCategory::WrongHero));
         let stats = save(&|f| f.elims = "40".into());
         assert_eq!(stats.toast, "Stats corrected");
         assert_eq!(stats.category, Some(GameCategory::WrongStats));
@@ -485,11 +495,13 @@ mod tests {
     /// edit, "No changes to save", which offers none either.)
     #[test]
     fn an_unchanged_save_offers_no_report() {
-        let unchanged = saved(false, false, false, false, false);
+        let unchanged = saved(false, false, false, false, false, false);
         assert_eq!(unchanged.toast, "Saved");
         assert_eq!(unchanged.category, None);
         assert!(!offers_report(unchanged));
-        assert!(offers_report(saved(false, false, false, true, false)));
+        assert!(offers_report(saved(
+            false, false, false, true, false, false
+        )));
         let app_save = |set: &dyn Fn(&mut EditForm)| {
             let (_dir, mut app) = crate::fixtures::test_app();
             let g = sample_game();
@@ -515,11 +527,11 @@ mod tests {
     #[test]
     fn an_unchanged_save_on_a_held_game_offers_no_report() {
         let held = "Saved. A map or hero is still missing, so this game stays on this computer.";
-        let unchanged = saved(true, true, false, false, false);
+        let unchanged = saved(true, true, false, false, false, false);
         assert_eq!(unchanged.toast, held);
         assert_eq!(unchanged.category, None);
         assert!(!offers_report(unchanged));
-        let fixed = saved(true, true, true, false, false);
+        let fixed = saved(true, true, true, false, false, false);
         assert_eq!(fixed.category, Some(GameCategory::WrongStats));
         assert!(offers_report(fixed));
     }
