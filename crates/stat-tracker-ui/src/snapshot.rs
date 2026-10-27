@@ -8,8 +8,32 @@ use crate::fixtures;
 use crate::model::Game;
 
 /// Read the daemon snapshot via the existing lib API. Missing / unreadable → empty.
+/// Deleted games are left out, so every tab and total skips them: a delete
+/// still queued in `commands/` (the tracker may be stopped, and the GUI
+/// never applies commands itself) counts as a pending delete, and no row
+/// with a pending delete is kept.
 pub fn load_snapshot(data_dir: &Path) -> Snapshot {
-    storage::read_snapshot(data_dir).unwrap_or_default()
+    let mut snap = storage::read_snapshot(data_dir).unwrap_or_default();
+    for (_, cmd) in storage::read_commands(data_dir) {
+        if let storage::StoreCommand::DeleteSession { session_id } = cmd
+            && !snap.pending_deletes.contains(&session_id)
+        {
+            snap.pending_deletes.push(session_id);
+        }
+    }
+    drop_deleted(&mut snap);
+    snap
+}
+
+/// Drop the match and session rows of games with a pending delete.
+pub fn drop_deleted(snap: &mut Snapshot) {
+    if snap.pending_deletes.is_empty() {
+        return;
+    }
+    let gone: std::collections::HashSet<String> = snap.pending_deletes.iter().cloned().collect();
+    snap.matches
+        .retain(|m| m.session_id.is_empty() || !gone.contains(&m.session_id));
+    snap.sessions.retain(|s| !gone.contains(&s.session_id));
 }
 
 pub fn snapshot_mtime(data_dir: &Path) -> Option<SystemTime> {
@@ -93,6 +117,52 @@ mod tests {
             "sample Ana row has two hero segments"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A delete made while the tracker is stopped stays queued; a GUI
+    /// restart reads the old snapshot, and the game must not come back.
+    #[test]
+    fn a_game_deleted_while_the_tracker_is_stopped_stays_gone_on_reload() {
+        let dir = std::env::temp_dir().join(format!(
+            "sst-ui-del-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let snap = install_fixture(&dir, FixtureKind::Sample).expect("install");
+        let sid = snap.matches[0].session_id.clone();
+        let before = games_from_snapshot(&snap).len();
+        crate::commands::delete_session(&dir, &sid).expect("queue");
+
+        let reloaded = load_snapshot(&dir);
+        let games = games_from_snapshot(&reloaded);
+        assert_eq!(games.len(), before - 1);
+        assert!(games.iter().all(|g| g.session_id != sid), "row gone");
+        assert!(reloaded.sessions.iter().all(|s| s.session_id != sid));
+        assert!(
+            reloaded.pending_deletes.contains(&sid),
+            "pending for the site"
+        );
+        assert!(
+            crate::commands::queued(&dir).iter().any(|c| matches!(
+                c,
+                storage::StoreCommand::DeleteSession { session_id } if *session_id == sid
+            )),
+            "still queued for the tracker to apply and upload"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A snapshot that still lists a game with a tombstone leaves it out.
+    #[test]
+    fn a_row_with_a_pending_tombstone_is_left_out() {
+        let mut snap = fixtures::snapshot(FixtureKind::Sample);
+        let sid = snap.matches[0].session_id.clone();
+        snap.pending_deletes = vec![sid.clone()];
+        drop_deleted(&mut snap);
+        assert!(snap.matches.iter().all(|m| m.session_id != sid));
+        assert!(snap.sessions.iter().all(|s| s.session_id != sid));
     }
 
     #[test]
