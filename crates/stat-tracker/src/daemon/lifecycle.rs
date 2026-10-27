@@ -540,7 +540,8 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     if let Some(extras) = extra_packs {
         tokio::spawn(extras.run());
     }
-    let result = run_loop(ctx, early_sigterm).await;
+    let result = run_loop(Arc::clone(&ctx), early_sigterm).await;
+    close_store_before_exit(ctx).await;
     // The status file's counters as they stand when the run ends.
     ocr_switch.lock().unwrap_or_else(|e| e.into_inner()).check();
     if result.is_ok()
@@ -549,6 +550,34 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         guard.finish();
     }
     result
+}
+
+/// Longest wait for SurrealKV's close at exit. A clean close took about
+/// 130 ms in the KDE soak; the rest of the deadline stays with the runtime.
+const STORE_CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Drop the last store handle and wait for SurrealKV's close while the
+/// runtime still runs. Dropping the handle only starts the close (the SDK
+/// router task runs it), so returning straight to `shutdown_timeout`
+/// raced it: the runtime cancelled SurrealKV's background tasks mid-close
+/// and it logged `Error shutting down task: JoinError::Cancelled`.
+/// A task that still holds the context (an abandoned capture) keeps the
+/// store open. The runtime drops it at exit and the WAL replays it on the
+/// next start, as in 0.5.0.
+async fn close_store_before_exit(ctx: Arc<DaemonCtx>) {
+    let data_dir = ctx.data_dir.clone();
+    let Some(ctx) = Arc::into_inner(ctx) else {
+        tracing::debug!(target: "scuffed_stat_tracker", "store still shared at exit; not waiting for its close");
+        return;
+    };
+    drop(ctx);
+    let within = stat_tracker::replace::shutdown_time_left().min(STORE_CLOSE_WAIT);
+    if !storage::wait_for_engine_close(&data_dir, within).await {
+        tracing::warn!(
+            target: "scuffed_stat_tracker",
+            "store still closing at exit; its WAL is replayed on the next start"
+        );
+    }
 }
 
 /// The pack keeper's install hook: a names-v1 install reloads the name

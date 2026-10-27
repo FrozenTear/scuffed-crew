@@ -178,6 +178,37 @@ impl LocalStore {
     }
 }
 
+/// Wait until SurrealKV has closed the store in `data_dir`, for at most
+/// `within`. Call it after the last [`LocalStore`] handle is dropped.
+///
+/// SurrealKV takes an flock on `stats.surrealkv/LOCK` at open and releases
+/// it as the last step of its close, after the memtable flush and the WAL
+/// cleanup. flock is per open file, so this process can take it on a new fd
+/// once the close is done. Our own writer lock is on the directory, not on
+/// `LOCK`, and stays held until exit. Returns `false` when the close did not
+/// finish in time.
+pub async fn wait_for_engine_close(data_dir: &Path, within: std::time::Duration) -> bool {
+    let lock = data_dir.join("stats.surrealkv").join("LOCK");
+    let until = tokio::time::Instant::now() + within;
+    loop {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock)
+        {
+            // Locked and dropped at once: nothing opens the store after this.
+            Ok(file) if file.try_lock().is_ok() => return true,
+            Ok(_) => {}
+            // No LOCK file: no engine to wait for.
+            Err(_) => return true,
+        }
+        if tokio::time::Instant::now() >= until {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests;
 

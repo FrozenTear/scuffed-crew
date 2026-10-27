@@ -128,3 +128,25 @@ async fn writer_lock_survives_store_drop_until_process_exit() {
         "leaked dup must still hold the flock",
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wait_for_engine_close_sees_surrealkv_finish_its_close() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open");
+    store.insert_match(snap("s1", 3)).await.expect("insert");
+    let short = std::time::Duration::from_millis(100);
+    assert!(
+        !wait_for_engine_close(dir.path(), short).await,
+        "an open store keeps SurrealKV's LOCK"
+    );
+    drop(store);
+    let long = std::time::Duration::from_secs(5);
+    assert!(
+        wait_for_engine_close(dir.path(), long).await,
+        "the close finishes inside the runtime once the last handle drops"
+    );
+    let reopened = LocalStore::open(dir.path())
+        .await
+        .expect("reopen after close");
+    assert_eq!(reopened.match_count().await.expect("count"), 1);
+}
