@@ -8,6 +8,7 @@
 mod debug_dumps;
 mod event_loop;
 mod lifecycle;
+mod live_upload;
 mod poll;
 mod session;
 mod shutdown;
@@ -15,10 +16,13 @@ mod sync_sched;
 mod tab;
 #[cfg(test)]
 mod tests_debug_dumps;
+#[cfg(test)]
+mod tests_live_upload;
 
 pub(crate) use debug_dumps::*;
 pub(crate) use event_loop::*;
 pub(crate) use lifecycle::*;
+pub(crate) use live_upload::*;
 pub(crate) use poll::*;
 pub(crate) use session::*;
 pub(crate) use shutdown::*;
