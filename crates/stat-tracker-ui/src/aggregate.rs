@@ -174,17 +174,30 @@ pub fn filter_games<'a>(games: &'a [Game], filter: &GameFilter) -> Vec<&'a Game>
         .iter()
         .filter(|g| filter.window.is_none_or(|w| w.contains(g.played_at)))
         .filter(|g| filter.roles.is_empty() || filter.roles.contains(&g.role))
-        .filter(|g| filter.hero.as_ref().is_none_or(|h| &g.hero == h))
+        .filter(|g| {
+            filter
+                .hero
+                .as_ref()
+                .is_none_or(|h| hero_name(&g.hero) == hero_name(h))
+        })
         .filter(|g| filter.map.as_ref().is_none_or(|m| &g.map_name == m))
         .filter(|g| filter.outcome.is_none_or(|o| g.outcome == o))
         .collect()
 }
 
+/// The name one hero is grouped under: the reader's name, so a row an
+/// older picker saved as "Lucio" or "Torbjorn" joins Lúcio or Torbjörn.
+/// A name that is not a known hero stays as it is.
+pub fn hero_name(name: &str) -> &str {
+    scuffed_types::hero_key_to_name(name).unwrap_or(name)
+}
+
 pub fn distinct_heroes(games: &[&Game]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for g in games {
-        if !g.hero.is_empty() && !out.iter().any(|h| h == &g.hero) {
-            out.push(g.hero.clone());
+        let hero = hero_name(&g.hero);
+        if !hero.is_empty() && !out.iter().any(|h| h == hero) {
+            out.push(hero.to_string());
         }
     }
     out.sort();
@@ -334,7 +347,8 @@ fn bump_outcome(r: &mut Record, outcome: Outcome) {
 }
 
 fn bump_hero(rows: &mut Vec<(String, Role, Record)>, g: &Game) {
-    if let Some((_, _, rec)) = rows.iter_mut().find(|(h, _, _)| h == &g.hero) {
+    let hero = hero_name(&g.hero);
+    if let Some((_, _, rec)) = rows.iter_mut().find(|(h, _, _)| h == hero) {
         rec.games += 1;
         bump_outcome(rec, g.outcome);
     } else {
@@ -345,7 +359,7 @@ fn bump_hero(rows: &mut Vec<(String, Role, Record)>, g: &Game) {
             draws: 0,
         };
         bump_outcome(&mut rec, g.outcome);
-        rows.push((g.hero.clone(), g.role, rec));
+        rows.push((hero.to_string(), g.role, rec));
     }
 }
 
@@ -445,6 +459,34 @@ mod tests {
             "win rate {}",
             agg.record.win_rate()
         );
+    }
+
+    /// A row an older picker saved as "Lucio" or "Torbjorn" counts with
+    /// the reader's Lúcio or Torbjörn: one row, one filter option.
+    #[test]
+    fn older_hero_spellings_share_one_row() {
+        let rows = vec![
+            game("Lucio", Role::Support, Outcome::Win, ts(2026, 9, 2)),
+            game("Lúcio", Role::Support, Outcome::Loss, ts(2026, 9, 3)),
+            game("Torbjorn", Role::Damage, Outcome::Win, ts(2026, 9, 4)),
+            game("Torbjörn", Role::Damage, Outcome::Win, ts(2026, 9, 5)),
+        ];
+        let agg = aggregate(&rows, None, None);
+        let heroes: Vec<(&str, usize)> = agg
+            .heroes
+            .iter()
+            .map(|h| (h.hero.as_str(), h.record.games))
+            .collect();
+        assert_eq!(heroes.len(), 2, "{heroes:?}");
+        assert!(heroes.contains(&("Lúcio", 2)), "{heroes:?}");
+        assert!(heroes.contains(&("Torbjörn", 2)), "{heroes:?}");
+        let all: Vec<&Game> = rows.iter().collect();
+        assert_eq!(distinct_heroes(&all), vec!["Lúcio", "Torbjörn"]);
+        let filter = GameFilter {
+            hero: Some("Lúcio".into()),
+            ..GameFilter::default()
+        };
+        assert_eq!(filter_games(&rows, &filter).len(), 2);
     }
 
     #[test]

@@ -1818,13 +1818,13 @@ impl TrackerApp {
         choices
     }
 
-    fn arm_training_toast(&mut self, session_id: &str, category: crate::report::GameCategory) {
-        if !self.games.iter().any(|g| g.session_id == session_id) {
+    pub(crate) fn arm_training_toast(&mut self, sid: &str, category: crate::report::GameCategory) {
+        if !self.games.iter().any(|g| g.session_id == sid) {
             self.toast_action = None;
             return;
         }
         self.toast_action = Some(Message::Report(crate::report::ReportMessage::OpenGame {
-            session_id: Some(session_id.to_string()),
+            session_id: Some(sid.to_string()),
             category: Some(category),
             training: true,
             choices: Vec::new(),

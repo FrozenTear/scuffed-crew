@@ -49,6 +49,13 @@ pub fn wants_build_id(args: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
     args.into_iter().any(|arg| arg.as_ref() == "--build-id")
 }
 
+/// The dir a `--fixture` run uses when no `--data-dir` is given: one per
+/// kind under the temp dir. Only this dir starts each run with no queued
+/// commands; a `--data-dir` the user passed keeps them.
+pub fn default_fixture_dir(kind: FixtureKind) -> PathBuf {
+    std::env::temp_dir().join(format!("scuffed-stat-tracker-ui-fixture-{}", kind.name()))
+}
+
 impl Cli {
     pub fn parse() -> Self {
         Self::parse_args(std::env::args().skip(1))
@@ -111,8 +118,7 @@ impl Cli {
             // One dir per kind, so the games kit pictures never show up
             // in a later sample run.
             if let Some(kind) = fixture {
-                std::env::temp_dir()
-                    .join(format!("scuffed-stat-tracker-ui-fixture-{}", kind.name()))
+                default_fixture_dir(kind)
             } else {
                 config.data_dir.clone()
             }

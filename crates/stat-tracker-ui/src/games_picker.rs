@@ -53,13 +53,6 @@ impl Field {
         }
     }
 
-    fn other(self) -> Field {
-        match self {
-            Field::Map => Field::Hero,
-            Field::Hero => Field::Map,
-        }
-    }
-
     pub fn set_label(self) -> &'static str {
         match self {
             Field::Map => "Set map",
@@ -257,9 +250,9 @@ pub fn release_line(
         Upload::Undecided => {
             "Saving releases this game: it uploads once you set the result.".into()
         }
-        Upload::Uploaded | Upload::Rejected(_) => match field.other() {
-            Field::Map => "Saving sets the hero.".into(),
-            Field::Hero => "Saving sets the map.".into(),
+        Upload::Uploaded | Upload::Rejected(_) => match field {
+            Field::Map => "Saving sets the map.".into(),
+            Field::Hero => "Saving sets the hero.".into(),
         },
     }
 }
@@ -318,11 +311,21 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
                 }
             }
         }
+        // A click also moves the highlight to the clicked row, so Enter,
+        // Up and Down go on from the name that was picked.
         Msg::Pick(name) => {
+            let at = open_with_game(app).and_then(|(p, g)| {
+                candidates(p.field, &p.query, read(&g, p.field))
+                    .iter()
+                    .position(|n| *n == name)
+            });
             if let Some(p) = &mut app.games_tab.picker
                 && known(p.field).contains(&name.as_str())
             {
                 p.picked = Some(name);
+                if let Some(at) = at {
+                    p.active = at;
+                }
             }
         }
         Msg::Cancel => app.games_tab.picker = None,
@@ -371,15 +374,7 @@ fn save(app: &mut TrackerApp) {
         Field::Hero => ("Hero saved", crate::report::GameCategory::WrongHero),
     };
     app.replace_toast(saved);
-    if app.games.iter().any(|g| g.session_id == p.sid) {
-        app.toast_action = Some(Message::Report(crate::report::ReportMessage::OpenGame {
-            session_id: Some(p.sid.clone()),
-            category: Some(category),
-            training: true,
-            choices: Vec::new(),
-        }));
-        app.toast_shown_at = None;
-    }
+    app.arm_training_toast(&p.sid, category);
 }
 
 /// The amber outlined "⚠ Set map" / "⚠ Set hero" on a held field.
@@ -483,13 +478,32 @@ pub fn no_match(field: Field, query: &str) -> String {
     format!("No {what} called '{}'", query.trim())
 }
 
+/// Where the typed part sits in `name`, as a byte range of `name`. It
+/// matches as [`candidates`] does (any case, accents folded), so "lucio"
+/// marks "Lúcio" whole. Folding can change a character's length, so the
+/// match is mapped back one character at a time.
+fn typed_range(name: &str, query: &str) -> Option<(usize, usize)> {
+    let q = fold(query.trim());
+    if q.is_empty() {
+        return None;
+    }
+    // Each character's start in `name` and in the folded name.
+    let mut starts = Vec::new();
+    let mut folded = String::new();
+    for (i, c) in name.char_indices() {
+        starts.push((i, folded.len()));
+        folded.push_str(&fold(c.encode_utf8(&mut [0; 4])));
+    }
+    starts.push((name.len(), folded.len()));
+    let at = folded.find(&q)?;
+    let start = starts.iter().find(|(_, f)| *f == at)?.0;
+    let end = starts.iter().find(|(_, f)| *f == at + q.len())?.0;
+    Some((start, end))
+}
+
 /// A name with the typed part in bold.
 fn name_spans(name: &'static str, query: &str) -> Element<'static, Message> {
-    let q = query.trim().to_lowercase();
-    let at = (!q.is_empty())
-        .then(|| name.to_lowercase().find(&q))
-        .flatten()
-        .filter(|&i| name.is_char_boundary(i) && name.is_char_boundary(i + q.len()));
+    let at = typed_range(name, query);
     let span = |t: &'static str, bold: bool| {
         iced::widget::span(t)
             .size(SIZE_META)
@@ -497,10 +511,10 @@ fn name_spans(name: &'static str, query: &str) -> Element<'static, Message> {
             .font(if bold { FONT_BOLD } else { iced::Font::DEFAULT })
     };
     let spans: Vec<iced::widget::text::Span<'static, ()>> = match at {
-        Some(i) => vec![
+        Some((i, j)) => vec![
             span(&name[..i], false),
-            span(&name[i..i + q.len()], true),
-            span(&name[i + q.len()..], false),
+            span(&name[i..j], true),
+            span(&name[j..], false),
         ],
         None => vec![span(name, false)],
     };
@@ -961,6 +975,71 @@ mod tests {
         assert_eq!(
             line(&g, Some("Ilios"), false, true),
             "Saving releases this game: it uploads once you set the result."
+        );
+    }
+
+    /// Enter after a click saves the clicked name, not the row the keys
+    /// last lit, and the arrows go on from it.
+    #[test]
+    fn enter_after_a_click_keeps_the_clicked_name() {
+        use crate::games_table::Msg as T;
+        let (_dir, mut app) = app();
+        open(&mut app, Field::Map);
+        let names = candidates(Field::Map, "", read(game(&app, HELD), Field::Map));
+        let clicked = names[3].to_string();
+        let _ = update(&mut app, Msg::Pick(clicked.clone()));
+        assert_eq!(app.games_tab.picker.as_ref().unwrap().active, 3);
+        table(&mut app, T::Enter);
+        let p = app.games_tab.picker.clone().unwrap();
+        assert_eq!(p.picked.as_deref(), Some(clicked.as_str()));
+        let _ = update(&mut app, Msg::Move(1));
+        assert_eq!(app.games_tab.picker.as_ref().unwrap().active, 4);
+        let _ = update(&mut app, Msg::Save);
+        assert_eq!(game(&app, HELD).map_name, clicked);
+    }
+
+    /// The bold part covers what was typed, accents or not.
+    #[test]
+    fn the_typed_part_is_found_through_accents() {
+        assert_eq!(typed_range("Lúcio", "lucio"), Some((0, "Lúcio".len())));
+        assert_eq!(typed_range("Lúcio", "úc"), Some((1, 4)));
+        assert_eq!(typed_range("Torbjörn", "jorn"), Some((4, "Torbjörn".len())));
+        assert_eq!(
+            typed_range("Esperança", "anca"),
+            Some((5, "Esperança".len()))
+        );
+        assert_eq!(typed_range("Ilios", " LI "), Some((1, 3)));
+        assert_eq!(typed_range("Ilios", ""), None);
+        assert_eq!(typed_range("Ilios", "zz"), None);
+    }
+
+    /// With a picker open, Tab leaves the focus alone, so Enter still
+    /// goes to the picker.
+    #[test]
+    fn tab_leaves_an_open_picker_in_charge() {
+        use crate::games_rows::Focus;
+        use crate::games_table::Msg as T;
+        let (_dir, mut app) = app();
+        open(&mut app, Field::Map);
+        table(&mut app, T::Tab);
+        assert_eq!(app.games_tab.focus, Focus::None);
+        table(&mut app, T::Enter);
+        assert!(app.games_tab.picker.as_ref().unwrap().picked.is_some());
+    }
+
+    /// An uploaded game's line names the field being set.
+    #[test]
+    fn an_uploaded_game_says_which_field_saving_sets() {
+        let (_dir, app) = app();
+        let mut g = game(&app, NORMAL).clone();
+        g.synced = true;
+        assert_eq!(
+            release_line(&g, Field::Map, Some("Ilios"), false, true),
+            "Saving sets the map."
+        );
+        assert_eq!(
+            release_line(&g, Field::Hero, Some("Ana"), false, true),
+            "Saving sets the hero."
         );
     }
 

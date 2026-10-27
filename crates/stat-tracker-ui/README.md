@@ -114,7 +114,7 @@ Example payload (same tagged JSON the daemon applies):
 {"op":"set_outcome","session_id":"sess-t1","outcome":"defeat"}
 ```
 
-Fixture mode still writes those files (under the fixture `--data-dir`); there is no daemon to apply them unless you point `--data-dir` at a live tree.
+Fixture mode still writes those files (under the fixture `--data-dir`); there is no daemon to apply them unless you point `--data-dir` at a live tree. A fixture run in its default temp dir starts with no queued commands; one with a `--data-dir` you pass keeps the queued commands there.
 
 ### Flags
 

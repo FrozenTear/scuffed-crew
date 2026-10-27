@@ -63,11 +63,31 @@ pub fn snapshot_mtime(data_dir: &Path) -> Option<SystemTime> {
 }
 
 /// Materialize a fixture through `live_snapshot.json` and `read_snapshot`.
+/// Queued commands are cleared only in the kind's default fixture dir: a
+/// `--data-dir` the user passed may be a live tree, and its queued edits,
+/// results and deletes must stay.
 pub fn install_fixture(data_dir: &Path, kind: FixtureKind) -> anyhow::Result<Snapshot> {
+    install_fixture_in(data_dir, kind, clears_commands(data_dir, kind))
+}
+
+/// Whether a fixture run in `data_dir` clears `commands/`: only in the
+/// kind's default fixture dir.
+fn clears_commands(data_dir: &Path, kind: FixtureKind) -> bool {
+    data_dir == crate::cli::default_fixture_dir(kind)
+}
+
+/// [`install_fixture`], with `clear_commands` deciding whether queued
+/// commands go. Each kind reuses its default dir, so clearing it there
+/// brings back a game deleted in an earlier run.
+fn install_fixture_in(
+    data_dir: &Path,
+    kind: FixtureKind,
+    clear_commands: bool,
+) -> anyhow::Result<Snapshot> {
     std::fs::create_dir_all(data_dir)?;
-    // Each kind reuses one dir: a fixture starts with no queued commands,
-    // so a game deleted in an earlier run comes back.
-    let _ = std::fs::remove_dir_all(data_dir.join("commands"));
+    if clear_commands {
+        let _ = std::fs::remove_dir_all(data_dir.join("commands"));
+    }
     let snap = fixtures::snapshot(kind);
     let bytes = serde_json::to_vec_pretty(&snap)?;
     std::fs::write(data_dir.join("live_snapshot.json"), bytes)?;
@@ -215,21 +235,62 @@ mod tests {
         assert_eq!(std::fs::read_dir(&cmds).unwrap().count(), 2);
     }
 
-    /// Each fixture run starts clean: a delete queued in an earlier run of
-    /// the same kind doesn't hide the game.
+    /// A run in the default fixture dir starts clean: a delete queued in an
+    /// earlier run of the same kind doesn't hide the game.
     #[test]
-    fn a_fixture_run_starts_with_no_queued_deletes() {
+    fn a_fixture_run_in_the_default_dir_starts_with_no_queued_deletes() {
         let dir = tempfile::tempdir().unwrap();
-        let snap = install_fixture(dir.path(), FixtureKind::Sample).expect("install");
+        let snap = install_fixture_in(dir.path(), FixtureKind::Sample, true).expect("install");
         let sid = snap.matches[0].session_id.clone();
         crate::commands::delete_session(dir.path(), &sid).unwrap();
-        let again = install_fixture(dir.path(), FixtureKind::Sample).expect("install");
+        let again = install_fixture_in(dir.path(), FixtureKind::Sample, true).expect("install");
         assert!(
             games_from_snapshot(&again)
                 .iter()
                 .any(|g| g.session_id == sid)
         );
         assert!(queued_deletes(dir.path()).is_empty());
+    }
+
+    /// A `--data-dir` the user passed may be a live tree: a fixture run
+    /// there keeps every queued command, and the deleted game stays gone.
+    #[test]
+    fn a_fixture_run_in_a_given_data_dir_keeps_queued_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = install_fixture(dir.path(), FixtureKind::Sample).expect("install");
+        let sid = snap.matches[0].session_id.clone();
+        crate::commands::delete_session(dir.path(), &sid).unwrap();
+        let cmds = dir.path().join("commands");
+        std::fs::write(cmds.join("cmd_1_1.json"), b"not json").unwrap();
+        let again = install_fixture(dir.path(), FixtureKind::Sample).expect("install");
+        assert!(
+            games_from_snapshot(&again)
+                .iter()
+                .all(|g| g.session_id != sid)
+        );
+        assert_eq!(queued_deletes(dir.path()), vec![sid]);
+        assert_eq!(std::fs::read_dir(&cmds).unwrap().count(), 2);
+    }
+
+    /// Only the kind's own default dir clears `commands/`; a `--data-dir`
+    /// the user passed never does.
+    #[test]
+    fn only_the_default_fixture_dir_clears_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let games = crate::cli::default_fixture_dir(FixtureKind::Games);
+        assert_eq!(
+            crate::cli::Cli::parse_args(["--fixture", "games"]).data_dir,
+            games
+        );
+        assert!(clears_commands(&games, FixtureKind::Games));
+        assert!(!clears_commands(&games, FixtureKind::Sample));
+        let given = crate::cli::Cli::parse_args([
+            "--fixture",
+            "games",
+            "--data-dir",
+            dir.path().to_str().unwrap(),
+        ]);
+        assert!(!clears_commands(&given.data_dir, FixtureKind::Games));
     }
 
     #[test]

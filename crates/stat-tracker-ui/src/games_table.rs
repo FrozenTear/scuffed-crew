@@ -89,6 +89,9 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
         }
         Msg::CancelDelete => cancel_delete(app),
         Msg::Delete(sid) => delete(app, &sid),
+        // Enter goes to an open picker, so Tab leaves the focus ring where
+        // it is rather than put it on Delete game.
+        Msg::Tab if app.games_tab.picker.is_some() => {}
         Msg::Tab => {
             let focus = &mut app.games_tab.focus;
             match focus {
