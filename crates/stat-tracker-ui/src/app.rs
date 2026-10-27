@@ -994,10 +994,7 @@ impl TrackerApp {
                 });
                 if let Some(sid) = sid {
                     match &saved {
-                        Some(Ok(saved)) => {
-                            self.replace_toast(saved.toast);
-                            self.arm_training_toast(&sid, saved.category);
-                        }
+                        Some(Ok(saved)) => crate::commands::show_saved(self, &sid, saved),
                         Some(Err(e)) => self.replace_toast(e.clone()),
                         None => {}
                     }

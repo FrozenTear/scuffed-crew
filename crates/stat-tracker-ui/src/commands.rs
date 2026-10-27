@@ -144,16 +144,35 @@ pub fn save_edit(
     let map_changed = edit.map_name.is_some();
     let hero_changed = edit.hero.is_some() || edit.role.is_some();
     edit_match(data_dir, &game.session_id, edit)?;
+    Ok(saved(
+        held,
+        was_held,
+        stats_changed,
+        map_changed,
+        hero_changed,
+    ))
+}
+
+/// What a queued Edit says, from whether the game is still held, was held,
+/// and which kinds of field changed.
+fn saved(
+    held: bool,
+    was_held: bool,
+    stats_changed: bool,
+    map_changed: bool,
+    hero_changed: bool,
+) -> Saved {
     // The training report files the fix under what was fixed: a stat fix
-    // first, as the stats are what the reader reads most.
+    // first, as the stats are what the reader reads most. A save that
+    // changed nothing fixed nothing, so it offers no report.
     let category = if stats_changed {
-        GameCategory::WrongStats
+        Some(GameCategory::WrongStats)
     } else if map_changed {
-        GameCategory::WrongMap
+        Some(GameCategory::WrongMap)
     } else if hero_changed {
-        GameCategory::WrongHero
+        Some(GameCategory::WrongHero)
     } else {
-        GameCategory::WrongStats
+        None
     };
     let toast = if held {
         "Saved. A map or hero is still missing, so this game stays on this computer."
@@ -169,15 +188,24 @@ pub fn save_edit(
             (false, false) => "Saved",
         }
     };
-    Ok(Saved { toast, category })
+    Saved { toast, category }
 }
 
 /// What an Edit save says, and the training report category its toast
-/// offers.
+/// offers (`None`: the save changed nothing, so no report is offered).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Saved {
     pub toast: &'static str,
-    pub category: GameCategory,
+    pub category: Option<GameCategory>,
+}
+
+/// Show an Edit save's toast, with the training report offer when the
+/// save fixed something.
+pub(crate) fn show_saved(app: &mut crate::app::TrackerApp, sid: &str, saved: &Saved) {
+    app.replace_toast(saved.toast);
+    if let Some(category) = saved.category {
+        app.arm_training_toast(sid, category);
+    }
 }
 
 /// A save that set the missing map or hero and changed no stat.
@@ -320,7 +348,7 @@ mod tests {
         // the map.
         let saved = save_edit(&dir, &g, &form).unwrap();
         assert_eq!(saved.toast, RELEASED);
-        assert_eq!(saved.category, GameCategory::WrongMap);
+        assert_eq!(saved.category, Some(GameCategory::WrongMap));
         let edit = queued_edit(&dir);
         assert_eq!(edit.map_name.as_deref(), Some("King's Row"));
         let mut after = g.clone();
@@ -339,7 +367,7 @@ mod tests {
         form.elims = "15".into();
         let saved = save_edit(&dir, &g, &form).unwrap();
         assert_eq!(saved.toast, "Stats corrected");
-        assert_eq!(saved.category, GameCategory::WrongStats);
+        assert_eq!(saved.category, Some(GameCategory::WrongStats));
     }
 
     /// A hero-only Edit that releases a hold files its report as Wrong
@@ -354,7 +382,7 @@ mod tests {
         form.hero = "Mercy".into();
         let saved = save_edit(&dir, &g, &form).unwrap();
         assert_eq!(saved.toast, RELEASED);
-        assert_eq!(saved.category, GameCategory::WrongHero);
+        assert_eq!(saved.category, Some(GameCategory::WrongHero));
     }
 
     /// A map-only or hero-only Edit on a game that wasn't held names what
@@ -370,19 +398,19 @@ mod tests {
         };
         let map = save(&|f| f.map_name = "Havana".into());
         assert_eq!(map.toast, "Map corrected");
-        assert_eq!(map.category, GameCategory::WrongMap);
+        assert_eq!(map.category, Some(GameCategory::WrongMap));
         let hero = save(&|f| f.hero = "Mercy".into());
         assert_eq!(hero.toast, "Hero corrected");
-        assert_eq!(hero.category, GameCategory::WrongHero);
+        assert_eq!(hero.category, Some(GameCategory::WrongHero));
         let both = save(&|f| {
             f.map_name = "Havana".into();
             f.hero = "Mercy".into();
         });
         assert_eq!(both.toast, "Map and hero corrected");
-        assert_eq!(both.category, GameCategory::WrongMap);
+        assert_eq!(both.category, Some(GameCategory::WrongMap));
         let stats = save(&|f| f.elims = "40".into());
         assert_eq!(stats.toast, "Stats corrected");
-        assert_eq!(stats.category, GameCategory::WrongStats);
+        assert_eq!(stats.category, Some(GameCategory::WrongStats));
     }
 
     #[test]
@@ -435,6 +463,65 @@ mod tests {
         app.edit.map_name = "Ilios".into();
         let _ = app.update(crate::app::Message::SaveEdit);
         assert!(!app.editing, "a good save closes the form");
+    }
+
+    /// Whether `saved` shown in an app offers a training report.
+    fn offers_report(saved: Saved) -> bool {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let g = sample_game();
+        app.games = vec![g.clone()];
+        show_saved(&mut app, &g.session_id, &saved);
+        assert_eq!(app.toast.as_deref(), Some(saved.toast));
+        matches!(
+            app.toast_action,
+            Some(crate::app::Message::Report(
+                crate::report::ReportMessage::OpenGame { training: true, .. }
+            ))
+        )
+    }
+
+    /// A save that changed nothing says "Saved" and offers no training
+    /// report; a fix still offers one. (The form never sends an empty
+    /// edit, "No changes to save", which offers none either.)
+    #[test]
+    fn an_unchanged_save_offers_no_report() {
+        let unchanged = saved(false, false, false, false, false);
+        assert_eq!(unchanged.toast, "Saved");
+        assert_eq!(unchanged.category, None);
+        assert!(!offers_report(unchanged));
+        assert!(offers_report(saved(false, false, false, true, false)));
+        let app_save = |set: &dyn Fn(&mut EditForm)| {
+            let (_dir, mut app) = crate::fixtures::test_app();
+            let g = sample_game();
+            app.games = vec![g.clone()];
+            app.expanded = Some(g.session_id.clone());
+            let _ = app.update(crate::app::Message::ToggleEdit);
+            set(&mut app.edit);
+            let _ = app.update(crate::app::Message::SaveEdit);
+            (app.toast.clone(), app.toast_action.is_some())
+        };
+        assert_eq!(
+            app_save(&|_| {}),
+            (Some("No changes to save".to_string()), false)
+        );
+        assert_eq!(
+            app_save(&|f| f.elims = "40".into()),
+            (Some("Stats corrected".to_string()), true)
+        );
+    }
+
+    /// The same on a game held for a missing map or hero: a save that
+    /// changed nothing offers no report; a stat fix still offers one.
+    #[test]
+    fn an_unchanged_save_on_a_held_game_offers_no_report() {
+        let held = "Saved. A map or hero is still missing, so this game stays on this computer.";
+        let unchanged = saved(true, true, false, false, false);
+        assert_eq!(unchanged.toast, held);
+        assert_eq!(unchanged.category, None);
+        assert!(!offers_report(unchanged));
+        let fixed = saved(true, true, true, false, false);
+        assert_eq!(fixed.category, Some(GameCategory::WrongStats));
+        assert!(offers_report(fixed));
     }
 
     /// The reader's own spellings find the hero, stored as the reader
