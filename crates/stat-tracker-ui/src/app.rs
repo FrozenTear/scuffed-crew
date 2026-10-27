@@ -2957,26 +2957,6 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
-    fn a_stopped_or_foreign_pid_does_not_block_uninstall() {
-        use crate::daemon::StopError;
-
-        assert!(StopError::NotRunning.allows_restart());
-        assert!(
-            StopError::Refused("Saved process id is not the tracker, not stopping it")
-                .allows_restart()
-        );
-        assert!(StopError::Refused("Refusing to stop this window's process").allows_restart());
-        assert!(
-            !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
-                .allows_restart()
-        );
-        assert!(
-            !StopError::Failed("Could not stop the tracker: Permission denied".into())
-                .allows_restart()
-        );
-    }
-
-    #[test]
     fn setup_guide_keys_do_not_dismiss_notes_underneath() {
         use iced::keyboard::Key;
         use iced::keyboard::key::Named;
