@@ -156,7 +156,7 @@ jobs:
         run: |
           set -o pipefail
           cargo test --locked -p scuffed-stat-tracker --bin scuffed-stat-tracker \
-            -- --exact main_tests::poll_cadence::capture_futures_stay_small \
+            -- --exact daemon::poll::tests_cadence::capture_futures_stay_small \
             | tee "$RUNNER_TEMP/stack-guard.log"
           grep -q "test result: ok. 1 passed" "$RUNNER_TEMP/stack-guard.log"
 
