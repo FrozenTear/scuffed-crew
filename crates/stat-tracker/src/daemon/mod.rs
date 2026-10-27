@@ -13,6 +13,8 @@ mod session;
 mod shutdown;
 mod sync_sched;
 mod tab;
+#[cfg(test)]
+mod tests_debug_dumps;
 
 pub(crate) use debug_dumps::*;
 pub(crate) use event_loop::*;
