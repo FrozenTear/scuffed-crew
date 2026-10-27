@@ -325,21 +325,24 @@ pub fn Leaderboards() -> Element {
         // Empty while a saved season is unresolved. Do not send it raw.
         let url = season.fetch_path(&url);
         async move {
+            let load = async {
+                if let Some(held) = leaderboard_hold(&url) {
+                    return held;
+                }
+                match ApiClient::web().fetch::<LeaderboardPayload>(&url).await {
+                    Ok(payload) => {
+                        shown_at.set(parse_cached_at(payload.cached_at.as_deref()));
+                        LeaderboardLoad::Rows(payload.rows)
+                    }
+                    Err(_) => {
+                        shown_at.set(None);
+                        LeaderboardLoad::Failed
+                    }
+                }
+            }
+            .await;
             // The board travels with its rows, so a tab switch never splits
             // the previous board's rows by the new board's rule.
-            if let Some(held) = leaderboard_hold(&url) {
-                return (m, held);
-            }
-            let load = match ApiClient::web().fetch::<LeaderboardPayload>(&url).await {
-                Ok(payload) => {
-                    shown_at.set(parse_cached_at(payload.cached_at.as_deref()));
-                    LeaderboardLoad::Rows(payload.rows)
-                }
-                Err(_) => {
-                    shown_at.set(None);
-                    LeaderboardLoad::Failed
-                }
-            };
             (m, load)
         }
     });
