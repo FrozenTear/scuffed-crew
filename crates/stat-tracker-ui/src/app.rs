@@ -994,9 +994,9 @@ impl TrackerApp {
                 });
                 if let Some(sid) = sid {
                     match &saved {
-                        Some(Ok(msg)) => {
-                            self.replace_toast(*msg);
-                            self.arm_training_toast(&sid, crate::report::GameCategory::WrongStats);
+                        Some(Ok(saved)) => {
+                            self.replace_toast(saved.toast);
+                            self.arm_training_toast(&sid, saved.category);
                         }
                         Some(Err(e)) => self.replace_toast(e.clone()),
                         None => {}

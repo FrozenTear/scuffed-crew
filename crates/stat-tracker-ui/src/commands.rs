@@ -8,6 +8,7 @@ use stat_tracker::storage::{
 };
 
 use crate::model::{Game, Outcome};
+use crate::report::GameCategory;
 
 pub fn queue(data_dir: &Path, cmd: &StoreCommand) -> Result<(), String> {
     storage::queue_command(data_dir, cmd).map_err(|e| e.to_string())
@@ -113,7 +114,7 @@ pub fn save_edit(
     data_dir: &Path,
     game: &Game,
     form: &crate::model::EditForm,
-) -> Result<&'static str, String> {
+) -> Result<Saved, String> {
     let mut edit = form.diff(game);
     if let Some(typed) = edit.map_name.take() {
         let map = stat_tracker::parse::canonical_map(&typed)
@@ -140,14 +141,43 @@ pub fn save_edit(
         edit.mitigation,
     ];
     let stats_changed = stats.iter().any(Option::is_some);
+    let map_changed = edit.map_name.is_some();
+    let hero_changed = edit.hero.is_some() || edit.role.is_some();
     edit_match(data_dir, &game.session_id, edit)?;
-    Ok(if held {
+    // The training report files the fix under what was fixed: a stat fix
+    // first, as the stats are what the reader reads most.
+    let category = if stats_changed {
+        GameCategory::WrongStats
+    } else if map_changed {
+        GameCategory::WrongMap
+    } else if hero_changed {
+        GameCategory::WrongHero
+    } else {
+        GameCategory::WrongStats
+    };
+    let toast = if held {
         "Saved. A map or hero is still missing, so this game stays on this computer."
-    } else if was_held && !stats_changed {
+    } else if stats_changed {
+        "Stats corrected"
+    } else if was_held {
         RELEASED
     } else {
-        "Stats corrected"
-    })
+        match (map_changed, hero_changed) {
+            (true, true) => "Map and hero corrected",
+            (true, false) => "Map corrected",
+            (false, true) => "Hero corrected",
+            (false, false) => "Saved",
+        }
+    };
+    Ok(Saved { toast, category })
+}
+
+/// What an Edit save says, and the training report category its toast
+/// offers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Saved {
+    pub toast: &'static str,
+    pub category: GameCategory,
 }
 
 /// A save that set the missing map or hero and changed no stat.
@@ -286,8 +316,11 @@ mod tests {
         assert!(g.needs_review());
         let mut form = EditForm::from_game(&g);
         form.map_name = "kings row".into();
-        // No stat changed, so no "Stats corrected".
-        assert_eq!(save_edit(&dir, &g, &form).unwrap(), RELEASED);
+        // No stat changed, so no "Stats corrected", and the report is for
+        // the map.
+        let saved = save_edit(&dir, &g, &form).unwrap();
+        assert_eq!(saved.toast, RELEASED);
+        assert_eq!(saved.category, GameCategory::WrongMap);
         let edit = queued_edit(&dir);
         assert_eq!(edit.map_name.as_deref(), Some("King's Row"));
         let mut after = g.clone();
@@ -304,7 +337,52 @@ mod tests {
         let mut form = EditForm::from_game(&g);
         form.map_name = "Ilios".into();
         form.elims = "15".into();
-        assert_eq!(save_edit(&dir, &g, &form).unwrap(), "Stats corrected");
+        let saved = save_edit(&dir, &g, &form).unwrap();
+        assert_eq!(saved.toast, "Stats corrected");
+        assert_eq!(saved.category, GameCategory::WrongStats);
+    }
+
+    /// A hero-only Edit that releases a hold files its report as Wrong
+    /// hero.
+    #[test]
+    fn a_hero_release_reports_a_wrong_hero() {
+        let dir = tmp();
+        let mut g = sample_game();
+        g.hero = String::new();
+        assert!(g.needs_review());
+        let mut form = EditForm::from_game(&g);
+        form.hero = "Mercy".into();
+        let saved = save_edit(&dir, &g, &form).unwrap();
+        assert_eq!(saved.toast, RELEASED);
+        assert_eq!(saved.category, GameCategory::WrongHero);
+    }
+
+    /// A map-only or hero-only Edit on a game that wasn't held names what
+    /// it fixed, never "Stats corrected", and reports that field.
+    #[test]
+    fn a_map_or_hero_edit_names_what_it_fixed() {
+        let g = sample_game();
+        assert!(!g.needs_review());
+        let save = |set: &dyn Fn(&mut EditForm)| {
+            let mut form = EditForm::from_game(&g);
+            set(&mut form);
+            save_edit(&tmp(), &g, &form).unwrap()
+        };
+        let map = save(&|f| f.map_name = "Havana".into());
+        assert_eq!(map.toast, "Map corrected");
+        assert_eq!(map.category, GameCategory::WrongMap);
+        let hero = save(&|f| f.hero = "Mercy".into());
+        assert_eq!(hero.toast, "Hero corrected");
+        assert_eq!(hero.category, GameCategory::WrongHero);
+        let both = save(&|f| {
+            f.map_name = "Havana".into();
+            f.hero = "Mercy".into();
+        });
+        assert_eq!(both.toast, "Map and hero corrected");
+        assert_eq!(both.category, GameCategory::WrongMap);
+        let stats = save(&|f| f.elims = "40".into());
+        assert_eq!(stats.toast, "Stats corrected");
+        assert_eq!(stats.category, GameCategory::WrongStats);
     }
 
     #[test]
@@ -414,7 +492,7 @@ mod tests {
         let g = held_game();
         let mut form = EditForm::from_game(&g);
         form.elims = "20".into();
-        let msg = save_edit(&dir, &g, &form).unwrap();
+        let msg = save_edit(&dir, &g, &form).unwrap().toast;
         assert!(msg.contains("stays on this computer"), "{msg}");
         assert_eq!(queued_edit(&dir).elims, Some(20));
     }
