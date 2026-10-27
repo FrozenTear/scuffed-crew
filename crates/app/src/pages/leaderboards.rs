@@ -144,10 +144,6 @@ const PAGE_CSS: &str = r#"
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 struct LeaderboardPayload {
     rows: Vec<LeaderboardRow>,
-    /// Win rate board only: players under the ranking floor, sent by a
-    /// newer server. Missing or empty means the page splits `rows` itself.
-    #[serde(default)]
-    unranked: Vec<LeaderboardRow>,
     /// Missing on an older response. Empty or unparseable hides the label.
     #[serde(default)]
     cached_at: Option<String>,
@@ -186,8 +182,7 @@ fn parse_cached_at(raw: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
 enum LeaderboardLoad {
     Hold,
     Failed,
-    /// Ranked rows, then the server's unranked rows (often empty).
-    Rows(Vec<LeaderboardRow>, Vec<LeaderboardRow>),
+    Rows(Vec<LeaderboardRow>),
 }
 
 /// `Some(Hold)` when the season filter has not resolved yet. A non-empty
@@ -208,15 +203,13 @@ fn leaderboard_message(
     match load {
         None | Some(LeaderboardLoad::Hold) => Some("Loading..."),
         Some(LeaderboardLoad::Failed) => Some("Couldn't load leaderboards."),
-        Some(LeaderboardLoad::Rows(list, extra))
-            if list.is_empty() && extra.is_empty() && hero_filtered =>
-        {
+        Some(LeaderboardLoad::Rows(list)) if list.is_empty() && hero_filtered => {
             Some("No ranked matches on this hero yet.")
         }
-        Some(LeaderboardLoad::Rows(list, extra)) if list.is_empty() && extra.is_empty() => {
+        Some(LeaderboardLoad::Rows(list)) if list.is_empty() => {
             Some("No ranked matches yet. Upload stats from the tracker.")
         }
-        Some(LeaderboardLoad::Rows(..)) => None,
+        Some(LeaderboardLoad::Rows(_)) => None,
     }
 }
 
@@ -251,35 +244,19 @@ struct BoardSplit {
 
 /// Split a board's rows. On the Win rate board, rows with fewer than
 /// [`WINRATE_RANK_MIN_GAMES`] games leave the ranking and go to
-/// `unranked`, joined by the server's own `server_unranked` rows when a
-/// newer server sends them. A player shows once: a ranked player is
-/// dropped from `unranked`, and a repeat in `unranked` keeps the first
-/// copy. `unranked` is sorted by most games, then by name. Ranked rows
-/// keep the server's order (by win rate). Other boards keep every row
-/// ranked and ignore `server_unranked`.
-fn board_split(
-    metric: &str,
-    rows: &[LeaderboardRow],
-    server_unranked: &[LeaderboardRow],
-) -> BoardSplit {
+/// `unranked`, most games first, then by name. Ranked rows keep the
+/// server's order (by win rate). Other boards keep every row ranked.
+fn board_split(metric: &str, rows: &[LeaderboardRow]) -> BoardSplit {
     if metric != "winrate" {
         return BoardSplit {
             ranked: rows.to_vec(),
             unranked: Vec::new(),
         };
     }
-    let (ranked, below): (Vec<_>, Vec<_>) = rows
+    let (ranked, mut unranked): (Vec<_>, Vec<_>) = rows
         .iter()
         .cloned()
         .partition(|r| r.games >= WINRATE_RANK_MIN_GAMES);
-    let mut seen: std::collections::HashSet<String> =
-        ranked.iter().map(|r| r.member_id.clone()).collect();
-    let mut unranked: Vec<LeaderboardRow> = server_unranked
-        .iter()
-        .cloned()
-        .chain(below)
-        .filter(|r| seen.insert(r.member_id.clone()))
-        .collect();
     unranked.sort_by(|a, b| {
         b.games
             .cmp(&a.games)
@@ -356,7 +333,7 @@ pub fn Leaderboards() -> Element {
             let load = match ApiClient::web().fetch::<LeaderboardPayload>(&url).await {
                 Ok(payload) => {
                     shown_at.set(parse_cached_at(payload.cached_at.as_deref()));
-                    LeaderboardLoad::Rows(payload.rows, payload.unranked)
+                    LeaderboardLoad::Rows(payload.rows)
                 }
                 Err(_) => {
                     shown_at.set(None);
@@ -371,8 +348,8 @@ pub fn Leaderboards() -> Element {
         let message =
             leaderboard_message(snapshot.as_ref().map(|(_, load)| load), hero().is_some());
         let (split, note) = match snapshot.as_ref() {
-            Some((board, LeaderboardLoad::Rows(list, extra))) => {
-                (Some(board_split(board, list, extra)), board_note(board))
+            Some((board, LeaderboardLoad::Rows(list))) => {
+                (Some(board_split(board, list)), board_note(board))
             }
             _ => (None, LIST_RULE_NOTE),
         };
@@ -696,7 +673,7 @@ mod tests {
             named("nine", "Nine", 9, 9, 1.0),
             named("ten", "Ten", 10, 6, 0.6),
         ];
-        let split = board_split("winrate", &rows, &[]);
+        let split = board_split("winrate", &rows);
         assert_eq!(ids(&split.ranked), vec!["ten"]);
         assert_eq!(ids(&split.unranked), vec!["nine"]);
         assert_eq!(wr_cell(&split.ranked[0]).text, "60%");
@@ -711,7 +688,7 @@ mod tests {
             named("b", "B", 20, 12, 0.6),
             named("c", "C", 10, 5, 0.5),
         ];
-        let split = board_split("winrate", &rows, &[]);
+        let split = board_split("winrate", &rows);
         assert_eq!(ids(&split.ranked), vec!["a", "b", "c"]);
         assert_eq!(ids(&split.unranked), vec!["short"]);
     }
@@ -719,10 +696,10 @@ mod tests {
     #[test]
     fn winrate_board_with_ten_plus_only_has_an_empty_unranked_list() {
         let rows = vec![named("a", "A", 10, 7, 0.7), named("b", "B", 31, 15, 0.48)];
-        let split = board_split("winrate", &rows, &[]);
+        let split = board_split("winrate", &rows);
         assert_eq!(ids(&split.ranked), vec!["a", "b"]);
         assert!(split.unranked.is_empty());
-        assert!(board_split("winrate", &[], &[]).unranked.is_empty());
+        assert!(board_split("winrate", &[]).unranked.is_empty());
     }
 
     #[test]
@@ -734,7 +711,7 @@ mod tests {
             named("m4", "Cat", 5, 5, 1.0),
             named("m5", "Ann", 9, 6, 0.67),
         ];
-        let split = board_split("winrate", &rows, &[]);
+        let split = board_split("winrate", &rows);
         assert!(split.ranked.is_empty());
         assert_eq!(ids(&split.unranked), vec!["m2", "m5", "m3", "m1", "m4"]);
     }
@@ -748,80 +725,17 @@ mod tests {
             r#"{"member_id":"o","display_name":"O","games":7,"winrate":0.5714286,"kd":1.0}"#,
         )
         .unwrap();
-        let split = board_split("winrate", &[drawn, old], &[]);
+        let split = board_split("winrate", &[drawn, old]);
         let texts: Vec<String> = split.unranked.iter().map(|r| wr_cell(r).text).collect();
         assert_eq!(texts, vec!["5W-3L-1D", "4W"]);
         assert!(split.unranked.iter().all(|r| !wr_cell(r).is_rate));
     }
 
     #[test]
-    fn server_unranked_list_is_used_and_ranked_rows_still_need_ten() {
-        let rows = vec![
-            named("a", "A", 14, 10, 0.71),
-            named("short", "Short", 6, 6, 1.0),
-        ];
-        let server = vec![
-            named("s1", "Sam", 7, 4, 0.57),
-            named("short", "Short", 6, 6, 1.0),
-            named("s2", "Bea", 9, 3, 0.33),
-        ];
-        let split = board_split("winrate", &rows, &server);
-        assert_eq!(ids(&split.ranked), vec!["a"]);
-        assert_eq!(ids(&split.unranked), vec!["s2", "s1", "short"]);
-    }
-
-    #[test]
-    fn nobody_shows_twice_across_ranked_and_unranked() {
-        let rows = vec![named("a", "A", 10, 6, 0.6)];
-        let server = vec![
-            named("a", "A", 10, 6, 0.6),
-            named("b", "B", 8, 4, 0.5),
-            named("b", "B", 8, 4, 0.5),
-        ];
-        let split = board_split("winrate", &rows, &server);
-        assert_eq!(ids(&split.ranked), vec!["a"]);
-        assert_eq!(ids(&split.unranked), vec!["b"]);
-    }
-
-    #[test]
-    fn payload_reads_unranked_or_defaults_to_empty() {
-        let newer: LeaderboardPayload = serde_json::from_str(
-            r#"{"rows":[{"member_id":"a","display_name":"A","games":10,"wins":6,"losses":4,"draws":0,"winrate":0.6,"kd":1.0}],"unranked":[{"member_id":"b","display_name":"B","games":9,"wins":5,"losses":3,"draws":1,"winrate":0.5555556,"kd":1.0}]}"#,
-        )
-        .unwrap();
-        assert_eq!(ids(&newer.unranked), vec!["b"]);
-        let split = board_split("winrate", &newer.rows, &newer.unranked);
-        assert_eq!(wr_cell(&split.unranked[0]).text, "5W-3L-1D");
-
-        let older: LeaderboardPayload = serde_json::from_str(
-            r#"{"rows":[{"member_id":"b","display_name":"B","games":9,"winrate":0.5555556,"kd":1.0}]}"#,
-        )
-        .unwrap();
-        assert!(older.unranked.is_empty());
-        let split = board_split("winrate", &older.rows, &older.unranked);
-        assert!(split.ranked.is_empty());
-        assert_eq!(ids(&split.unranked), vec!["b"]);
-    }
-
-    #[test]
-    fn unranked_only_board_still_renders() {
-        assert_eq!(
-            leaderboard_message(
-                Some(&LeaderboardLoad::Rows(
-                    Vec::new(),
-                    vec![named("b", "B", 7, 3, 0.43)]
-                )),
-                false
-            ),
-            None
-        );
-    }
-
-    #[test]
     fn kd_and_games_boards_are_not_split() {
         let rows = vec![named("a", "A", 5, 3, 0.6), named("b", "B", 12, 6, 0.5)];
         for metric in ["kd", "games"] {
-            let split = board_split(metric, &rows, &[named("x", "X", 6, 3, 0.5)]);
+            let split = board_split(metric, &rows);
             assert_eq!(ids(&split.ranked), vec!["a", "b"], "{metric}");
             assert!(split.unranked.is_empty(), "{metric}");
             assert_eq!(board_note(metric), LIST_RULE_NOTE);
@@ -860,28 +774,25 @@ mod tests {
             Some("Couldn't load leaderboards.")
         );
         assert_eq!(
-            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new(), Vec::new())), true),
+            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), true),
             Some("No ranked matches on this hero yet.")
         );
         assert_eq!(
-            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new(), Vec::new())), false),
+            leaderboard_message(Some(&LeaderboardLoad::Rows(Vec::new())), false),
             Some("No ranked matches yet. Upload stats from the tracker.")
         );
         assert_eq!(
             leaderboard_message(
-                Some(&LeaderboardLoad::Rows(
-                    vec![LeaderboardRow {
-                        member_id: "m1".into(),
-                        display_name: "A".into(),
-                        games: 1,
-                        wins: 1,
-                        losses: 0,
-                        draws: 0,
-                        winrate: 1.0,
-                        kd: 1.0,
-                    }],
-                    Vec::new()
-                )),
+                Some(&LeaderboardLoad::Rows(vec![LeaderboardRow {
+                    member_id: "m1".into(),
+                    display_name: "A".into(),
+                    games: 1,
+                    wins: 1,
+                    losses: 0,
+                    draws: 0,
+                    winrate: 1.0,
+                    kd: 1.0,
+                }])),
                 false
             ),
             None
