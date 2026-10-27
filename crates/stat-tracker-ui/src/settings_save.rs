@@ -8,7 +8,7 @@
 //! over a file that does not parse or that changed on disk.
 
 use iced::Task;
-use stat_tracker::config::{Config, ShadowRecognizerControl};
+use stat_tracker::config::{Config, EnvOverlay, ShadowRecognizerControl};
 
 use crate::app::{Message, SETTINGS_SAVE_REFUSED, TrackerApp};
 use crate::daemon::{self, DaemonVerb};
@@ -183,17 +183,23 @@ pub(crate) enum SettingsSaveError {
 ///
 /// A write happens only when the file parses as `snapshot`, the file as
 /// written when the form was built. The form shows `shown`, that file with
-/// the env overlay on top (`settings_env`). The form's sync URL and
-/// shortcut checks run in `before_write`, after that match, so a reload is
-/// not blocked by the empty defaults a broken startup file leaves in the
-/// form. The write is `form.to_config(shown)` with `edit` on top, and every
-/// overlaid value the form left as shown put back to the file's, then
-/// [`Config::save_at`], which edits the file in place.
+/// the env overlay `env` on top (`settings_env`). The website URL and token
+/// the form still shows from the overlay go back to the file's first
+/// ([`crate::settings_env::sync_fields_to_write`]). The cleartext URL check
+/// then runs on the URL that will be written, so an outside URL never
+/// blocks a change, and the other checks run in `before_write`. Both come
+/// after the snapshot match, so a reload is not blocked by the empty
+/// defaults a broken startup file leaves in the form. The write is
+/// `form.to_config(shown)` with `edit` on top, and every overlaid value the
+/// form left as shown put back to the file's, then [`Config::save_at`],
+/// which edits the file in place.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn save_settings_form(
     path: &std::path::Path,
     form_built_unreadable: bool,
     snapshot: &Config,
     shown: &Config,
+    env: EnvOverlay,
     form: &SettingsForm,
     edit: Option<ConfigEdit>,
     before_write: impl FnOnce() -> Result<(), String>,
@@ -204,6 +210,20 @@ pub(crate) fn save_settings_form(
     };
     if form_built_unreadable || fresh != *snapshot {
         return Ok(SettingsFileSave::Reloaded(fresh));
+    }
+    let mut form = form.clone();
+    (form.sync_url, form.sync_token) = crate::settings_env::sync_fields_to_write(
+        &form.sync_url,
+        &form.sync_token,
+        shown,
+        snapshot,
+        env,
+    );
+    // Block the whole save. Writing the form would either store the
+    // cleartext URL or drop the sync block; the file on disk stays as it
+    // is until the URL is https, loopback http, or blank.
+    if let Some(problem) = settings::sync_url_problem(&form.sync_url) {
+        return Err(SettingsSaveError::Blocked(problem.to_string()));
     }
     before_write().map_err(SettingsSaveError::Blocked)?;
     let mut next = form.to_config(shown);
@@ -287,16 +307,23 @@ impl TrackerApp {
             }
         };
         let typed = self.settings.clone();
+        let env = self.env_overlay();
         let form = match from {
             SaveFrom::Classic => typed.clone(),
             SaveFrom::Page(commit) => {
                 let mut saved_form = SettingsForm::from_config(&self.saved_config);
                 saved_form.overlay_hotkey = self.overlay_hotkey.bind.clone();
                 saved_form.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
+                // A token from outside locks the website fields, so the
+                // page never commits them and the file's sync stays.
+                let commit = if commit == Commit::Sync && self.sync_locked() {
+                    Commit::Control
+                } else {
+                    commit
+                };
                 form_for_commit(&typed, &saved_form, commit)
             }
         };
-        let sync_url = form.sync_url.clone();
         let saved_ocr = self.saved_config.ocr;
         let form_classic_ocr = form.classic_ocr;
         let known_packs = self.ocr_switch.packs;
@@ -310,6 +337,7 @@ impl TrackerApp {
             self.config_unreadable,
             &self.saved_file,
             &self.saved_config,
+            env,
             &form,
             edit,
             || {
@@ -318,14 +346,6 @@ impl TrackerApp {
                 if let Some((poll, cooldown)) = &timings
                     && let Some(problem) = timings_problem(poll, cooldown)
                 {
-                    return Err(problem.to_string());
-                }
-                // Block the whole save. Writing the form would either store
-                // the cleartext URL or drop the sync block; the file on disk
-                // stays as it is until the URL is https, loopback http, or blank.
-                // This runs only after the file matches the form's snapshot, so
-                // a reload of a fixed file is not stopped by the default URL.
-                if let Some(problem) = settings::sync_url_problem(&sync_url) {
                     return Err(problem.to_string());
                 }
                 // Turning classic OCR off needs a tracker version
@@ -574,8 +594,17 @@ player_name = \"FrozenTear\"
             Config::shadow_control(snapshot.shadow_recognizer, None),
         );
         form.set_toggle(SettingsToggle::PrereleaseUpdates, true);
-        let saved = save_settings_form(&path, false, &snapshot, &snapshot, &form, None, || Ok(()))
-            .expect("save writes");
+        let saved = save_settings_form(
+            &path,
+            false,
+            &snapshot,
+            &snapshot,
+            EnvOverlay::default(),
+            &form,
+            None,
+            || Ok(()),
+        )
+        .expect("save writes");
         let SettingsFileSave::Saved(written) = saved else {
             panic!("expected a write, got {saved:?}");
         };
@@ -630,6 +659,7 @@ player_name = \"FrozenTear\"
             false,
             &snapshot,
             &snapshot,
+            EnvOverlay::default(),
             &form,
             Some(ConfigEdit::FrameRate(Some(2))),
             || Ok(()),
@@ -686,9 +716,17 @@ server_url = \"https://crew.example\"
                 };
                 form.set_toggle(toggle, on);
             }
-            let saved =
-                save_settings_form(&path, false, &snapshot, &snapshot, &form, edit, || Ok(()))
-                    .expect("writes");
+            let saved = save_settings_form(
+                &path,
+                false,
+                &snapshot,
+                &snapshot,
+                EnvOverlay::default(),
+                &form,
+                edit,
+                || Ok(()),
+            )
+            .expect("writes");
             let SettingsFileSave::Saved(written) = saved else {
                 panic!("{edit:?} {toggle:?}: expected a write, got {saved:?}");
             };
@@ -769,6 +807,7 @@ token = \"secret-token-must-stay\"
             form_built_unreadable,
             &snapshot,
             &snapshot,
+            EnvOverlay::default(),
             &form,
             None,
             || {
@@ -808,6 +847,7 @@ token = \"secret-token-must-stay\"
             form_built_unreadable,
             &snapshot,
             &snapshot,
+            EnvOverlay::default(),
             &form,
             None,
             || {
@@ -840,6 +880,7 @@ token = \"secret-token-must-stay\"
             form_built_unreadable,
             &snapshot,
             &snapshot,
+            EnvOverlay::default(),
             &form,
             None,
             || Ok(()),
@@ -887,6 +928,7 @@ token = \"secret-token-must-stay\"
             form_built_unreadable,
             &snapshot,
             &snapshot,
+            EnvOverlay::default(),
             &form,
             None,
             || Err("must not write over a hand edit".into()),
@@ -924,6 +966,7 @@ token = \"secret-token-must-stay\"
             true,
             &defaults,
             &defaults,
+            EnvOverlay::default(),
             &dirty,
             None,
             || Err("must not write while the form was built unreadable".into()),
@@ -934,5 +977,94 @@ token = \"secret-token-must-stay\"
             std::fs::read_to_string(&defaults_path).expect("defaults"),
             defaults_text
         );
+    }
+
+    /// The file at `path` with `[sync]` (https://crew.example, T_file), and
+    /// the config shown with `env` on top of it.
+    fn file_with_env_sync(path: &std::path::Path, env_url: &str) -> (Config, Config) {
+        let raw = "\
+data_dir = \"/tmp/sst-env-sync\"
+
+[sync]
+server_url = \"https://crew.example\"
+token = \"T_file\"
+";
+        std::fs::write(path, raw).expect("seed");
+        let file = Config::read_at(path).expect("parse");
+        let mut shown = file.clone();
+        shown.sync = Some(stat_tracker::config::SyncConfig {
+            server_url: env_url.into(),
+            token: "T_env".into(),
+        });
+        (file, shown)
+    }
+
+    /// SCUFFED_TOKEN in the GUI's environment: changing only the Website
+    /// URL on the classic page writes the URL with the file's token, never
+    /// the outside one.
+    #[test]
+    fn an_outside_token_never_reaches_the_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let (file, shown) = file_with_env_sync(&path, "https://crew.example");
+        let env = EnvOverlay {
+            token: true,
+            ..EnvOverlay::default()
+        };
+        let mut form = SettingsForm::from_config(&shown);
+        assert_eq!(form.sync_token, "T_env");
+        form.sync_url = "https://new.example".into();
+        let saved = save_settings_form(&path, false, &file, &shown, env, &form, None, || Ok(()))
+            .expect("writes");
+        assert!(matches!(saved, SettingsFileSave::Saved(_)), "{saved:?}");
+        let text = std::fs::read_to_string(&path).expect("file");
+        assert!(!text.contains("T_env"), "{text}");
+        let on_disk = Config::read_at(&path).expect("reread").sync.expect("sync");
+        assert_eq!(on_disk.token, "T_file");
+        assert_eq!(on_disk.server_url, "https://new.example");
+
+        // An unrelated change leaves the file's sync as it was.
+        let (file, shown) = file_with_env_sync(&path, "https://crew.example");
+        let mut form = SettingsForm::from_config(&shown);
+        form.debug_ocr = true;
+        save_settings_form(&path, false, &file, &shown, env, &form, None, || Ok(()))
+            .expect("writes");
+        let on_disk = Config::read_at(&path).expect("reread");
+        assert!(on_disk.debug_ocr);
+        assert_eq!(on_disk.sync, file.sync);
+    }
+
+    /// A cleartext SCUFFED_SERVER is never written, so it does not block
+    /// other changes; a cleartext URL the player typed still does.
+    #[test]
+    fn a_cleartext_outside_server_does_not_block_other_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("config.toml");
+        let (file, shown) = file_with_env_sync(&path, "http://env.example");
+        let env = EnvOverlay {
+            token: true,
+            server: true,
+            ..EnvOverlay::default()
+        };
+        let mut form = SettingsForm::from_config(&shown);
+        assert_eq!(form.sync_url, "http://env.example");
+        form.debug_ocr = true;
+        let saved = save_settings_form(&path, false, &file, &shown, env, &form, None, || Ok(()))
+            .expect("not blocked");
+        assert!(matches!(saved, SettingsFileSave::Saved(_)), "{saved:?}");
+        let on_disk = Config::read_at(&path).expect("reread");
+        assert!(on_disk.debug_ocr);
+        assert_eq!(on_disk.sync, file.sync);
+
+        let file = on_disk;
+        let mut typed = SettingsForm::from_config(&shown);
+        typed.sync_url = "http://typed.example".into();
+        let before = std::fs::read_to_string(&path).expect("file");
+        let blocked = save_settings_form(&path, false, &file, &shown, env, &typed, None, || Ok(()));
+        assert!(
+            matches!(blocked, Err(SettingsSaveError::Blocked(_))),
+            "{blocked:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&path).expect("file"), before);
     }
 }

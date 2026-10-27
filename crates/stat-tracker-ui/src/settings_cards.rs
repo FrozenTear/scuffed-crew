@@ -33,7 +33,8 @@ const COMPANION_HELP: &str = "A small click-through card with your live stats.";
 /// What the switch gates ([`crate::companion_gate`]).
 const COMPANION_LIVE_NOTE: &str = "While this is on, the bar, the tray and the shortcut hide or show it for one game. Off turns them off too.";
 /// Under a website token set outside the app.
-const SYNC_ENV_NOTE: &str = "That token is used instead of one saved here.";
+const SYNC_ENV_NOTE: &str =
+    "That token is used instead of one saved here, so the website and token are locked.";
 /// Under Upload games after each match (spec).
 const UPLOAD_HELP: &str = "Only your own stats are sent.";
 /// Sub-heading of the Sharing rows inside Website account.
@@ -176,7 +177,7 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
                 .color(theme::WARN),
         );
     }
-    if let Some(vars) = crate::settings_env::sync_env(stat_tracker::config::Config::env_overlay()) {
+    if let Some(vars) = crate::settings_env::sync_env(app.env_overlay()) {
         connection = connection.push(crate::capture_reading::lock_line(vars));
     }
 
@@ -376,8 +377,12 @@ pub(crate) fn tracker_service(app: &TrackerApp, demo: bool) -> Element<'_, Messa
     divided(rows)
 }
 
-/// Website connection: website URL and token, with their own Apply.
+/// Website connection: website URL and token, with their own Apply. A
+/// token from outside the app locks both fields and Apply, so no save can
+/// write the outside values into config.toml.
 pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let env_vars = crate::settings_env::sync_env(app.env_overlay());
+    let locked = demo || env_vars.is_some();
     let saved = app.saved_config.sync.as_ref();
     let typed_differs = saved.map_or(
         !app.settings.sync_url.trim().is_empty() || !app.settings.sync_token.trim().is_empty(),
@@ -405,11 +410,11 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
             SettingsField::SyncUrl,
             Some(Commit::Sync),
             false,
-            demo,
+            locked,
         ),
     );
     let mut token_help = vec![hint("Paste the token from the website.")];
-    if let Some(vars) = crate::settings_env::sync_env(stat_tracker::config::Config::env_overlay()) {
+    if let Some(vars) = env_vars {
         token_help.push(crate::capture_reading::lock_line(vars));
         token_help.push(hint(SYNC_ENV_NOTE));
         token_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
@@ -423,13 +428,13 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
             SettingsField::SyncToken,
             Some(Commit::Sync),
             true,
-            demo,
+            locked,
         ),
     );
     let mut apply_btn = button(text("Apply").size(SIZE_META).font(FONT_BOLD).color(TEXT))
         .padding(Padding::from([7, 16]))
-        .style(crate::settings_page::primary_btn(typed_differs && !demo));
-    if typed_differs && !demo {
+        .style(crate::settings_page::primary_btn(typed_differs && !locked));
+    if typed_differs && !locked {
         apply_btn = apply_btn.on_press(Message::SettingsPage(Msg::Commit(Commit::Sync)));
     }
     let footer = Row::new()
@@ -445,7 +450,7 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
 pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     // STAT_TRACKER_DEBUG_OCR turns them on whatever the file says, so the
     // row shows On and locks, as OCR workers does.
-    let env_debug = stat_tracker::config::Config::env_overlay().debug_ocr;
+    let env_debug = app.env_overlay().debug_ocr;
     let mut debug_help = vec![hint(DEBUG_IMAGES_HELP)];
     if env_debug {
         debug_help.push(crate::capture_reading::lock_line(

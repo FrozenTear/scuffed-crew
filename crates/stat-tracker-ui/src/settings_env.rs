@@ -78,6 +78,41 @@ pub(crate) fn keep_file_values(next: &mut Config, shown: &Config, file: &Config)
     }
 }
 
+/// The website URL and token a save writes, from the form's `url` and
+/// `token`. A value the overlay put in (`SCUFFED_TOKEN`, `SCUFFED_SERVER`)
+/// that the form still shows goes back to the file's, field by field, so
+/// no override reaches config.toml. With no token in the file the token
+/// comes back blank, so the save leaves the file's sync as it was (a URL
+/// typed next to the outside token cannot be stored without a token).
+pub(crate) fn sync_fields_to_write(
+    url: &str,
+    token: &str,
+    shown: &Config,
+    file: &Config,
+    env: EnvOverlay,
+) -> (String, String) {
+    let Some(in_effect) = shown.sync.as_ref().filter(|_| shown.sync != file.sync) else {
+        return (url.to_string(), token.to_string());
+    };
+    let from_file = file.sync.as_ref();
+    let token = if token.trim() == in_effect.token {
+        from_file.map(|s| s.token.clone()).unwrap_or_default()
+    } else {
+        token.to_string()
+    };
+    let url = if url.trim() != in_effect.server_url {
+        url.to_string()
+    } else if let Some(s) = from_file {
+        s.server_url.clone()
+    } else if env.server {
+        String::new()
+    } else {
+        // The URL of a token-less [sync] table: the file's own.
+        url.to_string()
+    };
+    (url, token)
+}
+
 /// The variable that turns debug images on outside the app.
 pub(crate) const DEBUG_OCR_ENV: &str = "STAT_TRACKER_DEBUG_OCR";
 
@@ -93,6 +128,24 @@ pub(crate) fn sync_env(overlay: EnvOverlay) -> Option<&'static str> {
 }
 
 impl TrackerApp {
+    /// What this process's CLI / env overlay sets, for the lock lines. A
+    /// fixture (demo or test) shows none, as [`load`] never reads the
+    /// host's environment for one.
+    pub(crate) fn env_overlay(&self) -> EnvOverlay {
+        if self.fixture.is_some() {
+            EnvOverlay::default()
+        } else {
+            Config::env_overlay()
+        }
+    }
+
+    /// `SCUFFED_TOKEN` (or `--token`) sets the website token outside the
+    /// app: the 0.6 page locks the Website URL, the token and their Apply,
+    /// and its saves leave the file's sync as it is.
+    pub(crate) fn sync_locked(&self) -> bool {
+        sync_env(self.env_overlay()).is_some()
+    }
+
     /// Take in `file`, now what config.toml holds at `path`.
     pub(crate) fn take_saved_file(&mut self, file: Config, path: &Path) {
         self.saved_config = shown_from_file(&file, path);
@@ -139,6 +192,75 @@ mod tests {
         keep_file_values(&mut next, &shown, &file);
         assert_eq!(next.sync, sync("pasted"));
         assert_eq!(next.ocr_threads, Some(2));
+    }
+
+    fn file_and_shown(file_token: Option<&str>, env: (&str, &str)) -> (Config, Config) {
+        let mut file = Config::default();
+        file.sync = file_token.and_then(sync);
+        let mut shown = file.clone();
+        shown.sync = Some(SyncConfig {
+            server_url: env.0.into(),
+            token: env.1.into(),
+        });
+        (file, shown)
+    }
+
+    const TOKEN_ONLY: EnvOverlay = EnvOverlay {
+        token: true,
+        server: false,
+        debug_ocr: false,
+        ocr_threads: None,
+    };
+
+    #[test]
+    fn an_outside_token_left_as_shown_goes_back_to_the_file_token() {
+        let (file, shown) = file_and_shown(Some("T_file"), ("https://crew.example", "T_env"));
+        // Only the URL changed: the file's token goes with it.
+        let (url, token) =
+            sync_fields_to_write("https://new.example", "T_env", &shown, &file, TOKEN_ONLY);
+        assert_eq!(
+            (url.as_str(), token.as_str()),
+            ("https://new.example", "T_file")
+        );
+        // A token the player typed is theirs to write.
+        let (_, token) =
+            sync_fields_to_write("https://crew.example", "pasted", &shown, &file, TOKEN_ONLY);
+        assert_eq!(token, "pasted");
+    }
+
+    #[test]
+    fn an_outside_server_left_as_shown_goes_back_to_the_file_url() {
+        let env = EnvOverlay {
+            server: true,
+            ..TOKEN_ONLY
+        };
+        let (file, shown) = file_and_shown(Some("T_file"), ("http://env.example", "T_env"));
+        let (url, token) = sync_fields_to_write("http://env.example", "pasted", &shown, &file, env);
+        assert_eq!(
+            (url.as_str(), token.as_str()),
+            ("https://crew.example", "pasted")
+        );
+        // No sync in the file: neither outside value is written.
+        let (file, shown) = file_and_shown(None, ("http://env.example", "T_env"));
+        let (url, token) = sync_fields_to_write("http://env.example", "T_env", &shown, &file, env);
+        assert_eq!((url.as_str(), token.as_str()), ("", ""));
+    }
+
+    #[test]
+    fn without_an_outside_sync_the_form_is_written_as_typed() {
+        let (file, _) = file_and_shown(Some("T_file"), ("", ""));
+        let shown = file.clone();
+        let (url, token) =
+            sync_fields_to_write(" https://typed ", "typed", &shown, &file, TOKEN_ONLY);
+        assert_eq!((url.as_str(), token.as_str()), (" https://typed ", "typed"));
+    }
+
+    #[test]
+    fn a_fixture_shows_no_outside_values() {
+        let (_dir, app) = crate::fixtures::test_app();
+        assert!(app.fixture.is_some());
+        assert_eq!(app.env_overlay(), EnvOverlay::default());
+        assert!(!app.sync_locked());
     }
 
     #[test]
