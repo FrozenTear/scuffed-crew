@@ -120,25 +120,19 @@ fn status_strip(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         .installed_version
         .clone()
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-    // Demo mode shows the sample tracker as running, like the top bar.
-    let running = app.daemon.running() || demo;
+    // The words and the dot come from the same status as the top bar, so
+    // the two never disagree. Demo mode shows the sample tracker as running.
+    let status = crate::tracker_status::header_status_for(app);
     let mut strip = Row::new()
         .spacing(16)
         .align_y(Alignment::Center)
         .push(widgets::status_stub(
-            if running {
-                "Tracker running"
-            } else {
-                "Tracker stopped"
-            },
-            widgets::header_status_color(widgets::header_status_for(app)),
+            crate::tracker_status::strip_label(status),
+            crate::tracker_status::header_status_color(status),
         ))
         .push(meta(format!("Version {version}")));
-    if let Some(game) = app.games.first() {
-        strip = strip.push(meta(format!(
-            "Last game {}",
-            crate::model::local_hm(game.played_at)
-        )));
+    if let Some(at) = crate::tracker_status::last_game_when(&app.games, app.clock) {
+        strip = strip.push(meta(format!("Last game {at}")));
     }
     strip = strip.push(space().width(Fill));
     if app.daemon_busy {
@@ -150,15 +144,12 @@ fn status_strip(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             .push(tag(AFTER_RESTART_TAG))
             .push(meta(changes_waiting_label(waiting)));
     }
-    // Restart runs Start when the tracker is stopped, so the one button
-    // always gets it running with the saved config.
-    let verb = if running {
-        DaemonVerb::Restart
-    } else {
-        DaemonVerb::Start
-    };
+    // A stopped tracker gets Start tracker, a running one Restart tracker;
+    // both get it running with the saved config.
+    let running = app.daemon.running() || demo;
+    let (verb, label) = strip_action(running);
     strip = strip.push(strip_btn(
-        "Restart tracker",
+        label,
         waiting > 0,
         (!demo && !app.daemon_busy).then_some(Message::Daemon(verb)),
     ));
@@ -176,6 +167,15 @@ fn status_strip(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         .width(Fill)
         .style(theme::surface_panel)
         .into()
+}
+
+/// What the strip's tracker button runs and says.
+fn strip_action(running: bool) -> (DaemonVerb, &'static str) {
+    if running {
+        (DaemonVerb::Restart, "Restart tracker")
+    } else {
+        (DaemonVerb::Start, "Start tracker")
+    }
 }
 
 /// A strip button. Without a message it is drawn but does nothing (demo).
@@ -394,14 +394,10 @@ fn fold_header(
     .into()
 }
 
-fn fold_style(_theme: &Theme, _status: button::Status) -> button::Style {
-    button::Style {
-        background: None,
-        text_color: TEXT,
-        border: Border::default(),
-        shadow: Shadow::default(),
-        snap: false,
-    }
+/// Fold rows and "Run setup again": no chrome at rest, a light tint on
+/// hover and press.
+fn fold_style(theme: &Theme, status: button::Status) -> button::Style {
+    theme::quiet_btn(theme::RADIUS_INNER)(theme, status)
 }
 
 fn advanced_body<'a>(
@@ -517,6 +513,12 @@ mod tests {
         for width in [640.0, 1600.0] {
             let _ = view(&app, width);
         }
+    }
+
+    #[test]
+    fn a_stopped_tracker_gets_start_not_restart() {
+        assert_eq!(strip_action(true), (DaemonVerb::Restart, "Restart tracker"));
+        assert_eq!(strip_action(false), (DaemonVerb::Start, "Start tracker"));
     }
 
     #[test]

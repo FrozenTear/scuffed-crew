@@ -127,8 +127,8 @@ fn add_chip<'a>(
             .color(TEXT_2),
     )
     .padding(Padding::from([4, 10]))
-    .style(|_: &Theme, _| button::Style {
-        background: None,
+    .style(|_: &Theme, status| button::Style {
+        background: theme::hover_tint(status),
         text_color: TEXT_2,
         border: Border {
             color: BORDER,

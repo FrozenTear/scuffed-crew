@@ -35,6 +35,7 @@ pub mod layout;
 pub mod maps;
 pub mod model;
 pub mod nav;
+pub mod nav_fit;
 pub mod notes;
 pub mod overlay;
 #[cfg(feature = "companion")]
@@ -51,6 +52,7 @@ pub mod settings_update;
 pub mod setup_guide;
 pub mod snapshot;
 pub mod theme;
+pub mod tracker_status;
 pub mod tray;
 pub mod uninstall;
 pub mod update;

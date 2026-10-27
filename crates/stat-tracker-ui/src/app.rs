@@ -339,6 +339,8 @@ pub enum Message {
     Report(crate::report::ReportMessage),
     /// A message from the 0.6 Settings page ([`crate::settings_update`]).
     SettingsPage(crate::settings_update::Msg),
+    /// A message from the 0.6 top bar ([`crate::nav::update`]).
+    Nav(crate::nav::Msg),
 }
 
 struct NotesDialog {
@@ -448,6 +450,8 @@ pub struct TrackerApp {
     pub filter_hero: Option<String>,
     pub filter_map: Option<String>,
     pub filter_outcome: Option<Outcome>,
+    /// Games shows only games that need a look (the top bar chip).
+    pub needs_look_filter: bool,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
     pub(crate) toast_action: Option<Message>,
@@ -581,7 +585,7 @@ impl TrackerApp {
             };
 
         let snapshot_mtime = snapshot::snapshot_mtime(&cli.data_dir);
-        let live_status = live_status_for(&games);
+        let live_status = crate::tracker_status::classic_live_status(&games);
         let config_existed = Config::config_path()
             .map(|path| path.exists())
             .unwrap_or(false);
@@ -696,6 +700,7 @@ impl TrackerApp {
             filter_hero: None,
             filter_map: None,
             filter_outcome: None,
+            needs_look_filter: false,
             toast: None,
             toast_action: None,
             sessions_with_kit: HashSet::new(),
@@ -1158,6 +1163,7 @@ impl TrackerApp {
                 self.toggle_classic_ocr(want_classic)
             }
             Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
+            Message::Nav(msg) => crate::nav::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()
@@ -2617,7 +2623,7 @@ impl TrackerApp {
                 let snap = snapshot::load_snapshot(&self.data_dir);
                 self.games = games_from_snapshot(&snap);
                 self.refresh_kit_sessions();
-                self.live_status = live_status_for(&self.games);
+                self.live_status = crate::tracker_status::classic_live_status(&self.games);
                 self.health_status = self.health_now();
                 self.clock = Utc::now();
             }
@@ -2971,14 +2977,6 @@ fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> 
         games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
     } else {
         Utc::now()
-    }
-}
-
-fn live_status_for(games: &[Game]) -> String {
-    if let Some(g) = games.first() {
-        format!("Last game {}", crate::model::local_hm(g.played_at))
-    } else {
-        "Waiting for a capture".into()
     }
 }
 

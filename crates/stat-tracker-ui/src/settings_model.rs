@@ -7,9 +7,11 @@
 
 use stat_tracker::config::{PauseOverride, SCREENCAST_MAX_FPS_DEFAULT};
 
-/// Content width where Settings becomes two columns.
+/// Settings page width where it becomes two columns: the window less the
+/// page gutters and the scroll gutter, not the window width the top bar
+/// breakpoints use.
 pub const TWO_COLUMN_MIN: f32 = 1100.0;
-/// Widest the one-column page gets.
+/// Widest the one-column page gets, in the same page width.
 pub const SINGLE_COLUMN_MAX: f32 = 760.0;
 /// Memory each OCR worker holds (one Tesseract instance with its model).
 pub const OCR_WORKER_MB: usize = 23;

@@ -28,9 +28,34 @@ pub fn app_header(app: &TrackerApp) -> Element<'_, Message> {
         .size(SIZE_FEATURED)
         .font(FONT_EXTRABOLD)
         .color(TEXT);
+    let status = crate::tracker_status::header_status_for(app);
 
-    // Filters and the companion switch share a wrapping row. Status stays on
-    // the title line so a read-only indicator is not another control in that row.
+    // Status stays on the title line so a read-only indicator is not another
+    // control in the row below.
+    column![
+        row![
+            title,
+            space().width(Fill),
+            status_stub(
+                &app.live_status,
+                crate::tracker_status::classic_status_color(status)
+            )
+        ]
+        .spacing(16)
+        .align_y(Alignment::Center)
+        .width(Fill),
+        header_controls(app),
+    ]
+    .spacing(12)
+    .width(Fill)
+    .into()
+}
+
+/// The season switch, the role chips and the Companion switch in one
+/// wrapping row. The classic header and the 0.6 stats tabs both draw it.
+/// The first two filter the stats; the Companion switch shows or hides the
+/// in-game overlay.
+pub fn header_controls(app: &TrackerApp) -> Element<'_, Message> {
     let mut controls = Row::new().spacing(12).align_y(Alignment::Center);
     if crate::seasons::show_season_picker(&app.seasons.seasons) {
         controls = controls.push(season_switch(&app.seasons.seasons, &app.season));
@@ -44,24 +69,7 @@ pub fn app_header(app: &TrackerApp) -> Element<'_, Message> {
         .spacing(0)
         .align_y(Alignment::Center),
     );
-
-    column![
-        row![
-            title,
-            space().width(Fill),
-            status_stub(
-                &app.live_status,
-                header_status_color(header_status_for(app))
-            )
-        ]
-        .spacing(16)
-        .align_y(Alignment::Center)
-        .width(Fill),
-        controls.wrap(),
-    ]
-    .spacing(12)
-    .width(Fill)
-    .into()
+    controls.wrap().into()
 }
 
 pub fn sidebar(current: Screen) -> Element<'static, Message> {
@@ -210,72 +218,11 @@ pub fn overlay_toggle(showing: bool, game_running: bool) -> Element<'static, Mes
         .into()
 }
 
-/// What the Overview title-row dot is reporting. The label text stays the
-/// capture line (`Last game HH:MM` / `Waiting for a capture`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeaderStatus {
-    /// Daemon is up and a capture is in progress (manual capture, or a live game).
-    Capturing,
-    /// Idle, or still waiting for the first capture.
-    Waiting,
-    /// Daemon is not running, or the last capture attempt errored.
-    Down,
-    /// Server returned 401/403 for the sync token.
-    TokenRejected,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HeaderStatusInput {
-    pub demo: bool,
-    pub daemon_running: bool,
-    pub capturing: bool,
-    pub game_running: bool,
-    pub sync_token_rejected: bool,
-    pub capture_error: bool,
-}
-
-pub fn classify_header_status(input: HeaderStatusInput) -> HeaderStatus {
-    if input.sync_token_rejected {
-        return HeaderStatus::TokenRejected;
-    }
-    if input.capture_error || (!input.demo && !input.daemon_running) {
-        return HeaderStatus::Down;
-    }
-    let live = input.capturing || (!input.demo && input.daemon_running && input.game_running);
-    if live {
-        HeaderStatus::Capturing
-    } else {
-        HeaderStatus::Waiting
-    }
-}
-
-pub fn header_status_color(status: HeaderStatus) -> Color {
-    match status {
-        // Running is green, whether a game is being read or the tracker is
-        // idle and ready ("Tracker running" / "Ready"). The label says which.
-        HeaderStatus::Capturing | HeaderStatus::Waiting => theme::OK,
-        // Amber is kept for real warnings only.
-        HeaderStatus::TokenRejected => theme::WARN,
-        HeaderStatus::Down => theme::DANGER,
-    }
-}
-
-pub(crate) fn header_status_for(app: &TrackerApp) -> HeaderStatus {
-    let sync_token_rejected = app.saved_config.sync.as_ref().is_some_and(|sync| {
-        stat_tracker::sync::auth_pause_matches(&app.data_dir, &sync.server_url, &sync.token)
-    });
-    classify_header_status(HeaderStatusInput {
-        demo: app.fixture.is_some(),
-        daemon_running: app.daemon.running(),
-        capturing: app.capturing,
-        game_running: app.game_running,
-        sync_token_rejected,
-        capture_error: app.preview_error.is_some(),
-    })
-}
-
-/// Read-only capture indicator. Dot + text, no button chrome and no hover.
-/// The text is unchanged; only the dot colour follows [`HeaderStatus`].
+/// Read-only status indicator: a dot and one run of text, no button chrome
+/// and no hover. The caller picks both: the classic header passes its
+/// capture line and the 0.5 dot colour, the 0.6 Settings strip its words
+/// and dot from [`crate::tracker_status`]. The 0.6 top bar draws its own
+/// line with the time in a separate span ([`crate::nav`]).
 pub fn status_stub<'a>(
     live: impl iced::widget::text::IntoFragment<'a>,
     dot: Color,
@@ -349,14 +296,18 @@ pub fn toast_bar(msg: &str, action: Option<Message>) -> Element<'static, Message
     .into()
 }
 
-pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
+/// Card mark for a game that counts in the top bar's "need a look".
+pub const NEEDS_LOOK_MARK: &str = "needs a look";
+
+/// `in_progress`: the game is the open session ([`role_and_edited`]).
+pub fn featured_game_card(game: &Game, in_progress: bool) -> Element<'static, Message> {
     let stats = if game.has_stat_line() {
         Some(stat_line(game))
     } else {
         None
     };
     let body = column![
-        role_and_edited(game),
+        role_and_edited(game, in_progress),
         map_block(game, SIZE_FEATURED, FONT_EXTRABOLD),
         with_unsure(
             text(format!(
@@ -389,8 +340,8 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
     )
 }
 
-pub fn compact_game_card(game: &Game) -> Element<'static, Message> {
-    compact_game_card_inner(game, false, false)
+pub fn compact_game_card(game: &Game, in_progress: bool) -> Element<'static, Message> {
+    compact_game_card_inner(game, false, in_progress)
 }
 
 pub fn compact_game_card_clickable(
@@ -410,7 +361,7 @@ fn compact_game_card_inner(
     in_progress: bool,
 ) -> Element<'static, Message> {
     let mut body = column![
-        role_and_edited(game),
+        role_and_edited(game, in_progress),
         map_block(game, SIZE_TITLE, FONT_BOLD),
         with_unsure(
             text(game.display_hero())
@@ -723,7 +674,7 @@ pub fn expanded_game_card<'a>(
         with_unsure(outcome_label(game.outcome), game.field_unsure("result"))
     };
     let mut body = column![
-        role_and_edited(game),
+        role_and_edited(game, in_progress),
         map_block(game, SIZE_TITLE, FONT_BOLD),
         with_unsure(
             text(format!(
@@ -1051,12 +1002,16 @@ fn review_panel(game: &Game) -> Element<'static, Message> {
     col.into()
 }
 
-fn role_and_edited(game: &Game) -> Element<'static, Message> {
+/// Status chips over the map. `in_progress` is true for the open session,
+/// whose missing result is not a reason to look ([`Game::needs_look`]).
+fn role_and_edited(game: &Game, in_progress: bool) -> Element<'static, Message> {
     // The role sits next to the hero name below; here it read like a
     // label for the map.
     let mut r = row![].spacing(8).align_y(Alignment::Center);
     if game.held_locally() {
         r = r.push(status_chip("needs review", theme::WARN));
+    } else if game.needs_look(in_progress) {
+        r = r.push(status_chip(NEEDS_LOOK_MARK, theme::WARN));
     }
     if game.edited {
         r = r.push(status_chip("edited", theme::WARN));
@@ -1360,88 +1315,9 @@ fn card_shell(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        HeaderStatus, HeaderStatusInput, classify_header_status, header_status_color,
-        map_stripe_outcome, win_bar_portions,
-    };
+    use super::{map_stripe_outcome, win_bar_portions};
     use crate::aggregate::Record;
     use crate::model::Outcome;
-    use crate::theme;
-
-    fn input(demo: bool, daemon: bool, capturing: bool, game: bool) -> HeaderStatusInput {
-        HeaderStatusInput {
-            demo,
-            daemon_running: daemon,
-            capturing,
-            game_running: game,
-            sync_token_rejected: false,
-            capture_error: false,
-        }
-    }
-
-    #[test]
-    fn header_dot_follows_capture_state() {
-        assert_eq!(
-            classify_header_status(input(false, true, false, true)),
-            HeaderStatus::Capturing
-        );
-        assert_eq!(
-            classify_header_status(input(false, true, true, false)),
-            HeaderStatus::Capturing
-        );
-        assert_eq!(
-            header_status_color(HeaderStatus::Capturing),
-            theme::OK,
-            "capturing is mint"
-        );
-
-        assert_eq!(
-            classify_header_status(input(false, true, false, false)),
-            HeaderStatus::Waiting,
-            "daemon up, no live game, is idle"
-        );
-        assert_eq!(
-            classify_header_status(input(true, false, false, true)),
-            HeaderStatus::Waiting,
-            "demo mode is not a live capture, even though the fixture reports a game"
-        );
-        assert_eq!(
-            header_status_color(HeaderStatus::Waiting),
-            theme::OK,
-            "running and idle (\"Tracker running\" / \"Ready\") is green"
-        );
-
-        assert_eq!(
-            classify_header_status(input(false, false, false, false)),
-            HeaderStatus::Down
-        );
-        let mut errored = input(false, true, true, true);
-        errored.capture_error = true;
-        assert_eq!(classify_header_status(errored), HeaderStatus::Down);
-        assert_eq!(header_status_color(HeaderStatus::Down), theme::DANGER);
-
-        let mut rejected = input(false, true, true, true);
-        rejected.sync_token_rejected = true;
-        assert_eq!(
-            classify_header_status(rejected),
-            HeaderStatus::TokenRejected
-        );
-        assert_eq!(
-            header_status_color(HeaderStatus::TokenRejected),
-            theme::WARN,
-            "token rejection reuses the warning colour"
-        );
-        assert_ne!(
-            header_status_color(HeaderStatus::Waiting),
-            theme::WARN,
-            "amber is only for warnings, not a running tracker"
-        );
-        assert_ne!(
-            header_status_color(HeaderStatus::Down),
-            theme::OK,
-            "a stopped tracker must not look running"
-        );
-    }
 
     #[test]
     fn win_bar_portions_match_rate() {

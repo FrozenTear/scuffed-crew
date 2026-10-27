@@ -321,6 +321,15 @@ impl Game {
         !self.review_fields().is_empty()
     }
 
+    /// The game needs a look: a map or hero is missing, or the game closed
+    /// without a result. `in_progress` is true for the open session
+    /// ([`game_card_in_progress`]), whose result is not in yet. Fields the
+    /// reader marked unsure do not count: their "unsure" marks are enough.
+    /// The top bar count, its Games filter and the card mark all use this.
+    pub fn needs_look(&self, in_progress: bool) -> bool {
+        self.needs_review() || (self.outcome == Outcome::Unknown && !in_progress)
+    }
+
     /// Unsynced and missing a map or hero. The game has not been uploaded.
     pub fn held_locally(&self) -> bool {
         self.needs_review() && !self.synced

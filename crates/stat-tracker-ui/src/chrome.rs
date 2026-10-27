@@ -51,7 +51,7 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
                 left: PAGE_PAD_X,
                 right: 8.0,
             }),
-        page_body(app, content, crate::settings::view),
+        page_body(app, content, crate::settings::view, PAGE_PAD_X),
     ]
     .spacing(0)
     .width(Fill)
@@ -59,31 +59,45 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
     .into()
 }
 
-/// 0.6 layout: tabs across the top, page controls under them on the
-/// stats screens, and the new Settings page.
+/// 0.6 layout: tabs across the top, then the page title, then on the stats
+/// screens the season, role and Companion row, then the screen. The bar and
+/// the page share one gutter ([`theme::page_gutter`]).
+///
+/// The control row is a stopgap: it is the 0.5 header row, not the spec's
+/// filter chips (Season, queues, roles, Crew, Hero, Map; "Filters (n)" at
+/// 1024), which land with the per-screen redesigns.
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
-    let bar = responsive(|size| crate::nav::top_bar(app, size.width))
-        .width(Fill)
-        .height(Length::Shrink);
-    let mut content = column![];
-    if app.screen != Screen::Settings {
-        content = content.push(crate::nav::page_controls(app));
-    }
-    column![bar, page_body(app, content, crate::settings_page::view)]
+    responsive(move |size| {
+        let mut content = column![crate::nav::page_heading(app.screen)];
+        if app.screen != Screen::Settings {
+            content = content.push(widgets::header_controls(app));
+        }
+        let gutter = theme::page_gutter(size.width);
+        column![
+            crate::nav::top_bar(app, size.width),
+            page_body(app, content, crate::settings_page::view, gutter),
+        ]
         .spacing(0)
         .width(Fill)
         .height(Fill)
         .into()
+    })
+    .width(Fill)
+    .height(Fill)
+    .into()
 }
 
 /// The pane right of the sidebar or under the tabs: `content` (what the
-/// layout puts first), the toast, the restart bar, then the screen, padded.
+/// layout puts first: the header, or the title and controls), the toast,
+/// the restart bar, then the screen, padded `pad_x` at the sides. The
+/// toast and the restart bar never come between a title and its controls.
 /// Settings fills the height and scrolls its own form (`settings`); the
 /// other screens scroll the whole pane.
 fn page_body<'a>(
     app: &'a TrackerApp,
     content: Column<'a, Message>,
     settings: fn(&'a TrackerApp, f32) -> Element<'a, Message>,
+    pad_x: f32,
 ) -> Element<'a, Message> {
     let settings_screen = app.screen == Screen::Settings;
     let height = if settings_screen {
@@ -117,8 +131,8 @@ fn page_body<'a>(
         .padding(Padding {
             top: PAGE_PAD_Y,
             bottom: PAGE_PAD_Y,
-            left: PAGE_PAD_X,
-            right: PAGE_PAD_X,
+            left: pad_x,
+            right: pad_x,
         });
     if settings_screen {
         container(main).width(Fill).height(Fill).into()

@@ -18,7 +18,7 @@ use crate::aggregate::{Record, SeasonWindow, aggregate};
 use crate::app::{Message, TrackerApp};
 use crate::hotkey::{self, OverlayHotkey};
 use crate::layout::seasons_columns;
-use crate::model::{Game, SeasonSel};
+use crate::model::{Game, Screen, SeasonSel};
 use crate::theme::{
     FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, GRID_GAP, SIZE_FEATURED, SIZE_META, SIZE_TITLE, TEXT,
     TEXT_2, TEXT_3,
@@ -321,15 +321,16 @@ fn system_time_to_utc(t: SystemTime) -> Option<DateTime<Utc>> {
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let rows = season_rows(&app.games, &app.seasons.seasons);
     let cols = seasons_columns(content_width);
-    let mut col = column![
-        text("Seasons").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
+    let mut col = column![].spacing(GRID_GAP).width(Fill);
+    if let Some(title) = crate::nav::classic_title(app, Screen::Seasons) {
+        col = col.push(title);
+    }
+    col = col.push(
         text("Read-only. Seasons are managed on the website under /admin/seasons.")
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
-    ]
-    .spacing(GRID_GAP)
-    .width(Fill);
+    );
 
     if let Some(note) = last_refreshed_note(&app.seasons) {
         col = col.push(text(note).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3));
