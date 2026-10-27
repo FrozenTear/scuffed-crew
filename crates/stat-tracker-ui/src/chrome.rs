@@ -80,10 +80,11 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
+        // Settings has none; Overview draws the spec's filter chips itself.
         // Seasons lists every season, so it draws its row without the
         // season switch ([`crate::seasons_tab::filter_row`]).
         match app.screen {
-            Screen::Settings => {}
+            Screen::Settings | Screen::Overview => {}
             Screen::Seasons => content = content.push(crate::seasons_tab::filter_row(app)),
             _ => content = content.push(widgets::header_controls(app)),
         }

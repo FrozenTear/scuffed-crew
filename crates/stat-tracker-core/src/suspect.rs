@@ -53,7 +53,7 @@ pub fn clear_edited_suspects(fields: &mut Vec<String>, storage_field: &str) {
     });
 }
 
-fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
+pub fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
     match storage_field {
         "hero" => &["hero"],
         "map_name" => &["map", "mode"],
@@ -68,7 +68,7 @@ fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
     }
 }
 
-fn flat_suspect_name(name: &str) -> Option<&str> {
+pub fn flat_suspect_name(name: &str) -> Option<&str> {
     if SUSPECT_FIELD_NAMES.contains(&name) {
         return Some(name);
     }
