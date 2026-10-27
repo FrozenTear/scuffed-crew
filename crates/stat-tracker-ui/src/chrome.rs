@@ -1,7 +1,10 @@
 //! The window chrome around the screens: the 0.6 top tabs or the 0.5
 //! sidebar ([`crate::nav::NavStyle`]). Both wrap the same [`page_body`],
-//! so the toast, the restart bar, the page padding and the scrolling are
-//! drawn one way for both layouts.
+//! so the page padding and the scrolling are drawn one way for both
+//! layouts. The sidebar puts the toast and the restart bar above the
+//! screen; the top tabs float them at the bottom of the window, where the
+//! spec puts its one toast (p4 "Report sent"), so nothing sits between the
+//! bar and the page heading.
 
 use iced::widget::{Column, column, container, responsive, row, stack};
 use iced::{Element, Fill, Length, Padding};
@@ -28,6 +31,7 @@ pub(crate) fn with_layers<'a, const N: usize>(
         .style(theme::page_background);
     layers
         .into_iter()
+        .chain([crate::what_leaves::layer(app)])
         .flatten()
         .fold(page.into(), |below, layer| {
             stack![below, layer].width(Fill).height(Fill).into()
@@ -51,7 +55,14 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
                 left: PAGE_PAD_X,
                 right: 8.0,
             }),
-        page_body(app, content, crate::settings::view, PAGE_PAD_X, true, None),
+        page_body(
+            app,
+            content,
+            crate::settings::view,
+            PAGE_PAD_X,
+            true,
+            Prompts::Inline
+        ),
     ]
     .spacing(0)
     .width(Fill)
@@ -73,10 +84,7 @@ fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
             content = content.push(widgets::header_controls(app));
         }
         let gutter = theme::page_gutter(size.width);
-        // On Settings the toast is as wide as the page column below it.
-        let toast_max = (app.screen == Screen::Settings)
-            .then(|| crate::settings_model::page_width(size.width - 2.0 * gutter));
-        column![
+        let window = column![
             crate::nav::top_bar(app, size.width),
             page_body(
                 app,
@@ -84,23 +92,67 @@ fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
                 crate::settings_page::view,
                 gutter,
                 false,
-                toast_max
+                Prompts::Floating
             ),
         ]
         .spacing(0)
         .width(Fill)
-        .height(Fill)
-        .into()
+        .height(Fill);
+        match floating_prompts(app, size.width - 2.0 * gutter) {
+            Some(prompts) => stack![window, prompts].width(Fill).height(Fill).into(),
+            None => window.into(),
+        }
     })
     .width(Fill)
     .height(Fill)
     .into()
 }
 
+/// Where the toast and the restart bar go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Prompts {
+    /// Above the screen, under the header (the 0.5 sidebar).
+    Inline,
+    /// Over the window at the bottom ([`floating_prompts`]).
+    Floating,
+}
+
+/// Widest the floating toast and restart bar get.
+const FLOAT_MAX: f32 = 640.0;
+/// Space between them and the window's bottom edge.
+const FLOAT_GAP: f32 = 16.0;
+
+/// The toast and the restart bar, centred at the bottom of the window,
+/// at most [`FLOAT_MAX`] wide and never wider than the page (`page`).
+/// Only they take clicks: the space around them passes them through.
+fn floating_prompts(app: &TrackerApp, page: f32) -> Option<Element<'_, Message>> {
+    let restart = app.restart_bar_visible();
+    if app.toast.is_none() && !restart {
+        return None;
+    }
+    let mut prompts = Column::new().spacing(8);
+    if let Some(t) = &app.toast {
+        prompts = prompts.push(widgets::toast_bar(t, app.toast_action.clone()));
+    }
+    if restart {
+        prompts = prompts.push(restart_prompt::bar());
+    }
+    Some(
+        container(container(prompts).max_width(FLOAT_MAX.min(page.max(0.0))))
+            .padding(FLOAT_GAP)
+            .width(Fill)
+            .height(Fill)
+            .align_x(iced::alignment::Horizontal::Center)
+            .align_y(iced::alignment::Vertical::Bottom)
+            .into(),
+    )
+}
+
 /// The pane right of the sidebar or under the tabs: `content` (what the
-/// layout puts first: the header, or the title and controls), the toast,
-/// the restart bar, then the screen, padded `pad_x` at the sides. The
-/// toast and the restart bar never come between a title and its controls.
+/// layout puts first: the header, or the title and controls), then with
+/// [`Prompts::Inline`] the toast and the restart bar, then the screen,
+/// padded `pad_x` at the sides. The toast and the restart bar never come
+/// between a title and its controls.
 /// The classic Settings (`settings_scrolls`) fills the height and scrolls
 /// its own form; every other screen, the 0.6 Settings page included,
 /// scrolls the whole pane, so the scrollbar sits in one place on every tab.
@@ -110,7 +162,7 @@ fn page_body<'a>(
     settings: fn(&'a TrackerApp, f32) -> Element<'a, Message>,
     pad_x: f32,
     settings_scrolls: bool,
-    toast_max: Option<f32>,
+    prompts: Prompts,
 ) -> Element<'a, Message> {
     let settings_screen = settings_scrolls && app.screen == Screen::Settings;
     let height = if settings_screen {
@@ -119,15 +171,13 @@ fn page_body<'a>(
         Length::Shrink
     };
     let mut content = content.spacing(16).width(Fill).height(height);
-    if let Some(t) = &app.toast {
-        let bar = widgets::toast_bar(t, app.toast_action.clone());
-        content = content.push(match toast_max {
-            Some(max) => container(bar).width(Fill).max_width(max).into(),
-            None => bar,
-        });
-    }
-    if app.restart_bar_visible() {
-        content = content.push(restart_prompt::bar());
+    if prompts == Prompts::Inline {
+        if let Some(t) = &app.toast {
+            content = content.push(widgets::toast_bar(t, app.toast_action.clone()));
+        }
+        if app.restart_bar_visible() {
+            content = content.push(restart_prompt::bar());
+        }
     }
     content = content.push(
         responsive(move |size| match app.screen {
