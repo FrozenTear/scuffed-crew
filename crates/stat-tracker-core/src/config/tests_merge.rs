@@ -51,9 +51,12 @@ fn assert_kept(text: &str, lines: &[&str]) {
     }
 }
 
+/// One named change to apply to a parsed config.
+type NamedEdit = (&'static str, Box<dyn Fn(&mut Config)>);
+
 #[test]
 fn comments_survive_every_kind_of_change() {
-    let edits: Vec<(&str, Box<dyn Fn(&mut Config)>)> = vec![
+    let edits: Vec<NamedEdit> = vec![
         (
             "replace root values",
             Box::new(|c| {

@@ -1117,12 +1117,14 @@ mod tests {
 
     #[test]
     fn values_the_form_normalises_are_not_changes() {
-        let mut hand = Config::default();
-        hand.capture_output = Some(String::new());
-        hand.sync = Some(stat_tracker::config::SyncConfig {
-            server_url: "http://crew.example".into(),
-            token: "t".into(),
-        });
+        let hand = Config {
+            capture_output: Some(String::new()),
+            sync: Some(stat_tracker::config::SyncConfig {
+                server_url: "http://crew.example".into(),
+                token: "t".into(),
+            }),
+            ..Config::default()
+        };
         let saved = as_form_would_save(&hand);
         assert_eq!(changes_waiting(&hand, &saved), 0);
     }

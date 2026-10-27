@@ -256,8 +256,10 @@ mod tests {
     }
 
     fn file_and_shown(file_token: Option<&str>, env: (&str, &str)) -> (Config, Config) {
-        let mut file = Config::default();
-        file.sync = file_token.and_then(sync);
+        let file = Config {
+            sync: file_token.and_then(sync),
+            ..Config::default()
+        };
         let mut shown = file.clone();
         shown.sync = Some(SyncConfig {
             server_url: env.0.into(),
