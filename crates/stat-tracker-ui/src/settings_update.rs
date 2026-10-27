@@ -104,9 +104,12 @@ pub struct PageState {
     /// The baseline is the default config because config.toml did not
     /// parse at launch. The first read that works replaces it.
     baseline_unknown: bool,
-    /// Our own Restart or Start just worked. The next new pid is that
-    /// run's, not a restart from elsewhere, so it leaves the baseline alone.
-    ours_started: bool,
+    /// Our own Restart or Start just worked: `Some` holds the pid seen
+    /// when it finished. The first new pid after that is the run's, not a
+    /// restart from elsewhere, so it leaves the baseline alone. If the pid
+    /// goes to none instead, the run ended before its pid was seen, and
+    /// the next pid is not ours.
+    ours_started: Option<Option<u32>>,
     /// The config saved when a Restart or Start began. It becomes the
     /// baseline when that run succeeds, so a change made while it ran
     /// still counts as waiting.
@@ -146,7 +149,7 @@ impl PageState {
             chip_draft: None,
             restart_baseline: saved,
             baseline_unknown: false,
-            ours_started: false,
+            ours_started: None,
             restart_pending: None,
             seen_pid: pid,
             reader_pending: None,
@@ -202,7 +205,7 @@ impl PageState {
         {
             self.restart_baseline = started;
             self.baseline_unknown = false;
-            self.ours_started = true;
+            self.ours_started = Some(self.seen_pid);
         }
     }
 
@@ -210,12 +213,18 @@ impl PageState {
     /// ours loaded the saved config. Called after every refresh. The pid
     /// our own run produced moves nothing, whether it shows at once or on a
     /// later tick, so a change saved while that run started still waits.
+    /// A run of ours that exits before its pid is seen is no longer
+    /// awaited, so a later start from elsewhere moves the baseline.
     pub fn observe_tracker(&mut self, pid: Option<u32>, saved: &Config) {
         if self.restart_pending.is_some() || pid == self.seen_pid {
             return;
         }
         self.seen_pid = pid;
-        if pid.is_none() || std::mem::take(&mut self.ours_started) {
+        let ours = self
+            .ours_started
+            .take()
+            .is_some_and(|at_done| pid.is_some() && pid != at_done);
+        if pid.is_none() || ours {
             return;
         }
         self.restart_baseline = saved.clone();
@@ -767,6 +776,26 @@ mod tests {
         assert_eq!(app.changes_waiting(), 1);
         // A restart from elsewhere after that loads what is saved.
         app.page_state.observe_tracker(Some(43), &app.saved_config);
+        assert_eq!(app.changes_waiting(), 0);
+    }
+
+    /// Through the real messages: our Restart's tracker exits before its
+    /// pid is seen, so the next tracker is a start from elsewhere and
+    /// loads what is saved.
+    #[test]
+    fn a_run_of_ours_that_exits_unseen_is_not_awaited() {
+        use crate::daemon::DaemonVerb;
+        let (_dir, mut app) = live_app();
+        app.page_state.observe_tracker(Some(7), &app.saved_config);
+        let _ = app.update(Message::Daemon(DaemonVerb::Restart));
+        let _ = app.update(page(Msg::Edit(ConfigEdit::FrameRate(Some(2)))));
+        // The refresh in DaemonDone finds no tracker: the run is gone.
+        let _ = app.update(Message::DaemonDone(Ok("Tracker restarted".into())));
+        assert_eq!(app.daemon.pid, None);
+        assert_eq!(app.changes_waiting(), 1);
+        assert_eq!(app.page_state.ours_started, None);
+        // A tracker started elsewhere loads the saved change.
+        app.page_state.observe_tracker(Some(9), &app.saved_config);
         assert_eq!(app.changes_waiting(), 0);
     }
 
