@@ -206,7 +206,7 @@ enum GameView<'a> {
 }
 
 fn game_view<'a>(id: &str, row: Option<&'a GameRow>, error: Option<&str>) -> GameView<'a> {
-    if game_path(id).is_none() {
+    if is_dot_segment(id) {
         return GameView::Missing;
     }
     match (row, error) {
