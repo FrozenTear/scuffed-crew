@@ -53,6 +53,8 @@ pub fn clear_edited_suspects(fields: &mut Vec<String>, storage_field: &str) {
     });
 }
 
+/// The flat suspect names (`e`, `dmg`, `map`, ...) that a hand edit of
+/// `storage_field` fixes. Empty for a field the reader never marks.
 pub fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
     match storage_field {
         "hero" => &["hero"],
@@ -68,6 +70,8 @@ pub fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
     }
 }
 
+/// `name` as a flat suspect name: itself when it already is one, the
+/// field of an older `rN.field` row name, or None for anything else.
 pub fn flat_suspect_name(name: &str) -> Option<&str> {
     if SUSPECT_FIELD_NAMES.contains(&name) {
         return Some(name);
