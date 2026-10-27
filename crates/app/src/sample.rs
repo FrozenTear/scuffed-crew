@@ -159,6 +159,7 @@ pub fn list_result(games: u32, wins: u32, losses: u32, draws: u32, winrate: f32)
         let rebuilt = (f64::from(winrate) * f64::from(games))
             .round()
             .clamp(0.0, f64::from(games)) as u32;
+        // Every non-win is stored as a loss on purpose so decided() equals games, not real losses.
         Tally::new(games, rebuilt, games - rebuilt, 0)
     };
     let muted = tally.folds_away();
