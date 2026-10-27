@@ -53,9 +53,6 @@ pub fn clear_edited_suspects(fields: &mut Vec<String>, storage_field: &str) {
     });
 }
 
-/// The flat suspect names a manual edit of `storage_field` (`elims`,
-/// `map_name`, ...) settles: `damage` is `dmg`, `map_name` is `map` and
-/// `mode`. Empty for a field with no suspect name.
 pub fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
     match storage_field {
         "hero" => &["hero"],
@@ -71,8 +68,6 @@ pub fn suspect_names_for_edit(storage_field: &str) -> &'static [&'static str] {
     }
 }
 
-/// The flat name of a stored suspect name: `dmg` stays `dmg`, a row name
-/// such as `r3.dmg` becomes `dmg`. `None` for a name off the allowlist.
 pub fn flat_suspect_name(name: &str) -> Option<&str> {
     if SUSPECT_FIELD_NAMES.contains(&name) {
         return Some(name);
