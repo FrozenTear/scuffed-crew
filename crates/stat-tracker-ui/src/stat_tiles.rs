@@ -4,7 +4,7 @@
 //!
 //! One shared component for the Games expanded row and the Overview's
 //! newest game. Callers use [`row`] only, so Tracker's shared tiles from
-//! #556 can replace this module whole.
+//! the Games PR can replace this module whole.
 
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, column, container, image, text};
