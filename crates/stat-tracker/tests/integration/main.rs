@@ -38,6 +38,7 @@ mod real_dim_zero_cells;
 mod result_signal_wiring;
 mod run_marker_sigterm;
 mod team_size_fixtures;
+mod tess_engine;
 mod vision_baseline_fixtures;
 
 /// A file in this folder without a `mod` line is never compiled, and a new
