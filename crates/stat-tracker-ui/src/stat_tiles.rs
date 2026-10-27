@@ -1,0 +1,122 @@
+//! The six flat stat tiles (spec p1 and p2): E, D, A, DMG, HEAL and MIT,
+//! each with its label and value, and an amber outline with "⚠ UNSURE" on
+//! a value the reader was not sure of and no hand edit has fixed since.
+//!
+//! One shared component for the Games expanded row and the Overview's
+//! newest game. Callers use [`row`] only, so Tracker's shared tiles from
+//! #556 can replace this module whole.
+
+use iced::widget::{Row, column, container, image, text};
+use iced::{Alignment, Background, Border, Element, Padding, Theme};
+
+use crate::app::Message;
+use crate::icons::{self, Icon};
+use crate::model::Game;
+use crate::theme::{self, BORDER, FONT_BOLD, SIZE_LABEL, TEXT, TEXT_3};
+
+/// The six stat tiles: label, the field the reader marks, and the value.
+const TILES: [(&str, &str); 6] = [
+    ("E", "elims"),
+    ("D", "deaths"),
+    ("A", "assists"),
+    ("DMG", "damage"),
+    ("HEAL", "healing"),
+    ("MIT", "mitigation"),
+];
+
+/// The six tiles for `g`, wrapping on a narrow page.
+pub fn row(g: &Game) -> Element<'static, Message> {
+    let mut tiles = Row::new().spacing(8);
+    for (label, field) in TILES {
+        tiles = tiles.push(tile(label, stat(g, field), unsure_now(g, field)));
+    }
+    tiles.wrap().into()
+}
+
+/// A field the reader was unsure of that no hand edit has fixed since.
+pub fn unsure_now(g: &Game, field: &str) -> bool {
+    g.field_unsure(field) && !g.edited_fields.iter().any(|e| e == field)
+}
+
+fn stat(g: &Game, field: &str) -> u32 {
+    match field {
+        "elims" => g.elims,
+        "deaths" => g.deaths,
+        "assists" => g.assists,
+        "damage" => g.damage,
+        "healing" => g.healing,
+        _ => g.mitigation,
+    }
+}
+
+/// "8.9k" from 1000 up.
+pub fn short_num(n: u32) -> String {
+    if n >= 1000 {
+        format!("{:.1}k", f64::from(n) / 1000.0)
+    } else {
+        n.to_string()
+    }
+}
+
+/// A stat tile; an unsure one has an amber outline and "⚠ UNSURE".
+fn tile(label: &'static str, value: u32, unsure: bool) -> Element<'static, Message> {
+    let mut head = Row::new().spacing(4).align_y(Alignment::Center).push(
+        text(label)
+            .size(SIZE_LABEL)
+            .font(FONT_BOLD)
+            .color(if unsure { theme::WARN } else { TEXT_3 }),
+    );
+    if unsure {
+        head = head
+            .push(image(icons::handle(Icon::Warn)).width(10).height(10))
+            .push(
+                text("UNSURE")
+                    .size(SIZE_LABEL)
+                    .font(FONT_BOLD)
+                    .color(theme::WARN),
+            );
+    }
+    container(
+        column![
+            head,
+            text(short_num(value)).size(22).font(FONT_BOLD).color(TEXT)
+        ]
+        .spacing(4),
+    )
+    .padding(Padding::from([10, 14]))
+    .style(move |_: &Theme| container::Style {
+        background: Some(Background::Color(theme::BG)),
+        border: Border {
+            color: if unsure { theme::WARN } else { BORDER },
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numbers_shorten_from_a_thousand() {
+        assert_eq!(short_num(8_912), "8.9k");
+        assert_eq!(short_num(28), "28");
+    }
+
+    #[test]
+    fn a_hand_edit_settles_an_unsure_tile() {
+        let mut g = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ))
+        .remove(0);
+        g.suspect_fields = vec!["damage".into()];
+        g.edited_fields.clear();
+        assert!(unsure_now(&g, "damage"));
+        g.edited_fields = vec!["damage".into()];
+        assert!(!unsure_now(&g, "damage"));
+        let _ = row(&g);
+    }
+}

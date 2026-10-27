@@ -1,7 +1,7 @@
 //! The Overview's main column (spec p1): the latest session's card
 //! ("TONIGHT · 5 games · 4-1", its sparkline, "Since 23:31 · 1 h 21 min"),
 //! the newest game (mode, hero, role and time, the map, the result, the
-//! six stat tiles with UNSURE ones in amber), then "Earlier tonight" as
+//! six shared stat tiles from [`crate::stat_tiles`]), then "Earlier tonight" as
 //! compact rows. "Check" and a row open the game on Games.
 //!
 //! A session shows its record, never a win rate (small-sample rule).
@@ -16,6 +16,7 @@ use crate::icons::{self, Icon};
 use crate::model::{Game, Outcome, Role, Screen, game_card_in_progress};
 use crate::overview_page::Msg;
 use crate::session_bits::{day_part, span_line, sparkline};
+use crate::stat_tiles::unsure_now;
 use crate::theme::{
     self, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_LABEL,
     SIZE_META, TEXT, TEXT_2, TEXT_3,
@@ -24,16 +25,6 @@ use crate::widgets;
 
 /// No game in the filters at all.
 pub const EMPTY: &str = "No games yet. Press Tab in-game to capture the scoreboard.";
-
-/// The six stat tiles: label, the field the reader marks, and the value.
-const TILES: [(&str, &str); 6] = [
-    ("E", "elims"),
-    ("D", "deaths"),
-    ("A", "assists"),
-    ("DMG", "damage"),
-    ("HEAL", "healing"),
-    ("MIT", "mitigation"),
-];
 
 /// "TONIGHT" while the session is this evening's, else "LAST SESSION ·
 /// Sunday night".
@@ -138,11 +129,6 @@ pub fn record_line(record: &crate::aggregate::Record) -> String {
     }
 }
 
-/// A field the reader was unsure of that no hand edit has fixed since.
-pub fn unsure_now(g: &Game, field: &str) -> bool {
-    g.field_unsure(field) && !g.edited_fields.iter().any(|e| e == field)
-}
-
 /// "2 stats unsure", or `None`.
 pub fn unsure_label(g: &Game) -> Option<String> {
     match g.suspect_fields.iter().filter(|f| unsure_now(g, f)).count() {
@@ -194,10 +180,6 @@ fn newest_card(g: &Game, playing: bool) -> Element<'static, Message> {
         );
     }
 
-    let mut tiles = Row::new().spacing(8);
-    for (label, field) in TILES {
-        tiles = tiles.push(tile(label, stat(g, field), unsure_now(g, field)));
-    }
     let stripe = if playing {
         theme::ACCENT
     } else {
@@ -219,7 +201,7 @@ fn newest_card(g: &Game, playing: bool) -> Element<'static, Message> {
                     .font(FONT_EXTRABOLD)
                     .color(TEXT),
                 result,
-                tiles.wrap(),
+                crate::stat_tiles::row(g),
             ]
             .spacing(10)
             .padding(Padding::from([18, 20])),
@@ -229,64 +211,6 @@ fn newest_card(g: &Game, playing: bool) -> Element<'static, Message> {
     .width(Fill)
     .clip(true)
     .style(theme::surface_panel)
-    .into()
-}
-
-fn stat(g: &Game, field: &str) -> u32 {
-    match field {
-        "elims" => g.elims,
-        "deaths" => g.deaths,
-        "assists" => g.assists,
-        "damage" => g.damage,
-        "healing" => g.healing,
-        _ => g.mitigation,
-    }
-}
-
-/// "8.9k" from 1000 up.
-pub fn short_num(n: u32) -> String {
-    if n >= 1000 {
-        format!("{:.1}k", f64::from(n) / 1000.0)
-    } else {
-        n.to_string()
-    }
-}
-
-/// A stat tile; an unsure one has an amber outline and "⚠ UNSURE".
-fn tile(label: &'static str, value: u32, unsure: bool) -> Element<'static, Message> {
-    let mut head = Row::new().spacing(4).align_y(Alignment::Center).push(
-        text(label)
-            .size(SIZE_LABEL)
-            .font(FONT_BOLD)
-            .color(if unsure { theme::WARN } else { TEXT_3 }),
-    );
-    if unsure {
-        head = head
-            .push(image(icons::handle(Icon::Warn)).width(10).height(10))
-            .push(
-                text("UNSURE")
-                    .size(SIZE_LABEL)
-                    .font(FONT_BOLD)
-                    .color(theme::WARN),
-            );
-    }
-    container(
-        column![
-            head,
-            text(short_num(value)).size(22).font(FONT_BOLD).color(TEXT)
-        ]
-        .spacing(4),
-    )
-    .padding(Padding::from([10, 14]))
-    .style(move |_: &Theme| container::Style {
-        background: Some(Background::Color(theme::BG)),
-        border: Border {
-            color: if unsure { theme::WARN } else { BORDER },
-            width: 1.0,
-            radius: 10.0.into(),
-        },
-        ..container::Style::default()
-    })
     .into()
 }
 
@@ -561,8 +485,6 @@ mod tests {
 
     #[test]
     fn numbers_and_modes_read_like_the_spec() {
-        assert_eq!(short_num(8_912), "8.9k");
-        assert_eq!(short_num(28), "28");
         assert_eq!(mode_of("King's Row"), Some("Hybrid"));
         assert_eq!(mode_of(""), None);
         assert_eq!(role_label(Role::Support), Some("SUPPORT"));

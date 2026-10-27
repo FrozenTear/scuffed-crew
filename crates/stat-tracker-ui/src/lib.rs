@@ -69,6 +69,7 @@ pub mod settings_save;
 pub mod settings_update;
 pub mod setup_guide;
 pub mod snapshot;
+mod stat_tiles;
 pub mod theme;
 pub mod tracker_status;
 pub mod tray;
