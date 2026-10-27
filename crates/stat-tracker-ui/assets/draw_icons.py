@@ -6,10 +6,17 @@ Run from this folder with Pillow installed:
 
 It writes tab-icons/overview.png (four rounded squares spanning 14 of the
 16 px box, as in the spec; a white alpha mask the GUI tints), warn.png
-(the chip's warning sign, 12 px), and for the Settings page check.png (the
-status strip's check in a circle, 14 px), lock.png (the env lock, 12 px)
-and fold-open.png / fold-closed.png (the ADVANCED row chevrons, 14 px). Each is drawn at 2x for a 1x box, from an
-8x supersampled mask, so a rerun gives the same files.
+(the chip's warning sign, 12 px), and for the Settings page check.png
+(the status strip's check in a circle, 14 px), lock.png (the env lock,
+12 px) and fold-open.png / fold-closed.png (the ADVANCED row chevrons,
+14 px). Each is drawn at 2x for a 1x box, from an 8x supersampled mask,
+so a rerun gives the same files.
+
+The other five tab masks (games, heroes, maps, seasons, settings) are not
+drawn here. They were rasterised once at 2x (32 x 32, white on alpha)
+from the stroke SVG paths in the 0.6 design spec, which is not in this
+repository, so this script cannot redraw them. A replacement is any
+32 x 32 white alpha mask in the same style.
 """
 
 from PIL import Image, ImageDraw
