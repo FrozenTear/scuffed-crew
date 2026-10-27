@@ -21,7 +21,8 @@ use super::history::{cell_is_unsure, marked_value, outcome_class, show_new_reade
 use super::role::game_role_label;
 use super::{format_date, map_game_mode, member_stats_url};
 
-/// One of the member's own games. The id goes in as one encoded path segment.
+/// Base path for the member's own games. `game_path` appends the id to it as
+/// one encoded path segment.
 const MY_MATCHES_PATH: &str = "/api/stats/me/matches";
 
 const EDITED_BADGE: &str = "Edited";
@@ -434,6 +435,10 @@ mod tests {
             Some("/api/stats/me/matches/a%2Fb%20c")
         );
         assert_eq!(
+            game_path("a?b#c%d").as_deref(),
+            Some("/api/stats/me/matches/a%3Fb%23c%25d")
+        );
+        assert_eq!(
             game_path("a.b").as_deref(),
             Some("/api/stats/me/matches/a.b")
         );
@@ -461,6 +466,10 @@ mod tests {
         assert_eq!(game_view("a", Some(&game), None), GameView::Found(&game));
         assert_eq!(
             game_view("a", None, Some("HTTP error 404: Match not found")),
+            GameView::Missing
+        );
+        assert_eq!(
+            game_view("a", None, Some("HTTP error: 404")),
             GameView::Missing
         );
         for err in [
