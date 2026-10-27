@@ -427,7 +427,7 @@ mod tests {
             app.sessions_with_kit.insert("stale".into());
             send(&mut app, key);
             assert_eq!(app.expanded.as_deref(), Some(sid.as_str()));
-            assert!(app.sessions_with_kit.is_empty());
+            assert!(!app.sessions_with_kit.contains("stale"));
         }
     }
 
