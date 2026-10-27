@@ -40,7 +40,11 @@ the check passes only when, for every entry:
 6. no other file under `crates/stat-tracker` changed or appeared: unmoved
    tests, tests an earlier set A PR moved, `ocr_bench.rs`, `main.rs` and the
    daemon sources stay byte-identical to the base. A change to these scripts
-   is only noted: run the base's copies (`git show BASE:path`) then.
+   is only noted: run the base's copies (`git show BASE:path`) then. The
+   one exception is `src/tests_file_size.rs` (G1), checked on every run: a
+   moved capped file takes its cap with it at the same value, the
+   `main_tests/mod.rs` cap drops by exactly the number of moved files (one
+   `mod` line each), and the list stays sorted.
 
 At head, no string literal in a `.rs` file under `crates/stat-tracker/src`,
 and no line in `.github/workflows`, may still name a test under a mapped old
@@ -160,9 +164,11 @@ def diff(a, b, a_name, b_name, limit=40):
 CAP_ENTRY = re.compile(r'^    \("([^"]+)", (\d+)\),$')
 
 
-def caps_moved_only(base_text, head_text, renames):
+def caps_moved_only(base_text, head_text, renames, hub_drop=0):
     """None when `head_text` is `base_text` with the `CAPS` entries of moved
-    files renamed (same cap values) and the list still sorted; else why not."""
+    files renamed (same cap values), the `main_tests/mod.rs` cap (when listed)
+    lowered by exactly `hub_drop` (the `mod` lines a move removes from it),
+    and the list still sorted; else why not."""
     if base_text is None:
         return "not in the base"
 
@@ -181,9 +187,16 @@ def caps_moved_only(base_text, head_text, renames):
     head_caps, head_rest = split(head_text)
     if base_rest != head_rest:
         return "changed outside the CAPS entries"
-    want = sorted((renames.get(path, path), cap) for path, cap in base_caps)
+    hub = "stat-tracker/src/main_tests/mod.rs"
+    want = sorted(
+        (renames.get(path, path), cap - hub_drop if path == hub else cap)
+        for path, cap in base_caps
+    )
     if head_caps != want:
-        return "CAPS is not the base list with the moved paths renamed, at the same caps, sorted"
+        return (
+            "CAPS is not the base list with the moved paths renamed at the same caps, "
+            f"main_tests/mod.rs lowered by {hub_drop}, and sorted"
+        )
     return None
 
 
@@ -363,6 +376,7 @@ def main():
         at_base(root, args.base, caps_rel),
         (root / caps_rel).read_text(encoding="utf-8"),
         renames,
+        hub_drop=len(moves),
     )
     if problem:
         errors.append(f"{caps_rel}: {problem}")
