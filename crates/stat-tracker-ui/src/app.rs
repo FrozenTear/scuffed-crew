@@ -987,16 +987,16 @@ impl TrackerApp {
                         .map(|g| crate::commands::save_edit(&self.data_dir, g, &self.edit))
                 });
                 if let Some(sid) = sid {
-                    match saved {
+                    match &saved {
                         Some(Ok(msg)) => {
-                            self.replace_toast(msg);
+                            self.replace_toast(*msg);
                             self.arm_training_toast(&sid, crate::report::GameCategory::WrongStats);
                         }
-                        Some(Err(e)) => self.replace_toast(e),
+                        Some(Err(e)) => self.replace_toast(e.clone()),
                         None => {}
                     }
                 }
-                self.editing = false;
+                self.editing = matches!(saved, Some(Err(_)));
                 Task::none()
             }
             Message::PickMap { session_id, map } => {
@@ -2397,7 +2397,7 @@ impl TrackerApp {
             if mtime != self.snapshot_mtime {
                 self.snapshot_mtime = mtime;
                 let snap = snapshot::load_snapshot(&self.data_dir);
-                self.games = games_from_snapshot(&snap);
+                self.games = self.games_tab.games_from(&snap);
                 self.refresh_kit_sessions();
                 self.live_status = crate::tracker_status::classic_live_status(&self.games);
                 self.refresh_health();

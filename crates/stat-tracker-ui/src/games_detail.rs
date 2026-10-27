@@ -3,7 +3,7 @@
 //! corrected values and the upload and reader status. No iced here; the
 //! panel module draws it.
 
-use crate::model::{Game, SegmentView};
+use crate::model::{Game, Outcome, SegmentView};
 
 /// Per-tile deltas start at this many games on the hero (the spec's one
 /// 10-game threshold). Fewer gets one "Too few games" caption.
@@ -128,8 +128,12 @@ pub fn read_vs_set_line(stat: Stat, read: u32, set: u32) -> String {
     )
 }
 
+/// The one caption while the hero is unknown: no deltas (UX Spec).
+pub const AVG_HERO_UNSET: &str = "vs avg: shown once the hero is set.";
+
 /// The player's averages on one hero.
 #[derive(Debug, Clone, PartialEq)]
+
 pub struct Averages {
     pub hero: String,
     /// Games on the hero up to this one, this one included.
@@ -482,6 +486,9 @@ pub enum Upload {
     InProgress,
     /// No website linked: games stay on this computer.
     SyncOff,
+    /// Ended with no result. The uploader skips it (and may mark the row
+    /// synced without sending it) until a result is picked.
+    Undecided,
 }
 
 /// The game's upload state. `in_progress` is the open session, and
@@ -490,17 +497,23 @@ pub fn upload(g: &Game, in_progress: bool, sync_on: bool) -> Upload {
     if let Some(msg) = g.upload_reject.as_deref() {
         return Upload::Rejected(msg.to_string());
     }
+    let missing = g.review_fields();
+    let held = match (missing.contains(&"map"), missing.contains(&"hero")) {
+        (true, true) => Some("map and hero"),
+        (true, false) => Some("map"),
+        (false, true) => Some("hero"),
+        (false, false) => None,
+    };
+    // An ended game with no result was never sent, whatever `synced` says:
+    // the daemon marks such a row synced without uploading it.
+    if g.outcome == Outcome::Unknown && !in_progress && sync_on {
+        return held.map_or(Upload::Undecided, Upload::Held);
+    }
     if g.synced {
         return Upload::Uploaded;
     }
-    let missing = g.review_fields();
-    let (map, hero) = (missing.contains(&"map"), missing.contains(&"hero"));
-    if map || hero {
-        return Upload::Held(match (map, hero) {
-            (true, true) => "map and hero",
-            (true, false) => "map",
-            _ => "hero",
-        });
+    if let Some(what) = held {
+        return Upload::Held(what);
     }
     if in_progress {
         Upload::InProgress
@@ -520,6 +533,7 @@ impl Upload {
             Upload::Held(_) => "Needs a look",
             Upload::InProgress => "Game in progress",
             Upload::SyncOff => "Not uploading",
+            Upload::Undecided => "Not uploaded",
         }
     }
 
@@ -530,14 +544,20 @@ impl Upload {
             Upload::Waiting => format!("Read by {recognizer} · sends when the server answers"),
             Upload::Rejected(msg) => format!("Server: {msg}"),
             Upload::Held(what) => {
+                let (verb, it) = match *what {
+                    "map" => ("is", "the map"),
+                    "hero" => ("is", "the hero"),
+                    _ => ("are", "them"),
+                };
                 format!(
-                    "The {what} is missing. This game stays on this computer until you set it with Edit."
+                    "The {what} {verb} missing. This game stays on this computer until you set {it}."
                 )
             }
             Upload::InProgress => format!("Read by {recognizer} · sends after the game ends"),
             Upload::SyncOff => {
                 "Only on this computer · sign in to the website in Settings to upload".into()
             }
+            Upload::Undecided => "No result yet · it uploads once you pick one".into(),
         }
     }
 
@@ -785,6 +805,35 @@ mod tests {
         assert_eq!(read_vs_set(&g, Stat::D), None);
     }
 
+    /// An ended game with no result reads as not uploaded even when the
+    /// daemon marked its row synced without sending it; a live one, or a
+    /// held one, keeps its own state.
+    #[test]
+    fn an_undecided_game_never_reads_uploaded() {
+        let mut g = game("g", "Wrecking Ball", 24, 1, at(20, 0, 0));
+        g.outcome = Outcome::Unknown;
+        g.synced = true;
+        assert_eq!(upload(&g, false, true), Upload::Undecided);
+        assert_eq!(upload(&g, false, true).title(), "Not uploaded");
+        assert_eq!(
+            upload(&g, false, true).detail(""),
+            "No result yet · it uploads once you pick one"
+        );
+        assert_eq!(
+            upload(&g, false, false),
+            Upload::Uploaded,
+            "sync off: unchanged"
+        );
+        g.synced = false;
+        assert_eq!(upload(&g, true, true), Upload::InProgress);
+        g.map_name.clear();
+        assert_eq!(upload(&g, false, true), Upload::Held("map"));
+        g.map_name = "Ilios".into();
+        g.outcome = Outcome::Win;
+        g.synced = true;
+        assert_eq!(upload(&g, false, true), Upload::Uploaded);
+    }
+
     #[test]
     fn upload_status_lines() {
         let mut g = game("g", "Wrecking Ball", 24, 1, at(20, 0, 0));
@@ -831,12 +880,20 @@ mod tests {
         assert_eq!(u.title(), "Needs a look");
         assert_eq!(
             u.detail(""),
-            "The map is missing. This game stays on this computer until you set it with Edit."
+            "The map is missing. This game stays on this computer until you set the map."
         );
         g.hero = "Unknown".into();
         assert_eq!(upload(&g, false, false), Upload::Held("map and hero"));
+        assert_eq!(
+            upload(&g, false, true).detail(""),
+            "The map and hero are missing. This game stays on this computer until you set them."
+        );
         g.map_name = "Ilios".into();
         assert_eq!(upload(&g, true, true), Upload::Held("hero"));
+        assert_eq!(
+            upload(&g, false, true).detail(""),
+            "The hero is missing. This game stays on this computer until you set the hero."
+        );
         g.hero = "Mei".into();
         assert_eq!(upload(&g, false, true), Upload::Waiting);
     }

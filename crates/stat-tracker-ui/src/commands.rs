@@ -97,9 +97,7 @@ pub fn save_edit(
         edit.map_name = (map != game.map_name).then_some(map);
     }
     if let Some(typed) = edit.hero.take() {
-        let hero = scuffed_types::HEROES
-            .iter()
-            .find(|h| h.eq_ignore_ascii_case(typed.trim()))
+        let hero = hero_from_typed(&typed)
             .ok_or_else(|| format!("Hero not found: {typed}. Type a hero name like Ana"))?;
         edit.hero = (*hero != game.hero).then(|| hero.to_string());
     }
@@ -111,6 +109,18 @@ pub fn save_edit(
         "Saved. A map or hero is still missing, so this game stays on this computer."
     } else {
         "Stats corrected"
+    })
+}
+
+/// The HEROES name a typed hero means. Case, punctuation and accents fold
+/// the way the reader's keys do ([`scuffed_types::hero_key_to_name`]), so
+/// "soldier 76", "dva", "Lúcio" and "Torbjörn" all find their hero.
+fn hero_from_typed(typed: &str) -> Option<&'static str> {
+    let typed = typed.trim();
+    let want = scuffed_types::hero_key_to_name(typed);
+    scuffed_types::HEROES.iter().copied().find(|h| {
+        h.eq_ignore_ascii_case(typed)
+            || want.is_some_and(|w| scuffed_types::hero_key_to_name(h) == Some(w))
     })
 }
 
@@ -255,6 +265,45 @@ mod tests {
                 .unwrap_err()
                 .starts_with("Hero not found")
         );
+    }
+
+    /// A refused map keeps the Edit form open with what was typed, so the
+    /// stat fixes typed with it are not lost; a good save closes it.
+    #[test]
+    fn a_refused_edit_keeps_the_form_and_what_was_typed() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let mut g = sample_game();
+        g.session_id = "sess-edit".into();
+        app.games = vec![g.clone()];
+        app.expanded = Some(g.session_id.clone());
+        let _ = app.update(crate::app::Message::ToggleEdit);
+        assert!(app.editing);
+        app.edit.map_name = "Not A Real Place".into();
+        app.edit.elims = "21".into();
+        let _ = app.update(crate::app::Message::SaveEdit);
+        assert!(app.editing, "the form stays open on a refused map");
+        assert_eq!(app.edit.map_name, "Not A Real Place");
+        assert_eq!(app.edit.elims, "21");
+        app.edit.map_name = "Ilios".into();
+        let _ = app.update(crate::app::Message::SaveEdit);
+        assert!(!app.editing, "a good save closes the form");
+    }
+
+    /// The reader's own spellings find the hero, stored as HEROES has it.
+    #[test]
+    fn a_typed_hero_folds_case_punctuation_and_accents() {
+        for (typed, want) in [
+            ("soldier 76", "Soldier: 76"),
+            ("dva", "D.Va"),
+            ("Lúcio", "Lucio"),
+            ("Torbjörn", "Torbjorn"),
+            ("wrecking-ball", "Wrecking Ball"),
+        ] {
+            let stored = hero_from_typed(typed);
+            assert_eq!(stored, Some(want), "{typed}");
+            assert!(scuffed_types::HEROES.contains(&want), "{want}");
+        }
+        assert_eq!(hero_from_typed("Nobody"), None);
     }
 
     /// A stat edit on a held game saves, and says the game stays local.
