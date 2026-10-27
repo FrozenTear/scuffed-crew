@@ -145,6 +145,11 @@ OPTIONS:
   -V, --version         Print the tracker version and exit
   --build-id            Print this app's build id and exit (an update that
                         changes it asks a running window to restart)
+
+ENVIRONMENT:
+  SCUFFED_TRACKER_LAYOUT=classic
+                        Start the 0.5 layout (sidebar and the old Settings
+                        page with Save). Unset or tabs: the 0.6 top tabs.
 "
     }
 }
@@ -175,5 +180,12 @@ mod tests {
         assert!(super::wants_build_id(["--replace", "--build-id"]));
         assert!(!super::wants_build_id(["--version", "--help"]));
         assert!(Cli::help_text().contains("--build-id"));
+    }
+
+    #[test]
+    fn help_names_the_layout_switch() {
+        let help = Cli::help_text();
+        assert!(help.contains("ENVIRONMENT:"));
+        assert!(help.contains(&format!("{}=classic", crate::nav::LAYOUT_ENV)));
     }
 }

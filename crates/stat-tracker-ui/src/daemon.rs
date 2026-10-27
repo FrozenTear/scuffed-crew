@@ -24,6 +24,14 @@ pub enum DaemonVerb {
     Restart,
 }
 
+impl DaemonVerb {
+    /// The tracker this verb leaves running loads the config saved when it
+    /// began, so the Settings strip's changes waiting move to it.
+    pub fn applies_saved_config(self) -> bool {
+        matches!(self, DaemonVerb::Start | DaemonVerb::Restart)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DaemonView {
     pub pid: Option<u32>,
@@ -638,6 +646,13 @@ pub async fn toggle_autostart(currently_enabled: bool) -> Result<String, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn start_and_restart_load_the_saved_config_and_stop_does_not() {
+        assert!(DaemonVerb::Start.applies_saved_config());
+        assert!(DaemonVerb::Restart.applies_saved_config());
+        assert!(!DaemonVerb::Stop.applies_saved_config());
+    }
 
     #[test]
     fn comm_identity_matches_daemon_rule() {

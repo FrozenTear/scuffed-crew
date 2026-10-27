@@ -1,7 +1,7 @@
 //! Server seasons: fetch / cache / selection / Seasons screen (design §4.4, §5).
 //!
 //! `GET /api/public/seasons` on launch and every 30 minutes. Cached to
-//! `<data_dir>/seasons.json`. Header selection persists in `<data_dir>/ui_state.json`.
+//! `<data_dir>/seasons.json`. The season choice persists in `<data_dir>/ui_state.json`.
 //! Fixture mode never hits the network. Aggregation is half-open
 //! `starts_at <= played_at < ends_at` (UTC), same as the website.
 
@@ -18,7 +18,7 @@ use crate::aggregate::{Record, SeasonWindow, aggregate};
 use crate::app::{Message, TrackerApp};
 use crate::hotkey::{self, OverlayHotkey};
 use crate::layout::seasons_columns;
-use crate::model::{Game, SeasonSel};
+use crate::model::{Game, Screen, SeasonSel};
 use crate::theme::{
     FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, GRID_GAP, SIZE_FEATURED, SIZE_META, SIZE_TITLE, TEXT,
     TEXT_2, TEXT_3,
@@ -59,6 +59,10 @@ struct UiStateFile {
     /// Missing → on. The overlay stays click-through; this is an evdev bind.
     #[serde(default)]
     overlay_hotkey_enabled: Option<bool>,
+    /// "Show Companion during games" on the 0.6 Settings page. Missing →
+    /// on. Off keeps the Companion closed whatever the per-game toggle says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion_during_games: Option<bool>,
     /// Tracker version whose in-app notes were last closed. Missing on the
     /// first launch, so the notes open once. Install method does not matter:
     /// the GUI compares this with the version it is actually running.
@@ -156,6 +160,20 @@ pub fn save_overlay_hotkey(data_dir: &Path, hotkey: &OverlayHotkey) -> std::io::
     let mut file = read_ui_state_file(data_dir).unwrap_or_default();
     file.overlay_hotkey = Some(hotkey.bind.clone());
     file.overlay_hotkey_enabled = Some(hotkey.enabled);
+    write_ui_state_file(data_dir, &file)
+}
+
+/// Missing file or field → on.
+pub fn load_companion_during_games(data_dir: &Path) -> bool {
+    read_ui_state_file(data_dir)
+        .and_then(|f| f.companion_during_games)
+        .unwrap_or(true)
+}
+
+/// Other `ui_state.json` fields are left as they were.
+pub fn save_companion_during_games(data_dir: &Path, on: bool) -> std::io::Result<()> {
+    let mut file = read_ui_state_file(data_dir).unwrap_or_default();
+    file.companion_during_games = Some(on);
     write_ui_state_file(data_dir, &file)
 }
 
@@ -270,7 +288,7 @@ pub fn apply_fetched_seasons(existing: Vec<Season>, fetched: Vec<Season>) -> Vec
 
 pub fn format_window(starts_at: DateTime<Utc>, ends_at: DateTime<Utc>) -> String {
     format!(
-        "{} – {}",
+        "{} to {}",
         starts_at.format("%d %b %Y"),
         ends_at.format("%d %b %Y")
     )
@@ -321,15 +339,16 @@ fn system_time_to_utc(t: SystemTime) -> Option<DateTime<Utc>> {
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let rows = season_rows(&app.games, &app.seasons.seasons);
     let cols = seasons_columns(content_width);
-    let mut col = column![
-        text("Seasons").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),
+    let mut col = column![].spacing(GRID_GAP).width(Fill);
+    if let Some(title) = crate::nav::classic_title(app, Screen::Seasons) {
+        col = col.push(title);
+    }
+    col = col.push(
         text("Read-only. Seasons are managed on the website under /admin/seasons.")
             .size(SIZE_META)
             .font(FONT_MEDIUM)
             .color(TEXT_3),
-    ]
-    .spacing(GRID_GAP)
-    .width(Fill);
+    );
 
     if let Some(note) = last_refreshed_note(&app.seasons) {
         col = col.push(text(note).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3));
@@ -354,7 +373,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     col.into()
 }
 
-/// Maps grammar: name, featured WR, `N games · W–L`, muted window, win bar.
+/// Maps grammar: name, featured WR, `N games · W-L`, muted window, win bar.
 /// Undecided is appended only when some games have no outcome.
 pub fn season_card_line(record: &Record) -> String {
     let base = format!("{} · {}", record.games_label(), record.wl_label());
@@ -570,6 +589,21 @@ mod tests {
     }
 
     #[test]
+    fn companion_during_games_defaults_on_and_keeps_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_companion_during_games(dir.path()));
+        save_ui_state(dir.path(), &SeasonSel::Season("s5".into())).unwrap();
+        save_companion_during_games(dir.path(), false).unwrap();
+        assert!(!load_companion_during_games(dir.path()));
+        assert_eq!(
+            load_ui_state(dir.path()),
+            Some(SeasonSel::Season("s5".into()))
+        );
+        save_companion_during_games(dir.path(), true).unwrap();
+        assert!(load_companion_during_games(dir.path()));
+    }
+
+    #[test]
     fn ui_state_roundtrip_distinguishes_missing_from_all_time() {
         let dir = tmp("uistate");
         std::fs::create_dir_all(&dir).unwrap();
@@ -707,7 +741,7 @@ mod tests {
     fn format_window_utc_dates() {
         assert_eq!(
             format_window(ts(2026, 6, 24, 0), ts(2026, 9, 1, 0)),
-            "24 Jun 2026 – 01 Sep 2026"
+            "24 Jun 2026 to 01 Sep 2026"
         );
     }
 
@@ -719,7 +753,7 @@ mod tests {
             losses: 1,
             draws: 0,
         };
-        assert_eq!(season_card_line(&decided), "4 games · 3–1");
+        assert_eq!(season_card_line(&decided), "4 games · 3-1");
 
         let draws = Record {
             games: 5,
@@ -727,7 +761,7 @@ mod tests {
             losses: 2,
             draws: 1,
         };
-        assert_eq!(season_card_line(&draws), "5 games · 2–2–1");
+        assert_eq!(season_card_line(&draws), "5 games · 2-2-1");
 
         let mixed = Record {
             games: 62,
@@ -735,7 +769,7 @@ mod tests {
             losses: 15,
             draws: 0,
         };
-        assert_eq!(season_card_line(&mixed), "62 games · 10–15 · 37 undecided");
+        assert_eq!(season_card_line(&mixed), "62 games · 10-15 · 37 undecided");
     }
 
     #[test]

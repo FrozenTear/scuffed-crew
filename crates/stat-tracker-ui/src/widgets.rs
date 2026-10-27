@@ -28,40 +28,45 @@ pub fn app_header(app: &TrackerApp) -> Element<'_, Message> {
         .size(SIZE_FEATURED)
         .font(FONT_EXTRABOLD)
         .color(TEXT);
+    let status = crate::tracker_status::classic_status_for(app);
 
-    // Filters and the companion switch share a wrapping row. Status stays on
-    // the title line so a read-only indicator is not another control in that row.
-    let mut controls = Row::new().spacing(12).align_y(Alignment::Center);
-    if crate::seasons::show_season_picker(&app.seasons.seasons) {
-        controls = controls.push(season_switch(&app.seasons.seasons, &app.season));
-    }
-    controls = controls.push(role_chips(app.roles));
-    controls = controls.push(
-        row![
-            space().width(8),
-            overlay_toggle(app.overlay_showing(), app.game_running),
-        ]
-        .spacing(0)
-        .align_y(Alignment::Center),
-    );
-
+    // Status stays on the title line so a read-only indicator is not another
+    // control in the row below.
     column![
         row![
             title,
             space().width(Fill),
             status_stub(
                 &app.live_status,
-                header_status_color(header_status_for(app))
+                crate::tracker_status::classic_status_color(status)
             )
         ]
         .spacing(16)
         .align_y(Alignment::Center)
         .width(Fill),
-        controls.wrap(),
+        header_controls(app),
     ]
     .spacing(12)
     .width(Fill)
     .into()
+}
+
+/// The season switch, the role chips and the Companion switch in one
+/// wrapping row. The classic header and the 0.6 stats tabs both draw it.
+/// The first two filter the stats; the Companion switch shows or hides the
+/// in-game overlay.
+pub fn header_controls(app: &TrackerApp) -> Element<'_, Message> {
+    let mut controls = Row::new().spacing(12).align_y(Alignment::Center);
+    if crate::seasons::show_season_picker(&app.seasons.seasons) {
+        controls = controls.push(season_switch(&app.seasons.seasons, &app.season));
+    }
+    controls = controls.push(role_chips(app.roles));
+    controls = controls.push(
+        row![space().width(8), overlay_toggle(app.companion_chip()),]
+            .spacing(0)
+            .align_y(Alignment::Center),
+    );
+    controls.wrap().into()
 }
 
 pub fn sidebar(current: Screen) -> Element<'static, Message> {
@@ -198,10 +203,11 @@ fn filter_tray<'a>(chips: Element<'a, Message>) -> Element<'a, Message> {
         .into()
 }
 
-pub fn overlay_toggle(showing: bool, game_running: bool) -> Element<'static, Message> {
-    toggler(showing)
-        .label(crate::overlay::companion_copy(showing, game_running))
-        .on_toggle(|_| Message::ToggleOverlay)
+/// The Companion switch, drawn disabled while Settings turns it off.
+pub fn overlay_toggle(chip: crate::companion_gate::CompanionChip) -> Element<'static, Message> {
+    toggler(chip.showing)
+        .label(chip.label())
+        .on_toggle_maybe(chip.enabled.then_some(|_| Message::ToggleOverlay))
         .size(20)
         .text_size(SIZE_META)
         .font(FONT_SEMIBOLD)
@@ -210,71 +216,15 @@ pub fn overlay_toggle(showing: bool, game_running: bool) -> Element<'static, Mes
         .into()
 }
 
-/// What the Overview title-row dot is reporting. The label text stays the
-/// capture line (`Last game HH:MM` / `Waiting for a capture`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HeaderStatus {
-    /// Daemon is up and a capture is in progress (manual capture, or a live game).
-    Capturing,
-    /// Idle, or still waiting for the first capture.
-    Waiting,
-    /// Daemon is not running, or the last capture attempt errored.
-    Down,
-    /// Server returned 401/403 for the sync token.
-    TokenRejected,
-}
-
-#[derive(Debug, Clone, Copy)]
-pub struct HeaderStatusInput {
-    pub demo: bool,
-    pub daemon_running: bool,
-    pub capturing: bool,
-    pub game_running: bool,
-    pub sync_token_rejected: bool,
-    pub capture_error: bool,
-}
-
-pub fn classify_header_status(input: HeaderStatusInput) -> HeaderStatus {
-    if input.sync_token_rejected {
-        return HeaderStatus::TokenRejected;
-    }
-    if input.capture_error || (!input.demo && !input.daemon_running) {
-        return HeaderStatus::Down;
-    }
-    let live = input.capturing || (!input.demo && input.daemon_running && input.game_running);
-    if live {
-        HeaderStatus::Capturing
-    } else {
-        HeaderStatus::Waiting
-    }
-}
-
-pub fn header_status_color(status: HeaderStatus) -> Color {
-    match status {
-        HeaderStatus::Capturing => theme::OK,
-        // Waiting/idle is amber. Token rejection reuses that warning colour.
-        HeaderStatus::Waiting | HeaderStatus::TokenRejected => theme::WARN,
-        HeaderStatus::Down => theme::DANGER,
-    }
-}
-
-fn header_status_for(app: &TrackerApp) -> HeaderStatus {
-    let sync_token_rejected = app.saved_config.sync.as_ref().is_some_and(|sync| {
-        stat_tracker::sync::auth_pause_matches(&app.data_dir, &sync.server_url, &sync.token)
-    });
-    classify_header_status(HeaderStatusInput {
-        demo: app.fixture.is_some(),
-        daemon_running: app.daemon.running(),
-        capturing: app.capturing,
-        game_running: app.game_running,
-        sync_token_rejected,
-        capture_error: app.preview_error.is_some(),
-    })
-}
-
-/// Read-only capture indicator. Dot + text, no button chrome and no hover.
-/// The text is unchanged; only the dot colour follows [`HeaderStatus`].
-pub fn status_stub<'a>(live: &'a str, dot: Color) -> Element<'a, Message> {
+/// Read-only status indicator: a dot and one run of text, no button chrome
+/// and no hover. The caller picks both: the classic header passes its
+/// capture line and the 0.5 dot colour, the 0.6 Settings strip its words
+/// and dot from [`crate::tracker_status`]. The 0.6 top bar draws its own
+/// line with the time in a separate span ([`crate::nav`]).
+pub fn status_stub<'a>(
+    live: impl iced::widget::text::IntoFragment<'a>,
+    dot: Color,
+) -> Element<'a, Message> {
     row![
         container(space().width(8).height(8))
             .width(8)
@@ -344,14 +294,18 @@ pub fn toast_bar(msg: &str, action: Option<Message>) -> Element<'static, Message
     .into()
 }
 
-pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
+/// Card mark for a game that counts in the top bar's "need a look".
+pub const NEEDS_LOOK_MARK: &str = "needs a look";
+
+/// `in_progress`: the game is the open session ([`role_and_edited`]).
+pub fn featured_game_card(game: &Game, in_progress: bool) -> Element<'static, Message> {
     let stats = if game.has_stat_line() {
         Some(stat_line(game))
     } else {
         None
     };
     let body = column![
-        role_and_edited(game),
+        role_and_edited(game, in_progress),
         map_block(game, SIZE_FEATURED, FONT_EXTRABOLD),
         with_unsure(
             text(format!(
@@ -384,8 +338,8 @@ pub fn featured_game_card(game: &Game) -> Element<'static, Message> {
     )
 }
 
-pub fn compact_game_card(game: &Game) -> Element<'static, Message> {
-    compact_game_card_inner(game, false, false)
+pub fn compact_game_card(game: &Game, in_progress: bool) -> Element<'static, Message> {
+    compact_game_card_inner(game, false, in_progress)
 }
 
 pub fn compact_game_card_clickable(
@@ -405,7 +359,7 @@ fn compact_game_card_inner(
     in_progress: bool,
 ) -> Element<'static, Message> {
     let mut body = column![
-        role_and_edited(game),
+        role_and_edited(game, in_progress),
         map_block(game, SIZE_TITLE, FONT_BOLD),
         with_unsure(
             text(game.display_hero())
@@ -492,7 +446,7 @@ pub fn season_panel(
                 .font(FONT_EXTRABOLD)
                 .color(TEXT),
             text(format!(
-                "{}–{}–{}",
+                "{}-{}-{}",
                 record.wins, record.losses, record.draws
             ))
             .size(SIZE_BODY)
@@ -564,7 +518,7 @@ pub fn map_row(m: &MapAgg) -> Element<'static, Message> {
 
 /// Compact Maps-screen card. Surface + 4 px WR stripe (no role tint, a map
 /// is not a single role). Same hierarchy as [`hero_card`]: title, featured WR,
-/// games · W–L, FillPortion win bar.
+/// games · W-L, FillPortion win bar.
 pub fn map_card(m: &MapAgg) -> Element<'static, Message> {
     let wr = format!("{:.0}%", m.record.win_rate_pct());
     let body = column![
@@ -649,8 +603,7 @@ pub fn surface_stat_card(
 pub fn health_panel(
     status: &str,
     hint: Option<&str>,
-    overlay_showing: bool,
-    game_running: bool,
+    companion: crate::companion_gate::CompanionChip,
 ) -> Element<'static, Message> {
     let mut col = column![
         label_text("Tracker health"),
@@ -668,7 +621,7 @@ pub fn health_panel(
                 .color(TEXT_3),
         );
     }
-    container(col.push(overlay_toggle(overlay_showing, game_running)))
+    container(col.push(overlay_toggle(companion)))
         .padding(PAD_INNER)
         .width(Fill)
         .style(theme::surface_panel)
@@ -718,7 +671,7 @@ pub fn expanded_game_card<'a>(
         with_unsure(outcome_label(game.outcome), game.field_unsure("result"))
     };
     let mut body = column![
-        role_and_edited(game),
+        role_and_edited(game, in_progress),
         map_block(game, SIZE_TITLE, FONT_BOLD),
         with_unsure(
             text(format!(
@@ -1046,12 +999,16 @@ fn review_panel(game: &Game) -> Element<'static, Message> {
     col.into()
 }
 
-fn role_and_edited(game: &Game) -> Element<'static, Message> {
+/// Status chips over the map. `in_progress` is true for the open session,
+/// whose missing result is not a reason to look ([`Game::needs_look`]).
+fn role_and_edited(game: &Game, in_progress: bool) -> Element<'static, Message> {
     // The role sits next to the hero name below; here it read like a
     // label for the map.
     let mut r = row![].spacing(8).align_y(Alignment::Center);
-    if game.held_locally() {
-        r = r.push(status_chip("needs review", theme::WARN));
+    // One word with the bar's chip: a game held back for a missing map or
+    // hero needs a look too (`needs_look` covers it).
+    if game.needs_look(in_progress) {
+        r = r.push(status_chip(NEEDS_LOOK_MARK, theme::WARN));
     }
     if game.edited {
         r = r.push(status_chip("edited", theme::WARN));
@@ -1258,7 +1215,7 @@ fn format_stat(n: u32) -> String {
     }
 }
 
-/// Fill / rest portions for a 0–1 win rate. Portions go on the *containers*
+/// Fill / rest portions for a 0-1 win rate. Portions go on the *containers*
 /// (not Shrink-wrapped `space()` children) or the bar stays ~50/50.
 pub fn win_bar_portions(rate: f32) -> (u16, u16) {
     let fill = (rate.clamp(0.0, 1.0) * 100.0).round() as u16;
@@ -1266,7 +1223,7 @@ pub fn win_bar_portions(rate: f32) -> (u16, u16) {
     (fill, rest)
 }
 
-/// Public so the Seasons screen can reuse the same 4–8 px bar.
+/// Public so the Seasons screen can reuse the same 4-8 px bar.
 pub fn win_bar_for(rate: f32) -> Element<'static, Message> {
     win_bar(rate)
 }
@@ -1355,79 +1312,9 @@ fn card_shell(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        HeaderStatus, HeaderStatusInput, classify_header_status, header_status_color,
-        map_stripe_outcome, win_bar_portions,
-    };
+    use super::{map_stripe_outcome, win_bar_portions};
     use crate::aggregate::Record;
     use crate::model::Outcome;
-    use crate::theme;
-
-    fn input(demo: bool, daemon: bool, capturing: bool, game: bool) -> HeaderStatusInput {
-        HeaderStatusInput {
-            demo,
-            daemon_running: daemon,
-            capturing,
-            game_running: game,
-            sync_token_rejected: false,
-            capture_error: false,
-        }
-    }
-
-    #[test]
-    fn header_dot_follows_capture_state() {
-        assert_eq!(
-            classify_header_status(input(false, true, false, true)),
-            HeaderStatus::Capturing
-        );
-        assert_eq!(
-            classify_header_status(input(false, true, true, false)),
-            HeaderStatus::Capturing
-        );
-        assert_eq!(
-            header_status_color(HeaderStatus::Capturing),
-            theme::OK,
-            "capturing is mint"
-        );
-
-        assert_eq!(
-            classify_header_status(input(false, true, false, false)),
-            HeaderStatus::Waiting,
-            "daemon up, no live game, is idle"
-        );
-        assert_eq!(
-            classify_header_status(input(true, false, false, true)),
-            HeaderStatus::Waiting,
-            "demo mode is not a live capture, even though the fixture reports a game"
-        );
-        assert_eq!(header_status_color(HeaderStatus::Waiting), theme::WARN);
-
-        assert_eq!(
-            classify_header_status(input(false, false, false, false)),
-            HeaderStatus::Down
-        );
-        let mut errored = input(false, true, true, true);
-        errored.capture_error = true;
-        assert_eq!(classify_header_status(errored), HeaderStatus::Down);
-        assert_eq!(header_status_color(HeaderStatus::Down), theme::DANGER);
-
-        let mut rejected = input(false, true, true, true);
-        rejected.sync_token_rejected = true;
-        assert_eq!(
-            classify_header_status(rejected),
-            HeaderStatus::TokenRejected
-        );
-        assert_eq!(
-            header_status_color(HeaderStatus::TokenRejected),
-            theme::WARN,
-            "token rejection reuses the warning colour"
-        );
-        assert_ne!(
-            header_status_color(HeaderStatus::Waiting),
-            theme::OK,
-            "idle must not stay the old always-mint dot"
-        );
-    }
 
     #[test]
     fn win_bar_portions_match_rate() {

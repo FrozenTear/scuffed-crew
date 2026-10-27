@@ -92,7 +92,7 @@ pub const ROLE_DAMAGE: Color = Color::from_rgb(
 );
 pub const ROLE_SUPPORT: Color = OK;
 
-/// Card radius, documented product exception (Nirify 16–20 range).
+/// Card radius, documented product exception (Nirify 16-20 range).
 pub const RADIUS_CARD: f32 = 16.0;
 /// Inner blocks / stat boxes.
 pub const RADIUS_INNER: f32 = 12.0;
@@ -101,6 +101,10 @@ pub const RADIUS_CHIP: f32 = 999.0;
 pub const PAD_INNER: f32 = 12.0;
 pub const PAGE_PAD_Y: f32 = 24.0;
 pub const PAGE_PAD_X: f32 = 32.0;
+/// 0.6 side gutter below [`WIDE_GUTTER_MIN`] ([`page_gutter`]).
+pub const PAGE_PAD_X_NARROW: f32 = 24.0;
+/// Window width from which the 0.6 gutter is [`PAGE_PAD_X`].
+pub const WIDE_GUTTER_MIN: f32 = 1440.0;
 pub const GRID_GAP: f32 = 12.0;
 /// Outcome stripe, 4 px, not a Fill-height child (that collapses in Row).
 pub const STRIPE: f32 = 4.0;
@@ -109,7 +113,7 @@ pub const HEIGHT_COMPACT: f32 = 180.0;
 /// Open game on the Games tab: label, two stat rows, and the not-final note.
 pub const HEIGHT_IN_PROGRESS: f32 = 292.0;
 pub const HEIGHT_HERO: f32 = 160.0;
-/// Maps screen compact card, name, featured WR, games · W–L, win bar.
+/// Maps screen compact card, name, featured WR, games · W-L, win bar.
 pub const HEIGHT_MAP: f32 = 148.0;
 /// Fixed sidebar; the content pane flexes (rev 3, no left-pinned 1400 cap).
 pub const SIDEBAR_WIDTH: f32 = 168.0;
@@ -119,6 +123,17 @@ pub const SIZE_META: f32 = 13.0;
 pub const SIZE_BODY: f32 = 14.0;
 pub const SIZE_TITLE: f32 = 20.0;
 pub const SIZE_FEATURED: f32 = 28.0;
+
+/// Side gutter of the 0.6 top bar and the page under it at window `width`
+/// (spec: 24 px at 1024, 32 px at 1600). Both use it, so the brand and the
+/// page line up. The classic sidebar layout keeps [`PAGE_PAD_X`].
+pub fn page_gutter(width: f32) -> f32 {
+    if width.is_finite() && width >= WIDE_GUTTER_MIN {
+        PAGE_PAD_X
+    } else {
+        PAGE_PAD_X_NARROW
+    }
+}
 
 pub fn iced_theme() -> Theme {
     Theme::custom(
@@ -410,6 +425,33 @@ pub fn ghost_btn() -> impl Fn(&Theme, button::Status) -> button::Style {
     }
 }
 
+/// Background tint for a quiet button (a tab, a link, a fold row) while
+/// it is hovered or pressed, so it reacts like the other controls. `None`
+/// at rest.
+pub fn hover_tint(status: button::Status) -> Option<Background> {
+    let alpha = match status {
+        button::Status::Hovered => 0.05,
+        button::Status::Pressed => 0.09,
+        button::Status::Active | button::Status::Disabled => return None,
+    };
+    Some(Background::Color(Color { a: alpha, ..TEXT }))
+}
+
+/// No chrome at rest, [`hover_tint`] on hover and press. `radius` rounds
+/// the tint.
+pub fn quiet_btn(radius: f32) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| button::Style {
+        background: hover_tint(status),
+        text_color: TEXT,
+        border: Border {
+            radius: radius.into(),
+            ..Border::default()
+        },
+        shadow: Shadow::default(),
+        snap: false,
+    }
+}
+
 pub fn danger_btn(armed: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
     move |_theme, _status| button::Style {
         background: Some(Background::Color(if armed { DANGER } else { SURFACE })),
@@ -474,6 +516,29 @@ mod tests {
         assert!(off.background.is_none());
         assert_eq!(off.text_color, TEXT_2);
         assert_ne!(off.background, season.background);
+    }
+
+    #[test]
+    fn bar_and_page_share_one_gutter() {
+        assert_eq!(page_gutter(1000.0), 24.0);
+        assert_eq!(page_gutter(1280.0), 24.0);
+        assert_eq!(page_gutter(WIDE_GUTTER_MIN - 1.0), 24.0);
+        assert_eq!(page_gutter(WIDE_GUTTER_MIN), PAGE_PAD_X);
+        assert_eq!(page_gutter(1600.0), 32.0);
+        assert_eq!(page_gutter(f32::NAN), PAGE_PAD_X_NARROW);
+    }
+
+    #[test]
+    fn quiet_buttons_react_to_hover_and_press() {
+        let style = |status| quiet_btn(6.0)(&iced_theme(), status);
+        assert!(style(button::Status::Active).background.is_none());
+        assert!(style(button::Status::Disabled).background.is_none());
+        let alpha = |status| match style(status).background {
+            Some(Background::Color(c)) => c.a,
+            _ => 0.0,
+        };
+        assert!(alpha(button::Status::Hovered) > 0.0);
+        assert!(alpha(button::Status::Pressed) > alpha(button::Status::Hovered));
     }
 
     #[test]

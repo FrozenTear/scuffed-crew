@@ -18,6 +18,18 @@ fn ocr_threads_resolved_clamps_and_auto() {
 }
 
 #[test]
+fn ocr_threads_override_takes_whole_numbers_of_one_or_more_as_written() {
+    use super::ocr_threads_override;
+    assert_eq!(ocr_threads_override("3"), Some(3));
+    assert_eq!(ocr_threads_override("1"), Some(1));
+    assert_eq!(ocr_threads_override("0"), None);
+    assert_eq!(ocr_threads_override("abc"), None);
+    assert_eq!(ocr_threads_override(" 3"), None);
+    assert_eq!(ocr_threads_override(""), None);
+    assert_eq!(super::OCR_THREADS_ENV, "STAT_TRACKER_OCR_THREADS");
+}
+
+#[test]
 fn shadow_env_off_values_keep_it_off() {
     for v in [
         None,

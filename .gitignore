@@ -3,6 +3,8 @@
 # App favicon rasters. The blanket png ignore is for screenshots and captures.
 !crates/app/assets/favicon-32.png
 !crates/app/assets/apple-touch-icon.png
+# Icons compiled into the tracker GUI (include_bytes!); a clean checkout must have them.
+!crates/stat-tracker-ui/assets/**/*.png
 # Design-review After screenshots (PR #97 Patch Notes)
 !docs/design-review/**/*.png
 # Synthetic (non-capture) end-reel layout for the nameplate POTG wake test.

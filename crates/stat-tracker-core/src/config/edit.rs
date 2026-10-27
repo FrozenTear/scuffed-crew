@@ -1,6 +1,11 @@
 //! In-place edits of `config.toml`: [`Config::text_for_save`] and the
 //! first-run guide's [`Config::apply_setup_patch`]. A hand-edited file keeps
-//! its comments, order and unknown keys when only an in-place key changes.
+//! its comments, order and unknown keys whatever a save changes. A key a
+//! save removes takes only its own line (a comment at the end of it
+//! included); the comment lines above it move onto the entry below it.
+//! They go with it when it was the last entry of its table, or the entry
+//! below is a dotted key, an implicit table or an array of tables
+//! (`merge`).
 
 use super::file::{atomic_write_600, unreadable_config};
 use super::parse_error::{TomlFailure, describe};
@@ -31,10 +36,14 @@ impl Config {
     /// (byte for byte), comments included. When the only change is
     /// `shadow_recognizer`, `reader`, `ocr`, `update_channel`, or
     /// `capture_route` (or `reader` together with `shadow_recognizer`), that
-    /// key is edited in place so comments, order, and every other key stay as
-    /// they were. A
-    /// document that does not parse is an error, not a pretty-printed
-    /// replacement. A missing file (no `existing` text) is a fresh
+    /// key is spliced in place and the new word is written even when it is
+    /// the default. Any other set of changes is edited in place too
+    /// (`merge::edit_in_place`): changed keys are set, new keys inserted,
+    /// keys the struct no longer writes removed, and comments, order and
+    /// keys the struct does not know stay. Only when that edit cannot be
+    /// made, or would not read back as `next`, is the file replaced by a
+    /// pretty-printed document. A document that does not parse is an error,
+    /// not a replacement. A missing file (no `existing` text) is a fresh
     /// pretty-printed document.
     pub fn text_for_save(
         existing: Option<&str>,
@@ -65,6 +74,9 @@ impl Config {
         }
         if only_capture_route_differs(&loaded, next) {
             return patch_capture_route(existing, next.capture_route);
+        }
+        if let Some(text) = super::merge::edit_in_place(existing, &loaded, next) {
+            return Ok(text);
         }
         Ok(toml::to_string_pretty(next)?)
     }

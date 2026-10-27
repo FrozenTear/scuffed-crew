@@ -6,24 +6,46 @@ use crate::aggregate::{
 };
 use crate::app::{Message, TrackerApp};
 use crate::layout::games_columns;
-use crate::model::{Game, Outcome, game_card_in_progress};
+use crate::model::{Game, Outcome, Screen, game_card_in_progress};
 use crate::theme::{self, FONT_BOLD, FONT_SEMIBOLD, GRID_GAP, SIZE_META, SIZE_TITLE, TEXT};
 use crate::widgets;
+
+/// Copy of the clearable chip the top bar's "need a look" chip turns on.
+pub const NEEDS_LOOK_FILTER_LABEL: &str = "Needs a look ×";
+
+/// The games the Games tab lists: the season, role, hero, map and outcome
+/// filters, then the "Needs a look" filter when it is on.
+pub fn shown_games(app: &TrackerApp) -> Vec<&Game> {
+    let mut shown = filter_games(&app.games, &app.games_filter());
+    if app.needs_look_filter {
+        let live = app.live_game_session.as_deref();
+        shown.retain(|g| crate::nav::counts_as_needs_look(g, live));
+    }
+    shown
+}
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let header_only = app.header_filter();
     let option_pool = filter_games(&app.games, &header_only);
     let heroes = distinct_heroes(&option_pool);
     let maps = distinct_maps(&option_pool);
-    let shown = filter_games(&app.games, &app.games_filter());
+    let shown = shown_games(app);
     let groups = group_by_session_gap(&shown, DEFAULT_SESSION_GAP);
     let cols = games_columns(content_width);
 
-    let mut col = column![text("Games").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT)]
-        .spacing(GRID_GAP)
-        .width(Fill);
+    let mut col = column![].spacing(GRID_GAP).width(Fill);
+    if let Some(title) = crate::nav::classic_title(app, Screen::Games) {
+        col = col.push(title);
+    }
     if app.games.iter().any(|game| game.upload_reject.is_some()) {
         col = col.push(retry_rejected_uploads_button());
+    }
+    if app.needs_look_filter {
+        col = col.push(widgets::filter_chip(
+            NEEDS_LOOK_FILTER_LABEL.into(),
+            true,
+            Message::Nav(crate::nav::Msg::ClearNeedsLook),
+        ));
     }
     col = col.push(filter_bar(app, &heroes, &maps));
 
@@ -44,7 +66,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     col.into()
 }
 
-/// Compact shelf at `cols` (2–4, more on an ultrawide). An expanded game
+/// Compact shelf at `cols` (2-4, more on an ultrawide). An expanded game
 /// *replaces* its compact card (full-width) instead of duplicating below the row.
 fn sitting_cards<'a>(games: &[Game], app: &'a TrackerApp, cols: usize) -> Element<'a, Message> {
     let cols = cols.max(1);

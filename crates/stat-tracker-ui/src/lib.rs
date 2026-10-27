@@ -12,24 +12,37 @@
 //! into this binary and shown from the update prompt, once after the
 //! installed version changes, and from About.
 
+mod account_card;
 pub mod aggregate;
 pub mod app;
 /// Shared with build.rs; the lib only compiles it for its tests.
 #[cfg(test)]
 mod build_id_hash;
 pub mod capture;
+mod capture_reading;
+mod capture_shared;
+mod chrome;
 pub mod cli;
 pub mod clipboard;
 pub mod commands;
+pub mod companion_gate;
+#[cfg(test)]
+mod copy_rules;
 pub mod daemon;
 pub mod fixtures;
+mod form_widgets;
 pub mod games;
 pub mod heroes;
 pub mod hotkey;
+pub mod icons;
+#[cfg(test)]
+mod include_tracked;
 pub mod instance;
 pub mod layout;
 pub mod maps;
 pub mod model;
+pub mod nav;
+pub mod nav_fit;
 pub mod notes;
 pub mod overlay;
 #[cfg(feature = "companion")]
@@ -39,12 +52,24 @@ pub mod report;
 pub mod restart_prompt;
 pub mod seasons;
 pub mod settings;
+pub mod settings_cards;
+mod settings_env;
+mod settings_fixed;
+pub mod settings_model;
+mod settings_open;
+pub mod settings_page;
+mod settings_rows;
+pub mod settings_save;
+pub mod settings_update;
 pub mod setup_guide;
 pub mod snapshot;
 pub mod theme;
+pub mod tracker_status;
 pub mod tray;
 pub mod uninstall;
 pub mod update;
+mod update_check;
+mod what_leaves;
 pub mod widgets;
 
 pub use aggregate::{Aggregates, SeasonWindow, aggregate};

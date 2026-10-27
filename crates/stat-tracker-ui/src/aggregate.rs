@@ -62,12 +62,12 @@ impl Record {
         self.win_rate() * 100.0
     }
 
-    /// `4–1` or `4–1–1` when draws are present (Games session header).
+    /// `4-1` or `4-1-1` when draws are present (Games session header).
     pub fn wl_label(&self) -> String {
         if self.draws > 0 {
-            format!("{}–{}–{}", self.wins, self.losses, self.draws)
+            format!("{}-{}-{}", self.wins, self.losses, self.draws)
         } else {
-            format!("{}–{}", self.wins, self.losses)
+            format!("{}-{}", self.wins, self.losses)
         }
     }
 
@@ -86,11 +86,11 @@ impl Record {
             .saturating_sub(self.wins + self.losses + self.draws)
     }
 
-    /// Seasons-screen line: `62 games · 10–15–0 · 37 undecided`.
+    /// Seasons-screen line: `62 games · 10-15-0 · 37 undecided`.
     /// The undecided tail is omitted when every game is decided.
     pub fn season_line(&self) -> String {
         let base = format!(
-            "{} · {}–{}–{}",
+            "{} · {}-{}-{}",
             self.games_label(),
             self.wins,
             self.losses,
@@ -132,7 +132,7 @@ pub struct Aggregates {
 }
 
 /// One sitting of games (daemon session window: 30-minute idle gap).
-/// Header uses the local date of the oldest game (`Sat Aug 30 · 4–1`).
+/// Header uses the local date of the oldest game (`Sat Aug 30 · 4-1`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionGroup {
     pub heading: String,
@@ -566,12 +566,12 @@ mod tests {
             "Aug 18 and Sep 2 must stay split: {groups:?}"
         );
         assert!(
-            groups[0].heading.contains("· 2–1"),
+            groups[0].heading.contains("· 2-1"),
             "newest sitting heading {}",
             groups[0].heading
         );
         assert!(
-            groups[1].heading.contains("· 1–0"),
+            groups[1].heading.contains("· 1-0"),
             "older sitting heading {}",
             groups[1].heading
         );
@@ -606,7 +606,7 @@ mod tests {
             "20 min across midnight is one sitting: {night:?}"
         );
         assert!(
-            night[0].heading.contains("· 1–1"),
+            night[0].heading.contains("· 1-1"),
             "heading {}",
             night[0].heading
         );
@@ -646,7 +646,7 @@ mod tests {
             draws: 0,
         };
         assert_eq!(decided.undecided(), 0);
-        assert_eq!(decided.season_line(), "25 games · 10–15–0");
+        assert_eq!(decided.season_line(), "25 games · 10-15-0");
 
         let mixed = Record {
             games: 62,
@@ -655,7 +655,7 @@ mod tests {
             draws: 0,
         };
         assert_eq!(mixed.undecided(), 37);
-        assert_eq!(mixed.season_line(), "62 games · 10–15–0 · 37 undecided");
+        assert_eq!(mixed.season_line(), "62 games · 10-15-0 · 37 undecided");
         assert!((mixed.win_rate() - 0.4).abs() < f32::EPSILON);
 
         let one_unknown = Record {
@@ -664,7 +664,7 @@ mod tests {
             losses: 0,
             draws: 0,
         };
-        assert_eq!(one_unknown.season_line(), "2 games · 1–0–0 · 1 undecided");
+        assert_eq!(one_unknown.season_line(), "2 games · 1-0-0 · 1 undecided");
     }
 
     #[test]

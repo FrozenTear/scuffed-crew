@@ -1,11 +1,11 @@
 //! Responsive column counts from available content width (design rev 3).
 //!
-//! Cards stay at least ~[`MIN_CARD`] wide. Games and maps start at 2–4
-//! columns, heroes at 4–6. On an ultrawide window they add a column once a
+//! Cards stay at least ~[`MIN_CARD`] wide. Games and maps start at 2-4
+//! columns, heroes at 4-6. On an ultrawide window they add a column once a
 //! card would pass [`MAX_CARD`] / [`MAX_HERO_CARD`], so a card does not turn
 //! into a long empty bar. Tonight is one featured card plus as many compact
 //! cards as fit at that minimum. Settings cards stay between
-//! [`MIN_SETTINGS_CARD`] and [`MAX_SETTINGS_CARD`] in 1–4 columns (G4).
+//! [`MIN_SETTINGS_CARD`] and [`MAX_SETTINGS_CARD`] in 1-4 columns (G4).
 
 use crate::theme::{GRID_GAP, PAGE_PAD_X, SIDEBAR_WIDTH};
 

@@ -424,68 +424,40 @@ fn pin_capture_route_in_place() {
     );
 }
 
-/// Any other change is a full pretty-printed rewrite: comments and keys the
-/// struct does not know are dropped.
+/// Any other change is edited in place too: the changed value is replaced
+/// where it is, a new key goes after the last root line, and comments and
+/// keys the struct does not know stay.
 #[test]
-fn pin_other_changes_rewrite_the_whole_file() {
-    let saved = save(&base_with_sync(), |c| {
+fn pin_other_changes_edit_in_place() {
+    let base = base_with_sync();
+    let saved = save(&base, |c| {
         c.player_name = Some("Ada".to_string());
         c.debug_ocr = true;
     });
     assert_eq!(
         saved,
-        "\
-data_dir = \"/pin/data\"
-capture_output = \"DP-1\"
-player_name = \"Ada\"
-session_window_secs = 1800
-finished_game_close_secs = 180
-game_process_names = [\"Overwatch.exe\"]
-debug_ocr = true
-
-[sync]
-server_url = \"https://old.example\"
-token = \"old-token\"
-
-[auto_detect]
-enabled = true
-poll_interval_secs = 4
-cooldown_secs = 120
-"
+        one_edit(
+            &root_insert(&base, "debug_ocr = true\n"),
+            "player_name = \"FrozenTear\"",
+            "player_name = \"Ada\""
+        )
     );
 }
 
 /// Settings can change `reader` and `ocr` in one save. Only `reader` +
-/// `shadow_recognizer` has a combined in-place path, so this pair takes the
-/// full rewrite, from either fixture.
+/// `shadow_recognizer` has a combined splice, so this pair takes the general
+/// in-place edit: both keys are inserted in field order, or both removed
+/// when they go back to their defaults (which a save leaves out).
 #[test]
-fn pin_reader_and_ocr_together_rewrite_the_whole_file() {
-    let saved = save(&base_with_sync(), |c| {
+fn pin_reader_and_ocr_together_edit_in_place() {
+    let base = base_with_sync();
+    let saved = save(&base, |c| {
         c.reader = ReaderSetting::OcrV1;
         c.ocr = OcrSetting::Off;
     });
     assert_eq!(
         saved,
-        "\
-data_dir = \"/pin/data\"
-capture_output = \"DP-1\"
-player_name = \"FrozenTear\"
-session_window_secs = 1800
-finished_game_close_secs = 180
-game_process_names = [\"Overwatch.exe\"]
-debug_ocr = false
-reader = \"ocr-v1\"
-ocr = \"off\"
-
-[sync]
-server_url = \"https://old.example\"
-token = \"old-token\"
-
-[auto_detect]
-enabled = true
-poll_interval_secs = 4
-cooldown_secs = 120
-"
+        root_insert(&base, "reader = \"ocr-v1\"\nocr = \"off\"\n")
     );
     let saved = save(SET, |c| {
         c.reader = ReaderSetting::New;
@@ -493,24 +465,11 @@ cooldown_secs = 120
     });
     assert_eq!(
         saved,
-        "\
-data_dir = \"/pin/data\"
-capture_route = \"screenshot\"
-session_window_secs = 1800
-finished_game_close_secs = 180
-game_process_names = [\"Overwatch.exe\"]
-debug_ocr = false
-update_channel = \"prerelease\"
-
-[sync]
-server_url = \"https://old.example\"
-token = \"old-token\"
-
-[auto_detect]
-enabled = true
-poll_interval_secs = 4
-cooldown_secs = 120
-"
+        one_edit(
+            &one_edit(SET, "reader = \"ocr-v1\" # classic reader\n", ""),
+            "ocr = \"off\"\n",
+            ""
+        )
     );
 }
 
@@ -709,8 +668,8 @@ fn base_after_setup_patch() -> String {
 /// CRLF line endings, as the code handles them today (captured, not
 /// designed). An unchanged save returns the file as it is, and a splice
 /// changes only the value bytes, so CRLF stays. An insert goes through
-/// `toml_edit::DocumentMut`, which writes the whole file back with LF.
-/// A full rewrite is LF.
+/// `toml_edit::DocumentMut`, which writes the whole file back with LF, and
+/// so does the general in-place edit.
 #[test]
 fn pin_crlf_files_through_the_in_place_paths() {
     let crlf = |text: &str| text.replace('\n', "\r\n");
@@ -752,7 +711,7 @@ fn pin_crlf_files_through_the_in_place_paths() {
         Config::text_for_setup_patch(Some(&base), &setup_patch()).unwrap(),
         base_after_setup_patch()
     );
-    // A full rewrite is the usual LF text.
+    // The general in-place edit is the LF text too.
     assert_eq!(
         save(&base, |c| c.debug_ocr = true),
         save(&base_with_sync(), |c| c.debug_ocr = true)
@@ -761,7 +720,7 @@ fn pin_crlf_files_through_the_in_place_paths() {
 
 /// A UTF-8 byte-order mark, as the code handles it today (captured, not
 /// designed). The file parses. An unchanged save and a splice keep the BOM.
-/// An insert (`toml_edit::DocumentMut`) and a full rewrite drop it.
+/// An insert (`toml_edit::DocumentMut`) and the general in-place edit drop it.
 #[test]
 fn pin_bom_files_through_the_in_place_paths() {
     let bom = |text: &str| format!("\u{feff}{text}");
@@ -794,7 +753,7 @@ fn pin_bom_files_through_the_in_place_paths() {
         Config::text_for_setup_patch(Some(&set), &setup_patch()).unwrap(),
         bom(&set_after_setup_patch())
     );
-    // Inserts and a full rewrite drop it.
+    // Inserts and the general in-place edit drop it.
     assert_eq!(
         save(&base, |c| c.shadow_recognizer = true),
         root_insert(&base_with_sync(), "shadow_recognizer = true\n")

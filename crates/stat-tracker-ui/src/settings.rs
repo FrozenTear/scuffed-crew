@@ -1,6 +1,6 @@
 //! Settings form + screen. Writes today's `Config` fields via `Config::save`.
 //!
-//! Layout: masonry in 1–4 columns by width (Maps density tokens, G4),
+//! Layout: masonry in 1-4 columns by width (Maps density tokens, G4),
 //! Stored data spanning the pane, Save as a full-width footer strip.
 //! `capture_route` chooses the screen stream or the older screenshot portal.
 //! `data_dir`, `ocr_threads`, and `finished_game_close_secs` are preserved
@@ -21,7 +21,13 @@ use stat_tracker::ocr_switch::{
 };
 
 use crate::app::{Message, TrackerApp};
+use crate::capture_shared::{self, capture_route_help};
+use crate::form_widgets::{
+    DEMO_NOTE, REPORT_HINT, action_btn, checkbox_style, field_caption, hint, output_chip,
+    uninstall_button,
+};
 use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SINGLE_MAX, SettingsLayout, settings_layout};
+use crate::settings_model::parse_process_names;
 use crate::theme::{
     self, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY, SIZE_LABEL,
     SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
@@ -468,15 +474,6 @@ pub(crate) fn capture_route_label(route: CaptureRoute) -> &'static str {
     }
 }
 
-/// The line under the capture chips that says what Automatic does here.
-pub(crate) fn capture_route_help(session: SessionKind) -> &'static str {
-    if session == SessionKind::X11 {
-        "This is an X11 session. Automatic captures the screen directly with X11. Older screenshot is the previous portal."
-    } else {
-        "Automatic uses the screen stream on KDE and GNOME, and direct capture on other desktops. Screen stream forces that stream. Older screenshot is the previous portal."
-    }
-}
-
 /// Shown on X11 next to the Older screenshot choice.
 pub(crate) const X11_SCREENSHOT_NOTE: &str = "Older screenshot captures the whole desktop on X11 with more than one monitor, so Automatic is recommended.";
 
@@ -608,6 +605,33 @@ pub(crate) fn card_problem<'a>(
         (None, Some(notice)) => Some((notice, false)),
         (None, None) => None,
     }
+}
+
+/// What both pages show under the reader controls: the problem line drawn
+/// by `warn` (with OK when it is a refused click), then the "new reader"
+/// hint while the running tracker has classic OCR off.
+pub(crate) fn ocr_problem_lines<'a>(
+    app: &'a TrackerApp,
+    warn: impl Fn(&'a str) -> Element<'a, Message>,
+) -> Vec<Element<'a, Message>> {
+    let mut lines = Vec::new();
+    if let Some((problem, dismissable)) = card_problem(
+        app.ocr_switch.refusal.as_deref(),
+        app.ocr_switch.notice.as_deref(),
+    ) {
+        lines.push(warn(problem));
+        if dismissable {
+            lines.push(action_btn(
+                DISMISS_REFUSAL_LABEL,
+                false,
+                Message::DismissOcrRefusal,
+            ));
+        }
+    }
+    if app.ocr_switch.daemon_off {
+        lines.push(hint(NEW_READER_IMPLIED));
+    }
+    lines
 }
 
 /// "Reader packs ready: 2 of 3", or a placeholder until they were checked.
@@ -801,8 +825,8 @@ impl SettingsForm {
 
     /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, the report kit caps,
     /// `finished_game_close_secs`, `setup_completed`, `reader_pack_url`,
-    /// `debug_portal_frames`, and
-    /// `name_reader` (Settings has no control for it yet).
+    /// `debug_portal_frames`, the stream keys, and `name_reader` (the 0.6
+    /// page sets those through [`crate::settings_model::ConfigEdit`]).
     /// `shadow_recognizer` comes from the form's persisted reader (the file
     /// value). An env lock never writes true by itself. `update_channel`
     /// keeps the file's value (unset stays unset) unless the checkbox was
@@ -915,15 +939,6 @@ pub fn sync_url_problem(url: &str) -> Option<&'static str> {
 
 pub fn parse_u64(raw: &str, fallback: u64) -> u64 {
     raw.trim().parse().unwrap_or(fallback)
-}
-
-/// Comma or newline list. Empty → empty vec (process gate off, as in Config).
-pub fn parse_process_names(raw: &str) -> Vec<String> {
-    raw.split([',', '\n'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
-        .collect()
 }
 
 pub fn save_config(config: &Config) -> Result<(), String> {
@@ -1047,9 +1062,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     }
 
     if demo {
-        col = col.push(widgets::empty_surface(
-            "Demo mode: settings, the tracker service, and stored data are not changed.",
-        ));
+        col = col.push(widgets::empty_surface(DEMO_NOTE));
     }
 
     col = col.push(action_btn(
@@ -1099,13 +1112,13 @@ fn section_card(id: SettingsSection, app: &TrackerApp, demo: bool) -> Element<'_
     match id {
         SettingsSection::Daemon => daemon_card(app, demo),
         SettingsSection::Capture => capture_card(app, demo),
-        SettingsSection::Companion => companion_card(app, demo),
+        SettingsSection::Companion => settings_card("Companion", companion_body(app, demo)),
         SettingsSection::Player => player_card(app, demo),
-        SettingsSection::AutoDetect => auto_detect_card(app, demo),
-        SettingsSection::Sync => sync_card(app, demo),
+        SettingsSection::AutoDetect => settings_card("Auto-detect", auto_detect_body(app, demo)),
+        SettingsSection::Sync => settings_card("Website sync", sync_body(app, demo)),
         SettingsSection::Ocr => ocr_card(app, demo),
-        SettingsSection::Diagnostics => diagnostics_card(app, demo),
-        SettingsSection::Data => data_card(app, demo),
+        SettingsSection::Diagnostics => settings_card("Diagnostics", diagnostics_body(app, demo)),
+        SettingsSection::Data => settings_card("Stored data", data_body(app, demo)),
     }
 }
 
@@ -1134,6 +1147,12 @@ fn section_columns<'a>(columns: Vec<Vec<Element<'a, Message>>>) -> Element<'a, M
 }
 
 fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let body = column![service_body(app, demo), updates_body(app, demo)].spacing(6);
+    settings_card("Tracker service", body.into())
+}
+
+/// Status, pid and the start, stop and login buttons.
+pub(crate) fn service_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let d = &app.daemon;
     let mut actions = row![].spacing(8).align_y(Alignment::Center);
     if !demo && !app.daemon_busy {
@@ -1210,7 +1229,12 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         );
     }
     body = body.push(actions);
+    body.into()
+}
 
+/// How this install updates, the copy button and the pre-release switch.
+pub(crate) fn updates_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let mut body = column![].spacing(6);
     let install = install_row(
         app.package_probe(),
         app.update.as_ref().map(|i| i.latest.as_str()),
@@ -1232,8 +1256,7 @@ fn daemon_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         body = body.push(action_btn("Copy command", false, Message::CopyUpdateCmd));
     }
     body = body.push(prerelease_updates_block(app));
-
-    settings_card("Tracker service", body.into())
+    body.into()
 }
 
 fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -1247,8 +1270,6 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             Message::SelectCaptureRoute(choice),
         ));
     }
-    // KDE direct's help goes with its chip, and only where it can work.
-    let kde_direct = session != SessionKind::X11 && show_kde_direct(&app.desktop, route);
 
     let mut chips = row![output_chip(
         "Auto (first monitor)",
@@ -1264,29 +1285,6 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         ));
     }
 
-    let backend = match app.backend {
-        None => "Looking for a capture method…",
-        Some(stat_tracker::capture::CaptureBackend::Wayshot) => "Wayland",
-        Some(stat_tracker::capture::CaptureBackend::X11) => "X11",
-        Some(stat_tracker::capture::CaptureBackend::Portal) => "Desktop portal",
-        Some(stat_tracker::capture::CaptureBackend::Kwin) => "KDE direct (KWin)",
-        Some(stat_tracker::capture::CaptureBackend::None) => "None available",
-    };
-
-    let capture_label = if app.backend.is_none() {
-        "Looking for a capture method…"
-    } else if app.capturing {
-        "Capturing…"
-    } else {
-        "Capture now"
-    };
-
-    let env_note = Config::capture_env_note(
-        std::env::var(stat_tracker::config::CAPTURE_ENV)
-            .ok()
-            .as_deref(),
-        &stat_tracker::config::environment_d_capture_files(),
-    );
     let mut body = column![
         field_caption("Capture method"),
         route_chips.wrap(),
@@ -1296,7 +1294,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             .color(TEXT_3),
     ]
     .spacing(6);
-    if kde_direct {
+    if capture_shared::shows_kde_direct_help(app) {
         body = body.push(
             text(KDE_DIRECT_HELP)
                 .size(SIZE_META)
@@ -1304,31 +1302,18 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 .color(TEXT_3),
         );
     }
-    for (note, tone) in capture_route_notes(
-        &app.desktop,
-        session,
-        route,
-        app.kde_direct.as_ref(),
-        app.ocr_switch.capture_notice.as_deref(),
-    ) {
-        body = body.push(
-            text(note)
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(match tone {
-                    NoteTone::Info => TEXT_3,
-                    NoteTone::Warn => theme::WARN,
-                }),
-        );
-    }
+    body = capture_shared::push_route_notes(body, app);
     body = body.push(field_caption("Monitor")).push(chips.wrap()).push(
-        text(format!("Detected: {backend}"))
-            .size(SIZE_META)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
+        text(format!(
+            "Detected: {}",
+            capture_shared::backend_label(app.backend)
+        ))
+        .size(SIZE_META)
+        .font(FONT_MEDIUM)
+        .color(TEXT_3),
     );
 
-    if let Some(note) = env_note {
+    if let Some(note) = app.capture_env_note() {
         body = body.push(
             text(note)
                 .size(SIZE_META)
@@ -1338,27 +1323,18 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     }
 
     if !demo {
-        let mut btn = button(
-            text(capture_label)
-                .size(SIZE_META)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT),
-        )
-        .padding(Padding::from([8, 16]))
-        .style(theme::chip(true));
-        if app.backend.is_some() && !app.capturing {
+        let label = capture_shared::capture_button_label(app.backend.is_some(), app.capturing);
+        let mut btn = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
+            .padding(Padding::from([8, 16]))
+            .style(theme::chip(true));
+        if capture_shared::can_capture(app) {
             btn = btn.on_press(Message::CaptureNow);
         }
         body = body.push(btn);
     }
 
-    if let Some(err) = &app.preview_error {
-        body = body.push(
-            text(err.clone())
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(theme::DANGER),
-        );
+    if let Some(err) = capture_shared::preview_error(app) {
+        body = body.push(err);
     }
 
     if let Some((handle, when)) = &app.preview {
@@ -1374,7 +1350,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 .height(iced::Length::Fixed(280.0)),
         );
         body = body.push(
-            text("What the tracker sees. The scoreboard should be visible.")
+            text(capture_shared::PREVIEW_CAPTION)
                 .size(SIZE_LABEL)
                 .font(FONT_MEDIUM)
                 .color(TEXT_3),
@@ -1384,7 +1360,7 @@ fn capture_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     settings_card("Capture", body.into())
 }
 
-fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+pub(crate) fn companion_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![
         checkbox(app.settings.overlay_hotkey_enabled)
             .label("Keyboard shortcut to hide or show the overlay")
@@ -1408,7 +1384,7 @@ fn companion_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         ));
     }
 
-    settings_card("Companion", body.into())
+    body.into()
 }
 
 /// In-game name and session window, side by side.
@@ -1460,7 +1436,7 @@ fn player_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     settings_card("Player and sessions", body.into())
 }
 
-fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+pub(crate) fn auto_detect_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![
         checkbox(app.settings.auto_detect_enabled)
             .label("Watch for match start and end")
@@ -1495,10 +1471,10 @@ fn auto_detect_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         body = body.push(hint(POLL_INTERVAL_HELP));
     }
 
-    settings_card("Auto-detect", body.into())
+    body.into()
 }
 
-fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+pub(crate) fn sync_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let mut body = column![field_input(
         "Website URL",
         "https://your-site.com",
@@ -1526,7 +1502,7 @@ fn sync_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         demo,
         Some("Both needed to upload. Blank either to turn sync off."),
     ));
-    settings_card("Website sync", body.into())
+    body.into()
 }
 
 fn ocr_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -1559,26 +1535,14 @@ fn classic_ocr_block(app: &TrackerApp) -> Element<'_, Message> {
             .push(hint(CLASSIC_OCR_RESTART))
             .push(hint(pack_status_line(app.ocr_switch.packs.as_ref())));
     }
-    if let Some((problem, dismissable)) = card_problem(
-        app.ocr_switch.refusal.as_deref(),
-        app.ocr_switch.notice.as_deref(),
-    ) {
-        body = body.push(
-            text(problem.to_string())
-                .size(SIZE_META)
-                .font(FONT_MEDIUM)
-                .color(theme::WARN),
-        );
-        if dismissable {
-            body = body.push(action_btn(
-                DISMISS_REFUSAL_LABEL,
-                false,
-                Message::DismissOcrRefusal,
-            ));
-        }
-    }
-    if app.ocr_switch.daemon_off {
-        body = body.push(hint(NEW_READER_IMPLIED));
+    for line in ocr_problem_lines(app, |problem| {
+        text(problem.to_string())
+            .size(SIZE_META)
+            .font(FONT_MEDIUM)
+            .color(theme::WARN)
+            .into()
+    }) {
+        body = body.push(line);
     }
     body.into()
 }
@@ -1589,7 +1553,7 @@ pub(crate) fn reading_model_status(installed: bool) -> &'static str {
     if installed {
         "Reading model is installed"
     } else {
-        "Reading model is missing. Classic OCR reads use the generic English model, which is less accurate"
+        "Reading model is missing. Classic OCR reads use the generic English model, which is less accurate."
     }
 }
 
@@ -1597,7 +1561,7 @@ pub(crate) const READING_MODEL_HINT: &str = "\
 Install puts back the game-font model that ships with the tracker. It does not \
 train one on this computer.";
 
-fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+pub(crate) fn reading_model_block(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let installed = reading_model_status(app.tessdata_installed);
     let mut actions = row![].spacing(8);
     if !demo && !app.tessdata_busy {
@@ -1661,7 +1625,7 @@ fn new_reader_block(app: &TrackerApp) -> Element<'_, Message> {
     .into()
 }
 
-fn shadow_reader_block(app: &TrackerApp) -> Element<'_, Message> {
+pub(crate) fn shadow_reader_block(app: &TrackerApp) -> Element<'_, Message> {
     let mut toggle = checkbox(app.settings.displayed_reader().file_flag())
         .label(SHADOW_READER_LABEL)
         .size(16)
@@ -1690,13 +1654,13 @@ pub(crate) fn shadow_toggle_interactive(locked: bool) -> bool {
 
 /// Help under the poll interval field. Empty or 4 is auto, which polls every
 /// 1.5 s with the new reader and every 4 s with classic OCR.
-const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4 s with classic OCR. 4 also means auto. For slower checks on a low-power laptop, enter 5 or more.";
+pub(crate) const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4 s with classic OCR. 4 also means auto. For slower checks on a low-power laptop, enter 5 or more.";
 /// Help under "Save debug images from each capture". The accepted and
 /// rejected scoreboard frames are not blanked, so it says whose names they
 /// show and where they stay.
-const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture, so leave it off unless diagnosing.";
+pub(crate) const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture, so leave it off unless diagnosing.";
 
-fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
+pub(crate) fn diagnostics_body(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
     let body = column![
         checkbox(app.settings.debug_ocr)
             .label("Save debug images from each capture")
@@ -1707,10 +1671,10 @@ fn diagnostics_card(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
         hint(DEBUG_IMAGES_HELP),
     ]
     .spacing(6);
-    settings_card("Diagnostics", body.into())
+    body.into()
 }
 
-fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+pub(crate) fn data_body(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let running = app.daemon.running();
     let mut copy = column![hint(
         "Compact rewrites the store and keeps one backup. Delete removes local matches and the saved screen-share permission, not the website. The next screen share asks for permission again."
@@ -1782,7 +1746,7 @@ fn data_card(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     if show_actions {
         body = body.push(actions.wrap());
     }
-    settings_card("Stored data", body.into())
+    body.into()
 }
 
 /// A "text … button" row in a card that spans the pane: left-aligned and no
@@ -1799,7 +1763,7 @@ fn report_row() -> Element<'static, Message> {
         "Report a problem",
         action_row(
             row![
-                text("Crash, low FPS, or anything else. You see the report before it is sent.")
+                text(REPORT_HINT)
                     .size(SIZE_META)
                     .font(FONT_MEDIUM)
                     .color(TEXT_3)
@@ -1830,15 +1794,7 @@ fn uninstall_row() -> Element<'static, Message> {
                     .font(FONT_MEDIUM)
                     .color(TEXT_3)
                     .width(Fill),
-                button(
-                    text("Uninstall")
-                        .size(SIZE_META)
-                        .font(FONT_SEMIBOLD)
-                        .color(theme::DANGER),
-                )
-                .padding(Padding::from([8, 16]))
-                .style(theme::danger_btn(false))
-                .on_press(Message::OpenUninstall),
+                uninstall_button(Some(Message::OpenUninstall), Padding::from([8, 16])),
             ]
             .align_y(Alignment::Center)
             .spacing(GRID_GAP),
@@ -1879,25 +1835,6 @@ fn settings_card<'a>(title: &'static str, body: Element<'a, Message>) -> Element
     .padding(PAD_INNER)
     .width(Fill)
     .style(theme::surface_panel)
-    .into()
-}
-
-fn field_caption(label: &'static str) -> text::Text<'static> {
-    text(label)
-        .size(SIZE_META)
-        .font(FONT_SEMIBOLD)
-        .color(TEXT_2)
-}
-
-/// Help copy. Wraps at [`HELP_MEASURE`] even in a wider card.
-fn hint(copy: impl Into<String>) -> Element<'static, Message> {
-    container(
-        text(copy.into())
-            .size(SIZE_LABEL)
-            .font(FONT_MEDIUM)
-            .color(TEXT_3),
-    )
-    .max_width(HELP_MEASURE)
     .into()
 }
 
@@ -1954,57 +1891,6 @@ fn field_input<'a>(
         .into()
 }
 
-fn output_chip(
-    label: impl Into<String>,
-    selected: bool,
-    msg: Message,
-) -> Element<'static, Message> {
-    widgets::filter_chip(label.into(), selected, msg)
-}
-
-fn action_btn(label: &'static str, primary: bool, msg: Message) -> Element<'static, Message> {
-    let label = text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT);
-    if primary {
-        button(label)
-            .padding(Padding::from([8, 16]))
-            .style(theme::chip(true))
-            .on_press(msg)
-            .into()
-    } else {
-        button(label)
-            .padding(Padding::from([8, 16]))
-            .style(theme::ghost_btn())
-            .on_press(msg)
-            .into()
-    }
-}
-
-fn checkbox_style(
-    _theme: &iced::Theme,
-    status: iced::widget::checkbox::Status,
-) -> iced::widget::checkbox::Style {
-    let selected = matches!(
-        status,
-        iced::widget::checkbox::Status::Active { is_checked: true }
-            | iced::widget::checkbox::Status::Hovered { is_checked: true }
-            | iced::widget::checkbox::Status::Disabled { is_checked: true }
-    );
-    iced::widget::checkbox::Style {
-        background: iced::Background::Color(if selected { theme::ACCENT } else { theme::BG }),
-        icon_color: TEXT,
-        border: iced::Border {
-            color: if selected {
-                theme::ACCENT
-            } else {
-                theme::BORDER
-            },
-            width: 1.0,
-            radius: theme::inner_radius(),
-        },
-        text_color: Some(TEXT),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     /// READ-1: the default new reader does not need the model, so a missing
@@ -2014,6 +1900,7 @@ mod tests {
         let missing = super::reading_model_status(false);
         assert!(!missing.contains("to read the scoreboard"), "{missing}");
         assert!(missing.contains("less accurate"), "{missing}");
+        assert!(missing.ends_with('.'), "{missing}");
         assert_eq!(
             super::reading_model_status(true),
             "Reading model is installed"
@@ -2106,19 +1993,6 @@ mod tests {
             form.to_config(&base()).sync.is_none(),
             "an unsafe URL must not become a saved sync config"
         );
-    }
-
-    #[test]
-    fn process_names_split_comma_and_newline() {
-        assert_eq!(
-            parse_process_names("Overwatch.exe, wine"),
-            vec!["Overwatch.exe", "wine"]
-        );
-        assert_eq!(
-            parse_process_names("Overwatch.exe\nwine\n"),
-            vec!["Overwatch.exe", "wine"]
-        );
-        assert!(parse_process_names("  ,  \n").is_empty());
     }
 
     #[test]

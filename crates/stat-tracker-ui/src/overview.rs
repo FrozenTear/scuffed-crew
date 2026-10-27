@@ -5,7 +5,7 @@ use iced::{Alignment, Element, Fill};
 use crate::aggregate::{aggregate, aggregate_filtered};
 use crate::app::{Message, TrackerApp};
 use crate::layout::{heroes_columns, tonight_compact_columns};
-use crate::model::{Game, Screen, SeasonSel};
+use crate::model::{Game, Screen, SeasonSel, game_card_in_progress};
 use crate::theme::{self, FONT_SEMIBOLD, GRID_GAP};
 use crate::widgets;
 
@@ -22,7 +22,11 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let stats = aggregate_filtered(&app.games, &filter);
     let all_time = aggregate(&app.games, None, None);
 
-    let tonight_shelf = tonight_shelf(&tonight, tonight_compact_columns(content_width));
+    let tonight_shelf = tonight_shelf(
+        &tonight,
+        tonight_compact_columns(content_width),
+        app.live_game_session.as_deref(),
+    );
     let heroes_shelf = heroes_shelf(&stats, heroes_columns(content_width));
     let bottom = row![
         widgets::season_panel(
@@ -34,8 +38,7 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         widgets::health_panel(
             &app.health_status,
             app.hero_pack_hint(),
-            app.overlay_showing(),
-            app.game_running,
+            app.companion_chip(),
         ),
     ]
     .spacing(GRID_GAP)
@@ -60,7 +63,12 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     col.into()
 }
 
-fn tonight_shelf(games: &[&Game], compact_cols: usize) -> Element<'static, Message> {
+fn tonight_shelf(
+    games: &[&Game],
+    compact_cols: usize,
+    live: Option<&str>,
+) -> Element<'static, Message> {
+    let in_progress = |g: &Game| game_card_in_progress(&g.session_id, g.outcome, live);
     let cols = compact_cols.max(1);
     let mut col = column![widgets::label_text("Tonight")]
         .spacing(GRID_GAP)
@@ -69,13 +77,13 @@ fn tonight_shelf(games: &[&Game], compact_cols: usize) -> Element<'static, Messa
         col = col.push(widgets::empty_surface(TONIGHT_EMPTY));
         return col.into();
     }
-    col = col.push(widgets::featured_game_card(games[0]));
+    col = col.push(widgets::featured_game_card(games[0], in_progress(games[0])));
     let rest: Vec<_> = games.iter().skip(1).copied().collect();
     if !rest.is_empty() {
         for chunk in rest.chunks(cols) {
             let mut row = Row::new().spacing(GRID_GAP).width(Fill);
             for g in chunk {
-                row = row.push(widgets::compact_game_card(g));
+                row = row.push(widgets::compact_game_card(g, in_progress(g)));
             }
             for _ in chunk.len()..cols {
                 row = row.push(space().width(Fill));

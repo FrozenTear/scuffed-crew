@@ -19,6 +19,34 @@ pub fn snapshot(kind: FixtureKind) -> Snapshot {
     }
 }
 
+/// The command line of a demo window on the empty fixture in `data_dir`,
+/// for tests ([`test_app`]).
+#[cfg(test)]
+pub(crate) fn test_cli(data_dir: &std::path::Path) -> crate::cli::Cli {
+    crate::cli::Cli {
+        data_dir: data_dir.to_path_buf(),
+        fixture: Some(FixtureKind::Empty),
+        seasons_url: None,
+        companion: false,
+        help: false,
+        version: false,
+        replace: false,
+    }
+}
+
+/// A demo app on the empty fixture in a fresh temp dir, for tests. A
+/// fixture never reads the host's config.toml or its env overlay, and a
+/// test app starts on the 0.6 layout whatever `SCUFFED_TRACKER_LAYOUT`
+/// says. It still reads the desktop and session variables, the installed
+/// tracker's version and the systemd unit, so a test must not depend on
+/// those.
+#[cfg(test)]
+pub(crate) fn test_app() -> (tempfile::TempDir, crate::app::TrackerApp) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let app = crate::app::TrackerApp::new(test_cli(dir.path())).0;
+    (dir, app)
+}
+
 pub fn sample_seasons_json() -> &'static str {
     r#"[
   {

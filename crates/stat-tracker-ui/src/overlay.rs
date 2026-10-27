@@ -1157,7 +1157,7 @@ mod tests {
             model.win_rate_line()
         );
         assert!(
-            model.win_rate_line().contains("2–1"),
+            model.win_rate_line().contains("2-1"),
             "{}",
             model.win_rate_line()
         );

@@ -1,18 +1,20 @@
-use iced::widget::{Row, column, text};
+use iced::widget::{Row, column};
 use iced::{Element, Fill};
 
 use crate::aggregate::aggregate_filtered;
 use crate::app::{Message, TrackerApp};
 use crate::layout::heroes_columns;
-use crate::theme::{FONT_BOLD, GRID_GAP, SIZE_TITLE, TEXT};
+use crate::model::Screen;
+use crate::theme::GRID_GAP;
 use crate::widgets;
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let stats = aggregate_filtered(&app.games, &app.header_filter());
     let cols = heroes_columns(content_width);
-    let mut col = column![text("Heroes").size(SIZE_TITLE).font(FONT_BOLD).color(TEXT),]
-        .spacing(GRID_GAP)
-        .width(Fill);
+    let mut col = column![].spacing(GRID_GAP).width(Fill);
+    if let Some(title) = crate::nav::classic_title(app, Screen::Heroes) {
+        col = col.push(title);
+    }
 
     if stats.heroes.is_empty() {
         col = col.push(widgets::empty_surface("No heroes in this window"));
