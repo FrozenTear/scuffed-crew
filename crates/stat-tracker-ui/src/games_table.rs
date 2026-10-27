@@ -260,7 +260,7 @@ pub fn view<'a>(
     if state.filters_open || crate::filter_chips::active_count(app) > 0 {
         col = col.push(chips);
     }
-    // Two or more rejected games: one Retry all line (UX Spec, OQ5).
+    // Any rejected game: one Retry all line (UX Spec, OQ5).
     if let Some(retry_all) = crate::games_retry::above_table(app) {
         col = col.push(retry_all);
     }
