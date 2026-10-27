@@ -2937,6 +2937,7 @@ fn health_status_for(
 mod tests {
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
+    use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
 
     #[test]
