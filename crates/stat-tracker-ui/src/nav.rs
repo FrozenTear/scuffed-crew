@@ -382,10 +382,17 @@ fn warn_icon() -> Element<'static, Message> {
         .into()
 }
 
+/// Cache keys of the Settings page icons in [`png_handle`] (tab icons use
+/// their index, the chip's warning sign `u8::MAX`).
+pub(crate) const ICON_CHECK: (u8, bool) = (u8::MAX - 1, false);
+pub(crate) const ICON_LOCK: (u8, bool) = (u8::MAX - 2, false);
+pub(crate) const ICON_FOLD_OPEN: (u8, bool) = (u8::MAX - 3, false);
+pub(crate) const ICON_FOLD_CLOSED: (u8, bool) = (u8::MAX - 4, false);
+
 /// Decoded once and kept, so every frame reuses the same handle. The
 /// PNGs are decoded here because iced's own decoder has no codecs in
 /// this build.
-fn png_handle(key: (u8, bool), bytes: &'static [u8]) -> image::Handle {
+pub(crate) fn png_handle(key: (u8, bool), bytes: &'static [u8]) -> image::Handle {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
     static CACHE: OnceLock<Mutex<HashMap<(u8, bool), image::Handle>>> = OnceLock::new();

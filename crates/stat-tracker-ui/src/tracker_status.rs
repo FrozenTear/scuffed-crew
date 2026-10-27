@@ -113,14 +113,19 @@ pub fn strip_label(status: HeaderStatus) -> &'static str {
 }
 
 pub(crate) fn header_status_for(app: &TrackerApp) -> HeaderStatus {
-    let sync_token_rejected = app.saved_config.sync.as_ref().is_some_and(|sync| {
-        stat_tracker::sync::auth_pause_matches(&app.data_dir, &sync.server_url, &sync.token)
-    });
     classify_header_status(HeaderStatusInput {
         demo: app.fixture.is_some(),
         daemon_running: app.daemon.running(),
         game_running: app.game_running,
-        sync_token_rejected,
+        sync_token_rejected: sync_token_rejected(app),
+    })
+}
+
+/// The website answered 401 or 403 for the saved token. The top bar, the
+/// Settings strip and the Website account card all read this.
+pub(crate) fn sync_token_rejected(app: &TrackerApp) -> bool {
+    app.saved_config.sync.as_ref().is_some_and(|sync| {
+        stat_tracker::sync::auth_pause_matches(&app.data_dir, &sync.server_url, &sync.token)
     })
 }
 

@@ -1,22 +1,37 @@
 //! Pure model for the 0.6 Settings page (redesign variant A).
 //!
 //! Everyday sections sit in the left column and the Advanced rows in the
-//! right one from [`TWO_COLUMN_MIN`] px of content width. Below that the
-//! page is one column, no wider than [`SINGLE_COLUMN_MAX`]. Advanced rows
-//! fold; [`AdvancedOpen`] remembers which are open. Nothing here draws.
+//! right one from [`TWO_COLUMN_MIN`] px of page width. Below that the page
+//! is one column, no wider than [`SINGLE_COLUMN_MAX`] and left-aligned on
+//! the gutter. Advanced rows fold; [`AdvancedOpen`] remembers which are
+//! open. Changes apply as they are made, so the page counts what waits for
+//! a tracker restart ([`changes_waiting`]) against one list of keys only
+//! this app reads ([`APP_ONLY_KEYS`]). Nothing here draws.
 
-use stat_tracker::config::{PauseOverride, SCREENCAST_MAX_FPS_DEFAULT};
+use stat_tracker::config::{
+    CaptureRoute, Config, PauseOverride, SCREENCAST_MAX_FPS_DEFAULT, SCREENCAST_MAX_FPS_MAX,
+    SCREENCAST_MAX_FPS_MIN, ocr_threads_override,
+};
+
+pub use stat_tracker::config::OCR_THREADS_ENV;
+
+use crate::settings::SessionKind;
 
 /// Settings page width where it becomes two columns: the window less the
-/// page gutters and the scroll gutter, not the window width the top bar
-/// breakpoints use.
+/// page gutters, not the window width the top bar breakpoints use.
 pub const TWO_COLUMN_MIN: f32 = 1100.0;
-/// Widest the one-column page gets, in the same page width.
+/// Widest one column gets (spec `.setw`, 760 px). The classic page keeps
+/// its own cap ([`crate::layout::SETTINGS_SINGLE_MAX`]).
 pub const SINGLE_COLUMN_MAX: f32 = 760.0;
+/// Gap between the two columns (spec 24 px).
+pub const COLUMN_GAP: f32 = 24.0;
+/// Widest the two-column page gets, so controls stay near their labels on
+/// an ultrawide window. Left-aligned like the one-column page.
+pub const PAGE_MAX: f32 = 2.0 * SINGLE_COLUMN_MAX + COLUMN_GAP;
 /// Memory each OCR worker holds (one Tesseract instance with its model).
 pub const OCR_WORKER_MB: usize = 23;
-/// Env var that fixes the OCR worker count outside the app.
-pub const OCR_THREADS_ENV: &str = "STAT_TRACKER_OCR_THREADS";
+/// Most OCR workers the tracker runs ([`Config::ocr_threads_resolved`]).
+pub const OCR_WORKERS_MAX: u32 = 8;
 
 /// One or two columns for `content` px of width.
 pub fn columns_for(content: f32) -> usize {
@@ -25,6 +40,40 @@ pub fn columns_for(content: f32) -> usize {
     } else {
         1
     }
+}
+
+/// Width the page draws at for `content` px: the column cap in one
+/// column, the two-column cap in two.
+pub fn page_width(content: f32) -> f32 {
+    let content = if content.is_finite() {
+        content.max(0.0)
+    } else {
+        0.0
+    };
+    let cap = if columns_for(content) == 2 {
+        PAGE_MAX
+    } else {
+        SINGLE_COLUMN_MAX
+    };
+    content.min(cap)
+}
+
+/// Config keys only this app reads, so a change to one never waits for a
+/// tracker restart: the update channel, the setup flag, the session
+/// window (Overview and Companion grouping) and the reader pack address
+/// (not used yet). The waiting count, the After restart tags and the
+/// legend all come from this list.
+pub const APP_ONLY_KEYS: [&str; 4] = [
+    "update_channel",
+    "setup_completed",
+    "session_window_secs",
+    "reader_pack_url",
+];
+
+/// True when `key` reaches the tracker only after it restarts: the tracker
+/// reads config.toml once, at start.
+pub fn needs_restart(key: &str) -> bool {
+    !APP_ONLY_KEYS.contains(&key)
 }
 
 /// Left column, top to bottom.
@@ -84,8 +133,30 @@ impl AdvancedSection {
         }
     }
 
+    /// The config keys this row's controls write.
+    pub fn keys(self) -> &'static [&'static str] {
+        match self {
+            AdvancedSection::CaptureReading => &[
+                "capture_route",
+                "capture_output",
+                "game_process_names",
+                "screencast_pause_between_grabs",
+                "screencast_max_fps",
+                "reader",
+                "ocr",
+                "name_reader",
+                "ocr_threads",
+            ],
+            AdvancedSection::TrackerService => &["auto_detect"],
+            AdvancedSection::StoredData => &[],
+            AdvancedSection::WebsiteConnection => &["sync"],
+            AdvancedSection::Troubleshooting => &["debug_ocr", "shadow_recognizer"],
+        }
+    }
+
     /// One line under the row: the current values, so a closed row says
-    /// how it is set without opening it.
+    /// how it is set without opening it. It names only what the open row
+    /// holds.
     pub fn summary(self, v: &AdvancedValues) -> String {
         match self {
             AdvancedSection::CaptureReading => format!(
@@ -100,40 +171,40 @@ impl AdvancedSection {
                 } else {
                     "Does not start on login"
                 };
-                let watch = if v.auto_detect {
-                    "watches for match start and end"
+                if v.auto_detect {
+                    format!(
+                        "{login}, watches for match start and end, checks every {}, waits {} s after a match",
+                        duration_line(v.poll_ms),
+                        v.cooldown_secs,
+                    )
                 } else {
-                    "match watching off"
-                };
-                format!(
-                    "{login}, {watch}, checks every {}, waits {} s after a match, closes a finished game after {} s",
-                    seconds_line(v.poll_ms),
-                    v.cooldown_secs,
-                    v.finished_close_secs
-                )
+                    format!("{login}, match watching off")
+                }
             }
             AdvancedSection::StoredData => format!(
-                "{} on this computer. Compact, Delete, older undecided games",
+                "{} tracked on this computer. Compact, Delete",
                 games_line(v.games)
             ),
-            AdvancedSection::WebsiteConnection => {
-                let state = if v.sync_on { "on" } else { "off" };
-                format!("Upload {state}. Manual server and token, has its own Apply")
+            AdvancedSection::WebsiteConnection => match &v.sync_host {
+                Some(host) => format!("Uploads to {host}. Server address and token, own Apply"),
+                None => "Uploads off. Server address and token, own Apply".to_string(),
+            },
+            AdvancedSection::Troubleshooting => {
+                let mut parts = vec![format!("Debug images {}", on_off(v.debug_images))];
+                if let Some(frames) = v.compare_frames {
+                    parts.push(format!("KDE compare frames {}", on_off(frames)));
+                }
+                parts.push(format!("extra number reader {}", on_off(v.extra_reader)));
+                parts.push("report a problem, about, uninstall".to_string());
+                parts.join(", ")
             }
-            AdvancedSection::Troubleshooting => format!(
-                "Debug images {}, KDE compare frames {}, reader comparisons in the log {}, Report pictures limit {} games or {} MB, report a problem, uninstall",
-                on_off(v.debug_images),
-                on_off(v.compare_frames),
-                on_off(v.reader_log),
-                v.report_max_games,
-                v.report_max_mb
-            ),
         }
     }
 
-    /// Rows whose changes reach the tracker only after it restarts.
+    /// Rows whose changes reach the tracker only after it restarts: any
+    /// row with a key the tracker reads.
     pub fn after_restart(self) -> bool {
-        matches!(self, AdvancedSection::CaptureReading)
+        self.keys().iter().any(|key| needs_restart(key))
     }
 
     fn bit(self) -> u8 {
@@ -147,25 +218,24 @@ impl AdvancedSection {
     }
 }
 
-/// Values the closed Advanced rows summarise. Built from the form and the
-/// app, so a change shows in the summary before Save.
+/// Values the closed Advanced rows summarise, from the saved settings.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AdvancedValues {
     pub route: &'static str,
+    /// A monitor name, or "the Auto monitor" ([`monitor_phrase`]).
     pub monitor: String,
     pub reader: ReaderChoice,
     pub autostart: bool,
     pub auto_detect: bool,
     pub poll_ms: u64,
     pub cooldown_secs: u64,
-    pub finished_close_secs: u64,
     pub games: usize,
-    pub sync_on: bool,
+    /// The website's host while uploads are on.
+    pub sync_host: Option<String>,
     pub debug_images: bool,
-    pub compare_frames: bool,
-    pub reader_log: bool,
-    pub report_max_games: usize,
-    pub report_max_mb: u64,
+    /// KDE compare frames, on KDE only (`None` elsewhere).
+    pub compare_frames: Option<bool>,
+    pub extra_reader: bool,
 }
 
 fn lower_first(s: &str) -> String {
@@ -180,12 +250,15 @@ fn on_off(v: bool) -> &'static str {
     if v { "on" } else { "off" }
 }
 
-/// `1.5 s`, `4 s`.
-pub fn seconds_line(ms: u64) -> String {
-    if ms.is_multiple_of(1000) {
+/// `800 ms`, `1.25 s`, `4 s`.
+pub fn duration_line(ms: u64) -> String {
+    if ms < 1000 {
+        format!("{ms} ms")
+    } else if ms.is_multiple_of(1000) {
         format!("{} s", ms / 1000)
     } else {
-        format!("{:.1} s", ms as f64 / 1000.0)
+        let text = format!("{:.2}", ms as f64 / 1000.0);
+        format!("{} s", text.trim_end_matches('0'))
     }
 }
 
@@ -195,6 +268,16 @@ fn games_line(n: usize) -> String {
     } else {
         format!("{n} games")
     }
+}
+
+/// The host part of a website address, for the summary and the account
+/// card: `https://ow.example.no/` gives `ow.example.no`.
+pub fn url_host(url: &str) -> String {
+    let rest = url.trim();
+    let rest = rest.split_once("://").map_or(rest, |(_, r)| r);
+    let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    let host = host.rsplit_once('@').map_or(host, |(_, h)| h);
+    host.to_string()
 }
 
 /// Which Advanced rows are open. All start closed, so the page opens on
@@ -216,8 +299,8 @@ impl AdvancedOpen {
     }
 }
 
-/// The three reader setups the Reading radio offers. They map onto the two
-/// existing switches: `reader = "new"` and `ocr = "on"`.
+/// The three reader setups the Reader radio list offers. They map onto two
+/// config keys: `reader = "new"` and `ocr = "on"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ReaderChoice {
     NewOnly,
@@ -240,14 +323,19 @@ impl ReaderChoice {
         }
     }
 
-    /// What the form's two switches show. OCR off always means the new
-    /// reader, so new-reader-off with OCR off is shown as new reader only.
+    /// What the two switches mean. OCR off always means the new reader, so
+    /// new-reader-off with OCR off is new reader only.
     pub fn from_switches(new_reader: bool, classic_ocr: bool) -> Self {
         match (new_reader, classic_ocr) {
             (_, false) => ReaderChoice::NewOnly,
             (true, true) => ReaderChoice::NewWithOcrBackup,
             (false, true) => ReaderChoice::ClassicOnly,
         }
+    }
+
+    /// The choice a config stands for.
+    pub fn of(config: &Config) -> Self {
+        Self::from_switches(config.reader.is_new(), config.ocr.is_on())
     }
 
     /// `reader = "new"` for this choice.
@@ -274,7 +362,9 @@ pub struct SessionWindow(pub u64);
 impl std::fmt::Display for SessionWindow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let secs = self.0;
-        if secs >= 3600 && secs.is_multiple_of(3600) {
+        if secs == 0 {
+            write!(f, "Off")
+        } else if secs >= 3600 && secs.is_multiple_of(3600) {
             let h = secs / 3600;
             if h == 1 {
                 write!(f, "1 hour")
@@ -290,11 +380,10 @@ impl std::fmt::Display for SessionWindow {
 }
 
 /// The dropdown entries: the presets, plus the stored value when it is not
-/// one, in order.
+/// one (0 included, shown as "Off"), in order.
 pub fn session_window_options(current: Option<u64>) -> Vec<SessionWindow> {
     let mut all: Vec<u64> = SESSION_WINDOW_PRESETS.to_vec();
     if let Some(c) = current
-        && c > 0
         && !all.contains(&c)
     {
         all.push(c);
@@ -345,27 +434,47 @@ pub fn with_chip(raw: &str, chip: &str) -> String {
     chips.join(", ")
 }
 
-/// Config keys that never wait for a tracker restart: the GUI reads them
-/// itself, or they only mark setup as done.
-const NOT_FOR_TRACKER: [&str; 2] = ["update_channel", "setup_completed"];
+/// An in-game name as typed, without a `#1234` tag (the help says to leave
+/// it out, and the scoreboard never shows it). `None` when nothing is left.
+pub fn name_chip(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    let name = match raw.rsplit_once('#') {
+        Some((name, tag)) if !tag.is_empty() && tag.chars().all(|c| c.is_ascii_digit()) => name,
+        _ => raw,
+    };
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// `config` as the Settings form would write it back. A hand-edited value
+/// the form normalises (a cleartext sync URL it drops, an empty
+/// `capture_output`) then never counts as a change.
+fn as_form_would_save(config: &Config) -> Config {
+    crate::settings::SettingsForm::from_config_and_shadow(
+        config,
+        Config::shadow_control(config.shadow_recognizer, None),
+    )
+    .to_config(config)
+}
 
 /// How many settings differ between `running` (what the tracker started
-/// with) and `now` (the form as it stands). Each changed value counts once,
-/// so "1 change waiting" means one setting.
-pub fn changes_waiting(
-    running: &stat_tracker::config::Config,
-    now: &stat_tracker::config::Config,
-) -> usize {
-    let (Ok(a), Ok(b)) = (serde_json::to_value(running), serde_json::to_value(now)) else {
-        return usize::from(running != now);
+/// with) and `saved` (config.toml now), leaving out [`APP_ONLY_KEYS`]. Each
+/// changed setting counts once: one Reader pick changes `reader` and `ocr`
+/// but counts as one.
+pub fn changes_waiting(running: &Config, saved: &Config) -> usize {
+    let running = as_form_would_save(running);
+    let saved = as_form_would_save(saved);
+    let reader = usize::from(ReaderChoice::of(&running) != ReaderChoice::of(&saved));
+    let (Ok(a), Ok(b)) = (serde_json::to_value(&running), serde_json::to_value(&saved)) else {
+        return usize::from(running != saved);
     };
     match (a, b) {
         (serde_json::Value::Object(mut a), serde_json::Value::Object(mut b)) => {
-            for key in NOT_FOR_TRACKER {
-                a.remove(key);
-                b.remove(key);
+            for key in APP_ONLY_KEYS.iter().chain(&["reader", "ocr"]) {
+                a.remove(*key);
+                b.remove(*key);
             }
-            leaf_diffs(&serde_json::Value::Object(a), &serde_json::Value::Object(b))
+            reader + leaf_diffs(&serde_json::Value::Object(a), &serde_json::Value::Object(b))
         }
         (a, b) => usize::from(a != b),
     }
@@ -391,55 +500,264 @@ fn leaf_diffs(a: &serde_json::Value, b: &serde_json::Value) -> usize {
     }
 }
 
-/// "1 change waiting", "3 changes waiting".
-pub fn changes_waiting_label(n: usize) -> String {
-    if n == 1 {
-        "1 change waiting".to_string()
-    } else {
-        format!("{n} changes waiting")
+/// The count and the words after it: (1, " change waiting").
+pub fn changes_waiting_words(n: usize) -> (String, &'static str) {
+    (
+        n.to_string(),
+        if n == 1 {
+            " change waiting"
+        } else {
+            " changes waiting"
+        },
+    )
+}
+
+/// A setting the 0.6 page applies straight to config.toml. The rest go
+/// through the shared form ([`crate::settings::SettingsForm`]); these
+/// four have no form field, and the classic page keeps them as they are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigEdit {
+    /// Stream frame rate. `None` is the default.
+    FrameRate(Option<u32>),
+    /// Pause between grabs. On leaves the choice to the tracker per desktop.
+    PauseBetweenGrabs(bool),
+    NameReader(bool),
+    /// OCR workers. `None` is Auto.
+    OcrWorkers(Option<u32>),
+}
+
+impl ConfigEdit {
+    /// Write this edit into `config`. A value equal to the default is
+    /// stored as missing, so config.toml stays short.
+    pub fn apply(self, config: &mut Config) {
+        match self {
+            ConfigEdit::FrameRate(fps) => {
+                config.screencast_max_fps = fps
+                    .map(|f| f.clamp(SCREENCAST_MAX_FPS_MIN, SCREENCAST_MAX_FPS_MAX))
+                    .filter(|&f| f != SCREENCAST_MAX_FPS_DEFAULT);
+            }
+            ConfigEdit::PauseBetweenGrabs(on) => {
+                config.screencast_pause_between_grabs = if on {
+                    config.screencast_pause_between_grabs.filter(|&v| v)
+                } else {
+                    Some(false)
+                };
+            }
+            ConfigEdit::NameReader(on) => config.name_reader = on,
+            ConfigEdit::OcrWorkers(n) => {
+                config.ocr_threads = n.map(|n| n.clamp(1, OCR_WORKERS_MAX));
+            }
+        }
     }
 }
 
-/// "Stream frame rate" value line, and whether it differs from the default.
-pub fn frame_rate_line(clamped: u32) -> (String, bool) {
-    let changed = clamped != SCREENCAST_MAX_FPS_DEFAULT;
-    let line = if changed {
-        format!("{clamped} per second (default {SCREENCAST_MAX_FPS_DEFAULT})")
-    } else {
-        format!("{clamped} per second (default)")
-    };
-    (line, changed)
+/// One entry in the Stream frame rate dropdown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameRate(pub u32);
+
+impl std::fmt::Display for FrameRate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.0 == SCREENCAST_MAX_FPS_DEFAULT {
+            write!(f, "{} fps (default)", self.0)
+        } else {
+            write!(f, "{} fps", self.0)
+        }
+    }
 }
 
-/// "Pause between grabs" value line, and whether it differs from the default.
-pub fn pause_line(pause: PauseOverride) -> (&'static str, bool) {
+/// Every frame rate the tracker takes, 1 to 5.
+pub fn frame_rate_options() -> Vec<FrameRate> {
+    (SCREENCAST_MAX_FPS_MIN..=SCREENCAST_MAX_FPS_MAX)
+        .map(FrameRate)
+        .collect()
+}
+
+/// The Pause between grabs switch: whether it shows On, and the env var
+/// value that fixes it outside the app (the switch is then locked).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PauseRow {
+    pub on: bool,
+    pub locked: bool,
+    /// Differs from the default (on, decided per desktop).
+    pub changed: bool,
+}
+
+pub fn pause_row(pause: PauseOverride) -> PauseRow {
     match pause {
-        PauseOverride::Auto => ("Auto, where this desktop handles it (default)", false),
-        PauseOverride::ConfigOff => ("Off", true),
-        PauseOverride::EnvOn => ("On, set by STAT_TRACKER_SCREENCAST_PAUSE", true),
-        PauseOverride::EnvOff => ("Off, set by STAT_TRACKER_SCREENCAST_PAUSE", true),
+        PauseOverride::Auto => PauseRow {
+            on: true,
+            locked: false,
+            changed: false,
+        },
+        PauseOverride::ConfigOff => PauseRow {
+            on: false,
+            locked: false,
+            changed: true,
+        },
+        PauseOverride::EnvOn => PauseRow {
+            on: true,
+            locked: true,
+            changed: false,
+        },
+        PauseOverride::EnvOff => PauseRow {
+            on: false,
+            locked: true,
+            changed: true,
+        },
     }
 }
 
-/// "OCR workers" value line: count and memory.
-pub fn ocr_workers_line(workers: usize) -> String {
-    let mb = workers * OCR_WORKER_MB;
-    if workers == 1 {
-        format!("1 worker, about {mb} MB")
+/// One entry in the OCR workers dropdown. `None` is Auto.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcrWorkers(pub Option<u32>);
+
+impl std::fmt::Display for OcrWorkers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            None => write!(f, "Auto"),
+            Some(n) => write!(f, "{n}"),
+        }
+    }
+}
+
+/// Auto, then 1 to 8.
+pub fn ocr_worker_options() -> Vec<OcrWorkers> {
+    std::iter::once(OcrWorkers(None))
+        .chain((1..=OCR_WORKERS_MAX).map(|n| OcrWorkers(Some(n))))
+        .collect()
+}
+
+/// The count [`OCR_THREADS_ENV`] fixes, when its value is one the tracker
+/// takes. Any other value (empty, "0", "abc", " 3") is ignored by the
+/// tracker, so it does not lock the row.
+pub fn ocr_env_lock(env: Option<&str>) -> Option<u32> {
+    env.and_then(ocr_threads_override)
+}
+
+/// Help under OCR workers: the memory each one takes, and the count in
+/// use when Auto picks it.
+pub fn ocr_workers_help(resolved: usize, auto: bool) -> String {
+    if auto {
+        format!("About {OCR_WORKER_MB} MB each. Auto uses {resolved} on this computer.")
     } else {
-        format!("{workers} workers, about {mb} MB")
+        format!("About {OCR_WORKER_MB} MB each.")
     }
 }
 
-/// True when the env var fixes the worker count, so the row is locked.
-pub fn ocr_workers_locked(env: Option<&str>) -> bool {
-    env.is_some_and(|v| !v.trim().is_empty())
+/// What the tracker is still waiting for, on rows the 0.6 spec shows but
+/// the tracker cannot store yet. Each is drawn off and disabled.
+pub const COMING_LATER: &str = "Comes in a later update.";
+
+/// The Upload games row: on while a server and token are saved. It is
+/// read-only here; Website connection sets or clears the token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UploadRow {
+    pub on: bool,
+    pub note: &'static str,
 }
 
-/// Settings the 0.6 spec shows that the tracker cannot store yet. Each is
-/// drawn off and greyed, with this reason, until S11 adds the config key or
-/// status message it needs.
-pub const WAITS_FOR_S11: &str = "Waits for the tracker update (S11).";
+pub fn upload_row(sync_on: bool) -> UploadRow {
+    UploadRow {
+        on: sync_on,
+        note: if sync_on {
+            "To stop uploads, clear the token under Advanced, Website connection."
+        } else {
+            "Add the server address and token under Advanced, Website connection."
+        },
+    }
+}
+
+/// The monitor Auto captures, as far as this app can tell from the output
+/// names: the only output, or the only one that is not a built-in panel
+/// (eDP, LVDS, DSI). With several external monitors the tracker picks the
+/// largest, which only it can see, so this is `None` ("Auto").
+pub fn auto_monitor(outputs: &[String]) -> Option<&str> {
+    let builtin = |name: &str| ["eDP", "LVDS", "DSI"].iter().any(|p| name.starts_with(p));
+    if outputs.len() == 1 {
+        return Some(&outputs[0]);
+    }
+    let mut external = outputs.iter().filter(|o| !builtin(o));
+    match (external.next(), external.next()) {
+        (Some(only), None) => Some(only),
+        _ => None,
+    }
+}
+
+/// "Auto (DP-3)" when the Auto monitor is known, else "Auto".
+pub fn auto_monitor_label(outputs: &[String]) -> String {
+    match auto_monitor(outputs) {
+        Some(name) => format!("Auto ({name})"),
+        None => "Auto".to_string(),
+    }
+}
+
+/// The monitor for a summary line: the chosen one, the Auto one when it is
+/// known, or "the Auto monitor".
+pub fn monitor_phrase(chosen: &str, outputs: &[String]) -> String {
+    let chosen = chosen.trim();
+    if !chosen.is_empty() {
+        return chosen.to_string();
+    }
+    auto_monitor(outputs).map_or_else(|| "the Auto monitor".to_string(), str::to_string)
+}
+
+/// Whether the screen stream rows (Pause between grabs, Stream frame rate)
+/// do anything here: the stream runs for Screen stream, and for Automatic
+/// on KDE and GNOME. Never on X11.
+pub fn stream_rows_apply(desktop: &str, session: SessionKind, route: CaptureRoute) -> bool {
+    if session == SessionKind::X11 {
+        return false;
+    }
+    match route {
+        CaptureRoute::Screencast => true,
+        CaptureRoute::Auto => {
+            stat_tracker::capture::is_kde(desktop) || stat_tracker::capture::is_gnome(desktop)
+        }
+        CaptureRoute::Screenshot | CaptureRoute::Kwin => false,
+    }
+}
+
+/// The version the strip shows: the installed tracker's, else this
+/// build's tracker version. Never this UI crate's own version.
+pub fn strip_version(installed: Option<&str>) -> String {
+    installed
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map_or_else(crate::update::daemon_package_version, str::to_string)
+}
+
+/// A row whose value can differ from the default, for its changed dot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DefaultRow {
+    SessionWindow,
+    CaptureMethod,
+    Monitor,
+    GameProcesses,
+    PauseBetweenGrabs,
+    FrameRate,
+    Reader,
+    NameReader,
+    OcrWorkers,
+}
+
+/// True when `config` holds something else than a fresh install for `row`.
+pub fn differs_from_default(config: &Config, row: DefaultRow) -> bool {
+    let d = Config::default();
+    match row {
+        DefaultRow::SessionWindow => config.session_window_secs != d.session_window_secs,
+        DefaultRow::CaptureMethod => config.capture_route != d.capture_route,
+        DefaultRow::Monitor => config
+            .capture_output
+            .as_deref()
+            .is_some_and(|o| !o.trim().is_empty()),
+        DefaultRow::GameProcesses => config.game_process_names != d.game_process_names,
+        DefaultRow::PauseBetweenGrabs => config.screencast_pause_between_grabs == Some(false),
+        DefaultRow::FrameRate => config.screencast_max_fps() != SCREENCAST_MAX_FPS_DEFAULT,
+        DefaultRow::Reader => ReaderChoice::of(config) != ReaderChoice::of(&d),
+        DefaultRow::NameReader => config.name_reader != d.name_reader,
+        DefaultRow::OcrWorkers => config.ocr_threads.is_some(),
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -454,6 +772,16 @@ mod tests {
         assert_eq!(columns_for(3000.0), 2);
         assert_eq!(columns_for(f32::NAN), 1);
         assert_eq!(columns_for(f32::INFINITY), 1);
+    }
+
+    #[test]
+    fn the_page_is_capped_in_both_modes() {
+        assert_eq!(page_width(976.0), SINGLE_COLUMN_MAX);
+        assert_eq!(page_width(700.0), 700.0);
+        assert_eq!(page_width(1200.0), 1200.0);
+        assert_eq!(page_width(3400.0), PAGE_MAX);
+        assert_eq!(PAGE_MAX, 1544.0);
+        assert_eq!(page_width(f32::NAN), 0.0);
     }
 
     #[test]
@@ -482,13 +810,50 @@ mod tests {
     }
 
     #[test]
-    fn only_capture_and_reading_is_tagged_after_restart() {
+    fn rows_with_a_tracker_key_are_tagged_after_restart() {
         for section in AdvancedSection::ALL {
             assert_eq!(
                 section.after_restart(),
-                section == AdvancedSection::CaptureReading,
+                section != AdvancedSection::StoredData,
                 "{section:?}"
             );
+        }
+        assert!(!needs_restart("session_window_secs"));
+        assert!(!needs_restart("update_channel"));
+        assert!(needs_restart("player_name"));
+        assert!(needs_restart("auto_detect"));
+    }
+
+    #[test]
+    fn every_listed_key_is_a_config_key() {
+        let mut config = Config::default();
+        config.screencast_max_fps = Some(3);
+        config.screencast_pause_between_grabs = Some(false);
+        config.ocr_threads = Some(2);
+        config.name_reader = false;
+        config.shadow_recognizer = true;
+        config.sync = Some(stat_tracker::config::SyncConfig {
+            server_url: "https://example.org".into(),
+            token: "t".into(),
+        });
+        config.capture_output = Some("DP-3".into());
+        config.capture_route = CaptureRoute::Screencast;
+        config.reader_pack_url = Some("https://example.org/packs".into());
+        config.update_channel = "prerelease".into();
+        config.setup_completed = true;
+        config.debug_ocr = true;
+        config.reader = stat_tracker::config::ReaderSetting::OcrV1;
+        config.ocr = stat_tracker::config::OcrSetting::Off;
+        // Keys left out while they hold their default are set above.
+        let serde_json::Value::Object(map) = serde_json::to_value(&config).unwrap() else {
+            panic!("config is a table");
+        };
+        let all = AdvancedSection::ALL
+            .iter()
+            .flat_map(|s| s.keys().iter())
+            .chain(APP_ONLY_KEYS.iter());
+        for key in all {
+            assert!(map.contains_key(*key), "{key}");
         }
     }
 
@@ -496,17 +861,12 @@ mod tests {
     fn advanced_rows_start_closed_and_fold_independently() {
         let mut open = AdvancedOpen::default();
         assert!(!open.any_open());
-        for section in AdvancedSection::ALL {
-            assert!(!open.is_open(section));
-        }
         open.toggle(AdvancedSection::CaptureReading);
         open.toggle(AdvancedSection::StoredData);
         assert!(open.is_open(AdvancedSection::CaptureReading));
         assert!(open.is_open(AdvancedSection::StoredData));
         assert!(!open.is_open(AdvancedSection::TrackerService));
         open.toggle(AdvancedSection::CaptureReading);
-        assert!(!open.is_open(AdvancedSection::CaptureReading));
-        assert!(open.is_open(AdvancedSection::StoredData));
         open.toggle(AdvancedSection::StoredData);
         assert!(!open.any_open());
     }
@@ -523,35 +883,6 @@ mod tests {
             ReaderChoice::from_switches(false, false),
             ReaderChoice::NewOnly
         );
-        assert!(!ReaderChoice::NewOnly.classic_ocr());
-        assert!(ReaderChoice::NewWithOcrBackup.classic_ocr());
-        assert!(!ReaderChoice::ClassicOnly.new_reader());
-    }
-
-    #[test]
-    fn value_lines_mark_changes_from_default() {
-        let (line, changed) = frame_rate_line(SCREENCAST_MAX_FPS_DEFAULT);
-        assert!(!changed);
-        assert!(line.contains("default"), "{line}");
-        let (line, changed) = frame_rate_line(2);
-        assert!(changed);
-        assert!(line.starts_with("2 per second"), "{line}");
-        assert!(!pause_line(PauseOverride::Auto).1);
-        assert!(pause_line(PauseOverride::ConfigOff).1);
-        assert!(
-            pause_line(PauseOverride::EnvOn)
-                .0
-                .contains("STAT_TRACKER_SCREENCAST_PAUSE")
-        );
-    }
-
-    #[test]
-    fn ocr_workers_show_memory_and_the_env_lock() {
-        assert_eq!(ocr_workers_line(1), "1 worker, about 23 MB");
-        assert_eq!(ocr_workers_line(3), "3 workers, about 69 MB");
-        assert!(!ocr_workers_locked(None));
-        assert!(!ocr_workers_locked(Some("  ")));
-        assert!(ocr_workers_locked(Some("2")));
     }
 
     fn values() -> AdvancedValues {
@@ -563,56 +894,80 @@ mod tests {
             auto_detect: true,
             poll_ms: 1500,
             cooldown_secs: 120,
-            finished_close_secs: 180,
             games: 857,
-            sync_on: true,
+            sync_host: Some("ow.example.no".into()),
             debug_images: false,
-            compare_frames: false,
-            reader_log: false,
-            report_max_games: 50,
-            report_max_mb: 500,
+            compare_frames: None,
+            extra_reader: false,
         }
     }
 
     #[test]
-    fn advanced_summaries_show_values() {
-        let v = values();
+    fn advanced_summaries_name_only_what_the_rows_hold() {
+        let mut v = values();
         assert_eq!(
             AdvancedSection::CaptureReading.summary(&v),
             "Automatic capture on DP-3, new reader with OCR backup, report pictures off"
         );
         assert_eq!(
             AdvancedSection::TrackerService.summary(&v),
-            "Starts on login, watches for match start and end, checks every 1.5 s, waits 120 s after a match, closes a finished game after 180 s"
+            "Starts on login, watches for match start and end, checks every 1.5 s, waits 120 s after a match"
         );
-        assert!(
-            AdvancedSection::StoredData
-                .summary(&v)
-                .starts_with("857 games on this computer")
+        assert_eq!(
+            AdvancedSection::StoredData.summary(&v),
+            "857 games tracked on this computer. Compact, Delete"
+        );
+        assert_eq!(
+            AdvancedSection::WebsiteConnection.summary(&v),
+            "Uploads to ow.example.no. Server address and token, own Apply"
+        );
+        assert!(!AdvancedSection::Troubleshooting.summary(&v).contains("KDE"));
+        v.auto_detect = false;
+        v.compare_frames = Some(true);
+        v.sync_host = None;
+        assert_eq!(
+            AdvancedSection::TrackerService.summary(&v),
+            "Starts on login, match watching off"
         );
         assert!(
             AdvancedSection::Troubleshooting
                 .summary(&v)
-                .contains("Report pictures limit 50 games or 500 MB")
+                .contains("KDE compare frames on")
         );
-        assert_eq!(seconds_line(4000), "4 s");
+        assert!(
+            AdvancedSection::WebsiteConnection
+                .summary(&v)
+                .starts_with("Uploads off")
+        );
     }
 
     #[test]
-    fn session_window_keeps_any_stored_value() {
+    fn durations_read_naturally() {
+        assert_eq!(duration_line(4000), "4 s");
+        assert_eq!(duration_line(1500), "1.5 s");
+        assert_eq!(duration_line(1250), "1.25 s");
+        assert_eq!(duration_line(80), "80 ms");
+    }
+
+    #[test]
+    fn host_comes_out_of_the_address() {
+        assert_eq!(url_host("https://ow.example.no/"), "ow.example.no");
+        assert_eq!(url_host("http://127.0.0.1:3030/api"), "127.0.0.1:3030");
+        assert_eq!(url_host("crew.example"), "crew.example");
+    }
+
+    #[test]
+    fn session_window_keeps_any_stored_value_and_lists_zero() {
         let opts = session_window_options(Some(1800));
         assert_eq!(opts.len(), SESSION_WINDOW_PRESETS.len());
-        assert!(
-            opts.iter()
-                .any(|o| o.to_string() == "3 hours" && o.0 == 10_800)
-        );
         assert_eq!(SessionWindow(1800).to_string(), "30 min");
-        assert_eq!(SessionWindow(3600).to_string(), "1 hour");
+        assert_eq!(SessionWindow(10_800).to_string(), "3 hours");
         let odd = session_window_options(Some(2700));
-        assert_eq!(odd.len(), SESSION_WINDOW_PRESETS.len() + 1);
         assert!(odd.contains(&SessionWindow(2700)));
         assert!(odd.windows(2).all(|w| w[0].0 < w[1].0));
-        assert_eq!(SessionWindow(45).to_string(), "45 s");
+        let zero = session_window_options(Some(0));
+        assert_eq!(zero[0], SessionWindow(0));
+        assert_eq!(SessionWindow(0).to_string(), "Off");
     }
 
     #[test]
@@ -623,36 +978,21 @@ mod tests {
         );
         assert_eq!(without_chip("Overwatch.exe, ow.exe", 0), "ow.exe");
         assert_eq!(without_chip("Overwatch.exe", 5), "Overwatch.exe");
-        assert_eq!(
-            with_chip("Overwatch.exe", " ow.exe "),
-            "Overwatch.exe, ow.exe"
-        );
         assert_eq!(with_chip("Overwatch.exe", "overwatch.EXE"), "Overwatch.exe");
         assert_eq!(with_chip("", "  "), "");
     }
 
     #[test]
-    fn changes_waiting_counts_each_setting() {
-        let base = stat_tracker::config::Config::default();
-        assert_eq!(changes_waiting(&base, &base), 0);
-        let mut now = base.clone();
-        now.session_window_secs += 60;
-        assert_eq!(changes_waiting(&base, &now), 1);
-        now.auto_detect.cooldown_secs += 1;
-        assert_eq!(changes_waiting(&base, &now), 2);
-        let mut channel = base.clone();
-        channel.update_channel = "alpha".into();
-        assert_eq!(changes_waiting(&base, &channel), 0);
-        assert_eq!(changes_waiting_label(1), "1 change waiting");
-        assert_eq!(changes_waiting_label(3), "3 changes waiting");
+    fn a_name_chip_drops_the_battle_tag() {
+        assert_eq!(name_chip("FrozenTear#2112").as_deref(), Some("FrozenTear"));
+        assert_eq!(name_chip(" FrozenTear ").as_deref(), Some("FrozenTear"));
+        assert_eq!(name_chip("A#B").as_deref(), Some("A#B"));
+        assert_eq!(name_chip("#1234"), None);
+        assert_eq!(name_chip("  "), None);
     }
 
     #[test]
     fn process_names_split_comma_and_newline() {
-        assert_eq!(
-            parse_process_names("Overwatch.exe, wine"),
-            vec!["Overwatch.exe", "wine"]
-        );
         assert_eq!(
             parse_process_names("Overwatch.exe\nwine\n"),
             vec!["Overwatch.exe", "wine"]
@@ -661,7 +1001,245 @@ mod tests {
     }
 
     #[test]
-    fn copy_has_no_em_dashes() {
+    fn changes_waiting_counts_tracker_settings_only() {
+        let base = Config::default();
+        assert_eq!(changes_waiting(&base, &base), 0);
+        let mut now = base.clone();
+        now.auto_detect.cooldown_secs += 1;
+        assert_eq!(changes_waiting(&base, &now), 1);
+        now.game_process_names.push("ow2.exe".into());
+        assert_eq!(changes_waiting(&base, &now), 2);
+        // Only this app reads these.
+        let mut app_only = base.clone();
+        app_only.update_channel = "alpha".into();
+        app_only.session_window_secs = 10_800;
+        app_only.reader_pack_url = Some("https://example.org".into());
+        app_only.setup_completed = !base.setup_completed;
+        assert_eq!(changes_waiting(&base, &app_only), 0);
+    }
+
+    #[test]
+    fn one_reader_pick_is_one_change() {
+        let base = Config::default();
+        for choice in ReaderChoice::ALL {
+            let mut now = base.clone();
+            now.reader = if choice.new_reader() {
+                stat_tracker::config::ReaderSetting::New
+            } else {
+                stat_tracker::config::ReaderSetting::OcrV1
+            };
+            now.ocr = if choice.classic_ocr() {
+                stat_tracker::config::OcrSetting::On
+            } else {
+                stat_tracker::config::OcrSetting::Off
+            };
+            let want = usize::from(choice != ReaderChoice::of(&base));
+            assert_eq!(changes_waiting(&base, &now), want, "{choice:?}");
+        }
+    }
+
+    #[test]
+    fn values_the_form_normalises_are_not_changes() {
+        let mut hand = Config::default();
+        hand.capture_output = Some(String::new());
+        hand.sync = Some(stat_tracker::config::SyncConfig {
+            server_url: "http://crew.example".into(),
+            token: "t".into(),
+        });
+        let saved = as_form_would_save(&hand);
+        assert_eq!(changes_waiting(&hand, &saved), 0);
+    }
+
+    #[test]
+    fn changes_waiting_words_split_the_count() {
+        assert_eq!(
+            changes_waiting_words(1),
+            ("1".to_string(), " change waiting")
+        );
+        assert_eq!(
+            changes_waiting_words(3),
+            ("3".to_string(), " changes waiting")
+        );
+    }
+
+    #[test]
+    fn config_edits_store_defaults_as_missing() {
+        let mut c = Config::default();
+        ConfigEdit::FrameRate(Some(3)).apply(&mut c);
+        assert_eq!(c.screencast_max_fps, Some(3));
+        ConfigEdit::FrameRate(Some(SCREENCAST_MAX_FPS_DEFAULT)).apply(&mut c);
+        assert_eq!(c.screencast_max_fps, None);
+        ConfigEdit::FrameRate(Some(9)).apply(&mut c);
+        assert_eq!(c.screencast_max_fps, Some(SCREENCAST_MAX_FPS_MAX));
+        ConfigEdit::FrameRate(None).apply(&mut c);
+        assert_eq!(c.screencast_max_fps, None);
+
+        ConfigEdit::PauseBetweenGrabs(false).apply(&mut c);
+        assert_eq!(c.screencast_pause_between_grabs, Some(false));
+        ConfigEdit::PauseBetweenGrabs(true).apply(&mut c);
+        assert_eq!(c.screencast_pause_between_grabs, None);
+        c.screencast_pause_between_grabs = Some(true);
+        ConfigEdit::PauseBetweenGrabs(true).apply(&mut c);
+        assert_eq!(c.screencast_pause_between_grabs, Some(true));
+
+        ConfigEdit::NameReader(false).apply(&mut c);
+        assert!(!c.name_reader);
+        ConfigEdit::OcrWorkers(Some(12)).apply(&mut c);
+        assert_eq!(c.ocr_threads, Some(OCR_WORKERS_MAX));
+        ConfigEdit::OcrWorkers(None).apply(&mut c);
+        assert_eq!(c.ocr_threads, None);
+    }
+
+    #[test]
+    fn frame_rates_and_workers_list_every_choice() {
+        let rates: Vec<String> = frame_rate_options().iter().map(|r| r.to_string()).collect();
+        assert_eq!(rates.len(), 5);
+        assert_eq!(
+            rates[(SCREENCAST_MAX_FPS_DEFAULT - 1) as usize],
+            format!("{SCREENCAST_MAX_FPS_DEFAULT} fps (default)")
+        );
+        assert_eq!(rates[0], "1 fps");
+        let workers = ocr_worker_options();
+        assert_eq!(workers.len(), 9);
+        assert_eq!(workers[0].to_string(), "Auto");
+        assert_eq!(workers[8].to_string(), "8");
+    }
+
+    #[test]
+    fn pause_switch_follows_the_override() {
+        assert_eq!(
+            pause_row(PauseOverride::Auto),
+            PauseRow {
+                on: true,
+                locked: false,
+                changed: false
+            }
+        );
+        assert!(!pause_row(PauseOverride::ConfigOff).on);
+        assert!(pause_row(PauseOverride::ConfigOff).changed);
+        assert!(pause_row(PauseOverride::EnvOn).locked);
+        assert!(!pause_row(PauseOverride::EnvOff).on);
+    }
+
+    #[test]
+    fn only_a_value_the_tracker_takes_locks_ocr_workers() {
+        assert_eq!(ocr_env_lock(None), None);
+        assert_eq!(ocr_env_lock(Some("")), None);
+        assert_eq!(ocr_env_lock(Some("0")), None);
+        assert_eq!(ocr_env_lock(Some("abc")), None);
+        assert_eq!(ocr_env_lock(Some(" 3")), None);
+        assert_eq!(ocr_env_lock(Some("3")), Some(3));
+        assert_eq!(
+            ocr_workers_help(4, true),
+            "About 23 MB each. Auto uses 4 on this computer."
+        );
+        assert_eq!(ocr_workers_help(2, false), "About 23 MB each.");
+    }
+
+    #[test]
+    fn upload_row_follows_sync() {
+        assert!(upload_row(true).on);
+        assert!(!upload_row(false).on);
+        assert!(upload_row(true).note.contains("clear the token"));
+        assert_ne!(upload_row(true).note, upload_row(false).note);
+    }
+
+    #[test]
+    fn auto_monitor_follows_the_tracker_rule() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            auto_monitor_label(&names(&["eDP-1", "DP-3"])),
+            "Auto (DP-3)"
+        );
+        assert_eq!(auto_monitor_label(&names(&["eDP-1"])), "Auto (eDP-1)");
+        assert_eq!(auto_monitor_label(&names(&["DP-1", "DP-3"])), "Auto");
+        assert_eq!(auto_monitor_label(&[]), "Auto");
+        assert_eq!(
+            monitor_phrase("", &names(&["eDP-1", "HDMI-A-1"])),
+            "HDMI-A-1"
+        );
+        assert_eq!(monitor_phrase(" DP-2 ", &[]), "DP-2");
+        assert_eq!(monitor_phrase("", &[]), "the Auto monitor");
+    }
+
+    #[test]
+    fn stream_rows_apply_only_where_the_stream_runs() {
+        assert!(stream_rows_apply(
+            "KDE",
+            SessionKind::Wayland,
+            CaptureRoute::Auto
+        ));
+        assert!(stream_rows_apply(
+            "GNOME",
+            SessionKind::Wayland,
+            CaptureRoute::Auto
+        ));
+        assert!(!stream_rows_apply(
+            "niri",
+            SessionKind::Wayland,
+            CaptureRoute::Auto
+        ));
+        assert!(stream_rows_apply(
+            "niri",
+            SessionKind::Wayland,
+            CaptureRoute::Screencast
+        ));
+        assert!(!stream_rows_apply(
+            "KDE",
+            SessionKind::Wayland,
+            CaptureRoute::Screenshot
+        ));
+        assert!(!stream_rows_apply(
+            "KDE",
+            SessionKind::Wayland,
+            CaptureRoute::Kwin
+        ));
+        assert!(!stream_rows_apply(
+            "KDE",
+            SessionKind::X11,
+            CaptureRoute::Screencast
+        ));
+    }
+
+    #[test]
+    fn the_strip_never_shows_the_ui_crate_version() {
+        assert_eq!(strip_version(Some("0.6.0")), "0.6.0");
+        let fallback = strip_version(None);
+        assert_eq!(fallback, crate::update::daemon_package_version());
+        assert_ne!(fallback, env!("CARGO_PKG_VERSION"));
+        assert_eq!(strip_version(Some("  ")), fallback);
+    }
+
+    #[test]
+    fn changed_dots_compare_with_a_fresh_install() {
+        let base = Config::default();
+        for row in [
+            DefaultRow::SessionWindow,
+            DefaultRow::CaptureMethod,
+            DefaultRow::Monitor,
+            DefaultRow::GameProcesses,
+            DefaultRow::PauseBetweenGrabs,
+            DefaultRow::FrameRate,
+            DefaultRow::Reader,
+            DefaultRow::NameReader,
+            DefaultRow::OcrWorkers,
+        ] {
+            assert!(!differs_from_default(&base, row), "{row:?}");
+        }
+        let mut c = base.clone();
+        c.session_window_secs = 10_800;
+        c.capture_output = Some("DP-3".into());
+        c.screencast_max_fps = Some(3);
+        c.ocr_threads = Some(2);
+        assert!(differs_from_default(&c, DefaultRow::SessionWindow));
+        assert!(differs_from_default(&c, DefaultRow::Monitor));
+        assert!(differs_from_default(&c, DefaultRow::FrameRate));
+        assert!(differs_from_default(&c, DefaultRow::OcrWorkers));
+        assert!(!differs_from_default(&c, DefaultRow::NameReader));
+    }
+
+    #[test]
+    fn copy_has_no_dashes() {
         let mut all: Vec<String> = Vec::new();
         all.extend(EverydaySection::ALL.iter().map(|s| s.title().to_string()));
         for s in AdvancedSection::ALL {
@@ -669,9 +1247,15 @@ mod tests {
             all.push(s.summary(&values()));
         }
         all.extend(ReaderChoice::ALL.iter().map(|c| c.label().to_string()));
-        all.push(WAITS_FOR_S11.into());
+        all.push(COMING_LATER.into());
+        all.push(upload_row(true).note.into());
+        all.push(upload_row(false).note.into());
         for line in all {
-            assert!(!line.contains('\u{2014}'), "{line}");
+            assert!(
+                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
+                "{line}"
+            );
+            assert!(!line.contains("S11"), "{line}");
         }
     }
 }

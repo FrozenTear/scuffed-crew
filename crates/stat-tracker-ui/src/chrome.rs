@@ -51,7 +51,7 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
                 left: PAGE_PAD_X,
                 right: 8.0,
             }),
-        page_body(app, content, crate::settings::view, PAGE_PAD_X),
+        page_body(app, content, crate::settings::view, PAGE_PAD_X, true),
     ]
     .spacing(0)
     .width(Fill)
@@ -75,7 +75,7 @@ fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
         let gutter = theme::page_gutter(size.width);
         column![
             crate::nav::top_bar(app, size.width),
-            page_body(app, content, crate::settings_page::view, gutter),
+            page_body(app, content, crate::settings_page::view, gutter, false),
         ]
         .spacing(0)
         .width(Fill)
@@ -91,15 +91,17 @@ fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
 /// layout puts first: the header, or the title and controls), the toast,
 /// the restart bar, then the screen, padded `pad_x` at the sides. The
 /// toast and the restart bar never come between a title and its controls.
-/// Settings fills the height and scrolls its own form (`settings`); the
-/// other screens scroll the whole pane.
+/// The classic Settings (`settings_scrolls`) fills the height and scrolls
+/// its own form; every other screen, the 0.6 Settings page included,
+/// scrolls the whole pane, so the scrollbar sits in one place on every tab.
 fn page_body<'a>(
     app: &'a TrackerApp,
     content: Column<'a, Message>,
     settings: fn(&'a TrackerApp, f32) -> Element<'a, Message>,
     pad_x: f32,
+    settings_scrolls: bool,
 ) -> Element<'a, Message> {
-    let settings_screen = app.screen == Screen::Settings;
+    let settings_screen = settings_scrolls && app.screen == Screen::Settings;
     let height = if settings_screen {
         Fill
     } else {

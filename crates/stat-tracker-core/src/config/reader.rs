@@ -240,3 +240,15 @@ impl Config {
         (total / 2).clamp(2, 4)
     }
 }
+
+/// Env var that sets the tracker's OCR worker count. `--ocr-threads` wins
+/// over it, and it wins over `ocr_threads` in the file.
+pub const OCR_THREADS_ENV: &str = "STAT_TRACKER_OCR_THREADS";
+
+/// The worker count an `--ocr-threads` or [`OCR_THREADS_ENV`] value sets: a
+/// whole number of 1 or more, exactly as written (no trimming). `None`
+/// means the tracker ignores the value. Settings uses the same rule to
+/// decide whether the env var locks its OCR workers row.
+pub fn ocr_threads_override(raw: &str) -> Option<u32> {
+    raw.parse::<u32>().ok().filter(|&n| n > 0)
+}

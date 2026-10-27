@@ -795,8 +795,8 @@ impl SettingsForm {
 
     /// Map the form onto `base`, keeping `data_dir`, `ocr_threads`, the report kit caps,
     /// `finished_game_close_secs`, `setup_completed`, `reader_pack_url`,
-    /// `debug_portal_frames`, and
-    /// `name_reader` (Settings has no control for it yet).
+    /// `debug_portal_frames`, the stream keys, and `name_reader` (the 0.6
+    /// page sets those through [`crate::settings_model::ConfigEdit`]).
     /// `shadow_recognizer` comes from the form's persisted reader (the file
     /// value). An env lock never writes true by itself. `update_channel`
     /// keeps the file's value (unset stays unset) unless the checkbox was
@@ -1537,7 +1537,7 @@ pub(crate) fn reading_model_status(installed: bool) -> &'static str {
     if installed {
         "Reading model is installed"
     } else {
-        "Reading model is missing. Classic OCR reads use the generic English model, which is less accurate"
+        "Reading model is missing. Classic OCR reads use the generic English model, which is less accurate."
     }
 }
 
@@ -1638,11 +1638,11 @@ pub(crate) fn shadow_toggle_interactive(locked: bool) -> bool {
 
 /// Help under the poll interval field. Empty or 4 is auto, which polls every
 /// 1.5 s with the new reader and every 4 s with classic OCR.
-const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4 s with classic OCR. 4 also means auto. For slower checks on a low-power laptop, enter 5 or more.";
+pub(crate) const POLL_INTERVAL_HELP: &str = "Empty means auto: 1.5 s with the new reader, 4 s with classic OCR. 4 also means auto. For slower checks on a low-power laptop, enter 5 or more.";
 /// Help under "Save debug images from each capture". The accepted and
 /// rejected scoreboard frames are not blanked, so it says whose names they
 /// show and where they stay.
-const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture, so leave it off unless diagnosing.";
+pub(crate) const DEBUG_IMAGES_HELP: &str = "Writes Tab crops, the accepted and rejected scoreboard frames, and poll Victory/Defeat evidence frames (not every tick). The scoreboard frames show other players' names. These images stay on this PC only. Slows capture, so leave it off unless diagnosing.";
 
 pub(crate) fn diagnostics_body(app: &TrackerApp, _demo: bool) -> Element<'_, Message> {
     let body = column![
@@ -1892,6 +1892,7 @@ mod tests {
         let missing = super::reading_model_status(false);
         assert!(!missing.contains("to read the scoreboard"), "{missing}");
         assert!(missing.contains("less accurate"), "{missing}");
+        assert!(missing.ends_with('.'), "{missing}");
         assert_eq!(
             super::reading_model_status(true),
             "Reading model is installed"

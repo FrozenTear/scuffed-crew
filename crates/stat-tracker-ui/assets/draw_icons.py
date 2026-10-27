@@ -5,8 +5,10 @@ Run from this folder with Pillow installed:
     python3 draw_icons.py
 
 It writes tab-icons/overview-dim.png and tab-icons/overview-on.png (four
-rounded squares spanning 14 of the 16 px box, as in the spec) and warn.png
-(the chip's warning sign, 12 px). Each is drawn at 2x for a 1x box, from an
+rounded squares spanning 14 of the 16 px box, as in the spec), warn.png
+(the chip's warning sign, 12 px), and for the Settings page check.png (the
+status strip's check in a circle, 14 px), lock.png (the env lock, 12 px)
+and fold-open.png / fold-closed.png (the ADVANCED row chevrons, 14 px). Each is drawn at 2x for a 1x box, from an
 8x supersampled mask, so a rerun gives the same files.
 """
 
@@ -16,6 +18,8 @@ SUPER = 8
 TEXT = (242, 242, 247)  # theme TEXT, selected tab
 TEXT_2 = (201, 201, 214)  # theme TEXT_2, other tabs
 WARN = (245, 184, 74)  # theme WARN
+OK = (70, 216, 164)  # theme OK
+TEXT_3 = (141, 141, 160)  # theme TEXT_3
 
 
 def paint(mask, size, colour):
@@ -63,11 +67,60 @@ def warn_mask():
     return mask
 
 
+def check_mask():
+    """A circle outline with a tick inside, 28 px."""
+    s = SUPER
+    mask = Image.new("L", (28 * s, 28 * s), 0)
+    draw = ImageDraw.Draw(mask)
+    stroke = round(2.4 * s)
+    draw.ellipse((2 * s, 2 * s, 26 * s - 1, 26 * s - 1), outline=255, width=stroke)
+    tick = [(9 * s, 14.5 * s), (12.5 * s, 18 * s), (19 * s, 10.5 * s)]
+    draw.line(tick, fill=255, width=stroke, joint="curve")
+    for x, y in (tick[0], tick[-1]):
+        r = stroke // 2
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=255)
+    return mask
+
+
+def lock_mask():
+    """A padlock: a shackle over a rounded body, 24 px."""
+    s = SUPER
+    mask = Image.new("L", (24 * s, 24 * s), 0)
+    draw = ImageDraw.Draw(mask)
+    stroke = round(2.4 * s)
+    draw.arc((7 * s, 3 * s, 17 * s, 15 * s), 180, 360, fill=255, width=stroke)
+    draw.line([(7 * s + stroke // 2, 9 * s), (7 * s + stroke // 2, 11 * s)], fill=255, width=stroke)
+    draw.line([(17 * s - stroke // 2, 9 * s), (17 * s - stroke // 2, 11 * s)], fill=255, width=stroke)
+    draw.rounded_rectangle((4 * s, 10 * s, 20 * s, 22 * s), radius=round(2.5 * s), fill=255)
+    return mask
+
+
+def chevron_mask(down):
+    """A chevron pointing right, or down when `down`, 28 px."""
+    s = SUPER
+    mask = Image.new("L", (28 * s, 28 * s), 0)
+    draw = ImageDraw.Draw(mask)
+    stroke = round(2.4 * s)
+    if down:
+        points = [(8 * s, 11 * s), (14 * s, 17 * s), (20 * s, 11 * s)]
+    else:
+        points = [(11 * s, 8 * s), (17 * s, 14 * s), (11 * s, 20 * s)]
+    draw.line(points, fill=255, width=stroke, joint="curve")
+    for x, y in (points[0], points[-1]):
+        r = stroke // 2
+        draw.ellipse((x - r, y - r, x + r, y + r), fill=255)
+    return mask
+
+
 def main():
     mask = overview_mask()
     paint(mask, 32, TEXT).save("tab-icons/overview-on.png", optimize=True)
     paint(mask, 32, TEXT_2).save("tab-icons/overview-dim.png", optimize=True)
     paint(warn_mask(), 24, WARN).save("warn.png", optimize=True)
+    paint(check_mask(), 28, OK).save("check.png", optimize=True)
+    paint(lock_mask(), 24, TEXT_3).save("lock.png", optimize=True)
+    paint(chevron_mask(True), 28, TEXT_2).save("fold-open.png", optimize=True)
+    paint(chevron_mask(False), 28, TEXT_2).save("fold-closed.png", optimize=True)
 
 
 if __name__ == "__main__":

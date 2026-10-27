@@ -71,17 +71,13 @@ impl Config {
 
         // OCR worker count: CLI > env > config file > auto (None).
         if let Some(raw) = Self::arg_value("--ocr-threads")
-            .or_else(|| std::env::var("STAT_TRACKER_OCR_THREADS").ok())
+            .or_else(|| std::env::var(super::reader::OCR_THREADS_ENV).ok())
         {
-            match raw.parse::<u32>() {
-                Ok(n) if n > 0 => config.ocr_threads = Some(n),
-                Ok(_) => tracing::warn!(
+            match super::reader::ocr_threads_override(&raw) {
+                Some(n) => config.ocr_threads = Some(n),
+                None => tracing::warn!(
                     value = %raw,
-                    "STAT_TRACKER_OCR_THREADS / --ocr-threads must be >= 1; ignoring"
-                ),
-                Err(_) => tracing::warn!(
-                    value = %raw,
-                    "invalid STAT_TRACKER_OCR_THREADS / --ocr-threads; ignoring"
+                    "STAT_TRACKER_OCR_THREADS / --ocr-threads must be a whole number of 1 or more; ignoring"
                 ),
             }
         }

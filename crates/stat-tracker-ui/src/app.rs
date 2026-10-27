@@ -7,7 +7,7 @@ use gtk::gdk::prelude::MonitorExt;
 use iced::widget::image::Handle;
 use iced::{Element, Subscription, Task, window};
 use stat_tracker::capture::CaptureBackend;
-use stat_tracker::config::{Config, ShadowRecognizerControl};
+use stat_tracker::config::Config;
 use stat_tracker::report::LogOnlyCategory;
 
 use crate::aggregate::GameFilter;
@@ -27,135 +27,15 @@ use crate::snapshot::{self, games_from_snapshot};
 use crate::tray::{self, TrayAction, TrayHandle};
 use crate::update::{self, UpdateInfo, UpdatePlan, UpdateProgress};
 
-/// Shown when the tracker service is already running.
-const SETTINGS_SAVED_RESTART: &str =
-    "Settings saved. Restart the tracker for changes to take effect.";
-
 /// Save must not replace a config.toml that did not parse.
-const SETTINGS_SAVE_REFUSED: &str =
+pub(crate) const SETTINGS_SAVE_REFUSED: &str =
     "Could not read config.toml, so settings were not saved. Fix that file, then try again.";
-
-/// The file parsed, but it is not the snapshot this form was built from.
-const SETTINGS_RELOADED_FROM_DISK: &str = "\
-config.toml changed on disk. Settings reloaded from the file, please review and save again.";
 
 /// How long the unreadable-config toast stays up before it clears itself.
 const REFUSED_TOAST_TIMEOUT: Duration = Duration::from_secs(8);
 
 fn toast_if_config_unreadable(unreadable: bool) -> Option<&'static str> {
     unreadable.then_some(SETTINGS_SAVE_REFUSED)
-}
-
-/// Every Save re-reads the file. `Err` means it still does not parse.
-fn reread_config_for_save(path: &std::path::Path) -> Result<Config, &'static str> {
-    Config::read_at(path).map_err(|_| SETTINGS_SAVE_REFUSED)
-}
-
-/// Result of pressing Save against the config file.
-#[derive(Debug, PartialEq)]
-enum SettingsFileSave {
-    /// The file does not parse. Nothing was written.
-    Unreadable,
-    /// The form was built while the file was unreadable, or the parsed file
-    /// differs from that snapshot. Nothing was written.
-    Reloaded(Config),
-    /// The on-disk parse matched the snapshot, and the form was written.
-    Saved(Config),
-}
-
-#[derive(Debug)]
-enum SettingsSaveError {
-    /// Sync URL or shortcut check failed. The file was not written.
-    Blocked(String),
-    /// The in-place write failed.
-    Write(String),
-}
-
-/// Re-read `path`, then either refuse, reload, or write the form in place.
-///
-/// A write happens only when the file parses as `snapshot`. The form's sync
-/// URL and shortcut checks run in `before_write`, after that match, so a
-/// reload is not blocked by the empty defaults a broken startup file leaves
-/// in the form. The write is `form.to_config(snapshot)` then [`Config::save_at`],
-/// which edits `shadow_recognizer` in place when that is the only change.
-fn save_settings_form(
-    path: &std::path::Path,
-    form_built_unreadable: bool,
-    snapshot: &Config,
-    form: &SettingsForm,
-    before_write: impl FnOnce() -> Result<(), String>,
-) -> Result<SettingsFileSave, SettingsSaveError> {
-    let fresh = match reread_config_for_save(path) {
-        Err(_) => return Ok(SettingsFileSave::Unreadable),
-        Ok(fresh) => fresh,
-    };
-    if form_built_unreadable || fresh != *snapshot {
-        return Ok(SettingsFileSave::Reloaded(fresh));
-    }
-    before_write().map_err(SettingsSaveError::Blocked)?;
-    let next = form.to_config(snapshot);
-    next.save_at(path)
-        .map_err(|err| SettingsSaveError::Write(err.to_string()))?;
-    Ok(SettingsFileSave::Saved(next))
-}
-
-/// Form fields from `fresh`, keeping the shortcut the member was editing.
-fn form_after_disk_reload(
-    previous: &SettingsForm,
-    fresh: &Config,
-    shadow: ShadowRecognizerControl,
-) -> SettingsForm {
-    let mut next = SettingsForm::from_config_and_shadow(fresh, shadow);
-    next.overlay_hotkey = previous.overlay_hotkey.clone();
-    next.overlay_hotkey_enabled = previous.overlay_hotkey_enabled;
-    next
-}
-
-/// True when `after` differs from `before` only in `update_channel`.
-///
-/// Only this app reads that key, so the save does not need a tracker restart.
-fn only_update_channel_changed(before: &Config, after: &Config) -> bool {
-    if before.update_channel == after.update_channel {
-        return false;
-    }
-    let mut same = before.clone();
-    same.update_channel.clone_from(&after.update_channel);
-    same == *after
-}
-
-/// True when the save changed the channel the update check uses, so it must
-/// run again on the new channel. `installed` matters: on an alpha install an
-/// unset channel is already prerelease, so writing `stable` is a switch.
-fn update_channel_switched(before: &Config, after: &Config, installed: Option<&str>) -> bool {
-    update::prerelease_updates_effective(&before.update_channel, installed)
-        != update::prerelease_updates_effective(&after.update_channel, installed)
-}
-
-/// True when the save changed which screen the tracker captures. The
-/// tracker reads `capture_output` once at start, so the app restarts a
-/// running tracker after such a save instead of asking the player to.
-fn capture_output_changed(before: &Config, after: &Config) -> bool {
-    before.capture_output != after.capture_output
-}
-
-fn capture_route_changed(before: &Config, after: &Config) -> bool {
-    before.capture_route != after.capture_route
-}
-
-const SETTINGS_SAVED_RESTARTING: &str =
-    "Settings saved. Restarting the tracker to use the new screen.";
-
-const SETTINGS_SAVED_ROUTE: &str =
-    "Settings saved. Restarting the tracker to use the new capture method.";
-
-const SETTINGS_SAVED_ROUTE_ENV: &str = "Settings saved. STAT_TRACKER_CAPTURE in the environment overrides this choice, so the tracker keeps that route. Edit the file under .config/environment.d, then log out and back in.";
-
-fn toast_after_successful_save(daemon_up: bool) -> &'static str {
-    if daemon_up {
-        SETTINGS_SAVED_RESTART
-    } else {
-        "Settings saved"
-    }
 }
 
 /// Dismiss clears the toast, including the unreadable-config error.
@@ -458,11 +338,11 @@ pub struct TrackerApp {
     /// Sessions whose report kit was present the last time games were loaded.
     pub sessions_with_kit: HashSet<String>,
     /// When the unreadable-config toast was shown. Cleared with the toast.
-    toast_shown_at: Option<SystemTime>,
+    pub(crate) toast_shown_at: Option<SystemTime>,
     pub settings: SettingsForm,
     pub saved_config: Config,
     /// The on-disk config.toml did not parse. Save must not overwrite it.
-    config_unreadable: bool,
+    pub(crate) config_unreadable: bool,
     pub daemon: DaemonView,
     pub daemon_busy: bool,
     pub outputs: Vec<String>,
@@ -501,7 +381,7 @@ pub struct TrackerApp {
     dialog_show_older: bool,
     notes_dialog: Option<NotesDialog>,
     notes_seen: NotesSeen,
-    uninstall_dialog: Option<crate::uninstall::UninstallDialog>,
+    pub(crate) uninstall_dialog: Option<crate::uninstall::UninstallDialog>,
     uninstall_busy: bool,
     /// Report a problem dialog, or the crash prompt shown at start.
     report: Option<crate::report::ReportUi>,
@@ -519,7 +399,7 @@ pub struct TrackerApp {
     seasons_url: Option<String>,
     last_seasons_attempt: Option<DateTime<Utc>>,
     /// Last update check started (GUI-7). `None` in fixture mode.
-    last_update_check: Option<std::time::Instant>,
+    pub(crate) last_update_check: Option<std::time::Instant>,
     quit_gate: QuitGate,
     /// The running update's gate: `update::LIVE_GATE`, or a test's own.
     update_gate: &'static update::UpdateGate,
@@ -681,7 +561,11 @@ impl TrackerApp {
             &saved_config,
             installed_version.as_deref(),
         );
-        let page_state = crate::settings_update::PageState::new(saved_config.clone());
+        let page_state = crate::settings_update::PageState::new(
+            saved_config.clone(),
+            daemon.pid,
+            seasons::load_companion_during_games(&cli.data_dir),
+        );
         let mut app = Self {
             live_status,
             health_status,
@@ -876,7 +760,8 @@ impl TrackerApp {
     }
 
     pub fn overlay_showing(&self) -> bool {
-        overlay::overlay_visible(&self.overlay_hold, self.game_running)
+        self.page_state.companion_during_games
+            && overlay::overlay_visible(&self.overlay_hold, self.game_running)
     }
 
     fn apply_overlay_policy(&mut self) {
@@ -931,6 +816,7 @@ impl TrackerApp {
                 }
                 if screen != Screen::Settings {
                     self.confirm_clear = false;
+                    self.page_state.left_page();
                 }
                 if screen == Screen::Settings
                     && let Some(backend) = self.backend
@@ -1216,164 +1102,16 @@ impl TrackerApp {
                 Task::none()
             }
             Message::SaveSettings => {
-                if self.fixture.is_some() {
-                    return Task::none();
-                }
-                let config_path = match Config::config_path() {
-                    Ok(path) => path,
-                    Err(_) => {
-                        self.config_unreadable = true;
-                        self.show_refused_toast();
-                        return Task::none();
-                    }
-                };
-                let sync_url = self.settings.sync_url.clone();
-                let saved_ocr = self.saved_config.ocr;
-                let form_classic_ocr = self.settings.classic_ocr;
-                let known_packs = self.ocr_switch.packs;
-                let hotkey_enabled = self.settings.overlay_hotkey_enabled;
-                let hotkey_bind = self.settings.overlay_hotkey.clone();
-                let mut stored_hotkey = None;
-                let outcome = save_settings_form(
-                    &config_path,
-                    self.config_unreadable,
-                    &self.saved_config,
-                    &self.settings,
-                    || {
-                        // Block the whole save. Writing the form would either store
-                        // the cleartext URL or drop the sync block; the file on disk
-                        // stays as it is until the URL is https, loopback http, or blank.
-                        // This runs only after the file matches the form's snapshot, so
-                        // a reload of a fixed file is not stopped by the default URL.
-                        if let Some(problem) = settings::sync_url_problem(&sync_url) {
-                            return Err(problem.to_string());
-                        }
-                        // Turning classic OCR off needs a tracker version
-                        // that can, and the reader packs. The click looked;
-                        // the save checks what that look found. The tracker
-                        // itself decides again when it starts.
-                        if let Some(reason) = settings::ocr_save_problem(
-                            saved_ocr,
-                            form_classic_ocr,
-                            known_packs.as_ref(),
-                            &stat_tracker::ocr_switch::Read::needing_ocr(),
-                        ) {
-                            return Err(reason);
-                        }
-                        let hotkey = OverlayHotkey::normalized(hotkey_enabled, &hotkey_bind);
-                        stored_hotkey = Some(hotkey.validate_for_save()?);
-                        Ok(())
-                    },
-                );
-                match outcome {
-                    Ok(SettingsFileSave::Unreadable) => {
-                        self.config_unreadable = true;
-                        self.show_refused_toast();
-                    }
-                    Ok(SettingsFileSave::Reloaded(fresh)) => {
-                        self.settings = form_after_disk_reload(
-                            &self.settings,
-                            &fresh,
-                            fresh.shadow_recognizer_control(),
-                        )
-                        .with_installed_version(&fresh, self.installed_version.as_deref());
-                        self.saved_config = fresh;
-                        self.config_unreadable = false;
-                        self.health_status = self.health_now();
-                        self.replace_toast(SETTINGS_RELOADED_FROM_DISK.to_string());
-                        self.toast_shown_at = None;
-                    }
-                    Ok(SettingsFileSave::Saved(config)) => {
-                        let Some(hotkey) = stored_hotkey else {
-                            self.replace_toast(
-                                "Could not save settings: shortcut was not checked".to_string(),
-                            );
-                            return Task::none();
-                        };
-                        if let Err(e) = seasons::save_overlay_hotkey(&self.data_dir, &hotkey) {
-                            self.replace_toast(format!("Could not save companion shortcut: {e}"));
-                            return Task::none();
-                        }
-                        let daemon_up = daemon::is_daemon_running(&self.data_dir);
-                        let gui_only = only_update_channel_changed(&self.saved_config, &config);
-                        let route_changed = capture_route_changed(&self.saved_config, &config);
-                        let restart_for_screen = daemon_up
-                            && !self.daemon_busy
-                            && capture_output_changed(&self.saved_config, &config);
-                        let restart_for_route = daemon_up && !self.daemon_busy && route_changed;
-                        let env_overrides_route = std::env::var(stat_tracker::config::CAPTURE_ENV)
-                            .ok()
-                            .is_some_and(|value| !value.trim().is_empty());
-                        let recheck = update_channel_switched(
-                            &self.saved_config,
-                            &config,
-                            self.installed_version.as_deref(),
-                        );
-                        self.saved_config = config;
-                        self.config_unreadable = false;
-                        self.health_status = self.health_now();
-                        self.overlay_hotkey = hotkey;
-                        self.settings = SettingsForm::from_config(&self.saved_config)
-                            .with_installed_version(
-                                &self.saved_config,
-                                self.installed_version.as_deref(),
-                            );
-                        self.settings.overlay_hotkey = self.overlay_hotkey.bind.clone();
-                        self.settings.overlay_hotkey_enabled = self.overlay_hotkey.enabled;
-                        self.replace_toast(if restart_for_route && env_overrides_route {
-                            SETTINGS_SAVED_ROUTE_ENV
-                        } else if restart_for_screen {
-                            SETTINGS_SAVED_RESTARTING
-                        } else if restart_for_route {
-                            SETTINGS_SAVED_ROUTE
-                        } else {
-                            toast_after_successful_save(daemon_up && !gui_only)
-                        });
-                        self.toast_shown_at = None;
-                        let mut tasks = Vec::new();
-                        if restart_for_screen || restart_for_route {
-                            // Same path as the Restart button, so the unit or
-                            // the spawned tracker is restarted the usual way.
-                            self.daemon_busy = true;
-                            self.page_state.set_restart_pending(true);
-                            tasks.push(Task::perform(
-                                daemon::run_verb(
-                                    self.data_dir.clone(),
-                                    DaemonVerb::Restart,
-                                    self.daemon.service_installed,
-                                ),
-                                Message::DaemonDone,
-                            ));
-                        }
-                        if recheck {
-                            // `check_for_update` reads the channel from config.toml,
-                            // which now holds the new value.
-                            tasks.push(Task::perform(
-                                update::check_for_update(),
-                                Message::UpdateChecked,
-                            ));
-                            self.last_update_check = Some(std::time::Instant::now());
-                        }
-                        if !tasks.is_empty() {
-                            return Task::batch(tasks);
-                        }
-                    }
-                    Err(SettingsSaveError::Blocked(message)) => {
-                        self.replace_toast(message);
-                    }
-                    Err(SettingsSaveError::Write(message)) => {
-                        self.replace_toast(format!("Could not save settings: {message}"));
-                    }
-                }
-                Task::none()
+                self.save_settings(crate::settings_save::SaveFrom::Classic, None)
             }
             Message::Daemon(verb) => {
                 if self.fixture.is_some() || self.daemon_busy {
                     return Task::none();
                 }
                 self.daemon_busy = true;
-                let restart = matches!(verb, DaemonVerb::Restart | DaemonVerb::Start);
-                self.page_state.set_restart_pending(restart);
+                if matches!(verb, DaemonVerb::Restart | DaemonVerb::Start) {
+                    self.page_state.restart_started(&self.saved_config);
+                }
                 let data_dir = self.data_dir.clone();
                 let installed = self.daemon.service_installed;
                 Task::perform(
@@ -1383,13 +1121,14 @@ impl TrackerApp {
             }
             Message::DaemonDone(result) => {
                 self.daemon_busy = false;
-                self.page_state
-                    .daemon_done(result.is_ok(), &self.saved_config);
+                self.page_state.daemon_done(result.is_ok());
                 self.replace_toast(match result {
                     Ok(m) => m,
                     Err(e) => e,
                 });
                 self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+                self.page_state
+                    .observe_tracker(self.daemon.pid, &self.saved_config);
                 Task::perform(daemon::systemd_enabled(), Message::AutostartReady)
             }
             Message::ToggleAutostart => {
@@ -1620,6 +1359,10 @@ impl TrackerApp {
                 Task::none()
             }
             Message::OpenUninstall => {
+                if self.fixture.is_some() {
+                    self.replace_toast(crate::settings_update::DEMO_REFUSED);
+                    return Task::none();
+                }
                 let exe = std::env::current_exe().unwrap_or_default();
                 let Some(home) =
                     dirs::home_dir().filter(|home| crate::uninstall::home_is_usable(home))
@@ -1658,6 +1401,10 @@ impl TrackerApp {
                 Task::none()
             }
             Message::ConfirmUninstall => {
+                if self.fixture.is_some() {
+                    self.uninstall_dialog = None;
+                    return Task::none();
+                }
                 let Some(crate::uninstall::UninstallDialog::Confirm {
                     home,
                     prefix,
@@ -1812,6 +1559,8 @@ impl TrackerApp {
                     }
                 }
                 self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+                self.page_state
+                    .observe_tracker(self.daemon.pid, &self.saved_config);
                 if self.quit_gate.update_finished() {
                     tracing::info!("update finished: running the quit that waited for it");
                     return self.exit_now();
@@ -1924,7 +1673,7 @@ impl TrackerApp {
         }
     }
 
-    fn replace_toast(&mut self, text: impl Into<String>) {
+    pub(crate) fn replace_toast(&mut self, text: impl Into<String>) {
         show_plain_toast(&mut self.toast, &mut self.toast_action, text.into());
     }
 
@@ -2578,7 +2327,7 @@ impl TrackerApp {
         }
     }
 
-    fn show_refused_toast(&mut self) {
+    pub(crate) fn show_refused_toast(&mut self) {
         self.replace_toast(
             toast_if_config_unreadable(true)
                 .unwrap_or(SETTINGS_SAVE_REFUSED)
@@ -2628,6 +2377,8 @@ impl TrackerApp {
                 self.clock = Utc::now();
             }
             self.daemon = daemon::refresh_view(&self.data_dir, &self.daemon);
+            self.page_state
+                .observe_tracker(self.daemon.pid, &self.saved_config);
             let status = stat_tracker::ocr_switch::read_status(&self.data_dir);
             self.ocr_switch.daemon_off =
                 settings::daemon_runs_ocr_off(status.as_ref(), self.daemon.pid);
@@ -2886,7 +2637,7 @@ impl TrackerApp {
         hero_pack_hint(self.sync_on(), self.ocr_switch.packs.as_ref())
     }
 
-    fn health_now(&self) -> String {
+    pub(crate) fn health_now(&self) -> String {
         let base = health_with_ocr_notice(
             health_status_for(
                 &self.data_dir,
@@ -3170,22 +2921,6 @@ fn health_status_for(
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn a_new_capture_screen_restarts_the_tracker_and_other_saves_do_not() {
-        let before = super::Config::default();
-        let mut picked = before.clone();
-        picked.capture_output = Some("DP-1".into());
-        assert!(super::capture_output_changed(&before, &picked));
-        assert!(super::capture_output_changed(&picked, &before));
-        let mut other = picked.clone();
-        other.capture_output = Some("eDP-1".into());
-        assert!(super::capture_output_changed(&picked, &other));
-        let mut same = picked.clone();
-        same.update_channel = "prerelease".into();
-        assert!(!super::capture_output_changed(&picked, &same));
-        assert!(!super::capture_output_changed(&picked, &picked));
-    }
-
     use super::{TrayWindowOp, tray_hide_op, tray_show_op};
     use iced::window;
     use stat_tracker::config::Config;
@@ -3246,246 +2981,16 @@ mod tests {
     }
 
     #[test]
-    fn save_toasts_have_no_em_or_en_dash() {
-        for copy in [
-            super::SETTINGS_SAVED_RESTART,
-            super::SETTINGS_SAVE_REFUSED,
-            super::SETTINGS_RELOADED_FROM_DISK,
-            "Settings saved",
-        ] {
-            assert!(!copy.contains('—'), "{copy}");
-            assert!(!copy.contains('–'), "{copy}");
-        }
+    fn the_refused_toast_has_no_em_or_en_dash() {
+        let copy = super::SETTINGS_SAVE_REFUSED;
+        assert!(!copy.contains('\u{2014}'), "{copy}");
+        assert!(!copy.contains('\u{2013}'), "{copy}");
         assert_eq!(
             super::toast_if_config_unreadable(true),
             Some(super::SETTINGS_SAVE_REFUSED)
         );
         assert!(super::SETTINGS_SAVE_REFUSED.contains("not saved"));
         assert!(super::toast_if_config_unreadable(false).is_none());
-        assert!(super::SETTINGS_SAVED_RESTART.contains("Restart the tracker"));
-    }
-
-    #[test]
-    fn alpha_updates_save_rechecks_and_needs_no_tracker_restart() {
-        use crate::settings::{SettingsForm, SettingsToggle};
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let raw = "\
-# keep this comment
-data_dir = \"/tmp/sst-alpha-save\"
-player_name = \"FrozenTear\"
-";
-        std::fs::write(&path, raw).expect("seed");
-        let snapshot = Config::parse_file_contents(raw).expect("parse");
-        let mut form = SettingsForm::from_config_and_shadow(
-            &snapshot,
-            Config::shadow_control(snapshot.shadow_recognizer, None),
-        );
-        form.set_toggle(SettingsToggle::PrereleaseUpdates, true);
-        let saved = super::save_settings_form(&path, false, &snapshot, &form, || Ok(()))
-            .expect("save writes");
-        let super::SettingsFileSave::Saved(written) = saved else {
-            panic!("expected a write, got {saved:?}");
-        };
-        let on_disk = std::fs::read_to_string(&path).expect("file");
-        assert!(on_disk.contains("# keep this comment"), "{on_disk}");
-        assert!(
-            on_disk.contains("update_channel = \"prerelease\""),
-            "{on_disk}"
-        );
-        assert!(
-            Config::parse_file_contents(&on_disk)
-                .expect("reparse")
-                .wants_prerelease_updates(),
-            "the next update check reads prerelease from disk"
-        );
-        assert!(super::update_channel_switched(&snapshot, &written, None));
-        assert!(super::only_update_channel_changed(&snapshot, &written));
-        assert_eq!(super::toast_after_successful_save(false), "Settings saved");
-
-        let mut other = written.clone();
-        other.debug_ocr = !other.debug_ocr;
-        assert!(!super::only_update_channel_changed(&written, &other));
-        assert!(!super::update_channel_switched(&written, &other, None));
-        assert!(!super::only_update_channel_changed(&written, &written));
-
-        let mut respelled = written.clone();
-        respelled.update_channel = "PRERELEASE".into();
-        assert!(!super::update_channel_switched(&written, &respelled, None));
-
-        // On an alpha install an unset channel is already prerelease, so
-        // writing `stable` switches and writing `prerelease` does not.
-        let alpha = Some("0.5.0-alpha.3");
-        let mut stable = snapshot.clone();
-        stable.update_channel = "stable".into();
-        assert!(super::update_channel_switched(&snapshot, &stable, alpha));
-        assert!(!super::update_channel_switched(&snapshot, &written, alpha));
-    }
-
-    #[test]
-    fn save_reloads_a_fixed_or_hand_edited_config_instead_of_overwriting_it() {
-        use crate::settings::{SettingsForm, SettingsToggle};
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("config.toml");
-        let broken = "\
-this is not toml
-token = \"secret-token-must-stay\"
-";
-        std::fs::write(&path, broken).expect("seed broken file");
-
-        // Startup: the file did not parse, so the form is defaults.
-        let mut snapshot = Config::default();
-        let mut form = SettingsForm::from_config_and_shadow(
-            &snapshot,
-            Config::shadow_control(snapshot.shadow_recognizer, None),
-        );
-        let mut form_built_unreadable = true;
-        assert!(form.player_name.is_empty());
-        assert!(form.sync_token.is_empty());
-
-        let mut checked_before_reload = false;
-        let refused =
-            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || {
-                checked_before_reload = true;
-                Ok(())
-            })
-            .expect("refuse is not a write error");
-        assert!(!checked_before_reload);
-        assert_eq!(refused, super::SettingsFileSave::Unreadable);
-        assert_eq!(std::fs::read_to_string(&path).expect("unchanged"), broken);
-
-        let fixed = "\
-# scoreboard name
-data_dir = \"/tmp/sst-fixed-on-disk\"
-player_name = \"FrozenTear\"
-session_window_secs = 1800
-finished_game_close_secs = 180
-game_process_names = [\"Overwatch.exe\"]
-debug_ocr = false
-
-[auto_detect]
-enabled = true
-poll_interval_secs = 4
-cooldown_secs = 120
-
-[sync]
-server_url = \"https://crew.example\"
-token = \"secret-token-must-stay\"
-";
-        std::fs::write(&path, fixed).expect("fix the file");
-
-        // (a) First Save reloads the fixed file and does not write the defaults.
-        let mut checked_before_reload = false;
-        let reloaded =
-            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || {
-                checked_before_reload = true;
-                Err("sync check must not run before a reload".into())
-            })
-            .expect("reload is not a write error");
-        assert!(!checked_before_reload);
-        let super::SettingsFileSave::Reloaded(fresh) = reloaded else {
-            panic!("first save after the fix must reload, got {reloaded:?}");
-        };
-        assert_eq!(std::fs::read_to_string(&path).expect("file"), fixed);
-        form = super::form_after_disk_reload(
-            &form,
-            &fresh,
-            Config::shadow_control(fresh.shadow_recognizer, None),
-        );
-        snapshot = fresh;
-        form_built_unreadable = false;
-        assert_eq!(form.player_name, "FrozenTear");
-        assert_eq!(form.sync_token, "secret-token-must-stay");
-        assert_eq!(form.sync_url, "https://crew.example");
-        assert!(!snapshot.shadow_recognizer);
-
-        // Second Save, after the member toggles the reader, writes only that key.
-        form.set_toggle(SettingsToggle::ShadowRecognizer, true);
-        let saved =
-            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || Ok(()))
-                .expect("second save writes");
-        let super::SettingsFileSave::Saved(written) = saved else {
-            panic!("second save must write the toggle, got {saved:?}");
-        };
-        assert!(written.shadow_recognizer);
-        let text = std::fs::read_to_string(&path).expect("saved");
-        let loaded = Config::read_at(&path).expect("load after save");
-        assert!(loaded.shadow_recognizer);
-        assert_eq!(
-            loaded.player_name.as_deref(),
-            Some("FrozenTear"),
-            "the reloaded name must survive the toggle write"
-        );
-        assert_eq!(
-            loaded.sync.as_ref().map(|sync| sync.token.as_str()),
-            Some("secret-token-must-stay")
-        );
-        let header = text.find("[auto_detect]").expect("tables");
-        assert_eq!(
-            &text[header..],
-            &fixed[fixed.find("[auto_detect]").expect("tables")..]
-        );
-        assert_eq!(text[..header].matches("shadow_recognizer").count(), 1);
-        assert!(text[..header].contains("shadow_recognizer = true"));
-        assert!(text.contains("# scoreboard name"));
-        assert!(text.contains("player_name = \"FrozenTear\""));
-
-        // (b) A hand edit while the form is open is reloaded, not overwritten.
-        let hand_edited = fixed.replace(
-            "player_name = \"FrozenTear\"",
-            "player_name = \"the other account\"",
-        );
-        let hand_edited = hand_edited.replace(
-            "token = \"secret-token-must-stay\"",
-            "token = \"token-edited-on-disk\"",
-        );
-        std::fs::write(&path, &hand_edited).expect("hand edit");
-        form.set_toggle(SettingsToggle::ShadowRecognizer, false);
-        let outcome =
-            super::save_settings_form(&path, form_built_unreadable, &snapshot, &form, || {
-                Err("must not write over a hand edit".into())
-            })
-            .expect("hand edit reloads");
-        let super::SettingsFileSave::Reloaded(fresh) = outcome else {
-            panic!("a hand edit must reload, got {outcome:?}");
-        };
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("hand edit kept"),
-            hand_edited
-        );
-        form = super::form_after_disk_reload(
-            &form,
-            &fresh,
-            Config::shadow_control(fresh.shadow_recognizer, None),
-        );
-        assert_eq!(form.player_name, "the other account");
-        assert_eq!(form.sync_token, "token-edited-on-disk");
-        assert!(!form.sync_token.is_empty());
-
-        // The startup flag reloads even when the parsed values already match.
-        let defaults_path = dir.path().join("defaults.toml");
-        let defaults = Config::default();
-        let defaults_text = toml::to_string_pretty(&defaults).expect("pretty");
-        std::fs::write(&defaults_path, &defaults_text).expect("write defaults");
-        let round_trip = Config::read_at(&defaults_path).expect("read defaults");
-        assert_eq!(round_trip, defaults);
-        let defaults_form = SettingsForm::from_config_and_shadow(
-            &defaults,
-            Config::shadow_control(defaults.shadow_recognizer, None),
-        );
-        let mut dirty = defaults_form;
-        dirty.set_toggle(SettingsToggle::ShadowRecognizer, true);
-        let flagged = super::save_settings_form(&defaults_path, true, &defaults, &dirty, || {
-            Err("must not write while the form was built unreadable".into())
-        })
-        .expect("flagged reload");
-        assert!(matches!(flagged, super::SettingsFileSave::Reloaded(_)));
-        assert_eq!(
-            std::fs::read_to_string(&defaults_path).expect("defaults"),
-            defaults_text
-        );
     }
 
     #[test]
@@ -3505,7 +3010,10 @@ token = \"secret-token-must-stay\"
             Some(shown),
             due
         ));
-        assert_ne!(super::toast_after_successful_save(true), refused);
+        assert_ne!(
+            crate::settings_save::toast_after_successful_save(true),
+            refused
+        );
     }
 
     #[test]

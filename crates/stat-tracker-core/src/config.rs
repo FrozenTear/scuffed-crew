@@ -21,7 +21,10 @@ pub use poll::{
     AutoDetectConfig, CLASSIC_POLL_INTERVAL, LEGACY_DEFAULT_POLL_SECS, NEW_READER_POLL_INTERVAL,
     POLL_INTERVAL_MS_MAX, POLL_INTERVAL_MS_MIN,
 };
-pub use reader::{OCR_ENV, OcrControl, OcrSetting, ReaderSetting, ShadowRecognizerControl};
+pub use reader::{
+    OCR_ENV, OCR_THREADS_ENV, OcrControl, OcrSetting, ReaderSetting, ShadowRecognizerControl,
+    ocr_threads_override,
+};
 pub use report_kit::{DEFAULT_MAX_GAMES, DEFAULT_MAX_MB, Retention};
 pub use sync::{
     SYNC_URL_HTTPS_REQUIRED, SYNC_URL_INVALID, SyncConfig, SyncUrlReject, validate_sync_server_url,

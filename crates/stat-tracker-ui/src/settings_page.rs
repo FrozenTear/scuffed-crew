@@ -1,51 +1,52 @@
-//! 0.6 Settings page (redesign variant A, top tabs).
+//! 0.6 Settings page (redesign variant A, top tabs; spec p6, p7, p9).
 //!
-//! Status strip with Save and Restart on top, then everyday settings on the
-//! left and folding ADVANCED rows on the right (one column below
-//! [`crate::settings_model::TWO_COLUMN_MIN`]). The old card layout stays in [`crate::settings::view`]
-//! for `SCUFFED_TRACKER_LAYOUT=classic`; both draw from the same form, so
-//! Save writes the same config either way.
+//! Under the "Settings" heading: the status strip (status, version, last
+//! capture; on the right the changes waiting and Restart tracker), "Run
+//! setup again" and the legend, then the everyday cards on the left and
+//! the ADVANCED rows in one panel on the right. Below
+//! [`crate::settings_model::TWO_COLUMN_MIN`] the page is one column of at
+//! most [`crate::settings_model::SINGLE_COLUMN_MAX`], left-aligned on the
+//! page gutter, and the strip puts its right group on a second line.
 //!
-//! Rows the tracker cannot store yet are drawn off and greyed with
-//! [`crate::settings_model::WAITS_FOR_S11`]. Capture and reading is drawn
-//! by [`crate::capture_reading`]; the page's state and messages are in
-//! [`crate::settings_update`].
+//! There is no Save: every change applies as it is made
+//! ([`crate::settings_update`]). The old card layout with its Save stays in
+//! [`crate::settings::view`] for `SCUFFED_TRACKER_LAYOUT=classic`; both
+//! edit the same form and write through [`crate::settings_save`]. The
+//! window chrome scrolls this page like every other tab.
 
-use iced::widget::scrollable::{Direction, Scrollbar};
-use iced::widget::{Row, button, column, container, row, scrollable, space, text};
-use iced::{Alignment, Background, Border, Element, Fill, Padding, Shadow, Theme};
+use iced::widget::{Column, Row, button, column, container, image, row, space, text};
+use iced::{Alignment, Background, Border, Color, Element, Fill, Length, Padding, Shadow, Theme};
 
 use crate::app::{Message, TrackerApp};
 use crate::daemon::DaemonVerb;
-use crate::form_widgets::{action_btn, hint};
-use crate::layout::{SCROLLBAR_WIDTH, SETTINGS_SCROLL_GUTTER};
-use crate::settings::{self, SAVE_LABEL};
+use crate::settings_cards;
 use crate::settings_model::{
-    AdvancedSection, AdvancedValues, EverydaySection, ReaderChoice, SINGLE_COLUMN_MAX,
-    changes_waiting, changes_waiting_label, columns_for,
+    AdvancedSection, AdvancedValues, COLUMN_GAP, EverydaySection, ReaderChoice,
+    changes_waiting_words, columns_for, monitor_phrase, page_width, strip_version,
 };
-use crate::settings_rows::{self, AFTER_RESTART_TAG, changed_dot, stub_row, sub_heading, tag};
+use crate::settings_rows::{Tag, changed_dot, hairline, link, tag};
 use crate::settings_update::Msg;
 use crate::theme::{
-    self, ACCENT, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, GRID_GAP, PAD_INNER, SIZE_BODY,
-    SIZE_LABEL, SIZE_META, TEXT, TEXT_2, TEXT_3,
+    self, ACCENT, FONT_BOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_LABEL, SIZE_META, TEXT,
+    TEXT_2, TEXT_3,
 };
-use crate::{update, widgets};
+use crate::{tracker_status, update, widgets};
 
-/// Copy under the Website account summary.
-const WEBSITE_ACCOUNT_HINT: &str =
-    "Server address and token are under Advanced, Website connection.";
-/// Sub-heading of the Sharing rows inside Website account.
-const SHARING_HEADING: &str = "Sharing · both start off";
-/// "Read my rank after Comp games" help.
-const RANK_HELP: &str = "Saves rank, rank change and its label. Applies from the next game.";
-/// "Share stat pictures" help.
-const STAT_PICTURES_HELP: &str = "Uploads the grayscale stat area after each game to help train the reader. No names. Kept 30 days. Report pictures are a separate setting in Capture and reading.";
-/// Link under the Sharing rows. The page it opens is not built yet.
-const WHAT_LEAVES_LABEL: &str = "What leaves your PC ›";
-/// Copy for the legend under the status strip. The spec line says changes
-/// apply as you make them; this page still has Save, so it says that.
-const LEGEND_APPLY: &str = "Changes apply when you save, except those tagged After restart.";
+/// Space between the status items on the strip's left (spec about 24).
+pub(crate) const STRIP_STATUS_GAP: f32 = 24.0;
+/// Space between the strip's right-hand items (spec about 12).
+pub(crate) const STRIP_ACTION_GAP: f32 = 12.0;
+/// Padding inside a card and the strip (spec about 18 to 20).
+const CARD_PAD: f32 = 20.0;
+/// Space between cards (spec 16).
+const CARD_GAP: f32 = 16.0;
+/// Button corner (spec about 10).
+const BUTTON_RADIUS: f32 = 10.0;
+/// Space between the legend's dot and its words.
+const LEGEND_DOT_GAP: f32 = 6.0;
+
+/// The legend under the strip (spec p6).
+const LEGEND_APPLY: &str = "Changes apply as you make them, except those tagged After restart.";
 const LEGEND_CHANGED: &str = "changed from default";
 const RUN_SETUP_LABEL: &str = "Run setup again";
 const DEMO_NOTE: &str =
@@ -53,8 +54,8 @@ const DEMO_NOTE: &str =
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
     let demo = app.fixture.is_some();
-    let two_columns = columns_for(content_width - SETTINGS_SCROLL_GUTTER) == 2;
-    let mut page = column![].spacing(GRID_GAP).width(Fill);
+    let two_columns = columns_for(content_width) == 2;
+    let mut page = column![].spacing(CARD_GAP).width(Fill);
 
     if let Some(info) = &app.update
         && app.update_banner_visible()
@@ -74,13 +75,13 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
         page = page.push(widgets::empty_surface(DEMO_NOTE));
     }
     page = page
-        .push(status_strip(app, demo))
+        .push(status_strip(app, demo, two_columns))
         .push(setup_and_legend(demo));
 
     if two_columns {
         page = page.push(
             row![everyday_column(app, demo), advanced_column(app, demo)]
-                .spacing(GRID_GAP)
+                .spacing(COLUMN_GAP)
                 .align_y(Alignment::Start)
                 .width(Fill),
         );
@@ -90,80 +91,119 @@ pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
             .push(advanced_column(app, demo));
     }
 
-    // The one-column page is no wider than SINGLE_COLUMN_MAX and centred.
-    let page: Element<'_, Message> = if two_columns {
-        page.into()
-    } else {
-        container(page.max_width(SINGLE_COLUMN_MAX))
-            .width(Fill)
-            .center_x(Fill)
-            .into()
-    };
-    scrollable(container(page).width(Fill).padding(Padding {
-        right: SETTINGS_SCROLL_GUTTER,
-        ..Padding::ZERO
-    }))
-    .direction(Direction::Vertical(
-        Scrollbar::new()
-            .width(SCROLLBAR_WIDTH)
-            .scroller_width(SCROLLBAR_WIDTH),
-    ))
-    .width(Fill)
-    .height(Fill)
-    .into()
+    // Left-aligned on the gutter in both modes (spec p9), capped so the
+    // controls stay near their labels.
+    container(page.max_width(page_width(content_width)))
+        .width(Fill)
+        .align_left(Fill)
+        .into()
 }
 
-/// Tracker status and version on the left; on the right the changes
-/// waiting for a restart, Restart tracker and Save.
-fn status_strip(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let version = app
-        .installed_version
-        .clone()
-        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
-    // The words and the dot come from the same status as the top bar, so
-    // the two never disagree. Demo mode shows the sample tracker as running.
-    let status = crate::tracker_status::header_status_for(app);
-    let mut strip = Row::new()
-        .spacing(16)
+/// The strip's left group: the status with its check, Version (which
+/// opens About), and the last capture.
+fn strip_status(app: &TrackerApp) -> Element<'_, Message> {
+    let status = tracker_status::header_status_for(app);
+    let running = matches!(
+        status,
+        tracker_status::HeaderStatus::Capturing | tracker_status::HeaderStatus::Waiting
+    );
+    let mark: Element<'_, Message> = if running {
+        settings_cards::check_icon(16.0)
+    } else {
+        container(space().width(8).height(8))
+            .width(8)
+            .height(8)
+            .style(move |_: &Theme| container::Style {
+                background: Some(Background::Color(tracker_status::header_status_color(
+                    status,
+                ))),
+                border: Border {
+                    radius: theme::RADIUS_CHIP.into(),
+                    ..Border::default()
+                },
+                ..container::Style::default()
+            })
+            .into()
+    };
+    let words = text(tracker_status::strip_label(status))
+        .size(SIZE_BODY)
+        .font(FONT_BOLD)
+        .color(TEXT);
+    let version = button(meta_pair(
+        "Version",
+        strip_version(app.installed_version.as_deref()),
+    ))
+    .padding(Padding::from([2, 4]))
+    .style(theme::quiet_btn(6.0))
+    .on_press(Message::OpenAbout);
+    let mut left = Row::new()
+        .spacing(STRIP_STATUS_GAP)
         .align_y(Alignment::Center)
-        .push(widgets::status_stub(
-            crate::tracker_status::strip_label(status),
-            crate::tracker_status::header_status_color(status),
-        ))
-        .push(meta(format!("Version {version}")));
-    if let Some(at) = crate::tracker_status::last_game_when(&app.games, app.clock) {
-        strip = strip.push(meta(format!("Last game {at}")));
+        .push(row![mark, words].spacing(8).align_y(Alignment::Center))
+        .push(version);
+    if let Some(at) = tracker_status::last_game_when(&app.games, app.clock) {
+        left = left.push(meta_pair("Last capture", at));
     }
-    strip = strip.push(space().width(Fill));
-    if app.daemon_busy {
-        strip = strip.push(meta("Working…"));
-    }
+    left.wrap().into()
+}
+
+/// The strip's right group: Working, the waiting count with its tag, and
+/// the tracker button last.
+fn strip_actions(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     let waiting = app.changes_waiting();
+    let mut right = Row::new()
+        .spacing(STRIP_ACTION_GAP)
+        .align_y(Alignment::Center);
+    if app.daemon_busy {
+        right = right.push(meta("Working…"));
+    }
     if waiting > 0 {
-        strip = strip
-            .push(tag(AFTER_RESTART_TAG))
-            .push(meta(changes_waiting_label(waiting)));
+        let (count, words) = changes_waiting_words(waiting);
+        right = right.push(tag(Tag::AfterRestart)).push(
+            row![
+                text(count).size(SIZE_META).font(FONT_BOLD).color(TEXT),
+                text(words).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_2),
+            ]
+            .align_y(Alignment::Center),
+        );
     }
     // A stopped tracker gets Start tracker, a running one Restart tracker;
     // both get it running with the saved config.
     let running = app.daemon.running() || demo;
     let (verb, label) = strip_action(running);
-    strip = strip.push(strip_btn(
-        label,
-        waiting > 0,
-        (!demo && !app.daemon_busy).then_some(Message::Daemon(verb)),
-    ));
-    let unsaved = changes_waiting(
-        &app.saved_config,
-        &app.settings.to_config(&app.saved_config),
-    ) > 0;
-    strip = strip.push(strip_btn(
-        SAVE_LABEL,
-        unsaved,
-        (!demo).then_some(Message::SaveSettings),
-    ));
-    container(strip)
-        .padding(PAD_INNER)
+    let primary = waiting > 0 || !running;
+    let enabled = !demo && !app.daemon_busy;
+    let mut b = button(text(label).size(SIZE_META).font(FONT_BOLD).color(TEXT))
+        .padding(Padding::from([9, 18]));
+    b = if primary {
+        b.style(primary_btn(enabled || demo))
+    } else {
+        b.style(ghost_btn(enabled || demo))
+    };
+    if enabled {
+        b = b.on_press(Message::Daemon(verb));
+    }
+    right.push(b).into()
+}
+
+/// Tracker status, version and last capture on the left; changes waiting
+/// and Restart tracker on the right. One line in two-column mode; in one
+/// column the right group goes on a second line, end-aligned (spec p9).
+fn status_strip(app: &TrackerApp, demo: bool, two_columns: bool) -> Element<'_, Message> {
+    let left = strip_status(app);
+    let right = strip_actions(app, demo);
+    let body: Element<'_, Message> = if two_columns {
+        row![left, space().width(Fill), right]
+            .spacing(STRIP_ACTION_GAP)
+            .align_y(Alignment::Center)
+            .into()
+    } else {
+        column![left, container(right).width(Fill).align_right(Fill)]
+            .spacing(12)
+            .into()
+    };
+    container(body)
+        .padding(Padding::from([14.0, CARD_PAD]))
         .width(Fill)
         .style(theme::surface_panel)
         .into()
@@ -178,128 +218,114 @@ fn strip_action(running: bool) -> (DaemonVerb, &'static str) {
     }
 }
 
-/// A strip button. Without a message it is drawn but does nothing (demo).
-fn strip_btn(
-    label: &'static str,
-    primary: bool,
-    msg: Option<Message>,
-) -> Element<'static, Message> {
-    let mut b = button(text(label).size(SIZE_META).font(FONT_SEMIBOLD).color(TEXT))
-        .padding(Padding::from([8, 16]));
-    b = if primary {
-        b.style(primary_btn)
-    } else {
-        b.style(theme::ghost_btn())
-    };
-    if let Some(msg) = msg {
-        b = b.on_press(msg);
-    }
-    b.into()
+/// A dim label and a bold value ("Version 0.6.0", "Last capture 00:40").
+fn meta_pair(label: &'static str, value: String) -> Element<'static, Message> {
+    row![
+        text(label).size(SIZE_META).font(FONT_MEDIUM).color(TEXT_3),
+        text(value).size(SIZE_META).font(FONT_BOLD).color(TEXT),
+    ]
+    .spacing(5)
+    .align_y(Alignment::Center)
+    .into()
 }
 
-/// Filled accent button. Same look when disabled, so the demo shows it.
-fn primary_btn(_theme: &Theme, status: button::Status) -> button::Style {
-    button::Style {
-        background: Some(Background::Color(match status {
-            button::Status::Hovered | button::Status::Pressed => iced::Color { a: 0.85, ..ACCENT },
+fn faded(c: Color, enabled: bool) -> Color {
+    if enabled {
+        c
+    } else {
+        Color { a: c.a * 0.45, ..c }
+    }
+}
+
+/// Filled accent button, dimmed while it cannot be pressed.
+pub(crate) fn primary_btn(enabled: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_theme, status| {
+        let fill = match status {
+            button::Status::Hovered | button::Status::Pressed => Color { a: 0.85, ..ACCENT },
             _ => ACCENT,
-        })),
-        text_color: TEXT,
-        border: Border {
-            color: ACCENT,
-            width: 1.0,
-            radius: theme::RADIUS_CHIP.into(),
-        },
-        shadow: Shadow::default(),
-        snap: false,
+        };
+        button::Style {
+            background: Some(Background::Color(faded(fill, enabled))),
+            text_color: faded(TEXT, enabled),
+            border: Border {
+                color: faded(ACCENT, enabled),
+                width: 1.0,
+                radius: BUTTON_RADIUS.into(),
+            },
+            shadow: Shadow::default(),
+            snap: false,
+        }
+    }
+}
+
+/// Outlined button in the same shape, dimmed while it cannot be pressed.
+fn ghost_btn(enabled: bool) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |theme_, status| {
+        let base = theme::ghost_btn()(theme_, status);
+        button::Style {
+            background: theme::hover_tint(status).or(base.background),
+            text_color: faded(base.text_color, enabled),
+            border: Border {
+                color: faded(base.border.color, enabled),
+                radius: BUTTON_RADIUS.into(),
+                ..base.border
+            },
+            ..base
+        }
     }
 }
 
 /// "Run setup again" on the left, the legend on the right.
 fn setup_and_legend(demo: bool) -> Element<'static, Message> {
-    let mut setup = button(
-        text(RUN_SETUP_LABEL)
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(ACCENT),
-    )
-    .padding(0)
-    .style(fold_style);
-    if !demo {
-        setup = setup.on_press(Message::Setup(crate::setup_guide::SetupMessage::Open));
-    }
     Row::new()
-        .spacing(GRID_GAP)
+        .spacing(16)
         .align_y(Alignment::Center)
-        .push(setup)
+        .push(link(
+            RUN_SETUP_LABEL,
+            (!demo).then_some(Message::Setup(crate::setup_guide::SetupMessage::Open)),
+        ))
         .push(space().width(Fill))
-        .push(meta(LEGEND_APPLY))
         .push(
-            row![changed_dot(), meta(LEGEND_CHANGED)]
-                .spacing(6)
-                .align_y(Alignment::Center),
+            row![
+                text(LEGEND_APPLY)
+                    .size(SIZE_LABEL)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_3),
+                changed_dot(),
+                text(LEGEND_CHANGED)
+                    .size(SIZE_LABEL)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT_3),
+            ]
+            .spacing(LEGEND_DOT_GAP)
+            .align_y(Alignment::Center),
         )
         .into()
 }
 
 fn everyday_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let mut col = column![].spacing(GRID_GAP).width(Fill);
+    let mut col = column![].spacing(CARD_GAP).width(Fill);
     for section in EverydaySection::ALL {
         let body = match section {
-            EverydaySection::PlayerSessions => column![
-                settings_rows::names_row(app, demo),
-                settings_rows::session_window_row(app),
-            ]
-            .spacing(14)
-            .into(),
-            EverydaySection::Companion => column![
-                widgets::overlay_toggle(app.overlay_showing(), app.game_running),
-                settings::companion_body(app, demo),
-            ]
-            .spacing(8)
-            .into(),
-            EverydaySection::WebsiteAccount => website_account(app),
-            EverydaySection::Updates => settings::updates_body(app, demo),
+            EverydaySection::PlayerSessions => settings_cards::player(app, demo),
+            EverydaySection::Companion => settings_cards::companion(app, demo),
+            EverydaySection::WebsiteAccount => settings_cards::website_account(app),
+            EverydaySection::Updates => settings_cards::updates(app, demo),
         };
         col = col.push(card(section.title(), body));
     }
     col.into()
 }
 
-fn website_account(app: &TrackerApp) -> Element<'_, Message> {
-    let line = match app.saved_config.sync.as_ref() {
-        Some(sync) if app.sync_on() => format!("Connected to {}", sync.server_url),
-        _ => "Not connected. Games stay on this computer.".to_string(),
-    };
-    column![
-        text(line).size(SIZE_BODY).font(FONT_MEDIUM).color(TEXT),
-        stub_row("Upload games after each match", None, false),
-        hint(WEBSITE_ACCOUNT_HINT),
-        space().height(4),
-        sub_heading(SHARING_HEADING),
-        stub_row("Read my rank after Comp games", Some(RANK_HELP), false),
-        stub_row("Share stat pictures", Some(STAT_PICTURES_HELP), false),
-        // The page this opens is not built yet (PLAN-0.6 carry-over).
-        text(WHAT_LEAVES_LABEL)
-            .size(SIZE_META)
-            .font(FONT_SEMIBOLD)
-            .color(ACCENT),
-    ]
-    .spacing(8)
-    .into()
-}
-
+/// ADVANCED: the five rows in one panel with hairlines between them, and
+/// an accent bar beside an open row.
 fn advanced_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
-    let mut col = column![
-        text("ADVANCED")
-            .size(SIZE_LABEL)
-            .font(FONT_SEMIBOLD)
-            .color(TEXT_3)
-    ]
-    .spacing(8)
-    .width(Fill);
     let values = advanced_values(app);
-    for section in AdvancedSection::ALL {
+    let mut panel = Column::new().spacing(0).width(Fill);
+    for (i, section) in AdvancedSection::ALL.into_iter().enumerate() {
+        if i > 0 {
+            panel = panel.push(hairline());
+        }
         let open = app.page_state.is_open(section);
         let mut fold = column![fold_header(section, open, &values)]
             .spacing(0)
@@ -308,49 +334,62 @@ fn advanced_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
             fold = fold.push(
                 container(advanced_body(section, app, demo))
                     .padding(Padding {
-                        top: 0.0,
-                        bottom: PAD_INNER,
-                        left: PAD_INNER,
-                        right: PAD_INNER,
+                        top: 4.0,
+                        bottom: CARD_PAD,
+                        left: CARD_PAD,
+                        right: CARD_PAD,
                     })
                     .width(Fill),
             );
         }
-        col = col.push(container(fold).width(Fill).style(theme::surface_panel));
+        let bar = container(space().width(3))
+            .width(3)
+            .height(Fill)
+            .style(move |_: &Theme| container::Style {
+                background: open.then_some(Background::Color(ACCENT)),
+                ..container::Style::default()
+            });
+        panel = panel.push(row![bar, fold].height(Length::Shrink).width(Fill));
     }
-    col.into()
+    column![
+        text("ADVANCED")
+            .size(SIZE_LABEL)
+            .font(FONT_BOLD)
+            .color(TEXT_3),
+        container(panel)
+            .width(Fill)
+            .clip(true)
+            .style(theme::surface_panel),
+    ]
+    .spacing(8)
+    .width(Fill)
+    .into()
 }
 
-/// What the closed Advanced rows summarise, from the form as it stands.
+/// What the closed Advanced rows summarise, from what is saved.
 fn advanced_values(app: &TrackerApp) -> AdvancedValues {
-    let config = app.settings.to_config(&app.saved_config);
-    let reader = ReaderChoice::from_switches(app.settings.new_reader, app.settings.classic_ocr);
-    let monitor = settings::nonempty(&app.settings.capture_output).unwrap_or_else(|| {
-        app.outputs
-            .first()
-            .cloned()
-            .unwrap_or_else(|| "first monitor".to_string())
-    });
-    let retention = config.report_kit_retention();
+    let config = &app.saved_config;
     AdvancedValues {
         route: crate::capture_reading::route_label(config.capture_route),
-        monitor,
-        reader,
+        monitor: monitor_phrase(config.capture_output.as_deref().unwrap_or(""), &app.outputs),
+        reader: ReaderChoice::of(config),
         autostart: app.daemon.autostart,
         auto_detect: config.auto_detect.enabled,
         poll_ms: config
             .auto_detect
-            .poll_interval(reader.new_reader())
+            .poll_interval(config.reader.is_new())
             .as_millis() as u64,
         cooldown_secs: config.auto_detect.cooldown_secs,
-        finished_close_secs: config.finished_game_close_secs,
         games: app.games.len(),
-        sync_on: crate::app::sync_on_for(&config),
+        sync_host: config
+            .sync
+            .as_ref()
+            .filter(|_| app.sync_on())
+            .map(|s| crate::settings_model::url_host(&s.server_url)),
         debug_images: config.debug_ocr,
-        compare_frames: config.debug_portal_frames,
-        reader_log: config.shadow_recognizer,
-        report_max_games: retention.max_games,
-        report_max_mb: retention.max_bytes / (1024 * 1024),
+        compare_frames: stat_tracker::capture::is_kde(&app.desktop)
+            .then(|| config.debug_portal_frames_enabled()),
+        extra_reader: app.settings.displayed_reader().file_flag(),
     }
 }
 
@@ -366,38 +405,40 @@ fn fold_header(
             .color(TEXT),
     );
     if section.after_restart() {
-        title = title.push(tag(AFTER_RESTART_TAG));
+        title = title.push(tag(Tag::AfterRestart));
     }
+    let chevron = if open {
+        crate::nav::png_handle(
+            crate::nav::ICON_FOLD_OPEN,
+            include_bytes!("../assets/fold-open.png"),
+        )
+    } else {
+        crate::nav::png_handle(
+            crate::nav::ICON_FOLD_CLOSED,
+            include_bytes!("../assets/fold-closed.png"),
+        )
+    };
     button(
         row![
             column![
                 title,
                 text(section.summary(values))
-                    .size(SIZE_META)
+                    .size(SIZE_LABEL)
                     .font(FONT_MEDIUM)
                     .color(TEXT_3),
             ]
             .spacing(4)
             .width(Fill),
-            text(if open { "⌄" } else { "›" })
-                .size(18)
-                .font(FONT_SEMIBOLD)
-                .color(TEXT_2),
+            image(chevron).width(14).height(14),
         ]
-        .spacing(GRID_GAP)
+        .spacing(16)
         .align_y(Alignment::Center),
     )
-    .padding(PAD_INNER)
+    .padding(Padding::from([14.0, CARD_PAD - 3.0]))
     .width(Fill)
-    .style(fold_style)
+    .style(theme::quiet_btn(0.0))
     .on_press(Message::SettingsPage(Msg::ToggleAdvanced(section)))
     .into()
-}
-
-/// Fold rows and "Run setup again": no chrome at rest, a light tint on
-/// hover and press.
-fn fold_style(theme: &Theme, status: button::Status) -> button::Style {
-    theme::quiet_btn(theme::RADIUS_INNER)(theme, status)
 }
 
 fn advanced_body<'a>(
@@ -407,74 +448,25 @@ fn advanced_body<'a>(
 ) -> Element<'a, Message> {
     match section {
         AdvancedSection::CaptureReading => crate::capture_reading::body(app, demo),
-        AdvancedSection::TrackerService => column![
-            settings::service_body(app, demo),
-            sub_heading("Match watching"),
-            settings::auto_detect_body(app, demo),
-        ]
-        .spacing(8)
-        .into(),
-        AdvancedSection::StoredData => settings::data_body(app, demo),
-        AdvancedSection::WebsiteConnection => settings::sync_body(app, demo),
-        AdvancedSection::Troubleshooting => column![
-            settings::diagnostics_body(app, demo),
-            settings::shadow_reader_block(app),
-            troubleshooting_actions(),
-        ]
-        .spacing(GRID_GAP)
-        .into(),
+        AdvancedSection::TrackerService => settings_cards::tracker_service(app, demo),
+        AdvancedSection::StoredData => settings_cards::stored_data(app, demo),
+        AdvancedSection::WebsiteConnection => settings_cards::website_connection(app, demo),
+        AdvancedSection::Troubleshooting => settings_cards::troubleshooting(app, demo),
     }
 }
 
-/// Report a problem and About, then Uninstall. Uninstall is only here.
-fn troubleshooting_actions() -> Element<'static, Message> {
-    column![
-        hint("Crash, low FPS, or anything else. You see the report before it is sent."),
-        Row::new()
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .push(action_btn(
-                "Report a problem",
-                false,
-                Message::Report(crate::report::ReportMessage::Open(None)),
-            ))
-            .push(action_btn("About", false, Message::OpenAbout))
-            .push(space().width(Fill))
-            .push(
-                button(
-                    text("Uninstall")
-                        .size(SIZE_META)
-                        .font(FONT_SEMIBOLD)
-                        .color(theme::DANGER),
-                )
-                .padding(Padding::from([8, 16]))
-                .style(theme::danger_btn(false))
-                .on_press(Message::OpenUninstall),
-            )
-            .wrap(),
-    ]
-    .spacing(8)
-    .into()
-}
-
 fn card<'a>(title: &'static str, body: Element<'a, Message>) -> Element<'a, Message> {
-    container(
-        column![
-            text(title).size(SIZE_BODY).font(FONT_BOLD).color(TEXT),
-            body,
-        ]
-        .spacing(8),
-    )
-    .padding(PAD_INNER)
-    .width(Fill)
-    .style(theme::surface_panel)
-    .into()
+    container(column![text(title).size(15).font(FONT_BOLD).color(TEXT), body,].spacing(14))
+        .padding(Padding::from([18.0, CARD_PAD]))
+        .width(Fill)
+        .style(theme::surface_panel)
+        .into()
 }
 
 fn meta(copy: impl Into<String>) -> Element<'static, Message> {
     text(copy.into())
         .size(SIZE_META)
-        .font(FONT_MEDIUM)
+        .font(FONT_SEMIBOLD)
         .color(TEXT_3)
         .into()
 }
@@ -482,6 +474,9 @@ fn meta(copy: impl Into<String>) -> Element<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings_model::{SINGLE_COLUMN_MAX, TWO_COLUMN_MIN};
+    use iced::advanced::layout::{Limits, Node};
+    use iced::advanced::widget::Tree;
 
     fn app() -> (tempfile::TempDir, TrackerApp) {
         let dir = tempfile::tempdir().unwrap();
@@ -498,21 +493,86 @@ mod tests {
         (dir, app)
     }
 
+    fn headless() -> iced::Renderer {
+        use iced::advanced::renderer::Headless;
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            FONT_MEDIUM,
+            iced::Pixels(SIZE_BODY),
+            Some("tiny-skia"),
+        ))
+        .expect("the tiny-skia renderer needs no display");
+        for bytes in [
+            theme::FONT_BYTES_MEDIUM,
+            theme::FONT_BYTES_SEMIBOLD,
+            theme::FONT_BYTES_BOLD,
+            theme::FONT_BYTES_EXTRABOLD,
+        ] {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .expect("font system lock")
+                .load_font(std::borrow::Cow::Borrowed(bytes));
+        }
+        renderer
+    }
+
+    /// Lay the page out at `width` x 4000 px.
+    fn lay_out(mut element: Element<'_, Message>, width: f32) -> Node {
+        let renderer = headless();
+        let mut tree = Tree::new(&element);
+        element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &Limits::new(iced::Size::ZERO, iced::Size::new(width, 4000.0)),
+        )
+    }
+
     #[test]
     fn page_draws_at_both_widths_with_every_row_open() {
         let (_dir, mut app) = app();
-        for width in [
-            640.0,
-            crate::settings_model::TWO_COLUMN_MIN + SETTINGS_SCROLL_GUTTER + 1.0,
-        ] {
+        for width in [640.0, 976.0, TWO_COLUMN_MIN + 1.0] {
             let _ = view(&app, width);
         }
         for section in AdvancedSection::ALL {
             let _ = app.update(Message::SettingsPage(Msg::ToggleAdvanced(section)));
         }
-        for width in [640.0, 1600.0] {
+        for width in [640.0, 976.0, 1600.0, 3400.0] {
             let _ = view(&app, width);
         }
+    }
+
+    /// Render fix 2 (spec p9): at 1024 the one column starts at the
+    /// gutter and stops at its cap; it is not centred.
+    #[test]
+    fn the_one_column_page_is_left_aligned_and_capped() {
+        let (_dir, app) = app();
+        let node = lay_out(view(&app, 976.0), 976.0);
+        let page = &node.children()[0];
+        assert!(page.bounds().x.abs() < 0.5, "{:?}", page.bounds());
+        assert!((page.bounds().width - SINGLE_COLUMN_MAX).abs() < 0.5);
+        let wide = lay_out(view(&app, 3400.0), 3400.0);
+        let page = &wide.children()[0];
+        assert!(page.bounds().x.abs() < 0.5);
+        assert!((page.bounds().width - crate::settings_model::PAGE_MAX).abs() < 0.5);
+    }
+
+    /// M9: with a change waiting, the one-column strip puts its actions on
+    /// a second line and nothing runs past the column.
+    #[test]
+    fn the_one_column_strip_fits_with_a_change_waiting() {
+        let (_dir, mut app) = app();
+        app.saved_config.auto_detect.cooldown_secs += 1;
+        assert_eq!(app.changes_waiting(), 1);
+        let node = lay_out(view(&app, 976.0), 976.0);
+        let page = &node.children()[0];
+        // Demo note, then the strip.
+        let strip = &page.children()[1];
+        let inner = &strip.children()[0];
+        let lines = inner.children();
+        assert_eq!(lines.len(), 2, "status, then the actions");
+        let actions = &lines[1].children()[0];
+        let right_edge = lines[1].bounds().x + actions.bounds().x + actions.bounds().width;
+        assert!(right_edge <= inner.bounds().width + 0.5, "{right_edge}");
+        assert!(actions.bounds().x > 0.0, "end-aligned");
     }
 
     #[test]
@@ -522,19 +582,20 @@ mod tests {
     }
 
     #[test]
-    fn copy_has_no_em_dashes() {
-        for line in [
-            WEBSITE_ACCOUNT_HINT,
-            SHARING_HEADING,
-            RANK_HELP,
-            STAT_PICTURES_HELP,
-            WHAT_LEAVES_LABEL,
-            LEGEND_APPLY,
-            LEGEND_CHANGED,
-            RUN_SETUP_LABEL,
-            DEMO_NOTE,
-        ] {
-            assert!(!line.contains('\u{2014}'), "{line}");
+    fn strip_gaps_follow_the_spec() {
+        assert_eq!(STRIP_STATUS_GAP, 24.0);
+        assert_eq!(STRIP_ACTION_GAP, 12.0);
+        assert!(LEGEND_DOT_GAP <= 6.0);
+    }
+
+    #[test]
+    fn copy_has_no_dashes() {
+        for line in [LEGEND_APPLY, LEGEND_CHANGED, RUN_SETUP_LABEL, DEMO_NOTE] {
+            assert!(
+                !line.contains('\u{2014}') && !line.contains('\u{2013}'),
+                "{line}"
+            );
         }
+        assert!(LEGEND_APPLY.starts_with("Changes apply as you make them"));
     }
 }

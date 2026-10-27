@@ -59,6 +59,10 @@ struct UiStateFile {
     /// Missing → on. The overlay stays click-through; this is an evdev bind.
     #[serde(default)]
     overlay_hotkey_enabled: Option<bool>,
+    /// "Show Companion during games" on the 0.6 Settings page. Missing →
+    /// on. Off keeps the Companion closed whatever the per-game toggle says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    companion_during_games: Option<bool>,
     /// Tracker version whose in-app notes were last closed. Missing on the
     /// first launch, so the notes open once. Install method does not matter:
     /// the GUI compares this with the version it is actually running.
@@ -156,6 +160,20 @@ pub fn save_overlay_hotkey(data_dir: &Path, hotkey: &OverlayHotkey) -> std::io::
     let mut file = read_ui_state_file(data_dir).unwrap_or_default();
     file.overlay_hotkey = Some(hotkey.bind.clone());
     file.overlay_hotkey_enabled = Some(hotkey.enabled);
+    write_ui_state_file(data_dir, &file)
+}
+
+/// Missing file or field → on.
+pub fn load_companion_during_games(data_dir: &Path) -> bool {
+    read_ui_state_file(data_dir)
+        .and_then(|f| f.companion_during_games)
+        .unwrap_or(true)
+}
+
+/// Other `ui_state.json` fields are left as they were.
+pub fn save_companion_during_games(data_dir: &Path, on: bool) -> std::io::Result<()> {
+    let mut file = read_ui_state_file(data_dir).unwrap_or_default();
+    file.companion_during_games = Some(on);
     write_ui_state_file(data_dir, &file)
 }
 
@@ -568,6 +586,21 @@ mod tests {
         );
         assert!(!show_season_picker(&[]));
         assert!(show_season_picker(&list));
+    }
+
+    #[test]
+    fn companion_during_games_defaults_on_and_keeps_other_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_companion_during_games(dir.path()));
+        save_ui_state(dir.path(), &SeasonSel::Season("s5".into())).unwrap();
+        save_companion_during_games(dir.path(), false).unwrap();
+        assert!(!load_companion_during_games(dir.path()));
+        assert_eq!(
+            load_ui_state(dir.path()),
+            Some(SeasonSel::Season("s5".into()))
+        );
+        save_companion_during_games(dir.path(), true).unwrap();
+        assert!(load_companion_during_games(dir.path()));
     }
 
     #[test]
