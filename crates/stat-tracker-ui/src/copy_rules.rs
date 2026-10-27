@@ -12,6 +12,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("companion_gate.rs", include_str!("companion_gate.rs")),
     ("cli.rs", include_str!("cli.rs")),
     ("form_widgets.rs", include_str!("form_widgets.rs")),
+    ("games_state.rs", include_str!("games_state.rs")),
     ("icons.rs", include_str!("icons.rs")),
     ("nav.rs", include_str!("nav.rs")),
     ("nav_fit.rs", include_str!("nav_fit.rs")),

@@ -20,8 +20,10 @@ use iced::{Alignment, Background, Border, Color, Element, Fill, Length, Padding,
 
 use crate::aggregate::{GameFilter, Record, filter_games};
 use crate::app::{Message, TrackerApp};
+use crate::games_state;
 use crate::icons::{self, Icon};
 use crate::model::{Game, Outcome, Screen, SeasonSel};
+use crate::overview_chips::Hidden;
 use crate::small_sample::{RATE_MIN, Sample, TOO_FEW, rate, sample};
 use crate::tab_bits::{self, PageMsg};
 use crate::theme::SURFACE_2;
@@ -293,17 +295,27 @@ const HEAD_H: f32 = 32.0;
 const TILE: (f32, f32) = (40.0, 24.0);
 const PCT_W: f32 = 48.0;
 
-/// The games the Maps stats count: the season, role and hero filters.
-/// The Games tab's outcome and map filters stay on Games: a win-only
-/// filter would show every map at 100%, and a map filter would leave one
-/// row. The open game waits for its result.
+/// The chips Maps leaves out of its filter row, because [`maps_games`]
+/// does not apply them: a map filter would leave one row, a result filter
+/// would show every map at 100%, and Needs a look filters Games only.
+pub const HIDDEN: Hidden = Hidden {
+    season: false,
+    hero: false,
+    map: true,
+    result: true,
+    needs_look: true,
+};
+
+/// The games the Maps stats count: the season, role and hero filters, the
+/// same set [`HIDDEN`] leaves in the chip row. The open game waits for its
+/// result.
 pub fn maps_games(app: &TrackerApp) -> Vec<&Game> {
     let filter = GameFilter {
         outcome: None,
         map: None,
         ..app.games_filter()
     };
-    tab_bits::settled(
+    games_state::settled(
         filter_games(&app.games, &filter),
         app.live_game_session.as_deref(),
     )
@@ -324,21 +336,21 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
         SeasonSel::AllTime => "All time".to_string(),
     };
 
-    let pool = filter_games(&app.games, &app.header_filter());
-    let mut page =
-        Column::new()
-            .spacing(GRID_GAP)
-            .width(Fill)
-            .push(crate::overview_page::chip_row(
-                app,
-                &crate::aggregate::distinct_heroes(&pool),
-                &crate::aggregate::distinct_maps(&pool),
-                crate::overview_page::chips_fold(width),
-            ));
-    if tab_bits::loading(app) {
+    let mut page = Column::new().spacing(GRID_GAP).width(Fill);
+    if games_state::loading(app) {
         return page
-            .push(empty_card(tab_bits::LOADING, tab_bits::LOADING_LINE))
+            .push(empty_card(games_state::LOADING, games_state::LOADING_LINE))
             .into();
+    }
+    if games_state::shows_filters(app) {
+        let pool = filter_games(&app.games, &app.header_filter());
+        page = page.push(crate::overview_page::chip_row_except(
+            app,
+            &crate::aggregate::distinct_heroes(&pool),
+            &[],
+            crate::overview_page::chips_fold(width),
+            HIDDEN,
+        ));
     }
     if app.games.is_empty() {
         return page
@@ -914,6 +926,36 @@ mod tests {
         assert_eq!(rows[0].record.undecided(), 1);
         app.live_game_session = None;
         assert_eq!(maps_games(&app).len(), 2);
+    }
+
+    #[test]
+    fn hidden_chips_are_the_filters_maps_ignores() {
+        use crate::overview_chips::active_count_except;
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.games = vec![
+            game("Ilios", Outcome::Win, 1),
+            game("Busan", Outcome::Loss, 2),
+        ];
+        app.filter_map = Some("Ilios".into());
+        app.filter_outcome = Some(Outcome::Win);
+        app.needs_look_filter = true;
+        assert_eq!(
+            maps_games(&app).len(),
+            2,
+            "map, result and Needs a look ignored"
+        );
+        assert_eq!(
+            active_count_except(&app, HIDDEN),
+            0,
+            "so none of them shows"
+        );
+        assert_eq!(
+            active_count_except(&app, crate::overview_chips::Hidden::default()),
+            3
+        );
+        app.filter_hero = Some("Nobody".into());
+        assert!(maps_games(&app).is_empty(), "hero applies");
+        assert_eq!(active_count_except(&app, HIDDEN), 1, "and shows");
     }
 
     #[test]

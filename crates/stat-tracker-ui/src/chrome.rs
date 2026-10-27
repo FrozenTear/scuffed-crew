@@ -80,13 +80,13 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
-        // Settings has none; Overview and Maps draw the spec's filter chips
-        // themselves. Seasons lists every season, so it draws its row
-        // without the season switch ([`crate::seasons_tab::filter_row`]).
-        match app.screen {
-            Screen::Settings | Screen::Overview | Screen::Maps => {}
-            Screen::Seasons => content = content.push(crate::seasons_tab::filter_row(app)),
-            _ => content = content.push(widgets::header_controls(app)),
+        // Settings has none; Overview, Maps and Seasons draw the spec's
+        // filter chips themselves.
+        if !matches!(
+            app.screen,
+            Screen::Settings | Screen::Overview | Screen::Maps | Screen::Seasons
+        ) {
+            content = content.push(widgets::header_controls(app));
         }
         let gutter = theme::page_gutter(size.width);
         let window = column![

@@ -1,8 +1,6 @@
 //! Small pieces the 0.6 Maps and Seasons tabs share: their one message
-//! type, cards, labels, rules, the amber "N undecided · Review" chip, the
-//! open-game rule and the loading line. Only these two tabs use it; the
-//! shared filter chips and stat tiles replace the overlapping bits once
-//! they are in.
+//! type, cards, labels, rules, the amber "N undecided · Review" chip and
+//! the Best and Worst colours. Only these two tabs use it.
 
 use iced::widget::text::Wrapping;
 use iced::widget::{button, container, image, row, space, text};
@@ -10,7 +8,7 @@ use iced::{Alignment, Background, Border, Color, Element, Padding, Task, Theme};
 
 use crate::app::{Message, TrackerApp};
 use crate::icons::{self, Icon};
-use crate::model::{Game, SeasonSel, game_card_in_progress};
+use crate::model::SeasonSel;
 use crate::theme::{self, ACCENT, BORDER, FONT_BOLD, SIZE_LABEL, SURFACE, TEXT_3, WARN};
 
 /// Spec `--accent-soft`: the accent at 16%.
@@ -18,23 +16,6 @@ pub const ACCENT_SOFT: Color = Color { a: 0.16, ..ACCENT };
 
 /// The amber outline on undecided and need-a-look items (never a fill).
 pub const WARN_LINE: Color = Color { a: 0.45, ..WARN };
-
-/// Title and line while the tracker has not written its game list yet
-/// (no `live_snapshot.json`): neutral, not "No maps yet".
-pub const LOADING: &str = "Waiting for your games";
-pub const LOADING_LINE: &str = "They show up here once the tracker has saved its game list.";
-
-/// No game list on disk yet. Fixtures always have one.
-pub fn loading(app: &TrackerApp) -> bool {
-    app.fixture.is_none() && app.snapshot_mtime.is_none()
-}
-
-/// `games` less the open game (`live`), whose result is not in yet: it
-/// counts once it closes, so an undecided count never includes it.
-pub fn settled<'a>(mut games: Vec<&'a Game>, live: Option<&str>) -> Vec<&'a Game> {
-    games.retain(|g| !game_card_in_progress(&g.session_id, g.outcome, live));
-    games
-}
 
 /// Mint at 50% or above, red below (Best and Worst lists).
 pub fn pct_color(pct: u32) -> Color {
@@ -201,19 +182,6 @@ mod tests {
 
         let _ = update(&mut app, PageMsg::Review(None));
         assert_eq!(app.season, SeasonSel::AllTime);
-    }
-
-    #[test]
-    fn loading_only_before_the_first_game_list() {
-        let (_dir, mut app) = crate::fixtures::test_app();
-        assert!(!loading(&app), "a fixture has its list");
-        app.fixture = None;
-        app.snapshot_mtime = None;
-        assert!(loading(&app));
-        app.snapshot_mtime = Some(std::time::SystemTime::now());
-        assert!(!loading(&app));
-        assert_eq!(pct_color(50), theme::OK);
-        assert_eq!(pct_color(49), theme::DANGER);
     }
 
     #[test]

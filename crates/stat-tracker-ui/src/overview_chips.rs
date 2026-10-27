@@ -55,38 +55,58 @@ pub fn single_role(roles: RoleFilter) -> Option<Role> {
     }
 }
 
-/// Filters that are on: each is a "×" chip.
-pub fn active_count(app: &TrackerApp) -> usize {
-    usize::from(app.needs_look_filter)
+/// Chips a page leaves out because it does not apply that filter, so a
+/// chip never shows (or counts in "Filters (n)") without doing anything.
+/// The default hides none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Hidden {
+    pub season: bool,
+    pub hero: bool,
+    pub map: bool,
+    /// The result chip a Games filter leaves on ("Win ×").
+    pub result: bool,
+    pub needs_look: bool,
+}
+
+/// Filters that are on, less the chips `hide` leaves out: each is a "×"
+/// chip.
+pub fn active_count_except(app: &TrackerApp, hide: Hidden) -> usize {
+    usize::from(!hide.needs_look && app.needs_look_filter)
         + usize::from(
-            matches!(app.season, SeasonSel::Season(_))
+            !hide.season
+                && matches!(app.season, SeasonSel::Season(_))
                 && crate::seasons::show_season_picker(&app.seasons.seasons),
         )
         + usize::from(!app.roles.unrestricted())
-        + usize::from(app.filter_hero.is_some())
-        + usize::from(app.filter_map.is_some())
-        + usize::from(app.filter_outcome.is_some())
+        + usize::from(!hide.hero && app.filter_hero.is_some())
+        + usize::from(!hide.map && app.filter_map.is_some())
+        + usize::from(!hide.result && app.filter_outcome.is_some())
 }
 
-/// The chip row. `heroes` and `maps` are the values the current season and
-/// role leave, so a dropdown never offers a choice with no games. With
-/// `open` false only the chips that filter show. The row also holds
-/// "Needs a look ×" while the top bar's filter is on.
-pub fn bar<'a>(
+/// The chip row, without the chips `hide` leaves out. `heroes` and `maps`
+/// are the values the current season and role leave, so a dropdown never
+/// offers a choice with no games. With `open` false only the chips that
+/// filter show. The row also holds "Needs a look ×" while the top bar's
+/// filter is on.
+pub fn bar_except<'a>(
     app: &'a TrackerApp,
     heroes: &[String],
     maps: &[String],
     open: bool,
+    hide: Hidden,
 ) -> Element<'a, Message> {
     let mut chips = Row::new().spacing(8).align_y(Alignment::Center);
-    if app.needs_look_filter {
+    if !hide.needs_look && app.needs_look_filter {
         chips = chips.push(set_chip(
             "Needs a look".to_string(),
             Message::Nav(crate::nav::Msg::ClearNeedsLook),
         ));
     }
     let season_set = matches!(app.season, SeasonSel::Season(_));
-    if crate::seasons::show_season_picker(&app.seasons.seasons) && (open || season_set) {
+    if !hide.season
+        && crate::seasons::show_season_picker(&app.seasons.seasons)
+        && (open || season_set)
+    {
         chips = chips.push(season_chip(app));
     }
     if open {
@@ -98,7 +118,7 @@ pub fn bar<'a>(
     if open {
         chips = chips.push(disabled_chip("Crew: anyone ▾"));
     }
-    if open || app.filter_hero.is_some() {
+    if !hide.hero && (open || app.filter_hero.is_some()) {
         chips = chips.push(value_chip(
             "Hero",
             app.filter_hero.as_deref(),
@@ -107,7 +127,7 @@ pub fn bar<'a>(
             Message::FilterHero,
         ));
     }
-    if open || app.filter_map.is_some() {
+    if !hide.map && (open || app.filter_map.is_some()) {
         chips = chips.push(value_chip(
             "Map",
             app.filter_map.as_deref(),
@@ -116,7 +136,7 @@ pub fn bar<'a>(
             Message::FilterMap,
         ));
     }
-    if let Some(outcome) = app.filter_outcome {
+    if let Some(outcome) = app.filter_outcome.filter(|_| !hide.result) {
         chips = chips.push(set_chip(
             outcome.label().to_string(),
             Message::FilterOutcome(None),

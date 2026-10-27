@@ -220,7 +220,7 @@ pub fn model(
     now: DateTime<Utc>,
 ) -> Model {
     let base = GameFilter::from_header(None, roles);
-    let all = crate::tab_bits::settled(filter_games(games, &base), live);
+    let all = crate::games_state::settled(filter_games(games, &base), live);
     let mut ordered: Vec<&Season> = seasons.iter().collect();
     ordered.sort_by_key(|s| std::cmp::Reverse(s.starts_at));
 
@@ -331,19 +331,16 @@ fn cols(width: f32) -> Cols {
 
 const PCT_W: f32 = 48.0;
 
-/// The role chips and the Companion toggle: the header row without the
-/// season switch, since this page lists every season. Swapped for the
-/// shared filter chips when they are in.
-pub fn filter_row(app: &TrackerApp) -> Element<'_, Message> {
-    row![
-        crate::widgets::role_chips(app.roles),
-        space().width(8),
-        crate::widgets::overlay_toggle(app.companion_chip()),
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center)
-    .into()
-}
+/// The chips Seasons leaves out: the page lists every season and counts
+/// by role only, so the season, hero, map, result and Needs a look chips
+/// would show without filtering anything.
+pub const HIDDEN: crate::overview_chips::Hidden = crate::overview_chips::Hidden {
+    season: true,
+    hero: true,
+    map: true,
+    result: true,
+    needs_look: true,
+};
 
 pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     let m = model(
@@ -355,15 +352,24 @@ pub fn view(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     );
     let c = cols(width);
     let mut page = Column::new().spacing(24).width(Fill);
-    if tab_bits::loading(app) {
+    if crate::games_state::shows_filters(app) {
+        page = page.push(crate::overview_page::chip_row_except(
+            app,
+            &[],
+            &[],
+            crate::overview_page::chips_fold(width),
+            HIDDEN,
+        ));
+    }
+    if crate::games_state::loading(app) {
         return page
             .push(tab_bits::card(
                 column![
-                    text(tab_bits::LOADING)
+                    text(crate::games_state::LOADING)
                         .size(SIZE_BODY)
                         .font(FONT_BOLD)
                         .color(TEXT),
-                    text(tab_bits::LOADING_LINE)
+                    text(crate::games_state::LOADING_LINE)
                         .size(12)
                         .font(FONT_MEDIUM)
                         .color(TEXT_2),
@@ -1059,6 +1065,21 @@ mod tests {
             draws: 0,
         };
         assert_eq!(rate_tile_note(&r), "52-55 · 110 games");
+    }
+
+    #[test]
+    fn only_the_role_chip_shows_on_seasons() {
+        use crate::overview_chips::active_count_except;
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.seasons.seasons = seasons();
+        app.season = crate::model::SeasonSel::Season("s4".into());
+        app.filter_hero = Some("Ana".into());
+        app.filter_map = Some("Ilios".into());
+        app.filter_outcome = Some(Outcome::Win);
+        app.needs_look_filter = true;
+        assert_eq!(active_count_except(&app, HIDDEN), 0);
+        app.roles = RoleFilter::default().toggle(crate::model::Role::Tank);
+        assert_eq!(active_count_except(&app, HIDDEN), 1);
     }
 
     #[test]

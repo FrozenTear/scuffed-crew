@@ -33,6 +33,7 @@ pub mod fixtures;
 mod fixtures_full;
 mod form_widgets;
 pub mod games;
+mod games_state;
 pub mod heroes;
 pub mod hotkey;
 pub mod icons;
