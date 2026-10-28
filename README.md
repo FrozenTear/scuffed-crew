@@ -63,8 +63,8 @@ A desktop app and background service that watch Overwatch 2, read the
 scoreboard when you press Tab and on the end screens, and keep per-game stats
 on your PC, optionally syncing them to your org's site. It reads boards with
 its own reader by default, with Tesseract OCR as a fallback. Linux-first:
-capture works on Wayland (KDE Plasma, GNOME, niri and other portal desktops)
-and on X11.
+capture works on Wayland (KDE Plasma, GNOME, niri, Sway, Hyprland and other
+desktops) and on X11.
 
 Install it from the AUR on Arch-based distros
 ([`scuffed-stat-tracker-bin`](https://aur.archlinux.org/packages/scuffed-stat-tracker-bin)),

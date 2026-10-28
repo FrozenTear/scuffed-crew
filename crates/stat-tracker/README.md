@@ -1,7 +1,8 @@
 # scuffed-stat-tracker
 
 Overwatch 2 personal stat tracker for Linux. A background daemon
-watches for Tab (scoreboard) presses, OCRs the scoreboard, tracks game
+watches for Tab (scoreboard) presses, reads the scoreboard with its own
+reader (Tesseract OCR is the fallback), tracks game
 sessions/outcomes, stores everything locally, and optionally syncs per-game
 results to the Scuffed Crew site. The desktop GUI is the Iced crate
 `scuffed-stat-tracker-ui` (binary still named `stat-tracker-gui` so
