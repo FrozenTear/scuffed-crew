@@ -1,7 +1,8 @@
 # scuffed-stat-tracker
 
 Overwatch 2 personal stat tracker for Linux. A background daemon
-watches for Tab (scoreboard) presses, OCRs the scoreboard, tracks game
+watches for Tab (scoreboard) presses, reads the scoreboard with its own
+reader (Tesseract OCR is the fallback), tracks game
 sessions/outcomes, stores everything locally, and optionally syncs per-game
 results to the Scuffed Crew site. The desktop GUI is the Iced crate
 `scuffed-stat-tracker-ui` (binary still named `stat-tracker-gui` so
@@ -67,6 +68,27 @@ carries a CI-trained `koverwatch.traineddata` (game-font model) installed the
 same way; the bundled copy is canonical and replaces an older one (a `.bak` is
 kept), since most hosts cannot regenerate it locally (`text2image`
 hangs/segfaults with pango ≥ 1.56).
+
+**Arch, CachyOS and other Arch-based distros (AUR):**
+[`scuffed-stat-tracker-bin`](https://aur.archlinux.org/packages/scuffed-stat-tracker-bin)
+installs the stable release tarball system-wide under `/usr`. It provides and
+conflicts with `scuffed-stat-tracker`.
+
+```sh
+paru -S scuffed-stat-tracker-bin        # or: yay -S ...
+sudo usermod -aG input "$USER"          # Tab hotkey; log out and back in
+systemctl --user daemon-reload
+systemctl --user enable --now scuffed-stat-tracker.service
+```
+
+Then open "Scuffed Stat Tracker" from the app menu. Updates come through your
+AUR helper. After an upgrade, run `systemctl --user daemon-reload` and
+`systemctl --user restart scuffed-stat-tracker.service`. The app sees that a
+package owns this copy and tells you to update with your package manager. For
+screen capture on KDE Wayland install `xdg-desktop-portal-kde`. On niri and
+GNOME, install `xdg-desktop-portal-gnome`.
+
+Other distros use the tarball below.
 
 **One-liner** (downloads latest matching release and installs into
 `~/.local`):
