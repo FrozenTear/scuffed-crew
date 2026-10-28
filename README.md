@@ -29,6 +29,26 @@ Built with [Dioxus](https://dioxuslabs.com) (WASM frontend), [Axum](https://gith
 Production is `scuffed-server` serving the `dx build` output — see
 `scripts/build.sh` and the `Containerfile`.
 
+### Site stats pages
+
+The site shows the stats the tracker uploads. Win rates follow one small-sample
+rule everywhere: a win rate shows from 10 decided games, and below that the page
+shows the record (wins, losses, draws) under "Too few games".
+
+- `/stats` is My Stats for the signed-in member, and `/stats/match/:id` is one of
+  their own games: result, map, mode, hero, role, date and all six stat lines
+  (eliminations, assists, deaths, damage, healing, mitigation). Values the reader
+  was unsure about carry a mark, and a game corrected in the tracker shows an
+  "Edited" badge. A game that is missing or belongs to someone else shows "not in
+  your match history".
+- `/matches/:id` is the public page for a team fixture: score, map, mode, date,
+  and the VOD link and replay code when there are any.
+- `/leaderboards` has Win rate, K/D and Games boards, with hero and season
+  filters. The server only sends players with 5 or more games on the Win rate and
+  K/D boards. The Win rate board ranks players with 10 or more decided games and
+  lists the rest below it under "Too few games" with their record. The K/D and
+  Games boards are not split that way.
+
 ## Run it locally
 
 Prereqs: stable Rust, the [Dioxus CLI](https://dioxuslabs.com/learn/0.7/getting_started/) (`dx`).
