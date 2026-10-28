@@ -94,6 +94,15 @@ curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffe
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
 
+On Arch-based distros the alpha builds are also on the AUR as
+[`scuffed-stat-tracker-alpha-bin`](https://aur.archlinux.org/packages/scuffed-stat-tracker-alpha-bin).
+It provides and conflicts with `scuffed-stat-tracker`, so it replaces
+`scuffed-stat-tracker-bin` and the other way round. Saved games and settings in
+your home folder stay. Both packages use the same
+`scuffed-stat-tracker.service` user unit, so after switching run
+`systemctl --user daemon-reload` and
+`systemctl --user restart scuffed-stat-tracker.service`.
+
 The tarball's `.sha256` is checked before extract. A missing `.sha256` asset
 stops the install. With no minisign public key configured, bootstrap warns and
 falls back to that sha256 from the same GitHub release. Once a public key is
