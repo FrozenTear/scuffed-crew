@@ -15,7 +15,7 @@ Native **Iced 0.14** (wgpu) tracker GUI for the Scuffed Crew stat tracker.
 
 Design: `docs/notes/stat-tracker-gui-redesign-2026-09-02.md` rev 2 tokens + rev 3 responsive layout (branch `docs/tracker-gui-redesign`). Tokens: `radius-card` 16, `radius-inner` 12, page pad 24/32, Urbanist, role tints, `border` / `text-3` / `ok` / `danger`.
 
-0.6 Design: the Scuffed Tracker 0.6 redesign spec FrozenTear approved (variant A, top tabs). The 0.6 layout puts the tabs across the top (Overview, Games, Heroes, Maps, Seasons, Settings) with the tracker status and a "need a look" chip at the right, and a new Settings page. The other screens keep their 0.5 bodies until their own 0.6 PRs.
+0.6 Design: the Scuffed Tracker 0.6 redesign spec FrozenTear approved (variant A, top tabs). The 0.6 layout puts the tabs across the top (Overview, Games, Heroes, Maps, Seasons, Settings) with the tracker status and a "need a look" chip at the right, and a new Settings page. Every tab has its 0.6 screen since 0.6.0-alpha.1.
 
 P0 to P5 are on `main` (PRs #56 to #61). **v0.4.0** is the first Iced-only tracker
 release (Overview / Games / Heroes / Maps / Seasons / Settings + companion

@@ -68,6 +68,34 @@ same way; the bundled copy is canonical and replaces an older one (a `.bak` is
 kept), since most hosts cannot regenerate it locally (`text2image`
 hangs/segfaults with pango ≥ 1.56).
 
+**Arch, CachyOS and other Arch-based distros (AUR):** two packages install
+the same release tarball system-wide under `/usr`:
+
+- [`scuffed-stat-tracker-bin`](https://aur.archlinux.org/packages/scuffed-stat-tracker-bin)
+  follows stable releases.
+- [`scuffed-stat-tracker-alpha-bin`](https://aur.archlinux.org/packages/scuffed-stat-tracker-alpha-bin)
+  follows alpha builds.
+
+Both provide and conflict with `scuffed-stat-tracker`, so installing one
+replaces the other. Your saved games and settings in your home folder stay.
+Both use the same `scuffed-stat-tracker.service` user unit.
+
+```sh
+paru -S scuffed-stat-tracker-bin        # or: yay -S ...
+sudo usermod -aG input "$USER"          # Tab hotkey; log out and back in
+systemctl --user daemon-reload
+systemctl --user enable --now scuffed-stat-tracker.service
+```
+
+Then open "Scuffed Stat Tracker" from the app menu. Updates come through your
+AUR helper. After an upgrade, run `systemctl --user daemon-reload` and
+`systemctl --user restart scuffed-stat-tracker.service`. The app sees that a
+package owns this copy and tells you to update with your package manager. For
+screen capture on KDE Wayland install `xdg-desktop-portal-kde`. On niri and
+GNOME, install `xdg-desktop-portal-gnome`.
+
+Other distros use the tarball below.
+
 **One-liner** (downloads latest matching release and installs into
 `~/.local`):
 
