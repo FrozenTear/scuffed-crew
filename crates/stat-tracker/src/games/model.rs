@@ -2,9 +2,9 @@
 //! and (for daemon-side totals) the tracker. Moved from the GUI crate
 //! unchanged; the GUI re-exports it as `crate::model`.
 
-use chrono::{DateTime, Local, TimeZone, Utc};
 use crate::detect::MatchOutcome;
 use crate::storage::{HeroSegment, PersonalMatch};
+use chrono::{DateTime, Local, TimeZone, Utc};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
