@@ -692,3 +692,29 @@ async fn a_finished_copy_is_not_reused_and_older_copies_are_pruned() {
     assert!(second_path.is_dir());
     assert!(!first_path.exists(), "the older finished copy is pruned");
 }
+
+/// What an interrupted copy leaves (a `.partial` copy, a `.pending` note
+/// whose copy never got its final name) is cleaned up, and the new copy
+/// has its note before it has its final name.
+#[tokio::test]
+async fn leftovers_of_an_interrupted_copy_are_cleaned_up() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(alpha1_store(dir.path()).await);
+    assert!(
+        crate::storage::wait_for_engine_close(dir.path(), std::time::Duration::from_secs(10)).await
+    );
+    let p = |n: &str| dir.path().join(format!("{PRE_TIMELINE_BACKUP_PREFIX}{n}"));
+    std::fs::create_dir_all(p("20200101_000000.partial")).unwrap();
+    std::fs::write(p("20200101_000000.partial").join("db"), "half").unwrap();
+    std::fs::write(p("20200101_000001.pending"), "").unwrap();
+    let backup = prepare_timeline_migration(dir.path()).await;
+    let TimelineBackup::Ready(Some(path)) = &backup else {
+        panic!("{backup:?}");
+    };
+    assert!(!p("20200101_000000.partial").exists(), "half copy removed");
+    assert!(
+        !p("20200101_000001.pending").exists(),
+        "orphan note removed"
+    );
+    assert!(std::path::PathBuf::from(format!("{}.pending", path.display())).exists());
+}
