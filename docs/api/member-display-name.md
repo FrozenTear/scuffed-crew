@@ -65,11 +65,38 @@ Both bodies are JSON. The frontend should match on `error`.
 | 409 | `{"error":"display_name_taken"}` | The key is already used by another member. | That name is taken |
 | 400 | `{"error":"display_name_invalid"}` | The name is empty after normalization, or it contains a control character. | The name is not allowed |
 
+### Who may edit
+
+`PUT /api/members/{id}` sets the display name and the other profile fields.
+
+- A member may edit their own profile.
+- An admin may edit any other member. Last-admin guards still apply when the
+  body changes `is_active` or when an admin changes a role.
+- An officer may edit a member or a recruit. Those are the ranks
+  `officer_may_moderate` allows. An officer may not edit an admin or another
+  officer.
+- A member or recruit who edits someone else gets 403
+  `{"error":"Can only edit your own profile"}`.
+- An officer who edits an admin or another officer gets 403
+  `{"error":"Officers cannot edit the profile of admins or other officers"}`.
+
+`POST /api/upload/avatar` with `member_id` uses this same rule.
+
+`PUT /api/members/{id}/game-accounts` and
+`DELETE /api/members/{id}/game-accounts/{account_id}` use this same rank rule
+when the caller changes someone else's account. A member or recruit who edits
+someone else's game account gets 403
+`{"error":"Can only edit your own game accounts"}`. Deleting someone else's
+account gets 403 `{"error":"Can only delete your own game accounts"}`. An
+officer who edits or deletes an admin or another officer's account gets the
+same officer 403 as a profile edit. A refused delete removes nothing. Editing
+or deleting your own game account is allowed. An admin may edit or delete any
+other member's game account.
+
 ### Routes
 
-- `PUT /api/members/{id}` sets or changes a display name. The caller is the
-  member (own profile) or an officer editing that member. This is the profile
-  update and the officer edit.
+- `PUT /api/members/{id}` sets or changes a display name. Who may call it is
+  described above.
 - `POST /api/auth/setup` creates the first admin. The display name is the
   username, and the key is stored on that member row.
 - Application trial and accept (`PATCH /api/applications/{id}`) create the
