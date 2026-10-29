@@ -201,3 +201,58 @@ async fn a_bad_request_gets_an_error_line() {
     let parsed: Response = serde_json::from_str(&answer).unwrap();
     assert!(matches!(parsed, Response::Err { code, .. } if code == "unsupported_proto"));
 }
+
+/// Request times on a copy of a real store (memfix PR 2 acceptance: games
+/// under 1 s, rev under 50 ms). Ignored: needs `MEMFIX_PARITY_STORE` = a
+/// data dir holding `stats.surrealkv` (copied to a temp dir first). Run in
+/// a release-like profile.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn the_query_times_on_a_real_store_copy() {
+    let Some(src) = std::env::var_os("MEMFIX_PARITY_STORE") else {
+        panic!("set MEMFIX_PARITY_STORE");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new("cp")
+        .arg("-a")
+        .arg(std::path::Path::new(&src).join("stats.surrealkv"))
+        .arg(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    let (listener, _) = bind(dir.path()).unwrap();
+    tokio::spawn(serve(listener, store.clone(), dir.path().to_path_buf()));
+    let time = |req: Request| {
+        let d = dir.path().to_path_buf();
+        async move {
+            let t = std::time::Instant::now();
+            let r = ask(&d, req).await.unwrap();
+            (t.elapsed().as_millis(), r)
+        }
+    };
+    let (rev_ms, _) = time(Request::Rev).await;
+    let (cold_ms, cold) = time(Request::Totals {
+        filter: GameFilter::default(),
+    })
+    .await;
+    let (warm_ms, _) = time(Request::Totals {
+        filter: GameFilter::default(),
+    })
+    .await;
+    let (games_ms, games) = time(Request::Games {
+        filter: GameFilter::default(),
+    })
+    .await;
+    let Response::Totals { totals, .. } = cold else {
+        panic!("totals");
+    };
+    let Response::Games { games, .. } = games else {
+        panic!("games");
+    };
+    println!(
+        "{} games: rev {rev_ms} ms, totals cold {cold_ms} ms (builds the list), totals warm {warm_ms} ms, games list warm {games_ms} ms ({} games)",
+        totals.record.games,
+        games.len()
+    );
+}
