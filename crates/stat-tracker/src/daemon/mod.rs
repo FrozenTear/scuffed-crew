@@ -11,6 +11,7 @@ pub(crate) mod gui_presence;
 mod lifecycle;
 pub(crate) mod memtune;
 mod poll;
+pub(crate) mod query_server;
 mod session;
 mod shutdown;
 pub(crate) mod snapshot_policy;
@@ -22,6 +23,8 @@ mod tests_debug_dumps;
 mod tests_gui_presence;
 #[cfg(test)]
 mod tests_memtune;
+#[cfg(test)]
+mod tests_query_server;
 #[cfg(test)]
 mod tests_snapshot_policy;
 

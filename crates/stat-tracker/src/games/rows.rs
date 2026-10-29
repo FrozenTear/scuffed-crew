@@ -2,6 +2,8 @@
 //! rows read from the store): one row per game. Moved from the GUI crate
 //! unchanged.
 
+use std::path::Path;
+
 use super::model::Game;
 use crate::storage::Snapshot;
 
@@ -28,4 +30,34 @@ pub fn games_from_snapshot(snap: &Snapshot) -> Vec<Game> {
         }
     }
     out
+}
+
+/// Session ids with a `DeleteSession` waiting in `commands/`. A read-only
+/// look: unlike [`crate::storage::read_commands`] it never removes a file it
+/// can't parse, which is the tracker's call.
+pub fn queued_deletes(data_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(data_dir.join("commands")) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .filter_map(|p| std::fs::read(p).ok())
+        .filter_map(|b| serde_json::from_slice::<crate::storage::StoreCommand>(&b).ok())
+        .filter_map(|c| match c {
+            crate::storage::StoreCommand::DeleteSession { session_id } => Some(session_id),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Drop the match and session rows of these games.
+pub fn drop_sessions(snap: &mut Snapshot, gone: &[String]) {
+    if gone.is_empty() {
+        return;
+    }
+    snap.matches
+        .retain(|m| m.session_id.is_empty() || !gone.contains(&m.session_id));
+    snap.sessions.retain(|s| !gone.contains(&s.session_id));
 }

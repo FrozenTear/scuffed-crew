@@ -7,7 +7,7 @@ use chrono::{DateTime, Datelike, Local, NaiveDate, Utc};
 
 use crate::games::model::{Game, Outcome, Role, RoleFilter};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SeasonWindow {
     pub starts_at: DateTime<Utc>,
     pub ends_at: DateTime<Utc>,
@@ -19,7 +19,7 @@ impl SeasonWindow {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GameFilter {
     pub window: Option<SeasonWindow>,
     pub roles: Vec<Role>,
@@ -40,7 +40,7 @@ impl GameFilter {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Record {
     pub games: usize,
     pub wins: usize,
@@ -104,26 +104,26 @@ impl Record {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HeroAgg {
     pub hero: String,
     pub role: Role,
     pub record: Record,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MapAgg {
     pub map_name: String,
     pub record: Record,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RoleAgg {
     pub role: Role,
     pub record: Record,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Aggregates {
     pub record: Record,
     pub heroes: Vec<HeroAgg>,

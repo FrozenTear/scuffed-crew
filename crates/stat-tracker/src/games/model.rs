@@ -6,7 +6,7 @@ use crate::detect::MatchOutcome;
 use crate::storage::{HeroSegment, PersonalMatch};
 use chrono::{DateTime, Local, TimeZone, Utc};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Role {
     Tank,
     Damage,
@@ -38,7 +38,7 @@ impl Role {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Outcome {
     Win,
     Loss,
@@ -137,7 +137,7 @@ impl RoleFilter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GameOcr {
     pub hero: String,
     pub role: String,
@@ -151,7 +151,7 @@ pub struct GameOcr {
     pub mitigation: u32,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SegmentView {
     pub index: u32,
     pub hero: String,
@@ -193,7 +193,7 @@ impl SegmentView {
 
 /// Display-normalized game row. Aggregation and views share this, not the
 /// daemon's storage struct, so season math stays a pure UI-crate function.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Game {
     pub session_id: String,
     pub hero: String,

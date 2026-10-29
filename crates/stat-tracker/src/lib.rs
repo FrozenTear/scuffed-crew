@@ -19,6 +19,7 @@ pub mod names;
 pub mod ocr;
 pub mod ocr_switch;
 pub mod packs;
+pub mod query;
 pub mod reader_apply;
 pub mod report;
 pub mod shadow;

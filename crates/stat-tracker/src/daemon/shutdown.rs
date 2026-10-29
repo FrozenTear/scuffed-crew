@@ -259,6 +259,8 @@ pub(crate) async fn shutdown_from_signal(
                     }
                     ShutdownStage::SnapshotExport => {
                         flush_snapshot_if_dirty(store, data_dir).await;
+                        // The app falls back to that file once the socket is gone.
+                        let _ = std::fs::remove_file(stat_tracker::query::socket_path(data_dir));
                         // perf.log lines already queued go to disk before the
                         // process ends (the open window is not closed here).
                         // Bounded by what is left of the shutdown deadline,
