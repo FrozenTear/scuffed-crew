@@ -695,7 +695,7 @@ async fn a_finished_copy_is_not_reused_and_older_copies_are_pruned() {
 
 /// What an interrupted copy leaves (a `.partial` copy, a `.pending` note
 /// whose copy never got its final name) is cleaned up, and the new copy
-/// has its note before it has its final name.
+/// has its note.
 #[tokio::test]
 async fn leftovers_of_an_interrupted_copy_are_cleaned_up() {
     let dir = tempfile::tempdir().unwrap();
@@ -717,4 +717,96 @@ async fn leftovers_of_an_interrupted_copy_are_cleaned_up() {
         "orphan note removed"
     );
     assert!(std::path::PathBuf::from(format!("{}.pending", path.display())).exists());
+}
+
+/// A finished copy that already has this second's name is not given a
+/// note: the new copy takes a free name next to it (second review F2).
+#[tokio::test]
+async fn a_finished_copy_of_the_same_second_keeps_no_note() {
+    let dir = tempfile::tempdir().unwrap();
+    drop(alpha1_store(dir.path()).await);
+    assert!(
+        crate::storage::wait_for_engine_close(dir.path(), std::time::Duration::from_secs(10)).await
+    );
+    // Finished copies (no note) under this second's name and the next two.
+    let now = Utc::now();
+    let taken: Vec<std::path::PathBuf> = (0..3)
+        .map(|s| {
+            let stamp = (now + chrono::Duration::seconds(s)).format("%Y%m%d_%H%M%S");
+            let copy = dir
+                .path()
+                .join(format!("{PRE_TIMELINE_BACKUP_PREFIX}{stamp}"));
+            std::fs::create_dir_all(&copy).unwrap();
+            std::fs::write(copy.join("db"), "an earlier move's copy").unwrap();
+            copy
+        })
+        .collect();
+    let backup = prepare_timeline_migration(dir.path()).await;
+    let TimelineBackup::Ready(Some(path)) = &backup else {
+        panic!("{backup:?}");
+    };
+    let note = |p: &std::path::Path| std::path::PathBuf::from(format!("{}.pending", p.display()));
+    assert!(!taken.contains(path), "{}", path.display());
+    assert!(note(path).exists());
+    for copy in &taken {
+        assert!(!note(copy).exists(), "{}", copy.display());
+        assert!(copy.join("db").exists());
+    }
+}
+
+/// The copy has its durable note before it takes its final name, and a
+/// copy that cannot be named, or whose name cannot be made durable, leaves
+/// neither a named copy nor a note: it gives up its name and its note
+/// before any of it is deleted (second review F1, F3).
+#[test]
+fn a_backup_is_noted_before_it_is_named_and_unnamed_before_it_is_deleted() {
+    use std::path::Path;
+    let dir = tempfile::tempdir().unwrap();
+    let live = dir.path().join("live");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::write(live.join("db"), "rows").unwrap();
+    let p = |n: &str| {
+        dir.path()
+            .join(format!("{PRE_TIMELINE_BACKUP_PREFIX}20261029_101500{n}"))
+    };
+    let (backup, partial, note) = (p(""), p(".partial"), p(".pending"));
+    let sync = |d: &Path| std::fs::File::open(d)?.sync_all();
+    let write = |rename: &dyn Fn(&Path, &Path) -> std::io::Result<()>,
+                 sync: &dyn Fn(&Path) -> std::io::Result<()>| {
+        migrate_timeline::write_backup(&live, dir.path(), &partial, &backup, rename, sync)
+    };
+    let gone = || !backup.exists() && !note.exists() && !partial.exists();
+
+    let noted = std::cell::Cell::new(false);
+    write(
+        &|from, to| {
+            noted.set(note.exists());
+            std::fs::rename(from, to)
+        },
+        &sync,
+    )
+    .unwrap();
+    assert!(noted.get(), "the note is made before the copy is named");
+    assert!(backup.join("db").exists() && note.exists() && !partial.exists());
+    std::fs::remove_dir_all(&backup).unwrap();
+    std::fs::remove_file(&note).unwrap();
+
+    let refused = write(&|_, _| Err(std::io::Error::other("rename")), &sync);
+    assert!(refused.is_err());
+    assert!(gone(), "a copy that is not named leaves nothing");
+
+    // The sync after the rename fails. The last data-dir sync is the one
+    // before the delete: by then the name and the note are gone and the
+    // copy is still whole.
+    let last_sync = std::cell::Cell::new(None);
+    let failing = |d: &Path| {
+        if backup.exists() {
+            return Err(std::io::Error::other("EIO"));
+        }
+        last_sync.set(Some((note.exists(), partial.join("db").exists())));
+        sync(d)
+    };
+    assert!(write(&|from, to| std::fs::rename(from, to), &failing).is_err());
+    assert_eq!(last_sync.get(), Some((false, true)));
+    assert!(gone(), "a copy whose name did not hold leaves nothing");
 }
