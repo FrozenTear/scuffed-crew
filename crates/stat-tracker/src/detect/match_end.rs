@@ -448,7 +448,7 @@ pub fn detect_outcome_with(
     titles: &Titles,
     words: &ResultWords,
 ) -> MatchOutcome {
-    let rgb = img.to_rgb8();
+    let rgb = crate::frame::rgb_view(img);
     detect_outcome_signal_inner(img, &rgb, None, p4, titles, words)
         .map(|(outcome, _)| outcome)
         .unwrap_or(MatchOutcome::Unknown)
@@ -467,7 +467,7 @@ pub fn detect_outcome_with(
 /// This entry point is ocr-v1's. The daemon's go through the reader switch:
 /// [`detect_outcome_signal_polled`] and [`detect_outcome_with`].
 pub fn detect_outcome_signal(img: &DynamicImage) -> Option<(MatchOutcome, OutcomeSource)> {
-    let rgb = img.to_rgb8();
+    let rgb = crate::frame::rgb_view(img);
     detect_outcome_signal_with_rgb(img, &rgb)
 }
 
@@ -585,7 +585,7 @@ pub fn detect_outcome_text_with(
     if let Titles::Words(read) = titles {
         return end_title_from_words(read);
     }
-    read_end_title(img, &img.to_rgb8(), None, p4, titles)
+    read_end_title(img, &crate::frame::rgb_view(img), None, p4, titles)
 }
 
 /// Centered italic end-title (theme-colored VICTORY/DEFEAT over the world).
