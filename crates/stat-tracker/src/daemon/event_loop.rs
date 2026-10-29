@@ -328,14 +328,7 @@ pub(crate) async fn run_loop(
                         data_dir,
                         st.capture_count,
                     );
-                    // A board stored after the result (the final scoreboard)
-                    // belongs to a finished game: that write is owed even with
-                    // no GUI running.
-                    if st.active_game.as_ref().is_some_and(|g| g.finished()) {
-                        refresh_snapshot_game_finished(store, data_dir).await;
-                    } else {
-                        refresh_snapshot(store, data_dir).await;
-                    }
+                    refresh_snapshot_after_capture(&st, store, data_dir, &sid).await;
                 }
                 // A Tab pressed while that capture ran runs now, unless the
                 // capture took its board (it would read the same board). A
@@ -1161,5 +1154,31 @@ where
             Err(_elapsed) => Err(()),
         },
         value = &mut work => Ok(value),
+    }
+}
+
+/// Whether the snapshot write after a stored capture is owed whatever the
+/// GUI: the board went to a game that already has its result (the final
+/// scoreboard, pressed after the result). Keyed on the board's session, not
+/// on whichever game is active now.
+pub(crate) fn capture_owes_snapshot_write(st: &SessionState, sid: &str) -> bool {
+    st.active_game
+        .as_ref()
+        .filter(|g| g.session_id == sid)
+        .is_some_and(|g| g.finished())
+}
+
+/// Mark the live snapshot after a capture report stored a row (the run
+/// loop, and the shutdown drain of reports that landed late).
+pub(crate) async fn refresh_snapshot_after_capture(
+    st: &SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    sid: &str,
+) {
+    if capture_owes_snapshot_write(st, sid) {
+        refresh_snapshot_game_finished(store, data_dir).await;
+    } else {
+        refresh_snapshot(store, data_dir).await;
     }
 }
