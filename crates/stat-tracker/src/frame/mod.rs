@@ -16,8 +16,9 @@ use std::borrow::Cow;
 
 use image::{DynamicImage, RgbImage};
 
-/// The frame as RGB, borrowed when it already is RGB (every stream frame is:
-/// `capture::stream::framebuf::to_dynamic`), converted otherwise.
+/// The frame as RGB, borrowed when it already is RGB (PipeWire stream and
+/// KWin frames: `capture::stream::framebuf::to_dynamic`), converted otherwise
+/// (X11 and portal screenshots are RGBA).
 /// `DynamicImage::to_rgb8` always copies, a full frame (11 to 15 MB) per
 /// poll tick.
 pub fn rgb_view(img: &DynamicImage) -> Cow<'_, RgbImage> {

@@ -500,9 +500,10 @@ pub(crate) async fn run_loop(
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
                             // One RGB view shared by the outcome + phase detectors
-                            // (P6): borrowed, as stream frames are RGB already, so
-                            // no full-frame copy per tick. Title OCR still uses the
-                            // original frame.
+                            // (P6): borrowed for RGB frames (the PipeWire stream and
+                            // KWin), so no full-frame copy per tick there; RGBA
+                            // backends (X11, portal screenshots) still convert once.
+                            // Title OCR still uses the original frame.
                             let rgb = stat_tracker::frame::rgb_view(&img);
                             // PR-A: the polled variants gate their OCR on the
                             // crop holding still across consecutive ticks,
