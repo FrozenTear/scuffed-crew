@@ -88,9 +88,16 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
             copy_tree(&entry.path(), &dest)?;
         } else {
             std::fs::copy(entry.path(), &dest)?;
+            // On disk before the copy can count as complete.
+            std::fs::File::open(&dest)?.sync_all()?;
         }
     }
-    Ok(())
+    sync_dir(to)
+}
+
+/// fsync a directory, so the entries made in it survive a power loss.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
 }
 
 /// A complete pre-timeline copy left by an earlier start whose move did not
@@ -106,6 +113,7 @@ fn existing_backup(data_dir: &Path) -> Option<PathBuf> {
                 && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
                     n.starts_with(PRE_TIMELINE_BACKUP_PREFIX) && !n.ends_with(".partial")
                 })
+                && pending_path(p).exists()
         })
         .collect();
     found.sort();
@@ -181,7 +189,11 @@ pub(super) async fn prepare_with(
     let backup = data_dir.join(format!("{PRE_TIMELINE_BACKUP_PREFIX}{stamp}"));
     let partial = data_dir.join(format!("{PRE_TIMELINE_BACKUP_PREFIX}{stamp}.partial"));
     let _ = std::fs::remove_dir_all(&partial);
-    if let Err(e) = copy_tree(&live, &partial).and_then(|()| std::fs::rename(&partial, &backup)) {
+    let copied = copy_tree(&live, &partial)
+        .and_then(|()| sync_dir(data_dir))
+        .and_then(|()| std::fs::rename(&partial, &backup))
+        .and_then(|()| sync_dir(data_dir));
+    if let Err(e) = copied {
         let _ = std::fs::remove_dir_all(&partial);
         return TimelineBackup::Failed(format!("backup copy failed: {e}"));
     }
@@ -199,6 +211,27 @@ fn pending_path(backup: &Path) -> PathBuf {
     let mut name = backup.as_os_str().to_owned();
     name.push(".pending");
     PathBuf::from(name)
+}
+
+/// After a finished move, keep only `keep` (the copy this move made) of
+/// the finished pre-timeline copies: older ones (left by a move redone
+/// after an older tracker's vacuum dropped the tables) hold games the user
+/// may have deleted since. A copy still pending is never removed here.
+fn prune_finished_backups(data_dir: &Path, keep: &Path) {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|e| e.path()) {
+        let finished_copy = path.is_dir()
+            && path != keep
+            && !pending_path(&path).exists()
+            && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                n.starts_with(PRE_TIMELINE_BACKUP_PREFIX) && !n.ends_with(".partial")
+            });
+        if finished_copy {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// Copies an interrupted start left half done.
@@ -275,6 +308,9 @@ impl LocalStore {
         self.set_timeline_migrated(true);
         if let TimelineBackup::Ready(Some(path)) = backup {
             let _ = std::fs::remove_file(pending_path(path));
+            if let Some(data_dir) = path.parent() {
+                prune_finished_backups(data_dir, path);
+            }
         }
         tracing::info!(
             records = written,
@@ -336,7 +372,7 @@ impl LocalStore {
                 let rows = self.session_rows_raw(sid).await?;
                 // The list the game shows today: the own list of the row the
                 // app shows (the newest that passes the tracked filter, else
-                // the newest). Rows written by alpha.2 have no list of their
+                // the newest). Rows written since alpha.1.1 have no list of their
                 // own (a rebuild after an older vacuum dropped the table), so
                 // then the newest row that has one. No list on any row: no
                 // record, the game shows as today.
