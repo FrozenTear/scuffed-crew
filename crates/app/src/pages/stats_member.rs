@@ -14,6 +14,7 @@ use crate::sample::{
     HERO_RULE_NOTE, MAP_RULE_NOTE, OTHER_HEROES, OTHER_RESULT_CLASS, Tally, fold_small, other_label,
 };
 use crate::state::use_auth;
+use crate::stats_privacy;
 
 #[derive(Debug, Clone, Deserialize)]
 struct PersonalStats {
@@ -207,6 +208,25 @@ pub fn StatsMember(id: String) -> Element {
     });
 
     let mut tab = use_signal(|| MemberStatsTab::Overview);
+
+    // A refused summary (private, members only, bad id) is the whole page's
+    // answer. Say so instead of showing tabs that never load.
+    let denied = stats
+        .error
+        .read()
+        .as_deref()
+        .and_then(stats_privacy::member_stats_denied);
+    if let Some(copy) = denied {
+        return rsx! {
+            crate::styles::StyleOnce { id: "scuffed-css-pages-stats_member-member-stats-css", css: MEMBER_STATS_CSS }
+            crate::styles::StyleOnce { id: "scuffed-css-admin-shared", css: crate::styles::admin::CSS }
+
+            div { class: "stats-page member-stats",
+                h1 { "Member Stats" }
+                p { class: "empty-state", role: "status", "{copy}" }
+            }
+        };
+    }
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats_member-member-stats-css", css: MEMBER_STATS_CSS }

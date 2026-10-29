@@ -39,6 +39,7 @@ pub const CSS: &str = r#"
             min-height: 2.5rem;
         }
     }
+    .row-btn:disabled { opacity: 0.45; cursor: not-allowed; }
     .row-btn:hover { border-color: var(--accent-soft); color: var(--text); }
     .row-btn.danger:hover { border-color: var(--danger); color: var(--danger); }
     .row-btn.primary { background: var(--accent); color: white; border-color: var(--accent); }
