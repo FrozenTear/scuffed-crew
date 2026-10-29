@@ -260,3 +260,144 @@ async fn the_compact_write_time_on_a_real_store_copy() {
         .len();
     println!("{rows} rows: compact write ms {times:?} (first, then warm); file {bytes} B");
 }
+
+/// [`measure`] for plain code on this thread.
+fn measure_sync(f: impl FnOnce()) -> (i64, i64, i64) {
+    let (base, bytes, calls) = (
+        LIVE.load(Ordering::Relaxed),
+        ALLOCATED.load(Ordering::Relaxed),
+        CALLS.load(Ordering::Relaxed),
+    );
+    PEAK.store(base, Ordering::Relaxed);
+    COUNTING.with(|c| c.set(true));
+    f();
+    COUNTING.with(|c| c.set(false));
+    (
+        PEAK.load(Ordering::Relaxed) - base,
+        ALLOCATED.load(Ordering::Relaxed) - bytes,
+        CALLS.load(Ordering::Relaxed) - calls,
+    )
+}
+
+/// A stream frame as the daemon gets it: RGB (`framebuf::to_dynamic`),
+/// 2560x1440, a dark game scene with a lighter band (no scoreboard, no
+/// title), the frame a poll tick sees most of the time.
+fn stream_frame() -> image::DynamicImage {
+    let (w, h) = (2560u32, 1440u32);
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+        let v = ((x / 40 + y / 40) % 7) as u8 * 6 + if (500..700).contains(&y) { 60 } else { 10 };
+        image::Rgb([v, v / 2 + 5, v / 3 + 8])
+    }))
+}
+
+const FRAME_BYTES: i64 = 2560 * 1440 * 3;
+
+/// One poll-tick outcome check and one report-kit blanking on a stream
+/// frame: what memfix PR 3 cut. Before it, each made a full RGB copy of
+/// the frame (11 MB) through `DynamicImage::to_rgb8`; now they read the
+/// frame in place. Fails if a full-frame copy comes back on either path.
+#[test]
+fn the_poll_check_and_the_report_blanking_do_not_copy_the_frame() {
+    let frame = stream_frame();
+    let _ = stat_tracker::detect::match_end::detect_outcome_signal(&frame); // warm
+    let (_, poll_bytes, poll_calls) = measure_sync(|| {
+        std::hint::black_box(stat_tracker::detect::match_end::detect_outcome_signal(
+            &frame,
+        ));
+    });
+    let (_, blank_bytes, blank_calls) = measure_sync(|| {
+        std::hint::black_box(stat_tracker::report::blank::blanked_scoreboard(
+            &frame, None,
+        ));
+    });
+    println!(
+        "frame {FRAME_BYTES} B; outcome check allocated {poll_bytes} B in {poll_calls} calls; \
+         report blanking allocated {blank_bytes} B in {blank_calls} calls"
+    );
+    assert!(
+        poll_bytes < FRAME_BYTES,
+        "the outcome check copied the frame ({poll_bytes} B)"
+    );
+    // The blanking keeps its scoreboard crop (smaller than the frame).
+    assert!(
+        blank_bytes < FRAME_BYTES,
+        "the blanking copied the frame ({blank_bytes} B)"
+    );
+}
+
+/// Step 0 of memfix PR 3, as far as it runs without game frames: the poll
+/// check and the report blanking on stream-size frames at 4 per second for
+/// `SOAK_SECS` (default 1800), printing RSS and live heap every 30 s and a
+/// linear fit. Ignored: run by hand (`--ignored --nocapture`).
+#[test]
+#[ignore]
+fn frame_path_soak() {
+    let secs: u64 = std::env::var("SOAK_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1800);
+    let rss_mb = || {
+        let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
+        statm
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse::<f64>()
+            .unwrap()
+            * 4096.0
+            / 1e6
+    };
+    let frame_seed = stream_frame();
+    let start = std::time::Instant::now();
+    let mut samples: Vec<(f64, f64)> = Vec::new();
+    let mut ticks = 0u64;
+    let mut next = std::time::Duration::ZERO;
+    let mut total_bytes = 0i64;
+    while start.elapsed().as_secs() < secs {
+        // A fresh frame per tick, as each grab makes one.
+        let frame = frame_seed.clone();
+        let (_, bytes, _) = measure_sync(|| {
+            std::hint::black_box(stat_tracker::detect::match_end::detect_outcome_signal(
+                &frame,
+            ));
+            if ticks % 20 == 0 {
+                std::hint::black_box(stat_tracker::report::blank::blanked_scoreboard(
+                    &frame, None,
+                ));
+            }
+        });
+        total_bytes += bytes;
+        drop(frame);
+        ticks += 1;
+        if start.elapsed() >= next {
+            let t = start.elapsed().as_secs_f64() / 3600.0;
+            samples.push((t, rss_mb()));
+            println!(
+                "t={:>5.0}s rss={:.1} MB ticks={ticks} alloc_per_tick={:.2} MB",
+                start.elapsed().as_secs_f64(),
+                rss_mb(),
+                total_bytes as f64 / ticks as f64 / 1e6
+            );
+            next += std::time::Duration::from_secs(30);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let n = samples.len() as f64;
+    let (sx, sy) = samples
+        .iter()
+        .fold((0.0, 0.0), |a, s| (a.0 + s.0, a.1 + s.1));
+    let (mx, my) = (sx / n, sy / n);
+    let slope = samples.iter().map(|s| (s.0 - mx) * (s.1 - my)).sum::<f64>()
+        / samples
+            .iter()
+            .map(|s| (s.0 - mx).powi(2))
+            .sum::<f64>()
+            .max(1e-12);
+    let max = samples.iter().map(|s| s.1).fold(0.0, f64::max);
+    println!(
+        "soak {secs}s: rss start {:.1} MB, max {max:.1} MB, end {:.1} MB, fit {slope:.2} MB/h, ticks {ticks}, alloc per tick {:.2} MB",
+        samples.first().unwrap().1,
+        samples.last().unwrap().1,
+        total_bytes as f64 / ticks as f64 / 1e6
+    );
+}
