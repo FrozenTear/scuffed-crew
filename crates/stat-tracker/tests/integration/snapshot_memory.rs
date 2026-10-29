@@ -88,6 +88,10 @@ static MEASURING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Peak live bytes above the starting level, bytes allocated and
 /// allocation calls, for `f` on this thread.
+// The guard is held across `f.await` on purpose: the one caller runs on a
+// current-thread runtime, whose tasks never take MEASURING, and another
+// test waiting for it blocks its own thread only.
+#[allow(clippy::await_holding_lock)]
 async fn measure<F: std::future::Future<Output = ()>>(f: F) -> (i64, i64, i64) {
     let _one = MEASURING.lock().unwrap_or_else(|e| e.into_inner());
     let (base, bytes, calls) = (
@@ -306,16 +310,21 @@ fn tick_rgb(img: &image::DynamicImage) -> std::borrow::Cow<'_, image::RgbImage> 
 
 /// The poll tick's frame work, as run_loop calls it: the RGB view, the
 /// polled outcome check, the polled phase check and the end-reel check.
-fn poll_tick(img: &image::DynamicImage, new_reader: bool) {
+/// `stability` carries over between ticks as `st.ocr_stability` does, so a
+/// still frame's second tick runs the reads gated on a repeat sighting.
+fn poll_tick(
+    img: &image::DynamicImage,
+    new_reader: bool,
+    stability: &mut stat_tracker::frame::stability::FrameStability,
+) {
     use stat_tracker::detect::{match_end, match_start};
-    let mut stability = stat_tracker::frame::stability::FrameStability::default();
     let rgb = tick_rgb(img);
     let titles = match_end::Titles::for_rgb(new_reader, &rgb);
     let words = match_end::ResultWords::for_reader(new_reader);
     std::hint::black_box(match_end::detect_outcome_signal_polled(
         img,
         &rgb,
-        &mut stability,
+        stability,
         match_end::FinalScoreSource::for_reader(new_reader),
         &titles,
         &words,
@@ -323,7 +332,7 @@ fn poll_tick(img: &image::DynamicImage, new_reader: bool) {
     std::hint::black_box(match_start::detect_phase_polled(
         img,
         &rgb,
-        &mut stability,
+        stability,
         match_start::PhaseSource::for_reader(new_reader),
     ));
     std::hint::black_box(match_end::detect_end_reel_with(img, &rgb, &titles));
@@ -334,12 +343,19 @@ fn poll_tick(img: &image::DynamicImage, new_reader: bool) {
 /// through `DynamicImage::to_rgb8`, and so did the blanking on top of its
 /// scoreboard crop; now both read the frame in place. Fails if a full-frame
 /// copy comes back on either path.
+///
+/// This process loads no words pack (no `SCUFFED_TEMPLATE_DIR`), so both
+/// reader settings read through OCR here. The words-pack tick is measured
+/// in a process of its own
+/// ([`the_poll_tick_on_a_words_pack_does_not_copy_the_frame`]).
 #[test]
 fn the_poll_tick_and_the_report_blanking_do_not_copy_the_frame() {
     let frame = stream_frame();
     for new_reader in [true, false] {
-        poll_tick(&frame, new_reader); // warm: packs and tables load once
-        let (_, bytes, calls) = measure_sync(|| poll_tick(&frame, new_reader));
+        let mut stability = stat_tracker::frame::stability::FrameStability::default();
+        // Warm: packs and tables load once, and the next tick is a repeat.
+        poll_tick(&frame, new_reader, &mut stability);
+        let (_, bytes, calls) = measure_sync(|| poll_tick(&frame, new_reader, &mut stability));
         println!(
             "frame {FRAME_BYTES} B; poll tick (new reader {new_reader}) allocated {bytes} B in {calls} calls"
         );
@@ -402,13 +418,14 @@ fn frame_path_soak() {
         .map(|_| {
             let (rx, seed) = (work_rx.clone(), seed.clone());
             std::thread::spawn(move || {
+                let mut stability = stat_tracker::frame::stability::FrameStability::default();
                 loop {
                     let job = rx.lock().unwrap().recv();
                     let Ok((tick, done)) = job else { return };
                     // A fresh frame per tick, as each grab makes one.
                     let frame = (*seed).clone();
                     let (_, bytes, _) = measure_sync(|| {
-                        poll_tick(&frame, true);
+                        poll_tick(&frame, true, &mut stability);
                         if tick % 20 == 0 {
                             std::hint::black_box(stat_tracker::report::blank::blanked_scoreboard(
                                 &frame, None,
@@ -466,5 +483,58 @@ fn frame_path_soak() {
         samples[0].1,
         samples[samples.len() - 1].1,
         total as f64 / ticks as f64 / 1e6
+    );
+}
+
+/// The poll tick under `reader = "new"` with a words pack loaded (synthetic
+/// end-title, accolade and FINAL SCORE templates, as `end_title_wiring` and
+/// `final_score_wiring` write them): the words reads take the frame in
+/// place too. One test per process, so the reader is set up here.
+#[test]
+fn the_poll_tick_on_a_words_pack_does_not_copy_the_frame() {
+    use stat_tracker::detect::match_end::Titles;
+    use stat_tracker::shadow::result::WORDS_SUBDIR;
+    if !crate::common::own_process(
+        module_path!(),
+        "the_poll_tick_on_a_words_pack_does_not_copy_the_frame",
+    ) {
+        return;
+    }
+    let bars = |seed: u32, w: u32, h: u32| {
+        image::GrayImage::from_fn(w, h, |x, y| {
+            let on = (2..h - 2).contains(&y)
+                && ((x / (2 + seed)).is_multiple_of(2) || (y + x * seed).is_multiple_of(11));
+            image::Luma([if on { 229 } else { 0 }])
+        })
+    };
+    let data = tempfile::tempdir().unwrap();
+    let words = data.path().join(WORDS_SUBDIR);
+    std::fs::create_dir_all(&words).unwrap();
+    for (name, img) in [
+        ("accolade_victory.png", bars(1, 70, 30)),
+        ("accolade_defeat.png", bars(3, 60, 30)),
+        ("end_title_victory.png", bars(2, 90, 34)),
+        ("end_title_defeat.png", bars(4, 80, 34)),
+        ("p4_final_score.png", bars(5, 120, 24)),
+    ] {
+        img.save(words.join(name)).unwrap();
+    }
+    // SAFETY: this test runs alone in a process of its own
+    // (`common::own_process`); nothing else reads the environment
+    // concurrently.
+    unsafe { std::env::set_var(stat_tracker::shadow::reader::TEMPLATE_DIR_ENV, data.path()) };
+    let frame = stream_frame();
+    let titles = Titles::for_rgb(true, &tick_rgb(&frame));
+    assert!(
+        matches!(titles, Titles::Words(_)),
+        "no words read: {titles:?}"
+    );
+    let mut stability = stat_tracker::frame::stability::FrameStability::default();
+    poll_tick(&frame, true, &mut stability);
+    let (_, bytes, calls) = measure_sync(|| poll_tick(&frame, true, &mut stability));
+    println!("frame {FRAME_BYTES} B; poll tick (words pack) allocated {bytes} B in {calls} calls");
+    assert!(
+        bytes < FRAME_BYTES / 2,
+        "the poll tick copied the frame ({bytes} B, words pack)"
     );
 }
