@@ -12,6 +12,9 @@ use scuffed_types::api::{DaemonConfigResponse, StatsUploadResponse};
 use super::backoff::parse_retry_after;
 use super::batching::BatchCaps;
 use super::errors::{SyncUploadError, parse_upload_error_body, server_error_text};
+use super::visibility::{
+    MAX_BODY_BYTES, STATS_SETTINGS_PATH, StatsVisibility, parse_stats_visibility,
+};
 use super::wire::upload_request;
 
 #[derive(Clone)]
@@ -138,6 +141,34 @@ impl SyncClient {
         resp.json::<DaemonConfigResponse>()
             .await
             .map_err(|e| SyncUploadError::plain(e.to_string()))
+    }
+
+    /// Who can see this member's stats on the site, for the Settings line.
+    ///
+    /// One GET of `STATS_SETTINGS_PATH` with the saved token. Any failure
+    /// (unsafe URL, network, 401, 5xx, a body that is too large or not
+    /// JSON, an unknown value) is `None`: the line stays hidden and the
+    /// sync state is untouched, so this never pauses uploads.
+    pub async fn fetch_stats_visibility(&self) -> Option<StatsVisibility> {
+        self.refuse_unsafe_transport().ok()?;
+        let creds = self.credentials();
+        let url = format!("{}{STATS_SETTINGS_PATH}", creds.server_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&creds.token)
+            .send()
+            .await
+            .ok()?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return None;
+        }
+        let bytes = resp.bytes().await.ok()?;
+        if bytes.len() > MAX_BODY_BYTES {
+            return None;
+        }
+        parse_stats_visibility(status, std::str::from_utf8(&bytes).ok()?)
     }
 
     /// POST `/api/stats/upload`.

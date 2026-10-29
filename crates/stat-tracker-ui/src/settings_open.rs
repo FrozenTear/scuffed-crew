@@ -5,6 +5,8 @@
 //! and the "What leaves your PC" dialog are handled here too.
 
 use iced::Task;
+use stat_tracker::config::SyncConfig;
+use stat_tracker::sync::{StatsVisibility, SyncClient};
 
 use crate::app::{Message, TrackerApp};
 use crate::setup_guide::{TokenCheckResult, check_token};
@@ -19,6 +21,12 @@ pub enum OpenMsg {
     AccountChecked {
         key: (String, String),
         name: Option<String>,
+    },
+    /// The website answered the stats visibility read for `key`: the value,
+    /// or `None` for a failed read or a value this tracker does not know.
+    VisibilityChecked {
+        key: (String, String),
+        value: Option<StatsVisibility>,
     },
     /// Sign out under Website account: clear the saved token.
     SignOut,
@@ -43,6 +51,12 @@ pub struct OpenState {
     account: Option<((String, String), String)>,
     /// The URL and token a check is running for.
     asking: Option<(String, String)>,
+    /// Who the website says can see the member's stats, with the URL and
+    /// token it was asked for. Kept while the next read runs, so the line
+    /// does not flicker; cleared by a failed or unknown answer.
+    visibility: Option<((String, String), StatsVisibility)>,
+    /// The URL and token a visibility read is running for.
+    asking_visibility: Option<(String, String)>,
     /// The "What leaves your PC" dialog is open.
     pub what_leaves_open: bool,
 }
@@ -54,6 +68,30 @@ impl OpenState {
             .as_ref()
             .filter(|(k, _)| k == key)
             .map(|(_, name)| name.as_str())
+    }
+
+    /// Take a visibility answer for `key`. Only the latest read counts: an
+    /// older one, from a token since replaced or signed out, is dropped.
+    fn visibility_checked(&mut self, key: (String, String), value: Option<StatsVisibility>) {
+        if self.asking_visibility.as_ref() == Some(&key) {
+            self.asking_visibility = None;
+            self.visibility = value.map(|v| (key, v));
+        }
+    }
+
+    /// Record that a visibility read for `key` is the one in flight.
+    #[cfg(test)]
+    pub(crate) fn mark_asking_visibility(&mut self, key: (String, String)) {
+        self.asking_visibility = Some(key);
+    }
+
+    /// The last good visibility for `key`, never one read for another
+    /// URL or token.
+    pub fn stats_visibility(&self, key: &(String, String)) -> Option<StatsVisibility> {
+        self.visibility
+            .as_ref()
+            .filter(|(k, _)| k == key)
+            .map(|(_, value)| *value)
     }
 }
 
@@ -99,7 +137,43 @@ pub fn on_open(app: &mut TrackerApp) -> Task<Message> {
             },
         ));
     }
+    if let Some(task) = ask_visibility(app) {
+        tasks.push(task);
+    }
     Task::batch(tasks)
+}
+
+/// Read the stats visibility again. It runs on every open, since the
+/// member can change it on the website while the tracker stays up. A demo
+/// asks nothing. Unlike the account name, a cached answer does not skip the
+/// read.
+fn ask_visibility(app: &mut TrackerApp) -> Option<Task<Message>> {
+    if app.fixture.is_some() {
+        return None;
+    }
+    let key = sync_key(app)?;
+    if app.page_state.opened.asking_visibility.as_ref() == Some(&key) {
+        return None;
+    }
+    // The same check as setup's: never a cleartext or bad URL.
+    let base = crate::setup_guide::normalize_base(&key.0).ok()?;
+    let client = SyncClient::try_new(SyncConfig {
+        server_url: base,
+        token: key.1.clone(),
+    })
+    .ok()?;
+    app.page_state.opened.asking_visibility = Some(key.clone());
+    Some(Task::perform(
+        async move { client.fetch_stats_visibility().await },
+        move |value| {
+            Message::SettingsPage(crate::settings_update::Msg::Open(
+                OpenMsg::VisibilityChecked {
+                    key: key.clone(),
+                    value,
+                },
+            ))
+        },
+    ))
 }
 
 /// Measure the stored data again, after Settings opens, Compact or Delete.
@@ -137,9 +211,12 @@ pub fn update(
             }
             state.account = name.map(|n| (key, n));
         }
+        OpenMsg::VisibilityChecked { key, value } => state.visibility_checked(key, value),
         OpenMsg::WhatLeaves(open) => state.what_leaves_open = open,
         OpenMsg::SignOut => {
             state.account = None;
+            state.visibility = None;
+            state.asking_visibility = None;
             app.settings.sync_token.clear();
             return save_sync(app);
         }
@@ -179,5 +256,48 @@ mod tests {
         assert!(OpenMsg::SignOut.acts());
         assert!(!OpenMsg::WhatLeaves(true).acts());
         assert!(!OpenMsg::StoreSized(1).acts());
+    }
+
+    fn key(token: &str) -> (String, String) {
+        ("https://a.example".to_string(), token.to_string())
+    }
+
+    fn asked(state: &mut OpenState, k: &(String, String)) {
+        state.mark_asking_visibility(k.clone());
+    }
+
+    #[test]
+    fn a_visibility_is_shown_only_for_the_token_it_was_asked_for() {
+        let mut state = OpenState::default();
+        let k = key("t1");
+        assert_eq!(state.stats_visibility(&k), None, "nothing read yet");
+        asked(&mut state, &k);
+        state.visibility_checked(k.clone(), Some(StatsVisibility::Members));
+        assert_eq!(state.stats_visibility(&k), Some(StatsVisibility::Members));
+        assert_eq!(state.stats_visibility(&key("t2")), None);
+    }
+
+    #[test]
+    fn a_failed_or_unknown_answer_clears_the_line() {
+        let mut state = OpenState::default();
+        let k = key("t1");
+        asked(&mut state, &k);
+        state.visibility_checked(k.clone(), Some(StatsVisibility::Public));
+        // The next open reads again: the last good value stays while it runs.
+        asked(&mut state, &k);
+        assert_eq!(state.stats_visibility(&k), Some(StatsVisibility::Public));
+        state.visibility_checked(k.clone(), None);
+        assert_eq!(state.stats_visibility(&k), None);
+    }
+
+    #[test]
+    fn an_answer_nobody_is_waiting_for_is_dropped() {
+        let mut state = OpenState::default();
+        let (old, new) = (key("old"), key("new"));
+        asked(&mut state, &old);
+        asked(&mut state, &new);
+        state.visibility_checked(old.clone(), Some(StatsVisibility::Private));
+        assert_eq!(state.stats_visibility(&old), None);
+        assert_eq!(state.asking_visibility.as_ref(), Some(&new));
     }
 }

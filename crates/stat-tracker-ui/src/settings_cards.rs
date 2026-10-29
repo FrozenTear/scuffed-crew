@@ -162,6 +162,9 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
                 mark,
                 env_vars.is_some(),
             ));
+            if let Some(line) = crate::account_card::visibility_line(app) {
+                connection = connection.push(line);
+            }
         }
         _ => {
             connection = connection.push(

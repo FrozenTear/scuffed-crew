@@ -5,6 +5,7 @@
 //! - `backoff`: the periodic sync clock.
 //! - `batching`: the 413 caps and the 400/422 bisection.
 //! - `auth_pause`: `sync_auth.json` and the GUI status text.
+//! - `visibility`: the member's stats visibility, parsed from the site.
 //! - `client`: [`SyncClient`], the only reqwest code.
 //!
 //! Every public item is re-exported here, so `crate::sync::X` paths are
@@ -15,6 +16,7 @@ mod backoff;
 mod batching;
 mod client;
 mod errors;
+mod visibility;
 mod wire;
 
 pub use crate::version::USER_AGENT;
@@ -39,6 +41,7 @@ pub use client::{
     off_site_redirect_message, token_safe_redirects,
 };
 pub use errors::{SyncUploadError, server_error_text};
+pub use visibility::{StatsVisibility, parse_stats_visibility};
 pub use wire::{row_needs_review, upload_request};
 
 // Names the test files saw through `use super::*` before the split: two of
@@ -69,3 +72,6 @@ mod tests_auth_pause;
 
 #[cfg(test)]
 mod tests_batching;
+
+#[cfg(test)]
+mod tests_visibility;
