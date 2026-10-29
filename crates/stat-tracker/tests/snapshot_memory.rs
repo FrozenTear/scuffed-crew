@@ -74,8 +74,8 @@ const ROWS_PER_GAME: usize = 20;
 
 fn row(game: usize, capture: usize) -> PersonalMatch {
     let at = |s: usize| {
-        let t = chrono::DateTime::from_timestamp(1_800_000_000 + (game * 3_600 + s) as i64, 0)
-            .unwrap();
+        let t =
+            chrono::DateTime::from_timestamp(1_800_000_000 + (game * 3_600 + s) as i64, 0).unwrap();
         surrealdb_types::Datetime::from(t)
     };
     let segment = |hero: &str, from: usize, to: usize| HeroSegment {
@@ -117,7 +117,11 @@ fn row(game: usize, capture: usize) -> PersonalMatch {
         corrected_mitigation: None,
         edited_fields: Vec::new(),
         edited_at: None,
-        heroes_played: vec![segment("Ana", 0, 5), segment("Kiriko", 6, 6), segment("Ana", 7, 19)],
+        heroes_played: vec![
+            segment("Ana", 0, 5),
+            segment("Kiriko", 6, 6),
+            segment("Ana", 7, 19),
+        ],
         segment_resolutions: Vec::new(),
         recognizer: "cv-v8".into(),
         suspect_fields: Vec::new(),

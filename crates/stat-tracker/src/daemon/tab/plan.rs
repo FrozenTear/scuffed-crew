@@ -585,7 +585,7 @@ pub(crate) async fn apply_capture_report(
                     {
                         tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to back-fill session outcome");
                     }
-                    refresh_snapshot(store, data_dir).await;
+                    refresh_snapshot_game_finished(store, data_dir).await;
                 }
                 persist_active_game(data_dir, Some(g));
             }
@@ -737,12 +737,14 @@ pub(crate) async fn apply_capture_report(
                         session_id = %g.session_id,
                         "outcome recovered from captured frame: back-filling session"
                     );
-                    if g.session_created
-                        && let Err(e) = store
+                    if g.session_created {
+                        if let Err(e) = store
                             .set_session_outcome(&g.session_id, &g.outcome.to_string())
                             .await
-                    {
-                        tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to back-fill session outcome");
+                        {
+                            tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to back-fill session outcome");
+                        }
+                        refresh_snapshot_game_finished(store, data_dir).await;
                     }
                 } else if recorded
                     && g.finished()
@@ -766,6 +768,7 @@ pub(crate) async fn apply_capture_report(
                     {
                         tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to re-seal session outcome");
                     }
+                    refresh_snapshot_game_finished(store, data_dir).await;
                 }
                 persist_active_game(data_dir, Some(g));
             }

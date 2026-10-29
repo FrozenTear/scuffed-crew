@@ -18,6 +18,12 @@ mod sync_sched;
 mod tab;
 #[cfg(test)]
 mod tests_debug_dumps;
+#[cfg(test)]
+mod tests_gui_presence;
+#[cfg(test)]
+mod tests_memtune;
+#[cfg(test)]
+mod tests_snapshot_policy;
 
 pub(crate) use debug_dumps::*;
 pub(crate) use event_loop::*;
