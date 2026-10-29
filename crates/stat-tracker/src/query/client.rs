@@ -35,13 +35,20 @@ impl std::fmt::Display for QueryError {
 
 impl std::error::Error for QueryError {}
 
-/// Ask the daemon for `data_dir`. A local connect does not wait (it fails
-/// at once with no listener); `timeout` bounds each write and read.
+/// Ask the daemon for `data_dir`. The connect, each write and the read are
+/// bounded by `timeout` (a connect to a live but stuck daemon would
+/// otherwise wait), and the answer counts only from a process of this user.
 pub fn ask(data_dir: &Path, request: &Request, timeout: Duration) -> Result<Response, QueryError> {
-    let path = super::socket_path(data_dir);
-    let mut stream = match std::os::unix::net::UnixStream::connect(&path) {
-        Ok(s) => s,
-        Err(e)
+    let Some(path) = super::socket_path(data_dir) else {
+        return Err(QueryError::NotRunning);
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(std::os::unix::net::UnixStream::connect(&path));
+    });
+    let mut stream = match rx.recv_timeout(timeout) {
+        Ok(Ok(s)) => s,
+        Ok(Err(e))
             if matches!(
                 e.kind(),
                 std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
@@ -49,8 +56,21 @@ pub fn ask(data_dir: &Path, request: &Request, timeout: Duration) -> Result<Resp
         {
             return Err(QueryError::NotRunning);
         }
-        Err(e) => return Err(QueryError::Io(e)),
+        Ok(Err(e)) => return Err(QueryError::Io(e)),
+        Err(_) => {
+            return Err(QueryError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "the tracker did not accept in time",
+            )));
+        }
     };
+    {
+        use std::os::fd::AsFd as _;
+        let peer = super::peer_uid(stream.as_fd()).map_err(QueryError::Io)?;
+        if peer != super::my_uid() {
+            return Err(QueryError::Bad("the socket belongs to another user".into()));
+        }
+    }
     stream
         .set_read_timeout(Some(timeout))
         .map_err(QueryError::Io)?;

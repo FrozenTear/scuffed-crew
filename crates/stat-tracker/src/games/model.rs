@@ -137,7 +137,8 @@ impl RoleFilter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+/// Immutable OCR reads used for the "edited" badge / corrections list.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct GameOcr {
     pub hero: String,
     pub role: String,
@@ -703,8 +704,6 @@ mod review_tests {
     }
 }
 
-/// Editable text state for `EditMatch`. One `String` per field (parsed on save).
-#[derive(Debug, Clone, PartialEq, Default)]
 #[cfg(test)]
 mod placeholder_tests {
     use super::{Outcome, empty_dash};

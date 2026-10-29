@@ -510,12 +510,12 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     match super::query_server::bind(&config.data_dir) {
         Ok((listener, path)) => {
             tracing::info!(target: "scuffed_stat_tracker", path = %path.display(), "query socket ready");
-            tokio::spawn(super::query_server::serve(
+            super::query_server::start(
                 listener,
                 store.clone(),
                 config.data_dir.clone(),
                 crate::store_rev,
-            ));
+            );
         }
         Err(e) => {
             tracing::warn!(target: "scuffed_stat_tracker", error = %e, "no query socket; the app reads live_snapshot.json")

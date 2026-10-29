@@ -4,6 +4,7 @@
 
 pub use stat_tracker::games::model::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Screen {
     #[default]
     Overview,
@@ -38,7 +39,7 @@ impl Screen {
     }
 }
 
-/// Immutable OCR reads used for the "edited" badge / corrections list.
+/// Editable text state for `EditMatch`. One `String` per field (parsed on save).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EditForm {
     pub session_id: String,

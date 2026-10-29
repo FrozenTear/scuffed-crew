@@ -8,7 +8,7 @@ use stat_tracker::games::model::Role;
 use stat_tracker::query::client::{self, QueryError};
 use stat_tracker::query::proto::{Request, Response};
 
-use super::query_server::{bind, serve};
+use super::query_server::{admit, bind, serve};
 use crate::storage::{LocalStore, PersonalMatch};
 
 static REV: AtomicU64 = AtomicU64::new(41);
@@ -134,8 +134,39 @@ async fn the_daemon_answers_with_the_totals_the_gui_computes() {
     };
     assert_eq!((r, totals.record.games), (42, 4));
 
+    // A delete the GUI queued (no stored change, no new revision) is
+    // hidden at once, as on the file path.
+    crate::storage::queue_command(
+        dir.path(),
+        &crate::storage::StoreCommand::DeleteSession {
+            session_id: "g3".into(),
+        },
+    )
+    .unwrap();
+    let Response::Totals { totals, .. } = ask(
+        dir.path(),
+        Request::Totals {
+            filter: GameFilter::default(),
+        },
+    )
+    .await
+    .unwrap() else {
+        panic!("totals");
+    };
+    assert_eq!(totals.record.games, 3, "g3 queued for delete");
+
     // A second daemon cannot take a live socket.
     assert!(bind(dir.path()).is_err());
+}
+
+#[test]
+fn only_this_user_is_served() {
+    assert!(admit(Ok(1000), 1000));
+    assert!(!admit(Ok(1001), 1000), "another uid");
+    assert!(
+        !admit(Err(std::io::Error::other("no cred")), 1000),
+        "unknown peer"
+    );
 }
 
 #[tokio::test]
@@ -146,7 +177,7 @@ async fn a_stale_socket_is_replaced_and_no_daemon_is_not_running() {
         Err(QueryError::NotRunning)
     ));
     // A socket file left by a killed daemon: nobody listens.
-    let path = stat_tracker::query::socket_path(dir.path());
+    let path = stat_tracker::query::socket_path(dir.path()).unwrap();
     drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
     assert!(path.exists());
     assert!(matches!(

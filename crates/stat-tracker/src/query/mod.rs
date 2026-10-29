@@ -22,22 +22,54 @@ pub const SOCKET_FILE: &str = "tracker.sock";
 /// terminating zero).
 const MAX_SOCKET_PATH: usize = 107;
 
-/// Where the daemon for `data_dir` listens. The data dir, unless that path
-/// is too long for a Unix socket; then `$XDG_RUNTIME_DIR`, named after a
-/// hash of the data dir so two data dirs never share one.
-pub fn socket_path(data_dir: &Path) -> PathBuf {
+/// Where the daemon for `data_dir` listens: the data dir, unless that
+/// path is too long for a Unix socket; then `$XDG_RUNTIME_DIR` (private to
+/// the user), named after a hash of the data dir so two data dirs never
+/// share one. `None` when neither works: no socket, and the app reads
+/// `live_snapshot.json`. Never a shared directory such as `/tmp`.
+pub fn socket_path(data_dir: &Path) -> Option<PathBuf> {
     let direct = data_dir.join(SOCKET_FILE);
     if direct.as_os_str().len() <= MAX_SOCKET_PATH {
-        return direct;
+        return Some(direct);
     }
     use sha2::Digest as _;
     let hash = sha2::Sha256::digest(data_dir.as_os_str().as_encoded_bytes());
     let short: String = hash[..8].iter().map(|b| format!("{b:02x}")).collect();
-    let dir = std::env::var_os("XDG_RUNTIME_DIR")
-        .filter(|d| !d.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    dir.join(format!("scuffed-stat-tracker-{short}.sock"))
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty())?;
+    let path = PathBuf::from(dir).join(format!("scuffed-stat-tracker-{short}.sock"));
+    (path.as_os_str().len() <= MAX_SOCKET_PATH).then_some(path)
+}
+
+/// The uid of the process on the other end of a Unix socket (`SO_PEERCRED`).
+pub fn peer_uid(fd: std::os::fd::BorrowedFd<'_>) -> std::io::Result<u32> {
+    use std::os::fd::AsRawFd as _;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` and `len` are valid out pointers of the right size.
+    let rc = unsafe {
+        libc::getsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if rc == 0 {
+        Ok(cred.uid)
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+/// This process's effective uid.
+pub fn my_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions.
+    unsafe { libc::geteuid() }
 }
 
 #[cfg(test)]

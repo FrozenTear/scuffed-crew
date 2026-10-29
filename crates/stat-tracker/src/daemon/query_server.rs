@@ -10,12 +10,16 @@
 //! [`WRITE_WAIT`], so a stuck client cannot hold the list.
 //!
 //! The game list is built once per stored revision: the compact snapshot
-//! rows, the deletes still queued in `commands/`, then
-//! `games_from_snapshot`, exactly as the GUI builds it from the file.
+//! rows through `games_from_snapshot`, exactly as the GUI builds it from the
+//! file. The deletes still queued in `commands/` are taken off on every
+//! request (the GUI queues them without a stored change). The server holds
+//! a store handle, so shutdown stops it ([`stop`]) before the store closes.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::*;
 
 use stat_tracker::games::model::Game;
 use stat_tracker::query::proto::{self, Request, Response};
@@ -27,7 +31,12 @@ pub(crate) const WRITE_WAIT: Duration = Duration::from_secs(5);
 
 /// Bind the socket for `data_dir`, replacing a stale one.
 pub(crate) fn bind(data_dir: &Path) -> std::io::Result<(tokio::net::UnixListener, PathBuf)> {
-    let path = stat_tracker::query::socket_path(data_dir);
+    let Some(path) = stat_tracker::query::socket_path(data_dir) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "the data dir path is too long for a socket and XDG_RUNTIME_DIR is unset",
+        ));
+    };
     if path.exists() {
         if std::os::unix::net::UnixStream::connect(&path).is_ok() {
             return Err(std::io::Error::new(
@@ -43,6 +52,35 @@ pub(crate) fn bind(data_dir: &Path) -> std::io::Result<(tokio::net::UnixListener
     Ok((listener, path))
 }
 
+/// Serve only this user: a peer we cannot identify is refused too.
+pub(crate) fn admit(peer_uid: std::io::Result<u32>, me: u32) -> bool {
+    peer_uid.is_ok_and(|uid| uid == me)
+}
+
+static RUNNING: std::sync::Mutex<Option<tokio::task::AbortHandle>> = std::sync::Mutex::new(None);
+
+/// Start [`serve`] as a task that [`stop`] can end.
+pub(crate) fn start(
+    listener: tokio::net::UnixListener,
+    store: storage::LocalStore,
+    data_dir: PathBuf,
+    rev: fn() -> u64,
+) {
+    let task = tokio::spawn(serve(listener, store, data_dir, rev));
+    *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
+}
+
+/// End the server and every open connection (each holds a store handle),
+/// and remove the socket. Shutdown calls this before the store closes.
+pub(crate) fn stop(data_dir: &Path) {
+    if let Some(task) = RUNNING.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        task.abort();
+    }
+    if let Some(path) = stat_tracker::query::socket_path(data_dir) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// The game list at one revision.
 #[derive(Default)]
 pub(crate) struct GamesCache {
@@ -54,23 +92,21 @@ impl GamesCache {
         &mut self,
         rev: u64,
         store: &storage::LocalStore,
-        data_dir: &Path,
     ) -> Result<Arc<Vec<Game>>, String> {
         if let Some((at, games)) = &self.at
             && *at == rev
         {
             return Ok(games.clone());
         }
-        let mut snap = store.compact_snapshot().await.map_err(|e| e.to_string())?;
-        let queued = stat_tracker::games::rows::queued_deletes(data_dir);
-        stat_tracker::games::rows::drop_sessions(&mut snap, &queued);
+        let snap = store.compact_snapshot().await.map_err(|e| e.to_string())?;
         let games = Arc::new(stat_tracker::games::rows::games_from_snapshot(&snap));
         self.at = Some((rev, games.clone()));
         Ok(games)
     }
 }
 
-/// Serve until the listener fails or the task is dropped.
+/// Serve until the task is aborted ([`stop`]). Connections are tasks of a
+/// `JoinSet` owned here, so aborting this ends them too.
 pub(crate) async fn serve(
     listener: tokio::net::UnixListener,
     store: storage::LocalStore,
@@ -79,13 +115,24 @@ pub(crate) async fn serve(
 ) {
     let cache = Arc::new(tokio::sync::Mutex::new(GamesCache::default()));
     let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CLIENTS));
-    // SAFETY: geteuid has no preconditions.
-    let me = unsafe { libc::geteuid() };
+    let me = stat_tracker::query::my_uid();
+    let mut connections = tokio::task::JoinSet::new();
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else {
-            return;
+        while connections.try_join_next().is_some() {}
+        let mut stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(e) => {
+                // Out of descriptors, an aborted connect: not fatal.
+                tracing::warn!(target: "scuffed_stat_tracker", error = %e, "query socket accept failed");
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            }
         };
-        if !stream.peer_cred().is_ok_and(|c| c.uid() == me) {
+        let peer = {
+            use std::os::fd::AsFd as _;
+            stat_tracker::query::peer_uid(stream.as_fd())
+        };
+        if !admit(peer, me) {
             continue; // another user: closed unread
         }
         let Ok(slot) = slots.clone().try_acquire_owned() else {
@@ -97,7 +144,7 @@ pub(crate) async fn serve(
             continue;
         };
         let (store, data_dir, cache) = (store.clone(), data_dir.clone(), cache.clone());
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let _slot = slot;
             let answer = match read_request(&mut stream).await {
                 Err(e) => e,
@@ -130,9 +177,21 @@ pub(crate) async fn respond(
     match request {
         Request::Hello | Request::Rev => proto::answer(request, rev, &[]),
         Request::Totals { .. } | Request::Games { .. } => {
-            match cache.lock().await.games(rev, store, data_dir).await {
-                Ok(games) => proto::answer(request, rev, &games),
-                Err(e) => Response::err("internal", e),
+            let games = match cache.lock().await.games(rev, store).await {
+                Ok(games) => games,
+                Err(e) => return Response::err("internal", e),
+            };
+            // A delete the GUI queued is hidden at once, as on the file path.
+            let queued = stat_tracker::games::rows::queued_deletes(data_dir);
+            if queued.is_empty() {
+                proto::answer(request, rev, &games)
+            } else {
+                let kept: Vec<Game> = games
+                    .iter()
+                    .filter(|g| g.session_id.is_empty() || !queued.contains(&g.session_id))
+                    .cloned()
+                    .collect();
+                proto::answer(request, rev, &kept)
             }
         }
     }

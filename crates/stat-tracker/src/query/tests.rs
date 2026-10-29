@@ -111,14 +111,39 @@ fn totals_are_the_pages_own_totals() {
 }
 
 #[test]
-fn a_long_data_dir_gets_a_short_socket_path() {
+fn a_long_data_dir_gets_a_short_socket_path_and_never_a_shared_dir() {
     let short = std::path::Path::new("/home/u/.local/share/scuffed-stat-tracker");
-    assert_eq!(super::socket_path(short), short.join(super::SOCKET_FILE));
-    let long = std::path::PathBuf::from(format!("/home/u/{}", "x".repeat(120)));
-    let p = super::socket_path(&long);
-    assert!(p.as_os_str().len() <= 107, "{}", p.display());
-    assert_ne!(
-        super::socket_path(&long),
-        super::socket_path(&long.join("y"))
+    assert_eq!(
+        super::socket_path(short),
+        Some(short.join(super::SOCKET_FILE))
     );
+    let long = std::path::PathBuf::from(format!("/home/u/{}", "x".repeat(120)));
+    if std::env::var_os("XDG_RUNTIME_DIR").is_some_and(|d| !d.is_empty()) {
+        let p = super::socket_path(&long).expect("runtime dir");
+        assert!(p.as_os_str().len() <= 107, "{}", p.display());
+        assert!(p.starts_with(std::env::var_os("XDG_RUNTIME_DIR").unwrap()));
+        assert_ne!(
+            super::socket_path(&long),
+            super::socket_path(&long.join("y"))
+        );
+    } else {
+        assert_eq!(super::socket_path(&long), None, "no /tmp fallback");
+    }
+}
+
+#[test]
+fn a_connect_to_a_daemon_that_never_accepts_gives_up_in_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::socket_path(dir.path()).unwrap();
+    // Bound with a backlog but never accepted: the connect queues, then the
+    // read must time out.
+    let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let started = std::time::Instant::now();
+    let res = super::client::ask(
+        dir.path(),
+        &Request::Rev,
+        std::time::Duration::from_millis(200),
+    );
+    assert!(res.is_err());
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
 }
