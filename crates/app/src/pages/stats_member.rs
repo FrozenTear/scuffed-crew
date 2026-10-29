@@ -293,7 +293,7 @@ pub fn StatsMember(id: String) -> Element {
                                         }
                                     } else {
                                         rsx! {
-                                            DataTable { headers: vec!["Role", "Matches", "Win %"],
+                                            DataTable { headers: vec!["Role", "Matches", "Win rate"],
                                                 for agg in shown.iter() {
                                                     {
                                                         let tally = agg.tally();
