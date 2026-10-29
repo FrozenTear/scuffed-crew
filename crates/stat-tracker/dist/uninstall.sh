@@ -436,7 +436,7 @@ tracker_data_name() {
         update-install.log)
             return 0
             ;;
-        stats.surrealkv.pre-vacuum-*|stats.surrealkv.pre-timeline-*)
+        stats.surrealkv.pre-*)
             return 0
             ;;
     esac

@@ -80,11 +80,16 @@ impl LocalStore {
         Ok(out)
     }
 
-    /// [`hydrate`] these rows from the store.
+    /// [`hydrate`] these rows from the store (migrated stores only).
     pub(super) async fn hydrate_rows(
         &self,
         rows: &mut [PersonalMatch],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Before the marker the rows are the truth: a record left by an
+        // interrupted move must not hide a row edit made meanwhile.
+        if !self.timeline_migrated() {
+            return Ok(());
+        }
         let timelines = self
             .load_timelines(rows.iter().map(|r| r.session_id.as_str()))
             .await?;

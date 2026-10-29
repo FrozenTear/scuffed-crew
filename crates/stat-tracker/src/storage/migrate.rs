@@ -105,9 +105,14 @@ impl LocalStore {
             std::collections::HashMap::new();
         let mut pages = super::export::RowPages::new(PACK_KEY_PAGE);
         while let Some(rows) = pages.next(self).await? {
-            let old = self
-                .load_timelines(rows.iter().map(|r| r.session_id.as_str()))
-                .await?;
+            // Records count only on a migrated store; before the marker the
+            // move rebuilds them from these (renamed) rows.
+            let old = if self.timeline_migrated() {
+                self.load_timelines(rows.iter().map(|r| r.session_id.as_str()))
+                    .await?
+            } else {
+                std::collections::HashMap::new()
+            };
             for mut row in rows {
                 let record = old.get(&row.session_id);
                 let shown = |row: &PersonalMatch, t: Option<&super::timeline::TimelineRecord>| {

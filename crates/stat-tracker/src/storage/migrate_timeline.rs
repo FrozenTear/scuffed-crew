@@ -13,10 +13,11 @@
 //!    complete copy is the only one with the final name). No space or a
 //!    failed copy: no migration, the store keeps today's layout.
 //! 2. [`LocalStore::migrate_timeline_if_needed`]: one session at a time,
-//!    store the timeline of the newest row that has one. A game with no
-//!    stored timeline on any row gets no record and keeps showing what it
-//!    shows today. Existing records are skipped, so a stop part way through
-//!    is finished by the next start.
+//!    store the timeline of the row the app shows for the game. A game whose
+//!    shown row has no stored timeline gets no record and keeps showing what
+//!    it shows today. Records are rebuilt from the rows until the marker is
+//!    set (reads ignore them before that), so a stop part way through is
+//!    finished by the next start with nothing stale.
 //! 3. The marker is written last.
 
 use std::path::{Path, PathBuf};
@@ -92,8 +93,9 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// A complete pre-timeline copy left by an earlier start that did not
-/// finish the migration. It holds the state before any migration write.
+/// A complete pre-timeline copy left by an earlier start whose move did not
+/// finish (its `.pending` file is still there). It holds the state before
+/// any move write. An older copy from a finished move is never reused.
 fn existing_backup(data_dir: &Path) -> Option<PathBuf> {
     let mut found: Vec<PathBuf> = std::fs::read_dir(data_dir)
         .ok()?
@@ -122,7 +124,11 @@ pub fn remove_pre_timeline_backups(data_dir: &Path) {
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.starts_with(PRE_TIMELINE_BACKUP_PREFIX))
         {
-            let _ = std::fs::remove_dir_all(&path);
+            let _ = if path.is_dir() {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
         }
     }
 }
@@ -143,23 +149,24 @@ pub(super) async fn prepare_with(
     if !has_data {
         return TimelineBackup::Ready(None);
     }
-    {
-        let store = match LocalStore::open_inner(data_dir, false).await {
-            Ok(store) => store,
-            Err(e) => return TimelineBackup::Failed(format!("could not open the store: {e}")),
-        };
-        if store.timeline_migrated() {
-            return TimelineBackup::NotNeeded;
-        }
-    }
+    let migrated = match LocalStore::open_inner(data_dir, false).await {
+        Ok(store) => store.timeline_migrated(),
+        Err(e) => return TimelineBackup::Failed(format!("could not open the store: {e}")),
+    };
+    // Dropping the handle only starts SurrealKV's close; the daemon's own
+    // open right after this must not find the engine still holding LOCK.
     match super::lock_released_within(data_dir, std::time::Duration::from_secs(10)).await {
         Ok(true) => {}
         Ok(false) => return TimelineBackup::Failed("the store did not finish closing".into()),
         Err(e) => return TimelineBackup::Failed(format!("cannot check the store closed: {e}")),
     }
+    if migrated {
+        return TimelineBackup::NotNeeded;
+    }
     if let Some(path) = existing_backup(data_dir) {
         return TimelineBackup::Ready(Some(path));
     }
+    remove_partial_backups(data_dir);
     let need = dir_size(&live).saturating_mul(2);
     match free_bytes(data_dir) {
         Some(free) if free >= need => {}
@@ -179,7 +186,35 @@ pub(super) async fn prepare_with(
         return TimelineBackup::Failed(format!("backup copy failed: {e}"));
     }
     crate::fs_mode::tighten_private_dir(&backup);
+    // Marks this copy as the one for a move still in progress; removed with
+    // the marker. Only such a copy is reused by a later start.
+    if let Err(e) = std::fs::write(pending_path(&backup), b"") {
+        return TimelineBackup::Failed(format!("backup copy failed: {e}"));
+    }
     TimelineBackup::Ready(Some(backup))
+}
+
+/// `<backup>.pending`: this backup belongs to a move that has not finished.
+fn pending_path(backup: &Path) -> PathBuf {
+    let mut name = backup.as_os_str().to_owned();
+    name.push(".pending");
+    PathBuf::from(name)
+}
+
+/// Copies an interrupted start left half done.
+fn remove_partial_backups(data_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|e| e.path()) {
+        if path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(PRE_TIMELINE_BACKUP_PREFIX) && n.ends_with(".partial"))
+        {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 impl LocalStore {
@@ -238,6 +273,9 @@ impl LocalStore {
         let written = self.fill_timelines(None).await?;
         self.write_timeline_marker().await?;
         self.set_timeline_migrated(true);
+        if let TimelineBackup::Ready(Some(path)) = backup {
+            let _ = std::fs::remove_file(pending_path(path));
+        }
         tracing::info!(
             records = written,
             "hero timelines moved to one record per game"
@@ -250,9 +288,10 @@ impl LocalStore {
             .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Store a record for each session that has a stored timeline and no
-    /// record yet. `stop_after` ends the pass after that many sessions (a
-    /// crash in tests). Returns the records written.
+    /// Store a record for each session whose shown row has a stored timeline,
+    /// unless an equal record is there already. `stop_after` ends the pass
+    /// after that many sessions (a crash in tests). Returns the records
+    /// written.
     pub(super) async fn fill_timelines(
         &self,
         stop_after: Option<usize>,
@@ -291,15 +330,37 @@ impl LocalStore {
                     return Ok(written);
                 }
                 visited += 1;
-                if sid.is_empty() || have.contains_key(sid) {
+                if sid.is_empty() {
                     continue;
                 }
                 let rows = self.session_rows_raw(sid).await?;
-                let Some(newest) = rows.iter().rev().find(|m| !m.heroes_played.is_empty()) else {
-                    continue; // no stored timeline: no record, shows as today
+                // The list the game shows today: the own list of the row the
+                // app shows (the newest that passes the tracked filter, else
+                // the newest). Rows written by alpha.2 have no list of their
+                // own (a rebuild after an older vacuum dropped the table), so
+                // then the newest row that has one. No list on any row: no
+                // record, the game shows as today.
+                let shown = rows
+                    .iter()
+                    .rev()
+                    .find(|m| super::export::row_is_tracked(m))
+                    .or(rows.last())
+                    .filter(|m| !m.heroes_played.is_empty())
+                    .or_else(|| rows.iter().rev().find(|m| !m.heroes_played.is_empty()));
+                let Some(shown) = shown else {
+                    continue;
                 };
                 let resolutions = collect_segment_resolutions(&rows);
-                self.upsert_timeline(sid, &newest.heroes_played, &resolutions)
+                let fresh = (&shown.heroes_played, &resolutions);
+                // Rewritten from the rows each pass until the marker is set,
+                // so a record left by an interrupted pass is never stale.
+                if have
+                    .get(sid)
+                    .is_some_and(|t| (&t.heroes_played, &t.segment_resolutions) == fresh)
+                {
+                    continue;
+                }
+                self.upsert_timeline(sid, &shown.heroes_played, &resolutions)
                     .await?;
                 written += 1;
             }

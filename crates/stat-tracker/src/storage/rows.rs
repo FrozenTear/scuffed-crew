@@ -277,9 +277,9 @@ impl LocalStore {
         self.db.query("DELETE personal_match").await?;
         self.db.query("DELETE match_session").await?;
         self.db.query("DELETE deleted_session").await?;
+        // The marker stays: an empty store already has the new layout, so
+        // the next start takes no backup and moves nothing.
         self.db.query("DELETE hero_timeline").await?;
-        self.db.query("DELETE store_meta").await?;
-        self.set_timeline_migrated(false);
         tracing::info!("cleared all match data from local store");
         Ok(())
     }

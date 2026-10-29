@@ -163,7 +163,9 @@ async fn t1_t2_t8_migration_changes_no_row_and_no_shown_game() {
 async fn t3_a_second_run_writes_nothing_and_t4_a_stop_part_way_is_finished_later() {
     let dir = tempfile::tempdir().unwrap();
     let store = alpha1_store(dir.path()).await;
-    assert!(store.fill_timelines(Some(2)).await.unwrap() <= 2);
+    // Sessions in key order: legacy (no list, no record), pinned, res, swap.
+    assert_eq!(store.fill_timelines(Some(2)).await.unwrap(), 1);
+    assert_eq!(record_ids(&store).await, vec!["pinned"]);
     assert!(
         !store.timeline_marker().await.unwrap(),
         "no marker before the end"
@@ -185,7 +187,7 @@ async fn t3_a_second_run_writes_nothing_and_t4_a_stop_part_way_is_finished_later
     assert_eq!(
         store.fill_timelines(None).await.unwrap(),
         0,
-        "records are skipped"
+        "equal records are kept"
     );
     assert_eq!(record_ids(&store).await, once);
 }
@@ -229,6 +231,13 @@ async fn t5_a_capture_after_the_move_writes_one_record_and_no_timeline_copy() {
             .all(|m| m.heroes_played.is_empty()),
         "new rows carry no timeline copy"
     );
+
+    // The upload reads the stored timeline: new rows carry no list of their
+    // own, yet the queue sends the new majority.
+    let queued = store.get_unsynced().await.unwrap();
+    let swap: Vec<_> = queued.iter().filter(|m| m.session_id == "swap").collect();
+    assert!(!swap.is_empty());
+    assert!(swap.iter().all(|m| m.display_hero() == "Kiriko"));
 
     // A pinned hero never re-queues.
     store
@@ -319,9 +328,29 @@ async fn t7_backup_first_and_no_backup_means_no_move() {
     assert_eq!(maintain::dir_size(path), maintain::dir_size(&live));
     assert!(!path.to_string_lossy().ends_with(".partial"));
 
-    // The next start reuses that copy (it holds the state before any write).
+    // A start that stops before the marker leaves the copy pending; the
+    // next start reuses it (it holds the state before any write).
+    let pending = std::path::PathBuf::from(format!("{}.pending", path.display()));
+    assert!(pending.exists());
+    assert_eq!(prepare_timeline_migration(dir.path()).await, backup);
+    let copies = std::fs::read_dir(dir.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with(PRE_TIMELINE_BACKUP_PREFIX)
+        })
+        .count();
+    assert_eq!(copies, 1);
+    // Right after prepare, the daemon's own open succeeds.
     let store = LocalStore::open(dir.path()).await.unwrap();
-    assert!(migrate(&store).await > 0);
+    assert!(store.migrate_timeline_if_needed(&backup).await.unwrap() > 0);
+    assert!(
+        !pending.exists(),
+        "the move finished: the copy is no longer pending"
+    );
     drop(store);
     assert!(
         crate::storage::wait_for_engine_close(dir.path(), std::time::Duration::from_secs(10)).await
@@ -330,6 +359,100 @@ async fn t7_backup_first_and_no_backup_means_no_move() {
         prepare_timeline_migration(dir.path()).await,
         TimelineBackup::NotNeeded
     );
+    // A migrated store opens straight after the check, with no wait.
+    drop(LocalStore::open(dir.path()).await.unwrap());
+}
+
+#[tokio::test]
+async fn delete_all_removes_the_timeline_backups() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("stats.surrealkv")).unwrap();
+    for name in ["20261029_101500", "20261029_101500.partial"] {
+        let p = dir
+            .path()
+            .join(format!("{PRE_TIMELINE_BACKUP_PREFIX}{name}"));
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("db"), "games").unwrap();
+    }
+    let note = format!("{PRE_TIMELINE_BACKUP_PREFIX}20261029_101500.pending");
+    std::fs::write(dir.path().join(note), "").unwrap();
+    force_clear_data_dir(dir.path()).unwrap();
+    let left: Vec<_> = std::fs::read_dir(dir.path()).unwrap().flatten().collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// Item 2 (M7): the record copies the list the game shows (its newest
+/// row's), not a fresh derivation and not an older row's.
+#[tokio::test]
+async fn t2_the_stored_list_wins_over_a_fresh_derivation() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = alpha1_store(dir.path()).await;
+    for i in 0..4 {
+        store
+            .insert_match(cap("drift", "Ana", 700 + i))
+            .await
+            .unwrap();
+    }
+    store.create_session(&session("drift")).await.unwrap();
+    // Raw reads say Ana; the stored lists say Lucio (newest) and Zen (older).
+    let seg = |hero: &str| HeroSegment {
+        hero: hero.into(),
+        role: "Support".into(),
+        first_seen: at(700),
+        last_seen: at(703),
+        snapshots: 4,
+        confirmed: true,
+        resolution: None,
+    };
+    store
+        .db
+        .query("UPDATE personal_match SET heroes_played = $hp WHERE session_id = 'drift'")
+        .bind(("hp", vec![seg("Zen")]))
+        .await
+        .unwrap();
+    store
+        .db
+        .query(
+            "UPDATE personal_match SET heroes_played = $hp \
+             WHERE session_id = 'drift' AND played_at = $at",
+        )
+        .bind(("hp", vec![seg("Lucio")]))
+        .bind(("at", at(703)))
+        .await
+        .unwrap();
+    let before = store.get_session_snapshots("drift").await.unwrap();
+    assert_eq!(before.last().unwrap().display_hero(), "Lucio");
+    migrate(&store).await;
+    let t = store.get_timeline("drift").await.unwrap().unwrap();
+    assert_eq!(t.heroes_played, vec![seg("Lucio")]);
+    let after = store.get_session_snapshots("drift").await.unwrap();
+    assert_eq!(
+        after.last().unwrap().display_hero(),
+        "Lucio",
+        "shows as before"
+    );
+}
+
+/// A move that stopped part way leaves records the reads ignore; an edit
+/// made before the next start is kept by the rebuild.
+#[tokio::test]
+async fn an_edit_between_a_partial_move_and_the_next_start_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = alpha1_store(dir.path()).await;
+    store.fill_timelines(None).await.unwrap(); // no marker
+    assert!(!store.timeline_migrated());
+    store
+        .resolve_hero_segment("swap", 1, SEGMENT_CONFIRM)
+        .await
+        .unwrap();
+    let edited = store.get_session_snapshots("swap").await.unwrap();
+    assert_eq!(
+        edited[0].heroes_played[1].resolution.as_deref(),
+        Some(SEGMENT_CONFIRM)
+    );
+    migrate(&store).await;
+    let after = store.get_session_snapshots("swap").await.unwrap();
+    assert_eq!(after[0].heroes_played, edited[0].heroes_played, "kept");
 }
 
 #[tokio::test]
@@ -396,7 +519,10 @@ async fn t11_delete_and_clear_leave_no_record() {
     assert!(store.get_timeline("swap").await.unwrap().is_none());
     store.clear_all_data().await.unwrap();
     assert!(record_ids(&store).await.is_empty());
-    assert!(!store.timeline_marker().await.unwrap());
+    assert!(
+        store.timeline_marker().await.unwrap(),
+        "an empty store keeps the new layout: no second backup"
+    );
 }
 
 #[tokio::test]
@@ -409,8 +535,10 @@ async fn t12_open_vacuum_and_clear_never_write_a_backup() {
     LocalStore::vacuum(dir.path()).await.unwrap();
     {
         let store = LocalStore::open(dir.path()).await.unwrap();
+        assert!(!store.timeline_migrated(), "vacuum and open do not move");
+        assert!(!store.timeline_marker().await.unwrap());
+        assert!(record_ids(&store).await.is_empty());
         store.clear_all_data().await.unwrap();
-        assert!(!store.timeline_migrated());
     }
     let backups = std::fs::read_dir(dir.path())
         .unwrap()

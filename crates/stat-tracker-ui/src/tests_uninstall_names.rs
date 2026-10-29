@@ -9,6 +9,7 @@ fn store_backups_are_tracker_data() {
         "stats.surrealkv.pre-vacuum-20261028_223456",
         "stats.surrealkv.pre-timeline-20261029_101500",
         "stats.surrealkv.pre-timeline-20261029_101500.partial",
+        "stats.surrealkv.pre-timeline-20261029_101500.pending",
         "matches.jsonl",
         "live_snapshot.json",
     ] {
@@ -23,5 +24,7 @@ fn store_backups_are_tracker_data() {
 #[test]
 fn the_shell_uninstaller_removes_the_timeline_backups_too() {
     let sh = include_str!("../../stat-tracker/dist/uninstall.sh");
-    assert!(sh.contains("stats.surrealkv.pre-vacuum-*|stats.surrealkv.pre-timeline-*)"));
+    // Both match every `stats.surrealkv.pre-*` backup (vacuum, hero
+    // timeline, a half-done `.partial` copy and its `.pending` note).
+    assert!(sh.contains("        stats.surrealkv.pre-*)\n"));
 }

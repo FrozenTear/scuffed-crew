@@ -202,9 +202,15 @@ impl LocalStore {
         if self.timeline_migrated() {
             // One record holds the decisions; the re-derive below writes the
             // flags and re-queues the rows whose effective hero changed.
+            // The timeline as the game shows it now (no record: the rows'
+            // own list), so the re-derive below compares against it and
+            // re-queues the rows whose uploaded hero changes.
             let segments = match self.get_timeline(session_id).await? {
                 Some(t) => t.heroes_played,
-                None => derive_hero_segments(&snaps, &resolutions),
+                None => snaps
+                    .last()
+                    .map(|m| m.heroes_played.clone())
+                    .unwrap_or_default(),
             };
             self.upsert_timeline(session_id, &segments, &resolutions)
                 .await?;
