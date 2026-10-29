@@ -7,14 +7,23 @@
 
 mod debug_dumps;
 mod event_loop;
+pub(crate) mod gui_presence;
 mod lifecycle;
+pub(crate) mod memtune;
 mod poll;
 mod session;
 mod shutdown;
+pub(crate) mod snapshot_policy;
 mod sync_sched;
 mod tab;
 #[cfg(test)]
 mod tests_debug_dumps;
+#[cfg(test)]
+mod tests_gui_presence;
+#[cfg(test)]
+mod tests_memtune;
+#[cfg(test)]
+mod tests_snapshot_policy;
 
 pub(crate) use debug_dumps::*;
 pub(crate) use event_loop::*;

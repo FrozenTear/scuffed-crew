@@ -199,7 +199,12 @@ pub(crate) async fn apply_landed_capture_reports(
             std::future::ready(())
         })
         .await;
-        apply_capture_report(st, store, data_dir, &sid, result, Instant::now()).await;
+        let stored_sid = stored_session(&sid, &result);
+        // A stored row marks the snapshot like in the run loop, so the
+        // shutdown write includes a final board that landed while stopping.
+        if apply_capture_report(st, store, data_dir, &sid, result, Instant::now()).await {
+            refresh_snapshot_after_capture(st, store, data_dir, &stored_sid).await;
+        }
     }
 }
 

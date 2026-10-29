@@ -221,6 +221,7 @@ async fn refresh_hero_timeline_stamps_segments_and_preserves_raw() {
         store.insert_match(m).await.unwrap();
     }
     mark_current(&store).await;
+    let log_before = std::fs::read(dir.path().join("matches.jsonl")).unwrap();
 
     store.refresh_session_hero_timeline("s1").await.unwrap();
 
@@ -242,15 +243,26 @@ async fn refresh_hero_timeline_stamps_segments_and_preserves_raw() {
         "raw Genji read survived"
     );
 
-    // jsonl fallback carries the timeline too, raw hero preserved.
+    // matches.jsonl has no reader, so the refresh that runs after every
+    // capture leaves it alone: it used to read, parse and rewrite the whole
+    // file each time.
+    assert_eq!(
+        std::fs::read(dir.path().join("matches.jsonl")).unwrap(),
+        log_before
+    );
     let logged = read_match_log(dir.path());
     assert_eq!(logged.len(), 4);
-    assert!(
-        logged
-            .iter()
-            .all(|m| m.heroes_played.len() == 2 && m.display_hero() == "Ana")
+    assert!(logged.iter().all(|m| m.heroes_played.is_empty()));
+
+    // Nor does a segment decision.
+    store
+        .resolve_hero_segment("s1", 1, crate::storage::SEGMENT_CONFIRM)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("matches.jsonl")).unwrap(),
+        log_before
     );
-    assert!(logged.iter().any(|m| m.hero == "Genji"));
 }
 
 #[tokio::test]

@@ -224,6 +224,8 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         tracing::warn!(target: "scuffed_stat_tracker", error = %e, "could not turn off core dumps");
     }
     stat_tracker::omp::log_startup(&omp);
+    super::memtune::log_startup();
+    tokio::spawn(super::memtune::trim_loop());
 
     let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
     let dump_poll_frames = std::env::args().any(|a| a == "--dump-poll-frames");
@@ -1039,7 +1041,8 @@ pub(crate) async fn log_selected_output(backend: capture::CaptureBackend, config
 }
 
 /// Open the local store, log its match count, and write the initial live
-/// snapshot so the GUI has current data the moment the daemon takes the lock.
+/// snapshot (GUI or not: one bounded write) so a GUI has current data the
+/// moment the daemon takes the lock.
 pub(crate) async fn open_store(data_dir: &std::path::Path) -> anyhow::Result<storage::LocalStore> {
     let store = storage::LocalStore::open(data_dir)
         .await
@@ -1055,8 +1058,9 @@ pub(crate) async fn open_store(data_dir: &std::path::Path) -> anyhow::Result<sto
         .map_err(anyhow::Error::from_boxed)?;
     tracing::info!(target: "scuffed_stat_tracker", stored_matches = count, "local store ready");
 
-    // Initial snapshot so the GUI has current data from the moment the daemon
-    // takes the store lock (refreshed after every mutation from here on).
+    // Initial snapshot so a GUI has current data from the moment the daemon
+    // takes the store lock. From here on it is written while a GUI runs,
+    // after a finished game, and at shutdown (main.rs, snapshot_policy).
     if let Err(e) = store.export_snapshot(data_dir).await {
         tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to write initial live snapshot");
     }

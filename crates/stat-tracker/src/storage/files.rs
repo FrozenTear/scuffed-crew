@@ -1,5 +1,6 @@
 //! The on-disk files beside the store: the append-only `matches.jsonl` log
-//! and the `live_snapshot.json` export the GUI and report bundle read.
+//! (a record nothing in the app reads) and the `live_snapshot.json` export
+//! the GUI and report bundle read.
 
 use std::path::{Path, PathBuf};
 
@@ -38,10 +39,10 @@ fn match_log_path(data_dir: &Path) -> PathBuf {
 
 /// Rewrite `matches.jsonl` rows of one session (atomic tmp+rename): apply
 /// `update` to each, or drop them entirely when `update` is `None`. The log is
-/// append-only at capture time, so without this back-fills and deletes never
-/// reached the GUI's last-resort fallback — it showed `unknown` outcomes and
-/// deleted games forever (A5). Rare (once per correction), so the O(file)
-/// rewrite is fine; unparseable lines (schema drift) are preserved verbatim.
+/// append-only at capture time; this keeps corrections and deletes in step
+/// (A5). Nothing in the app reads the log, and every call reads, parses and
+/// rewrites the whole file, so call it only for rare corrections, never per
+/// capture. Unparseable lines (schema drift) are preserved verbatim.
 pub(super) fn rewrite_match_log_session(
     data_dir: &Path,
     session_id: &str,

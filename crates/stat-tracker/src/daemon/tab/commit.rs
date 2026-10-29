@@ -384,7 +384,11 @@ pub(crate) async fn store_best_guess_on_close(
                 "game closed with a stat never read for sure: stored the best guess, marked unsure"
             );
             g.session_created = true;
-            refresh_snapshot(store, data_dir).await;
+            if g.finished() {
+                refresh_snapshot_game_finished(store, data_dir).await;
+            } else {
+                refresh_snapshot(store, data_dir).await;
+            }
             true
         }
         Err(e) => {

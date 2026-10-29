@@ -1,14 +1,13 @@
 //! The capture write path and the reads: `insert_match`, sessions,
-//! captures, counts, `export_snapshot`, and the SurrealQL projection rows.
-
-use std::path::Path;
+//! captures, counts, and the SurrealQL projection rows. The live snapshot
+//! export is in `export.rs`.
 
 use serde::Deserialize;
 use surrealdb_types::{Datetime as SurrealDatetime, SurrealValue};
 
 use super::{
-    LocalStore, MatchSession, PersonalMatch, Snapshot, name_recognizer_absent, outcome_is_decided,
-    rewrite_match_log_session, snapshot_path,
+    LocalStore, MatchSession, PersonalMatch, name_recognizer_absent, outcome_is_decided,
+    rewrite_match_log_session,
 };
 
 impl LocalStore {
@@ -36,8 +35,8 @@ impl LocalStore {
                 && let Some(outcome) = self.session_decided_outcome(&match_data.session_id).await?
             {
                 match_data.outcome = outcome.clone();
-                // The caller logged this row as unknown. Keep the fallback
-                // log in step with the store.
+                // The caller logged this row as unknown. Keep the
+                // matches.jsonl record in step with the store.
                 rewrite_match_log_session(
                     &self.data_dir,
                     &match_data.session_id,
@@ -265,28 +264,6 @@ impl LocalStore {
         self.db.query("DELETE match_session").await?;
         self.db.query("DELETE deleted_session").await?;
         tracing::info!("cleared all match data from local store");
-        Ok(())
-    }
-
-    /// Export all matches and sessions to `live_snapshot.json` (atomic via
-    /// tmp+rename). SurrealKV is single-process, so while the daemon holds the
-    /// store open the GUI cannot read it — this snapshot is the GUI's live
-    /// data source, refreshed by the daemon after every mutation. Unlike
-    /// `matches.jsonl` (append-only insert log), it reflects back-filled
-    /// outcomes and sync-state changes.
-    pub async fn export_snapshot(
-        &self,
-        data_dir: &Path,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let snapshot = Snapshot {
-            matches: self.get_all_matches().await?,
-            sessions: self.get_all_sessions().await?,
-            pending_deletes: self.get_pending_tombstones().await?,
-        };
-        let json = serde_json::to_vec(&snapshot)?;
-        let tmp = data_dir.join("live_snapshot.json.tmp");
-        std::fs::write(&tmp, &json)?;
-        std::fs::rename(&tmp, snapshot_path(data_dir))?;
         Ok(())
     }
 

@@ -150,6 +150,9 @@ async fn one_bad_row_uploads_the_rest_and_stays_quarantined() {
         bad_row.upload_rejection(),
         Some("Upload rejected by server: hero is not allowed")
     );
+    // Sync progress only marks the snapshot dirty; with no GUI running in
+    // the test it is not written, so write it as a GUI tick would.
+    store.export_snapshot(dir.path()).await.unwrap();
     let listed = storage::read_snapshot(dir.path())
         .expect("game list snapshot")
         .matches;

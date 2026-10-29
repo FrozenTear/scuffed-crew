@@ -373,4 +373,124 @@ mod tests {
         assert_eq!(games.len(), tracked);
         assert!(games.iter().all(|game| game.session_id != "hanamura"));
     }
+
+    /// Games captured in the same instant have no defined order in the
+    /// store; order those by session id so only real order is compared.
+    fn in_order(mut games: Vec<Game>) -> Vec<Game> {
+        games.sort_by(|a, b| {
+            b.played_at
+                .cmp(&a.played_at)
+                .then(a.session_id.cmp(&b.session_id))
+                .then(a.elims.cmp(&b.elims))
+        });
+        games
+    }
+
+    /// The tracker's full store, as the old export wrote it: every row.
+    async fn full_snapshot(store: &storage::LocalStore) -> Snapshot {
+        Snapshot {
+            matches: store.get_all_matches().await.unwrap(),
+            sessions: store.get_all_sessions().await.unwrap(),
+            pending_deletes: store.get_pending_tombstones().await.unwrap(),
+        }
+    }
+
+    /// The daemon's compact `live_snapshot.json` (newest tracked row per
+    /// game) shows exactly the games, in the same order, as the old full
+    /// export did. Run on every fixture plus extra capture rows per game,
+    /// a game whose newest row is untracked, and a deleted game.
+    #[tokio::test]
+    async fn the_compact_snapshot_shows_the_same_games_as_the_full_one() {
+        for kind in [FixtureKind::Sample, FixtureKind::Games, FixtureKind::Full] {
+            let dir = tempfile::tempdir().unwrap();
+            let store = storage::LocalStore::open(dir.path()).await.unwrap();
+            let fixture = fixtures::snapshot(kind);
+            for (i, m) in fixture.matches.iter().enumerate() {
+                let mut m = m.clone();
+                store.insert_match(m.clone()).await.unwrap();
+                // Two older captures of the same game with other numbers.
+                if !m.session_id.is_empty() && i % 3 == 0 {
+                    let newest: chrono::DateTime<chrono::Utc> = m.played_at.into();
+                    for back in [60, 120] {
+                        m.played_at = (newest - chrono::TimeDelta::seconds(back)).into();
+                        m.elims += 1;
+                        store.insert_match(m.clone()).await.unwrap();
+                    }
+                }
+            }
+            for s in &fixture.sessions {
+                store.create_session(s).await.unwrap();
+            }
+            if let Some(first) = fixture.matches.iter().find(|m| !m.session_id.is_empty()) {
+                // The newest row corrected to a deathmatch map: the GUI shows
+                // the game's newest tracked row instead.
+                let mut dm = first.clone();
+                let at: chrono::DateTime<chrono::Utc> = first.played_at.into();
+                dm.played_at = (at + chrono::TimeDelta::seconds(30)).into();
+                dm.corrected_map_name = Some("Château Guillard".into());
+                store.insert_match(dm).await.unwrap();
+            }
+            if let Some(last) = fixture
+                .matches
+                .iter()
+                .rev()
+                .find(|m| !m.session_id.is_empty())
+            {
+                store.delete_session(&last.session_id).await.unwrap();
+            }
+
+            let full = full_snapshot(&store).await;
+            store.export_snapshot(dir.path()).await.unwrap();
+            let compact = load_snapshot(dir.path());
+            assert!(compact.matches.len() <= full.matches.len(), "{kind:?}");
+            assert_eq!(
+                format!("{:?}", in_order(games_from_snapshot(&compact))),
+                format!("{:?}", in_order(games_from_snapshot(&full))),
+                "{kind:?}"
+            );
+            assert_eq!(compact.pending_deletes, full.pending_deletes, "{kind:?}");
+            assert_eq!(compact.sessions.len(), full.sessions.len(), "{kind:?}");
+        }
+    }
+
+    /// The same parity on a copy of a real store. Ignored: needs
+    /// `MEMFIX_PARITY_STORE` = a data dir holding `stats.surrealkv`
+    /// (copied to a temp dir first; the given dir is never opened).
+    #[tokio::test]
+    #[ignore]
+    async fn the_compact_snapshot_matches_on_a_real_store_copy() {
+        let Some(src) = std::env::var_os("MEMFIX_PARITY_STORE") else {
+            panic!("set MEMFIX_PARITY_STORE");
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("cp")
+            .arg("-a")
+            .arg(std::path::Path::new(&src).join("stats.surrealkv"))
+            .arg(dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let store = storage::LocalStore::open(dir.path()).await.unwrap();
+        let full = full_snapshot(&store).await;
+        let t = std::time::Instant::now();
+        store.export_snapshot(dir.path()).await.unwrap();
+        let ms = t.elapsed().as_millis();
+        let bytes = std::fs::metadata(dir.path().join("live_snapshot.json"))
+            .unwrap()
+            .len();
+        let compact = load_snapshot(dir.path());
+        let (old, new) = (
+            in_order(games_from_snapshot(&full)),
+            in_order(games_from_snapshot(&compact)),
+        );
+        println!(
+            "rows {} -> {}, sessions {}, games {} -> {}, compact file {bytes} B, write {ms} ms",
+            full.matches.len(),
+            compact.matches.len(),
+            compact.sessions.len(),
+            old.len(),
+            new.len()
+        );
+        assert_eq!(format!("{new:?}"), format!("{old:?}"));
+    }
 }
