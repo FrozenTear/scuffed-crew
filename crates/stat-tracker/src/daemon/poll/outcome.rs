@@ -124,7 +124,7 @@ pub(crate) async fn apply_poll_decision(
             {
                 tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to back-fill session outcome");
             }
-            refresh_snapshot(store, data_dir).await;
+            refresh_snapshot_game_finished(store, data_dir).await;
         }
     }
     if let Some(map) = commit.adopted_map {

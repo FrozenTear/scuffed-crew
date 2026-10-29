@@ -846,70 +846,77 @@ fn rand_id() -> u64 {
     seed ^ (std::process::id() as u64).wrapping_mul(0x517cc1b727220a95)
 }
 
-/// Minimum gap between full snapshot rewrites (P11). Capture/poll can mark the
-/// export dirty faster than this; the next due flush (or a forced one after
-/// sync / shutdown) actually rewrites the file.
-const SNAPSHOT_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(2);
+/// When `live_snapshot.json` is written (daemon/snapshot_policy.rs).
+/// Module-level so capture + sync tasks share it.
+static SNAPSHOT_STATE: std::sync::Mutex<daemon::snapshot_policy::SnapshotPolicy> =
+    std::sync::Mutex::new(daemon::snapshot_policy::SnapshotPolicy::new());
 
-/// (dirty, last successful export). Module-level so capture + sync tasks share it.
-static SNAPSHOT_STATE: std::sync::Mutex<(bool, Option<std::time::Instant>)> =
-    std::sync::Mutex::new((false, None));
-
-/// Mark the live snapshot dirty and export if the debounce window has elapsed.
+/// Mark the live snapshot dirty; write it if a GUI is running and the
+/// debounce has passed.
 async fn refresh_snapshot(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    refresh_snapshot_inner(store, data_dir, false).await;
+    mark_snapshot(store, data_dir, false).await;
 }
 
-/// Export immediately (sync complete, shutdown). Resets dirty.
+/// Sync progress (rows flipped to synced). The same as [`refresh_snapshot`]:
+/// a running GUI sees the new state, a closed one costs nothing.
 async fn refresh_snapshot_force(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    refresh_snapshot_inner(store, data_dir, true).await;
+    mark_snapshot(store, data_dir, false).await;
 }
 
-/// Flush a debounce-deferred snapshot once its window has passed. Called from
-/// the cmd-timer tick so a dirty snapshot never waits on the next mutation.
+/// A game finished (its result was recorded or sealed). The fallback file
+/// must stay fresh for the next GUI start even with no GUI running, so this
+/// write is owed; it waits a moment for the rest of the burst.
+async fn refresh_snapshot_game_finished(store: &storage::LocalStore, data_dir: &std::path::Path) {
+    mark_snapshot(store, data_dir, true).await;
+}
+
+/// Cmd-timer tick: write a dirty snapshot once it is due (a GUI that opened
+/// since, an owed write that has settled, a debounce that has passed).
 async fn flush_snapshot_if_due(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    let due = {
-        let state = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.0
-            && state
-                .1
-                .is_none_or(|last| last.elapsed() >= SNAPSHOT_DEBOUNCE)
-    };
-    if due {
-        refresh_snapshot_inner(store, data_dir, true).await;
-    }
+    write_snapshot_if(store, data_dir, |p, now| {
+        p.due(now, daemon::gui_presence::gui_present(data_dir))
+    })
+    .await;
 }
 
-/// Shutdown path: export a trailing dirty snapshot regardless of the window,
-/// the GUI must see the final state (try_sync only force-exports on success).
+/// Shutdown: write a dirty snapshot whatever the GUI or the debounce, so the
+/// next GUI start shows the final state.
 async fn flush_snapshot_if_dirty(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    let dirty = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner()).0;
-    if dirty {
-        refresh_snapshot_inner(store, data_dir, true).await;
-    }
+    write_snapshot_if(store, data_dir, |p, _| p.dirty()).await;
 }
 
-async fn refresh_snapshot_inner(
+async fn mark_snapshot(store: &storage::LocalStore, data_dir: &std::path::Path, owed: bool) {
+    SNAPSHOT_STATE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .mark(std::time::Instant::now(), owed);
+    flush_snapshot_if_due(store, data_dir).await;
+}
+
+async fn write_snapshot_if(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
-    force: bool,
+    due: impl FnOnce(&daemon::snapshot_policy::SnapshotPolicy, std::time::Instant) -> bool,
 ) {
-    {
-        let mut state = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner());
-        state.0 = true;
-        if !force
-            && let Some(last) = state.1
-            && last.elapsed() < SNAPSHOT_DEBOUNCE
-        {
+    let generation = {
+        let state = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        if !due(&state, std::time::Instant::now()) {
             return;
         }
-    }
+        state.generation()
+    };
+    let started = std::time::Instant::now();
     match store.export_snapshot(data_dir).await {
         Ok(()) => {
-            if let Ok(mut state) = SNAPSHOT_STATE.lock() {
-                state.0 = false;
-                state.1 = Some(std::time::Instant::now());
-            }
+            SNAPSHOT_STATE
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .wrote(started, generation);
+            tracing::debug!(
+                target: "scuffed_stat_tracker",
+                ms = started.elapsed().as_millis() as u64,
+                "live snapshot written"
+            );
         }
         Err(e) => tracing::debug!(error = %e, "live snapshot refresh failed"),
     }

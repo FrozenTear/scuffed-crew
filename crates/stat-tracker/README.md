@@ -580,10 +580,12 @@ These writes are not the long-running unit, so they are not in
 ## Data & IPC
 
 Single-process SurrealKV store at `{data_dir}/stats.surrealkv`. Because only
-one process can hold it, the daemon exports `live_snapshot.json` after
-mutations (debounced) and appends to `matches.jsonl`; the GUI reads those when
-the daemon holds the lock and sends manual edits through a file command queue
-(`{data_dir}/commands/`).
+one process can hold it, the daemon writes a small `live_snapshot.json` (the
+newest tracked row of each game, every session, pending deletes) while a GUI
+is running, after each finished game, at clean shutdown and at startup. The
+GUI reads that file and sends manual edits through a file command queue
+(`{data_dir}/commands/`). `matches.jsonl` is an append-only record of
+captures; the app does not read it.
 
 ## Troubleshooting
 

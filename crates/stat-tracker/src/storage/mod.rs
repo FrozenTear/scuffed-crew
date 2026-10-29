@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 mod commands;
 mod edits;
+mod export;
 mod files;
 pub mod maintain;
 mod migrate;
@@ -262,3 +263,6 @@ mod tests_commands;
 
 #[cfg(test)]
 mod tests_files;
+
+#[cfg(test)]
+mod tests_export;

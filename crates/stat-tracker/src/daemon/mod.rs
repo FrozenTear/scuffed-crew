@@ -7,11 +7,13 @@
 
 mod debug_dumps;
 mod event_loop;
+pub(crate) mod gui_presence;
 mod lifecycle;
 pub(crate) mod memtune;
 mod poll;
 mod session;
 mod shutdown;
+pub(crate) mod snapshot_policy;
 mod sync_sched;
 mod tab;
 #[cfg(test)]

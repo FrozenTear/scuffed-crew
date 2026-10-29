@@ -306,7 +306,7 @@ pub(crate) async fn commit_retired_game(
         {
             tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to seal session outcome");
         }
-        refresh_snapshot(store, data_dir).await;
+        refresh_snapshot_game_finished(store, data_dir).await;
     }
     // No result ever arrived. The server cannot store that. The command
     // tick marks the rows synced locally and does not send them.
