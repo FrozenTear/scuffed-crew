@@ -549,9 +549,17 @@ pub struct UpdateMemberSettingsRequest {
 }
 
 /// Daemon configuration returned by GET /api/stats/daemon-config (token auth).
+///
+/// `stats_visibility` uses the same `public` | `members` | `private` strings as
+/// GET and PUT /api/stats/settings. The field is optional so a server that
+/// omits it, and a client that ignores it, both keep working.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfigResponse {
     pub player_name: Option<String>,
+    /// Stored visibility, or public when the member has no settings row.
+    /// Absent when an older server omits the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats_visibility: Option<StatsVisibility>,
 }
 
 /// `GET /api/stats/token-check` (daemon token auth).
@@ -1281,5 +1289,40 @@ mod tests {
         assert!(!StatsVisibility::Members.on_leaderboard(false));
         assert!(StatsVisibility::Members.on_leaderboard(true));
         assert!(StatsVisibility::Public.on_leaderboard(false));
+    }
+
+    #[test]
+    fn daemon_config_stats_visibility_is_optional() {
+        let bare: DaemonConfigResponse = serde_json::from_str(r#"{"player_name":"Ana"}"#).unwrap();
+        assert_eq!(bare.player_name.as_deref(), Some("Ana"));
+        assert_eq!(bare.stats_visibility, None);
+        let raw = serde_json::to_string(&bare).unwrap();
+        assert!(!raw.contains("stats_visibility"), "{raw}");
+
+        let null_name: DaemonConfigResponse =
+            serde_json::from_str(r#"{"player_name":null}"#).unwrap();
+        assert_eq!(null_name.player_name, None);
+        assert_eq!(null_name.stats_visibility, None);
+
+        for (label, vis) in [
+            ("public", StatsVisibility::Public),
+            ("members", StatsVisibility::Members),
+            ("private", StatsVisibility::Private),
+        ] {
+            let parsed: DaemonConfigResponse = serde_json::from_str(&format!(
+                r#"{{"player_name":null,"stats_visibility":"{label}"}}"#
+            ))
+            .unwrap();
+            assert_eq!(parsed.stats_visibility, Some(vis));
+            let out = serde_json::to_string(&DaemonConfigResponse {
+                player_name: None,
+                stats_visibility: Some(vis),
+            })
+            .unwrap();
+            assert!(
+                out.contains(&format!("\"stats_visibility\":\"{label}\"")),
+                "{out}"
+            );
+        }
     }
 }
