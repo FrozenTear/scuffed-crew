@@ -15,12 +15,15 @@
 use scuffed_types::{HeroRole, RoleStats, role_for_hero_name};
 
 use crate::components::member_gate::is_http_status;
+use crate::sample::{TOO_FEW_GAMES, Tally};
 
 pub(crate) struct RoleAgg {
     pub name: &'static str,
     pub color: &'static str,
     pub matches: u32,
     pub wins: u32,
+    pub losses: u32,
+    pub draws: u32,
     weighted_elims: f64,
     weighted_deaths: f64,
     weighted_damage: f64,
@@ -34,6 +37,8 @@ impl RoleAgg {
             color,
             matches: 0,
             wins: 0,
+            losses: 0,
+            draws: 0,
             weighted_elims: 0.0,
             weighted_deaths: 0.0,
             weighted_damage: 0.0,
@@ -41,8 +46,9 @@ impl RoleAgg {
         }
     }
 
-    pub(crate) fn winrate(&self) -> f64 {
-        super::winrate_pct(self.wins, self.matches)
+    /// Games and results for the shared small-sample rule in [`crate::sample`].
+    pub(crate) fn tally(&self) -> Tally {
+        Tally::new(self.matches, self.wins, self.losses, self.draws)
     }
 
     pub(crate) fn avg_elims(&self) -> f64 {
@@ -65,6 +71,8 @@ impl RoleAgg {
         &mut self,
         matches: u32,
         wins: u32,
+        losses: u32,
+        draws: u32,
         avg_elims: f64,
         avg_deaths: f64,
         avg_damage: f64,
@@ -73,10 +81,21 @@ impl RoleAgg {
         let weight = f64::from(matches);
         self.matches += matches;
         self.wins += wins;
+        self.losses += losses;
+        self.draws += draws;
         self.weighted_elims += avg_elims * weight;
         self.weighted_deaths += avg_deaths * weight;
         self.weighted_damage += avg_damage * weight;
         self.weighted_healing += avg_healing * weight;
+    }
+}
+
+/// Result text for one role, on the same rule as heroes: the win rate from
+/// 10 decided games, otherwise "Too few games" and the W-L-D record.
+pub(crate) fn role_result(tally: Tally) -> String {
+    match tally.win_rate_pct() {
+        Some(pct) => format!("{pct:.1}%"),
+        None => format!("{TOO_FEW_GAMES}, {}", tally.record()),
     }
 }
 
@@ -169,6 +188,8 @@ pub(crate) fn role_aggs_from_rows(rows: &[RoleStats]) -> Vec<RoleAgg> {
         buckets[bucket_index(&row.role)].add(
             row.matches,
             row.wins,
+            row.losses,
+            row.draws,
             row.avg_elims,
             row.avg_deaths,
             row.avg_damage,
@@ -218,6 +239,22 @@ mod tests {
             avg_damage: 1000.0,
             avg_healing: 500.0,
         }
+    }
+
+    fn row_wld(role: &str, wins: u32, losses: u32, draws: u32, matches: u32) -> RoleStats {
+        RoleStats {
+            matches,
+            wins,
+            losses,
+            draws,
+            ..row(role, matches, wins, 1.0)
+        }
+    }
+
+    fn role_text(rows: &[RoleStats], name: &str) -> String {
+        let aggs = role_aggs_from_rows(rows);
+        let agg = aggs.iter().find(|agg| agg.name == name).unwrap();
+        role_result(agg.tally())
     }
 
     fn matches_of(aggs: &[RoleAgg], name: &str) -> u32 {
@@ -362,9 +399,51 @@ mod tests {
         assert_eq!(unknown.avg_deaths(), 3.0);
         assert_eq!(unknown.avg_damage(), 1000.0);
         assert_eq!(unknown.avg_healing(), 500.0);
-        assert_eq!(unknown.winrate(), 50.0);
+        assert_eq!(unknown.tally().win_rate_pct(), None);
+        assert_eq!(unknown.tally().record(), "2W-2L");
         assert_eq!(matches_of(&aggs, "Support"), 1);
         assert_eq!(matches_of(&aggs, "Damage"), 0);
+    }
+
+    #[test]
+    fn nine_decided_games_show_the_record_and_no_percent() {
+        let text = role_text(&[row_wld("Tank", 5, 4, 0, 9)], "Tank");
+        assert_eq!(text, "Too few games, 5W-4L");
+        assert!(!text.contains('%'));
+    }
+
+    #[test]
+    fn ten_decided_games_show_the_win_rate() {
+        assert_eq!(role_text(&[row_wld("Tank", 6, 4, 0, 10)], "Tank"), "60.0%");
+    }
+
+    #[test]
+    fn draws_count_as_decided_for_roles() {
+        assert_eq!(
+            role_text(&[row_wld("Support", 5, 4, 1, 10)], "Support"),
+            "50.0%"
+        );
+        let nine = role_text(&[row_wld("Support", 5, 3, 1, 9)], "Support");
+        assert_eq!(nine, "Too few games, 5W-3L-1D");
+    }
+
+    #[test]
+    fn undecided_games_do_not_count_toward_ten_for_roles() {
+        let text = role_text(&[row_wld("Damage", 5, 4, 0, 12)], "Damage");
+        assert_eq!(text, "Too few games, 5W-4L");
+    }
+
+    #[test]
+    fn small_roles_have_no_three_game_mute() {
+        let aggs = role_aggs_from_rows(&[row_wld("Tank", 1, 1, 0, 2)]);
+        let tank = aggs.iter().find(|agg| agg.name == "Tank").unwrap();
+        assert_eq!(role_result(tank.tally()), "Too few games, 1W-1L");
+    }
+
+    #[test]
+    fn rows_for_one_role_sum_their_results() {
+        let rows = [row_wld("Damage", 3, 2, 0, 5), row_wld("damage", 4, 1, 0, 5)];
+        assert_eq!(role_text(&rows, "Damage"), "70.0%");
     }
 
     #[test]
