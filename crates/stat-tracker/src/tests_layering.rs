@@ -4,7 +4,7 @@
 //! them ([`CRATE_OF`]), and a crate may use only the crates under it:
 //!
 //! ```text
-//!              top: report, reader_apply, tab_retry (+ the bin)
+//!   top: report, reader_apply, tab_retry, games, query (+ the bin)
 //!          /        |          |           \
 //!      game      capture     store       vision
 //!   boundary,    capture/*   storage,    ocr, detect, shadow, names,
@@ -65,8 +65,7 @@ impl Crate {
     }
 }
 
-/// Module path prefix -> crate. The longest matching prefix wins, so
-/// `report::blank` is vision while the rest of `report` is top.
+/// Module path prefix -> crate; the longest wins (`report::blank` is vision, `report` top).
 const CRATE_OF: &[(&str, Crate)] = &[
     ("config", Crate::Core),
     ("fs_mode", Crate::Core),
@@ -100,6 +99,8 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("packs", Crate::Vision),
     ("report::blank", Crate::Vision),
     ("shadow", Crate::Vision),
+    ("games", Crate::Top),
+    ("query", Crate::Top),
     ("reader_apply", Crate::Top),
     ("report", Crate::Top),
     ("tab_retry", Crate::Top),
@@ -109,10 +110,9 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("tests_release_pins", Crate::Top),
 ];
 
-/// The crates the split has made so far: directory under `crates/`, the
-/// would-be crate it holds, and its lib name. `stat-tracker` still holds
-/// every would-be crate not yet extracted. An extraction PR adds its crate
-/// here, and the test then walks its `src/` too, from its `lib.rs`.
+/// The crates split so far: directory under `crates/`, would-be crate, lib
+/// name. `stat-tracker` holds every crate not yet extracted; an extraction
+/// PR adds its crate here and the test then walks its `src/` from `lib.rs`.
 const PHYSICAL: &[(&str, Crate, &str)] = &[
     ("stat-tracker", Crate::Top, "stat_tracker"),
     ("stat-tracker-core", Crate::Core, "stat_tracker_core"),

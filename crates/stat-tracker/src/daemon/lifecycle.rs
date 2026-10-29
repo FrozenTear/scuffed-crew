@@ -504,6 +504,17 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
             "hero timeline move failed; it is retried at the next start"
         ),
     }
+    // The query socket for the desktop app's page totals
+    // (daemon/query_server.rs). Without it the app reads live_snapshot.json.
+    match super::query_server::bind(&config.data_dir) {
+        Ok((listener, path)) => {
+            tracing::info!(target: "scuffed_stat_tracker", path = %path.display(), "query socket ready");
+            super::query_server::start(listener, store.clone(), config.data_dir.clone());
+        }
+        Err(e) => {
+            tracing::warn!(target: "scuffed_stat_tracker", error = %e, "no query socket; the app reads live_snapshot.json")
+        }
+    }
 
     // One answer for "which reader": `ocr = "off"` implies the new one,
     // whatever `reader` says. The capture path, the reader packs, the

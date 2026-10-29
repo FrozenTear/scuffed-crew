@@ -76,6 +76,8 @@ pub struct LocalStore {
     /// `store_meta:schema`), so new rows are written without their own copy.
     /// Read at open; set by [`LocalStore::migrate_timeline_if_needed`].
     timeline_migrated: Arc<std::sync::atomic::AtomicBool>,
+    /// Stored-data revision ([`LocalStore::rev`]): moves on every write.
+    rev: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Advisory exclusive lock on the store directory inode.
@@ -178,6 +180,7 @@ impl LocalStore {
             writer_lock,
             deleted_here: Arc::default(),
             timeline_migrated: Arc::default(),
+            rev: Arc::new(std::sync::atomic::AtomicU64::new(start_rev())),
         };
         // Read only: `open` never migrates (vacuum, the GUI's clear and the
         // tools open stores too). The daemon calls migrate_timeline_if_needed.
@@ -189,6 +192,20 @@ impl LocalStore {
             store.migrate_pack_key_heroes().await?;
         }
         Ok(store)
+    }
+
+    /// The stored-data revision: starts at the open time in unix ms (a new
+    /// process never repeats one) and moves when a method that writes starts
+    /// and again when it returns ([`RevGuard`]), on every path. A reader that
+    /// caches by revision and raced a write cached it under the first bump;
+    /// the second bump, after the write, makes it read again.
+    pub fn rev(&self) -> u64 {
+        self.rev.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(super) fn rev_guard(&self) -> RevGuard {
+        self.rev.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        RevGuard(self.rev.clone())
     }
 
     /// Keep the store-directory flock until this process exits.
@@ -208,6 +225,22 @@ impl LocalStore {
             ),
         }
     }
+}
+
+/// Bumps the store revision again when dropped (see [`LocalStore::rev`]).
+pub(super) struct RevGuard(Arc<std::sync::atomic::AtomicU64>);
+
+impl Drop for RevGuard {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn start_rev() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(1)
 }
 
 /// Wait until SurrealKV has closed the store in `data_dir`, for at most

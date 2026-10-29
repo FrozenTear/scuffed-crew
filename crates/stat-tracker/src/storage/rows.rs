@@ -15,6 +15,7 @@ impl LocalStore {
         &self,
         mut match_data: PersonalMatch,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         if !match_data.session_id.is_empty() {
             // A capture that was in flight when its game was deleted must not
             // bring the game back. The caller already logged the row to
@@ -171,6 +172,7 @@ impl LocalStore {
         &self,
         session: &MatchSession,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         // A capture that was in flight when its game was deleted must not
         // bring the session row back.
         if self.deleted_here(&session.session_id) {
@@ -210,6 +212,7 @@ impl LocalStore {
         capture_time: SurrealDatetime,
         outcome: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         // A carried board is written after the current row and carries an
         // older timestamp. Do not move last_capture_at backwards. Sessions
         // are listed by that stamp.
@@ -272,6 +275,7 @@ impl LocalStore {
     }
 
     pub async fn clear_all_data(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let _rev = self.rev_guard();
         // Local reset only — deliberately does NOT tombstone: clearing a
         // machine must not wipe the account's server history.
         self.db.query("DELETE personal_match").await?;

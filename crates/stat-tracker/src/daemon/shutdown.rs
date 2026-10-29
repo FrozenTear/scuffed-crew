@@ -264,6 +264,9 @@ pub(crate) async fn shutdown_from_signal(
                     }
                     ShutdownStage::SnapshotExport => {
                         flush_snapshot_if_dirty(store, data_dir).await;
+                        // The query server holds a store handle; it ends here, before
+                        // the store closes. The app then reads that file.
+                        super::query_server::stop(data_dir);
                         // perf.log lines already queued go to disk before the
                         // process ends (the open window is not closed here).
                         // Bounded by what is left of the shutdown deadline,

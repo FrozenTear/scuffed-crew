@@ -5,6 +5,7 @@ use stat_tracker::storage::{self, Snapshot};
 
 use crate::cli::FixtureKind;
 use crate::fixtures;
+#[cfg(test)]
 use crate::model::Game;
 
 /// Read the daemon snapshot via the existing lib API. Missing / unreadable → empty.
@@ -26,35 +27,7 @@ pub fn load_snapshot(data_dir: &Path) -> Snapshot {
     snap
 }
 
-/// Session ids with a `DeleteSession` waiting in `commands/`. A read-only
-/// look: unlike [`storage::read_commands`] it never removes a file it
-/// can't parse, which is the tracker's call.
-pub fn queued_deletes(data_dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(data_dir.join("commands")) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
-        .filter_map(|p| std::fs::read(p).ok())
-        .filter_map(|b| serde_json::from_slice::<storage::StoreCommand>(&b).ok())
-        .filter_map(|c| match c {
-            storage::StoreCommand::DeleteSession { session_id } => Some(session_id),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Drop the match and session rows of these games.
-pub fn drop_sessions(snap: &mut Snapshot, gone: &[String]) {
-    if gone.is_empty() {
-        return;
-    }
-    snap.matches
-        .retain(|m| m.session_id.is_empty() || !gone.contains(&m.session_id));
-    snap.sessions.retain(|s| !gone.contains(&s.session_id));
-}
+pub use stat_tracker::games::rows::{drop_sessions, queued_deletes};
 
 pub fn snapshot_mtime(data_dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(data_dir.join("live_snapshot.json"))
@@ -102,30 +75,9 @@ fn install_fixture_in(
     Ok(load_snapshot(data_dir))
 }
 
-pub fn games_from_snapshot(snap: &Snapshot) -> Vec<Game> {
-    // Snapshot is already newest-first / latest-per-game; keep first row per session.
-    // Deathmatch stays in the local store and is never part of the totals or
-    // the history list. The mode or the map (Château Guillard) is enough.
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for m in &snap.matches {
-        let map = m.display_map_name();
-        let mode = stat_tracker::parse::uploaded_game_mode(map, &m.game_mode);
-        if !stat_tracker::parse::stats_row_is_tracked(map, &m.game_mode)
-            || !stat_tracker::parse::stats_row_is_tracked(map, &mode)
-        {
-            continue;
-        }
-        if m.session_id.is_empty() {
-            out.push(Game::from_match(m));
-            continue;
-        }
-        if seen.insert(m.session_id.clone()) {
-            out.push(Game::from_match(m));
-        }
-    }
-    out
-}
+/// The game list every page shows (`stat_tracker::games::rows`, shared
+/// with the tracker's page totals).
+pub use stat_tracker::games::rows::games_from_snapshot;
 
 #[cfg(test)]
 mod tests {

@@ -16,7 +16,9 @@ scuffed-types = { path = "../types" }
 anyhow = "1"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 tokio = { version = "1", features = [
+    "io-util",
     "macros",
+    "net",
     "rt-multi-thread",
     "process",
     "signal",

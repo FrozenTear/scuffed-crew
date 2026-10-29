@@ -12,6 +12,7 @@ fn store_backups_are_tracker_data() {
         "stats.surrealkv.pre-timeline-20261029_101500.pending",
         "matches.jsonl",
         "live_snapshot.json",
+        "tracker.sock",
     ] {
         assert!(is_tracker_data_name(name), "{name}");
     }

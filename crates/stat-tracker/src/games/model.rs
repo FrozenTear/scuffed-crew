@@ -1,0 +1,721 @@
+//! Display-normalized game rows and their labels, shared by the GUI pages
+//! and (for daemon-side totals) the tracker. Moved from the GUI crate
+//! unchanged; the GUI re-exports it as `crate::model`.
+
+use crate::detect::MatchOutcome;
+use crate::storage::{HeroSegment, PersonalMatch};
+use chrono::{DateTime, Local, TimeZone, Utc};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Role {
+    Tank,
+    Damage,
+    Support,
+    Unknown,
+}
+
+impl Role {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "tank" => Role::Tank,
+            "damage" | "dps" => Role::Damage,
+            "support" => Role::Support,
+            _ => Role::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Role::Tank => "Tank",
+            Role::Damage => "Damage",
+            Role::Support => "Support",
+            Role::Unknown => "Role",
+        }
+    }
+
+    pub fn all_playable() -> [Role; 3] {
+        [Role::Tank, Role::Damage, Role::Support]
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Outcome {
+    Win,
+    Loss,
+    Draw,
+    Unknown,
+}
+
+impl Outcome {
+    pub fn parse(s: &str) -> Self {
+        match MatchOutcome::parse_lenient(s) {
+            MatchOutcome::Victory => Outcome::Win,
+            MatchOutcome::Defeat => Outcome::Loss,
+            MatchOutcome::Draw => Outcome::Draw,
+            MatchOutcome::Unknown => Outcome::Unknown,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Outcome::Win => "Win",
+            Outcome::Loss => "Loss",
+            Outcome::Draw => "Draw",
+            Outcome::Unknown => "-",
+        }
+    }
+
+    /// Canonical store / `StoreCommand::SetOutcome` spelling.
+    pub fn store_label(self) -> &'static str {
+        match self {
+            Outcome::Win => "victory",
+            Outcome::Loss => "defeat",
+            Outcome::Draw => "draw",
+            Outcome::Unknown => "unknown",
+        }
+    }
+}
+
+/// Games-tab label while the session is still the open game.
+pub const IN_PROGRESS_LABEL: &str = "In progress";
+
+/// Small note under live stats. Those numbers update until the game closes.
+pub const NOT_FINAL_NOTE: &str = "not final";
+
+/// Compact/expanded Games card uses the in-progress layout only for the
+/// open session. A closed game, including one whose result is still unknown,
+/// keeps the normal card.
+pub fn game_card_in_progress(
+    session_id: &str,
+    outcome: Outcome,
+    live_session: Option<&str>,
+) -> bool {
+    !session_id.is_empty() && outcome == Outcome::Unknown && live_session == Some(session_id)
+}
+
+/// Toggleable role chips. No chip on = every role (same as unset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RoleFilter {
+    pub tank: bool,
+    pub damage: bool,
+    pub support: bool,
+}
+
+impl RoleFilter {
+    pub fn toggle(mut self, role: Role) -> Self {
+        match role {
+            Role::Tank => self.tank = !self.tank,
+            Role::Damage => self.damage = !self.damage,
+            Role::Support => self.support = !self.support,
+            Role::Unknown => {}
+        }
+        self
+    }
+
+    pub fn is_on(self, role: Role) -> bool {
+        match role {
+            Role::Tank => self.tank,
+            Role::Damage => self.damage,
+            Role::Support => self.support,
+            Role::Unknown => false,
+        }
+    }
+
+    pub fn unrestricted(self) -> bool {
+        !self.tank && !self.damage && !self.support
+    }
+
+    pub fn matches(self, role: Role) -> bool {
+        self.unrestricted() || self.is_on(role)
+    }
+
+    pub fn selected_roles(self) -> Vec<Role> {
+        Role::all_playable()
+            .into_iter()
+            .filter(|r| self.is_on(*r))
+            .collect()
+    }
+}
+
+/// Immutable OCR reads used for the "edited" badge / corrections list.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct GameOcr {
+    pub hero: String,
+    pub role: String,
+    pub map_name: String,
+    pub outcome: String,
+    pub elims: u32,
+    pub deaths: u32,
+    pub assists: u32,
+    pub damage: u32,
+    pub healing: u32,
+    pub mitigation: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SegmentView {
+    pub index: u32,
+    pub hero: String,
+    pub role: Role,
+    pub snapshots: u32,
+    pub confirmed: bool,
+    pub dismissed: bool,
+    pub resolution: Option<String>,
+    /// First and last Tab read of this run, to the second.
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+}
+
+impl SegmentView {
+    pub fn from_segment(index: u32, seg: &HeroSegment) -> Self {
+        Self {
+            index,
+            hero: seg.hero.clone(),
+            role: Role::parse(&seg.role),
+            snapshots: seg.snapshots,
+            confirmed: seg.confirmed,
+            dismissed: seg.is_dismissed(),
+            resolution: seg.resolution.clone(),
+            first_seen: seg.first_seen.into(),
+            last_seen: seg.last_seen.into(),
+        }
+    }
+
+    pub fn status_label(&self) -> &'static str {
+        if self.dismissed {
+            "dismissed"
+        } else if self.confirmed {
+            "confirmed"
+        } else {
+            "unconfirmed"
+        }
+    }
+}
+
+/// Display-normalized game row. Aggregation and views share this, not the
+/// daemon's storage struct, so season math stays a pure UI-crate function.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Game {
+    pub session_id: String,
+    pub hero: String,
+    pub map_name: String,
+    pub role: Role,
+    pub outcome: Outcome,
+    pub elims: u32,
+    pub deaths: u32,
+    pub assists: u32,
+    pub damage: u32,
+    pub healing: u32,
+    pub mitigation: u32,
+    pub played_at: DateTime<Utc>,
+    pub edited: bool,
+    pub edited_fields: Vec<String>,
+    pub ocr: GameOcr,
+    pub segments: Vec<SegmentView>,
+    /// Server message when this game was refused on upload. `None` when the
+    /// row is synced or still queued.
+    pub upload_reject: Option<String>,
+    /// Flat names the new reader was not sure about.
+    pub suspect_fields: Vec<String>,
+    /// True when this row has already been uploaded. A blank map on a
+    /// synced row was stored by an older build. It is not a local hold.
+    pub synced: bool,
+    /// The reader that read the scoreboard, e.g. "cv-v1" or "ocr-v1".
+    pub recognizer: String,
+}
+
+/// The six stats a "N stats unsure" count covers, as flat names.
+const STAT_FLATS: [&str; 6] = ["e", "a", "d", "dmg", "h", "mit"];
+
+/// Label for a game the server refused. The detail line is the server message.
+pub const UPLOAD_REJECTED_LABEL: &str = "Upload rejected";
+
+impl Game {
+    pub fn from_match(m: &PersonalMatch) -> Self {
+        Self {
+            session_id: m.session_id.clone(),
+            hero: m.display_hero().to_string(),
+            map_name: m.display_map_name().to_string(),
+            role: Role::parse(m.display_role()),
+            outcome: Outcome::parse(m.display_outcome()),
+            elims: m.display_elims(),
+            deaths: m.display_deaths(),
+            assists: m.display_assists(),
+            damage: m.display_damage(),
+            healing: m.display_healing(),
+            mitigation: m.display_mitigation(),
+            played_at: m.played_at.into(),
+            edited: m.is_edited(),
+            edited_fields: m.edited_fields.clone(),
+            ocr: GameOcr {
+                hero: m.hero.clone(),
+                role: m.role.clone(),
+                map_name: m.map_name.clone(),
+                outcome: m.outcome.clone(),
+                elims: m.elims,
+                deaths: m.deaths,
+                assists: m.assists,
+                damage: m.damage,
+                healing: m.healing,
+                mitigation: m.mitigation,
+            },
+            segments: m
+                .heroes_played
+                .iter()
+                .enumerate()
+                .map(|(i, s)| SegmentView::from_segment(i as u32, s))
+                .collect(),
+            upload_reject: m.upload_rejection().map(str::to_string),
+            suspect_fields: crate::reader_apply::upload_suspect_fields(&m.suspect_fields),
+            synced: m.synced,
+            recognizer: m.stored_recognizer().to_string(),
+        }
+    }
+
+    /// A field the reader was unsure of that no hand edit has fixed since.
+    /// `name` is a flat name (`e`, `dmg`, `map`). Same as [`Game::unsure_now`].
+    pub fn field_unsure(&self, name: &str) -> bool {
+        self.unsure_now(name)
+    }
+
+    /// A field the reader was unsure of that no hand edit has fixed since.
+    /// `field` is a flat name (`e`, `dmg`) or an edit name (`elims`,
+    /// `damage`); both map through `crate::suspect`, the rules the
+    /// store and uploader apply. The names are flat already: `Game::from`
+    /// keeps only flat names (`r3.dmg` is stored as `dmg`).
+    pub fn unsure_now(&self, field: &str) -> bool {
+        let flats: &[&str] = match crate::suspect::suspect_names_for_edit(field) {
+            [] => &[field],
+            names => names,
+        };
+        flats.iter().any(|flat| self.flat_unsure_now(flat))
+    }
+
+    fn flat_unsure_now(&self, flat: &str) -> bool {
+        self.suspect_fields.iter().any(|s| s == flat)
+            && !self
+                .edited_fields
+                .iter()
+                .any(|e| crate::suspect::suspect_names_for_edit(e).contains(&flat))
+    }
+
+    /// How many of the six stats (E, D, A, DMG, HEAL, MIT) are still
+    /// unsure. Hero, map and result are not stats and never count here.
+    pub fn unsure_stats(&self) -> usize {
+        STAT_FLATS
+            .iter()
+            .filter(|f| self.flat_unsure_now(f))
+            .count()
+    }
+
+    /// "2 stats unsure", or `None` when no stat is unsure.
+    pub fn unsure_label(&self) -> Option<String> {
+        match self.unsure_stats() {
+            0 => None,
+            1 => Some("1 stat unsure".to_string()),
+            n => Some(format!("{n} stats unsure")),
+        }
+    }
+
+    /// When the game started: the first Tab read of its hero runs, or
+    /// `played_at` for a row with none. `played_at` is the last Tab read.
+    pub fn started_at(&self) -> DateTime<Utc> {
+        self.segments
+            .iter()
+            .map(|s| s.first_seen)
+            .min()
+            .map_or(self.played_at, |first| first.min(self.played_at))
+    }
+
+    /// When the game ended, as far as the tracker saw: the last Tab read.
+    pub fn ended_at(&self) -> DateTime<Utc> {
+        self.segments
+            .iter()
+            .map(|s| s.last_seen)
+            .max()
+            .map_or(self.played_at, |last| last.max(self.played_at))
+    }
+
+    pub fn display_hero(&self) -> String {
+        display_hero_name(&self.hero)
+    }
+
+    /// Title for a missing map. The stored string stays empty so a blank
+    /// read is not shown as a map name.
+    pub fn display_map(&self) -> String {
+        let trimmed = self.map_name.trim();
+        if trimmed.is_empty() {
+            "Map needed".into()
+        } else {
+            self.map_name.clone()
+        }
+    }
+
+    /// `map`, `mode`, and `hero` names from the server suspect list.
+    /// Empty when this game can be uploaded.
+    pub fn review_fields(&self) -> Vec<&'static str> {
+        crate::parse::review_suspect_fields(&self.map_name, "", &self.hero)
+    }
+
+    pub fn needs_review(&self) -> bool {
+        !self.review_fields().is_empty()
+    }
+
+    /// The game needs a look: a map or hero is missing, or the game closed
+    /// without a result. `in_progress` is true for the open session
+    /// ([`game_card_in_progress`]), whose result is not in yet. Fields the
+    /// reader marked unsure do not count: their "unsure" marks are enough.
+    /// The top bar count, its Games filter and the card mark all use this.
+    pub fn needs_look(&self, in_progress: bool) -> bool {
+        (self.outcome == Outcome::Unknown && !in_progress) || self.needs_review()
+    }
+
+    /// Unsynced and missing a map or hero. The game has not been uploaded.
+    pub fn held_locally(&self) -> bool {
+        self.needs_review() && !self.synced
+    }
+
+    /// Banner for a missing map or hero.
+    ///
+    /// A game that is still queued says it stays on this computer. A game
+    /// that already uploaded must not say that. Picking a value re-queues
+    /// the row so the site can be corrected.
+    pub fn review_notice(&self) -> Option<&'static str> {
+        if !self.needs_review() {
+            return None;
+        }
+        if self.synced {
+            let fields = self.review_fields();
+            let map = fields
+                .iter()
+                .any(|field| *field == "map" || *field == "mode");
+            let hero = fields.contains(&"hero");
+            return Some(match (map, hero) {
+                (true, false) => "Map is missing. Pick one to fix it on the site.",
+                (false, true) => "Hero is missing. Pick one to fix it on the site.",
+                _ => "Map and hero are missing. Pick them to fix this game on the site.",
+            });
+        }
+        Some("Needs a look. This game stays on this computer until you pick the missing fields.")
+    }
+
+    pub fn has_stat_line(&self) -> bool {
+        self.elims + self.deaths + self.assists + self.damage + self.healing + self.mitigation > 0
+    }
+
+    pub fn show_timeline(&self) -> bool {
+        !self.session_id.is_empty()
+            && (self.segments.len() > 1
+                || self
+                    .segments
+                    .iter()
+                    .any(|s| !s.confirmed || s.resolution.is_some()))
+    }
+
+    /// OCR → corrected pairs for fields that carry a manual overlay.
+    pub fn corrections(&self) -> Vec<(&'static str, String, String)> {
+        let mut out = Vec::new();
+        let push =
+            |out: &mut Vec<_>, field: &str, label: &'static str, ocr: String, shown: String| {
+                if self.edited_fields.iter().any(|f| f == field) && ocr != shown {
+                    out.push((label, empty_dash(ocr), shown));
+                }
+            };
+        push(
+            &mut out,
+            "hero",
+            "Hero",
+            self.ocr.hero.clone(),
+            self.hero.clone(),
+        );
+        push(
+            &mut out,
+            "role",
+            "Role",
+            self.ocr.role.clone(),
+            self.role.label().to_string(),
+        );
+        push(
+            &mut out,
+            "map_name",
+            "Map",
+            self.ocr.map_name.clone(),
+            self.map_name.clone(),
+        );
+        push(
+            &mut out,
+            "outcome",
+            "Result",
+            self.ocr.outcome.clone(),
+            self.outcome.store_label().to_string(),
+        );
+        push(
+            &mut out,
+            "elims",
+            "Elims",
+            self.ocr.elims.to_string(),
+            self.elims.to_string(),
+        );
+        push(
+            &mut out,
+            "deaths",
+            "Deaths",
+            self.ocr.deaths.to_string(),
+            self.deaths.to_string(),
+        );
+        push(
+            &mut out,
+            "assists",
+            "Assists",
+            self.ocr.assists.to_string(),
+            self.assists.to_string(),
+        );
+        push(
+            &mut out,
+            "damage",
+            "Damage",
+            self.ocr.damage.to_string(),
+            self.damage.to_string(),
+        );
+        push(
+            &mut out,
+            "healing",
+            "Healing",
+            self.ocr.healing.to_string(),
+            self.healing.to_string(),
+        );
+        push(
+            &mut out,
+            "mitigation",
+            "Mitigation",
+            self.ocr.mitigation.to_string(),
+            self.mitigation.to_string(),
+        );
+        out
+    }
+}
+
+/// Wall-clock `HH:MM` for a stored UTC timestamp, in the machine's local zone.
+/// Storage is UTC; every user-facing time goes through here.
+pub fn local_hm(at: DateTime<Utc>) -> String {
+    hm_in(at, &Local)
+}
+
+fn hm_in<Tz: TimeZone>(at: DateTime<Utc>, tz: &Tz) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    at.with_timezone(tz).format("%H:%M").to_string()
+}
+
+pub fn display_hero_name(name: &str) -> String {
+    let t = name.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("unknown") {
+        "Unknown hero".into()
+    } else {
+        t.to_string()
+    }
+}
+
+pub fn empty_dash(s: String) -> String {
+    if s.is_empty() { "-".into() } else { s }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{display_hero_name, hm_in};
+    use chrono::{DateTime, FixedOffset, Utc};
+
+    #[test]
+    fn clock_time_uses_zone_not_utc() {
+        // The 2026-09-29 Antarctic Peninsula game: 22:15Z is 00:15 in Oslo (CEST).
+        let at: DateTime<Utc> = "2026-09-29T22:15:38Z".parse().unwrap();
+        let cest = FixedOffset::east_opt(2 * 3600).unwrap();
+        assert_eq!(hm_in(at, &cest), "00:15");
+        assert_eq!(hm_in(at, &Utc), "22:15");
+    }
+
+    #[test]
+    fn in_progress_card_is_only_the_open_unknown_session() {
+        use super::{IN_PROGRESS_LABEL, NOT_FINAL_NOTE, Outcome, game_card_in_progress};
+
+        assert!(game_card_in_progress("s1", Outcome::Unknown, Some("s1")));
+        assert!(!game_card_in_progress("s1", Outcome::Win, Some("s1")));
+        assert!(!game_card_in_progress("s1", Outcome::Unknown, Some("s2")));
+        assert!(!game_card_in_progress("s1", Outcome::Unknown, None));
+        assert!(!game_card_in_progress("", Outcome::Unknown, Some("")));
+        assert_eq!(IN_PROGRESS_LABEL, "In progress");
+        assert_eq!(NOT_FINAL_NOTE, "not final");
+        assert!(!IN_PROGRESS_LABEL.contains('\u{2014}'));
+        assert!(!IN_PROGRESS_LABEL.contains('\u{2013}'));
+        assert!(!NOT_FINAL_NOTE.contains('\u{2014}'));
+        assert!(!NOT_FINAL_NOTE.contains('\u{2013}'));
+    }
+
+    #[test]
+    fn unknown_hero_label() {
+        assert_eq!(display_hero_name(""), "Unknown hero");
+        assert_eq!(display_hero_name("   "), "Unknown hero");
+        assert_eq!(display_hero_name("Unknown"), "Unknown hero");
+        assert_eq!(display_hero_name("unknown"), "Unknown hero");
+        assert_eq!(display_hero_name("Ana"), "Ana");
+    }
+
+    #[test]
+    fn field_unsure_uses_flat_names() {
+        let mut game = super::Game {
+            session_id: "s".into(),
+            hero: "Ana".into(),
+            map_name: "Busan".into(),
+            role: super::Role::Support,
+            outcome: super::Outcome::Win,
+            elims: 1,
+            deaths: 0,
+            assists: 0,
+            damage: 0,
+            healing: 0,
+            mitigation: 0,
+            played_at: Utc::now(),
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: super::GameOcr::default(),
+            segments: Vec::new(),
+            upload_reject: None,
+            suspect_fields: vec!["dmg".into(), "hero".into()],
+            synced: false,
+            recognizer: String::new(),
+        };
+        assert!(game.field_unsure("dmg"));
+        assert!(game.field_unsure("hero"));
+        assert!(!game.field_unsure("e"));
+        game.suspect_fields.clear();
+        assert!(!game.field_unsure("dmg"));
+    }
+
+    /// A game read off a sure own row stores no suspect field, so neither
+    /// the card header (hero, result) nor any stat box shows unsure.
+    #[test]
+    fn a_game_from_a_sure_own_row_shows_nothing_unsure() {
+        let game = super::Game {
+            session_id: "s".into(),
+            hero: "Wrecking Ball".into(),
+            map_name: "Ilios".into(),
+            role: super::Role::Tank,
+            outcome: super::Outcome::Win,
+            elims: 28,
+            deaths: 5,
+            assists: 11,
+            damage: 10083,
+            healing: 1647,
+            mitigation: 3425,
+            played_at: Utc::now(),
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: super::GameOcr::default(),
+            segments: Vec::new(),
+            upload_reject: None,
+            suspect_fields: Vec::new(),
+            synced: false,
+            recognizer: String::new(),
+        };
+        for field in [
+            "hero", "result", "map", "mode", "e", "a", "d", "dmg", "h", "mit",
+        ] {
+            assert!(!game.field_unsure(field), "{field}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::{Game, GameOcr, Outcome, Role};
+    use chrono::Utc;
+
+    fn game(hero: &str, map: &str) -> Game {
+        Game {
+            session_id: "s".into(),
+            hero: hero.into(),
+            map_name: map.into(),
+            role: Role::Support,
+            outcome: Outcome::Win,
+            elims: 1,
+            deaths: 0,
+            assists: 0,
+            damage: 0,
+            healing: 0,
+            mitigation: 0,
+            played_at: Utc::now(),
+            edited: false,
+            edited_fields: Vec::new(),
+            ocr: GameOcr::default(),
+            segments: Vec::new(),
+            upload_reject: None,
+            suspect_fields: Vec::new(),
+            synced: false,
+            recognizer: String::new(),
+        }
+    }
+
+    #[test]
+    fn blank_map_and_unknown_hero_need_a_pick() {
+        let blank = game("Ana", "");
+        assert_eq!(blank.display_map(), "Map needed");
+        assert_eq!(blank.review_fields(), vec!["map", "mode"]);
+        assert!(blank.needs_review());
+
+        let unknown = game("Unknown", "Busan");
+        assert_eq!(unknown.review_fields(), vec!["hero"]);
+        assert!(unknown.needs_review());
+
+        let ready = game("Ana", "King's Row");
+        assert!(ready.review_fields().is_empty());
+        assert!(!ready.needs_review());
+        assert_eq!(ready.display_map(), "King's Row");
+        assert_eq!(
+            blank.review_notice(),
+            Some(
+                "Needs a look. This game stays on this computer until you pick the missing fields."
+            )
+        );
+        assert!(blank.held_locally());
+    }
+
+    #[test]
+    fn synced_blank_map_does_not_say_the_game_stays_on_this_computer() {
+        let mut blank = game("Ana", "");
+        blank.synced = true;
+        let notice = blank
+            .review_notice()
+            .expect("a synced blank map still offers a pick");
+        assert_eq!(notice, "Map is missing. Pick one to fix it on the site.");
+        assert!(!notice.contains("stays on this computer"));
+        assert!(!notice.contains("Needs a look"));
+        assert!(!notice.contains('—') && !notice.contains('–'));
+        assert!(!blank.held_locally());
+        assert!(blank.needs_review());
+
+        let mut hero = game("Unknown", "Busan");
+        hero.synced = true;
+        assert_eq!(
+            hero.review_notice(),
+            Some("Hero is missing. Pick one to fix it on the site.")
+        );
+        assert!(!hero.held_locally());
+    }
+}
+
+#[cfg(test)]
+mod placeholder_tests {
+    use super::{Outcome, empty_dash};
+
+    /// Placeholders shown in the app use a plain hyphen, not an em dash.
+    #[test]
+    fn placeholders_have_no_em_dash() {
+        assert_eq!(Outcome::Unknown.label(), "-");
+        assert_eq!(empty_dash(String::new()), "-");
+        assert_eq!(empty_dash("Dorado".into()), "Dorado");
+        for o in [Outcome::Win, Outcome::Loss, Outcome::Draw, Outcome::Unknown] {
+            assert!(!o.label().contains('\u{2014}'), "{}", o.label());
+        }
+    }
+}

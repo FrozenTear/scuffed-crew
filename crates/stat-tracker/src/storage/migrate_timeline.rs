@@ -347,6 +347,7 @@ impl LocalStore {
         &self,
         backup: &TimelineBackup,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         if self.timeline_migrated() || self.timeline_marker().await? {
             self.set_timeline_migrated(true);
             return Ok(0);
