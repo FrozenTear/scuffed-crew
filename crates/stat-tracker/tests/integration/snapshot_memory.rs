@@ -1,28 +1,53 @@
 //! The live snapshot write must not hold the whole table.
 //!
-//! Its own test binary, so its counting allocator sees only this test.
 //! It compares the peak live heap of one write against the old full export
 //! (every row loaded, then serialised in one buffer) on the same store. The
 //! old export peaked near 98 MB on a real 19,694-row store; the compact
 //! write holds one page of rows plus the one row per game it keeps.
 //! Measured with live-heap counters, not RSS: RSS hides retention behind
 //! allocator settings and trims, so it cannot tell the two writes apart.
+//!
+//! The counting allocator counts only on a thread that turned it on, so the
+//! other tests in this binary do not move the numbers. The test runs on a
+//! current-thread runtime: the embedded store's tasks run on that thread
+//! too (blocking-pool work, such as a sort, is not counted).
 
 use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::Cell;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use stat_tracker::storage::{HeroSegment, LocalStore, MatchSession, PersonalMatch, Snapshot};
 
 struct Counting;
 
-static LIVE: AtomicUsize = AtomicUsize::new(0);
-static PEAK: AtomicUsize = AtomicUsize::new(0);
-static ALLOCATED: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+static LIVE: AtomicI64 = AtomicI64::new(0);
+static PEAK: AtomicI64 = AtomicI64::new(0);
+static ALLOCATED: AtomicI64 = AtomicI64::new(0);
+static CALLS: AtomicI64 = AtomicI64::new(0);
+
+fn on() -> bool {
+    COUNTING.try_with(Cell::get).unwrap_or(false)
+}
 
 fn grew(by: usize) {
+    if !on() {
+        return;
+    }
+    let by = by as i64;
     let now = LIVE.fetch_add(by, Ordering::Relaxed) + by;
     PEAK.fetch_max(now, Ordering::Relaxed);
     ALLOCATED.fetch_add(by, Ordering::Relaxed);
+    CALLS.fetch_add(1, Ordering::Relaxed);
+}
+
+fn shrank(by: usize) {
+    if on() {
+        LIVE.fetch_sub(by as i64, Ordering::Relaxed);
+    }
 }
 
 unsafe impl GlobalAlloc for Counting {
@@ -42,12 +67,12 @@ unsafe impl GlobalAlloc for Counting {
     }
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         unsafe { System.dealloc(ptr, layout) };
-        LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+        shrank(layout.size());
     }
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
         let p = unsafe { System.realloc(ptr, layout, new_size) };
         if !p.is_null() {
-            LIVE.fetch_sub(layout.size(), Ordering::Relaxed);
+            shrank(layout.size());
             grew(new_size);
         }
         p
@@ -57,15 +82,22 @@ unsafe impl GlobalAlloc for Counting {
 #[global_allocator]
 static GLOBAL: Counting = Counting;
 
-/// Peak live bytes above the starting level, and bytes allocated, for `f`.
-async fn measure<F: std::future::Future<Output = ()>>(f: F) -> (usize, usize) {
-    let base = LIVE.load(Ordering::Relaxed);
+/// Peak live bytes above the starting level, bytes allocated and
+/// allocation calls, for `f` on this thread.
+async fn measure<F: std::future::Future<Output = ()>>(f: F) -> (i64, i64, i64) {
+    let (base, bytes, calls) = (
+        LIVE.load(Ordering::Relaxed),
+        ALLOCATED.load(Ordering::Relaxed),
+        CALLS.load(Ordering::Relaxed),
+    );
     PEAK.store(base, Ordering::Relaxed);
-    let allocated = ALLOCATED.load(Ordering::Relaxed);
+    COUNTING.with(|c| c.set(true));
     f.await;
+    COUNTING.with(|c| c.set(false));
     (
-        PEAK.load(Ordering::Relaxed).saturating_sub(base),
-        ALLOCATED.load(Ordering::Relaxed) - allocated,
+        PEAK.load(Ordering::Relaxed) - base,
+        ALLOCATED.load(Ordering::Relaxed) - bytes,
+        CALLS.load(Ordering::Relaxed) - calls,
     )
 }
 
@@ -129,7 +161,7 @@ fn row(game: usize, capture: usize) -> PersonalMatch {
     }
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[tokio::test(flavor = "current_thread")]
 async fn the_snapshot_write_does_not_hold_the_whole_table() {
     let dir = tempfile::tempdir().unwrap();
     let store = LocalStore::open(dir.path()).await.unwrap();
@@ -166,19 +198,27 @@ async fn the_snapshot_write_does_not_hold_the_whole_table() {
     old_export().await;
     store.export_snapshot(dir.path()).await.unwrap();
 
-    let (old_peak, old_bytes) = measure(old_export()).await;
-    let (new_peak, new_bytes) = measure(async {
+    let (old_peak, old_bytes, old_calls) = measure(old_export()).await;
+    let (new_peak, new_bytes, new_calls) = measure(async {
         store.export_snapshot(dir.path()).await.unwrap();
     })
     .await;
     let rows = GAMES * ROWS_PER_GAME;
     println!(
-        "{rows} rows: old full export peak {old_peak} B, allocated {old_bytes} B; \
-         compact write peak {new_peak} B, allocated {new_bytes} B"
+        "{rows} rows: old full export peak {old_peak} B, allocated {old_bytes} B in \
+         {old_calls} calls; compact write peak {new_peak} B, allocated {new_bytes} B in \
+         {new_calls} calls"
     );
     let written = stat_tracker::storage::read_snapshot(dir.path()).unwrap();
     assert_eq!(written.matches.len(), GAMES, "one row per game");
 
+    // Both still read every row once (the newest row per game needs them),
+    // so bytes allocated stay about the same; that churn is why memtune
+    // caps the arenas. What the compact write removes is holding them all.
+    assert!(
+        old_calls > 0 && new_calls > 0,
+        "the counter sees the store's work"
+    );
     // The old export holds every row: its peak grows with the table. The
     // compact write holds a page (500 rows here, the whole 3,000-row table
     // is 6 pages) plus 150 kept rows. Expect well under half; a write that

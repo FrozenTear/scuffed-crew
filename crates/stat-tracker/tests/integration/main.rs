@@ -37,6 +37,7 @@ mod player_row_fixtures;
 mod real_dim_zero_cells;
 mod result_signal_wiring;
 mod run_marker_sigterm;
+mod snapshot_memory;
 mod team_size_fixtures;
 mod tess_engine;
 mod vision_baseline_fixtures;
