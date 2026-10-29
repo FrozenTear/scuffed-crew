@@ -328,7 +328,14 @@ pub(crate) async fn run_loop(
                         data_dir,
                         st.capture_count,
                     );
-                    refresh_snapshot(store, data_dir).await;
+                    // A board stored after the result (the final scoreboard)
+                    // belongs to a finished game: that write is owed even with
+                    // no GUI running.
+                    if st.active_game.as_ref().is_some_and(|g| g.finished()) {
+                        refresh_snapshot_game_finished(store, data_dir).await;
+                    } else {
+                        refresh_snapshot(store, data_dir).await;
+                    }
                 }
                 // A Tab pressed while that capture ran runs now, unless the
                 // capture took its board (it would read the same board). A

@@ -52,3 +52,25 @@ fn heap_and_rss_read() {
     assert!(resident_bytes().is_some_and(|b| b > 0));
     trim();
 }
+
+/// The limits only take effect when `main` sets them before the runtime
+/// starts a thread, and the trim loop only runs when the daemon spawns it.
+/// Nothing else would fail if either were dropped or moved.
+#[test]
+fn main_applies_the_limits_before_the_runtime_and_spawns_the_trim_loop() {
+    let main = include_str!("../main.rs");
+    let main = main.split("\n#[cfg(test)]").next().unwrap();
+    let apply = main
+        .find("daemon::memtune::apply();")
+        .expect("main applies memtune");
+    let runtime = main
+        .find("tokio::runtime::Builder::new_multi_thread()")
+        .expect("main builds the runtime");
+    assert!(
+        apply < runtime,
+        "memtune::apply must run before the runtime starts threads"
+    );
+    let lifecycle = include_str!("lifecycle.rs");
+    assert!(lifecycle.contains("tokio::spawn(super::memtune::trim_loop());"));
+    assert!(lifecycle.contains("super::memtune::log_startup();"));
+}
