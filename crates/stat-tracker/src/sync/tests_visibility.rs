@@ -89,7 +89,7 @@ fn json_response(status: &str, body: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn fetch_sends_the_token_to_the_settings_route_and_reads_the_value() {
+async fn fetch_sends_the_token_to_the_daemon_config_route_and_reads_the_value() {
     let (url, server) = serve_once(json_response(
         "200 OK",
         r#"{"player_name":null,"stats_visibility":"members"}"#,
@@ -97,11 +97,28 @@ async fn fetch_sends_the_token_to_the_settings_route_and_reads_the_value() {
     let got = client(&url).fetch_stats_visibility().await;
     let head = server.join().expect("server").to_ascii_lowercase();
     assert_eq!(got, Some(StatsVisibility::Members));
-    assert!(head.starts_with("get /api/stats/settings "), "{head:?}");
+    assert!(
+        head.starts_with("get /api/stats/daemon-config "),
+        "{head:?}"
+    );
     assert!(
         head.contains("authorization: bearer super-secret-token"),
         "{head:?}"
     );
+}
+
+#[tokio::test]
+async fn fetch_reads_each_value_from_daemon_config() {
+    for (raw, want) in [
+        ("public", StatsVisibility::Public),
+        ("members", StatsVisibility::Members),
+        ("private", StatsVisibility::Private),
+    ] {
+        let body = format!(r#"{{"player_name":"FrozenTear","stats_visibility":"{raw}"}}"#);
+        let (url, server) = serve_once(json_response("200 OK", &body));
+        assert_eq!(client(&url).fetch_stats_visibility().await, Some(want));
+        server.join().expect("server");
+    }
 }
 
 #[tokio::test]
@@ -113,6 +130,11 @@ async fn fetch_failures_are_no_answer() {
         ("200 OK", "not json"),
         ("200 OK", r#"{"stats_visibility":"friends"}"#),
         ("200 OK", r#"{"player_name":"FrozenTear"}"#),
+        (
+            "200 OK",
+            r#"{"player_name":"FrozenTear","stats_visibility":null}"#,
+        ),
+        ("200 OK", r#"{"player_name":null}"#),
     ] {
         let (url, server) = serve_once(json_response(status, body));
         assert_eq!(

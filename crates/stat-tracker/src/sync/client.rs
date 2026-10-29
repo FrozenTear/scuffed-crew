@@ -12,10 +12,12 @@ use scuffed_types::api::{DaemonConfigResponse, StatsUploadResponse};
 use super::backoff::parse_retry_after;
 use super::batching::BatchCaps;
 use super::errors::{SyncUploadError, parse_upload_error_body, server_error_text};
-use super::visibility::{
-    MAX_BODY_BYTES, STATS_SETTINGS_PATH, StatsVisibility, parse_stats_visibility,
-};
+use super::visibility::{MAX_BODY_BYTES, StatsVisibility, parse_stats_visibility};
 use super::wire::upload_request;
+
+/// Daemon-token route for the member's config. It carries `player_name` and,
+/// on servers that send it, `stats_visibility`.
+const DAEMON_CONFIG_PATH: &str = "/api/stats/daemon-config";
 
 #[derive(Clone)]
 pub struct SyncClient {
@@ -125,7 +127,7 @@ impl SyncClient {
         self.refuse_unsafe_transport()
             .map_err(|e| SyncUploadError::plain(e.to_string()))?;
         let creds = self.credentials();
-        let url = format!("{}/api/stats/daemon-config", creds.server_url);
+        let url = format!("{}{DAEMON_CONFIG_PATH}", creds.server_url);
         let resp = self
             .http
             .get(&url)
@@ -145,14 +147,15 @@ impl SyncClient {
 
     /// Who can see this member's stats on the site, for the Settings line.
     ///
-    /// One GET of `STATS_SETTINGS_PATH` with the saved token. Any failure
-    /// (unsafe URL, network, 401, 5xx, a body that is too large or not
-    /// JSON, an unknown value) is `None`: the line stays hidden and the
-    /// sync state is untouched, so this never pauses uploads.
+    /// One GET of the daemon-config route with the saved token, reading only
+    /// `stats_visibility`. Any failure (unsafe URL, network, 401, 5xx, a body
+    /// that is too large or not JSON, a missing field from an older server, an
+    /// unknown value) is `None`: the line stays hidden and the sync state is
+    /// untouched, so this never pauses uploads.
     pub async fn fetch_stats_visibility(&self) -> Option<StatsVisibility> {
         self.refuse_unsafe_transport().ok()?;
         let creds = self.credentials();
-        let url = format!("{}{STATS_SETTINGS_PATH}", creds.server_url);
+        let url = format!("{}{DAEMON_CONFIG_PATH}", creds.server_url);
         let resp = self
             .http
             .get(&url)
