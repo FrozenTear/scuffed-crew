@@ -652,3 +652,43 @@ impl LocalStore {
         self.session_rows_raw(sid).await.unwrap()
     }
 }
+
+/// A finished move's copy is not reused when the marker is lost later (an
+/// older tracker's vacuum dropped the tables): the next move takes a fresh
+/// copy, and once it is done only that newest copy is kept.
+#[tokio::test]
+async fn a_finished_copy_is_not_reused_and_older_copies_are_pruned() {
+    let dir = tempfile::tempdir().unwrap();
+    let wait =
+        || crate::storage::wait_for_engine_close(dir.path(), std::time::Duration::from_secs(10));
+    drop(alpha1_store(dir.path()).await);
+    assert!(wait().await);
+    let first = prepare_timeline_migration(dir.path()).await;
+    let TimelineBackup::Ready(Some(first_path)) = first.clone() else {
+        panic!("{first:?}");
+    };
+    {
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        assert!(store.migrate_timeline_if_needed(&first).await.unwrap() > 0);
+        // An older tracker's vacuum drops both tables.
+        store
+            .db
+            .query("DELETE hero_timeline; DELETE store_meta;")
+            .await
+            .unwrap();
+    }
+    assert!(wait().await);
+    // Backup names carry the second; make the next one differ.
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = prepare_timeline_migration(dir.path()).await;
+    let TimelineBackup::Ready(Some(second_path)) = second.clone() else {
+        panic!("{second:?}");
+    };
+    assert_ne!(second_path, first_path, "a finished copy is not reused");
+    {
+        let store = LocalStore::open(dir.path()).await.unwrap();
+        assert!(store.migrate_timeline_if_needed(&second).await.unwrap() > 0);
+    }
+    assert!(second_path.is_dir());
+    assert!(!first_path.exists(), "the older finished copy is pruned");
+}

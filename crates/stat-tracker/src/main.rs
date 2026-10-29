@@ -984,17 +984,35 @@ async fn write_snapshot_if(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .wrote(started, generation);
-            tracing::info!(
-                target: "scuffed_stat_tracker",
-                ms = started.elapsed().as_millis() as u64,
-                "live snapshot written"
-            );
+            let ms = started.elapsed().as_millis() as u64;
+            // A running GUI (also in the tray) gets a write per change: debug,
+            // unless a write is slow enough to matter.
+            if ms > SLOW_SNAPSHOT_WRITE_MS {
+                tracing::info!(target: "scuffed_stat_tracker", ms, "live snapshot written (slow)");
+            } else {
+                tracing::debug!(target: "scuffed_stat_tracker", ms, "live snapshot written");
+            }
+            if SNAPSHOT_WRITE_FAILING.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(target: "scuffed_stat_tracker", "live snapshot writes work again");
+            }
         }
         Err(e) => {
-            tracing::warn!(target: "scuffed_stat_tracker", error = %e, "live snapshot write failed")
+            // Once per failure run (a full disk fails every tick), not per try.
+            if !SNAPSHOT_WRITE_FAILING.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::warn!(target: "scuffed_stat_tracker", error = %e, "live snapshot write failed");
+            } else {
+                tracing::debug!(target: "scuffed_stat_tracker", error = %e, "live snapshot write failed again");
+            }
         }
     }
 }
+
+/// A snapshot write slower than this is logged at info.
+const SLOW_SNAPSHOT_WRITE_MS: u64 = 1000;
+
+/// The last snapshot write failed (so the next failure is not warned again).
+static SNAPSHOT_WRITE_FAILING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// What the Tab capture task sends back to the run loop.
 type CaptureReports = tokio::sync::mpsc::UnboundedReceiver<(String, Result<CaptureReport, String>)>;
