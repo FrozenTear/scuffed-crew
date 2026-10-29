@@ -36,12 +36,18 @@ fn session(session_id: &str, secs: i64) -> MatchSession {
 /// as (session, elims, played_at) so the storage tests need no UI types.
 fn shown(snap: &Snapshot) -> Vec<(String, u32, String)> {
     let mut seen = std::collections::HashSet::new();
-    snap.matches
+    let mut out = snap
+        .matches
         .iter()
         .filter(|m| super::export::row_is_tracked(m))
         .filter(|m| m.session_id.is_empty() || seen.insert(m.session_id.clone()))
         .map(|m| (m.session_id.clone(), m.elims, m.played_at.to_string()))
-        .collect()
+        .collect::<Vec<_>>();
+    // Rows captured in the same instant have no defined order in the store:
+    // keep newest first and order a tie by session and elims, so only the
+    // order across instants is compared.
+    out.sort_by(|a, b| b.2.cmp(&a.2).then(a.0.cmp(&b.0)).then(a.1.cmp(&b.1)));
+    out
 }
 
 /// The pre-0.6.0-alpha.1.1 export: every row.
@@ -214,7 +220,11 @@ async fn export_snapshot_writes_the_compact_file() {
     fixture(&store).await;
     store.export_snapshot(dir.path()).await.unwrap();
     let read = read_snapshot(dir.path()).expect("snapshot parses");
-    let compact = store.compact_snapshot().await.unwrap();
+    let mut compact = store.compact_snapshot().await.unwrap();
+    // The file leaves out record ids (`#[serde(skip)]`).
+    for m in &mut compact.matches {
+        m.id = None;
+    }
     assert_eq!(read.matches, compact.matches);
     assert_eq!(read.pending_deletes, compact.pending_deletes);
     assert!(!dir.path().join("live_snapshot.json.tmp").exists());

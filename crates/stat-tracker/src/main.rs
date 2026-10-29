@@ -848,58 +848,111 @@ fn rand_id() -> u64 {
 
 /// When `live_snapshot.json` is written (daemon/snapshot_policy.rs).
 /// Module-level so capture + sync tasks share it.
-static SNAPSHOT_STATE: std::sync::Mutex<daemon::snapshot_policy::SnapshotPolicy> =
+static SNAPSHOT_STATE: SnapshotState =
     std::sync::Mutex::new(daemon::snapshot_policy::SnapshotPolicy::new());
+
+type SnapshotState = std::sync::Mutex<daemon::snapshot_policy::SnapshotPolicy>;
+/// "Is a GUI running?" ([`daemon::gui_presence::gui_present`] in the daemon).
+type GuiProbe<'a> = &'a (dyn Fn() -> bool + Sync);
 
 /// Mark the live snapshot dirty; write it if a GUI is running and the
 /// debounce has passed.
 async fn refresh_snapshot(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    mark_snapshot(store, data_dir, false).await;
+    let gui = || daemon::gui_presence::gui_present(data_dir);
+    refresh_snapshot_in(&SNAPSHOT_STATE, &gui, store, data_dir).await;
 }
 
 /// Sync progress (rows flipped to synced). The same as [`refresh_snapshot`]:
 /// a running GUI sees the new state, a closed one costs nothing.
 async fn refresh_snapshot_force(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    mark_snapshot(store, data_dir, false).await;
+    let gui = || daemon::gui_presence::gui_present(data_dir);
+    refresh_snapshot_force_in(&SNAPSHOT_STATE, &gui, store, data_dir).await;
 }
 
-/// A game finished (its result was recorded or sealed). The fallback file
-/// must stay fresh for the next GUI start even with no GUI running, so this
-/// write is owed; it waits a moment for the rest of the burst.
+/// A game finished (its result was recorded, sealed or stored at close).
+/// The fallback file must stay fresh for the next GUI start even with no GUI
+/// running, so this write is owed; it waits a moment for the rest of the
+/// burst.
 async fn refresh_snapshot_game_finished(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    mark_snapshot(store, data_dir, true).await;
+    let gui = || daemon::gui_presence::gui_present(data_dir);
+    refresh_snapshot_game_finished_in(&SNAPSHOT_STATE, &gui, store, data_dir).await;
 }
 
 /// Cmd-timer tick: write a dirty snapshot once it is due (a GUI that opened
 /// since, an owed write that has settled, a debounce that has passed).
 async fn flush_snapshot_if_due(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    write_snapshot_if(store, data_dir, |p, now| {
-        p.due(now, daemon::gui_presence::gui_present(data_dir))
-    })
-    .await;
+    let gui = || daemon::gui_presence::gui_present(data_dir);
+    flush_snapshot_if_due_in(&SNAPSHOT_STATE, &gui, store, data_dir).await;
 }
 
 /// Shutdown: write a dirty snapshot whatever the GUI or the debounce, so the
 /// next GUI start shows the final state.
 async fn flush_snapshot_if_dirty(store: &storage::LocalStore, data_dir: &std::path::Path) {
-    write_snapshot_if(store, data_dir, |p, _| p.dirty()).await;
+    flush_snapshot_if_dirty_in(&SNAPSHOT_STATE, store, data_dir).await;
 }
 
-async fn mark_snapshot(store: &storage::LocalStore, data_dir: &std::path::Path, owed: bool) {
-    SNAPSHOT_STATE
+async fn refresh_snapshot_in(
+    state: &SnapshotState,
+    gui: GuiProbe<'_>,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) {
+    mark_snapshot(state, false);
+    flush_snapshot_if_due_in(state, gui, store, data_dir).await;
+}
+
+async fn refresh_snapshot_force_in(
+    state: &SnapshotState,
+    gui: GuiProbe<'_>,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) {
+    mark_snapshot(state, false);
+    flush_snapshot_if_due_in(state, gui, store, data_dir).await;
+}
+
+async fn refresh_snapshot_game_finished_in(
+    state: &SnapshotState,
+    gui: GuiProbe<'_>,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) {
+    mark_snapshot(state, true);
+    flush_snapshot_if_due_in(state, gui, store, data_dir).await;
+}
+
+async fn flush_snapshot_if_due_in(
+    state: &SnapshotState,
+    gui: GuiProbe<'_>,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) {
+    write_snapshot_if(state, store, data_dir, |p, now| p.due(now, gui())).await;
+}
+
+async fn flush_snapshot_if_dirty_in(
+    state: &SnapshotState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+) {
+    write_snapshot_if(state, store, data_dir, |p, _| p.dirty()).await;
+}
+
+fn mark_snapshot(state: &SnapshotState, owed: bool) {
+    state
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .mark(std::time::Instant::now(), owed);
-    flush_snapshot_if_due(store, data_dir).await;
 }
 
 async fn write_snapshot_if(
+    state: &SnapshotState,
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
     due: impl FnOnce(&daemon::snapshot_policy::SnapshotPolicy, std::time::Instant) -> bool,
 ) {
     let generation = {
-        let state = SNAPSHOT_STATE.lock().unwrap_or_else(|e| e.into_inner());
+        let state = state.lock().unwrap_or_else(|e| e.into_inner());
         if !due(&state, std::time::Instant::now()) {
             return;
         }
@@ -908,17 +961,19 @@ async fn write_snapshot_if(
     let started = std::time::Instant::now();
     match store.export_snapshot(data_dir).await {
         Ok(()) => {
-            SNAPSHOT_STATE
+            state
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .wrote(started, generation);
-            tracing::debug!(
+            tracing::info!(
                 target: "scuffed_stat_tracker",
                 ms = started.elapsed().as_millis() as u64,
                 "live snapshot written"
             );
         }
-        Err(e) => tracing::debug!(error = %e, "live snapshot refresh failed"),
+        Err(e) => {
+            tracing::warn!(target: "scuffed_stat_tracker", error = %e, "live snapshot write failed")
+        }
     }
 }
 

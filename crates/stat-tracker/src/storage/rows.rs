@@ -35,8 +35,8 @@ impl LocalStore {
                 && let Some(outcome) = self.session_decided_outcome(&match_data.session_id).await?
             {
                 match_data.outcome = outcome.clone();
-                // The caller logged this row as unknown. Keep the fallback
-                // log in step with the store.
+                // The caller logged this row as unknown. Keep the
+                // matches.jsonl record in step with the store.
                 rewrite_match_log_session(
                     &self.data_dir,
                     &match_data.session_id,

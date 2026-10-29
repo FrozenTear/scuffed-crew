@@ -374,6 +374,18 @@ mod tests {
         assert!(games.iter().all(|game| game.session_id != "hanamura"));
     }
 
+    /// Games captured in the same instant have no defined order in the
+    /// store; order those by session id so only real order is compared.
+    fn in_order(mut games: Vec<Game>) -> Vec<Game> {
+        games.sort_by(|a, b| {
+            b.played_at
+                .cmp(&a.played_at)
+                .then(a.session_id.cmp(&b.session_id))
+                .then(a.elims.cmp(&b.elims))
+        });
+        games
+    }
+
     /// The tracker's full store, as the old export wrote it: every row.
     async fn full_snapshot(store: &storage::LocalStore) -> Snapshot {
         Snapshot {
@@ -432,8 +444,8 @@ mod tests {
             let compact = load_snapshot(dir.path());
             assert!(compact.matches.len() <= full.matches.len(), "{kind:?}");
             assert_eq!(
-                format!("{:?}", games_from_snapshot(&compact)),
-                format!("{:?}", games_from_snapshot(&full)),
+                format!("{:?}", in_order(games_from_snapshot(&compact))),
+                format!("{:?}", in_order(games_from_snapshot(&full))),
                 "{kind:?}"
             );
             assert_eq!(compact.pending_deletes, full.pending_deletes, "{kind:?}");
@@ -467,7 +479,10 @@ mod tests {
             .unwrap()
             .len();
         let compact = load_snapshot(dir.path());
-        let (old, new) = (games_from_snapshot(&full), games_from_snapshot(&compact));
+        let (old, new) = (
+            in_order(games_from_snapshot(&full)),
+            in_order(games_from_snapshot(&compact)),
+        );
         println!(
             "rows {} -> {}, sessions {}, games {} -> {}, compact file {bytes} B, write {ms} ms",
             full.matches.len(),
