@@ -67,26 +67,16 @@ impl RoleAgg {
         avg(self.weighted_healing, self.matches)
     }
 
-    fn add(
-        &mut self,
-        matches: u32,
-        wins: u32,
-        losses: u32,
-        draws: u32,
-        avg_elims: f64,
-        avg_deaths: f64,
-        avg_damage: f64,
-        avg_healing: f64,
-    ) {
-        let weight = f64::from(matches);
-        self.matches += matches;
-        self.wins += wins;
-        self.losses += losses;
-        self.draws += draws;
-        self.weighted_elims += avg_elims * weight;
-        self.weighted_deaths += avg_deaths * weight;
-        self.weighted_damage += avg_damage * weight;
-        self.weighted_healing += avg_healing * weight;
+    fn add(&mut self, row: &RoleStats) {
+        let weight = f64::from(row.matches);
+        self.matches += row.matches;
+        self.wins += row.wins;
+        self.losses += row.losses;
+        self.draws += row.draws;
+        self.weighted_elims += row.avg_elims * weight;
+        self.weighted_deaths += row.avg_deaths * weight;
+        self.weighted_damage += row.avg_damage * weight;
+        self.weighted_healing += row.avg_healing * weight;
     }
 }
 
@@ -185,16 +175,7 @@ fn bucket_index(role: &str) -> usize {
 pub(crate) fn role_aggs_from_rows(rows: &[RoleStats]) -> Vec<RoleAgg> {
     let mut buckets = fresh_buckets();
     for row in rows {
-        buckets[bucket_index(&row.role)].add(
-            row.matches,
-            row.wins,
-            row.losses,
-            row.draws,
-            row.avg_elims,
-            row.avg_deaths,
-            row.avg_damage,
-            row.avg_healing,
-        );
+        buckets[bucket_index(&row.role)].add(row);
     }
     buckets.into_iter().collect()
 }
