@@ -1078,6 +1078,25 @@ const STATS_CSS: &str = r#"
         .my-stats .stats-tab { white-space: nowrap; padding: 0.55rem 0.9rem; }
         .map-callouts { flex-direction: column; }
     }
+    /* 390px viewports sit in this band. Four tabs share the row, no sideways scroll. */
+    @media (max-width: 420px) {
+        .my-stats .stats-tabs {
+            overflow-x: hidden;
+            flex-wrap: nowrap;
+            gap: 0;
+            min-width: 0;
+        }
+        .my-stats .stats-tab {
+            box-sizing: border-box;
+            flex: 1 1 0;
+            min-width: 0;
+            white-space: nowrap;
+            padding: 0.5rem 0.15rem;
+            font-size: 0.72rem;
+            letter-spacing: 0.01em;
+            text-align: center;
+        }
+    }
 "#;
 
 /// Release note inside the tracker install and reinstall blocks.
@@ -1716,6 +1735,52 @@ mod header_layout_tests {
             has_declaration(tracks_block, "padding: 0"),
             "{tracks_block}"
         );
+    }
+
+    #[test]
+    fn stats_tabs_fit_at_390px_without_horizontal_scroll() {
+        let desktop_tabs = block_after(STATS_CSS, ".my-stats .stats-tabs {");
+        let desktop_tabs = desktop_tabs.split('}').next().unwrap();
+        assert!(
+            !desktop_tabs.contains("overflow"),
+            "desktop tab row does not scroll: {desktop_tabs}"
+        );
+        let desktop_tab = block_after(STATS_CSS, ".my-stats .stats-tab {");
+        let desktop_tab = desktop_tab.split('}').next().unwrap();
+        assert!(
+            has_declaration(desktop_tab, "padding: 0.6rem 1.2rem"),
+            "{desktop_tab}"
+        );
+        assert!(
+            has_declaration(desktop_tab, "font-size: 0.9rem"),
+            "{desktop_tab}"
+        );
+
+        let phone_at = STATS_CSS
+            .find("@media (max-width: 720px)")
+            .expect("phone rules");
+        let narrow_at = STATS_CSS
+            .find("@media (max-width: 420px)")
+            .expect("390px is inside the 420px band");
+        assert!(
+            phone_at < narrow_at,
+            "narrow tab rules must follow the 720px scroll rule so they win"
+        );
+
+        let narrow = block_after(STATS_CSS, "@media (max-width: 420px)");
+        let tabs = block_after(narrow, ".my-stats .stats-tabs {");
+        let tabs = tabs.split('}').next().unwrap();
+        assert!(has_declaration(tabs, "overflow-x: hidden"), "{tabs}");
+        assert!(!tabs.contains("overflow-x: auto"), "{tabs}");
+        assert!(has_declaration(tabs, "gap: 0"), "{tabs}");
+
+        let tab = block_after(narrow, ".my-stats .stats-tab {");
+        let tab = tab.split('}').next().unwrap();
+        assert!(tab.contains("flex: 1 1 0"), "{tab}");
+        assert!(has_declaration(tab, "min-width: 0"), "{tab}");
+        assert!(has_declaration(tab, "box-sizing: border-box"), "{tab}");
+        assert!(has_declaration(tab, "font-size: 0.72rem"), "{tab}");
+        assert!(has_declaration(tab, "padding: 0.5rem 0.15rem"), "{tab}");
     }
 
     fn assert_shared_cell(block: &str, align: &str) {
