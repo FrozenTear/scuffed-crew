@@ -1,6 +1,6 @@
 //! One hero timeline per game (`hero_timeline`), read back into rows.
 //!
-//! Until 0.6.0-alpha.2 every capture row of a game carried the same
+//! Until 0.6.0-alpha.1.1 every capture row of a game carried the same
 //! `heroes_played` and `segment_resolutions`, and every capture rewrote all
 //! of the game's rows (the segments' `snapshots` and `last_seen` move each
 //! time). Once the store is migrated (`store_meta:schema`, see

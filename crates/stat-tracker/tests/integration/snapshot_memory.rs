@@ -228,3 +228,35 @@ async fn the_snapshot_write_does_not_hold_the_whole_table() {
         "compact write peak {new_peak} B is not under a third of the full export's {old_peak} B"
     );
 }
+
+/// The compact write's time on a copy of a real store (memfix M1). Ignored:
+/// needs `MEMFIX_PARITY_STORE` = a data dir holding `stats.surrealkv`,
+/// copied to a temp dir first (the given dir is never opened). Run it in a
+/// release-like profile; prints the first write and the warm ones.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn the_compact_write_time_on_a_real_store_copy() {
+    let Some(src) = std::env::var_os("MEMFIX_PARITY_STORE") else {
+        panic!("set MEMFIX_PARITY_STORE");
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new("cp")
+        .arg("-a")
+        .arg(std::path::Path::new(&src).join("stats.surrealkv"))
+        .arg(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    let rows = store.match_count().await.unwrap();
+    let mut times = Vec::new();
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        store.export_snapshot(dir.path()).await.unwrap();
+        times.push(t.elapsed().as_millis());
+    }
+    let bytes = std::fs::metadata(dir.path().join("live_snapshot.json"))
+        .unwrap()
+        .len();
+    println!("{rows} rows: compact write ms {times:?} (first, then warm); file {bytes} B");
+}
