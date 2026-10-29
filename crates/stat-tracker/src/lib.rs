@@ -12,6 +12,7 @@ pub mod capture_gate;
 pub mod detect;
 pub mod frame;
 pub mod game_running;
+pub mod games;
 pub mod input;
 pub mod mapcrops;
 pub mod names;

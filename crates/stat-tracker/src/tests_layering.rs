@@ -65,8 +65,7 @@ impl Crate {
     }
 }
 
-/// Module path prefix -> crate. The longest matching prefix wins, so
-/// `report::blank` is vision while the rest of `report` is top.
+/// Module path prefix -> crate; the longest wins (`report::blank` is vision, `report` top).
 const CRATE_OF: &[(&str, Crate)] = &[
     ("config", Crate::Core),
     ("fs_mode", Crate::Core),
@@ -100,6 +99,7 @@ const CRATE_OF: &[(&str, Crate)] = &[
     ("packs", Crate::Vision),
     ("report::blank", Crate::Vision),
     ("shadow", Crate::Vision),
+    ("games", Crate::Top),
     ("reader_apply", Crate::Top),
     ("report", Crate::Top),
     ("tab_retry", Crate::Top),
