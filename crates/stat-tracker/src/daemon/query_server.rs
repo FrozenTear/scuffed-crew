@@ -85,19 +85,33 @@ pub(crate) fn stop(data_dir: &Path) {
 #[derive(Default)]
 pub(crate) struct GamesCache {
     at: Option<(u64, Arc<Vec<Game>>)>,
+    /// One build at a time: clients that miss together wait for one read.
+    build: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl GamesCache {
-    /// The list at `rev`, built if missing. The lock is held only to look
-    /// and to store, not across the store read (two clients that miss at
-    /// once both build; the second result wins). The rows are read from the
-    /// store on the runtime (an async read, one page at a time), the list
-    /// is built on the blocking pool.
+    /// The list at `rev`, built if missing. The cache lock is held only to
+    /// look and to store, not across the store read, so a hit never waits on
+    /// a build. Builds are single-flight (a second miss waits, then finds the
+    /// first one's list), and a list is stored only if it is not older than
+    /// the cached one. The rows are read from the store on the runtime (an
+    /// async read, one page at a time); the list is built on the blocking
+    /// pool.
     pub(crate) async fn games(
         cache: &tokio::sync::Mutex<GamesCache>,
         rev: u64,
         store: &storage::LocalStore,
     ) -> Result<Arc<Vec<Game>>, String> {
+        let build = {
+            let c = cache.lock().await;
+            if let Some((at, games)) = &c.at
+                && *at == rev
+            {
+                return Ok(games.clone());
+            }
+            c.build.clone()
+        };
+        let _one = build.lock().await;
         if let Some((at, games)) = &cache.lock().await.at
             && *at == rev
         {
@@ -109,7 +123,10 @@ impl GamesCache {
         })
         .await
         .map_err(|e| e.to_string())?;
-        cache.lock().await.at = Some((rev, games.clone()));
+        let mut c = cache.lock().await;
+        if c.at.as_ref().is_none_or(|(at, _)| *at <= rev) {
+            c.at = Some((rev, games.clone()));
+        }
         Ok(games)
     }
 }

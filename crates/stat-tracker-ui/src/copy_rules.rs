@@ -46,7 +46,10 @@ const SOURCES: &[(&str, &str)] = &[
     ("settings_rows.rs", include_str!("settings_rows.rs")),
     ("settings_save.rs", include_str!("settings_save.rs")),
     ("settings_update.rs", include_str!("settings_update.rs")),
-    ("small_sample.rs", include_str!("small_sample.rs")),
+    (
+        "games/small_sample.rs",
+        include_str!("../../stat-tracker/src/games/small_sample.rs"),
+    ),
     ("stat_tiles.rs", include_str!("stat_tiles.rs")),
     ("tab_bits.rs", include_str!("tab_bits.rs")),
     ("tracker_status.rs", include_str!("tracker_status.rs")),

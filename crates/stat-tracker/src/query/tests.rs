@@ -147,3 +147,108 @@ fn a_connect_to_a_daemon_that_never_accepts_gives_up_in_time() {
     assert!(res.is_err());
     assert!(started.elapsed() < std::time::Duration::from_secs(3));
 }
+
+/// A listener with a backlog of 0 that never accepts: the first client
+/// sits in the queue, the next connect cannot queue.
+fn full_listener(path: &std::path::Path) -> std::os::fd::OwnedFd {
+    use std::os::fd::FromRawFd as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    // SAFETY: plain socket(2), bind(2), listen(2) calls on a fd we own.
+    unsafe {
+        let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+        assert!(fd >= 0);
+        let mut addr: libc::sockaddr_un = std::mem::zeroed();
+        addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+        for (d, b) in addr.sun_path.iter_mut().zip(path.as_os_str().as_bytes()) {
+            *d = *b as libc::c_char;
+        }
+        let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+        assert_eq!(
+            libc::bind(fd, (&addr as *const libc::sockaddr_un).cast(), len),
+            0
+        );
+        assert_eq!(libc::listen(fd, 0), 0);
+        std::os::fd::OwnedFd::from_raw_fd(fd)
+    }
+}
+
+#[test]
+fn a_daemon_with_a_full_backlog_fails_fast_without_a_waiting_thread() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::socket_path(dir.path()).unwrap();
+    let _listener = full_listener(&path);
+    let _queued = std::os::unix::net::UnixStream::connect(&path).unwrap();
+    let started = std::time::Instant::now();
+    let res = super::client::ask(dir.path(), &Request::Rev, std::time::Duration::from_secs(5));
+    assert!(
+        matches!(&res, Err(super::client::QueryError::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut),
+        "{res:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "a full backlog must not wait out the timeout"
+    );
+}
+
+#[test]
+fn a_server_that_trickles_bytes_is_cut_off_at_the_deadline() {
+    use std::io::{BufRead as _, Write as _};
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::socket_path(dir.path()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(s.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        for _ in 0..100 {
+            if s.write_all(b" ").is_err() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    });
+    let started = std::time::Instant::now();
+    let res = super::client::ask(
+        dir.path(),
+        &Request::Rev,
+        std::time::Duration::from_millis(300),
+    );
+    assert!(res.is_err(), "{res:?}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1500),
+        "the answer has one deadline, not one per read ({:?})",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn an_answer_over_the_cap_is_refused() {
+    use std::io::{BufRead as _, Write as _};
+    let dir = tempfile::tempdir().unwrap();
+    let path = super::socket_path(dir.path()).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    std::thread::spawn(move || {
+        let (mut s, _) = listener.accept().unwrap();
+        let mut line = String::new();
+        std::io::BufReader::new(s.try_clone().unwrap())
+            .read_line(&mut line)
+            .unwrap();
+        let chunk = vec![b' '; 1 << 20];
+        for _ in 0..20 {
+            if s.write_all(&chunk).is_err() {
+                return;
+            }
+        }
+    });
+    let res = super::client::ask(
+        dir.path(),
+        &Request::Rev,
+        std::time::Duration::from_secs(10),
+    );
+    assert!(
+        matches!(&res, Err(super::client::QueryError::Bad(m)) if m.contains("too large")),
+        "{res:?}"
+    );
+}

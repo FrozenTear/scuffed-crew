@@ -433,7 +433,7 @@ tracker_data_name() {
         matches.jsonl|commands|daemon.pid|daemon.log|daemon.log.1|debug|shadow|\
         tessdata|active_game.json|sync_auth.json|portraits|ui_state.json|\
         report-kit|run.marker|last_crash.marker|ocr_switch.json|ocr_switch.json.tmp|\
-        update-install.log)
+        update-install.log|tracker.sock)
             return 0
             ;;
         stats.surrealkv.pre-*)

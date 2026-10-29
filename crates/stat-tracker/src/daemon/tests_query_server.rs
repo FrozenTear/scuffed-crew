@@ -203,9 +203,10 @@ async fn a_bad_request_gets_an_error_line() {
 }
 
 /// Request times on a copy of a real store (memfix PR 2 acceptance: games
-/// under 1 s, rev under 50 ms). Ignored: needs `MEMFIX_PARITY_STORE` = a
-/// data dir holding `stats.surrealkv` (copied to a temp dir first). Run in
-/// a release-like profile.
+/// under 1 s, rev under 50 ms), on the store as the daemon serves it (the
+/// hero timeline move done first). Ignored: needs `MEMFIX_PARITY_STORE` =
+/// a data dir holding `stats.surrealkv` (copied to a temp dir first). Run
+/// in a release-like profile; fails over the limits.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn the_query_times_on_a_real_store_copy() {
@@ -220,39 +221,52 @@ async fn the_query_times_on_a_real_store_copy() {
         .status()
         .unwrap();
     assert!(status.success());
+    let backup = crate::storage::prepare_timeline_migration(dir.path()).await;
     let store = LocalStore::open(dir.path()).await.unwrap();
+    store.migrate_timeline_if_needed(&backup).await.unwrap();
+    assert!(store.timeline_migrated());
     let (listener, _) = bind(dir.path()).unwrap();
     tokio::spawn(serve(listener, store.clone(), dir.path().to_path_buf()));
-    let time = |req: Request| {
+    let time = |req: Request, timeout: std::time::Duration| {
         let d = dir.path().to_path_buf();
         async move {
             let t = std::time::Instant::now();
-            let r = ask(&d, req).await.unwrap();
+            let r = tokio::task::spawn_blocking(move || client::ask(&d, &req, timeout))
+                .await
+                .unwrap()
+                .unwrap();
             (t.elapsed().as_millis(), r)
         }
     };
-    let (rev_ms, _) = time(Request::Rev).await;
-    let (cold_ms, cold) = time(Request::Totals {
-        filter: GameFilter::default(),
-    })
-    .await;
-    let (warm_ms, _) = time(Request::Totals {
-        filter: GameFilter::default(),
-    })
-    .await;
-    let (games_ms, games) = time(Request::Games {
-        filter: GameFilter::default(),
-    })
-    .await;
-    let Response::Totals { totals, .. } = cold else {
+    let all = || GameFilter::default();
+    let (rev_ms, _) = time(Request::Rev, client::QUICK).await;
+    let (cold_totals_ms, totals) = time(Request::Totals { filter: all() }, client::SLOW).await;
+    let (warm_totals_ms, _) = time(Request::Totals { filter: all() }, client::SLOW).await;
+    // A write moves the revision, so the next list is built again.
+    store
+        .clear_tombstones(vec!["no-such-game".into()])
+        .await
+        .unwrap();
+    let (cold_games_ms, games) = time(Request::Games { filter: all() }, client::SLOW).await;
+    let (warm_games_ms, _) = time(Request::Games { filter: all() }, client::SLOW).await;
+    let Response::Totals { totals, .. } = totals else {
         panic!("totals");
     };
     let Response::Games { games, .. } = games else {
         panic!("games");
     };
     println!(
-        "{} games: rev {rev_ms} ms, totals cold {cold_ms} ms (builds the list), totals warm {warm_ms} ms, games list warm {games_ms} ms ({} games)",
+        "{} games ({} listed): rev {rev_ms} ms; totals cold {cold_totals_ms} ms, warm {warm_totals_ms} ms; games cold {cold_games_ms} ms, warm {warm_games_ms} ms",
         totals.record.games,
         games.len()
+    );
+    assert!(rev_ms < 50, "rev took {rev_ms} ms");
+    assert!(
+        cold_games_ms < 1000,
+        "a cold games request took {cold_games_ms} ms"
+    );
+    assert!(
+        cold_totals_ms < 1000,
+        "cold totals took {cold_totals_ms} ms"
     );
 }
