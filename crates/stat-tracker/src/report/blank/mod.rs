@@ -524,9 +524,11 @@ fn blanked_scoreboard_inner(
     at: CaptureTime,
     copy_portraits: bool,
 ) -> BlankedBoard {
-    let rgb = frame.to_rgb8();
+    // Borrowed for an RGB frame (every stream frame): this runs for the
+    // report kit on every accepted Tab, and only reads the frame.
+    let rgb = crate::frame::rgb_view(frame);
     let (x, y, w, h) = crop_scoreboard_rect(rgb.width(), rgb.height());
-    let crop = image::imageops::crop_imm(&rgb, x, y, w, h).to_image();
+    let crop = image::imageops::crop_imm(&*rgb, x, y, w, h).to_image();
     blank_crop_inner(
         &crop,
         team_size,
