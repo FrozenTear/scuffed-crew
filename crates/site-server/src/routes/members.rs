@@ -759,23 +759,49 @@ pub struct UpsertGameAccountRequest {
     pub role: Option<Option<String>>,
 }
 
-/// PUT /api/members/:id/game-accounts — upsert game account (self or officer+)
+/// PUT /api/members/:id/game-accounts. Upsert a game account.
+///
+/// Self is allowed. Editing someone else uses the same rank rule as profile
+/// edits ([`crate::membership_policy::can_edit_other_profile`]): an admin may
+/// edit anyone, and an officer may edit a member or recruit. A refused officer
+/// edit is 403 `{"error":"Officers cannot edit the profile of admins or other officers"}`.
+/// A member or recruit editing someone else is 403
+/// `{"error":"Can only edit your own game accounts"}`.
 pub async fn upsert_game_account(
     State(state): State<AppState>,
     caller: OrgMember,
     Path(member_id): Path<String>,
     Json(body): Json<UpsertGameAccountRequest>,
 ) -> Result<Json<GameAccount>, (StatusCode, Json<ErrorResponse>)> {
-    let is_self = caller.member.id == member_id;
-    let is_officer = caller.member.org_role.is_at_least(OrgRole::Officer);
-
-    if !is_self && !is_officer {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Can only edit your own game accounts".into(),
-            }),
-        ));
+    if caller.member.id != member_id {
+        let target = state.db.get_member_safe(&member_id).await.map_err(|e| {
+            tracing::error!(error = %e, "get_member_safe for game account");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "Internal server error".into(),
+                }),
+            )
+        })?;
+        let Some(target) = target else {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "Member not found".into(),
+                }),
+            ));
+        };
+        if let Err(denial) = crate::membership_policy::can_edit_other_profile(
+            caller.member.org_role,
+            target.org_role,
+        ) {
+            let error = if caller.member.org_role.is_at_least(OrgRole::Officer) {
+                denial.message().to_string()
+            } else {
+                "Can only edit your own game accounts".to_string()
+            };
+            return Err((denial.status(), Json(ErrorResponse { error })));
+        }
     }
 
     // Length units differ on purpose.
@@ -1193,7 +1219,10 @@ mod tests {
     use axum::http::StatusCode;
     use scuffed_db::OrgRole;
 
-    use super::{UpdateMemberRequest, get_member, update_member};
+    use super::{
+        UpdateMemberRequest, UpsertGameAccountRequest, get_member, update_member,
+        upsert_game_account,
+    };
     use crate::extractors::OrgMember;
     use crate::test_support::{must_err, must_ok, seed_user, test_state};
 
@@ -1619,5 +1648,131 @@ mod tests {
                 && entry.details.as_deref() == Some(want)
         });
         assert!(hit, "missing deactivation rename audit");
+    }
+
+    async fn put_game_account(
+        state: &crate::state::AppState,
+        caller: OrgMember,
+        target_id: &str,
+        account_name: &str,
+    ) -> Result<
+        Json<scuffed_db::GameAccount>,
+        (
+            StatusCode,
+            Json<scuffed_auth::server::session::ErrorResponse>,
+        ),
+    > {
+        upsert_game_account(
+            State(state.clone()),
+            caller,
+            Path(target_id.to_string()),
+            Json(UpsertGameAccountRequest {
+                game_id: "ow2".into(),
+                account_name: account_name.into(),
+                account_id: None,
+                rank: None,
+                sr: None,
+                role: None,
+            }),
+        )
+        .await
+    }
+
+    /// Game-account writes follow the same rank rule as profile edits.
+    #[tokio::test]
+    async fn game_account_edit_follows_moderation_rank() {
+        let state = test_state().await;
+        let _officer = named_member(&state, "officer", "Officer", OrgRole::Officer).await;
+        let member = named_member(&state, "plain", "Plain", OrgRole::Member).await;
+        let member_id = member.member.id.clone();
+        let admin = named_member(&state, "admin", "Boss", OrgRole::Admin).await;
+        let admin_id = admin.member.id.clone();
+        let peer = named_member(&state, "peer", "Peer", OrgRole::Officer).await;
+        let peer_id = peer.member.id.clone();
+
+        let Json(saved) = must_ok(
+            put_game_account(
+                &state,
+                caller_for(&state, "officer").await,
+                &member_id,
+                "PlainOwl",
+            )
+            .await,
+            "officer edits member game account",
+        );
+        assert_eq!(saved.account_name, "PlainOwl");
+
+        let (status, body) = must_err(
+            put_game_account(
+                &state,
+                caller_for(&state, "officer").await,
+                &admin_id,
+                "Nope",
+            )
+            .await,
+            "officer edits admin game account",
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.error,
+            "Officers cannot edit the profile of admins or other officers"
+        );
+        assert!(
+            state
+                .db
+                .list_member_game_accounts(&admin_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let (status, body) = must_err(
+            put_game_account(
+                &state,
+                caller_for(&state, "officer").await,
+                &peer_id,
+                "Nope",
+            )
+            .await,
+            "officer edits officer game account",
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.error,
+            "Officers cannot edit the profile of admins or other officers"
+        );
+        assert!(
+            state
+                .db
+                .list_member_game_accounts(&peer_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let Json(saved) = must_ok(
+            put_game_account(
+                &state,
+                caller_for(&state, "admin").await,
+                &peer_id,
+                "PeerOwl",
+            )
+            .await,
+            "admin edits officer game account",
+        );
+        assert_eq!(saved.account_name, "PeerOwl");
+
+        let Json(saved) = must_ok(
+            put_game_account(
+                &state,
+                caller_for(&state, "plain").await,
+                &member_id,
+                "Mine",
+            )
+            .await,
+            "self edits game account",
+        );
+        assert_eq!(saved.account_name, "Mine");
+        assert_eq!(saved.member_id, member_id);
     }
 }
