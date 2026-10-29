@@ -111,14 +111,6 @@ enum StatsTab {
 
 // -- Shared helpers --
 
-fn winrate_pct(wins: u32, total: u32) -> f64 {
-    if total == 0 {
-        0.0
-    } else {
-        (wins as f64 / total as f64) * 100.0
-    }
-}
-
 /// Class for win-rate TEXT values. Plain text tokens, never a traffic light.
 /// Polarity is carried by the bar against the 50% reference hairline; the only
 /// text distinction is sample-size honesty: a result without a win rate yet
@@ -152,10 +144,6 @@ pub(super) fn wr_bar_color(tally: Tally) -> &'static str {
         "var(--chart-wr-down)"
     }
 }
-
-/// Role cards mute under this many games. Heroes, maps and seasons follow
-/// the small-sample rule in [`crate::sample`] instead.
-pub(super) const MIN_GAMES: u32 = crate::sample::RECORD_MIN_GAMES;
 
 /// Platform line on `/stats`. Linux supports Wayland and X11. No other OS builds.
 const TRACKER_PLATFORM_COPY: &str =

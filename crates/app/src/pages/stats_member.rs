@@ -5,6 +5,7 @@ use serde::Deserialize;
 use super::stats::load_error_state;
 use super::stats::role::{
     RolePanel, hide_member_role_error, member_roles_path, role_aggs_from_rows, role_panel,
+    role_result,
 };
 use crate::components::ui::{SeasonSelect, use_stats_season};
 use crate::components::{DataTable, member_pending};
@@ -64,23 +65,6 @@ fn result_class(tally: Tally) -> &'static str {
         "stats-wr"
     } else {
         "stats-wr muted"
-    }
-}
-
-fn winrate_pct(wins: u32, total: u32) -> f64 {
-    if total == 0 {
-        0.0
-    } else {
-        (wins as f64 / total as f64) * 100.0
-    }
-}
-
-/// Match personal stats: plain WR text; mute low sample (no 3-bin traffic light).
-fn wr_text_class(matches: u32) -> &'static str {
-    if matches < 3 {
-        "stats-wr muted"
-    } else {
-        "stats-wr"
     }
 }
 
@@ -309,19 +293,19 @@ pub fn StatsMember(id: String) -> Element {
                                         }
                                     } else {
                                         rsx! {
-                                            DataTable { headers: vec!["Role", "Matches", "Win %"],
+                                            DataTable { headers: vec!["Role", "Matches", "Win rate"],
                                                 for agg in shown.iter() {
                                                     {
-                                                        let wr = winrate_pct(agg.wins, agg.matches);
-                                                        let wr_cls = wr_text_class(agg.matches);
-                                                        let row_cls = if agg.matches < 3 { "stats-row-muted" } else { "" };
+                                                        let tally = agg.tally();
+                                                        let result = role_result(tally);
+                                                        let wr_cls = result_class(tally);
                                                         let name = agg.name;
                                                         let matches = agg.matches;
                                                         rsx! {
-                                                            tr { key: "{name}", class: "{row_cls}",
+                                                            tr { key: "{name}",
                                                                 td { "{name}" }
                                                                 td { "{matches}" }
-                                                                td { span { class: "{wr_cls}", "{wr:.1}%" } }
+                                                                td { span { class: "{wr_cls}", "{result}" } }
                                                             }
                                                         }
                                                     }
