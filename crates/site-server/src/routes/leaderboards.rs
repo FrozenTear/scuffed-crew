@@ -9,11 +9,11 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use scuffed_auth::server::session::ErrorResponse;
-use scuffed_db::{AuditAction, AuditTargetType, HeroStats, MemberLeaderboardRow, Season};
+use scuffed_db::{AuditAction, AuditTargetType, HeroStats, MemberLeaderboardRow, OrgRole, Season};
 use scuffed_types::api::{CreateSeasonRequest, UpdateSeasonRequest};
 use scuffed_types::{HeroAgg, MemberLeaderboardRow as TypesMemberRow, resolve_hero_query};
 
-use crate::extractors::AdminUser;
+use crate::extractors::{AdminUser, OptionalOrgMember};
 use crate::leaderboard_cache::{
     CacheError, FailKind, LeaderboardKey, LoadError, LoadedBoard, OnError, truncate_to_requested,
 };
@@ -61,12 +61,18 @@ fn default_top() -> u32 {
     3
 }
 
-/// GET /api/public/members/:id/heroes?top=3 — public top heroes (no auth).
+/// GET /api/public/members/:id/heroes?top=3. Public top heroes (no auth required).
 ///
 /// `top=0` returns **all** heroes (hero-stats W2 B4). Default remains 3.
 /// Non-zero values are clamped to 1..=50.
+///
+/// Missing and inactive members stay 404. An active member with
+/// `stats_visibility = members` is 403 `stats_members_only` for signed-out
+/// and inactive callers, and 200 for an active crew member. `private` is 403
+/// `stats_private` unless the caller is the owner or an officer.
 pub async fn public_member_heroes(
     State(state): State<AppState>,
+    viewer: OptionalOrgMember,
     Path(id): Path<String>,
     Query(q): Query<HeroesQuery>,
 ) -> Result<Json<Vec<HeroAgg>>, (StatusCode, Json<ErrorResponse>)> {
@@ -90,6 +96,27 @@ pub async fn public_member_heroes(
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: "Member not found".into(),
+            }),
+        ));
+    }
+    let active = viewer.0.as_ref();
+    let visibility = state.db.get_stats_visibility(&id).await.map_err(|_e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal error".into(),
+            }),
+        )
+    })?;
+    if let Some(error) = visibility.denial(
+        active.is_some(),
+        active.is_some_and(|m| m.id == id),
+        active.is_some_and(|m| m.org_role.is_at_least(OrgRole::Officer)),
+    ) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: error.into(),
             }),
         ));
     }
@@ -205,13 +232,16 @@ impl LoadError for BoardError {
 
 /// GET /api/public/leaderboards?metric=winrate|kd|games&limit=25&season=<id>&hero=<name>
 ///
-/// Anonymous and logged-in callers get the same rows. Inactive members are
-/// omitted by the query. One grouped scan per season is cached. Metric,
-/// hero, and limit are projections of that snapshot, so a different hero
-/// does not start another scan. The cache key still carries a public
-/// audience tag so a crew-only board cannot be stored in this slot.
+/// Inactive members are omitted by the query. `stats_visibility = private`
+/// is omitted for every caller. `members` is omitted for signed-out and
+/// inactive callers and included for an active member. Those two audiences
+/// use different cache slots, so a members-only row from the crew scan is
+/// not served to an anonymous caller. One grouped scan per season per
+/// audience is cached. Metric, hero, and limit are projections of that
+/// snapshot, so a different hero does not start another scan.
 pub async fn public_leaderboards(
     State(state): State<AppState>,
+    viewer: OptionalOrgMember,
     Query(q): Query<LeaderboardQuery>,
 ) -> Result<Json<PublicLeaderboardBody>, (StatusCode, Json<ErrorResponse>)> {
     let metric = match q.metric.as_str() {
@@ -240,11 +270,18 @@ pub async fn public_leaderboards(
         .filter(|s| !s.is_empty())
         .unwrap_or("")
         .to_string();
-    // One cache entry per season. Metric, hero, and limit are projections.
-    let key = LeaderboardKey::public_board("scan", 0, &season_id, "");
+    // One cache entry per season per audience. Metric, hero, and limit are
+    // projections. Anonymous and active members do not share the slot.
+    let crew = viewer.0.is_some();
+    let key = if crew {
+        LeaderboardKey::crew_board("scan", 0, &season_id, "")
+    } else {
+        LeaderboardKey::public_board("scan", 0, &season_id, "")
+    };
 
     let load_state = state.clone();
     let load_season = season_id.clone();
+    let load_crew = crew;
     let board = state
         .leaderboard_cache
         .get_or_load(key, move || {
@@ -269,7 +306,7 @@ pub async fn public_leaderboards(
                 })?;
                 let snapshot = state
                     .db
-                    .leaderboard_snapshot(season_window)
+                    .leaderboard_snapshot(season_window, load_crew)
                     .await
                     .map_err(|_e| BoardError::Db)?;
                 Ok(LoadedBoard {
@@ -666,8 +703,8 @@ mod cache_http_tests {
         let anon = get_board(&app, None).await;
         let authed = get_board(&app, Some("viewer-session")).await;
         assert_eq!(
-            anon, authed,
-            "auth must not change the public board or its cache slot"
+            anon["rows"], authed["rows"],
+            "public visibility rows match. The callers do not share a cache slot."
         );
 
         let ids: Vec<&str> = anon["rows"]

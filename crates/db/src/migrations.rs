@@ -808,6 +808,13 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE TABLE IF NOT EXISTS member_settings SCHEMAFULL;
         DEFINE FIELD OVERWRITE member_id ON member_settings TYPE string;
         DEFINE FIELD OVERWRITE player_name ON member_settings TYPE option<string>;
+        -- Who can see this member's tracker stats.
+        -- public: everyone. members: active signed-in crew only.
+        -- private: owner and officers on per-member routes, and off every leaderboard.
+        -- Legacy rows that predate the field read back as public.
+        DEFINE FIELD OVERWRITE stats_visibility ON member_settings TYPE string
+            DEFAULT 'public'
+            ASSERT $value IN ['public', 'members', 'private'];
 
         DEFINE INDEX IF NOT EXISTS ms_member_idx ON member_settings COLUMNS member_id UNIQUE;
 

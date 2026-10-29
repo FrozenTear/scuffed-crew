@@ -7,16 +7,15 @@ use axum::{
 
 use scuffed_auth::server::session::ErrorResponse;
 use scuffed_db::{
-    AuditAction, AuditTargetType, DaemonToken, HeroStats, MapStats, PersonalMatch, PersonalStats,
-    RoleStats,
+    AuditAction, AuditTargetType, DaemonToken, HeroStats, MapStats, OrgRole, PersonalMatch,
+    PersonalStats, RoleStats,
 };
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
     MemberSettingsResponse, NAME_RECOGNIZER_ID_ERROR, PaginationParams, RECOGNIZER_ID_ERROR,
-    SUSPECT_FIELDS_ERROR, SeasonQuery, StatsUploadBody, StatsUploadResponse, TokenCheckResponse,
-    UPLOAD_HERO_UNKNOWN, UpdateMemberSettingsRequest, is_upload_hero_unknown,
-    resolve_name_recognizer, resolve_recognizer, resolve_suspect_fields, validate_deleted_session,
-    validate_upload_entry,
+    SUSPECT_FIELDS_ERROR, SeasonQuery, StatsUploadBody, StatsUploadResponse, StatsVisibility,
+    TokenCheckResponse, UPLOAD_HERO_UNKNOWN, is_upload_hero_unknown, resolve_name_recognizer,
+    resolve_recognizer, resolve_suspect_fields, validate_deleted_session, validate_upload_entry,
 };
 use scuffed_types::{
     STATS_UPLOAD_MAX_DELETED_SESSIONS, STATS_UPLOAD_MAX_MATCHES, hero_key_to_name,
@@ -441,13 +440,55 @@ pub async fn my_map_stats(
         })
 }
 
-/// GET /api/stats/member/:id — view another member's stats (session auth)
+fn stats_forbidden(error: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: error.to_string(),
+        }),
+    )
+}
+
+fn internal_error() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
+}
+
+async fn ensure_member_stats_visible(
+    state: &AppState,
+    viewer: &OrgMember,
+    target_id: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    let visibility = state
+        .db
+        .get_stats_visibility(target_id)
+        .await
+        .map_err(|_e| internal_error())?;
+    if let Some(error) = visibility.denial(
+        true,
+        viewer.member.id == target_id,
+        viewer.member.org_role.is_at_least(OrgRole::Officer),
+    ) {
+        return Err(stats_forbidden(error));
+    }
+    Ok(())
+}
+
+/// GET /api/stats/member/:id — view another member's stats (session auth).
+///
+/// `public` and `members` are visible to any active member. `private` is the
+/// owner or an officer. Anyone else gets 403 `stats_private`.
 pub async fn member_stats(
     State(state): State<AppState>,
-    _member: OrgMember,
+    member: OrgMember,
     Path(member_id): Path<String>,
     Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<PersonalStats>, (StatusCode, Json<ErrorResponse>)> {
+    ensure_member_stats_visible(&state, &member, &member_id).await?;
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
@@ -467,10 +508,11 @@ pub async fn member_stats(
 /// GET /api/stats/member/:id/heroes — view another member's hero stats
 pub async fn member_hero_stats(
     State(state): State<AppState>,
-    _member: OrgMember,
+    member: OrgMember,
     Path(member_id): Path<String>,
     Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<HeroStats>>, (StatusCode, Json<ErrorResponse>)> {
+    ensure_member_stats_visible(&state, &member, &member_id).await?;
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
@@ -490,15 +532,17 @@ pub async fn member_hero_stats(
 /// GET /api/stats/member/:id/roles — another member's per-role stats (session auth).
 ///
 /// Same query, [`RoleStats`] shape, and ordering as [`my_role_stats`].
-/// Visibility matches [`member_hero_stats`]: any active org member may read any
-/// member id. There is no per-member privacy flag. A missing id returns `[]`.
-/// Anonymous requests are 401; inactive or suspended callers are 403.
+/// Visibility matches [`member_stats`]: `public` and `members` for any active
+/// member, `private` for the owner or an officer. A missing id with public
+/// visibility returns `[]`. Anonymous requests are 401; inactive or suspended
+/// callers are 403 `Membership inactive` before this check.
 pub async fn member_role_stats(
     State(state): State<AppState>,
-    _member: OrgMember,
+    member: OrgMember,
     Path(member_id): Path<String>,
     Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<RoleStats>>, (StatusCode, Json<ErrorResponse>)> {
+    ensure_member_stats_visible(&state, &member, &member_id).await?;
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
@@ -518,10 +562,11 @@ pub async fn member_role_stats(
 /// GET /api/stats/member/:id/maps — view another member's map stats
 pub async fn member_map_stats(
     State(state): State<AppState>,
-    _member: OrgMember,
+    member: OrgMember,
     Path(member_id): Path<String>,
     Query(sq): Query<SeasonQuery>,
 ) -> Result<Json<Vec<MapStats>>, (StatusCode, Json<ErrorResponse>)> {
+    ensure_member_stats_visible(&state, &member, &member_id).await?;
     let season = resolve_season_window(&state, sq.season.as_deref()).await?;
     state
         .db
@@ -648,38 +693,96 @@ pub async fn get_member_settings(
                 }),
             )
         })?;
+    let (player_name, stats_visibility) = match settings {
+        Some(s) => (s.player_name, s.stats_visibility),
+        None => (None, StatsVisibility::Public),
+    };
     Ok(Json(MemberSettingsResponse {
-        player_name: settings.and_then(|s| s.player_name),
+        player_name,
+        stats_visibility,
     }))
 }
 
-/// PUT /api/stats/settings — save player's daemon settings (session auth)
+enum SettingsPutReject {
+    Malformed,
+    BadVisibility,
+}
+
+/// Same JSON shape as [`scuffed_types::UpdateMemberSettingsRequest`].
+///
+/// Parsed by hand so an unknown `stats_visibility` is 400. A missing
+/// `player_name` is still `None`, which clears the stored name.
+fn parse_settings_put(
+    value: serde_json::Value,
+) -> Result<(Option<String>, Option<StatsVisibility>), SettingsPutReject> {
+    let Some(obj) = value.as_object() else {
+        return Err(SettingsPutReject::Malformed);
+    };
+    let player_name = match obj.get("player_name") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(_) => return Err(SettingsPutReject::Malformed),
+    };
+    let stats_visibility = match obj.get("stats_visibility") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "public" => Some(StatsVisibility::Public),
+            "members" => Some(StatsVisibility::Members),
+            "private" => Some(StatsVisibility::Private),
+            _ => return Err(SettingsPutReject::BadVisibility),
+        },
+        Some(_) => return Err(SettingsPutReject::BadVisibility),
+    };
+    Ok((player_name, stats_visibility))
+}
+
+/// PUT /api/stats/settings. Save the caller's daemon settings (session auth).
+///
+/// Omitting `player_name` still clears the stored name. Omitting
+/// `stats_visibility` keeps the stored value. A visibility change drops the
+/// leaderboard cache so the next board is scanned under the new rule.
 pub async fn update_member_settings(
     State(state): State<AppState>,
     member: OrgMember,
-    Json(body): Json<UpdateMemberSettingsRequest>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<MemberSettingsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let (player_name_raw, stats_visibility) =
+        parse_settings_put(body).map_err(|reject| match reject {
+            SettingsPutReject::Malformed => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(ErrorResponse {
+                    error: "invalid_settings".into(),
+                }),
+            ),
+            SettingsPutReject::BadVisibility => (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_stats_visibility".into(),
+                }),
+            ),
+        })?;
     // Trim and treat empty string as None
-    let player_name = body
-        .player_name
+    let player_name = player_name_raw
         .as_deref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty());
 
+    let before = state
+        .db
+        .get_stats_visibility(&member.member.id)
+        .await
+        .map_err(|_e| internal_error())?;
     let settings = state
         .db
-        .upsert_member_settings(&member.member.id, player_name)
+        .upsert_member_settings(&member.member.id, player_name, stats_visibility)
         .await
-        .map_err(|_e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal error".into(),
-                }),
-            )
-        })?;
+        .map_err(|_e| internal_error())?;
+    if settings.stats_visibility != before {
+        state.leaderboard_cache.invalidate();
+    }
     Ok(Json(MemberSettingsResponse {
         player_name: settings.player_name,
+        stats_visibility: settings.stats_visibility,
     }))
 }
 
