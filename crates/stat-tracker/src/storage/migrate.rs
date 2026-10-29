@@ -98,6 +98,7 @@ impl LocalStore {
     pub async fn migrate_pack_key_heroes(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let mut rewritten = 0usize;
         let mut reupload = 0usize;
         let mut sessions = std::collections::BTreeSet::new();

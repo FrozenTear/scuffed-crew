@@ -20,6 +20,7 @@ impl LocalStore {
         &self,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         // Marked before the delete, so a capture insert cannot land between
         // the delete and the mark. A failed delete (the query or any checked
         // statement) unmarks it, or every later row of that game would be
@@ -68,6 +69,7 @@ impl LocalStore {
         &self,
         session_ids: &[String],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let mut sids: Vec<String> = session_ids
             .iter()
             .filter(|sid| !sid.is_empty())
@@ -107,6 +109,7 @@ impl LocalStore {
         &self,
         session_ids: Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         if session_ids.is_empty() {
             return Ok(());
         }

@@ -53,6 +53,7 @@ impl LocalStore {
         &self,
         cmd: &StoreCommand,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         match cmd {
             StoreCommand::SetOutcome {
                 session_id,

@@ -11,7 +11,8 @@
 //!
 //! The game list is built once per stored revision: the compact snapshot
 //! rows through `games_from_snapshot`, exactly as the GUI builds it from the
-//! file. The deletes still queued in `commands/` are taken off on every
+//! file, keyed by the store's revision (`LocalStore::rev`, moved by every
+//! write). The deletes still queued in `commands/` are taken off on every
 //! request (the GUI queues them without a stored change). The server holds
 //! a store handle, so shutdown stops it ([`stop`]) before the store closes.
 
@@ -64,9 +65,8 @@ pub(crate) fn start(
     listener: tokio::net::UnixListener,
     store: storage::LocalStore,
     data_dir: PathBuf,
-    rev: fn() -> u64,
 ) {
-    let task = tokio::spawn(serve(listener, store, data_dir, rev));
+    let task = tokio::spawn(serve(listener, store, data_dir));
     *RUNNING.lock().unwrap_or_else(|e| e.into_inner()) = Some(task.abort_handle());
 }
 
@@ -88,19 +88,28 @@ pub(crate) struct GamesCache {
 }
 
 impl GamesCache {
-    async fn games(
-        &mut self,
+    /// The list at `rev`, built if missing. The lock is held only to look
+    /// and to store, not across the store read (two clients that miss at
+    /// once both build; the second result wins). The rows are read from the
+    /// store on the runtime (an async read, one page at a time), the list
+    /// is built on the blocking pool.
+    pub(crate) async fn games(
+        cache: &tokio::sync::Mutex<GamesCache>,
         rev: u64,
         store: &storage::LocalStore,
     ) -> Result<Arc<Vec<Game>>, String> {
-        if let Some((at, games)) = &self.at
+        if let Some((at, games)) = &cache.lock().await.at
             && *at == rev
         {
             return Ok(games.clone());
         }
         let snap = store.compact_snapshot().await.map_err(|e| e.to_string())?;
-        let games = Arc::new(stat_tracker::games::rows::games_from_snapshot(&snap));
-        self.at = Some((rev, games.clone()));
+        let games = tokio::task::spawn_blocking(move || {
+            Arc::new(stat_tracker::games::rows::games_from_snapshot(&snap))
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        cache.lock().await.at = Some((rev, games.clone()));
         Ok(games)
     }
 }
@@ -111,7 +120,6 @@ pub(crate) async fn serve(
     listener: tokio::net::UnixListener,
     store: storage::LocalStore,
     data_dir: PathBuf,
-    rev: fn() -> u64,
 ) {
     let cache = Arc::new(tokio::sync::Mutex::new(GamesCache::default()));
     let slots = Arc::new(tokio::sync::Semaphore::new(MAX_CLIENTS));
@@ -148,7 +156,7 @@ pub(crate) async fn serve(
             let _slot = slot;
             let answer = match read_request(&mut stream).await {
                 Err(e) => e,
-                Ok(request) => respond(&request, rev(), &cache, &store, &data_dir).await,
+                Ok(request) => respond(&request, store.rev(), &cache, &store, &data_dir).await,
             };
             let _ =
                 tokio::time::timeout(WRITE_WAIT, stream.write_all(&proto::encode(&answer))).await;
@@ -177,7 +185,7 @@ pub(crate) async fn respond(
     match request {
         Request::Hello | Request::Rev => proto::answer(request, rev, &[]),
         Request::Totals { .. } | Request::Games { .. } => {
-            let games = match cache.lock().await.games(rev, store).await {
+            let games = match GamesCache::games(cache, rev, store).await {
                 Ok(games) => games,
                 Err(e) => return Response::err("internal", e),
             };

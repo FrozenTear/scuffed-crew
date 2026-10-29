@@ -22,6 +22,7 @@ impl LocalStore {
         hero: &str,
         role: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         // Write through to the capture rows like set_session_map/outcome do:
         // the GUI and the sync path read personal_match, not match_session, so
         // a session-only update is invisible to both (the 07-18 "Tracer" game).
@@ -75,6 +76,7 @@ impl LocalStore {
         &self,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let snaps = self.get_session_snapshots(session_id).await?;
         if snaps.is_empty() {
             return Ok(());
@@ -185,6 +187,7 @@ impl LocalStore {
         segment: u32,
         action: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let snaps = self.get_session_snapshots(session_id).await?;
         if snaps.is_empty() {
             return Ok(());
@@ -244,6 +247,7 @@ impl LocalStore {
         session_id: &str,
         map: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let mode = crate::parse::stored_game_mode(map);
         self.db
             .query(
@@ -288,6 +292,7 @@ impl LocalStore {
         session_id: &str,
         map: &str,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let snaps = self.get_session_snapshots(session_id).await?;
         let kept = snaps.iter().filter(|m| m.has_member_map_edit()).count();
         if kept == 0 {
@@ -353,6 +358,7 @@ impl LocalStore {
         session_id: &str,
         outcome: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         self.db
             .query(
                 "UPDATE match_session SET final_outcome = $outcome WHERE session_id = $sid; \
@@ -412,6 +418,7 @@ impl LocalStore {
         session_id: &str,
         edit: &MatchEdit,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let now = SurrealDatetime::from(chrono::Utc::now());
         let snaps = self.get_session_snapshots(session_id).await?;
         for mut m in snaps {

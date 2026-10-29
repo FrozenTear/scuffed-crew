@@ -121,6 +121,7 @@ impl LocalStore {
         code: Option<&str>,
         message: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let message = format_upload_rejection(code, message);
         let mut touched = std::collections::HashSet::new();
         for claim in claims {
@@ -157,6 +158,7 @@ impl LocalStore {
         &self,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         self.db
             .query("UPDATE personal_match SET upload_reject = '' WHERE session_id = $sid")
             .bind(("sid", session_id.to_string()))
@@ -185,6 +187,7 @@ impl LocalStore {
         &self,
         claims: &[SyncClaim],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         if claims.is_empty() {
             return Ok(());
         }
@@ -243,6 +246,7 @@ impl LocalStore {
     pub async fn clear_rejected_uploads(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let mut result = self
             .db
             .query(

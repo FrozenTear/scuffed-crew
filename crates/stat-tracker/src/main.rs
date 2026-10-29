@@ -938,26 +938,7 @@ async fn flush_snapshot_if_dirty_in(
     write_snapshot_if(state, store, data_dir, |p, _| p.dirty()).await;
 }
 
-/// The stored-data revision the query socket reports
-/// (`stat_tracker::query`). Starts at the daemon's start time in unix
-/// milliseconds, so a restarted daemon never repeats a revision, and moves
-/// on every mark below (every stored change goes through one).
-static STORE_REV: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn start_store_rev() {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(1);
-    STORE_REV.store(now, std::sync::atomic::Ordering::Relaxed);
-}
-
-fn store_rev() -> u64 {
-    STORE_REV.load(std::sync::atomic::Ordering::Relaxed)
-}
-
 fn mark_snapshot(state: &SnapshotState, owed: bool) {
-    STORE_REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     state
         .lock()
         .unwrap_or_else(|e| e.into_inner())

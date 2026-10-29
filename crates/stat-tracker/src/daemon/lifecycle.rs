@@ -506,16 +506,10 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     }
     // The query socket for the desktop app's page totals
     // (daemon/query_server.rs). Without it the app reads live_snapshot.json.
-    crate::start_store_rev();
     match super::query_server::bind(&config.data_dir) {
         Ok((listener, path)) => {
             tracing::info!(target: "scuffed_stat_tracker", path = %path.display(), "query socket ready");
-            super::query_server::start(
-                listener,
-                store.clone(),
-                config.data_dir.clone(),
-                crate::store_rev,
-            );
+            super::query_server::start(listener, store.clone(), config.data_dir.clone());
         }
         Err(e) => {
             tracing::warn!(target: "scuffed_stat_tracker", error = %e, "no query socket; the app reads live_snapshot.json")

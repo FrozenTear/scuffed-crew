@@ -1,8 +1,6 @@
 //! Tests for `query_server.rs`: a real socket, the lib client, and the
 //! answers the GUI would compute itself from `live_snapshot.json`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use stat_tracker::games::aggregate::{GameFilter, aggregate_filtered};
 use stat_tracker::games::model::Role;
 use stat_tracker::query::client::{self, QueryError};
@@ -10,12 +8,6 @@ use stat_tracker::query::proto::{Request, Response};
 
 use super::query_server::{admit, bind, serve};
 use crate::storage::{LocalStore, PersonalMatch};
-
-static REV: AtomicU64 = AtomicU64::new(41);
-
-fn rev() -> u64 {
-    REV.load(Ordering::Relaxed)
-}
 
 fn row(sid: &str, hero: &str, role: &str, outcome: &str, secs: i64) -> PersonalMatch {
     let at = chrono::DateTime::from_timestamp(1_800_000_000 + secs, 0).unwrap();
@@ -59,18 +51,14 @@ async fn the_daemon_answers_with_the_totals_the_gui_computes() {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
     }
-    tokio::spawn(serve(
-        listener,
-        store.clone(),
-        dir.path().to_path_buf(),
-        rev,
-    ));
+    tokio::spawn(serve(listener, store.clone(), dir.path().to_path_buf()));
 
     let Response::Hello { proto, rev: r, .. } = ask(dir.path(), Request::Hello).await.unwrap()
     else {
         panic!("hello");
     };
-    assert_eq!((proto, r), (stat_tracker::query::proto::PROTO, 41));
+    assert_eq!(proto, stat_tracker::query::proto::PROTO);
+    assert_eq!(r, store.rev(), "the store's own revision");
 
     // What the GUI does with the file.
     store.export_snapshot(dir.path()).await.unwrap();
@@ -117,11 +105,12 @@ async fn the_daemon_answers_with_the_totals_the_gui_computes() {
     assert_eq!(games, gui_games);
 
     // A new stored change moves the revision; the next answer sees it.
+    let before = store.rev();
     store
         .insert_match(row("g4", "Ana", "Support", "victory", 600))
         .await
         .unwrap();
-    REV.fetch_add(1, Ordering::Relaxed);
+    assert!(store.rev() > before, "a write moves the revision");
     let Response::Totals { rev: r, totals } = ask(
         dir.path(),
         Request::Totals {
@@ -132,7 +121,7 @@ async fn the_daemon_answers_with_the_totals_the_gui_computes() {
     .unwrap() else {
         panic!("totals");
     };
-    assert_eq!((r, totals.record.games), (42, 4));
+    assert_eq!((r, totals.record.games), (store.rev(), 4));
 
     // A delete the GUI queued (no stored change, no new revision) is
     // hidden at once, as on the file path.
@@ -186,7 +175,7 @@ async fn a_stale_socket_is_replaced_and_no_daemon_is_not_running() {
     ));
     let store = LocalStore::open(dir.path()).await.unwrap();
     let (listener, _) = bind(dir.path()).expect("stale socket replaced");
-    tokio::spawn(serve(listener, store, dir.path().to_path_buf(), rev));
+    tokio::spawn(serve(listener, store, dir.path().to_path_buf()));
     assert!(matches!(
         ask(dir.path(), Request::Rev).await,
         Ok(Response::Rev { .. })
@@ -199,7 +188,7 @@ async fn a_bad_request_gets_an_error_line() {
     let dir = tempfile::tempdir().unwrap();
     let store = LocalStore::open(dir.path()).await.unwrap();
     let (listener, path) = bind(dir.path()).unwrap();
-    tokio::spawn(serve(listener, store, dir.path().to_path_buf(), rev));
+    tokio::spawn(serve(listener, store, dir.path().to_path_buf()));
     let answer = tokio::task::spawn_blocking(move || {
         let mut s = std::os::unix::net::UnixStream::connect(path).unwrap();
         s.write_all(b"{\"v\":9,\"q\":\"rev\"}\n").unwrap();
