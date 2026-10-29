@@ -172,8 +172,48 @@ fn a_final_board_owes_its_write_and_only_for_its_own_game() {
 fn the_run_loop_and_the_shutdown_drain_mark_the_snapshot_after_a_capture() {
     let event_loop = include_str!("event_loop.rs");
     let shutdown = include_str!("shutdown.rs");
+    for source in [event_loop, shutdown] {
+        assert!(source.contains("let stored_sid = stored_session(&sid, &result);"));
+    }
     assert!(
-        event_loop.contains("refresh_snapshot_after_capture(&st, store, data_dir, &sid).await;")
+        event_loop
+            .contains("refresh_snapshot_after_capture(&st, store, data_dir, &stored_sid).await;")
     );
-    assert!(shutdown.contains("refresh_snapshot_after_capture(st, store, data_dir, &sid).await;"));
+    assert!(
+        shutdown
+            .contains("refresh_snapshot_after_capture(st, store, data_dir, &stored_sid).await;")
+    );
+}
+
+/// A split stores the board in the new game it opens, so the owed write is
+/// decided on that game: a final board read as the first Tab of the next
+/// game (stats fell, the result already on screen) still owes its write.
+#[test]
+fn a_split_board_owes_its_write_on_the_game_it_opened() {
+    use crate::detect::MatchOutcome;
+    let now = Instant::now();
+    let mut report = crate::main_tests::rejected_report("s2");
+    report.split = true;
+    let split = Ok(report);
+    assert_eq!(crate::stored_session("s1", &split), "s2");
+    let st = crate::main_tests::session(
+        Some(crate::ActiveGame::open_at(
+            "s2".into(),
+            MatchOutcome::Victory,
+            Vec::new(),
+            now,
+        )),
+        now,
+    );
+    assert!(crate::capture_owes_snapshot_write(
+        &st,
+        &crate::stored_session("s1", &split)
+    ));
+    assert!(
+        !crate::capture_owes_snapshot_write(&st, "s1"),
+        "the requested session is the game the split retired"
+    );
+    let stay = Ok(crate::main_tests::rejected_report("s1"));
+    assert_eq!(crate::stored_session("s1", &stay), "s1");
+    assert_eq!(crate::stored_session("s1", &Err("no frame".into())), "s1");
 }
