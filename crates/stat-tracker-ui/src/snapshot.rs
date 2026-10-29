@@ -5,6 +5,7 @@ use stat_tracker::storage::{self, Snapshot};
 
 use crate::cli::FixtureKind;
 use crate::fixtures;
+#[cfg(test)]
 use crate::model::Game;
 
 /// Read the daemon snapshot via the existing lib API. Missing / unreadable → empty.
@@ -102,30 +103,9 @@ fn install_fixture_in(
     Ok(load_snapshot(data_dir))
 }
 
-pub fn games_from_snapshot(snap: &Snapshot) -> Vec<Game> {
-    // Snapshot is already newest-first / latest-per-game; keep first row per session.
-    // Deathmatch stays in the local store and is never part of the totals or
-    // the history list. The mode or the map (Château Guillard) is enough.
-    let mut seen = std::collections::HashSet::new();
-    let mut out = Vec::new();
-    for m in &snap.matches {
-        let map = m.display_map_name();
-        let mode = stat_tracker::parse::uploaded_game_mode(map, &m.game_mode);
-        if !stat_tracker::parse::stats_row_is_tracked(map, &m.game_mode)
-            || !stat_tracker::parse::stats_row_is_tracked(map, &mode)
-        {
-            continue;
-        }
-        if m.session_id.is_empty() {
-            out.push(Game::from_match(m));
-            continue;
-        }
-        if seen.insert(m.session_id.clone()) {
-            out.push(Game::from_match(m));
-        }
-    }
-    out
-}
+/// The game list every page shows (`stat_tracker::games::rows`, shared
+/// with the tracker's page totals).
+pub use stat_tracker::games::rows::games_from_snapshot;
 
 #[cfg(test)]
 mod tests {
