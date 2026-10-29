@@ -28,6 +28,9 @@ static LIVE: AtomicI64 = AtomicI64::new(0);
 static PEAK: AtomicI64 = AtomicI64::new(0);
 static ALLOCATED: AtomicI64 = AtomicI64::new(0);
 static CALLS: AtomicI64 = AtomicI64::new(0);
+/// The largest single allocation since [`measure_sync`] started: a frame
+/// copy is one frame-sized buffer, while working buffers are smaller.
+static LARGEST: AtomicI64 = AtomicI64::new(0);
 
 fn on() -> bool {
     COUNTING.try_with(Cell::get).unwrap_or(false)
@@ -42,6 +45,7 @@ fn grew(by: usize) {
     PEAK.fetch_max(now, Ordering::Relaxed);
     ALLOCATED.fetch_add(by, Ordering::Relaxed);
     CALLS.fetch_add(1, Ordering::Relaxed);
+    LARGEST.fetch_max(by, Ordering::Relaxed);
 }
 
 fn shrank(by: usize) {
@@ -270,8 +274,9 @@ async fn the_compact_write_time_on_a_real_store_copy() {
     println!("{rows} rows: compact write ms {times:?} (first, then warm); file {bytes} B");
 }
 
-/// [`measure`] for plain code on this thread.
-fn measure_sync(f: impl FnOnce()) -> (i64, i64, i64) {
+/// [`measure`] for plain code on this thread, with the largest single
+/// allocation as a fourth number.
+fn measure_sync(f: impl FnOnce()) -> (i64, i64, i64, i64) {
     let _one = MEASURING.lock().unwrap_or_else(|e| e.into_inner());
     let (base, bytes, calls) = (
         LIVE.load(Ordering::Relaxed),
@@ -279,6 +284,7 @@ fn measure_sync(f: impl FnOnce()) -> (i64, i64, i64) {
         CALLS.load(Ordering::Relaxed),
     );
     PEAK.store(base, Ordering::Relaxed);
+    LARGEST.store(0, Ordering::Relaxed);
     COUNTING.with(|c| c.set(true));
     f();
     COUNTING.with(|c| c.set(false));
@@ -286,6 +292,7 @@ fn measure_sync(f: impl FnOnce()) -> (i64, i64, i64) {
         PEAK.load(Ordering::Relaxed) - base,
         ALLOCATED.load(Ordering::Relaxed) - bytes,
         CALLS.load(Ordering::Relaxed) - calls,
+        LARGEST.load(Ordering::Relaxed),
     )
 }
 
@@ -355,17 +362,18 @@ fn the_poll_tick_and_the_report_blanking_do_not_copy_the_frame() {
         let mut stability = stat_tracker::frame::stability::FrameStability::default();
         // Warm: packs and tables load once, and the next tick is a repeat.
         poll_tick(&frame, new_reader, &mut stability);
-        let (_, bytes, calls) = measure_sync(|| poll_tick(&frame, new_reader, &mut stability));
+        let (_, bytes, calls, largest) =
+            measure_sync(|| poll_tick(&frame, new_reader, &mut stability));
         println!(
-            "frame {FRAME_BYTES} B; poll tick (new reader {new_reader}) allocated {bytes} B in {calls} calls"
+            "frame {FRAME_BYTES} B; poll tick (new reader {new_reader}) allocated {bytes} B in {calls} calls, largest {largest} B"
         );
         assert!(
-            bytes < FRAME_BYTES / 2,
-            "the poll tick copied the frame ({bytes} B, new reader {new_reader})"
+            bytes < FRAME_BYTES / 2 && largest < FRAME_BYTES / 2,
+            "the poll tick copied the frame ({bytes} B, largest {largest} B, new reader {new_reader})"
         );
     }
     let _ = stat_tracker::report::blank::blanked_scoreboard(&frame, None); // warm
-    let (_, blank_bytes, blank_calls) = measure_sync(|| {
+    let (_, blank_bytes, blank_calls, _) = measure_sync(|| {
         std::hint::black_box(stat_tracker::report::blank::blanked_scoreboard(
             &frame, None,
         ));
@@ -424,7 +432,7 @@ fn frame_path_soak() {
                     let Ok((tick, done)) = job else { return };
                     // A fresh frame per tick, as each grab makes one.
                     let frame = (*seed).clone();
-                    let (_, bytes, _) = measure_sync(|| {
+                    let (_, bytes, _, _) = measure_sync(|| {
                         poll_tick(&frame, true, &mut stability);
                         if tick % 20 == 0 {
                             std::hint::black_box(stat_tracker::report::blank::blanked_scoreboard(
@@ -489,7 +497,10 @@ fn frame_path_soak() {
 /// The poll tick under `reader = "new"` with a words pack loaded (synthetic
 /// end-title, accolade and FINAL SCORE templates, as `end_title_wiring` and
 /// `final_score_wiring` write them): the words reads take the frame in
-/// place too. One test per process, so the reader is set up here.
+/// place too. They build working buffers per region every tick (several MB
+/// in all), so the check is on the largest single allocation: a frame copy
+/// is one frame-sized buffer. One test per process, so the reader is set
+/// up here.
 #[test]
 fn the_poll_tick_on_a_words_pack_does_not_copy_the_frame() {
     use stat_tracker::detect::match_end::Titles;
@@ -531,10 +542,12 @@ fn the_poll_tick_on_a_words_pack_does_not_copy_the_frame() {
     );
     let mut stability = stat_tracker::frame::stability::FrameStability::default();
     poll_tick(&frame, true, &mut stability);
-    let (_, bytes, calls) = measure_sync(|| poll_tick(&frame, true, &mut stability));
-    println!("frame {FRAME_BYTES} B; poll tick (words pack) allocated {bytes} B in {calls} calls");
+    let (_, bytes, calls, largest) = measure_sync(|| poll_tick(&frame, true, &mut stability));
+    println!(
+        "frame {FRAME_BYTES} B; poll tick (words pack) allocated {bytes} B in {calls} calls, largest {largest} B"
+    );
     assert!(
-        bytes < FRAME_BYTES / 2,
-        "the poll tick copied the frame ({bytes} B, words pack)"
+        largest < FRAME_BYTES / 2,
+        "the poll tick copied the frame (largest {largest} B, words pack)"
     );
 }
