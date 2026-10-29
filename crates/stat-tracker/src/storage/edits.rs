@@ -38,10 +38,9 @@ impl LocalStore {
             .bind(("role", role.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
-        // Keep the append-only log in step too (HW-1a jsonl parity): the GUI's
-        // last-resort fallback reads matches.jsonl, so a hero repair that never
-        // reached it left the fallback showing the stale hero forever, exactly
-        // like the outcome/map back-fills before rewrite_match_log_session.
+        // Keep the append-only log in step too (HW-1a jsonl parity). Nothing
+        // in the app reads matches.jsonl any more; a manual repair is rare,
+        // so the rewrite stays until the log itself is retired.
         let (hero, role) = (hero.to_string(), role.to_string());
         rewrite_match_log_session(
             &self.data_dir,
@@ -67,11 +66,11 @@ impl LocalStore {
     /// other back-fills: it writes a row only when its timeline actually
     /// changed, and re-queues it for sync (`synced = false`) only when the
     /// row's EFFECTIVE (uploaded) hero/role would change — a stable-hero game
-    /// is a no-op after its first snapshot. Persists across the same layers as
-    /// `set_session_*`: the SurrealKV `personal_match` rows and the
-    /// `matches.jsonl` fallback. (`match_session` carries no timeline field,
-    /// and the GUI's `live_snapshot.json` is re-exported by the daemon after
-    /// the capture completes.)
+    /// is a no-op for sync after its first snapshot. The rows themselves are
+    /// rewritten on every capture: a segment's `snapshots` and `last_seen`
+    /// move each time. Only the SurrealKV `personal_match` rows carry the
+    /// timeline; `matches.jsonl` (no reader) and `match_session` do not, and
+    /// the daemon's `live_snapshot.json` picks it up on its next write.
     pub async fn refresh_session_hero_timeline(
         &self,
         session_id: &str,
@@ -119,16 +118,9 @@ impl LocalStore {
                     .await?;
             }
         }
-        // jsonl parity: the GUI's last-resort fallback reads matches.jsonl, so
-        // stamp the derived timeline there too (raw hero/role untouched).
-        let segments_for_log = segments.clone();
-        rewrite_match_log_session(
-            &self.data_dir,
-            session_id,
-            Some(&move |m| {
-                m.heroes_played = segments_for_log.clone();
-            }),
-        );
+        // matches.jsonl is not stamped: nothing reads it, and this runs after
+        // every capture, so a whole-file rewrite here cost a parse of every
+        // logged row per capture.
         Ok(())
     }
 
@@ -175,14 +167,6 @@ impl LocalStore {
                 .bind(("sr", resolutions.clone()))
                 .await?;
         }
-        let res_for_log = resolutions.clone();
-        rewrite_match_log_session(
-            &self.data_dir,
-            session_id,
-            Some(&move |m| {
-                m.segment_resolutions = res_for_log.clone();
-            }),
-        );
 
         // Re-derive with the updated resolutions and re-stamp heroes_played.
         self.refresh_session_hero_timeline(session_id).await
@@ -357,8 +341,8 @@ impl LocalStore {
     /// re-queues the rows for sync. Editing all snapshots — not just the final
     /// one — means whichever snapshot the server-side per-session upsert lands
     /// last still carries the correction, and mirrors the write-through the
-    /// outcome/map/hero back-fills already use. The `matches.jsonl` fallback is
-    /// rewritten with the same overlay so the GUI's last-resort view agrees.
+    /// outcome/map/hero back-fills already use. The `matches.jsonl` record is
+    /// rewritten with the same overlay so it stays in step.
     pub async fn edit_match(
         &self,
         session_id: &str,

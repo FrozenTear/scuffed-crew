@@ -8,8 +8,8 @@ use super::{LocalStore, rewrite_match_log_session};
 impl LocalStore {
     /// Delete a session and all its capture snapshots (manual cleanup of a
     /// junk/misdetected game). Records a tombstone so the next sync deletes
-    /// the game server-side too, and drops the session from `matches.jsonl`
-    /// so the GUI's log fallback stops showing it.
+    /// the game server-side too, and drops the session from the append-only
+    /// `matches.jsonl` record.
     ///
     /// The three writes run in one transaction and every statement is
     /// checked. Unchecked, a failed tombstone write still returned Ok after
