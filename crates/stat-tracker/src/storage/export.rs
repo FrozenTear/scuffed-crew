@@ -61,6 +61,82 @@ impl Keep {
     }
 }
 
+/// Every `personal_match` row, newest first, a page at a time, as stored
+/// (not hydrated). Keyset on played_at (idx_played_at gives the order).
+/// After a full page, the rest of its last timestamp is read by equality and
+/// the walk goes on strictly below it, so ties never split or repeat.
+pub(super) struct RowPages {
+    page: usize,
+    below: Option<SurrealDatetime>,
+    done: bool,
+}
+
+impl RowPages {
+    pub(super) fn new(page: usize) -> Self {
+        Self {
+            page: page.max(1),
+            below: None,
+            done: false,
+        }
+    }
+
+    pub(super) async fn next(
+        &mut self,
+        store: &LocalStore,
+    ) -> Result<Option<Vec<PersonalMatch>>, Box<dyn std::error::Error + Send + Sync>> {
+        if self.done {
+            return Ok(None);
+        }
+        let page = self.page;
+        // The page size is a fixed number, not input; a literal lets the
+        // engine push the LIMIT into the index scan.
+        let mut rows: Vec<PersonalMatch> = match self.below {
+            None => store
+                .db
+                .query(format!(
+                    "SELECT * FROM personal_match ORDER BY played_at DESC LIMIT {page}"
+                ))
+                .await?
+                .take(0)?,
+            Some(at) => store
+                .db
+                .query(format!(
+                    "SELECT * FROM personal_match WHERE played_at < $at \
+                     ORDER BY played_at DESC LIMIT {page}"
+                ))
+                .bind(("at", at))
+                .await?
+                .take(0)?,
+        };
+        let last = rows.last().map(|m| m.played_at);
+        match last.filter(|_| rows.len() == page) {
+            None => self.done = true,
+            Some(last) => {
+                let seen: Vec<RecordId> = rows
+                    .iter()
+                    .filter(|m| m.played_at == last)
+                    .filter_map(|m| m.id.clone())
+                    .collect();
+                let tied: Vec<PersonalMatch> = store
+                    .db
+                    .query("SELECT * FROM personal_match WHERE played_at = $at")
+                    .bind(("at", last))
+                    .await?
+                    .take(0)?;
+                rows.extend(
+                    tied.into_iter()
+                        .filter(|m| !m.id.as_ref().is_some_and(|id| seen.contains(id))),
+                );
+                self.below = Some(last);
+            }
+        }
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(rows))
+    }
+}
+
 impl LocalStore {
     /// The compact snapshot (see the module doc), read in pages.
     pub async fn compact_snapshot(
@@ -73,57 +149,13 @@ impl LocalStore {
         &self,
         page: usize,
     ) -> Result<Snapshot, Box<dyn std::error::Error + Send + Sync>> {
-        let page = page.max(1);
         let mut keep = Keep::default();
-        // Keyset on played_at (idx_played_at gives the order). After a full
-        // page, the rest of its last timestamp is read by equality, then the
-        // walk goes on strictly below it, so ties never split or repeat.
-        let mut below: Option<SurrealDatetime> = None;
-        loop {
-            // The page size is a fixed number, not input; a literal lets the
-            // engine push the LIMIT into the index scan.
-            let rows: Vec<PersonalMatch> = match below {
-                None => self
-                    .db
-                    .query(format!(
-                        "SELECT * FROM personal_match ORDER BY played_at DESC LIMIT {page}"
-                    ))
-                    .await?
-                    .take(0)?,
-                Some(at) => self
-                    .db
-                    .query(format!(
-                        "SELECT * FROM personal_match WHERE played_at < $at \
-                         ORDER BY played_at DESC LIMIT {page}"
-                    ))
-                    .bind(("at", at))
-                    .await?
-                    .take(0)?,
-            };
-            let full = rows.len() == page;
-            let last = rows.last().map(|m| m.played_at);
-            let mut at_last: Vec<RecordId> = Vec::new();
+        let mut pages = RowPages::new(page);
+        while let Some(mut rows) = pages.next(self).await? {
+            self.hydrate_rows(&mut rows).await?;
             for m in rows {
-                if Some(m.played_at) == last {
-                    at_last.extend(m.id.clone());
-                }
                 keep.push(m);
             }
-            let Some(last) = last.filter(|_| full) else {
-                break;
-            };
-            let tied: Vec<PersonalMatch> = self
-                .db
-                .query("SELECT * FROM personal_match WHERE played_at = $at")
-                .bind(("at", last))
-                .await?
-                .take(0)?;
-            for m in tied {
-                if !m.id.as_ref().is_some_and(|id| at_last.contains(id)) {
-                    keep.push(m);
-                }
-            }
-            below = Some(last);
         }
         Ok(Snapshot {
             matches: keep.rows,

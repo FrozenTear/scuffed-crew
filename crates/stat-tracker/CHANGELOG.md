@@ -15,6 +15,22 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.6.0-alpha.1.1
+
+The tracker uses far less memory over long runs and no longer does work for the desktop app while the app is closed. Each game's hero history is now stored once instead of on every capture of the game, so the stat store grows more slowly; your games, heroes and totals look the same as before.
+
+### Highlights
+
+- Memory stays flat over days of running, with or without games (it used to climb past 1 GB).
+- The game list file the app reads is about 0.5 MB instead of about 10 MB, and is written only while the app is open, after each finished game, at start and at stop.
+- On its first start, alpha.1.1 keeps a copy of your stat store next to it before it moves any hero data.
+
+Technical detail. Memory: glibc allocator limits (at most 2 arenas, a 1 MiB mmap threshold, a 4 MiB trim threshold, `malloc_trim` every 5 minutes; a `MALLOC_*` or `GLIBC_TUNABLES` setting of your own wins, and `STAT_TRACKER_MEMTUNE=0` turns them off), no more rewrite of `matches.jsonl` on every capture, and a small `live_snapshot.json` (the newest row of each game, every session, pending deletes) written only while the app runs (also when it sits in the tray), after each finished game, at start and at stop.
+
+Hero timeline: each game's hero timeline (swaps, confirmed and dismissed segments) is one record in a new `hero_timeline` table instead of a copy on every capture row, so a Tab capture writes one record, not every row of the game. On the first start the tracker copies `stats.surrealkv` to `stats.surrealkv.pre-timeline-<date>` (it needs twice the store size free; without the space or the copy, it keeps the old layout and tries again at the next start), then fills the table from the rows and writes a `store_meta:schema` marker last. Until the marker is there, the rows stay the source of truth. Rows are not changed, so games from before the update keep their own copy, and a game that never had a stored timeline keeps showing what it showed before. Saved-pack hero names are fixed in pages at start instead of loading the whole store. Once the move is done, only the newest `pre-timeline` copy is kept. "Delete all local match data" and the uninstaller also remove it.
+
+Going back to alpha.1: games from before the update show as before; games played on alpha.1.1 show their raw hero and no swap history there. An alpha.1 vacuum (automatic at start when the store is over 32 MiB, or Settings, Stored data, Compact stored data) drops the new tables. Back on alpha.1.1 the tracker takes a new copy and rebuilds the timelines of older games from their rows; the timelines of games played on alpha.1.1 are lost (the `pre-vacuum` copy keeps them until the next vacuum). A segment confirm or dismiss made on alpha.1 for a game that already has a timeline record is not seen back on alpha.1.1 (the record wins). To undo the move completely: stop the tracker, move `stats.surrealkv` aside, and rename `stats.surrealkv.pre-timeline-<date>` to `stats.surrealkv`.
+
 ## 0.6.0-alpha.1
 
 This is the first alpha of the 0.6 line. The desktop app has a new look with new Overview, Games, Heroes, Maps and Seasons tabs, and a Settings page rebuilt around the new config keys. It is an alpha: it installs on the alpha channel, and the stable channel keeps offering 0.5.x.

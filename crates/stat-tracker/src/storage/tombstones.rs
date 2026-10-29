@@ -11,10 +11,11 @@ impl LocalStore {
     /// the game server-side too, and drops the session from the append-only
     /// `matches.jsonl` record.
     ///
-    /// The three writes run in one transaction and every statement is
-    /// checked. Unchecked, a failed tombstone write still returned Ok after
-    /// the local rows were gone: the game vanished from the app but nothing
-    /// was left to delete it from the site.
+    /// The writes (the game's hero timeline record too) run in one
+    /// transaction and every statement is checked. Unchecked, a failed
+    /// tombstone write still returned Ok after the local rows were gone: the
+    /// game vanished from the app but nothing was left to delete it from the
+    /// site.
     pub async fn delete_session(
         &self,
         session_id: &str,
@@ -35,9 +36,11 @@ impl LocalStore {
                  DELETE match_session WHERE session_id = $sid; \
                  DELETE personal_match WHERE session_id = $sid; \
                  CREATE deleted_session SET session_id = $sid, deleted_at = time::now(); \
+                 DELETE $tid; \
                  COMMIT TRANSACTION;",
             )
             .bind(("sid", session_id.to_string()))
+            .bind(("tid", super::timeline::timeline_id(session_id)))
             .await
         {
             Ok(response) => response.check().map(|_| ()),

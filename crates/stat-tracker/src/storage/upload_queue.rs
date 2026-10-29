@@ -94,7 +94,10 @@ impl LocalStore {
             "SELECT * FROM personal_match WHERE synced = false AND outcome != 'unknown' ORDER BY played_at ASC"
         };
         let mut result = self.db.query(sql).await?;
-        let matches: Vec<PersonalMatch> = result.take(0)?;
+        let mut matches: Vec<PersonalMatch> = result.take(0)?;
+        // The upload sends display_hero/display_role, which come from the
+        // game's stored timeline.
+        self.hydrate_rows(&mut matches).await?;
         if unknown_only {
             Ok(matches)
         } else {

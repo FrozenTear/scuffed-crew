@@ -465,6 +465,8 @@ for broad in ".config" "Documents" "Games"; do
     DATA="$HOME_DIR/$broad"
     mkdir -p "$DATA/stats.surrealkv" "$DATA/other-app" "$HOME_DIR/.local/share/scuffed-stat-tracker/stats.surrealkv"
     printf 'games\n' > "$DATA/stats.surrealkv/db"
+    mkdir -p "$DATA/stats.surrealkv.pre-timeline-20261029_101500"
+    printf 'games\n' > "$DATA/stats.surrealkv.pre-timeline-20261029_101500/db"
     printf 'stay\n' > "$DATA/keep-me.txt"
     printf 'other\n' > "$DATA/other-app/file"
     printf 'default\n' > "$HOME_DIR/.local/share/scuffed-stat-tracker/stats.surrealkv/db"
@@ -476,6 +478,8 @@ for broad in ".config" "Documents" "Games"; do
     [[ "$(cat "$DATA/keep-me.txt")" == "stay" ]] || fail "$broad neighbor was removed"
     [[ "$(cat "$DATA/other-app/file")" == "other" ]] || fail "$broad other app was removed"
     [[ ! -e "$DATA/stats.surrealkv" ]] || fail "$broad tracker database was left"
+    [[ ! -e "$DATA/stats.surrealkv.pre-timeline-20261029_101500" ]] \
+        || fail "$broad hero-timeline backup was left"
     [[ "$(cat "$HOME_DIR/.local/share/scuffed-stat-tracker/stats.surrealkv/db")" == "default" ]] \
         || fail "default saved games were removed while purging $broad"
     [[ -d "$PREFIX" ]] || fail "install folder was removed while purging $broad"

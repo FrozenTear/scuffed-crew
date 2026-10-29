@@ -123,6 +123,7 @@ pub fn force_clear_data_dir(data_dir: &Path) -> Result<(), Box<dyn std::error::E
         std::fs::remove_dir_all(&db_path)?;
     }
     clear_match_log(data_dir);
+    super::remove_pre_timeline_backups(data_dir);
     tracing::info!("force-cleared data directory");
     Ok(())
 }
