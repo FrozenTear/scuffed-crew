@@ -421,7 +421,8 @@ async fn avatar_folder_for_upload(
 /// - Absent, blank, or equal to the caller: save into `avatars/<caller key>/`
 ///   and delete-on-replace the caller's current avatar file.
 /// - Another member: same permission as `PUT /api/members/{mid}` for that
-///   profile (self, or officer+). Otherwise 403 `{ "error": "..." }`. Unknown
+///   profile (self, an admin, or an officer editing a member or recruit).
+///   Otherwise 403 `{ "error": "..." }`. Unknown
 ///   member 404. The file is saved into `avatars/<target key>/` and
 ///   delete-on-replace runs against the target's current `avatar_url`, only
 ///   inside the target's folder.

@@ -99,6 +99,31 @@ pub fn officer_may_moderate(target: OrgRole) -> bool {
     matches!(target, OrgRole::Member | OrgRole::Recruit)
 }
 
+/// Whether `actor` may edit another member's profile.
+///
+/// Self-edits are allowed by the route before this runs. Admins may edit any
+/// other profile. Officers may edit only ranks [`officer_may_moderate`] allows
+/// (member and recruit). Members and recruits may edit only their own profile.
+/// A profile edit does not remove admin authority, so the last-admin guards on
+/// role changes and `is_active` stay on those paths.
+pub fn can_edit_other_profile(actor: OrgRole, target: OrgRole) -> Result<(), PolicyDenial> {
+    match actor {
+        OrgRole::Admin => Ok(()),
+        OrgRole::Officer => {
+            if officer_may_moderate(target) {
+                Ok(())
+            } else {
+                Err(PolicyDenial::Forbidden(
+                    "Officers cannot edit the profile of admins or other officers",
+                ))
+            }
+        }
+        OrgRole::Member | OrgRole::Recruit => {
+            Err(PolicyDenial::Forbidden("Can only edit your own profile"))
+        }
+    }
+}
+
 /// Whether `actor` may moderate `target` (ban/suspend/warn/note).
 pub fn can_moderate(
     actor: OrgRole,
@@ -297,6 +322,30 @@ mod tests {
         );
         let already = can_change_role("a1", "a2", OrgRole::Admin, true, OrgRole::Admin, 2, true);
         assert!(matches!(already, Err(PolicyDenial::BadRequest(_))));
+    }
+
+    #[test]
+    fn profile_edit_rank_matches_moderation() {
+        assert!(can_edit_other_profile(OrgRole::Officer, OrgRole::Member).is_ok());
+        assert!(can_edit_other_profile(OrgRole::Officer, OrgRole::Recruit).is_ok());
+        assert!(can_edit_other_profile(OrgRole::Admin, OrgRole::Officer).is_ok());
+        assert!(can_edit_other_profile(OrgRole::Admin, OrgRole::Admin).is_ok());
+
+        let officer_admin = can_edit_other_profile(OrgRole::Officer, OrgRole::Admin).unwrap_err();
+        assert_eq!(officer_admin.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            officer_admin.message(),
+            "Officers cannot edit the profile of admins or other officers"
+        );
+        let officer_peer = can_edit_other_profile(OrgRole::Officer, OrgRole::Officer).unwrap_err();
+        assert_eq!(officer_peer.status(), StatusCode::FORBIDDEN);
+        assert_eq!(officer_peer.message(), officer_admin.message());
+
+        let member = can_edit_other_profile(OrgRole::Member, OrgRole::Recruit).unwrap_err();
+        assert_eq!(member.status(), StatusCode::FORBIDDEN);
+        assert_eq!(member.message(), "Can only edit your own profile");
+        let recruit = can_edit_other_profile(OrgRole::Recruit, OrgRole::Member).unwrap_err();
+        assert_eq!(recruit.message(), "Can only edit your own profile");
     }
 
     #[test]
