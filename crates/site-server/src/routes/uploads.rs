@@ -1012,6 +1012,42 @@ mod tests {
         tokio::fs::remove_dir_all(&root).await.ok();
     }
 
+    /// An officer may not upload an avatar for an admin. The stored URL and
+    /// the file on disk stay as they were.
+    #[tokio::test]
+    async fn officer_upload_for_admin_is_forbidden_and_leaves_avatar() {
+        let mut state = crate::test_support::test_state().await;
+        let root = unique_tmp("officer-admin-avatar");
+        state.upload_dir = root.clone();
+        let (officer, officer_token) =
+            session_member(&state, "officeradminava", scuffed_db::OrgRole::Officer).await;
+        let (admin, _) = session_member(&state, "adminava", scuffed_db::OrgRole::Admin).await;
+        let (admin_file, admin_url) = plant_avatar(&root, &admin.id, "admin.png").await;
+        set_avatar_url(&state, &admin.id, &admin_url).await;
+        let admin_dir = root.join("avatars").join(member_dir_key(&admin.id));
+        let officer_dir = root.join("avatars").join(member_dir_key(&officer.id));
+        let admin_before = files_in(&admin_dir);
+
+        let app = crate::create_router(state.clone());
+        let res = post_avatar(&app, &officer_token, Some(&admin.id)).await;
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+        let body = response_json(res).await;
+        assert_eq!(
+            body["error"],
+            "Officers cannot edit the profile of admins or other officers"
+        );
+        let stored = state.db.get_member_safe(&admin.id).await.unwrap().unwrap();
+        assert_eq!(stored.avatar_url.as_deref(), Some(admin_url.as_str()));
+        assert!(admin_file.exists());
+        assert_eq!(files_in(&admin_dir), admin_before);
+        assert!(
+            !officer_dir.exists() || files_in(&officer_dir).is_empty(),
+            "a refused upload must not write the officer folder"
+        );
+
+        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
     #[tokio::test]
     async fn unknown_avatar_member_id_is_not_found() {
         let mut state = crate::test_support::test_state().await;

@@ -724,6 +724,42 @@ async fn game_account_name_is_trimmed_and_capped_at_64() {
     );
 }
 
+/// An officer may upsert a game account on their own member id. The rank rule
+/// applies only when the caller edits someone else.
+#[tokio::test]
+async fn officer_can_upsert_own_game_account() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/officermember/game-accounts",
+            OFFICER_TOKEN,
+            json!({
+                "game_id": "ow2",
+                "account_name": "OfficerOwl"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["account_name"], "OfficerOwl");
+    assert_eq!(json["member_id"], "officermember");
+
+    let stored = state
+        .db
+        .list_member_game_accounts("officermember")
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].account_name, "OfficerOwl");
+}
+
 /// NS2-5: the profile's team list now comes from one `plays_on` traversal
 /// instead of scanning every team's full roster. Two teams and zero teams are
 /// the cases the old loop and the new query can disagree on.
