@@ -224,6 +224,8 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         tracing::warn!(target: "scuffed_stat_tracker", error = %e, "could not turn off core dumps");
     }
     stat_tracker::omp::log_startup(&omp);
+    super::memtune::log_startup();
+    tokio::spawn(super::memtune::trim_loop());
 
     let collect_portraits = std::env::args().any(|a| a == "--collect-portraits");
     let dump_poll_frames = std::env::args().any(|a| a == "--dump-poll-frames");

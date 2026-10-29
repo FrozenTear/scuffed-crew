@@ -8,6 +8,7 @@
 mod debug_dumps;
 mod event_loop;
 mod lifecycle;
+pub(crate) mod memtune;
 mod poll;
 mod session;
 mod shutdown;

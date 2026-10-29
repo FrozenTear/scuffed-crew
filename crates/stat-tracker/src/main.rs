@@ -146,6 +146,8 @@ fn main() -> anyhow::Result<()> {
     // it set.
     // Under the systemd unit the variable is already there and this returns.
     let omp = stat_tracker::omp::ensure_thread_limit();
+    // Allocator limits, also before any thread (daemon/memtune.rs).
+    daemon::memtune::apply();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
