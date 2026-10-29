@@ -189,20 +189,32 @@ pub(super) async fn prepare_with(
     let backup = data_dir.join(format!("{PRE_TIMELINE_BACKUP_PREFIX}{stamp}"));
     let partial = data_dir.join(format!("{PRE_TIMELINE_BACKUP_PREFIX}{stamp}.partial"));
     let _ = std::fs::remove_dir_all(&partial);
+    let pending = pending_path(&backup);
+    // Order matters: the `.pending` note is durable before the copy takes
+    // its final name, so a final-named copy without a note can only come
+    // from a finished move. A note whose copy is missing is removed later.
+    let mut renamed = false;
     let copied = copy_tree(&live, &partial)
+        .and_then(|()| std::fs::write(&pending, b""))
+        .and_then(|()| std::fs::File::open(&pending)?.sync_all())
         .and_then(|()| sync_dir(data_dir))
         .and_then(|()| std::fs::rename(&partial, &backup))
-        .and_then(|()| sync_dir(data_dir));
+        .and_then(|()| {
+            renamed = true;
+            sync_dir(data_dir)
+        });
     if let Err(e) = copied {
+        // Leave nothing behind that a later start could take for a good
+        // copy. A copy of the same name made before this call (the rename
+        // then fails) is not this call's to remove.
         let _ = std::fs::remove_dir_all(&partial);
+        if renamed {
+            let _ = std::fs::remove_dir_all(&backup);
+        }
+        let _ = std::fs::remove_file(&pending);
         return TimelineBackup::Failed(format!("backup copy failed: {e}"));
     }
     crate::fs_mode::tighten_private_dir(&backup);
-    // Marks this copy as the one for a move still in progress; removed with
-    // the marker. Only such a copy is reused by a later start.
-    if let Err(e) = std::fs::write(pending_path(&backup), b"") {
-        return TimelineBackup::Failed(format!("backup copy failed: {e}"));
-    }
     TimelineBackup::Ready(Some(backup))
 }
 
@@ -234,18 +246,25 @@ fn prune_finished_backups(data_dir: &Path, keep: &Path) {
     }
 }
 
-/// Copies an interrupted start left half done.
+/// Copies an interrupted start left half done, and `.pending` notes whose
+/// copy never got its final name.
 fn remove_partial_backups(data_dir: &Path) {
     let Ok(entries) = std::fs::read_dir(data_dir) else {
         return;
     };
     for path in entries.flatten().map(|e| e.path()) {
-        if path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| n.starts_with(PRE_TIMELINE_BACKUP_PREFIX) && n.ends_with(".partial"))
-        {
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with(PRE_TIMELINE_BACKUP_PREFIX) {
+            continue;
+        }
+        if name.ends_with(".partial") {
             let _ = std::fs::remove_dir_all(&path);
+        } else if let Some(copy) = name.strip_suffix(".pending")
+            && !data_dir.join(copy).is_dir()
+        {
+            let _ = std::fs::remove_file(&path);
         }
     }
 }

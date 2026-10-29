@@ -129,3 +129,51 @@ mod wiring {
         assert!(file(&dir).exists(), "owed write");
     }
 }
+
+/// The write after a stored capture is owed when the board went to a game
+/// that has its result, and only for that game's own board.
+#[test]
+fn a_final_board_owes_its_write_and_only_for_its_own_game() {
+    use crate::detect::MatchOutcome;
+    let now = Instant::now();
+    let st = |outcome| {
+        crate::main_tests::session(
+            Some(crate::ActiveGame::open_at(
+                "s1".into(),
+                outcome,
+                Vec::new(),
+                now,
+            )),
+            now,
+        )
+    };
+    assert!(crate::capture_owes_snapshot_write(
+        &st(MatchOutcome::Victory),
+        "s1"
+    ));
+    assert!(
+        !crate::capture_owes_snapshot_write(&st(MatchOutcome::Victory), "s2"),
+        "a board of another game"
+    );
+    assert!(!crate::capture_owes_snapshot_write(
+        &st(MatchOutcome::Unknown),
+        "s1"
+    ));
+    assert!(!crate::capture_owes_snapshot_write(
+        &crate::main_tests::session(None, now),
+        "s1"
+    ));
+}
+
+/// Both places that store a capture report mark the snapshot the same way:
+/// the run loop, and the shutdown drain of reports that landed late (a
+/// final board must reach the shutdown write).
+#[test]
+fn the_run_loop_and_the_shutdown_drain_mark_the_snapshot_after_a_capture() {
+    let event_loop = include_str!("event_loop.rs");
+    let shutdown = include_str!("shutdown.rs");
+    assert!(
+        event_loop.contains("refresh_snapshot_after_capture(&st, store, data_dir, &sid).await;")
+    );
+    assert!(shutdown.contains("refresh_snapshot_after_capture(st, store, data_dir, &sid).await;"));
+}

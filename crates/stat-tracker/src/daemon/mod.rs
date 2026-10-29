@@ -20,6 +20,8 @@ mod tab;
 #[cfg(test)]
 mod tests_debug_dumps;
 #[cfg(test)]
+mod tests_frame_copies;
+#[cfg(test)]
 mod tests_gui_presence;
 #[cfg(test)]
 mod tests_memtune;
