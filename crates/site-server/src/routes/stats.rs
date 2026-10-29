@@ -809,7 +809,12 @@ pub async fn token_check(
     )
 }
 
-/// GET /api/stats/daemon-config — fetch config for daemon (token auth)
+/// GET /api/stats/daemon-config. Daemon-token auth, read only.
+///
+/// `stats_visibility` comes from the same `member_settings` row as
+/// `player_name`. No row uses public, which is what GET /api/stats/settings
+/// reports for a member with no row. This route does not write settings, and
+/// the daemon token is not accepted on /api/stats/settings.
 pub async fn daemon_config(
     State(state): State<AppState>,
     daemon: DaemonUser,
@@ -826,8 +831,14 @@ pub async fn daemon_config(
                 }),
             )
         })?;
+    // Same default as `get_member_settings`: a missing row is public.
+    let (player_name, stats_visibility) = match settings {
+        Some(s) => (s.player_name, s.stats_visibility),
+        None => (None, StatsVisibility::Public),
+    };
     Ok(Json(DaemonConfigResponse {
-        player_name: settings.and_then(|s| s.player_name),
+        player_name,
+        stats_visibility: Some(stats_visibility),
     }))
 }
 
@@ -1622,6 +1633,142 @@ mod tests {
             .await
             .unwrap();
         (state, member.id, daemon_token, session_token)
+    }
+
+    async fn json_call(
+        app: axum::Router,
+        method: &str,
+        uri: &str,
+        bearer: Option<&str>,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if let Some(token) = bearer {
+            builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let req = if let Some(body) = body {
+            builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap()
+        } else {
+            builder.body(Body::empty()).unwrap()
+        };
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, parsed)
+    }
+
+    /// Daemon-config returns the same visibility GET /api/stats/settings does.
+    /// A missing settings row is public. The daemon token cannot write settings.
+    #[tokio::test]
+    async fn daemon_config_returns_stats_visibility() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let app = create_router(state);
+
+        let (status, cfg) = json_call(
+            app.clone(),
+            "GET",
+            "/api/stats/daemon-config",
+            Some(&daemon_token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{cfg}");
+        assert!(cfg["player_name"].is_null(), "{cfg}");
+        assert_eq!(cfg["stats_visibility"], "public");
+
+        let (status, settings) = json_call(
+            app.clone(),
+            "GET",
+            "/api/stats/settings",
+            Some(&session_token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{settings}");
+        assert_eq!(settings["stats_visibility"], cfg["stats_visibility"]);
+
+        for vis in ["public", "members", "private"] {
+            let (status, put) = json_call(
+                app.clone(),
+                "PUT",
+                "/api/stats/settings",
+                Some(&session_token),
+                Some(serde_json::json!({
+                    "player_name": "Ana",
+                    "stats_visibility": vis
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{put}");
+            assert_eq!(put["stats_visibility"], vis);
+            assert_eq!(put["player_name"], "Ana");
+
+            let (status, cfg) = json_call(
+                app.clone(),
+                "GET",
+                "/api/stats/daemon-config",
+                Some(&daemon_token),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{cfg}");
+            assert_eq!(cfg["stats_visibility"], vis, "{cfg}");
+            assert_eq!(cfg["player_name"], "Ana");
+
+            let (status, settings) = json_call(
+                app.clone(),
+                "GET",
+                "/api/stats/settings",
+                Some(&session_token),
+                None,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{settings}");
+            assert_eq!(settings["stats_visibility"], cfg["stats_visibility"]);
+        }
+
+        let (missing_status, missing_body) =
+            json_call(app.clone(), "GET", "/api/stats/daemon-config", None, None).await;
+        assert_eq!(missing_status, StatusCode::UNAUTHORIZED, "{missing_body}");
+        assert_eq!(missing_body["error"], "Missing Bearer token");
+
+        let (bad_status, bad_body) = json_call(
+            app.clone(),
+            "GET",
+            "/api/stats/daemon-config",
+            Some("not-a-daemon-token"),
+            None,
+        )
+        .await;
+        assert_eq!(bad_status, StatusCode::UNAUTHORIZED, "{bad_body}");
+        assert_eq!(bad_body["error"], "Invalid or revoked daemon token");
+
+        // The daemon token stays off the session settings routes.
+        let (status, body) = json_call(
+            app.clone(),
+            "GET",
+            "/api/stats/settings",
+            Some(&daemon_token),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        let (status, body) = json_call(
+            app.clone(),
+            "PUT",
+            "/api/stats/settings",
+            Some(&daemon_token),
+            Some(serde_json::json!({
+                "player_name": "Ana",
+                "stats_visibility": "public"
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
     }
 
     async fn get_my_matches(app: axum::Router, token: &str) -> serde_json::Value {
