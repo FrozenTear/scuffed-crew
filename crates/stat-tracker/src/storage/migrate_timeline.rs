@@ -185,37 +185,79 @@ pub(super) async fn prepare_with(
         }
         None => return TimelineBackup::Failed("cannot read the free disk space".into()),
     }
-    let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-    let backup = data_dir.join(format!("{PRE_TIMELINE_BACKUP_PREFIX}{stamp}"));
-    let partial = data_dir.join(format!("{PRE_TIMELINE_BACKUP_PREFIX}{stamp}.partial"));
+    let stamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
+    // A finished copy may already have this second's name (a move redone
+    // right after an older tracker's vacuum dropped the tables): a note is
+    // only ever made for a name that is free.
+    let Some(name) = (0u32..100)
+        .map(|n| match n {
+            0 => format!("{PRE_TIMELINE_BACKUP_PREFIX}{stamp}"),
+            n => format!("{PRE_TIMELINE_BACKUP_PREFIX}{stamp}_{n}"),
+        })
+        .find(|name| std::fs::symlink_metadata(data_dir.join(name)).is_err())
+    else {
+        return TimelineBackup::Failed("no free name for the backup".into());
+    };
+    let backup = data_dir.join(&name);
+    let partial = data_dir.join(format!("{name}.partial"));
     let _ = std::fs::remove_dir_all(&partial);
-    let pending = pending_path(&backup);
-    // Order matters: the `.pending` note is durable before the copy takes
-    // its final name, so a final-named copy without a note can only come
-    // from a finished move. A note whose copy is missing is removed later.
-    let mut renamed = false;
-    let copied = copy_tree(&live, &partial)
-        .and_then(|()| std::fs::write(&pending, b""))
-        .and_then(|()| std::fs::File::open(&pending)?.sync_all())
-        .and_then(|()| sync_dir(data_dir))
-        .and_then(|()| std::fs::rename(&partial, &backup))
-        .and_then(|()| {
-            renamed = true;
-            sync_dir(data_dir)
-        });
-    if let Err(e) = copied {
-        // Leave nothing behind that a later start could take for a good
-        // copy. A copy of the same name made before this call (the rename
-        // then fails) is not this call's to remove.
-        let _ = std::fs::remove_dir_all(&partial);
-        if renamed {
-            let _ = std::fs::remove_dir_all(&backup);
-        }
-        let _ = std::fs::remove_file(&pending);
+    let named = write_backup(
+        &live,
+        data_dir,
+        &partial,
+        &backup,
+        |from, to| std::fs::rename(from, to),
+        sync_dir,
+    );
+    if let Err(e) = named {
         return TimelineBackup::Failed(format!("backup copy failed: {e}"));
     }
     crate::fs_mode::tighten_private_dir(&backup);
     TimelineBackup::Ready(Some(backup))
+}
+
+/// Copy the closed store `live` to `backup` through `partial`, with its
+/// `.pending` note. `rename` and `sync` are the data-dir steps (a test
+/// replaces them to fail one).
+///
+/// Order matters: the note is durable before the copy takes its final
+/// name, so a final-named copy without a note can only come from a
+/// finished move. On an error nothing is left that a later start could
+/// take for a good copy: a named copy gives up its name, and the note goes,
+/// durably, before any of it is deleted, so a delete cut short leaves only
+/// what [`remove_partial_backups`] clears.
+pub(super) fn write_backup(
+    live: &Path,
+    data_dir: &Path,
+    partial: &Path,
+    backup: &Path,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+    sync: impl Fn(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    let pending = pending_path(backup);
+    let mut renamed = false;
+    let copied = copy_tree(live, partial)
+        .and_then(|()| std::fs::write(&pending, b""))
+        .and_then(|()| std::fs::File::open(&pending)?.sync_all())
+        .and_then(|()| sync(data_dir))
+        .and_then(|()| rename(partial, backup))
+        .and_then(|()| {
+            renamed = true;
+            sync(data_dir)
+        });
+    if copied.is_err() {
+        // A copy of the same name made before this call (the rename then
+        // fails) is not this call's to remove.
+        let doomed = if renamed && rename(backup, partial).is_err() {
+            backup
+        } else {
+            partial
+        };
+        let _ = std::fs::remove_file(&pending);
+        let _ = sync(data_dir);
+        let _ = std::fs::remove_dir_all(doomed);
+    }
+    copied
 }
 
 /// `<backup>.pending`: this backup belongs to a move that has not finished.

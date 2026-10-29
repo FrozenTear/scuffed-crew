@@ -316,6 +316,7 @@ pub(crate) async fn run_loop(
                     std::future::ready(())
                 })
                 .await;
+                let stored_sid = stored_session(&sid, &result);
                 // The report handler is the same function the night harness
                 // calls. Sync stays here so a slow upload cannot hide inside it.
                 if apply_capture_report(&mut st, store, data_dir, &sid, result, Instant::now()).await {
@@ -328,7 +329,7 @@ pub(crate) async fn run_loop(
                         data_dir,
                         st.capture_count,
                     );
-                    refresh_snapshot_after_capture(&st, store, data_dir, &sid).await;
+                    refresh_snapshot_after_capture(&st, store, data_dir, &stored_sid).await;
                 }
                 // A Tab pressed while that capture ran runs now, unless the
                 // capture took its board (it would read the same board). A
@@ -1160,10 +1161,20 @@ where
     }
 }
 
+/// The session a capture report stored its row in: a split's new game, or
+/// else the session the Tab was settled to. Read before the report moves.
+pub(crate) fn stored_session(sid: &str, result: &Result<CaptureReport, String>) -> String {
+    match result {
+        Ok(report) if report.split => report.session_id.clone(),
+        _ => sid.to_owned(),
+    }
+}
+
 /// Whether the snapshot write after a stored capture is owed whatever the
 /// GUI: the board went to a game that already has its result (the final
-/// scoreboard, pressed after the result). Keyed on the board's session, not
-/// on whichever game is active now.
+/// scoreboard, pressed after the result, or a split's new game opened with
+/// its result). `sid` is the session that stored the row
+/// ([`stored_session`]), not whichever game is active now.
 pub(crate) fn capture_owes_snapshot_write(st: &SessionState, sid: &str) -> bool {
     st.active_game
         .as_ref()
