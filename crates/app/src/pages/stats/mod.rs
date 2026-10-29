@@ -1170,6 +1170,8 @@ pub fn Stats() -> Element {
         spawn(async move {
             let body = UpdateMemberSettingsRequest {
                 player_name: if name.is_empty() { None } else { Some(name) },
+                // The name field does not change who can see stats.
+                stats_visibility: None,
             };
             match ApiClient::web()
                 .put_json::<_, MemberSettingsResponse>("/api/stats/settings", &body)

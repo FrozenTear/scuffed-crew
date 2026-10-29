@@ -475,16 +475,77 @@ pub struct CreateDaemonTokenResponse {
     pub label: String,
 }
 
+/// Who can see a member's tracker stats.
+///
+/// Stored on `member_settings.stats_visibility`. Missing rows and legacy rows
+/// read as [`StatsVisibility::Public`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatsVisibility {
+    /// Signed-out visitors and every crew member.
+    #[default]
+    Public,
+    /// Active signed-in crew members. Signed-out callers do not see the numbers.
+    Members,
+    /// The member, and officers. Off every leaderboard, including for the owner.
+    Private,
+}
+
+impl StatsVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Members => "members",
+            Self::Private => "private",
+        }
+    }
+
+    /// Leaderboards and other multi-member aggregates.
+    ///
+    /// `crew` is true for an active signed-in member. `private` is never
+    /// included. `members` is included only when `crew` is true.
+    pub fn on_leaderboard(self, crew: bool) -> bool {
+        match self {
+            Self::Public => true,
+            Self::Members => crew,
+            Self::Private => false,
+        }
+    }
+
+    /// `None` when this viewer may see the member's own stat routes.
+    ///
+    /// `active_member` means a signed-in crew member who is not suspended.
+    /// `owner` and `officer` are that same viewer. Signed-out and inactive
+    /// callers pass false for all three flags.
+    pub fn denial(self, active_member: bool, owner: bool, officer: bool) -> Option<&'static str> {
+        match self {
+            Self::Public => None,
+            Self::Members if active_member => None,
+            Self::Members => Some("stats_members_only"),
+            Self::Private if owner || officer => None,
+            Self::Private => Some("stats_private"),
+        }
+    }
+}
+
 /// Per-member settings returned by GET /api/stats/settings (session auth).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberSettingsResponse {
     pub player_name: Option<String>,
+    pub stats_visibility: StatsVisibility,
 }
 
 /// Body for PUT /api/stats/settings.
+///
+/// Omitting `player_name`, or sending null, clears the stored name. That is
+/// the same as before `stats_visibility` existed. Omitting `stats_visibility`,
+/// or sending null, keeps the stored value. The handler answers 400
+/// `invalid_stats_visibility` for any other JSON value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateMemberSettingsRequest {
     pub player_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats_visibility: Option<StatsVisibility>,
 }
 
 /// Daemon configuration returned by GET /api/stats/daemon-config (token auth).
@@ -1182,5 +1243,43 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bare.name_recognizer, None);
+    }
+
+    #[test]
+    fn stats_visibility_serde_and_denial() {
+        assert_eq!(
+            serde_json::to_string(&StatsVisibility::Members).unwrap(),
+            "\"members\""
+        );
+        assert_eq!(
+            serde_json::from_str::<StatsVisibility>("\"private\"").unwrap(),
+            StatsVisibility::Private
+        );
+        assert!(serde_json::from_str::<StatsVisibility>("\"nope\"").is_err());
+
+        let omitted: UpdateMemberSettingsRequest =
+            serde_json::from_str(r#"{"player_name":"Ana"}"#).unwrap();
+        assert_eq!(omitted.stats_visibility, None);
+        let missing_name =
+            serde_json::from_str::<UpdateMemberSettingsRequest>(r#"{"stats_visibility":"public"}"#)
+                .unwrap();
+        assert_eq!(missing_name.player_name, None);
+        assert_eq!(missing_name.stats_visibility, Some(StatsVisibility::Public));
+
+        assert_eq!(
+            StatsVisibility::Members.denial(false, false, false),
+            Some("stats_members_only")
+        );
+        assert_eq!(StatsVisibility::Members.denial(true, false, false), None);
+        assert_eq!(
+            StatsVisibility::Private.denial(true, false, false),
+            Some("stats_private")
+        );
+        assert_eq!(StatsVisibility::Private.denial(true, true, false), None);
+        assert_eq!(StatsVisibility::Private.denial(true, false, true), None);
+        assert!(!StatsVisibility::Private.on_leaderboard(true));
+        assert!(!StatsVisibility::Members.on_leaderboard(false));
+        assert!(StatsVisibility::Members.on_leaderboard(true));
+        assert!(StatsVisibility::Public.on_leaderboard(false));
     }
 }

@@ -14,6 +14,7 @@ use crate::types::{
     MemberLeaderboardRow, PersonalMatch, PersonalStats, RoleStats,
 };
 use crate::{with_timeout, Database, DbError, DbResult};
+use scuffed_types::StatsVisibility;
 
 /// Per-role aggregates with the read-time role fill.
 mod role_fill;
@@ -841,14 +842,17 @@ impl Database {
         Ok(all)
     }
 
-    /// Public member leaderboard from personal_match aggregates.
+    /// Signed-in member leaderboard from personal_match aggregates.
     ///
     /// - `metric`: `"winrate"` | `"kd"` | `"games"`
     /// - optional `season_window` `(starts_at, ends_at)` filters via
     ///   `played_at >= starts AND played_at < ends` (bound params only)
     /// - optional `hero`: when `Some`, adds `AND hero = $hero` (bound param;
-    ///   canonical `scuffed_types::HEROES` string — validate at the HTTP layer)
+    ///   canonical `scuffed_types::HEROES` string, validated at the HTTP layer)
     /// - inactive / missing members are omitted (banned stay off public boards)
+    /// - `stats_visibility = private` is omitted for every caller
+    /// - `stats_visibility = members` is included here (the crew board). The
+    ///   anonymous HTTP board passes `crew = false` to [`leaderboard_snapshot`]
     /// - winrate/kd require ≥ [`LEADERBOARD_MIN_GAMES`] matches (per-hero games
     ///   when `hero` is set); kd also requires that many K/D-plausible games
     ///   (`kd_games`), since only those feed the K/D sums
@@ -861,14 +865,16 @@ impl Database {
         season_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
         hero: Option<&str>,
     ) -> DbResult<Vec<MemberLeaderboardRow>> {
-        let snapshot = self.leaderboard_snapshot(season_window).await?;
+        let snapshot = self.leaderboard_snapshot(season_window, true).await?;
         Ok(snapshot.project(metric, hero.unwrap_or(""), limit))
     }
 
     /// One grouped scan for every hero in the season window.
     ///
-    /// Metric, limit, and hero are not part of the query. Callers sort and
-    /// truncate with [`LeaderboardSnapshot::project`].
+    /// `crew` keeps `stats_visibility = members`. The anonymous board passes
+    /// false. `private` is dropped either way. Metric, limit, and hero are
+    /// not part of the query. Callers sort and truncate with
+    /// [`LeaderboardSnapshot::project`].
     ///
     /// `games` and `wins` count every row with a victory, defeat, or draw.
     /// `losses` and `draws` split the rest, so `wins + losses + draws == games`.
@@ -882,6 +888,7 @@ impl Database {
     pub async fn leaderboard_snapshot(
         &self,
         season_window: Option<(DateTime<Utc>, DateTime<Utc>)>,
+        crew: bool,
     ) -> DbResult<LeaderboardSnapshot> {
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
@@ -949,6 +956,31 @@ impl Database {
                 })
                 .collect();
 
+            // Rows with no settings record stay public and are not in this map.
+            #[derive(Deserialize, SurrealValue)]
+            struct VisRow {
+                member_id: String,
+                stats_visibility: String,
+            }
+            let mut vis_q = self
+                .client
+                .query(
+                    "SELECT member_id, stats_visibility FROM member_settings WHERE stats_visibility IN ['members', 'private']",
+                )
+                .await?;
+            let vis_rows: Vec<VisRow> = vis_q.take(0)?;
+            let restricted: HashMap<String, StatsVisibility> = vis_rows
+                .into_iter()
+                .filter_map(|row| {
+                    let vis = match row.stats_visibility.as_str() {
+                        "members" => StatsVisibility::Members,
+                        "private" => StatsVisibility::Private,
+                        _ => return None,
+                    };
+                    Some((row.member_id, vis))
+                })
+                .collect();
+
             let mut aggs = Vec::with_capacity(rows.len());
             for row in rows {
                 if row.games == 0 {
@@ -963,6 +995,12 @@ impl Database {
                 let Some(display_name) = active.get(&mid).cloned() else {
                     continue;
                 };
+                if restricted
+                    .get(&mid)
+                    .is_some_and(|vis| !vis.on_leaderboard(crew))
+                {
+                    continue;
+                }
                 aggs.push((
                     row.hero,
                     LeaderboardHeroAgg {
@@ -3463,7 +3501,7 @@ mod tests {
             .check()
             .unwrap();
 
-        let snap = db.leaderboard_snapshot(None).await.unwrap();
+        let snap = db.leaderboard_snapshot(None, true).await.unwrap();
         let sierra = snap
             .by_hero
             .get("Sierra")
@@ -3605,7 +3643,7 @@ mod tests {
             .await
             .unwrap();
 
-        let snap = db.leaderboard_snapshot(None).await.unwrap();
+        let snap = db.leaderboard_snapshot(None, true).await.unwrap();
         let gamer_agg = snap.all.iter().find(|r| r.member_id == gamer).unwrap();
         assert_eq!((gamer_agg.games, gamer_agg.kd_games), (5, 1));
 
@@ -3798,5 +3836,67 @@ mod tests {
         let mut stored: Vec<&str> = after.iter().map(|m| m.hero.as_str()).collect();
         stored.sort_unstable();
         assert!(stored.contains(&"sombra") && stored.contains(&"SOMBRA"));
+    }
+
+    #[tokio::test]
+    async fn leaderboard_omits_private_and_hides_members_only_from_the_public_board() {
+        use crate::types::OrgRole;
+        use scuffed_types::StatsVisibility;
+
+        let db = test_db().await;
+        let public_m = db
+            .create_member("u-pub", "PubVis", OrgRole::Member)
+            .await
+            .unwrap();
+        let members_m = db
+            .create_member("u-mem", "MemVis", OrgRole::Member)
+            .await
+            .unwrap();
+        let private_m = db
+            .create_member("u-priv", "PrivVis", OrgRole::Member)
+            .await
+            .unwrap();
+        db.upsert_member_settings(&members_m.id, None, Some(StatsVisibility::Members))
+            .await
+            .unwrap();
+        db.upsert_member_settings(&private_m.id, None, Some(StatsVisibility::Private))
+            .await
+            .unwrap();
+
+        for (id, sid) in [
+            (public_m.id.as_str(), "vis-pub"),
+            (members_m.id.as_str(), "vis-mem"),
+            (private_m.id.as_str(), "vis-priv"),
+        ] {
+            let mut game = entry(sid, "victory", 4);
+            game.member_id = id.to_string();
+            db.upsert_personal_matches(id, &[game]).await.unwrap();
+        }
+
+        let crew = db.leaderboard_snapshot(None, true).await.unwrap();
+        let crew_ids: Vec<_> = crew
+            .project("games", "", 50)
+            .into_iter()
+            .map(|row| row.member_id)
+            .collect();
+        assert!(crew_ids.contains(&public_m.id));
+        assert!(crew_ids.contains(&members_m.id));
+        assert!(!crew_ids.contains(&private_m.id));
+
+        let public_board = db.leaderboard_snapshot(None, false).await.unwrap();
+        let public_ids: Vec<_> = public_board
+            .project("games", "", 50)
+            .into_iter()
+            .map(|row| row.member_id)
+            .collect();
+        assert_eq!(public_ids, vec![public_m.id.clone()]);
+
+        let via_helper = db
+            .member_leaderboard("games", 50, None, None)
+            .await
+            .unwrap();
+        let helper_ids: Vec<_> = via_helper.into_iter().map(|row| row.member_id).collect();
+        assert!(helper_ids.contains(&members_m.id));
+        assert!(!helper_ids.contains(&private_m.id));
     }
 }

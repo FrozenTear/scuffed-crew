@@ -932,6 +932,8 @@ pub struct MapStats {
 pub struct MemberSettings {
     pub member_id: String,
     pub player_name: Option<String>,
+    /// Missing on a legacy row. Callers treat that as [`scuffed_types::StatsVisibility::Public`].
+    pub stats_visibility: scuffed_types::StatsVisibility,
 }
 
 /// A daemon authentication token.
