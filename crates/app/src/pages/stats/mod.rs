@@ -22,6 +22,7 @@ use crate::hooks::use_api_with;
 use crate::routes::Route;
 use crate::sample::Tally;
 use crate::state::{AuthState, use_auth, use_relay_availability_state};
+use crate::stats_privacy;
 
 // -- Shared data models (fetched once here, consumed by the tab modules) --
 
@@ -273,6 +274,12 @@ const STATS_CSS: &str = r#"
         gap: 1rem;
         margin-bottom: 1.5rem;
     }
+    .my-stats .stats-visibility-note {
+        font-size: 0.8rem;
+        color: var(--text-3);
+        margin: -0.75rem 0 1rem;
+    }
+    .my-stats .stats-visibility-note a { color: var(--accent); }
     .stats-header-actions {
         display: flex;
         flex-wrap: wrap;
@@ -1130,6 +1137,13 @@ pub fn Stats() -> Element {
         member_stats_url(&auth(), "/api/stats/settings".to_string())
     });
 
+    let visibility = server_settings
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .map(|s| s.stats_visibility);
+
     let mut tab = use_signal(|| StatsTab::Overview);
     let mut toast = use_toast();
 
@@ -1275,6 +1289,13 @@ pub fn Stats() -> Element {
                         if dens == "compact" { "Density: Compact" } else { "Density: Comfortable" }
                     }
                     Link { to: Route::Leaderboards {}, "Leaderboards" }
+                }
+            }
+
+            if let Some(visibility) = visibility {
+                p { class: "stats-visibility-note",
+                    "{stats_privacy::notice(visibility)} "
+                    Link { to: Route::ProfileSettings {}, "Change in settings" }
                 }
             }
 

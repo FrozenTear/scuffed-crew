@@ -15,6 +15,7 @@ mod pages;
 mod routes;
 mod sample;
 mod state;
+mod stats_privacy;
 mod styles;
 mod theme;
 mod util;

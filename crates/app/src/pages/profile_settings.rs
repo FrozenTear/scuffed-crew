@@ -8,6 +8,9 @@ use crate::pages::display_name::{
 use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 use scuffed_types::MeResponse;
+use scuffed_types::api::{MemberSettingsResponse, StatsVisibility};
+
+use crate::stats_privacy;
 
 /// Prefill source: the public profile projection (flattened member + accounts).
 #[derive(Debug, Clone, Deserialize)]
@@ -212,6 +215,20 @@ pub fn ProfileSettings() -> Element {
     let mut load_error = use_signal(|| None::<String>);
     let mut name_error = use_signal(|| None::<String>);
     let mut saving = use_signal(|| false);
+    // None until GET /api/stats/settings answers.
+    let mut stats_visibility = use_signal(|| None::<StatsVisibility>);
+    let mut stats_load_failed = use_signal(|| false);
+    let mut stats_saving = use_signal(|| false);
+
+    use_future(move || async move {
+        match ApiClient::web()
+            .fetch::<MemberSettingsResponse>("/api/stats/settings")
+            .await
+        {
+            Ok(s) => stats_visibility.set(Some(s.stats_visibility)),
+            Err(_) => stats_load_failed.set(true),
+        }
+    });
 
     use_future(move || async move {
         let me = match ApiClient::web().fetch::<MeResponse>("/api/auth/me").await {
@@ -292,6 +309,37 @@ pub fn ProfileSettings() -> Element {
                 }
             }
             saving.set(false);
+        });
+    };
+
+    let on_save_visibility = move |_| {
+        let Some(choice) = stats_visibility() else {
+            return;
+        };
+        stats_saving.set(true);
+        spawn(async move {
+            // A PUT without player_name clears it, so read the stored name
+            // right before saving. The in-game name is edited on My Stats.
+            let stored = ApiClient::web()
+                .fetch::<MemberSettingsResponse>("/api/stats/settings")
+                .await;
+            let result = match stored {
+                Ok(current) => {
+                    let body = stats_privacy::settings_body(current.player_name, choice);
+                    ApiClient::web()
+                        .put_json::<_, MemberSettingsResponse>("/api/stats/settings", &body)
+                        .await
+                }
+                Err(e) => Err(e),
+            };
+            match result {
+                Ok(saved) => {
+                    stats_visibility.set(Some(saved.stats_visibility));
+                    toast.show(Toast::success("Stats visibility saved."));
+                }
+                Err(e) => toast.show(Toast::error(stats_privacy::save_error(&e))),
+            }
+            stats_saving.set(false);
         });
     };
 
@@ -406,6 +454,40 @@ pub fn ProfileSettings() -> Element {
                         disabled: saving(),
                         onclick: on_save_profile,
                         "Save profile"
+                    }
+                }
+
+                div { class: "profile-edit-section",
+                    h2 { "Stats privacy" }
+                    if let Some(choice) = stats_visibility() {
+                        div { class: "profile-edit-field",
+                            label { r#for: "stats-visibility", "Who can see my stats" }
+                            select {
+                                id: "stats-visibility",
+                                value: choice.as_str(),
+                                onchange: move |e| {
+                                    if let Some(next) = stats_privacy::parse(&e.value()) {
+                                        stats_visibility.set(Some(next));
+                                    }
+                                },
+                                for v in stats_privacy::OPTIONS {
+                                    option { value: v.as_str(), selected: choice == v,
+                                        "{stats_privacy::label(v)}"
+                                    }
+                                }
+                            }
+                            p { class: "profile-edit-hint", "{stats_privacy::hint(choice)}" }
+                        }
+                        button {
+                            class: "profile-edit-btn",
+                            disabled: stats_saving(),
+                            onclick: on_save_visibility,
+                            "Save visibility"
+                        }
+                    } else if stats_load_failed() {
+                        p { class: "profile-edit-hint", "Couldn't load your stats visibility." }
+                    } else {
+                        p { class: "profile-edit-hint", "Loading..." }
                     }
                 }
 

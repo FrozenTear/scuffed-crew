@@ -9,8 +9,8 @@ use crate::components::{
 use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
 use crate::state::use_auth;
 use scuffed_api_client::{ApiClient, ClientError};
-use scuffed_types::AttendanceStats;
 use scuffed_types::api::{ChangeRoleRequest, CreateGameAccountRequest, ToggleActiveRequest};
+use scuffed_types::{AttendanceStats, OrgRole, UserInfo};
 
 // --- Types ---
 // These local types have API-enriched fields (joined names, computed stats)
@@ -19,6 +19,9 @@ use scuffed_types::api::{ChangeRoleRequest, CreateGameAccountRequest, ToggleActi
 #[derive(Debug, Clone, Deserialize)]
 struct Member {
     id: String,
+    /// Login user of this member. Matches `UserInfo::id`, so an officer's own row is known.
+    #[serde(default)]
+    user_id: String,
     display_name: String,
     org_role: String,
     is_active: bool,
@@ -126,6 +129,33 @@ fn admin_avatar_upload_url(member_id: &str) -> String {
         "/api/upload/avatar?member_id={}",
         crate::util::encode_query(member_id)
     )
+}
+
+/// What the server answers when an officer edits an admin or another officer.
+const OFFICER_RANK_ERROR: &str = "Officers cannot edit the profile of admins or other officers";
+
+/// Shown on a disabled control and in a toast for that refusal.
+const OFFICER_RANK_COPY: &str =
+    "Officers cannot edit the profile of admins or other officers. Ask an admin.";
+
+/// Same rule as the server's `can_edit_other_profile`: an officer may edit
+/// themselves, a member, or a recruit, and nobody above. Admins may edit anyone.
+fn officer_locked_out(user: Option<&UserInfo>, target: &Member) -> bool {
+    let Some(user) = user else {
+        return false;
+    };
+    user.role == Some(OrgRole::Officer)
+        && user.id != target.user_id
+        && !matches!(target.org_role.as_str(), "member" | "recruit")
+}
+
+/// Toast for a failed profile, avatar, or game account write. The officer rank
+/// refusal gets plain copy. Anything else keeps the server text.
+fn profile_edit_failure(prefix: &str, err: &ClientError) -> String {
+    if err.http_status() == Some(403) && err.to_string().contains(OFFICER_RANK_ERROR) {
+        return OFFICER_RANK_COPY.to_string();
+    }
+    format!("{prefix}: {err}")
 }
 
 /// Toast copy when the avatar upload is rejected. 403 and 404 come from the
@@ -376,7 +406,7 @@ pub fn AdminMembers() -> Element {
                         members.refresh += 1;
                         games.refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Failed: {e}"))),
+                    Err(e) => toast.show(Toast::error(profile_edit_failure("Failed", &e))),
                 }
             });
         }
@@ -489,7 +519,10 @@ pub fn AdminMembers() -> Element {
                         add_acct_id.set(String::new());
                         accts_refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Failed to add account: {e}"))),
+                    Err(e) => toast.show(Toast::error(profile_edit_failure(
+                        "Failed to add account",
+                        &e,
+                    ))),
                 }
             });
         }
@@ -515,7 +548,7 @@ pub fn AdminMembers() -> Element {
                         toast.show(Toast::success("Game account removed."));
                         accts_refresh += 1;
                     }
-                    Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
+                    Err(e) => toast.show(Toast::error(profile_edit_failure("Delete failed", &e))),
                 }
             });
         }
@@ -643,6 +676,8 @@ pub fn AdminMembers() -> Element {
 
     // --- Render ---
 
+    let me = auth().user;
+
     rsx! {
 
         div { class: "admin-toolbar",
@@ -672,6 +707,8 @@ pub fn AdminMembers() -> Element {
                                 let m_accts = member.clone();
                                 let m_avatar = member.clone();
                                 let m_pw = member.clone();
+                                let locked = officer_locked_out(me.as_ref(), member);
+                                let lock_title = if locked { OFFICER_RANK_COPY } else { "" };
                                 let status_str = if member.is_active { "active" } else { "inactive" };
                                 let joined = crate::util::format_datetime(&member.joined_at);
                                 let row_class = member_row_class(member.is_active);
@@ -693,12 +730,16 @@ pub fn AdminMembers() -> Element {
                                                 if member.is_active {
                                                     button {
                                                         class: "row-btn danger",
+                                                        disabled: locked,
+                                                        title: lock_title,
                                                         onclick: move |_| open_toggle(m_toggle.clone()),
                                                         "Deactivate"
                                                     }
                                                 } else {
                                                     button {
                                                         class: "row-btn",
+                                                        disabled: locked,
+                                                        title: lock_title,
                                                         onclick: move |_| open_toggle(m_toggle.clone()),
                                                         "Activate"
                                                     }
@@ -722,11 +763,15 @@ pub fn AdminMembers() -> Element {
                                                 }
                                                 button {
                                                     class: "row-btn",
+                                                    disabled: locked,
+                                                    title: lock_title,
                                                     onclick: move |_| open_accounts(m_accts.clone()),
                                                     "Accounts"
                                                 }
                                                 button {
                                                     class: "row-btn",
+                                                    disabled: locked,
+                                                    title: lock_title,
                                                     onclick: move |_| open_avatar(m_avatar.clone()),
                                                     "Avatar"
                                                 }
@@ -766,6 +811,8 @@ pub fn AdminMembers() -> Element {
                         for member in inactive.iter() {
                             {
                                 let m_toggle = member.clone();
+                                let locked = officer_locked_out(me.as_ref(), member);
+                                let lock_title = if locked { OFFICER_RANK_COPY } else { "" };
                                 rsx! {
                                     tr { key: "inactive-{member.id}", class: "is-inactive",
                                         td { "{member.display_name}" }
@@ -774,6 +821,8 @@ pub fn AdminMembers() -> Element {
                                         td {
                                             button {
                                                 class: "row-btn",
+                                                disabled: locked,
+                                                title: lock_title,
                                                 onclick: move |_| open_toggle(m_toggle.clone()),
                                                 "Activate"
                                             }
@@ -1188,11 +1237,72 @@ mod tests {
     fn member(id: &str, active: bool) -> Member {
         Member {
             id: id.into(),
+            user_id: format!("user-{id}"),
             display_name: id.into(),
             org_role: "member".into(),
             is_active: active,
             joined_at: "2026-09-02T00:00:00Z".into(),
         }
+    }
+
+    fn user(id: &str, role: OrgRole) -> UserInfo {
+        UserInfo {
+            id: id.into(),
+            username: id.into(),
+            avatar_url: None,
+            role: Some(role),
+        }
+    }
+
+    fn member_with_role(id: &str, role: &str) -> Member {
+        Member {
+            org_role: role.into(),
+            ..member(id, true)
+        }
+    }
+
+    #[test]
+    fn officer_is_locked_out_of_admins_and_officers_only() {
+        let officer = user("user-me", OrgRole::Officer);
+        for (role, locked) in [
+            ("admin", true),
+            ("officer", true),
+            ("member", false),
+            ("recruit", false),
+        ] {
+            let target = member_with_role("t", role);
+            assert_eq!(
+                officer_locked_out(Some(&officer), &target),
+                locked,
+                "{role}"
+            );
+        }
+        // An officer's own row stays editable, as on the server.
+        let mut own = member_with_role("me", "officer");
+        own.user_id = "user-me".into();
+        assert!(!officer_locked_out(Some(&officer), &own));
+    }
+
+    #[test]
+    fn admins_and_signed_out_are_never_locked_out() {
+        let target = member_with_role("t", "admin");
+        assert!(!officer_locked_out(
+            Some(&user("a", OrgRole::Admin)),
+            &target
+        ));
+        assert!(!officer_locked_out(None, &target));
+    }
+
+    #[test]
+    fn officer_rank_403_gets_plain_copy() {
+        let rank = ClientError::http(403, format!(r#"{{"error":"{OFFICER_RANK_ERROR}"}}"#), None);
+        assert_eq!(profile_edit_failure("Failed", &rank), OFFICER_RANK_COPY);
+        let other = ClientError::http(403, r#"{"error":"Can only edit your own profile"}"#, None);
+        assert_eq!(
+            profile_edit_failure("Failed", &other),
+            "Failed: HTTP error 403: Can only edit your own profile"
+        );
+        assert!(!OFFICER_RANK_COPY.contains('\u{2014}'));
     }
 
     #[test]
