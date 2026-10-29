@@ -218,7 +218,10 @@ mod tests {
     fn a_limit_the_user_set_wins() {
         let a = plan(env(&[
             ("MALLOC_ARENA_MAX", "4"),
-            ("GLIBC_TUNABLES", "glibc.malloc.trim_threshold=1:glibc.foo=2"),
+            (
+                "GLIBC_TUNABLES",
+                "glibc.malloc.trim_threshold=1:glibc.foo=2",
+            ),
         ]));
         assert_eq!(a.set, vec!["mmap_threshold"]);
         assert_eq!(a.user, vec!["arena_max", "trim_threshold"]);

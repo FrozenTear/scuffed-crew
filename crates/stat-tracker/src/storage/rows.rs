@@ -146,8 +146,21 @@ impl LocalStore {
             .db
             .query("SELECT * FROM personal_match ORDER BY played_at DESC")
             .await?;
-        let matches: Vec<PersonalMatch> = result.take(0)?;
+        let mut matches: Vec<PersonalMatch> = result.take(0)?;
+        self.hydrate_rows(&mut matches).await?;
         Ok(matches)
+    }
+
+    /// [`Self::get_all_matches`] as stored, without the `hero_timeline`
+    /// records: vacuum copies rows verbatim.
+    pub(super) async fn get_all_matches_raw(
+        &self,
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut result = self
+            .db
+            .query("SELECT * FROM personal_match ORDER BY played_at DESC")
+            .await?;
+        Ok(result.take(0)?)
     }
 
     /// Create the session row, idempotently: if a row with this `session_id`
@@ -253,7 +266,8 @@ impl LocalStore {
             .query("SELECT * FROM personal_match WHERE session_id = $sid ORDER BY played_at ASC")
             .bind(("sid", session_id.to_string()))
             .await?;
-        let matches: Vec<PersonalMatch> = result.take(0)?;
+        let mut matches: Vec<PersonalMatch> = result.take(0)?;
+        self.hydrate_rows(&mut matches).await?;
         Ok(matches)
     }
 
@@ -263,6 +277,9 @@ impl LocalStore {
         self.db.query("DELETE personal_match").await?;
         self.db.query("DELETE match_session").await?;
         self.db.query("DELETE deleted_session").await?;
+        self.db.query("DELETE hero_timeline").await?;
+        self.db.query("DELETE store_meta").await?;
+        self.set_timeline_migrated(false);
         tracing::info!("cleared all match data from local store");
         Ok(())
     }

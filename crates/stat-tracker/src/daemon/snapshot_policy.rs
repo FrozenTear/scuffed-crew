@@ -119,7 +119,10 @@ mod tests {
             assert!(!p.due(t0 + Duration::from_secs(i), false));
         }
         assert!(p.dirty(), "the change waits for a GUI or an owed write");
-        assert!(p.due(t0 + Duration::from_secs(300), true), "a GUI that opens gets it");
+        assert!(
+            p.due(t0 + Duration::from_secs(300), true),
+            "a GUI that opens gets it"
+        );
     }
 
     #[test]
@@ -132,6 +135,9 @@ mod tests {
         assert!(p.due(t0 + MUST_SETTLE, false));
         p.wrote(t0 + MUST_SETTLE, p.generation());
         p.mark(t0 + Duration::from_secs(10), false);
-        assert!(!p.due(t0 + Duration::from_secs(20), false), "the owed write was paid");
+        assert!(
+            !p.due(t0 + Duration::from_secs(20), false),
+            "the owed write was paid"
+        );
     }
 }

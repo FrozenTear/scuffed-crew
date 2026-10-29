@@ -78,6 +78,9 @@ fn rewrite_pack_key_fields(row: &mut PersonalMatch) -> bool {
     true
 }
 
+/// Rows read per page by [`LocalStore::migrate_pack_key_heroes`].
+const PACK_KEY_PAGE: usize = 500;
+
 impl LocalStore {
     /// Rewrite saved pack-key heroes to the display name, and set the role
     /// from the hero table. A row that already says `Wrecking Ball` keeps
@@ -86,28 +89,67 @@ impl LocalStore {
     /// Runs on every open. A second run finds nothing to change and writes
     /// nothing. A game is queued for upload only when the hero or role that
     /// would be sent actually changes.
+    ///
+    /// Reads the rows in pages (never the whole table). Each row is renamed
+    /// as stored; the uploaded hero is compared on the row as reads show it
+    /// (with its game's `hero_timeline` record). Timeline records are renamed
+    /// too, written after the row pass so every page compares against the
+    /// records as they were.
     pub async fn migrate_pack_key_heroes(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let matches = self.get_all_matches().await?;
         let mut rewritten = 0usize;
         let mut reupload = 0usize;
         let mut sessions = std::collections::BTreeSet::new();
-        for mut row in matches {
-            let before_hero = row.display_hero().to_string();
-            let before_role = row.display_role().to_string();
-            if !rewrite_pack_key_fields(&mut row) {
-                continue;
+        let mut renamed: std::collections::HashMap<String, super::timeline::TimelineRecord> =
+            std::collections::HashMap::new();
+        let mut pages = super::export::RowPages::new(PACK_KEY_PAGE);
+        while let Some(rows) = pages.next(self).await? {
+            let old = self
+                .load_timelines(rows.iter().map(|r| r.session_id.as_str()))
+                .await?;
+            for mut row in rows {
+                let record = old.get(&row.session_id);
+                let shown = |row: &PersonalMatch, t: Option<&super::timeline::TimelineRecord>| {
+                    let mut view = row.clone();
+                    if let Some(t) = t {
+                        view.heroes_played = t.heroes_played.clone();
+                        view.segment_resolutions = t.segment_resolutions.clone();
+                    }
+                    (
+                        view.display_hero().to_string(),
+                        view.display_role().to_string(),
+                    )
+                };
+                let before = shown(&row, record);
+                let row_changed = rewrite_pack_key_fields(&mut row);
+                let new_record = record.map(|t| {
+                    let mut t = t.clone();
+                    let mut changed = false;
+                    for segment in &mut t.heroes_played {
+                        changed |= apply_known_hero(&mut segment.hero, &mut segment.role);
+                    }
+                    if changed {
+                        renamed.insert(row.session_id.clone(), t.clone());
+                    }
+                    t
+                });
+                let queue = before != shown(&row, new_record.as_ref());
+                if !row_changed && !queue {
+                    continue;
+                }
+                self.write_rewritten_match(&row, queue).await?;
+                if !row.session_id.is_empty() {
+                    sessions.insert(row.session_id.clone());
+                }
+                rewritten += 1;
+                if queue {
+                    reupload += 1;
+                }
             }
-            let queue = before_hero != row.display_hero() || before_role != row.display_role();
-            self.write_rewritten_match(&row, queue).await?;
-            if !row.session_id.is_empty() {
-                sessions.insert(row.session_id.clone());
-            }
-            rewritten += 1;
-            if queue {
-                reupload += 1;
-            }
+        }
+        for t in renamed.values() {
+            self.put_timeline(t).await?;
         }
         for session in self.get_all_sessions().await? {
             let Some((hero, role)) = known_hero_role(&session.hero) else {

@@ -136,7 +136,10 @@ mod tests {
                 data.join(GUI_LOCK_FILE)
             ]
         );
-        assert_eq!(lock_paths(Some("".into()), data), vec![data.join(GUI_LOCK_FILE)]);
+        assert_eq!(
+            lock_paths(Some("".into()), data),
+            vec![data.join(GUI_LOCK_FILE)]
+        );
         assert_eq!(lock_paths(None, data), vec![data.join(GUI_LOCK_FILE)]);
     }
 

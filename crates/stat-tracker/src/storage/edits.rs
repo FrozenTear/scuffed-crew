@@ -84,6 +84,11 @@ impl LocalStore {
         let resolutions = collect_segment_resolutions(&snaps);
         let segments = derive_hero_segments(&snaps, &resolutions);
 
+        if self.timeline_migrated() {
+            return self
+                .store_session_timeline(session_id, &snaps, &segments, &resolutions)
+                .await;
+        }
         for m in &snaps {
             let Some(id) = m.id.clone() else { continue };
             if m.heroes_played == segments {
@@ -124,6 +129,48 @@ impl LocalStore {
         Ok(())
     }
 
+    /// [`Self::refresh_session_hero_timeline`] on a migrated store: the
+    /// timeline is one `hero_timeline` record, written once when it changed.
+    /// `snaps` are hydrated, so each row's display is the stored timeline's.
+    /// Only rows whose uploaded hero or role changes are written (re-queued
+    /// for sync); no row gets a timeline copy.
+    async fn store_session_timeline(
+        &self,
+        session_id: &str,
+        snaps: &[super::PersonalMatch],
+        segments: &[super::HeroSegment],
+        resolutions: &[SegmentResolution],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let stored = self.get_timeline(session_id).await?;
+        let current = stored
+            .as_ref()
+            .is_some_and(|t| t.heroes_played == segments && t.segment_resolutions == resolutions);
+        // No list stored and nothing to store: leave the rows' own copies
+        // (an older game keeps showing what it shows today).
+        if current || (stored.is_none() && segments.is_empty() && resolutions.is_empty()) {
+            return Ok(());
+        }
+        self.upsert_timeline(session_id, segments, resolutions)
+            .await?;
+        for m in snaps {
+            let Some(id) = m.id.clone() else { continue };
+            let mut probe = m.clone();
+            probe.heroes_played = segments.to_vec();
+            if m.display_hero() == probe.display_hero() && m.display_role() == probe.display_role()
+            {
+                continue;
+            }
+            self.db
+                .query(
+                    "UPDATE $id SET synced = false, upload_reject = '', \
+                     sync_rev = (sync_rev ?? 0) + 1 RETURN NONE",
+                )
+                .bind(("id", id))
+                .await?;
+        }
+        Ok(())
+    }
+
     /// MANUAL confirm/dismiss of one derived hero segment (HS-1). Records the
     /// decision in `segment_resolutions` (keyed by segment index; a repeat on
     /// the same index replaces it, and an unrecognized action clears it) on
@@ -152,6 +199,17 @@ impl LocalStore {
         }
         resolutions.sort_by_key(|r| r.segment);
 
+        if self.timeline_migrated() {
+            // One record holds the decisions; the re-derive below writes the
+            // flags and re-queues the rows whose effective hero changed.
+            let segments = match self.get_timeline(session_id).await? {
+                Some(t) => t.heroes_played,
+                None => derive_hero_segments(&snaps, &resolutions),
+            };
+            self.upsert_timeline(session_id, &segments, &resolutions)
+                .await?;
+            return self.refresh_session_hero_timeline(session_id).await;
+        }
         // Persist the resolution set on all rows. This field is never uploaded
         // (only its effect via the derived primary is), so it does NOT flip
         // `synced` here — the re-derive below re-queues exactly the rows whose

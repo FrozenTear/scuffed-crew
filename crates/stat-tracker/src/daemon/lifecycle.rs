@@ -491,7 +491,19 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
 
     log_selected_output(backend, &config).await;
 
+    // The hero timeline move (storage/migrate_timeline.rs): the backup copy
+    // is taken here, after startup maintenance and before the store opens;
+    // the move itself runs on the open store. Only the daemon does this.
+    let timeline_backup = storage::prepare_timeline_migration(&config.data_dir).await;
     let store = open_store(&config.data_dir).await?;
+    match store.migrate_timeline_if_needed(&timeline_backup).await {
+        Ok(_) => {}
+        Err(e) => tracing::error!(
+            target: "scuffed_stat_tracker",
+            error = %e,
+            "hero timeline move failed; it is retried at the next start"
+        ),
+    }
 
     // One answer for "which reader": `ocr = "off"` implies the new one,
     // whatever `reader` says. The capture path, the reader packs, the
