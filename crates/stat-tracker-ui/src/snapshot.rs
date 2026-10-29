@@ -418,7 +418,12 @@ mod tests {
                 dm.corrected_map_name = Some("Château Guillard".into());
                 store.insert_match(dm).await.unwrap();
             }
-            if let Some(last) = fixture.matches.iter().rev().find(|m| !m.session_id.is_empty()) {
+            if let Some(last) = fixture
+                .matches
+                .iter()
+                .rev()
+                .find(|m| !m.session_id.is_empty())
+            {
                 store.delete_session(&last.session_id).await.unwrap();
             }
 
@@ -458,7 +463,9 @@ mod tests {
         let t = std::time::Instant::now();
         store.export_snapshot(dir.path()).await.unwrap();
         let ms = t.elapsed().as_millis();
-        let bytes = std::fs::metadata(dir.path().join("live_snapshot.json")).unwrap().len();
+        let bytes = std::fs::metadata(dir.path().join("live_snapshot.json"))
+            .unwrap()
+            .len();
         let compact = load_snapshot(dir.path());
         let (old, new) = (games_from_snapshot(&full), games_from_snapshot(&compact));
         println!(

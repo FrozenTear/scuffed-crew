@@ -1004,10 +1004,10 @@ fn remove_exact_file(path: &Path, home: &Path, prefix: &Path) -> Result<RemoveOu
     }
 }
 
-/// Files and folders the tracker writes inside its saved-games folder.
-/// Anything else in that folder stays, including when the folder is
-/// `~/.config`, `~/Documents`, or `~/Games`.
-fn is_tracker_data_name(name: &str) -> bool {
+/// Files and folders the tracker writes inside its saved-games folder
+/// (`stats.surrealkv.pre-*`: vacuum and hero-timeline backups). Anything
+/// else stays, including when the folder is `~/.config`, `~/Documents`, or `~/Games`.
+pub(crate) fn is_tracker_data_name(name: &str) -> bool {
     matches!(
         name,
         "stats.surrealkv"
@@ -1032,7 +1032,7 @@ fn is_tracker_data_name(name: &str) -> bool {
             | "ocr_switch.json"
             | "ocr_switch.json.tmp"
             | "update-install.log"
-    ) || name.starts_with("stats.surrealkv.pre-vacuum-")
+    ) || name.starts_with("stats.surrealkv.pre-")
 }
 
 fn is_broad_saved_folder(dir: &Path, home: &Path) -> bool {

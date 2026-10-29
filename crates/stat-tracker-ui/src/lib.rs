@@ -103,6 +103,8 @@ mod winrate_bar;
 
 #[cfg(test)]
 mod tests_settings_to_config;
+#[cfg(test)]
+mod tests_uninstall_names;
 
 pub use aggregate::{Aggregates, SeasonWindow, aggregate};
 pub use cli::{Cli, FixtureKind};

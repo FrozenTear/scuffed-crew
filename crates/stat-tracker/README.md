@@ -504,7 +504,7 @@ only these paths are writable:
 
 `{data_dir}` holds `stats.surrealkv`, `commands/`, `debug/` PNGs, portraits,
 `daemon.pid`, `sync_auth.json`, `live_snapshot.json`, `active_game.json`,
-`daemon.log`, and vacuum backups. The default directory is already in the
+`daemon.log`, and vacuum and hero-timeline backups (`stats.surrealkv.pre-*`). The default directory is already in the
 table above. An absolute `data_dir` anywhere else, including another
 folder under `$HOME`, is read-only under the sandbox. `install.sh` writes
 `~/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf` for
