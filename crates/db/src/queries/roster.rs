@@ -101,6 +101,8 @@ macro_rules! roster_select {
             $select,
             " AND is_active = true ",
             "AND in.is_active = true ",
+            "AND in.is_tombstone != true ",
+            "AND meta::id(in) != 'deleted' ",
             "AND meta::id(in) NOT IN ( ",
             "SELECT VALUE member_id FROM moderation_action ",
             "WHERE is_active = true ",
@@ -119,6 +121,9 @@ impl Database {
         team_id: &str,
         role: TeamRole,
     ) -> DbResult<RosterEntry> {
+        if crate::is_tombstone_member(member_id) {
+            return Err(crate::DbError::Conflict("tombstone".into()));
+        }
         with_timeout(async {
             // RELATE then SELECT back with string casts for proper deserialization
             let mut result = self

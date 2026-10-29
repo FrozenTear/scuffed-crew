@@ -82,6 +82,12 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
             ASSERT $value IN [NONE, 'server_managed', 'external'];
         DEFINE FIELD OVERWRITE nostr_secret_key_encrypted ON member TYPE option<object> FLEXIBLE;
         DEFINE FIELD OVERWRITE is_active ON member TYPE bool DEFAULT true;
+        -- Account-erasure placeholder. Real members stay false. Listings,
+        -- counts, setup, and last-admin all require this to be not true.
+        DEFINE FIELD OVERWRITE is_tombstone ON member TYPE bool DEFAULT false;
+        -- Tracker soft-delete. NONE means stats are live. A datetime hides
+        -- reads and blocks uploads until the purge task hard-deletes the rows.
+        DEFINE FIELD OVERWRITE stats_delete_scheduled_at ON member TYPE option<datetime> DEFAULT NONE;
 
         DEFINE INDEX IF NOT EXISTS member_user_idx ON member COLUMNS user_id UNIQUE;
         DEFINE INDEX IF NOT EXISTS member_nostr_pubkey_idx ON member COLUMNS nostr_pubkey UNIQUE;
@@ -856,6 +862,14 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE expires_at ON stat_report TYPE option<datetime>;
         DEFINE INDEX IF NOT EXISTS stat_report_member_created_idx ON stat_report COLUMNS member_id, created_at;
         DEFINE INDEX IF NOT EXISTS stat_report_expires_idx ON stat_report COLUMNS expires_at;
+
+        -- Signed NIP-09 (kind 5) requests produced while erasing an account.
+        -- The row is the signed event only. It does not copy message text.
+        DEFINE TABLE IF NOT EXISTS nostr_deletion_request SCHEMAFULL;
+        DEFINE FIELD OVERWRITE signed_event ON nostr_deletion_request TYPE string;
+        DEFINE FIELD OVERWRITE event_count ON nostr_deletion_request TYPE int DEFAULT 0;
+        DEFINE FIELD OVERWRITE published ON nostr_deletion_request TYPE bool DEFAULT false;
+        DEFINE FIELD OVERWRITE created_at ON nostr_deletion_request TYPE datetime DEFAULT time::now();
     "#,
         )
         .await?
@@ -864,6 +878,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
     // Key every display name and install the UNIQUE index. A clash or an
     // unkeyable stored name fails startup and does not rewrite display_name.
     crate::display_name::backfill_display_name_keys(client).await?;
+
+    // The "Deleted member" tombstone is not created here. A fresh database
+    // must still look empty to first-run setup. The first account erase
+    // creates the row, with is_tombstone = true.
 
     // Dedupe (member_id, session_id), rewrite blank legacy ids, then replace
     // pm_session_idx with a UNIQUE index. Must run after the schema statement

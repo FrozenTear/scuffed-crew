@@ -52,7 +52,13 @@ impl Database {
         avatar_url: Option<String>,
     ) -> DbResult<User> {
         with_timeout(async {
+            if crate::is_reserved_username(&username) {
+                return Err(crate::DbError::ReservedName);
+            }
             if let Some(mut existing) = self.get_user_by_provider(provider, &provider_id).await? {
+                if crate::is_tombstone_user(&existing.id) {
+                    return Err(crate::DbError::Conflict("tombstone".into()));
+                }
                 if existing.username != username || existing.avatar_url != avatar_url {
                     existing.username = username;
                     existing.avatar_url = avatar_url;
@@ -285,6 +291,9 @@ impl Database {
         if username.is_empty() {
             return Err(DbError::Config("username required".into()));
         }
+        if crate::is_reserved_username(&username) {
+            return Err(crate::DbError::ReservedName);
+        }
 
         if self.get_local_user_by_username(&username).await?.is_some() {
             return Err(DbError::Config("username already taken".into()));
@@ -347,6 +356,35 @@ impl Database {
             }
             let user = self.db_user_to_user(db)?;
             Ok(Some((user, hash)))
+        })
+        .await
+    }
+
+    /// Password hash for one user, if this account has one.
+    ///
+    /// OAuth-only rows return `None`. The hash is for verify-and-drop only.
+    pub async fn password_hash_for_user(&self, user_id: &str) -> DbResult<Option<String>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT password_hash FROM $rid")
+                .bind(("rid", RecordId::new("user", user_id)))
+                .await?;
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                #[serde(default)]
+                #[surreal(default)]
+                password_hash: Option<String>,
+            }
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows.into_iter().next().and_then(|row| {
+                let hash = row.password_hash?;
+                if hash.is_empty() {
+                    None
+                } else {
+                    Some(hash)
+                }
+            }))
         })
         .await
     }

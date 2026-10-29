@@ -76,6 +76,9 @@ impl Database {
         raw_token: &str,
         label: &str,
     ) -> DbResult<DaemonToken> {
+        if crate::is_tombstone_member(member_id) {
+            return Err(crate::DbError::Conflict("tombstone".into()));
+        }
         with_timeout(async {
             let token_hash = hash_session_token(raw_token);
             let db_tok = DbDaemonToken {
@@ -114,6 +117,9 @@ impl Database {
             let Some(tok) = tokens.into_iter().next() else {
                 return Ok(DaemonTokenAuth::Missing);
             };
+            if crate::is_tombstone_member(&tok.member_id) {
+                return Ok(DaemonTokenAuth::Missing);
+            }
             if expiry_elapsed(expires_at_utc(tok.expires_at)) {
                 return Ok(DaemonTokenAuth::Expired);
             }
@@ -137,6 +143,60 @@ impl Database {
         .await
     }
 
+    /// Deadline when this bearer was revoked while a stats delete is still pending.
+    ///
+    /// Active tokens are not this path: [`Database::validate_daemon_token`]
+    /// accepts them, and the upload handler returns the 409. A hash that does
+    /// not match, or a member whose deadline was cleared by restore, is
+    /// `None` so the caller answers 401. The lookup does not stamp `last_used_at`.
+    pub async fn stats_delete_deadline_for_token(
+        &self,
+        raw_token: &str,
+    ) -> DbResult<Option<chrono::DateTime<chrono::Utc>>> {
+        with_timeout(async {
+            let token_hash = hash_session_token(raw_token);
+            #[derive(Deserialize, SurrealValue)]
+            struct Tok {
+                member_id: String,
+            }
+            let mut result = self
+                .client
+                .query("SELECT member_id FROM daemon_token WHERE token_hash = $tok LIMIT 1")
+                .bind(("tok", token_hash))
+                .await?;
+            let tokens: Vec<Tok> = result.take(0)?;
+            let Some(tok) = tokens.into_iter().next() else {
+                return Ok(None);
+            };
+            if crate::is_tombstone_member(&tok.member_id) {
+                return Ok(None);
+            }
+            #[derive(Deserialize, SurrealValue)]
+            struct Deadline {
+                #[serde(default)]
+                #[surreal(default)]
+                stats_delete_scheduled_at: Option<SurrealDatetime>,
+                #[serde(default)]
+                #[surreal(default)]
+                is_tombstone: bool,
+            }
+            let mut member = self
+                .client
+                .query("SELECT stats_delete_scheduled_at, is_tombstone FROM $rid")
+                .bind(("rid", RecordId::new("member", tok.member_id.as_str())))
+                .await?;
+            let rows: Vec<Deadline> = member.take(0)?;
+            let Some(row) = rows.into_iter().next() else {
+                return Ok(None);
+            };
+            if row.is_tombstone {
+                return Ok(None);
+            }
+            Ok(row.stats_delete_scheduled_at.map(Into::into))
+        })
+        .await
+    }
+
     /// Active, unexpired token, without writing `last_used_at`.
     ///
     /// Pack downloads use this so a file fetch does not touch the database.
@@ -150,7 +210,13 @@ impl Database {
                 .bind(("tok", token_hash))
                 .await?;
             let tokens: Vec<DbDaemonToken> = result.take(0)?;
-            Ok(tokens.into_iter().next().map(|tok| tok.member_id))
+            Ok(tokens.into_iter().next().and_then(|tok| {
+                if crate::is_tombstone_member(&tok.member_id) {
+                    None
+                } else {
+                    Some(tok.member_id)
+                }
+            }))
         })
         .await
     }

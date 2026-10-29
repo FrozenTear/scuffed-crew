@@ -145,6 +145,13 @@ fn db_to_strategy(db: DbStrategy) -> Result<Strategy, DbError> {
     })
 }
 
+fn strategy_owner_label(owner_id: &str, owner_name: Option<String>) -> String {
+    if owner_id == crate::DELETED_MEMBER_ID {
+        return crate::DELETED_MEMBER_NAME.to_string();
+    }
+    owner_name.unwrap_or_else(|| owner_id.to_string())
+}
+
 fn db_summary_to_summary(db: DbStrategySummary) -> StrategySummary {
     StrategySummary {
         id: extract_id(db.id),
@@ -152,7 +159,7 @@ fn db_summary_to_summary(db: DbStrategySummary) -> StrategySummary {
         map_id: db.map_id,
         sub_map_id: db.sub_map_id,
         game_mode: parse_game_mode(&db.game_mode),
-        owner_name: db.owner_name.unwrap_or(db.owner_id),
+        owner_name: strategy_owner_label(&db.owner_id, db.owner_name),
         visibility: parse_visibility(&db.visibility),
         element_count: db.element_count as usize,
         updated_at: db.updated_at.into(),

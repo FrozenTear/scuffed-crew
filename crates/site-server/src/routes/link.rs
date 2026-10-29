@@ -510,6 +510,9 @@ pub async fn approve(
             return internal().into_response();
         }
     };
+    if let Some(at) = member.member.stats_delete_scheduled_at {
+        return crate::extractors::stats_delete_pending_response(at);
+    }
     let mut secret = generate_secret_hex();
     let minted = match state
         .db

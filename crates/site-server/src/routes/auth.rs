@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -17,12 +17,14 @@ use scuffed_auth::server::session::{
     clear_session_cookie, generate_session_token, validate_csrf_state,
 };
 use scuffed_auth::{AuthProvider, UserInfo};
-use scuffed_db::{Member, OrgRole};
+use scuffed_db::{AuditAction, AuditTargetType, Member, OrgRole};
 use scuffed_types::{
     AuthProvidersResponse, LocalLoginRequest, OkResponse, RegisterRequest, SetupRequest,
     SetupStatusResponse,
 };
 
+use crate::extractors::presented_session_token;
+use crate::routes::audit_log::audit;
 use crate::state::AppState;
 
 fn validate_local_username(username: &str) -> Result<String, &'static str> {
@@ -35,6 +37,9 @@ fn validate_local_username(username: &str) -> Result<String, &'static str> {
         .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         return Err("username may only contain letters, digits, _ and -");
+    }
+    if scuffed_db::is_reserved_username(&u) {
+        return Err("reserved_name");
     }
     Ok(u)
 }
@@ -194,6 +199,9 @@ pub async fn callback(
         // login page can show a banner. Other callback failures stay plain text.
         Err((status, msg)) => return oauth_callback_refusal(status, msg),
     };
+    if scuffed_db::is_tombstone_user(&user.id) {
+        return oauth_callback_refusal(StatusCode::FORBIDDEN, "tombstone");
+    }
 
     // Create session
     let session_token = generate_session_token();
@@ -292,6 +300,12 @@ async fn upsert_oauth_user_if_allowed(
     db.upsert_user_from_oauth(provider, provider_id, username, avatar_url)
         .await
         .map_err(|e| {
+            if matches!(e, scuffed_db::DbError::ReservedName) {
+                return (StatusCode::BAD_REQUEST, "reserved_name");
+            }
+            if matches!(e, scuffed_db::DbError::Conflict(ref code) if code == "tombstone") {
+                return (StatusCode::FORBIDDEN, "tombstone");
+            }
             tracing::error!("Failed to upsert user: {e}");
             (StatusCode::INTERNAL_SERVER_ERROR, "Database error")
         })
@@ -305,6 +319,11 @@ pub struct MeResponse {
     /// no valid public NIP-05 domain configured. Computed here so the client
     /// never guesses the domain. Mirrors `scuffed_types::MeResponse::nip05`.
     pub nip05: Option<String>,
+    /// `Some` for every signed-in response. `true` when a local password is
+    /// set, so account delete requires `password`. OAuth-only accounts are
+    /// `Some(false)`. Never set on `user`. The hash is not returned.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_password: Option<bool>,
 }
 
 /// GET /api/auth/me — return current user + member info
@@ -327,10 +346,27 @@ pub async fn me(
             let nip05 = member.as_ref().and_then(|m| {
                 crate::state::nip05_identifier(&m.display_name, state.nip05_domain.as_deref())
             });
+            let has_password = match state.db.password_hash_for_user(&auth_user.id).await {
+                Ok(hash) => hash.is_some(),
+                Err(error) => {
+                    tracing::error!(
+                        error_kind = account_db_kind(&error),
+                        "password presence lookup"
+                    );
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "Internal error".into(),
+                        }),
+                    )
+                        .into_response();
+                }
+            };
             Json(MeResponse {
                 user: info,
                 member,
                 nip05,
+                has_password: Some(has_password),
             })
             .into_response()
         }
@@ -347,6 +383,310 @@ pub async fn logout(State(state): State<AppState>, jar: CookieJar) -> impl IntoR
     }
     let clear_cookie = clear_session_cookie(&state.session_config);
     (jar.add(clear_cookie), StatusCode::OK).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct DeleteAccountBody {
+    #[serde(default)]
+    password: Option<String>,
+    confirm: String,
+}
+
+fn account_code(status: StatusCode, code: &'static str) -> Response {
+    (status, Json(serde_json::json!({ "code": code }))).into_response()
+}
+
+struct AccountCaller {
+    user: scuffed_auth::User,
+    member: Member,
+}
+
+fn account_unauthorized(error: &str) -> Response {
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: error.into(),
+        }),
+    )
+        .into_response()
+}
+
+/// Session for account delete. A tombstone session is 403 and is not a login.
+#[allow(clippy::result_large_err)]
+async fn load_account_caller(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Result<AccountCaller, Response> {
+    let Some(token) = presented_session_token(&state.session_config.cookie_name, headers, jar)
+    else {
+        return Err(account_unauthorized("Authentication required"));
+    };
+    let user_id = match state.db.get_session(&token).await {
+        Ok(Some(id)) => id,
+        Ok(None) => return Err(account_unauthorized("Session expired or invalid")),
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "session lookup");
+            return Err(account_internal());
+        }
+    };
+    if scuffed_db::is_tombstone_user(&user_id) {
+        return Err(account_code(StatusCode::FORBIDDEN, "tombstone"));
+    }
+    let user = match state.db.get_user(&user_id).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return Err(account_unauthorized("Session expired or invalid")),
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "user lookup");
+            return Err(account_internal());
+        }
+    };
+    if scuffed_db::is_tombstone_user(&user.id) {
+        return Err(account_code(StatusCode::FORBIDDEN, "tombstone"));
+    }
+    let (member, suspended) = match state.db.get_member_auth_by_user(&user.id).await {
+        Ok(Some(pair)) => pair,
+        Ok(None) => {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "Not an org member".into(),
+                }),
+            )
+                .into_response());
+        }
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "member auth lookup");
+            return Err(account_internal());
+        }
+    };
+    if scuffed_db::is_tombstone_member(&member.id) {
+        return Err(account_code(StatusCode::FORBIDDEN, "tombstone"));
+    }
+    if !member.is_active {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Membership inactive".into(),
+            }),
+        )
+            .into_response());
+    }
+    if suspended {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "Account suspended".into(),
+            }),
+        )
+            .into_response());
+    }
+    Ok(AccountCaller { user, member })
+}
+
+/// DELETE /api/auth/me. Erase the signed-in account. Session only.
+///
+/// `confirm` must equal the display name or the username after trimming.
+/// The match is case-sensitive. A local account (password hash present)
+/// must send that password. An OAuth-only account must present a session
+/// created within the last 10 minutes. Tracker daemon tokens are 401.
+/// The tombstone account is 403.
+pub async fn delete_account(
+    State(state): State<AppState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(body): Json<DeleteAccountBody>,
+) -> Response {
+    let member = match load_account_caller(&state, &headers, &jar).await {
+        Ok(caller) => caller,
+        Err(response) => return response,
+    };
+    let confirm = body.confirm.trim();
+    let name_ok =
+        confirm == member.member.display_name.trim() || confirm == member.user.username.trim();
+    if !name_ok {
+        return account_code(StatusCode::BAD_REQUEST, "confirm_mismatch");
+    }
+
+    let password_hash = match state.db.password_hash_for_user(&member.user.id).await {
+        Ok(hash) => hash,
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "password lookup");
+            return account_internal();
+        }
+    };
+    if let Some(hash) = password_hash {
+        let password = body.password.as_deref().unwrap_or("");
+        match verify_password(password, &hash) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => {
+                return account_code(StatusCode::UNAUTHORIZED, "invalid_password");
+            }
+        }
+    } else {
+        let fresh = session_is_fresh(&state, &headers, &jar).await;
+        match fresh {
+            Ok(true) => {}
+            Ok(false) => return account_code(StatusCode::UNAUTHORIZED, "reauth_required"),
+            Err(()) => return account_internal(),
+        }
+    }
+
+    match state
+        .db
+        .member_is_last_actionable_admin(&member.member.id)
+        .await
+    {
+        Ok(true) => return account_code(StatusCode::CONFLICT, "last_admin"),
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "last admin check");
+            return account_internal();
+        }
+    }
+
+    let signed = match sign_account_deletion(&state, &member.member.id).await {
+        Ok(signed) => signed,
+        Err(()) => return account_internal(),
+    };
+
+    let report = match state
+        .db
+        .erase_account(
+            &member.member.id,
+            &member.user.id,
+            member.member.nostr_pubkey.as_deref(),
+            signed.as_ref().map(|(json, _)| json.as_str()),
+        )
+        .await
+    {
+        Ok(report) => report,
+        Err(scuffed_db::DbError::Conflict(code)) if code == "last_admin" => {
+            return account_code(StatusCode::CONFLICT, "last_admin");
+        }
+        Err(error) => {
+            tracing::error!(error_kind = account_db_kind(&error), "erase account");
+            return account_internal();
+        }
+    };
+
+    state.leaderboard_cache.invalidate_all();
+    for id in &report.stat_report_ids {
+        if let Err(error) = crate::stat_reports::remove_report_files(&state.reports_dir, id).await {
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "stat report file remove after erase"
+            );
+        }
+    }
+    if let (Some(url), Some((_, event))) = (&state.relay_url, signed)
+        && let Err(error) = scuffed_chat::publish_event_oneshot(url, event).await
+    {
+        tracing::warn!(error = %error, "nip-09 publish failed");
+    }
+
+    audit(
+        &state.db,
+        &member.member.id,
+        AuditAction::DeletedAccount,
+        AuditTargetType::Member,
+        &member.member.id,
+        Some(&format!(
+            "personal_match={} stat_report={}",
+            report.personal_match,
+            report.stat_report_ids.len()
+        )),
+    )
+    .await;
+
+    let clear_cookie = clear_session_cookie(&state.session_config);
+    (
+        jar.add(clear_cookie),
+        Json(serde_json::json!({ "deleted": true })),
+    )
+        .into_response()
+}
+
+fn account_internal() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ErrorResponse {
+            error: "Internal error".into(),
+        }),
+    )
+        .into_response()
+}
+
+fn account_db_kind(error: &scuffed_db::DbError) -> &'static str {
+    match error {
+        scuffed_db::DbError::Surreal(_) => "surreal",
+        scuffed_db::DbError::NotFound(_) => "not_found",
+        scuffed_db::DbError::Conflict(_) => "conflict",
+        scuffed_db::DbError::Config(_) => "config",
+        scuffed_db::DbError::Timeout => "timeout",
+        scuffed_db::DbError::Crypto(_) => "crypto",
+        scuffed_db::DbError::DisplayNameInvalid => "display_name_invalid",
+        scuffed_db::DbError::DisplayNameTaken => "display_name_taken",
+        scuffed_db::DbError::ReservedName => "reserved_name",
+    }
+}
+
+async fn session_is_fresh(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+) -> Result<bool, ()> {
+    let Some(token) = presented_session_token(&state.session_config.cookie_name, headers, jar)
+    else {
+        return Ok(false);
+    };
+    let created = state.db.session_created_at(&token).await.map_err(|error| {
+        tracing::error!(error_kind = account_db_kind(&error), "session age lookup");
+    })?;
+    let Some(created) = created else {
+        return Ok(false);
+    };
+    Ok(chrono::Utc::now().signed_duration_since(created) <= chrono::Duration::minutes(10))
+}
+
+/// Sign a NIP-09 kind 5 when this member has stored forum event ids and a
+/// server-held key. No key, or no stored ids: skip. Articles are not included.
+async fn sign_account_deletion(
+    state: &AppState,
+    member_id: &str,
+) -> Result<Option<(String, scuffed_types::NostrEvent)>, ()> {
+    let ids = state
+        .db
+        .member_stored_nostr_event_ids(member_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(
+                error_kind = account_db_kind(&error),
+                "list stored nostr ids"
+            );
+        })?;
+    if ids.is_empty() {
+        return Ok(None);
+    }
+    let Some(secret) = state
+        .db
+        .get_nostr_secret_key(member_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(error_kind = account_db_kind(&error), "nostr secret lookup");
+        })?
+    else {
+        return Ok(None);
+    };
+    let keys = scuffed_chat::EventBuilder::keys_from_hex(secret.as_str()).map_err(|_| ())?;
+    let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let event =
+        scuffed_chat::EventBuilder::build_delete_event(&keys, &refs, Some("account deleted"))
+            .map_err(|_| ())?;
+    let relay_event = scuffed_chat::EventBuilder::to_relay_event(&event);
+    let json = serde_json::to_string(&relay_event).map_err(|_| ())?;
+    drop(secret);
+    Ok(Some((json, relay_event)))
 }
 
 /// GET /api/auth/setup-status — whether first-boot admin creation is required.
@@ -497,6 +837,15 @@ pub async fn local_register(
     // create_local_user re-checks uniqueness; surface it as a clean 409.
     let user = match state.db.create_local_user(&username, &password_hash).await {
         Ok(u) => u,
+        Err(scuffed_db::DbError::ReservedName) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "reserved_name".into(),
+                }),
+            )
+                .into_response();
+        }
         Err(e) if e.to_string().contains("already taken") => {
             // Same blandness as login: do not say whether this username exists.
             return (
@@ -689,6 +1038,15 @@ pub async fn setup(
 
     let user = match state.db.create_local_user(&username, &password_hash).await {
         Ok(u) => u,
+        Err(scuffed_db::DbError::ReservedName) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "reserved_name".into(),
+                }),
+            )
+                .into_response();
+        }
         Err(e) => {
             tracing::error!("setup create_local_user: {e}");
             abandon_failed_setup(&state, None).await;
@@ -903,7 +1261,11 @@ pub async fn local_login(
     };
 
     match verify_password(&body.password, &hash) {
-        Ok(true) => {}
+        Ok(true) => {
+            if scuffed_db::is_tombstone_user(&user.id) {
+                return invalid();
+            }
+        }
         Ok(false) => {
             if let Some(secs) = state.login_lockout.record_failure(&username) {
                 return too_many_logins(secs);
@@ -1123,6 +1485,16 @@ pub async fn nostr_login_verify(
         }
     };
 
+    if scuffed_db::is_tombstone_user(&user_id) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "invalid credentials".into(),
+            }),
+        )
+            .into_response();
+    }
+
     let session_token = generate_session_token();
     if let Err(e) = state
         .db
@@ -1150,8 +1522,9 @@ pub async fn nostr_login_verify(
 #[cfg(test)]
 mod oauth_recruitment_tests {
     use super::{oauth_signup_decision, upsert_oauth_user_if_allowed};
-    use axum::http::StatusCode;
+    use axum::http::{StatusCode, header};
     use scuffed_auth::AuthProvider;
+    use tower::ServiceExt;
 
     #[test]
     fn closed_registration_callback_redirects_without_session_cookie() {
@@ -1287,5 +1660,198 @@ mod oauth_recruitment_tests {
         .expect("new discord id allowed when recruitment is open");
         assert_eq!(created.username, "opened");
         assert_eq!(created.provider, AuthProvider::Discord);
+    }
+
+    fn no_session_cookie(response: &axum::response::Response) -> bool {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .all(|value| {
+                value
+                    .to_str()
+                    .ok()
+                    .is_none_or(|raw| !raw.starts_with("sc_session="))
+            })
+    }
+
+    async fn login(app: &axum::Router, username: &str, password: &str) -> axum::response::Response {
+        app.clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/auth/local/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        40000,
+                    ))))
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "username": username, "password": password })
+                            .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    /// Password, OAuth link, and daemon token all fail closed for Deleted member.
+    #[tokio::test]
+    async fn tombstone_cannot_log_in_by_password_oauth_or_token() {
+        use http_body_util::BodyExt;
+        use scuffed_auth::crypto::hash_session_token;
+        use scuffed_auth::password::hash_password;
+        use scuffed_db::{DELETED_USER_ID, DbError};
+
+        let state = crate::test_support::test_state().await;
+        scuffed_db::queries::erasure::ensure_deleted_member(&state.db.client)
+            .await
+            .unwrap();
+        let app = crate::create_router(state.clone());
+
+        let reserved = login(&app, "deleteduser", "correct-horse").await;
+        assert_eq!(reserved.status(), StatusCode::UNAUTHORIZED);
+        assert!(no_session_cookie(&reserved));
+
+        let hash = hash_password("correct-horse").unwrap();
+        state
+            .db
+            .client
+            .query("UPDATE user:deleteduser SET username = 'ghostmember', password_hash = $hash")
+            .bind(("hash", hash))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let matched = login(&app, "ghostmember", "correct-horse").await;
+        assert_eq!(matched.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            no_session_cookie(&matched),
+            "a matching password on the tombstone user must not set a session"
+        );
+
+        state
+            .db
+            .client
+            .query(
+                "UPDATE user:deleteduser SET provider = 'discord', provider_id = 'discord-tomb', \
+                 provider_id_hash = NONE",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let linked = upsert_oauth_user_if_allowed(
+            &state.db,
+            AuthProvider::Discord,
+            "discord-tomb".into(),
+            "someone".into(),
+            None,
+        )
+        .await
+        .expect_err("oauth link of the tombstone provider id");
+        assert_eq!(linked.0, StatusCode::FORBIDDEN);
+        assert_eq!(linked.1, "tombstone");
+        let refusal = super::oauth_callback_refusal(linked.0, linked.1);
+        assert_eq!(refusal.status(), StatusCode::FORBIDDEN);
+        assert!(no_session_cookie(&refusal));
+        let session_err = state
+            .db
+            .create_session(DELETED_USER_ID, "should-not-mint", 1)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(session_err, DbError::Conflict(ref code) if code == "tombstone"),
+            "{session_err}"
+        );
+
+        let reserved_name = upsert_oauth_user_if_allowed(
+            &state.db,
+            AuthProvider::Discord,
+            "brand-new-tomb".into(),
+            " DeletedUser ".into(),
+            None,
+        )
+        .await
+        .expect_err("reserved oauth username");
+        assert_eq!(reserved_name.0, StatusCode::BAD_REQUEST);
+        assert_eq!(reserved_name.1, "reserved_name");
+
+        let token_hash = hash_session_token("tomb-daemon");
+        state
+            .db
+            .client
+            .query(
+                "CREATE daemon_token SET member_id = 'deleted', token_hash = $hash, \
+                 label = 'forged', is_active = true, created_at = time::now(), expires_at = NONE",
+            )
+            .bind(("hash", token_hash))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let upload = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/stats/upload")
+                    .header(header::AUTHORIZATION, "Bearer tomb-daemon")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        40000,
+                    ))))
+                    .body(axum::body::Body::from(r#"{"matches":[]}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(upload.status(), StatusCode::UNAUTHORIZED);
+        assert!(no_session_cookie(&upload));
+        let bytes = upload.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "Invalid or revoked daemon token");
+        assert!(body.get("code").is_none(), "{body}");
+
+        let session_hash = hash_session_token("forged-session");
+        state
+            .db
+            .client
+            .query(
+                "CREATE session SET user_id = 'deleteduser', token = $hash, \
+                 expires_at = time::now() + 1d, created_at = time::now()",
+            )
+            .bind(("hash", session_hash))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            state
+                .db
+                .get_session("forged-session")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(DELETED_USER_ID)
+        );
+        let me = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("GET")
+                    .uri("/api/auth/me")
+                    .header(header::COOKIE, "sc_session=forged-session")
+                    .extension(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                        [127, 0, 0, 1],
+                        40000,
+                    ))))
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(me.status(), StatusCode::UNAUTHORIZED);
     }
 }

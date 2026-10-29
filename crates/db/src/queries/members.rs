@@ -17,7 +17,7 @@ use crate::{with_timeout, Database, DbResult};
 /// so encrypted secrets never enter process memory on bulk reads.
 const MEMBER_SAFE_COLS: &str = "id, user_id, org_role, display_name, bio, avatar_url, timezone, \
     pronouns, availability_status, nostr_pubkey, nostr_key_mode, joined_at, is_active, \
-    main_role, twitch, twitter";
+    main_role, twitch, twitter, stats_delete_scheduled_at";
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbMember {
@@ -53,6 +53,9 @@ struct DbMember {
     #[serde(default)]
     #[surreal(default)]
     twitter: Option<String>,
+    #[serde(default)]
+    #[surreal(default)]
+    stats_delete_scheduled_at: Option<SurrealDatetime>,
 }
 
 /// Singleton first-boot lock row (`bootstrap_lock:setup`).
@@ -163,7 +166,15 @@ fn db_to_member(db: DbMember) -> DbResult<Member> {
         main_role: db.main_role,
         twitch: db.twitch,
         twitter: db.twitter,
+        stats_delete_scheduled_at: db.stats_delete_scheduled_at.map(Into::into),
     })
+}
+
+fn reject_tombstone_promotion(id: &str, new_role: OrgRole) -> DbResult<()> {
+    if crate::is_tombstone_member(id) && new_role != OrgRole::Recruit {
+        return Err(crate::DbError::Conflict("tombstone_role".into()));
+    }
+    Ok(())
 }
 
 impl Database {
@@ -178,6 +189,12 @@ impl Database {
         display_name: &str,
         role: OrgRole,
     ) -> DbResult<Member> {
+        if crate::is_tombstone_user(user_id) {
+            return Err(crate::DbError::Conflict("tombstone".into()));
+        }
+        if crate::is_reserved_display_name(display_name) {
+            return Err(crate::DbError::ReservedName);
+        }
         let display_name_key = crate::display_name::display_name_key(display_name)
             .map_err(|_| crate::DbError::DisplayNameInvalid)?;
         // Generate keypair if crypto is available
@@ -212,6 +229,7 @@ impl Database {
                 main_role: None,
                 twitch: None,
                 twitter: None,
+                stats_delete_scheduled_at: None,
             };
             let created: Option<DbMember> =
                 self.client
@@ -236,7 +254,10 @@ impl Database {
             }
             let mut result = self
                 .client
-                .query("SELECT count() FROM member WHERE is_active = true GROUP ALL")
+                .query(
+                    "SELECT count() FROM member WHERE is_active = true \
+                     AND is_tombstone != true AND meta::id(id) != 'deleted' GROUP ALL",
+                )
                 .await?;
             let counts: Vec<CountResult> = result.take(0)?;
             Ok(counts.first().map(|c| c.count).unwrap_or(0))
@@ -276,11 +297,14 @@ impl Database {
             let q = if include_inactive {
                 format!(
                     "SELECT {MEMBER_SAFE_COLS} FROM member \
+                     WHERE is_tombstone != true AND meta::id(id) != 'deleted' \
                      ORDER BY display_name ASC LIMIT $lim START $off"
                 )
             } else {
                 format!(
-                    "SELECT {MEMBER_SAFE_COLS} FROM member WHERE is_active = true \
+                    "SELECT {MEMBER_SAFE_COLS} FROM member \
+                     WHERE is_active = true AND is_tombstone != true \
+                     AND meta::id(id) != 'deleted' \
                      ORDER BY display_name ASC LIMIT $lim START $off"
                 )
             };
@@ -444,7 +468,8 @@ impl Database {
                 .query(
                     "SELECT nostr_pubkey, nostr_secret_key_encrypted FROM member \
                      WHERE is_active = true AND nostr_key_mode = 'server_managed' \
-                     AND nostr_pubkey != NONE AND nostr_secret_key_encrypted != NONE",
+                     AND nostr_pubkey != NONE AND nostr_secret_key_encrypted != NONE \
+                     AND is_tombstone != true AND meta::id(id) != 'deleted'",
                 )
                 .await?;
             let rows: Vec<Row> = result.take(0)?;
@@ -479,6 +504,14 @@ impl Database {
         twitch: Option<Option<&str>>,
         twitter: Option<Option<&str>>,
     ) -> DbResult<Member> {
+        if crate::is_tombstone_member(id) {
+            return Err(crate::DbError::Conflict("tombstone".into()));
+        }
+        if let Some(name) = display_name {
+            if crate::is_reserved_display_name(name) {
+                return Err(crate::DbError::ReservedName);
+            }
+        }
         let display_name_key = match display_name {
             Some(name) => Some(
                 crate::display_name::display_name_key(name)
@@ -608,7 +641,8 @@ impl Database {
         with_timeout(async {
             let q = format!(
                 "SELECT {MEMBER_SAFE_COLS} FROM member \
-                 WHERE is_active = true AND nostr_pubkey != NONE LIMIT 2000"
+                 WHERE is_active = true AND nostr_pubkey != NONE \
+                 AND is_tombstone != true AND meta::id(id) != 'deleted' LIMIT 2000"
             );
             let mut result = self.client.query(&q).await?;
             let members: Vec<DbMember> = result.take(0)?;
@@ -667,7 +701,7 @@ impl Database {
                 // rows for equality + LIMIT lookups on SurrealDB v3 (verified
                 // via probe: count() scan finds the row, index path does not).
                 // Member table is org-scale; a scan is fine.
-                .query("SELECT * FROM member WITH NOINDEX WHERE nostr_pubkey = $pk AND is_active = true LIMIT 1")
+                .query("SELECT * FROM member WITH NOINDEX WHERE nostr_pubkey = $pk AND is_active = true AND is_tombstone != true AND meta::id(id) != 'deleted' LIMIT 1")
                 .bind(("pk", pubkey.to_string()))
                 .await?;
             let members: Vec<DbMember> = result.take(0)?;
@@ -687,6 +721,7 @@ impl Database {
     /// paths (e.g. application accept) where the target's current role is not a
     /// meaningful precondition.
     pub async fn change_member_role(&self, id: &str, new_role: OrgRole) -> DbResult<Member> {
+        reject_tombstone_promotion(id, new_role)?;
         with_timeout(async {
             let rid = RecordId::new("member", id);
             let mut result = self
@@ -721,6 +756,7 @@ impl Database {
         expected: OrgRole,
         new_role: OrgRole,
     ) -> DbResult<Member> {
+        reject_tombstone_promotion(id, new_role)?;
         with_timeout(async {
             let rid = RecordId::new("member", id);
             let mut result = self
@@ -766,7 +802,10 @@ impl Database {
             }
             let mut result = self
                 .client
-                .query("SELECT count() FROM member GROUP ALL")
+                .query(
+                    "SELECT count() FROM member WHERE is_tombstone != true \
+                     AND meta::id(id) != 'deleted' GROUP ALL",
+                )
                 .await?;
             let counts: Vec<CountResult> = result.take(0)?;
             Ok(counts.first().map(|c| c.count).unwrap_or(0) > 0)
@@ -887,7 +926,8 @@ impl Database {
             let mut result = self
                 .client
                 .query(
-                    "SELECT count() FROM member WHERE is_active = true AND org_role = 'admin' GROUP ALL",
+                    "SELECT count() FROM member WHERE is_active = true AND org_role = 'admin' \
+                     AND is_tombstone != true AND meta::id(id) != 'deleted' GROUP ALL",
                 )
                 .await?;
             let counts: Vec<CountResult> = result.take(0)?;
@@ -926,6 +966,8 @@ impl Database {
                 .query(
                     "SELECT count() FROM member \
                      WHERE is_active = true AND org_role = 'admin' \
+                     AND is_tombstone != true \
+                     AND meta::id(id) != 'deleted' \
                      AND meta::id(id) NOT IN ( \
                          SELECT VALUE member_id FROM moderation_action \
                          WHERE is_active = true \

@@ -424,6 +424,9 @@ impl Database {
         offset: u32,
         season: Option<SeasonWindow>,
     ) -> DbResult<Vec<PersonalMatch>> {
+        if self.stats_delete_deadline(member_id).await?.is_some() {
+            return Ok(Vec::new());
+        }
         with_timeout(async {
             let fetch = limit + 1;
             let mut q = self
@@ -477,6 +480,29 @@ impl Database {
         Ok(rows.first().map(|c| c.count).unwrap_or(0))
     }
 
+    /// Pending tracker soft-delete deadline, if this member has one.
+    async fn stats_delete_deadline(&self, member_id: &str) -> DbResult<Option<DateTime<Utc>>> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                #[serde(default)]
+                #[surreal(default)]
+                stats_delete_scheduled_at: Option<SurrealDatetime>,
+            }
+            let mut result = self
+                .client
+                .query("SELECT stats_delete_scheduled_at FROM $rid")
+                .bind(("rid", RecordId::new("member", member_id)))
+                .await?;
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows
+                .into_iter()
+                .next()
+                .and_then(|row| row.stats_delete_scheduled_at.map(Into::into)))
+        })
+        .await
+    }
+
     pub async fn get_personal_stats(&self, member_id: &str) -> DbResult<PersonalStats> {
         self.get_personal_stats_in(member_id, None).await
     }
@@ -487,6 +513,16 @@ impl Database {
         member_id: &str,
         season: Option<SeasonWindow>,
     ) -> DbResult<PersonalStats> {
+        if let Some(at) = self.stats_delete_deadline(member_id).await? {
+            return Ok(PersonalStats {
+                member_id: member_id.to_string(),
+                total_matches: 0,
+                wins: 0,
+                losses: 0,
+                draws: 0,
+                stats_delete_scheduled_at: Some(at),
+            });
+        }
         with_timeout(async {
             let total = self.count_matches(member_id, "", season).await?;
             let wins = self
@@ -504,6 +540,7 @@ impl Database {
                 wins,
                 losses,
                 draws,
+                stats_delete_scheduled_at: None,
             })
         })
         .await
@@ -525,6 +562,9 @@ impl Database {
         member_id: &str,
         season: Option<SeasonWindow>,
     ) -> DbResult<Vec<HeroStats>> {
+        if self.stats_delete_deadline(member_id).await?.is_some() {
+            return Ok(Vec::new());
+        }
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct HeroRow {
@@ -625,6 +665,9 @@ impl Database {
         member_id: &str,
         season: Option<SeasonWindow>,
     ) -> DbResult<Vec<RoleStats>> {
+        if self.stats_delete_deadline(member_id).await?.is_some() {
+            return Ok(Vec::new());
+        }
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct RoleRow {
@@ -793,7 +836,11 @@ impl Database {
             }
             let mut active_q = self
                 .client
-                .query("SELECT id, display_name FROM member WHERE is_active = true")
+                .query(
+                    "SELECT id, display_name FROM member \
+                     WHERE is_active = true AND stats_delete_scheduled_at IS NONE \
+                     AND is_tombstone != true AND meta::id(id) != 'deleted'",
+                )
                 .await?;
             let active_rows: Vec<ActiveName> = active_q.take(0)?;
             let active: HashMap<String, String> = active_rows
@@ -868,6 +915,12 @@ impl Database {
                     WHERE member_id IN $ids
                       AND hero = $hero
                       AND outcome IN ['victory', 'defeat', 'draw']
+                      AND member_id NOT IN (
+                        SELECT VALUE meta::id(id) FROM member
+                        WHERE stats_delete_scheduled_at IS NOT NONE
+                           OR is_tombstone = true
+                           OR meta::id(id) = 'deleted'
+                      )
                     GROUP BY member_id
                     "#,
                 )
@@ -909,6 +962,9 @@ impl Database {
         member_id: &str,
         season: Option<SeasonWindow>,
     ) -> DbResult<Vec<MapStats>> {
+        if self.stats_delete_deadline(member_id).await?.is_some() {
+            return Ok(Vec::new());
+        }
         with_timeout(async {
             #[derive(Deserialize, SurrealValue)]
             struct MapRow {

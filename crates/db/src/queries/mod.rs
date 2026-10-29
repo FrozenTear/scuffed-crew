@@ -7,6 +7,7 @@ pub mod channels;
 pub mod daemon_tokens;
 pub mod device_link;
 pub mod dms;
+pub mod erasure;
 pub mod events;
 pub mod forum;
 pub mod game_accounts;
