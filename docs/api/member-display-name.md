@@ -82,11 +82,16 @@ Both bodies are JSON. The frontend should match on `error`.
 
 `POST /api/upload/avatar` with `member_id` uses this same rule.
 
-`PUT /api/members/{id}/game-accounts` uses this same rank rule when the caller
-edits someone else. A member or recruit who edits someone else's game account
-gets 403 `{"error":"Can only edit your own game accounts"}`. An officer who
-edits an admin or another officer gets the same officer 403 as a profile edit.
-Editing your own game account is allowed.
+`PUT /api/members/{id}/game-accounts` and
+`DELETE /api/members/{id}/game-accounts/{account_id}` use this same rank rule
+when the caller changes someone else's account. A member or recruit who edits
+someone else's game account gets 403
+`{"error":"Can only edit your own game accounts"}`. Deleting someone else's
+account gets 403 `{"error":"Can only delete your own game accounts"}`. An
+officer who edits or deletes an admin or another officer's account gets the
+same officer 403 as a profile edit. A refused delete removes nothing. Editing
+or deleting your own game account is allowed. An admin may edit or delete any
+other member's game account.
 
 ### Routes
 

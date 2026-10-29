@@ -104,7 +104,8 @@ pub fn officer_may_moderate(target: OrgRole) -> bool {
 /// Self-edits are allowed by the route before this runs. Admins may edit any
 /// other profile. Officers may edit only ranks [`officer_may_moderate`] allows
 /// (member and recruit). Members and recruits may edit only their own profile.
-/// `PUT /api/members/{id}/game-accounts` uses this same rule for someone else.
+/// `PUT` and `DELETE /api/members/{id}/game-accounts` use this same rule for
+/// someone else.
 /// A profile edit does not remove admin authority, so the last-admin guards on
 /// role changes and `is_active` stay on those paths.
 pub fn can_edit_other_profile(actor: OrgRole, target: OrgRole) -> Result<(), PolicyDenial> {

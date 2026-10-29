@@ -759,6 +759,51 @@ pub struct UpsertGameAccountRequest {
     pub role: Option<Option<String>>,
 }
 
+/// Rank check for creating, updating, or deleting someone else's game account.
+///
+/// Self (`caller` member id equals `member_id`) is allowed without a lookup.
+/// Anyone else must pass [`crate::membership_policy::can_edit_other_profile`].
+/// An officer who fails gets the profile 403. A member or recruit gets
+/// `own_only_error`.
+async fn require_other_game_account_edit(
+    state: &AppState,
+    caller: &OrgMember,
+    member_id: &str,
+    own_only_error: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if caller.member.id == member_id {
+        return Ok(());
+    }
+    let target = state.db.get_member_safe(member_id).await.map_err(|e| {
+        tracing::error!(error = %e, "get_member_safe for game account");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: "Internal server error".into(),
+            }),
+        )
+    })?;
+    let Some(target) = target else {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Member not found".into(),
+            }),
+        ));
+    };
+    if let Err(denial) =
+        crate::membership_policy::can_edit_other_profile(caller.member.org_role, target.org_role)
+    {
+        let error = if caller.member.org_role.is_at_least(OrgRole::Officer) {
+            denial.message().to_string()
+        } else {
+            own_only_error.to_string()
+        };
+        return Err((denial.status(), Json(ErrorResponse { error })));
+    }
+    Ok(())
+}
+
 /// PUT /api/members/:id/game-accounts. Upsert a game account.
 ///
 /// Self is allowed. Editing someone else uses the same rank rule as profile
@@ -773,36 +818,13 @@ pub async fn upsert_game_account(
     Path(member_id): Path<String>,
     Json(body): Json<UpsertGameAccountRequest>,
 ) -> Result<Json<GameAccount>, (StatusCode, Json<ErrorResponse>)> {
-    if caller.member.id != member_id {
-        let target = state.db.get_member_safe(&member_id).await.map_err(|e| {
-            tracing::error!(error = %e, "get_member_safe for game account");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Internal server error".into(),
-                }),
-            )
-        })?;
-        let Some(target) = target else {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "Member not found".into(),
-                }),
-            ));
-        };
-        if let Err(denial) = crate::membership_policy::can_edit_other_profile(
-            caller.member.org_role,
-            target.org_role,
-        ) {
-            let error = if caller.member.org_role.is_at_least(OrgRole::Officer) {
-                denial.message().to_string()
-            } else {
-                "Can only edit your own game accounts".to_string()
-            };
-            return Err((denial.status(), Json(ErrorResponse { error })));
-        }
-    }
+    require_other_game_account_edit(
+        &state,
+        &caller,
+        &member_id,
+        "Can only edit your own game accounts",
+    )
+    .await?;
 
     // Length units differ on purpose.
     // `account_name` is counted in Unicode scalars (`chars().count()`), so 64
@@ -881,23 +903,24 @@ pub async fn upsert_game_account(
         })
 }
 
-/// DELETE /api/members/:member_id/game-accounts/:id — delete game account (self or officer+)
+/// DELETE /api/members/:member_id/game-accounts/:id. Delete a game account.
+///
+/// Same rank rule as the game-account upsert. A member or recruit deleting
+/// someone else's account is 403 `{"error":"Can only delete your own game accounts"}`.
+/// An officer who deletes an admin or another officer's account gets the
+/// profile 403, and the row stays.
 pub async fn delete_game_account(
     State(state): State<AppState>,
     caller: OrgMember,
     Path((member_id, account_id)): Path<(String, String)>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let is_self = caller.member.id == member_id;
-    let is_officer = caller.member.org_role.is_at_least(OrgRole::Officer);
-
-    if !is_self && !is_officer {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ErrorResponse {
-                error: "Can only delete your own game accounts".into(),
-            }),
-        ));
-    }
+    require_other_game_account_edit(
+        &state,
+        &caller,
+        &member_id,
+        "Can only delete your own game accounts",
+    )
+    .await?;
 
     state
         .db
@@ -1220,8 +1243,8 @@ mod tests {
     use scuffed_db::OrgRole;
 
     use super::{
-        UpdateMemberRequest, UpsertGameAccountRequest, get_member, update_member,
-        upsert_game_account,
+        UpdateMemberRequest, UpsertGameAccountRequest, delete_game_account, get_member,
+        update_member, upsert_game_account,
     };
     use crate::extractors::OrgMember;
     use crate::test_support::{must_err, must_ok, seed_user, test_state};
@@ -1774,5 +1797,181 @@ mod tests {
         );
         assert_eq!(saved.account_name, "Mine");
         assert_eq!(saved.member_id, member_id);
+    }
+
+    async fn plant_game_account(
+        state: &crate::state::AppState,
+        member_id: &str,
+        name: &str,
+    ) -> String {
+        state
+            .db
+            .upsert_game_account(member_id, "ow2", name, None, None, None, None)
+            .await
+            .expect("plant game account")
+            .id
+    }
+
+    async fn delete_account(
+        state: &crate::state::AppState,
+        caller: OrgMember,
+        member_id: &str,
+        account_id: &str,
+    ) -> Result<
+        StatusCode,
+        (
+            StatusCode,
+            Json<scuffed_auth::server::session::ErrorResponse>,
+        ),
+    > {
+        delete_game_account(
+            State(state.clone()),
+            caller,
+            Path((member_id.to_string(), account_id.to_string())),
+        )
+        .await
+    }
+
+    /// Deleting someone else's game account follows the same rank rule.
+    #[tokio::test]
+    async fn game_account_delete_follows_moderation_rank() {
+        let state = test_state().await;
+        let officer = named_member(&state, "officer", "Officer", OrgRole::Officer).await;
+        let officer_id = officer.member.id.clone();
+        let member = named_member(&state, "plain", "Plain", OrgRole::Member).await;
+        let member_id = member.member.id.clone();
+        let admin = named_member(&state, "admin", "Boss", OrgRole::Admin).await;
+        let admin_id = admin.member.id.clone();
+        let peer = named_member(&state, "peer", "Peer", OrgRole::Officer).await;
+        let peer_id = peer.member.id.clone();
+        let member_account = plant_game_account(&state, &member_id, "PlainOwl").await;
+        let admin_account = plant_game_account(&state, &admin_id, "BossOwl").await;
+        let peer_account = plant_game_account(&state, &peer_id, "PeerOwl").await;
+        let self_account = plant_game_account(&state, &officer_id, "Mine").await;
+
+        let status = must_ok(
+            delete_account(
+                &state,
+                caller_for(&state, "officer").await,
+                &member_id,
+                &member_account,
+            )
+            .await,
+            "officer deletes member game account",
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            state
+                .db
+                .list_member_game_accounts(&member_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let (status, body) = must_err(
+            delete_account(
+                &state,
+                caller_for(&state, "officer").await,
+                &admin_id,
+                &admin_account,
+            )
+            .await,
+            "officer deletes admin game account",
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.error,
+            "Officers cannot edit the profile of admins or other officers"
+        );
+        assert_eq!(
+            state
+                .db
+                .list_member_game_accounts(&admin_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let (status, body) = must_err(
+            delete_account(
+                &state,
+                caller_for(&state, "officer").await,
+                &peer_id,
+                &peer_account,
+            )
+            .await,
+            "officer deletes officer game account",
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(
+            body.error,
+            "Officers cannot edit the profile of admins or other officers"
+        );
+        assert_eq!(
+            state
+                .db
+                .list_member_game_accounts(&peer_id)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let status = must_ok(
+            delete_account(
+                &state,
+                caller_for(&state, "admin").await,
+                &peer_id,
+                &peer_account,
+            )
+            .await,
+            "admin deletes officer game account",
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            state
+                .db
+                .list_member_game_accounts(&peer_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let status = must_ok(
+            delete_account(
+                &state,
+                caller_for(&state, "officer").await,
+                &officer_id,
+                &self_account,
+            )
+            .await,
+            "self deletes game account",
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            state
+                .db
+                .list_member_game_accounts(&officer_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+
+        let own = plant_game_account(&state, &member_id, "PlainAgain").await;
+        let status = must_ok(
+            delete_account(&state, caller_for(&state, "plain").await, &member_id, &own).await,
+            "member deletes own game account",
+        );
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            state
+                .db
+                .list_member_game_accounts(&member_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
