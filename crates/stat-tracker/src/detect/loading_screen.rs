@@ -1,11 +1,15 @@
-//! The loading screen (`ENTERING GAME`): black above and below a flat
-//! lit strip. Pixel check only, no OCR.
+//! The loading screen (`ENTERING GAME`): black above and below a lit
+//! strip. Pixel check only, no OCR.
 //!
 //! It is the shape the end-reel letterbox check in [`super::match_end`]
 //! turns away as a loading slab: both 7% edge bands dark, a partly lit
-//! middle, both shoulders black and a middle that is one flat colour.
-//! Used only by the opt-in pre-game screen saves; no boundary or outcome
-//! reads it.
+//! middle and both shoulders black. The strip is a vertical navy gradient
+//! (each row one colour, the colour drifting down the screen), so its
+//! flatness is checked per row as well as across the whole middle (the
+//! end-reel flat-UI test); either one passing is enough, so the per-row
+//! test only adds the gradient. A dark scene (a spawn room, footage) has
+//! rows of many colours and no dominant one. Used only by the
+//! opt-in pre-game screen saves; no boundary or outcome reads it.
 
 use image::RgbImage;
 
@@ -20,6 +24,30 @@ const MID_DARK_MAX: f32 = 0.65;
 
 /// Edge bands at least this dark, as in the end-reel letterbox check.
 const EDGE_DARK_MIN: f32 = 0.72;
+
+/// A pixel is lit when its brightest channel reaches this (the dark test
+/// of [`dark_ratio`] is below it).
+const LIT_MIN: u8 = 36;
+
+/// A lit pixel with every channel at least this is a white glyph of the
+/// `ENTERING GAME` text and is left out of the row colour.
+const GLYPH_MIN: u8 = 160;
+
+/// A middle row counts when at least this share of its samples is lit
+/// (the black padding around the strip is no row of it).
+const ROW_LIT_MIN: f32 = 0.25;
+
+/// A lit sample is the row's colour when each channel is within this of
+/// the row's mean.
+const ROW_TOLERANCE: i32 = 16;
+
+/// A row is flat when at least this share of its lit samples is its
+/// colour (glyph edges are the rest).
+const ROW_FLAT_MIN: f32 = 0.80;
+
+/// The middle is the loading strip when at least this share of its
+/// counted rows is flat.
+const FLAT_ROWS_MIN: f32 = 0.85;
 
 /// Whether `rgb` looks like the loading screen.
 pub fn is_loading_screen(rgb: &RgbImage) -> bool {
@@ -37,7 +65,48 @@ pub fn is_loading_screen(rgb: &RgbImage) -> bool {
     if top_dark < EDGE_DARK_MIN || bot_dark < EDGE_DARK_MIN || mid_dark >= MID_DARK_MAX {
         return false;
     }
-    shoulders_dark(rgb, gx, gy, gw, gh) && !letterbox_mid_is_footage(rgb, gx, mid_y, gw, mid_h)
+    shoulders_dark(rgb, gx, gy, gw, gh)
+        && (rows_are_flat(rgb, gx, mid_y, gw, mid_h)
+            || !letterbox_mid_is_footage(rgb, gx, mid_y, gw, mid_h))
+}
+
+/// Whether the lit rows of the band are each about one colour (white
+/// glyphs left out). Rows may differ from each other: the strip is a
+/// gradient.
+fn rows_are_flat(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
+    let (w, h) = rgb.dimensions();
+    let x1 = (x0 + cw).min(w);
+    let y1 = (y0 + ch).min(h);
+    let mut lit: Vec<[u8; 3]> = Vec::new();
+    let (mut counted, mut flat) = (0u32, 0u32);
+    for y in (y0..y1).step_by(2) {
+        lit.clear();
+        let mut samples = 0u32;
+        for x in (x0..x1).step_by(2) {
+            samples += 1;
+            let p = rgb.get_pixel(x, y).0;
+            let max = p[0].max(p[1]).max(p[2]);
+            let min = p[0].min(p[1]).min(p[2]);
+            if max >= LIT_MIN && min < GLYPH_MIN {
+                lit.push(p);
+            }
+        }
+        if samples == 0 || (lit.len() as f32) < samples as f32 * ROW_LIT_MIN {
+            continue;
+        }
+        counted += 1;
+        let n = lit.len() as i64;
+        let mean: [i32; 3] =
+            std::array::from_fn(|c| (lit.iter().map(|p| i64::from(p[c])).sum::<i64>() / n) as i32);
+        let near = lit
+            .iter()
+            .filter(|p| (0..3).all(|c| (i32::from(p[c]) - mean[c]).abs() <= ROW_TOLERANCE))
+            .count();
+        if near as f32 >= lit.len() as f32 * ROW_FLAT_MIN {
+            flat += 1;
+        }
+    }
+    counted > 0 && flat as f32 >= counted as f32 * FLAT_ROWS_MIN
 }
 
 /// The bands just inside the edge bands carry gameplay on a highlight reel
@@ -83,9 +152,98 @@ mod tests {
         })
     }
 
+    /// `entering_game_frame` from the end-reel tests (`tests_match_end.rs`),
+    /// built from the real frames 013904 / 223050: ~38% black bars and a
+    /// ~24% navy strip that is a vertical gradient, white glyphs, and a thin
+    /// HUD line in the top band.
+    fn entering_game_frame() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        for y in 136..224 {
+            let t = (y - 136) as u8;
+            let navy = Rgb([20 + t / 4, 28 + t / 5, 42 + t / 3]);
+            for x in 0..640 {
+                img.put_pixel(x, y, navy);
+            }
+        }
+        for y in 168..192 {
+            for x in 200..440 {
+                if x % 7 < 3 {
+                    img.put_pixel(x, y, Rgb([240, 240, 240]));
+                }
+            }
+        }
+        for x in 8..400 {
+            img.put_pixel(x, 4, Rgb([220, 220, 220]));
+        }
+        img
+    }
+
+    /// A taller strip whose navy drifts from dark to bright down the
+    /// screen, with glyphs.
+    fn navy_gradient() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        for y in 120..240 {
+            let t = (y - 120) as u8;
+            let navy = Rgb([12 + t / 4, 20 + t / 3, 40 + t / 2]);
+            for x in 0..640 {
+                img.put_pixel(x, y, navy);
+            }
+        }
+        for y in 170..190 {
+            for x in (220..420).filter(|x| x % 5 < 2) {
+                img.put_pixel(x, y, Rgb([235, 238, 245]));
+            }
+        }
+        img
+    }
+
     #[test]
     fn the_entering_game_strip_is_the_loading_screen() {
         assert!(is_loading_screen(&entering_game()));
+    }
+
+    #[test]
+    fn the_real_entering_game_gradient_is_the_loading_screen() {
+        assert!(is_loading_screen(&entering_game_frame()));
+    }
+
+    #[test]
+    fn a_vertical_navy_gradient_is_the_loading_screen() {
+        assert!(is_loading_screen(&navy_gradient()));
+    }
+
+    #[test]
+    fn a_flat_middle_with_a_grey_share_is_still_the_loading_screen() {
+        // 84% navy and 16% light grey per sampled row: the grey pulls the
+        // row mean more than 16 off the navy, so the per-row test fails,
+        // and the whole-middle flat-UI test (one bin holds 84%) passes.
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        for y in 136..224 {
+            for x in 0..640u32 {
+                let p = if x % 50 < 7 {
+                    Rgb([150, 150, 150])
+                } else {
+                    Rgb([24, 32, 52])
+                };
+                img.put_pixel(x, y, p);
+            }
+        }
+        // The middle band of a 640x360 frame is y 108 for 144 rows.
+        assert!(!rows_are_flat(&img, 0, 108, 640, 144));
+        assert!(is_loading_screen(&img));
+    }
+
+    #[test]
+    fn a_strip_of_noisy_rows_is_not() {
+        // The loading shape (black bars and shoulders) around footage.
+        let mut img = entering_game();
+        for y in 136..224u32 {
+            for x in 0..640u32 {
+                let n = ((x.wrapping_mul(37) ^ y.wrapping_mul(17)) % 90) as u8;
+                img.put_pixel(x, y, Rgb([40 + n, 90 - n / 2, 30 + n / 3]));
+            }
+        }
+        assert!(!is_loading_screen(&img));
     }
 
     /// 7% edge bands black, as in the end-reel tests.
