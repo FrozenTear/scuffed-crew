@@ -217,6 +217,27 @@ impl PostWant {
     }
 }
 
+/// A tick's pre-game read with the frame, when the read keeps it.
+pub(crate) type PreKept<T> = (super::pregame_dump::Seen, Option<Arc<T>>);
+
+/// One polled frame split between the two saves, one `Arc` for both, made
+/// only when a save keeps it: the pre-game read with the frame when `pre`
+/// keeps it, and the frame for the post-game saves when `post` keeps it
+/// (`end_seen`: the tick read an end). With the switch off both are `None`
+/// and the frame is dropped here.
+pub(crate) fn kept_frames<T>(
+    img: T,
+    pre: Option<(super::pregame_dump::Seen, bool)>,
+    post: Option<PostWant>,
+    end_seen: bool,
+) -> (Option<PreKept<T>>, Option<Arc<T>>) {
+    let post_keep = post.is_some_and(|want| want.keeps(end_seen));
+    let pre_keep = pre.is_some_and(|(_, keep)| keep);
+    let kept = (pre_keep || post_keep).then(|| Arc::new(img));
+    let pregame = pre.map(|(seen, keep)| (seen, kept.clone().filter(|_| keep)));
+    (pregame, kept.filter(|_| post_keep))
+}
+
 /// Why a window ended, as the sidecar says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PostEnd {

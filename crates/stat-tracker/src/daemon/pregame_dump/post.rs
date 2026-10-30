@@ -5,6 +5,35 @@
 use super::*;
 
 impl PregameDump {
+    /// The poll loop's post-game want for the coming tick: `None` with the
+    /// switch off (no saver), so the tick keeps no frame for these saves.
+    pub(crate) fn post_want_of(
+        dump: Option<&mut Self>,
+        now: Instant,
+    ) -> Option<crate::daemon::postgame_dump::PostWant> {
+        dump.map(|dump| dump.post_want(now))
+    }
+
+    /// The poll loop's post-game step, after the tick's decision so a
+    /// confirmed outcome opens the window: feed the saver `tick` and
+    /// `frame`, then return how soon the next tick should come, only in the
+    /// window and only when `every_tick_polls`. With the switch off (no
+    /// saver) nothing is checked: `now`, `tick` and `every_tick_polls` are
+    /// never called, `frame` is dropped and the regular interval stays.
+    pub(crate) fn post_after_decision(
+        dump: Option<&mut Self>,
+        now: impl Fn() -> Instant,
+        tick: impl FnOnce() -> crate::daemon::postgame_dump::PostTick,
+        frame: Option<Arc<image::DynamicImage>>,
+        poll: Duration,
+        every_tick_polls: impl FnOnce() -> bool,
+    ) -> Option<Duration> {
+        let dump = dump?;
+        dump.observe_post(now(), tick(), frame);
+        dump.post_sooner_tick(now(), poll)
+            .filter(|_| every_tick_polls())
+    }
+
     /// What the next tick should hand over for the post-game saves, at
     /// its poll time `now`; nothing once the writer is gone. Notes when
     /// this tick was polled ([`Self::observe_post`], [`Self::post_sooner_tick`])

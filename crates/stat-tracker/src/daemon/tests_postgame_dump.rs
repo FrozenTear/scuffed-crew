@@ -871,32 +871,118 @@ fn the_staged_pre_game_sweep_leaves_post_game_files_alone() {
 
 #[test]
 fn switch_off_has_no_saver_and_the_poll_loop_checks_nothing_new() {
+    // Switch off: no saver, so no tracker, no writer thread, no folder.
     let dir = tempfile::tempdir().unwrap();
-    assert!(PregameDump::new(false, dir.path(), POLL).is_none());
+    let mut off = PregameDump::new(false, dir.path(), POLL);
+    assert!(off.is_none());
     assert!(!dir.path().join("debug").exists());
-
-    let run_loop: String = crate::main_tests::fn_source("run_loop")
-        .split_whitespace()
-        .collect();
-    // The want comes from the saver, so with no saver no frame is kept.
-    assert!(
-        run_loop.contains("letpostgame_want=pregame_dump.as_mut().map(|dump|dump.post_want(now));")
+    // The poll's want comes from the saver: none, so the tick keeps no
+    // frame, even one read as an end, and makes no `Arc` for it.
+    let t0 = Instant::now();
+    assert_eq!(PregameDump::post_want_of(off.as_mut(), t0), None);
+    let img = Arc::new(());
+    let (pregame, postgame) = kept_frames(Arc::clone(&img), None, None, true);
+    assert!(pregame.is_none() && postgame.is_none());
+    assert_eq!(Arc::strong_count(&img), 1, "the frame is dropped, not held");
+    // After the decision: nothing fed, no clock, game or cadence read, no
+    // faster tick, and the frame is not held.
+    let calls = std::cell::Cell::new(0);
+    let count = || calls.set(calls.get() + 1);
+    let frame = banner();
+    let sooner = PregameDump::post_after_decision(
+        off.as_mut(),
+        || {
+            count();
+            t0
+        },
+        || {
+            count();
+            PostTick::default()
+        },
+        Some(Arc::clone(&frame)),
+        POLL,
+        || {
+            count();
+            true
+        },
     );
-    assert!(run_loop.contains("letpost_keep=postgame_want.is_some_and("));
-    assert!(run_loop.contains("letkept=(pre_keep||post_keep).then(||Arc::new(img));"));
-    // The feed and the faster tick sit under the saver.
-    let fed = run_loop
-        .find("ifletSome(dump)=pregame_dump.as_mut(){letgame=st.active_game.as_ref();letpost_tick=")
-        .expect("fed only with the saver");
-    let observed = run_loop
-        .find("dump.observe_post(Instant::now(),post_tick,postgame);")
-        .expect("fed");
-    let faster = run_loop
-        .find("ifletSome(next)=dump.post_sooner_tick(Instant::now(),poll_interval)&&poll_divisor(&st,Instant::now(),capture::shot_route(),poll_interval)==1{poll_timer.reset_after(next);}")
-        .expect("only in the window, only where every tick polls");
-    assert!(fed < observed && observed < faster);
+    assert_eq!(sooner, None, "the regular interval stays");
+    assert_eq!(calls.get(), 0, "nothing is checked");
+    assert_eq!(
+        Arc::strong_count(&frame),
+        1,
+        "the frame is dropped, not held"
+    );
+
+    // The same steps with the switch on do keep, feed and bring the tick
+    // forward, so the checks above are not empty.
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let confirm = PostTick {
+        end: Some(EndSeen::Title),
+        confirmed: true,
+        ..PostTick::default()
+    };
+    let every = PostWant {
+        every: true,
+        on_end: false,
+    };
+    let (pregame, postgame) = kept_frames(Arc::clone(&img), None, Some(every), false);
+    assert!(pregame.is_none() && postgame.is_some());
+    let pre = Some((Seen::BanResults, true));
+    let (pregame, postgame) = kept_frames(Arc::clone(&img), pre, None, false);
+    assert!(pregame.is_some_and(|(_, frame)| frame.is_some()) && postgame.is_none());
+    for every_tick_polls in [true, false] {
+        let on_dir = tempfile::tempdir().unwrap();
+        let mut on = PregameDump::new(true, on_dir.path(), POLL);
+        assert!(PregameDump::post_want_of(on.as_mut(), at(0)).is_some());
+        calls.set(0);
+        let sooner = PregameDump::post_after_decision(
+            on.as_mut(),
+            || {
+                count();
+                at(300)
+            },
+            || {
+                count();
+                confirm
+            },
+            Some(banner()),
+            POLL,
+            || {
+                count();
+                every_tick_polls
+            },
+        );
+        assert!(on.as_ref().is_some_and(|dump| dump.post_window_open()));
+        // Two clock reads, the tick, the cadence check.
+        assert_eq!(calls.get(), 4);
+        // Only where every tick polls.
+        let want = every_tick_polls.then_some(Duration::from_millis(700));
+        assert_eq!(sooner, want);
+    }
+
+    // The wiring stays a source check: `run_loop` needs a live capture
+    // route, the game process gate, signal handlers and a store, so no unit
+    // test can run one of its ticks. Only call names and their order are
+    // matched, never layout, so a reformat does not break it.
+    let run_loop = crate::main_tests::fn_source("run_loop");
+    let find = |name: &str| run_loop.find(name).unwrap_or_else(|| panic!("{name}"));
+    let want = find("PregameDump::post_want_of(");
+    let split = find("postgame_dump::kept_frames(");
+    let decided = find("apply_poll_tick(");
+    let fed = find("PregameDump::post_after_decision(");
+    let faster = find("poll_timer.reset_after(");
+    assert!(want < split && split < decided && decided < fed && fed < faster);
+    // The cadence check is the one handed to the post-game step, and it
+    // asks that every tick polls (divisor 1).
+    let cadence = &run_loop[fed..faster];
+    let divisor = cadence.find("poll_divisor(").expect("cadence check");
+    let rest: String = cadence[divisor..].split_whitespace().collect();
+    assert!(rest.contains(")==1"), "only where every tick polls");
+    // No faster tick elsewhere, and nothing reaches the post-game saves
+    // around these steps.
     assert_eq!(run_loop.matches("poll_timer.reset_after(").count(), 1);
-    // After the decision: the confirming tick opens the window.
-    let decided = run_loop.find("apply_poll_tick(").expect("decision");
-    assert!(decided < fed);
+    for direct in [".post_want(", ".observe_post(", ".post_sooner_tick("] {
+        assert!(!run_loop.contains(direct), "{direct}");
+    }
 }

@@ -506,9 +506,8 @@ pub(crate) async fn run_loop(
                         // end reel is when they matter most. Their samples
                         // count from the tick's start, not the grab's end,
                         // so the 1 s steps do not drift.
-                        let postgame_want = pregame_dump
-                            .as_mut()
-                            .map(|dump| dump.post_want(now));
+                        let postgame_want =
+                            daemon::pregame_dump::PregameDump::post_want_of(pregame_dump.as_mut(), now);
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -628,13 +627,12 @@ pub(crate) async fn run_loop(
                             );
                             // The frame moves into the tick's result, no copy,
                             // one `Arc` for both saves.
-                            let post_keep = postgame_want
-                                .is_some_and(|want| want.keeps(signal.is_some() || end_reel));
-                            let pre_keep = pregame_seen.is_some_and(|(_, keep)| keep);
-                            let kept = (pre_keep || post_keep).then(|| Arc::new(img));
-                            let pregame = pregame_seen
-                                .map(|(seen, keep)| (seen, kept.clone().filter(|_| keep)));
-                            let postgame = kept.filter(|_| post_keep);
+                            let (pregame, postgame) = daemon::postgame_dump::kept_frames(
+                                img,
+                                pregame_seen,
+                                postgame_want,
+                                signal.is_some() || end_reel,
+                            );
                             (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame, postgame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
@@ -798,32 +796,36 @@ pub(crate) async fn run_loop(
                         // The post-game saves see the tick after the
                         // decision, so a confirmed outcome opens their
                         // window. Switch off: nothing is checked.
-                        if let Some(dump) = pregame_dump.as_mut() {
-                            let game = st.active_game.as_ref();
-                            let post_tick = daemon::postgame_dump::PostTick {
-                                end: daemon::postgame_dump::EndSeen::of(signal.map(|(_, source)| source), end_reel),
-                                confirmed: tick.signal_confirmed,
-                                running: game.is_some_and(|g| !g.finished()),
-                                finished: game.is_some_and(|g| g.finished()),
-                                new_screen: matches!(
-                                    phase,
-                                    detect::GamePhase::MapVote { .. } | detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
-                                ),
-                                game_opened: game.map(|g| g.opened_at),
-                            };
-                            dump.observe_post(Instant::now(), post_tick, postgame);
-                            // About one frame a second in the window: bring
-                            // the next tick forward (an ordinary poll), only
-                            // after a tick that handed over a frame, never
-                            // under 250 ms, and only where the route polls
-                            // every tick now (a screenshot route's slower
-                            // floor stays). A panicked or frameless tick
-                            // keeps the regular interval.
-                            if let Some(next) = dump.post_sooner_tick(Instant::now(), poll_interval)
-                                && poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval) == 1
-                            {
-                                poll_timer.reset_after(next);
-                            }
+                        // About one frame a second in the window: bring
+                        // the next tick forward (an ordinary poll), only
+                        // after a tick that handed over a frame, never
+                        // under 250 ms, and only where the route polls
+                        // every tick now (a screenshot route's slower
+                        // floor stays). A panicked or frameless tick
+                        // keeps the regular interval.
+                        let sooner = daemon::pregame_dump::PregameDump::post_after_decision(
+                            pregame_dump.as_mut(),
+                            Instant::now,
+                            || {
+                                let game = st.active_game.as_ref();
+                                daemon::postgame_dump::PostTick {
+                                    end: daemon::postgame_dump::EndSeen::of(signal.map(|(_, source)| source), end_reel),
+                                    confirmed: tick.signal_confirmed,
+                                    running: game.is_some_and(|g| !g.finished()),
+                                    finished: game.is_some_and(|g| g.finished()),
+                                    new_screen: matches!(
+                                        phase,
+                                        detect::GamePhase::MapVote { .. } | detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
+                                    ),
+                                    game_opened: game.map(|g| g.opened_at),
+                                }
+                            },
+                            postgame,
+                            poll_interval,
+                            || poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval) == 1,
+                        );
+                        if let Some(next) = sooner {
+                            poll_timer.reset_after(next);
                         }
                     }
                     Ok(Err(e)) => {
