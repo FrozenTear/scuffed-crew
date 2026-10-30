@@ -4,7 +4,7 @@ name = "scuffed-stat-tracker"
 # Bump crates/stat-tracker-core/Cargo.toml with this line: APP_VERSION and
 # USER_AGENT are built there. the_version_constants_are_this_release
 # (src/tests_release_pins.rs) and dist/check-tag-version.sh fail otherwise.
-version = "0.6.0-alpha.1.2"
+version = "0.6.0-alpha.1.3"
 edition = "2024"
 # The oldest toolchain the locked dependencies build on (roaring needs 1.90).
 rust-version = "1.90"
