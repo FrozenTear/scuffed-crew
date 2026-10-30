@@ -62,7 +62,8 @@ async fn the_fully_revealed_ban_results_are_the_saved_frame() {
         Some(shown(&ban)),
     );
     // No examples installed: the shape rule decides. Each frame passes it
-    // (the icons are under the title region) and replaces the held one.
+    // (the icons are under the title region), replaces the held one and
+    // confirms it, so the held one becomes the frame owed a write.
     let mut handed: Vec<Arc<image::DynamicImage>> = Vec::new();
     for (i, icons) in (1..=4).enumerate() {
         let ms = 3_000 + 1_500 * i as u64;
@@ -75,26 +76,34 @@ async fn the_fully_revealed_ban_results_are_the_saved_frame() {
         let frame = shown(&rgb);
         handed.push(Arc::clone(&frame));
         dump.observe(at(ms), seen, Some(frame));
-        // Only the latest results frame is held; the earlier ones are ours
-        // alone again.
+        // Only the latest results frame and the one before it are held;
+        // the earlier ones are ours alone again.
         let held: Vec<usize> = handed
             .iter()
             .enumerate()
             .filter(|(_, f)| Arc::strong_count(f) > 1)
             .map(|(k, _)| k)
             .collect();
-        assert_eq!(held, [i], "{icons} icons");
+        let want_held: Vec<usize> = (i.saturating_sub(1)..=i).collect();
+        assert_eq!(held, want_held, "{icons} icons");
     }
-    // The select's first frame (no title read here), then its read.
-    let roster = image::RgbImage::from_pixel(1280, 720, image::Rgb([30, 34, 44]));
+    // The select's first frame shows its title, then its read.
+    let select = select_with_title();
     let want = dump.want(at(9_000));
-    let seen = classify(want, &detect::GamePhase::Unknown, &roster, &dump.examples());
-    assert_eq!(seen, Seen::Other);
+    let examples = dump.examples();
+    let seen = classify_with(
+        want,
+        &detect::GamePhase::Unknown,
+        &select,
+        shows_title,
+        |f| examples.matches(f),
+    );
+    assert_eq!(seen, Seen::SelectTitle);
     dump.observe(at(9_000), seen, None);
     dump.observe(
         at(10_500),
         Seen::Phase(PregamePhase::HeroSelect),
-        Some(shown(&roster)),
+        Some(shown(&select)),
     );
     assert!(dump.finish(Duration::from_secs(30)).await);
 
@@ -132,6 +141,8 @@ enum SelectComes {
     Title,
     /// Its phase read straight away, with no title frame first.
     PhaseRead,
+    /// A plain roster frame (no title read), then its phase read.
+    Roster,
 }
 
 /// A ban, the results revealed over two polls (two icons, then four), then
@@ -163,10 +174,19 @@ async fn results_then_select(comes: SelectComes) -> (Option<image::RgbImage>, bo
         assert_eq!(seen, Seen::BanResults, "{icons} icons");
     }
     let mut ms = 6_000;
-    if let SelectComes::Title = comes {
-        let seen = tick(&mut dump, ms, unknown(), select_with_title());
-        assert_eq!(seen, Seen::SelectTitle);
-        ms += 1_500;
+    match comes {
+        SelectComes::Title => {
+            let seen = tick(&mut dump, ms, unknown(), select_with_title());
+            assert_eq!(seen, Seen::SelectTitle);
+            ms += 1_500;
+        }
+        SelectComes::Roster => {
+            let roster = image::RgbImage::from_pixel(1280, 720, image::Rgb([30, 34, 44]));
+            let seen = tick(&mut dump, ms, unknown(), roster);
+            assert_eq!(seen, Seen::Other);
+            ms += 1_500;
+        }
+        SelectComes::PhaseRead => {}
     }
     let seen = tick(
         &mut dump,
@@ -203,11 +223,22 @@ async fn results_straight_into_the_select_title_save_the_held_frame() {
 }
 
 #[tokio::test]
-async fn results_straight_into_a_select_read_with_no_title_drop_the_held_frame() {
+async fn results_straight_into_a_select_read_save_the_frame_before_the_held_one() {
     // The phase read lags a poll, so the held frame may be the select
-    // sliding in: dropped, as before.
+    // sliding in: dropped, as before. The frame before it, which it
+    // confirmed, is saved instead.
     let (saved, select) = results_then_select(SelectComes::PhaseRead).await;
-    assert!(saved.is_none(), "no ban results saved");
+    assert!(saved == Some(ban_results(2)), "the two-icon frame is saved");
+    assert!(select);
+}
+
+#[tokio::test]
+async fn results_then_a_plain_roster_frame_save_the_frame_before_the_last() {
+    // The cost of not trusting a plain frame after a replacement: the
+    // last results frame may be the select sliding in, so the roster frame
+    // does not confirm it, and the frame before it is saved.
+    let (saved, select) = results_then_select(SelectComes::Roster).await;
+    assert!(saved == Some(ban_results(2)), "the two-icon frame is saved");
     assert!(select);
 }
 

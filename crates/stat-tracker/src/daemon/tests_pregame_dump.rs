@@ -15,7 +15,8 @@ const POLL: Duration = Duration::from_millis(1_500);
 /// Drives a tracker the way the poll loop does: a tick hands its frame only
 /// when [`keeps_frame`] says so, and a loading screen reads as one only
 /// when the loading check runs ([`classify`]). Frames are numbered `Arc`s
-/// so every tick can check the tracker holds at most one.
+/// so every tick can check the tracker holds at most one, or two while a
+/// ban-results frame is owed a write.
 struct Run {
     tracker: PregameTracker<Arc<u32>>,
     start: Instant,
@@ -80,7 +81,8 @@ impl Run {
             .iter()
             .filter(|f| Arc::strong_count(f) > 1)
             .count();
-        assert!(held <= 1, "the tracker holds {held} frames");
+        let bound = 1 + usize::from(self.tracker.owes_frame());
+        assert!(held <= bound, "the tracker holds {held} frames");
     }
 
     fn names(&self) -> Vec<(&str, u32)> {
@@ -219,40 +221,18 @@ fn ban_results_shown_for_two_polls_keep_the_first_one() {
 }
 
 #[test]
-fn the_last_ban_results_frame_is_saved_and_only_one_is_held() {
-    // The ban icons and scores fill in under the title over four polls:
-    // each frame replaces the held one, and the last one is written.
+fn the_last_ban_results_frame_before_a_select_title_is_saved() {
+    // 1.5 s polls: the ban icons and scores fill in under the title over
+    // three polls, then the select title shows. Each later results frame
+    // confirms the one before it, and the title confirms the last one.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, BAN, 2);
-    for (i, ms) in [3_000, 4_500, 6_000, 7_500].into_iter().enumerate() {
+    for (i, ms) in [3_000, 4_500, 6_000].into_iter().enumerate() {
         run.tick(ms, RESULTS, 3 + i as u32);
         assert!(run.tracker.holds_frame());
+        assert_eq!(run.tracker.owes_frame(), i > 0);
     }
-    // The select's first frame, then its read.
-    run.tick(9_000, Seen::Other, 7);
-    run.tick(10_500, SELECT, 8);
-    assert_eq!(
-        run.names(),
-        [
-            ("heroban_first.png", 1),
-            ("heroban_last.png", 2),
-            ("ban_results.png", 6),
-            ("heroselect_first.png", 8),
-        ]
-    );
-}
-
-#[test]
-fn a_replacement_right_before_a_select_title_read_is_saved() {
-    // With the new reader: the last results frame is confirmed by the
-    // select's first frame (no title read yet) and saved.
-    let mut run = Run::new();
-    run.tick(0, BAN, 1);
-    run.tick(1_500, BAN, 2);
-    run.tick(3_000, RESULTS, 3);
-    run.tick(4_500, RESULTS, 4);
-    run.tick(6_000, Seen::Other, 5);
     run.tick(7_500, Seen::SelectTitle, 6);
     run.tick(9_000, SELECT, 7);
     assert_eq!(
@@ -260,10 +240,56 @@ fn a_replacement_right_before_a_select_title_read_is_saved() {
         [
             ("heroban_first.png", 1),
             ("heroban_last.png", 2),
-            ("ban_results.png", 4),
+            ("ban_results.png", 5),
             ("heroselect_first.png", 7),
         ]
     );
+}
+
+#[test]
+fn a_plain_frame_after_a_replacement_does_not_confirm_it() {
+    // ocr-v1 at 4 s polls (no select title read): R1, then T (the select
+    // sliding in under a results title), then the select's first frame S0
+    // and its read. T confirms R1; S0 does not confirm T. R1 is saved.
+    let mut run = Run::polled(4_000);
+    run.tick(0, BAN, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, RESULTS, 3);
+    run.tick(12_000, RESULTS, 4);
+    run.tick(16_000, Seen::Other, 5);
+    run.tick(20_000, SELECT, 6);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 6),
+        ]
+    );
+    // The same at 1.5 s polls over a longer reveal: the frame before the
+    // last results frame is saved.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    for (i, ms) in [3_000, 4_500, 6_000, 7_500].into_iter().enumerate() {
+        run.tick(ms, RESULTS, 3 + i as u32);
+    }
+    run.tick(9_000, Seen::Other, 7);
+    run.tick(10_500, SELECT, 8);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 5),
+            ("heroselect_first.png", 8),
+        ]
+    );
+}
+
+#[test]
+fn a_select_title_confirms_only_the_replacement_right_before_it() {
     // The title is read with no lag, so the replacement right before it
     // was still the results, with the bans filled in: written.
     let mut run = Run::new();
@@ -281,6 +307,49 @@ fn a_replacement_right_before_a_select_title_read_is_saved() {
             ("heroban_last.png", 2),
             ("ban_results.png", 5),
             ("heroselect_first.png", 7),
+        ]
+    );
+    // A plain frame between: the replacement may be the select sliding in
+    // and the plain frame its first frame, so the title confirms nothing
+    // and the frame before the replacement is saved.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(6_000, Seen::Other, 5);
+    run.tick(7_500, Seen::SelectTitle, 6);
+    run.tick(9_000, SELECT, 7);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 7),
+        ]
+    );
+}
+
+#[test]
+fn a_select_title_after_a_skipped_tick_does_not_confirm_a_replacement() {
+    // R1, T, then the S0 tick never reaches the tracker (Tab busy, an
+    // expected capture miss), then the select title: two polls after T,
+    // so not its next tick. T is not confirmed; R1 is saved.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(7_500, Seen::SelectTitle, 5);
+    run.tick(9_000, SELECT, 6);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 6),
         ]
     );
 }
@@ -303,9 +372,9 @@ fn a_first_candidate_right_before_a_select_title_read_is_not_saved() {
 }
 
 #[test]
-fn a_release_writes_the_replacement_it_holds() {
-    // The game closes while the results are still up: no select follows
-    // the held replacement, so it is written.
+fn a_release_writes_the_frame_before_the_replacement() {
+    // The game closes, or capture fails, after R1 and T: T may be the
+    // select sliding in, so R1 (confirmed by T) is written, not T.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, BAN, 2);
@@ -318,43 +387,47 @@ fn a_release_writes_the_replacement_it_holds() {
         [
             ("heroban_first.png", 1),
             ("heroban_last.png", 2),
-            ("ban_results.png", 4),
+            ("ban_results.png", 3),
         ]
     );
 }
 
 #[test]
-fn a_replacement_right_before_the_select_read_is_not_saved() {
+fn a_replacement_right_before_the_select_read_saves_the_frame_before_it() {
     // The frame just before the select read is the select's first frame:
-    // it replaced the earlier results frame and is dropped, so nothing is
-    // written rather than a select frame.
+    // it is dropped, and the results frame it confirmed is written.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, BAN, 2);
     run.tick(3_000, RESULTS, 3);
     run.tick(4_500, RESULTS, 4);
     run.tick(6_000, SELECT, 5);
-    assert!(
-        run.names().iter().all(|(n, _)| *n != "ban_results.png"),
-        "{:?}",
-        run.names()
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 5),
+        ]
     );
-    assert!(run.tracker.holds_frame(), "the select's frame, no results");
+    assert!(run.tracker.holds_frame(), "the select's frame");
+    assert!(!run.tracker.owes_frame(), "no results frame left");
 }
 
 #[test]
 fn a_replacement_keeps_the_window_of_the_first_candidate() {
     // 1.5 s polls: results from 1.5 s on, replaced every poll, and no
     // next screen. The window (16.5 s) runs from the first frame, so the
-    // held one is dropped at 19.5 s however recent it is.
+    // held one and the owed one are dropped at 19.5 s however recent.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     for (i, ms) in (1_500..=18_000).step_by(1_500).enumerate() {
         run.tick(ms, RESULTS, 2 + i as u32);
     }
-    assert!(run.tracker.holds_frame());
+    assert!(run.tracker.owes_frame());
     run.tick(19_500, RESULTS, 30);
-    assert!(!run.tracker.holds_frame());
+    assert!(!run.tracker.holds_frame(), "the owed frame is dropped too");
     run.tick(21_000, Seen::Other, 31);
     run.tick(22_500, SELECT, 32);
     assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
