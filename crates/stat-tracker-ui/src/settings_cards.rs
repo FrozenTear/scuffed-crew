@@ -443,7 +443,7 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
 }
 
 /// Help under Save pre-game screens (`debug_save_pregame_screens`).
-pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, hero select and loading screens of each game in debug/pregame, newest 20 games. They show other players' names and stay on this PC only. Leave it off unless asked for them.";
+pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, hero select and loading screen of each game in debug/pregame, keeping the newest 20 games (about 0.5 to 0.8 GB). They show other players' names and stay on this PC only. Turning it off keeps the saved pictures. Leave it off unless someone asked for them.";
 
 /// Troubleshooting: debug images, pre-game screens, the extra number
 /// reader, then Report a problem, About and Uninstall. Demo draws them
