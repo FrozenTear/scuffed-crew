@@ -379,6 +379,23 @@ fn a_select_title_after_a_skipped_tick_does_not_confirm_a_replacement() {
 }
 
 #[test]
+fn a_select_title_after_a_plain_frame_does_not_confirm_a_replacement() {
+    // R1, T, then a plain frame and the title less than one tick after T
+    // (a poll runs late after a slow read): the plain frame came between,
+    // so T is not confirmed. R1 is saved.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(5_200, Seen::Other, 5);
+    run.tick(6_600, Seen::SelectTitle, 6);
+    run.tick(8_100, SELECT, 7);
+    let saved = run.names();
+    assert!(saved.contains(&("ban_results.png", 3)), "{saved:?}");
+}
+
+#[test]
 fn a_first_candidate_right_before_a_select_title_is_saved() {
     // One results frame only, then the title on the very next tick: the
     // title is read with no lag and the frame did not show it, so it was

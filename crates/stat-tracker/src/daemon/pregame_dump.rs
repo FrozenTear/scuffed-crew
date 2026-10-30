@@ -86,9 +86,9 @@ pub(crate) const BAN_RESULTS_DELAY: Duration = Duration::from_millis(1_000);
 /// last ban-phase frame, and a candidate not settled this long plus one
 /// poll interval after the first candidate frame is dropped (the ban read
 /// was lost: ESC, alt-tab). A replacement does not extend it. Measured
-/// from the first candidate, and with the poll added so
-/// a next screen read 13 to 14 s after the results at 4 s polls (19 s
-/// then) still settles it.
+/// from the first candidate, and with the poll added so a next screen
+/// read 13 to 14 s after the results at 4 s polls (19 s then) still
+/// settles it.
 pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 
 /// A phase gone for at most this long and back is a detector flicker (the

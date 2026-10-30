@@ -212,13 +212,17 @@ fn the_pregame_screens_switch_maps_to_its_config_key_both_ways() {
             .keys()
             .contains(&"debug_save_pregame_screens")
     );
-    assert!(crate::settings_model::needs_restart(
-        "debug_save_pregame_screens"
-    ));
 
     let mut on = defaults.clone();
     ConfigEdit::SavePregameScreens(true).apply(&mut on);
     assert!(on.debug_save_pregame_screens);
+    // The After restart tag follows the key's name, and any name not read
+    // by this app only gets it: the name must be the one the switch
+    // writes, which the tracker reads at start.
+    let key = "debug_save_pregame_screens";
+    let written = serde_json::to_value(&on).expect("config as json");
+    assert_eq!(written.get(key), Some(&serde_json::Value::Bool(true)));
+    assert!(crate::settings_model::needs_restart(key));
     // Tagged After restart: until the tracker restarts, the switch counts
     // as one change waiting.
     assert_eq!(crate::settings_model::changes_waiting(&defaults, &on), 1);
