@@ -442,10 +442,15 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
     divided(vec![url, token, footer.into()])
 }
 
-/// Help under Save pre-game screens (`debug_save_pregame_screens`).
-pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, hero select and loading screens of each game in debug/pregame, newest 20 games. They show other players' names and stay on this PC only. Leave it off unless asked for them.";
+/// The Troubleshooting switch for `debug_save_pregame_screens`: the
+/// pre-game screens and the screens after each match.
+pub(crate) const PREGAME_SCREENS_LABEL: &str = "Save screens around each game";
 
-/// Troubleshooting: debug images, pre-game screens, the extra number
+/// Help under [`PREGAME_SCREENS_LABEL`]. The size: up to 40 post-game and
+/// about 8 pre-game frames a game, 3 to 5 MB each at 1440p, 20 games.
+pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, hero select and loading screen of each game and the screens after it in debug/pregame, keeping the newest 20 games (up to about 3 to 5 GB). They show other players' names and stay on this PC only. Turning it off keeps the saved pictures. Leave it off unless someone asked for them.";
+
+/// Troubleshooting: debug images, screens around each game, the extra number
 /// reader, then Report a problem, About and Uninstall. Demo draws them
 /// without actions.
 pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
@@ -471,7 +476,7 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
     );
     // The tracker reads the key once at start: After restart.
     let pregame = setting_row(
-        title_line("Save pre-game screens", false, &[Tag::AfterRestart]),
+        title_line(PREGAME_SCREENS_LABEL, false, &[Tag::AfterRestart]),
         vec![hint(PREGAME_SCREENS_HELP)],
         crate::settings_keys::edit_switch(
             app.saved_config.debug_save_pregame_screens,

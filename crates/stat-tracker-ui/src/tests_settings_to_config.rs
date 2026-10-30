@@ -198,7 +198,7 @@ fn a_form_saved_over_its_own_file_keeps_every_key() {
     assert_eq!(back, want, "only the edited key changed");
 }
 
-/// The Troubleshooting switch Save pre-game screens writes
+/// The Troubleshooting switch Save screens around each game writes
 /// `debug_save_pregame_screens` both ways, through the saved text, and a
 /// form save after it keeps the edit. It is off by default.
 #[test]
@@ -243,4 +243,29 @@ fn the_pregame_screens_switch_maps_to_its_config_key_both_ways() {
         read, defaults,
         "only the switch changed, back to the defaults"
     );
+}
+
+/// The switch's label and help say what it saves, where, how much, and that
+/// it stays on this PC (UX Spec, PR 582 wording plus the post-game screens).
+#[test]
+fn the_screens_around_each_game_copy_is_plain() {
+    use crate::settings_cards::{PREGAME_SCREENS_HELP, PREGAME_SCREENS_LABEL};
+
+    assert_eq!(PREGAME_SCREENS_LABEL, "Save screens around each game");
+    for words in [
+        "loading screen of each game and the screens after it in debug/pregame",
+        "keeping the newest 20 games (up to about 3 to 5 GB)",
+        "other players' names",
+        "stay on this PC only",
+        "Turning it off keeps the saved pictures.",
+        "Leave it off unless someone asked for them.",
+    ] {
+        assert!(PREGAME_SCREENS_HELP.contains(words), "{words}");
+    }
+    for copy in [PREGAME_SCREENS_LABEL, PREGAME_SCREENS_HELP] {
+        assert!(
+            !copy.contains('\u{2014}') && !copy.contains('\u{2013}'),
+            "{copy}"
+        );
+    }
 }
