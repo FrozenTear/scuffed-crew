@@ -98,6 +98,30 @@ impl PregameDump {
         post.observe(at, tick, frame, &mut sink);
     }
 
+    /// The pre-game want for the coming tick: `want`, plus the loading
+    /// check while a post-game window is open, so a loading screen after
+    /// the match ends the window ([`Self::observe_post`]). It is the same
+    /// check as the pre-game saves' ([`classify`]); no frame is kept for
+    /// it (`other_frame` is the tracker's own).
+    pub(super) fn with_post_loading(&self, want: PregameWant) -> PregameWant {
+        PregameWant {
+            loading: want.loading || self.post.window_open(),
+            ..want
+        }
+    }
+
+    /// `seen` for the pre-game tracker at `now`: a loading read only the
+    /// post-game window asked for is no loading screen to it, so it sees
+    /// what it would have with no window open. Its ban-results wait and a
+    /// window never overlap: a hero ban read ends the window.
+    pub(super) fn pre_seen(&self, now: Instant, seen: Seen) -> Seen {
+        if seen == Seen::Loading && !self.tracker.want(now).loading {
+            Seen::Other
+        } else {
+            seen
+        }
+    }
+
     /// Replace the writer with one whose thread is gone (tests).
     #[cfg(test)]
     pub(crate) fn kill_writer(&mut self) {

@@ -83,6 +83,11 @@ impl PostSink for Rec {
         self.shots.push((shot.at_s, shot.label, shot.frame));
         true
     }
+    fn relabel_last(&mut self, label: &'static str) {
+        if let Some(last) = self.shots.last_mut() {
+            last.1 = label;
+        }
+    }
     fn ended(&mut self, why: PostEnd) {
         self.ended.push(why);
     }

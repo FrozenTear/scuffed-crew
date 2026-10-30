@@ -22,7 +22,10 @@
 //! last saved frame is [`POSTGAME_STILL_KEEP`] old (a still screen whose
 //! numbers change too little for the thumbnail), and always from
 //! [`POSTGAME_KEEP_ALL_FROM`] on. The label is the outcome source the
-//! detector already read on that frame, if any.
+//! detector already read on that frame, if any. The rank word reads only
+//! once its crop held still since the poll before (the stability wait), so
+//! the rank screen's first frame reads nothing: a frame saved with no read
+//! on the tick right before a rank read is relabelled `rank_update`.
 //!
 //! Polling: with the switch on, the window's ticks are ordinary polls,
 //! brought forward to about one a second ([`sooner_tick`]). A tick is
@@ -274,6 +277,9 @@ pub(crate) trait PostSink {
     fn opened(&mut self, now: Instant, confirmed_s: f64, game_opened: Option<Instant>);
     /// Save `shot`; false when it was not queued.
     fn shot(&mut self, shot: PostShot) -> bool;
+    /// Give the last saved shot `label` instead (the next sidecar note
+    /// carries it).
+    fn relabel_last(&mut self, label: &'static str);
     fn ended(&mut self, why: PostEnd);
 }
 
@@ -289,6 +295,9 @@ struct Window {
     /// The last saved frame's thumbnail and time.
     thumb: Option<(Thumb, Instant)>,
     saved: usize,
+    /// The previous tick saved its frame with no read on it (`after_end`):
+    /// a rank read on this tick relabels it ([`PostgameTracker::observe`]).
+    unread_last: bool,
 }
 
 enum State {
@@ -361,8 +370,8 @@ impl PostgameTracker {
         }
     }
 
-    /// Whether a window is open (tests).
-    #[cfg(test)]
+    /// Whether a window is open: its ticks look for the loading screen too
+    /// ([`super::pregame_dump::PregameDump::want`]).
     pub(crate) fn window_open(&self) -> bool {
         matches!(self.state, State::Window(_))
     }
@@ -482,6 +491,15 @@ impl PostgameTracker {
                 // No game running and no end read: the ring is dropped here.
             }
             State::Window(mut w) => {
+                // The rank word reads only once its crop held still since
+                // the previous poll, so the rank screen's first frame reads
+                // no outcome. A rank read here means the previous tick's
+                // frame showed the same rank word: when that tick saved it
+                // as `after_end`, it is the rank update (before the window
+                // ends, so the final note has it).
+                if std::mem::take(&mut w.unread_last) && tick.end == Some(EndSeen::Rank) {
+                    sink.relabel_last(EndSeen::Rank.label());
+                }
                 if tick.new_screen {
                     // The next game is here: its ticks arm the ring again.
                     self.end(now, PostEnd::NewScreen, sink);
@@ -492,7 +510,8 @@ impl PostgameTracker {
                     if let Some(frame) = frame.filter(|_| Self::due(&w, now)) {
                         w.last_sample = Some(now);
                         let label = tick.end.map_or("after_end", EndSeen::label);
-                        Self::save_if_new(&mut w, now, frame, label, sink);
+                        let saved = Self::save_if_new(&mut w, now, frame, label, sink);
+                        w.unread_last = saved && tick.end.is_none();
                     }
                     if w.saved >= self.cap {
                         self.end(now, PostEnd::Cap, sink);
@@ -532,6 +551,7 @@ impl PostgameTracker {
             last_sample: None,
             thumb: None,
             saved: 0,
+            unread_last: false,
         };
         for r in ring {
             if now.saturating_duration_since(r.at) > self.span || w.saved >= self.cap {
@@ -558,14 +578,14 @@ impl PostgameTracker {
     /// Save `frame` unless it is the last saved picture again: a near
     /// duplicate (mean grey change at most [`THUMB_SAME`]) is skipped,
     /// except once the last saved frame is [`POSTGAME_STILL_KEEP`] old and
-    /// from [`POSTGAME_KEEP_ALL_FROM`] on.
+    /// from [`POSTGAME_KEEP_ALL_FROM`] on. True when it was saved.
     fn save_if_new(
         w: &mut Window,
         at: Instant,
         frame: Frame,
         label: &'static str,
         sink: &mut impl PostSink,
-    ) {
+    ) -> bool {
         let thumb = Thumb::of(&frame);
         let keep_all = at.saturating_duration_since(w.zero) >= POSTGAME_KEEP_ALL_FROM;
         if !keep_all
@@ -574,7 +594,7 @@ impl PostgameTracker {
                     && at.saturating_duration_since(*saved_at) < POSTGAME_STILL_KEEP
             })
         {
-            return;
+            return false;
         }
         let shot = PostShot {
             at_s: secs_from(w.zero, at),
@@ -584,6 +604,9 @@ impl PostgameTracker {
         if sink.shot(shot) {
             w.thumb = Some((thumb, at));
             w.saved += 1;
+            true
+        } else {
+            false
         }
     }
 
@@ -859,6 +882,12 @@ impl PostSink for DumpSink<'_> {
             self.log.doc.frames.pop();
         }
         queued
+    }
+
+    fn relabel_last(&mut self, label: &'static str) {
+        if let Some(last) = self.log.doc.frames.last_mut() {
+            last.label = label;
+        }
     }
 
     /// The final note always goes: a full queue keeps it pending, sent

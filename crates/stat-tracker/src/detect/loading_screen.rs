@@ -9,7 +9,8 @@
 //! end-reel flat-UI test); either one passing is enough, so the per-row
 //! test only adds the gradient. A dark scene (a spawn room, footage) has
 //! rows of many colours and no dominant one. Used only by the
-//! opt-in pre-game screen saves; no boundary or outcome reads it.
+//! opt-in screen saves (the pre-game ones, and the post-game window,
+//! which a loading screen ends); no boundary or outcome reads it.
 //!
 //! The saves use the stricter [`is_entering_game`]: the same check plus
 //! one line of white text centred on the strip, so a navy band with its

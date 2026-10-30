@@ -1393,7 +1393,7 @@ impl PregameDump {
     }
 
     pub(crate) fn want(&self, now: Instant) -> PregameWant {
-        self.tracker.want(now)
+        self.with_post_loading(self.tracker.want(now))
     }
 
     /// The tracker (tests).
@@ -1414,8 +1414,9 @@ impl PregameDump {
         seen: Seen,
         frame: Option<Arc<image::DynamicImage>>,
     ) {
-        let root = &self.root;
         self.saw_loading = seen == Seen::Loading;
+        let seen = self.pre_seen(now, seen);
+        let root = &self.root;
         let shots = self
             .tracker
             .observe(now, seen, frame, || unique_pregame_folder(root, Utc::now()));

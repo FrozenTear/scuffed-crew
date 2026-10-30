@@ -502,3 +502,179 @@ fn a_new_game_folder_clears_the_leftover_folders_and_keeps_every_real_game() {
     assert_eq!(folders.len(), PREGAME_KEEP_GAMES, "{folders:?}");
     assert_eq!(folders[0], "20261030_100000", "no real game pushed out");
 }
+
+/// One poll tick the way the poll loop feeds it: the pre-game read with
+/// the saver's own want, the pre-game step, then the post-game one.
+fn loop_tick(
+    dump: &mut PregameDump,
+    now: Instant,
+    rgb: image::RgbImage,
+    tick: PostTick,
+) -> PregameWant {
+    let want = dump.want(now);
+    let post_want = dump.post_want(now);
+    let no_title = |_: &image::RgbImage| false;
+    let seen = classify_with(want, &detect::GamePhase::Unknown, &rgb, no_title, no_title);
+    let (pre, frame) = kept_frames(
+        image::DynamicImage::ImageRgb8(rgb),
+        Some((seen, keeps_frame(want, seen))),
+        Some(post_want),
+        tick.end.is_some(),
+    );
+    if let Some((seen, pre_frame)) = pre {
+        dump.observe(now, seen, pre_frame);
+    }
+    PregameDump::post_after_decision(Some(dump), || now, || tick, frame, POLL, || true);
+    want
+}
+
+#[tokio::test]
+async fn a_loading_screen_after_the_rank_screen_ends_the_window_at_its_first_frame() {
+    use super::tests_loading_stand_ins::entering_game_slab;
+    let dir = tempfile::tempdir().unwrap();
+    let mut dump = PregameDump::new(true, dir.path(), POLL).expect("on");
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let read = |end: EndSeen| PostTick {
+        end: Some(end),
+        ..PostTick::default()
+    };
+    // No window and no pre-game: the loading check does not run.
+    let confirm = PostTick {
+        confirmed: true,
+        ..read(EndSeen::Title)
+    };
+    let want = loop_tick(&mut dump, at(0), picture(20, Some((0.4, 0.6))), confirm);
+    assert!(!want.loading);
+    assert!(dump.post_window_open());
+    // The accolades, then the rank screen: the window looks for loading.
+    let accolades = picture(70, Some((0.1, 0.3)));
+    let want = loop_tick(&mut dump, at(1_000), accolades, read(EndSeen::Accolades));
+    assert!(want.loading && !want.other_frame);
+    let rank = picture(110, Some((0.6, 0.8)));
+    loop_tick(&mut dump, at(2_000), rank, read(EndSeen::Rank));
+    assert!(dump.post_window_open());
+    // The first loading frame ends the window, by the pre-game check.
+    let slab = entering_game_slab(1280, 720);
+    let want = loop_tick(&mut dump, at(3_000), slab.clone(), PostTick::default());
+    assert!(want.loading);
+    assert!(!dump.post_window_open());
+    // Later loading frames: no window, no loading check, nothing held.
+    for ms in [4_000, 5_000] {
+        let want = loop_tick(&mut dump, at(ms), slab.clone(), PostTick::default());
+        assert!(!want.loading, "{ms}");
+    }
+    assert!(!dump.tracker().holds_loading());
+    assert!(dump.finish(Duration::from_secs(30)).await);
+
+    let root = pregame_dir(dir.path());
+    let folders = names_in(&root);
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    let doc: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(&folders[0]).join(POSTGAME_SIDECAR)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(doc["ended"], "new_game_screen");
+    let frames = doc["frames"].as_array().unwrap();
+    assert_eq!(frames.len(), 3, "{frames:?}");
+    for f in frames {
+        assert!(
+            f["t_s"].as_f64().unwrap() < 3.0,
+            "a loading frame saved: {f}"
+        );
+        assert_ne!(f["label"], "after_end", "{f}");
+    }
+}
+
+#[test]
+fn the_rank_screens_first_frame_is_labelled_rank_update_once_the_next_tick_reads_it() {
+    let mut run = open_window();
+    // A frame with no read (the end reel), then the accolades.
+    run.tick(2_500, AFTER, moving(1));
+    let accolades = picture(70, Some((0.1, 0.3)));
+    run.tick(
+        3_500,
+        ended(AFTER, EndSeen::Accolades, false),
+        shown(accolades.clone()),
+    );
+    run.tick(
+        4_500,
+        ended(AFTER, EndSeen::Accolades, false),
+        noisy(&accolades, 1),
+    );
+    // The rank screen's first frame reads nothing (its word has not held
+    // still yet), the next tick reads it.
+    let rank = picture(110, Some((0.6, 0.8)));
+    run.tick(5_500, AFTER, shown(rank.clone()));
+    assert_eq!(run.rec.labels().last(), Some(&"after_end"));
+    let mut t = 6_500;
+    while t <= 10_500 {
+        run.tick(
+            t,
+            ended(AFTER, EndSeen::Rank, false),
+            noisy(&rank, t as u32),
+        );
+        t += 1_000;
+    }
+    // Only a frame saved on the tick right before a rank read: here a
+    // tick in between handed over no frame.
+    run.tick(11_500, AFTER, moving(2));
+    run.tracker
+        .observe(run.at(12_500), AFTER, None, &mut run.rec);
+    run.tick(13_500, ended(AFTER, EndSeen::Rank, false), noisy(&rank, 2));
+    assert_eq!(
+        run.rec.labels(),
+        vec![
+            "end_title",
+            "after_end",
+            "accolades",
+            "rank_update",
+            "rank_update",
+            "after_end",
+            "rank_update"
+        ]
+    );
+    assert_eq!(run.rec.times(), vec![0.0, 1.0, 2.0, 4.0, 9.0, 10.0, 12.0]);
+}
+
+#[tokio::test]
+async fn the_sidecar_labels_the_rank_screens_first_frame_rank_update() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dump = PregameDump::new(true, dir.path(), POLL).expect("on");
+    let t0 = Instant::now();
+    let at = |ms: u64| t0 + Duration::from_millis(ms);
+    let read = |end: EndSeen| PostTick {
+        end: Some(end),
+        ..PostTick::default()
+    };
+    let confirm = PostTick {
+        confirmed: true,
+        ..read(EndSeen::Title)
+    };
+    loop_tick(&mut dump, at(0), picture(20, Some((0.4, 0.6))), confirm);
+    let accolades = picture(70, Some((0.1, 0.3)));
+    loop_tick(&mut dump, at(1_000), accolades, read(EndSeen::Accolades));
+    let rank = picture(110, Some((0.6, 0.8)));
+    loop_tick(&mut dump, at(2_000), rank.clone(), PostTick::default());
+    // The same rank screen, read now: a near duplicate, not saved, yet
+    // the frame before it is relabelled in the final note.
+    loop_tick(&mut dump, at(3_000), rank, read(EndSeen::Rank));
+    assert!(dump.post_window_open());
+    assert!(dump.finish(Duration::from_secs(30)).await);
+
+    let root = pregame_dir(dir.path());
+    let folders = names_in(&root);
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    let doc: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(&folders[0]).join(POSTGAME_SIDECAR)).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(doc["ended"], "shutdown");
+    let labels: Vec<&str> = doc["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["label"].as_str().unwrap())
+        .collect();
+    assert_eq!(labels, vec!["end_title", "accolades", "rank_update"]);
+}
