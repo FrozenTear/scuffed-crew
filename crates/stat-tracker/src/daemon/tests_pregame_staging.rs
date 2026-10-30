@@ -676,7 +676,7 @@ async fn only_the_latest_loading_frame_is_held() {
 
 /// A writer that queues batches nobody writes, with the queue empty, and
 /// the saver on it.
-fn counted_dump(dir: &std::path::Path) -> (PregameDump, std::sync::mpsc::Receiver<ShotBatch>) {
+fn counted_dump(dir: &std::path::Path) -> (PregameDump, std::sync::mpsc::Receiver<WriterJob>) {
     let (writer, queue) = PregameWriter::stalled();
     (
         PregameDump::with_writer(pregame_dir(dir), POLL, writer),
@@ -716,10 +716,10 @@ fn loading_passes_write_nothing_until_one_save_at_the_game_start() {
             Some(frame(20 + k)),
         );
     }
-    let during: Vec<ShotBatch> = queue.try_iter().collect();
+    let during: Vec<ShotBatch> = queue.try_iter().map(|job| job.shots).collect();
     assert!(during.is_empty(), "{during:?}");
     dump.observe(at(12_000), SELECT, Some(frame(9)));
-    let at_start: Vec<_> = queue.try_iter().flatten().collect();
+    let at_start: Vec<_> = queue.try_iter().flat_map(|job| job.shots).collect();
     assert_eq!(loading_ops(&at_start), ["Save"], "{at_start:?}");
     let saved = at_start.iter().find_map(|op| match op {
         PregameOp::Save(s) if s.name == LOADING_NAME => Some(s.frame.width()),
@@ -732,7 +732,7 @@ fn loading_passes_write_nothing_until_one_save_at_the_game_start() {
     dump.observe(at(13_500), Seen::Loading, Some(frame(40)));
     assert!(!dump_holds_loading(&dump));
     dump.observe(at(15_000), BAN, Some(frame(41)));
-    let after: Vec<_> = queue.try_iter().flatten().collect();
+    let after: Vec<_> = queue.try_iter().flat_map(|job| job.shots).collect();
     assert!(loading_ops(&after).is_empty(), "{after:?}");
 }
 
@@ -783,13 +783,13 @@ async fn a_dropped_loading_frame_writes_nothing() {
             End::Shutdown => {
                 // Nothing to look at after it: what it queued is all.
                 assert!(dump.finish(Duration::from_secs(1)).await);
-                let ops: Vec<_> = queue.try_iter().flatten().collect();
+                let ops: Vec<_> = queue.try_iter().flat_map(|job| job.shots).collect();
                 assert!(loading_ops(&ops).is_empty(), "{ops:?}");
                 continue;
             }
         }
         assert!(!dump_holds_loading(&dump));
-        let ops: Vec<_> = queue.try_iter().flatten().collect();
+        let ops: Vec<_> = queue.try_iter().flat_map(|job| job.shots).collect();
         assert!(loading_ops(&ops).is_empty(), "{ops:?}");
     }
 }

@@ -585,7 +585,7 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // store's close its own share of the deadline.
     let within = stat_tracker::replace::shutdown_time_left().saturating_sub(STORE_CLOSE_WAIT);
     finish_or_abort_sync(sync_task.take(), within).await;
-    // The phase's last frame and the queued pre-game writes, briefly.
+    // The phase's last frame, the post-game sidecar and the queued writes, briefly.
     if let Some(dump) = pregame_dump.take() {
         let within = stat_tracker::replace::shutdown_time_left()
             .saturating_sub(STORE_CLOSE_WAIT)
@@ -1145,7 +1145,7 @@ pub(crate) fn log_startup_readiness(
         tracing::info!(
             target: "scuffed_stat_tracker",
             dir = %daemon::pregame_dump::pregame_dir(&config.data_dir).display(),
-            "debug_save_pregame_screens: saving pre-game screens (newest {} games kept)",
+            "debug_save_pregame_screens: saving the screens around each game (newest {} games kept)",
             daemon::pregame_dump::PREGAME_KEEP_GAMES
         );
     } else if let Some(dir) = daemon::pregame_dump::stale_pregame_dir(false, &config.data_dir) {
