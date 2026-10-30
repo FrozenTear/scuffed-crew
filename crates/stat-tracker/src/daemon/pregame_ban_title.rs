@@ -271,16 +271,16 @@ impl BanTitleExamples {
 
     /// Whether the ban-results title is on `rgb`: an example match when
     /// there are examples, the shape rule otherwise. The score or the
-    /// shape is logged at debug, to tune the rule from real runs. A shape
-    /// that passes is also logged at info: it is only looked for while no
-    /// candidate is held, so that is about one line per game.
+    /// shape is logged at debug, to tune the rule from real runs, and so
+    /// are the numbers of a shape that passes: the title is looked for on
+    /// every poll while the ban results wait, so a pass comes once a poll.
     pub(crate) fn matches(&self, rgb: &image::RgbImage) -> bool {
         if self.cuts.is_empty() {
             let shape = shape_metrics(rgb);
             let pass = shape.is_some_and(|m| m.passes());
             tracing::debug!(target: "scuffed_stat_tracker", ?shape, pass, "ban-results title shape");
             if let Some(m) = shape.filter(|_| pass) {
-                tracing::info!(
+                tracing::debug!(
                     target: "scuffed_stat_tracker",
                     bright = m.bright,
                     dark = m.dark,
@@ -288,7 +288,7 @@ impl BanTitleExamples {
                     span = m.span,
                     top = m.top_bright,
                     bottom = m.bottom_bright,
-                    "ban-results candidate: the title passed the shape rule"
+                    "ban-results title passed the shape rule"
                 );
             }
             return pass;

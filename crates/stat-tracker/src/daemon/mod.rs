@@ -25,12 +25,21 @@ mod tests_debug_dumps;
 mod tests_frame_copies;
 #[cfg(test)]
 mod tests_gui_presence;
+// The loading stand-ins shared with `detect/loading_screen.rs`'s tests;
+// the lib's test-only module is not built for the bin's tests.
+#[cfg(test)]
+#[path = "../detect/tests_loading_stand_ins.rs"]
+mod tests_loading_stand_ins;
 #[cfg(test)]
 mod tests_memtune;
 #[cfg(test)]
 mod tests_pregame_ban_title;
 #[cfg(test)]
 mod tests_pregame_dump;
+#[cfg(test)]
+mod tests_pregame_reveal;
+#[cfg(test)]
+mod tests_pregame_staging;
 #[cfg(test)]
 mod tests_query_server;
 #[cfg(test)]

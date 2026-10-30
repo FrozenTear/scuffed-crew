@@ -10,6 +10,24 @@
 //! test only adds the gradient. A dark scene (a spawn room, footage) has
 //! rows of many colours and no dominant one. Used only by the
 //! opt-in pre-game screen saves; no boundary or outcome reads it.
+//!
+//! The saves use the stricter [`is_entering_game`]: the same check plus
+//! one line of white text centred on the strip, so a navy band with its
+//! text off centre, wider than half the screen or with a bar far under it
+//! fails, and so does a band with no text yet (the fade-in). There is no
+//! minimum width: on real frames the `ENTERING GAME` text is about 0.17 of
+//! the width and an `APPLYING UPDATE` band's about 0.19, too close to tell
+//! apart. What tells them apart is the words: a band of exactly two words
+//! whose second is at least [`WORD_RATIO_REJECT`] as wide as the first
+//! (`APPLYING UPDATE`, about 0.74) fails; `ENTERING GAME` (about 0.61)
+//! passes. Of three clusters, the end one across the wider gap is left
+//! out first as a spinner, but only when it is spinner-sized (at most
+//! [`SPINNER_WIDTH_MAX`] of the width and [`SPINNER_HEIGHT_MAX`] of the
+//! height, any shape, about 1.5 times the stand-in spinner); otherwise the
+//! three are not two words. Anything else passes, and the
+//! saves keep only the last frame that passes before the game starts. The
+//! ratio is tuned on the English texts: on other clients only the game
+//! start decides.
 
 use image::RgbImage;
 
@@ -48,6 +66,262 @@ const ROW_FLAT_MIN: f32 = 0.80;
 /// The middle is the loading strip when at least this share of its
 /// counted rows is flat.
 const FLAT_ROWS_MIN: f32 = 0.85;
+
+/// The `ENTERING GAME` text, as shares of the 16:9 game area: one line of
+/// white glyphs centred across the screen and centred down the strip at
+/// half height, at most half the width (about 0.17 on real frames; no
+/// minimum).
+const TEXT_CENTRE_X_TOL: f32 = 0.05;
+const TEXT_WIDTH_MAX: f32 = 0.50;
+const TEXT_CENTRE_Y_MIN: f32 = 0.44;
+const TEXT_CENTRE_Y_MAX: f32 = 0.56;
+const TEXT_HEIGHT_MAX: f32 = 0.10;
+
+/// Fewest glyph samples that make text (a few stray white pixels do not).
+const TEXT_SAMPLES_MIN: u32 = 24;
+
+/// Glyph columns of the text box at least this far apart (a share of the
+/// game width, counted as the empty sampled columns between them) are in
+/// different words; letters are closer.
+const WORD_GAP: f32 = 0.0045;
+
+/// A band of exactly two words whose second is at least this share of the
+/// first's width is no `ENTERING GAME` (about 0.61) but `APPLYING UPDATE`
+/// (about 0.74).
+pub const WORD_RATIO_REJECT: f32 = 0.70;
+
+/// An end cluster of three is the spinner, left out of the words, only
+/// when it is at most this wide (a share of the game width) and this tall
+/// (of its height). The bound is width and height only, with no shape
+/// limit: the real spinner is already about 1.38 as wide as tall, so a
+/// partial arc can be flatter or thinner still, and with a shape limit an
+/// update band with such an arc would count as three words and pass rule
+/// C. The stand-in spinner (`two_word_band`) is 0.03 wide and as tall as
+/// the text, 0.067, so these allow about 1.5 times it. The width limit
+/// alone keeps real second words in: `GAME` is about 0.064 of the width
+/// and `UPDATE` about 0.077, both above 0.045.
+const SPINNER_WIDTH_MAX: f32 = 0.045;
+const SPINNER_HEIGHT_MAX: f32 = 0.10;
+
+/// Glyph samples this close across (a share of the game width) on one
+/// row, or on rows this close down (a share of its height) with spans this
+/// close across, are one piece of text: letters and words join, a blob
+/// elsewhere on the band does not.
+const TEXT_JOIN_X: f32 = 0.03;
+const TEXT_JOIN_Y: f32 = 0.02;
+
+/// A piece with fewer glyph samples than this share of the largest piece
+/// is a stray blob (a cursor, a small overlay) and is left out of the text
+/// box. A progress bar is not: it is as large as text.
+const TEXT_PIECE_MIN: f32 = 0.15;
+
+/// [`is_loading_screen`] and the `ENTERING GAME` text where it sits: at
+/// least [`TEXT_SAMPLES_MIN`] glyph samples in the middle band, spanning
+/// one line centred across the screen and down the strip, at most half its
+/// width, and not exactly two words with the second at least
+/// [`WORD_RATIO_REJECT`] of the first. A navy band with no text (the
+/// fade-in), its text elsewhere or the `APPLYING UPDATE` words is not the
+/// loading screen. Only the pre-game saves use it; [`is_loading_screen`]
+/// is unchanged.
+pub fn is_entering_game(rgb: &RgbImage) -> bool {
+    is_loading_screen(rgb) && entering_game_text(rgb)
+}
+
+/// The white text of the middle band, as shares of the 16:9 game area.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextBox {
+    pub width: f32,
+    pub height: f32,
+    pub centre_x: f32,
+    pub centre_y: f32,
+    /// Glyph samples in the box's pieces (every second pixel each way).
+    pub samples: u32,
+    /// Words in the box ([`WORD_GAP`]), after a spinner: of exactly three,
+    /// the end one across the wider gap (the words are closer to each
+    /// other than to it) is left out when it is spinner-sized
+    /// ([`SPINNER_WIDTH_MAX`], [`SPINNER_HEIGHT_MAX`]); otherwise all
+    /// three count.
+    pub words: usize,
+    /// The second word's width over the first's, with exactly two words.
+    pub word_ratio: Option<f32>,
+}
+
+/// One run of glyph samples on a sampled row.
+struct Run {
+    y: u32,
+    x0: u32,
+    x1: u32,
+    n: u32,
+}
+
+/// The box around the white glyphs of the middle band, from its pieces
+/// of text with stray small blobs left out ([`TEXT_PIECE_MIN`]); `None`
+/// with fewer than [`TEXT_SAMPLES_MIN`] glyph samples in them. What
+/// [`is_entering_game`] measures, public for checks on real frames.
+pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
+    let (w, h) = rgb.dimensions();
+    let (gx, gy, gw, gh) = crate::frame::geometry::game_rect_16_9(w, h);
+    if gw == 0 || gh == 0 {
+        return None;
+    }
+    let y0 = gy + gh * 300 / 1000;
+    let y1 = (y0 + gh * 400 / 1000).min(h);
+    let x1 = (gx + gw).min(w);
+    let join_x = (gw as f32 * TEXT_JOIN_X) as u32;
+    let join_y = (gh as f32 * TEXT_JOIN_Y) as u32;
+    let mut runs: Vec<Run> = Vec::new();
+    // Each glyph sample's column, row and the run it is in.
+    let mut columns: Vec<(u32, u32, usize)> = Vec::new();
+    for y in (y0..y1).step_by(2) {
+        let mut open: Option<Run> = None;
+        for x in (gx..x1).step_by(2) {
+            let p = rgb.get_pixel(x, y).0;
+            if p[0].min(p[1]).min(p[2]) < GLYPH_MIN {
+                continue;
+            }
+            match open.as_mut() {
+                Some(r) if x - r.x1 <= join_x => {
+                    r.x1 = x;
+                    r.n += 1;
+                }
+                _ => {
+                    runs.extend(open.take());
+                    open = Some(Run {
+                        y,
+                        x0: x,
+                        x1: x,
+                        n: 1,
+                    });
+                }
+            }
+            // The open run is pushed next, at this index.
+            columns.push((x, y, runs.len()));
+        }
+        runs.extend(open);
+    }
+    // Join runs into pieces (union-find); runs are in row order.
+    let mut parent: Vec<usize> = (0..runs.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for i in 0..runs.len() {
+        for j in i + 1..runs.len() {
+            if runs[j].y - runs[i].y > join_y {
+                break;
+            }
+            let near = runs[j].x0 <= runs[i].x1 + join_x && runs[i].x0 <= runs[j].x1 + join_x;
+            if runs[j].y > runs[i].y && near {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                parent[a] = b;
+            }
+        }
+    }
+    // Per piece: samples and box (left, right, top, bottom).
+    let mut pieces: std::collections::HashMap<usize, (u32, u32, u32, u32, u32)> =
+        std::collections::HashMap::new();
+    for (i, r) in runs.iter().enumerate() {
+        let p = pieces
+            .entry(root(&mut parent, i))
+            .or_insert((0, u32::MAX, 0, u32::MAX, 0));
+        p.0 += r.n;
+        p.1 = p.1.min(r.x0);
+        p.2 = p.2.max(r.x1);
+        p.3 = p.3.min(r.y);
+        p.4 = p.4.max(r.y);
+    }
+    let largest = pieces.values().map(|p| p.0).max()?;
+    let (mut samples, mut left, mut right, mut top, mut bottom) = (0u32, u32::MAX, 0, u32::MAX, 0);
+    let kept: std::collections::HashSet<usize> = pieces
+        .iter()
+        .filter(|(_, p)| p.0 as f32 >= largest as f32 * TEXT_PIECE_MIN)
+        .map(|(root, _)| *root)
+        .collect();
+    for p in kept.iter().map(|root| &pieces[root]) {
+        samples += p.0;
+        left = left.min(p.1);
+        right = right.max(p.2);
+        top = top.min(p.3);
+        bottom = bottom.max(p.4);
+    }
+    if samples < TEXT_SAMPLES_MIN {
+        return None;
+    }
+    let mut lit: Vec<(u32, u32)> = columns
+        .iter()
+        .filter(|&&(_, _, run)| kept.contains(&root(&mut parent, run)))
+        .map(|&(x, y, _)| (x, y))
+        .collect();
+    lit.sort_unstable();
+    let words = words(&lit, gw, gh);
+    let word_ratio = match words[..] {
+        [(a0, a1), (b0, b1)] if a1 > a0 => Some((b1 - b0) as f32 / (a1 - a0) as f32),
+        _ => None,
+    };
+    let share_x = |x: u32| (x - gx) as f32 / gw as f32;
+    let share_y = |y: u32| (y - gy) as f32 / gh as f32;
+    Some(TextBox {
+        width: (right - left) as f32 / gw as f32,
+        height: (bottom - top) as f32 / gh as f32,
+        centre_x: (share_x(left) + share_x(right)) / 2.0,
+        centre_y: (share_y(top) + share_y(bottom)) / 2.0,
+        samples,
+        words: words.len(),
+        word_ratio,
+    })
+}
+
+/// The words (first and last column) of the glyph samples `lit` (column,
+/// row; sorted), sampled every second pixel in a `gw` x `gh` game area: a
+/// new word starts where the empty sampled columns between two lit ones
+/// span at least [`WORD_GAP`] of the width. Of exactly three, the end one
+/// across the wider gap is the spinner and is left out when it is
+/// spinner-sized ([`SPINNER_WIDTH_MAX`], [`SPINNER_HEIGHT_MAX`], any
+/// shape); otherwise all three are kept, since a stray gap in a word can
+/// leave a letter or two at the other end as small.
+fn words(lit: &[(u32, u32)], gw: u32, gh: u32) -> Vec<(u32, u32)> {
+    let gap = gw as f32 * WORD_GAP;
+    // First and last column, top and bottom row.
+    let mut words: Vec<(u32, u32, u32, u32)> = Vec::new();
+    for &(x, y) in lit {
+        match words.last_mut() {
+            Some((_, end, top, bottom)) if ((x - *end).saturating_sub(2) as f32) < gap => {
+                *end = x;
+                *top = (*top).min(y);
+                *bottom = (*bottom).max(y);
+            }
+            _ => words.push((x, x, y, y)),
+        }
+    }
+    if let [(_, a1, ..), (b0, b1, ..), (c0, ..)] = words[..] {
+        let spinner = |(x0, x1, y0, y1): (u32, u32, u32, u32)| {
+            let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
+            w <= gw as f32 * SPINNER_WIDTH_MAX && h <= gh as f32 * SPINNER_HEIGHT_MAX
+        };
+        // The end across the wider gap: the words are closer to each other
+        // than to the spinner.
+        let end = if b0 - a1 > c0 - b1 { 0 } else { 2 };
+        if spinner(words[end]) {
+            words.remove(end);
+        }
+    }
+    words.into_iter().map(|(x0, x1, ..)| (x0, x1)).collect()
+}
+
+/// Whether the white glyphs of the middle band sit as the `ENTERING GAME`
+/// text does, and are not the two `APPLYING UPDATE` words.
+fn entering_game_text(rgb: &RgbImage) -> bool {
+    text_box(rgb).is_some_and(|t| {
+        (t.centre_x - 0.5).abs() <= TEXT_CENTRE_X_TOL
+            && t.width <= TEXT_WIDTH_MAX
+            && !t.word_ratio.is_some_and(|r| r >= WORD_RATIO_REJECT)
+            && (TEXT_CENTRE_Y_MIN..=TEXT_CENTRE_Y_MAX).contains(&t.centre_y)
+            && t.height <= TEXT_HEIGHT_MAX
+    })
+}
 
 /// Whether `rgb` looks like the loading screen.
 pub fn is_loading_screen(rgb: &RgbImage) -> bool {
@@ -127,6 +401,333 @@ mod tests {
     use image::Rgb;
 
     use super::*;
+
+    use crate::detect::tests_loading_stand_ins::*;
+
+    #[test]
+    fn an_applying_update_band_is_not_entering_game() {
+        // Off-centre text with a bar, off-centre text alone, centred text
+        // over a wide bar: each passes the plain loading check, and each
+        // fails the text place or width.
+        for (centred, bar) in [(false, true), (false, false), (true, true)] {
+            let band = applying_update_band(640, 360, centred, bar);
+            assert!(is_loading_screen(&band), "centred {centred}, bar {bar}");
+            assert!(!is_entering_game(&band), "centred {centred}, bar {bar}");
+        }
+    }
+
+    #[test]
+    fn the_entering_game_slab_is_entering_game() {
+        let slab = entering_game_slab(640, 360);
+        assert!(is_loading_screen(&slab));
+        assert!(is_entering_game(&slab));
+        // The other ENTERING GAME stand-ins here pass the stricter check too.
+        assert!(is_entering_game(&entering_game()));
+        assert!(is_entering_game(&entering_game_frame()));
+        assert!(is_entering_game(&navy_gradient()));
+        // The same layout drawn at each size (not a rescaled 640x360).
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            assert!(is_entering_game(&entering_game_slab(w, h)), "{w}x{h}");
+            for (centred, bar) in [(false, true), (false, false), (true, true)] {
+                let band = applying_update_band(w, h, centred, bar);
+                assert!(!is_entering_game(&band), "{w}x{h} {centred} {bar}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_stray_blob_on_the_band_leaves_the_text_box_alone() {
+        // A cursor-sized white blob on the strip, far right of the text,
+        // and one in the black bar above it: left out of the box, so the
+        // slab still passes, at each size.
+        for (w, h) in [(640, 360), (1920, 1080), (2560, 1440)] {
+            let mut slab = entering_game_slab(w, h);
+            let clean = text_box(&slab).expect("text");
+            block(&mut slab, 590..596, 140..146);
+            block(&mut slab, 60..66, 116..122);
+            assert_eq!(text_box(&slab), Some(clean), "{w}x{h}");
+            assert!(is_entering_game(&slab), "{w}x{h}");
+        }
+        // A bar as large as the text is no stray blob: it widens the box
+        // past half the width.
+        let mut slab = entering_game_slab(640, 360);
+        block(&mut slab, 60..580, 200..204);
+        assert!(text_box(&slab).expect("text").width > TEXT_WIDTH_MAX);
+        assert!(!is_entering_game(&slab));
+    }
+
+    #[test]
+    fn the_word_ratio_rejects_only_exactly_two_words_at_seventy_percent() {
+        // ENTERING GAME (0.61) passes, APPLYING UPDATE (0.74) fails, and a
+        // pair just below and just above 0.70, at each size.
+        let cases = [
+            (ENTERING_WORDS, true),
+            (UPDATE_WORDS, false),
+            ((0.18, 0.68), true),
+            ((0.18, 0.72), false),
+        ];
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            for (words, pass) in cases {
+                let band = two_word_band(w, h, words, None);
+                let t = text_box(&band).expect("text");
+                assert_eq!(t.words, 2, "{w}x{h} {words:?}: {t:?}");
+                let ratio = t.word_ratio.expect("two words");
+                assert!((ratio - words.1).abs() < 0.015, "{w}x{h} {words:?}: {t:?}");
+                assert!(is_loading_screen(&band));
+                assert_eq!(is_entering_game(&band), pass, "{w}x{h} {words:?}: {t:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_spinner_beside_the_words_is_left_out_of_the_ratio() {
+        // Two words plus the stand-in spinner on either side, at each size:
+        // judged on the two words, so 0.61 and 0.68 pass, 0.72 and 0.74 fail.
+        let cases = [
+            (ENTERING_WORDS, true),
+            (UPDATE_WORDS, false),
+            ((0.18, 0.68), true),
+            ((0.18, 0.72), false),
+        ];
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            for spinner in [Some(true), Some(false)] {
+                for (words, pass) in cases {
+                    let band = two_word_band(w, h, words, spinner);
+                    let t = text_box(&band).expect("text");
+                    let at = format!("{w}x{h} {spinner:?} {words:?}: {t:?}");
+                    assert_eq!(t.words, 2, "{at}");
+                    assert!((t.word_ratio.unwrap() - words.1).abs() < 0.015, "{at}");
+                    assert_eq!(is_entering_game(&band), pass, "{at}");
+                }
+            }
+        }
+    }
+
+    /// The stand-ins' text height (rows 168 to 192 of 360).
+    const TEXT_H: f32 = 24.0 / 360.0;
+
+    /// The navy band with solid white parts `(gap before, width, height)`,
+    /// shares of the frame, left to right: the line centred across it, each
+    /// part centred down it.
+    fn parts_band(w: u32, h: u32, parts: &[(f32, f32, f32)]) -> RgbImage {
+        let mut img = navy_band(w, h);
+        let line: f32 = parts.iter().map(|p| p.0 + p.1).sum();
+        let mut x0 = 0.5 - line / 2.0;
+        for &(gap, width, height) in parts {
+            x0 += gap;
+            let (a, b) = ((x0 * w as f32) as u32, ((x0 + width) * w as f32) as u32);
+            let (c, d) = (
+                ((0.5 - height / 2.0) * h as f32) as u32,
+                ((0.5 + height / 2.0) * h as f32) as u32,
+            );
+            for y in c..d {
+                for x in a..b {
+                    img.put_pixel(x, y, Rgb(GLYPH));
+                }
+            }
+            x0 += width;
+        }
+        img
+    }
+
+    #[test]
+    fn entering_game_split_into_three_with_no_spinner_passes() {
+        // ENTERING GAME 0.173 wide (0.10 and 0.061, 0.012 apart) with a
+        // stray 0.008 gap splitting ENTERING into 0.05 and 0.042: three
+        // text-sized clusters, no spinner. Dropping GAME (the end across
+        // the wider gap) would judge 0.042 over 0.05 and reject it.
+        let parts = [
+            (0.0, 0.05, TEXT_H),
+            (0.008, 0.042, TEXT_H),
+            (0.012, 0.061, TEXT_H),
+        ];
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            let band = parts_band(w, h, &parts);
+            let t = text_box(&band).expect("text");
+            assert_eq!((t.words, t.word_ratio), (3, None), "{w}x{h}: {t:?}");
+            assert!((t.width - 0.173).abs() < 0.01, "{w}x{h}: {t:?}");
+            assert!(is_loading_screen(&band), "{w}x{h}");
+            assert!(is_entering_game(&band), "{w}x{h}: {t:?}");
+        }
+    }
+
+    #[test]
+    fn a_spinner_sized_end_across_the_narrower_gap_is_kept() {
+        // ENTERING GAME with a stray 0.008 gap leaving EN (0.03 wide, as
+        // the stand-in spinner) at the left: GAME, across the wider gap,
+        // is no spinner, so the three count and the band passes. Dropping
+        // EN would judge GAME over TERING (about 0.98) and reject it. EN is
+        // spinner-sized (with or without a shape limit), but it still
+        // passes: EN sits across the narrower gap, so it is not the checked
+        // end, and GAME (0.061) is wider than the 0.045 width limit.
+        let parts = [
+            (0.0, 0.03, TEXT_H),
+            (0.008, 0.062, TEXT_H),
+            (0.012, 0.061, TEXT_H),
+        ];
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            let band = parts_band(w, h, &parts);
+            let t = text_box(&band).expect("text");
+            assert_eq!((t.words, t.word_ratio), (3, None), "{w}x{h}: {t:?}");
+            assert!(is_entering_game(&band), "{w}x{h}: {t:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_spinner_sized_end_cluster_is_left_out() {
+        // APPLYING UPDATE (0.10 and 0.074, 0.012 apart) with a block 0.025
+        // to the right, just inside and just outside each bound at
+        // 1920x1080 (`(width, height)` shares): inside it is the spinner and
+        // the words are judged (rejected), outside it is a third word.
+        let update = [(0.0, 0.10, TEXT_H), (0.012, 0.074, TEXT_H)];
+        // In pairs: 0.045 wide at most, 0.10 tall at most.
+        let cases = [
+            ((0.043, TEXT_H), true),
+            ((0.048, TEXT_H), false),
+            ((0.042, 0.097), true),
+            ((0.042, 0.104), false),
+        ];
+        for ((sw, sh), spinner) in cases {
+            let band = parts_band(1920, 1080, &[update[0], update[1], (0.025, sw, sh)]);
+            let t = text_box(&band).expect("text");
+            assert_eq!(t.words, if spinner { 2 } else { 3 }, "{sw} {sh}: {t:?}");
+            if sh <= TEXT_HEIGHT_MAX {
+                assert_eq!(is_entering_game(&band), !spinner, "{sw} {sh}: {t:?}");
+            }
+        }
+        // The bounds in sampled pixels, 1920x1080: 86.4 wide, 108 tall.
+        let cluster = |x0: u32, x1: u32, y0: u32, y1: u32| {
+            (x0..=x1).step_by(2).flat_map(move |x| [(x, y0), (x, y1)])
+        };
+        let count = |sw: u32, sh: u32| {
+            let mut lit: Vec<(u32, u32)> = cluster(700, 900, 500, 572)
+                .chain(cluster(912, 1060, 500, 572))
+                .chain(cluster(1090, 1090 + sw, 536 - sh / 2, 536 + sh / 2))
+                .collect();
+            lit.sort_unstable();
+            words(&lit, 1920, 1080).len()
+        };
+        for ((sw, sh), n) in [((86, 72), 2), ((88, 72), 3), ((80, 108), 2), ((80, 110), 3)] {
+            assert_eq!(count(sw, sh), n, "{sw} x {sh}");
+        }
+    }
+
+    #[test]
+    fn a_spinner_of_any_shape_inside_the_size_limits_is_left_out() {
+        // A partial arc 2.5 times as wide as tall (0.04 wide) or as tall as
+        // wide (0.02 wide, 0.089 tall), inside the width and height limits,
+        // on either end of APPLYING UPDATE: left out as the spinner, so the
+        // update band is judged on its two words and rejected, at each size.
+        let update = [(0.0, 0.10, TEXT_H), (0.012, 0.074, TEXT_H)];
+        let arcs = [
+            (0.04, 0.04 * 16.0 / 9.0 / 2.5),
+            (0.02, 0.02 * 16.0 / 9.0 * 2.5),
+        ];
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            for (sw, sh) in arcs {
+                let aspect = (sw * w as f32) / (sh * h as f32);
+                assert!(aspect.max(1.0 / aspect) > 2.4, "{w}x{h} {sw} {sh}");
+                let right = [update[0], update[1], (0.025, sw, sh)];
+                let left = [(0.0, sw, sh), (0.025, 0.10, TEXT_H), update[1]];
+                for parts in [right, left] {
+                    let band = parts_band(w, h, &parts);
+                    let t = text_box(&band).expect("text");
+                    let at = format!("{w}x{h} {parts:?}: {t:?}");
+                    assert_eq!(t.words, 2, "{at}");
+                    assert!(
+                        t.word_ratio.expect("two words") >= WORD_RATIO_REJECT,
+                        "{at}"
+                    );
+                    assert!(is_loading_screen(&band), "{at}");
+                    assert!(!is_entering_game(&band), "{at}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_band_that_splits_into_one_or_many_words_is_not_judged_by_ratio() {
+        // One solid word, and strokes that split into many: no ratio.
+        let mut one = navy_band(1920, 1080);
+        block(&mut one, 270..370, 168..192);
+        let t = text_box(&one).expect("text");
+        assert_eq!((t.words, t.word_ratio), (1, None));
+        assert!(is_entering_game(&one));
+        let many = centred_text_band(1920, 1080, 0.186);
+        let t = text_box(&many).expect("text");
+        assert!(t.words > 3 && t.word_ratio.is_none(), "{t:?}");
+        assert!(is_entering_game(&many));
+    }
+
+    #[test]
+    fn the_band_must_be_centred_one_line_and_at_most_half_the_width() {
+        let pass = |xs: std::ops::Range<u32>, ys: std::ops::Range<u32>| {
+            let mut band = navy_band(640, 360);
+            glyphs(&mut band, xs, ys);
+            is_entering_game(&band)
+        };
+        assert!(pass(266..374, 168..192), "centred, 0.17 wide");
+        assert!(!pass(120..520, 168..192), "0.62 wide");
+        assert!(!pass(304..412, 168..192), "off centre by 0.07");
+        assert!(!pass(266..374, 150..192), "0.12 tall");
+        assert!(!pass(266..374, 136..150), "centred at 0.39 down");
+        assert!(!pass(266..374, 210..222), "centred at 0.6 down");
+    }
+
+    #[test]
+    fn centred_text_as_wide_as_on_real_frames_passes() {
+        // 0.17 to 0.186 wide, in strokes that do not split into two words:
+        // passes at each size.
+        for (w, h) in [(640, 360), (1280, 720), (1920, 1080), (2560, 1440)] {
+            for share in [0.17, 0.173, 0.186] {
+                let band = centred_text_band(w, h, share);
+                let t = text_box(&band).expect("text");
+                assert!((t.width - share).abs() < 0.02, "{w}x{h} {share}: {t:?}");
+                assert!(is_entering_game(&band), "{w}x{h} {share}: {t:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_fade_with_no_or_faint_text_fails_the_glyph_floor() {
+        // The fade-in: the navy strip with no text yet, or text not yet
+        // white, or a few white specks below the glyph floor.
+        for (w, h) in [(640, 360), (1920, 1080)] {
+            let strip = navy_band(w, h);
+            assert!(is_loading_screen(&strip), "{w}x{h}");
+            assert!(text_box(&strip).is_none(), "{w}x{h}");
+            assert!(!is_entering_game(&strip), "{w}x{h}");
+            let mut faint = centred_text_band(w, h, 0.17);
+            for p in faint.pixels_mut() {
+                if p.0 == GLYPH {
+                    p.0 = [120, 122, 130];
+                }
+            }
+            assert!(!is_entering_game(&faint), "{w}x{h} faint");
+        }
+        // The glyph floor: 23 samples fail, 24 pass (one row of white
+        // pixels on the sampled grid, every second pixel).
+        for (n, pass) in [(23, false), (24, true)] {
+            let mut row = navy_band(640, 360);
+            for k in 0..n {
+                row.put_pixel(298 + 2 * k, 180, Rgb(GLYPH));
+            }
+            // Below the floor there is no text box at all.
+            assert_eq!(text_box(&row).map(|t| t.samples), pass.then_some(n));
+            assert_eq!(is_entering_game(&row), pass, "{n} samples");
+        }
+    }
+
+    #[test]
+    fn a_navy_band_with_no_text_is_not_entering_game() {
+        let mut slab = entering_game_slab(640, 360);
+        for p in slab.pixels_mut() {
+            if p.0 == GLYPH {
+                p.0 = [30, 36, 60];
+            }
+        }
+        assert!(!is_entering_game(&slab));
+    }
 
     /// Black bars and a navy strip with white glyphs, like `ENTERING GAME`.
     fn entering_game() -> RgbImage {

@@ -406,6 +406,7 @@ fn advanced_values(app: &TrackerApp) -> AdvancedValues {
             .filter(|_| app.sync_on())
             .map(|s| crate::settings_model::url_host(&s.server_url)),
         debug_images: config.debug_ocr,
+        pregame_screens: config.debug_save_pregame_screens,
         compare_frames: stat_tracker::capture::is_kde(&app.desktop)
             .then(|| config.debug_portal_frames_enabled()),
         extra_reader: app.settings.displayed_reader().file_flag(),

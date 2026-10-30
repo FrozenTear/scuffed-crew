@@ -15,29 +15,33 @@ const POLL: Duration = Duration::from_millis(1_500);
 /// Drives a tracker the way the poll loop does: a tick hands its frame only
 /// when [`keeps_frame`] says so, and a loading screen reads as one only
 /// when the loading check runs ([`classify`]). Frames are numbered `Arc`s
-/// so every tick can check the tracker holds at most one.
-struct Run {
-    tracker: PregameTracker<Arc<u32>>,
+/// so every tick can check the tracker holds at most one. The disk is a
+/// model: saved files in `shots`, staged ones in `staged` until promoted
+/// (then they join `shots`) or discarded.
+pub(crate) struct Run {
+    pub(crate) tracker: PregameTracker<Arc<u32>>,
     start: Instant,
-    games: usize,
+    pub(crate) games: usize,
     made: Vec<Arc<u32>>,
-    shots: Vec<(String, &'static str, u32)>,
+    pub(crate) shots: Vec<(String, &'static str, u32)>,
+    pub(crate) staged: Vec<(String, &'static str, u32)>,
 }
 
 impl Run {
     /// At the new reader's 1.5 s polls (ban-results window 16.5 s).
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::polled(1_500)
     }
 
     /// At polls `poll_ms` apart (4 s with ocr-v1: window 19 s).
-    fn polled(poll_ms: u64) -> Self {
+    pub(crate) fn polled(poll_ms: u64) -> Self {
         Self {
             tracker: PregameTracker::new(Duration::from_millis(poll_ms)),
             start: Instant::now(),
             games: 0,
             made: Vec::new(),
             shots: Vec::new(),
+            staged: Vec::new(),
         }
     }
 
@@ -46,7 +50,7 @@ impl Run {
     }
 
     /// One tick `ms` after the start, showing `seen` as frame `frame`.
-    fn tick(&mut self, ms: u64, seen: Seen, frame: u32) {
+    pub(crate) fn tick(&mut self, ms: u64, seen: Seen, frame: u32) {
         let now = self.at(ms);
         let want = self.tracker.want(now);
         let seen = match seen {
@@ -67,14 +71,33 @@ impl Run {
         self.record(shots);
     }
 
-    fn release(&mut self, ms: u64) {
+    pub(crate) fn release(&mut self, ms: u64) {
         let shots = self.tracker.release(self.at(ms));
         self.record(shots);
     }
 
-    fn record(&mut self, shots: Vec<PregameShot<Arc<u32>>>) {
-        self.shots
-            .extend(shots.into_iter().map(|s| (s.folder, s.name, *s.frame)));
+    fn record(&mut self, ops: Vec<PregameOp<Arc<u32>>>) {
+        for op in ops {
+            match op {
+                PregameOp::Save(s) => self.shots.push((s.folder, s.name, *s.frame)),
+                PregameOp::Stage(s) => {
+                    self.staged
+                        .retain(|(f, n, _)| (f, *n) != (&s.folder, s.name));
+                    self.staged.push((s.folder, s.name, *s.frame));
+                }
+                PregameOp::Promote { folder, name } => {
+                    let at = self
+                        .staged
+                        .iter()
+                        .position(|(f, n, _)| (f, *n) == (&folder, name))
+                        .expect("a promote has a staged frame");
+                    self.shots.push(self.staged.remove(at));
+                }
+                PregameOp::Discard { folder, name } => {
+                    self.staged.retain(|(f, n, _)| (f, *n) != (&folder, name));
+                }
+            }
+        }
         let held = self
             .made
             .iter()
@@ -83,7 +106,7 @@ impl Run {
         assert!(held <= 1, "the tracker holds {held} frames");
     }
 
-    fn names(&self) -> Vec<(&str, u32)> {
+    pub(crate) fn names(&self) -> Vec<(&str, u32)> {
         self.shots.iter().map(|(_, n, f)| (*n, *f)).collect()
     }
 }
@@ -163,6 +186,9 @@ fn each_phase_saves_its_first_and_last_frame_once() {
     run.tick(11_000, Seen::Loading, 12);
     run.tick(12_000, Seen::Loading, 13);
     run.tick(13_000, Seen::Other, 14);
+    // No hero ban or select read within 20 s: the game did not start after
+    // the loading screen, so its held frame is dropped.
+    run.tick(33_000, Seen::Other, 15);
     assert_eq!(
         run.names(),
         [
@@ -173,9 +199,9 @@ fn each_phase_saves_its_first_and_last_frame_once() {
             ("ban_results.png", 7),
             ("heroselect_first.png", 9),
             ("heroselect_last.png", 11),
-            ("loading.png", 12),
         ]
     );
+    assert!(run.staged.is_empty());
     assert!(run.shots.iter().all(|(folder, _, _)| folder == "game1"));
 }
 
@@ -216,6 +242,256 @@ fn ban_results_shown_for_two_polls_keep_the_first_one() {
             ("heroselect_first.png", 5),
         ]
     );
+}
+
+#[test]
+fn the_last_ban_results_frame_before_a_select_title_is_saved() {
+    // 1.5 s polls: the ban icons and scores fill in under the title over
+    // three polls, then the select title shows. Each later results frame
+    // confirms the one before it, and the title confirms the last one.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    for (i, ms) in [3_000, 4_500, 6_000].into_iter().enumerate() {
+        run.tick(ms, RESULTS, 3 + i as u32);
+        assert!(run.tracker.holds_frame());
+        assert_eq!(run.tracker.owes_frame(), i > 0);
+    }
+    run.tick(7_500, Seen::SelectTitle, 6);
+    run.tick(9_000, SELECT, 7);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 5),
+            ("heroselect_first.png", 7),
+        ]
+    );
+}
+
+#[test]
+fn a_plain_frame_after_a_replacement_does_not_confirm_it() {
+    // ocr-v1 at 4 s polls (no select title read): R1, then T (the select
+    // sliding in under a results title), then the select's first frame S0
+    // and its read. T confirms R1; S0 does not confirm T. R1 is saved.
+    let mut run = Run::polled(4_000);
+    run.tick(0, BAN, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, RESULTS, 3);
+    run.tick(12_000, RESULTS, 4);
+    run.tick(16_000, Seen::Other, 5);
+    run.tick(20_000, SELECT, 6);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 6),
+        ]
+    );
+    // The same at 1.5 s polls over a longer reveal: the frame before the
+    // last results frame is saved.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    for (i, ms) in [3_000, 4_500, 6_000, 7_500].into_iter().enumerate() {
+        run.tick(ms, RESULTS, 3 + i as u32);
+    }
+    run.tick(9_000, Seen::Other, 7);
+    run.tick(10_500, SELECT, 8);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 5),
+            ("heroselect_first.png", 8),
+        ]
+    );
+}
+
+#[test]
+fn a_select_title_confirms_only_the_replacement_right_before_it() {
+    // The title is read with no lag, so the replacement right before it
+    // was still the results, with the bans filled in: written.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(6_000, RESULTS, 5);
+    run.tick(7_500, Seen::SelectTitle, 6);
+    run.tick(9_000, SELECT, 7);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 5),
+            ("heroselect_first.png", 7),
+        ]
+    );
+    // A plain frame between: the replacement may be the select sliding in
+    // and the plain frame its first frame, so the title confirms nothing
+    // and the frame before the replacement is saved.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(6_000, Seen::Other, 5);
+    run.tick(7_500, Seen::SelectTitle, 6);
+    run.tick(9_000, SELECT, 7);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 7),
+        ]
+    );
+}
+
+#[test]
+fn a_select_title_after_a_skipped_tick_does_not_confirm_a_replacement() {
+    // R1, T, then the S0 tick never reaches the tracker (Tab busy, an
+    // expected capture miss), then the select title: two polls after T,
+    // so not its next tick. T is not confirmed; R1 is saved.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(7_500, Seen::SelectTitle, 5);
+    run.tick(9_000, SELECT, 6);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 6),
+        ]
+    );
+}
+
+#[test]
+fn a_select_title_after_a_plain_frame_does_not_confirm_a_replacement() {
+    // R1, T, then a plain frame and the title less than one tick after T
+    // (a poll runs late after a slow read): the plain frame came between,
+    // so T is not confirmed. R1 is saved.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(5_200, Seen::Other, 5);
+    run.tick(6_600, Seen::SelectTitle, 6);
+    run.tick(8_100, SELECT, 7);
+    let saved = run.names();
+    assert!(saved.contains(&("ban_results.png", 3)), "{saved:?}");
+}
+
+#[test]
+fn a_first_candidate_right_before_a_select_title_is_saved() {
+    // One results frame only, then the title on the very next tick: the
+    // title is read with no lag and the frame did not show it, so it was
+    // still the results.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, Seen::SelectTitle, 4);
+    run.tick(6_000, SELECT, 5);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 5),
+        ]
+    );
+    assert!(run.staged.is_empty());
+    // After a skipped tick it is not: the frame between may have been the
+    // select's own first frame.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(6_000, Seen::SelectTitle, 4);
+    run.tick(7_500, SELECT, 5);
+    assert!(
+        run.names().iter().all(|(n, _)| *n != "ban_results.png"),
+        "{:?}",
+        run.names()
+    );
+}
+
+#[test]
+fn a_release_writes_the_frame_before_the_replacement() {
+    // The game closes, or capture fails, after R1 and T: T may be the
+    // select sliding in, so R1 (confirmed by T) is written, not T.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.release(5_000);
+    assert!(!run.tracker.holds_frame());
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+        ]
+    );
+}
+
+#[test]
+fn a_replacement_right_before_the_select_read_saves_the_frame_before_it() {
+    // The frame just before the select read is the select's first frame:
+    // it is dropped, and the results frame it confirmed is written.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(6_000, SELECT, 5);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 5),
+        ]
+    );
+    assert!(run.tracker.holds_frame(), "the select's frame");
+    assert!(!run.tracker.owes_frame(), "no results frame left");
+}
+
+#[test]
+fn a_replacement_keeps_the_window_of_the_first_candidate() {
+    // 1.5 s polls: results from 1.5 s on, replaced every poll, and no
+    // next screen. The window (16.5 s) runs from the first frame, so the
+    // held one and the owed one are dropped at 19.5 s however recent.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    for (i, ms) in (1_500..=18_000).step_by(1_500).enumerate() {
+        run.tick(ms, RESULTS, 2 + i as u32);
+    }
+    assert!(run.tracker.owes_frame());
+    run.tick(19_500, RESULTS, 30);
+    assert!(!run.tracker.holds_frame());
+    assert!(run.staged.is_empty(), "the staged frame is deleted too");
+    run.tick(21_000, Seen::Other, 31);
+    run.tick(22_500, SELECT, 32);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
 }
 
 #[test]
@@ -302,11 +578,19 @@ fn no_frame_is_kept_or_checked_outside_a_pre_game() {
     assert!(run.made.is_empty(), "no frame handed over outside a game");
     run.tick(2_000, VOTE, 3);
     run.tick(3_000, Seen::Loading, 4);
-    // Loading written: nothing more is wanted from other screens.
-    assert_eq!(run.tracker.want(run.at(4_000)), PregameWant::default());
+    run.tick(4_500, SELECT, 5);
+    // Loading saved: nothing more is wanted from other screens.
+    assert_eq!(run.tracker.want(run.at(17_000)), PregameWant::default());
     let later = (PREGAME_GAME_GAP + Duration::from_secs(10)).as_millis() as u64;
-    run.tick(later, Seen::Loading, 5);
-    assert_eq!(run.names(), [("mapvote_first.png", 3), ("loading.png", 4)]);
+    run.tick(later, Seen::Loading, 6);
+    assert_eq!(
+        run.names(),
+        [
+            ("mapvote_first.png", 3),
+            ("loading.png", 4),
+            ("heroselect_first.png", 5)
+        ]
+    );
 }
 
 #[test]
@@ -387,6 +671,7 @@ fn the_hero_select_between_rounds_writes_nothing() {
     run.tick(0, VOTE, 1);
     run.tick(5_000, SELECT, 2);
     run.tick(6_000, SELECT, 3);
+    // No hero ban or select read within 20 s after it: dropped.
     run.tick(8_000, Seen::Loading, 4);
     run.tick(10_000, Seen::Other, 5);
     // A short first round, then the select again, inside the game window.
@@ -402,7 +687,6 @@ fn the_hero_select_between_rounds_writes_nothing() {
             ("mapvote_first.png", 1),
             ("heroselect_first.png", 2),
             ("heroselect_last.png", 3),
-            ("loading.png", 4),
         ]
     );
     assert_eq!(run.games, 1);
@@ -496,7 +780,12 @@ fn retention_keeps_the_newest_twenty_games() {
         name: "mapvote_first.png",
         frame: frame(64, 36),
     };
-    write_pregame_shots(&root, &[shot], PREGAME_KEEP_GAMES, &mut Vec::new());
+    write_pregame_ops(
+        &root,
+        &[PregameOp::Save(shot)],
+        PREGAME_KEEP_GAMES,
+        &mut Vec::new(),
+    );
     let left = names_in(&root);
     assert_eq!(left.len(), PREGAME_KEEP_GAMES + 1);
     for i in 0..3 {
@@ -571,7 +860,12 @@ fn a_clock_set_back_does_not_delete_the_new_folder() {
         name: "mapvote_first.png",
         frame: frame(8, 8),
     };
-    write_pregame_shots(&root, &[shot], PREGAME_KEEP_GAMES, &mut Vec::new());
+    write_pregame_ops(
+        &root,
+        &[PregameOp::Save(shot)],
+        PREGAME_KEEP_GAMES,
+        &mut Vec::new(),
+    );
     assert!(
         root.join("20200101_000000")
             .join("mapvote_first.png")
@@ -587,14 +881,16 @@ fn the_folder_order_survives_a_restart_with_the_clock_behind() {
     for i in 0..PREGAME_KEEP_GAMES - 1 {
         std::fs::create_dir_all(root.join(format!("20261001_0000{i:02}"))).unwrap();
     }
-    let shot = |name: &str| PregameShot {
-        folder: name.to_string(),
-        name: "mapvote_first.png",
-        frame: frame(8, 8),
+    let shot = |name: &str| {
+        PregameOp::Save(PregameShot {
+            folder: name.to_string(),
+            name: "mapvote_first.png",
+            frame: frame(8, 8),
+        })
     };
     // Run 1, clock behind: one game, 20 folders in all.
     let mut made = load_pregame_order(&root);
-    write_pregame_shots(
+    write_pregame_ops(
         &root,
         &[shot("20200101_000000")],
         PREGAME_KEEP_GAMES,
@@ -603,7 +899,7 @@ fn the_folder_order_survives_a_restart_with_the_clock_behind() {
     // Run 2 reads the order back; its first game must not prune run 1's.
     let mut made = load_pregame_order(&root);
     assert_eq!(made, ["20200101_000000"]);
-    write_pregame_shots(
+    write_pregame_ops(
         &root,
         &[shot("20200102_000000")],
         PREGAME_KEEP_GAMES,
@@ -638,7 +934,12 @@ fn a_repeated_name_in_the_order_file_counts_once() {
         frame: frame(8, 8),
     };
     // 20 folders with the new one: nothing goes.
-    write_pregame_shots(&root, &[shot], PREGAME_KEEP_GAMES, &mut made);
+    write_pregame_ops(
+        &root,
+        &[PregameOp::Save(shot)],
+        PREGAME_KEEP_GAMES,
+        &mut made,
+    );
     assert_eq!(names_in(&root).len(), PREGAME_KEEP_GAMES);
 }
 
@@ -656,7 +957,12 @@ fn games_written_while_the_clock_is_behind_all_count_as_newest() {
             name: "mapvote_first.png",
             frame: frame(8, 8),
         };
-        write_pregame_shots(&root, &[shot], PREGAME_KEEP_GAMES, &mut made);
+        write_pregame_ops(
+            &root,
+            &[PregameOp::Save(shot)],
+            PREGAME_KEEP_GAMES,
+            &mut made,
+        );
     }
     let left = names_in(&root);
     assert_eq!(left.len(), PREGAME_KEEP_GAMES);
@@ -671,12 +977,14 @@ fn games_written_while_the_clock_is_behind_all_count_as_newest() {
 fn a_save_leaves_no_temporary_file() {
     let dir = tempfile::tempdir().unwrap();
     let root = pregame_dir(dir.path());
-    let shot = |w| PregameShot {
-        folder: "20261030_120000".to_string(),
-        name: "heroban_last.png",
-        frame: frame(w, 9),
+    let shot = |w| {
+        PregameOp::Save(PregameShot {
+            folder: "20261030_120000".to_string(),
+            name: "heroban_last.png",
+            frame: frame(w, 9),
+        })
     };
-    write_pregame_shots(
+    write_pregame_ops(
         &root,
         &[shot(10), shot(20)],
         PREGAME_KEEP_GAMES,
@@ -872,6 +1180,23 @@ fn a_select_read_two_polls_late_is_not_the_ban_results() {
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, BAN, 2);
+    run.tick(3_000, Seen::Other, 3);
+    run.tick(4_500, Seen::SelectTitle, 4);
+    run.tick(6_000, SELECT, 5);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("heroselect_first.png", 5),
+        ]
+    );
+    // That first frame with the results title is the results since
+    // alpha.1.3: the select title is read with no lag, and a half drawn
+    // one counts, so a frame showing none of it was still the results.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
     run.tick(3_000, RESULTS, 3);
     run.tick(4_500, Seen::SelectTitle, 4);
     run.tick(6_000, SELECT, 5);
@@ -880,6 +1205,7 @@ fn a_select_read_two_polls_late_is_not_the_ban_results() {
         [
             ("heroban_first.png", 1),
             ("heroban_last.png", 2),
+            ("ban_results.png", 3),
             ("heroselect_first.png", 5),
         ]
     );
@@ -1023,14 +1349,15 @@ fn ban_results_at_a_four_second_poll() {
             ("heroselect_first.png", 5),
         ]
     );
-    // Two late polls, the second showing the select title: still the select.
+    // Two late polls, the second showing the select title: that title on
+    // the very next tick confirms the results frame before it.
     let mut run = Run::polled(4_000);
     run.tick(0, BAN, 1);
     run.tick(4_000, BAN, 2);
     run.tick(8_000, RESULTS, 3);
     run.tick(12_000, Seen::SelectTitle, 4);
     run.tick(16_000, SELECT, 5);
-    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+    assert!(run.names().contains(&("ban_results.png", 3)));
 }
 
 #[test]
@@ -1044,6 +1371,7 @@ fn results_then_the_roster_then_loading_inside_the_window_are_saved() {
     run.tick(10_000, Seen::Other, 4);
     run.tick(14_000, Seen::Other, 5);
     run.tick(18_000, Seen::Loading, 6);
+    run.tick(22_000, SELECT, 7);
     assert_eq!(
         run.names(),
         [
@@ -1051,6 +1379,7 @@ fn results_then_the_roster_then_loading_inside_the_window_are_saved() {
             ("heroban_first.png", 2),
             ("ban_results.png", 3),
             ("loading.png", 6),
+            ("heroselect_first.png", 7),
         ]
     );
     // The same with the loading screen past the window (15 s plus the 4 s
@@ -1092,6 +1421,7 @@ fn the_window_adds_one_poll_to_fifteen_seconds() {
         run.tick(ms, Seen::Other, 4 + i as u32);
     }
     run.tick(24_000, Seen::Loading, 7);
+    run.tick(28_000, SELECT, 8);
     assert_eq!(
         run.names(),
         [
@@ -1099,6 +1429,7 @@ fn the_window_adds_one_poll_to_fifteen_seconds() {
             ("heroban_last.png", 2),
             ("ban_results.png", 3),
             ("loading.png", 7),
+            ("heroselect_first.png", 8),
         ]
     );
     // One more roster poll: 20 s after the results, past 19 s.
@@ -1141,11 +1472,11 @@ fn a_ban_read_lost_past_the_window_saves_no_results() {
 fn a_dead_writer_is_logged_once_and_told_apart_from_a_busy_one() {
     let mut writer = PregameWriter::dead();
     let shot = || {
-        vec![PregameShot {
+        vec![PregameOp::Save(PregameShot {
             folder: "20261030_120000".to_string(),
             name: "mapvote_first.png",
             frame: frame(4, 4),
-        }]
+        })]
     };
     assert!(writer.send(Vec::new()), "nothing to send is no failure");
     assert!(!writer.dead_logged());

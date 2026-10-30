@@ -22,6 +22,7 @@ mod end_reel_fixtures;
 mod end_title_fixtures;
 mod end_title_wiring;
 mod final_score_wiring;
+mod loading_frames;
 mod name_window_geometry;
 mod names_fallback;
 mod no_game_art;

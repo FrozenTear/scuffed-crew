@@ -9,27 +9,70 @@
 //! hands it to [`PregameTracker::observe`], which decides what to write.
 //! Writes happen only when a phase starts or ends, on one writer thread
 //! ([`PregameWriter`]) fed by a bounded queue. The tracker holds at most
-//! one frame: the latest one of the phase on screen, to write as that
-//! phase's last frame when the phase changes, or the ban-results frame
-//! until the next screen shows. With the switch off no tracker exists.
+//! one frame: the latest of the phase on screen (to write as that phase's
+//! last frame when the phase changes), the latest ban-results frame until
+//! the next screen shows, or the latest loading frame until the game
+//! starts. A ban-results frame that may still be saved later is staged on
+//! disk instead ([`PregameOp::Stage`]: a hidden `.<name>.staged` file in
+//! the game's folder, replaced by each later stage), then renamed to its
+//! name or deleted. With the switch off no tracker exists.
+//!
+//! The loading screen: the latest frame that passes the loading check is
+//! held in memory, replacing the one before (nothing is written for it
+//! yet), and saved once, as an ordinary save, only when the game starts:
+//! a hero ban or hero select read in the same game within
+//! [`LOADING_START_WAIT`] of it, the screen after loading. So an `APPLYING
+//! UPDATE` band that passes the check is replaced by the `ENTERING GAME`
+//! screen after it, even with a frame between that fails the check. A
+//! loading frame with no game start after it is dropped, and nothing is
+//! written: no start within [`LOADING_START_WAIT`] (the menu, a lobby), a
+//! release (the game closed, capture stopped, a clean shutdown), or a map
+//! vote read after it (a requeue's vote opening the next game; the
+//! loading screen comes after the vote). Dropped, the loading screen is
+//! still looked for, so a later `ENTERING GAME` in the same game is held
+//! and saved. A tracker killed between the loading screen and the game
+//! start (a crash, a kill, power loss) loses that game's loading screen;
+//! its other screens, saved as they happen, are not affected.
 //!
 //! Ban results are no phase of their own yet. The candidate is the first
 //! frame at least [`BAN_RESULTS_DELAY`] after the last ban-phase frame (in
 //! practice the next poll) that shows the ban-results title
 //! ([`super::pregame_ban_title`]: a shape rule, or example screenshots on
-//! this PC when there are any, which replace it). It is kept only when it
-//! is confirmed by one more non-phase frame before the next phase reads,
-//! and only written within [`BAN_RESULTS_WINDOW`] plus one poll interval
-//! of the candidate frame. The phase read lags a new screen by one poll,
-//! so a candidate right before the hero select read is the hero select's
-//! first frame and is dropped. A frame that shows the hero select's title
+//! this PC when there are any, which replace it). The ban icons and scores
+//! fill in below the title while the screen stays up, so each later frame
+//! with the title replaces the held one. That later frame confirms the
+//! held one, which is staged as the frame owed a write (replacing an
+//! earlier staged one); the newest frame waits for its own confirmation.
+//! Only the newest frame that is confirmed when the results end is saved,
+//! once per game: the held one when it is confirmed, the staged one
+//! otherwise. Either is only saved within [`BAN_RESULTS_WINDOW`] plus one
+//! poll interval of the first candidate frame.
+//!
+//! What confirms the held frame: a frame that shows the hero select's
+//! title on the very next tick, with no plain frame or skipped tick
+//! between. For a first candidate, also any later non-phase frame other
+//! than a select title (it is not the next screen's first frame read one
+//! poll early). For a replacement, also a later frame with the results
+//! title, but no plain frame: the replacement may be the select sliding
+//! in under a results title, and the plain frame the select's own first
+//! frame. So on the roster path (results, roster, select) the frame
+//! before the last results frame is the one saved. A release (no next
+//! screen) confirms nothing, so a lone first candidate is not saved then.
+//!
+//! The phase read lags a new screen by one poll, so a held frame right
+//! before the hero select read is the select's first frame and is not
+//! saved (the staged one is, if any): a lone first candidate right before
+//! the select read is dropped. A frame that shows the hero select's title
 //! (the words-v1 mask, read without the stability wait, and only with
 //! `reader = "new"`, which loads the mask) is the select too: it never
-//! becomes or confirms a candidate, and it ends the wait, which covers a
-//! select read that lags two polls or more. The candidate is also dropped
-//! when the ban comes back, and when that window runs out before the next
-//! screen reads. Only a map vote or a ban opens a game folder; a hero
-//! select alone is the one between rounds.
+//! becomes a candidate, and it ends the wait, which covers a select read
+//! that lags two polls or more. It confirms the held frame when it comes
+//! on the very next tick: the title is read with no lag, and the held
+//! frame did not show it, so that frame was still the results. Every
+//! ban-results frame is dropped (a staged one deleted) when the ban comes
+//! back, and when that window runs out before the next screen reads. Only
+//! a map vote or a ban opens a game folder; a hero select alone is the one
+//! between rounds.
 
 use crate::*;
 use std::time::Duration;
@@ -48,10 +91,11 @@ pub(crate) const BAN_RESULTS_DELAY: Duration = Duration::from_millis(1_000);
 
 /// The wait for a candidate ends this long plus one poll interval after the
 /// last ban-phase frame, and a candidate not settled this long plus one
-/// poll interval after its own frame is dropped (the ban read was lost:
-/// ESC, alt-tab). Measured from the candidate, and with the poll added so
-/// a next screen read 13 to 14 s after the results at 4 s polls (19 s
-/// then) still settles it.
+/// poll interval after the first candidate frame is dropped (the ban read
+/// was lost: ESC, alt-tab). A replacement does not extend it. Measured
+/// from the first candidate, and with the poll added so a next screen
+/// read 13 to 14 s after the results at 4 s polls (19 s then) still
+/// settles it.
 pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 
 /// A phase gone for at most this long and back is a detector flicker (the
@@ -59,8 +103,21 @@ pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 /// screen: a requeue's map vote, or the hero select between rounds.
 pub(crate) const PHASE_FLICKER: Duration = Duration::from_secs(12);
 
-/// Batches of shots waiting for the writer. A full queue drops the batch
-/// (logged), so frames pinned by pending writes stay bounded.
+/// The game start (a hero ban or hero select read) must come within this
+/// of the last loading pass for it to be saved; held longer with no start,
+/// it is dropped. Real games read the start about 13.5 s after the last
+/// pass at 1.5 s polls and about 16 s at 4 s polls.
+pub(crate) const LOADING_START_WAIT: Duration = Duration::from_secs(20);
+
+/// Batches of shots waiting for the writer. A full queue drops the whole
+/// batch (logged), so frames pinned by pending writes stay bounded. A
+/// dropped save is a screen lost, and still counts as saved (the loading
+/// screen too: it is not looked for again in that game). A dropped stage
+/// (ban results only) leaves the file staged before it, if any, so the
+/// saver goes back to what that file is ([`PregameTracker::stage_lost`]).
+/// A dropped promote or discard leaves its staged file in place, unsaved,
+/// until a later stage of the same name replaces it or the sweep at the
+/// next start or the next game folder deletes it.
 pub(crate) const PREGAME_QUEUE: usize = 8;
 
 /// The most the shutdown waits for the writer to finish.
@@ -74,7 +131,8 @@ const FOLDER_FORMAT: &str = "%Y%m%d_%H%M%S";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Seen {
     Phase(PregamePhase),
-    /// The loading screen ([`detect::loading_screen::is_loading_screen`]).
+    /// The loading screen ([`detect::loading_screen::is_entering_game`]:
+    /// the loading check plus where the `ENTERING GAME` text sits).
     Loading,
     /// No phase read yet, but the hero select's title is on the frame: the
     /// select before its read settles.
@@ -132,6 +190,8 @@ impl PregamePhase {
 }
 
 pub(crate) const BAN_RESULTS_NAME: &str = "ban_results.png";
+/// Saved once, when the game starts; until then the frame is held in
+/// memory only (never staged on disk).
 pub(crate) const LOADING_NAME: &str = "loading.png";
 
 /// Which frames the next tick should hand over, so a tick the tracker has
@@ -146,7 +206,7 @@ pub(crate) struct PregameWant {
     /// ban-results wait is on).
     pub(crate) select_title: bool,
     /// Look for the ban-results title on a frame that is no phase (the
-    /// wait is on and has no candidate yet).
+    /// wait is on; a frame showing it replaces a held candidate).
     pub(crate) ban_title: bool,
 }
 
@@ -193,7 +253,7 @@ pub(crate) fn classify_with(
         return Seen::Phase(p);
     }
     if want.loading
-        && detect::loading_screen::is_loading_screen(rgb)
+        && detect::loading_screen::is_entering_game(rgb)
         && !detect::match_start::passes_ban_gate(rgb)
     {
         return Seen::Loading;
@@ -239,6 +299,28 @@ pub(crate) struct PregameShot<F> {
     pub(crate) frame: F,
 }
 
+/// One step for the writer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum PregameOp<F> {
+    /// Write the frame as its name.
+    Save(PregameShot<F>),
+    /// Write the frame as the staged copy of its name ([`staged_name`]),
+    /// replacing an earlier one: not saved yet, so the tracker need not
+    /// hold it. Ban results only: the loading frame is held in memory and
+    /// saved with [`PregameOp::Save`].
+    Stage(PregameShot<F>),
+    /// Rename the staged copy of `name` to `name`.
+    Promote { folder: String, name: &'static str },
+    /// Delete the staged copy of `name`.
+    Discard { folder: String, name: &'static str },
+}
+
+/// The hidden name a frame of `name` is staged under: no game folder, no
+/// `.png`, and swept away at start and when a new game folder is made.
+pub(crate) fn staged_name(name: &str) -> String {
+    format!(".{name}.staged")
+}
+
 struct PregameGame {
     folder: String,
     last_event: Instant,
@@ -267,31 +349,68 @@ struct OnScreen<F> {
     last_is_new: bool,
 }
 
-/// The ban-results candidate frame.
+/// The ban-results candidate: the latest frame with the title (the one
+/// frame held), and where the confirmed frame before it is staged.
 struct BanResults<F> {
     frame: F,
-    /// When it was taken: the window runs from there.
+    /// When the first candidate frame was taken: the window runs from
+    /// there, and a replacement keeps it.
     taken_at: Instant,
-    /// Another non-phase frame came after it, so it is not the next
-    /// screen's first frame read one poll early.
+    /// `frame` is not the select's first frame: a later non-phase frame
+    /// other than a select title came after a first candidate, or a select
+    /// title on the very next tick.
     confirmed: bool,
+    /// `frame` replaced an earlier candidate, so a plain later frame does
+    /// not confirm it.
+    replaced: bool,
+    /// A plain frame came right after the replacement `frame`: a select
+    /// title after that no longer confirms it.
+    passed: bool,
+    /// When `frame` was taken: a select title confirms it only on the
+    /// next tick.
+    frame_at: Instant,
+    /// The game folder where the frame before `frame`, confirmed by
+    /// `frame` (a later frame with the title), is staged: saved when
+    /// `frame` is not confirmed by then, deleted otherwise.
+    owed: Option<String>,
+    /// `owed` before the latest stage: what is on disk when that stage's
+    /// batch is dropped (an earlier confirmed frame, or nothing of this
+    /// candidate).
+    owed_before: Option<String>,
+}
+
+/// The latest loading-check pass of the open game, held until the game
+/// starts (saved) or it is dropped. Replaced by each later pass.
+struct HeldLoading<F> {
+    frame: F,
+    /// When `frame` was taken.
+    at: Instant,
 }
 
 /// Decides which pre-game frames to write. Generic over the frame so tests
-/// use plain values. It holds at most one frame: the latest of the phase on
-/// screen, or the ban-results candidate (never both, no phase is on screen
-/// while a candidate waits).
+/// use plain values. It holds the latest frame of the phase on screen, the
+/// ban-results candidate, or the loading frame (never two: no phase is on
+/// screen while a candidate waits, a loading pass ends the results wait
+/// and the phase on screen, and the next phase read saves or drops the
+/// loading frame before it is held).
 pub(crate) struct PregameTracker<F> {
     game: Option<PregameGame>,
     on_screen: Option<OnScreen<F>>,
+    /// The loading frame waiting for the game to start.
+    loading: Option<HeldLoading<F>>,
     /// When the ban phase was last seen, while a ban-results frame may
     /// still come.
     ban_ended_at: Option<Instant>,
-    /// Written when the next screen shows, if confirmed; dropped when the
-    /// ban comes back (it was a flicker, not the results).
+    /// Settled when the next screen shows (the held frame if confirmed,
+    /// the staged one otherwise); dropped when the ban comes back (it was
+    /// a flicker, not the results) or the window runs out.
     ban_results: Option<BanResults<F>>,
     /// [`BAN_RESULTS_WINDOW`] plus one poll interval.
     window: Duration,
+    /// Longest gap after a candidate frame for a select title to count as
+    /// the very next tick: one and a half poll intervals, so a skipped tick
+    /// (Tab busy, a capture miss) is not mistaken for none.
+    next_tick: Duration,
 }
 
 impl<F> PregameTracker<F> {
@@ -300,9 +419,11 @@ impl<F> PregameTracker<F> {
         Self {
             game: None,
             on_screen: None,
+            loading: None,
             ban_ended_at: None,
             ban_results: None,
             window: BAN_RESULTS_WINDOW + poll,
+            next_tick: poll + poll / 2,
         }
     }
 }
@@ -314,10 +435,23 @@ impl<F: Clone> PregameTracker<F> {
             .filter(|g| now.saturating_duration_since(g.last_event) <= PREGAME_GAME_GAP)
     }
 
-    /// Whether the tracker holds a frame (for tests of the one-frame bound).
+    /// Whether the tracker holds a frame (for tests of the frame bound).
     #[cfg(test)]
     pub(crate) fn holds_frame(&self) -> bool {
-        self.on_screen.is_some() || self.ban_results.is_some()
+        self.on_screen.is_some() || self.ban_results.is_some() || self.loading.is_some()
+    }
+
+    /// Whether a loading frame is held, waiting for the game to start
+    /// (tests).
+    #[cfg(test)]
+    pub(crate) fn holds_loading(&self) -> bool {
+        self.loading.is_some()
+    }
+
+    /// Whether a ban-results frame is staged, owed a write (tests).
+    #[cfg(test)]
+    pub(crate) fn owes_frame(&self) -> bool {
+        self.ban_results.as_ref().is_some_and(|c| c.owed.is_some())
     }
 
     /// What the tick at `now` should hand over.
@@ -332,12 +466,11 @@ impl<F: Clone> PregameTracker<F> {
             .as_ref()
             .is_some_and(|s| s.phase == PregamePhase::HeroBan);
         let waiting = !game.ban_results_saved && (ban_on_screen || self.ban_ended_at.is_some());
-        let ban_title = waiting && self.ban_results.is_none();
         PregameWant {
             loading,
-            other_frame: loading || ban_title,
+            other_frame: loading || waiting,
             select_title: waiting,
-            ban_title,
+            ban_title: waiting,
         }
     }
 
@@ -349,16 +482,34 @@ impl<F: Clone> PregameTracker<F> {
         seen: Seen,
         frame: Option<F>,
         new_folder: impl FnOnce() -> String,
-    ) -> Vec<PregameShot<F>> {
+    ) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
+        // The select title is no start: it is only looked for while the
+        // ban results may come, and a loading frame ends that wait.
+        let started = matches!(
+            seen,
+            Seen::Phase(PregamePhase::HeroBan | PregamePhase::HeroSelect)
+        );
+        self.settle_loading(now, started, &mut shots);
         match seen {
             Seen::Phase(phase) => self.observe_phase(now, phase, frame, new_folder, &mut shots),
             Seen::Loading | Seen::Other | Seen::BanResults => {
                 self.observe_other(now, seen, frame, &mut shots)
             }
             Seen::SelectTitle => {
-                // The select is on screen: the results, if any, end here,
-                // and this frame confirms nothing.
+                // The select is on screen: the results, if any, end here.
+                // A candidate on the tick right before it (no plain frame
+                // between, no tick skipped), first or replacement, is
+                // confirmed: the title is read with no lag, so that frame
+                // still showed the results.
+                let next_tick = self.next_tick;
+                if let Some(c) = self
+                    .ban_results
+                    .as_mut()
+                    .filter(|c| !c.passed && now.saturating_duration_since(c.frame_at) <= next_tick)
+                {
+                    c.confirmed = true;
+                }
                 tracing::debug!(
                     target: "scuffed_stat_tracker",
                     candidate = self.ban_results.is_some(),
@@ -372,13 +523,64 @@ impl<F: Clone> PregameTracker<F> {
     }
 
     /// No frames for now (the game closed, capture stopped, shutdown):
-    /// write the phase's last frame and a confirmed ban-results frame, and
-    /// hold nothing.
-    pub(crate) fn release(&mut self, now: Instant) -> Vec<PregameShot<F>> {
+    /// write the phase's last frame and a confirmed ban-results frame (an
+    /// unconfirmed one is not: it may be the select sliding in, so the
+    /// staged frame before it is saved, if any), and hold nothing. A held
+    /// loading frame is dropped, nothing written: the game did not start
+    /// after it.
+    pub(crate) fn release(&mut self, now: Instant) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
         self.end_phase(now, &mut shots);
         self.settle_ban_results(now, &mut shots);
+        self.drop_loading();
         shots
+    }
+
+    /// Save the held loading frame, once, when the game starts (`started`:
+    /// a hero ban or hero select read, the screen after loading) in the
+    /// game open at `now`, within [`LOADING_START_WAIT`] of the last pass;
+    /// saved, the loading screen is no longer looked for in this game.
+    /// Drop it when no start came within [`LOADING_START_WAIT`] (a start after
+    /// that too), or a start came after the game closed (a hero ban then
+    /// opens the next game; a lone hero select opens none).
+    fn settle_loading(&mut self, now: Instant, started: bool, shots: &mut Vec<PregameOp<F>>) {
+        let open = self.game_open(now).is_some();
+        let Some(at) = self.loading.as_ref().map(|l| l.at) else {
+            return;
+        };
+        let over = now.saturating_duration_since(at) > LOADING_START_WAIT;
+        if started && open && !over {
+            if let (Some(game), Some(held)) = (self.game.as_mut(), self.loading.take()) {
+                game.loading_saved = true;
+                shots.push(PregameOp::Save(PregameShot {
+                    folder: game.folder.clone(),
+                    name: LOADING_NAME,
+                    frame: held.frame,
+                }));
+            }
+        } else if started || over {
+            self.drop_loading();
+        }
+    }
+
+    /// A batch that staged `name` was dropped (the writer's queue was
+    /// full), so the staged file on disk, if any, is an older frame. For
+    /// the ban results (the only frame staged), the owed frame goes back
+    /// to what it was before that stage: the earlier confirmed frame
+    /// staged for this candidate, still a results frame, or none.
+    pub(crate) fn stage_lost(&mut self, name: &str) {
+        if name == BAN_RESULTS_NAME
+            && let Some(c) = self.ban_results.as_mut()
+        {
+            c.owed = c.owed_before.take();
+        }
+    }
+
+    /// Drop the held loading frame, if any; nothing is on disk for it. The
+    /// loading screen is still looked for, so a later pass in this game is
+    /// held again.
+    fn drop_loading(&mut self) {
+        self.loading = None;
     }
 
     fn observe_phase(
@@ -387,13 +589,18 @@ impl<F: Clone> PregameTracker<F> {
         phase: PregamePhase,
         frame: Option<F>,
         new_folder: impl FnOnce() -> String,
-        shots: &mut Vec<PregameShot<F>>,
+        shots: &mut Vec<PregameOp<F>>,
     ) {
         if phase == PregamePhase::HeroBan {
             // The ban is back, late or not: the candidate was a frame
             // inside it, not the results.
-            self.ban_results = None;
-            self.ban_ended_at = None;
+            self.drop_ban_results(shots);
+        }
+        if phase == PregamePhase::MapVote {
+            // The loading screen comes after the vote, so a pass before
+            // this vote was not this game's loading screen (a requeue's
+            // vote opens the next game).
+            self.drop_loading();
         }
         if self.on_screen.as_ref().is_some_and(|s| s.phase != phase) {
             self.end_phase(now, shots);
@@ -450,11 +657,11 @@ impl<F: Clone> PregameTracker<F> {
             }
             None if game.firsts & phase.bit() == 0 => {
                 game.firsts |= phase.bit();
-                shots.push(PregameShot {
+                shots.push(PregameOp::Save(PregameShot {
                     folder: game.folder.clone(),
                     name: phase.first_name(),
                     frame: frame.clone(),
-                });
+                }));
                 // Same frame: a one-tick phase writes no last.
                 self.on_screen = Some(OnScreen {
                     phase,
@@ -479,13 +686,19 @@ impl<F: Clone> PregameTracker<F> {
         now: Instant,
         seen: Seen,
         frame: Option<F>,
-        shots: &mut Vec<PregameShot<F>>,
+        shots: &mut Vec<PregameOp<F>>,
     ) {
         self.end_phase(now, shots);
-        // This frame is no phase, so a waiting candidate was not the next
-        // phase's first frame.
+        // This frame is no phase, so a first candidate was not the next
+        // phase's first frame. A replacement may be the select sliding in
+        // under the results title, and this frame the select's own first
+        // frame: only a later results frame or a select title confirms it.
         if let Some(c) = self.ban_results.as_mut() {
-            c.confirmed = true;
+            if c.replaced {
+                c.passed = seen != Seen::BanResults;
+            } else {
+                c.confirmed = true;
+            }
         }
         if self.game_open(now).is_none() || seen == Seen::Loading {
             self.settle_ban_results(now, shots);
@@ -496,73 +709,125 @@ impl<F: Clone> PregameTracker<F> {
         {
             // No next screen in time: the ban read was lost (ESC,
             // alt-tab), and the candidate is a frame from that gap.
-            self.ban_results = None;
-            self.ban_ended_at = None;
+            self.drop_ban_results(shots);
         } else if let Some(ended) = self.ban_ended_at {
             let since = now.saturating_duration_since(ended);
             if since > self.window && self.ban_results.is_none() {
                 // No results title in time: stop looking.
                 self.ban_ended_at = None;
-            } else if since >= BAN_RESULTS_DELAY
-                && seen == Seen::BanResults
-                && self.ban_results.is_none()
+            } else if seen == Seen::BanResults
                 && let Some(frame) = frame.clone()
             {
-                self.ban_results = Some(BanResults {
-                    frame,
-                    taken_at: now,
-                    confirmed: false,
-                });
+                match (self.ban_results.as_mut(), self.game.as_ref()) {
+                    // Still the results, more of the bans shown: the held
+                    // frame is confirmed and staged, owed a write (over an
+                    // earlier staged one), and this one waits for its own
+                    // confirmation.
+                    (Some(c), Some(game)) => {
+                        shots.push(PregameOp::Stage(PregameShot {
+                            folder: game.folder.clone(),
+                            name: BAN_RESULTS_NAME,
+                            frame: std::mem::replace(&mut c.frame, frame),
+                        }));
+                        c.owed_before = c.owed.replace(game.folder.clone());
+                        c.confirmed = false;
+                        c.replaced = true;
+                        c.passed = false;
+                        c.frame_at = now;
+                    }
+                    (None, _) if since >= BAN_RESULTS_DELAY => {
+                        self.ban_results = Some(BanResults {
+                            frame,
+                            taken_at: now,
+                            confirmed: false,
+                            replaced: false,
+                            passed: false,
+                            frame_at: now,
+                            owed: None,
+                            owed_before: None,
+                        });
+                    }
+                    _ => {}
+                }
             }
         }
         if self.game_open(now).is_none() {
             return;
         }
-        let Some(game) = self.game.as_mut() else {
+        let Some(game) = self.game.as_ref() else {
             return;
         };
+        // Held in memory, replacing an earlier pass (an update band before
+        // the ENTERING GAME screen can pass the check too); nothing is
+        // written until the game starts.
         if seen == Seen::Loading
             && !game.loading_saved
             && let Some(frame) = frame
         {
-            game.loading_saved = true;
-            shots.push(PregameShot {
-                folder: game.folder.clone(),
-                name: LOADING_NAME,
-                frame,
-            });
+            self.loading = Some(HeldLoading { frame, at: now });
         }
     }
 
-    /// Write the waiting ban-results frame when it is confirmed and still
-    /// inside the window (15 s plus one poll) at `now`, drop it otherwise,
-    /// and stop waiting for one. Nothing else ever writes it, so a dropped
-    /// candidate is never saved later (game end, shutdown).
-    fn settle_ban_results(&mut self, now: Instant, shots: &mut Vec<PregameShot<F>>) {
+    /// Save the held ban-results frame when it is confirmed, the staged one
+    /// otherwise, while inside the window (15 s plus one poll from the
+    /// first candidate) at `now`; drop them otherwise (the staged one
+    /// deleted), and stop waiting for one. Nothing else ever saves them,
+    /// so a dropped candidate is never saved later (game end, shutdown).
+    fn settle_ban_results(&mut self, now: Instant, shots: &mut Vec<PregameOp<F>>) {
         self.ban_ended_at = None;
-        let Some(c) = self
-            .ban_results
-            .take()
-            .filter(|c| c.confirmed && now.saturating_duration_since(c.taken_at) <= self.window)
-        else {
+        let Some(c) = self.ban_results.take() else {
             return;
         };
-        let Some(game) = self.game.as_mut() else {
-            return;
-        };
-        if !game.ban_results_saved {
-            game.ban_results_saved = true;
-            shots.push(PregameShot {
-                folder: game.folder.clone(),
+        let inside = now.saturating_duration_since(c.taken_at) <= self.window;
+        let game = self
+            .game
+            .as_mut()
+            .filter(|g| inside && !g.ban_results_saved);
+        match (game, c.confirmed, c.owed) {
+            (Some(game), true, owed) => {
+                game.ban_results_saved = true;
+                shots.push(PregameOp::Save(PregameShot {
+                    folder: game.folder.clone(),
+                    name: BAN_RESULTS_NAME,
+                    frame: c.frame,
+                }));
+                if let Some(folder) = owed {
+                    shots.push(PregameOp::Discard {
+                        folder,
+                        name: BAN_RESULTS_NAME,
+                    });
+                }
+            }
+            (Some(game), false, Some(folder)) => {
+                game.ban_results_saved = true;
+                shots.push(PregameOp::Promote {
+                    folder,
+                    name: BAN_RESULTS_NAME,
+                });
+            }
+            (_, _, Some(folder)) => shots.push(PregameOp::Discard {
+                folder,
                 name: BAN_RESULTS_NAME,
-                frame: c.frame,
+            }),
+            _ => {}
+        }
+    }
+
+    /// Drop the ban-results candidate (deleting its staged frame) and stop
+    /// waiting for one.
+    fn drop_ban_results(&mut self, shots: &mut Vec<PregameOp<F>>) {
+        self.ban_ended_at = None;
+        if let Some(folder) = self.ban_results.take().and_then(|c| c.owed) {
+            shots.push(PregameOp::Discard {
+                folder,
+                name: BAN_RESULTS_NAME,
             });
         }
     }
 
     /// The phase on screen ended: write its last frame when that is not
     /// the first one, and start the ban-results wait after a ban.
-    fn end_phase(&mut self, now: Instant, shots: &mut Vec<PregameShot<F>>) {
+    fn end_phase(&mut self, now: Instant, shots: &mut Vec<PregameOp<F>>) {
         let Some(s) = self.on_screen.take() else {
             return;
         };
@@ -573,11 +838,11 @@ impl<F: Clone> PregameTracker<F> {
             self.ban_ended_at = game.last_seen[s.phase.index()].or(Some(now));
         }
         if s.last_is_new {
-            shots.push(PregameShot {
+            shots.push(PregameOp::Save(PregameShot {
                 folder: game.folder.clone(),
                 name: s.phase.last_name(),
                 frame: s.last,
-            });
+            }));
         }
     }
 }
@@ -646,17 +911,26 @@ fn save_pregame_order(root: &std::path::Path, made: &[String]) {
 /// for folders not in `made`, then `made` (the folders in the order they
 /// were made, oldest first) after them all: a clock set back gives a new
 /// folder an old name, and it still goes last. The newest of `made` is
-/// never deleted.
+/// never deleted. A folder with only staged or temporary files in it
+/// ([`only_leftovers`]) does not count.
 pub(crate) fn prune_pregame_games(root: &std::path::Path, keep: usize, made: &[String]) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    let mut older: Vec<String> = entries
+    let games: Vec<String> = entries
         .flatten()
         // `DirEntry::file_type` does not follow symlinks.
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|name| is_game_folder(name))
+        .collect();
+    // The game in progress: never deleted, even with nothing saved yet.
+    let newest = made.iter().rev().find(|name| games.contains(name));
+    // A folder holding only staged or temporary files is no saved game: it
+    // takes no slot and pushes no game out ([`sweep_staged`] deletes it).
+    let mut older: Vec<String> = games
+        .into_iter()
+        .filter(|name| !only_leftovers(&root.join(name)))
         .collect();
     // Each folder once, even if `made` repeats it.
     let mut ours: Vec<String> = Vec::new();
@@ -671,7 +945,6 @@ pub(crate) fn prune_pregame_games(root: &std::path::Path, keep: usize, made: &[S
     if total <= keep {
         return;
     }
-    let newest = ours.last();
     for name in older
         .iter()
         .chain(ours.iter())
@@ -684,44 +957,149 @@ pub(crate) fn prune_pregame_games(root: &std::path::Path, keep: usize, made: &[S
     }
 }
 
-/// Write `shots` under `root` at full size, each to a temporary file then
-/// renamed, so a crash leaves no half PNG under the final name. After a
-/// new game folder (added to `made`), keep the newest `keep` and save the
-/// order.
-pub(crate) fn write_pregame_shots(
-    root: &std::path::Path,
-    shots: &[PregameShot<Arc<image::DynamicImage>>],
-    keep: usize,
-    made: &mut Vec<String>,
-) {
-    for shot in shots {
-        let dir = root.join(&shot.folder);
-        let new_folder = !dir.is_dir();
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            tracing::debug!(target: "scuffed_stat_tracker", error = %e, "pre-game folder not made");
+/// A staged frame ([`staged_name`]) or a temporary file of a write (a
+/// dot name ending `.tmp`): never a saved screen.
+fn is_leftover(name: &str) -> bool {
+    name.starts_with('.') && (name.ends_with(".staged") || name.ends_with(".tmp"))
+}
+
+/// Whether `dir` holds files and all of them are leftovers
+/// ([`is_leftover`]). An empty or unreadable folder, or one with anything
+/// else in it (a saved screen, a subfolder), is not.
+fn only_leftovers(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut any = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let leftover = entry.file_name().to_str().is_some_and(is_leftover)
+            && entry.file_type().is_ok_and(|t| t.is_file());
+        if !leftover {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Delete what a write left half done under `root`: staged frames
+/// ([`staged_name`]) and temporary files, in `root` itself and in every
+/// game folder but `except`, and then each of those folders it left
+/// empty. Run at start and when a new game folder is made, since a staged
+/// frame belongs to the game in progress only. A saved screen is never
+/// touched, and a folder with one in it is never deleted.
+pub(crate) fn sweep_staged(root: &std::path::Path, except: Option<&str>) {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_file() && is_leftover(&name) {
+            // The order file's temporary copy.
+            let _ = std::fs::remove_file(entry.path());
             continue;
         }
-        let tmp = dir.join(format!(".{}.tmp", shot.name));
-        let saved = shot
-            .frame
-            .save_with_format(&tmp, image::ImageFormat::Png)
-            .map_err(|e| e.to_string())
-            .and_then(|()| std::fs::rename(&tmp, dir.join(shot.name)).map_err(|e| e.to_string()));
-        if let Err(e) = saved {
-            let _ = std::fs::remove_file(&tmp);
-            tracing::debug!(target: "scuffed_stat_tracker", error = %e, "pre-game frame not saved");
+        if !kind.is_dir() || !is_game_folder(&name) || except == Some(name.as_str()) {
+            continue;
         }
-        if new_folder {
-            made.retain(|name| name != &shot.folder);
-            made.push(shot.folder.clone());
-            prune_pregame_games(root, keep, made);
-            made.retain(|name| root.join(name).is_dir());
-            save_pregame_order(root, made);
+        let Ok(files) = std::fs::read_dir(entry.path()) else {
+            continue;
+        };
+        let mut swept = false;
+        for file in files.flatten() {
+            let leftover = file.file_name().to_str().is_some_and(is_leftover);
+            if leftover && file.file_type().is_ok_and(|t| t.is_file()) {
+                swept |= std::fs::remove_file(file.path()).is_ok();
+            }
+        }
+        if swept {
+            // Only an empty folder goes: `remove_dir` fails on any other.
+            let _ = std::fs::remove_dir(entry.path());
         }
     }
 }
 
-pub(crate) type ShotBatch = Vec<PregameShot<Arc<image::DynamicImage>>>;
+/// Write `frame` under `root` at full size as `<folder>/<file>`, to a
+/// temporary file then renamed, so a crash leaves no half PNG under the
+/// final name. After a new game folder (added to `made`), keep the newest
+/// `keep`, save the order and sweep staged frames left in the others.
+fn write_frame(
+    root: &std::path::Path,
+    folder: &str,
+    file: &str,
+    frame: &image::DynamicImage,
+    keep: usize,
+    made: &mut Vec<String>,
+) {
+    let dir = root.join(folder);
+    let new_folder = !dir.is_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::debug!(target: "scuffed_stat_tracker", error = %e, "pre-game folder not made");
+        return;
+    }
+    let tmp = dir.join(format!(".{file}.tmp"));
+    let saved = frame
+        .save_with_format(&tmp, image::ImageFormat::Png)
+        .map_err(|e| e.to_string())
+        .and_then(|()| std::fs::rename(&tmp, dir.join(file)).map_err(|e| e.to_string()));
+    if let Err(e) = saved {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::debug!(target: "scuffed_stat_tracker", error = %e, "pre-game frame not saved");
+    }
+    if new_folder {
+        made.retain(|name| name != folder);
+        made.push(folder.to_string());
+        prune_pregame_games(root, keep, made);
+        made.retain(|name| root.join(name).is_dir());
+        save_pregame_order(root, made);
+        sweep_staged(root, Some(folder));
+    }
+}
+
+/// Carry out `ops` under `root`, in order: saves and stages through
+/// [`write_frame`], a promote as one rename of the staged frame, a discard
+/// as its delete. A stage first deletes the staged frame it replaces, so a
+/// stage whose write fails leaves none, and a promote or discard with no
+/// staged frame changes nothing: an older frame is never saved in place of
+/// a newer one that failed to write.
+pub(crate) fn write_pregame_ops(
+    root: &std::path::Path,
+    ops: &[PregameOp<Arc<image::DynamicImage>>],
+    keep: usize,
+    made: &mut Vec<String>,
+) {
+    for op in ops {
+        match op {
+            PregameOp::Save(shot) => {
+                write_frame(root, &shot.folder, shot.name, &shot.frame, keep, made)
+            }
+            PregameOp::Stage(shot) => {
+                let staged = staged_name(shot.name);
+                let _ = std::fs::remove_file(root.join(&shot.folder).join(&staged));
+                write_frame(root, &shot.folder, &staged, &shot.frame, keep, made)
+            }
+            PregameOp::Promote { folder, name } => {
+                let dir = root.join(folder);
+                if let Err(e) = std::fs::rename(dir.join(staged_name(name)), dir.join(name)) {
+                    tracing::debug!(target: "scuffed_stat_tracker", error = %e, "pre-game staged frame not saved");
+                }
+            }
+            PregameOp::Discard { folder, name } => {
+                let _ = std::fs::remove_file(root.join(folder).join(staged_name(name)));
+            }
+        }
+    }
+}
+
+pub(crate) type ShotBatch = Vec<PregameOp<Arc<image::DynamicImage>>>;
 
 /// One thread writes every batch in order, so two writes of the same
 /// `*_last.png` never overlap. The queue is bounded by [`PREGAME_QUEUE`].
@@ -740,8 +1118,10 @@ impl PregameWriter {
             .spawn(move || {
                 // Game folders in the order they were made, oldest first.
                 let mut made = load_pregame_order(&root);
+                // Staged frames of a run that ended mid-game.
+                sweep_staged(&root, None);
                 for batch in rx {
-                    write_pregame_shots(&root, &batch, PREGAME_KEEP_GAMES, &mut made);
+                    write_pregame_ops(&root, &batch, PREGAME_KEEP_GAMES, &mut made);
                 }
             })?;
         Ok(Self {
@@ -751,9 +1131,10 @@ impl PregameWriter {
         })
     }
 
-    /// Queue `shots`; false when the queue is full or the writer is gone.
-    /// A full queue is logged at debug each time; a writer thread that
-    /// ended (a panic) is logged once at warn, and no later batch is sent.
+    /// Queue `shots`; false when the queue is full or the writer is gone,
+    /// and then none of the batch is written. A full queue is logged at
+    /// debug each time; a writer thread that ended (a panic) is logged
+    /// once at warn, and no later batch is sent.
     pub(crate) fn send(&mut self, shots: ShotBatch) -> bool {
         if shots.is_empty() {
             return true;
@@ -875,8 +1256,29 @@ impl PregameDump {
         }
     }
 
+    /// A saver writing through `writer` with no examples (tests).
+    #[cfg(test)]
+    pub(crate) fn with_writer(
+        root: std::path::PathBuf,
+        poll: Duration,
+        writer: PregameWriter,
+    ) -> Self {
+        Self {
+            root,
+            tracker: PregameTracker::new(poll),
+            writer,
+            examples: Arc::default(),
+        }
+    }
+
     pub(crate) fn want(&self, now: Instant) -> PregameWant {
         self.tracker.want(now)
+    }
+
+    /// The tracker (tests).
+    #[cfg(test)]
+    pub(crate) fn tracker(&self) -> &PregameTracker<Arc<image::DynamicImage>> {
+        &self.tracker
     }
 
     /// The ban-results title examples, for the poll's blocking read.
@@ -895,14 +1297,31 @@ impl PregameDump {
         let shots = self
             .tracker
             .observe(now, seen, frame, || unique_pregame_folder(root, Utc::now()));
-        self.writer.send(shots);
+        self.send(shots);
     }
 
     /// The game closed or capture stopped: write what is owed and hold no
     /// frame.
     pub(crate) fn release(&mut self, now: Instant) {
         let shots = self.tracker.release(now);
-        self.writer.send(shots);
+        self.send(shots);
+    }
+
+    /// Queue `shots`; when the batch is dropped, the tracker forgets each
+    /// frame it staged.
+    fn send(&mut self, shots: ShotBatch) {
+        let staged: Vec<&'static str> = shots
+            .iter()
+            .filter_map(|op| match op {
+                PregameOp::Stage(shot) => Some(shot.name),
+                _ => None,
+            })
+            .collect();
+        if !self.writer.send(shots) {
+            for name in staged {
+                self.tracker.stage_lost(name);
+            }
+        }
     }
 
     /// Shutdown: write what is owed and wait up to `within` for the queue.
