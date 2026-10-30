@@ -258,7 +258,7 @@ fn the_screens_around_each_game_copy_is_plain() {
     assert_eq!(PREGAME_SCREENS_LABEL, "Save screens around each game");
     for words in [
         "loading screen of each game and the screens after it in debug/pregame",
-        "keeping the newest 20 games (up to about 3 to 5 GB)",
+        "keeping the newest 20 games (up to about 4 to 7 GB at 1440p, about 9 to 15 GB at 4K)",
         "other players' names",
         "stay on this PC only",
         "Turning it off keeps the saved pictures.",

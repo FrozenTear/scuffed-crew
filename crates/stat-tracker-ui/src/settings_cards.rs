@@ -446,9 +446,10 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
 /// pre-game screens and the screens after each match.
 pub(crate) const PREGAME_SCREENS_LABEL: &str = "Save screens around each game";
 
-/// Help under [`PREGAME_SCREENS_LABEL`]. The size: up to 40 post-game and
-/// about 8 pre-game frames a game, 3 to 5 MB each at 1440p, 20 games.
-pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, hero select and loading screen of each game and the screens after it in debug/pregame, keeping the newest 20 games (up to about 3 to 5 GB). They show other players' names and stay on this PC only. Turning it off keeps the saved pictures. Leave it off unless someone asked for them.";
+/// Help under [`PREGAME_SCREENS_LABEL`]. The size: up to 60 post-game and
+/// about 8 pre-game frames a game, 3 to 5 MB each at 1440p (about 2.25
+/// times that at 4K), 20 games.
+pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, hero select and loading screen of each game and the screens after it in debug/pregame, keeping the newest 20 games (up to about 4 to 7 GB at 1440p, about 9 to 15 GB at 4K). They show other players' names and stay on this PC only. Turning it off keeps the saved pictures. Leave it off unless someone asked for them.";
 
 /// Troubleshooting: debug images, screens around each game, the extra number
 /// reader, then Report a problem, About and Uninstall. Demo draws them
