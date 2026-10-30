@@ -187,7 +187,7 @@ fn each_phase_saves_its_first_and_last_frame_once() {
     run.tick(12_000, Seen::Loading, 13);
     run.tick(13_000, Seen::Other, 14);
     // No hero ban or select read within 12 s: the game did not start after
-    // the loading screen, so its staged frame is dropped.
+    // the loading screen, so its held frame is dropped.
     run.tick(25_000, Seen::Other, 15);
     assert_eq!(
         run.names(),

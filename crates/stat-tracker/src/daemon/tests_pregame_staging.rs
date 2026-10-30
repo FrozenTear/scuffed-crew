@@ -1,8 +1,8 @@
-//! Pre-game saver tests for frames staged on disk until they are known to
-//! be saved: a lone ban-results frame, what is left on disk after each way
-//! the ban results end, the loading screen kept only when the game starts
-//! (synthetic `ENTERING GAME` and `APPLYING UPDATE` frames made in code),
-//! and leftovers of a stopped run.
+//! Pre-game saver tests for frames kept until they are known to be saved:
+//! a lone ban-results frame and what is left on disk after each way the
+//! ban results end (staged on disk), the loading screen held in memory and
+//! saved only when the game starts (synthetic `ENTERING GAME` and
+//! `APPLYING UPDATE` frames made in code), and leftovers of a stopped run.
 
 use super::pregame_dump::*;
 use super::tests_loading_stand_ins::*;
@@ -135,6 +135,7 @@ async fn stale_staged_frames_are_swept_and_never_count_as_games() {
     let root = pregame_dir(dir.path());
     let old = root.join("20261001_000000");
     std::fs::create_dir_all(&old).unwrap();
+    // A staged loading frame is only left by an older build.
     let stale = [
         staged_name(BAN_RESULTS_NAME),
         staged_name(LOADING_NAME),
@@ -274,7 +275,7 @@ fn a_staged_file_never_makes_retention_delete_a_saved_game() {
     let second = game_with(&root, "20261002_000000", &["loading.png"]);
     let stage = PregameOp::Stage(PregameShot {
         folder: "20261003_000000".to_string(),
-        name: LOADING_NAME,
+        name: BAN_RESULTS_NAME,
         frame: frame(8),
     });
     write_pregame_ops(&root, &[stage], 2, &mut Vec::new());
@@ -282,7 +283,7 @@ fn a_staged_file_never_makes_retention_delete_a_saved_game() {
     assert_eq!(all_in(&second), ["loading.png"]);
     assert_eq!(
         all_in(&root.join("20261003_000000")),
-        [staged_name(LOADING_NAME)]
+        [staged_name(BAN_RESULTS_NAME)]
     );
 }
 
@@ -484,13 +485,15 @@ async fn a_requeue_vote_after_an_update_band_drops_it() {
     assert!(folders[0].files.iter().all(|f| !f.starts_with('.')));
     assert!(folders[1].loading.as_ref() == Some(&entering_game_slab(1280, 720)));
     assert!(folders[1].files.iter().all(|f| !f.starts_with('.')));
-    // The tracker deletes the band's staged frame itself, not only the
-    // sweep when the next folder is made.
+    // The tracker drops the band itself at the vote, writing nothing for
+    // it.
     let mut run = Run::new();
     run.tick(0, Seen::Phase(PregamePhase::MapVote), 1);
     run.tick(11_000, Seen::Loading, 2);
+    assert!(run.tracker.holds_loading());
     run.tick(13_000, Seen::Phase(PregamePhase::MapVote), 3);
     assert_eq!(run.games, 2);
+    assert!(!run.tracker.holds_loading());
     assert!(run.staged.is_empty(), "{:?}", run.staged);
     assert!(run.names().iter().all(|(n, _)| *n != LOADING_NAME));
 }
@@ -534,7 +537,7 @@ async fn entering_game_saves_its_last_pass_when_the_game_starts() {
 #[tokio::test]
 async fn entering_game_after_a_dropped_update_band_is_still_saved() {
     // The band is dropped at 15.5 s (no start in 12 s); the loading screen
-    // is still looked for, so ENTERING GAME after it is staged and saved.
+    // is still looked for, so ENTERING GAME after it is held and saved.
     let mut steps = vec![frame_step(2_000, update_band())];
     for ms in (3_500..=15_500).step_by(1_500) {
         steps.push(frame_step(ms, plain()));
@@ -545,10 +548,10 @@ async fn entering_game_after_a_dropped_update_band_is_still_saved() {
 }
 
 #[tokio::test]
-async fn a_loading_frame_is_held_nowhere_once_it_is_staged() {
-    // Each pass moves into its stage: once the writer has staged it on
-    // disk, no copy is left in the saver (the tracker, the game, the
-    // queue). Also with a ban-results frame held just before.
+async fn only_the_latest_loading_frame_is_held() {
+    // Each pass replaces the one before in memory: after every tick the
+    // saver (tracker, game, queue) holds exactly one loading frame, the
+    // newest. Also with a ban-results frame held just before.
     let dir = tempfile::tempdir().unwrap();
     let mut dump = PregameDump::new(true, dir.path(), POLL).unwrap();
     let start = Instant::now();
@@ -562,57 +565,193 @@ async fn a_loading_frame_is_held_nowhere_once_it_is_staged() {
     dump.observe(at(1_500), BAN, Some(shown(&vote)));
     dump.observe(at(3_000), RESULTS, Some(shown(&vote)));
     let mut handed: Vec<Arc<image::DynamicImage>> = Vec::new();
-    for (k, ms) in [4_500, 6_000, 7_500].into_iter().enumerate() {
-        let frame = shown(&entering_game_slab(320 + 32 * k as u32, 180));
+    for k in 0..6u32 {
+        let frame = shown(&entering_game_slab(320 + 32 * k, 180));
         handed.push(Arc::clone(&frame));
-        dump.observe(at(ms), Seen::Loading, Some(frame));
-        let mut held = handed.len();
+        dump.observe(at(4_500 + 1_500 * u64::from(k)), Seen::Loading, Some(frame));
+        let held: Vec<usize> = (0..handed.len())
+            .filter(|&i| Arc::strong_count(&handed[i]) > 1)
+            .collect();
+        assert_eq!(held, [k as usize], "pass {k}: the newest, and only it");
+    }
+    dump.observe(at(13_500), SELECT, Some(shown(&vote)));
+    assert!(dump.finish(Duration::from_secs(30)).await);
+    assert!(handed.iter().all(|f| Arc::strong_count(f) == 1));
+}
+
+/// A writer that queues batches nobody writes, with the queue empty, and
+/// the saver on it.
+fn counted_dump(dir: &std::path::Path) -> (PregameDump, std::sync::mpsc::Receiver<ShotBatch>) {
+    let (writer, queue) = PregameWriter::stalled();
+    (
+        PregameDump::with_writer(pregame_dir(dir), POLL, writer),
+        queue,
+    )
+}
+
+/// The kind of every op naming the loading screen.
+fn loading_ops(ops: &[PregameOp<Arc<image::DynamicImage>>]) -> Vec<&'static str> {
+    ops.iter()
+        .filter_map(|op| match op {
+            PregameOp::Save(s) if s.name == LOADING_NAME => Some("Save"),
+            PregameOp::Stage(s) if s.name == LOADING_NAME => Some("Stage"),
+            PregameOp::Promote { name, .. } if *name == LOADING_NAME => Some("Promote"),
+            PregameOp::Discard { name, .. } if *name == LOADING_NAME => Some("Discard"),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn loading_passes_write_nothing_until_one_save_at_the_game_start() {
+    // A map vote, then seven loading passes (an update band, then ENTERING
+    // GAME): the writer gets no batch at all for them. The hero select
+    // read then queues one batch with exactly one op for the loading
+    // screen: a save of the last pass.
+    let dir = tempfile::tempdir().unwrap();
+    let (mut dump, queue) = counted_dump(dir.path());
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    dump.observe(at(0), Seen::Phase(PregamePhase::MapVote), Some(frame(8)));
+    assert_eq!(queue.try_iter().count(), 1, "the vote's first frame");
+    for k in 0..7u32 {
+        dump.observe(
+            at(1_500 + 1_500 * u64::from(k)),
+            Seen::Loading,
+            Some(frame(20 + k)),
+        );
+    }
+    let during: Vec<ShotBatch> = queue.try_iter().collect();
+    assert!(during.is_empty(), "{during:?}");
+    dump.observe(at(12_000), SELECT, Some(frame(9)));
+    let at_start: Vec<_> = queue.try_iter().flatten().collect();
+    assert_eq!(loading_ops(&at_start), ["Save"], "{at_start:?}");
+    let saved = at_start.iter().find_map(|op| match op {
+        PregameOp::Save(s) if s.name == LOADING_NAME => Some(s.frame.width()),
+        _ => None,
+    });
+    assert_eq!(saved, Some(26), "the last pass");
+    // Saved: nothing more is held or looked for in this game.
+    assert!(!dump_holds_loading(&dump));
+    dump.observe(at(13_500), Seen::Loading, Some(frame(40)));
+    let after: Vec<_> = queue.try_iter().flatten().collect();
+    assert!(loading_ops(&after).is_empty(), "{after:?}");
+}
+
+fn dump_holds_loading(dump: &PregameDump) -> bool {
+    dump.tracker().holds_loading()
+}
+
+#[test]
+fn a_dropped_loading_frame_writes_nothing() {
+    // Each way a held loading frame ends without a game start queues no op
+    // for it at all, and the saver holds no loading frame after it.
+    enum End {
+        Timeout,
+        Release,
+        Requeue,
+        LateStart,
+    }
+    for end in [End::Timeout, End::Release, End::Requeue, End::LateStart] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut dump, queue) = counted_dump(dir.path());
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        dump.observe(at(0), Seen::Phase(PregamePhase::MapVote), Some(frame(8)));
+        dump.observe(at(1_500), Seen::Loading, Some(frame(9)));
+        dump.observe(at(3_000), Seen::Loading, Some(frame(10)));
+        assert!(dump_holds_loading(&dump));
+        match end {
+            End::Timeout => {
+                for ms in (4_500..=16_500).step_by(1_500) {
+                    dump.observe(at(ms), Seen::Other, None);
+                }
+            }
+            End::Release => dump.release(at(4_500)),
+            End::Requeue => dump.observe(
+                at(16_000),
+                Seen::Phase(PregamePhase::MapVote),
+                Some(frame(11)),
+            ),
+            End::LateStart => dump.observe(at(15_500), BAN, Some(frame(11))),
+        }
+        assert!(!dump_holds_loading(&dump));
+        let ops: Vec<_> = queue.try_iter().flatten().collect();
+        assert!(loading_ops(&ops).is_empty(), "{ops:?}");
+    }
+}
+
+#[tokio::test]
+async fn loading_png_is_never_on_disk_before_the_game_starts() {
+    // Through the real writer: the folder is watched after every pass,
+    // once the writer is done with every pass before the newest, and no
+    // loading file (saved, staged or temporary) is ever in it. The game
+    // start then saves the last pass, and nothing else is left.
+    let dir = tempfile::tempdir().unwrap();
+    let mut dump = PregameDump::new(true, dir.path(), POLL).unwrap();
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let vote = image::RgbImage::from_pixel(64, 36, image::Rgb([20, 30, 60]));
+    dump.observe(
+        at(0),
+        Seen::Phase(PregamePhase::MapVote),
+        Some(shown(&vote)),
+    );
+    dump.observe(
+        at(1_500),
+        Seen::Phase(PregamePhase::MapVote),
+        Some(shown(&vote)),
+    );
+    let root = pregame_dir(dir.path());
+    let listed = || -> Vec<String> {
+        std::fs::read_dir(&root)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|e| e.path().is_dir())
+            .flat_map(|e| all_in(&e.path()))
+            .collect()
+    };
+    let mut handed: Vec<Arc<image::DynamicImage>> = Vec::new();
+    for k in 0..6u32 {
+        let frame = shown(&entering_game_slab(320 + 32 * k, 180));
+        handed.push(Arc::clone(&frame));
+        dump.observe(at(3_000 + 1_500 * u64::from(k)), Seen::Loading, Some(frame));
         for _ in 0..500 {
-            held = handed.iter().filter(|f| Arc::strong_count(f) > 1).count();
-            if held == 0 {
+            let busy = handed[..handed.len() - 1]
+                .iter()
+                .any(|f| Arc::strong_count(f) > 1);
+            if !busy && listed().iter().any(|n| n == "mapvote_last.png") {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(held, 0, "pass {k}: a loading frame is still held");
+        let files = listed();
+        assert!(files.iter().any(|n| n == "mapvote_last.png"), "{files:?}");
+        assert!(
+            files.iter().all(|n| !n.contains("loading")),
+            "pass {k}: {files:?}"
+        );
     }
-    dump.observe(at(9_000), SELECT, Some(shown(&vote)));
+    dump.observe(at(12_000), SELECT, Some(shown(&vote)));
     assert!(dump.finish(Duration::from_secs(30)).await);
-}
-
-#[test]
-fn a_dropped_loading_stage_never_saves_the_older_staged_frame() {
-    // The queue is full when ENTERING GAME is staged, so the update band
-    // staged before it is still the file on disk. The game start must not
-    // save that file as the loading screen.
-    let dir = tempfile::tempdir().unwrap();
-    let (mut writer, queue) = PregameWriter::stalled();
-    let filler = || {
-        vec![PregameOp::Discard {
-            folder: "x".to_string(),
-            name: LOADING_NAME,
-        }]
-    };
-    for _ in 0..PREGAME_QUEUE - 2 {
-        assert!(writer.send(filler()));
-    }
-    let mut dump = PregameDump::with_writer(pregame_dir(dir.path()), POLL, writer);
-    let start = Instant::now();
-    let at = |ms: u64| start + Duration::from_millis(ms);
-    dump.observe(at(0), Seen::Phase(PregamePhase::MapVote), Some(frame(8)));
-    // The update band's stage fills the queue; ENTERING GAME's is dropped.
-    dump.observe(at(1_500), Seen::Loading, Some(frame(9)));
-    dump.observe(at(3_000), Seen::Loading, Some(frame(10)));
-    let sent: Vec<_> = queue.try_iter().collect();
-    assert_eq!(sent.len(), PREGAME_QUEUE);
-    dump.observe(at(4_500), BAN, Some(frame(11)));
-    let after: Vec<_> = queue.try_iter().flatten().collect();
-    assert!(
-        !after
+    let files = listed();
+    assert_eq!(
+        files
             .iter()
-            .any(|op| matches!(op, PregameOp::Promote { name, .. } if *name == LOADING_NAME)),
-        "{after:?}"
+            .filter(|n| n.contains("loading"))
+            .collect::<Vec<_>>(),
+        [LOADING_NAME]
     );
+    assert!(files.iter().all(|f| !f.starts_with('.')), "{files:?}");
+    let game = std::fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .find(|p| p.is_dir())
+        .unwrap();
+    let saved = image::open(game.join(LOADING_NAME)).unwrap();
+    assert_eq!(saved.width(), 320 + 32 * 5, "the last pass");
 }
 
 #[test]
@@ -650,29 +789,28 @@ fn a_dropped_ban_results_stage_keeps_the_confirmed_frame_on_disk_owed() {
 
 #[test]
 fn a_stage_that_fails_to_write_leaves_no_older_frame_to_save() {
-    // The update band is staged; ENTERING GAME's write fails (a folder in
-    // the way of its temporary file). The game start's promote must not
-    // save the band.
+    // R1 is staged; R2's write fails (a folder in the way of its temporary
+    // file). The promote must not save R1 in its place.
     let dir = tempfile::tempdir().unwrap();
     let root = pregame_dir(dir.path());
     let folder = "20261001_000000";
     let stage = |w| {
         PregameOp::Stage(PregameShot {
             folder: folder.to_string(),
-            name: LOADING_NAME,
+            name: BAN_RESULTS_NAME,
             frame: frame(w),
         })
     };
     let mut made = Vec::new();
     write_pregame_ops(&root, &[stage(8)], 2, &mut made);
     let game = root.join(folder);
-    assert!(game.join(staged_name(LOADING_NAME)).is_file());
-    std::fs::create_dir(game.join(format!(".{}.tmp", staged_name(LOADING_NAME)))).unwrap();
+    assert!(game.join(staged_name(BAN_RESULTS_NAME)).is_file());
+    std::fs::create_dir(game.join(format!(".{}.tmp", staged_name(BAN_RESULTS_NAME)))).unwrap();
     let promote = PregameOp::Promote {
         folder: folder.to_string(),
-        name: LOADING_NAME,
+        name: BAN_RESULTS_NAME,
     };
     write_pregame_ops(&root, &[stage(9), promote], 2, &mut made);
-    assert!(!game.join(LOADING_NAME).exists());
-    assert!(!game.join(staged_name(LOADING_NAME)).exists());
+    assert!(!game.join(BAN_RESULTS_NAME).exists());
+    assert!(!game.join(staged_name(BAN_RESULTS_NAME)).exists());
 }
