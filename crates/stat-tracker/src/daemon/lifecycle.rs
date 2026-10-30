@@ -568,17 +568,27 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     }
     let mut sync_task = None;
     let mut restart_to = None;
+    let mut pregame_dump =
+        daemon::pregame_dump::PregameDump::new(ctx.save_pregame_screens, &ctx.data_dir);
     let result = run_loop(
         Arc::clone(&ctx),
         early_sigterm,
         &mut sync_task,
         &mut restart_to,
+        &mut pregame_dump,
     )
     .await;
     // The sync task holds a store clone: settle it first, leaving the
     // store's close its own share of the deadline.
     let within = stat_tracker::replace::shutdown_time_left().saturating_sub(STORE_CLOSE_WAIT);
     finish_or_abort_sync(sync_task.take(), within).await;
+    // The phase's last frame and the queued pre-game writes, briefly.
+    if let Some(dump) = pregame_dump.take() {
+        let within = stat_tracker::replace::shutdown_time_left()
+            .saturating_sub(STORE_CLOSE_WAIT)
+            .min(daemon::pregame_dump::PREGAME_SHUTDOWN_CAP);
+        dump.finish(within).await;
+    }
     // The status file's counters as they stand when the run ends.
     ocr_switch.lock().unwrap_or_else(|e| e.into_inner()).check();
     if let Some(path) = restart_to {
@@ -1126,6 +1136,20 @@ pub(crate) fn log_startup_readiness(
             target: "scuffed_stat_tracker",
             dir = %config.data_dir.join("debug").join("poll").display(),
             "debug_ocr: poll Victory/Defeat evidence frames on confirm and first streak (keeps the last {POLL_DUMP_KEEP} frames)"
+        );
+    }
+    if config.debug_save_pregame_screens {
+        tracing::info!(
+            target: "scuffed_stat_tracker",
+            dir = %daemon::pregame_dump::pregame_dir(&config.data_dir).display(),
+            "debug_save_pregame_screens: saving pre-game screens (newest {} games kept)",
+            daemon::pregame_dump::PREGAME_KEEP_GAMES
+        );
+    } else if let Some(dir) = daemon::pregame_dump::stale_pregame_dir(false, &config.data_dir) {
+        tracing::info!(
+            target: "scuffed_stat_tracker",
+            dir = %dir.display(),
+            "this debug folder is no longer written while debug_save_pregame_screens is off (it shows other players' names); existing files are left as they are"
         );
     }
     for dir in stale_board_debug_dirs(config.debug_ocr_enabled(), &config.data_dir) {

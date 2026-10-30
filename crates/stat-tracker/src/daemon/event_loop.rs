@@ -13,6 +13,9 @@ pub(crate) async fn run_loop(
     // Set when the binary on disk was replaced: `run` restarts into it
     // after the store's close.
     restart_to: &mut Option<std::path::PathBuf>,
+    // `debug_save_pregame_screens`: `None` while off, so no check runs and
+    // no frame is kept. The caller flushes it after the loop.
+    pregame_dump: &mut Option<daemon::pregame_dump::PregameDump>,
 ) -> anyhow::Result<()> {
     // Ergonomic locals over the shared context; spawned tasks clone the Arc.
     let backend = &ctx.backend;
@@ -23,18 +26,6 @@ pub(crate) async fn run_loop(
     let dump_poll_frames = ctx.dump_poll_frames;
     let debug_ocr = ctx.debug_ocr;
     let data_dir: &std::path::Path = &ctx.data_dir;
-    // `debug_save_pregame_screens`: `None` while off, so no check runs and
-    // no frame is kept.
-    let mut pregame_dump =
-        daemon::pregame_dump::PregameDump::new(ctx.save_pregame_screens, data_dir);
-    if pregame_dump.is_some() {
-        tracing::info!(
-            target: "scuffed_stat_tracker",
-            dir = %daemon::pregame_dump::pregame_dir(data_dir).display(),
-            "debug_save_pregame_screens: saving pre-game screens (newest {} games kept)",
-            daemon::pregame_dump::PREGAME_KEEP_GAMES
-        );
-    }
 
     let mut game_gate = detect::game_running::GameProcessGate::new(&ctx.game_process_names);
     // Starts false so a boot with the game already closed does not close a
@@ -395,6 +386,9 @@ pub(crate) async fn run_loop(
                 }
                 game_was_running = running;
                 if !running {
+                    if let Some(dump) = pregame_dump.as_mut() {
+                        dump.release(Instant::now());
+                    }
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
                     poll_failures.game_stopped();
@@ -793,7 +787,15 @@ pub(crate) async fn run_loop(
                         // The game gate ran first: the game is running. A
                         // known state (a held lock, a share opening, declined
                         // or closed) is no failure and has its own log line.
-                        match poll_failures.on_error(&e.to_string(), Instant::now()) {
+                        let failure = poll_failures.on_error(&e.to_string(), Instant::now());
+                        // Capture failed: the pre-game saves hold no frame
+                        // either. An expected one-poll miss leaves them be.
+                        if failure != PollErrorLog::Expected
+                            && let Some(dump) = pregame_dump.as_mut()
+                        {
+                            dump.release(Instant::now());
+                        }
+                        match failure {
                             PollErrorLog::Expected => {
                                 tracing::trace!(target: "scuffed_stat_tracker", error = %e, "poll capture skipped");
                             }

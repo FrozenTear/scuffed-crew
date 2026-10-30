@@ -103,11 +103,12 @@ pub struct Config {
     #[serde(default)]
     pub debug_ocr: bool,
     /// Save full-size PNGs of the pre-game screens (map vote, hero ban, hero
-    /// select, the frame after the ban vote, the loading screen) under
-    /// `{data_dir}/debug/pregame/<game>/`, newest 20 games kept. Off by
-    /// default and not written while off. Local only: nothing reads, uploads
-    /// or syncs the files. Config-file only: Settings keeps the value from
-    /// the file. The daemon applies it in `daemon::pregame_dump`.
+    /// select, the ban results, the loading screen) under
+    /// `{data_dir}/debug/pregame/<YYYYMMDD_HHMMSS>/` (UTC), newest 20 games
+    /// kept. Off by default and not written while off; turning it off
+    /// leaves the folder. Local only: nothing reads, uploads or syncs the
+    /// files. Config-file only: Settings keeps the value from the file. Read
+    /// at start. The daemon applies it in `daemon::pregame_dump`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub debug_save_pregame_screens: bool,
     /// Most games whose report pictures are kept in `report-kit/`. Missing
