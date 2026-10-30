@@ -15,6 +15,22 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.6.0-alpha.1.2
+
+This alpha adds an opt-in switch that saves pictures of the pre-game screens on your PC, so we can tune the detection of them, and a Settings line that tells you who can see your stats on the website. Nothing changes unless you turn the switch on, and the Settings line appears only when you are signed in.
+
+### Highlights
+
+- New config switch `debug_save_pregame_screens`, off by default and local only. It saves PNGs of the map vote, hero bans, ban results, hero select and loading screens, and keeps the newest 20 games.
+- The ban results screen is found by a built-in title shape check, or by your own example screenshots in `templates/pregame/ban_results/`.
+- The Website card in Settings shows a read-only line saying who can see your stats, taken from the stats visibility setting on the site.
+
+Technical detail. Pre-game saves: set `debug_save_pregame_screens = true` in the config file (there is no Settings toggle) and restart the tracker. Each game gets a folder under `debug/pregame/` named by its UTC start time, holding the first and last frame of the map vote, the hero ban and the hero select, one ban results frame and the loading screen. A small `.order` file remembers which folders are newest, so a wrong clock does not delete the latest games, and only real folders with an exact name are ever removed. The files are written by one background thread with a small queue: if it falls behind, frames are dropped and the poll loop never waits. Nothing uploads, syncs or reads the pictures, and they are not blanked, so they show other players' names. Expect about 0.5 to 0.8 GB for 20 games at 1440p. Turning the switch off leaves the folder as it is. With it off there is no extra work and no new files.
+
+Ban results: the screen cannot be told by timing alone, so a frame counts only when its title area matches. With no examples installed, a built-in shape check on the title (bright, centred text on a dark ground) decides. Put regular `.png` examples of the screen in `templates/pregame/ban_results/` (restart after adding them, at most 16 are read, `.jpg` files and symlinks are ignored) and the title must match one of them instead. The frame is kept once one more non-phase screen follows it, within 15 seconds plus one poll interval, and dropped if the bans come back. The loading screen is found by the ENTERING GAME strip.
+
+Settings: the Website card reads `stats_visibility` from the site's daemon-config route with your saved token and shows one grey line, for example that your stats are shown to signed-in crew members only. The line is hidden when you are signed out or uploads are off, and when the site does not answer, is an older version without the field, or sends a value the tracker does not know. A failed check never pauses uploads. Changing the setting happens on the site, and the line updates the next time Settings is opened.
+
 ## 0.6.0-alpha.1.1
 
 The tracker uses far less memory over long runs and no longer does work for the desktop app while the app is closed. Each game's hero history is now stored once instead of on every capture of the game, so the stat store grows more slowly; your games, heroes and totals look the same as before.
