@@ -20,9 +20,14 @@
 //! apart. What tells them apart is the words: a band of exactly two words
 //! whose second is at least [`WORD_RATIO_REJECT`] as wide as the first
 //! (`APPLYING UPDATE`, about 0.74) fails; `ENTERING GAME` (about 0.61)
-//! passes. Anything else passes, and the saves keep only the last frame
-//! that passes before the game starts. The ratio is tuned on the English
-//! texts: on other clients only the game start decides.
+//! passes. Of three clusters, the end one across the wider gap is left
+//! out first as a spinner, but only when it is spinner-sized (at most
+//! [`SPINNER_WIDTH_MAX`] of the width, [`SPINNER_HEIGHT_MAX`] of the
+//! height and roughly square, about 1.5 times the stand-in spinner);
+//! otherwise the three are not two words. Anything else passes, and the
+//! saves keep only the last frame that passes before the game starts. The
+//! ratio is tuned on the English texts: on other clients only the game
+//! start decides.
 
 use image::RgbImage;
 
@@ -85,6 +90,18 @@ const WORD_GAP: f32 = 0.0045;
 /// (about 0.74).
 pub const WORD_RATIO_REJECT: f32 = 0.70;
 
+/// An end cluster of three is the spinner, left out of the words, only
+/// when it is at most this wide (a share of the game width) and this tall
+/// (of its height), and neither side is more than [`SPINNER_ASPECT_MAX`]
+/// times the other. The stand-in spinner (`two_word_band`) is 0.03 wide
+/// and as tall as the text, 0.067 (0.8 as wide as tall in pixels), so
+/// these allow about 1.5 times it; the shortest real word, `GAME` in the
+/// 0.173 wide `ENTERING GAME` at 0.61, is about 0.061 wide, and the
+/// second word of the 0.186 wide `APPLYING UPDATE` at 0.74 about 0.074.
+const SPINNER_WIDTH_MAX: f32 = 0.045;
+const SPINNER_HEIGHT_MAX: f32 = 0.10;
+const SPINNER_ASPECT_MAX: f32 = 1.6;
+
 /// Glyph samples this close across (a share of the game width) on one
 /// row, or on rows this close down (a share of its height) with spans this
 /// close across, are one piece of text: letters and words join, a blob
@@ -120,7 +137,8 @@ pub struct TextBox {
     pub samples: u32,
     /// Words in the box ([`WORD_GAP`]), after a spinner: of exactly three,
     /// the end one across the wider gap (the words are closer to each
-    /// other than to it) is left out.
+    /// other than to it) is left out when it is spinner-sized
+    /// ([`SPINNER_WIDTH_MAX`]); otherwise all three count.
     pub words: usize,
     /// The second word's width over the first's, with exactly two words.
     pub word_ratio: Option<f32>,
@@ -150,8 +168,8 @@ pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
     let join_x = (gw as f32 * TEXT_JOIN_X) as u32;
     let join_y = (gh as f32 * TEXT_JOIN_Y) as u32;
     let mut runs: Vec<Run> = Vec::new();
-    // Each glyph sample's column and the run it is in.
-    let mut columns: Vec<(u32, usize)> = Vec::new();
+    // Each glyph sample's column, row and the run it is in.
+    let mut columns: Vec<(u32, u32, usize)> = Vec::new();
     for y in (y0..y1).step_by(2) {
         let mut open: Option<Run> = None;
         for x in (gx..x1).step_by(2) {
@@ -175,7 +193,7 @@ pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
                 }
             }
             // The open run is pushed next, at this index.
-            columns.push((x, runs.len()));
+            columns.push((x, y, runs.len()));
         }
         runs.extend(open);
     }
@@ -230,14 +248,13 @@ pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
     if samples < TEXT_SAMPLES_MIN {
         return None;
     }
-    let mut lit: Vec<u32> = columns
+    let mut lit: Vec<(u32, u32)> = columns
         .iter()
-        .filter(|&&(_, run)| kept.contains(&root(&mut parent, run)))
-        .map(|&(x, _)| x)
+        .filter(|&&(_, _, run)| kept.contains(&root(&mut parent, run)))
+        .map(|&(x, y, _)| (x, y))
         .collect();
     lit.sort_unstable();
-    lit.dedup();
-    let words = words(&lit, gw as f32 * WORD_GAP);
+    let words = words(&lit, gw, gh);
     let word_ratio = match words[..] {
         [(a0, a1), (b0, b1)] if a1 > a0 => Some((b1 - b0) as f32 / (a1 - a0) as f32),
         _ => None,
@@ -255,22 +272,44 @@ pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
     })
 }
 
-/// The words (first and last column) of the sorted glyph columns `lit`,
-/// sampled every second pixel: a new word starts where the empty sampled
-/// columns between two lit ones span at least `gap` pixels. Of exactly
-/// three, the spinner is left out: the end one across the wider gap.
-fn words(lit: &[u32], gap: f32) -> Vec<(u32, u32)> {
-    let mut words: Vec<(u32, u32)> = Vec::new();
-    for &x in lit {
+/// The words (first and last column) of the glyph samples `lit` (column,
+/// row; sorted), sampled every second pixel in a `gw` x `gh` game area: a
+/// new word starts where the empty sampled columns between two lit ones
+/// span at least [`WORD_GAP`] of the width. Of exactly three, the end one
+/// across the wider gap is the spinner and is left out when it is
+/// spinner-sized ([`SPINNER_WIDTH_MAX`], [`SPINNER_HEIGHT_MAX`],
+/// [`SPINNER_ASPECT_MAX`]); otherwise all three are kept, since a stray gap
+/// in a word can leave a letter or two at the other end as small.
+fn words(lit: &[(u32, u32)], gw: u32, gh: u32) -> Vec<(u32, u32)> {
+    let gap = gw as f32 * WORD_GAP;
+    // First and last column, top and bottom row.
+    let mut words: Vec<(u32, u32, u32, u32)> = Vec::new();
+    for &(x, y) in lit {
         match words.last_mut() {
-            Some((_, end)) if ((x - *end).saturating_sub(2) as f32) < gap => *end = x,
-            _ => words.push((x, x)),
+            Some((_, end, top, bottom)) if ((x - *end).saturating_sub(2) as f32) < gap => {
+                *end = x;
+                *top = (*top).min(y);
+                *bottom = (*bottom).max(y);
+            }
+            _ => words.push((x, x, y, y)),
         }
     }
-    if let [(_, a1), (b0, b1), (c0, _)] = words[..] {
-        words.remove(if b0 - a1 > c0 - b1 { 0 } else { 2 });
+    if let [(_, a1, ..), (b0, b1, ..), (c0, ..)] = words[..] {
+        let spinner = |(x0, x1, y0, y1): (u32, u32, u32, u32)| {
+            let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
+            w <= gw as f32 * SPINNER_WIDTH_MAX
+                && h <= gh as f32 * SPINNER_HEIGHT_MAX
+                && w <= h * SPINNER_ASPECT_MAX
+                && h <= w * SPINNER_ASPECT_MAX
+        };
+        // The end across the wider gap: the words are closer to each other
+        // than to the spinner.
+        let end = if b0 - a1 > c0 - b1 { 0 } else { 2 };
+        if spinner(words[end]) {
+            words.remove(end);
+        }
     }
-    words
+    words.into_iter().map(|(x0, x1, ..)| (x0, x1)).collect()
 }
 
 /// Whether the white glyphs of the middle band sit as the `ENTERING GAME`
@@ -443,15 +482,146 @@ mod tests {
 
     #[test]
     fn a_spinner_beside_the_words_is_left_out_of_the_ratio() {
-        // Two words plus a spinner on either side: judged on the two words.
-        for spinner in [Some(true), Some(false)] {
-            for (words, pass) in [(ENTERING_WORDS, true), (UPDATE_WORDS, false)] {
-                let band = two_word_band(1920, 1080, words, spinner);
-                let t = text_box(&band).expect("text");
-                assert_eq!(t.words, 2, "{spinner:?} {words:?}: {t:?}");
-                assert!((t.word_ratio.unwrap() - words.1).abs() < 0.015, "{t:?}");
-                assert_eq!(is_entering_game(&band), pass, "{spinner:?} {words:?}");
+        // Two words plus the stand-in spinner on either side, at each size:
+        // judged on the two words, so 0.61 and 0.68 pass, 0.72 and 0.74 fail.
+        let cases = [
+            (ENTERING_WORDS, true),
+            (UPDATE_WORDS, false),
+            ((0.18, 0.68), true),
+            ((0.18, 0.72), false),
+        ];
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            for spinner in [Some(true), Some(false)] {
+                for (words, pass) in cases {
+                    let band = two_word_band(w, h, words, spinner);
+                    let t = text_box(&band).expect("text");
+                    let at = format!("{w}x{h} {spinner:?} {words:?}: {t:?}");
+                    assert_eq!(t.words, 2, "{at}");
+                    assert!((t.word_ratio.unwrap() - words.1).abs() < 0.015, "{at}");
+                    assert_eq!(is_entering_game(&band), pass, "{at}");
+                }
             }
+        }
+    }
+
+    /// The stand-ins' text height (rows 168 to 192 of 360).
+    const TEXT_H: f32 = 24.0 / 360.0;
+
+    /// The navy band with solid white parts `(gap before, width, height)`,
+    /// shares of the frame, left to right: the line centred across it, each
+    /// part centred down it.
+    fn parts_band(w: u32, h: u32, parts: &[(f32, f32, f32)]) -> RgbImage {
+        let mut img = navy_band(w, h);
+        let line: f32 = parts.iter().map(|p| p.0 + p.1).sum();
+        let mut x0 = 0.5 - line / 2.0;
+        for &(gap, width, height) in parts {
+            x0 += gap;
+            let (a, b) = ((x0 * w as f32) as u32, ((x0 + width) * w as f32) as u32);
+            let (c, d) = (
+                ((0.5 - height / 2.0) * h as f32) as u32,
+                ((0.5 + height / 2.0) * h as f32) as u32,
+            );
+            for y in c..d {
+                for x in a..b {
+                    img.put_pixel(x, y, Rgb(GLYPH));
+                }
+            }
+            x0 += width;
+        }
+        img
+    }
+
+    #[test]
+    fn entering_game_split_into_three_with_no_spinner_passes() {
+        // ENTERING GAME 0.173 wide (0.10 and 0.061, 0.012 apart) with a
+        // stray 0.008 gap splitting ENTERING into 0.05 and 0.042: three
+        // text-sized clusters, no spinner. Dropping GAME (the end across
+        // the wider gap) would judge 0.042 over 0.05 and reject it.
+        let parts = [
+            (0.0, 0.05, TEXT_H),
+            (0.008, 0.042, TEXT_H),
+            (0.012, 0.061, TEXT_H),
+        ];
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            let band = parts_band(w, h, &parts);
+            let t = text_box(&band).expect("text");
+            assert_eq!((t.words, t.word_ratio), (3, None), "{w}x{h}: {t:?}");
+            assert!((t.width - 0.173).abs() < 0.01, "{w}x{h}: {t:?}");
+            assert!(is_loading_screen(&band), "{w}x{h}");
+            assert!(is_entering_game(&band), "{w}x{h}: {t:?}");
+        }
+    }
+
+    #[test]
+    fn a_spinner_sized_end_across_the_narrower_gap_is_kept() {
+        // ENTERING GAME with a stray 0.008 gap leaving EN (0.03 wide, as
+        // the stand-in spinner) at the left: GAME, across the wider gap,
+        // is no spinner, so the three count and the band passes. Dropping
+        // EN would judge GAME over TERING (about 0.98) and reject it.
+        let parts = [
+            (0.0, 0.03, TEXT_H),
+            (0.008, 0.062, TEXT_H),
+            (0.012, 0.061, TEXT_H),
+        ];
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            let band = parts_band(w, h, &parts);
+            let t = text_box(&band).expect("text");
+            assert_eq!((t.words, t.word_ratio), (3, None), "{w}x{h}: {t:?}");
+            assert!(is_entering_game(&band), "{w}x{h}: {t:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_spinner_sized_end_cluster_is_left_out() {
+        // APPLYING UPDATE (0.10 and 0.074, 0.012 apart) with a block 0.025
+        // to the right, just inside and just outside each bound at
+        // 1920x1080 (`(width, height)` shares): inside it is the spinner and
+        // the words are judged (rejected), outside it is a third word.
+        let update = [(0.0, 0.10, TEXT_H), (0.012, 0.074, TEXT_H)];
+        // In pairs: 0.045 wide at most, 0.10 tall at most, at most 1.6 as
+        // tall as wide, at most 1.6 as wide as tall.
+        let cases = [
+            ((0.043, TEXT_H), true),
+            ((0.048, TEXT_H), false),
+            ((0.042, 0.097), true),
+            ((0.042, 0.104), false),
+            ((0.03, 0.082), true),
+            ((0.03, 0.090), false),
+            ((0.032, 0.04), true),
+            ((0.040, 0.04), false),
+        ];
+        for ((sw, sh), spinner) in cases {
+            let band = parts_band(1920, 1080, &[update[0], update[1], (0.025, sw, sh)]);
+            let t = text_box(&band).expect("text");
+            assert_eq!(t.words, if spinner { 2 } else { 3 }, "{sw} {sh}: {t:?}");
+            if sh <= TEXT_HEIGHT_MAX {
+                assert_eq!(is_entering_game(&band), !spinner, "{sw} {sh}: {t:?}");
+            }
+        }
+        // The bounds in sampled pixels, 1920x1080: 86.4 wide, 108 tall,
+        // each side at most 1.6 times the other.
+        let cluster = |x0: u32, x1: u32, y0: u32, y1: u32| {
+            (x0..=x1).step_by(2).flat_map(move |x| [(x, y0), (x, y1)])
+        };
+        let count = |sw: u32, sh: u32| {
+            let mut lit: Vec<(u32, u32)> = cluster(700, 900, 500, 572)
+                .chain(cluster(912, 1060, 500, 572))
+                .chain(cluster(1090, 1090 + sw, 536 - sh / 2, 536 + sh / 2))
+                .collect();
+            lit.sort_unstable();
+            words(&lit, 1920, 1080).len()
+        };
+        for ((sw, sh), n) in [
+            ((86, 72), 2),
+            ((88, 72), 3),
+            ((80, 108), 2),
+            ((80, 110), 3),
+            ((60, 96), 2),
+            ((60, 98), 3),
+            ((80, 50), 2),
+            ((82, 50), 3),
+        ] {
+            assert_eq!(count(sw, sh), n, "{sw} x {sh}");
         }
     }
 
