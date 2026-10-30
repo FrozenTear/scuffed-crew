@@ -1,6 +1,7 @@
 //! Pre-game saver tests on synthetic frames made in code (no real
-//! screenshot): the ban results revealed over several polls, and an
-//! `APPLYING UPDATE` band that must not be saved as the loading screen.
+//! screenshot): the ban results revealed over several polls, what ends
+//! them (the select's title or its phase read), and an `APPLYING UPDATE`
+//! band that must not be saved as the loading screen.
 
 use super::pregame_ban_title::*;
 use super::pregame_dump::*;
@@ -108,6 +109,106 @@ async fn the_fully_revealed_ban_results_are_the_saved_frame() {
         .unwrap()
         .to_rgb8();
     assert!(saved == ban_results(4), "the four-icon frame is saved");
+}
+
+/// The hero select with its title: the roster, and a mark where the
+/// words-v1 read would find `SELECT A PREFERRED HERO` (the read itself
+/// needs the mask, which tests do not load).
+fn select_with_title() -> image::RgbImage {
+    let mut img = image::RgbImage::from_pixel(1280, 720, image::Rgb([30, 34, 44]));
+    fill(&mut img, (0.41, 0.165, 0.565, 0.2), TEXT);
+    img
+}
+
+/// Stands in for the words-v1 read of the select title.
+fn shows_title(rgb: &image::RgbImage) -> bool {
+    let (w, h) = rgb.dimensions();
+    rgb.get_pixel(w / 2, h * 18 / 100).0 == TEXT
+}
+
+/// How the select comes after the ban results.
+enum SelectComes {
+    /// A frame showing its title, then its phase read.
+    Title,
+    /// Its phase read straight away, with no title frame first.
+    PhaseRead,
+}
+
+/// A ban, the results revealed over two polls (two icons, then four), then
+/// the select as `comes`. Returns the saved ban results and whether the
+/// select's first frame was saved.
+async fn results_then_select(comes: SelectComes) -> (Option<image::RgbImage>, bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dump = PregameDump::new(true, dir.path(), POLL).unwrap();
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let ban = image::RgbImage::from_pixel(64, 36, image::Rgb([40, 20, 20]));
+    dump.observe(at(0), Seen::Phase(PregamePhase::HeroBan), Some(shown(&ban)));
+    dump.observe(
+        at(1_500),
+        Seen::Phase(PregamePhase::HeroBan),
+        Some(shown(&ban)),
+    );
+    let examples = dump.examples();
+    let tick = |dump: &mut PregameDump, ms: u64, phase: detect::GamePhase, rgb: image::RgbImage| {
+        let want = dump.want(at(ms));
+        let seen = classify_with(want, &phase, &rgb, shows_title, |f| examples.matches(f));
+        let frame = keeps_frame(want, seen).then(|| shown(&rgb));
+        dump.observe(at(ms), seen, frame);
+        seen
+    };
+    let unknown = || detect::GamePhase::Unknown;
+    for (ms, icons) in [(3_000, 2), (4_500, 4)] {
+        let seen = tick(&mut dump, ms, unknown(), ban_results(icons));
+        assert_eq!(seen, Seen::BanResults, "{icons} icons");
+    }
+    let mut ms = 6_000;
+    if let SelectComes::Title = comes {
+        let seen = tick(&mut dump, ms, unknown(), select_with_title());
+        assert_eq!(seen, Seen::SelectTitle);
+        ms += 1_500;
+    }
+    let seen = tick(
+        &mut dump,
+        ms,
+        detect::GamePhase::HeroSelect,
+        select_with_title(),
+    );
+    assert_eq!(seen, Seen::Phase(PregamePhase::HeroSelect));
+    assert!(dump.finish(Duration::from_secs(30)).await);
+
+    let root = pregame_dir(dir.path());
+    let games: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir())
+        .collect();
+    assert_eq!(games.len(), 1);
+    let saved = image::open(games[0].join(BAN_RESULTS_NAME))
+        .ok()
+        .map(|i| i.to_rgb8());
+    (saved, games[0].join("heroselect_first.png").is_file())
+}
+
+#[tokio::test]
+async fn results_straight_into_the_select_title_save_the_held_frame() {
+    // No plain frame between: the title is read with no lag, so the held
+    // replacement was still the results, all four bans shown.
+    let (saved, select) = results_then_select(SelectComes::Title).await;
+    assert!(
+        saved == Some(ban_results(4)),
+        "the four-icon frame is saved"
+    );
+    assert!(select);
+}
+
+#[tokio::test]
+async fn results_straight_into_a_select_read_with_no_title_drop_the_held_frame() {
+    // The phase read lags a poll, so the held frame may be the select
+    // sliding in: dropped, as before.
+    let (saved, select) = results_then_select(SelectComes::PhaseRead).await;
+    assert!(saved.is_none(), "no ban results saved");
+    assert!(select);
 }
 
 /// A 640x360 frame: black bars around the loading strip's vertical navy

@@ -244,7 +244,7 @@ fn the_last_ban_results_frame_is_saved_and_only_one_is_held() {
 }
 
 #[test]
-fn a_replacement_right_before_a_select_title_read_is_not_saved() {
+fn a_replacement_right_before_a_select_title_read_is_saved() {
     // With the new reader: the last results frame is confirmed by the
     // select's first frame (no title read yet) and saved.
     let mut run = Run::new();
@@ -264,8 +264,8 @@ fn a_replacement_right_before_a_select_title_read_is_not_saved() {
             ("heroselect_first.png", 7),
         ]
     );
-    // A replacement right before a select title read may be the select
-    // sliding in under a results title: dropped, never saved as the results.
+    // The title is read with no lag, so the replacement right before it
+    // was still the results, with the bans filled in: written.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, BAN, 2);
@@ -274,6 +274,27 @@ fn a_replacement_right_before_a_select_title_read_is_not_saved() {
     run.tick(6_000, RESULTS, 5);
     run.tick(7_500, Seen::SelectTitle, 6);
     run.tick(9_000, SELECT, 7);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 5),
+            ("heroselect_first.png", 7),
+        ]
+    );
+}
+
+#[test]
+fn a_first_candidate_right_before_a_select_title_read_is_not_saved() {
+    // One results frame only, then the title: that frame never had its
+    // confirmation, so nothing is written (unchanged).
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, Seen::SelectTitle, 4);
+    run.tick(6_000, SELECT, 5);
     assert!(
         run.names().iter().all(|(n, _)| *n != "ban_results.png"),
         "{:?}",
