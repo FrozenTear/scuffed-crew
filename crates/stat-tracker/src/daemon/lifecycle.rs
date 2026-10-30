@@ -568,8 +568,11 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     }
     let mut sync_task = None;
     let mut restart_to = None;
-    let mut pregame_dump =
-        daemon::pregame_dump::PregameDump::new(ctx.save_pregame_screens, &ctx.data_dir);
+    let mut pregame_dump = daemon::pregame_dump::PregameDump::new(
+        ctx.save_pregame_screens,
+        &ctx.data_dir,
+        ctx.auto_detect.poll_interval(ctx.use_new_reader),
+    );
     let result = run_loop(
         Arc::clone(&ctx),
         early_sigterm,

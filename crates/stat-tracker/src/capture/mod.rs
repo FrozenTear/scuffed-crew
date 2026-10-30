@@ -745,6 +745,22 @@ mod tests {
     }
 
     #[test]
+    fn lasting_poll_misses_are_a_declined_share_and_paused_screenshots() {
+        let backoff = format!("portal screenshot: {}", portal::SHOT_BACKOFF);
+        for lasting in [
+            "Screen share was declined",
+            "Screen share permission timed out: no captures until Overwatch is restarted",
+            backoff.as_str(),
+        ] {
+            assert!(is_lasting_poll_miss(lasting), "{lasting}");
+            assert!(is_expected_poll_miss(lasting), "{lasting}");
+        }
+        for passing in [stream::STREAM_MISS, "capture failed: EIO"] {
+            assert!(!is_lasting_poll_miss(passing), "{passing}");
+        }
+    }
+
+    #[test]
     fn the_x11_failure_notice_names_the_error() {
         let notice = x11_failure_notice("cannot open display :0");
         assert!(notice.contains("X11 capture is not available"), "{notice}");

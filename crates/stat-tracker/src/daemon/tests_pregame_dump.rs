@@ -9,6 +9,8 @@ const BAN: Seen = Seen::Phase(PregamePhase::HeroBan);
 const SELECT: Seen = Seen::Phase(PregamePhase::HeroSelect);
 /// A frame with the ban-results title.
 const RESULTS: Seen = Seen::BanResults;
+/// The new reader's poll interval.
+const POLL: Duration = Duration::from_millis(1_500);
 
 /// Drives a tracker the way the poll loop does: a tick hands its frame only
 /// when [`keeps_frame`] says so, and a loading screen reads as one only
@@ -23,9 +25,15 @@ struct Run {
 }
 
 impl Run {
+    /// At the new reader's 1.5 s polls (ban-results window 16.5 s).
     fn new() -> Self {
+        Self::polled(1_500)
+    }
+
+    /// At polls `poll_ms` apart (4 s with ocr-v1: window 19 s).
+    fn polled(poll_ms: u64) -> Self {
         Self {
-            tracker: PregameTracker::default(),
+            tracker: PregameTracker::new(Duration::from_millis(poll_ms)),
             start: Instant::now(),
             games: 0,
             made: Vec::new(),
@@ -91,7 +99,7 @@ fn off_by_default_writes_nothing() {
     assert!(on.debug_save_pregame_screens);
 
     let dir = tempfile::tempdir().unwrap();
-    assert!(PregameDump::new(file.debug_save_pregame_screens, dir.path()).is_none());
+    assert!(PregameDump::new(file.debug_save_pregame_screens, dir.path(), POLL).is_none());
     assert!(!dir.path().join("debug").exists());
     assert_eq!(stale_pregame_dir(false, dir.path()), None);
     std::fs::create_dir_all(pregame_dir(dir.path())).unwrap();
@@ -122,7 +130,7 @@ fn the_poll_loop_feeds_and_releases_the_saver_and_shutdown_flushes_it() {
 
     let lifecycle: String = include_str!("lifecycle.rs").split_whitespace().collect();
     let made = lifecycle
-        .find("PregameDump::new(ctx.save_pregame_screens,&ctx.data_dir)")
+        .find("PregameDump::new(ctx.save_pregame_screens,&ctx.data_dir,ctx.auto_detect.poll_interval(ctx.use_new_reader),)")
         .expect("made from the switch");
     let looped = lifecycle.find("letresult=run_loop(").expect("run loop");
     let settle = lifecycle
@@ -691,7 +699,7 @@ fn a_save_leaves_no_temporary_file() {
 #[tokio::test]
 async fn saves_are_full_size_pngs_written_in_order() {
     let dir = tempfile::tempdir().unwrap();
-    let mut dump = PregameDump::new(true, dir.path()).unwrap();
+    let mut dump = PregameDump::new(true, dir.path(), POLL).unwrap();
     let start = Instant::now();
     dump.observe(start, VOTE, Some(frame(64, 36)));
     dump.observe(start + Duration::from_secs(1), VOTE, Some(frame(48, 36)));
@@ -889,7 +897,7 @@ fn a_missed_results_screen_then_the_roster_saves_no_results() {
     run.tick(6_000, SELECT, 5);
     assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
     // The same at 4 s polls.
-    let mut run = Run::new();
+    let mut run = Run::polled(4_000);
     run.tick(0, BAN, 1);
     run.tick(4_000, BAN, 2);
     run.tick(8_000, Seen::Other, 3);
@@ -927,7 +935,7 @@ fn a_dropped_candidate_is_never_saved_later() {
 #[tokio::test]
 async fn the_shutdown_flush_writes_no_unmatched_candidate() {
     let dir = tempfile::tempdir().unwrap();
-    let mut dump = PregameDump::new(true, dir.path()).unwrap();
+    let mut dump = PregameDump::new(true, dir.path(), POLL).unwrap();
     let start = Instant::now();
     let at = |ms: u64| start + Duration::from_millis(ms);
     dump.observe(at(0), BAN, Some(frame(64, 36)));
@@ -977,7 +985,7 @@ fn results_then_a_late_select_read_keep_the_results() {
 #[test]
 fn ban_results_at_a_four_second_poll() {
     // ocr-v1 polls every 4 s: results up for two polls are kept.
-    let mut run = Run::new();
+    let mut run = Run::polled(4_000);
     run.tick(0, BAN, 1);
     run.tick(4_000, BAN, 2);
     run.tick(8_000, RESULTS, 3);
@@ -993,7 +1001,7 @@ fn ban_results_at_a_four_second_poll() {
         ]
     );
     // One poll between the ban and the select read: it is the select.
-    let mut run = Run::new();
+    let mut run = Run::polled(4_000);
     run.tick(0, BAN, 1);
     run.tick(4_000, BAN, 2);
     run.tick(8_000, RESULTS, 3);
@@ -1001,7 +1009,7 @@ fn ban_results_at_a_four_second_poll() {
     assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
     // The window runs from the results frame: ban 0 s, results 4 s, roster
     // 8 s, the select's first frame 12 s, the select read 16 s.
-    let mut run = Run::new();
+    let mut run = Run::polled(4_000);
     run.tick(0, BAN, 1);
     run.tick(4_000, RESULTS, 2);
     run.tick(8_000, Seen::Other, 3);
@@ -1016,7 +1024,7 @@ fn ban_results_at_a_four_second_poll() {
         ]
     );
     // Two late polls, the second showing the select title: still the select.
-    let mut run = Run::new();
+    let mut run = Run::polled(4_000);
     run.tick(0, BAN, 1);
     run.tick(4_000, BAN, 2);
     run.tick(8_000, RESULTS, 3);
@@ -1027,9 +1035,9 @@ fn ban_results_at_a_four_second_poll() {
 
 #[test]
 fn results_then_the_roster_then_loading_inside_the_window_are_saved() {
-    // Ban 0 s, results 4 s, roster 8 s and 12 s, ENTERING GAME 16 s: past
-    // 15 s from the ban, inside 15 s from the results frame.
-    let mut run = Run::new();
+    // 4 s polls. Ban 2 s, results 6 s, roster 10 s and 14 s, ENTERING GAME
+    // 18 s: past 15 s from the ban, inside the window from the results.
+    let mut run = Run::polled(4_000);
     run.tick(0, VOTE, 1);
     run.tick(2_000, BAN, 2);
     run.tick(6_000, RESULTS, 3);
@@ -1045,14 +1053,15 @@ fn results_then_the_roster_then_loading_inside_the_window_are_saved() {
             ("loading.png", 6),
         ]
     );
-    // The same with the loading screen past 15 s from the results frame.
-    let mut run = Run::new();
+    // The same with the loading screen past the window (15 s plus the 4 s
+    // poll) from the results frame.
+    let mut run = Run::polled(4_000);
     run.tick(0, VOTE, 1);
     run.tick(2_000, BAN, 2);
     run.tick(6_000, RESULTS, 3);
     run.tick(10_000, Seen::Other, 4);
     run.tick(14_000, Seen::Other, 5);
-    run.tick(21_500, Seen::Loading, 6);
+    run.tick(25_500, Seen::Loading, 6);
     assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
 }
 
@@ -1061,7 +1070,8 @@ fn results_then_the_roster_then_nothing_drop_the_candidate() {
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, RESULTS, 2);
-    for ms in (3_000..=18_000).step_by(1_500) {
+    // Past 16.5 s (15 s plus the 1.5 s poll) after the results frame.
+    for ms in (3_000..=19_500).step_by(1_500) {
         run.tick(ms, Seen::Other, 3);
     }
     assert!(!run.tracker.holds_frame(), "dropped past its window");
@@ -1070,21 +1080,56 @@ fn results_then_the_roster_then_nothing_drop_the_candidate() {
 }
 
 #[test]
+fn the_window_adds_one_poll_to_fifteen_seconds() {
+    // 4 s polls: ban 0 s and 4 s, results 8 s, roster 12, 16 and 20 s,
+    // ENTERING GAME 24 s, 16 s after the results frame: past 15 s, inside
+    // 15 s plus one poll.
+    let mut run = Run::polled(4_000);
+    run.tick(0, BAN, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, RESULTS, 3);
+    for (i, ms) in [12_000, 16_000, 20_000].into_iter().enumerate() {
+        run.tick(ms, Seen::Other, 4 + i as u32);
+    }
+    run.tick(24_000, Seen::Loading, 7);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("loading.png", 7),
+        ]
+    );
+    // One more roster poll: 20 s after the results, past 19 s.
+    let mut run = Run::polled(4_000);
+    run.tick(0, BAN, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, RESULTS, 3);
+    for (i, ms) in [12_000, 16_000, 20_000, 24_000].into_iter().enumerate() {
+        run.tick(ms, Seen::Other, 4 + i as u32);
+    }
+    run.tick(28_000, Seen::Loading, 8);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+    assert_eq!(BAN_RESULTS_WINDOW, Duration::from_secs(15));
+}
+
+#[test]
 fn a_ban_read_lost_past_the_window_saves_no_results() {
     // BAN at 0 s and 10 s, other screens every 1.5 s from 11.5 s, the ban
-    // back at 28 s.
+    // back at 31 s.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(10_000, BAN, 2);
-    for (i, ms) in (11_500..29_000).step_by(1_500).enumerate() {
+    for (i, ms) in (11_500..31_000).step_by(1_500).enumerate() {
         run.tick(ms, RESULTS, 10 + i as u32);
     }
-    // The candidate from 11.5 s ran out of its window at 28 s.
+    // The candidate from 11.5 s ran out of its window (16.5 s) at 28 s.
     assert!(!run.tracker.holds_frame());
-    run.tick(29_500, BAN, 40);
-    run.tick(31_000, Seen::Other, 41);
-    run.tick(32_500, Seen::Other, 42);
-    run.tick(34_000, SELECT, 43);
+    run.tick(31_000, BAN, 40);
+    run.tick(32_500, Seen::Other, 41);
+    run.tick(34_000, Seen::Other, 42);
+    run.tick(35_500, SELECT, 43);
     assert!(
         run.names().iter().all(|(n, _)| *n != "ban_results.png"),
         "{:?}",

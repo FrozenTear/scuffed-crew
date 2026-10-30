@@ -17,18 +17,19 @@
 //! frame at least [`BAN_RESULTS_DELAY`] after the last ban-phase frame (in
 //! practice the next poll) that shows the ban-results title
 //! ([`super::pregame_ban_title`]: a shape rule, or example screenshots on
-//! this PC when there are any). It is kept only when one more non-phase
-//! frame follows it before the next phase reads, and only written within
-//! [`BAN_RESULTS_WINDOW`] of the candidate frame. The phase read lags a new
-//! screen by one poll, so a candidate right before the hero select read is
-//! the hero select's first frame and is dropped. A frame that shows the
-//! hero select's title (the words-v1 mask, read without the stability
-//! wait, and only with `reader = "new"`, which loads the mask) is the
-//! select too: it never becomes or confirms a candidate, and it ends the
-//! wait, which covers a select read that lags two polls or more. The
-//! candidate is also dropped when the ban comes back, and when
-//! [`BAN_RESULTS_WINDOW`] runs out before the next screen reads. Only a map vote or a ban opens a game
-//! folder; a hero select alone is the one between rounds.
+//! this PC when there are any, which replace it). It is kept only when it
+//! is confirmed by one more non-phase frame before the next phase reads,
+//! and only written within [`BAN_RESULTS_WINDOW`] plus one poll interval
+//! of the candidate frame. The phase read lags a new screen by one poll,
+//! so a candidate right before the hero select read is the hero select's
+//! first frame and is dropped. A frame that shows the hero select's title
+//! (the words-v1 mask, read without the stability wait, and only with
+//! `reader = "new"`, which loads the mask) is the select too: it never
+//! becomes or confirms a candidate, and it ends the wait, which covers a
+//! select read that lags two polls or more. The candidate is also dropped
+//! when the ban comes back, and when that window runs out before the next
+//! screen reads. Only a map vote or a ban opens a game folder; a hero
+//! select alone is the one between rounds.
 
 use crate::*;
 use std::time::Duration;
@@ -45,10 +46,12 @@ pub(crate) const PREGAME_GAME_GAP: Duration = Duration::from_secs(3 * 60);
 /// (4 s with ocr-v1), so this is the next poll.
 pub(crate) const BAN_RESULTS_DELAY: Duration = Duration::from_millis(1_000);
 
-/// The wait for a candidate ends this long after the last ban-phase frame,
-/// and a candidate not settled this long after its own frame is dropped
-/// (the ban read was lost: ESC, alt-tab). Measured from the candidate, so
-/// at 4 s polls a select read 12 s after the results still settles it.
+/// The wait for a candidate ends this long plus one poll interval after the
+/// last ban-phase frame, and a candidate not settled this long plus one
+/// poll interval after its own frame is dropped (the ban read was lost:
+/// ESC, alt-tab). Measured from the candidate, and with the poll added so
+/// a next screen read 13 to 14 s after the results at 4 s polls (19 s
+/// then) still settles it.
 pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 
 /// A phase gone for at most this long and back is a detector flicker (the
@@ -287,15 +290,19 @@ pub(crate) struct PregameTracker<F> {
     /// Written when the next screen shows, if confirmed; dropped when the
     /// ban comes back (it was a flicker, not the results).
     ban_results: Option<BanResults<F>>,
+    /// [`BAN_RESULTS_WINDOW`] plus one poll interval.
+    window: Duration,
 }
 
-impl<F> Default for PregameTracker<F> {
-    fn default() -> Self {
+impl<F> PregameTracker<F> {
+    /// A tracker for a poll loop that polls every `poll`.
+    pub(crate) fn new(poll: Duration) -> Self {
         Self {
             game: None,
             on_screen: None,
             ban_ended_at: None,
             ban_results: None,
+            window: BAN_RESULTS_WINDOW + poll,
         }
     }
 }
@@ -352,6 +359,11 @@ impl<F: Clone> PregameTracker<F> {
             Seen::SelectTitle => {
                 // The select is on screen: the results, if any, end here,
                 // and this frame confirms nothing.
+                tracing::debug!(
+                    target: "scuffed_stat_tracker",
+                    candidate = self.ban_results.is_some(),
+                    "hero-select title: the ban-results wait ends"
+                );
                 self.end_phase(now, &mut shots);
                 self.settle_ban_results(now, &mut shots);
             }
@@ -480,7 +492,7 @@ impl<F: Clone> PregameTracker<F> {
         } else if self
             .ban_results
             .as_ref()
-            .is_some_and(|c| now.saturating_duration_since(c.taken_at) > BAN_RESULTS_WINDOW)
+            .is_some_and(|c| now.saturating_duration_since(c.taken_at) > self.window)
         {
             // No next screen in time: the ban read was lost (ESC,
             // alt-tab), and the candidate is a frame from that gap.
@@ -488,7 +500,7 @@ impl<F: Clone> PregameTracker<F> {
             self.ban_ended_at = None;
         } else if let Some(ended) = self.ban_ended_at {
             let since = now.saturating_duration_since(ended);
-            if since > BAN_RESULTS_WINDOW && self.ban_results.is_none() {
+            if since > self.window && self.ban_results.is_none() {
                 // No results title in time: stop looking.
                 self.ban_ended_at = None;
             } else if since >= BAN_RESULTS_DELAY
@@ -523,14 +535,16 @@ impl<F: Clone> PregameTracker<F> {
     }
 
     /// Write the waiting ban-results frame when it is confirmed and still
-    /// inside [`BAN_RESULTS_WINDOW`] at `now`, drop it otherwise, and stop
-    /// waiting for one. Nothing else ever writes it, so a dropped
+    /// inside the window (15 s plus one poll) at `now`, drop it otherwise,
+    /// and stop waiting for one. Nothing else ever writes it, so a dropped
     /// candidate is never saved later (game end, shutdown).
     fn settle_ban_results(&mut self, now: Instant, shots: &mut Vec<PregameShot<F>>) {
         self.ban_ended_at = None;
-        let Some(c) = self.ban_results.take().filter(|c| {
-            c.confirmed && now.saturating_duration_since(c.taken_at) <= BAN_RESULTS_WINDOW
-        }) else {
+        let Some(c) = self
+            .ban_results
+            .take()
+            .filter(|c| c.confirmed && now.saturating_duration_since(c.taken_at) <= self.window)
+        else {
             return;
         };
         let Some(game) = self.game.as_mut() else {
@@ -826,7 +840,8 @@ pub(crate) struct PregameDump {
 impl PregameDump {
     /// `None` when `on` is false: no tracker, no thread, no checks, no
     /// files. Also `None`, logged, when the writer thread cannot start.
-    pub(crate) fn new(on: bool, data_dir: &std::path::Path) -> Option<Self> {
+    /// `poll` is the poll loop's interval, added to the ban-results window.
+    pub(crate) fn new(on: bool, data_dir: &std::path::Path, poll: Duration) -> Option<Self> {
         if !on {
             return None;
         }
@@ -849,7 +864,7 @@ impl PregameDump {
         match PregameWriter::start(root.clone()) {
             Ok(writer) => Some(Self {
                 root,
-                tracker: PregameTracker::default(),
+                tracker: PregameTracker::new(poll),
                 writer,
                 examples: Arc::new(examples),
             }),

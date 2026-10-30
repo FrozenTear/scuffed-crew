@@ -20,15 +20,21 @@ fn fill(img: &mut image::RgbImage, (fx0, fy0, fx1, fy1): (f32, f32, f32, f32), r
 const GROUND: [u8; 3] = [18, 20, 26];
 const TEXT: [u8; 3] = [238, 238, 242];
 
-/// A title built to the shape rule: white letter blocks from 15% to 85%
-/// of the width, in the middle 40% of the height, on a dark ground.
-fn shaped(w: u32, h: u32) -> image::RgbImage {
+/// Letter blocks from 15% to 85% of the width, covering about 64% of its
+/// columns, between `y0` and `y1` of the height, on a dark ground.
+fn letters(w: u32, h: u32, y0: f32, y1: f32) -> image::RgbImage {
     let mut img = image::RgbImage::from_pixel(w, h, image::Rgb(GROUND));
     for k in 0..14 {
         let x = 0.15 + 0.05 * k as f32;
-        fill(&mut img, (x, 0.3, x + 0.035, 0.7), TEXT);
+        fill(&mut img, (x, y0, x + 0.046, y1), TEXT);
     }
     img
+}
+
+/// A title built to the shape rule: [`letters`] in the middle 40% of the
+/// height.
+fn shaped(w: u32, h: u32) -> image::RgbImage {
+    letters(w, h, 0.3, 0.7)
 }
 
 fn metrics(img: &image::RgbImage) -> ShapeMetrics {
@@ -78,12 +84,8 @@ fn a_title_built_to_the_shape_rule_passes_at_1440p_and_720p() {
 #[test]
 fn each_shape_condition_alone_turns_a_frame_away() {
     let (w, h) = (1280, 720);
-    // Too little bright: thin strokes.
-    let mut thin = image::RgbImage::from_pixel(w, h, image::Rgb(GROUND));
-    for k in 0..14 {
-        let x = 0.15 + 0.05 * k as f32;
-        fill(&mut thin, (x, 0.45, x + 0.01, 0.55), TEXT);
-    }
+    // Too little bright: short letters.
+    let thin = letters(w, h, 0.45, 0.55);
     // Too much bright: a solid block.
     let mut solid = image::RgbImage::from_pixel(w, h, image::Rgb(GROUND));
     fill(&mut solid, (0.12, 0.12, 0.88, 0.88), TEXT);
@@ -94,10 +96,9 @@ fn each_shape_condition_alone_turns_a_frame_away() {
             p.0 = [110, 110, 110];
         }
     }
-    // Centroid off: dense on the left, one stroke far right for the span.
+    // Centroid off: a wide block on the left.
     let mut left = image::RgbImage::from_pixel(w, h, image::Rgb(GROUND));
-    fill(&mut left, (0.05, 0.25, 0.35, 0.75), TEXT);
-    fill(&mut left, (0.69, 0.4, 0.71, 0.6), TEXT);
+    fill(&mut left, (0.02, 0.3, 0.66, 0.7), TEXT);
     // Too narrow: a compact word in the middle.
     let mut narrow = image::RgbImage::from_pixel(w, h, image::Rgb(GROUND));
     fill(&mut narrow, (0.3, 0.25, 0.7, 0.75), TEXT);
@@ -119,6 +120,27 @@ fn each_shape_condition_alone_turns_a_frame_away() {
         let m = metrics(&img);
         assert_eq!(failing(&m), [condition], "{m:?}");
         assert!(!m.passes());
+        assert!(!BanTitleExamples::default().matches(&img));
+    }
+}
+
+#[test]
+fn a_stray_bright_pixel_near_each_edge_does_not_widen_the_span() {
+    for (w, h) in [(2560, 1440), (1280, 720)] {
+        // A compact word in the middle, and one bright pixel near each
+        // edge of the title region on its middle row.
+        let mut img = image::RgbImage::from_pixel(w, h, image::Rgb(GROUND));
+        fill(&mut img, (0.3, 0.25, 0.7, 0.75), TEXT);
+        let [x0, y0, x1, y1] = BAN_RESULTS_TITLE;
+        let y = ((y0 + y1) / 2.0 * h as f32) as u32;
+        for fx in [0.02, 0.98] {
+            let x = ((x0 + (x1 - x0) * fx) * w as f32) as u32;
+            img.put_pixel(x, y, image::Rgb(TEXT));
+        }
+        let m = metrics(&img);
+        // First to last bright column would be about 0.96 of the width.
+        assert!(m.span < 0.45, "{w}x{h}: {m:?}");
+        assert_eq!(failing(&m), ["span"], "{w}x{h}: {m:?}");
         assert!(!BanTitleExamples::default().matches(&img));
     }
 }
@@ -208,32 +230,114 @@ fn ban_results_examples_are_read_from_the_data_dir() {
     assert!(loaded.matches(&titled_frame(1920, 1080, 0.0)));
 }
 
+/// `f` on its own thread, or a failure after 10 s instead of a hang (an
+/// example loader that opened a FIFO would block on it).
+fn within_10s<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(10))
+        .expect("the example loader blocked")
+}
+
+/// A PNG whose header says `w` x `h`, with an empty data chunk: enough
+/// for the size checks, which run before decoding.
+fn png_header_only(path: &std::path::Path, w: u32, h: u32) {
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &b in bytes {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = w.to_be_bytes().to_vec();
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    for (kind, data) in [
+        (b"IHDR", ihdr),
+        (b"IDAT", Vec::new()),
+        (b"IEND", Vec::new()),
+    ] {
+        let mut chunk = kind.to_vec();
+        chunk.extend_from_slice(&data);
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        png.extend_from_slice(&chunk);
+        png.extend_from_slice(&crc32(&chunk).to_be_bytes());
+    }
+    std::fs::write(path, png).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
-fn the_example_loader_skips_fifos_symlinks_and_oversized_files() {
+fn each_example_guard_turns_a_file_away_for_its_reason() {
+    let dir = tempfile::tempdir().unwrap();
+    // A FIFO named like an example: opening it would block startup.
+    let fifo = dir.path().join("fifo.png");
+    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    // A symlink to a real example.
+    let real = dir.path().join("real.png");
+    titled_frame(640, 360, 0.0).save(&real).unwrap();
+    let link = dir.path().join("link.png");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    // Wider than 8K, and 8K wide but over the pixel cap (headers only).
+    let wide = dir.path().join("wide.png");
+    png_header_only(&wide, MAX_EXAMPLE_SIDE + 8, 4);
+    let many = dir.path().join("many.png");
+    png_header_only(&many, MAX_EXAMPLE_SIDE, MAX_EXAMPLE_SIDE);
+    // Larger than the byte cap (sparse, never decoded).
+    let big = dir.path().join("big.png");
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(MAX_EXAMPLE_BYTES + 1)
+        .unwrap();
+    let why = |path: std::path::PathBuf| within_10s(move || example_cut(&path).unwrap_err());
+    assert_eq!(why(fifo), "not a regular file");
+    assert_eq!(why(link), "not a regular file");
+    assert_eq!(why(big), format!("larger than {MAX_EXAMPLE_BYTES} bytes"));
+    assert_eq!(
+        why(wide),
+        format!("{}x4 is over {MAX_EXAMPLE_SIDE} px", MAX_EXAMPLE_SIDE + 8)
+    );
+    assert_eq!(
+        why(many),
+        format!("{MAX_EXAMPLE_SIDE}x{MAX_EXAMPLE_SIDE} is over {MAX_EXAMPLE_PIXELS} pixels")
+    );
+    assert!(example_cut(&real).is_ok());
+}
+
+#[cfg(unix)]
+#[test]
+fn the_cap_counts_only_regular_png_files() {
     let dir = tempfile::tempdir().unwrap();
     let examples = ban_title_dir(dir.path());
     std::fs::create_dir_all(&examples).unwrap();
-    // A FIFO named like an example: opening it would block startup.
-    let fifo = examples.join("a_fifo.png");
-    let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
-    assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
-    // A symlink to a real example outside.
     let outside = dir.path().join("outside.png");
     titled_frame(640, 360, 0.0).save(&outside).unwrap();
-    std::os::unix::fs::symlink(&outside, examples.join("b_link.png")).unwrap();
-    // Wider than 8K: skipped before decoding.
-    image::RgbImage::from_pixel(MAX_EXAMPLE_SIDE + 8, 4, [9, 9, 9].into())
-        .save(examples.join("c_wide.png"))
-        .unwrap();
-    // Larger than the byte cap (sparse, never decoded).
-    let big = std::fs::File::create(examples.join("d_big.png")).unwrap();
-    big.set_len(MAX_EXAMPLE_BYTES + 1).unwrap();
-    // One good example.
+    // More symlinks and FIFOs than the cap, all sorting before the one
+    // good example.
+    for i in 0..MAX_EXAMPLES {
+        std::os::unix::fs::symlink(&outside, examples.join(format!("a_link{i:02}.png"))).unwrap();
+    }
+    for i in 0..2 {
+        let fifo = examples.join(format!("b_fifo{i}.png"));
+        let c = std::ffi::CString::new(fifo.as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+    }
     titled_frame(640, 360, 0.0)
-        .save(examples.join("e_good.png"))
+        .save(examples.join("z_good.png"))
         .unwrap();
-    assert_eq!(BanTitleExamples::load_dir(&examples).len(), 1);
+    let loaded = within_10s(move || BanTitleExamples::load_dir(&examples).len());
+    assert_eq!(loaded, 1);
 }
 
 #[test]
@@ -283,24 +387,4 @@ fn the_real_classify_uses_the_ban_title_check_for_the_ban_title() {
         classify(idle, &unknown, &shaped(1280, 720), &none),
         Seen::Other
     );
-}
-
-#[test]
-fn lasting_poll_misses_are_a_declined_share_and_paused_screenshots() {
-    use stat_tracker::capture::{is_expected_poll_miss, is_lasting_poll_miss};
-    let backoff = format!(
-        "portal screenshot: {}",
-        stat_tracker::capture::portal::SHOT_BACKOFF
-    );
-    for lasting in [
-        "Screen share was declined",
-        "Screen share permission timed out: no captures until Overwatch is restarted",
-        backoff.as_str(),
-    ] {
-        assert!(is_lasting_poll_miss(lasting), "{lasting}");
-        assert!(is_expected_poll_miss(lasting), "{lasting}");
-    }
-    for passing in [stat_tracker::capture::STREAM_MISS, "capture failed: EIO"] {
-        assert!(!is_lasting_poll_miss(passing), "{passing}");
-    }
 }
