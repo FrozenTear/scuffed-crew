@@ -66,6 +66,18 @@ const TEXT_HEIGHT_MAX: f32 = 0.10;
 /// Fewest glyph samples that make text (a few stray white pixels do not).
 const TEXT_SAMPLES_MIN: u32 = 24;
 
+/// Glyph samples this close across (a share of the game width) on one
+/// row, or on rows this close down (a share of its height) with spans this
+/// close across, are one piece of text: letters and words join, a blob
+/// elsewhere on the band does not.
+const TEXT_JOIN_X: f32 = 0.03;
+const TEXT_JOIN_Y: f32 = 0.02;
+
+/// A piece with fewer glyph samples than this share of the largest piece
+/// is a stray blob (a cursor, a small overlay) and is left out of the text
+/// box. A progress bar is not: it is as large as text.
+const TEXT_PIECE_MIN: f32 = 0.15;
+
 /// [`is_loading_screen`] and the `ENTERING GAME` text where it sits: the
 /// glyphs in the middle band span one line, centred across the screen and
 /// about as wide as those words. A navy band with its text elsewhere, or
@@ -75,41 +87,135 @@ pub fn is_entering_game(rgb: &RgbImage) -> bool {
     is_loading_screen(rgb) && entering_game_text(rgb)
 }
 
-/// Whether the white glyphs of the middle band sit and span as the
-/// `ENTERING GAME` text does.
-fn entering_game_text(rgb: &RgbImage) -> bool {
+/// The white text of the middle band, as shares of the 16:9 game area.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TextBox {
+    pub width: f32,
+    pub height: f32,
+    pub centre_x: f32,
+    pub centre_y: f32,
+    /// Glyph samples in the box's pieces (every second pixel each way).
+    pub samples: u32,
+}
+
+/// One run of glyph samples on a sampled row.
+struct Run {
+    y: u32,
+    x0: u32,
+    x1: u32,
+    n: u32,
+}
+
+/// The box around the white glyphs of the middle band, from its pieces
+/// of text with stray small blobs left out ([`TEXT_PIECE_MIN`]); `None`
+/// with fewer than [`TEXT_SAMPLES_MIN`] glyph samples in them. What
+/// [`is_entering_game`] measures, public for checks on real frames.
+pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
     let (w, h) = rgb.dimensions();
     let (gx, gy, gw, gh) = crate::frame::geometry::game_rect_16_9(w, h);
+    if gw == 0 || gh == 0 {
+        return None;
+    }
     let y0 = gy + gh * 300 / 1000;
     let y1 = (y0 + gh * 400 / 1000).min(h);
     let x1 = (gx + gw).min(w);
-    let (mut left, mut right, mut top, mut bottom) = (u32::MAX, 0u32, u32::MAX, 0u32);
-    let mut glyphs = 0u32;
+    let join_x = (gw as f32 * TEXT_JOIN_X) as u32;
+    let join_y = (gh as f32 * TEXT_JOIN_Y) as u32;
+    let mut runs: Vec<Run> = Vec::new();
     for y in (y0..y1).step_by(2) {
+        let mut open: Option<Run> = None;
         for x in (gx..x1).step_by(2) {
             let p = rgb.get_pixel(x, y).0;
-            if p[0].min(p[1]).min(p[2]) >= GLYPH_MIN {
-                glyphs += 1;
-                left = left.min(x);
-                right = right.max(x);
-                top = top.min(y);
-                bottom = bottom.max(y);
+            if p[0].min(p[1]).min(p[2]) < GLYPH_MIN {
+                continue;
+            }
+            match open.as_mut() {
+                Some(r) if x - r.x1 <= join_x => {
+                    r.x1 = x;
+                    r.n += 1;
+                }
+                _ => {
+                    runs.extend(open.take());
+                    open = Some(Run {
+                        y,
+                        x0: x,
+                        x1: x,
+                        n: 1,
+                    });
+                }
+            }
+        }
+        runs.extend(open);
+    }
+    // Join runs into pieces (union-find); runs are in row order.
+    let mut parent: Vec<usize> = (0..runs.len()).collect();
+    fn root(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    for i in 0..runs.len() {
+        for j in i + 1..runs.len() {
+            if runs[j].y - runs[i].y > join_y {
+                break;
+            }
+            let near = runs[j].x0 <= runs[i].x1 + join_x && runs[i].x0 <= runs[j].x1 + join_x;
+            if runs[j].y > runs[i].y && near {
+                let (a, b) = (root(&mut parent, i), root(&mut parent, j));
+                parent[a] = b;
             }
         }
     }
-    if glyphs < TEXT_SAMPLES_MIN || gw == 0 || gh == 0 {
-        return false;
+    // Per piece: samples and box (left, right, top, bottom).
+    let mut pieces: std::collections::HashMap<usize, (u32, u32, u32, u32, u32)> =
+        std::collections::HashMap::new();
+    for (i, r) in runs.iter().enumerate() {
+        let p = pieces
+            .entry(root(&mut parent, i))
+            .or_insert((0, u32::MAX, 0, u32::MAX, 0));
+        p.0 += r.n;
+        p.1 = p.1.min(r.x0);
+        p.2 = p.2.max(r.x1);
+        p.3 = p.3.min(r.y);
+        p.4 = p.4.max(r.y);
+    }
+    let largest = pieces.values().map(|p| p.0).max()?;
+    let (mut samples, mut left, mut right, mut top, mut bottom) = (0u32, u32::MAX, 0, u32::MAX, 0);
+    for p in pieces
+        .values()
+        .filter(|p| p.0 as f32 >= largest as f32 * TEXT_PIECE_MIN)
+    {
+        samples += p.0;
+        left = left.min(p.1);
+        right = right.max(p.2);
+        top = top.min(p.3);
+        bottom = bottom.max(p.4);
+    }
+    if samples < TEXT_SAMPLES_MIN {
+        return None;
     }
     let share_x = |x: u32| (x - gx) as f32 / gw as f32;
     let share_y = |y: u32| (y - gy) as f32 / gh as f32;
-    let width = (right - left) as f32 / gw as f32;
-    let height = (bottom - top) as f32 / gh as f32;
-    let centre_x = (share_x(left) + share_x(right)) / 2.0;
-    let centre_y = (share_y(top) + share_y(bottom)) / 2.0;
-    (centre_x - 0.5).abs() <= TEXT_CENTRE_X_TOL
-        && (TEXT_WIDTH_MIN..=TEXT_WIDTH_MAX).contains(&width)
-        && (TEXT_CENTRE_Y_MIN..=TEXT_CENTRE_Y_MAX).contains(&centre_y)
-        && height <= TEXT_HEIGHT_MAX
+    Some(TextBox {
+        width: (right - left) as f32 / gw as f32,
+        height: (bottom - top) as f32 / gh as f32,
+        centre_x: (share_x(left) + share_x(right)) / 2.0,
+        centre_y: (share_y(top) + share_y(bottom)) / 2.0,
+        samples,
+    })
+}
+
+/// Whether the white glyphs of the middle band sit and span as the
+/// `ENTERING GAME` text does.
+fn entering_game_text(rgb: &RgbImage) -> bool {
+    text_box(rgb).is_some_and(|t| {
+        (t.centre_x - 0.5).abs() <= TEXT_CENTRE_X_TOL
+            && (TEXT_WIDTH_MIN..=TEXT_WIDTH_MAX).contains(&t.width)
+            && (TEXT_CENTRE_Y_MIN..=TEXT_CENTRE_Y_MAX).contains(&t.centre_y)
+            && t.height <= TEXT_HEIGHT_MAX
+    })
 }
 
 /// Whether `rgb` looks like the loading screen.
@@ -191,59 +297,7 @@ mod tests {
 
     use super::*;
 
-    // Synthetic stand-ins made in code, no real screenshot. The saver's
-    // tests (`daemon/tests_pregame_reveal.rs`) keep the same two builders.
-
-    /// A 640x360 frame: black bars around the strip's vertical navy
-    /// gradient (rows 136 to 224, as on the loading screen).
-    fn navy_band() -> RgbImage {
-        let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
-        for y in 136..224 {
-            let t = (y - 136) as u8;
-            let navy = Rgb([20 + t / 4, 28 + t / 5, 42 + t / 3]);
-            for x in 0..640 {
-                img.put_pixel(x, y, navy);
-            }
-        }
-        img
-    }
-
-    fn glyphs(img: &mut RgbImage, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>) {
-        for y in ys {
-            for x in xs.clone().filter(|x| x % 7 < 3) {
-                img.put_pixel(x, y, Rgb([240, 240, 240]));
-            }
-        }
-    }
-
-    /// The `ENTERING GAME` slab: one line of white glyphs centred across
-    /// the screen, 0.375 of its width, at half height.
-    fn entering_game_slab() -> RgbImage {
-        let mut img = navy_band();
-        glyphs(&mut img, 200..440, 168..192);
-        img
-    }
-
-    /// An `APPLYING UPDATE` band: the same navy band, its text left of
-    /// centre, with a progress bar under it when `bar` is set, or centred
-    /// above a bar when `centred` is set.
-    fn applying_update_band(centred: bool, bar: bool) -> RgbImage {
-        let mut img = navy_band();
-        let (text, track) = if centred {
-            (220..420, 120..520)
-        } else {
-            (48..248, 48..592)
-        };
-        glyphs(&mut img, text, 160..176);
-        if bar {
-            for y in 196..200 {
-                for x in track.clone() {
-                    img.put_pixel(x, y, Rgb([230, 232, 236]));
-                }
-            }
-        }
-        img
-    }
+    use crate::detect::tests_loading_stand_ins::*;
 
     #[test]
     fn an_applying_update_band_is_not_entering_game() {
@@ -251,7 +305,7 @@ mod tests {
         // over a wide bar: each passes the plain loading check, and each
         // fails the text place or width.
         for (centred, bar) in [(false, true), (false, false), (true, true)] {
-            let band = applying_update_band(centred, bar);
+            let band = applying_update_band(640, 360, centred, bar);
             assert!(is_loading_screen(&band), "centred {centred}, bar {bar}");
             assert!(!is_entering_game(&band), "centred {centred}, bar {bar}");
         }
@@ -259,25 +313,47 @@ mod tests {
 
     #[test]
     fn the_entering_game_slab_is_entering_game() {
-        let slab = entering_game_slab();
+        let slab = entering_game_slab(640, 360);
         assert!(is_loading_screen(&slab));
         assert!(is_entering_game(&slab));
         // The other ENTERING GAME stand-ins here pass the stricter check too.
         assert!(is_entering_game(&entering_game()));
         assert!(is_entering_game(&entering_game_frame()));
         assert!(is_entering_game(&navy_gradient()));
-        // The same layout at 1440p and 720p.
-        for (w, h) in [(2560, 1440), (1280, 720)] {
-            let big = image::imageops::resize(&slab, w, h, image::imageops::FilterType::Nearest);
-            assert!(is_entering_game(&big), "{w}x{h}");
+        // The same layout drawn at each size (not a rescaled 640x360).
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            assert!(is_entering_game(&entering_game_slab(w, h)), "{w}x{h}");
+            for (centred, bar) in [(false, true), (false, false), (true, true)] {
+                let band = applying_update_band(w, h, centred, bar);
+                assert!(!is_entering_game(&band), "{w}x{h} {centred} {bar}");
+            }
         }
     }
 
     #[test]
+    fn a_stray_blob_on_the_band_leaves_the_text_box_alone() {
+        // A cursor-sized white blob on the strip, far right of the text,
+        // and one in the black bar above it: left out of the box, so the
+        // slab still passes, at each size.
+        for (w, h) in [(640, 360), (1920, 1080), (2560, 1440)] {
+            let mut slab = entering_game_slab(w, h);
+            let clean = text_box(&slab).expect("text");
+            block(&mut slab, 590..596, 140..146);
+            block(&mut slab, 60..66, 116..122);
+            assert_eq!(text_box(&slab), Some(clean), "{w}x{h}");
+            assert!(is_entering_game(&slab), "{w}x{h}");
+        }
+        // A bar as large as the text is no stray blob: it widens the box.
+        let mut slab = entering_game_slab(640, 360);
+        block(&mut slab, 60..580, 200..204);
+        assert!(!is_entering_game(&slab));
+    }
+
+    #[test]
     fn a_navy_band_with_no_text_is_not_entering_game() {
-        let mut slab = entering_game_slab();
+        let mut slab = entering_game_slab(640, 360);
         for p in slab.pixels_mut() {
-            if p.0 == [240, 240, 240] {
+            if p.0 == GLYPH {
                 p.0 = [30, 36, 60];
             }
         }

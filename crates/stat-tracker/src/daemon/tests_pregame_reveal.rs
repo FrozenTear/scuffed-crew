@@ -5,6 +5,7 @@
 
 use super::pregame_ban_title::*;
 use super::pregame_dump::*;
+use super::tests_loading_stand_ins::*;
 use crate::*;
 use std::time::Duration;
 
@@ -242,57 +243,6 @@ async fn results_then_a_plain_roster_frame_save_the_frame_before_the_last() {
     assert!(select);
 }
 
-/// A 640x360 frame: black bars around the loading strip's vertical navy
-/// gradient. The same builders as the tests in `detect/loading_screen.rs`.
-fn navy_band() -> image::RgbImage {
-    let mut img = image::RgbImage::from_pixel(640, 360, image::Rgb([0, 0, 0]));
-    for y in 136..224 {
-        let t = (y - 136) as u8;
-        let navy = image::Rgb([20 + t / 4, 28 + t / 5, 42 + t / 3]);
-        for x in 0..640 {
-            img.put_pixel(x, y, navy);
-        }
-    }
-    img
-}
-
-fn glyphs(img: &mut image::RgbImage, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>) {
-    for y in ys {
-        for x in xs.clone().filter(|x| x % 7 < 3) {
-            img.put_pixel(x, y, image::Rgb([240, 240, 240]));
-        }
-    }
-}
-
-/// The `ENTERING GAME` slab: one line of white glyphs centred across the
-/// screen, 0.375 of its width, at half height.
-fn entering_game_slab() -> image::RgbImage {
-    let mut img = navy_band();
-    glyphs(&mut img, 200..440, 168..192);
-    img
-}
-
-/// An `APPLYING UPDATE` band: the same navy band, its text left of centre,
-/// with a progress bar under it when `bar` is set, or centred above a bar
-/// when `centred` is set.
-fn applying_update_band(centred: bool, bar: bool) -> image::RgbImage {
-    let mut img = navy_band();
-    let (text, track) = if centred {
-        (220..420, 120..520)
-    } else {
-        (48..248, 48..592)
-    };
-    glyphs(&mut img, text, 160..176);
-    if bar {
-        for y in 196..200 {
-            for x in track.clone() {
-                img.put_pixel(x, y, image::Rgb([230, 232, 236]));
-            }
-        }
-    }
-    img
-}
-
 const LOADING_WANTED: PregameWant = PregameWant {
     loading: true,
     other_frame: true,
@@ -305,7 +255,7 @@ fn an_applying_update_band_is_not_saved_as_loading() {
     let unknown = detect::GamePhase::Unknown;
     let no_title = |_: &image::RgbImage| false;
     for (centred, bar) in [(false, true), (false, false), (true, true)] {
-        let band = applying_update_band(centred, bar);
+        let band = applying_update_band(640, 360, centred, bar);
         // The plain loading check, which nothing else uses, still passes
         // it; the saver's stricter check does not.
         assert!(detect::loading_screen::is_loading_screen(&band));
@@ -319,7 +269,7 @@ fn an_applying_update_band_is_not_saved_as_loading() {
         classify_with(
             LOADING_WANTED,
             &unknown,
-            &entering_game_slab(),
+            &entering_game_slab(640, 360),
             no_title,
             no_title
         ),

@@ -4,6 +4,8 @@ pub mod match_end;
 pub mod match_start;
 pub mod names;
 pub mod own_row;
+#[cfg(test)]
+pub(crate) mod tests_loading_stand_ins;
 // Moved to `frame/stability.rs` (0.6 lane D V2); old path kept.
 pub use crate::frame::stability;
 // Tab key input and the game-process check read no screen: they live in
