@@ -15,17 +15,60 @@
 //! and compare each box with the bounds in `detect/loading_screen.rs`
 //! (centre x 0.45 to 0.55, width 0.25 to 0.50, centre y 0.44 to 0.56,
 //! height at most 0.10).
+//!
+//! The same folder also pins those bounds, in a test that runs with the
+//! others: each `entering_game*.png` in it must pass the ENTERING GAME
+//! check and each `applying_update*.png` must fail it, so a later change
+//! to the bounds fails on a machine that has the frames. It skips quietly
+//! when the variable is unset or no such file is there.
 
 use stat_tracker::detect::loading_screen::{is_entering_game, is_loading_screen, text_box};
+
+/// The folder `SCUFFED_LOADING_FRAMES_DIR` names, if set and not empty.
+fn frames_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("SCUFFED_LOADING_FRAMES_DIR")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+#[test]
+fn local_entering_game_frames_pass_and_update_bands_fail() {
+    let Some(dir) = frames_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for path in entries.flatten().map(|e| e.path()) {
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_lowercase();
+        let want = if name.starts_with("entering_game") {
+            true
+        } else if name.starts_with("applying_update") {
+            false
+        } else {
+            continue;
+        };
+        if !path.is_file() || !name.ends_with(".png") {
+            continue;
+        }
+        let rgb = image::open(&path)
+            .unwrap_or_else(|e| panic!("{name}: {e}"))
+            .to_rgb8();
+        assert_eq!(is_entering_game(&rgb), want, "{name}: ENTERING GAME check");
+    }
+}
 
 #[test]
 #[ignore = "opt-in: reads real frames from SCUFFED_LOADING_FRAMES_DIR"]
 fn report_the_loading_checks_on_local_frames() {
-    let Some(dir) = std::env::var_os("SCUFFED_LOADING_FRAMES_DIR").filter(|d| !d.is_empty()) else {
+    let Some(dir) = frames_dir() else {
         eprintln!("skip: SCUFFED_LOADING_FRAMES_DIR is not set");
         return;
     };
-    let dir = std::path::PathBuf::from(dir);
     let mut pngs: Vec<_> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .flatten()
