@@ -28,6 +28,8 @@ mod tests_gui_presence;
 #[cfg(test)]
 mod tests_memtune;
 #[cfg(test)]
+mod tests_pregame_ban_title;
+#[cfg(test)]
 mod tests_pregame_dump;
 #[cfg(test)]
 mod tests_query_server;

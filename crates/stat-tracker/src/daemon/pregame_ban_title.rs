@@ -1,17 +1,23 @@
-//! The ban-results title check for the opt-in pre-game saves: a small grey
-//! cut of the title region, matched against example screenshots of the
-//! ban-results screen kept on this PC.
+//! The ban-results title check for the opt-in pre-game saves, on Vision's
+//! title region: screen fractions of the 16:9 game area (x0, y0, x1, y1) =
+//! (0.43, 0.05, 0.575, 0.12).
 //!
-//! The region is Vision's, as screen fractions of the 16:9 game area
-//! (x0, y0, x1, y1) = (0.43, 0.05, 0.575, 0.12). Vision matched small grey
-//! cuts of it against saved examples at 0.6 and was right on 2 of 2 real
-//! shots. Only those 2 samples exist, and no real crop may live in the
-//! repo, so the examples are read from
-//! `{data_dir}/templates/pregame/ban_results/` (full screenshots of the
-//! ban-results screen, any size, PNG) when the tracker starts. With no
-//! example there nothing matches, and no `ban_results.png` is written: a
-//! missing file beats a wrong one. The threshold is stricter than
-//! Vision's 0.6 for the same reason: two samples are no calibration.
+//! Two ways to tell, one of them in use:
+//!
+//! * With no example installed, a shape rule on the grey region
+//!   ([`SHAPE`]): a band of bright title text, centred and wide, on a dark
+//!   ground, clear of the region's top and bottom edges. Vision measured
+//!   it at 8 of 8 on real shots, also downscaled to 1080p and 720p.
+//! * With examples in `{data_dir}/templates/pregame/ban_results/` (full
+//!   screenshots of the ban-results screen, `.png` only, read when the
+//!   tracker starts), a small grey cut of the region must match one of
+//!   them by normalized correlation. Vision matched such cuts at 0.6 and
+//!   was right on 2 of 2 real shots; the threshold here is stricter
+//!   because two samples are no calibration. Examples replace the shape
+//!   rule, so they can only make the check tighter or more specific.
+//!
+//! No real crop lives in the repo. Either way a frame that does not match
+//! is never saved as the ban results.
 
 /// The title region, as fractions of the 16:9 game area.
 pub(crate) const BAN_RESULTS_TITLE: [f32; 4] = [0.43, 0.05, 0.575, 0.12];
@@ -29,6 +35,139 @@ pub(crate) const BAN_TITLE_MATCH_MIN: f32 = 0.7;
 /// 255) is a flat area with no title on it, and matches nothing.
 const CUT_SPREAD_MIN: f32 = 6.0;
 
+/// At most this many example files are read; the rest are skipped.
+pub(crate) const MAX_EXAMPLES: usize = 16;
+
+/// An example file larger than this is skipped unread.
+pub(crate) const MAX_EXAMPLE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// An example wider or taller than this (8K) is skipped before decoding.
+pub(crate) const MAX_EXAMPLE_SIDE: u32 = 8192;
+
+/// The template-free shape rule. A STARTING RULE, from Vision's real shots:
+/// two English positives (about 30% bright, 63% dark, 99% of the width),
+/// the ban vote (2.6% bright, 42% width) and the hero select and roster (no
+/// bright pixel) as negatives; 8 of 8 right, also downscaled to 1080p and
+/// 720p. Untested on colourblind filters and on real 1080p captures, so
+/// expect to retune it once saved frames exist. All its numbers live here.
+pub(crate) struct ShapeRule {
+    /// A grey level above this is bright (title text).
+    pub(crate) bright_above: u8,
+    /// A grey level below this is dark (the ground).
+    pub(crate) dark_below: u8,
+    /// Share of bright pixels, inclusive.
+    pub(crate) bright_min: f32,
+    pub(crate) bright_max: f32,
+    /// At least this share of dark pixels.
+    pub(crate) dark_min: f32,
+    /// The bright pixels' column centroid, as a share of the width.
+    pub(crate) centroid_min: f32,
+    pub(crate) centroid_max: f32,
+    /// First to last column holding a bright pixel, as a share of the width.
+    pub(crate) span_min: f32,
+    /// The top tenth and the bottom tenth of rows each hold at most this
+    /// share of bright pixels.
+    pub(crate) edge_bright_max: f32,
+}
+
+pub(crate) const SHAPE: ShapeRule = ShapeRule {
+    bright_above: 200,
+    dark_below: 60,
+    bright_min: 0.12,
+    bright_max: 0.55,
+    dark_min: 0.40,
+    centroid_min: 0.40,
+    centroid_max: 0.60,
+    span_min: 0.60,
+    edge_bright_max: 0.05,
+};
+
+/// What the shape rule measures on the grey title region.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ShapeMetrics {
+    pub(crate) bright: f32,
+    pub(crate) dark: f32,
+    /// `None` with no bright pixel.
+    pub(crate) centroid: Option<f32>,
+    pub(crate) span: f32,
+    pub(crate) top_bright: f32,
+    pub(crate) bottom_bright: f32,
+}
+
+impl ShapeMetrics {
+    /// Every condition of [`SHAPE`].
+    pub(crate) fn passes(&self) -> bool {
+        let r = &SHAPE;
+        (r.bright_min..=r.bright_max).contains(&self.bright)
+            && self.dark >= r.dark_min
+            && self
+                .centroid
+                .is_some_and(|c| (r.centroid_min..=r.centroid_max).contains(&c))
+            && self.span >= r.span_min
+            && self.top_bright <= r.edge_bright_max
+            && self.bottom_bright <= r.edge_bright_max
+    }
+}
+
+/// Measure [`SHAPE`] on `rgb`'s title region, at full resolution; `None`
+/// when the region is too small to have edge rows.
+pub(crate) fn shape_metrics(rgb: &image::RgbImage) -> Option<ShapeMetrics> {
+    let (x0, y0, rw, rh) = title_rect(rgb.width(), rgb.height())?;
+    if rh < 10 || rw < 10 {
+        return None;
+    }
+    let edge_rows = rh / 10;
+    let mut cols = vec![0u32; rw as usize];
+    let (mut bright, mut dark, mut top, mut bottom) = (0u32, 0u32, 0u32, 0u32);
+    for dy in 0..rh {
+        for dx in 0..rw {
+            let [r, g, b] = rgb.get_pixel(x0 + dx, y0 + dy).0;
+            let grey = luma(r, g, b);
+            if grey > SHAPE.bright_above {
+                bright += 1;
+                cols[dx as usize] += 1;
+                if dy < edge_rows {
+                    top += 1;
+                }
+                if dy >= rh - edge_rows {
+                    bottom += 1;
+                }
+            } else if grey < SHAPE.dark_below {
+                dark += 1;
+            }
+        }
+    }
+    let total = (rw * rh) as f32;
+    let edge_total = (rw * edge_rows) as f32;
+    let centroid = (bright > 0).then(|| {
+        let weighted: f64 = cols
+            .iter()
+            .enumerate()
+            .map(|(x, &n)| (x as f64 + 0.5) * f64::from(n))
+            .sum();
+        (weighted / f64::from(bright) / f64::from(rw)) as f32
+    });
+    let first = cols.iter().position(|&n| n > 0);
+    let last = cols.iter().rposition(|&n| n > 0);
+    let span = match (first, last) {
+        (Some(a), Some(b)) => (b - a + 1) as f32 / rw as f32,
+        _ => 0.0,
+    };
+    Some(ShapeMetrics {
+        bright: bright as f32 / total,
+        dark: dark as f32 / total,
+        centroid,
+        span,
+        top_bright: top as f32 / edge_total,
+        bottom_bright: bottom as f32 / edge_total,
+    })
+}
+
+/// The grey level of a pixel, with the Rec. 709 weights `image` uses.
+fn luma(r: u8, g: u8, b: u8) -> u8 {
+    ((2126 * u32::from(r) + 7152 * u32::from(g) + 722 * u32::from(b)) / 10000) as u8
+}
+
 /// Where the examples are read from, under the data dir.
 pub(crate) fn ban_title_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir
@@ -37,15 +176,20 @@ pub(crate) fn ban_title_dir(data_dir: &std::path::Path) -> std::path::PathBuf {
         .join("ban_results")
 }
 
-/// The examples' grey cuts, zero-mean and unit length.
+/// The ban-results check: the examples' grey cuts (zero-mean, unit
+/// length), or the shape rule when there are none.
 #[derive(Debug, Default)]
 pub(crate) struct BanTitleExamples {
     cuts: Vec<Vec<f32>>,
 }
 
 impl BanTitleExamples {
-    /// Read every PNG in `dir`; a file that does not decode, or whose cut is
-    /// flat, is skipped. A missing folder is no examples.
+    /// Read up to [`MAX_EXAMPLES`] `.png` files in `dir` (any case). Only
+    /// regular files are opened (no symlink, and no FIFO that would block),
+    /// files over [`MAX_EXAMPLE_BYTES`] or with a side over
+    /// [`MAX_EXAMPLE_SIDE`] are skipped before decoding, and only the title
+    /// region is converted. Each skipped file is logged at info with why.
+    /// A missing folder is no examples.
     pub(crate) fn load_dir(dir: &std::path::Path) -> Self {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Self::default();
@@ -60,19 +204,34 @@ impl BanTitleExamples {
             })
             .collect();
         paths.sort();
-        let frames = paths.iter().filter_map(|p| match image::open(p) {
-            Ok(img) => Some(img.to_rgb8()),
-            Err(e) => {
-                tracing::debug!(target: "scuffed_stat_tracker", error = %e, path = %p.display(), "ban-results example not read");
-                None
+        if paths.len() > MAX_EXAMPLES {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                found = paths.len(),
+                kept = MAX_EXAMPLES,
+                "ban-results examples: only the first ones by name are read"
+            );
+            paths.truncate(MAX_EXAMPLES);
+        }
+        let mut cuts = Vec::new();
+        for path in &paths {
+            match example_cut(path) {
+                Ok(cut) => cuts.push(cut),
+                Err(why) => tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    path = %path.display(),
+                    why,
+                    "ban-results example not used"
+                ),
             }
-        });
-        Self::from_frames(frames)
+        }
+        Self { cuts }
     }
 
+    #[cfg(test)]
     pub(crate) fn from_frames(frames: impl IntoIterator<Item = image::RgbImage>) -> Self {
         Self {
-            cuts: frames.into_iter().filter_map(|f| grey_cut(&f)).collect(),
+            cuts: frames.into_iter().filter_map(|f| frame_cut(&f)).collect(),
         }
     }
 
@@ -86,36 +245,72 @@ impl BanTitleExamples {
         if self.cuts.is_empty() {
             return None;
         }
-        let cut = grey_cut(rgb)?;
+        let cut = frame_cut(rgb)?;
         self.cuts
             .iter()
             .map(|ex| ex.iter().zip(&cut).map(|(a, b)| a * b).sum::<f32>())
             .reduce(f32::max)
     }
 
-    /// Whether the ban-results title is on `rgb`.
+    /// Whether the ban-results title is on `rgb`: an example match when
+    /// there are examples, the shape rule otherwise. The score or the
+    /// shape is logged at debug, to tune the rule from real runs.
     pub(crate) fn matches(&self, rgb: &image::RgbImage) -> bool {
-        self.best_score(rgb)
-            .is_some_and(|score| score >= BAN_TITLE_MATCH_MIN)
+        if self.cuts.is_empty() {
+            let shape = shape_metrics(rgb);
+            let pass = shape.is_some_and(|m| m.passes());
+            tracing::debug!(target: "scuffed_stat_tracker", ?shape, pass, "ban-results title shape");
+            return pass;
+        }
+        let score = self.best_score(rgb);
+        let pass = score.is_some_and(|s| s >= BAN_TITLE_MATCH_MIN);
+        tracing::debug!(target: "scuffed_stat_tracker", ?score, pass, "ban-results title score");
+        pass
     }
 }
 
-/// The title region of the 16:9 game area, grey, at [`CUT_W`] x [`CUT_H`],
-/// zero-mean and unit length; `None` when it is flat or empty.
-fn grey_cut(rgb: &image::RgbImage) -> Option<Vec<f32>> {
-    let (w, h) = rgb.dimensions();
+/// One example file's grey cut, or why it was not used.
+fn example_cut(path: &std::path::Path) -> Result<Vec<f32>, String> {
+    let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+    if !meta.file_type().is_file() {
+        return Err("not a regular file".into());
+    }
+    if meta.len() > MAX_EXAMPLE_BYTES {
+        return Err(format!("larger than {MAX_EXAMPLE_BYTES} bytes"));
+    }
+    let (w, h) = image::image_dimensions(path).map_err(|e| e.to_string())?;
+    if w > MAX_EXAMPLE_SIDE || h > MAX_EXAMPLE_SIDE {
+        return Err(format!("{w}x{h} is over {MAX_EXAMPLE_SIDE} px"));
+    }
+    let img = image::open(path).map_err(|e| e.to_string())?;
+    let (x, y, rw, rh) = title_rect(w, h).ok_or("no title region")?;
+    grey_cut(&img.crop_imm(x, y, rw, rh).to_luma8())
+        .ok_or_else(|| "the title region is flat (no title on it)".into())
+}
+
+/// A frame's grey cut; `None` when the region is empty or flat.
+fn frame_cut(rgb: &image::RgbImage) -> Option<Vec<f32>> {
+    let (x, y, w, h) = title_rect(rgb.width(), rgb.height())?;
+    let region = image::imageops::crop_imm(rgb, x, y, w, h).to_image();
+    grey_cut(&image::DynamicImage::ImageRgb8(region).to_luma8())
+}
+
+/// The title region of a `w` x `h` frame's 16:9 game area, in pixels;
+/// `None` when it is empty.
+fn title_rect(w: u32, h: u32) -> Option<(u32, u32, u32, u32)> {
     let (gx, gy, gw, gh) = stat_tracker::frame::geometry::game_rect_16_9(w, h);
     let [fx0, fy0, fx1, fy1] = BAN_RESULTS_TITLE;
     let x0 = gx + (gw as f32 * fx0) as u32;
     let y0 = gy + (gh as f32 * fy0) as u32;
     let x1 = (gx + (gw as f32 * fx1) as u32).min(w);
     let y1 = (gy + (gh as f32 * fy1) as u32).min(h);
-    if x1 <= x0 || y1 <= y0 {
-        return None;
-    }
-    let region = image::imageops::crop_imm(rgb, x0, y0, x1 - x0, y1 - y0).to_image();
-    let grey = image::DynamicImage::ImageRgb8(region).to_luma8();
-    let small = image::imageops::resize(&grey, CUT_W, CUT_H, image::imageops::FilterType::Triangle);
+    (x1 > x0 && y1 > y0).then(|| (x0, y0, x1 - x0, y1 - y0))
+}
+
+/// A grey title region at [`CUT_W`] x [`CUT_H`], zero-mean and unit
+/// length; `None` when it is flat.
+fn grey_cut(grey: &image::GrayImage) -> Option<Vec<f32>> {
+    let small = image::imageops::resize(grey, CUT_W, CUT_H, image::imageops::FilterType::Triangle);
     let px: Vec<f32> = small.pixels().map(|p| f32::from(p.0[0])).collect();
     let n = px.len() as f32;
     let mean = px.iter().sum::<f32>() / n;

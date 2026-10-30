@@ -16,18 +16,18 @@
 //! Ban results are no phase of their own yet. The candidate is the first
 //! frame at least [`BAN_RESULTS_DELAY`] after the last ban-phase frame (in
 //! practice the next poll) that shows the ban-results title
-//! ([`super::pregame_ban_title`], matched against example screenshots on
-//! this PC; with none, nothing is ever a candidate). It is kept only when
-//! one more non-phase frame follows it before the next phase reads, and
-//! only written while [`BAN_RESULTS_WINDOW`] lasts. The phase read lags a new
+//! ([`super::pregame_ban_title`]: a shape rule, or example screenshots on
+//! this PC when there are any). It is kept only when one more non-phase
+//! frame follows it before the next phase reads, and only written within
+//! [`BAN_RESULTS_WINDOW`] of the candidate frame. The phase read lags a new
 //! screen by one poll, so a candidate right before the hero select read is
 //! the hero select's first frame and is dropped. A frame that shows the
 //! hero select's title (the words-v1 mask, read without the stability
-//! wait) is the select too: it never becomes or confirms a candidate, and
-//! it ends the wait, which covers a select read that lags two polls or
-//! more. The candidate is also dropped when the ban comes back, and when
-//! [`BAN_RESULTS_WINDOW`] runs out before the next screen reads (the ban
-//! read was lost: ESC, alt-tab). Only a map vote or a ban opens a game
+//! wait, and only with `reader = "new"`, which loads the mask) is the
+//! select too: it never becomes or confirms a candidate, and it ends the
+//! wait, which covers a select read that lags two polls or more. The
+//! candidate is also dropped when the ban comes back, and when
+//! [`BAN_RESULTS_WINDOW`] runs out before the next screen reads. Only a map vote or a ban opens a game
 //! folder; a hero select alone is the one between rounds.
 
 use crate::*;
@@ -45,8 +45,10 @@ pub(crate) const PREGAME_GAME_GAP: Duration = Duration::from_secs(3 * 60);
 /// (4 s with ocr-v1), so this is the next poll.
 pub(crate) const BAN_RESULTS_DELAY: Duration = Duration::from_millis(1_000);
 
-/// The wait for the ban results ends this long after the last ban-phase
-/// frame; a candidate not settled by then is dropped.
+/// The wait for a candidate ends this long after the last ban-phase frame,
+/// and a candidate not settled this long after its own frame is dropped
+/// (the ban read was lost: ESC, alt-tab). Measured from the candidate, so
+/// at 4 s polls a select read 12 s after the results still settles it.
 pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 
 /// A phase gone for at most this long and back is a detector flicker (the
@@ -265,8 +267,8 @@ struct OnScreen<F> {
 /// The ban-results candidate frame.
 struct BanResults<F> {
     frame: F,
-    /// The last ban-phase frame before it: the window runs from there.
-    ban_ended: Instant,
+    /// When it was taken: the window runs from there.
+    taken_at: Instant,
     /// Another non-phase frame came after it, so it is not the next
     /// screen's first frame read one poll early.
     confirmed: bool,
@@ -475,12 +477,19 @@ impl<F: Clone> PregameTracker<F> {
         }
         if self.game_open(now).is_none() || seen == Seen::Loading {
             self.settle_ban_results(now, shots);
+        } else if self
+            .ban_results
+            .as_ref()
+            .is_some_and(|c| now.saturating_duration_since(c.taken_at) > BAN_RESULTS_WINDOW)
+        {
+            // No next screen in time: the ban read was lost (ESC,
+            // alt-tab), and the candidate is a frame from that gap.
+            self.ban_results = None;
+            self.ban_ended_at = None;
         } else if let Some(ended) = self.ban_ended_at {
             let since = now.saturating_duration_since(ended);
-            if since > BAN_RESULTS_WINDOW {
-                // No next screen in time: the ban read was lost (ESC,
-                // alt-tab), and the candidate is a frame from that gap.
-                self.ban_results = None;
+            if since > BAN_RESULTS_WINDOW && self.ban_results.is_none() {
+                // No results title in time: stop looking.
                 self.ban_ended_at = None;
             } else if since >= BAN_RESULTS_DELAY
                 && seen == Seen::BanResults
@@ -489,7 +498,7 @@ impl<F: Clone> PregameTracker<F> {
             {
                 self.ban_results = Some(BanResults {
                     frame,
-                    ban_ended: ended,
+                    taken_at: now,
                     confirmed: false,
                 });
             }
@@ -520,7 +529,7 @@ impl<F: Clone> PregameTracker<F> {
     fn settle_ban_results(&mut self, now: Instant, shots: &mut Vec<PregameShot<F>>) {
         self.ban_ended_at = None;
         let Some(c) = self.ban_results.take().filter(|c| {
-            c.confirmed && now.saturating_duration_since(c.ban_ended) <= BAN_RESULTS_WINDOW
+            c.confirmed && now.saturating_duration_since(c.taken_at) <= BAN_RESULTS_WINDOW
         }) else {
             return;
         };
@@ -698,7 +707,7 @@ pub(crate) fn write_pregame_shots(
     }
 }
 
-type ShotBatch = Vec<PregameShot<Arc<image::DynamicImage>>>;
+pub(crate) type ShotBatch = Vec<PregameShot<Arc<image::DynamicImage>>>;
 
 /// One thread writes every batch in order, so two writes of the same
 /// `*_last.png` never overlap. The queue is bounded by [`PREGAME_QUEUE`].
@@ -760,6 +769,19 @@ impl PregameWriter {
         self.dead_logged
     }
 
+    /// A writer whose queue nobody reads, so it fills (tests). Keep the
+    /// receiver alive.
+    #[cfg(test)]
+    pub(crate) fn stalled() -> (Self, std::sync::mpsc::Receiver<ShotBatch>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ShotBatch>(PREGAME_QUEUE);
+        let writer = Self {
+            tx: Some(tx),
+            thread: None,
+            dead_logged: false,
+        };
+        (writer, rx)
+    }
+
     /// A writer whose thread is already gone (tests).
     #[cfg(test)]
     pub(crate) fn dead() -> Self {
@@ -815,7 +837,7 @@ impl PregameDump {
             tracing::info!(
                 target: "scuffed_stat_tracker",
                 dir = %examples_dir.display(),
-                "pre-game screens: no ban-results examples, so ban_results.png is not saved"
+                "pre-game screens: no ban-results examples, the ban-results title is told by its shape"
             );
         } else {
             tracing::info!(

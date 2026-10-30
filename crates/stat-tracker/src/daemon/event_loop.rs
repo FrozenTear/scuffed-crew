@@ -791,10 +791,11 @@ pub(crate) async fn run_loop(
                         // Capture failed: the pre-game saves hold no frame
                         // either. An expected one-poll miss leaves them be,
                         // but not one that can last the game (a declined
-                        // share, paused screenshot requests).
-                        if (failure != PollErrorLog::Expected
-                            || capture::is_lasting_poll_miss(&e.to_string()))
-                            && let Some(dump) = pregame_dump.as_mut()
+                        // share, paused screenshot requests). Switch off:
+                        // nothing is checked.
+                        if let Some(dump) = pregame_dump.as_mut()
+                            && (failure != PollErrorLog::Expected
+                                || capture::is_lasting_poll_miss(&e.to_string()))
                         {
                             dump.release(Instant::now());
                         }

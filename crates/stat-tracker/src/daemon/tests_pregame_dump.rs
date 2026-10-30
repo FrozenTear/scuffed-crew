@@ -114,7 +114,7 @@ fn the_poll_loop_feeds_and_releases_the_saver_and_shutdown_flushes_it() {
     // expected one-poll miss does not.
     assert_eq!(run_loop.matches("dump.release(Instant::now())").count(), 2);
     assert!(run_loop.contains(
-        "if(failure!=PollErrorLog::Expected||capture::is_lasting_poll_miss(&e.to_string()))&&letSome(dump)=pregame_dump.as_mut(){dump.release(Instant::now());}"
+        "ifletSome(dump)=pregame_dump.as_mut()&&(failure!=PollErrorLog::Expected||capture::is_lasting_poll_miss(&e.to_string())){dump.release(Instant::now());}"
     ));
     assert!(run_loop.contains(
         "if!running{ifletSome(dump)=pregame_dump.as_mut(){dump.release(Instant::now());}clear_cadence_wakes("
@@ -913,7 +913,7 @@ fn a_dropped_candidate_is_never_saved_later() {
     run.release(10_500);
     assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
     // A confirmed candidate past the window is dropped too, on every path:
-    // here the loading screen settles it 20 s after the ban.
+    // here the game closing (`release`) settles it 18.5 s after its frame.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, RESULTS, 2);
@@ -930,11 +930,20 @@ async fn the_shutdown_flush_writes_no_unmatched_candidate() {
     let mut dump = PregameDump::new(true, dir.path()).unwrap();
     let start = Instant::now();
     let at = |ms: u64| start + Duration::from_millis(ms);
-    dump.observe(at(0), BAN, Some(frame(16, 9)));
-    dump.observe(at(1_500), BAN, Some(frame(16, 9)));
-    // No examples are installed, so nothing reads as the results title.
-    dump.observe(at(3_000), Seen::Other, None);
-    dump.observe(at(4_500), Seen::Other, None);
+    dump.observe(at(0), BAN, Some(frame(64, 36)));
+    dump.observe(at(1_500), BAN, Some(frame(64, 36)));
+    // No examples are installed: the shape rule decides, and the roster (no
+    // bright title) fails it. Each frame goes through the real classify and
+    // is handed over, so a tracker that took any frame would write one.
+    let roster = image::RgbImage::from_pixel(640, 360, image::Rgb([30, 34, 44]));
+    for ms in [3_000, 4_500] {
+        let want = dump.want(at(ms));
+        assert!(want.ban_title);
+        let seen = classify(want, &detect::GamePhase::Unknown, &roster, &dump.examples());
+        assert_eq!(seen, Seen::Other);
+        let shown = Arc::new(image::DynamicImage::ImageRgb8(roster.clone()));
+        dump.observe(at(ms), seen, Some(shown));
+    }
     assert!(dump.finish(Duration::from_secs(30)).await);
     let root = pregame_dir(dir.path());
     let games = names_in(&root);
@@ -990,6 +999,22 @@ fn ban_results_at_a_four_second_poll() {
     run.tick(8_000, RESULTS, 3);
     run.tick(12_000, SELECT, 4);
     assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+    // The window runs from the results frame: ban 0 s, results 4 s, roster
+    // 8 s, the select's first frame 12 s, the select read 16 s.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(4_000, RESULTS, 2);
+    run.tick(8_000, Seen::Other, 3);
+    run.tick(12_000, Seen::Other, 4);
+    run.tick(16_000, SELECT, 5);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("ban_results.png", 2),
+            ("heroselect_first.png", 5),
+        ]
+    );
     // Two late polls, the second showing the select title: still the select.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
@@ -1001,21 +1026,65 @@ fn ban_results_at_a_four_second_poll() {
 }
 
 #[test]
+fn results_then_the_roster_then_loading_inside_the_window_are_saved() {
+    // Ban 0 s, results 4 s, roster 8 s and 12 s, ENTERING GAME 16 s: past
+    // 15 s from the ban, inside 15 s from the results frame.
+    let mut run = Run::new();
+    run.tick(0, VOTE, 1);
+    run.tick(2_000, BAN, 2);
+    run.tick(6_000, RESULTS, 3);
+    run.tick(10_000, Seen::Other, 4);
+    run.tick(14_000, Seen::Other, 5);
+    run.tick(18_000, Seen::Loading, 6);
+    assert_eq!(
+        run.names(),
+        [
+            ("mapvote_first.png", 1),
+            ("heroban_first.png", 2),
+            ("ban_results.png", 3),
+            ("loading.png", 6),
+        ]
+    );
+    // The same with the loading screen past 15 s from the results frame.
+    let mut run = Run::new();
+    run.tick(0, VOTE, 1);
+    run.tick(2_000, BAN, 2);
+    run.tick(6_000, RESULTS, 3);
+    run.tick(10_000, Seen::Other, 4);
+    run.tick(14_000, Seen::Other, 5);
+    run.tick(21_500, Seen::Loading, 6);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+}
+
+#[test]
+fn results_then_the_roster_then_nothing_drop_the_candidate() {
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, RESULTS, 2);
+    for ms in (3_000..=18_000).step_by(1_500) {
+        run.tick(ms, Seen::Other, 3);
+    }
+    assert!(!run.tracker.holds_frame(), "dropped past its window");
+    run.release(30_000);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+}
+
+#[test]
 fn a_ban_read_lost_past_the_window_saves_no_results() {
     // BAN at 0 s and 10 s, other screens every 1.5 s from 11.5 s, the ban
     // back at 28 s.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(10_000, BAN, 2);
-    for (i, ms) in (11_500..28_000).step_by(1_500).enumerate() {
+    for (i, ms) in (11_500..29_000).step_by(1_500).enumerate() {
         run.tick(ms, RESULTS, 10 + i as u32);
     }
-    // The window ran out at 25 s: the candidate is gone.
+    // The candidate from 11.5 s ran out of its window at 28 s.
     assert!(!run.tracker.holds_frame());
-    run.tick(28_000, BAN, 40);
-    run.tick(29_500, Seen::Other, 41);
-    run.tick(31_000, Seen::Other, 42);
-    run.tick(32_500, SELECT, 43);
+    run.tick(29_500, BAN, 40);
+    run.tick(31_000, Seen::Other, 41);
+    run.tick(32_500, Seen::Other, 42);
+    run.tick(34_000, SELECT, 43);
     assert!(
         run.names().iter().all(|(n, _)| *n != "ban_results.png"),
         "{:?}",
@@ -1039,68 +1108,11 @@ fn a_dead_writer_is_logged_once_and_told_apart_from_a_busy_one() {
     assert!(writer.dead_logged());
     assert!(!writer.send(shot()));
     assert!(writer.dead_logged());
-}
-
-/// A dark frame with a title-like row of bright blocks in the ban-results
-/// title region; `shift` moves the blocks (a different title).
-fn titled_frame(w: u32, h: u32, shift: f32) -> image::RgbImage {
-    use super::pregame_ban_title::BAN_RESULTS_TITLE;
-    let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([14, 16, 22]));
-    let [x0, y0, x1, y1] = BAN_RESULTS_TITLE;
-    let (rw, rh) = ((x1 - x0) * w as f32, (y1 - y0) * h as f32);
-    for k in 0..9 {
-        let gx0 = x0 * w as f32 + rw * ((0.06 + 0.1 * k as f32 + shift) % 0.95);
-        let gw = rw * if k % 3 == 0 { 0.07 } else { 0.04 };
-        let gy0 = y0 * h as f32 + rh * 0.3;
-        let gh = rh * if k % 2 == 0 { 0.4 } else { 0.25 };
-        for y in gy0 as u32..(gy0 + gh) as u32 {
-            for x in gx0 as u32..(gx0 + gw) as u32 {
-                img.put_pixel(x, y, image::Rgb([235, 235, 240]));
-            }
-        }
+    // A busy writer (queue full, thread alive) is not logged as dead.
+    let (mut busy, _queue) = PregameWriter::stalled();
+    for _ in 0..PREGAME_QUEUE {
+        assert!(busy.send(shot()));
     }
-    img
-}
-
-#[test]
-fn the_ban_results_title_matches_its_example_at_another_size() {
-    use super::pregame_ban_title::{BAN_TITLE_MATCH_MIN, BanTitleExamples};
-    let examples = BanTitleExamples::from_frames([titled_frame(2560, 1440, 0.0)]);
-    assert_eq!(examples.len(), 1);
-    // The same title at 1080p.
-    let same = titled_frame(1920, 1080, 0.0);
-    assert!(examples.best_score(&same).unwrap() >= BAN_TITLE_MATCH_MIN);
-    assert!(examples.matches(&same));
-    // Another title (the roster's) does not match.
-    let other = titled_frame(1920, 1080, 0.05);
-    assert!(
-        !examples.matches(&other),
-        "{:?}",
-        examples.best_score(&other)
-    );
-    // A flat title area matches nothing.
-    let flat = image::RgbImage::from_pixel(1920, 1080, image::Rgb([14, 16, 22]));
-    assert_eq!(examples.best_score(&flat), None);
-    // No examples: nothing matches.
-    assert!(!BanTitleExamples::default().matches(&same));
-}
-
-#[test]
-fn ban_results_examples_are_read_from_the_data_dir() {
-    use super::pregame_ban_title::{BanTitleExamples, ban_title_dir};
-    let dir = tempfile::tempdir().unwrap();
-    let examples = ban_title_dir(dir.path());
-    assert_eq!(BanTitleExamples::load_dir(&examples).len(), 0);
-    std::fs::create_dir_all(&examples).unwrap();
-    titled_frame(640, 360, 0.0)
-        .save(examples.join("results.png"))
-        .unwrap();
-    std::fs::write(examples.join("notes.txt"), b"not an image").unwrap();
-    std::fs::write(examples.join("broken.png"), b"not a png").unwrap();
-    image::RgbImage::from_pixel(640, 360, image::Rgb([0, 0, 0]))
-        .save(examples.join("flat.png"))
-        .unwrap();
-    let loaded = BanTitleExamples::load_dir(&examples);
-    assert_eq!(loaded.len(), 1);
-    assert!(loaded.matches(&titled_frame(1920, 1080, 0.0)));
+    assert!(!busy.send(shot()), "a full queue drops the batch");
+    assert!(!busy.dead_logged());
 }
