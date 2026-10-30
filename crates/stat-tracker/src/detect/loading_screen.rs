@@ -98,8 +98,8 @@ pub const WORD_RATIO_REJECT: f32 = 0.70;
 /// update band with such an arc would count as three words and pass rule
 /// C. The stand-in spinner (`two_word_band`) is 0.03 wide and as tall as
 /// the text, 0.067, so these allow about 1.5 times it. The width limit
-/// alone keeps real second words in: `GAME` is about 0.064 of the width
-/// and `UPDATE` about 0.077, both above 0.045.
+/// alone keeps real second words in: `GAME` is about 0.053 of the width
+/// and `UPDATE` about 0.065, both above 0.045.
 const SPINNER_WIDTH_MAX: f32 = 0.045;
 const SPINNER_HEIGHT_MAX: f32 = 0.10;
 
