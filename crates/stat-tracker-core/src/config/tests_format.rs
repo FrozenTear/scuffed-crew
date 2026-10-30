@@ -88,6 +88,7 @@ fn sample(full: bool) -> Config {
             Vec::new()
         },
         debug_ocr: full,
+        debug_save_pregame_screens: full,
         report_kit_max_games: full.then_some(80),
         report_kit_max_mb: full.then_some(1000),
         ocr_threads: full.then_some(2),

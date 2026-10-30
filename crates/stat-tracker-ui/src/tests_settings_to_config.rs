@@ -42,6 +42,7 @@ fn every_key_set() -> Config {
         finished_game_close_secs: 240,
         game_process_names: vec!["Overwatch.exe".to_string(), "wine64".to_string()],
         debug_ocr: true,
+        debug_save_pregame_screens: true,
         report_kit_max_games: Some(80),
         report_kit_max_mb: Some(1000),
         ocr_threads: Some(2),
@@ -90,6 +91,7 @@ fn every_config_key_is_owned_by_the_form_or_kept_from_the_file() {
         // while its checkbox still shows what it showed at load.
         data_dir,
         debug_portal_frames,
+        debug_save_pregame_screens,
         screencast_max_fps,
         screencast_pause_between_grabs,
         finished_game_close_secs,
@@ -134,6 +136,7 @@ fn every_config_key_is_owned_by_the_form_or_kept_from_the_file() {
 
     assert_eq!(data_dir, file.data_dir);
     assert_eq!(debug_portal_frames, file.debug_portal_frames);
+    assert_eq!(debug_save_pregame_screens, file.debug_save_pregame_screens);
     assert_eq!(screencast_max_fps, file.screencast_max_fps);
     assert_eq!(
         screencast_pause_between_grabs,

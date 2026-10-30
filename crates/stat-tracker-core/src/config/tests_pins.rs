@@ -103,6 +103,7 @@ fn every_field_set() -> Config {
         finished_game_close_secs: 240,
         game_process_names: vec!["Overwatch.exe".to_string(), "wine64".to_string()],
         debug_ocr: true,
+        debug_save_pregame_screens: true,
         report_kit_max_games: Some(80),
         report_kit_max_mb: Some(1000),
         ocr_threads: Some(2),
@@ -150,6 +151,7 @@ game_process_names = [
     \"wine64\",
 ]
 debug_ocr = true
+debug_save_pregame_screens = true
 report_kit_max_games = 80
 report_kit_max_mb = 1000
 ocr_threads = 2
@@ -261,6 +263,7 @@ fn pin_key_order() {
             "finished_game_close_secs",
             "game_process_names",
             "debug_ocr",
+            "debug_save_pregame_screens",
             "report_kit_max_games",
             "report_kit_max_mb",
             "ocr_threads",
@@ -324,6 +327,7 @@ fn pin_minimal_file_field_values() {
     assert_eq!(c.finished_game_close_secs, 180);
     assert_eq!(c.game_process_names, ["Overwatch.exe"]);
     assert!(!c.debug_ocr);
+    assert!(!c.debug_save_pregame_screens);
     assert_eq!(c.report_kit_max_games, None);
     assert_eq!(c.report_kit_max_mb, None);
     assert_eq!(c.ocr_threads, None);

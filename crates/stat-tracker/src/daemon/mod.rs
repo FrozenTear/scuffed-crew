@@ -11,6 +11,8 @@ pub(crate) mod gui_presence;
 mod lifecycle;
 pub(crate) mod memtune;
 mod poll;
+pub(crate) mod pregame_ban_title;
+pub(crate) mod pregame_dump;
 pub(crate) mod query_server;
 mod session;
 mod shutdown;
@@ -25,6 +27,10 @@ mod tests_frame_copies;
 mod tests_gui_presence;
 #[cfg(test)]
 mod tests_memtune;
+#[cfg(test)]
+mod tests_pregame_ban_title;
+#[cfg(test)]
+mod tests_pregame_dump;
 #[cfg(test)]
 mod tests_query_server;
 #[cfg(test)]

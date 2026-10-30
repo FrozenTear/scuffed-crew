@@ -13,6 +13,9 @@ pub(crate) async fn run_loop(
     // Set when the binary on disk was replaced: `run` restarts into it
     // after the store's close.
     restart_to: &mut Option<std::path::PathBuf>,
+    // `debug_save_pregame_screens`: `None` while off, so no check runs and
+    // no frame is kept. The caller flushes it after the loop.
+    pregame_dump: &mut Option<daemon::pregame_dump::PregameDump>,
 ) -> anyhow::Result<()> {
     // Ergonomic locals over the shared context; spawned tasks clone the Arc.
     let backend = &ctx.backend;
@@ -383,6 +386,9 @@ pub(crate) async fn run_loop(
                 }
                 game_was_running = running;
                 if !running {
+                    if let Some(dump) = pregame_dump.as_mut() {
+                        dump.release(Instant::now());
+                    }
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
                     poll_failures.game_stopped();
@@ -490,6 +496,12 @@ pub(crate) async fn run_loop(
                         // A copy: a poll that a Tab drops leaves the
                         // session's stability history as it was.
                         let mut stability = st.ocr_stability.clone();
+                        // A Tab-busy tick reads no phase, so it is not fed
+                        // to the pre-game saves.
+                        let pregame_want = pregame_dump
+                            .as_ref()
+                            .filter(|_| !outcome_only)
+                            .map(|dump| (dump.want(Instant::now()), dump.examples()));
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -571,6 +583,10 @@ pub(crate) async fn run_loop(
                             // the title card's phrase OCR does not run.
                             let end_reel =
                                 detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
+                            let pregame_seen = pregame_want.map(|(want, examples)| {
+                                let seen = daemon::pregame_dump::classify(want, &phase, &rgb, &examples);
+                                (seen, daemon::pregame_dump::keeps_frame(want, seen))
+                            });
                             // Result templates are not on the Tab frame. A
                             // polled outcome frame feeds the new reader's
                             // result. The read the signal came from is that
@@ -603,7 +619,10 @@ pub(crate) async fn run_loop(
                                 stat_tracker::perf::Stage::PollAnalyze,
                                 analyze_started.elapsed(),
                             );
-                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png)
+                            // The frame moves into the tick's result, no copy.
+                            let pregame = pregame_seen
+                                .map(|(seen, keep)| (seen, keep.then(|| Arc::new(img))));
+                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
                             stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -621,7 +640,7 @@ pub(crate) async fn run_loop(
                         if let Some(seen) = kept_frame {
                             seen_stream = Some(seen);
                         }
-                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = match analyzed {
+                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
                                     &mut st,
@@ -637,7 +656,7 @@ pub(crate) async fn run_loop(
                                 return Ok(());
                             }
                             Ok(joined) => joined.unwrap_or_else(|_| {
-                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None)
+                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None, None)
                             }),
                         };
                         if stat_tracker::replace::shutdown_requested() {
@@ -668,6 +687,9 @@ pub(crate) async fn run_loop(
                             tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: outcome crop not written");
                         }
                         st.ocr_stability = stability;
+                        if let (Some(dump), Some((seen, frame))) = (pregame_dump.as_mut(), pregame) {
+                            dump.observe(Instant::now(), seen, frame);
+                        }
                         if let Some(read) = result_read
                             && let Some(game) = st.active_game.as_mut()
                         {
@@ -765,7 +787,19 @@ pub(crate) async fn run_loop(
                         // The game gate ran first: the game is running. A
                         // known state (a held lock, a share opening, declined
                         // or closed) is no failure and has its own log line.
-                        match poll_failures.on_error(&e.to_string(), Instant::now()) {
+                        let failure = poll_failures.on_error(&e.to_string(), Instant::now());
+                        // Capture failed: the pre-game saves hold no frame
+                        // either. An expected one-poll miss leaves them be,
+                        // but not one that can last the game (a declined
+                        // share, paused screenshot requests). Switch off:
+                        // nothing is checked.
+                        if let Some(dump) = pregame_dump.as_mut()
+                            && (failure != PollErrorLog::Expected
+                                || capture::is_lasting_poll_miss(&e.to_string()))
+                        {
+                            dump.release(Instant::now());
+                        }
+                        match failure {
                             PollErrorLog::Expected => {
                                 tracing::trace!(target: "scuffed_stat_tracker", error = %e, "poll capture skipped");
                             }
