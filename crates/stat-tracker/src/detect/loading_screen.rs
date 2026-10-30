@@ -22,9 +22,9 @@
 //! (`APPLYING UPDATE`, about 0.74) fails; `ENTERING GAME` (about 0.61)
 //! passes. Of three clusters, the end one across the wider gap is left
 //! out first as a spinner, but only when it is spinner-sized (at most
-//! [`SPINNER_WIDTH_MAX`] of the width, [`SPINNER_HEIGHT_MAX`] of the
-//! height and roughly square, about 1.5 times the stand-in spinner);
-//! otherwise the three are not two words. Anything else passes, and the
+//! [`SPINNER_WIDTH_MAX`] of the width and [`SPINNER_HEIGHT_MAX`] of the
+//! height, any shape, about 1.5 times the stand-in spinner); otherwise the
+//! three are not two words. Anything else passes, and the
 //! saves keep only the last frame that passes before the game starts. The
 //! ratio is tuned on the English texts: on other clients only the game
 //! start decides.
@@ -92,15 +92,16 @@ pub const WORD_RATIO_REJECT: f32 = 0.70;
 
 /// An end cluster of three is the spinner, left out of the words, only
 /// when it is at most this wide (a share of the game width) and this tall
-/// (of its height), and neither side is more than [`SPINNER_ASPECT_MAX`]
-/// times the other. The stand-in spinner (`two_word_band`) is 0.03 wide
-/// and as tall as the text, 0.067 (0.8 as wide as tall in pixels), so
-/// these allow about 1.5 times it; the shortest real word, `GAME` in the
-/// 0.173 wide `ENTERING GAME` at 0.61, is about 0.061 wide, and the
-/// second word of the 0.186 wide `APPLYING UPDATE` at 0.74 about 0.074.
+/// (of its height). The bound is width and height only, with no shape
+/// limit: the real spinner is already about 1.38 as wide as tall, so a
+/// partial arc can be flatter or thinner still, and with a shape limit an
+/// update band with such an arc would count as three words and pass rule
+/// C. The stand-in spinner (`two_word_band`) is 0.03 wide and as tall as
+/// the text, 0.067, so these allow about 1.5 times it. The width limit
+/// alone keeps real second words in: `GAME` is about 0.064 of the width
+/// and `UPDATE` about 0.077, both above 0.045.
 const SPINNER_WIDTH_MAX: f32 = 0.045;
 const SPINNER_HEIGHT_MAX: f32 = 0.10;
-const SPINNER_ASPECT_MAX: f32 = 1.6;
 
 /// Glyph samples this close across (a share of the game width) on one
 /// row, or on rows this close down (a share of its height) with spans this
@@ -138,7 +139,8 @@ pub struct TextBox {
     /// Words in the box ([`WORD_GAP`]), after a spinner: of exactly three,
     /// the end one across the wider gap (the words are closer to each
     /// other than to it) is left out when it is spinner-sized
-    /// ([`SPINNER_WIDTH_MAX`]); otherwise all three count.
+    /// ([`SPINNER_WIDTH_MAX`], [`SPINNER_HEIGHT_MAX`]); otherwise all
+    /// three count.
     pub words: usize,
     /// The second word's width over the first's, with exactly two words.
     pub word_ratio: Option<f32>,
@@ -277,9 +279,9 @@ pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
 /// new word starts where the empty sampled columns between two lit ones
 /// span at least [`WORD_GAP`] of the width. Of exactly three, the end one
 /// across the wider gap is the spinner and is left out when it is
-/// spinner-sized ([`SPINNER_WIDTH_MAX`], [`SPINNER_HEIGHT_MAX`],
-/// [`SPINNER_ASPECT_MAX`]); otherwise all three are kept, since a stray gap
-/// in a word can leave a letter or two at the other end as small.
+/// spinner-sized ([`SPINNER_WIDTH_MAX`], [`SPINNER_HEIGHT_MAX`], any
+/// shape); otherwise all three are kept, since a stray gap in a word can
+/// leave a letter or two at the other end as small.
 fn words(lit: &[(u32, u32)], gw: u32, gh: u32) -> Vec<(u32, u32)> {
     let gap = gw as f32 * WORD_GAP;
     // First and last column, top and bottom row.
@@ -297,10 +299,7 @@ fn words(lit: &[(u32, u32)], gw: u32, gh: u32) -> Vec<(u32, u32)> {
     if let [(_, a1, ..), (b0, b1, ..), (c0, ..)] = words[..] {
         let spinner = |(x0, x1, y0, y1): (u32, u32, u32, u32)| {
             let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
-            w <= gw as f32 * SPINNER_WIDTH_MAX
-                && h <= gh as f32 * SPINNER_HEIGHT_MAX
-                && w <= h * SPINNER_ASPECT_MAX
-                && h <= w * SPINNER_ASPECT_MAX
+            w <= gw as f32 * SPINNER_WIDTH_MAX && h <= gh as f32 * SPINNER_HEIGHT_MAX
         };
         // The end across the wider gap: the words are closer to each other
         // than to the spinner.
@@ -557,7 +556,10 @@ mod tests {
         // ENTERING GAME with a stray 0.008 gap leaving EN (0.03 wide, as
         // the stand-in spinner) at the left: GAME, across the wider gap,
         // is no spinner, so the three count and the band passes. Dropping
-        // EN would judge GAME over TERING (about 0.98) and reject it.
+        // EN would judge GAME over TERING (about 0.98) and reject it. EN is
+        // spinner-sized (with or without a shape limit), but it still
+        // passes: EN sits across the narrower gap, so it is not the checked
+        // end, and GAME (0.061) is wider than the 0.045 width limit.
         let parts = [
             (0.0, 0.03, TEXT_H),
             (0.008, 0.062, TEXT_H),
@@ -578,17 +580,12 @@ mod tests {
         // 1920x1080 (`(width, height)` shares): inside it is the spinner and
         // the words are judged (rejected), outside it is a third word.
         let update = [(0.0, 0.10, TEXT_H), (0.012, 0.074, TEXT_H)];
-        // In pairs: 0.045 wide at most, 0.10 tall at most, at most 1.6 as
-        // tall as wide, at most 1.6 as wide as tall.
+        // In pairs: 0.045 wide at most, 0.10 tall at most.
         let cases = [
             ((0.043, TEXT_H), true),
             ((0.048, TEXT_H), false),
             ((0.042, 0.097), true),
             ((0.042, 0.104), false),
-            ((0.03, 0.082), true),
-            ((0.03, 0.090), false),
-            ((0.032, 0.04), true),
-            ((0.040, 0.04), false),
         ];
         for ((sw, sh), spinner) in cases {
             let band = parts_band(1920, 1080, &[update[0], update[1], (0.025, sw, sh)]);
@@ -598,8 +595,7 @@ mod tests {
                 assert_eq!(is_entering_game(&band), !spinner, "{sw} {sh}: {t:?}");
             }
         }
-        // The bounds in sampled pixels, 1920x1080: 86.4 wide, 108 tall,
-        // each side at most 1.6 times the other.
+        // The bounds in sampled pixels, 1920x1080: 86.4 wide, 108 tall.
         let cluster = |x0: u32, x1: u32, y0: u32, y1: u32| {
             (x0..=x1).step_by(2).flat_map(move |x| [(x, y0), (x, y1)])
         };
@@ -611,17 +607,41 @@ mod tests {
             lit.sort_unstable();
             words(&lit, 1920, 1080).len()
         };
-        for ((sw, sh), n) in [
-            ((86, 72), 2),
-            ((88, 72), 3),
-            ((80, 108), 2),
-            ((80, 110), 3),
-            ((60, 96), 2),
-            ((60, 98), 3),
-            ((80, 50), 2),
-            ((82, 50), 3),
-        ] {
+        for ((sw, sh), n) in [((86, 72), 2), ((88, 72), 3), ((80, 108), 2), ((80, 110), 3)] {
             assert_eq!(count(sw, sh), n, "{sw} x {sh}");
+        }
+    }
+
+    #[test]
+    fn a_spinner_of_any_shape_inside_the_size_limits_is_left_out() {
+        // A partial arc 2.5 times as wide as tall (0.04 wide) or as tall as
+        // wide (0.02 wide, 0.089 tall), inside the width and height limits,
+        // on either end of APPLYING UPDATE: left out as the spinner, so the
+        // update band is judged on its two words and rejected, at each size.
+        let update = [(0.0, 0.10, TEXT_H), (0.012, 0.074, TEXT_H)];
+        let arcs = [
+            (0.04, 0.04 * 16.0 / 9.0 / 2.5),
+            (0.02, 0.02 * 16.0 / 9.0 * 2.5),
+        ];
+        for (w, h) in [(1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)] {
+            for (sw, sh) in arcs {
+                let aspect = (sw * w as f32) / (sh * h as f32);
+                assert!(aspect.max(1.0 / aspect) > 2.4, "{w}x{h} {sw} {sh}");
+                let right = [update[0], update[1], (0.025, sw, sh)];
+                let left = [(0.0, sw, sh), (0.025, 0.10, TEXT_H), update[1]];
+                for parts in [right, left] {
+                    let band = parts_band(w, h, &parts);
+                    let t = text_box(&band).expect("text");
+                    let at = format!("{w}x{h} {parts:?}: {t:?}");
+                    assert_eq!(t.words, 2, "{at}");
+                    assert!(
+                        t.word_ratio.expect("two words") >= WORD_RATIO_REJECT,
+                        "{at}"
+                    );
+                    assert!(is_loading_screen(&band), "{at}");
+                    assert!(!is_entering_game(&band), "{at}");
+                }
+            }
         }
     }
 
