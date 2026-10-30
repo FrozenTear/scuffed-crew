@@ -197,3 +197,50 @@ fn a_form_saved_over_its_own_file_keeps_every_key() {
     };
     assert_eq!(back, want, "only the edited key changed");
 }
+
+/// The Troubleshooting switch Save pre-game screens writes
+/// `debug_save_pregame_screens` both ways, through the saved text, and a
+/// form save after it keeps the edit. It is off by default.
+#[test]
+fn the_pregame_screens_switch_maps_to_its_config_key_both_ways() {
+    use crate::settings_model::{AdvancedSection, ConfigEdit};
+
+    let defaults = Config::default();
+    assert!(!defaults.debug_save_pregame_screens, "off by default");
+    assert!(
+        AdvancedSection::Troubleshooting
+            .keys()
+            .contains(&"debug_save_pregame_screens")
+    );
+    assert!(crate::settings_model::needs_restart(
+        "debug_save_pregame_screens"
+    ));
+
+    let mut on = defaults.clone();
+    ConfigEdit::SavePregameScreens(true).apply(&mut on);
+    assert!(on.debug_save_pregame_screens);
+    let text = Config::text_for_save(None, &on).expect("save on");
+    assert!(text.contains("debug_save_pregame_screens = true"), "{text}");
+    let read = Config::parse_file_contents(&text).expect("parse on");
+    assert!(read.debug_save_pregame_screens);
+    let control = ShadowRecognizerControl {
+        file_on: read.shadow_recognizer,
+        locked: false,
+    };
+    let form = SettingsForm::from_config_and_shadow(&read, control);
+    assert!(
+        form.to_config(&read).debug_save_pregame_screens,
+        "a form save keeps the switch"
+    );
+
+    let mut off = read.clone();
+    ConfigEdit::SavePregameScreens(false).apply(&mut off);
+    assert!(!off.debug_save_pregame_screens);
+    let text = Config::text_for_save(Some(&text), &off).expect("save off");
+    let read = Config::parse_file_contents(&text).expect("parse off");
+    assert!(!read.debug_save_pregame_screens);
+    assert_eq!(
+        read, defaults,
+        "only the switch changed, back to the defaults"
+    );
+}

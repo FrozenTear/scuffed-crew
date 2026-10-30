@@ -17,9 +17,9 @@ use crate::settings::{
     self, DEBUG_IMAGES_HELP, FIELD_SHORT, POLL_INTERVAL_HELP, PRERELEASE_UPDATES_LABEL,
     SHADOW_READER_ENV_NOTE, SHADOW_READER_HINT, SHADOW_READER_LABEL, SettingsField, SettingsToggle,
 };
-use crate::settings_model::url_host;
+use crate::settings_model::{ConfigEdit, url_host};
 use crate::settings_rows::{
-    divided, link, page_field, row_title, setting_row, sub_heading, switch, title_line,
+    Tag, divided, link, page_field, row_title, setting_row, sub_heading, switch, title_line,
 };
 use crate::settings_save::Commit;
 use crate::settings_update::{Msg, apply, apply_with};
@@ -442,8 +442,12 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
     divided(vec![url, token, footer.into()])
 }
 
-/// Troubleshooting: debug images, the extra number reader, then Report a
-/// problem, About and Uninstall. Demo draws them without actions.
+/// Help under Save pre-game screens (`debug_save_pregame_screens`).
+pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, hero select and loading screens of each game in debug/pregame, newest 20 games. They show other players' names and stay on this PC only. Leave it off unless asked for them.";
+
+/// Troubleshooting: debug images, pre-game screens, the extra number
+/// reader, then Report a problem, About and Uninstall. Demo draws them
+/// without actions.
 pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     // STAT_TRACKER_DEBUG_OCR turns them on whatever the file says, so the
     // row shows On and locks, as OCR workers does.
@@ -463,6 +467,16 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             toggle(!demo && !env_debug, |v| {
                 apply(Message::SettingsToggle(SettingsToggle::DebugOcr, v))
             }),
+        ),
+    );
+    // The tracker reads the key once at start: After restart.
+    let pregame = setting_row(
+        title_line("Save pre-game screens", false, &[Tag::AfterRestart]),
+        vec![hint(PREGAME_SCREENS_HELP)],
+        crate::settings_keys::edit_switch(
+            app.saved_config.debug_save_pregame_screens,
+            demo,
+            ConfigEdit::SavePregameScreens,
         ),
     );
     let locked = app.settings.shadow.locked;
@@ -507,7 +521,7 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             .push(uninstall),
     ]
     .spacing(8);
-    divided(vec![debug, shadow, actions.into()])
+    divided(vec![debug, pregame, shadow, actions.into()])
 }
 
 /// Stored data keeps the classic body: its buttons are the same.

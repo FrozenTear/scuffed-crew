@@ -107,8 +107,8 @@ pub struct Config {
     /// `{data_dir}/debug/pregame/<YYYYMMDD_HHMMSS>/` (UTC), newest 20 games
     /// kept. Off by default and not written while off; turning it off
     /// leaves the folder. Local only: nothing reads, uploads or syncs the
-    /// files. Config-file only: Settings keeps the value from the file. Read
-    /// at start. The ban results are told by a built-in title shape rule,
+    /// files. Also set by Save pre-game screens in Settings, Troubleshooting
+    /// (After restart). Read at start. The ban results are told by a built-in title shape rule,
     /// or, when `{data_dir}/templates/pregame/ban_results/` holds example
     /// screenshots (`.png` only, read at start), by matching those. The
     /// daemon applies it in `daemon::pregame_dump`.

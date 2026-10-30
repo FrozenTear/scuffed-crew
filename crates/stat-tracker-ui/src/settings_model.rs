@@ -185,7 +185,11 @@ impl AdvancedSection {
             AdvancedSection::TrackerService => &["auto_detect"],
             AdvancedSection::StoredData => &[],
             AdvancedSection::WebsiteConnection => &["sync"],
-            AdvancedSection::Troubleshooting => &["debug_ocr", "shadow_recognizer"],
+            AdvancedSection::Troubleshooting => &[
+                "debug_ocr",
+                "debug_save_pregame_screens",
+                "shadow_recognizer",
+            ],
         }
     }
 
@@ -238,7 +242,10 @@ impl AdvancedSection {
                 None => "Uploads off. Manual server and token, has its own Apply".to_string(),
             },
             AdvancedSection::Troubleshooting => {
-                let mut parts = vec![format!("Debug images {}", on_off(v.debug_images))];
+                let mut parts = vec![
+                    format!("Debug images {}", on_off(v.debug_images)),
+                    format!("pre-game screens {}", on_off(v.pregame_screens)),
+                ];
                 if let Some(frames) = v.compare_frames {
                     parts.push(format!("KDE compare frames {}", on_off(frames)));
                 }
@@ -292,6 +299,8 @@ pub struct AdvancedValues {
     /// The website's host while uploads are on.
     pub sync_host: Option<String>,
     pub debug_images: bool,
+    /// Save pre-game screens (`debug_save_pregame_screens`).
+    pub pregame_screens: bool,
     /// KDE compare frames, on KDE only (`None` elsewhere).
     pub compare_frames: Option<bool>,
     pub extra_reader: bool,
@@ -600,6 +609,8 @@ pub enum ConfigEdit {
     NameReader(bool),
     /// OCR workers. `None` is Auto.
     OcrWorkers(Option<u32>),
+    /// Save pre-game screens (`debug_save_pregame_screens`).
+    SavePregameScreens(bool),
 }
 
 impl ConfigEdit {
@@ -625,6 +636,7 @@ impl ConfigEdit {
             ConfigEdit::ShareStatPictures(on) => config.share_stat_pictures = on,
             ConfigEdit::ShareReportPictures(on) => config.share_report_pictures = on,
             ConfigEdit::CaptureOnlyOnScreen(on) => config.capture_only_on_screen = on,
+            ConfigEdit::SavePregameScreens(on) => config.debug_save_pregame_screens = on,
             ConfigEdit::AddPlayerName(name) => {
                 // The core's rule: trimmed, no #1234 tag, at least 3
                 // characters. Anything else is not a name.
@@ -979,6 +991,7 @@ mod tests {
         config.update_channel = "prerelease".into();
         config.setup_completed = true;
         config.debug_ocr = true;
+        config.debug_save_pregame_screens = true;
         config.reader = stat_tracker::config::ReaderSetting::OcrV1;
         config.ocr = stat_tracker::config::OcrSetting::Off;
         config.share_report_pictures = true;
@@ -1037,6 +1050,7 @@ mod tests {
             store_bytes: Some(38_240_000),
             sync_host: Some("ow.example.no".into()),
             debug_images: false,
+            pregame_screens: false,
             compare_frames: None,
             extra_reader: false,
             report_pictures: false,
@@ -1090,6 +1104,17 @@ mod tests {
             "Uploads to ow.example.no. Manual server and token, has its own Apply"
         );
         assert!(!AdvancedSection::Troubleshooting.summary(&v).contains("KDE"));
+        assert!(
+            AdvancedSection::Troubleshooting
+                .summary(&v)
+                .starts_with("Debug images off, pre-game screens off, ")
+        );
+        v.pregame_screens = true;
+        assert!(
+            AdvancedSection::Troubleshooting
+                .summary(&v)
+                .contains("pre-game screens on")
+        );
         v.auto_detect = false;
         v.compare_frames = Some(true);
         v.sync_host = None;

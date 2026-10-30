@@ -34,7 +34,11 @@ pub(crate) const UPLOAD_NO_SITE: &str =
     "Add the website URL and token under Advanced, Website connection.";
 
 /// A switch that writes `edit(on)`, or a disabled one in a demo.
-fn edit_switch<'a>(on: bool, demo: bool, edit: fn(bool) -> ConfigEdit) -> Element<'a, Message> {
+pub(crate) fn edit_switch<'a>(
+    on: bool,
+    demo: bool,
+    edit: fn(bool) -> ConfigEdit,
+) -> Element<'a, Message> {
     switch(
         on,
         (!demo).then(|| {
