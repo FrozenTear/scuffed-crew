@@ -13,7 +13,10 @@
 //!
 //! The saves use the stricter [`is_entering_game`]: the same check plus
 //! the place and width of the `ENTERING GAME` text, so a navy band with
-//! other text (an `APPLYING UPDATE` band during a game update) fails.
+//! other text (an `APPLYING UPDATE` band during a game update) fails when
+//! that text is off centre or has a bar under it. A centred one with no
+//! bar still passes; the saves cover it by keeping only the last frame
+//! that passes before the game starts.
 
 use image::RgbImage;
 

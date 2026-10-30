@@ -17,6 +17,16 @@
 //! stage), then renamed to its name or deleted. With the switch off no
 //! tracker exists.
 //!
+//! The loading screen: every frame that passes the loading check is
+//! staged, replacing the one before, and the last one is saved once the
+//! game has started: when a pre-game phase reads after it (the screen
+//! after loading), or once no frame has passed for [`PHASE_FLICKER`]. So
+//! an `APPLYING UPDATE` band that passes the check is replaced by the
+//! `ENTERING GAME` screen after it, even with a frame between that fails
+//! the check. A release (the game closed, capture stopped, shutdown)
+//! before then deletes the staged frame: an update band alone is never
+//! saved when the game closes on it.
+//!
 //! Ban results are no phase of their own yet. The candidate is the first
 //! frame at least [`BAN_RESULTS_DELAY`] after the last ban-phase frame (in
 //! practice the next poll) that shows the ban-results title
@@ -83,7 +93,8 @@ pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 
 /// A phase gone for at most this long and back is a detector flicker (the
 /// phase read waits for the screen to hold still). Longer, and it is a new
-/// screen: a requeue's map vote, or the hero select between rounds.
+/// screen: a requeue's map vote, or the hero select between rounds. The
+/// loading screen gone this long is over: the game has started.
 pub(crate) const PHASE_FLICKER: Duration = Duration::from_secs(12);
 
 /// Batches of shots waiting for the writer. A full queue drops the batch
@@ -296,6 +307,8 @@ struct PregameGame {
     /// When each phase was last on screen, by [`PregamePhase::index`].
     last_seen: [Option<Instant>; 3],
     loading_saved: bool,
+    /// When the last loading-check pass was staged, until it is saved.
+    loading_staged_at: Option<Instant>,
     ban_results_saved: bool,
 }
 
@@ -427,6 +440,7 @@ impl<F: Clone> PregameTracker<F> {
         new_folder: impl FnOnce() -> String,
     ) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
+        self.settle_loading(now, matches!(seen, Seen::Phase(_)), &mut shots);
         match seen {
             Seen::Phase(phase) => self.observe_phase(now, phase, frame, new_folder, &mut shots),
             Seen::Loading | Seen::Other | Seen::BanResults => {
@@ -461,12 +475,44 @@ impl<F: Clone> PregameTracker<F> {
     /// No frames for now (the game closed, capture stopped, shutdown):
     /// write the phase's last frame and a confirmed ban-results frame (an
     /// unconfirmed one is not: it may be the select sliding in, so the
-    /// staged frame before it is saved, if any), and hold nothing.
+    /// staged frame before it is saved, if any), and hold nothing. A
+    /// staged loading frame is saved only when the game had started (see
+    /// [`Self::settle_loading`]); otherwise it is deleted.
     pub(crate) fn release(&mut self, now: Instant) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
         self.end_phase(now, &mut shots);
         self.settle_ban_results(now, &mut shots);
+        self.settle_loading(now, false, &mut shots);
+        if let Some(game) = self.game.as_mut()
+            && game.loading_staged_at.take().is_some()
+        {
+            shots.push(PregameOp::Discard {
+                folder: game.folder.clone(),
+                name: LOADING_NAME,
+            });
+        }
         shots
+    }
+
+    /// Save the staged loading frame once the game has started: a pre-game
+    /// phase reads (`phase_read`, the screen after loading), or no frame
+    /// has passed the loading check for longer than [`PHASE_FLICKER`].
+    /// Saved, the loading screen is no longer looked for in this game.
+    fn settle_loading(&mut self, now: Instant, phase_read: bool, shots: &mut Vec<PregameOp<F>>) {
+        let Some(game) = self.game.as_mut() else {
+            return;
+        };
+        let Some(at) = game.loading_staged_at else {
+            return;
+        };
+        if phase_read || now.saturating_duration_since(at) > PHASE_FLICKER {
+            game.loading_staged_at = None;
+            game.loading_saved = true;
+            shots.push(PregameOp::Promote {
+                folder: game.folder.clone(),
+                name: LOADING_NAME,
+            });
+        }
     }
 
     fn observe_phase(
@@ -511,6 +557,7 @@ impl<F: Clone> PregameTracker<F> {
                 firsts: 0,
                 last_seen: [None; 3],
                 loading_saved: false,
+                loading_staged_at: None,
                 ban_results_saved: false,
             });
         }
@@ -636,12 +683,14 @@ impl<F: Clone> PregameTracker<F> {
         let Some(game) = self.game.as_mut() else {
             return;
         };
+        // Staged, replacing an earlier pass: an update band before the
+        // ENTERING GAME screen can pass the check too.
         if seen == Seen::Loading
             && !game.loading_saved
             && let Some(frame) = frame
         {
-            game.loading_saved = true;
-            shots.push(PregameOp::Save(PregameShot {
+            game.loading_staged_at = Some(now);
+            shots.push(PregameOp::Stage(PregameShot {
                 folder: game.folder.clone(),
                 name: LOADING_NAME,
                 frame,

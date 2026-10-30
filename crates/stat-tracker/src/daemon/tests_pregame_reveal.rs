@@ -290,3 +290,149 @@ fn an_applying_update_band_is_not_saved_as_loading() {
         Seen::Loading
     );
 }
+
+/// One step of a loading run.
+enum Step {
+    /// A frame through the loading check, and what it must classify as.
+    Frame(image::RgbImage, Seen),
+    Phase(PregamePhase),
+    Release,
+}
+
+/// A map vote, then `steps` at their times (ms), through the real
+/// `classify_with`, `PregameDump` and writer. Returns the saved loading
+/// screen, if any, and every file in the game folder (dot names too).
+async fn loading_run(steps: Vec<(u64, Step)>) -> (Option<image::RgbImage>, Vec<String>) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dump = PregameDump::new(true, dir.path(), POLL).unwrap();
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let vote = image::RgbImage::from_pixel(64, 36, image::Rgb([20, 30, 60]));
+    dump.observe(
+        at(0),
+        Seen::Phase(PregamePhase::MapVote),
+        Some(shown(&vote)),
+    );
+    let no_title = |_: &image::RgbImage| false;
+    for (ms, step) in steps {
+        match step {
+            Step::Frame(rgb, want_seen) => {
+                let want = dump.want(at(ms));
+                let unknown = detect::GamePhase::Unknown;
+                let seen = classify_with(want, &unknown, &rgb, no_title, no_title);
+                assert_eq!(seen, want_seen, "at {ms} ms");
+                let frame = keeps_frame(want, seen).then(|| shown(&rgb));
+                dump.observe(at(ms), seen, frame);
+            }
+            Step::Phase(p) => dump.observe(at(ms), Seen::Phase(p), Some(shown(&vote))),
+            Step::Release => dump.release(at(ms)),
+        }
+    }
+    assert!(dump.finish(Duration::from_secs(30)).await);
+    let root = pregame_dir(dir.path());
+    let games: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir())
+        .collect();
+    assert_eq!(games.len(), 1);
+    let mut files: Vec<String> = std::fs::read_dir(&games[0])
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    files.sort();
+    let saved = image::open(games[0].join(LOADING_NAME))
+        .ok()
+        .map(|i| i.to_rgb8());
+    (saved, files)
+}
+
+/// A centred `APPLYING UPDATE` band with no bar: it passes the loading
+/// check (no rule tells it from `ENTERING GAME` yet).
+fn update_band() -> (image::RgbImage, Seen) {
+    (applying_update_band(1280, 720, true, false), Seen::Loading)
+}
+
+fn entering(w: u32, h: u32) -> (image::RgbImage, Seen) {
+    (entering_game_slab(w, h), Seen::Loading)
+}
+
+fn plain() -> (image::RgbImage, Seen) {
+    (
+        image::RgbImage::from_pixel(1280, 720, image::Rgb([90, 110, 80])),
+        Seen::Other,
+    )
+}
+
+fn frame_step(ms: u64, (rgb, seen): (image::RgbImage, Seen)) -> (u64, Step) {
+    (ms, Step::Frame(rgb, seen))
+}
+
+fn no_staged_file(files: &[String]) -> bool {
+    files.iter().all(|f| !f.starts_with('.'))
+}
+
+#[tokio::test]
+async fn an_update_band_then_entering_game_saves_entering_game() {
+    // Straight after it, and with a frame between that fails the check.
+    for gap in [false, true] {
+        let mut steps = vec![frame_step(2_000, update_band())];
+        if gap {
+            steps.push(frame_step(3_500, plain()));
+        }
+        steps.push(frame_step(5_000, entering(1280, 720)));
+        // The game has started: no loading screen for 12 s.
+        steps.push(frame_step(18_000, plain()));
+        let (saved, files) = loading_run(steps).await;
+        assert!(saved == Some(entering_game_slab(1280, 720)), "gap {gap}");
+        assert!(no_staged_file(&files), "gap {gap}: {files:?}");
+    }
+}
+
+#[tokio::test]
+async fn an_update_band_then_the_game_closing_saves_no_loading() {
+    // Chosen: nothing is saved, and the staged frame is deleted. Also with
+    // a frame that fails the check before the close.
+    for gap in [false, true] {
+        let mut steps = vec![
+            frame_step(2_000, update_band()),
+            frame_step(3_500, update_band()),
+        ];
+        if gap {
+            steps.push(frame_step(5_000, plain()));
+        }
+        steps.push((6_000, Step::Release));
+        let (saved, files) = loading_run(steps).await;
+        assert!(saved.is_none(), "gap {gap}");
+        assert!(no_staged_file(&files), "gap {gap}: {files:?}");
+    }
+}
+
+#[tokio::test]
+async fn entering_game_saves_its_last_pass_once_the_game_starts() {
+    // Saved 12 s after the last pass, or at once when a pre-game phase
+    // reads after it (the hero ban, when loading comes after the vote).
+    let ends = [
+        frame_step(16_000, plain()),
+        (5_000, Step::Phase(PregamePhase::HeroBan)),
+    ];
+    for end in ends {
+        let steps = vec![
+            frame_step(2_000, entering(1280, 720)),
+            frame_step(3_500, entering(1920, 1080)),
+            end,
+        ];
+        let (saved, files) = loading_run(steps).await;
+        assert!(saved == Some(entering_game_slab(1920, 1080)));
+        assert!(no_staged_file(&files), "{files:?}");
+    }
+    // Not yet started when the game closes: nothing is saved.
+    let steps = vec![
+        frame_step(2_000, entering(1280, 720)),
+        frame_step(3_500, plain()),
+        (8_000, Step::Release),
+    ];
+    let (saved, files) = loading_run(steps).await;
+    assert!(saved.is_none());
+    assert!(no_staged_file(&files), "{files:?}");
+}

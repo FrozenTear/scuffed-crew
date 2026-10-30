@@ -186,6 +186,9 @@ fn each_phase_saves_its_first_and_last_frame_once() {
     run.tick(11_000, Seen::Loading, 12);
     run.tick(12_000, Seen::Loading, 13);
     run.tick(13_000, Seen::Other, 14);
+    // The game has started (no loading screen for 12 s): the last loading
+    // frame is saved.
+    run.tick(25_000, Seen::Other, 15);
     assert_eq!(
         run.names(),
         [
@@ -196,7 +199,7 @@ fn each_phase_saves_its_first_and_last_frame_once() {
             ("ban_results.png", 7),
             ("heroselect_first.png", 9),
             ("heroselect_last.png", 11),
-            ("loading.png", 12),
+            ("loading.png", 13),
         ]
     );
     assert!(run.shots.iter().all(|(folder, _, _)| folder == "game1"));
@@ -558,10 +561,11 @@ fn no_frame_is_kept_or_checked_outside_a_pre_game() {
     assert!(run.made.is_empty(), "no frame handed over outside a game");
     run.tick(2_000, VOTE, 3);
     run.tick(3_000, Seen::Loading, 4);
-    // Loading written: nothing more is wanted from other screens.
-    assert_eq!(run.tracker.want(run.at(4_000)), PregameWant::default());
+    run.tick(16_000, Seen::Other, 5);
+    // Loading saved: nothing more is wanted from other screens.
+    assert_eq!(run.tracker.want(run.at(17_000)), PregameWant::default());
     let later = (PREGAME_GAME_GAP + Duration::from_secs(10)).as_millis() as u64;
-    run.tick(later, Seen::Loading, 5);
+    run.tick(later, Seen::Loading, 6);
     assert_eq!(run.names(), [("mapvote_first.png", 3), ("loading.png", 4)]);
 }
 
@@ -1343,6 +1347,7 @@ fn results_then_the_roster_then_loading_inside_the_window_are_saved() {
     run.tick(10_000, Seen::Other, 4);
     run.tick(14_000, Seen::Other, 5);
     run.tick(18_000, Seen::Loading, 6);
+    run.tick(34_000, Seen::Other, 7);
     assert_eq!(
         run.names(),
         [
@@ -1391,6 +1396,7 @@ fn the_window_adds_one_poll_to_fifteen_seconds() {
         run.tick(ms, Seen::Other, 4 + i as u32);
     }
     run.tick(24_000, Seen::Loading, 7);
+    run.tick(40_000, Seen::Other, 8);
     assert_eq!(
         run.names(),
         [
