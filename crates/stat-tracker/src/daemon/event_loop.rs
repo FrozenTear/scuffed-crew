@@ -23,6 +23,18 @@ pub(crate) async fn run_loop(
     let dump_poll_frames = ctx.dump_poll_frames;
     let debug_ocr = ctx.debug_ocr;
     let data_dir: &std::path::Path = &ctx.data_dir;
+    // `debug_save_pregame_screens`: `None` while off, so no check runs and
+    // no frame is kept.
+    let mut pregame_dump =
+        daemon::pregame_dump::PregameDump::new(ctx.save_pregame_screens, data_dir);
+    if pregame_dump.is_some() {
+        tracing::info!(
+            target: "scuffed_stat_tracker",
+            dir = %daemon::pregame_dump::pregame_dir(data_dir).display(),
+            "debug_save_pregame_screens: saving pre-game screens (newest {} games kept)",
+            daemon::pregame_dump::PREGAME_KEEP_GAMES
+        );
+    }
 
     let mut game_gate = detect::game_running::GameProcessGate::new(&ctx.game_process_names);
     // Starts false so a boot with the game already closed does not close a
@@ -490,6 +502,12 @@ pub(crate) async fn run_loop(
                         // A copy: a poll that a Tab drops leaves the
                         // session's stability history as it was.
                         let mut stability = st.ocr_stability.clone();
+                        // A Tab-busy tick reads no phase, so it is not fed
+                        // to the pre-game saves.
+                        let pregame_want = pregame_dump
+                            .as_ref()
+                            .filter(|_| !outcome_only)
+                            .map(|dump| dump.want(Instant::now()));
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -571,6 +589,10 @@ pub(crate) async fn run_loop(
                             // the title card's phrase OCR does not run.
                             let end_reel =
                                 detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
+                            let pregame_seen = pregame_want.map(|want| {
+                                let seen = daemon::pregame_dump::classify(want, &phase, &rgb);
+                                (seen, daemon::pregame_dump::keeps_frame(want, seen))
+                            });
                             // Result templates are not on the Tab frame. A
                             // polled outcome frame feeds the new reader's
                             // result. The read the signal came from is that
@@ -603,7 +625,10 @@ pub(crate) async fn run_loop(
                                 stat_tracker::perf::Stage::PollAnalyze,
                                 analyze_started.elapsed(),
                             );
-                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png)
+                            // The frame moves into the tick's result, no copy.
+                            let pregame = pregame_seen
+                                .map(|(seen, keep)| (seen, keep.then(|| Arc::new(img))));
+                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
                             stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -621,7 +646,7 @@ pub(crate) async fn run_loop(
                         if let Some(seen) = kept_frame {
                             seen_stream = Some(seen);
                         }
-                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = match analyzed {
+                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
                                     &mut st,
@@ -637,7 +662,7 @@ pub(crate) async fn run_loop(
                                 return Ok(());
                             }
                             Ok(joined) => joined.unwrap_or_else(|_| {
-                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None)
+                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None, None)
                             }),
                         };
                         if stat_tracker::replace::shutdown_requested() {
@@ -668,6 +693,9 @@ pub(crate) async fn run_loop(
                             tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: outcome crop not written");
                         }
                         st.ocr_stability = stability;
+                        if let (Some(dump), Some((seen, frame))) = (pregame_dump.as_mut(), pregame) {
+                            dump.observe(Instant::now(), seen, frame);
+                        }
                         if let Some(read) = result_read
                             && let Some(game) = st.active_game.as_mut()
                         {

@@ -1,4 +1,5 @@
 pub mod hero_portrait;
+pub mod loading_screen;
 pub mod match_end;
 pub mod match_start;
 pub mod names;

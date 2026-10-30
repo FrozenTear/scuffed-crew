@@ -1129,17 +1129,17 @@ fn letterbox_shoulders_are_content(rgb: &RgbImage, gx: u32, gy: u32, gw: u32, gh
     top < LETTERBOX_SHOULDER_DARK_MAX && bot < LETTERBOX_SHOULDER_DARK_MAX
 }
 
-const LETTERBOX_SHOULDER_TOP_Y_PM: u32 = 150;
-const LETTERBOX_SHOULDER_BOT_Y_PM: u32 = 770;
-const LETTERBOX_SHOULDER_H_PM: u32 = 80;
-const LETTERBOX_SHOULDER_DARK_MAX: f32 = 0.60;
+pub(super) const LETTERBOX_SHOULDER_TOP_Y_PM: u32 = 150;
+pub(super) const LETTERBOX_SHOULDER_BOT_Y_PM: u32 = 770;
+pub(super) const LETTERBOX_SHOULDER_H_PM: u32 = 80;
+pub(super) const LETTERBOX_SHOULDER_DARK_MAX: f32 = 0.60;
 
 /// Reject a uniform loading / transition slab. `ENTERING GAME` is a navy
 /// strip with a few white glyphs — among *lit* mid pixels one 16-wide
 /// RGB bin holds ~90%+. Dark padding around that strip is ignored so a
 /// thin chrome band cannot look like mixed footage. Real highlight
 /// footage spreads across bins.
-fn letterbox_mid_is_footage(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
+pub(super) fn letterbox_mid_is_footage(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
     mid_dominant_lit_bin_ratio(rgb, x0, y0, cw, ch) < LETTERBOX_FLAT_UI_MAX
 }
 
@@ -1176,7 +1176,7 @@ fn mid_dominant_lit_bin_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32
     best as f32 / total as f32
 }
 
-fn dark_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
+pub(super) fn dark_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
     let (w, h) = rgb.dimensions();
     let x1 = (x0 + cw).min(w);
     let y1 = (y0 + ch).min(h);

@@ -360,8 +360,7 @@ pub(crate) fn s1_tab_frame_lit(row: usize) -> image::DynamicImage {
     let frame = s1_tab_frame();
     let (w, h) = (frame.width(), frame.height());
     let (bx, by, bw, bh) = ocr::preprocess::crop_scoreboard_rect(w, h);
-    // Where the row is in the crop: `crop_player_row` on an image whose
-    // pixels carry their own y.
+    // Where the row is in the crop: `crop_player_row` on an image whose pixels carry their own y.
     let probe = image::RgbImage::from_fn(bw, bh, |_, y| {
         image::Rgb([(y % 256) as u8, (y / 256) as u8, 0])
     });
@@ -539,6 +538,7 @@ pub(crate) async fn o8_ctx(dir: &std::path::Path, use_new_reader: bool) -> Daemo
         collect_portraits: false,
         dump_poll_frames: false,
         debug_ocr: false,
+        save_pregame_screens: false,
         data_dir: dir.to_path_buf(),
         empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
         shadow: None,

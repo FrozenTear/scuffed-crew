@@ -547,6 +547,7 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         collect_portraits,
         dump_poll_frames,
         debug_ocr: config.debug_ocr_enabled(),
+        save_pregame_screens: config.debug_save_pregame_screens,
         data_dir,
         empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
         shadow: shadow::worker::ShadowWorker::start_for_reader(&config, reader),

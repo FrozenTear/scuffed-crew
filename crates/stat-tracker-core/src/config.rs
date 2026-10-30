@@ -102,6 +102,14 @@ pub struct Config {
     /// env `STAT_TRACKER_DEBUG_OCR=1` ([`Self::debug_ocr_enabled`]).
     #[serde(default)]
     pub debug_ocr: bool,
+    /// Save full-size PNGs of the pre-game screens (map vote, hero ban, hero
+    /// select, the frame after the ban vote, the loading screen) under
+    /// `{data_dir}/debug/pregame/<game>/`, newest 20 games kept. Off by
+    /// default and not written while off. Local only: nothing reads, uploads
+    /// or syncs the files. Config-file only: Settings keeps the value from
+    /// the file. The daemon applies it in `daemon::pregame_dump`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug_save_pregame_screens: bool,
     /// Most games whose report pictures are kept in `report-kit/`. Missing
     /// means [`DEFAULT_MAX_GAMES`] (50). Oldest go first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -332,6 +340,7 @@ impl Default for Config {
             finished_game_close_secs: default_finished_game_close_secs(),
             game_process_names: default_game_process_names(),
             debug_ocr: false,
+            debug_save_pregame_screens: false,
             report_kit_max_games: None,
             report_kit_max_mb: None,
             ocr_threads: None,
