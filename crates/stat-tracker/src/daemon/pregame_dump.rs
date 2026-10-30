@@ -18,14 +18,16 @@
 //! tracker exists.
 //!
 //! The loading screen: every frame that passes the loading check is
-//! staged, replacing the one before, and the last one is saved once the
-//! game has started: when a pre-game phase reads after it (the screen
-//! after loading), or once no frame has passed for [`PHASE_FLICKER`]. So
-//! an `APPLYING UPDATE` band that passes the check is replaced by the
-//! `ENTERING GAME` screen after it, even with a frame between that fails
-//! the check. A release (the game closed, capture stopped, shutdown)
-//! before then deletes the staged frame: an update band alone is never
-//! saved when the game closes on it.
+//! staged, replacing the one before, and the last one is saved only when
+//! the game starts: a hero ban or hero select read in the same game
+//! within [`PHASE_FLICKER`] of it, the screen after loading. So an `APPLYING UPDATE` band that passes the check is replaced
+//! by the `ENTERING GAME` screen after it, even with a frame between that
+//! fails the check. A loading frame with no game start after it is
+//! dropped (the staged file deleted): no start within [`PHASE_FLICKER`]
+//! (the menu, a lobby), a release (the game closed, capture stopped,
+//! shutdown), or a requeue's map vote opening the next game. Dropped, the
+//! loading screen is still looked for, so a later `ENTERING GAME` in the
+//! same game is staged and saved.
 //!
 //! Ban results are no phase of their own yet. The candidate is the first
 //! frame at least [`BAN_RESULTS_DELAY`] after the last ban-phase frame (in
@@ -70,6 +72,8 @@
 use crate::*;
 use std::time::Duration;
 
+mod post;
+
 /// Game folders kept under `debug/pregame/`; older ones are deleted.
 pub(crate) const PREGAME_KEEP_GAMES: usize = 20;
 
@@ -94,11 +98,17 @@ pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 /// A phase gone for at most this long and back is a detector flicker (the
 /// phase read waits for the screen to hold still). Longer, and it is a new
 /// screen: a requeue's map vote, or the hero select between rounds. The
-/// loading screen gone this long is over: the game has started.
+/// loading screen gone this long with no game start is dropped.
 pub(crate) const PHASE_FLICKER: Duration = Duration::from_secs(12);
 
-/// Batches of shots waiting for the writer. A full queue drops the batch
-/// (logged), so frames pinned by pending writes stay bounded.
+/// Batches of shots waiting for the writer. A full queue drops the whole
+/// batch (logged), so frames pinned by pending writes stay bounded. A
+/// dropped save is a screen lost. A dropped stage leaves the file staged
+/// before it, if any, so the saver forgets that staged frame
+/// ([`PregameTracker::stage_lost`]) and never saves it. A dropped promote
+/// or discard leaves its staged file in place, unsaved, until a later
+/// stage of the same name replaces it or the sweep at the next start or
+/// the next game folder deletes it.
 pub(crate) const PREGAME_QUEUE: usize = 8;
 
 /// The most the shutdown waits for the writer to finish.
@@ -353,6 +363,10 @@ struct BanResults<F> {
     /// `frame` (a later frame with the title), is staged: saved when
     /// `frame` is not confirmed by then, deleted otherwise.
     owed: Option<String>,
+    /// `owed` before the latest stage: what is on disk when that stage's
+    /// batch is dropped (an earlier confirmed frame, or nothing of this
+    /// candidate).
+    owed_before: Option<String>,
 }
 
 /// Decides which pre-game frames to write. Generic over the frame so tests
@@ -448,7 +462,13 @@ impl<F: Clone> PregameTracker<F> {
         new_folder: impl FnOnce() -> String,
     ) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
-        self.settle_loading(now, matches!(seen, Seen::Phase(_)), &mut shots);
+        // The select title is no start: it is only looked for while the
+        // ban results may come, and a loading frame ends that wait.
+        let started = matches!(
+            seen,
+            Seen::Phase(PregamePhase::HeroBan | PregamePhase::HeroSelect)
+        );
+        self.settle_loading(now, started, &mut shots);
         match seen {
             Seen::Phase(phase) => self.observe_phase(now, phase, frame, new_folder, &mut shots),
             Seen::Loading | Seen::Other | Seen::BanResults => {
@@ -484,39 +504,70 @@ impl<F: Clone> PregameTracker<F> {
     /// write the phase's last frame and a confirmed ban-results frame (an
     /// unconfirmed one is not: it may be the select sliding in, so the
     /// staged frame before it is saved, if any), and hold nothing. A
-    /// staged loading frame is saved only when the game had started (see
-    /// [`Self::settle_loading`]); otherwise it is deleted.
+    /// staged loading frame is deleted: the game did not start after it.
     pub(crate) fn release(&mut self, now: Instant) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
         self.end_phase(now, &mut shots);
         self.settle_ban_results(now, &mut shots);
-        self.settle_loading(now, false, &mut shots);
+        self.drop_loading(&mut shots);
+        shots
+    }
+
+    /// Save the staged loading frame when the game starts (`started`: a
+    /// hero ban or hero select read, the screen after loading) in the game
+    /// open at `now`, within [`PHASE_FLICKER`] of the last pass; saved, the
+    /// loading screen is no longer looked for in this game. Delete it when
+    /// no start came within [`PHASE_FLICKER`] (a start after that too), or
+    /// a start came after the game closed (a hero ban then opens the next
+    /// game; a lone hero select opens none). A map vote is no start: it
+    /// comes before the loading screen.
+    fn settle_loading(&mut self, now: Instant, started: bool, shots: &mut Vec<PregameOp<F>>) {
+        let open = self.game_open(now).is_some();
+        let Some(at) = self.game.as_ref().and_then(|g| g.loading_staged_at) else {
+            return;
+        };
+        let over = now.saturating_duration_since(at) > PHASE_FLICKER;
+        if started && open && !over {
+            if let Some(game) = self.game.as_mut() {
+                game.loading_staged_at = None;
+                game.loading_saved = true;
+                shots.push(PregameOp::Promote {
+                    folder: game.folder.clone(),
+                    name: LOADING_NAME,
+                });
+            }
+        } else if started || over {
+            self.drop_loading(shots);
+        }
+    }
+
+    /// A batch that staged `name` was dropped (the writer's queue was
+    /// full), so the staged file on disk, if any, is an older frame. A
+    /// loading one is never saved (it may be an update band before the
+    /// `ENTERING GAME` screen): nothing is written for it, and the next
+    /// stage replaces it or the sweep deletes it. The loading screen is
+    /// still looked for. For the ban results, the owed frame goes back to
+    /// what it was before that stage: the earlier confirmed frame staged
+    /// for this candidate, still a results frame, or none.
+    pub(crate) fn stage_lost(&mut self, name: &str) {
+        if name == LOADING_NAME {
+            if let Some(game) = self.game.as_mut() {
+                game.loading_staged_at = None;
+            }
+        } else if name == BAN_RESULTS_NAME
+            && let Some(c) = self.ban_results.as_mut()
+        {
+            c.owed = c.owed_before.take();
+        }
+    }
+
+    /// Delete the staged loading frame, if any. The loading screen is still
+    /// looked for, so a later pass in this game is staged again.
+    fn drop_loading(&mut self, shots: &mut Vec<PregameOp<F>>) {
         if let Some(game) = self.game.as_mut()
             && game.loading_staged_at.take().is_some()
         {
             shots.push(PregameOp::Discard {
-                folder: game.folder.clone(),
-                name: LOADING_NAME,
-            });
-        }
-        shots
-    }
-
-    /// Save the staged loading frame once the game has started: a pre-game
-    /// phase reads (`phase_read`, the screen after loading), or no frame
-    /// has passed the loading check for longer than [`PHASE_FLICKER`].
-    /// Saved, the loading screen is no longer looked for in this game.
-    fn settle_loading(&mut self, now: Instant, phase_read: bool, shots: &mut Vec<PregameOp<F>>) {
-        let Some(game) = self.game.as_mut() else {
-            return;
-        };
-        let Some(at) = game.loading_staged_at else {
-            return;
-        };
-        if phase_read || now.saturating_duration_since(at) > PHASE_FLICKER {
-            game.loading_staged_at = None;
-            game.loading_saved = true;
-            shots.push(PregameOp::Promote {
                 folder: game.folder.clone(),
                 name: LOADING_NAME,
             });
@@ -559,6 +610,9 @@ impl<F: Clone> PregameTracker<F> {
         };
         if new_game {
             self.end_phase(now, shots);
+            // A requeue: the last game never started after its loading
+            // frame.
+            self.drop_loading(shots);
             self.game = Some(PregameGame {
                 folder: new_folder(),
                 last_event: now,
@@ -664,7 +718,7 @@ impl<F: Clone> PregameTracker<F> {
                             name: BAN_RESULTS_NAME,
                             frame: std::mem::replace(&mut c.frame, frame),
                         }));
-                        c.owed = Some(game.folder.clone());
+                        c.owed_before = c.owed.replace(game.folder.clone());
                         c.confirmed = false;
                         c.replaced = true;
                         c.passed = false;
@@ -679,6 +733,7 @@ impl<F: Clone> PregameTracker<F> {
                             passed: false,
                             frame_at: now,
                             owed: None,
+                            owed_before: None,
                         });
                     }
                     _ => {}
@@ -1048,8 +1103,10 @@ pub(crate) fn write_note(
 
 /// Carry out `ops` under `root`, in order: saves and stages through
 /// [`write_frame`], a promote as one rename of the staged frame, a discard
-/// as its delete. A promote or discard with no staged frame (its stage was
-/// dropped with a full queue) changes nothing.
+/// as its delete. A stage first deletes the staged frame it replaces, so a
+/// stage whose write fails leaves none, and a promote or discard with no
+/// staged frame changes nothing: an older frame is never saved in place of
+/// a newer one that failed to write.
 pub(crate) fn write_pregame_ops(
     root: &std::path::Path,
     ops: &[PregameOp<Arc<image::DynamicImage>>],
@@ -1061,14 +1118,11 @@ pub(crate) fn write_pregame_ops(
             PregameOp::Save(shot) => {
                 write_frame(root, &shot.folder, shot.name, &shot.frame, keep, made)
             }
-            PregameOp::Stage(shot) => write_frame(
-                root,
-                &shot.folder,
-                &staged_name(shot.name),
-                &shot.frame,
-                keep,
-                made,
-            ),
+            PregameOp::Stage(shot) => {
+                let staged = staged_name(shot.name);
+                let _ = std::fs::remove_file(root.join(&shot.folder).join(&staged));
+                write_frame(root, &shot.folder, &staged, &shot.frame, keep, made)
+            }
             PregameOp::Promote { folder, name } => {
                 let dir = root.join(folder);
                 if let Err(e) = std::fs::rename(dir.join(staged_name(name)), dir.join(name)) {
@@ -1124,9 +1178,10 @@ impl PregameWriter {
         })
     }
 
-    /// Queue `shots`; false when the queue is full or the writer is gone.
-    /// A full queue is logged at debug each time; a writer thread that
-    /// ended (a panic) is logged once at warn, and no later batch is sent.
+    /// Queue `shots`; false when the queue is full or the writer is gone,
+    /// and then none of the batch is written. A full queue is logged at
+    /// debug each time; a writer thread that ended (a panic) is logged
+    /// once at warn, and no later batch is sent.
     pub(crate) fn send(&mut self, shots: ShotBatch) -> bool {
         self.send_job(WriterJob { shots, note: None })
     }
@@ -1299,6 +1354,27 @@ impl PregameDump {
         }
     }
 
+    /// A saver writing through `writer` with no examples (tests).
+    #[cfg(test)]
+    pub(crate) fn with_writer(
+        root: std::path::PathBuf,
+        poll: Duration,
+        writer: PregameWriter,
+    ) -> Self {
+        Self {
+            root,
+            tracker: PregameTracker::new(poll),
+            writer,
+            examples: Arc::default(),
+            post: super::postgame_dump::PostgameTracker::new(poll),
+            post_log: super::postgame_dump::PostLog::default(),
+            post_owner: super::postgame_dump::FolderOwner::default(),
+            saw_loading: false,
+            post_polled_at: None,
+            post_ticked_at: None,
+        }
+    }
+
     pub(crate) fn want(&self, now: Instant) -> PregameWant {
         self.tracker.want(now)
     }
@@ -1320,71 +1396,7 @@ impl PregameDump {
         let shots = self
             .tracker
             .observe(now, seen, frame, || unique_pregame_folder(root, Utc::now()));
-        self.writer.send(shots);
-    }
-
-    /// What the next tick should hand over for the post-game saves, at
-    /// its poll time `now`; nothing once the writer is gone. Notes when
-    /// this tick was polled ([`Self::observe_post`], [`Self::post_sooner_tick`])
-    /// and sends a final note a full queue refused.
-    pub(crate) fn post_want(&mut self, now: Instant) -> super::postgame_dump::PostWant {
-        self.post_polled_at = Some(now);
-        super::postgame_dump::retry_pending(&mut self.post_log, &mut self.writer);
-        if !self.writer.alive() {
-            return super::postgame_dump::PostWant::default();
-        }
-        self.post.want(now)
-    }
-
-    /// While a post-game window is open and this tick handed over a frame:
-    /// bring the next tick forward to this (at least
-    /// [`super::postgame_dump::POSTGAME_SLACK`]), when the next sample is
-    /// due before the regular tick (`poll` after this tick's poll).
-    pub(crate) fn post_sooner_tick(&self, now: Instant, poll: Duration) -> Option<Duration> {
-        let due_in = self.post.next_due_in(now)?;
-        let since = self
-            .post_ticked_at
-            .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
-        super::postgame_dump::sooner_tick(due_in, since, poll)
-    }
-
-    fn post_sink(
-        &mut self,
-    ) -> (
-        &mut super::postgame_dump::PostgameTracker,
-        super::postgame_dump::DumpSink<'_>,
-    ) {
-        let sink = super::postgame_dump::DumpSink {
-            root: &self.root,
-            latest: self.tracker.latest_game(),
-            owner: &self.post_owner,
-            log: &mut self.post_log,
-            writer: &mut self.writer,
-        };
-        (&mut self.post, sink)
-    }
-
-    /// Feed one poll tick to the post-game saves, after the pre-game ones
-    /// (whose loading read counts as a new screen). The tick counts at its
-    /// poll time ([`Self::post_want`]), else `now`. With the writer gone
-    /// the saves stop: no ring, no thumbnails.
-    pub(crate) fn observe_post(
-        &mut self,
-        now: Instant,
-        mut tick: super::postgame_dump::PostTick,
-        frame: Option<Arc<image::DynamicImage>>,
-    ) {
-        tick.new_screen |= std::mem::take(&mut self.saw_loading);
-        if !self.writer.alive() {
-            self.post.stop();
-            return;
-        }
-        let at = self.post_polled_at.take().unwrap_or(now);
-        self.post_ticked_at = Some(at);
-        let latest = self.tracker.latest_game().map(|(folder, _)| folder);
-        self.post_owner.note(at, latest, tick.game_opened);
-        let (post, mut sink) = self.post_sink();
-        post.observe(at, tick, frame, &mut sink);
+        self.send(shots);
     }
 
     /// The game closed or capture stopped: write what is owed and hold no
@@ -1393,28 +1405,25 @@ impl PregameDump {
     /// window's own time limit still ends it.
     pub(crate) fn release(&mut self, now: Instant) {
         let shots = self.tracker.release(now);
-        self.writer.send(shots);
+        self.send(shots);
         self.saw_loading = false;
     }
 
-    /// Replace the writer with one whose thread is gone (tests).
-    #[cfg(test)]
-    pub(crate) fn kill_writer(&mut self) {
-        self.writer = PregameWriter::dead();
-    }
-
-    /// Whether a post-game window is open (tests).
-    #[cfg(test)]
-    pub(crate) fn post_window_open(&self) -> bool {
-        self.post.window_open()
-    }
-
-    /// The game closed: [`Self::release`], and the post-game saves drop
-    /// their ring and end their window.
-    pub(crate) fn game_closed(&mut self, now: Instant) {
-        self.release(now);
-        let (post, mut sink) = self.post_sink();
-        post.release(now, super::postgame_dump::PostEnd::GameClosed, &mut sink);
+    /// Queue `shots`; when the batch is dropped, the tracker forgets each
+    /// frame it staged.
+    fn send(&mut self, shots: ShotBatch) {
+        let staged: Vec<&'static str> = shots
+            .iter()
+            .filter_map(|op| match op {
+                PregameOp::Stage(shot) => Some(shot.name),
+                _ => None,
+            })
+            .collect();
+        if !self.writer.send(shots) {
+            for name in staged {
+                self.tracker.stage_lost(name);
+            }
+        }
     }
 
     /// Shutdown: write what is owed and wait up to `within` for the queue.
