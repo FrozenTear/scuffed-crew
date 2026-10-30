@@ -841,17 +841,26 @@ fn save_pregame_order(root: &std::path::Path, made: &[String]) {
 /// for folders not in `made`, then `made` (the folders in the order they
 /// were made, oldest first) after them all: a clock set back gives a new
 /// folder an old name, and it still goes last. The newest of `made` is
-/// never deleted.
+/// never deleted. A folder with only staged or temporary files in it
+/// ([`only_leftovers`]) does not count.
 pub(crate) fn prune_pregame_games(root: &std::path::Path, keep: usize, made: &[String]) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    let mut older: Vec<String> = entries
+    let games: Vec<String> = entries
         .flatten()
         // `DirEntry::file_type` does not follow symlinks.
         .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|name| is_game_folder(name))
+        .collect();
+    // The game in progress: never deleted, even with nothing saved yet.
+    let newest = made.iter().rev().find(|name| games.contains(name));
+    // A folder holding only staged or temporary files is no saved game: it
+    // takes no slot and pushes no game out ([`sweep_staged`] deletes it).
+    let mut older: Vec<String> = games
+        .into_iter()
+        .filter(|name| !only_leftovers(&root.join(name)))
         .collect();
     // Each folder once, even if `made` repeats it.
     let mut ours: Vec<String> = Vec::new();
@@ -866,7 +875,6 @@ pub(crate) fn prune_pregame_games(root: &std::path::Path, keep: usize, made: &[S
     if total <= keep {
         return;
     }
-    let newest = ours.last();
     for name in older
         .iter()
         .chain(ours.iter())
@@ -879,34 +887,72 @@ pub(crate) fn prune_pregame_games(root: &std::path::Path, keep: usize, made: &[S
     }
 }
 
-/// Delete what a write left half done in the game folders under `root`:
-/// staged frames ([`staged_name`]) and temporary files, in every game
-/// folder but `except`. Run at start and when a new game folder is made,
-/// since a staged frame belongs to the game in progress only.
+/// A staged frame ([`staged_name`]) or a temporary file of a write (a
+/// dot name ending `.tmp`): never a saved screen.
+fn is_leftover(name: &str) -> bool {
+    name.starts_with('.') && (name.ends_with(".staged") || name.ends_with(".tmp"))
+}
+
+/// Whether `dir` holds files and all of them are leftovers
+/// ([`is_leftover`]). An empty or unreadable folder, or one with anything
+/// else in it (a saved screen, a subfolder), is not.
+fn only_leftovers(dir: &std::path::Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut any = false;
+    for entry in entries {
+        let Ok(entry) = entry else {
+            return false;
+        };
+        let leftover = entry.file_name().to_str().is_some_and(is_leftover)
+            && entry.file_type().is_ok_and(|t| t.is_file());
+        if !leftover {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// Delete what a write left half done under `root`: staged frames
+/// ([`staged_name`]) and temporary files, in `root` itself and in every
+/// game folder but `except`, and then each of those folders it left
+/// empty. Run at start and when a new game folder is made, since a staged
+/// frame belongs to the game in progress only. A saved screen is never
+/// touched, and a folder with one in it is never deleted.
 pub(crate) fn sweep_staged(root: &std::path::Path, except: Option<&str>) {
-    let Ok(games) = std::fs::read_dir(root) else {
+    let Ok(entries) = std::fs::read_dir(root) else {
         return;
     };
-    for game in games.flatten() {
-        let Ok(name) = game.file_name().into_string() else {
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        if !game.file_type().is_ok_and(|t| t.is_dir())
-            || !is_game_folder(&name)
-            || except == Some(name.as_str())
-        {
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        if kind.is_file() && is_leftover(&name) {
+            // The order file's temporary copy.
+            let _ = std::fs::remove_file(entry.path());
             continue;
         }
-        let Ok(files) = std::fs::read_dir(game.path()) else {
+        if !kind.is_dir() || !is_game_folder(&name) || except == Some(name.as_str()) {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(entry.path()) else {
             continue;
         };
+        let mut swept = false;
         for file in files.flatten() {
-            let leftover = file.file_name().to_str().is_some_and(|f| {
-                f.starts_with('.') && (f.ends_with(".staged") || f.ends_with(".tmp"))
-            });
+            let leftover = file.file_name().to_str().is_some_and(is_leftover);
             if leftover && file.file_type().is_ok_and(|t| t.is_file()) {
-                let _ = std::fs::remove_file(file.path());
+                swept |= std::fs::remove_file(file.path()).is_ok();
             }
+        }
+        if swept {
+            // Only an empty folder goes: `remove_dir` fails on any other.
+            let _ = std::fs::remove_dir(entry.path());
         }
     }
 }
