@@ -514,6 +514,26 @@ async fn an_update_band_then_entering_game_then_the_select_saves_entering_game()
     }
 }
 
+// Known limit: an update band that passes the check (not rejected by the
+// word-ratio rule) and is never replaced by an ENTERING GAME frame is saved
+// as loading.png when a ban or select read follows within 20 s. Pinned so a
+// change is deliberate.
+#[tokio::test]
+async fn known_limit_an_update_band_with_no_entering_game_frame_is_saved_when_the_game_starts() {
+    // Straight into the ban or the select, and with a frame between that
+    // fails the check.
+    for start in [PregamePhase::HeroBan, PregamePhase::HeroSelect] {
+        for gap in [false, true] {
+            let mut steps = vec![frame_step(2_000, update_band())];
+            if gap {
+                steps.push(frame_step(3_500, plain()));
+            }
+            steps.push(phase_step(6_500, start));
+            kept(&loading_run(steps).await, &update_band().0);
+        }
+    }
+}
+
 #[tokio::test]
 async fn fade_frames_with_no_text_never_replace_entering_game() {
     // The fade-in (the navy strip with no text yet) before ENTERING GAME,
