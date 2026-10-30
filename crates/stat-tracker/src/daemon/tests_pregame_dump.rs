@@ -7,6 +7,8 @@ use std::time::Duration;
 const VOTE: Seen = Seen::Phase(PregamePhase::MapVote);
 const BAN: Seen = Seen::Phase(PregamePhase::HeroBan);
 const SELECT: Seen = Seen::Phase(PregamePhase::HeroSelect);
+/// A frame with the ban-results title.
+const RESULTS: Seen = Seen::BanResults;
 
 /// Drives a tracker the way the poll loop does: a tick hands its frame only
 /// when [`keeps_frame`] says so, and a loading screen reads as one only
@@ -39,10 +41,11 @@ impl Run {
     fn tick(&mut self, ms: u64, seen: Seen, frame: u32) {
         let now = self.at(ms);
         let want = self.tracker.want(now);
-        let seen = if seen == Seen::Loading && !want.loading {
-            Seen::Other
-        } else {
-            seen
+        let seen = match seen {
+            Seen::Loading if !want.loading => Seen::Other,
+            Seen::SelectTitle if !want.select_title => Seen::Other,
+            Seen::BanResults if !want.ban_title => Seen::Other,
+            seen => seen,
         };
         let frame = keeps_frame(want, seen).then(|| Arc::new(frame));
         if let Some(f) = &frame {
@@ -111,7 +114,7 @@ fn the_poll_loop_feeds_and_releases_the_saver_and_shutdown_flushes_it() {
     // expected one-poll miss does not.
     assert_eq!(run_loop.matches("dump.release(Instant::now())").count(), 2);
     assert!(run_loop.contains(
-        "iffailure!=PollErrorLog::Expected&&letSome(dump)=pregame_dump.as_mut(){dump.release(Instant::now());}"
+        "if(failure!=PollErrorLog::Expected||capture::is_lasting_poll_miss(&e.to_string()))&&letSome(dump)=pregame_dump.as_mut(){dump.release(Instant::now());}"
     ));
     assert!(run_loop.contains(
         "if!running{ifletSome(dump)=pregame_dump.as_mut(){dump.release(Instant::now());}clear_cadence_wakes("
@@ -142,8 +145,8 @@ fn each_phase_saves_its_first_and_last_frame_once() {
     run.tick(4_000, BAN, 4);
     run.tick(5_000, BAN, 5);
     // Too soon after the ban for the results to have animated in.
-    run.tick(5_500, Seen::Other, 6);
-    run.tick(6_200, Seen::Other, 7);
+    run.tick(5_500, RESULTS, 6);
+    run.tick(6_200, RESULTS, 7);
     // The hero select's first frame, before its read settles.
     run.tick(7_000, Seen::Other, 8);
     run.tick(8_000, SELECT, 9);
@@ -176,7 +179,7 @@ fn the_frame_just_before_the_select_read_is_not_the_ban_results() {
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, BAN, 2);
-    run.tick(3_000, Seen::Other, 3);
+    run.tick(3_000, RESULTS, 3);
     run.tick(4_500, SELECT, 4);
     assert_eq!(
         run.names(),
@@ -193,7 +196,7 @@ fn ban_results_shown_for_two_polls_keep_the_first_one() {
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, BAN, 2);
-    run.tick(3_000, Seen::Other, 3);
+    run.tick(3_000, RESULTS, 3);
     run.tick(4_500, Seen::Other, 4);
     run.tick(6_000, SELECT, 5);
     assert_eq!(
@@ -214,7 +217,7 @@ fn a_ban_back_after_a_long_gap_drops_the_candidate() {
     run.tick(10_000, BAN, 2);
     // An overlay for more than PHASE_FLICKER, then the ban is back.
     for (i, ms) in (11_500..22_000).step_by(1_500).enumerate() {
-        run.tick(ms, Seen::Other, 10 + i as u32);
+        run.tick(ms, RESULTS, 10 + i as u32);
     }
     run.tick(23_000, BAN, 30);
     // Past the results window: nothing is left to write.
@@ -303,11 +306,12 @@ fn a_ban_back_after_a_flicker_is_not_taken_as_the_results() {
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(2_000, BAN, 2);
-    // The ban read drops for a tick and comes back: not the results.
-    run.tick(4_000, Seen::Other, 3);
+    // The ban read drops for a tick and comes back: not the results (even
+    // with the results title).
+    run.tick(4_000, RESULTS, 3);
     run.tick(6_000, BAN, 4);
     run.tick(8_000, BAN, 5);
-    run.tick(10_000, Seen::Other, 6);
+    run.tick(10_000, RESULTS, 6);
     run.tick(11_000, Seen::Other, 7);
     run.tick(12_000, SELECT, 8);
     assert_eq!(
@@ -331,7 +335,7 @@ fn ban_results_are_taken_when_loading_was_saved_first() {
     run.tick(3_000, BAN, 4);
     // The first tick after the ban is the results: its frame is kept even
     // with nothing else left to want, and the next one confirms it.
-    run.tick(5_000, Seen::Other, 5);
+    run.tick(5_000, RESULTS, 5);
     run.tick(6_000, Seen::Other, 6);
     run.tick(7_000, SELECT, 7);
     assert_eq!(
@@ -411,7 +415,7 @@ fn release_writes_the_last_frame_and_holds_nothing() {
     // An unconfirmed ban-results candidate is dropped, not written.
     run.tick(3_000, BAN, 3);
     run.tick(4_000, BAN, 4);
-    run.tick(5_500, Seen::Other, 5);
+    run.tick(5_500, RESULTS, 5);
     run.release(6_000);
     assert!(!run.tracker.holds_frame());
     assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
@@ -671,7 +675,13 @@ fn a_save_leaves_no_temporary_file() {
         &mut Vec::new(),
     );
     let game = root.join("20261030_120000");
-    assert_eq!(names_in(&game), ["heroban_last.png"]);
+    // Every name, dot names too: a leftover `.heroban_last.png.tmp` fails.
+    let mut all: Vec<String> = std::fs::read_dir(&game)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    all.sort();
+    assert_eq!(all, ["heroban_last.png"]);
     assert_eq!(
         image::open(game.join("heroban_last.png")).unwrap().width(),
         20
@@ -705,10 +715,9 @@ async fn saves_are_full_size_pngs_written_in_order() {
     assert_eq!((last.width(), last.height()), (32, 36));
 }
 
-/// The loading screen shape with its black bars in a navy that the
-/// map-vote gate counts (and the dark check counts as black).
-fn loading_with_navy_bars() -> image::RgbImage {
-    let mut img = image::RgbImage::from_pixel(640, 360, image::Rgb([10, 10, 34]));
+/// The loading screen shape: black bars, a navy strip with glyphs.
+fn loading_frame() -> image::RgbImage {
+    let mut img = image::RgbImage::from_pixel(640, 360, image::Rgb([0, 0, 0]));
     for y in 136..224 {
         for x in 0..640 {
             img.put_pixel(x, y, image::Rgb([24, 32, 52]));
@@ -722,26 +731,376 @@ fn loading_with_navy_bars() -> image::RgbImage {
     img
 }
 
+const LOADING_WANTED: PregameWant = PregameWant {
+    loading: true,
+    other_frame: true,
+    select_title: false,
+    ban_title: false,
+};
+
+fn no_title(_: &image::RgbImage) -> bool {
+    false
+}
+
 #[test]
-fn a_frame_passing_the_vote_gate_gets_no_loading_check() {
-    let img = loading_with_navy_bars();
-    assert!(detect::loading_screen::is_loading_screen(&img));
-    let want = PregameWant {
-        loading: true,
-        other_frame: true,
-    };
+fn the_loading_check_skips_a_ban_screen_but_not_a_navy_tinted_black() {
     let unknown = detect::GamePhase::Unknown;
-    assert_eq!(classify(want, &unknown, &img), Seen::Other);
-    let mut black_bars = img.clone();
-    for p in black_bars.pixels_mut() {
-        if p.0 == [10, 10, 34] {
-            p.0 = [0, 0, 0];
+    assert_eq!(
+        classify_with(
+            LOADING_WANTED,
+            &unknown,
+            &loading_frame(),
+            no_title,
+            no_title
+        ),
+        Seen::Loading
+    );
+    // Black tinted navy (blue 34 counts as dark): still the loading screen.
+    let mut tinted = loading_frame();
+    for p in tinted.pixels_mut() {
+        if p.0 == [0, 0, 0] {
+            p.0 = [10, 10, 34];
         }
     }
-    assert_eq!(classify(want, &unknown, &black_bars), Seen::Loading);
+    assert!(detect::match_start::gate_metrics(&tinted).navy_ratio >= 0.40);
+    assert_eq!(
+        classify_with(LOADING_WANTED, &unknown, &tinted, no_title, no_title),
+        Seen::Loading
+    );
+    // A bright red accent in the top band: the hero-ban gate passes, so it
+    // is a ban screen settling, not the loading screen.
+    let mut ban = loading_frame();
+    for y in 6..16 {
+        for x in 300..340 {
+            ban.put_pixel(x, y, image::Rgb([220, 30, 30]));
+        }
+    }
+    assert!(detect::loading_screen::is_loading_screen(&ban));
+    assert!(detect::match_start::passes_ban_gate(&ban));
+    assert_eq!(
+        classify_with(LOADING_WANTED, &unknown, &ban, no_title, no_title),
+        Seen::Other
+    );
     let no_check = PregameWant {
         loading: false,
-        other_frame: true,
+        ..LOADING_WANTED
     };
-    assert_eq!(classify(no_check, &unknown, &black_bars), Seen::Other);
+    assert_eq!(
+        classify_with(no_check, &unknown, &loading_frame(), no_title, no_title),
+        Seen::Other
+    );
+}
+
+#[test]
+fn the_select_title_is_read_only_while_the_ban_results_wait() {
+    let unknown = detect::GamePhase::Unknown;
+    let img = image::RgbImage::new(64, 36);
+    let waiting = PregameWant {
+        loading: false,
+        other_frame: true,
+        select_title: true,
+        ban_title: true,
+    };
+    assert_eq!(
+        classify_with(waiting, &unknown, &img, |_| true, no_title),
+        Seen::SelectTitle
+    );
+    assert_eq!(
+        classify_with(waiting, &unknown, &img, no_title, no_title),
+        Seen::Other
+    );
+    let idle = PregameWant {
+        select_title: false,
+        ban_title: false,
+        ..waiting
+    };
+    let mut asked = false;
+    let seen = classify_with(
+        idle,
+        &unknown,
+        &img,
+        |_| {
+            asked = true;
+            true
+        },
+        no_title,
+    );
+    assert_eq!(seen, Seen::Other);
+    assert!(!asked, "no title read outside the wait");
+    // A phase read wins over the title.
+    let select = detect::GamePhase::HeroSelect;
+    assert_eq!(
+        classify_with(waiting, &select, &img, |_| true, |_| true),
+        SELECT
+    );
+    assert!(!keeps_frame(waiting, Seen::SelectTitle));
+    // The ban-results title comes after the select title, and both after
+    // a phase read.
+    assert_eq!(
+        classify_with(waiting, &unknown, &img, no_title, |_| true),
+        Seen::BanResults
+    );
+    assert_eq!(
+        classify_with(waiting, &unknown, &img, |_| true, |_| true),
+        Seen::SelectTitle
+    );
+    assert!(keeps_frame(waiting, Seen::BanResults));
+    assert!(!keeps_frame(waiting, Seen::Other));
+}
+
+#[test]
+fn a_sure_or_suspect_select_title_read_counts() {
+    use stat_tracker::shadow::result::phrase::PhraseRead;
+    assert!(shows_select_title(Some(PhraseRead::Sure(0.9))));
+    assert!(shows_select_title(Some(PhraseRead::Suspect(0.5))));
+    assert!(!shows_select_title(Some(PhraseRead::Absent(0.1))));
+    assert!(!shows_select_title(None));
+}
+
+#[test]
+fn a_select_read_two_polls_late_is_not_the_ban_results() {
+    // 1.5 s polls: the select's first frame reads as nothing, its second
+    // shows the title but its phase read waits one more poll.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, Seen::SelectTitle, 4);
+    run.tick(6_000, SELECT, 5);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("heroselect_first.png", 5),
+        ]
+    );
+}
+
+#[test]
+fn a_missed_results_screen_then_the_roster_saves_no_results() {
+    // A 1 s results screen falls between two 1.5 s polls; the roster
+    // (no results title) follows for two polls.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, Seen::Other, 3);
+    run.tick(4_500, Seen::Other, 4);
+    run.tick(6_000, SELECT, 5);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+    // The same at 4 s polls.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, Seen::Other, 3);
+    run.tick(12_000, Seen::Other, 4);
+    run.tick(16_000, SELECT, 5);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+}
+
+#[test]
+fn a_dropped_candidate_is_never_saved_later() {
+    // No results title after the ban: nothing becomes a candidate, and
+    // neither the game closing nor shutdown writes one.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, Seen::Other, 3);
+    run.tick(4_500, Seen::Other, 4);
+    run.release(6_000);
+    run.tick(7_500, Seen::Loading, 5);
+    run.tick(9_000, SELECT, 6);
+    run.release(10_500);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+    // A confirmed candidate past the window is dropped too, on every path:
+    // here the loading screen settles it 20 s after the ban.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, RESULTS, 2);
+    run.tick(3_000, Seen::Other, 3);
+    run.release(20_000);
+    assert!(!run.tracker.holds_frame());
+    run.tick(21_000, Seen::Loading, 4);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+}
+
+#[tokio::test]
+async fn the_shutdown_flush_writes_no_unmatched_candidate() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dump = PregameDump::new(true, dir.path()).unwrap();
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    dump.observe(at(0), BAN, Some(frame(16, 9)));
+    dump.observe(at(1_500), BAN, Some(frame(16, 9)));
+    // No examples are installed, so nothing reads as the results title.
+    dump.observe(at(3_000), Seen::Other, None);
+    dump.observe(at(4_500), Seen::Other, None);
+    assert!(dump.finish(Duration::from_secs(30)).await);
+    let root = pregame_dir(dir.path());
+    let games = names_in(&root);
+    assert_eq!(games.len(), 1);
+    assert_eq!(
+        names_in(&root.join(&games[0])),
+        ["heroban_first.png", "heroban_last.png"]
+    );
+}
+
+#[test]
+fn results_then_a_late_select_read_keep_the_results() {
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, Seen::Other, 4);
+    run.tick(6_000, Seen::SelectTitle, 5);
+    run.tick(7_500, SELECT, 6);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 6),
+        ]
+    );
+}
+
+#[test]
+fn ban_results_at_a_four_second_poll() {
+    // ocr-v1 polls every 4 s: results up for two polls are kept.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, RESULTS, 3);
+    run.tick(12_000, Seen::Other, 4);
+    run.tick(16_000, SELECT, 5);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 5),
+        ]
+    );
+    // One poll between the ban and the select read: it is the select.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, RESULTS, 3);
+    run.tick(12_000, SELECT, 4);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+    // Two late polls, the second showing the select title: still the select.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, RESULTS, 3);
+    run.tick(12_000, Seen::SelectTitle, 4);
+    run.tick(16_000, SELECT, 5);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+}
+
+#[test]
+fn a_ban_read_lost_past_the_window_saves_no_results() {
+    // BAN at 0 s and 10 s, other screens every 1.5 s from 11.5 s, the ban
+    // back at 28 s.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(10_000, BAN, 2);
+    for (i, ms) in (11_500..28_000).step_by(1_500).enumerate() {
+        run.tick(ms, RESULTS, 10 + i as u32);
+    }
+    // The window ran out at 25 s: the candidate is gone.
+    assert!(!run.tracker.holds_frame());
+    run.tick(28_000, BAN, 40);
+    run.tick(29_500, Seen::Other, 41);
+    run.tick(31_000, Seen::Other, 42);
+    run.tick(32_500, SELECT, 43);
+    assert!(
+        run.names().iter().all(|(n, _)| *n != "ban_results.png"),
+        "{:?}",
+        run.names()
+    );
+}
+
+#[test]
+fn a_dead_writer_is_logged_once_and_told_apart_from_a_busy_one() {
+    let mut writer = PregameWriter::dead();
+    let shot = || {
+        vec![PregameShot {
+            folder: "20261030_120000".to_string(),
+            name: "mapvote_first.png",
+            frame: frame(4, 4),
+        }]
+    };
+    assert!(writer.send(Vec::new()), "nothing to send is no failure");
+    assert!(!writer.dead_logged());
+    assert!(!writer.send(shot()));
+    assert!(writer.dead_logged());
+    assert!(!writer.send(shot()));
+    assert!(writer.dead_logged());
+}
+
+/// A dark frame with a title-like row of bright blocks in the ban-results
+/// title region; `shift` moves the blocks (a different title).
+fn titled_frame(w: u32, h: u32, shift: f32) -> image::RgbImage {
+    use super::pregame_ban_title::BAN_RESULTS_TITLE;
+    let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([14, 16, 22]));
+    let [x0, y0, x1, y1] = BAN_RESULTS_TITLE;
+    let (rw, rh) = ((x1 - x0) * w as f32, (y1 - y0) * h as f32);
+    for k in 0..9 {
+        let gx0 = x0 * w as f32 + rw * ((0.06 + 0.1 * k as f32 + shift) % 0.95);
+        let gw = rw * if k % 3 == 0 { 0.07 } else { 0.04 };
+        let gy0 = y0 * h as f32 + rh * 0.3;
+        let gh = rh * if k % 2 == 0 { 0.4 } else { 0.25 };
+        for y in gy0 as u32..(gy0 + gh) as u32 {
+            for x in gx0 as u32..(gx0 + gw) as u32 {
+                img.put_pixel(x, y, image::Rgb([235, 235, 240]));
+            }
+        }
+    }
+    img
+}
+
+#[test]
+fn the_ban_results_title_matches_its_example_at_another_size() {
+    use super::pregame_ban_title::{BAN_TITLE_MATCH_MIN, BanTitleExamples};
+    let examples = BanTitleExamples::from_frames([titled_frame(2560, 1440, 0.0)]);
+    assert_eq!(examples.len(), 1);
+    // The same title at 1080p.
+    let same = titled_frame(1920, 1080, 0.0);
+    assert!(examples.best_score(&same).unwrap() >= BAN_TITLE_MATCH_MIN);
+    assert!(examples.matches(&same));
+    // Another title (the roster's) does not match.
+    let other = titled_frame(1920, 1080, 0.05);
+    assert!(
+        !examples.matches(&other),
+        "{:?}",
+        examples.best_score(&other)
+    );
+    // A flat title area matches nothing.
+    let flat = image::RgbImage::from_pixel(1920, 1080, image::Rgb([14, 16, 22]));
+    assert_eq!(examples.best_score(&flat), None);
+    // No examples: nothing matches.
+    assert!(!BanTitleExamples::default().matches(&same));
+}
+
+#[test]
+fn ban_results_examples_are_read_from_the_data_dir() {
+    use super::pregame_ban_title::{BanTitleExamples, ban_title_dir};
+    let dir = tempfile::tempdir().unwrap();
+    let examples = ban_title_dir(dir.path());
+    assert_eq!(BanTitleExamples::load_dir(&examples).len(), 0);
+    std::fs::create_dir_all(&examples).unwrap();
+    titled_frame(640, 360, 0.0)
+        .save(examples.join("results.png"))
+        .unwrap();
+    std::fs::write(examples.join("notes.txt"), b"not an image").unwrap();
+    std::fs::write(examples.join("broken.png"), b"not a png").unwrap();
+    image::RgbImage::from_pixel(640, 360, image::Rgb([0, 0, 0]))
+        .save(examples.join("flat.png"))
+        .unwrap();
+    let loaded = BanTitleExamples::load_dir(&examples);
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded.matches(&titled_frame(1920, 1080, 0.0)));
 }

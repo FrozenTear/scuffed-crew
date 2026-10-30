@@ -11,6 +11,7 @@ pub(crate) mod gui_presence;
 mod lifecycle;
 pub(crate) mod memtune;
 mod poll;
+pub(crate) mod pregame_ban_title;
 pub(crate) mod pregame_dump;
 pub(crate) mod query_server;
 mod session;

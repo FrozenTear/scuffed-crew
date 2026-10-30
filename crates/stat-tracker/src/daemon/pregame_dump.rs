@@ -15,12 +15,20 @@
 //!
 //! Ban results are no phase of their own yet. The candidate is the first
 //! frame at least [`BAN_RESULTS_DELAY`] after the last ban-phase frame (in
-//! practice the next poll), kept only when one more non-phase frame
-//! follows it before the next phase reads. The phase read lags a new
+//! practice the next poll) that shows the ban-results title
+//! ([`super::pregame_ban_title`], matched against example screenshots on
+//! this PC; with none, nothing is ever a candidate). It is kept only when
+//! one more non-phase frame follows it before the next phase reads, and
+//! only written while [`BAN_RESULTS_WINDOW`] lasts. The phase read lags a new
 //! screen by one poll, so a candidate right before the hero select read is
-//! the hero select's first frame and is dropped. It is also dropped when
-//! the ban comes back. Only a map vote or a ban opens a game folder; a
-//! hero select alone is the one between rounds.
+//! the hero select's first frame and is dropped. A frame that shows the
+//! hero select's title (the words-v1 mask, read without the stability
+//! wait) is the select too: it never becomes or confirms a candidate, and
+//! it ends the wait, which covers a select read that lags two polls or
+//! more. The candidate is also dropped when the ban comes back, and when
+//! [`BAN_RESULTS_WINDOW`] runs out before the next screen reads (the ban
+//! read was lost: ESC, alt-tab). Only a map vote or a ban opens a game
+//! folder; a hero select alone is the one between rounds.
 
 use crate::*;
 use std::time::Duration;
@@ -37,7 +45,8 @@ pub(crate) const PREGAME_GAME_GAP: Duration = Duration::from_secs(3 * 60);
 /// (4 s with ocr-v1), so this is the next poll.
 pub(crate) const BAN_RESULTS_DELAY: Duration = Duration::from_millis(1_000);
 
-/// No ban-results frame later than this after the last ban-phase frame.
+/// The wait for the ban results ends this long after the last ban-phase
+/// frame; a candidate not settled by then is dropped.
 pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 
 /// A phase gone for at most this long and back is a detector flicker (the
@@ -62,6 +71,11 @@ pub(crate) enum Seen {
     Phase(PregamePhase),
     /// The loading screen ([`detect::loading_screen::is_loading_screen`]).
     Loading,
+    /// No phase read yet, but the hero select's title is on the frame: the
+    /// select before its read settles.
+    SelectTitle,
+    /// No phase, and the ban-results title is on the frame.
+    BanResults,
     /// Anything else.
     Other,
 }
@@ -121,45 +135,94 @@ pub(crate) const LOADING_NAME: &str = "loading.png";
 pub(crate) struct PregameWant {
     /// Run the loading-screen check on a frame that is no pre-game phase.
     pub(crate) loading: bool,
-    /// Hand over a frame that is no pre-game phase (ban results, loading).
+    /// Hand over a loading-screen or ban-results frame.
     pub(crate) other_frame: bool,
+    /// Look for the hero select's title on a frame that is no phase (the
+    /// ban-results wait is on).
+    pub(crate) select_title: bool,
+    /// Look for the ban-results title on a frame that is no phase (the
+    /// wait is on and has no candidate yet).
+    pub(crate) ban_title: bool,
 }
 
-/// Classify a polled frame for the tracker, on the blocking thread. The
-/// loading check runs only when `want.loading` and the frame is no phase.
-/// A frame that passes the map-vote or hero-ban pixel gate is such a
-/// screen before its read settles, never the loading screen. The
-/// hero-select gate is left out: its colour spread can pass on the
-/// loading screen's white glyphs.
+/// Classify a polled frame for the tracker, on the blocking thread, with
+/// the process's words-v1 reader for the select title and `examples` for
+/// the ban-results title.
 pub(crate) fn classify(
     want: PregameWant,
     phase: &detect::GamePhase,
     rgb: &image::RgbImage,
+    examples: &super::pregame_ban_title::BanTitleExamples,
+) -> Seen {
+    classify_with(
+        want,
+        phase,
+        rgb,
+        |rgb| {
+            shows_select_title(shadow::read_phrase(
+                stat_tracker::shadow::result::phrase::Phrase::SelectAPreferredHero,
+                rgb,
+            ))
+        },
+        |rgb| examples.matches(rgb),
+    )
+}
+
+/// [`classify`] with the two title reads as arguments (tests).
+///
+/// The loading check runs only when `want.loading` and the frame is no
+/// phase, and a frame passing the hero-ban pixel gate (a ban screen before
+/// its read settles) is never the loading screen. The cheap loading check
+/// runs first. The map-vote gate is not used: a vote screen's navy is too
+/// bright to pass the loading check's dark bands, so it only turned away a
+/// loading screen whose black is tinted navy. The hero-select gate is not
+/// used either: its colour spread can pass on the loading screen's glyphs.
+pub(crate) fn classify_with(
+    want: PregameWant,
+    phase: &detect::GamePhase,
+    rgb: &image::RgbImage,
+    select_title: impl FnOnce(&image::RgbImage) -> bool,
+    ban_title: impl FnOnce(&image::RgbImage) -> bool,
 ) -> Seen {
     if let Some(p) = PregamePhase::of(phase) {
         return Seen::Phase(p);
     }
     if want.loading
-        && !passes_vote_or_ban_gate(rgb)
         && detect::loading_screen::is_loading_screen(rgb)
+        && !detect::match_start::passes_ban_gate(rgb)
     {
         return Seen::Loading;
+    }
+    if want.select_title && select_title(rgb) {
+        return Seen::SelectTitle;
+    }
+    if want.ban_title && ban_title(rgb) {
+        return Seen::BanResults;
     }
     Seen::Other
 }
 
-/// The map-vote or hero-ban pixel gate of [`detect::match_start`], with the
-/// thresholds of its module table.
-fn passes_vote_or_ban_gate(rgb: &image::RgbImage) -> bool {
-    let m = detect::match_start::gate_metrics(rgb);
-    m.navy_ratio >= 0.40 || (m.ban_red_ratio >= 0.003 && m.ban_dark_ratio >= 0.30)
+/// Whether a words-v1 read of SELECT A PREFERRED HERO says the hero select
+/// is on the frame. The mask is the pack's own cut of the select title
+/// region (Vision's 0.41,0.165,0.565,0.2 at 1440p), so no new reference
+/// crops are needed. Conservative on purpose: a suspect read (the title
+/// half drawn while the screen slides in) counts too, since a frame that
+/// is turned away here costs at most the results frame, while one let
+/// through is a select frame saved as the results. No mask loaded (`None`)
+/// is no title.
+pub(crate) fn shows_select_title(
+    read: Option<stat_tracker::shadow::result::phrase::PhraseRead>,
+) -> bool {
+    use stat_tracker::shadow::result::phrase::PhraseRead;
+    matches!(read, Some(PhraseRead::Sure(_) | PhraseRead::Suspect(_)))
 }
 
 /// Whether a tick seeing `seen` should hand its frame to the tracker.
 pub(crate) fn keeps_frame(want: PregameWant, seen: Seen) -> bool {
     match seen {
         Seen::Phase(_) => true,
-        Seen::Loading | Seen::Other => want.other_frame,
+        Seen::Loading | Seen::BanResults => want.other_frame,
+        Seen::Other | Seen::SelectTitle => false,
     }
 }
 
@@ -202,6 +265,8 @@ struct OnScreen<F> {
 /// The ban-results candidate frame.
 struct BanResults<F> {
     frame: F,
+    /// The last ban-phase frame before it: the window runs from there.
+    ban_ended: Instant,
     /// Another non-phase frame came after it, so it is not the next
     /// screen's first frame read one poll early.
     confirmed: bool,
@@ -257,12 +322,13 @@ impl<F: Clone> PregameTracker<F> {
             .on_screen
             .as_ref()
             .is_some_and(|s| s.phase == PregamePhase::HeroBan);
-        let ban_results = !game.ban_results_saved
-            && self.ban_results.is_none()
-            && (ban_on_screen || self.ban_ended_at.is_some());
+        let waiting = !game.ban_results_saved && (ban_on_screen || self.ban_ended_at.is_some());
+        let ban_title = waiting && self.ban_results.is_none();
         PregameWant {
             loading,
-            other_frame: loading || ban_results,
+            other_frame: loading || ban_title,
+            select_title: waiting,
+            ban_title,
         }
     }
 
@@ -278,7 +344,15 @@ impl<F: Clone> PregameTracker<F> {
         let mut shots = Vec::new();
         match seen {
             Seen::Phase(phase) => self.observe_phase(now, phase, frame, new_folder, &mut shots),
-            Seen::Loading | Seen::Other => self.observe_other(now, seen, frame, &mut shots),
+            Seen::Loading | Seen::Other | Seen::BanResults => {
+                self.observe_other(now, seen, frame, &mut shots)
+            }
+            Seen::SelectTitle => {
+                // The select is on screen: the results, if any, end here,
+                // and this frame confirms nothing.
+                self.end_phase(now, &mut shots);
+                self.settle_ban_results(now, &mut shots);
+            }
         }
         shots
     }
@@ -289,7 +363,7 @@ impl<F: Clone> PregameTracker<F> {
     pub(crate) fn release(&mut self, now: Instant) -> Vec<PregameShot<F>> {
         let mut shots = Vec::new();
         self.end_phase(now, &mut shots);
-        self.settle_ban_results(&mut shots);
+        self.settle_ban_results(now, &mut shots);
         shots
     }
 
@@ -312,7 +386,7 @@ impl<F: Clone> PregameTracker<F> {
         }
         if phase != PregamePhase::HeroBan {
             // The next screen: the ban results, if any, end here.
-            self.settle_ban_results(shots);
+            self.settle_ban_results(now, shots);
         }
         let continues = self.on_screen.is_some();
         let new_game = match self.game_open(now) {
@@ -400,17 +474,22 @@ impl<F: Clone> PregameTracker<F> {
             c.confirmed = true;
         }
         if self.game_open(now).is_none() || seen == Seen::Loading {
-            self.settle_ban_results(shots);
+            self.settle_ban_results(now, shots);
         } else if let Some(ended) = self.ban_ended_at {
             let since = now.saturating_duration_since(ended);
             if since > BAN_RESULTS_WINDOW {
-                self.settle_ban_results(shots);
+                // No next screen in time: the ban read was lost (ESC,
+                // alt-tab), and the candidate is a frame from that gap.
+                self.ban_results = None;
+                self.ban_ended_at = None;
             } else if since >= BAN_RESULTS_DELAY
+                && seen == Seen::BanResults
                 && self.ban_results.is_none()
                 && let Some(frame) = frame.clone()
             {
                 self.ban_results = Some(BanResults {
                     frame,
+                    ban_ended: ended,
                     confirmed: false,
                 });
             }
@@ -434,11 +513,15 @@ impl<F: Clone> PregameTracker<F> {
         }
     }
 
-    /// Write the waiting ban-results frame when it is confirmed, drop it
-    /// otherwise, and stop waiting for one.
-    fn settle_ban_results(&mut self, shots: &mut Vec<PregameShot<F>>) {
+    /// Write the waiting ban-results frame when it is confirmed and still
+    /// inside [`BAN_RESULTS_WINDOW`] at `now`, drop it otherwise, and stop
+    /// waiting for one. Nothing else ever writes it, so a dropped
+    /// candidate is never saved later (game end, shutdown).
+    fn settle_ban_results(&mut self, now: Instant, shots: &mut Vec<PregameShot<F>>) {
         self.ban_ended_at = None;
-        let Some(c) = self.ban_results.take().filter(|c| c.confirmed) else {
+        let Some(c) = self.ban_results.take().filter(|c| {
+            c.confirmed && now.saturating_duration_since(c.ban_ended) <= BAN_RESULTS_WINDOW
+        }) else {
             return;
         };
         let Some(game) = self.game.as_mut() else {
@@ -622,6 +705,8 @@ type ShotBatch = Vec<PregameShot<Arc<image::DynamicImage>>>;
 pub(crate) struct PregameWriter {
     tx: Option<std::sync::mpsc::SyncSender<ShotBatch>>,
     thread: Option<std::thread::JoinHandle<()>>,
+    /// The thread's end was logged (once).
+    dead_logged: bool,
 }
 
 impl PregameWriter {
@@ -639,11 +724,14 @@ impl PregameWriter {
         Ok(Self {
             tx: Some(tx),
             thread: Some(thread),
+            dead_logged: false,
         })
     }
 
     /// Queue `shots`; false when the queue is full or the writer is gone.
-    pub(crate) fn send(&self, shots: ShotBatch) -> bool {
+    /// A full queue is logged at debug each time; a writer thread that
+    /// ended (a panic) is logged once at warn, and no later batch is sent.
+    pub(crate) fn send(&mut self, shots: ShotBatch) -> bool {
         if shots.is_empty() {
             return true;
         }
@@ -652,10 +740,35 @@ impl PregameWriter {
         };
         match tx.try_send(shots) {
             Ok(()) => true,
-            Err(e) => {
-                tracing::debug!(target: "scuffed_stat_tracker", error = %e, "pre-game frames dropped: writer busy");
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                tracing::debug!(target: "scuffed_stat_tracker", "pre-game frames dropped: writer busy");
                 false
             }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                if !self.dead_logged {
+                    self.dead_logged = true;
+                    tracing::warn!(target: "scuffed_stat_tracker", "pre-game writer thread ended: pre-game screens are no longer saved this run");
+                }
+                false
+            }
+        }
+    }
+
+    /// Whether the writer thread ended this run is logged (tests).
+    #[cfg(test)]
+    pub(crate) fn dead_logged(&self) -> bool {
+        self.dead_logged
+    }
+
+    /// A writer whose thread is already gone (tests).
+    #[cfg(test)]
+    pub(crate) fn dead() -> Self {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<ShotBatch>(PREGAME_QUEUE);
+        drop(rx);
+        Self {
+            tx: Some(tx),
+            thread: None,
+            dead_logged: false,
         }
     }
 
@@ -683,6 +796,9 @@ pub(crate) struct PregameDump {
     root: std::path::PathBuf,
     tracker: PregameTracker<Arc<image::DynamicImage>>,
     writer: PregameWriter,
+    /// Ban-results title examples, read at start; shared with the poll's
+    /// blocking read.
+    examples: Arc<super::pregame_ban_title::BanTitleExamples>,
 }
 
 impl PregameDump {
@@ -693,11 +809,27 @@ impl PregameDump {
             return None;
         }
         let root = pregame_dir(data_dir);
+        let examples_dir = super::pregame_ban_title::ban_title_dir(data_dir);
+        let examples = super::pregame_ban_title::BanTitleExamples::load_dir(&examples_dir);
+        if examples.len() == 0 {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                dir = %examples_dir.display(),
+                "pre-game screens: no ban-results examples, so ban_results.png is not saved"
+            );
+        } else {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                examples = examples.len(),
+                "pre-game screens: ban-results examples loaded"
+            );
+        }
         match PregameWriter::start(root.clone()) {
             Ok(writer) => Some(Self {
                 root,
                 tracker: PregameTracker::default(),
                 writer,
+                examples: Arc::new(examples),
             }),
             Err(e) => {
                 tracing::warn!(target: "scuffed_stat_tracker", error = %e, "pre-game screens not saved: no writer thread");
@@ -708,6 +840,11 @@ impl PregameDump {
 
     pub(crate) fn want(&self, now: Instant) -> PregameWant {
         self.tracker.want(now)
+    }
+
+    /// The ban-results title examples, for the poll's blocking read.
+    pub(crate) fn examples(&self) -> Arc<super::pregame_ban_title::BanTitleExamples> {
+        Arc::clone(&self.examples)
     }
 
     /// Feed one poll tick and queue what it earned.

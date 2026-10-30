@@ -118,6 +118,13 @@ pub fn is_expected_poll_miss(err: &str) -> bool {
         || err.contains(portal::SHOT_BACKOFF)
 }
 
+/// An expected poll miss ([`is_expected_poll_miss`]) that can last the rest
+/// of the game: a declined share, or screenshot requests paused after the
+/// portal stopped answering.
+pub fn is_lasting_poll_miss(err: &str) -> bool {
+    stream::is_declined_capture(err) || err.contains(portal::SHOT_BACKOFF)
+}
+
 /// A grab error from a screenshot portal that is not answering: a request
 /// given up ([`portal::SHOT_UNANSWERED`]), or a grab turned away while new
 /// requests are paused or held after one ([`portal::SHOT_BACKOFF`]). The

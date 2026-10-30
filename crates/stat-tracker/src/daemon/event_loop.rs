@@ -501,7 +501,7 @@ pub(crate) async fn run_loop(
                         let pregame_want = pregame_dump
                             .as_ref()
                             .filter(|_| !outcome_only)
-                            .map(|dump| dump.want(Instant::now()));
+                            .map(|dump| (dump.want(Instant::now()), dump.examples()));
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -583,8 +583,8 @@ pub(crate) async fn run_loop(
                             // the title card's phrase OCR does not run.
                             let end_reel =
                                 detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
-                            let pregame_seen = pregame_want.map(|want| {
-                                let seen = daemon::pregame_dump::classify(want, &phase, &rgb);
+                            let pregame_seen = pregame_want.map(|(want, examples)| {
+                                let seen = daemon::pregame_dump::classify(want, &phase, &rgb, &examples);
                                 (seen, daemon::pregame_dump::keeps_frame(want, seen))
                             });
                             // Result templates are not on the Tab frame. A
@@ -789,8 +789,11 @@ pub(crate) async fn run_loop(
                         // or closed) is no failure and has its own log line.
                         let failure = poll_failures.on_error(&e.to_string(), Instant::now());
                         // Capture failed: the pre-game saves hold no frame
-                        // either. An expected one-poll miss leaves them be.
-                        if failure != PollErrorLog::Expected
+                        // either. An expected one-poll miss leaves them be,
+                        // but not one that can last the game (a declined
+                        // share, paused screenshot requests).
+                        if (failure != PollErrorLog::Expected
+                            || capture::is_lasting_poll_miss(&e.to_string()))
                             && let Some(dump) = pregame_dump.as_mut()
                         {
                             dump.release(Instant::now());
