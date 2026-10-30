@@ -39,8 +39,8 @@ struct DaemonCtx {
     /// and first word-OCR streak, not every mid-match tick. Also gates the
     /// `debug/accepted` and `debug/rejected` rings (unblanked board pixels).
     debug_ocr: bool,
-    /// `debug_save_pregame_screens`: the poller writes full-size pre-game
-    /// screens under `debug/pregame/` ([`daemon::pregame_dump`]).
+    /// `debug_save_pregame_screens`: the poller writes full-size pre- and
+    /// post-game screens under `debug/pregame/` ([`daemon::pregame_dump`]).
     save_pregame_screens: bool,
     data_dir: std::path::PathBuf,
     /// Consecutive scoreboard captures that parsed but resolved no map. Drives

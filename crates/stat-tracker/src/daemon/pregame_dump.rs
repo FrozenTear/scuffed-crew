@@ -337,6 +337,14 @@ impl<F: Clone> PregameTracker<F> {
         self.on_screen.is_some() || self.ban_results.is_some()
     }
 
+    /// The newest game's folder and when its last pre-game screen showed,
+    /// for the post-game saves.
+    pub(crate) fn latest_game(&self) -> Option<(&str, Instant)> {
+        self.game
+            .as_ref()
+            .map(|g| (g.folder.as_str(), g.last_event))
+    }
+
     /// What the tick at `now` should hand over.
     pub(crate) fn want(&self, now: Instant) -> PregameWant {
         let Some(game) = self.game_open(now) else {
@@ -745,21 +753,69 @@ pub(crate) fn write_pregame_shots(
             tracing::debug!(target: "scuffed_stat_tracker", error = %e, "pre-game frame not saved");
         }
         if new_folder {
-            made.retain(|name| name != &shot.folder);
-            made.push(shot.folder.clone());
-            prune_pregame_games(root, keep, made);
-            made.retain(|name| root.join(name).is_dir());
-            save_pregame_order(root, made);
+            note_new_folder(root, &shot.folder, keep, made);
         }
+    }
+}
+
+/// A new game folder was made: add it to `made` as the newest, keep the
+/// newest `keep` and save the order.
+fn note_new_folder(root: &std::path::Path, folder: &str, keep: usize, made: &mut Vec<String>) {
+    made.retain(|name| name != folder);
+    made.push(folder.to_string());
+    prune_pregame_games(root, keep, made);
+    made.retain(|name| root.join(name).is_dir());
+    save_pregame_order(root, made);
+}
+
+/// One small text file to write: `<root>/<folder>/<name>`, replaced whole
+/// each time (the post-game sidecar).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NoteFile {
+    pub(crate) folder: String,
+    pub(crate) name: &'static str,
+    pub(crate) text: String,
+}
+
+/// Write `note` the way [`write_pregame_shots`] writes a PNG: a temporary
+/// file then a rename, and a new game folder counts for the retention.
+pub(crate) fn write_note(
+    root: &std::path::Path,
+    note: &NoteFile,
+    keep: usize,
+    made: &mut Vec<String>,
+) {
+    let dir = root.join(&note.folder);
+    let new_folder = !dir.is_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::debug!(target: "scuffed_stat_tracker", error = %e, "post-game folder not made");
+        return;
+    }
+    let tmp = dir.join(format!(".{}.tmp", note.name));
+    let saved =
+        std::fs::write(&tmp, &note.text).and_then(|()| std::fs::rename(&tmp, dir.join(note.name)));
+    if let Err(e) = saved {
+        let _ = std::fs::remove_file(&tmp);
+        tracing::debug!(target: "scuffed_stat_tracker", error = %e, "post-game sidecar not saved");
+    }
+    if new_folder {
+        note_new_folder(root, &note.folder, keep, made);
     }
 }
 
 pub(crate) type ShotBatch = Vec<PregameShot<Arc<image::DynamicImage>>>;
 
+/// What the writer thread takes: shots, then an optional text file, written
+/// in that order.
+pub(crate) struct WriterJob {
+    pub(crate) shots: ShotBatch,
+    pub(crate) note: Option<NoteFile>,
+}
+
 /// One thread writes every batch in order, so two writes of the same
 /// `*_last.png` never overlap. The queue is bounded by [`PREGAME_QUEUE`].
 pub(crate) struct PregameWriter {
-    tx: Option<std::sync::mpsc::SyncSender<ShotBatch>>,
+    tx: Option<std::sync::mpsc::SyncSender<WriterJob>>,
     thread: Option<std::thread::JoinHandle<()>>,
     /// The thread's end was logged (once).
     dead_logged: bool,
@@ -767,14 +823,17 @@ pub(crate) struct PregameWriter {
 
 impl PregameWriter {
     pub(crate) fn start(root: std::path::PathBuf) -> std::io::Result<Self> {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<ShotBatch>(PREGAME_QUEUE);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterJob>(PREGAME_QUEUE);
         let thread = std::thread::Builder::new()
             .name("pregame-writer".into())
             .spawn(move || {
                 // Game folders in the order they were made, oldest first.
                 let mut made = load_pregame_order(&root);
-                for batch in rx {
-                    write_pregame_shots(&root, &batch, PREGAME_KEEP_GAMES, &mut made);
+                for job in rx {
+                    write_pregame_shots(&root, &job.shots, PREGAME_KEEP_GAMES, &mut made);
+                    if let Some(note) = &job.note {
+                        write_note(&root, note, PREGAME_KEEP_GAMES, &mut made);
+                    }
                 }
             })?;
         Ok(Self {
@@ -788,13 +847,18 @@ impl PregameWriter {
     /// A full queue is logged at debug each time; a writer thread that
     /// ended (a panic) is logged once at warn, and no later batch is sent.
     pub(crate) fn send(&mut self, shots: ShotBatch) -> bool {
-        if shots.is_empty() {
+        self.send_job(WriterJob { shots, note: None })
+    }
+
+    /// [`Self::send`] for shots plus a text file written after them.
+    pub(crate) fn send_job(&mut self, job: WriterJob) -> bool {
+        if job.shots.is_empty() && job.note.is_none() {
             return true;
         }
         let Some(tx) = self.tx.as_ref() else {
             return false;
         };
-        match tx.try_send(shots) {
+        match tx.try_send(job) {
             Ok(()) => true,
             Err(std::sync::mpsc::TrySendError::Full(_)) => {
                 tracing::debug!(target: "scuffed_stat_tracker", "pre-game frames dropped: writer busy");
@@ -819,8 +883,8 @@ impl PregameWriter {
     /// A writer whose queue nobody reads, so it fills (tests). Keep the
     /// receiver alive.
     #[cfg(test)]
-    pub(crate) fn stalled() -> (Self, std::sync::mpsc::Receiver<ShotBatch>) {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<ShotBatch>(PREGAME_QUEUE);
+    pub(crate) fn stalled() -> (Self, std::sync::mpsc::Receiver<WriterJob>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterJob>(PREGAME_QUEUE);
         let writer = Self {
             tx: Some(tx),
             thread: None,
@@ -832,7 +896,7 @@ impl PregameWriter {
     /// A writer whose thread is already gone (tests).
     #[cfg(test)]
     pub(crate) fn dead() -> Self {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<ShotBatch>(PREGAME_QUEUE);
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterJob>(PREGAME_QUEUE);
         drop(rx);
         Self {
             tx: Some(tx),
@@ -868,6 +932,13 @@ pub(crate) struct PregameDump {
     /// Ban-results title examples, read at start; shared with the poll's
     /// blocking read.
     examples: Arc<super::pregame_ban_title::BanTitleExamples>,
+    /// The post-game saves, same switch, same folders and writer.
+    post: super::postgame_dump::PostgameTracker,
+    post_log: super::postgame_dump::PostLog,
+    /// The last pre-game tick read the loading screen.
+    saw_loading: bool,
+    /// When the latest tick was polled ([`Self::post_want`]).
+    post_polled_at: Option<Instant>,
 }
 
 impl PregameDump {
@@ -900,6 +971,10 @@ impl PregameDump {
                 tracker: PregameTracker::new(poll),
                 writer,
                 examples: Arc::new(examples),
+                post: super::postgame_dump::PostgameTracker::new(poll),
+                post_log: super::postgame_dump::PostLog::default(),
+                saw_loading: false,
+                post_polled_at: None,
             }),
             Err(e) => {
                 tracing::warn!(target: "scuffed_stat_tracker", error = %e, "pre-game screens not saved: no writer thread");
@@ -925,22 +1000,83 @@ impl PregameDump {
         frame: Option<Arc<image::DynamicImage>>,
     ) {
         let root = &self.root;
+        self.saw_loading = seen == Seen::Loading;
         let shots = self
             .tracker
             .observe(now, seen, frame, || unique_pregame_folder(root, Utc::now()));
         self.writer.send(shots);
     }
 
+    /// What the next tick should hand over for the post-game saves. Notes
+    /// when this tick was polled, for [`Self::post_sooner_tick`].
+    pub(crate) fn post_want(&mut self, now: Instant) -> super::postgame_dump::PostWant {
+        self.post_polled_at = Some(now);
+        self.post.want(now)
+    }
+
+    /// While a post-game window is open: bring the next tick forward to
+    /// this, when the next sample is due before the regular tick (`poll`
+    /// after this tick's poll).
+    pub(crate) fn post_sooner_tick(&self, now: Instant, poll: Duration) -> Option<Duration> {
+        let due_in = self.post.next_due_in(now)?;
+        let since = self
+            .post_polled_at
+            .map_or(Duration::ZERO, |at| now.saturating_duration_since(at));
+        super::postgame_dump::sooner_tick(due_in, since, poll)
+    }
+
+    fn post_sink(
+        &mut self,
+    ) -> (
+        &mut super::postgame_dump::PostgameTracker,
+        super::postgame_dump::DumpSink<'_>,
+    ) {
+        let sink = super::postgame_dump::DumpSink {
+            root: &self.root,
+            latest: self.tracker.latest_game(),
+            log: &mut self.post_log,
+            writer: &mut self.writer,
+        };
+        (&mut self.post, sink)
+    }
+
+    /// Feed one poll tick to the post-game saves, after the pre-game ones
+    /// (whose loading read counts as a new screen).
+    pub(crate) fn observe_post(
+        &mut self,
+        now: Instant,
+        mut tick: super::postgame_dump::PostTick,
+        frame: Option<Arc<image::DynamicImage>>,
+    ) {
+        tick.new_screen |= std::mem::take(&mut self.saw_loading);
+        let (post, mut sink) = self.post_sink();
+        post.observe(now, tick, frame, &mut sink);
+    }
+
     /// The game closed or capture stopped: write what is owed and hold no
-    /// frame.
+    /// frame. The post-game saves end only when the game closed
+    /// ([`Self::game_closed`]): a failed capture may be one poll, and the
+    /// window's own time limit still ends it.
     pub(crate) fn release(&mut self, now: Instant) {
         let shots = self.tracker.release(now);
         self.writer.send(shots);
+        self.saw_loading = false;
+    }
+
+    /// The game closed: [`Self::release`], and the post-game saves drop
+    /// their ring and end their window.
+    pub(crate) fn game_closed(&mut self, now: Instant) {
+        self.release(now);
+        let (post, mut sink) = self.post_sink();
+        post.release(now, super::postgame_dump::PostEnd::GameClosed, &mut sink);
     }
 
     /// Shutdown: write what is owed and wait up to `within` for the queue.
     pub(crate) async fn finish(mut self, within: Duration) -> bool {
-        self.release(Instant::now());
+        let now = Instant::now();
+        let (post, mut sink) = self.post_sink();
+        post.release(now, super::postgame_dump::PostEnd::Shutdown, &mut sink);
+        self.release(now);
         self.writer.finish(within).await
     }
 }

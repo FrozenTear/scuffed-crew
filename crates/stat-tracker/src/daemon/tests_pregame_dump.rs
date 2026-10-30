@@ -119,13 +119,14 @@ fn the_poll_loop_feeds_and_releases_the_saver_and_shutdown_flushes_it() {
     assert!(run_loop.contains(".filter(|_|!outcome_only)"));
     assert!(run_loop.contains("dump.observe(Instant::now(),seen,frame)"));
     // The game gate going false and a failed capture both release it; an
-    // expected one-poll miss does not.
-    assert_eq!(run_loop.matches("dump.release(Instant::now())").count(), 2);
+    // expected one-poll miss does not. The game gate also ends the
+    // post-game saves (`game_closed`, which releases first).
+    assert_eq!(run_loop.matches("dump.release(Instant::now())").count(), 1);
     assert!(run_loop.contains(
         "ifletSome(dump)=pregame_dump.as_mut()&&(failure!=PollErrorLog::Expected||capture::is_lasting_poll_miss(&e.to_string())){dump.release(Instant::now());}"
     ));
     assert!(run_loop.contains(
-        "if!running{ifletSome(dump)=pregame_dump.as_mut(){dump.release(Instant::now());}clear_cadence_wakes("
+        "if!running{ifletSome(dump)=pregame_dump.as_mut(){dump.game_closed(Instant::now());}clear_cadence_wakes("
     ));
 
     let lifecycle: String = include_str!("lifecycle.rs").split_whitespace().collect();

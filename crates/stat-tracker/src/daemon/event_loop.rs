@@ -387,7 +387,7 @@ pub(crate) async fn run_loop(
                 game_was_running = running;
                 if !running {
                     if let Some(dump) = pregame_dump.as_mut() {
-                        dump.release(Instant::now());
+                        dump.game_closed(Instant::now());
                     }
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
@@ -502,6 +502,11 @@ pub(crate) async fn run_loop(
                             .as_ref()
                             .filter(|_| !outcome_only)
                             .map(|dump| (dump.want(Instant::now()), dump.examples()));
+                        // The post-game saves take Tab-busy ticks too: the
+                        // end reel is when they matter most.
+                        let postgame_want = pregame_dump
+                            .as_mut()
+                            .map(|dump| dump.post_want(Instant::now()));
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -619,10 +624,16 @@ pub(crate) async fn run_loop(
                                 stat_tracker::perf::Stage::PollAnalyze,
                                 analyze_started.elapsed(),
                             );
-                            // The frame moves into the tick's result, no copy.
+                            // The frame moves into the tick's result, no copy,
+                            // one `Arc` for both saves.
+                            let post_keep = postgame_want
+                                .is_some_and(|want| want.keeps(signal.is_some() || end_reel));
+                            let pre_keep = pregame_seen.is_some_and(|(_, keep)| keep);
+                            let kept = (pre_keep || post_keep).then(|| Arc::new(img));
                             let pregame = pregame_seen
-                                .map(|(seen, keep)| (seen, keep.then(|| Arc::new(img))));
-                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame)
+                                .map(|(seen, keep)| (seen, kept.clone().filter(|_| keep)));
+                            let postgame = kept.filter(|_| post_keep);
+                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame, postgame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
                             stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -640,7 +651,7 @@ pub(crate) async fn run_loop(
                         if let Some(seen) = kept_frame {
                             seen_stream = Some(seen);
                         }
-                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame) = match analyzed {
+                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame, postgame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
                                     &mut st,
@@ -656,7 +667,7 @@ pub(crate) async fn run_loop(
                                 return Ok(());
                             }
                             Ok(joined) => joined.unwrap_or_else(|_| {
-                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None, None)
+                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None, None, None)
                             }),
                         };
                         if stat_tracker::replace::shutdown_requested() {
@@ -781,6 +792,32 @@ pub(crate) async fn run_loop(
                             )
                             .await;
                             return Ok(());
+                        }
+                        // The post-game saves see the tick after the
+                        // decision, so a confirmed outcome opens their
+                        // window. Switch off: nothing is checked.
+                        if let Some(dump) = pregame_dump.as_mut() {
+                            let game = st.active_game.as_ref();
+                            let post_tick = daemon::postgame_dump::PostTick {
+                                end: daemon::postgame_dump::EndSeen::of(signal.map(|(_, source)| source), end_reel),
+                                confirmed: tick.signal_confirmed,
+                                running: game.is_some_and(|g| !g.finished()),
+                                finished: game.is_some_and(|g| g.finished()),
+                                new_screen: matches!(
+                                    phase,
+                                    detect::GamePhase::MapVote { .. } | detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
+                                ),
+                            };
+                            dump.observe_post(Instant::now(), post_tick, postgame);
+                            // About one frame a second in the window: bring
+                            // the next tick forward, only where the route
+                            // polls every tick now (a screenshot route's
+                            // slower floor stays).
+                            if let Some(next) = dump.post_sooner_tick(Instant::now(), poll_interval)
+                                && poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval) == 1
+                            {
+                                poll_timer.reset_after(next);
+                            }
                         }
                     }
                     Ok(Err(e)) => {
