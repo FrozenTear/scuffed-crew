@@ -503,10 +503,12 @@ pub(crate) async fn run_loop(
                             .filter(|_| !outcome_only)
                             .map(|dump| (dump.want(Instant::now()), dump.examples()));
                         // The post-game saves take Tab-busy ticks too: the
-                        // end reel is when they matter most.
+                        // end reel is when they matter most. Their samples
+                        // count from the tick's start, not the grab's end,
+                        // so the 1 s steps do not drift.
                         let postgame_want = pregame_dump
                             .as_mut()
-                            .map(|dump| dump.post_want(Instant::now()));
+                            .map(|dump| dump.post_want(now));
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -807,12 +809,16 @@ pub(crate) async fn run_loop(
                                     phase,
                                     detect::GamePhase::MapVote { .. } | detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
                                 ),
+                                game_opened: game.map(|g| g.opened_at),
                             };
                             dump.observe_post(Instant::now(), post_tick, postgame);
                             // About one frame a second in the window: bring
-                            // the next tick forward, only where the route
-                            // polls every tick now (a screenshot route's
-                            // slower floor stays).
+                            // the next tick forward (an ordinary poll), only
+                            // after a tick that handed over a frame, never
+                            // under 250 ms, and only where the route polls
+                            // every tick now (a screenshot route's slower
+                            // floor stays). A panicked or frameless tick
+                            // keeps the regular interval.
                             if let Some(next) = dump.post_sooner_tick(Instant::now(), poll_interval)
                                 && poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval) == 1
                             {

@@ -3,16 +3,17 @@
 
 use super::postgame_dump::*;
 use super::pregame_dump::*;
+pub(super) use super::tests_pregame_dump::names_in;
 use crate::*;
 use std::time::Duration;
 
 /// The new reader's poll interval.
-const POLL: Duration = Duration::from_millis(1_500);
+pub(super) const POLL: Duration = Duration::from_millis(1_500);
 
 /// A 160 by 90 frame of grey `level` with a bright band `band` (fractions
 /// of the height) across the middle third: a VICTORY or DEFEAT style
 /// banner when `band` is set, plain otherwise.
-fn picture(level: u8, band: Option<(f32, f32)>) -> image::RgbImage {
+pub(super) fn picture(level: u8, band: Option<(f32, f32)>) -> image::RgbImage {
     let mut img = image::RgbImage::from_pixel(160, 90, image::Rgb([level; 3]));
     if let Some((y0, y1)) = band {
         for y in (y0 * 90.0) as u32..(y1 * 90.0) as u32 {
@@ -24,23 +25,23 @@ fn picture(level: u8, band: Option<(f32, f32)>) -> image::RgbImage {
     img
 }
 
-fn shown(img: image::RgbImage) -> Frame {
+pub(super) fn shown(img: image::RgbImage) -> Frame {
     Arc::new(image::DynamicImage::ImageRgb8(img))
 }
 
 /// The banner over a dark ground.
-fn banner() -> Frame {
+pub(super) fn banner() -> Frame {
     shown(picture(20, Some((0.4, 0.6))))
 }
 
 /// Gameplay stand-in number `n`: each a clearly different grey.
-fn play(n: u8) -> Frame {
+pub(super) fn play(n: u8) -> Frame {
     shown(picture(60 + n.wrapping_mul(37) % 150, None))
 }
 
 /// The same picture as `img` with a one-step change in a few pixels: a
 /// near duplicate.
-fn noisy(img: &image::RgbImage, seed: u32) -> Frame {
+pub(super) fn noisy(img: &image::RgbImage, seed: u32) -> Frame {
     let mut out = img.clone();
     for i in 0..40u32 {
         let (x, y) = ((i * 7 + seed) % 160, (i * 13 + seed) % 90);
@@ -51,7 +52,7 @@ fn noisy(img: &image::RgbImage, seed: u32) -> Frame {
 }
 
 /// A frame that changes every call: a band 7 rows further down per `n`.
-fn moving(n: u32) -> Frame {
+pub(super) fn moving(n: u32) -> Frame {
     let mut img = picture(30, None);
     let y0 = (n * 7) % 80;
     for y in y0..y0 + 10 {
@@ -63,16 +64,16 @@ fn moving(n: u32) -> Frame {
 }
 
 #[derive(Default)]
-struct Rec {
-    opened: Vec<f64>,
-    shots: Vec<(f64, &'static str, Frame)>,
-    ended: Vec<PostEnd>,
+pub(super) struct Rec {
+    pub(super) opened: Vec<f64>,
+    pub(super) shots: Vec<(f64, &'static str, Frame)>,
+    pub(super) ended: Vec<PostEnd>,
     /// Refuse every shot (a full writer queue).
-    refuse: bool,
+    pub(super) refuse: bool,
 }
 
 impl PostSink for Rec {
-    fn opened(&mut self, _now: Instant, confirmed_s: f64) {
+    fn opened(&mut self, _now: Instant, confirmed_s: f64, _game: Option<Instant>) {
         self.opened.push(confirmed_s);
     }
     fn shot(&mut self, shot: PostShot) -> bool {
@@ -88,44 +89,46 @@ impl PostSink for Rec {
 }
 
 impl Rec {
-    fn times(&self) -> Vec<f64> {
+    pub(super) fn times(&self) -> Vec<f64> {
         self.shots
             .iter()
             .map(|(t, _, _)| (t * 10.0).round() / 10.0)
             .collect()
     }
-    fn labels(&self) -> Vec<&'static str> {
+    pub(super) fn labels(&self) -> Vec<&'static str> {
         self.shots.iter().map(|(_, l, _)| *l).collect()
     }
 }
 
 /// Drives a tracker the way the poll loop does: a tick hands its frame
 /// only when [`PostgameTracker::want`] asks for it.
-struct Run {
-    tracker: PostgameTracker,
-    start: Instant,
-    rec: Rec,
+pub(super) struct Run {
+    pub(super) tracker: PostgameTracker,
+    pub(super) start: Instant,
+    pub(super) rec: Rec,
 }
 
-const RUNNING: PostTick = PostTick {
+pub(super) const RUNNING: PostTick = PostTick {
     end: None,
     confirmed: false,
     running: true,
     finished: false,
     new_screen: false,
+    game_opened: None,
 };
 
 /// After the outcome is recorded: the game is open and finished.
-const AFTER: PostTick = PostTick {
+pub(super) const AFTER: PostTick = PostTick {
     end: None,
     confirmed: false,
     running: false,
     finished: true,
     new_screen: false,
+    game_opened: None,
 };
 
 impl Run {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             tracker: PostgameTracker::new(POLL),
             start: Instant::now(),
@@ -133,11 +136,11 @@ impl Run {
         }
     }
 
-    fn at(&self, ms: u64) -> Instant {
+    pub(super) fn at(&self, ms: u64) -> Instant {
         self.start + Duration::from_millis(ms)
     }
 
-    fn tick(&mut self, ms: u64, tick: PostTick, frame: Frame) {
+    pub(super) fn tick(&mut self, ms: u64, tick: PostTick, frame: Frame) {
         let now = self.at(ms);
         let frame = self
             .tracker
@@ -148,7 +151,7 @@ impl Run {
     }
 
     /// A game running from 0 to `ms`, one gameplay frame a poll.
-    fn play_until(&mut self, ms: u64) {
+    pub(super) fn play_until(&mut self, ms: u64) {
         let mut t = 0;
         let mut n = 0;
         while t < ms {
@@ -159,7 +162,7 @@ impl Run {
     }
 }
 
-fn ended(tick: PostTick, end: EndSeen, confirmed: bool) -> PostTick {
+pub(super) fn ended(tick: PostTick, end: EndSeen, confirmed: bool) -> PostTick {
     PostTick {
         end: Some(end),
         confirmed,
@@ -199,8 +202,13 @@ fn the_first_banner_frame_is_saved_from_the_ring_on_a_late_confirmation() {
         .expect("the banner's first frame is saved");
     assert_eq!(run.rec.times()[banner_at], -1.5);
     assert_eq!(run.rec.shots.len(), banner_at + 1, "{:?}", run.rec.times());
-    // No ring frame older than 5 s plus one poll.
-    assert!(run.rec.times().iter().all(|t| *t >= -1.5 - 6.5));
+    // The whole ring (5 frames, 6 s back) is young enough: two gameplay
+    // frames, then the banner's first.
+    assert_eq!(run.rec.times(), vec![-4.5, -3.0, -1.5]);
+    assert_eq!(
+        run.rec.labels(),
+        vec!["before_end", "before_end", "before_end"]
+    );
 }
 
 #[test]
@@ -241,7 +249,13 @@ fn the_ring_is_bounded_and_held_only_while_a_game_runs() {
     }
     // 1.5 s polls: 5 s plus one poll back is 5 frames.
     assert_eq!(run.tracker.ring_len(), 5);
-    assert_eq!(PostgameTracker::new(Duration::from_secs(4)).ring_len(), 0);
+    assert_eq!(run.tracker.ring_cap(), 5);
+    // 4 s polls: 2 back plus the newest; a fast poll still holds 5 at most.
+    assert_eq!(PostgameTracker::new(Duration::from_secs(4)).ring_cap(), 3);
+    assert_eq!(
+        PostgameTracker::new(Duration::from_millis(200)).ring_cap(),
+        POSTGAME_RING
+    );
     // The game ends with no outcome (closed by the quiet timer): the ring
     // is dropped, nothing saved.
     run.tick(70_000, PostTick::default(), play(1));
@@ -264,12 +278,17 @@ fn a_slower_poll_rings_fewer_frames() {
     assert_eq!(run.tracker.ring_len(), 3);
 }
 
-/// Runs a window the way the poll loop does: a tick every `poll`, brought
-/// forward by [`sooner_tick`], every frame different. The saved frames'
-/// times from time zero.
-fn sampled_at(poll: Duration) -> (Vec<f64>, Vec<PostEnd>) {
+/// Runs a window the way the poll loop does: a tick every `poll`, each
+/// tick's work taking `work`, brought forward by [`sooner_tick`] (from the
+/// end of the work, as `reset_after` does), every frame different. The
+/// saved frames' times from time zero.
+pub(super) fn sampled_at(
+    tracker: PostgameTracker,
+    poll: Duration,
+    work: Duration,
+) -> (Vec<f64>, Vec<PostEnd>) {
     let mut run = Run {
-        tracker: PostgameTracker::new(poll),
+        tracker,
         start: Instant::now(),
         rec: Rec::default(),
     };
@@ -278,13 +297,15 @@ fn sampled_at(poll: Duration) -> (Vec<f64>, Vec<PostEnd>) {
     run.tick(t, ended(AFTER, EndSeen::Title, true), moving(0));
     let mut n = 1;
     while run.tracker.window_open() && t < 200_000 {
-        let now = run.at(t);
-        let next = run
+        let done = run.at(t) + work;
+        t = match run
             .tracker
-            .next_due_in(now)
-            .and_then(|due| sooner_tick(due, Duration::ZERO, poll))
-            .unwrap_or(poll);
-        t += next.as_millis() as u64;
+            .next_due_in(done)
+            .and_then(|due| sooner_tick(due, work, poll))
+        {
+            Some(next) => t + (work + next).as_millis() as u64,
+            None => t + poll.as_millis() as u64,
+        };
         run.tick(t, AFTER, moving(n));
         n += 1;
     }
@@ -295,30 +316,50 @@ fn sampled_at(poll: Duration) -> (Vec<f64>, Vec<PostEnd>) {
 }
 
 #[test]
-fn sampling_is_fast_then_slower_and_the_cap_ends_the_window() {
+fn sampling_is_fast_then_slower_until_the_window_ends() {
     // The new reader's 1.5 s polls, the classic 4 s ones, and a 500 ms
-    // override: about 1 s apart for 30 s, then 2.5 s, up to the cap.
-    for poll in [POLL, Duration::from_secs(4), Duration::from_millis(500)] {
-        let (times, ended) = sampled_at(poll);
-        assert_eq!(ended, vec![PostEnd::Cap], "{poll:?}");
-        assert_eq!(times.len(), POSTGAME_MAX_FRAMES, "{poll:?}");
-        assert_eq!(times[0], 0.0, "time zero is the confirming frame");
-        let gaps: Vec<f64> = times
-            .windows(2)
-            .map(|w| ((w[1] - w[0]) * 10.0).round() / 10.0)
-            .collect();
-        for (i, gap) in gaps.iter().enumerate() {
-            if times[i + 1] < 30.0 {
-                assert_eq!(*gap, 1.0, "{poll:?}: fast at {}", times[i + 1]);
-            } else if times[i] >= 30.0 {
-                assert_eq!(*gap, 2.5, "{poll:?}: slow at {}", times[i + 1]);
+    // override, with no work and with 300 ms of grab and analysis a tick:
+    // 1 s apart for 30 s, then slower. A tick is brought forward only after
+    // one that handed over a frame, so at 1.5 s polls the slow samples are
+    // every second poll (3 s); at 4 s polls the slow step is brought
+    // forward to 2.5 s, from the last fast sample on (no frameless tick at
+    // 30 s, no 5 s gap).
+    for work in [Duration::ZERO, Duration::from_millis(300)] {
+        for (poll, first_slow, slow_gap, count) in [
+            (POLL, 32.0, 3.0, 50),
+            (Duration::from_secs(4), 31.5, 2.5, 54),
+            (Duration::from_millis(500), 31.5, 2.5, 54),
+        ] {
+            let (times, ended) = sampled_at(PostgameTracker::new(poll), poll, work);
+            let at = format!("{poll:?} {work:?}: {times:?}");
+            assert_eq!(ended, vec![PostEnd::Time], "{at}");
+            assert_eq!(times.len(), count, "{at}");
+            assert!(count < POSTGAME_MAX_FRAMES, "the cap is never what ends it");
+            assert_eq!(times[0], 0.0, "time zero is the confirming frame");
+            let gaps: Vec<f64> = times
+                .windows(2)
+                .map(|w| ((w[1] - w[0]) * 10.0).round() / 10.0)
+                .collect();
+            for (i, gap) in gaps.iter().enumerate() {
+                if times[i + 1] < 30.0 {
+                    // No drift: the work time is not added to each step.
+                    assert_eq!(*gap, 1.0, "{at}: fast at {}", times[i + 1]);
+                } else if times[i] >= 30.0 {
+                    assert_eq!(*gap, slow_gap, "{at}: slow at {}", times[i + 1]);
+                }
             }
+            assert_eq!((times[29], times[30]), (29.0, first_slow), "{at}");
+            assert!(*times.last().unwrap() < 90.0, "{at}");
         }
-        // The 1 s step that lands on 30 s is already slow, so the first
-        // slow frame is 2.5 s after the last fast one.
-        assert_eq!((times[29], times[30]), (29.0, 31.5), "{poll:?}: {times:?}");
-        assert_eq!(times[39], 54.0, "{poll:?}");
     }
+}
+
+#[test]
+fn the_cap_ends_the_window() {
+    let (times, ended) = sampled_at(PostgameTracker::capped(POLL, 12), POLL, Duration::ZERO);
+    assert_eq!(ended, vec![PostEnd::Cap]);
+    assert_eq!(times.len(), 12);
+    assert_eq!(postgame_name(POSTGAME_MAX_FRAMES - 1), "postgame_60.png");
 }
 
 #[test]
@@ -341,6 +382,15 @@ fn a_sooner_tick_counts_from_the_tick_not_from_the_end_of_its_work() {
     );
     // Never later than the regular tick.
     assert_eq!(sooner_tick(poll, Duration::ZERO, poll), None);
+    // Never at once: an overdue sample still waits the slack.
+    assert_eq!(
+        sooner_tick(Duration::ZERO, Duration::ZERO, poll),
+        Some(POSTGAME_SLACK)
+    );
+    assert_eq!(
+        sooner_tick(Duration::from_millis(1), work, poll),
+        Some(POSTGAME_SLACK)
+    );
 }
 
 #[test]
@@ -393,9 +443,21 @@ fn near_duplicates_are_dropped_and_changes_kept_until_the_window_ends() {
         );
         t += 1_500;
     }
-    assert_eq!(
-        run.rec.labels(),
-        vec!["end_title", "accolades", "rank_update"]
+    let mut labels = run.rec.labels();
+    labels.dedup();
+    assert_eq!(labels, vec!["end_title", "accolades", "rank_update"]);
+    // A still screen is saved again only once the last save is 5 s old,
+    // until 60 s; the near duplicates in between are dropped.
+    let times = run.rec.times();
+    let labels = run.rec.labels();
+    for i in 1..times.len() {
+        if times[i] < 60.0 && labels[i] == labels[i - 1] {
+            assert!(times[i] - times[i - 1] >= 5.0, "{times:?}");
+        }
+    }
+    assert!(
+        times.iter().filter(|t| **t < 60.0).count() <= 13,
+        "{times:?}"
     );
     assert_eq!(run.rec.ended, vec![PostEnd::Time]);
     // The window ended at 90 s after time zero.
@@ -540,15 +602,18 @@ fn the_folder_is_the_games_pre_game_folder_when_recent_and_unused() {
 #[test]
 fn names_run_from_01_to_the_cap() {
     assert_eq!(postgame_name(0), "postgame_01.png");
-    assert_eq!(postgame_name(39), "postgame_40.png");
-    assert_eq!(POSTGAME_MAX_FRAMES, 40);
+    assert_eq!(postgame_name(59), "postgame_60.png");
+    assert_eq!(POSTGAME_MAX_FRAMES, 60);
 }
 
 #[test]
-fn the_sidecar_lists_each_frame_with_its_time_and_label() {
-    let log = PostLog {
-        folder: Some("20261030_120000".into()),
+fn the_sidecar_lists_each_written_frame_with_its_time_and_label() {
+    let zero = chrono::DateTime::parse_from_rfc3339("2026-10-30T12:00:01.250Z")
+        .unwrap()
+        .with_timezone(&Utc);
+    let doc = PostSidecar {
         confirmed_s: 1.5,
+        zero_utc: Some(zero),
         frames: vec![
             PostEntry {
                 file: "postgame_01.png",
@@ -567,32 +632,34 @@ fn the_sidecar_lists_each_frame_with_its_time_and_label() {
             },
         ],
         ended: Some(PostEnd::Time),
-        used: Vec::new(),
     };
-    let doc: serde_json::Value = serde_json::from_str(&log.sidecar()).unwrap();
-    assert_eq!(doc["version"], 1);
-    assert_eq!(doc["confirmed_s"], 1.5);
-    assert_eq!(doc["ended"], "window_time");
-    assert_eq!(doc["frames"][0]["file"], "postgame_01.png");
-    assert_eq!(doc["frames"][0]["t_s"], -1.5);
-    assert_eq!(doc["frames"][2]["t_s"], 12.0);
-    assert_eq!(doc["frames"][2]["label"], "rank_update");
-    let open = PostLog { ended: None, ..log };
-    assert!(serde_json::from_str::<serde_json::Value>(&open.sidecar()).unwrap()["ended"].is_null());
-}
-
-/// The files under `dir`, sorted, dot files left out.
-fn names_in(dir: &std::path::Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map(|r| {
-            r.flatten()
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| !n.starts_with('.'))
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
+    let json: serde_json::Value = serde_json::from_str(&doc.render(|_| true)).unwrap();
+    assert_eq!(json["version"], 1);
+    assert_eq!(json["confirmed_s"], 1.5);
+    assert_eq!(json["time_zero_utc"], "2026-10-30T12:00:01.250Z");
+    assert_eq!(json["ended"], "window_time");
+    assert_eq!(json["frames"][0]["file"], "postgame_01.png");
+    assert_eq!(json["frames"][0]["t_s"], -1.5);
+    assert_eq!(json["frames"][2]["t_s"], 12.0);
+    assert_eq!(json["frames"][2]["label"], "rank_update");
+    // A frame whose write failed is not listed.
+    let json: serde_json::Value =
+        serde_json::from_str(&doc.render(|f| f != "postgame_02.png")).unwrap();
+    let files: Vec<&str> = json["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(files, ["postgame_01.png", "postgame_03.png"]);
+    let open = PostSidecar {
+        ended: None,
+        zero_utc: None,
+        ..doc
+    };
+    let json: serde_json::Value = serde_json::from_str(&open.render(|_| true)).unwrap();
+    assert!(json["ended"].is_null());
+    assert!(json["time_zero_utc"].is_null());
 }
 
 #[tokio::test]
@@ -611,21 +678,26 @@ async fn the_saver_writes_the_frames_and_sidecar_into_the_games_folder() {
             on_end: true
         }
     );
+    // The game opened at its map vote: the folder is its own.
     let running = PostTick {
         running: true,
+        game_opened: Some(at(0)),
         ..PostTick::default()
     };
     dump.observe_post(at(1_500), running, None);
+    dump.post_want(at(3_000));
     dump.observe_post(at(3_000), running, Some(play(1)));
     let read = PostTick {
         end: Some(EndSeen::Title),
         ..running
     };
+    dump.post_want(at(4_500));
     dump.observe_post(at(4_500), read, Some(banner()));
     let confirm = PostTick {
         end: Some(EndSeen::Title),
         confirmed: true,
         finished: true,
+        game_opened: Some(at(0)),
         ..PostTick::default()
     };
     dump.post_want(at(6_000));
@@ -637,10 +709,12 @@ async fn the_saver_writes_the_frames_and_sidecar_into_the_games_folder() {
     assert_eq!(dump.post_sooner_tick(at(6_000), POLL), Some(POSTGAME_FAST));
     // A failed capture releases the pre-game saves only: the window goes on.
     dump.release(at(6_500));
+    dump.post_want(at(7_000));
     dump.observe_post(
         at(7_000),
         PostTick {
             finished: true,
+            game_opened: Some(at(0)),
             ..PostTick::default()
         },
         Some(moving(5)),
@@ -739,7 +813,7 @@ fn the_retention_counts_post_game_folders_and_files() {
         let note = NoteFile {
             folder: folder.clone(),
             name: POSTGAME_SIDECAR,
-            text: "{}\n".into(),
+            doc: PostSidecar::default(),
         };
         write_note(root, &note, PREGAME_KEEP_GAMES, &mut made);
     }
@@ -754,7 +828,7 @@ fn the_retention_counts_post_game_folders_and_files() {
     let note = NoteFile {
         folder: "20261030_130000".into(),
         name: POSTGAME_SIDECAR,
-        text: "{}\n".into(),
+        doc: PostSidecar::default(),
     };
     write_note(root, &note, PREGAME_KEEP_GAMES, &mut made);
     assert_eq!(names_in(root).len(), PREGAME_KEEP_GAMES);
@@ -780,7 +854,7 @@ fn the_staged_pre_game_sweep_leaves_post_game_files_alone() {
     let note = NoteFile {
         folder: "20261030_130000".into(),
         name: POSTGAME_SIDECAR,
-        text: "{}\n".into(),
+        doc: PostSidecar::default(),
     };
     write_note(root, &note, PREGAME_KEEP_GAMES, &mut Vec::new());
     // Every name, dot names too.
@@ -805,9 +879,9 @@ fn switch_off_has_no_saver_and_the_poll_loop_checks_nothing_new() {
         .split_whitespace()
         .collect();
     // The want comes from the saver, so with no saver no frame is kept.
-    assert!(run_loop.contains(
-        "letpostgame_want=pregame_dump.as_mut().map(|dump|dump.post_want(Instant::now()));"
-    ));
+    assert!(
+        run_loop.contains("letpostgame_want=pregame_dump.as_mut().map(|dump|dump.post_want(now));")
+    );
     assert!(run_loop.contains("letpost_keep=postgame_want.is_some_and("));
     assert!(run_loop.contains("letkept=(pre_keep||post_keep).then(||Arc::new(img));"));
     // The feed and the faster tick sit under the saver.

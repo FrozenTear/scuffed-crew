@@ -36,6 +36,8 @@ mod tests_memtune;
 #[cfg(test)]
 mod tests_postgame_dump;
 #[cfg(test)]
+mod tests_postgame_round;
+#[cfg(test)]
 mod tests_pregame_ban_title;
 #[cfg(test)]
 mod tests_pregame_dump;

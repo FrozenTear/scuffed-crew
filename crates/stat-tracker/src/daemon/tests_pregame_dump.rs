@@ -733,7 +733,7 @@ fn frame(w: u32, h: u32) -> Arc<image::DynamicImage> {
     )))
 }
 
-fn names_in(dir: &std::path::Path) -> Vec<String> {
+pub(super) fn names_in(dir: &std::path::Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())

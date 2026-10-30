@@ -17,14 +17,27 @@
 //! a frame is sampled about once a second for [`POSTGAME_FAST_FOR`], then
 //! about every [`POSTGAME_SLOW`], until [`POSTGAME_WINDOW`] after time
 //! zero, [`POSTGAME_MAX_FRAMES`] saved, or a map vote, hero ban, hero
-//! select or loading screen reads. A sampled frame is saved only when its
-//! downscaled grey [`Thumb`] differs from the last saved one's. The label
-//! is the outcome source the detector already read on that frame, if any.
+//! select or loading screen reads. A sampled frame is saved when its
+//! downscaled grey [`Thumb`] differs from the last saved one's, when the
+//! last saved frame is [`POSTGAME_STILL_KEEP`] old (a still screen whose
+//! numbers change too little for the thumbnail), and always from
+//! [`POSTGAME_KEEP_ALL_FROM`] on. The label is the outcome source the
+//! detector already read on that frame, if any.
 //!
-//! Memory: the ring is the only place frames are held, and only while a
-//! game runs and no window is open; the window holds one thumbnail and no
+//! Polling: with the switch on, the window's ticks are ordinary polls,
+//! brought forward to about one a second ([`sooner_tick`]). A tick is
+//! brought forward only after a tick that handed over a frame, and never
+//! to less than [`POSTGAME_SLACK`]: a tick whose analysis panicked or
+//! kept no frame backs off to the regular poll interval.
+//!
+//! Memory: the ring is the only place frames are held, while a game runs
+//! (or, with no game running, for one frame read as an end until the next
+//! tick) and no window is open; the window holds one thumbnail and no
 //! frame. Each saved frame is one job for the pre-game writer, whose queue
-//! is bounded ([`super::pregame_dump::PREGAME_QUEUE`]).
+//! is bounded ([`super::pregame_dump::PREGAME_QUEUE`]). Nothing of the
+//! ring is ever written to disk; the PNG and sidecar writes go through
+//! hidden `.tmp` files that the staged sweep clears after a crash, and a
+//! folder of nothing else is no game ([`drop_leftover_folders`]).
 
 use crate::*;
 use std::collections::VecDeque;
@@ -51,8 +64,18 @@ pub(crate) const POSTGAME_SLOW: Duration = Duration::from_millis(2_500);
 /// The window ends this long after time zero.
 pub(crate) const POSTGAME_WINDOW: Duration = Duration::from_secs(90);
 
-/// The most post-game frames saved per game.
-pub(crate) const POSTGAME_MAX_FRAMES: usize = 40;
+/// The most post-game frames saved per game: more than the sampling can
+/// reach in [`POSTGAME_WINDOW`] (about 54 plus the ring), so the rank
+/// update at the end of the window is never cut by it.
+pub(crate) const POSTGAME_MAX_FRAMES: usize = 60;
+
+/// A still screen is saved again once the last saved frame is this old:
+/// a changed number or line of text is too small for the thumbnail.
+pub(crate) const POSTGAME_STILL_KEEP: Duration = Duration::from_secs(5);
+
+/// From this long after time zero (the last 30 s of the window, where the
+/// rank values settle), every sampled frame is saved, still or not.
+pub(crate) const POSTGAME_KEEP_ALL_FROM: Duration = Duration::from_secs(60);
 
 /// A poll this much before a sample is due still takes it (poll jitter).
 pub(crate) const POSTGAME_SLACK: Duration = Duration::from_millis(250);
@@ -61,8 +84,13 @@ pub(crate) const POSTGAME_SLACK: Duration = Duration::from_millis(250);
 pub(crate) const POSTGAME_REARM: Duration = Duration::from_secs(3 * 60);
 
 /// A game's pre-game folder takes its post-game frames when its last
-/// pre-game screen showed at most this long before the window opens.
+/// pre-game screen showed at most this long before the window opens, and
+/// only when it is that game's own folder ([`FolderOwner`]).
 pub(crate) const POSTGAME_FOLDER_GAP: Duration = Duration::from_secs(45 * 60);
+
+/// A pre-game folder belongs to the first game that opened no earlier than
+/// this before the folder was first seen.
+pub(crate) const POSTGAME_OWNER_GAP: Duration = Duration::from_secs(3 * 60);
 
 pub(crate) const POSTGAME_SIDECAR: &str = "postgame.json";
 
@@ -168,6 +196,9 @@ pub(crate) struct PostTick {
     pub(crate) finished: bool,
     /// A map vote, hero ban, hero select or loading screen read.
     pub(crate) new_screen: bool,
+    /// When the open game (finished or not) was opened: which game this
+    /// is, for its folder ([`FolderOwner`]).
+    pub(crate) game_opened: Option<Instant>,
 }
 
 /// Which frames the next tick should hand over.
@@ -216,9 +247,9 @@ pub(crate) struct PostShot {
 
 /// Where the tracker's decisions go.
 pub(crate) trait PostSink {
-    /// A window opened: time zero, and the confirming tick `confirmed_s`
-    /// seconds after it.
-    fn opened(&mut self, now: Instant, confirmed_s: f64);
+    /// A window opened: time zero, the confirming tick `confirmed_s`
+    /// seconds after it, and when its game was opened ([`PostTick::game_opened`]).
+    fn opened(&mut self, now: Instant, confirmed_s: f64, game_opened: Option<Instant>);
     /// Save `shot`; false when it was not queued.
     fn shot(&mut self, shot: PostShot) -> bool;
     fn ended(&mut self, why: PostEnd);
@@ -233,7 +264,8 @@ struct Ringed {
 struct Window {
     zero: Instant,
     last_sample: Option<Instant>,
-    thumb: Option<Thumb>,
+    /// The last saved frame's thumbnail and time.
+    thumb: Option<(Thumb, Instant)>,
     saved: usize,
 }
 
@@ -250,8 +282,12 @@ enum State {
 /// Decides which post-game frames to save.
 pub(crate) struct PostgameTracker {
     state: State,
-    ring_len: usize,
+    ring_cap: usize,
     span: Duration,
+    /// The latest tick handed over a frame: only then is the next tick
+    /// brought forward ([`Self::next_due_in`]).
+    handed: bool,
+    cap: usize,
 }
 
 /// Seconds from `zero` to `at`, negative before it.
@@ -271,9 +307,27 @@ impl PostgameTracker {
         let back = POSTGAME_RING_SPAN.as_millis().div_ceil(poll_ms) as usize + 1;
         Self {
             state: State::Idle,
-            ring_len: back.clamp(2, POSTGAME_RING),
+            ring_cap: back.clamp(2, POSTGAME_RING),
             span: POSTGAME_RING_SPAN + poll,
+            handed: false,
+            cap: POSTGAME_MAX_FRAMES,
         }
+    }
+
+    /// [`Self::new`] with a lower frame cap (tests: the sampling alone
+    /// cannot reach [`POSTGAME_MAX_FRAMES`]).
+    #[cfg(test)]
+    pub(crate) fn capped(poll: Duration, cap: usize) -> Self {
+        Self {
+            cap: cap.min(POSTGAME_MAX_FRAMES),
+            ..Self::new(poll)
+        }
+    }
+
+    /// The most frames the ring may hold for this poll (tests).
+    #[cfg(test)]
+    pub(crate) fn ring_cap(&self) -> usize {
+        self.ring_cap
     }
 
     /// Frames the ring holds (tests).
@@ -322,16 +376,33 @@ impl PostgameTracker {
         }
     }
 
-    /// While a window is open: how long from `now` until the next sample
-    /// is due (the poll loop brings its next tick forward to it, see
-    /// [`sooner_tick`]).
+    /// While a window is open and the latest tick handed over a frame: how
+    /// long from `now` until the next sample is due, at least
+    /// [`POSTGAME_SLACK`] (the poll loop brings its next tick forward to
+    /// it, see [`sooner_tick`]). A sample's time is its tick's poll time,
+    /// not the end of the tick's work, so the samples do not drift by the
+    /// grab and analysis time. `None` after a tick that handed over no
+    /// frame (its analysis panicked, or nothing was kept): the next tick is
+    /// the regular one, so a failing tick never polls again at once.
     pub(crate) fn next_due_in(&self, now: Instant) -> Option<Duration> {
         match &self.state {
-            State::Window(w) => Some(w.last_sample.map_or(Duration::ZERO, |last| {
-                (last + Self::interval(w, now)).saturating_duration_since(now)
-            })),
+            State::Window(w) if self.handed => {
+                // The interval at the next sample: the step that lands on
+                // the end of the fast part is already a slow one.
+                let due = w.last_sample.map_or(Duration::ZERO, |last| {
+                    (last + Self::interval(w, last + POSTGAME_FAST)).saturating_duration_since(now)
+                });
+                Some(due.max(POSTGAME_SLACK))
+            }
             _ => None,
         }
+    }
+
+    /// Drop the ring and any window with no sidecar note: the writer is
+    /// gone, so nothing could be saved.
+    pub(crate) fn stop(&mut self) {
+        self.state = State::Idle;
+        self.handed = false;
     }
 
     pub(crate) fn observe(
@@ -341,6 +412,7 @@ impl PostgameTracker {
         frame: Option<Frame>,
         sink: &mut impl PostSink,
     ) {
+        self.handed = frame.is_some();
         if let State::Done(at) = self.state
             && (tick.new_screen || now.saturating_duration_since(at) >= POSTGAME_REARM)
         {
@@ -357,19 +429,19 @@ impl PostgameTracker {
                 });
                 if tick.confirmed {
                     ring.extend(ringed);
-                    self.open(now, ring, sink);
+                    self.open(now, ring, tick.game_opened, sink);
                 } else if tick.running || (tick.end.is_some() && ringed.is_some()) {
                     // A game runs, or no game does and this frame reads as
                     // an end: the confirming read comes a poll later, and
                     // this may be the end title's first frame.
-                    ring.reserve_exact(self.ring_len);
+                    ring.reserve_exact(self.ring_cap);
                     ring.extend(ringed);
                     self.state = State::Armed(ring, tick.running);
                 }
             }
             State::Armed(mut ring, by_game) => {
                 if let Some(frame) = frame {
-                    while ring.len() >= self.ring_len {
+                    while ring.len() >= self.ring_cap {
                         ring.pop_front();
                     }
                     ring.push_back(Ringed {
@@ -381,7 +453,7 @@ impl PostgameTracker {
                 // A ring held for a lone end read opens only on a
                 // confirmation: a finished game then is an older one.
                 if tick.confirmed || (by_game && tick.finished) {
-                    self.open(now, ring, sink);
+                    self.open(now, ring, tick.game_opened, sink);
                 } else if tick.running || (!by_game && tick.end.is_some()) {
                     self.state = State::Armed(ring, tick.running);
                 }
@@ -400,7 +472,7 @@ impl PostgameTracker {
                         let label = tick.end.map_or("after_end", EndSeen::label);
                         Self::save_if_new(&mut w, now, frame, label, sink);
                     }
-                    if w.saved >= POSTGAME_MAX_FRAMES {
+                    if w.saved >= self.cap {
                         self.end(now, PostEnd::Cap, sink);
                     } else {
                         self.state = State::Window(w);
@@ -421,12 +493,18 @@ impl PostgameTracker {
         }
     }
 
-    fn open(&mut self, now: Instant, ring: VecDeque<Ringed>, sink: &mut impl PostSink) {
+    fn open(
+        &mut self,
+        now: Instant,
+        ring: VecDeque<Ringed>,
+        game_opened: Option<Instant>,
+        sink: &mut impl PostSink,
+    ) {
         let zero = ring
             .iter()
             .find(|r| r.end.is_some() && now.saturating_duration_since(r.at) <= self.span)
             .map_or(now, |r| r.at);
-        sink.opened(zero, secs_from(zero, now));
+        sink.opened(zero, secs_from(zero, now), game_opened);
         let mut w = Window {
             zero,
             last_sample: None,
@@ -434,7 +512,7 @@ impl PostgameTracker {
             saved: 0,
         };
         for r in ring {
-            if now.saturating_duration_since(r.at) > self.span || w.saved >= POSTGAME_MAX_FRAMES {
+            if now.saturating_duration_since(r.at) > self.span || w.saved >= self.cap {
                 continue;
             }
             let label = r.end.map_or(
@@ -448,13 +526,17 @@ impl PostgameTracker {
             w.last_sample = Some(r.at);
             Self::save_if_new(&mut w, r.at, r.frame, label, sink);
         }
-        if w.saved >= POSTGAME_MAX_FRAMES {
+        if w.saved >= self.cap {
             self.end(now, PostEnd::Cap, sink);
         } else {
             self.state = State::Window(w);
         }
     }
 
+    /// Save `frame` unless it is the last saved picture again: a near
+    /// duplicate (mean grey change at most [`THUMB_SAME`]) is skipped,
+    /// except once the last saved frame is [`POSTGAME_STILL_KEEP`] old and
+    /// from [`POSTGAME_KEEP_ALL_FROM`] on.
     fn save_if_new(
         w: &mut Window,
         at: Instant,
@@ -463,9 +545,12 @@ impl PostgameTracker {
         sink: &mut impl PostSink,
     ) {
         let thumb = Thumb::of(&frame);
-        if w.thumb
-            .as_ref()
-            .is_some_and(|t| t.diff(&thumb) <= THUMB_SAME)
+        let keep_all = at.saturating_duration_since(w.zero) >= POSTGAME_KEEP_ALL_FROM;
+        if !keep_all
+            && w.thumb.as_ref().is_some_and(|(t, saved_at)| {
+                t.diff(&thumb) <= THUMB_SAME
+                    && at.saturating_duration_since(*saved_at) < POSTGAME_STILL_KEEP
+            })
         {
             return;
         }
@@ -475,7 +560,7 @@ impl PostgameTracker {
             frame,
         };
         if sink.shot(shot) {
-            w.thumb = Some(thumb);
+            w.thumb = Some((thumb, at));
             w.saved += 1;
         }
     }
@@ -487,18 +572,66 @@ impl PostgameTracker {
 }
 
 /// When the poll loop should tick next for the post-game window: `due_in`
-/// (from [`PostgameTracker::next_due_in`]) when that comes before the
-/// regular tick, which is `poll` after the tick that started `since_tick`
-/// ago. `None` keeps the regular tick.
+/// (from [`PostgameTracker::next_due_in`]), never less than
+/// [`POSTGAME_SLACK`], when that comes before the regular tick, which is
+/// `poll` after the tick that started `since_tick` ago. `None` keeps the
+/// regular tick.
 pub(crate) fn sooner_tick(
     due_in: Duration,
     since_tick: Duration,
     poll: Duration,
 ) -> Option<Duration> {
+    let due_in = due_in.max(POSTGAME_SLACK);
     (due_in < poll.saturating_sub(since_tick)).then_some(due_in)
 }
 
-/// `postgame_01.png` to `postgame_40.png`, made once.
+/// Which game the newest pre-game folder belongs to: the first game seen
+/// open that was opened no earlier than [`POSTGAME_OWNER_GAP`] before the
+/// folder was first seen. A game that started with no pre-game read (no
+/// map vote or ban folder of its own) then never takes an older game's
+/// folder, however recent.
+#[derive(Debug, Default)]
+pub(crate) struct FolderOwner {
+    folder: String,
+    seen_at: Option<Instant>,
+    game: Option<Instant>,
+}
+
+impl FolderOwner {
+    /// One tick: `latest` is the newest pre-game folder, `game_opened` the
+    /// open game's open time.
+    pub(crate) fn note(
+        &mut self,
+        now: Instant,
+        latest: Option<&str>,
+        game_opened: Option<Instant>,
+    ) {
+        let Some(latest) = latest else {
+            return;
+        };
+        if self.seen_at.is_none() || self.folder != latest {
+            latest.clone_into(&mut self.folder);
+            self.seen_at = Some(now);
+            self.game = None;
+        }
+        if self.game.is_none()
+            && let (Some(opened), Some(seen)) = (game_opened, self.seen_at)
+            && opened + POSTGAME_OWNER_GAP >= seen
+        {
+            self.game = Some(opened);
+        }
+    }
+
+    /// Whether `folder` is the folder of the game opened at `game_opened`.
+    pub(crate) fn owns(&self, folder: &str, game_opened: Option<Instant>) -> bool {
+        self.seen_at.is_some()
+            && self.folder == folder
+            && game_opened.is_some()
+            && self.game == game_opened
+    }
+}
+
+/// `postgame_01.png` to `postgame_60.png`, made once.
 pub(crate) fn postgame_name(index: usize) -> &'static str {
     static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     let names = NAMES.get_or_init(|| {
@@ -517,35 +650,39 @@ pub(crate) struct PostEntry {
     pub(crate) label: &'static str,
 }
 
-/// The open (or last) window's sidecar content.
-#[derive(Debug, Default)]
-pub(crate) struct PostLog {
-    pub(crate) folder: Option<String>,
+/// What `postgame.json` says. Rendered on the writer thread
+/// ([`super::pregame_dump::write_note`]), after the frames queued before
+/// it, so it lists only the PNGs that were written.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PostSidecar {
     pub(crate) confirmed_s: f64,
+    /// Time zero as a UTC time, so a window in the wrong folder shows.
+    pub(crate) zero_utc: Option<chrono::DateTime<Utc>>,
     pub(crate) frames: Vec<PostEntry>,
     pub(crate) ended: Option<PostEnd>,
-    /// Every folder a window wrote to this run, newest last, at most
-    /// [`super::pregame_dump::PREGAME_KEEP_GAMES`] (older ones are pruned
-    /// anyway): a later window never writes into one of them.
-    pub(crate) used: Vec<String>,
 }
 
 fn round2(s: f64) -> f64 {
     (s * 100.0).round() / 100.0
 }
 
-impl PostLog {
-    /// `postgame.json`: time zero, the confirming poll, why it ended, and
-    /// each frame's file, seconds from time zero and label.
-    pub(crate) fn sidecar(&self) -> String {
+impl PostSidecar {
+    /// `postgame.json`: time zero (how it was chosen, and as UTC), the
+    /// confirming poll, why it ended, and each frame for which `written`
+    /// holds, with its seconds from time zero and label.
+    pub(crate) fn render(&self, written: impl Fn(&str) -> bool) -> String {
         let frames: Vec<serde_json::Value> = self
             .frames
             .iter()
+            .filter(|e| written(e.file))
             .map(|e| serde_json::json!({ "file": e.file, "t_s": round2(e.t_s), "label": e.label }))
             .collect();
         let doc = serde_json::json!({
             "version": 1,
-            "time_zero": "first ring frame read as a match end (outcome read or end-reel hint), else the confirming poll",
+            "time_zero": "first ring frame read as a match end (outcome read or end-reel hint) within about 5 s plus one poll, else the confirming poll",
+            "time_zero_utc": self
+                .zero_utc
+                .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
             "confirmed_s": round2(self.confirmed_s),
             "ended": self.ended.map(PostEnd::name),
             "frames": frames,
@@ -554,12 +691,28 @@ impl PostLog {
     }
 }
 
+/// The open (or last) window's sidecar and folder.
+#[derive(Debug, Default)]
+pub(crate) struct PostLog {
+    pub(crate) folder: Option<String>,
+    pub(crate) doc: PostSidecar,
+    /// Every folder a window wrote to this run, newest last, at most
+    /// [`super::pregame_dump::PREGAME_KEEP_GAMES`] (older ones are pruned
+    /// anyway): a later window never writes into one of them.
+    pub(crate) used: Vec<String>,
+    /// The final sidecar note a full queue refused: sent again on each
+    /// tick and, waiting briefly, at shutdown ([`super::pregame_dump::PregameDump::finish`]).
+    pub(crate) pending: Option<super::pregame_dump::NoteFile>,
+}
+
 /// The poll loop's sink: picks the game's folder when a window opens and
 /// queues each frame, then the sidecar, as one writer job.
 pub(crate) struct DumpSink<'a> {
     pub(crate) root: &'a std::path::Path,
     /// The newest pre-game folder and when its last screen showed.
     pub(crate) latest: Option<(&'a str, Instant)>,
+    /// Which game that folder belongs to.
+    pub(crate) owner: &'a FolderOwner,
     pub(crate) log: &'a mut PostLog,
     pub(crate) writer: &'a mut super::pregame_dump::PregameWriter,
 }
@@ -569,14 +722,31 @@ impl DumpSink<'_> {
         super::pregame_dump::NoteFile {
             folder: folder.to_string(),
             name: POSTGAME_SIDECAR,
-            text: self.log.sidecar(),
+            doc: self.log.doc.clone(),
         }
     }
 }
 
+/// Send the pending final note, if any, without waiting. Dropped when the
+/// writer is gone.
+pub(crate) fn retry_pending(log: &mut PostLog, writer: &mut super::pregame_dump::PregameWriter) {
+    let Some(note) = log.pending.take() else {
+        return;
+    };
+    let job = super::pregame_dump::WriterJob {
+        shots: Vec::new(),
+        note: Some(note.clone()),
+    };
+    if !writer.send_job(job) && writer.alive() {
+        log.pending = Some(note);
+    }
+}
+
 /// The folder a window opened at `zero` writes to: the newest pre-game
-/// folder when its last screen showed within [`POSTGAME_FOLDER_GAP`] and
-/// no earlier window this run wrote to it (`used`), else a new one.
+/// folder (`latest`, already only when it is the game's own, see
+/// [`FolderOwner`]) when its last screen showed within
+/// [`POSTGAME_FOLDER_GAP`] and no earlier window this run wrote to it
+/// (`used`), else a new one.
 pub(crate) fn postgame_folder(
     latest: Option<(&str, Instant)>,
     used: &[String],
@@ -592,23 +762,49 @@ pub(crate) fn postgame_folder(
 }
 
 impl PostSink for DumpSink<'_> {
-    fn opened(&mut self, now: Instant, confirmed_s: f64) {
+    fn opened(&mut self, now: Instant, confirmed_s: f64, game_opened: Option<Instant>) {
         let root = self.root;
-        let folder = postgame_folder(self.latest, &self.log.used, now, || {
+        let owner = self.owner;
+        let latest = self
+            .latest
+            .filter(|(folder, _)| owner.owns(folder, game_opened));
+        let folder = postgame_folder(latest, &self.log.used, now, || {
             super::pregame_dump::unique_pregame_folder(root, Utc::now())
         });
-        tracing::debug!(target: "scuffed_stat_tracker", folder = %folder, "post-game screens: window opened");
+        // `now` is time zero on the poll's clock; the tick's work since
+        // then is not added to it.
+        let since_zero = Instant::now().saturating_duration_since(now);
+        let zero_utc = Utc::now() - chrono::Duration::from_std(since_zero).unwrap_or_default();
+        tracing::info!(
+            target: "scuffed_stat_tracker",
+            folder = %folder,
+            time_zero_utc = %zero_utc.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            reused = latest.is_some_and(|(f, _)| f == folder),
+            "post-game screens: window opened"
+        );
         let mut used = std::mem::take(&mut self.log.used);
+        // A newest pre-game folder passed over here belongs to a game that
+        // has ended (or never got its own window): no later game takes it.
+        if let Some((passed, _)) = self.latest.filter(|(f, _)| *f != folder)
+            && !used.iter().any(|u| u == passed)
+        {
+            used.push(passed.to_string());
+        }
         used.push(folder.clone());
-        if used.len() > super::pregame_dump::PREGAME_KEEP_GAMES {
+        while used.len() > super::pregame_dump::PREGAME_KEEP_GAMES {
             used.remove(0);
         }
+        let pending = self.log.pending.take();
         *self.log = PostLog {
             folder: Some(folder),
-            confirmed_s,
-            frames: Vec::new(),
-            ended: None,
+            doc: PostSidecar {
+                confirmed_s,
+                zero_utc: Some(zero_utc),
+                frames: Vec::new(),
+                ended: None,
+            },
             used,
+            pending,
         };
     }
 
@@ -616,12 +812,12 @@ impl PostSink for DumpSink<'_> {
         let Some(folder) = self.log.folder.clone() else {
             return false;
         };
-        let index = self.log.frames.len();
+        let index = self.log.doc.frames.len();
         if index >= POSTGAME_MAX_FRAMES {
             return false;
         }
         let name = postgame_name(index);
-        self.log.frames.push(PostEntry {
+        self.log.doc.frames.push(PostEntry {
             file: name,
             t_s: shot.at_s,
             label: shot.label,
@@ -638,20 +834,94 @@ impl PostSink for DumpSink<'_> {
         };
         let queued = self.writer.send_job(job);
         if !queued {
-            self.log.frames.pop();
+            self.log.doc.frames.pop();
         }
         queued
     }
 
+    /// The final note always goes: a full queue keeps it pending, sent
+    /// again on the next ticks and at shutdown.
     fn ended(&mut self, why: PostEnd) {
-        self.log.ended = Some(why);
-        tracing::debug!(target: "scuffed_stat_tracker", why = why.name(), frames = self.log.frames.len(), "post-game screens: window ended");
-        if let Some(folder) = self.log.folder.clone() {
-            let note = self.note(&folder);
-            self.writer.send_job(super::pregame_dump::WriterJob {
-                shots: Vec::new(),
-                note: Some(note),
-            });
+        self.log.doc.ended = Some(why);
+        let Some(folder) = self.log.folder.clone() else {
+            return;
+        };
+        tracing::info!(
+            target: "scuffed_stat_tracker",
+            folder = %folder,
+            frames = self.log.doc.frames.len(),
+            why = why.name(),
+            "post-game screens: window ended"
+        );
+        // An older window's note first: one pending note at a time.
+        retry_pending(self.log, self.writer);
+        if self.log.pending.is_some() {
+            tracing::debug!(target: "scuffed_stat_tracker", "post-game sidecar: an older final note is replaced");
         }
+        self.log.pending = Some(self.note(&folder));
+        retry_pending(self.log, self.writer);
+    }
+}
+
+/// Whether `name` is left over from a post-game write: the hidden
+/// temporary file of a frame or of the sidecar.
+pub(crate) fn is_postgame_leftover(name: &str) -> bool {
+    name.strip_prefix('.')
+        .and_then(|n| n.strip_suffix(".tmp"))
+        .is_some_and(|n| {
+            n == POSTGAME_SIDECAR || (n.starts_with("postgame_") && n.ends_with(".png"))
+        })
+}
+
+/// Whether the game folder `dir` holds post-game leftovers and nothing
+/// else: no game, so it takes no retention slot
+/// ([`super::pregame_dump::prune_pregame_games`]). An empty folder, or
+/// one with a pre-game staged frame, is left to the pre-game rules.
+pub(crate) fn only_postgame_leftovers(dir: &std::path::Path) -> bool {
+    let Ok(files) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    let mut any = false;
+    for file in files {
+        let Ok(file) = file else {
+            return false;
+        };
+        if !file.file_name().to_str().is_some_and(is_postgame_leftover) {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// After a crash: delete each game folder under `root` but `except` that
+/// holds only post-game leftovers ([`only_postgame_leftovers`]), files
+/// first. Run at start and when a new game folder is made, before the
+/// staged sweep (which would leave such a folder empty, and an empty
+/// folder still counts as a game).
+pub(crate) fn drop_leftover_folders(root: &std::path::Path, except: Option<&str>) {
+    let Ok(games) = std::fs::read_dir(root) else {
+        return;
+    };
+    for game in games.flatten() {
+        let Ok(name) = game.file_name().into_string() else {
+            continue;
+        };
+        if !game.file_type().is_ok_and(|t| t.is_dir())
+            || !super::pregame_dump::is_game_folder(&name)
+            || except == Some(name.as_str())
+            || !only_postgame_leftovers(&game.path())
+        {
+            continue;
+        }
+        if let Ok(files) = std::fs::read_dir(game.path()) {
+            for file in files.flatten() {
+                if file.file_type().is_ok_and(|t| t.is_file()) {
+                    let _ = std::fs::remove_file(file.path());
+                }
+            }
+        }
+        // Only an empty folder goes.
+        let _ = std::fs::remove_dir(game.path());
     }
 }
