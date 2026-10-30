@@ -70,9 +70,11 @@ pub fn is_loading_screen(rgb: &RgbImage) -> bool {
             || !letterbox_mid_is_footage(rgb, gx, mid_y, gw, mid_h))
 }
 
-/// Whether the lit rows of the band are each about one colour (white
+/// Whether the lit rows of the band are each about one navy colour (white
 /// glyphs left out). Rows may differ from each other: the strip is a
-/// gradient.
+/// gradient. The row colour must be blue-dominant (b > r and b > g), so a
+/// dim or faded grey or warm band, which the tolerance alone would call
+/// flat, does not pass.
 fn rows_are_flat(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
     let (w, h) = rgb.dimensions();
     let x1 = (x0 + cw).min(w);
@@ -102,7 +104,8 @@ fn rows_are_flat(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
             .iter()
             .filter(|p| (0..3).all(|c| (i32::from(p[c]) - mean[c]).abs() <= ROW_TOLERANCE))
             .count();
-        if near as f32 >= lit.len() as f32 * ROW_FLAT_MIN {
+        let navy = mean[2] > mean[0] && mean[2] > mean[1];
+        if navy && near as f32 >= lit.len() as f32 * ROW_FLAT_MIN {
             flat += 1;
         }
     }
@@ -231,6 +234,36 @@ mod tests {
         // The middle band of a 640x360 frame is y 108 for 144 rows.
         assert!(!rows_are_flat(&img, 0, 108, 640, 144));
         assert!(is_loading_screen(&img));
+    }
+
+    #[test]
+    fn a_dim_faded_grey_or_warm_band_is_not() {
+        // A fade: each row a soft horizontal ramp (28 levels), within the
+        // per-row tolerance but across several colour bins, grey or warm
+        // and not blue: only the blue-dominant rule turns it away.
+        for (dr, dg) in [(0u32, 0u32), (20, 8)] {
+            let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+            for y in 136..224u32 {
+                for x in 0..640u32 {
+                    let v = 40 + x * 28 / 640;
+                    img.put_pixel(x, y, Rgb([(v + dr) as u8, (v + dg) as u8, v as u8]));
+                }
+            }
+            let mut blue = img.clone();
+            for p in blue.pixels_mut() {
+                if p.0 != [0, 0, 0] {
+                    let v = p.0[2];
+                    p.0 = [v, v + 4, v + 24];
+                }
+            }
+            assert!(!is_loading_screen(&img), "tint +{dr},+{dg}");
+            // The same band turned blue is flat per row: the colour, not
+            // the ramp, is what failed.
+            assert!(rows_are_flat(&blue, 0, 108, 640, 144), "tint +{dr},+{dg}");
+        }
+        // The real gradient still passes through the per-row test alone.
+        assert!(rows_are_flat(&entering_game_frame(), 0, 108, 640, 144));
+        assert!(rows_are_flat(&navy_gradient(), 0, 108, 640, 144));
     }
 
     #[test]
