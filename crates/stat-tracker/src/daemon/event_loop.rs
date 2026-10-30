@@ -154,6 +154,9 @@ pub(crate) async fn run_loop(
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Set when the post-game saves bring the next poll tick forward: the
+    // regular tick it comes before ([`tick_brought_forward_too_soon`]).
+    let mut post_regular_tick: Option<tokio::time::Instant> = None;
 
     // GUI command queue (manual outcome edits, session deletion), checked on
     // its own timer so edits apply even while no game is running.
@@ -354,7 +357,19 @@ pub(crate) async fn run_loop(
                     capture_task = Some(task);
                 }
             }
-            _ = poll_timer.tick(), if auto_detect.enabled => {
+            ticked = poll_timer.tick(), if auto_detect.enabled => {
+                // A tick brought forward for the post-game saves that finds
+                // the cadence slowed since: dropped before anything runs,
+                // and the regular tick comes instead, so the slow cadence
+                // counts regular ticks only.
+                if let Some(regular) = tick_brought_forward_too_soon(
+                    post_regular_tick.take(),
+                    || poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval),
+                ) {
+                    tracing::trace!(target: "scuffed_stat_tracker", "poll tick skipped: brought forward, the cadence slowed since");
+                    poll_timer.reset_at(regular);
+                    continue;
+                }
                 // Mid-match: a Tab capture saturates the OCR pool, skip the
                 // full poll so we do not contend (H3). During end-reel wake
                 // that skip starves the ~3s Victory/Defeat window (2026-09-06:
@@ -402,12 +417,9 @@ pub(crate) async fn run_loop(
                 // On Older screenshot and KDE direct the same skip runs out
                 // of a match too, down to IDLE_SHOT_POLL_FLOOR.
                 let divisor = poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval);
-                if divisor > 1 {
-                    st.poll_ticks_skipped += 1;
-                    if st.poll_ticks_skipped < divisor {
-                        tracing::trace!(target: "scuffed_stat_tracker", divisor, "poll tick skipped: adaptive slow cadence");
-                        continue;
-                    }
+                if slow_cadence_skips(&mut st.poll_ticks_skipped, divisor) {
+                    tracing::trace!(target: "scuffed_stat_tracker", divisor, "poll tick skipped: adaptive slow cadence");
+                    continue;
                 }
 
                 // A Tab press preempts the poll's grab and analysis: the poll
@@ -826,6 +838,7 @@ pub(crate) async fn run_loop(
                         );
                         if let Some(next) = sooner {
                             poll_timer.reset_after(next);
+                            post_regular_tick = Some(ticked + poll_interval);
                         }
                     }
                     Ok(Err(e)) => {
