@@ -21,11 +21,11 @@
 //! held in memory, replacing the one before (nothing is written for it
 //! yet), and saved once, as an ordinary save, only when the game starts:
 //! a hero ban or hero select read in the same game within
-//! [`PHASE_FLICKER`] of it, the screen after loading. So an `APPLYING
+//! [`LOADING_START_WAIT`] of it, the screen after loading. So an `APPLYING
 //! UPDATE` band that passes the check is replaced by the `ENTERING GAME`
 //! screen after it, even with a frame between that fails the check. A
 //! loading frame with no game start after it is dropped, and nothing is
-//! written: no start within [`PHASE_FLICKER`] (the menu, a lobby), a
+//! written: no start within [`LOADING_START_WAIT`] (the menu, a lobby), a
 //! release (the game closed, capture stopped, a clean shutdown), or a map
 //! vote read after it (a requeue's vote opening the next game; the
 //! loading screen comes after the vote). Dropped, the loading screen is
@@ -100,9 +100,14 @@ pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 
 /// A phase gone for at most this long and back is a detector flicker (the
 /// phase read waits for the screen to hold still). Longer, and it is a new
-/// screen: a requeue's map vote, or the hero select between rounds. The
-/// loading frame held this long with no game start is dropped.
+/// screen: a requeue's map vote, or the hero select between rounds.
 pub(crate) const PHASE_FLICKER: Duration = Duration::from_secs(12);
+
+/// The game start (a hero ban or hero select read) must come within this
+/// of the last loading pass for it to be saved; held longer with no start,
+/// it is dropped. Real games read the start about 13.5 s after the last
+/// pass at 1.5 s polls and about 16 s at 4 s polls.
+pub(crate) const LOADING_START_WAIT: Duration = Duration::from_secs(20);
 
 /// Batches of shots waiting for the writer. A full queue drops the whole
 /// batch (logged), so frames pinned by pending writes stay bounded. A
@@ -533,9 +538,9 @@ impl<F: Clone> PregameTracker<F> {
 
     /// Save the held loading frame, once, when the game starts (`started`:
     /// a hero ban or hero select read, the screen after loading) in the
-    /// game open at `now`, within [`PHASE_FLICKER`] of the last pass;
+    /// game open at `now`, within [`LOADING_START_WAIT`] of the last pass;
     /// saved, the loading screen is no longer looked for in this game.
-    /// Drop it when no start came within [`PHASE_FLICKER`] (a start after
+    /// Drop it when no start came within [`LOADING_START_WAIT`] (a start after
     /// that too), or a start came after the game closed (a hero ban then
     /// opens the next game; a lone hero select opens none).
     fn settle_loading(&mut self, now: Instant, started: bool, shots: &mut Vec<PregameOp<F>>) {
@@ -543,7 +548,7 @@ impl<F: Clone> PregameTracker<F> {
         let Some(at) = self.loading.as_ref().map(|l| l.at) else {
             return;
         };
-        let over = now.saturating_duration_since(at) > PHASE_FLICKER;
+        let over = now.saturating_duration_since(at) > LOADING_START_WAIT;
         if started && open && !over {
             if let (Some(game), Some(held)) = (self.game.as_mut(), self.loading.take()) {
                 game.loading_saved = true;

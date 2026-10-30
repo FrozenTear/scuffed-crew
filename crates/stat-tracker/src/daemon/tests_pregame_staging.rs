@@ -375,8 +375,9 @@ async fn loading_run(steps: Vec<(u64, Step)>) -> Vec<Folder> {
         .collect()
 }
 
-/// A centred `APPLYING UPDATE` band with no bar: it passes the loading
-/// check (no rule tells it from `ENTERING GAME` yet).
+/// A centred `APPLYING UPDATE` band with no bar whose text does not split
+/// into two words: it passes the loading check (only the game start rule
+/// tells it from `ENTERING GAME`).
 fn update_band() -> (image::RgbImage, Seen) {
     (applying_update_band(1280, 720, true, false), Seen::Loading)
 }
@@ -425,32 +426,33 @@ fn kept(folders: &[Folder], want: &image::RgbImage) {
 }
 
 #[tokio::test]
-async fn an_update_band_then_the_menu_past_twelve_seconds_saves_no_loading() {
-    // The band is staged, then the menu for 13.5 s, then the game closes:
-    // the game never started, so the band is dropped at 15.5 s.
+async fn an_update_band_then_the_menu_past_twenty_seconds_saves_no_loading() {
+    // The band is held, then the menu for 21 s, then the game closes: the
+    // game never started, so the band is dropped at 23 s.
     let mut steps = vec![frame_step(2_000, update_band())];
-    for ms in (3_500..=15_500).step_by(1_500) {
+    for ms in (3_500..=23_000).step_by(1_500) {
         steps.push(frame_step(ms, plain()));
     }
-    steps.push((17_000, Step::Release));
+    steps.push((24_500, Step::Release));
     nothing_kept(&loading_run(steps).await);
-    // Chosen: a start read more than 12 s after the last pass, with no
+    // Chosen: a start read more than 20 s after the last pass, with no
     // tick between, is too late too (the loading screen is long over).
     let steps = vec![
         frame_step(2_000, update_band()),
-        phase_step(14_500, PregamePhase::HeroBan),
+        phase_step(22_500, PregamePhase::HeroBan),
     ];
     nothing_kept(&loading_run(steps).await);
 }
 
 #[tokio::test]
 async fn an_update_band_then_the_game_closing_saves_no_loading() {
-    // Released more than 12 s after the band with no tick between, and
-    // within 12 s, with or without a frame that fails the check first.
-    let mut runs = vec![vec![
-        frame_step(2_000, update_band()),
-        (16_000, Step::Release),
-    ]];
+    // Released more than 20 s after the band with no tick between, and
+    // within 20 s, with or without a frame that fails the check first.
+    // Also a clean shutdown with the band held and no release first.
+    let mut runs = vec![
+        vec![frame_step(2_000, update_band()), (24_000, Step::Release)],
+        vec![frame_step(2_000, update_band())],
+    ];
     for gap in [false, true] {
         let mut steps = vec![
             frame_step(2_000, update_band()),
@@ -513,6 +515,79 @@ async fn an_update_band_then_entering_game_then_the_select_saves_entering_game()
 }
 
 #[tokio::test]
+async fn fade_frames_with_no_text_never_replace_entering_game() {
+    // The fade-in (the navy strip with no text yet) before ENTERING GAME,
+    // and the fade-out after it: neither passes the check, so ENTERING
+    // GAME is the frame saved at the start.
+    let fade = || (navy_band(1280, 720), Seen::Other);
+    for fade_first in [true, false] {
+        let steps = if fade_first {
+            vec![
+                frame_step(2_000, fade()),
+                frame_step(3_500, real_entering()),
+            ]
+        } else {
+            vec![
+                frame_step(2_000, real_entering()),
+                frame_step(3_500, fade()),
+            ]
+        };
+        let mut steps = steps;
+        steps.push(phase_step(5_000, PregamePhase::HeroBan));
+        kept(&loading_run(steps).await, &real_entering().0);
+    }
+}
+
+#[tokio::test]
+async fn words_as_on_real_frames_save_the_last_pass_at_the_start() {
+    // Real widths and word ratios: the two APPLYING UPDATE words (0.74)
+    // fail the check, ENTERING GAME (0.61) passes. The band then ENTERING
+    // GAME then a ban read saves ENTERING GAME; the band alone then a ban
+    // read saves nothing (the word ratio rejects it).
+    let words = || (two_word_band(1280, 720, UPDATE_WORDS, None), Seen::Other);
+    let steps = vec![
+        frame_step(2_000, words()),
+        frame_step(3_500, real_entering()),
+        phase_step(5_000, PregamePhase::HeroBan),
+    ];
+    kept(&loading_run(steps).await, &real_entering().0);
+    let steps = vec![
+        frame_step(2_000, words()),
+        phase_step(3_500, PregamePhase::HeroBan),
+    ];
+    nothing_kept(&loading_run(steps).await);
+    // Accepted limit: an update band that does not split into two words
+    // (here strokes 0.186 wide) passes, and alone before a ban read it is
+    // saved, since only the game start rule judges it.
+    let band = || (centred_text_band(1280, 720, 0.186), Seen::Loading);
+    let steps = vec![
+        frame_step(2_000, band()),
+        phase_step(3_500, PregamePhase::HeroBan),
+    ];
+    kept(&loading_run(steps).await, &band().0);
+}
+
+#[tokio::test]
+async fn a_start_read_up_to_twenty_seconds_after_loading_saves_it() {
+    // The start read 16 s after the last pass (about the worst seen at 4 s
+    // polls), with menu-like frames between: saved.
+    let mut steps = vec![frame_step(2_000, real_entering())];
+    for ms in (6_000..=14_000).step_by(4_000) {
+        steps.push(frame_step(ms, plain()));
+    }
+    steps.push(phase_step(18_000, PregamePhase::HeroSelect));
+    kept(&loading_run(steps).await, &real_entering().0);
+}
+
+/// The `ENTERING GAME` words as wide as on real frames.
+fn real_entering() -> (image::RgbImage, Seen) {
+    (
+        two_word_band(1280, 720, ENTERING_WORDS, None),
+        Seen::Loading,
+    )
+}
+
+#[tokio::test]
 async fn entering_game_saves_its_last_pass_when_the_game_starts() {
     // The hero select or the hero ban read after it (the ban when loading
     // comes after the vote).
@@ -536,14 +611,14 @@ async fn entering_game_saves_its_last_pass_when_the_game_starts() {
 
 #[tokio::test]
 async fn entering_game_after_a_dropped_update_band_is_still_saved() {
-    // The band is dropped at 15.5 s (no start in 12 s); the loading screen
+    // The band is dropped at 23 s (no start in 20 s); the loading screen
     // is still looked for, so ENTERING GAME after it is held and saved.
     let mut steps = vec![frame_step(2_000, update_band())];
-    for ms in (3_500..=15_500).step_by(1_500) {
+    for ms in (3_500..=23_000).step_by(1_500) {
         steps.push(frame_step(ms, plain()));
     }
-    steps.push(frame_step(17_000, entering(1280, 720)));
-    steps.push(phase_step(18_500, PregamePhase::HeroBan));
+    steps.push(frame_step(24_500, entering(1280, 720)));
+    steps.push(phase_step(26_000, PregamePhase::HeroBan));
     kept(&loading_run(steps).await, &entering_game_slab(1280, 720));
 }
 
@@ -631,9 +706,12 @@ fn loading_passes_write_nothing_until_one_save_at_the_game_start() {
         _ => None,
     });
     assert_eq!(saved, Some(26), "the last pass");
-    // Saved: nothing more is held or looked for in this game.
+    // Saved: nothing more is held or looked for in this game, even a
+    // pass handed over anyway, and a later start saves nothing again.
     assert!(!dump_holds_loading(&dump));
     dump.observe(at(13_500), Seen::Loading, Some(frame(40)));
+    assert!(!dump_holds_loading(&dump));
+    dump.observe(at(15_000), BAN, Some(frame(41)));
     let after: Vec<_> = queue.try_iter().flatten().collect();
     assert!(loading_ops(&after).is_empty(), "{after:?}");
 }
@@ -642,17 +720,25 @@ fn dump_holds_loading(dump: &PregameDump) -> bool {
     dump.tracker().holds_loading()
 }
 
-#[test]
-fn a_dropped_loading_frame_writes_nothing() {
+#[tokio::test]
+async fn a_dropped_loading_frame_writes_nothing() {
     // Each way a held loading frame ends without a game start queues no op
-    // for it at all, and the saver holds no loading frame after it.
+    // for it at all, and the saver holds no loading frame after it. The
+    // requeue's vote comes inside the 20 s, so the vote itself drops it.
     enum End {
         Timeout,
         Release,
         Requeue,
         LateStart,
+        Shutdown,
     }
-    for end in [End::Timeout, End::Release, End::Requeue, End::LateStart] {
+    for end in [
+        End::Timeout,
+        End::Release,
+        End::Requeue,
+        End::LateStart,
+        End::Shutdown,
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let (mut dump, queue) = counted_dump(dir.path());
         let start = Instant::now();
@@ -663,7 +749,7 @@ fn a_dropped_loading_frame_writes_nothing() {
         assert!(dump_holds_loading(&dump));
         match end {
             End::Timeout => {
-                for ms in (4_500..=16_500).step_by(1_500) {
+                for ms in (4_500..=24_000).step_by(1_500) {
                     dump.observe(at(ms), Seen::Other, None);
                 }
             }
@@ -673,7 +759,14 @@ fn a_dropped_loading_frame_writes_nothing() {
                 Seen::Phase(PregamePhase::MapVote),
                 Some(frame(11)),
             ),
-            End::LateStart => dump.observe(at(15_500), BAN, Some(frame(11))),
+            End::LateStart => dump.observe(at(23_500), BAN, Some(frame(11))),
+            End::Shutdown => {
+                // Nothing to look at after it: what it queued is all.
+                assert!(dump.finish(Duration::from_secs(1)).await);
+                let ops: Vec<_> = queue.try_iter().flatten().collect();
+                assert!(loading_ops(&ops).is_empty(), "{ops:?}");
+                continue;
+            }
         }
         assert!(!dump_holds_loading(&dump));
         let ops: Vec<_> = queue.try_iter().flatten().collect();
