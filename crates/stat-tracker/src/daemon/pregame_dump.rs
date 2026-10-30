@@ -10,24 +10,29 @@
 //! Writes happen only when a phase starts or ends, on one writer thread
 //! ([`PregameWriter`]) fed by a bounded queue. The tracker holds at most
 //! one frame: the latest of the phase on screen (to write as that phase's
-//! last frame when the phase changes), or the latest ban-results frame
-//! until the next screen shows. A frame that may still be saved later is
-//! staged on disk instead ([`PregameOp::Stage`]: a hidden
-//! `.<name>.staged` file in the game's folder, replaced by each later
-//! stage), then renamed to its name or deleted. With the switch off no
-//! tracker exists.
+//! last frame when the phase changes), the latest ban-results frame until
+//! the next screen shows, or the latest loading frame until the game
+//! starts. A ban-results frame that may still be saved later is staged on
+//! disk instead ([`PregameOp::Stage`]: a hidden `.<name>.staged` file in
+//! the game's folder, replaced by each later stage), then renamed to its
+//! name or deleted. With the switch off no tracker exists.
 //!
-//! The loading screen: every frame that passes the loading check is
-//! staged, replacing the one before, and the last one is saved only when
-//! the game starts: a hero ban or hero select read in the same game
-//! within [`PHASE_FLICKER`] of it, the screen after loading. So an `APPLYING UPDATE` band that passes the check is replaced
-//! by the `ENTERING GAME` screen after it, even with a frame between that
-//! fails the check. A loading frame with no game start after it is
-//! dropped (the staged file deleted): no start within [`PHASE_FLICKER`]
-//! (the menu, a lobby), a release (the game closed, capture stopped,
-//! shutdown), or a requeue's map vote opening the next game. Dropped, the
-//! loading screen is still looked for, so a later `ENTERING GAME` in the
-//! same game is staged and saved.
+//! The loading screen: the latest frame that passes the loading check is
+//! held in memory, replacing the one before (nothing is written for it
+//! yet), and saved once, as an ordinary save, only when the game starts:
+//! a hero ban or hero select read in the same game within
+//! [`LOADING_START_WAIT`] of it, the screen after loading. So an `APPLYING
+//! UPDATE` band that passes the check is replaced by the `ENTERING GAME`
+//! screen after it, even with a frame between that fails the check. A
+//! loading frame with no game start after it is dropped, and nothing is
+//! written: no start within [`LOADING_START_WAIT`] (the menu, a lobby), a
+//! release (the game closed, capture stopped, a clean shutdown), or a map
+//! vote read after it (a requeue's vote opening the next game; the
+//! loading screen comes after the vote). Dropped, the loading screen is
+//! still looked for, so a later `ENTERING GAME` in the same game is held
+//! and saved. A tracker killed between the loading screen and the game
+//! start (a crash, a kill, power loss) loses that game's loading screen;
+//! its other screens, saved as they happen, are not affected.
 //!
 //! Ban results are no phase of their own yet. The candidate is the first
 //! frame at least [`BAN_RESULTS_DELAY`] after the last ban-phase frame (in
@@ -97,18 +102,24 @@ pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 
 /// A phase gone for at most this long and back is a detector flicker (the
 /// phase read waits for the screen to hold still). Longer, and it is a new
-/// screen: a requeue's map vote, or the hero select between rounds. The
-/// loading screen gone this long with no game start is dropped.
+/// screen: a requeue's map vote, or the hero select between rounds.
 pub(crate) const PHASE_FLICKER: Duration = Duration::from_secs(12);
+
+/// The game start (a hero ban or hero select read) must come within this
+/// of the last loading pass for it to be saved; held longer with no start,
+/// it is dropped. Real games read the start about 13.5 s after the last
+/// pass at 1.5 s polls and about 16 s at 4 s polls.
+pub(crate) const LOADING_START_WAIT: Duration = Duration::from_secs(20);
 
 /// Batches of shots waiting for the writer. A full queue drops the whole
 /// batch (logged), so frames pinned by pending writes stay bounded. A
-/// dropped save is a screen lost. A dropped stage leaves the file staged
-/// before it, if any, so the saver forgets that staged frame
-/// ([`PregameTracker::stage_lost`]) and never saves it. A dropped promote
-/// or discard leaves its staged file in place, unsaved, until a later
-/// stage of the same name replaces it or the sweep at the next start or
-/// the next game folder deletes it.
+/// dropped save is a screen lost, and still counts as saved (the loading
+/// screen too: it is not looked for again in that game). A dropped stage
+/// (ban results only) leaves the file staged before it, if any, so the
+/// saver goes back to what that file is ([`PregameTracker::stage_lost`]).
+/// A dropped promote or discard leaves its staged file in place, unsaved,
+/// until a later stage of the same name replaces it or the sweep at the
+/// next start or the next game folder deletes it.
 pub(crate) const PREGAME_QUEUE: usize = 8;
 
 /// The most the shutdown waits for the writer to finish.
@@ -181,6 +192,8 @@ impl PregamePhase {
 }
 
 pub(crate) const BAN_RESULTS_NAME: &str = "ban_results.png";
+/// Saved once, when the game starts; until then the frame is held in
+/// memory only (never staged on disk).
 pub(crate) const LOADING_NAME: &str = "loading.png";
 
 /// Which frames the next tick should hand over, so a tick the tracker has
@@ -295,7 +308,8 @@ pub(crate) enum PregameOp<F> {
     Save(PregameShot<F>),
     /// Write the frame as the staged copy of its name ([`staged_name`]),
     /// replacing an earlier one: not saved yet, so the tracker need not
-    /// hold it.
+    /// hold it. Ban results only: the loading frame is held in memory and
+    /// saved with [`PregameOp::Save`].
     Stage(PregameShot<F>),
     /// Rename the staged copy of `name` to `name`.
     Promote { folder: String, name: &'static str },
@@ -317,8 +331,6 @@ struct PregameGame {
     /// When each phase was last on screen, by [`PregamePhase::index`].
     last_seen: [Option<Instant>; 3],
     loading_saved: bool,
-    /// When the last loading-check pass was staged, until it is saved.
-    loading_staged_at: Option<Instant>,
     ban_results_saved: bool,
 }
 
@@ -369,13 +381,25 @@ struct BanResults<F> {
     owed_before: Option<String>,
 }
 
+/// The latest loading-check pass of the open game, held until the game
+/// starts (saved) or it is dropped. Replaced by each later pass.
+struct HeldLoading<F> {
+    frame: F,
+    /// When `frame` was taken.
+    at: Instant,
+}
+
 /// Decides which pre-game frames to write. Generic over the frame so tests
-/// use plain values. It holds the latest frame of the phase on screen, or
-/// the ban-results candidate (never both: no phase is on screen while a
-/// candidate waits).
+/// use plain values. It holds the latest frame of the phase on screen, the
+/// ban-results candidate, or the loading frame (never two: no phase is on
+/// screen while a candidate waits, a loading pass ends the results wait
+/// and the phase on screen, and the next phase read saves or drops the
+/// loading frame before it is held).
 pub(crate) struct PregameTracker<F> {
     game: Option<PregameGame>,
     on_screen: Option<OnScreen<F>>,
+    /// The loading frame waiting for the game to start.
+    loading: Option<HeldLoading<F>>,
     /// When the ban phase was last seen, while a ban-results frame may
     /// still come.
     ban_ended_at: Option<Instant>,
@@ -397,6 +421,7 @@ impl<F> PregameTracker<F> {
         Self {
             game: None,
             on_screen: None,
+            loading: None,
             ban_ended_at: None,
             ban_results: None,
             window: BAN_RESULTS_WINDOW + poll,
@@ -415,7 +440,14 @@ impl<F: Clone> PregameTracker<F> {
     /// Whether the tracker holds a frame (for tests of the frame bound).
     #[cfg(test)]
     pub(crate) fn holds_frame(&self) -> bool {
-        self.on_screen.is_some() || self.ban_results.is_some()
+        self.on_screen.is_some() || self.ban_results.is_some() || self.loading.is_some()
+    }
+
+    /// Whether a loading frame is held, waiting for the game to start
+    /// (tests).
+    #[cfg(test)]
+    pub(crate) fn holds_loading(&self) -> bool {
+        self.loading.is_some()
     }
 
     /// The newest game's folder and when its last pre-game screen showed,
@@ -503,75 +535,62 @@ impl<F: Clone> PregameTracker<F> {
     /// No frames for now (the game closed, capture stopped, shutdown):
     /// write the phase's last frame and a confirmed ban-results frame (an
     /// unconfirmed one is not: it may be the select sliding in, so the
-    /// staged frame before it is saved, if any), and hold nothing. A
-    /// staged loading frame is deleted: the game did not start after it.
+    /// staged frame before it is saved, if any), and hold nothing. A held
+    /// loading frame is dropped, nothing written: the game did not start
+    /// after it.
     pub(crate) fn release(&mut self, now: Instant) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
         self.end_phase(now, &mut shots);
         self.settle_ban_results(now, &mut shots);
-        self.drop_loading(&mut shots);
+        self.drop_loading();
         shots
     }
 
-    /// Save the staged loading frame when the game starts (`started`: a
-    /// hero ban or hero select read, the screen after loading) in the game
-    /// open at `now`, within [`PHASE_FLICKER`] of the last pass; saved, the
-    /// loading screen is no longer looked for in this game. Delete it when
-    /// no start came within [`PHASE_FLICKER`] (a start after that too), or
-    /// a start came after the game closed (a hero ban then opens the next
-    /// game; a lone hero select opens none). A map vote is no start: it
-    /// comes before the loading screen.
+    /// Save the held loading frame, once, when the game starts (`started`:
+    /// a hero ban or hero select read, the screen after loading) in the
+    /// game open at `now`, within [`LOADING_START_WAIT`] of the last pass;
+    /// saved, the loading screen is no longer looked for in this game.
+    /// Drop it when no start came within [`LOADING_START_WAIT`] (a start after
+    /// that too), or a start came after the game closed (a hero ban then
+    /// opens the next game; a lone hero select opens none).
     fn settle_loading(&mut self, now: Instant, started: bool, shots: &mut Vec<PregameOp<F>>) {
         let open = self.game_open(now).is_some();
-        let Some(at) = self.game.as_ref().and_then(|g| g.loading_staged_at) else {
+        let Some(at) = self.loading.as_ref().map(|l| l.at) else {
             return;
         };
-        let over = now.saturating_duration_since(at) > PHASE_FLICKER;
+        let over = now.saturating_duration_since(at) > LOADING_START_WAIT;
         if started && open && !over {
-            if let Some(game) = self.game.as_mut() {
-                game.loading_staged_at = None;
+            if let (Some(game), Some(held)) = (self.game.as_mut(), self.loading.take()) {
                 game.loading_saved = true;
-                shots.push(PregameOp::Promote {
+                shots.push(PregameOp::Save(PregameShot {
                     folder: game.folder.clone(),
                     name: LOADING_NAME,
-                });
+                    frame: held.frame,
+                }));
             }
         } else if started || over {
-            self.drop_loading(shots);
+            self.drop_loading();
         }
     }
 
     /// A batch that staged `name` was dropped (the writer's queue was
-    /// full), so the staged file on disk, if any, is an older frame. A
-    /// loading one is never saved (it may be an update band before the
-    /// `ENTERING GAME` screen): nothing is written for it, and the next
-    /// stage replaces it or the sweep deletes it. The loading screen is
-    /// still looked for. For the ban results, the owed frame goes back to
-    /// what it was before that stage: the earlier confirmed frame staged
-    /// for this candidate, still a results frame, or none.
+    /// full), so the staged file on disk, if any, is an older frame. For
+    /// the ban results (the only frame staged), the owed frame goes back
+    /// to what it was before that stage: the earlier confirmed frame
+    /// staged for this candidate, still a results frame, or none.
     pub(crate) fn stage_lost(&mut self, name: &str) {
-        if name == LOADING_NAME {
-            if let Some(game) = self.game.as_mut() {
-                game.loading_staged_at = None;
-            }
-        } else if name == BAN_RESULTS_NAME
+        if name == BAN_RESULTS_NAME
             && let Some(c) = self.ban_results.as_mut()
         {
             c.owed = c.owed_before.take();
         }
     }
 
-    /// Delete the staged loading frame, if any. The loading screen is still
-    /// looked for, so a later pass in this game is staged again.
-    fn drop_loading(&mut self, shots: &mut Vec<PregameOp<F>>) {
-        if let Some(game) = self.game.as_mut()
-            && game.loading_staged_at.take().is_some()
-        {
-            shots.push(PregameOp::Discard {
-                folder: game.folder.clone(),
-                name: LOADING_NAME,
-            });
-        }
+    /// Drop the held loading frame, if any; nothing is on disk for it. The
+    /// loading screen is still looked for, so a later pass in this game is
+    /// held again.
+    fn drop_loading(&mut self) {
+        self.loading = None;
     }
 
     fn observe_phase(
@@ -586,6 +605,12 @@ impl<F: Clone> PregameTracker<F> {
             // The ban is back, late or not: the candidate was a frame
             // inside it, not the results.
             self.drop_ban_results(shots);
+        }
+        if phase == PregamePhase::MapVote {
+            // The loading screen comes after the vote, so a pass before
+            // this vote was not this game's loading screen (a requeue's
+            // vote opens the next game).
+            self.drop_loading();
         }
         if self.on_screen.as_ref().is_some_and(|s| s.phase != phase) {
             self.end_phase(now, shots);
@@ -610,16 +635,12 @@ impl<F: Clone> PregameTracker<F> {
         };
         if new_game {
             self.end_phase(now, shots);
-            // A requeue: the last game never started after its loading
-            // frame.
-            self.drop_loading(shots);
             self.game = Some(PregameGame {
                 folder: new_folder(),
                 last_event: now,
                 firsts: 0,
                 last_seen: [None; 3],
                 loading_saved: false,
-                loading_staged_at: None,
                 ban_results_saved: false,
             });
         }
@@ -743,21 +764,17 @@ impl<F: Clone> PregameTracker<F> {
         if self.game_open(now).is_none() {
             return;
         }
-        let Some(game) = self.game.as_mut() else {
+        let Some(game) = self.game.as_ref() else {
             return;
         };
-        // Staged, replacing an earlier pass: an update band before the
-        // ENTERING GAME screen can pass the check too.
+        // Held in memory, replacing an earlier pass (an update band before
+        // the ENTERING GAME screen can pass the check too); nothing is
+        // written until the game starts.
         if seen == Seen::Loading
             && !game.loading_saved
             && let Some(frame) = frame
         {
-            game.loading_staged_at = Some(now);
-            shots.push(PregameOp::Stage(PregameShot {
-                folder: game.folder.clone(),
-                name: LOADING_NAME,
-                frame,
-            }));
+            self.loading = Some(HeldLoading { frame, at: now });
         }
     }
 
@@ -1377,6 +1394,12 @@ impl PregameDump {
 
     pub(crate) fn want(&self, now: Instant) -> PregameWant {
         self.tracker.want(now)
+    }
+
+    /// The tracker (tests).
+    #[cfg(test)]
+    pub(crate) fn tracker(&self) -> &PregameTracker<Arc<image::DynamicImage>> {
+        &self.tracker
     }
 
     /// The ban-results title examples, for the poll's blocking read.

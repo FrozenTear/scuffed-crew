@@ -187,9 +187,9 @@ fn each_phase_saves_its_first_and_last_frame_once() {
     run.tick(11_000, Seen::Loading, 12);
     run.tick(12_000, Seen::Loading, 13);
     run.tick(13_000, Seen::Other, 14);
-    // No hero ban or select read within 12 s: the game did not start after
-    // the loading screen, so its staged frame is dropped.
-    run.tick(25_000, Seen::Other, 15);
+    // No hero ban or select read within 20 s: the game did not start after
+    // the loading screen, so its held frame is dropped.
+    run.tick(33_000, Seen::Other, 15);
     assert_eq!(
         run.names(),
         [
@@ -672,7 +672,7 @@ fn the_hero_select_between_rounds_writes_nothing() {
     run.tick(0, VOTE, 1);
     run.tick(5_000, SELECT, 2);
     run.tick(6_000, SELECT, 3);
-    // No hero ban or select read within 12 s after it: dropped.
+    // No hero ban or select read within 20 s after it: dropped.
     run.tick(8_000, Seen::Loading, 4);
     run.tick(10_000, Seen::Other, 5);
     // A short first round, then the select again, inside the game window.

@@ -62,6 +62,66 @@ pub(crate) fn entering_game_slab(w: u32, h: u32) -> RgbImage {
     img
 }
 
+/// The navy band with one line of glyph strokes centred across it, `share`
+/// of its width: no two words (the strokes split into many).
+pub(crate) fn centred_text_band(w: u32, h: u32, share: f32) -> RgbImage {
+    let mut img = navy_band(w, h);
+    let half = (320.0 * share).round() as u32;
+    glyphs(&mut img, 320 - half..320 + half, 168..192);
+    img
+}
+
+/// Words as wide as on real frames: `ENTERING GAME` 0.173 of the width
+/// with the second word 0.61 of the first, `APPLYING UPDATE` 0.186 and
+/// 0.74.
+pub(crate) const ENTERING_WORDS: (f32, f32) = (0.173, 0.61);
+pub(crate) const UPDATE_WORDS: (f32, f32) = (0.186, 0.74);
+
+/// Two solid words of white centred across the navy band: `(width,
+/// ratio)` the whole line as a share of the width and the second word's
+/// width over the first's, 0.012 apart. `spinner`: a block 0.03 wide on
+/// the left (`Some(true)`) or right, 0.025 from the words, the whole line
+/// still centred.
+pub(crate) fn two_word_band(
+    w: u32,
+    h: u32,
+    (width, ratio): (f32, f32),
+    spinner: Option<bool>,
+) -> RgbImage {
+    let mut img = navy_band(w, h);
+    let (gap, spin, spin_gap) = (0.012, 0.03, 0.025);
+    let first = (width - gap) / (1.0 + ratio);
+    let line = width
+        + if spinner.is_some() {
+            spin + spin_gap
+        } else {
+            0.0
+        };
+    let mut x = 0.5 - line / 2.0;
+    let mut parts = Vec::new();
+    if spinner == Some(true) {
+        parts.push((x, spin));
+        x += spin + spin_gap;
+    }
+    parts.push((x, first));
+    x += first + gap;
+    parts.push((x, first * ratio));
+    x += first * ratio;
+    if spinner == Some(false) {
+        parts.push((x + spin_gap, spin));
+    }
+    let (y0, y1) = (on(168, 360, h), on(192, 360, h));
+    for (x0, share) in parts {
+        let (a, b) = ((x0 * w as f32) as u32, ((x0 + share) * w as f32) as u32);
+        for y in y0..y1 {
+            for x in a..b {
+                img.put_pixel(x, y, Rgb(GLYPH));
+            }
+        }
+    }
+    img
+}
+
 /// An `APPLYING UPDATE` band: the same navy band, its text left of centre,
 /// with a progress bar under it when `bar` is set, or centred above a bar
 /// when `centred` is set.

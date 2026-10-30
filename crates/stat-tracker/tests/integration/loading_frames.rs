@@ -1,5 +1,5 @@
-//! Opt-in evidence for the loading check's bounds on real frames: the
-//! `ENTERING GAME` text box and the `APPLYING UPDATE` band. No real frame
+//! Opt-in evidence for the loading check on real frames: the `ENTERING
+//! GAME` text box and the `APPLYING UPDATE` band. No real frame
 //! is in the repo (they show the screen as it was), so this reads a local
 //! folder named by `SCUFFED_LOADING_FRAMES_DIR` and prints, for each
 //! `.png` in it, both loading checks and the measured text box. It asserts
@@ -12,15 +12,17 @@
 //!   loading_frames -- --ignored --nocapture
 //! ```
 //!
-//! and compare each box with the bounds in `detect/loading_screen.rs`
-//! (centre x 0.45 to 0.55, width 0.25 to 0.50, centre y 0.44 to 0.56,
-//! height at most 0.10).
+//! and compare each box with the rule in `detect/loading_screen.rs` (at
+//! least 24 glyph samples, centre x 0.45 to 0.55, centre y 0.44 to 0.56,
+//! height at most 0.10, width at most 0.50, and not exactly two words with
+//! the second at least 0.70 of the first).
 //!
-//! The same folder also pins those bounds, in a test that runs with the
+//! The same folder also pins that rule, in a test that runs with the
 //! others: each `entering_game*.png` in it must pass the ENTERING GAME
-//! check and each `applying_update*.png` must fail it, so a later change
-//! to the bounds fails on a machine that has the frames. It skips quietly
-//! when the variable is unset or no such file is there.
+//! check and each `applying_update*.png` must fail it (the word ratio is
+//! what tells them apart), so a later change to the rule fails on a
+//! machine that has the frames. A failure prints the measured numbers. It
+//! skips quietly when the variable is unset or no such file is there.
 
 use stat_tracker::detect::loading_screen::{is_entering_game, is_loading_screen, text_box};
 
@@ -58,7 +60,13 @@ fn local_entering_game_frames_pass_and_update_bands_fail() {
         let rgb = image::open(&path)
             .unwrap_or_else(|e| panic!("{name}: {e}"))
             .to_rgb8();
-        assert_eq!(is_entering_game(&rgb), want, "{name}: ENTERING GAME check");
+        assert_eq!(
+            is_entering_game(&rgb),
+            want,
+            "{name}: ENTERING GAME check; loading {}; text: {}",
+            is_loading_screen(&rgb),
+            describe(&rgb)
+        );
     }
 }
 
@@ -90,17 +98,29 @@ fn report_the_loading_checks_on_local_frames() {
             }
         };
         let (w, h) = rgb.dimensions();
-        let text = match text_box(&rgb) {
-            Some(t) => format!(
-                "width {:.3}, centre x {:.3}, centre y {:.3}, height {:.3}, {} samples",
-                t.width, t.centre_x, t.centre_y, t.height, t.samples
-            ),
-            None => "no text".to_string(),
-        };
+        let text = describe(&rgb);
         println!(
             "{name} ({w}x{h}): loading {}, entering game {}; text: {text}",
             is_loading_screen(&rgb),
             is_entering_game(&rgb)
         );
+    }
+}
+
+/// The measured text box: glyph samples, place, size, words and ratio.
+fn describe(rgb: &image::RgbImage) -> String {
+    match text_box(rgb) {
+        Some(t) => format!(
+            "width {:.3}, centre x {:.3}, centre y {:.3}, height {:.3}, {} samples, {} words, ratio {}",
+            t.width,
+            t.centre_x,
+            t.centre_y,
+            t.height,
+            t.samples,
+            t.words,
+            t.word_ratio
+                .map_or("none".to_string(), |r| format!("{r:.3}"))
+        ),
+        None => "no text".to_string(),
     }
 }
