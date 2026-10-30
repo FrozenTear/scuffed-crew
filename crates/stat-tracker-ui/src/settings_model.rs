@@ -244,7 +244,7 @@ impl AdvancedSection {
             AdvancedSection::Troubleshooting => {
                 let mut parts = vec![
                     format!("Debug images {}", on_off(v.debug_images)),
-                    format!("pre-game screens {}", on_off(v.pregame_screens)),
+                    format!("screens around each game {}", on_off(v.pregame_screens)),
                 ];
                 if let Some(frames) = v.compare_frames {
                     parts.push(format!("KDE compare frames {}", on_off(frames)));
@@ -299,7 +299,7 @@ pub struct AdvancedValues {
     /// The website's host while uploads are on.
     pub sync_host: Option<String>,
     pub debug_images: bool,
-    /// Save pre-game screens (`debug_save_pregame_screens`).
+    /// Save screens around each game (`debug_save_pregame_screens`).
     pub pregame_screens: bool,
     /// KDE compare frames, on KDE only (`None` elsewhere).
     pub compare_frames: Option<bool>,
@@ -609,7 +609,7 @@ pub enum ConfigEdit {
     NameReader(bool),
     /// OCR workers. `None` is Auto.
     OcrWorkers(Option<u32>),
-    /// Save pre-game screens (`debug_save_pregame_screens`).
+    /// Save screens around each game (`debug_save_pregame_screens`).
     SavePregameScreens(bool),
 }
 
@@ -1107,13 +1107,13 @@ mod tests {
         assert!(
             AdvancedSection::Troubleshooting
                 .summary(&v)
-                .starts_with("Debug images off, pre-game screens off, ")
+                .starts_with("Debug images off, screens around each game off, ")
         );
         v.pregame_screens = true;
         assert!(
             AdvancedSection::Troubleshooting
                 .summary(&v)
-                .contains("pre-game screens on")
+                .contains("screens around each game on")
         );
         v.auto_detect = false;
         v.compare_frames = Some(true);

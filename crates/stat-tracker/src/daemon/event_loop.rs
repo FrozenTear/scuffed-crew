@@ -154,6 +154,9 @@ pub(crate) async fn run_loop(
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Set when the post-game saves bring the next poll tick forward: the
+    // regular tick it comes before ([`tick_brought_forward_too_soon`]).
+    let mut post_regular_tick: Option<tokio::time::Instant> = None;
 
     // GUI command queue (manual outcome edits, session deletion), checked on
     // its own timer so edits apply even while no game is running.
@@ -354,7 +357,19 @@ pub(crate) async fn run_loop(
                     capture_task = Some(task);
                 }
             }
-            _ = poll_timer.tick(), if auto_detect.enabled => {
+            ticked = poll_timer.tick(), if auto_detect.enabled => {
+                // A tick brought forward for the post-game saves that finds
+                // the cadence slowed since: dropped before anything runs,
+                // and the regular tick comes instead, so the slow cadence
+                // counts regular ticks only.
+                if let Some(regular) = tick_brought_forward_too_soon(
+                    post_regular_tick.take(),
+                    || poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval),
+                ) {
+                    tracing::trace!(target: "scuffed_stat_tracker", "poll tick skipped: brought forward, the cadence slowed since");
+                    poll_timer.reset_at(regular);
+                    continue;
+                }
                 // Mid-match: a Tab capture saturates the OCR pool, skip the
                 // full poll so we do not contend (H3). During end-reel wake
                 // that skip starves the ~3s Victory/Defeat window (2026-09-06:
@@ -387,7 +402,7 @@ pub(crate) async fn run_loop(
                 game_was_running = running;
                 if !running {
                     if let Some(dump) = pregame_dump.as_mut() {
-                        dump.release(Instant::now());
+                        dump.game_closed(Instant::now());
                     }
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
@@ -402,12 +417,9 @@ pub(crate) async fn run_loop(
                 // On Older screenshot and KDE direct the same skip runs out
                 // of a match too, down to IDLE_SHOT_POLL_FLOOR.
                 let divisor = poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval);
-                if divisor > 1 {
-                    st.poll_ticks_skipped += 1;
-                    if st.poll_ticks_skipped < divisor {
-                        tracing::trace!(target: "scuffed_stat_tracker", divisor, "poll tick skipped: adaptive slow cadence");
-                        continue;
-                    }
+                if slow_cadence_skips(&mut st.poll_ticks_skipped, divisor) {
+                    tracing::trace!(target: "scuffed_stat_tracker", divisor, "poll tick skipped: adaptive slow cadence");
+                    continue;
                 }
 
                 // A Tab press preempts the poll's grab and analysis: the poll
@@ -502,6 +514,12 @@ pub(crate) async fn run_loop(
                             .as_ref()
                             .filter(|_| !outcome_only)
                             .map(|dump| (dump.want(Instant::now()), dump.examples()));
+                        // The post-game saves take Tab-busy ticks too: the
+                        // end reel is when they matter most. Their samples
+                        // count from the tick's start, not the grab's end,
+                        // so the 1 s steps do not drift.
+                        let postgame_want =
+                            daemon::pregame_dump::PregameDump::post_want_of(pregame_dump.as_mut(), now);
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -619,10 +637,15 @@ pub(crate) async fn run_loop(
                                 stat_tracker::perf::Stage::PollAnalyze,
                                 analyze_started.elapsed(),
                             );
-                            // The frame moves into the tick's result, no copy.
-                            let pregame = pregame_seen
-                                .map(|(seen, keep)| (seen, keep.then(|| Arc::new(img))));
-                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame)
+                            // The frame moves into the tick's result, no copy,
+                            // one `Arc` for both saves.
+                            let (pregame, postgame) = daemon::postgame_dump::kept_frames(
+                                img,
+                                pregame_seen,
+                                postgame_want,
+                                signal.is_some() || end_reel,
+                            );
+                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame, postgame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
                             stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -640,7 +663,7 @@ pub(crate) async fn run_loop(
                         if let Some(seen) = kept_frame {
                             seen_stream = Some(seen);
                         }
-                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame) = match analyzed {
+                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame, postgame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
                                     &mut st,
@@ -656,7 +679,7 @@ pub(crate) async fn run_loop(
                                 return Ok(());
                             }
                             Ok(joined) => joined.unwrap_or_else(|_| {
-                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None, None)
+                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None, None, None)
                             }),
                         };
                         if stat_tracker::replace::shutdown_requested() {
@@ -781,6 +804,41 @@ pub(crate) async fn run_loop(
                             )
                             .await;
                             return Ok(());
+                        }
+                        // The post-game saves see the tick after the
+                        // decision, so a confirmed outcome opens their
+                        // window. Switch off: nothing is checked.
+                        // About one frame a second in the window: bring
+                        // the next tick forward (an ordinary poll), only
+                        // after a tick that handed over a frame, never
+                        // under 250 ms, and only where the route polls
+                        // every tick now (a screenshot route's slower
+                        // floor stays). A panicked or frameless tick
+                        // keeps the regular interval.
+                        let sooner = daemon::pregame_dump::PregameDump::post_after_decision(
+                            pregame_dump.as_mut(),
+                            Instant::now,
+                            || {
+                                let game = st.active_game.as_ref();
+                                daemon::postgame_dump::PostTick {
+                                    end: daemon::postgame_dump::EndSeen::of(signal.map(|(_, source)| source), end_reel),
+                                    confirmed: tick.signal_confirmed,
+                                    running: game.is_some_and(|g| !g.finished()),
+                                    finished: game.is_some_and(|g| g.finished()),
+                                    new_screen: matches!(
+                                        phase,
+                                        detect::GamePhase::MapVote { .. } | detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
+                                    ),
+                                    game_opened: game.map(|g| g.opened_at),
+                                }
+                            },
+                            postgame,
+                            poll_interval,
+                            || poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval) == 1,
+                        );
+                        if let Some(next) = sooner {
+                            poll_timer.reset_after(next);
+                            post_regular_tick = Some(ticked + poll_interval);
                         }
                     }
                     Ok(Err(e)) => {
