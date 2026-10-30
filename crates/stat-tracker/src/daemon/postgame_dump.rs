@@ -627,11 +627,13 @@ impl PostSink for DumpSink<'_> {
             label: shot.label,
         });
         let job = super::pregame_dump::WriterJob {
-            shots: vec![super::pregame_dump::PregameShot {
-                folder: folder.clone(),
-                name,
-                frame: shot.frame,
-            }],
+            shots: vec![super::pregame_dump::PregameOp::Save(
+                super::pregame_dump::PregameShot {
+                    folder: folder.clone(),
+                    name,
+                    frame: shot.frame,
+                },
+            )],
             note: Some(self.note(&folder)),
         };
         let queued = self.writer.send_job(job);

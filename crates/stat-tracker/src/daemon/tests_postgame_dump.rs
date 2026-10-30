@@ -730,12 +730,12 @@ fn the_retention_counts_post_game_folders_and_files() {
     // 25 games, each only post-game files: a frame and its sidecar.
     for g in 0..25 {
         let folder = format!("20261030_12{g:02}00");
-        let shot = PregameShot {
+        let shot = PregameOp::Save(PregameShot {
             folder: folder.clone(),
             name: postgame_name(0),
             frame: shown(picture(10, None)),
-        };
-        write_pregame_shots(root, &[shot], PREGAME_KEEP_GAMES, &mut made);
+        });
+        write_pregame_ops(root, &[shot], PREGAME_KEEP_GAMES, &mut made);
         let note = NoteFile {
             folder: folder.clone(),
             name: POSTGAME_SIDECAR,
@@ -760,6 +760,39 @@ fn the_retention_counts_post_game_folders_and_files() {
     assert_eq!(names_in(root).len(), PREGAME_KEEP_GAMES);
     assert!(!root.join("20261030_120500").exists());
     assert!(names_in(&root.join("20261030_130000")).contains(&"postgame.json".to_string()));
+}
+
+#[test]
+fn the_staged_pre_game_sweep_leaves_post_game_files_alone() {
+    // A game folder with post-game files and staged pre-game frames left
+    // by a stopped run: a post-game sidecar in a new folder sweeps only the
+    // staged frames, and the post-game names never look staged.
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let old = root.join("20261030_120000");
+    std::fs::create_dir_all(&old).unwrap();
+    for name in [postgame_name(0), POSTGAME_SIDECAR] {
+        std::fs::write(old.join(name), b"x").unwrap();
+    }
+    for name in [BAN_RESULTS_NAME, LOADING_NAME] {
+        std::fs::write(old.join(staged_name(name)), b"x").unwrap();
+    }
+    let note = NoteFile {
+        folder: "20261030_130000".into(),
+        name: POSTGAME_SIDECAR,
+        text: "{}\n".into(),
+    };
+    write_note(root, &note, PREGAME_KEEP_GAMES, &mut Vec::new());
+    // Every name, dot names too.
+    let mut left: Vec<String> = std::fs::read_dir(&old)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["postgame.json", "postgame_01.png"]);
+    for index in 0..POSTGAME_MAX_FRAMES {
+        assert!(!postgame_name(index).starts_with('.'));
+    }
 }
 
 #[test]
