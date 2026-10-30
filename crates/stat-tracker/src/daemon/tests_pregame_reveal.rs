@@ -64,7 +64,7 @@ async fn the_fully_revealed_ban_results_are_the_saved_frame() {
     );
     // No examples installed: the shape rule decides. Each frame passes it
     // (the icons are under the title region), replaces the held one and
-    // confirms it, so the held one becomes the frame owed a write.
+    // confirms it, so the held one is staged on disk, owed a write.
     let mut handed: Vec<Arc<image::DynamicImage>> = Vec::new();
     for (i, icons) in (1..=4).enumerate() {
         let ms = 3_000 + 1_500 * i as u64;
@@ -77,16 +77,9 @@ async fn the_fully_revealed_ban_results_are_the_saved_frame() {
         let frame = shown(&rgb);
         handed.push(Arc::clone(&frame));
         dump.observe(at(ms), seen, Some(frame));
-        // Only the latest results frame and the one before it are held;
-        // the earlier ones are ours alone again.
-        let held: Vec<usize> = handed
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| Arc::strong_count(f) > 1)
-            .map(|(k, _)| k)
-            .collect();
-        let want_held: Vec<usize> = (i.saturating_sub(1)..=i).collect();
-        assert_eq!(held, want_held, "{icons} icons");
+        // Only the latest results frame is held: the one before it is ours
+        // alone again once the writer has staged it.
+        assert_eq!(only_held(&handed).await, [i], "{icons} icons");
     }
     // The select's first frame shows its title, then its read.
     let select = select_with_title();
@@ -119,6 +112,27 @@ async fn the_fully_revealed_ban_results_are_the_saved_frame() {
         .unwrap()
         .to_rgb8();
     assert!(saved == ban_results(4), "the four-icon frame is saved");
+}
+
+/// Which of `handed` are still held elsewhere once the writer has had up
+/// to 10 s to write what it was sent (a queued write pins its frame
+/// until it is on disk).
+pub(super) async fn only_held(handed: &[Arc<image::DynamicImage>]) -> Vec<usize> {
+    let held = || -> Vec<usize> {
+        handed
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| Arc::strong_count(f) > 1)
+            .map(|(k, _)| k)
+            .collect()
+    };
+    for _ in 0..500 {
+        if held().len() <= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    held()
 }
 
 /// The hero select with its title: the roster, and a mark where the

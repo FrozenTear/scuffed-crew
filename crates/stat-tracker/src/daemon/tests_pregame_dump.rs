@@ -15,30 +15,33 @@ const POLL: Duration = Duration::from_millis(1_500);
 /// Drives a tracker the way the poll loop does: a tick hands its frame only
 /// when [`keeps_frame`] says so, and a loading screen reads as one only
 /// when the loading check runs ([`classify`]). Frames are numbered `Arc`s
-/// so every tick can check the tracker holds at most one, or two while a
-/// ban-results frame is owed a write.
-struct Run {
-    tracker: PregameTracker<Arc<u32>>,
+/// so every tick can check the tracker holds at most one. The disk is a
+/// model: saved files in `shots`, staged ones in `staged` until promoted
+/// (then they join `shots`) or discarded.
+pub(crate) struct Run {
+    pub(crate) tracker: PregameTracker<Arc<u32>>,
     start: Instant,
-    games: usize,
+    pub(crate) games: usize,
     made: Vec<Arc<u32>>,
-    shots: Vec<(String, &'static str, u32)>,
+    pub(crate) shots: Vec<(String, &'static str, u32)>,
+    pub(crate) staged: Vec<(String, &'static str, u32)>,
 }
 
 impl Run {
     /// At the new reader's 1.5 s polls (ban-results window 16.5 s).
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::polled(1_500)
     }
 
     /// At polls `poll_ms` apart (4 s with ocr-v1: window 19 s).
-    fn polled(poll_ms: u64) -> Self {
+    pub(crate) fn polled(poll_ms: u64) -> Self {
         Self {
             tracker: PregameTracker::new(Duration::from_millis(poll_ms)),
             start: Instant::now(),
             games: 0,
             made: Vec::new(),
             shots: Vec::new(),
+            staged: Vec::new(),
         }
     }
 
@@ -47,7 +50,7 @@ impl Run {
     }
 
     /// One tick `ms` after the start, showing `seen` as frame `frame`.
-    fn tick(&mut self, ms: u64, seen: Seen, frame: u32) {
+    pub(crate) fn tick(&mut self, ms: u64, seen: Seen, frame: u32) {
         let now = self.at(ms);
         let want = self.tracker.want(now);
         let seen = match seen {
@@ -68,24 +71,42 @@ impl Run {
         self.record(shots);
     }
 
-    fn release(&mut self, ms: u64) {
+    pub(crate) fn release(&mut self, ms: u64) {
         let shots = self.tracker.release(self.at(ms));
         self.record(shots);
     }
 
-    fn record(&mut self, shots: Vec<PregameShot<Arc<u32>>>) {
-        self.shots
-            .extend(shots.into_iter().map(|s| (s.folder, s.name, *s.frame)));
+    fn record(&mut self, ops: Vec<PregameOp<Arc<u32>>>) {
+        for op in ops {
+            match op {
+                PregameOp::Save(s) => self.shots.push((s.folder, s.name, *s.frame)),
+                PregameOp::Stage(s) => {
+                    self.staged
+                        .retain(|(f, n, _)| (f, *n) != (&s.folder, s.name));
+                    self.staged.push((s.folder, s.name, *s.frame));
+                }
+                PregameOp::Promote { folder, name } => {
+                    let at = self
+                        .staged
+                        .iter()
+                        .position(|(f, n, _)| (f, *n) == (&folder, name))
+                        .expect("a promote has a staged frame");
+                    self.shots.push(self.staged.remove(at));
+                }
+                PregameOp::Discard { folder, name } => {
+                    self.staged.retain(|(f, n, _)| (f, *n) != (&folder, name));
+                }
+            }
+        }
         let held = self
             .made
             .iter()
             .filter(|f| Arc::strong_count(f) > 1)
             .count();
-        let bound = 1 + usize::from(self.tracker.owes_frame());
-        assert!(held <= bound, "the tracker holds {held} frames");
+        assert!(held <= 1, "the tracker holds {held} frames");
     }
 
-    fn names(&self) -> Vec<(&str, u32)> {
+    pub(crate) fn names(&self) -> Vec<(&str, u32)> {
         self.shots.iter().map(|(_, n, f)| (*n, *f)).collect()
     }
 }
@@ -355,15 +376,34 @@ fn a_select_title_after_a_skipped_tick_does_not_confirm_a_replacement() {
 }
 
 #[test]
-fn a_first_candidate_right_before_a_select_title_read_is_not_saved() {
-    // One results frame only, then the title: that frame never had its
-    // confirmation, so nothing is written (unchanged).
+fn a_first_candidate_right_before_a_select_title_is_saved() {
+    // One results frame only, then the title on the very next tick: the
+    // title is read with no lag and the frame did not show it, so it was
+    // still the results.
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, BAN, 2);
     run.tick(3_000, RESULTS, 3);
     run.tick(4_500, Seen::SelectTitle, 4);
     run.tick(6_000, SELECT, 5);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 3),
+            ("heroselect_first.png", 5),
+        ]
+    );
+    assert!(run.staged.is_empty());
+    // After a skipped tick it is not: the frame between may have been the
+    // select's own first frame.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(6_000, Seen::SelectTitle, 4);
+    run.tick(7_500, SELECT, 5);
     assert!(
         run.names().iter().all(|(n, _)| *n != "ban_results.png"),
         "{:?}",
@@ -427,7 +467,8 @@ fn a_replacement_keeps_the_window_of_the_first_candidate() {
     }
     assert!(run.tracker.owes_frame());
     run.tick(19_500, RESULTS, 30);
-    assert!(!run.tracker.holds_frame(), "the owed frame is dropped too");
+    assert!(!run.tracker.holds_frame());
+    assert!(run.staged.is_empty(), "the staged frame is deleted too");
     run.tick(21_000, Seen::Other, 31);
     run.tick(22_500, SELECT, 32);
     assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
@@ -711,7 +752,12 @@ fn retention_keeps_the_newest_twenty_games() {
         name: "mapvote_first.png",
         frame: frame(64, 36),
     };
-    write_pregame_shots(&root, &[shot], PREGAME_KEEP_GAMES, &mut Vec::new());
+    write_pregame_ops(
+        &root,
+        &[PregameOp::Save(shot)],
+        PREGAME_KEEP_GAMES,
+        &mut Vec::new(),
+    );
     let left = names_in(&root);
     assert_eq!(left.len(), PREGAME_KEEP_GAMES + 1);
     for i in 0..3 {
@@ -786,7 +832,12 @@ fn a_clock_set_back_does_not_delete_the_new_folder() {
         name: "mapvote_first.png",
         frame: frame(8, 8),
     };
-    write_pregame_shots(&root, &[shot], PREGAME_KEEP_GAMES, &mut Vec::new());
+    write_pregame_ops(
+        &root,
+        &[PregameOp::Save(shot)],
+        PREGAME_KEEP_GAMES,
+        &mut Vec::new(),
+    );
     assert!(
         root.join("20200101_000000")
             .join("mapvote_first.png")
@@ -802,14 +853,16 @@ fn the_folder_order_survives_a_restart_with_the_clock_behind() {
     for i in 0..PREGAME_KEEP_GAMES - 1 {
         std::fs::create_dir_all(root.join(format!("20261001_0000{i:02}"))).unwrap();
     }
-    let shot = |name: &str| PregameShot {
-        folder: name.to_string(),
-        name: "mapvote_first.png",
-        frame: frame(8, 8),
+    let shot = |name: &str| {
+        PregameOp::Save(PregameShot {
+            folder: name.to_string(),
+            name: "mapvote_first.png",
+            frame: frame(8, 8),
+        })
     };
     // Run 1, clock behind: one game, 20 folders in all.
     let mut made = load_pregame_order(&root);
-    write_pregame_shots(
+    write_pregame_ops(
         &root,
         &[shot("20200101_000000")],
         PREGAME_KEEP_GAMES,
@@ -818,7 +871,7 @@ fn the_folder_order_survives_a_restart_with_the_clock_behind() {
     // Run 2 reads the order back; its first game must not prune run 1's.
     let mut made = load_pregame_order(&root);
     assert_eq!(made, ["20200101_000000"]);
-    write_pregame_shots(
+    write_pregame_ops(
         &root,
         &[shot("20200102_000000")],
         PREGAME_KEEP_GAMES,
@@ -853,7 +906,12 @@ fn a_repeated_name_in_the_order_file_counts_once() {
         frame: frame(8, 8),
     };
     // 20 folders with the new one: nothing goes.
-    write_pregame_shots(&root, &[shot], PREGAME_KEEP_GAMES, &mut made);
+    write_pregame_ops(
+        &root,
+        &[PregameOp::Save(shot)],
+        PREGAME_KEEP_GAMES,
+        &mut made,
+    );
     assert_eq!(names_in(&root).len(), PREGAME_KEEP_GAMES);
 }
 
@@ -871,7 +929,12 @@ fn games_written_while_the_clock_is_behind_all_count_as_newest() {
             name: "mapvote_first.png",
             frame: frame(8, 8),
         };
-        write_pregame_shots(&root, &[shot], PREGAME_KEEP_GAMES, &mut made);
+        write_pregame_ops(
+            &root,
+            &[PregameOp::Save(shot)],
+            PREGAME_KEEP_GAMES,
+            &mut made,
+        );
     }
     let left = names_in(&root);
     assert_eq!(left.len(), PREGAME_KEEP_GAMES);
@@ -886,12 +949,14 @@ fn games_written_while_the_clock_is_behind_all_count_as_newest() {
 fn a_save_leaves_no_temporary_file() {
     let dir = tempfile::tempdir().unwrap();
     let root = pregame_dir(dir.path());
-    let shot = |w| PregameShot {
-        folder: "20261030_120000".to_string(),
-        name: "heroban_last.png",
-        frame: frame(w, 9),
+    let shot = |w| {
+        PregameOp::Save(PregameShot {
+            folder: "20261030_120000".to_string(),
+            name: "heroban_last.png",
+            frame: frame(w, 9),
+        })
     };
-    write_pregame_shots(
+    write_pregame_ops(
         &root,
         &[shot(10), shot(20)],
         PREGAME_KEEP_GAMES,
@@ -1087,6 +1152,23 @@ fn a_select_read_two_polls_late_is_not_the_ban_results() {
     let mut run = Run::new();
     run.tick(0, BAN, 1);
     run.tick(1_500, BAN, 2);
+    run.tick(3_000, Seen::Other, 3);
+    run.tick(4_500, Seen::SelectTitle, 4);
+    run.tick(6_000, SELECT, 5);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("heroselect_first.png", 5),
+        ]
+    );
+    // That first frame with the results title is the results since
+    // alpha.1.3: the select title is read with no lag, and a half drawn
+    // one counts, so a frame showing none of it was still the results.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
     run.tick(3_000, RESULTS, 3);
     run.tick(4_500, Seen::SelectTitle, 4);
     run.tick(6_000, SELECT, 5);
@@ -1095,6 +1177,7 @@ fn a_select_read_two_polls_late_is_not_the_ban_results() {
         [
             ("heroban_first.png", 1),
             ("heroban_last.png", 2),
+            ("ban_results.png", 3),
             ("heroselect_first.png", 5),
         ]
     );
@@ -1238,14 +1321,15 @@ fn ban_results_at_a_four_second_poll() {
             ("heroselect_first.png", 5),
         ]
     );
-    // Two late polls, the second showing the select title: still the select.
+    // Two late polls, the second showing the select title: that title on
+    // the very next tick confirms the results frame before it.
     let mut run = Run::polled(4_000);
     run.tick(0, BAN, 1);
     run.tick(4_000, BAN, 2);
     run.tick(8_000, RESULTS, 3);
     run.tick(12_000, Seen::SelectTitle, 4);
     run.tick(16_000, SELECT, 5);
-    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+    assert!(run.names().contains(&("ban_results.png", 3)));
 }
 
 #[test]
@@ -1356,11 +1440,11 @@ fn a_ban_read_lost_past_the_window_saves_no_results() {
 fn a_dead_writer_is_logged_once_and_told_apart_from_a_busy_one() {
     let mut writer = PregameWriter::dead();
     let shot = || {
-        vec![PregameShot {
+        vec![PregameOp::Save(PregameShot {
             folder: "20261030_120000".to_string(),
             name: "mapvote_first.png",
             frame: frame(4, 4),
-        }]
+        })]
     };
     assert!(writer.send(Vec::new()), "nothing to send is no failure");
     assert!(!writer.dead_logged());
