@@ -1,9 +1,11 @@
 //! Pre-game saver tests on synthetic frames made in code (no real
-//! screenshot): the ban results revealed over several polls, and an
-//! `APPLYING UPDATE` band that must not be saved as the loading screen.
+//! screenshot): the ban results revealed over several polls, what ends
+//! them (the select's title or its phase read), and an `APPLYING UPDATE`
+//! band that must not be saved as the loading screen.
 
 use super::pregame_ban_title::*;
 use super::pregame_dump::*;
+use super::tests_loading_stand_ins::*;
 use crate::*;
 use std::time::Duration;
 
@@ -61,7 +63,8 @@ async fn the_fully_revealed_ban_results_are_the_saved_frame() {
         Some(shown(&ban)),
     );
     // No examples installed: the shape rule decides. Each frame passes it
-    // (the icons are under the title region) and replaces the held one.
+    // (the icons are under the title region), replaces the held one and
+    // confirms it, so the held one becomes the frame owed a write.
     let mut handed: Vec<Arc<image::DynamicImage>> = Vec::new();
     for (i, icons) in (1..=4).enumerate() {
         let ms = 3_000 + 1_500 * i as u64;
@@ -74,26 +77,34 @@ async fn the_fully_revealed_ban_results_are_the_saved_frame() {
         let frame = shown(&rgb);
         handed.push(Arc::clone(&frame));
         dump.observe(at(ms), seen, Some(frame));
-        // Only the latest results frame is held; the earlier ones are ours
-        // alone again.
+        // Only the latest results frame and the one before it are held;
+        // the earlier ones are ours alone again.
         let held: Vec<usize> = handed
             .iter()
             .enumerate()
             .filter(|(_, f)| Arc::strong_count(f) > 1)
             .map(|(k, _)| k)
             .collect();
-        assert_eq!(held, [i], "{icons} icons");
+        let want_held: Vec<usize> = (i.saturating_sub(1)..=i).collect();
+        assert_eq!(held, want_held, "{icons} icons");
     }
-    // The select's first frame (no title read here), then its read.
-    let roster = image::RgbImage::from_pixel(1280, 720, image::Rgb([30, 34, 44]));
+    // The select's first frame shows its title, then its read.
+    let select = select_with_title();
     let want = dump.want(at(9_000));
-    let seen = classify(want, &detect::GamePhase::Unknown, &roster, &dump.examples());
-    assert_eq!(seen, Seen::Other);
+    let examples = dump.examples();
+    let seen = classify_with(
+        want,
+        &detect::GamePhase::Unknown,
+        &select,
+        shows_title,
+        |f| examples.matches(f),
+    );
+    assert_eq!(seen, Seen::SelectTitle);
     dump.observe(at(9_000), seen, None);
     dump.observe(
         at(10_500),
         Seen::Phase(PregamePhase::HeroSelect),
-        Some(shown(&roster)),
+        Some(shown(&select)),
     );
     assert!(dump.finish(Duration::from_secs(30)).await);
 
@@ -110,55 +121,126 @@ async fn the_fully_revealed_ban_results_are_the_saved_frame() {
     assert!(saved == ban_results(4), "the four-icon frame is saved");
 }
 
-/// A 640x360 frame: black bars around the loading strip's vertical navy
-/// gradient. The same builders as the tests in `detect/loading_screen.rs`.
-fn navy_band() -> image::RgbImage {
-    let mut img = image::RgbImage::from_pixel(640, 360, image::Rgb([0, 0, 0]));
-    for y in 136..224 {
-        let t = (y - 136) as u8;
-        let navy = image::Rgb([20 + t / 4, 28 + t / 5, 42 + t / 3]);
-        for x in 0..640 {
-            img.put_pixel(x, y, navy);
-        }
-    }
+/// The hero select with its title: the roster, and a mark where the
+/// words-v1 read would find `SELECT A PREFERRED HERO` (the read itself
+/// needs the mask, which tests do not load).
+fn select_with_title() -> image::RgbImage {
+    let mut img = image::RgbImage::from_pixel(1280, 720, image::Rgb([30, 34, 44]));
+    fill(&mut img, (0.41, 0.165, 0.565, 0.2), TEXT);
     img
 }
 
-fn glyphs(img: &mut image::RgbImage, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>) {
-    for y in ys {
-        for x in xs.clone().filter(|x| x % 7 < 3) {
-            img.put_pixel(x, y, image::Rgb([240, 240, 240]));
-        }
-    }
+/// Stands in for the words-v1 read of the select title.
+fn shows_title(rgb: &image::RgbImage) -> bool {
+    let (w, h) = rgb.dimensions();
+    rgb.get_pixel(w / 2, h * 18 / 100).0 == TEXT
 }
 
-/// The `ENTERING GAME` slab: one line of white glyphs centred across the
-/// screen, 0.375 of its width, at half height.
-fn entering_game_slab() -> image::RgbImage {
-    let mut img = navy_band();
-    glyphs(&mut img, 200..440, 168..192);
-    img
+/// How the select comes after the ban results.
+enum SelectComes {
+    /// A frame showing its title, then its phase read.
+    Title,
+    /// Its phase read straight away, with no title frame first.
+    PhaseRead,
+    /// A plain roster frame (no title read), then its phase read.
+    Roster,
 }
 
-/// An `APPLYING UPDATE` band: the same navy band, its text left of centre,
-/// with a progress bar under it when `bar` is set, or centred above a bar
-/// when `centred` is set.
-fn applying_update_band(centred: bool, bar: bool) -> image::RgbImage {
-    let mut img = navy_band();
-    let (text, track) = if centred {
-        (220..420, 120..520)
-    } else {
-        (48..248, 48..592)
+/// A ban, the results revealed over two polls (two icons, then four), then
+/// the select as `comes`. Returns the saved ban results and whether the
+/// select's first frame was saved.
+async fn results_then_select(comes: SelectComes) -> (Option<image::RgbImage>, bool) {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dump = PregameDump::new(true, dir.path(), POLL).unwrap();
+    let start = Instant::now();
+    let at = |ms: u64| start + Duration::from_millis(ms);
+    let ban = image::RgbImage::from_pixel(64, 36, image::Rgb([40, 20, 20]));
+    dump.observe(at(0), Seen::Phase(PregamePhase::HeroBan), Some(shown(&ban)));
+    dump.observe(
+        at(1_500),
+        Seen::Phase(PregamePhase::HeroBan),
+        Some(shown(&ban)),
+    );
+    let examples = dump.examples();
+    let tick = |dump: &mut PregameDump, ms: u64, phase: detect::GamePhase, rgb: image::RgbImage| {
+        let want = dump.want(at(ms));
+        let seen = classify_with(want, &phase, &rgb, shows_title, |f| examples.matches(f));
+        let frame = keeps_frame(want, seen).then(|| shown(&rgb));
+        dump.observe(at(ms), seen, frame);
+        seen
     };
-    glyphs(&mut img, text, 160..176);
-    if bar {
-        for y in 196..200 {
-            for x in track.clone() {
-                img.put_pixel(x, y, image::Rgb([230, 232, 236]));
-            }
-        }
+    let unknown = || detect::GamePhase::Unknown;
+    for (ms, icons) in [(3_000, 2), (4_500, 4)] {
+        let seen = tick(&mut dump, ms, unknown(), ban_results(icons));
+        assert_eq!(seen, Seen::BanResults, "{icons} icons");
     }
-    img
+    let mut ms = 6_000;
+    match comes {
+        SelectComes::Title => {
+            let seen = tick(&mut dump, ms, unknown(), select_with_title());
+            assert_eq!(seen, Seen::SelectTitle);
+            ms += 1_500;
+        }
+        SelectComes::Roster => {
+            let roster = image::RgbImage::from_pixel(1280, 720, image::Rgb([30, 34, 44]));
+            let seen = tick(&mut dump, ms, unknown(), roster);
+            assert_eq!(seen, Seen::Other);
+            ms += 1_500;
+        }
+        SelectComes::PhaseRead => {}
+    }
+    let seen = tick(
+        &mut dump,
+        ms,
+        detect::GamePhase::HeroSelect,
+        select_with_title(),
+    );
+    assert_eq!(seen, Seen::Phase(PregamePhase::HeroSelect));
+    assert!(dump.finish(Duration::from_secs(30)).await);
+
+    let root = pregame_dir(dir.path());
+    let games: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.is_dir())
+        .collect();
+    assert_eq!(games.len(), 1);
+    let saved = image::open(games[0].join(BAN_RESULTS_NAME))
+        .ok()
+        .map(|i| i.to_rgb8());
+    (saved, games[0].join("heroselect_first.png").is_file())
+}
+
+#[tokio::test]
+async fn results_straight_into_the_select_title_save_the_held_frame() {
+    // No plain frame between: the title is read with no lag, so the held
+    // replacement was still the results, all four bans shown.
+    let (saved, select) = results_then_select(SelectComes::Title).await;
+    assert!(
+        saved == Some(ban_results(4)),
+        "the four-icon frame is saved"
+    );
+    assert!(select);
+}
+
+#[tokio::test]
+async fn results_straight_into_a_select_read_save_the_frame_before_the_held_one() {
+    // The phase read lags a poll, so the held frame may be the select
+    // sliding in: dropped, as before. The frame before it, which it
+    // confirmed, is saved instead.
+    let (saved, select) = results_then_select(SelectComes::PhaseRead).await;
+    assert!(saved == Some(ban_results(2)), "the two-icon frame is saved");
+    assert!(select);
+}
+
+#[tokio::test]
+async fn results_then_a_plain_roster_frame_save_the_frame_before_the_last() {
+    // The cost of not trusting a plain frame after a replacement: the
+    // last results frame may be the select sliding in, so the roster frame
+    // does not confirm it, and the frame before it is saved.
+    let (saved, select) = results_then_select(SelectComes::Roster).await;
+    assert!(saved == Some(ban_results(2)), "the two-icon frame is saved");
+    assert!(select);
 }
 
 const LOADING_WANTED: PregameWant = PregameWant {
@@ -173,7 +255,7 @@ fn an_applying_update_band_is_not_saved_as_loading() {
     let unknown = detect::GamePhase::Unknown;
     let no_title = |_: &image::RgbImage| false;
     for (centred, bar) in [(false, true), (false, false), (true, true)] {
-        let band = applying_update_band(centred, bar);
+        let band = applying_update_band(640, 360, centred, bar);
         // The plain loading check, which nothing else uses, still passes
         // it; the saver's stricter check does not.
         assert!(detect::loading_screen::is_loading_screen(&band));
@@ -187,7 +269,7 @@ fn an_applying_update_band_is_not_saved_as_loading() {
         classify_with(
             LOADING_WANTED,
             &unknown,
-            &entering_game_slab(),
+            &entering_game_slab(640, 360),
             no_title,
             no_title
         ),
