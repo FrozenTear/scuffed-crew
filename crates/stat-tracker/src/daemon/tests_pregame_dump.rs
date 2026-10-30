@@ -219,6 +219,127 @@ fn ban_results_shown_for_two_polls_keep_the_first_one() {
 }
 
 #[test]
+fn the_last_ban_results_frame_is_saved_and_only_one_is_held() {
+    // The ban icons and scores fill in under the title over four polls:
+    // each frame replaces the held one, and the last one is written.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    for (i, ms) in [3_000, 4_500, 6_000, 7_500].into_iter().enumerate() {
+        run.tick(ms, RESULTS, 3 + i as u32);
+        assert!(run.tracker.holds_frame());
+    }
+    // The select's first frame, then its read.
+    run.tick(9_000, Seen::Other, 7);
+    run.tick(10_500, SELECT, 8);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 6),
+            ("heroselect_first.png", 8),
+        ]
+    );
+}
+
+#[test]
+fn a_replacement_right_before_a_select_title_read_is_not_saved() {
+    // With the new reader: the last results frame is confirmed by the
+    // select's first frame (no title read yet) and saved.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(6_000, Seen::Other, 5);
+    run.tick(7_500, Seen::SelectTitle, 6);
+    run.tick(9_000, SELECT, 7);
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 4),
+            ("heroselect_first.png", 7),
+        ]
+    );
+    // A replacement right before a select title read may be the select
+    // sliding in under a results title: dropped, never saved as the results.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(6_000, RESULTS, 5);
+    run.tick(7_500, Seen::SelectTitle, 6);
+    run.tick(9_000, SELECT, 7);
+    assert!(
+        run.names().iter().all(|(n, _)| *n != "ban_results.png"),
+        "{:?}",
+        run.names()
+    );
+}
+
+#[test]
+fn a_release_writes_the_replacement_it_holds() {
+    // The game closes while the results are still up: no select follows
+    // the held replacement, so it is written.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.release(5_000);
+    assert!(!run.tracker.holds_frame());
+    assert_eq!(
+        run.names(),
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 2),
+            ("ban_results.png", 4),
+        ]
+    );
+}
+
+#[test]
+fn a_replacement_right_before_the_select_read_is_not_saved() {
+    // The frame just before the select read is the select's first frame:
+    // it replaced the earlier results frame and is dropped, so nothing is
+    // written rather than a select frame.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, BAN, 2);
+    run.tick(3_000, RESULTS, 3);
+    run.tick(4_500, RESULTS, 4);
+    run.tick(6_000, SELECT, 5);
+    assert!(
+        run.names().iter().all(|(n, _)| *n != "ban_results.png"),
+        "{:?}",
+        run.names()
+    );
+    assert!(run.tracker.holds_frame(), "the select's frame, no results");
+}
+
+#[test]
+fn a_replacement_keeps_the_window_of_the_first_candidate() {
+    // 1.5 s polls: results from 1.5 s on, replaced every poll, and no
+    // next screen. The window (16.5 s) runs from the first frame, so the
+    // held one is dropped at 19.5 s however recent it is.
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    for (i, ms) in (1_500..=18_000).step_by(1_500).enumerate() {
+        run.tick(ms, RESULTS, 2 + i as u32);
+    }
+    assert!(run.tracker.holds_frame());
+    run.tick(19_500, RESULTS, 30);
+    assert!(!run.tracker.holds_frame());
+    run.tick(21_000, Seen::Other, 31);
+    run.tick(22_500, SELECT, 32);
+    assert!(run.names().iter().all(|(n, _)| *n != "ban_results.png"));
+}
+
+#[test]
 fn a_ban_back_after_a_long_gap_drops_the_candidate() {
     let mut run = Run::new();
     run.tick(0, BAN, 1);

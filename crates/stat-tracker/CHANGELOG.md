@@ -15,6 +15,17 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.6.0-alpha.1.3
+
+This alpha fixes two mistakes in the opt-in pre-game screen saves. The ban results picture now shows the bans and scores instead of the screen before they appear, and a game update screen is no longer saved as the loading screen. Nothing changes while the switch is off.
+
+### Highlights
+
+- The ban results picture is the last frame of the ban results screen, taken after the ban icons and scores have filled in.
+- An APPLYING UPDATE band shown during a game update is no longer saved as `loading.png`.
+
+Technical detail. Ban results: each later poll that still shows the ban results title replaces the held frame, the way `heroselect_last.png` is replaced, and the last one is written when the next screen shows. The tracker still holds only one frame. The title shape rule is unchanged: the title area is only the BAN RESULTS text, and the icons are below it, so a fully revealed screen passes it as before. The held frame is still kept only when one more non-phase frame follows it, and the 15 seconds plus one poll interval run from the first candidate frame, so a replacement does not extend them. A replacement read right before the hero select (its phase read or its title) may be the select sliding in, so it is dropped and no ban results picture is saved for that game rather than a wrong one. When the game closes or capture stops while the results are still up, the held frame is saved. Loading: the pre-game saves now also check that the white text in the ENTERING GAME strip is one line, centred across the screen and about as wide as those words. The plain loading check is unchanged, and nothing else used it.
+
 ## 0.6.0-alpha.1.2
 
 This alpha adds an opt-in switch that saves pictures of the pre-game screens on your PC, so we can tune the detection of them, and a Settings line that tells you who can see your stats on the website. Nothing changes unless you turn the switch on, and the Settings line appears only when you are signed in.

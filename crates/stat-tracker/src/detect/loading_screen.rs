@@ -10,6 +10,10 @@
 //! test only adds the gradient. A dark scene (a spawn room, footage) has
 //! rows of many colours and no dominant one. Used only by the
 //! opt-in pre-game screen saves; no boundary or outcome reads it.
+//!
+//! The saves use the stricter [`is_entering_game`]: the same check plus
+//! the place and width of the `ENTERING GAME` text, so a navy band with
+//! other text (an `APPLYING UPDATE` band during a game update) fails.
 
 use image::RgbImage;
 
@@ -48,6 +52,65 @@ const ROW_FLAT_MIN: f32 = 0.80;
 /// The middle is the loading strip when at least this share of its
 /// counted rows is flat.
 const FLAT_ROWS_MIN: f32 = 0.85;
+
+/// The `ENTERING GAME` text, as shares of the 16:9 game area: one line of
+/// white glyphs centred across the screen, about 0.375 of its width,
+/// centred down the strip at half height.
+const TEXT_CENTRE_X_TOL: f32 = 0.05;
+const TEXT_WIDTH_MIN: f32 = 0.25;
+const TEXT_WIDTH_MAX: f32 = 0.50;
+const TEXT_CENTRE_Y_MIN: f32 = 0.44;
+const TEXT_CENTRE_Y_MAX: f32 = 0.56;
+const TEXT_HEIGHT_MAX: f32 = 0.10;
+
+/// Fewest glyph samples that make text (a few stray white pixels do not).
+const TEXT_SAMPLES_MIN: u32 = 24;
+
+/// [`is_loading_screen`] and the `ENTERING GAME` text where it sits: the
+/// glyphs in the middle band span one line, centred across the screen and
+/// about as wide as those words. A navy band with its text elsewhere, or
+/// wider (a progress bar under it), is not the loading screen. Only the
+/// pre-game saves use it; [`is_loading_screen`] is unchanged.
+pub fn is_entering_game(rgb: &RgbImage) -> bool {
+    is_loading_screen(rgb) && entering_game_text(rgb)
+}
+
+/// Whether the white glyphs of the middle band sit and span as the
+/// `ENTERING GAME` text does.
+fn entering_game_text(rgb: &RgbImage) -> bool {
+    let (w, h) = rgb.dimensions();
+    let (gx, gy, gw, gh) = crate::frame::geometry::game_rect_16_9(w, h);
+    let y0 = gy + gh * 300 / 1000;
+    let y1 = (y0 + gh * 400 / 1000).min(h);
+    let x1 = (gx + gw).min(w);
+    let (mut left, mut right, mut top, mut bottom) = (u32::MAX, 0u32, u32::MAX, 0u32);
+    let mut glyphs = 0u32;
+    for y in (y0..y1).step_by(2) {
+        for x in (gx..x1).step_by(2) {
+            let p = rgb.get_pixel(x, y).0;
+            if p[0].min(p[1]).min(p[2]) >= GLYPH_MIN {
+                glyphs += 1;
+                left = left.min(x);
+                right = right.max(x);
+                top = top.min(y);
+                bottom = bottom.max(y);
+            }
+        }
+    }
+    if glyphs < TEXT_SAMPLES_MIN || gw == 0 || gh == 0 {
+        return false;
+    }
+    let share_x = |x: u32| (x - gx) as f32 / gw as f32;
+    let share_y = |y: u32| (y - gy) as f32 / gh as f32;
+    let width = (right - left) as f32 / gw as f32;
+    let height = (bottom - top) as f32 / gh as f32;
+    let centre_x = (share_x(left) + share_x(right)) / 2.0;
+    let centre_y = (share_y(top) + share_y(bottom)) / 2.0;
+    (centre_x - 0.5).abs() <= TEXT_CENTRE_X_TOL
+        && (TEXT_WIDTH_MIN..=TEXT_WIDTH_MAX).contains(&width)
+        && (TEXT_CENTRE_Y_MIN..=TEXT_CENTRE_Y_MAX).contains(&centre_y)
+        && height <= TEXT_HEIGHT_MAX
+}
 
 /// Whether `rgb` looks like the loading screen.
 pub fn is_loading_screen(rgb: &RgbImage) -> bool {
@@ -127,6 +190,99 @@ mod tests {
     use image::Rgb;
 
     use super::*;
+
+    // Synthetic stand-ins made in code, no real screenshot. The saver's
+    // tests (`daemon/tests_pregame_reveal.rs`) keep the same two builders.
+
+    /// A 640x360 frame: black bars around the strip's vertical navy
+    /// gradient (rows 136 to 224, as on the loading screen).
+    fn navy_band() -> RgbImage {
+        let mut img = RgbImage::from_pixel(640, 360, Rgb([0, 0, 0]));
+        for y in 136..224 {
+            let t = (y - 136) as u8;
+            let navy = Rgb([20 + t / 4, 28 + t / 5, 42 + t / 3]);
+            for x in 0..640 {
+                img.put_pixel(x, y, navy);
+            }
+        }
+        img
+    }
+
+    fn glyphs(img: &mut RgbImage, xs: std::ops::Range<u32>, ys: std::ops::Range<u32>) {
+        for y in ys {
+            for x in xs.clone().filter(|x| x % 7 < 3) {
+                img.put_pixel(x, y, Rgb([240, 240, 240]));
+            }
+        }
+    }
+
+    /// The `ENTERING GAME` slab: one line of white glyphs centred across
+    /// the screen, 0.375 of its width, at half height.
+    fn entering_game_slab() -> RgbImage {
+        let mut img = navy_band();
+        glyphs(&mut img, 200..440, 168..192);
+        img
+    }
+
+    /// An `APPLYING UPDATE` band: the same navy band, its text left of
+    /// centre, with a progress bar under it when `bar` is set, or centred
+    /// above a bar when `centred` is set.
+    fn applying_update_band(centred: bool, bar: bool) -> RgbImage {
+        let mut img = navy_band();
+        let (text, track) = if centred {
+            (220..420, 120..520)
+        } else {
+            (48..248, 48..592)
+        };
+        glyphs(&mut img, text, 160..176);
+        if bar {
+            for y in 196..200 {
+                for x in track.clone() {
+                    img.put_pixel(x, y, Rgb([230, 232, 236]));
+                }
+            }
+        }
+        img
+    }
+
+    #[test]
+    fn an_applying_update_band_is_not_entering_game() {
+        // Off-centre text with a bar, off-centre text alone, centred text
+        // over a wide bar: each passes the plain loading check, and each
+        // fails the text place or width.
+        for (centred, bar) in [(false, true), (false, false), (true, true)] {
+            let band = applying_update_band(centred, bar);
+            assert!(is_loading_screen(&band), "centred {centred}, bar {bar}");
+            assert!(!is_entering_game(&band), "centred {centred}, bar {bar}");
+        }
+    }
+
+    #[test]
+    fn the_entering_game_slab_is_entering_game() {
+        let slab = entering_game_slab();
+        assert!(is_loading_screen(&slab));
+        assert!(is_entering_game(&slab));
+        // The other ENTERING GAME stand-ins here pass the stricter check too.
+        assert!(is_entering_game(&entering_game()));
+        assert!(is_entering_game(&entering_game_frame()));
+        assert!(is_entering_game(&navy_gradient()));
+        // The same layout at 1440p and 720p.
+        for (w, h) in [(2560, 1440), (1280, 720)] {
+            let big = image::imageops::resize(&slab, w, h, image::imageops::FilterType::Nearest);
+            assert!(is_entering_game(&big), "{w}x{h}");
+        }
+    }
+
+    #[test]
+    fn a_navy_band_with_no_text_is_not_entering_game() {
+        let mut slab = entering_game_slab();
+        for p in slab.pixels_mut() {
+            if p.0 == [240, 240, 240] {
+                p.0 = [30, 36, 60];
+            }
+        }
+        assert!(!is_entering_game(&slab));
+    }
 
     /// Black bars and a navy strip with white glyphs, like `ENTERING GAME`.
     fn entering_game() -> RgbImage {

@@ -32,6 +32,8 @@ mod tests_pregame_ban_title;
 #[cfg(test)]
 mod tests_pregame_dump;
 #[cfg(test)]
+mod tests_pregame_reveal;
+#[cfg(test)]
 mod tests_query_server;
 #[cfg(test)]
 mod tests_snapshot_policy;
