@@ -36,8 +36,9 @@
 //! frame. Each saved frame is one job for the pre-game writer, whose queue
 //! is bounded ([`super::pregame_dump::PREGAME_QUEUE`]). Nothing of the
 //! ring is ever written to disk; the PNG and sidecar writes go through
-//! hidden `.tmp` files that the staged sweep clears after a crash, and a
-//! folder of nothing else is no game ([`drop_leftover_folders`]).
+//! hidden `.tmp` files that the staged sweep
+//! ([`super::pregame_dump::sweep_staged`]) clears after a crash, and a
+//! folder of nothing but leftovers takes no retention slot.
 
 use crate::*;
 use std::collections::VecDeque;
@@ -860,68 +861,5 @@ impl PostSink for DumpSink<'_> {
         }
         self.log.pending = Some(self.note(&folder));
         retry_pending(self.log, self.writer);
-    }
-}
-
-/// Whether `name` is left over from a post-game write: the hidden
-/// temporary file of a frame or of the sidecar.
-pub(crate) fn is_postgame_leftover(name: &str) -> bool {
-    name.strip_prefix('.')
-        .and_then(|n| n.strip_suffix(".tmp"))
-        .is_some_and(|n| {
-            n == POSTGAME_SIDECAR || (n.starts_with("postgame_") && n.ends_with(".png"))
-        })
-}
-
-/// Whether the game folder `dir` holds post-game leftovers and nothing
-/// else: no game, so it takes no retention slot
-/// ([`super::pregame_dump::prune_pregame_games`]). An empty folder, or
-/// one with a pre-game staged frame, is left to the pre-game rules.
-pub(crate) fn only_postgame_leftovers(dir: &std::path::Path) -> bool {
-    let Ok(files) = std::fs::read_dir(dir) else {
-        return false;
-    };
-    let mut any = false;
-    for file in files {
-        let Ok(file) = file else {
-            return false;
-        };
-        if !file.file_name().to_str().is_some_and(is_postgame_leftover) {
-            return false;
-        }
-        any = true;
-    }
-    any
-}
-
-/// After a crash: delete each game folder under `root` but `except` that
-/// holds only post-game leftovers ([`only_postgame_leftovers`]), files
-/// first. Run at start and when a new game folder is made, before the
-/// staged sweep (which would leave such a folder empty, and an empty
-/// folder still counts as a game).
-pub(crate) fn drop_leftover_folders(root: &std::path::Path, except: Option<&str>) {
-    let Ok(games) = std::fs::read_dir(root) else {
-        return;
-    };
-    for game in games.flatten() {
-        let Ok(name) = game.file_name().into_string() else {
-            continue;
-        };
-        if !game.file_type().is_ok_and(|t| t.is_dir())
-            || !super::pregame_dump::is_game_folder(&name)
-            || except == Some(name.as_str())
-            || !only_postgame_leftovers(&game.path())
-        {
-            continue;
-        }
-        if let Ok(files) = std::fs::read_dir(game.path()) {
-            for file in files.flatten() {
-                if file.file_type().is_ok_and(|t| t.is_file()) {
-                    let _ = std::fs::remove_file(file.path());
-                }
-            }
-        }
-        // Only an empty folder goes.
-        let _ = std::fs::remove_dir(game.path());
     }
 }

@@ -151,8 +151,8 @@ async fn stale_staged_frames_are_swept_and_never_count_as_games() {
     left.sort();
     assert_eq!(left, ["notes.txt"]);
 
-    // When a new game folder is made: the last game's staged frame goes,
-    // the new game's own stays, and only folders count toward the 20.
+    // When a new game folder is made: the last game's staged frame goes
+    // (and its folder, left empty), and the new game's own stays.
     let stage = |folder: &str| {
         PregameOp::Stage(PregameShot {
             folder: folder.to_string(),
@@ -179,5 +179,106 @@ async fn stale_staged_frames_are_swept_and_never_count_as_games() {
         .filter(|n| is_game_folder(n))
         .collect();
     games.sort();
-    assert_eq!(games, ["20261002_000000", "20261003_000000"]);
+    assert_eq!(games, ["20261001_000000", "20261003_000000"]);
+}
+
+/// A game folder `name` under `root` holding `files`, each with its name
+/// as its content.
+fn game_with(root: &std::path::Path, name: &str, files: &[&str]) -> std::path::PathBuf {
+    let dir = root.join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    for file in files {
+        std::fs::write(dir.join(file), file.as_bytes()).unwrap();
+    }
+    dir
+}
+
+/// Every name in `dir`, dot names too, sorted; empty when it is gone.
+fn all_in(dir: &std::path::Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .map(|it| {
+            it.map(|e| e.unwrap().file_name().into_string().unwrap())
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn starting_the_saver_deletes_every_leftover_and_no_saved_screen() {
+    // A run killed mid-game left staged and temporary files: in the
+    // pre-game folder itself, next to saved screens, and alone in a
+    // folder. Starting the saver (tracker start with the switch on)
+    // deletes them all, and that folder with them; saved screens and
+    // anything not ours stay.
+    let dir = tempfile::tempdir().unwrap();
+    let root = pregame_dir(dir.path());
+    let saved = game_with(
+        &root,
+        "20261001_000000",
+        &[
+            "heroban_first.png",
+            ".ban_results.png.staged",
+            ".loading.png.staged",
+            ".heroban_last.png.tmp",
+        ],
+    );
+    let lone = game_with(&root, "20261002_000000", &[".loading.png.staged"]);
+    let other = game_with(&root, "keep-me", &[".x.png.staged"]);
+    std::fs::write(root.join(".order.tmp"), b"x").unwrap();
+    let dump = PregameDump::new(true, dir.path(), POLL).unwrap();
+    assert!(dump.finish(Duration::from_secs(30)).await);
+    assert_eq!(all_in(&saved), ["heroban_first.png"]);
+    assert!(!lone.exists(), "a folder of leftovers only is deleted");
+    assert_eq!(all_in(&other), [".x.png.staged"], "not a game folder");
+    assert!(!root.join(".order.tmp").exists());
+}
+
+#[test]
+fn a_folder_of_leftovers_takes_no_slot_and_is_deleted() {
+    // Two slots: an older saved game, then a folder holding only a staged
+    // frame, then a new game. The leftover folder does not push the saved
+    // game out, and it is deleted when the new game's folder is made.
+    let dir = tempfile::tempdir().unwrap();
+    let root = pregame_dir(dir.path());
+    let saved = game_with(&root, "20261001_000000", &["mapvote_first.png"]);
+    let lone = game_with(&root, "20261002_000000", &[".ban_results.png.staged"]);
+    let shot = PregameOp::Save(PregameShot {
+        folder: "20261003_000000".to_string(),
+        name: "mapvote_first.png",
+        frame: frame(8),
+    });
+    write_pregame_ops(&root, &[shot], 2, &mut Vec::new());
+    assert_eq!(all_in(&saved), ["mapvote_first.png"]);
+    assert!(!lone.exists());
+    assert_eq!(all_in(&root.join("20261003_000000")), ["mapvote_first.png"]);
+}
+
+#[test]
+fn a_staged_file_never_makes_retention_delete_a_saved_game() {
+    // Two slots, two saved games (one with a staged frame left in it),
+    // and a new game whose first write is a staged frame. That staged
+    // frame is no saved game, so retention deletes neither saved game;
+    // only the old leftover goes, and the new game keeps its own.
+    let dir = tempfile::tempdir().unwrap();
+    let root = pregame_dir(dir.path());
+    let first = game_with(
+        &root,
+        "20261001_000000",
+        &["heroban_first.png", ".ban_results.png.staged"],
+    );
+    let second = game_with(&root, "20261002_000000", &["loading.png"]);
+    let stage = PregameOp::Stage(PregameShot {
+        folder: "20261003_000000".to_string(),
+        name: LOADING_NAME,
+        frame: frame(8),
+    });
+    write_pregame_ops(&root, &[stage], 2, &mut Vec::new());
+    assert_eq!(all_in(&first), ["heroban_first.png"]);
+    assert_eq!(all_in(&second), ["loading.png"]);
+    assert_eq!(
+        all_in(&root.join("20261003_000000")),
+        [staged_name(LOADING_NAME)]
+    );
 }

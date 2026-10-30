@@ -20,14 +20,14 @@ mod shutdown;
 pub(crate) mod snapshot_policy;
 mod sync_sched;
 mod tab;
-// The loading stand-ins shared with `detect/loading_screen.rs`'s tests;
-// the lib's test-only module is not built for the bin's tests.
 #[cfg(test)]
 mod tests_debug_dumps;
 #[cfg(test)]
 mod tests_frame_copies;
 #[cfg(test)]
 mod tests_gui_presence;
+// The loading stand-ins shared with `detect/loading_screen.rs`'s tests;
+// the lib's test-only module is not built for the bin's tests.
 #[cfg(test)]
 #[path = "../detect/tests_loading_stand_ins.rs"]
 mod tests_loading_stand_ins;

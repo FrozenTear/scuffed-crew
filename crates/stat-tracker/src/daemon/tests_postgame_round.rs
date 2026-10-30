@@ -1,6 +1,8 @@
 //! Tests for the post-game saves' poll pacing, ring age filter, dedup
 //! relaxation, folder owner, final sidecar note, dead writer and crash
-//! leftovers. Synthetic stand-ins only (see `tests_postgame_dump.rs`).
+//! leftovers (the post-game temp files, cleared by the shared pre-game
+//! sweep and retention rules). Synthetic stand-ins only (see
+//! `tests_postgame_dump.rs`).
 
 use super::postgame_dump::*;
 use super::pregame_dump::*;
@@ -446,8 +448,8 @@ fn leftover_only_folders_take_no_retention_slot() {
         );
     }
     // Three folders of post-game crash leftovers, newer than every real
-    // game: a temp frame, a temp sidecar, both. (A pre-game staged frame
-    // is the live game's and counts, by the pre-game rules.)
+    // game: a temp frame, a temp sidecar, both. (The shared rule from the
+    // pre-game saves: staged frames are covered by its own tests.)
     write(&root.join("20261030_110000"), &[".postgame_01.png.tmp"]);
     write(&root.join("20261030_110100"), &[".postgame.json.tmp"]);
     write(
@@ -462,8 +464,6 @@ fn leftover_only_folders_take_no_retention_slot() {
         .filter(|f| root.join(f).join("postgame_01.png").exists())
         .count();
     assert_eq!(real, PREGAME_KEEP_GAMES);
-    assert!(only_postgame_leftovers(&root.join("20261030_110200")));
-    assert!(!only_postgame_leftovers(&root.join("20261030_120000")));
     assert!(
         root.join("20261030_100000").exists(),
         "the oldest game stays"
@@ -501,9 +501,4 @@ fn a_new_game_folder_clears_the_leftover_folders_and_keeps_every_real_game() {
     let folders = names_in(root);
     assert_eq!(folders.len(), PREGAME_KEEP_GAMES, "{folders:?}");
     assert_eq!(folders[0], "20261030_100000", "no real game pushed out");
-    assert!(is_postgame_leftover(".postgame_07.png.tmp"));
-    assert!(is_postgame_leftover(".postgame.json.tmp"));
-    assert!(!is_postgame_leftover("postgame_07.png"));
-    assert!(!is_postgame_leftover(".ban_results.png.staged"));
-    assert!(!is_postgame_leftover(".order.tmp"));
 }
