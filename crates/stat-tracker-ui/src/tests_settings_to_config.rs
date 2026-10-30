@@ -219,6 +219,10 @@ fn the_pregame_screens_switch_maps_to_its_config_key_both_ways() {
     let mut on = defaults.clone();
     ConfigEdit::SavePregameScreens(true).apply(&mut on);
     assert!(on.debug_save_pregame_screens);
+    // Tagged After restart: until the tracker restarts, the switch counts
+    // as one change waiting.
+    assert_eq!(crate::settings_model::changes_waiting(&defaults, &on), 1);
+    assert_eq!(crate::settings_model::changes_waiting(&on, &on), 0);
     let text = Config::text_for_save(None, &on).expect("save on");
     assert!(text.contains("debug_save_pregame_screens = true"), "{text}");
     let read = Config::parse_file_contents(&text).expect("parse on");
