@@ -217,6 +217,11 @@ fn game_view<'a>(id: &str, row: Option<&'a GameRow>, error: Option<&str>) -> Gam
     }
 }
 
+/// The top "Back to My Stats" link. The not found panel already offers it.
+fn shows_top_back_link(view: &GameView) -> bool {
+    !matches!(view, GameView::Missing)
+}
+
 /// Known cells the reader flagged, each counted once.
 fn unsure_count(fields: &[String]) -> usize {
     scuffed_types::SUSPECT_FIELD_NAMES
@@ -362,7 +367,9 @@ pub fn StatsMatch(id: String) -> Element {
     let row = data.as_ref().and_then(|d| d.as_ref());
     let error = game.error.read().clone();
 
-    let body = match game_view(&route_id, row, error.as_deref()) {
+    let view = game_view(&route_id, row, error.as_deref());
+    let show_back = shows_top_back_link(&view);
+    let body = match view {
         GameView::Found(row) => game_detail(row),
         GameView::Missing => rsx! {
             NotFoundPanel {
@@ -381,7 +388,9 @@ pub fn StatsMatch(id: String) -> Element {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: super::STATS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-game-game-css", css: GAME_CSS }
         div { class: "stats-page my-stats game-page",
-            Link { class: "game-back", to: Route::Stats {}, "Back to My Stats" }
+            if show_back {
+                Link { class: "game-back", to: Route::Stats {}, "Back to My Stats" }
+            }
             {body}
         }
     }
@@ -602,5 +611,11 @@ mod tests {
         assert!(html.contains("outcome-loss"), "{html}");
         assert!(!html.contains("stat-unsure-mark"), "{html}");
         assert!(!html.contains("unsure read"), "{html}");
+    }
+
+    #[test]
+    fn missing_game_offers_back_to_my_stats_once() {
+        assert!(!shows_top_back_link(&GameView::Missing));
+        assert!(shows_top_back_link(&GameView::Pending));
     }
 }
