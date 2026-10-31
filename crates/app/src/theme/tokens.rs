@@ -41,7 +41,7 @@ pub const CLASSIC: Template = Template {
     font_head: "'Space Grotesk', system-ui, sans-serif",
     font_body: "'Inter', system-ui, sans-serif",
     font_mono: "'JetBrains Mono', ui-monospace, monospace",
-    text_xs: "11px",
+    text_xs: "12px",
     default_theme: "light",
     dark: Palette {
         bg: "#17171d",
@@ -329,6 +329,12 @@ mod tests {
         assert!(css.contains("--text-2:"));
         assert!(css.contains("--space-1:"));
         assert!(css.contains("[data-accent=\"strategy\"]"));
+    }
+
+    #[test]
+    fn smallest_text_token_is_twelve_px() {
+        let css = theme_css(&BrandConfig::product_default());
+        assert!(css.contains("--text-xs: 12px;"), "{css}");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::ui::{LoadError, SkeletonRows};
+use crate::components::ui::{ChipButton, LoadError, SkeletonRows};
 use crate::routes::Route;
 use crate::util::encode_query;
 use scuffed_api_client::ApiClient;
@@ -179,7 +179,7 @@ const PAGE_CSS: &str = r#"
     }
     .strategy-card-mode {
         display: inline-block;
-        font-size: 0.65rem;
+        font-size: 0.75rem;
         padding: 0.15rem 0.5rem;
         border-radius: 999px;
         font-weight: 600;
@@ -200,7 +200,7 @@ const PAGE_CSS: &str = r#"
         margin-top: auto;
         padding-top: 0.5rem;
         border-top: 1px solid var(--border);
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: var(--text-3);
     }
 
@@ -305,18 +305,17 @@ pub fn StrategyBrowse() -> Element {
             }
 
             // Filter chips
-            div { class: "strategy-filters",
+            div { class: "strategy-filters", role: "group", aria_label: "Filter by mode",
                 for mode in GAME_MODES.iter() {
                     {
                         let mode_str = mode.to_string();
-                        let is_active = selected_mode() == *mode;
-                        let chip_class = if is_active { "filter-chip active" } else { "filter-chip" };
                         rsx! {
-                            button {
+                            ChipButton {
                                 key: "{mode}",
-                                class: "{chip_class}",
+                                class: "filter-chip".to_string(),
+                                label: mode.to_string(),
+                                pressed: selected_mode() == *mode,
                                 onclick: move |_| selected_mode.set(mode_str.clone()),
-                                "{mode}"
                             }
                         }
                     }

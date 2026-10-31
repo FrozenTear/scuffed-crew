@@ -16,7 +16,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 
-use crate::components::ui::{SeasonSelect, use_season_change, use_stats_season};
+use crate::components::ui::{SeasonSelect, TabButton, use_season_change, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::use_api_with;
 use crate::routes::Route;
@@ -108,6 +108,19 @@ enum StatsTab {
     Heroes,
     Maps,
     History,
+}
+
+/// The one tabpanel under the My Stats tabs.
+const MY_STATS_PANEL: &str = "my-stats-panel";
+
+/// Id of a My Stats tab button. The tabpanel is labelled by the selected one.
+fn stats_tab_id(tab: StatsTab) -> &'static str {
+    match tab {
+        StatsTab::Overview => "my-stats-tab-overview",
+        StatsTab::Heroes => "my-stats-tab-heroes",
+        StatsTab::Maps => "my-stats-tab-maps",
+        StatsTab::History => "my-stats-tab-history",
+    }
 }
 
 // -- Shared helpers --
@@ -342,7 +355,7 @@ const STATS_CSS: &str = r#"
     }
     .my-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
     .stats-gate-note {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: var(--text-3);
         margin: 0 0 0.75rem;
     }
@@ -386,7 +399,7 @@ const STATS_CSS: &str = r#"
         padding-top: 0;
         padding-bottom: 0.15rem;
         border-color: transparent;
-        font-size: 0.65rem;
+        font-size: 0.75rem;
         font-weight: 600;
         letter-spacing: 0.04em;
         text-transform: uppercase;
@@ -842,7 +855,7 @@ const STATS_CSS: &str = r#"
         background: var(--surface-2);
         border: 1px solid var(--warn);
         color: var(--warn);
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -901,7 +914,7 @@ const STATS_CSS: &str = r#"
         align-items: center;
     }
     .filter-label {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.05em;
         color: var(--text-3);
@@ -922,7 +935,7 @@ const STATS_CSS: &str = r#"
         background: color-mix(in srgb, var(--accent) 12%, var(--bg));
     }
     .filter-hint {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: var(--text-3);
         margin: 0;
         width: 100%;
@@ -975,15 +988,15 @@ const STATS_CSS: &str = r#"
         background: var(--bg);
         min-width: 4.5rem;
     }
-    .mode-chip-name { font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; }
+    .mode-chip-name { font-size: 0.75rem; color: var(--text-3); text-transform: uppercase; }
     .mode-chip-wr { font-size: 1.1rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
-    .mode-chip-n { font-size: 0.7rem; color: var(--text-3); }
+    .mode-chip-n { font-size: 0.75rem; color: var(--text-3); }
     .form-strip { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .form-chip {
         width: 1.6rem; height: 1.6rem;
         display: inline-flex; align-items: center; justify-content: center;
         border-radius: 4px;
-        font-size: 0.7rem; font-weight: 700;
+        font-size: 0.75rem; font-weight: 700;
     }
     .form-chip.win { background: color-mix(in srgb, var(--ok) 25%, transparent); color: var(--ok); }
     .form-chip.loss { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); }
@@ -996,7 +1009,7 @@ const STATS_CSS: &str = r#"
     }
     .map-callout.best { border-left: 3px solid var(--ok); }
     .map-callout.worst { border-left: 3px solid var(--danger); }
-    .map-callout-label { font-size: 0.7rem; text-transform: uppercase; color: var(--text-3); }
+    .map-callout-label { font-size: 0.75rem; text-transform: uppercase; color: var(--text-3); }
     .map-callout-name { font-weight: 600; color: var(--text); }
     .map-callout-meta { color: var(--text-2); font-variant-numeric: tabular-nums; }
 
@@ -1416,35 +1429,53 @@ pub fn Stats() -> Element {
             }
 
             // Tabs
-            div { class: "stats-tabs",
-                button {
-                    class: if tab() == StatsTab::Overview { "stats-tab active" } else { "stats-tab" },
+            div { class: "stats-tabs", role: "tablist", aria_label: "My Stats sections",
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Overview".to_string(),
+                    id: stats_tab_id(StatsTab::Overview).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
+                    selected: tab() == StatsTab::Overview,
                     onclick: move |_| tab.set(StatsTab::Overview),
-                    "Overview"
                 }
-                button {
-                    class: if tab() == StatsTab::Heroes { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Heroes".to_string(),
+                    id: stats_tab_id(StatsTab::Heroes).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
+                    selected: tab() == StatsTab::Heroes,
                     onclick: move |_| tab.set(StatsTab::Heroes),
-                    "Heroes"
                 }
-                button {
-                    class: if tab() == StatsTab::Maps { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Maps".to_string(),
+                    id: stats_tab_id(StatsTab::Maps).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
+                    selected: tab() == StatsTab::Maps,
                     onclick: move |_| tab.set(StatsTab::Maps),
-                    "Maps"
                 }
-                button {
-                    class: if tab() == StatsTab::History { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "History".to_string(),
+                    id: stats_tab_id(StatsTab::History).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
+                    selected: tab() == StatsTab::History,
                     onclick: move |_| {
                         tab.set(StatsTab::History);
                         page_cursor.set(None);
                         cursor_history.set(vec![None]);
                     },
-                    "History"
                 }
             }
 
             // Tab content
-            {tab_body}
+            div {
+                id: MY_STATS_PANEL,
+                role: "tabpanel",
+                aria_labelledby: stats_tab_id(tab()),
+                tabindex: "0",
+                {tab_body}
+            }
         }
     }
 }
@@ -2013,5 +2044,25 @@ mod map_mode_tests {
         assert_eq!(map_game_mode("Watchpoint"), "Escort");
         assert_eq!(map_game_mode("gibraltar"), "Escort");
         assert_eq!(map_game_mode("not a map"), "Other");
+    }
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::*;
+
+    #[test]
+    fn my_stats_tab_ids_are_unique_and_differ_from_the_panel() {
+        let tabs = [
+            StatsTab::Overview,
+            StatsTab::Heroes,
+            StatsTab::Maps,
+            StatsTab::History,
+        ];
+        let ids: Vec<&str> = tabs.iter().map(|t| stats_tab_id(*t)).collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert!(!ids[i + 1..].contains(id), "{id}");
+            assert_ne!(*id, MY_STATS_PANEL);
+        }
     }
 }
