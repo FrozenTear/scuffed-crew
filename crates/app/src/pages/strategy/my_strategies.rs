@@ -1,7 +1,8 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::{ConfirmDialog, Toast, use_toast};
+use crate::components::ui::InlineConfirm;
+use crate::components::{Toast, use_toast};
 use crate::hooks::use_api;
 use crate::routes::Route;
 use crate::state::auth::use_auth;
@@ -260,9 +261,10 @@ pub fn StrategyMy() -> Element {
     let mut toast = use_toast();
     let mut strategies = use_api::<ListResponse>("/api/strategy/strategies/mine");
 
-    // Delete confirmation state
-    let mut delete_open = use_signal(|| false);
+    // Which card is asking "Delete this strategy?" (inline strip, no modal)
     let mut delete_target: Signal<Option<StrategySummary>> = use_signal(|| None);
+    // A DELETE is in flight. Blocks a second click from sending another one.
+    let mut deleting = use_signal(|| false);
 
     // Auth guard
     let auth_state = auth();
@@ -290,14 +292,13 @@ pub fn StrategyMy() -> Element {
 
     // --- Delete handlers ---
 
-    let mut open_delete = move |strat: StrategySummary| {
-        delete_target.set(Some(strat));
-        delete_open.set(true);
-    };
-
     let on_delete_confirm = move |_| {
+        if deleting() {
+            return;
+        }
         if let Some(strat) = delete_target() {
             let id = strat.id.clone();
+            deleting.set(true);
             spawn(async move {
                 match ApiClient::web()
                     .delete(&format!("/api/strategy/strategies/{id}"))
@@ -305,18 +306,17 @@ pub fn StrategyMy() -> Element {
                 {
                     Ok(_) => {
                         toast.show(Toast::success("Strategy deleted."));
-                        delete_open.set(false);
                         delete_target.set(None);
                         strategies.refresh += 1;
                     }
                     Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
                 }
+                deleting.set(false);
             });
         }
     };
 
     let on_delete_cancel = move |_| {
-        delete_open.set(false);
         delete_target.set(None);
     };
 
@@ -394,16 +394,29 @@ pub fn StrategyMy() -> Element {
                                                 span { "{s.element_count} elements" }
                                                 span { "{updated_short}" }
                                             }
-                                            div { class: "my-strategy-card-actions",
-                                                Link {
-                                                    to: Route::StrategyEditor { id: s.id.clone() },
-                                                    class: "card-btn",
-                                                    "Edit"
+                                            if delete_target().is_some_and(|t| t.id == s.id) {
+                                                InlineConfirm {
+                                                    id: format!("delete-strategy-{}", s.id),
+                                                    title: format!("Delete \"{}\"?", s.name),
+                                                    body: "This cannot be undone.".to_string(),
+                                                    confirm_label: "Delete".to_string(),
+                                                    busy: deleting(),
+                                                    on_confirm: on_delete_confirm,
+                                                    on_cancel: on_delete_cancel,
                                                 }
-                                                button {
-                                                    class: "card-btn danger",
-                                                    onclick: move |_| open_delete(s_del.clone()),
-                                                    "Delete"
+                                            } else {
+                                                div { class: "my-strategy-card-actions",
+                                                    Link {
+                                                        to: Route::StrategyEditor { id: s.id.clone() },
+                                                        class: "card-btn",
+                                                        "Edit"
+                                                    }
+                                                    button {
+                                                        id: "delete-strategy-{s.id}-trigger",
+                                                        class: "card-btn danger",
+                                                        onclick: move |_| delete_target.set(Some(s_del.clone())),
+                                                        "Delete"
+                                                    }
                                                 }
                                             }
                                         }
@@ -415,19 +428,6 @@ pub fn StrategyMy() -> Element {
                         }
                     },
                 }
-            }
-
-            // Delete confirmation dialog
-            ConfirmDialog {
-                title: "Delete Strategy".to_string(),
-                message: format!(
-                    "Are you sure you want to delete \"{}\"? This cannot be undone.",
-                    delete_target().map(|s| s.name).unwrap_or_default()
-                ),
-                open: delete_open(),
-                danger: true,
-                on_confirm: on_delete_confirm,
-                on_cancel: on_delete_cancel,
             }
         }
     }
@@ -507,5 +507,14 @@ mod tests {
         assert_eq!(resp.data[0].name, "Attack");
         assert_eq!(resp.data[0].map_id, "circuit-royal");
         assert_eq!(resp.data[0].element_count, 3);
+    }
+
+    #[test]
+    fn delete_confirm_is_busy_while_the_request_is_in_flight() {
+        let src = include_str!("my_strategies.rs");
+        let busy = ["busy: ", "deleting()"].concat();
+        assert_eq!(src.matches(busy.as_str()).count(), 1);
+        let guard = ["if ", "deleting() {"].concat();
+        assert!(src.contains(guard.as_str()));
     }
 }
