@@ -13,7 +13,9 @@ use scuffed_types::{MeResponse, OrgRole, UserInfo};
 
 const CSS: &str = r#"
 .login-page {
-    min-height: 100vh;
+    /* The site main already pads 48px for the fixed nav. */
+    min-height: calc(100vh - 48px);
+    box-sizing: border-box;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -46,10 +48,9 @@ const CSS: &str = r#"
     margin-bottom: 1rem;
 }
 .login-field label {
-    font-size: 0.75rem;
-    color: var(--text-3);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: var(--text-2);
 }
 .login-field input {
     background: var(--bg);
@@ -1007,6 +1008,29 @@ async fn nostr_login_flow() -> Result<(), String> {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    fn css_rule_body<'a>(marker: &str) -> &'a str {
+        let rest = CSS.split(marker).nth(1).expect("rule in login CSS");
+        rest.split('}').next().expect("rule body")
+    }
+
+    #[test]
+    fn login_page_fits_under_the_fixed_nav() {
+        let page = css_rule_body(".login-page {");
+        assert!(page.contains("min-height: calc(100vh - 48px)"), "{page}");
+        assert!(page.contains("box-sizing: border-box"), "{page}");
+        assert!(
+            !page.contains("min-height: 100vh"),
+            "100vh here stacks on the main's own 100vh and makes the page scroll: {page}"
+        );
+    }
+
+    #[test]
+    fn field_labels_are_plain_sentence_case() {
+        let label = css_rule_body(".login-field label {");
+        assert!(!label.contains("uppercase"), "{label}");
+        assert!(!label.contains("0.75rem"), "{label}");
+    }
 
     fn http(status: u16, body: &str) -> scuffed_api_client::ClientError {
         scuffed_api_client::ClientError::Http {

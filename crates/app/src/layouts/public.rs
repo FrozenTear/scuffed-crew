@@ -495,6 +495,7 @@ const NAV_CSS: &str = r#"
         min-width: 0;
         padding-top: 48px;
         min-height: 100vh;
+        box-sizing: border-box;
     }
     .site-footer {
         border-top: 1px solid var(--border);
@@ -993,6 +994,12 @@ mod tests {
             !NAV_CSS.contains(".site-main > *"),
             "page roots keep their own widths"
         );
+    }
+
+    #[test]
+    fn site_main_counts_its_nav_padding_inside_its_height() {
+        let main = css_rule(NAV_CSS, ".site-main {");
+        assert!(has_decl(&main, "box-sizing: border-box"), "{main}");
     }
 
     fn css_rule(css: &str, marker: &str) -> String {
