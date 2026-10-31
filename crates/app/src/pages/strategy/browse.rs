@@ -179,7 +179,7 @@ const PAGE_CSS: &str = r#"
     }
     .strategy-card-mode {
         display: inline-block;
-        font-size: 0.65rem;
+        font-size: 0.75rem;
         padding: 0.15rem 0.5rem;
         border-radius: 999px;
         font-weight: 600;

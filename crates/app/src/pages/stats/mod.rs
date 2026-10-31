@@ -110,6 +110,19 @@ enum StatsTab {
     History,
 }
 
+/// The one tabpanel under the My Stats tabs.
+const MY_STATS_PANEL: &str = "my-stats-panel";
+
+/// Id of a My Stats tab button. The tabpanel is labelled by the selected one.
+fn stats_tab_id(tab: StatsTab) -> &'static str {
+    match tab {
+        StatsTab::Overview => "my-stats-tab-overview",
+        StatsTab::Heroes => "my-stats-tab-heroes",
+        StatsTab::Maps => "my-stats-tab-maps",
+        StatsTab::History => "my-stats-tab-history",
+    }
+}
+
 // -- Shared helpers --
 
 /// Class for win-rate TEXT values. Plain text tokens, never a traffic light.
@@ -386,7 +399,7 @@ const STATS_CSS: &str = r#"
         padding-top: 0;
         padding-bottom: 0.15rem;
         border-color: transparent;
-        font-size: 0.65rem;
+        font-size: 0.75rem;
         font-weight: 600;
         letter-spacing: 0.04em;
         text-transform: uppercase;
@@ -1420,24 +1433,32 @@ pub fn Stats() -> Element {
                 TabButton {
                     class: "stats-tab".to_string(),
                     label: "Overview".to_string(),
+                    id: stats_tab_id(StatsTab::Overview).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
                     selected: tab() == StatsTab::Overview,
                     onclick: move |_| tab.set(StatsTab::Overview),
                 }
                 TabButton {
                     class: "stats-tab".to_string(),
                     label: "Heroes".to_string(),
+                    id: stats_tab_id(StatsTab::Heroes).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
                     selected: tab() == StatsTab::Heroes,
                     onclick: move |_| tab.set(StatsTab::Heroes),
                 }
                 TabButton {
                     class: "stats-tab".to_string(),
                     label: "Maps".to_string(),
+                    id: stats_tab_id(StatsTab::Maps).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
                     selected: tab() == StatsTab::Maps,
                     onclick: move |_| tab.set(StatsTab::Maps),
                 }
                 TabButton {
                     class: "stats-tab".to_string(),
                     label: "History".to_string(),
+                    id: stats_tab_id(StatsTab::History).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
                     selected: tab() == StatsTab::History,
                     onclick: move |_| {
                         tab.set(StatsTab::History);
@@ -1448,7 +1469,13 @@ pub fn Stats() -> Element {
             }
 
             // Tab content
-            {tab_body}
+            div {
+                id: MY_STATS_PANEL,
+                role: "tabpanel",
+                aria_labelledby: stats_tab_id(tab()),
+                tabindex: "0",
+                {tab_body}
+            }
         }
     }
 }
@@ -2017,5 +2044,25 @@ mod map_mode_tests {
         assert_eq!(map_game_mode("Watchpoint"), "Escort");
         assert_eq!(map_game_mode("gibraltar"), "Escort");
         assert_eq!(map_game_mode("not a map"), "Other");
+    }
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::*;
+
+    #[test]
+    fn my_stats_tab_ids_are_unique_and_differ_from_the_panel() {
+        let tabs = [
+            StatsTab::Overview,
+            StatsTab::Heroes,
+            StatsTab::Maps,
+            StatsTab::History,
+        ];
+        let ids: Vec<&str> = tabs.iter().map(|t| stats_tab_id(*t)).collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert!(!ids[i + 1..].contains(id), "{id}");
+            assert_ne!(*id, MY_STATS_PANEL);
+        }
     }
 }

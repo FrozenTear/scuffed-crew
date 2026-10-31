@@ -1058,6 +1058,83 @@ mod tests {
         }
     }
 
+    /// Every `font-size:` value in `src` that is a rem or px size under 12px.
+    /// `var(--text-*)` sizes are skipped, theme tokens floor those.
+    fn sizes_below_twelve_px(src: &str) -> Vec<String> {
+        let mut small = Vec::new();
+        for (at, _) in src.match_indices("font-size:") {
+            let rest = &src[at + "font-size:".len()..];
+            let end = rest.find([';', '"', '}', '\n']).unwrap_or(rest.len());
+            let value = rest[..end].trim();
+            let px = if let Some(rem) = value.strip_suffix("rem") {
+                rem.parse::<f32>().ok().map(|r| r * 16.0)
+            } else if let Some(px) = value.strip_suffix("px") {
+                px.parse::<f32>().ok()
+            } else {
+                None
+            };
+            if px.is_some_and(|px| px < 12.0) {
+                small.push(value.to_string());
+            }
+        }
+        small
+    }
+
+    #[test]
+    fn pages_in_the_a11y_pass_never_drop_below_twelve_px() {
+        let files = [
+            ("layouts/public.rs", include_str!("public.rs")),
+            (
+                "components/ui/toggle.rs",
+                include_str!("../components/ui/toggle.rs"),
+            ),
+            (
+                "pages/leaderboards.rs",
+                include_str!("../pages/leaderboards.rs"),
+            ),
+            (
+                "pages/stats_member.rs",
+                include_str!("../pages/stats_member.rs"),
+            ),
+            ("pages/stats/mod.rs", include_str!("../pages/stats/mod.rs")),
+            (
+                "pages/stats/game.rs",
+                include_str!("../pages/stats/game.rs"),
+            ),
+            (
+                "pages/stats/heroes.rs",
+                include_str!("../pages/stats/heroes.rs"),
+            ),
+            (
+                "pages/stats/history.rs",
+                include_str!("../pages/stats/history.rs"),
+            ),
+            (
+                "pages/strategy/browse.rs",
+                include_str!("../pages/strategy/browse.rs"),
+            ),
+            (
+                "pages/strategy/patch_notes.rs",
+                include_str!("../pages/strategy/patch_notes.rs"),
+            ),
+        ];
+        for (name, src) in files {
+            let small = sizes_below_twelve_px(src);
+            assert!(small.is_empty(), "{name} has sizes below 12px: {small:?}");
+        }
+    }
+
+    #[test]
+    fn small_size_scan_sees_rem_and_px_but_not_tokens() {
+        // Built from pieces so this file's own scan does not see a small size.
+        let fs = ["font", "-size:"].concat();
+        let css = format!(
+            "a {{ {fs} 0.65rem; }} b {{ {fs} 11px; }} c {{ {fs} 0.75rem; }} \
+             d {{ {fs} var(--text-xs); }}"
+        );
+        assert_eq!(sizes_below_twelve_px(&css), vec!["0.65rem", "11px"]);
+    }
+
     fn css_rule(css: &str, marker: &str) -> String {
         let start = css
             .find(marker)

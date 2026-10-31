@@ -16,11 +16,14 @@ pub fn toggle_class(base: &str, on: bool) -> String {
     }
 }
 
-/// One tab. Put these inside an element with `role="tablist"`.
+/// One tab. Put these inside an element with `role="tablist"`. `id` names
+/// this tab, `controls` is the id of the `role="tabpanel"` element it shows.
 #[component]
 pub fn TabButton(
     class: String,
     label: String,
+    id: String,
+    controls: String,
     selected: bool,
     onclick: EventHandler<()>,
 ) -> Element {
@@ -29,6 +32,8 @@ pub fn TabButton(
         button {
             r#type: "button",
             role: "tab",
+            id: "{id}",
+            aria_controls: "{controls}",
             aria_selected: if selected { "true" } else { "false" },
             class: "{class}",
             onclick: move |_| onclick.call(()),
@@ -81,12 +86,16 @@ mod tests {
                     TabButton {
                         class: "stats-tab".to_string(),
                         label: "Overview".to_string(),
+                        id: "t-overview".to_string(),
+                        controls: "t-panel".to_string(),
                         selected: true,
                         onclick: |_| {},
                     }
                     TabButton {
                         class: "stats-tab".to_string(),
                         label: "Heroes".to_string(),
+                        id: "t-heroes".to_string(),
+                        controls: "t-panel".to_string(),
                         selected: false,
                         onclick: |_| {},
                     }
@@ -98,6 +107,13 @@ mod tests {
         assert_eq!(html.matches("aria-selected=\"true\"").count(), 1, "{html}");
         assert_eq!(html.matches("aria-selected=\"false\"").count(), 1, "{html}");
         assert!(html.contains("class=\"stats-tab active\""), "{html}");
+        assert_eq!(
+            html.matches("aria-controls=\"t-panel\"").count(),
+            2,
+            "{html}"
+        );
+        assert!(html.contains("id=\"t-overview\""), "{html}");
+        assert!(html.contains("id=\"t-heroes\""), "{html}");
     }
 
     #[test]

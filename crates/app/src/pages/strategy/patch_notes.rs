@@ -511,7 +511,7 @@ const PAGE_CSS: &str = r#"
     .patch-search-label {
         flex-shrink: 0;
         font-family: var(--font-mono);
-        font-size: 0.68rem;
+        font-size: 0.75rem;
         font-weight: 600;
         letter-spacing: 0.08em;
         text-transform: uppercase;
@@ -582,7 +582,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-year {
         font-family: var(--font-mono);
-        font-size: 0.68rem;
+        font-size: 0.75rem;
         font-weight: 600;
         letter-spacing: 0.14em;
         text-transform: uppercase;
@@ -647,7 +647,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-version-badge {
         font-family: var(--font-mono);
-        font-size: 0.72rem;
+        font-size: 0.75rem;
         font-weight: 600;
         padding: 0.12rem 0.45rem;
         border-radius: 4px;
@@ -679,7 +679,7 @@ const PAGE_CSS: &str = r#"
         white-space: nowrap;
     }
     .patch-hero-count {
-        font-size: 0.68rem;
+        font-size: 0.75rem;
         color: var(--text-2);
         background: var(--surface-2);
         padding: 0.08rem 0.4rem;
@@ -700,7 +700,7 @@ const PAGE_CSS: &str = r#"
         grid-column: 2 / -2;
     }
     .patch-tag-pill {
-        font-size: 0.6rem;
+        font-size: 0.75rem;
         padding: 0.08rem 0.4rem;
         border-radius: var(--radius-pill);
         font-weight: 600;
@@ -710,12 +710,12 @@ const PAGE_CSS: &str = r#"
     }
     .patch-tag-more {
         font-family: var(--font-mono);
-        font-size: 0.6rem;
+        font-size: 0.75rem;
         color: var(--text-3);
         white-space: nowrap;
     }
     .patch-expand-icon {
-        font-size: 0.65rem;
+        font-size: 0.75rem;
         color: var(--text-3);
         line-height: 1;
         transition: transform 0.2s;
@@ -795,7 +795,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-hero-toc-title {
         font-family: var(--font-mono);
-        font-size: 0.62rem;
+        font-size: 0.75rem;
         font-weight: 600;
         letter-spacing: 0.12em;
         text-transform: uppercase;
@@ -884,14 +884,14 @@ const PAGE_CSS: &str = r#"
     }
     .patch-hero-change-count {
         font-family: var(--font-mono);
-        font-size: 0.62rem;
+        font-size: 0.75rem;
         letter-spacing: 0.04em;
         text-transform: uppercase;
         color: var(--text-3);
         white-space: nowrap;
     }
     .patch-change-badge {
-        font-size: 0.6rem;
+        font-size: 0.75rem;
         padding: 0.1rem 0.45rem;
         border-radius: var(--radius-pill);
         font-weight: 700;
@@ -930,7 +930,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-change-marker {
         flex-shrink: 0;
-        font-size: 0.68rem;
+        font-size: 0.75rem;
         line-height: 1.6;
         font-weight: 700;
     }

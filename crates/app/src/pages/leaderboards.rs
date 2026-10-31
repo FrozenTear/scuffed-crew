@@ -83,7 +83,7 @@ const PAGE_CSS: &str = r#"
     .lb-table th {
         text-align: left;
         font-family: var(--font-mono);
-        font-size: 0.68rem;
+        font-size: 0.75rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
         color: var(--text-3);
@@ -292,6 +292,14 @@ fn wr_tone(wr: &ListResult) -> PillTone {
     }
 }
 
+/// The one tabpanel under the ranking metric tabs.
+const LB_PANEL: &str = "leaderboard-panel";
+
+/// Id of a ranking metric tab button. The tabpanel is labelled by the selected one.
+fn metric_tab_id(metric: &str) -> String {
+    format!("leaderboard-tab-{metric}")
+}
+
 #[component]
 pub fn Leaderboards() -> Element {
     let mut metric = use_signal(|| "winrate".to_string());
@@ -386,18 +394,24 @@ pub fn Leaderboards() -> Element {
                 TabButton {
                     class: "lb-tab".to_string(),
                     label: "Win rate".to_string(),
+                    id: metric_tab_id("winrate"),
+                    controls: LB_PANEL.to_string(),
                     selected: metric() == "winrate",
                     onclick: move |_| metric.set("winrate".into()),
                 }
                 TabButton {
                     class: "lb-tab".to_string(),
                     label: "K/D".to_string(),
+                    id: metric_tab_id("kd"),
+                    controls: LB_PANEL.to_string(),
                     selected: metric() == "kd",
                     onclick: move |_| metric.set("kd".into()),
                 }
                 TabButton {
                     class: "lb-tab".to_string(),
                     label: "Games".to_string(),
+                    id: metric_tab_id("games"),
+                    controls: LB_PANEL.to_string(),
                     selected: metric() == "games",
                     onclick: move |_| metric.set("games".into()),
                 }
@@ -427,54 +441,60 @@ pub fn Leaderboards() -> Element {
                 }
             }
 
-            Card {
-                if let Some(message) = message {
-                    p { class: "lb-status", "{message}" }
-                } else if let Some(split) = split.as_ref() {
-                    if split.ranked.is_empty() {
-                        p { class: "lb-status", "{WINRATE_NONE_RANKED}" }
-                    } else {
-                        table { class: "lb-table",
-                            thead {
-                                tr {
-                                    th { "#" }
-                                    th { "Player" }
-                                    th { "Games" }
-                                    th { "WR" }
-                                    th { "K/D" }
+            div {
+                id: LB_PANEL,
+                role: "tabpanel",
+                aria_labelledby: metric_tab_id(&metric()),
+                tabindex: "0",
+                Card {
+                    if let Some(message) = message {
+                        p { class: "lb-status", "{message}" }
+                    } else if let Some(split) = split.as_ref() {
+                        if split.ranked.is_empty() {
+                            p { class: "lb-status", "{WINRATE_NONE_RANKED}" }
+                        } else {
+                            table { class: "lb-table",
+                                thead {
+                                    tr {
+                                        th { "#" }
+                                        th { "Player" }
+                                        th { "Games" }
+                                        th { "WR" }
+                                        th { "K/D" }
+                                    }
                                 }
-                            }
-                            tbody {
-                                for (i, r) in split.ranked.iter().enumerate() {
-                                    {
-                                        let rank = i + 1;
-                                        let wr = wr_cell(r);
-                                        let kd = format!("{:.2}", r.kd);
-                                        rsx! {
-                                            tr { key: "{r.member_id}",
-                                                td { class: "lb-rank", "{rank}" }
-                                                td {
-                                                    Link {
-                                                        to: Route::MemberProfile { id: r.member_id.clone() },
-                                                        "{r.display_name}"
+                                tbody {
+                                    for (i, r) in split.ranked.iter().enumerate() {
+                                        {
+                                            let rank = i + 1;
+                                            let wr = wr_cell(r);
+                                            let kd = format!("{:.2}", r.kd);
+                                            rsx! {
+                                                tr { key: "{r.member_id}",
+                                                    td { class: "lb-rank", "{rank}" }
+                                                    td {
+                                                        Link {
+                                                            to: Route::MemberProfile { id: r.member_id.clone() },
+                                                            "{r.display_name}"
+                                                        }
                                                     }
-                                                }
-                                                td { class: "lb-num", "{r.games}" }
-                                                td { class: "lb-num",
-                                                    if wr.muted {
-                                                        span { class: "lb-wr-muted", "{wr.text}" }
-                                                    } else {
-                                                        Pill { tone: wr_tone(&wr), "{wr.text}" }
+                                                    td { class: "lb-num", "{r.games}" }
+                                                    td { class: "lb-num",
+                                                        if wr.muted {
+                                                            span { class: "lb-wr-muted", "{wr.text}" }
+                                                        } else {
+                                                            Pill { tone: wr_tone(&wr), "{wr.text}" }
+                                                        }
                                                     }
+                                                    td { class: "lb-num", "{kd}" }
                                                 }
-                                                td { class: "lb-num", "{kd}" }
                                             }
                                         }
                                     }
                                 }
                             }
+                            p { class: "lb-rule-note", "{note}" }
                         }
-                        p { class: "lb-rule-note", "{note}" }
                     }
                 }
             }
@@ -829,5 +849,17 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn metric_tab_ids_are_unique_and_differ_from_the_panel() {
+        let ids: Vec<String> = ["winrate", "kd", "games"]
+            .into_iter()
+            .map(metric_tab_id)
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert!(!ids[i + 1..].contains(id), "{id}");
+            assert_ne!(id, LB_PANEL);
+        }
     }
 }
