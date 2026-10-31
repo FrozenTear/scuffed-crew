@@ -326,7 +326,7 @@ fn page_label(route: &Route) -> PageLabel {
         Route::Apply {} => named("Apply"),
         Route::Tournaments {} => named("Tournaments"),
         Route::Tournament { id } => named(format!("Tournament | {id}")),
-        Route::IdentitySettings {} => named("Identity"),
+        Route::IdentitySettings {} => named(crate::pages::ACCOUNT_KEYS),
         Route::ProfileSettings {} => named("Profile"),
         Route::MyReports {} => named("Reports"),
         Route::DmInbox {} => named("Messages"),
