@@ -734,7 +734,7 @@ pub fn PublicLayout() -> Element {
                             Link {
                                 to: Route::IdentitySettings {},
                                 onclick: move |_| account_open.set(false),
-                                "Settings"
+                                { crate::pages::ACCOUNT_KEYS }
                             }
                             Link {
                                 to: Route::MyReports {},
@@ -879,7 +879,7 @@ pub fn PublicLayout() -> Element {
                 Link {
                     to: Route::IdentitySettings {},
                     onclick: move |_| close_mobile_nav(mobile_open),
-                    "Settings"
+                    { crate::pages::ACCOUNT_KEYS }
                 }
                 Link {
                     to: Route::MyReports {},

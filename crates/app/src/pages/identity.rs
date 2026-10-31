@@ -10,10 +10,24 @@ use crate::components::{Toast, is_http_status, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
 
+/// The one name for this page: the h1, the head title and the account menu.
+pub const ACCOUNT_KEYS: &str = "Account keys";
+
+const INTRO: &str = "Your account key is your ID in chat and direct messages. \
+    We can keep one for you, or you can bring your own.";
+const HINT_PUBLIC_KEY: &str = "Your public key is safe to share. It is how others know it is you.";
+const HINT_NIP05: &str = "A NIP-05 name looks like an email address and points to your key.";
+const HINT_BACKUP: &str =
+    "An ncryptsec backup is your key locked with a password. You need the password to use it.";
+const HINT_ADVANCED: &str = "You rarely need these. Importing a key or unlinking changes how \
+    chat and direct messages sign you in.";
+const HINT_UNLINK: &str =
+    "Removes the key from your account. Export a backup first if you want to keep it.";
+
 const PAGE_CSS: &str = r#"
     .identity-page {
         padding: 3rem 2rem;
-        max-width: 640px;
+        max-width: 760px;
         margin: 0 auto;
     }
     .identity-page-title {
@@ -167,6 +181,42 @@ const PAGE_CSS: &str = r#"
         gap: 0.5rem;
         margin-top: 0.5rem;
     }
+    .identity-section p.identity-hint {
+        color: var(--text-3);
+        font-size: var(--text-xs);
+        margin: 0 0 1rem;
+    }
+    .identity-intro {
+        color: var(--text-2);
+        font-size: var(--text-base);
+        line-height: 1.5;
+        margin: 0 0 1rem;
+    }
+    .identity-advanced summary {
+        cursor: pointer;
+        font-family: var(--font-head);
+        font-size: 1.15rem;
+        font-weight: 700;
+        color: var(--text);
+    }
+    .identity-advanced summary:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 2px;
+    }
+    .identity-advanced[open] summary {
+        margin-bottom: 0.75rem;
+    }
+    .identity-sub {
+        border-top: 1px solid var(--border);
+        padding-top: 1rem;
+        margin-top: 1rem;
+    }
+    .identity-sub h3 {
+        font-family: var(--font-head);
+        font-size: var(--text-base);
+        color: var(--text);
+        margin: 0 0 0.5rem;
+    }
     .identity-cta-actions {
         display: flex;
         gap: 0.6rem;
@@ -225,6 +275,19 @@ fn has_nip07_extension() -> bool {
         .unwrap_or(false)
 }
 
+/// The collapsed group for rare, riskier actions. Closed until the visitor opens
+/// it, so it never carries an `open` attribute of its own.
+#[component]
+fn AdvancedGroup(children: Element) -> Element {
+    rsx! {
+        details { class: "identity-section identity-advanced",
+            summary { "Advanced" }
+            p { class: "identity-hint", "{HINT_ADVANCED}" }
+            {children}
+        }
+    }
+}
+
 #[component]
 pub fn IdentitySettings() -> Element {
     let mut toast = use_toast();
@@ -268,7 +331,7 @@ pub fn IdentitySettings() -> Element {
         spawn(async move {
             match link_nostr_identity(&pubkey).await {
                 Ok(()) => {
-                    toast.show(Toast::success("Nostr identity linked!"));
+                    toast.show(Toast::success("Key linked."));
                     refresh += 1;
                     pubkey_input.set(String::new());
                 }
@@ -349,7 +412,7 @@ pub fn IdentitySettings() -> Element {
         spawn(async move {
             match ApiClient::web().delete("/api/nostr/identity").await {
                 Ok(()) => {
-                    toast.show(Toast::success("Nostr identity unlinked."));
+                    toast.show(Toast::success("Key unlinked."));
                     refresh += 1;
                 }
                 Err(e) => toast.show(Toast::error(format!("Unlink failed: {e}"))),
@@ -371,25 +434,25 @@ pub fn IdentitySettings() -> Element {
     let auth_state = auth();
     let identity_gate: Option<(&str, &str, Route, &str)> = match me_data.as_ref() {
         None if !auth_state.loading && !auth_state.is_logged_in() => Some((
-            "Sign in to manage your Nostr identity.",
+            "Sign in to manage your account keys.",
             "Sign in",
             Route::Login {},
             "ui-btn ui-btn--primary ui-btn--md",
         )),
         None if !auth_state.loading && !auth_state.is_org_member() => Some((
-            "You need to be an org member to link a Nostr identity.",
+            "You need to be an org member to manage account keys.",
             "Apply",
             Route::Apply {},
             "ui-btn ui-btn--primary ui-btn--md",
         )),
         Some(Err(e)) if is_http_status(&e.to_string(), 401) => Some((
-            "Sign in to manage your Nostr identity.",
+            "Sign in to manage your account keys.",
             "Sign in",
             Route::Login {},
             "ui-btn ui-btn--primary ui-btn--md",
         )),
         Some(Ok(me)) if me.member.is_none() => Some((
-            "You need to be an org member to link a Nostr identity.",
+            "You need to be an org member to manage account keys.",
             "Apply",
             Route::Apply {},
             "ui-btn ui-btn--primary ui-btn--md",
@@ -417,22 +480,24 @@ pub fn IdentitySettings() -> Element {
         crate::styles::StyleOnce { id: "scuffed-css-pages-identity-page-css", css: PAGE_CSS }
 
         main { class: "identity-page",
-            h1 { class: "identity-page-title", "Nostr Identity" }
+            h1 { class: "identity-page-title", "{ACCOUNT_KEYS}" }
+            p { class: "identity-intro", "{INTRO}" }
             p { class: "identity-reports-link",
                 Link { to: Route::MyReports {}, "My reports" }
             }
 
             div { class: "identity-section",
-                h2 { "Identity Status" }
+                h2 { "Your key" }
                 if let Some(m) = member {
                     if let Some(ref pubkey) = m.nostr_pubkey {
                         div { class: "identity-field",
-                            label { class: "identity-label", "Public Key" }
+                            label { class: "identity-label", "Public key" }
                             code { class: "identity-mono", "{pubkey}" }
                         }
+                        p { class: "identity-hint", "{HINT_PUBLIC_KEY}" }
                         div { class: "identity-row",
                             div { class: "identity-field",
-                                label { class: "identity-label", "Key Mode" }
+                                label { class: "identity-label", "Key mode" }
                                 span { class: "identity-pill",
                                     {m.nostr_key_mode.as_deref().unwrap_or("unknown")}
                                 }
@@ -448,29 +513,9 @@ pub fn IdentitySettings() -> Element {
                                 }
                             }
                         }
-                        if confirm_unlink() {
-                            InlineConfirm {
-                                id: "unlink-identity".to_string(),
-                                title: "Unlink this key?".to_string(),
-                                body: "This removes the key from your account. Export a backup first if you want to keep it.".to_string(),
-                                confirm_label: "Unlink".to_string(),
-                                busy: working(),
-                                on_confirm: do_unlink,
-                                on_cancel: move |_| confirm_unlink.set(false),
-                            }
-                        } else {
-                            div { class: "identity-actions",
-                                button {
-                                    id: "unlink-identity-trigger",
-                                    class: "identity-btn identity-btn-danger",
-                                    disabled: working(),
-                                    onclick: move |_| confirm_unlink.set(true),
-                                    "Unlink Identity"
-                                }
-                            }
-                        }
+                        p { class: "identity-hint", "{HINT_NIP05}" }
                     } else {
-                        p { "No Nostr identity linked. Use one of the options below to get started." }
+                        p { "No key is linked yet. Use one of the options below to get started." }
                     }
                 } else if let Some((lead, label, route, btn_class)) = identity_gate {
                     p { "{lead}" }
@@ -486,11 +531,11 @@ pub fn IdentitySettings() -> Element {
 
             if member.is_some() && !has_pubkey {
                 div { class: "identity-section",
-                    h2 { "Link Nostr Identity" }
+                    h2 { "Link a key" }
                     if has_extension {
                         div { class: "identity-row",
                             div { class: "identity-field",
-                                label { class: "identity-label", "Public Key (hex or npub)" }
+                                label { class: "identity-label", "Public key (hex or npub)" }
                                 input {
                                     class: "identity-input",
                                     r#type: "text",
@@ -514,15 +559,16 @@ pub fn IdentitySettings() -> Element {
                             }
                         }
                     } else {
-                        p { "Install a NIP-07 browser extension (nos2x, Alby, or similar) to link your Nostr identity." }
+                        p { "Install a NIP-07 browser extension (nos2x, Alby, or similar) to link your key." }
                     }
                 }
             }
 
             if member.is_some() && is_server_managed {
                 div { class: "identity-section",
-                    h2 { "Key Backup (NIP-49)" }
+                    h2 { "Back up your key" }
                     p { "Export your key as an encrypted ncryptsec backup. Keep this password. You will need it to import the key later (which links it as an external identity)." }
+                    p { class: "identity-hint", "{HINT_BACKUP}" }
                     div { class: "identity-field",
                         label { class: "identity-label", "Backup Password (min 12 chars)" }
                         input {
@@ -553,64 +599,95 @@ pub fn IdentitySettings() -> Element {
                 }
             }
 
-            if member.is_some() && is_server_managed {
-                div { class: "identity-section",
-                    h2 { "Import External Key (NIP-49)" }
-                    p { class: "identity-warning",
-                        "You currently have a server-managed key. Importing an external key is \
-                         disabled to protect it. To switch to an external key, first Unlink your \
-                         identity above, then import. Importing does not restore a key into \
-                         server-managed mode."
+            if member.is_some() {
+                AdvancedGroup {
+                if member.is_some() && is_server_managed {
+                    div { class: "identity-sub",
+                        h3 { "Import an external key" }
+                        p { class: "identity-warning",
+                            "You currently have a server-managed key. Importing an external key is \
+                             disabled to protect it. To switch to an external key, first unlink your \
+                             key below, then import. Importing does not restore a key into \
+                             server-managed mode."
+                        }
+                    }
+                } else if member.is_some() {
+                    div { class: "identity-sub",
+                        h3 { "Import an external key" }
+                        p {
+                            "Link an external Nostr key from an ncryptsec backup. This sets your \
+                             identity to external mode. The server will not manage a key for you. \
+                             It replaces any currently linked external key. The nsec is decrypted \
+                             only to derive your public key."
+                        }
+                        div { class: "identity-field",
+                            label { class: "identity-label", "ncryptsec" }
+                            input {
+                                class: "identity-input",
+                                r#type: "text",
+                                placeholder: "ncryptsec1...",
+                                value: "{import_ncryptsec}",
+                                oninput: move |e| import_ncryptsec.set(e.value()),
+                            }
+                        }
+                        div { class: "identity-field",
+                            label { class: "identity-label", "Password" }
+                            input {
+                                class: "identity-input",
+                                r#type: "password",
+                                placeholder: "Backup password",
+                                value: "{import_password}",
+                                oninput: move |e| import_password.set(e.value()),
+                            }
+                        }
+                        if confirm_import() {
+                            InlineConfirm {
+                                id: "import-key".to_string(),
+                                title: "Replace your linked key?".to_string(),
+                                body: "Importing sets your key to one you manage yourself. The server will no longer manage a key for you, and any key linked now is replaced.".to_string(),
+                                confirm_label: "Import key".to_string(),
+                                busy: working(),
+                                on_confirm: do_import_key,
+                                on_cancel: move |_| confirm_import.set(false),
+                            }
+                        } else {
+                            div { class: "identity-actions",
+                                button {
+                                    id: "import-key-trigger",
+                                    class: "identity-btn identity-btn-primary",
+                                    disabled: working() || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty(),
+                                    onclick: on_import_key,
+                                    if working() { "Importing..." } else { "Import Key" }
+                                }
+                            }
+                        }
                     }
                 }
-            } else if member.is_some() {
-                div { class: "identity-section",
-                    h2 { "Import External Key (NIP-49)" }
-                    p {
-                        "Link an external Nostr key from an ncryptsec backup. This sets your \
-                         identity to external mode. The server will not manage a key for you. \
-                         It replaces any currently linked external key. The nsec is decrypted \
-                         only to derive your public key."
-                    }
-                    div { class: "identity-field",
-                        label { class: "identity-label", "ncryptsec" }
-                        input {
-                            class: "identity-input",
-                            r#type: "text",
-                            placeholder: "ncryptsec1...",
-                            value: "{import_ncryptsec}",
-                            oninput: move |e| import_ncryptsec.set(e.value()),
-                        }
-                    }
-                    div { class: "identity-field",
-                        label { class: "identity-label", "Password" }
-                        input {
-                            class: "identity-input",
-                            r#type: "password",
-                            placeholder: "Backup password",
-                            value: "{import_password}",
-                            oninput: move |e| import_password.set(e.value()),
-                        }
-                    }
-                    if confirm_import() {
-                        InlineConfirm {
-                            id: "import-key".to_string(),
-                            title: "Replace your linked key?".to_string(),
-                            body: "Importing sets your key to one you manage yourself. The server will no longer manage a key for you, and any key linked now is replaced.".to_string(),
-                            confirm_label: "Import key".to_string(),
-                            busy: working(),
-                            on_confirm: do_import_key,
-                            on_cancel: move |_| confirm_import.set(false),
-                        }
-                    } else {
-                        div { class: "identity-actions",
-                            button {
-                                id: "import-key-trigger",
-                                class: "identity-btn identity-btn-primary",
-                                disabled: working() || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty(),
-                                onclick: on_import_key,
-                                if working() { "Importing..." } else { "Import Key" }
+                    if has_pubkey {
+                        div { class: "identity-sub",
+                            h3 { "Unlink your key" }
+                            p { class: "identity-hint", "{HINT_UNLINK}" }
+                        if confirm_unlink() {
+                            InlineConfirm {
+                                id: "unlink-identity".to_string(),
+                                title: "Unlink this key?".to_string(),
+                                body: "This removes the key from your account. Export a backup first if you want to keep it.".to_string(),
+                                confirm_label: "Unlink".to_string(),
+                                busy: working(),
+                                on_confirm: do_unlink,
+                                on_cancel: move |_| confirm_unlink.set(false),
                             }
+                        } else {
+                            div { class: "identity-actions",
+                                button {
+                                    id: "unlink-identity-trigger",
+                                    class: "identity-btn identity-btn-danger",
+                                    disabled: working(),
+                                    onclick: move |_| confirm_unlink.set(true),
+                                    "Unlink Identity"
+                                }
+                            }
+                        }
                         }
                     }
                 }
@@ -729,4 +806,54 @@ async fn link_nostr_identity(pubkey: &str) -> Result<(), String> {
         .map_err(|e| format!("Verification failed: {e}"))?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn render(root: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn page_is_called_account_keys_everywhere() {
+        assert_eq!(ACCOUNT_KEYS, "Account keys");
+        assert!(!ACCOUNT_KEYS.contains("Nostr"));
+    }
+
+    #[test]
+    fn advanced_group_starts_collapsed_and_holds_its_children() {
+        fn root() -> Element {
+            rsx! {
+                AdvancedGroup { p { id: "inside", "Unlink your key" } }
+            }
+        }
+        let html = render(root);
+        assert!(html.contains("<details"), "{html}");
+        assert!(html.contains("<summary>Advanced</summary>"), "{html}");
+        assert!(html.contains("Unlink your key"), "{html}");
+        assert!(!html.contains(" open"), "must start collapsed: {html}");
+    }
+
+    #[test]
+    fn explainers_are_short_plain_sentences() {
+        for text in [
+            INTRO,
+            HINT_PUBLIC_KEY,
+            HINT_NIP05,
+            HINT_BACKUP,
+            HINT_ADVANCED,
+            HINT_UNLINK,
+        ] {
+            assert!(text.ends_with('.'), "{text}");
+            assert!(text.len() < 160, "{text}");
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text}"
+            );
+        }
+    }
 }

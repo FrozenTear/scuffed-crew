@@ -30,7 +30,7 @@ pub fn DmFailureNotice(failure: DmLoadFailure) -> Element {
             "{message}"
             if identity {
                 " "
-                Link { to: Route::IdentitySettings {}, "Visit identity settings" }
+                Link { to: Route::IdentitySettings {}, "Open account keys" }
                 " to enable it."
             }
         }
