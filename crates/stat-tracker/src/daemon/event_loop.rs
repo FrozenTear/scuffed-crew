@@ -601,9 +601,13 @@ pub(crate) async fn run_loop(
                             // the title card's phrase OCR does not run.
                             let end_reel =
                                 detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
+                            // A sure end-title read labels a post-game
+                            // frame `end_title` before the two-tick rule
+                            // makes it the signal.
+                            let end_title_seen = titles.sure_end_title().is_some();
                             let pregame_seen = pregame_want.map(|(want, examples)| {
-                                let seen = daemon::pregame_dump::classify(want, &phase, &rgb, &examples);
-                                (seen, daemon::pregame_dump::keeps_frame(want, seen))
+                                let seen = daemon::pregame_dump::classify_checked(want, &phase, &rgb, &examples);
+                                (seen, daemon::pregame_dump::keeps_checked(want, &seen))
                             });
                             // Result templates are not on the Tab frame. A
                             // polled outcome frame feeds the new reader's
@@ -645,7 +649,7 @@ pub(crate) async fn run_loop(
                                 postgame_want,
                                 signal.is_some() || end_reel,
                             );
-                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame, postgame)
+                            (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_outcome_png, pregame, postgame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
                             stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -663,7 +667,7 @@ pub(crate) async fn run_loop(
                         if let Some(seen) = kept_frame {
                             seen_stream = Some(seen);
                         }
-                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png, pregame, postgame) = match analyzed {
+                        let (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_outcome_png, pregame, postgame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
                                     &mut st,
@@ -679,7 +683,7 @@ pub(crate) async fn run_loop(
                                 return Ok(());
                             }
                             Ok(joined) => joined.unwrap_or_else(|_| {
-                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None, None, None)
+                                (None, detect::GamePhase::Unknown, None, false, false, detect::stability::FrameStability::default(), None, None, None, None)
                             }),
                         };
                         if stat_tracker::replace::shutdown_requested() {
@@ -821,7 +825,7 @@ pub(crate) async fn run_loop(
                             || {
                                 let game = st.active_game.as_ref();
                                 daemon::postgame_dump::PostTick {
-                                    end: daemon::postgame_dump::EndSeen::of(signal.map(|(_, source)| source), end_reel),
+                                    end: daemon::postgame_dump::EndSeen::of(signal.map(|(_, source)| source), end_reel, end_title_seen),
                                     confirmed: tick.signal_confirmed,
                                     running: game.is_some_and(|g| !g.finished()),
                                     finished: game.is_some_and(|g| g.finished()),

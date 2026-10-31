@@ -107,7 +107,8 @@ impl Run {
     }
 
     pub(crate) fn names(&self) -> Vec<(&str, u32)> {
-        self.shots.iter().map(|(_, n, f)| (*n, *f)).collect()
+        let saved = self.shots.iter().filter(|s| !s.1.starts_with("rejected_"));
+        saved.map(|(_, n, f)| (*n, *f)).collect()
     }
 }
 
@@ -1053,6 +1054,8 @@ const LOADING_WANTED: PregameWant = PregameWant {
     other_frame: true,
     select_title: false,
     ban_title: false,
+    roster: false,
+    rejected: 0,
 };
 
 fn no_title(_: &image::RgbImage) -> bool {
@@ -1114,9 +1117,9 @@ fn the_select_title_is_read_only_while_the_ban_results_wait() {
     let img = image::RgbImage::new(64, 36);
     let waiting = PregameWant {
         loading: false,
-        other_frame: true,
         select_title: true,
         ban_title: true,
+        ..LOADING_WANTED
     };
     assert_eq!(
         classify_with(waiting, &unknown, &img, |_| true, no_title),

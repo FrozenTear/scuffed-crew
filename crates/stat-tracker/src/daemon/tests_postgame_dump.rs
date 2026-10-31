@@ -933,7 +933,7 @@ fn switch_off_has_no_saver_and_the_poll_loop_checks_nothing_new() {
     };
     let (pregame, postgame) = kept_frames(Arc::clone(&img), None, Some(every), false);
     assert!(pregame.is_none() && postgame.is_some());
-    let pre = Some((Seen::BanResults, true));
+    let pre = Some((Seen::BanResults.into(), true));
     let (pregame, postgame) = kept_frames(Arc::clone(&img), pre, None, false);
     assert!(pregame.is_some_and(|(_, frame)| frame.is_some()) && postgame.is_none());
     for every_tick_polls in [true, false] {

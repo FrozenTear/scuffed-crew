@@ -154,7 +154,7 @@ impl Titles {
     }
 
     /// The word of a sure end-title read under `reader = "new"`.
-    fn sure_end_title(&self) -> Option<Outcome> {
+    pub fn sure_end_title(&self) -> Option<Outcome> {
         match self {
             Titles::Words(read) => read.sure(),
             Titles::Ocr | Titles::Held => None,

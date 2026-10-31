@@ -35,6 +35,7 @@ mod outcome_fixtures;
 mod pack_keeper_daemon;
 mod phase_fixtures;
 mod player_row_fixtures;
+mod pregame_frames;
 mod real_dim_zero_cells;
 mod result_signal_wiring;
 mod run_marker_sigterm;

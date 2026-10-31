@@ -517,7 +517,7 @@ fn loop_tick(
     let seen = classify_with(want, &detect::GamePhase::Unknown, &rgb, no_title, no_title);
     let (pre, frame) = kept_frames(
         image::DynamicImage::ImageRgb8(rgb),
-        Some((seen, keeps_frame(want, seen))),
+        Some((seen.into(), keeps_frame(want, seen))),
         Some(post_want),
         tick.end.is_some(),
     );
@@ -677,4 +677,222 @@ async fn the_sidecar_labels_the_rank_screens_first_frame_rank_update() {
         .map(|f| f["label"].as_str().unwrap())
         .collect();
     assert_eq!(labels, vec!["end_title", "accolades", "rank_update"]);
+}
+
+#[test]
+fn a_sure_end_title_with_no_signal_yet_is_the_end_title() {
+    use detect::match_end::OutcomeSource;
+    // The title's first frame: the two-tick rule gives no signal yet, and
+    // the end-reel hint wakes on the same read.
+    assert_eq!(EndSeen::of(None, true, true), Some(EndSeen::Title));
+    assert_eq!(EndSeen::of(None, false, true), Some(EndSeen::Title));
+    // The reel hint alone, or nothing.
+    assert_eq!(EndSeen::of(None, true, false), Some(EndSeen::Reel));
+    assert_eq!(EndSeen::of(None, false, false), None);
+    // A signal names its own source.
+    assert_eq!(
+        EndSeen::of(Some(OutcomeSource::RankScreen), false, true),
+        Some(EndSeen::Rank)
+    );
+    assert_eq!(
+        EndSeen::of(Some(OutcomeSource::EndTitle), false, false),
+        Some(EndSeen::Title)
+    );
+}
+
+#[test]
+fn a_window_opened_on_the_titles_first_frame_labels_it_end_title() {
+    // A Tab read finished the game, and the next poll is the title's first
+    // frame: the window opens on it (time zero), before any signal.
+    let mut run = Run::new();
+    run.play_until(10_000);
+    let first = EndSeen::of(None, true, true).expect("an end");
+    run.tick(10_500, ended(AFTER, first, false), banner());
+    assert!(run.tracker.window_open());
+    // The ring's earlier play frames are before it.
+    assert_eq!(run.rec.labels().last(), Some(&"end_title"));
+    assert_eq!(run.rec.times().last(), Some(&0.0));
+    assert!(
+        run.rec
+            .labels()
+            .iter()
+            .rev()
+            .skip(1)
+            .all(|l| *l == "before_end")
+    );
+}
+
+#[test]
+fn an_unread_frame_right_before_an_end_title_read_is_relabelled_end_title() {
+    let mut run = open_window();
+    // The title fading: no sure read, saved as `after_end`...
+    run.tick(2_500, AFTER, moving(1));
+    assert_eq!(run.rec.labels().last(), Some(&"after_end"));
+    // ...then read on the next tick: that frame was the title too.
+    run.tick(3_500, ended(AFTER, EndSeen::Title, false), moving(2));
+    assert_eq!(
+        run.rec.labels(),
+        vec!["end_title", "end_title", "end_title"]
+    );
+}
+
+/// Vertical bars in a seed-specific rhythm, 8-bit grey: a synthetic
+/// end-title word template (the words-v1 tests' own, no game art).
+fn bars(seed: u32, w: u32, h: u32) -> image::GrayImage {
+    image::GrayImage::from_fn(w, h, |x, y| {
+        let on = (2..h - 2).contains(&y)
+            && ((x / (2 + seed)).is_multiple_of(2) || (y + x * seed).is_multiple_of(11));
+        image::Luma([if on { 229 } else { 0 }])
+    })
+}
+
+/// A 1440p frame on a dark ground of green `level` (each tick its own, 10
+/// apart, so no frame is a near duplicate of the last), with `word` painted
+/// (doubled, in a team colour) where the end title sits.
+fn title_frame(level: u8, word: Option<&image::GrayImage>) -> image::RgbImage {
+    let mut frame = image::RgbImage::from_pixel(2560, 1440, image::Rgb([20, level, 50]));
+    if let Some(word) = word {
+        for y in 0..word.height() * 2 {
+            for x in 0..word.width() * 2 {
+                if word.get_pixel(x / 2, y / 2).0[0] > 100 {
+                    frame.put_pixel(1100 + x, 640 + y, image::Rgb([150, 20, 160]));
+                }
+            }
+        }
+    }
+    frame
+}
+
+/// The end titles' labels through the poll loop's own result read: each
+/// tick reads the end title with loaded words-v1 templates (the read the
+/// daemon's `shadow::read_end_title` makes), runs the end-reel wake and
+/// the two-tick poll signal on it, and builds the tick's end from those
+/// the way `event_loop` does. With `read_again`, the title is read once
+/// more after a fading frame with no read. Returns the sidecar's labels
+/// and times.
+async fn labels_of_a_real_end_title_read(
+    outcome: crate::shadow::result::Outcome,
+    read_again: bool,
+) -> Vec<(String, f64)> {
+    use detect::match_end::{
+        FinalScoreSource, OutcomeSource, ResultWords, Titles, detect_end_reel_with,
+        detect_outcome_signal_polled,
+    };
+    let data = tempfile::tempdir().unwrap();
+    let words = data.path().join(crate::shadow::result::WORDS_SUBDIR);
+    std::fs::create_dir_all(&words).unwrap();
+    let (victory, defeat) = (bars(2, 90, 34), bars(4, 80, 34));
+    for (name, img) in [
+        ("end_title_victory.png", &victory),
+        ("end_title_defeat.png", &defeat),
+    ] {
+        img.save(words.join(name)).unwrap();
+    }
+    let templates = crate::shadow::result::ResultTemplates::load_dir(&words)
+        .and_then(|t| t.end_titles())
+        .expect("end-title templates");
+    let word = match outcome {
+        crate::shadow::result::Outcome::Victory => &victory,
+        _ => &defeat,
+    };
+
+    let mut dump = PregameDump::new(true, data.path(), POLL).expect("on");
+    let mut stability = detect::stability::FrameStability::default();
+    let t0 = Instant::now();
+    let mut tick = |ms: u64, rgb: image::RgbImage, shows: bool| {
+        let img = image::DynamicImage::ImageRgb8(rgb.clone());
+        let titles = Titles::Words(templates.read_skipping(&rgb));
+        let sure = titles.sure_end_title();
+        assert_eq!(sure, shows.then_some(outcome), "{ms}: {titles:?}");
+        let end_reel = detect_end_reel_with(&img, &rgb, &titles);
+        let signal = detect_outcome_signal_polled(
+            &img,
+            &rgb,
+            &mut stability,
+            FinalScoreSource::Words,
+            &titles,
+            // The accolade and rank crops are dark: no word is read.
+            &ResultWords::ocr(),
+        );
+        if let Some((_, source)) = signal {
+            assert_eq!(source, OutcomeSource::EndTitle);
+        }
+        let post = PostTick {
+            end: EndSeen::of(signal.map(|(_, s)| s), end_reel, sure.is_some()),
+            confirmed: signal.is_some(),
+            running: true,
+            game_opened: Some(t0),
+            ..PostTick::default()
+        };
+        loop_tick(&mut dump, t0 + Duration::from_millis(ms), rgb, post);
+        signal.is_some()
+    };
+    // Play, then the title's first frame: no signal yet, only the wake.
+    assert!(!tick(0, title_frame(26, None), false));
+    assert!(!tick(1_500, title_frame(36, Some(word)), true));
+    // The same word on the next tick: the signal, the window opens.
+    assert!(tick(3_000, title_frame(46, Some(word)), true));
+    // The title fading, no sure read: saved as `after_end`, and with a
+    // read on the next tick relabelled `end_title`.
+    assert!(!tick(4_500, title_frame(56, None), false));
+    if read_again {
+        tick(6_000, title_frame(66, Some(word)), true);
+    }
+    assert!(dump.finish(Duration::from_secs(30)).await);
+
+    let root = pregame_dir(data.path());
+    let folders = names_in(&root);
+    assert_eq!(folders.len(), 1, "{folders:?}");
+    let doc: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join(&folders[0]).join(POSTGAME_SIDECAR)).unwrap(),
+    )
+    .unwrap();
+    doc["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| {
+            (
+                f["label"].as_str().unwrap().to_string(),
+                f["t_s"].as_f64().unwrap(),
+            )
+        })
+        .collect()
+}
+
+/// The labels of a real end title read: the first sighting (time zero,
+/// before the signal) and the signal's frame are `end_title`; the fading
+/// frame with no read is `after_end`, and `end_title` once the title is
+/// read on the tick after it, as is that read's own frame.
+async fn assert_end_title_labels(outcome: crate::shadow::result::Outcome) {
+    fn label(frames: &[(String, f64)]) -> Vec<(&str, f64)> {
+        frames.iter().map(|(l, t)| (l.as_str(), *t)).collect()
+    }
+    let frames = labels_of_a_real_end_title_read(outcome, true).await;
+    assert_eq!(
+        label(&frames),
+        vec![
+            ("end_title", 0.0),
+            ("end_title", 1.5),
+            ("end_title", 3.0),
+            ("end_title", 4.5)
+        ],
+        "{outcome:?}"
+    );
+    let frames = labels_of_a_real_end_title_read(outcome, false).await;
+    assert_eq!(
+        label(&frames),
+        vec![("end_title", 0.0), ("end_title", 1.5), ("after_end", 3.0)],
+        "{outcome:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_real_victory_title_read_labels_its_frames_end_title() {
+    assert_end_title_labels(crate::shadow::result::Outcome::Victory).await;
+}
+
+#[tokio::test]
+async fn a_real_defeat_title_read_labels_its_frames_end_title() {
+    assert_end_title_labels(crate::shadow::result::Outcome::Defeat).await;
 }

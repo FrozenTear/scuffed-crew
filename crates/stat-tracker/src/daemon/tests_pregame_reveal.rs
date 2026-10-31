@@ -262,6 +262,8 @@ const LOADING_WANTED: PregameWant = PregameWant {
     other_frame: true,
     select_title: false,
     ban_title: false,
+    roster: false,
+    rejected: 0,
 };
 
 #[test]

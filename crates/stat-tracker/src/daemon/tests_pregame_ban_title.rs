@@ -361,6 +361,8 @@ fn the_real_classify_uses_the_ban_title_check_for_the_ban_title() {
         other_frame: true,
         select_title: false,
         ban_title: true,
+        roster: false,
+        rejected: 0,
     };
     assert_eq!(
         classify(want, &unknown, &titled_frame(1280, 720, 0.0), &examples),

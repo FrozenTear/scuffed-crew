@@ -117,6 +117,29 @@ impl ShapeMetrics {
     }
 }
 
+/// A ban-results title check and the numbers that decided it: the shape
+/// rule's with no examples, the best example score otherwise.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct BanCheck {
+    pub(crate) pass: bool,
+    pub(crate) shape: Option<ShapeMetrics>,
+    pub(crate) score: Option<f32>,
+}
+
+impl BanCheck {
+    /// A failed check that came close: an example score of at least half
+    /// [`BAN_TITLE_MATCH_MIN`], or at least half the shape rule's least
+    /// share of bright title pixels. A roster or hero select frame has no
+    /// bright pixel there.
+    pub(crate) fn near_miss(&self) -> bool {
+        !self.pass
+            && (self.score.is_some_and(|s| s >= BAN_TITLE_MATCH_MIN / 2.0)
+                || self
+                    .shape
+                    .is_some_and(|m| m.bright >= SHAPE.bright_min / 2.0))
+    }
+}
+
 /// Measure [`SHAPE`] on `rgb`'s title region, at full resolution; `None`
 /// when the region is too small to have edge rows.
 pub(crate) fn shape_metrics(rgb: &image::RgbImage) -> Option<ShapeMetrics> {
@@ -269,12 +292,20 @@ impl BanTitleExamples {
             .reduce(f32::max)
     }
 
-    /// Whether the ban-results title is on `rgb`: an example match when
-    /// there are examples, the shape rule otherwise. The score or the
-    /// shape is logged at debug, to tune the rule from real runs, and so
-    /// are the numbers of a shape that passes: the title is looked for on
-    /// every poll while the ban results wait, so a pass comes once a poll.
+    /// Whether the ban-results title is on `rgb`: [`Self::check`]'s verdict
+    /// (tests).
+    #[cfg(test)]
     pub(crate) fn matches(&self, rgb: &image::RgbImage) -> bool {
+        self.check(rgb).pass
+    }
+
+    /// Whether the ban-results title is on `rgb`: an example match when
+    /// there are examples, the shape rule otherwise, with the numbers that
+    /// decided it. The score or the shape is logged at debug, to tune the
+    /// rule from real runs, and so are the numbers of a shape that passes:
+    /// the title is looked for on every poll while the ban results wait, so
+    /// a pass comes once a poll.
+    pub(crate) fn check(&self, rgb: &image::RgbImage) -> BanCheck {
         if self.cuts.is_empty() {
             let shape = shape_metrics(rgb);
             let pass = shape.is_some_and(|m| m.passes());
@@ -291,12 +322,20 @@ impl BanTitleExamples {
                     "ban-results title passed the shape rule"
                 );
             }
-            return pass;
+            return BanCheck {
+                pass,
+                shape,
+                score: None,
+            };
         }
         let score = self.best_score(rgb);
         let pass = score.is_some_and(|s| s >= BAN_TITLE_MATCH_MIN);
         tracing::debug!(target: "scuffed_stat_tracker", ?score, pass, "ban-results title score");
-        pass
+        BanCheck {
+            pass,
+            shape: None,
+            score,
+        }
     }
 }
 
