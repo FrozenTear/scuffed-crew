@@ -355,7 +355,7 @@ const STATS_CSS: &str = r#"
     }
     .my-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
     .stats-gate-note {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: var(--text-3);
         margin: 0 0 0.75rem;
     }
@@ -855,7 +855,7 @@ const STATS_CSS: &str = r#"
         background: var(--surface-2);
         border: 1px solid var(--warn);
         color: var(--warn);
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -914,7 +914,7 @@ const STATS_CSS: &str = r#"
         align-items: center;
     }
     .filter-label {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.05em;
         color: var(--text-3);
@@ -935,7 +935,7 @@ const STATS_CSS: &str = r#"
         background: color-mix(in srgb, var(--accent) 12%, var(--bg));
     }
     .filter-hint {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: var(--text-3);
         margin: 0;
         width: 100%;
@@ -988,15 +988,15 @@ const STATS_CSS: &str = r#"
         background: var(--bg);
         min-width: 4.5rem;
     }
-    .mode-chip-name { font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; }
+    .mode-chip-name { font-size: 0.75rem; color: var(--text-3); text-transform: uppercase; }
     .mode-chip-wr { font-size: 1.1rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
-    .mode-chip-n { font-size: 0.7rem; color: var(--text-3); }
+    .mode-chip-n { font-size: 0.75rem; color: var(--text-3); }
     .form-strip { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .form-chip {
         width: 1.6rem; height: 1.6rem;
         display: inline-flex; align-items: center; justify-content: center;
         border-radius: 4px;
-        font-size: 0.7rem; font-weight: 700;
+        font-size: 0.75rem; font-weight: 700;
     }
     .form-chip.win { background: color-mix(in srgb, var(--ok) 25%, transparent); color: var(--ok); }
     .form-chip.loss { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); }
@@ -1009,7 +1009,7 @@ const STATS_CSS: &str = r#"
     }
     .map-callout.best { border-left: 3px solid var(--ok); }
     .map-callout.worst { border-left: 3px solid var(--danger); }
-    .map-callout-label { font-size: 0.7rem; text-transform: uppercase; color: var(--text-3); }
+    .map-callout-label { font-size: 0.75rem; text-transform: uppercase; color: var(--text-3); }
     .map-callout-name { font-weight: 600; color: var(--text); }
     .map-callout-meta { color: var(--text-2); font-variant-numeric: tabular-nums; }
 

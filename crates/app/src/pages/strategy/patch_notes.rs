@@ -478,7 +478,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-count {
         font-family: var(--font-mono);
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         letter-spacing: 0.08em;
         text-transform: uppercase;
         color: var(--text-3);
@@ -559,7 +559,7 @@ const PAGE_CSS: &str = r#"
     .patch-chip {
         padding: 0.28rem 0.65rem;
         border-radius: var(--radius-pill);
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         font-weight: 600;
         border: 1px solid var(--border);
         background: var(--surface);
@@ -675,7 +675,7 @@ const PAGE_CSS: &str = r#"
     }
     .patch-card-date {
         font-family: var(--font-mono);
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: var(--text-3);
         white-space: nowrap;
     }

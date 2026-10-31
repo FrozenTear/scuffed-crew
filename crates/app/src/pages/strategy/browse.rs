@@ -200,7 +200,7 @@ const PAGE_CSS: &str = r#"
         margin-top: auto;
         padding-top: 0.5rem;
         border-top: 1px solid var(--border);
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: var(--text-3);
     }
 

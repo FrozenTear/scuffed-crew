@@ -173,7 +173,7 @@ const MEMBER_STATS_CSS: &str = r#"
     .member-stats .stats-wr { font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums; }
     .member-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
     .member-stats .stats-row-muted { opacity: 0.55; }
-    .member-stats .stats-gate-note { font-size: 0.7rem; color: var(--text-3); margin: 0 0 0.75rem; }
+    .member-stats .stats-gate-note { font-size: 0.75rem; color: var(--text-3); margin: 0 0 0.75rem; }
     .member-stats.stats-page .data-table th:not(:first-child),
     .member-stats.stats-page .data-table td:not(:first-child) {
         text-align: right;
