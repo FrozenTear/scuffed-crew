@@ -50,7 +50,7 @@ pub use feed::Feed;
 pub use forum::{Forum, ForumBoardPage};
 pub use forum_thread::ForumThread;
 pub use home::Home;
-pub use identity::IdentitySettings;
+pub use identity::{ACCOUNT_KEYS, IdentitySettings};
 pub use leaderboards::Leaderboards;
 pub use link::LinkDevice;
 pub(crate) use link::redirect_after_login_if_needed;
