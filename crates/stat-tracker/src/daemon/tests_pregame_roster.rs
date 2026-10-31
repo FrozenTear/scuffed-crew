@@ -428,43 +428,81 @@ fn put(dir: &std::path::Path, name: &str) {
     std::fs::write(dir.join(name), b"png").unwrap();
 }
 
+/// A small frame saved over `folder/name` through the writer's path.
+fn save(root: &std::path::Path, folder: &str, name: &'static str, made: &mut Vec<String>) {
+    let shot = PregameShot {
+        folder: folder.to_string(),
+        name,
+        frame: Arc::new(image::DynamicImage::ImageRgb8(image::RgbImage::new(64, 36))),
+    };
+    write_pregame_ops(root, &[PregameOp::Save(shot)], PREGAME_KEEP_GAMES, made);
+}
+
 #[test]
-fn rejected_files_count_toward_the_twenty_games_and_go_with_their_folder() {
+fn rejected_only_folders_take_no_game_slot_and_have_their_own_cap() {
     let dir = tempfile::tempdir().unwrap();
     let root = pregame_dir(dir.path());
-    // 21 old games holding only a rejected frame each.
-    for i in 0..21 {
+    // 20 real games, oldest first, and 3 folders holding only a rejected
+    // frame, older than every real game.
+    for i in 0..PREGAME_KEEP_GAMES {
+        put(&root.join(format!("20260102_0000{i:02}")), LOADING_NAME);
+    }
+    for i in 0..3 {
         put(
             &root.join(format!("20260101_0000{i:02}")),
             RejectLabel::Roster.file_name(),
         );
     }
-    let shot = PregameShot {
-        folder: "20261030_120000".to_string(),
-        name: RejectLabel::Loading.file_name(),
-        frame: Arc::new(image::DynamicImage::ImageRgb8(image::RgbImage::new(64, 36))),
-    };
-    write_pregame_ops(
-        &root,
-        &[PregameOp::Save(shot)],
-        PREGAME_KEEP_GAMES,
-        &mut Vec::new(),
-    );
+    // One of them with a staged leftover too: still rejected only.
+    put(&root.join("20260101_000000"), ".roster_last.png.staged");
+    // A 21st real game pushes out exactly the oldest real one, no
+    // rejected-only folder.
+    let mut made = Vec::new();
+    save(&root, "20261030_120000", LOADING_NAME, &mut made);
     let left = names_in(&root);
-    assert_eq!(left.len(), PREGAME_KEEP_GAMES, "{left:?}");
-    for i in 0..2 {
+    assert!(!left.contains(&"20260102_000000".to_string()), "{left:?}");
+    assert!(left.contains(&"20260102_000001".to_string()), "{left:?}");
+    for i in 0..3 {
+        assert!(left.contains(&format!("20260101_0000{i:02}")), "{left:?}");
+    }
+    assert_eq!(left.len(), PREGAME_KEEP_GAMES + 3, "{left:?}");
+    // The sweep (run for the new folder) took the staged leftover and kept
+    // the rejected frame and its folder: a saved file.
+    assert_eq!(
+        names_in(&root.join("20260101_000000")),
+        vec![RejectLabel::Roster.file_name().to_string()]
+    );
+    // New games that only turned frames down: the oldest rejected-only
+    // folders go past their cap, and every real game stays.
+    for g in 0..PREGAME_KEEP_REJECTED_ONLY {
+        save(
+            &root,
+            &format!("20261030_13{g:02}00"),
+            RejectLabel::Loading.file_name(),
+            &mut made,
+        );
+    }
+    let left = names_in(&root);
+    let rejected_only: Vec<_> = left
+        .iter()
+        .filter(|f| !root.join(f).join(LOADING_NAME).exists())
+        .collect();
+    assert_eq!(rejected_only.len(), PREGAME_KEEP_REJECTED_ONLY, "{left:?}");
+    for i in 0..3 {
         assert!(!left.contains(&format!("20260101_0000{i:02}")), "{left:?}");
     }
     assert_eq!(
-        names_in(&root.join("20261030_120000")),
+        left.len() - rejected_only.len(),
+        PREGAME_KEEP_GAMES,
+        "{left:?}"
+    );
+    // A rejected frame next to a real screen: a real game, in the cap.
+    assert_eq!(
+        names_in(&root.join("20261030_130000")),
         vec![RejectLabel::Loading.file_name().to_string()]
     );
-    // The sweep of staged leftovers keeps them: they are saved files.
-    sweep_staged(&root, None);
-    assert_eq!(
-        names_in(&root.join("20260101_000002")),
-        vec![RejectLabel::Roster.file_name().to_string()]
-    );
+    save(&root, "20261030_130000", LOADING_NAME, &mut made);
+    assert!(root.join("20261030_130000").join(LOADING_NAME).exists());
 }
 
 #[test]

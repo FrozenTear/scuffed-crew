@@ -108,8 +108,9 @@ pub struct Config {
     /// screens after
     /// each match (`postgame_NN.png` and `postgame.json`) under
     /// `{data_dir}/debug/pregame/<YYYYMMDD_HHMMSS>/` (UTC), newest 20 games
-    /// kept. Off by default and not written while off; turning it off
-    /// leaves the folder. Local only: nothing reads, uploads or syncs the
+    /// kept (and apart from them the newest 5 folders holding only
+    /// `rejected_<label>.png`). Off by default and not written while off;
+    /// turning it off leaves the folder. Local only: nothing reads, uploads or syncs the
     /// files. Also set by Save screens around each game in Settings,
     /// Troubleshooting (After restart). Read at start. The ban results are
     /// told by a built-in title shape rule, or, when

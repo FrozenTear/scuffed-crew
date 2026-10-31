@@ -97,6 +97,11 @@ pub(crate) use writer::PregameWriter;
 /// Game folders kept under `debug/pregame/`; older ones are deleted.
 pub(crate) const PREGAME_KEEP_GAMES: usize = 20;
 
+/// Game folders kept that hold only turned-down candidates
+/// (`rejected_<label>.png`): they take no slot of [`PREGAME_KEEP_GAMES`],
+/// so they never push a real game out, and are capped on their own.
+pub(crate) const PREGAME_KEEP_REJECTED_ONLY: usize = 5;
+
 /// Pre-game events further apart than this belong to different games. The
 /// vote, ban and select follow each other within seconds.
 pub(crate) const PREGAME_GAME_GAP: Duration = Duration::from_secs(3 * 60);
@@ -1014,7 +1019,10 @@ fn save_pregame_order(root: &std::path::Path, made: &[String]) {
 /// were made, oldest first) after them all: a clock set back gives a new
 /// folder an old name, and it still goes last. The newest of `made` is
 /// never deleted. A folder with only staged or temporary files in it
-/// ([`only_leftovers`]) does not count.
+/// does not count. A folder whose only saved screens are turned-down
+/// candidates (`rejected_<label>.png`) takes no slot either, so it never
+/// pushes a real game out: those folders have their own cap,
+/// [`PREGAME_KEEP_REJECTED_ONLY`], oldest deleted first.
 pub(crate) fn prune_pregame_games(root: &std::path::Path, keep: usize, made: &[String]) {
     let Ok(entries) = std::fs::read_dir(root) else {
         return;
@@ -1028,12 +1036,37 @@ pub(crate) fn prune_pregame_games(root: &std::path::Path, keep: usize, made: &[S
         .collect();
     // The game in progress: never deleted, even with nothing saved yet.
     let newest = made.iter().rev().find(|name| games.contains(name));
-    // A folder holding only staged or temporary files is no saved game: it
-    // takes no slot and pushes no game out ([`sweep_staged`] deletes it).
-    let mut older: Vec<String> = games
-        .into_iter()
-        .filter(|name| !only_leftovers(&root.join(name)))
-        .collect();
+    let mut real = Vec::new();
+    let mut rejected_only = Vec::new();
+    for name in games {
+        match folder_kind(&root.join(&name)) {
+            // A folder holding only staged or temporary files is no saved
+            // game: it takes no slot and pushes no game out
+            // ([`sweep_staged`] deletes it).
+            FolderKind::Leftovers => {}
+            FolderKind::RejectedOnly => rejected_only.push(name),
+            FolderKind::Game => real.push(name),
+        }
+    }
+    prune_oldest(root, real, keep, made, newest);
+    prune_oldest(
+        root,
+        rejected_only,
+        PREGAME_KEEP_REJECTED_ONLY,
+        made,
+        newest,
+    );
+}
+
+/// Delete the oldest of `folders` under `root` so at most `keep` are left,
+/// in the age order of [`prune_pregame_games`], never `newest`.
+fn prune_oldest(
+    root: &std::path::Path,
+    mut older: Vec<String>,
+    keep: usize,
+    made: &[String],
+    newest: Option<&String>,
+) {
     // Each folder once, even if `made` repeats it.
     let mut ours: Vec<String> = Vec::new();
     for name in made {
@@ -1065,26 +1098,47 @@ fn is_leftover(name: &str) -> bool {
     name.starts_with('.') && (name.ends_with(".staged") || name.ends_with(".tmp"))
 }
 
-/// Whether `dir` holds files and all of them are leftovers
-/// ([`is_leftover`]). An empty or unreadable folder, or one with anything
-/// else in it (a saved screen, a subfolder), is not.
-fn only_leftovers(dir: &std::path::Path) -> bool {
+/// A turned-down candidate's frame, `rejected_<label>.png` ([`rejects`]).
+fn is_rejected(name: &str) -> bool {
+    name.starts_with("rejected_") && name.ends_with(".png")
+}
+
+/// What a game folder holds, for the retention cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FolderKind {
+    /// Files, all of them leftovers ([`is_leftover`]).
+    Leftovers,
+    /// Files, at least one `rejected_<label>.png` ([`is_rejected`]) and
+    /// nothing but those and leftovers.
+    RejectedOnly,
+    /// Anything else: a saved screen, a subfolder, an empty or unreadable
+    /// folder.
+    Game,
+}
+
+fn folder_kind(dir: &std::path::Path) -> FolderKind {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        return false;
+        return FolderKind::Game;
     };
-    let mut any = false;
+    let (mut leftovers, mut rejected) = (false, false);
     for entry in entries {
         let Ok(entry) = entry else {
-            return false;
+            return FolderKind::Game;
         };
-        let leftover = entry.file_name().to_str().is_some_and(is_leftover)
-            && entry.file_type().is_ok_and(|t| t.is_file());
-        if !leftover {
-            return false;
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            return FolderKind::Game;
         }
-        any = true;
+        match entry.file_name().to_str() {
+            Some(name) if is_leftover(name) => leftovers = true,
+            Some(name) if is_rejected(name) => rejected = true,
+            _ => return FolderKind::Game,
+        }
     }
-    any
+    match (rejected, leftovers) {
+        (true, _) => FolderKind::RejectedOnly,
+        (false, true) => FolderKind::Leftovers,
+        (false, false) => FolderKind::Game,
+    }
 }
 
 /// Delete what a write left half done under `root`: staged frames
