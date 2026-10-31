@@ -1310,7 +1310,7 @@ pub fn Stats() -> Element {
                             onclick: move |_| setup_open.toggle(),
                             if setup_open() { "Hide instructions" } else { "Reinstall instructions" }
                         }
-                        Link { to: Route::StatsTokens {}, "Daemon Tokens" }
+                        Link { to: Route::StatsTokens {}, "Tracker tokens" }
                     }
                 }
             }
@@ -1375,7 +1375,7 @@ pub fn Stats() -> Element {
                     }
                     p {
                         "After installing, start the GUI, then paste this server's URL and a "
-                        Link { to: Route::StatsTokens {}, "daemon token" }
+                        Link { to: Route::StatsTokens {}, "tracker token" }
                         " to begin uploading."
                     }
                     div { class: "tracker-download-links",
