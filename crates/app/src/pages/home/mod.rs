@@ -145,7 +145,7 @@ pub fn Home() -> Element {
         return pending_home(body, site_settings.refresh);
     };
 
-    let content = settings.homepage.clone();
+    let content = crate::copy::plain_homepage(&settings.homepage);
     let home_shell: HomeShell = settings.home_shell;
     let home_skin: HomeSkin = settings.home_skin;
     let initials = org_initials(&settings.org_name);
@@ -560,5 +560,12 @@ mod tests {
         );
         assert!(html.contains("Retry"), "{html}");
         assert_no_template_copy(&html);
+    }
+
+    #[test]
+    fn home_normalises_settings_copy_before_blocks() {
+        let src = include_str!("mod.rs");
+        let needle = ["plain_homepage", "(&settings.homepage)"].concat();
+        assert!(src.matches(needle.as_str()).count() == 1);
     }
 }

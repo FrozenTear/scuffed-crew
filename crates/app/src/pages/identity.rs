@@ -5,6 +5,7 @@ use wasm_bindgen::prelude::*;
 
 use scuffed_api_client::ApiClient;
 
+use crate::components::ui::InlineConfirm;
 use crate::components::{Toast, is_http_status, use_toast};
 use crate::routes::Route;
 use crate::state::auth::use_auth;
@@ -235,6 +236,8 @@ pub fn IdentitySettings() -> Element {
     let mut import_ncryptsec = use_signal(String::new);
     let mut import_password = use_signal(String::new);
     let mut working = use_signal(|| false);
+    let mut confirm_import = use_signal(|| false);
+    let mut confirm_unlink = use_signal(|| false);
 
     let auth = use_auth();
     let identity = use_resource(move || {
@@ -309,20 +312,14 @@ pub fn IdentitySettings() -> Element {
             return;
         }
         // Importing links an *external* key and replaces any currently linked
-        // identity, so confirm before the mode change (DR1-NOSTR-003).
-        let confirmed = web_sys::window()
-            .and_then(|w| {
-                w.confirm_with_message(
-                    "Importing this key sets your identity to EXTERNAL mode and replaces any \
-                     currently linked Nostr key. The server will no longer manage a key for you. \
-                     Continue?",
-                )
-                .ok()
-            })
-            .unwrap_or(false);
-        if !confirmed {
-            return;
-        }
+        // identity, so ask first with the inline strip (DR1-NOSTR-003).
+        confirm_import.set(true);
+    };
+
+    let do_import_key = move |_| {
+        confirm_import.set(false);
+        let ncryptsec = import_ncryptsec().trim().to_string();
+        let password = import_password().trim().to_string();
         working.set(true);
         spawn(async move {
             let body = ImportKeyBody {
@@ -346,7 +343,8 @@ pub fn IdentitySettings() -> Element {
     };
 
     // ─── Unlink identity ───
-    let on_unlink = move |_| {
+    let do_unlink = move |_| {
+        confirm_unlink.set(false);
         working.set(true);
         spawn(async move {
             match ApiClient::web().delete("/api/nostr/identity").await {
@@ -450,12 +448,25 @@ pub fn IdentitySettings() -> Element {
                                 }
                             }
                         }
-                        div { class: "identity-actions",
-                            button {
-                                class: "identity-btn identity-btn-danger",
-                                disabled: working(),
-                                onclick: on_unlink,
-                                "Unlink Identity"
+                        if confirm_unlink() {
+                            InlineConfirm {
+                                id: "unlink-identity".to_string(),
+                                title: "Unlink this key?".to_string(),
+                                body: "This removes the key from your account. Export a backup first if you want to keep it.".to_string(),
+                                confirm_label: "Unlink".to_string(),
+                                busy: working(),
+                                on_confirm: do_unlink,
+                                on_cancel: move |_| confirm_unlink.set(false),
+                            }
+                        } else {
+                            div { class: "identity-actions",
+                                button {
+                                    id: "unlink-identity-trigger",
+                                    class: "identity-btn identity-btn-danger",
+                                    disabled: working(),
+                                    onclick: move |_| confirm_unlink.set(true),
+                                    "Unlink Identity"
+                                }
                             }
                         }
                     } else {
@@ -581,12 +592,25 @@ pub fn IdentitySettings() -> Element {
                             oninput: move |e| import_password.set(e.value()),
                         }
                     }
-                    div { class: "identity-actions",
-                        button {
-                            class: "identity-btn identity-btn-primary",
-                            disabled: working() || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty(),
-                            onclick: on_import_key,
-                            if working() { "Importing..." } else { "Import Key" }
+                    if confirm_import() {
+                        InlineConfirm {
+                            id: "import-key".to_string(),
+                            title: "Replace your linked key?".to_string(),
+                            body: "Importing sets your key to one you manage yourself. The server will no longer manage a key for you, and any key linked now is replaced.".to_string(),
+                            confirm_label: "Import key".to_string(),
+                            busy: working(),
+                            on_confirm: do_import_key,
+                            on_cancel: move |_| confirm_import.set(false),
+                        }
+                    } else {
+                        div { class: "identity-actions",
+                            button {
+                                id: "import-key-trigger",
+                                class: "identity-btn identity-btn-primary",
+                                disabled: working() || import_ncryptsec().trim().is_empty() || import_password().trim().is_empty(),
+                                onclick: on_import_key,
+                                if working() { "Importing..." } else { "Import Key" }
+                            }
                         }
                     }
                 }

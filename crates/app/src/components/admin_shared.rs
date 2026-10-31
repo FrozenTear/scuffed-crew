@@ -149,12 +149,21 @@ pub fn FormModal(
     }
 }
 
+/// Id of the Cancel button, so focus can start there when the dialog opens.
+const CONFIRM_CANCEL_ID: &str = "confirm-dialog-cancel";
+const CONFIRM_TITLE_ID: &str = "confirm-dialog-title";
+
+/// Modal confirm. Opens with focus on Cancel, closes on Esc, and names the
+/// action on the solid button (`confirm_label`, default "Confirm"). Pass
+/// `restore_focus_id` to move focus back to the button that opened it.
 #[component]
 pub fn ConfirmDialog(
     title: String,
     message: String,
     open: bool,
     #[props(default = false)] danger: bool,
+    #[props(default = "Confirm".to_string())] confirm_label: String,
+    #[props(default)] restore_focus_id: Option<String>,
     on_confirm: EventHandler<()>,
     on_cancel: EventHandler<()>,
     #[props(default = None)] extra: Option<Element>,
@@ -162,6 +171,45 @@ pub fn ConfirmDialog(
     if !open {
         return rsx! {};
     }
+    rsx! {
+        ConfirmDialogOpen {
+            title,
+            message,
+            danger,
+            confirm_label,
+            restore_focus_id,
+            on_confirm,
+            on_cancel,
+            extra,
+        }
+    }
+}
+
+/// The open dialog. Split from `ConfirmDialog` so the focus effect runs once
+/// per open instead of on every render of a closed dialog.
+#[component]
+fn ConfirmDialogOpen(
+    title: String,
+    message: String,
+    danger: bool,
+    confirm_label: String,
+    restore_focus_id: Option<String>,
+    on_confirm: EventHandler<()>,
+    on_cancel: EventHandler<()>,
+    extra: Option<Element>,
+) -> Element {
+    use crate::components::ui::inline_confirm::{
+        focus_element_by_id, focus_element_by_id_soon, key_cancels,
+    };
+
+    use_effect(|| focus_element_by_id(CONFIRM_CANCEL_ID));
+
+    let cancel = use_callback(move |_: ()| {
+        on_cancel.call(());
+        if let Some(id) = restore_focus_id.clone() {
+            focus_element_by_id_soon(id);
+        }
+    });
     let btn_class = if danger {
         "btn-save danger"
     } else {
@@ -170,11 +218,20 @@ pub fn ConfirmDialog(
     rsx! {
         div {
             class: "form-modal-overlay",
-            onclick: move |_| on_cancel.call(()),
+            onclick: move |_| cancel.call(()),
+            onkeydown: move |e| {
+                if key_cancels(&e.key()) {
+                    e.stop_propagation();
+                    cancel.call(());
+                }
+            },
             div {
                 class: "form-modal",
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-labelledby": CONFIRM_TITLE_ID,
                 onclick: move |e| e.stop_propagation(),
-                div { class: "form-modal-header", "{title}" }
+                div { id: CONFIRM_TITLE_ID, class: "form-modal-header", "{title}" }
                 div { class: "confirm-body",
                     p { "{message}" }
                     if let Some(extra) = extra {
@@ -183,14 +240,17 @@ pub fn ConfirmDialog(
                 }
                 div { class: "form-modal-footer",
                     button {
+                        id: CONFIRM_CANCEL_ID,
                         class: "btn-cancel",
-                        onclick: move |_| on_cancel.call(()),
+                        r#type: "button",
+                        onclick: move |_| cancel.call(()),
                         "Cancel"
                     }
                     button {
                         class: "{btn_class}",
+                        r#type: "button",
                         onclick: move |_| on_confirm.call(()),
-                        "Confirm"
+                        "{confirm_label}"
                     }
                 }
             }
@@ -234,5 +294,75 @@ pub fn SummaryCard(
         None => rsx! {
             div { class: "{class}", {body} }
         },
+    }
+}
+
+#[cfg(test)]
+mod confirm_dialog_tests {
+    use super::*;
+
+    fn render(root: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(root);
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn closed_dialog_renders_nothing() {
+        fn app() -> Element {
+            rsx! {
+                ConfirmDialog {
+                    title: "Delete it?".to_string(),
+                    message: "Gone for good.".to_string(),
+                    open: false,
+                    on_confirm: |_| {},
+                    on_cancel: |_| {},
+                }
+            }
+        }
+        assert!(!render(app).contains("Delete it?"));
+    }
+
+    #[test]
+    fn open_dialog_is_a_labelled_modal_with_a_named_action() {
+        fn app() -> Element {
+            rsx! {
+                ConfirmDialog {
+                    title: "Delete it?".to_string(),
+                    message: "Gone for good.".to_string(),
+                    open: true,
+                    danger: true,
+                    confirm_label: "Delete".to_string(),
+                    on_confirm: |_| {},
+                    on_cancel: |_| {},
+                }
+            }
+        }
+        let html = render(app);
+        assert!(html.contains("role=\"dialog\""), "{html}");
+        assert!(html.contains("aria-modal=\"true\""), "{html}");
+        assert!(
+            html.contains("aria-labelledby=\"confirm-dialog-title\""),
+            "{html}"
+        );
+        assert!(html.contains("id=\"confirm-dialog-cancel\""), "{html}");
+        assert!(html.contains(">Delete</button>"), "{html}");
+        assert!(!html.contains(">Confirm</button>"), "{html}");
+    }
+
+    #[test]
+    fn default_label_is_still_confirm() {
+        fn app() -> Element {
+            rsx! {
+                ConfirmDialog {
+                    title: "Sure?".to_string(),
+                    message: "Really.".to_string(),
+                    open: true,
+                    on_confirm: |_| {},
+                    on_cancel: |_| {},
+                }
+            }
+        }
+        assert!(render(app).contains(">Confirm</button>"));
     }
 }

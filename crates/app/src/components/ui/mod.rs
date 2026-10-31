@@ -3,6 +3,7 @@ pub mod card;
 pub mod feedback;
 pub mod field;
 pub mod hero_select;
+pub mod inline_confirm;
 pub mod label;
 pub mod pill;
 pub mod season_select;
@@ -23,6 +24,8 @@ pub use field::{Input, Select};
 #[allow(unused_imports)]
 pub use hero_select::HeroSelect;
 #[allow(unused_imports)]
+pub use inline_confirm::InlineConfirm;
+#[allow(unused_imports)]
 pub use label::Label;
 pub use pill::{Pill, PillTone};
 pub use season_select::{SeasonSelect, use_season_change, use_stats_season};
@@ -42,6 +45,7 @@ pub fn ui_css() -> String {
         hero_select::HERO_SELECT_CSS,
         season_select::SEASON_SELECT_CSS,
         feedback::FEEDBACK_CSS,
+        inline_confirm::INLINE_CONFIRM_CSS,
     ]
     .concat()
 }

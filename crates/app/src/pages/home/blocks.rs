@@ -1022,4 +1022,48 @@ mod tests {
         assert!(html.contains("Game titles"), "{html}");
         assert!(!html.contains(">Games<"), "{html}");
     }
+
+    fn dirty_home_content() -> HomepageContent {
+        let em = '\u{2014}';
+        let en = '\u{2013}';
+        crate::copy::plain_homepage(&HomepageContent {
+            hero_title: format!("Play {em} together"),
+            hero_sub: format!("Open {en} always"),
+            ethos_rules: vec![format!("Squads of 5{en}10")],
+            seeking_tags: vec![format!("DPS {em} Tank")],
+            footer_note: format!("Bye {em}"),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn normalised_home_copy_reaches_the_dom_without_long_dashes() {
+        fn hero() -> Element {
+            rsx! {
+                HeroBlock {
+                    content: dirty_home_content(),
+                    initials: "SO".to_string(),
+                    recruitment_open: false,
+                    show_secondary_cta: true,
+                    secondary_href: "#squads".to_string(),
+                    metric_squads: None,
+                    metric_members: None,
+                    metric_games: None,
+                    metrics_pending: false,
+                }
+            }
+        }
+        fn ethos() -> Element {
+            rsx! {
+                EthosBlock { content: dirty_home_content() }
+            }
+        }
+        let long_dash = |s: &str| s.chars().any(|c| matches!(c, '\u{2014}' | '\u{2013}'));
+        let hero_html = render(hero);
+        assert!(!long_dash(&hero_html), "{hero_html}");
+        assert!(hero_html.contains("Play, together"), "{hero_html}");
+        let ethos_html = render(ethos);
+        assert!(!long_dash(&ethos_html), "{ethos_html}");
+        assert!(ethos_html.contains("Squads of 5 to 10"), "{ethos_html}");
+    }
 }

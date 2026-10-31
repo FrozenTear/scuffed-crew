@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::ui::{BtnVariant, Button, Card, Pill, PillTone, Textarea};
+use crate::components::ui::{BtnVariant, Button, Card, InlineConfirm, Pill, PillTone, Textarea};
 use crate::components::{Toast, list_cap_notice, use_toast};
 use crate::hooks::{use_api, use_api_list};
 use crate::routes::Route;
@@ -55,6 +55,33 @@ fn mine_view<T>(
         Some(Some(Some(_))) => MineView::Status,
         Some(Some(None)) if error.is_none() => MineView::Form,
         _ => MineView::Failed,
+    }
+}
+
+/// A signed in member has nothing to apply for. Someone with a live
+/// application (pending or trial) still sees its status and the Withdraw
+/// button, so a trial member keeps that control.
+fn already_member(is_member: bool, mine: MineView, status: Option<&str>) -> bool {
+    if !is_member {
+        return false;
+    }
+    match mine {
+        MineView::Form => true,
+        MineView::Status => !matches!(status, Some("pending" | "trial")),
+        MineView::Pending | MineView::Failed => false,
+    }
+}
+
+/// Pill tone and label for an application status. A turned down application
+/// is a neutral "Not accepted", not a red alarm.
+fn status_pill(status: &str) -> (PillTone, String) {
+    match status {
+        "pending" => (PillTone::Warn, "Pending Review".to_string()),
+        "trial" => (PillTone::Accent, "Trial Period".to_string()),
+        "accepted" => (PillTone::Ok, "Accepted".to_string()),
+        "rejected" => (PillTone::Neutral, "Not accepted".to_string()),
+        "withdrawn" => (PillTone::Neutral, "Withdrawn".to_string()),
+        other => (PillTone::Neutral, other.to_string()),
     }
 }
 
@@ -114,26 +141,6 @@ const APPLY_CSS: &str = r#"
     .muted { color: var(--text-3); font-size: 0.88rem; }
 "#;
 
-fn status_tone(status: &str) -> PillTone {
-    match status {
-        "pending" => PillTone::Warn,
-        "trial" => PillTone::Accent,
-        "accepted" => PillTone::Ok,
-        _ => PillTone::Neutral,
-    }
-}
-
-fn status_label(status: &str) -> String {
-    match status {
-        "pending" => "Pending Review".to_string(),
-        "trial" => "Trial Period".to_string(),
-        "accepted" => "Accepted".to_string(),
-        "rejected" => "Not accepted".to_string(),
-        "withdrawn" => "Withdrawn".to_string(),
-        other => other.to_string(),
-    }
-}
-
 #[component]
 pub fn Apply() -> Element {
     let auth = use_auth();
@@ -149,6 +156,7 @@ pub fn Apply() -> Element {
     let mut selected_games = use_signal(Vec::<String>::new);
     let mut message = use_signal(String::new);
     let mut submitting = use_signal(|| false);
+    let mut confirm_withdraw = use_signal(|| false);
 
     let loading = auth().loading;
     let screen = apply_screen(loading, settings_phase);
@@ -212,9 +220,23 @@ pub fn Apply() -> Element {
                                 }
                             }
                         }
+                    } else if already_member(
+                        auth().is_org_member(),
+                        mine,
+                        status_app.as_ref().map(|a| a.status.as_str()),
+                    ) {
+                        rsx! {
+                            Card {
+                                h2 { class: "apply-card-title", "You are already in {org_name}" }
+                                p { class: "apply-card-desc", "Your membership is active, so there is nothing to apply for." }
+                                div { class: "apply-auth-buttons",
+                                    Link { to: Route::ProfileSettings {}, class: "ui-btn ui-btn--primary ui-btn--md", "Open your profile" }
+                                    Link { to: Route::Members {}, class: "ui-btn ui-btn--md", "See the crew" }
+                                }
+                            }
+                        }
                     } else if let Some(app) = status_app.clone() {
-                        let status_tone = status_tone(app.status.as_str());
-                        let status_label = status_label(app.status.as_str());
+                        let (status_tone, status_label) = status_pill(app.status.as_str());
                         let desc = match app.status.as_str() {
                             "pending" => {
                                 "Your application is being reviewed. We'll get back to you soon."
@@ -244,20 +266,15 @@ pub fn Apply() -> Element {
                                 }
                                 p { class: "apply-card-desc", "{desc}" }
                                 if can_withdraw {
-                                    div { class: "apply-actions",
-                                        Button {
-                                            variant: BtnVariant::Ghost,
-                                            disabled: submitting(),
-                                            onclick: move |_| {
-                                                #[cfg(target_arch = "wasm32")]
-                                                let confirmed = web_sys::window()
-                                                    .and_then(|w| w.confirm_with_message("Withdraw your application?").ok())
-                                                    .unwrap_or(false);
-                                                #[cfg(not(target_arch = "wasm32"))]
-                                                let confirmed = true;
-                                                if !confirmed {
-                                                    return;
-                                                }
+                                    if confirm_withdraw() {
+                                        InlineConfirm {
+                                            id: "withdraw-application".to_string(),
+                                            title: "Withdraw your application?".to_string(),
+                                            body: "You can apply again later if recruitment is open.".to_string(),
+                                            confirm_label: "Withdraw".to_string(),
+                                            busy: submitting(),
+                                            on_confirm: move |_| {
+                                                confirm_withdraw.set(false);
                                                 submitting.set(true);
                                                 spawn(async move {
                                                     match ApiClient::web()
@@ -278,10 +295,20 @@ pub fn Apply() -> Element {
                                                     submitting.set(false);
                                                 });
                                             },
-                                            if submitting() {
-                                                "Withdrawing..."
-                                            } else {
-                                                "Withdraw application"
+                                            on_cancel: move |_| confirm_withdraw.set(false),
+                                        }
+                                    } else {
+                                        div { class: "apply-actions",
+                                            Button {
+                                                id: "withdraw-application-trigger".to_string(),
+                                                variant: BtnVariant::Ghost,
+                                                disabled: submitting(),
+                                                onclick: move |_| confirm_withdraw.set(true),
+                                                if submitting() {
+                                                    "Withdrawing..."
+                                                } else {
+                                                    "Withdraw application"
+                                                }
                                             }
                                         }
                                     }
@@ -445,6 +472,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rejected_is_a_neutral_not_accepted_chip() {
+        let (tone, label) = status_pill("rejected");
+        assert_eq!(label, "Not accepted");
+        assert!(tone == PillTone::Neutral);
+        assert!(!label.contains("Rejected"));
+        assert!(status_pill("pending").0 == PillTone::Warn);
+        assert!(status_pill("accepted").0 == PillTone::Ok);
+        assert_eq!(status_pill("mystery").1, "mystery");
+    }
+
+    #[test]
+    fn members_are_told_they_are_already_in() {
+        // Old rejected or withdrawn applications and the empty form both give way.
+        assert!(already_member(true, MineView::Form, None));
+        assert!(already_member(true, MineView::Status, Some("rejected")));
+        assert!(already_member(true, MineView::Status, Some("withdrawn")));
+        assert!(already_member(true, MineView::Status, Some("accepted")));
+        // A live application keeps its status and Withdraw button.
+        assert!(!already_member(true, MineView::Status, Some("pending")));
+        assert!(!already_member(true, MineView::Status, Some("trial")));
+        // No flash while the application is still loading, or when it failed.
+        assert!(!already_member(true, MineView::Pending, None));
+        assert!(!already_member(true, MineView::Failed, None));
+        // Non members never see it.
+        assert!(!already_member(false, MineView::Form, None));
+        assert!(!already_member(false, MineView::Status, Some("rejected")));
+    }
+
+    #[test]
     fn settings_failure_is_not_an_endless_loading_state() {
         assert_eq!(apply_screen(false, FetchClass::Error), ApplyScreen::Error);
         assert_eq!(
@@ -521,9 +577,10 @@ mod tests {
 
     #[test]
     fn rejected_application_is_not_accepted_and_neutral() {
-        assert_eq!(status_label("rejected"), "Not accepted");
-        assert!(status_tone("rejected") == PillTone::Neutral);
-        assert!(status_tone("pending") == PillTone::Warn);
-        assert_eq!(status_label("pending"), "Pending Review");
+        let (tone, label) = status_pill("rejected");
+        assert_eq!(label, "Not accepted");
+        assert!(tone == PillTone::Neutral);
+        assert!(status_pill("pending").0 == PillTone::Warn);
+        assert_eq!(status_pill("pending").1, "Pending Review");
     }
 }
