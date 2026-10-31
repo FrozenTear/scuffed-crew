@@ -21,8 +21,7 @@ const HINT_BACKUP: &str =
     "An ncryptsec backup is your key locked with a password. You need the password to use it.";
 const HINT_ADVANCED: &str = "You rarely need these. Importing a key or unlinking changes how \
     chat and direct messages sign you in.";
-const HINT_UNLINK: &str =
-    "Removes the key from your account. Export a backup first if you want to keep it.";
+const HINT_UNLINK: &str = "Chat and direct messages stop working until you link a key again.";
 
 const PAGE_CSS: &str = r#"
     .identity-page {
@@ -601,7 +600,7 @@ pub fn IdentitySettings() -> Element {
 
             if member.is_some() {
                 AdvancedGroup {
-                if member.is_some() && is_server_managed {
+                if is_server_managed {
                     div { class: "identity-sub",
                         h3 { "Import an external key" }
                         p { class: "identity-warning",
@@ -611,7 +610,7 @@ pub fn IdentitySettings() -> Element {
                              server-managed mode."
                         }
                     }
-                } else if member.is_some() {
+                } else {
                     div { class: "identity-sub",
                         h3 { "Import an external key" }
                         p {
@@ -684,7 +683,7 @@ pub fn IdentitySettings() -> Element {
                                     class: "identity-btn identity-btn-danger",
                                     disabled: working(),
                                     onclick: move |_| confirm_unlink.set(true),
-                                    "Unlink Identity"
+                                    "Unlink key"
                                 }
                             }
                         }
@@ -855,5 +854,13 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn unlink_hint_does_not_repeat_the_confirm_text() {
+        let src = include_str!("identity.rs");
+        assert!(!HINT_UNLINK.contains("removes the key"), "{HINT_UNLINK}");
+        assert!(!HINT_UNLINK.contains("Export a backup"), "{HINT_UNLINK}");
+        assert!(!src.contains(&["Unlink", " Identity"].concat()));
     }
 }
