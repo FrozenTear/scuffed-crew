@@ -1,9 +1,11 @@
 //! Render-time dash rule for admin copy and patch notes.
 //!
 //! One rule, no exceptions:
-//! 1. A numeric range (a digit, optional spaces, an en dash or figure dash,
-//!    optional spaces, a digit) reads "{a} to {b}". "August 11-31" becomes
-//!    "August 11 to 31", "~5-10" becomes "~5 to 10".
+//! 1. A range reads "{a} to {b}": a digit, optional spaces, an en dash or
+//!    figure dash, optional spaces, a digit ("August 11-31" becomes
+//!    "August 11 to 31", "~5-10" becomes "~5 to 10"), or an en dash or figure
+//!    dash with a letter or digit right on both sides and no spaces ("Mon-Fri"
+//!    becomes "Mon to Fri").
 //! 2. Any other long dash (em dash, en dash, figure dash, horizontal bar,
 //!    two-em and three-em dash) becomes a comma and one space, with the
 //!    spaces around it collapsed. No comma is added next to punctuation that
@@ -48,12 +50,15 @@ pub fn plain_copy(text: &str) -> String {
             next += 1;
         }
         let trimmed_len = out.trim_end_matches(' ').len();
-        let prev_is_digit = out[..trimmed_len]
-            .chars()
-            .next_back()
-            .is_some_and(|p| p.is_ascii_digit());
+        let prev_char = out[..trimmed_len].chars().next_back();
         let next_char = chars.get(next).copied();
-        if is_range_dash(c) && prev_is_digit && next_char.is_some_and(|n| n.is_ascii_digit()) {
+        let digit_range = prev_char.is_some_and(|p| p.is_ascii_digit())
+            && next_char.is_some_and(|n| n.is_ascii_digit());
+        let unspaced = next == i + 1 && trimmed_len == out.len();
+        let word_range = unspaced
+            && prev_char.is_some_and(char::is_alphanumeric)
+            && next_char.is_some_and(char::is_alphanumeric);
+        if is_range_dash(c) && (digit_range || word_range) {
             out.truncate(trimmed_len);
             out.push_str(" to ");
             i = next;
@@ -132,6 +137,8 @@ mod tests {
             format!("3{FIG}4"),
             format!("1{EM}2"),
             format!("Mon{EN}Fri"),
+            format!("Mon {EN} Fri"),
+            format!("Q1{EN}Q3"),
             format!("Hello, {EM} world"),
             format!("Note: {EM} read"),
             format!("word {EM}. Next"),
@@ -171,8 +178,19 @@ mod tests {
     }
 
     #[test]
-    fn en_dash_between_words_is_a_comma() {
-        assert_eq!(plain_copy(&format!("Mon{EN}Fri")), "Mon, Fri");
+    fn en_dash_between_words_reads_as_to() {
+        assert_eq!(plain_copy(&format!("Mon{EN}Fri")), "Mon to Fri");
+        assert_eq!(
+            plain_copy(&format!("Open Mon{FIG}Fri.")),
+            "Open Mon to Fri."
+        );
+        assert_eq!(plain_copy(&format!("Q1{EN}Q3")), "Q1 to Q3");
+    }
+
+    #[test]
+    fn spaced_or_em_dash_between_words_is_still_a_comma() {
+        assert_eq!(plain_copy(&format!("Mon {EN} Fri")), "Mon, Fri");
+        assert_eq!(plain_copy(&format!("Mon{EM}Fri")), "Mon, Fri");
     }
 
     #[test]

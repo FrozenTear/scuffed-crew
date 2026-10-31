@@ -2159,7 +2159,7 @@ mod tests {
         assert_eq!(hero.changes[0].description, "Cooldown 12 to 14 seconds");
         let section = &note.sections[0];
         assert_eq!(section.category, "General, Updates");
-        assert_eq!(section.items, vec!["Mon, Fri queue", "Fixed"]);
+        assert_eq!(section.items, vec!["Mon to Fri queue", "Fixed"]);
         assert_eq!(note.version, "9.1");
         assert_eq!(note.date, "2026-08-11");
         assert_eq!(note.url, "https://example.com/patch");
