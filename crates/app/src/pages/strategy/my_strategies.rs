@@ -263,6 +263,8 @@ pub fn StrategyMy() -> Element {
 
     // Which card is asking "Delete this strategy?" (inline strip, no modal)
     let mut delete_target: Signal<Option<StrategySummary>> = use_signal(|| None);
+    // A DELETE is in flight. Blocks a second click from sending another one.
+    let mut deleting = use_signal(|| false);
 
     // Auth guard
     let auth_state = auth();
@@ -291,8 +293,12 @@ pub fn StrategyMy() -> Element {
     // --- Delete handlers ---
 
     let on_delete_confirm = move |_| {
+        if deleting() {
+            return;
+        }
         if let Some(strat) = delete_target() {
             let id = strat.id.clone();
+            deleting.set(true);
             spawn(async move {
                 match ApiClient::web()
                     .delete(&format!("/api/strategy/strategies/{id}"))
@@ -305,6 +311,7 @@ pub fn StrategyMy() -> Element {
                     }
                     Err(e) => toast.show(Toast::error(format!("Delete failed: {e}"))),
                 }
+                deleting.set(false);
             });
         }
     };
@@ -393,6 +400,7 @@ pub fn StrategyMy() -> Element {
                                                     title: format!("Delete \"{}\"?", s.name),
                                                     body: "This cannot be undone.".to_string(),
                                                     confirm_label: "Delete".to_string(),
+                                                    busy: deleting(),
                                                     on_confirm: on_delete_confirm,
                                                     on_cancel: on_delete_cancel,
                                                 }
@@ -499,5 +507,14 @@ mod tests {
         assert_eq!(resp.data[0].name, "Attack");
         assert_eq!(resp.data[0].map_id, "circuit-royal");
         assert_eq!(resp.data[0].element_count, 3);
+    }
+
+    #[test]
+    fn delete_confirm_is_busy_while_the_request_is_in_flight() {
+        let src = include_str!("my_strategies.rs");
+        let busy = ["busy: ", "deleting()"].concat();
+        assert_eq!(src.matches(busy.as_str()).count(), 1);
+        let guard = ["if ", "deleting() {"].concat();
+        assert!(src.contains(guard.as_str()));
     }
 }
