@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
-use crate::components::ui::{EmptyState, HeroSelect, Pill, PillTone};
+use crate::components::ui::{EmptyState, HeroSelect, LoadError, Pill, PillTone, SkeletonRows};
 use crate::routes::Route;
 use crate::sample::{LIST_RULE_NOTE, list_result};
 use crate::util::encode_query;
@@ -197,12 +197,25 @@ const PAGE_CSS: &str = r#"
         justify-content: center;
         align-items: center;
     }
-    .members-loading {
-        color: var(--text-3);
-        text-align: center;
-        padding: 3rem 0;
-    }
 "#;
+
+/// Where the roster fetch stands. `fetch_roster_members` returns `None` for a
+/// failed request, which the resource wraps as `Some(None)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RosterLoad {
+    Loading,
+    Failed,
+    Ready,
+}
+
+/// `fetched` is `None` while in flight, then `Some(ok)`.
+fn classify_roster(fetched: Option<bool>) -> RosterLoad {
+    match fetched {
+        None => RosterLoad::Loading,
+        Some(false) => RosterLoad::Failed,
+        Some(true) => RosterLoad::Ready,
+    }
+}
 
 #[component]
 pub fn Members() -> Element {
@@ -212,7 +225,7 @@ pub fn Members() -> Element {
 
     // Reading `hero()` inside the closure (before `async move`) makes the
     // resource reactive: it re-fetches whenever the selection changes.
-    let members = use_resource(move || {
+    let mut members = use_resource(move || {
         let hero = hero();
         async move {
             // Unfiltered: first page (unchanged). Hero filter: cursor-walk the
@@ -241,14 +254,30 @@ pub fn Members() -> Element {
             {
                 let hero_sel = hero();
                 let data = members.read();
+                let load = classify_roster(data.as_ref().map(|d| d.is_some()));
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match (data, &hero_sel) {
-                    (None, _) => rsx! { p { class: "members-loading", "Loading..." } },
+                    (None, _) if load == RosterLoad::Failed => rsx! {
+                        LoadError {
+                            message: "Couldn't load the crew. Check your connection and try again."
+                                .to_string(),
+                            on_retry: move |_| members.restart(),
+                        }
+                    },
+                    (None, _) => rsx! {
+                        SkeletonRows { status: "Loading the crew...".to_string(), rows: 6 }
+                    },
                     // No hero filter: render exactly as before.
                     (Some(list), None) => {
                         if list.is_empty() {
                             rsx! {
-                                EmptyState { title: "No members yet.", message: "Check back soon." }
+                                EmptyState {
+                                    title: "No members yet.",
+                                    message: "Check back soon, or be the first to join.",
+                                    next: rsx! {
+                                        Link { to: Route::Apply {}, "Apply to join" }
+                                    },
+                                }
                             }
                         } else {
                             rsx! {
@@ -374,6 +403,13 @@ fn hero_stat_line(hero: &str, hs: &HeroScoped) -> HeroStatLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_roster_fetch_is_not_loading_forever() {
+        assert_eq!(classify_roster(None), RosterLoad::Loading);
+        assert_eq!(classify_roster(Some(false)), RosterLoad::Failed);
+        assert_eq!(classify_roster(Some(true)), RosterLoad::Ready);
+    }
 
     fn line(games: u32, wins: u32, losses: u32, draws: u32, winrate: f32) -> HeroStatLine {
         let hs = HeroScoped {

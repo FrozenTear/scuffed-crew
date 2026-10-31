@@ -114,6 +114,26 @@ const APPLY_CSS: &str = r#"
     .muted { color: var(--text-3); font-size: 0.88rem; }
 "#;
 
+fn status_tone(status: &str) -> PillTone {
+    match status {
+        "pending" => PillTone::Warn,
+        "trial" => PillTone::Accent,
+        "accepted" => PillTone::Ok,
+        _ => PillTone::Neutral,
+    }
+}
+
+fn status_label(status: &str) -> String {
+    match status {
+        "pending" => "Pending Review".to_string(),
+        "trial" => "Trial Period".to_string(),
+        "accepted" => "Accepted".to_string(),
+        "rejected" => "Not accepted".to_string(),
+        "withdrawn" => "Withdrawn".to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[component]
 pub fn Apply() -> Element {
     let auth = use_auth();
@@ -194,21 +214,8 @@ pub fn Apply() -> Element {
                             }
                         }
                     } else if let Some(app) = status_app.clone() {
-                        let status_tone = match app.status.as_str() {
-                            "pending" => PillTone::Warn,
-                            "trial" => PillTone::Accent,
-                            "accepted" => PillTone::Ok,
-                            "rejected" => PillTone::Danger,
-                            _ => PillTone::Neutral,
-                        };
-                        let status_label = match app.status.as_str() {
-                            "pending" => "Pending Review",
-                            "trial" => "Trial Period",
-                            "accepted" => "Accepted",
-                            "rejected" => "Rejected",
-                            "withdrawn" => "Withdrawn",
-                            _ => &app.status,
-                        };
+                        let status_tone = status_tone(app.status.as_str());
+                        let status_label = status_label(app.status.as_str());
                         let desc = match app.status.as_str() {
                             "pending" => {
                                 "Your application is being reviewed. We'll get back to you soon."
@@ -516,5 +523,13 @@ mod tests {
             apply_fetch_phase(UseResourceState::Ready, false, false),
             SlotPhase::Ready
         );
+    }
+
+    #[test]
+    fn rejected_application_is_not_accepted_and_neutral() {
+        assert_eq!(status_label("rejected"), "Not accepted");
+        assert!(status_tone("rejected") == PillTone::Neutral);
+        assert!(status_tone("pending") == PillTone::Warn);
+        assert_eq!(status_label("pending"), "Pending Review");
     }
 }

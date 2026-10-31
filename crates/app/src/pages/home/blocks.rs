@@ -66,6 +66,11 @@ fn list_fallback(
 // Hero
 // ---------------------------------------------------------------------------
 
+/// Label under the game title count. One title reads singular.
+fn game_titles_label(n: usize) -> &'static str {
+    if n == 1 { "Game title" } else { "Game titles" }
+}
+
 #[component]
 pub fn HeroBlock(
     content: HomepageContent,
@@ -111,7 +116,7 @@ pub fn HeroBlock(
                     }
                     if metrics_pending {
                         div { class: "home-metrics",
-                            for label in ["Active squads", "Members", "Games"] {
+                            for label in ["Active squads", "Members", "Game titles"] {
                                 div { class: "home-metric",
                                     strong {
                                         span {
@@ -140,7 +145,7 @@ pub fn HeroBlock(
                             if let Some(n) = metric_games {
                                 div { class: "home-metric",
                                     strong { "{n}" }
-                                    span { "Games" }
+                                    span { "{game_titles_label(n)}" }
                                 }
                             }
                         }
@@ -987,5 +992,34 @@ mod tests {
         assert!(teams_will_render(true, ListPhase::Pending, true, false));
         assert!(!teams_will_render(true, ListPhase::Failed, true, false));
         assert!(teams_will_render(true, ListPhase::Failed, true, true));
+    }
+
+    #[test]
+    fn game_titles_label_is_singular_for_one() {
+        assert_eq!(game_titles_label(1), "Game title");
+        assert_eq!(game_titles_label(0), "Game titles");
+        assert_eq!(game_titles_label(4), "Game titles");
+    }
+
+    #[test]
+    fn hero_metric_says_game_titles_not_games() {
+        fn hero() -> Element {
+            rsx! {
+                HeroBlock {
+                    content: HomepageContent::default(),
+                    initials: "SO".to_string(),
+                    recruitment_open: false,
+                    show_secondary_cta: true,
+                    secondary_href: "#squads".to_string(),
+                    metric_squads: Some(2),
+                    metric_members: Some(10),
+                    metric_games: Some(3),
+                    metrics_pending: false,
+                }
+            }
+        }
+        let html = render(hero);
+        assert!(html.contains("Game titles"), "{html}");
+        assert!(!html.contains(">Games<"), "{html}");
     }
 }
