@@ -7,6 +7,7 @@
 mod canvas;
 mod client_error;
 mod components;
+mod copy;
 mod head;
 mod hooks;
 mod keybindings;
