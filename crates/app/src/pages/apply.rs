@@ -568,4 +568,13 @@ mod tests {
             SlotPhase::Ready
         );
     }
+
+    #[test]
+    fn rejected_application_is_not_accepted_and_neutral() {
+        let (tone, label) = status_pill("rejected");
+        assert_eq!(label, "Not accepted");
+        assert!(tone == PillTone::Neutral);
+        assert!(status_pill("pending").0 == PillTone::Warn);
+        assert_eq!(status_pill("pending").1, "Pending Review");
+    }
 }
