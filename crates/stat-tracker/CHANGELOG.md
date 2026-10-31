@@ -15,6 +15,19 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.6.0-alpha.1.4
+
+This alpha improves the opt-in screen saves around each game (the **Save screens around each game** switch, off by default). The tracker now saves the ENTERING GAME loading screen and the roster and map screen as two separate pictures, keeps the frames it nearly saved so the checks can be tuned, and labels real Victory and Defeat titles after a match as the end title. Nothing changes unless the switch is on.
+
+### Highlights
+
+- The roster and map screen before a game is saved as `roster.png` when it first shows and `roster_last.png` as its last frame, once per game, next to `loading.png` for the ENTERING GAME screen. Neither one stands in for the other.
+- The roster check looks at the layout, not at the number of player rows, so 5v5 and 6v6 rosters both match: at least 2 of 4 parts (the team headers, the role strips of the team columns, the bans, the map banner) must pass, and one of them must be the team headers or the bans.
+- Frames that came close but were turned down are saved as `rejected_loading.png`, `rejected_ban_results.png` or `rejected_roster.png`, with a debug log line giving their numbers. A game folder holding only such frames has its own cap of 5 folders and never counts toward the 20-game limit, so it cannot push out a real game.
+- After a match, real Victory and Defeat title frames are labelled `end_title` in `postgame.json`, from the title's first frame on, and so is a frame saved with no read just before an end title read.
+
+Technical detail. The roster parts are measured as shares of the 16:9 game area: the white TEAM 1 and TEAM 2 header bars, level and about 0.047 of the height; the coloured role strips on the columns' inner edges just under them; the red ban icons or the BANNED HEROES label; the white map name or the orange logo ring. The columns and the map banner alone are not enough, since post-match screens pass those two. While the roster stays up, each poll stages a full-size `roster_last.png` through the writer queue (8 jobs, a job is dropped when the writer is busy), saved when a phase is read or no roster frame came for 4 seconds. The roster is tuned on one real 5v5 frame at 1440p; no 6v6 frame or other resolution is checked yet. The loading rule is unchanged: an ENTERING GAME frame caught mid-fade, with no text drawn yet, is turned down and kept as `rejected_loading.png`, and the APPLYING UPDATE band stays rejected. Turned-down frames get at most one debug line a second per label (the same numbers again only after 30 seconds) and are replaced at most every 10 seconds; a held loading or ban results frame that is dropped is always written. The `end_title` label now comes from a sure end title read on the frame itself, before the second read makes it the match end signal; the post-match summary page is still `after_end`.
+
 ## 0.6.0-alpha.1.3
 
 This alpha fixes two mistakes in the opt-in pre-game screen saves and adds the screens after each match to them. The ban results picture can now come from later in the ban results screen, after more of the bans and scores have appeared, and the loading screen picture is only saved when the game starts after it, so the loading screen replaces a game update screen shown before it, and a loading frame with no game start after it is dropped. The loading screen check no longer asks for a minimum text width, which real loading screens failed, so `loading.png` is saved on real games again. Nothing changes while the switch is off, and the switch, Save screens around each game, can now be turned on in Settings.
