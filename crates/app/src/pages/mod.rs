@@ -64,7 +64,7 @@ pub use member_profile::MemberProfile;
 pub use members::Members;
 pub use my_reports::MyReports;
 pub use news::News;
-pub use not_found::NotFound;
+pub use not_found::{NotFound, NotFoundLink, NotFoundPanel};
 pub use polls::Polls;
 pub use profile_settings::ProfileSettings;
 pub use scrims::Scrims;

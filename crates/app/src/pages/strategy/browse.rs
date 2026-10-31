@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::ui::{LoadError, SkeletonRows};
 use crate::routes::Route;
 use crate::util::encode_query;
 use scuffed_api_client::ApiClient;
@@ -263,7 +264,7 @@ pub fn StrategyBrowse() -> Element {
 
     // Fetch strategies whenever debounced_search or selected_mode changes.
     // Result is Result so we can surface errors instead of eternal Loading.
-    let strategies = use_resource(move || {
+    let mut strategies = use_resource(move || {
         let search = debounced_search();
         let mode = selected_mode();
         async move {
@@ -327,13 +328,13 @@ pub fn StrategyBrowse() -> Element {
                 let data = strategies.read();
                 match data.as_ref() {
                     None => rsx! {
-                        p { class: "strategy-loading", "Loading strategies..." }
+                        SkeletonRows { status: "Loading strategies...".to_string() }
                     },
-                    Some(Err(err)) => rsx! {
-                        div { class: "strategy-empty",
-                            p { style: "color: var(--danger);",
-                                "Failed to load strategies: {err}"
-                            }
+                    Some(Err(_)) => rsx! {
+                        LoadError {
+                            message: "Couldn't load strategies. Check your connection and try again."
+                                .to_string(),
+                            on_retry: move |_| strategies.restart(),
                         }
                     },
                     Some(Ok(resp)) if resp.data.is_empty() => rsx! {

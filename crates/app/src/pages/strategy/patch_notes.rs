@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::ui::{LoadError, SkeletonRows};
+use crate::copy::plain_copy;
 use crate::hooks::use_api;
 
 // --- Types ---
@@ -11,7 +13,7 @@ use crate::hooks::use_api;
 /// `data` is required so a bare `[]` / `{}` cannot look like a successful empty list.
 #[derive(Debug, Clone, Deserialize)]
 struct ListResponse {
-    #[serde(alias = "patches")]
+    #[serde(alias = "patches", deserialize_with = "plain_notes")]
     data: Vec<PatchNote>,
 }
 
@@ -60,6 +62,37 @@ struct PatchSection {
     category: String,
     #[serde(default)]
     items: Vec<String>,
+}
+
+/// Deserialize the list, then strip long dashes from every free-text field.
+/// Version, date, url, hero ids and hero names are identifiers and stay as sent.
+fn plain_notes<'de, D>(deserializer: D) -> Result<Vec<PatchNote>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut notes = Vec::<PatchNote>::deserialize(deserializer)?;
+    for note in &mut notes {
+        plain_note(note);
+    }
+    Ok(notes)
+}
+
+fn plain_note(note: &mut PatchNote) {
+    note.title = note.title.take().map(|t| plain_copy(&t));
+    note.body = note.body.take().map(|b| plain_copy(&b));
+    for hero in &mut note.hero_updates {
+        hero.dev_comment = hero.dev_comment.take().map(|c| plain_copy(&c));
+        for change in &mut hero.changes {
+            change.ability = change.ability.take().map(|a| plain_copy(&a));
+            change.description = plain_copy(&change.description);
+        }
+    }
+    for section in &mut note.sections {
+        section.category = plain_copy(&section.category);
+        for item in &mut section.items {
+            *item = plain_copy(item);
+        }
+    }
 }
 
 /// Distinguishes loading vs failed so a missing API cannot look like loading.
@@ -1200,21 +1233,15 @@ pub fn PatchNotesPage() -> Element {
                     {
                         match (state, inner) {
                             (PatchFetchState::Loading, _) => rsx! {
-                                p { class: "patch-loading", "Loading patch notes..." }
+                                SkeletonRows { status: "Loading patch notes...".to_string() }
                             },
                             (PatchFetchState::Failed, _) => {
-                                let message = err.unwrap_or_else(|| "Request failed".to_string());
                                 let mut refresh = patches.refresh;
                                 rsx! {
-                                    div { class: "patch-empty",
-                                        p { class: "patch-error",
-                                            "Failed to load patch notes: {message}"
-                                        }
-                                        button {
-                                            class: "patch-chip patch-retry",
-                                            onclick: move |_| refresh += 1,
-                                            "Retry"
-                                        }
+                                    LoadError {
+                                        message: "Couldn't load patch notes. Check your connection and try again."
+                                            .to_string(),
+                                        on_retry: move |_| refresh += 1,
                                     }
                                 }
                             },
@@ -2093,5 +2120,50 @@ mod tests {
     #[test]
     fn hero_dom_id_is_stable() {
         assert_eq!(hero_dom_id(0, 3), "patch-0-hero-3");
+    }
+
+    #[test]
+    fn patch_notes_load_without_long_dashes() {
+        let raw = r#"{"data": [{
+            "version": "9.1",
+            "date": "2026-08-11",
+            "title": "Season 9 \u2014 Balance",
+            "body": "Live August 11\u201331 \u2014 read on",
+            "url": "https://example.com/patch",
+            "hero_updates": [{
+                "hero_id": "ana",
+                "hero_name": "Ana",
+                "dev_comment": "Too strong \u2014 toned down",
+                "changes": [{
+                    "ability": "Sleep \u2014 Dart",
+                    "description": "Cooldown 12\u201314 seconds"
+                }]
+            }],
+            "sections": [{
+                "category": "General \u2014 Updates",
+                "items": ["Mon\u2013Fri queue", "Fixed \u2014"]
+            }]
+        }]}"#;
+        let list: ListResponse = serde_json::from_str(raw).expect("parse");
+        let note = &list.data[0];
+        assert_eq!(note.title.as_deref(), Some("Season 9, Balance"));
+        assert_eq!(note.body.as_deref(), Some("Live August 11 to 31, read on"));
+        let hero = &note.hero_updates[0];
+        assert_eq!(hero.dev_comment.as_deref(), Some("Too strong, toned down"));
+        assert_eq!(hero.changes[0].ability.as_deref(), Some("Sleep, Dart"));
+        assert_eq!(hero.changes[0].description, "Cooldown 12 to 14 seconds");
+        let section = &note.sections[0];
+        assert_eq!(section.category, "General, Updates");
+        assert_eq!(section.items, vec!["Mon to Fri queue", "Fixed"]);
+        assert_eq!(note.version, "9.1");
+        assert_eq!(note.date, "2026-08-11");
+        assert_eq!(note.url, "https://example.com/patch");
+    }
+
+    #[test]
+    fn patch_search_matches_the_cleaned_title() {
+        let raw = r#"{"data": [{"version": "9.0", "title": "Season 9 \u2014 Balance"}]}"#;
+        let list: ListResponse = serde_json::from_str(raw).expect("parse");
+        assert!(patch_matches_search(&list.data[0], "season 9, balance"));
     }
 }
