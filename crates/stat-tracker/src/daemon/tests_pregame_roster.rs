@@ -487,3 +487,52 @@ fn a_rejected_frame_is_replaced_by_a_newer_one_of_its_label() {
     assert_eq!(image::image_dimensions(&path).unwrap(), (32, 36));
     assert_eq!(names_in(&root.join("20261030_120000")).len(), 1);
 }
+
+#[test]
+fn a_tick_reject_just_before_does_not_crowd_out_the_held_ban_results_frame() {
+    let near = super::pregame_ban_title::BanCheck {
+        pass: false,
+        shape: None,
+        score: Some(0.5),
+    };
+    assert!(near.near_miss());
+    let mut run = Run::new();
+    run.tick(0, BAN, 1);
+    run.tick(1_500, Seen::BanResults, 2);
+    run.tick(3_000, Seen::BanResults, 3);
+    // A ban-results near miss: written, and the 10 s limit starts.
+    let miss = Classified {
+        seen: Seen::Other,
+        rejects: Rejects {
+            ban_results: Some(near),
+            ..Default::default()
+        },
+    };
+    run.tick_checked(4_500, miss, 4);
+    // The select: the staged frame is saved, the held replacement turned
+    // down, and written although the limit is on.
+    run.tick(6_000, SELECT, 5);
+    assert_eq!(run.written(BAN_RESULTS_NAME), vec![2]);
+    assert_eq!(run.written(RejectLabel::BanResults.file_name()), vec![4, 3]);
+}
+
+#[test]
+fn a_frame_with_no_ban_title_near_it_is_no_ban_results_candidate() {
+    let unknown = detect::GamePhase::Unknown;
+    let want = PregameWant {
+        loading: false,
+        other_frame: true,
+        select_title: false,
+        ban_title: true,
+        roster: false,
+        rejected: 0,
+    };
+    let dark = image::RgbImage::from_pixel(1280, 720, image::Rgb([20, 20, 30]));
+    let check = |rgb: &image::RgbImage| super::pregame_ban_title::BanCheck {
+        pass: false,
+        shape: super::pregame_ban_title::shape_metrics(rgb),
+        score: None,
+    };
+    let checked = classify_checked_with(want, &unknown, &dark, |_| false, check);
+    assert_eq!(checked, Seen::Other.into());
+}

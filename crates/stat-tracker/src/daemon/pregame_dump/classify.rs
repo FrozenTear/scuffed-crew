@@ -98,7 +98,9 @@ pub(crate) fn classify_checked_with(
         if check.pass {
             return seen(Seen::BanResults);
         }
-        rejects.ban_results = Some(check);
+        // A near miss only: a roster or plain frame in the wait is no
+        // ban-results candidate.
+        rejects.ban_results = Some(check).filter(|c| c.near_miss());
     }
     if want.roster {
         let scores = detect::roster_screen::scores(rgb);

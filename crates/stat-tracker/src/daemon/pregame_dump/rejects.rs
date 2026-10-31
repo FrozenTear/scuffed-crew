@@ -214,22 +214,26 @@ impl<F: Clone> PregameTracker<F> {
             return;
         }
         for (label, detail) in rejects.details() {
-            self.turned_down(now, label, &detail, frame.clone(), shots);
+            self.turned_down(now, label, &detail, frame.clone(), false, shots);
         }
     }
 
     /// One turned-down `label` candidate with its numbers `detail`: one
     /// debug line, and `frame` written over `rejected_<label>.png` in the
-    /// open game's folder, each when the limiter lets it.
+    /// open game's folder, each when the limiter lets it. A `held` frame
+    /// (a held loading or ban-results frame dropped or not saved, at most
+    /// once per candidate) is logged and written whatever the limiter says,
+    /// so a tick's plain reject just before cannot crowd it out.
     pub(super) fn turned_down(
         &mut self,
         now: Instant,
         label: RejectLabel,
         detail: &str,
         frame: Option<F>,
+        held: bool,
         shots: &mut Vec<PregameOp<F>>,
     ) {
-        if self.rejects.log_due(label, now, detail) {
+        if self.rejects.log_due(label, now, detail) || held {
             tracing::debug!(
                 target: "scuffed_stat_tracker",
                 label = label.name(),
@@ -241,7 +245,7 @@ impl<F: Clone> PregameTracker<F> {
             return;
         };
         if let Some(frame) = frame
-            && self.rejects.frame_due(label, now)
+            && (held || self.rejects.frame_due(label, now))
         {
             self.rejects.frame_written(label, now);
             shots.push(PregameOp::Save(PregameShot {

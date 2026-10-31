@@ -126,6 +126,20 @@ pub(crate) struct BanCheck {
     pub(crate) score: Option<f32>,
 }
 
+impl BanCheck {
+    /// A failed check that came close: an example score of at least half
+    /// [`BAN_TITLE_MATCH_MIN`], or at least half the shape rule's least
+    /// share of bright title pixels. A roster or hero select frame has no
+    /// bright pixel there.
+    pub(crate) fn near_miss(&self) -> bool {
+        !self.pass
+            && (self.score.is_some_and(|s| s >= BAN_TITLE_MATCH_MIN / 2.0)
+                || self
+                    .shape
+                    .is_some_and(|m| m.bright >= SHAPE.bright_min / 2.0))
+    }
+}
+
 /// Measure [`SHAPE`] on `rgb`'s title region, at full resolution; `None`
 /// when the region is too small to have edge rows.
 pub(crate) fn shape_metrics(rgb: &image::RgbImage) -> Option<ShapeMetrics> {

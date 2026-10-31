@@ -625,7 +625,14 @@ impl<F: Clone> PregameTracker<F> {
             now.saturating_duration_since(held.at).as_secs_f32(),
             LOADING_START_WAIT.as_secs()
         );
-        self.turned_down(now, RejectLabel::Loading, &detail, Some(held.frame), shots);
+        self.turned_down(
+            now,
+            RejectLabel::Loading,
+            &detail,
+            Some(held.frame),
+            true,
+            shots,
+        );
     }
 
     fn observe_phase(
@@ -882,7 +889,14 @@ impl<F: Clone> PregameTracker<F> {
                 "held frame not saved: {why}; {:.1} s after the first candidate",
                 now.saturating_duration_since(c.taken_at).as_secs_f32()
             );
-            self.turned_down(now, RejectLabel::BanResults, &detail, Some(frame), shots);
+            self.turned_down(
+                now,
+                RejectLabel::BanResults,
+                &detail,
+                Some(frame),
+                true,
+                shots,
+            );
         }
     }
 
@@ -903,7 +917,14 @@ impl<F: Clone> PregameTracker<F> {
             "held frame dropped: {why}; {:.1} s after the first candidate",
             now.saturating_duration_since(c.taken_at).as_secs_f32()
         );
-        self.turned_down(now, RejectLabel::BanResults, &detail, Some(c.frame), shots);
+        self.turned_down(
+            now,
+            RejectLabel::BanResults,
+            &detail,
+            Some(c.frame),
+            true,
+            shots,
+        );
     }
 
     /// The phase on screen ended: write its last frame when that is not
