@@ -13,6 +13,7 @@ use serde::Deserialize;
 
 use crate::components::{is_http_status, member_pending};
 use crate::hooks::use_api_with;
+use crate::pages::{NotFoundLink, NotFoundPanel};
 use crate::routes::Route;
 use crate::state::use_auth;
 use crate::util::encode_query;
@@ -364,7 +365,14 @@ pub fn StatsMatch(id: String) -> Element {
     let body = match game_view(&route_id, row, error.as_deref()) {
         GameView::Found(row) => game_detail(row),
         GameView::Missing => rsx! {
-            p { class: "empty-state", "{MISSING_TEXT}" }
+            NotFoundPanel {
+                title: "Game not found",
+                message: MISSING_TEXT,
+                links: vec![
+                    NotFoundLink { label: "Back to My Stats", to: Route::Stats {} },
+                    NotFoundLink { label: "Back home", to: Route::Home {} },
+                ],
+            }
         },
         GameView::Pending => member_pending(&auth(), &game, "this game"),
     };
