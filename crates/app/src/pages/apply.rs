@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::components::ui::{BtnVariant, Button, Card, Pill, PillTone, Textarea};
+use crate::components::ui::{BtnVariant, Button, Card, InlineConfirm, Pill, PillTone, Textarea};
 use crate::components::{Toast, list_cap_notice, use_toast};
 use crate::hooks::{use_api, use_api_list};
 use crate::routes::Route;
@@ -129,6 +129,7 @@ pub fn Apply() -> Element {
     let mut selected_games = use_signal(Vec::<String>::new);
     let mut message = use_signal(String::new);
     let mut submitting = use_signal(|| false);
+    let mut confirm_withdraw = use_signal(|| false);
 
     let loading = auth().loading;
     let screen = apply_screen(loading, settings_phase);
@@ -237,20 +238,15 @@ pub fn Apply() -> Element {
                                 }
                                 p { class: "apply-card-desc", "{desc}" }
                                 if can_withdraw {
-                                    div { class: "apply-actions",
-                                        Button {
-                                            variant: BtnVariant::Ghost,
-                                            disabled: submitting(),
-                                            onclick: move |_| {
-                                                #[cfg(target_arch = "wasm32")]
-                                                let confirmed = web_sys::window()
-                                                    .and_then(|w| w.confirm_with_message("Withdraw your application?").ok())
-                                                    .unwrap_or(false);
-                                                #[cfg(not(target_arch = "wasm32"))]
-                                                let confirmed = true;
-                                                if !confirmed {
-                                                    return;
-                                                }
+                                    if confirm_withdraw() {
+                                        InlineConfirm {
+                                            id: "withdraw-application".to_string(),
+                                            title: "Withdraw your application?".to_string(),
+                                            body: "You can apply again later if recruitment is open.".to_string(),
+                                            confirm_label: "Withdraw".to_string(),
+                                            busy: submitting(),
+                                            on_confirm: move |_| {
+                                                confirm_withdraw.set(false);
                                                 submitting.set(true);
                                                 spawn(async move {
                                                     match ApiClient::web()
@@ -271,10 +267,20 @@ pub fn Apply() -> Element {
                                                     submitting.set(false);
                                                 });
                                             },
-                                            if submitting() {
-                                                "Withdrawing..."
-                                            } else {
-                                                "Withdraw application"
+                                            on_cancel: move |_| confirm_withdraw.set(false),
+                                        }
+                                    } else {
+                                        div { class: "apply-actions",
+                                            Button {
+                                                id: "withdraw-application-trigger".to_string(),
+                                                variant: BtnVariant::Ghost,
+                                                disabled: submitting(),
+                                                onclick: move |_| confirm_withdraw.set(true),
+                                                if submitting() {
+                                                    "Withdrawing..."
+                                                } else {
+                                                    "Withdraw application"
+                                                }
                                             }
                                         }
                                     }
