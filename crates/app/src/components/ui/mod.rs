@@ -14,6 +14,8 @@ pub use card::Card;
 pub use feedback::EmptyState;
 #[allow(unused_imports)]
 pub use feedback::Spinner;
+#[allow(unused_imports)]
+pub use feedback::{LoadError, SkeletonRows, StatusLine};
 pub use field::Textarea;
 #[allow(unused_imports)]
 pub use field::{Input, Select};
