@@ -1,0 +1,58 @@
+
+:root {
+  --font-head: 'Space Grotesk', system-ui, sans-serif;
+  --font-body: 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --text-xs: 12px;  --text-sm: 12.5px; --text-base: 14px; --text-lg: 15.5px;
+  --text-xl: 18px;  --text-2xl: 21px;  --text-3xl: 30px;
+
+  --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
+  --space-6: 24px; --space-8: 32px; --space-12: 48px;
+
+  --radius-sm: 7px; --radius-md: 9px; --radius-lg: 12px; --radius-pill: 999px;
+
+  --overlay: rgba(0,0,0,0.6);
+
+  /* Chart palette (dark values; light scope overrides). CVD-validated against
+     the dark surface (--surface). See docs/notes/stats-ui-w2-validation.md.
+     Snap-tuned to the dark lightness band; re-run the validator if edited. */
+  --chart-1: #8f73ff; --chart-2: #15ac7d; --chart-3: #b98a02; --chart-4: #ca474c; --chart-5: #089fd7; --chart-6: #984ab2;
+  /* Winrate bars: two-pole diverging encoding (W5a). Cool up-pole (> 50%),
+     warm down-pole (< 50%); exactly-50% and sub-min-games rows take the
+     neutral --text-3 midpoint. Chart poles, NOT status tokens. Pair
+     CVD-validated vs both surfaces. See docs/notes/stats-ui-w2-validation.md
+     (W5a section); re-run the validator if edited. */
+  --chart-wr-up: #089fd7; --chart-wr-down: #aa5000;
+}
+
+[data-theme="dark"] {
+  --bg: #17171d; --surface: #1f1f27; --surface-2: #282831; --border: #353541;
+  --text: #f4f4f8; --text-2: #c1c1cd; --text-3: #9696a3;
+  --accent: #8f73ff; --accent-fg: #ffffff; --accent-soft: rgba(143,115,255,0.17);
+  --ok: #46d8a4; --warn: #fbbf24; --danger: #f06a6a;
+}
+
+[data-theme="light"] {
+  --bg: #f7f7f9; --surface: #ffffff; --surface-2: #f0f0f4; --border: #e3e3e9;
+  --text: #16161c; --text-2: #545462; --text-3: #696975;
+  --accent: #6d4aff; --accent-fg: #ffffff; --accent-soft: rgba(109,74,255,0.1);
+  --ok: #087a50; --warn: #c2830a; --danger: #d63031;
+  /* CVD-validated against #ffffff. See docs/notes/stats-ui-w2-validation.md. */
+  --chart-1: #6d4aff; --chart-2: #0ea66e; --chart-3: #c2830a; --chart-4: #d63031; --chart-5: #0284c7; --chart-6: #7405c3;
+  --chart-wr-up: #0284c7; --chart-wr-down: #843900;
+}
+
+html, body {
+  /* --page-bg-* set from admin Site Settings when customized */
+  background-color: var(--page-bg-color, var(--bg));
+  background-image: var(--page-bg-image, none);
+  background-size: cover;
+  background-position: center;
+  background-attachment: fixed;
+  background-repeat: no-repeat;
+  color: var(--text);
+  font-family: var(--font-body); font-size: var(--text-base);
+}
+
+[data-accent="strategy"] { --accent: #ff7a1a; --accent-soft: rgba(255,122,26,.16); }

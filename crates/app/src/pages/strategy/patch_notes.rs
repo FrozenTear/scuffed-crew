@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::ui::{LoadError, SkeletonRows};
 use crate::hooks::use_api;
 
 // --- Types ---
@@ -1200,21 +1201,15 @@ pub fn PatchNotesPage() -> Element {
                     {
                         match (state, inner) {
                             (PatchFetchState::Loading, _) => rsx! {
-                                p { class: "patch-loading", "Loading patch notes..." }
+                                SkeletonRows { status: "Loading patch notes...".to_string() }
                             },
                             (PatchFetchState::Failed, _) => {
-                                let message = err.unwrap_or_else(|| "Request failed".to_string());
                                 let mut refresh = patches.refresh;
                                 rsx! {
-                                    div { class: "patch-empty",
-                                        p { class: "patch-error",
-                                            "Failed to load patch notes: {message}"
-                                        }
-                                        button {
-                                            class: "patch-chip patch-retry",
-                                            onclick: move |_| refresh += 1,
-                                            "Retry"
-                                        }
+                                    LoadError {
+                                        message: "Couldn't load patch notes. Check your connection and try again."
+                                            .to_string(),
+                                        on_retry: move |_| refresh += 1,
                                     }
                                 }
                             },
