@@ -83,7 +83,7 @@ const CSS: &str = r#"
 }
 .login-nostr-btn:disabled { opacity: 0.6; cursor: default; }
 .login-nostr-hint {
-    font-size: 0.72rem;
+    font-size: 0.75rem;
     color: var(--text-3);
     margin: 0.4rem 0 0;
     text-align: center;
@@ -1030,6 +1030,12 @@ mod tests {
         let label = css_rule_body(".login-field label {");
         assert!(!label.contains("uppercase"), "{label}");
         assert!(!label.contains("0.75rem"), "{label}");
+    }
+
+    #[test]
+    fn nostr_hint_meets_the_twelve_px_floor() {
+        let hint = css_rule_body(".login-nostr-hint {");
+        assert!(hint.contains("font-size: 0.75rem;"), "{hint}");
     }
 
     fn http(status: u16, body: &str) -> scuffed_api_client::ClientError {
