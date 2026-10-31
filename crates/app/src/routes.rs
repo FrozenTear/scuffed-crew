@@ -84,6 +84,10 @@ pub enum Route {
         StatsMatch { id: String },
         #[route("/patch-notes")]
         PatchNotes {},
+        #[redirect("/strategies", || Route::StrategyBrowse {})]
+        #[redirect("/matches", || Route::Home {})]
+        #[route("/:..segments")]
+        NotFound { segments: Vec<String> },
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)
@@ -142,16 +146,65 @@ pub enum Route {
         StrategyEditorNew {},
         #[route("/strategy/editor/:id")]
         StrategyEditor { id: String },
-    #[end_layout]
-
-    #[route("/:..segments")]
-    NotFound { segments: Vec<String> },
 }
 
 #[cfg(test)]
 mod tests {
     use super::Route;
     use std::str::FromStr;
+
+    #[test]
+    fn unknown_paths_fall_through_to_the_catch_all() {
+        for (path, segments) in [
+            ("/nope", vec!["nope"]),
+            ("/nope/deeper", vec!["nope", "deeper"]),
+            ("/admin/nope", vec!["admin", "nope"]),
+            ("/strategy/nope", vec!["strategy", "nope"]),
+        ] {
+            assert_eq!(
+                Route::from_str(path).unwrap(),
+                Route::NotFound {
+                    segments: segments.into_iter().map(String::from).collect()
+                },
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_and_dynamic_routes_still_win_over_the_catch_all() {
+        for path in [
+            "/",
+            "/members",
+            "/members/abc",
+            "/matches/abc",
+            "/leaderboards",
+            "/stats",
+            "/stats/tokens",
+            "/stats/match/abc",
+            "/patch-notes",
+            "/admin",
+            "/admin/members",
+            "/strategy",
+            "/strategy/editor/abc",
+            "/login",
+        ] {
+            let route = Route::from_str(path).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+            assert!(
+                !matches!(route, Route::NotFound { .. }),
+                "{path} fell into the catch-all"
+            );
+        }
+    }
+
+    #[test]
+    fn strategies_and_matches_redirect_to_real_pages() {
+        assert_eq!(
+            Route::from_str("/strategies").unwrap(),
+            Route::StrategyBrowse {}
+        );
+        assert_eq!(Route::from_str("/matches").unwrap(), Route::Home {});
+    }
 
     #[test]
     fn patch_notes_has_public_and_strategy_routes() {
