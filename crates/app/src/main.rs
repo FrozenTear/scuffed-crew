@@ -268,6 +268,18 @@ mod tests {
         assert_eq!(strip_html_comments("a<!-->b<!--->c<!--x-->d"), "abcd");
     }
 
+    /// The first paint follows a light system theme instead of flashing dark.
+    #[test]
+    fn boot_splash_has_a_light_variant() {
+        let visible = strip_html_comments(include_str!("../index.html"));
+        let light = visible
+            .split("prefers-color-scheme: light")
+            .nth(1)
+            .expect("light media query in index.html");
+        assert!(light.contains("html, body"), "{light}");
+        assert!(light.contains("background:"), "{light}");
+    }
+
     /// dx still sees a closing body tag inside a comment, so that count stays
     /// on the raw file. Head-tag counts use the stripped text.
     fn strip_html_comments(html: &str) -> String {

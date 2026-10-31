@@ -60,6 +60,16 @@
         text-transform: uppercase;
         color: #9696a3;
       }
+      /* Light visitors get a light first paint. The app theme takes over after boot. */
+      @media (prefers-color-scheme: light) {
+        html, body {
+          background: #f7f7f9;
+          color: #16161c;
+        }
+        #sc-boot .label {
+          color: #696975;
+        }
+      }
     </style>
   </head>
   <body>
