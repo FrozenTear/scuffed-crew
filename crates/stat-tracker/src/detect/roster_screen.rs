@@ -19,7 +19,10 @@
 //! * map banner: the white map name, or the orange logo ring.
 //!
 //! A frame is the roster when at least [`PARTS_MIN`] parts pass and one of
-//! them is a team part (headers or columns). Loose on purpose: a few wrong
+//! them is the headers or the bans. The columns and the map banner alone
+//! are not enough: on replayed real frames, post-match screens (the end
+//! summary, the accolades) passed on those two while failing the headers
+//! and the bans. Loose on purpose: a few wrong
 //! frames saved cost less than a missed roster, since the saves are
 //! training data. Tuned on one real 5v5 frame at 2560x1440 (every part
 //! passes it with a 2.4 to 3 times margin); no 6v6 frame or other
@@ -70,7 +73,8 @@ const MAP_LOGO_ORANGE_MIN: f32 = 0.04;
 /// box is a plain white area, not text.
 const TEXT_WHITE: (f32, f32) = (0.12, 0.90);
 
-/// The fewest passing parts that make the roster, one of them a team part.
+/// The fewest passing parts that make the roster, one of them the headers
+/// or the bans.
 pub const PARTS_MIN: usize = 2;
 
 /// What the roster check measured, one score per part.
@@ -124,9 +128,9 @@ impl RosterScores {
             .count()
     }
 
-    /// At least [`PARTS_MIN`] parts, one of them a team part.
+    /// At least [`PARTS_MIN`] parts, one of them the headers or the bans.
     pub fn is_roster(&self) -> bool {
-        self.passing() >= PARTS_MIN && (self.headers() || self.columns())
+        self.passing() >= PARTS_MIN && (self.headers() || self.bans())
     }
 
     /// Some part passed but the frame is no roster: a turned-down
@@ -402,12 +406,38 @@ mod tests {
             "{}",
             s.describe()
         );
-        // Bans and map but no team part: still no roster.
+        // Bans and map but no team part: two parts, one of them the bans.
         let mut img = roster(5, true, true);
         // The headers and columns painted over.
         fill(&mut img, [0.0, 0.23, 1.0, 0.76], [60, 70, 90]);
         let s = scores(&img);
+        assert!(
+            !s.headers() && !s.columns() && s.bans() && s.map(),
+            "{}",
+            s.describe()
+        );
+        assert!(s.is_roster(), "{}", s.describe());
+    }
+
+    #[test]
+    fn columns_and_map_alone_are_no_roster() {
+        // The post-match screens that passed the old rule: column-like
+        // strips and the map banner, no headers, no bans.
+        let mut img = roster(5, false, true);
+        // The headers painted over, above the first row.
+        fill(&mut img, [0.0, 0.18, 1.0, 0.284], [60, 70, 90]);
+        let s = scores(&img);
+        assert!(
+            !s.headers() && s.columns() && !s.bans() && s.map(),
+            "{}",
+            s.describe()
+        );
         assert!(!s.is_roster(), "{}", s.describe());
+        assert!(s.near_miss(), "{}", s.describe());
+        // A Dorado-like frame (headers, columns, bans, map) still passes.
+        let s = scores(&roster(5, true, true));
+        assert_eq!(s.passing(), 4, "{}", s.describe());
+        assert!(s.is_roster(), "{}", s.describe());
     }
 
     #[test]
