@@ -19,6 +19,12 @@ impl<F: Clone> PregameTracker<F> {
     /// (replacing the one before), and the staged one saved when the screen
     /// ends: at a phase read, or a frame that is no roster
     /// [`ROSTER_GONE`] after the last roster frame. Once per game.
+    ///
+    /// Each staging is a full-size PNG encode and write, on every poll the
+    /// roster stays up (one a poll interval, about 1.5 s), through the
+    /// writer's queue ([`PREGAME_QUEUE`], 8 jobs): when the writer is busy
+    /// the job is dropped, not waited for, so a staged frame can be older
+    /// than the last roster poll.
     pub(super) fn observe_roster(
         &mut self,
         now: Instant,
