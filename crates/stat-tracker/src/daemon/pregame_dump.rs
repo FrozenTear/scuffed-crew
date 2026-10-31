@@ -1,6 +1,6 @@
 //! Opt-in pre-game screen saves (`debug_save_pregame_screens`): full-size
-//! PNGs of the map vote, hero ban, ban results, hero select and loading
-//! screens under `{data_dir}/debug/pregame/<YYYYMMDD_HHMMSS>/` (UTC), one
+//! PNGs of the map vote, hero ban, ban results, roster, hero select and
+//! loading screens under `{data_dir}/debug/pregame/<YYYYMMDD_HHMMSS>/` (UTC), one
 //! folder per game, newest [`PREGAME_KEEP_GAMES`] kept. Training data for
 //! later ban and hero reading; local only, nothing reads, uploads or syncs
 //! them.
@@ -33,6 +33,12 @@
 //! and saved. A tracker killed between the loading screen and the game
 //! start (a crash, a kill, power loss) loses that game's loading screen;
 //! its other screens, saved as they happen, are not affected.
+//!
+//! The roster screen ([`roster`]) is saved apart from the others: its first
+//! frame as [`ROSTER_NAME`], its last as [`ROSTER_LAST_NAME`] (staged on
+//! disk, nothing held), so the loading and ban-results frames never stand
+//! in for it, nor it for them. Each check's turned-down candidates are
+//! logged and the last one kept as `rejected_<label>.png` ([`rejects`]).
 //!
 //! Ban results are no phase of their own yet. The candidate is the first
 //! frame at least [`BAN_RESULTS_DELAY`] after the last ban-phase frame (in
@@ -77,7 +83,16 @@
 use crate::*;
 use std::time::Duration;
 
+mod classify;
 mod post;
+mod rejects;
+mod roster;
+mod writer;
+
+pub(crate) use classify::*;
+pub(crate) use rejects::*;
+use roster::RosterOnScreen;
+pub(crate) use writer::PregameWriter;
 
 /// Game folders kept under `debug/pregame/`; older ones are deleted.
 pub(crate) const PREGAME_KEEP_GAMES: usize = 20;
@@ -141,6 +156,9 @@ pub(crate) enum Seen {
     SelectTitle,
     /// No phase, and the ban-results title is on the frame.
     BanResults,
+    /// No phase, and the roster screen's layout is on the frame
+    /// ([`detect::roster_screen`]).
+    Roster,
     /// Anything else.
     Other,
 }
@@ -195,6 +213,16 @@ pub(crate) const BAN_RESULTS_NAME: &str = "ban_results.png";
 /// Saved once, when the game starts; until then the frame is held in
 /// memory only (never staged on disk).
 pub(crate) const LOADING_NAME: &str = "loading.png";
+/// The roster screen's first frame, saved when it shows.
+pub(crate) const ROSTER_NAME: &str = "roster.png";
+/// The roster screen's latest frame: staged on disk while the screen stays
+/// up, saved (renamed) when it ends.
+pub(crate) const ROSTER_LAST_NAME: &str = "roster_last.png";
+
+/// A roster frame this long after the last one, with none between, ends
+/// the screen (a phase read ends it at once). Shorter, a frame that is no
+/// roster is a flicker of the layout check.
+pub(crate) const ROSTER_GONE: Duration = Duration::from_secs(4);
 
 /// Which frames the next tick should hand over, so a tick the tracker has
 /// no use for runs no loading check and keeps no frame.
@@ -210,87 +238,12 @@ pub(crate) struct PregameWant {
     /// Look for the ban-results title on a frame that is no phase (the
     /// wait is on; a frame showing it replaces a held candidate).
     pub(crate) ban_title: bool,
-}
-
-/// Classify a polled frame for the tracker, on the blocking thread, with
-/// the process's words-v1 reader for the select title and `examples` for
-/// the ban-results title.
-pub(crate) fn classify(
-    want: PregameWant,
-    phase: &detect::GamePhase,
-    rgb: &image::RgbImage,
-    examples: &super::pregame_ban_title::BanTitleExamples,
-) -> Seen {
-    classify_with(
-        want,
-        phase,
-        rgb,
-        |rgb| {
-            shows_select_title(shadow::read_phrase(
-                stat_tracker::shadow::result::phrase::Phrase::SelectAPreferredHero,
-                rgb,
-            ))
-        },
-        |rgb| examples.matches(rgb),
-    )
-}
-
-/// [`classify`] with the two title reads as arguments (tests).
-///
-/// The loading check runs only when `want.loading` and the frame is no
-/// phase, and a frame passing the hero-ban pixel gate (a ban screen before
-/// its read settles) is never the loading screen. The cheap loading check
-/// runs first. The map-vote gate is not used: a vote screen's navy is too
-/// bright to pass the loading check's dark bands, so it only turned away a
-/// loading screen whose black is tinted navy. The hero-select gate is not
-/// used either: its colour spread can pass on the loading screen's glyphs.
-pub(crate) fn classify_with(
-    want: PregameWant,
-    phase: &detect::GamePhase,
-    rgb: &image::RgbImage,
-    select_title: impl FnOnce(&image::RgbImage) -> bool,
-    ban_title: impl FnOnce(&image::RgbImage) -> bool,
-) -> Seen {
-    if let Some(p) = PregamePhase::of(phase) {
-        return Seen::Phase(p);
-    }
-    if want.loading
-        && detect::loading_screen::is_entering_game(rgb)
-        && !detect::match_start::passes_ban_gate(rgb)
-    {
-        return Seen::Loading;
-    }
-    if want.select_title && select_title(rgb) {
-        return Seen::SelectTitle;
-    }
-    if want.ban_title && ban_title(rgb) {
-        return Seen::BanResults;
-    }
-    Seen::Other
-}
-
-/// Whether a words-v1 read of SELECT A PREFERRED HERO says the hero select
-/// is on the frame. The mask is the pack's own cut of the select title
-/// region (Vision's 0.41,0.165,0.565,0.2 at 1440p), so no new reference
-/// crops are needed. Conservative on purpose: a suspect read (the title
-/// half drawn while the screen slides in) counts too, since a frame that
-/// is turned away here costs at most the results frame, while one let
-/// through is a select frame saved as the results. No mask loaded (`None`)
-/// is no title.
-pub(crate) fn shows_select_title(
-    read: Option<stat_tracker::shadow::result::phrase::PhraseRead>,
-) -> bool {
-    use stat_tracker::shadow::result::phrase::PhraseRead;
-    matches!(read, Some(PhraseRead::Sure(_) | PhraseRead::Suspect(_)))
-}
-
-/// Whether a tick seeing `seen` should hand its frame to the tracker.
-pub(crate) fn keeps_frame(want: PregameWant, seen: Seen) -> bool {
-    match seen {
-        Seen::Phase(_) => true,
-        Seen::Loading | Seen::BanResults => want.other_frame,
-        Seen::Other | Seen::SelectTitle => false,
-    }
+    /// Run the roster layout check on a frame that is no phase, and hand
+    /// over a frame that passes it.
+    pub(crate) roster: bool,
+    /// [`RejectLabel::bit`]s whose `rejected_<label>.png` may be written
+    /// now: a tick that turns down a candidate of one hands its frame over.
+    pub(crate) rejected: u8,
 }
 
 /// One file to write: `<root>/<folder>/<name>`.
@@ -332,6 +285,8 @@ struct PregameGame {
     last_seen: [Option<Instant>; 3],
     loading_saved: bool,
     ban_results_saved: bool,
+    /// The roster screen showed and ended: not looked for again.
+    roster_done: bool,
 }
 
 impl PregameGame {
@@ -407,6 +362,10 @@ pub(crate) struct PregameTracker<F> {
     /// the staged one otherwise); dropped when the ban comes back (it was
     /// a flicker, not the results) or the window runs out.
     ban_results: Option<BanResults<F>>,
+    /// The roster screen, while it shows.
+    roster: Option<RosterOnScreen>,
+    /// Rate limits for the turned-down candidates' lines and frames.
+    rejects: RejectLimiter,
     /// [`BAN_RESULTS_WINDOW`] plus one poll interval.
     window: Duration,
     /// Longest gap after a candidate frame for a select title to count as
@@ -424,6 +383,8 @@ impl<F> PregameTracker<F> {
             loading: None,
             ban_ended_at: None,
             ban_results: None,
+            roster: None,
+            rejects: RejectLimiter::default(),
             window: BAN_RESULTS_WINDOW + poll,
             next_tick: poll + poll / 2,
         }
@@ -476,21 +437,77 @@ impl<F: Clone> PregameTracker<F> {
             .as_ref()
             .is_some_and(|s| s.phase == PregamePhase::HeroBan);
         let waiting = !game.ban_results_saved && (ban_on_screen || self.ban_ended_at.is_some());
+        // The roster comes before the hero select: once the select is read
+        // in this game it is not looked for.
+        let roster =
+            !game.roster_done && game.last_seen[PregamePhase::HeroSelect.index()].is_none();
         PregameWant {
             loading,
             other_frame: loading || waiting,
             select_title: waiting,
             ban_title: waiting,
+            roster,
+            // Only for the checks that run on the tick.
+            rejected: self.rejects.due_bits(now)
+                & (if loading {
+                    RejectLabel::Loading.bit()
+                } else {
+                    0
+                } | if waiting {
+                    RejectLabel::BanResults.bit()
+                } else {
+                    0
+                } | if roster { RejectLabel::Roster.bit() } else { 0 }),
         }
     }
 
     /// Feed one poll tick. `frame` is `None` when [`keeps_frame`] said the
     /// tick need not keep it. `new_folder` names a new game's folder.
+    #[cfg(test)]
     pub(crate) fn observe(
         &mut self,
         now: Instant,
         seen: Seen,
         frame: Option<F>,
+        new_folder: impl FnOnce() -> String,
+    ) -> Vec<PregameOp<F>> {
+        self.observe_checked(now, seen.into(), frame, new_folder)
+    }
+
+    /// [`Self::observe`] with the checks the tick turned down: each is
+    /// logged at debug and its frame kept as `rejected_<label>.png`, both
+    /// rate limited ([`RejectLimiter`]).
+    pub(crate) fn observe_checked(
+        &mut self,
+        now: Instant,
+        checked: Classified,
+        frame: Option<F>,
+        new_folder: impl FnOnce() -> String,
+    ) -> Vec<PregameOp<F>> {
+        let seen = checked.seen;
+        let rejected_frame = if checked.rejects.labels().next().is_some() {
+            frame.clone()
+        } else {
+            None
+        };
+        // A roster frame goes to the roster only: to the rest it is a plain
+        // frame, as before the roster was looked for.
+        let (frame, roster_frame) = if seen == Seen::Roster {
+            (None, frame)
+        } else {
+            (frame, None)
+        };
+        let mut shots = self.observe_seen(now, seen, frame, roster_frame, new_folder);
+        self.note_rejects(now, &checked.rejects, rejected_frame, &mut shots);
+        shots
+    }
+
+    fn observe_seen(
+        &mut self,
+        now: Instant,
+        seen: Seen,
+        frame: Option<F>,
+        roster_frame: Option<F>,
         new_folder: impl FnOnce() -> String,
     ) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
@@ -501,11 +518,13 @@ impl<F: Clone> PregameTracker<F> {
             Seen::Phase(PregamePhase::HeroBan | PregamePhase::HeroSelect)
         );
         self.settle_loading(now, started, &mut shots);
+        self.observe_roster(now, seen, roster_frame, &mut shots);
         match seen {
             Seen::Phase(phase) => self.observe_phase(now, phase, frame, new_folder, &mut shots),
             Seen::Loading | Seen::Other | Seen::BanResults => {
                 self.observe_other(now, seen, frame, &mut shots)
             }
+            Seen::Roster => self.observe_other(now, Seen::Other, None, &mut shots),
             Seen::SelectTitle => {
                 // The select is on screen: the results, if any, end here.
                 // A candidate on the tick right before it (no plain frame
@@ -542,7 +561,12 @@ impl<F: Clone> PregameTracker<F> {
         let mut shots = Vec::new();
         self.end_phase(now, &mut shots);
         self.settle_ban_results(now, &mut shots);
-        self.drop_loading();
+        self.end_roster(&mut shots);
+        self.drop_loading(
+            now,
+            "no frames (game closed, capture stopped or shutdown)",
+            &mut shots,
+        );
         shots
     }
 
@@ -568,8 +592,10 @@ impl<F: Clone> PregameTracker<F> {
                     frame: held.frame,
                 }));
             }
-        } else if started || over {
-            self.drop_loading();
+        } else if over {
+            self.drop_loading(now, "no hero ban or hero select in time", shots);
+        } else if started {
+            self.drop_loading(now, "the game start came after the game closed", shots);
         }
     }
 
@@ -586,11 +612,20 @@ impl<F: Clone> PregameTracker<F> {
         }
     }
 
-    /// Drop the held loading frame, if any; nothing is on disk for it. The
-    /// loading screen is still looked for, so a later pass in this game is
-    /// held again.
-    fn drop_loading(&mut self) {
-        self.loading = None;
+    /// Drop the held loading frame, if any; nothing is on disk for it but
+    /// its turned-down copy ([`Self::turned_down`], with the wait timing).
+    /// The loading screen is still looked for, so a later pass in this game
+    /// is held again.
+    fn drop_loading(&mut self, now: Instant, why: &str, shots: &mut Vec<PregameOp<F>>) {
+        let Some(held) = self.loading.take() else {
+            return;
+        };
+        let detail = format!(
+            "held frame dropped: {why}; held {:.1} s, the start must come within {} s",
+            now.saturating_duration_since(held.at).as_secs_f32(),
+            LOADING_START_WAIT.as_secs()
+        );
+        self.turned_down(now, RejectLabel::Loading, &detail, Some(held.frame), shots);
     }
 
     fn observe_phase(
@@ -604,13 +639,13 @@ impl<F: Clone> PregameTracker<F> {
         if phase == PregamePhase::HeroBan {
             // The ban is back, late or not: the candidate was a frame
             // inside it, not the results.
-            self.drop_ban_results(shots);
+            self.drop_ban_results(now, "the hero ban came back", shots);
         }
         if phase == PregamePhase::MapVote {
             // The loading screen comes after the vote, so a pass before
             // this vote was not this game's loading screen (a requeue's
             // vote opens the next game).
-            self.drop_loading();
+            self.drop_loading(now, "a map vote came after it", shots);
         }
         if self.on_screen.as_ref().is_some_and(|s| s.phase != phase) {
             self.end_phase(now, shots);
@@ -642,6 +677,7 @@ impl<F: Clone> PregameTracker<F> {
                 last_seen: [None; 3],
                 loading_saved: false,
                 ban_results_saved: false,
+                roster_done: false,
             });
         }
         let Some(game) = self.game.as_ref().filter(|_| self.game_open(now).is_some()) else {
@@ -719,7 +755,7 @@ impl<F: Clone> PregameTracker<F> {
         {
             // No next screen in time: the ban read was lost (ESC,
             // alt-tab), and the candidate is a frame from that gap.
-            self.drop_ban_results(shots);
+            self.drop_ban_results(now, "no next screen within the window", shots);
         } else if let Some(ended) = self.ban_ended_at {
             let since = now.saturating_duration_since(ended);
             if since > self.window && self.ban_results.is_none() {
@@ -793,7 +829,8 @@ impl<F: Clone> PregameTracker<F> {
             .game
             .as_mut()
             .filter(|g| inside && !g.ban_results_saved);
-        match (game, c.confirmed, c.owed) {
+        // The held frame, when it is not the one saved, and why.
+        let turned = match (game, c.confirmed, c.owed) {
             (Some(game), true, owed) => {
                 game.ban_results_saved = true;
                 shots.push(PregameOp::Save(PregameShot {
@@ -807,6 +844,7 @@ impl<F: Clone> PregameTracker<F> {
                         name: BAN_RESULTS_NAME,
                     });
                 }
+                None
             }
             (Some(game), false, Some(folder)) => {
                 game.ban_results_saved = true;
@@ -814,25 +852,58 @@ impl<F: Clone> PregameTracker<F> {
                     folder,
                     name: BAN_RESULTS_NAME,
                 });
+                Some((
+                    c.frame,
+                    "not confirmed, the staged frame before it is saved",
+                ))
             }
-            (_, _, Some(folder)) => shots.push(PregameOp::Discard {
-                folder,
-                name: BAN_RESULTS_NAME,
-            }),
-            _ => {}
+            (Some(_), false, None) => {
+                Some((c.frame, "not confirmed (may be the hero select sliding in)"))
+            }
+            (None, _, owed) => {
+                if let Some(folder) = owed {
+                    shots.push(PregameOp::Discard {
+                        folder,
+                        name: BAN_RESULTS_NAME,
+                    });
+                }
+                Some((
+                    c.frame,
+                    if inside {
+                        "already saved in this game"
+                    } else {
+                        "outside the window"
+                    },
+                ))
+            }
+        };
+        if let Some((frame, why)) = turned {
+            let detail = format!(
+                "held frame not saved: {why}; {:.1} s after the first candidate",
+                now.saturating_duration_since(c.taken_at).as_secs_f32()
+            );
+            self.turned_down(now, RejectLabel::BanResults, &detail, Some(frame), shots);
         }
     }
 
     /// Drop the ban-results candidate (deleting its staged frame) and stop
-    /// waiting for one.
-    fn drop_ban_results(&mut self, shots: &mut Vec<PregameOp<F>>) {
+    /// waiting for one. The held frame is a turned-down candidate (`why`).
+    fn drop_ban_results(&mut self, now: Instant, why: &str, shots: &mut Vec<PregameOp<F>>) {
         self.ban_ended_at = None;
-        if let Some(folder) = self.ban_results.take().and_then(|c| c.owed) {
+        let Some(c) = self.ban_results.take() else {
+            return;
+        };
+        if let Some(folder) = c.owed {
             shots.push(PregameOp::Discard {
                 folder,
                 name: BAN_RESULTS_NAME,
             });
         }
+        let detail = format!(
+            "held frame dropped: {why}; {:.1} s after the first candidate",
+            now.saturating_duration_since(c.taken_at).as_secs_f32()
+        );
+        self.turned_down(now, RejectLabel::BanResults, &detail, Some(c.frame), shots);
     }
 
     /// The phase on screen ended: write its last frame when that is not
@@ -1162,151 +1233,6 @@ pub(crate) struct WriterJob {
     pub(crate) note: Option<NoteFile>,
 }
 
-/// One thread writes every batch in order, so two writes of the same
-/// `*_last.png` never overlap. The queue is bounded by [`PREGAME_QUEUE`].
-pub(crate) struct PregameWriter {
-    tx: Option<std::sync::mpsc::SyncSender<WriterJob>>,
-    thread: Option<std::thread::JoinHandle<()>>,
-    /// The thread's end was logged (once).
-    dead_logged: bool,
-}
-
-impl PregameWriter {
-    pub(crate) fn start(root: std::path::PathBuf) -> std::io::Result<Self> {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterJob>(PREGAME_QUEUE);
-        let thread = std::thread::Builder::new()
-            .name("pregame-writer".into())
-            .spawn(move || {
-                // Game folders in the order they were made, oldest first.
-                let mut made = load_pregame_order(&root);
-                // Staged frames of a run that ended mid-game.
-                sweep_staged(&root, None);
-                for job in rx {
-                    write_pregame_ops(&root, &job.shots, PREGAME_KEEP_GAMES, &mut made);
-                    if let Some(note) = &job.note {
-                        write_note(&root, note, PREGAME_KEEP_GAMES, &mut made);
-                    }
-                }
-            })?;
-        Ok(Self {
-            tx: Some(tx),
-            thread: Some(thread),
-            dead_logged: false,
-        })
-    }
-
-    /// Queue `shots`; false when the queue is full or the writer is gone,
-    /// and then none of the batch is written. A full queue is logged at
-    /// debug each time; a writer thread that ended (a panic) is logged
-    /// once at warn, and no later batch is sent.
-    pub(crate) fn send(&mut self, shots: ShotBatch) -> bool {
-        self.send_job(WriterJob { shots, note: None })
-    }
-
-    /// [`Self::send`] for shots plus a text file written after them.
-    pub(crate) fn send_job(&mut self, job: WriterJob) -> bool {
-        if job.shots.is_empty() && job.note.is_none() {
-            return true;
-        }
-        let Some(tx) = self.tx.as_ref() else {
-            return false;
-        };
-        match tx.try_send(job) {
-            Ok(()) => true,
-            Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                tracing::debug!(target: "scuffed_stat_tracker", "saved screens dropped (pre- or post-game): writer busy");
-                false
-            }
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                if !self.dead_logged {
-                    self.dead_logged = true;
-                    tracing::warn!(target: "scuffed_stat_tracker", "screen writer thread ended: the screens around each game are no longer saved this run");
-                }
-                false
-            }
-        }
-    }
-
-    /// Whether the writer thread still runs: not when it ended (a panic),
-    /// whether or not a send found that out yet.
-    pub(crate) fn alive(&self) -> bool {
-        !self.dead_logged
-            && self.tx.is_some()
-            && self.thread.as_ref().is_none_or(|t| !t.is_finished())
-    }
-
-    /// [`Self::send_job`], retried every 20 ms while the queue is full, up
-    /// to `within`: the post-game window's final note at shutdown.
-    pub(crate) async fn send_wait(&mut self, mut job: WriterJob, within: Duration) -> bool {
-        let deadline = Instant::now() + within;
-        loop {
-            let Some(tx) = self.tx.as_ref() else {
-                return false;
-            };
-            match tx.try_send(job) {
-                Ok(()) => return true,
-                Err(std::sync::mpsc::TrySendError::Full(back)) if Instant::now() < deadline => {
-                    job = back;
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-                Err(_) => return false,
-            }
-        }
-    }
-
-    /// Whether the writer thread ended this run is logged (tests).
-    #[cfg(test)]
-    pub(crate) fn dead_logged(&self) -> bool {
-        self.dead_logged
-    }
-
-    /// A writer whose queue nobody reads, so it fills (tests). Keep the
-    /// receiver alive.
-    #[cfg(test)]
-    pub(crate) fn stalled() -> (Self, std::sync::mpsc::Receiver<WriterJob>) {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterJob>(PREGAME_QUEUE);
-        let writer = Self {
-            tx: Some(tx),
-            thread: None,
-            dead_logged: false,
-        };
-        (writer, rx)
-    }
-
-    /// A writer whose thread is already gone (tests).
-    #[cfg(test)]
-    pub(crate) fn dead() -> Self {
-        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterJob>(PREGAME_QUEUE);
-        let thread = std::thread::spawn(move || drop(rx));
-        while !thread.is_finished() {
-            std::thread::yield_now();
-        }
-        Self {
-            tx: Some(tx),
-            thread: Some(thread),
-            dead_logged: false,
-        }
-    }
-
-    /// Close the queue and wait up to `within` for the queued writes.
-    /// True when they all finished.
-    pub(crate) async fn finish(mut self, within: Duration) -> bool {
-        drop(self.tx.take());
-        let Some(thread) = self.thread.take() else {
-            return true;
-        };
-        let deadline = Instant::now() + within;
-        while !thread.is_finished() {
-            if Instant::now() >= deadline {
-                tracing::debug!(target: "scuffed_stat_tracker", "pre-game writes still running at shutdown");
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        thread.join().is_ok()
-    }
-}
-
 /// The poll loop's pre-game saver: `Some` only with the switch on.
 pub(crate) struct PregameDump {
     root: std::path::PathBuf,
@@ -1407,19 +1333,26 @@ impl PregameDump {
         Arc::clone(&self.examples)
     }
 
-    /// Feed one poll tick and queue what it earned.
+    /// Feed one poll tick (what it saw, and the checks it turned down) and
+    /// queue what it earned.
     pub(crate) fn observe(
         &mut self,
         now: Instant,
-        seen: Seen,
+        seen: impl Into<Classified>,
         frame: Option<Arc<image::DynamicImage>>,
     ) {
-        self.saw_loading = seen == Seen::Loading;
-        let seen = self.pre_seen(now, seen);
+        let mut checked: Classified = seen.into();
+        self.saw_loading = checked.seen == Seen::Loading;
+        if !self.tracker.want(now).loading {
+            // The post-game window's own loading check: no pre-game
+            // candidate.
+            checked.rejects.loading = None;
+        }
+        checked.seen = self.pre_seen(now, checked.seen);
         let root = &self.root;
-        let shots = self
-            .tracker
-            .observe(now, seen, frame, || unique_pregame_folder(root, Utc::now()));
+        let shots = self.tracker.observe_checked(now, checked, frame, || {
+            unique_pregame_folder(root, Utc::now())
+        });
         self.send(shots);
     }
 

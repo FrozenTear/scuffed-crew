@@ -103,7 +103,9 @@ pub struct Config {
     #[serde(default)]
     pub debug_ocr: bool,
     /// Save full-size PNGs of the pre-game screens (map vote, hero ban, hero
-    /// select, the ban results, the loading screen) and the screens after
+    /// select, the ban results, the roster, the loading screen, and the last
+    /// turned-down frame of each check as `rejected_<label>.png`) and the
+    /// screens after
     /// each match (`postgame_NN.png` and `postgame.json`) under
     /// `{data_dir}/debug/pregame/<YYYYMMDD_HHMMSS>/` (UTC), newest 20 games
     /// kept. Off by default and not written while off; turning it off

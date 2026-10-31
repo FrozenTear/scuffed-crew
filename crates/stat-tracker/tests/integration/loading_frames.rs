@@ -18,8 +18,10 @@
 //! the second at least 0.70 of the first).
 //!
 //! The same folder also pins that rule, in a test that runs with the
-//! others: each `entering_game*.png` in it must pass the ENTERING GAME
-//! check and each `applying_update*.png` must fail it (the word ratio is
+//! others: each `entering_game*.png` in it whose text is drawn (a text box
+//! measured) must pass the ENTERING GAME check, one with no text box yet
+//! (a fade-in, turned down on purpose) must still be the loading slab, and
+//! each file named with `applying_update` must fail it (the word ratio is
 //! what tells them apart), so a later change to the rule fails on a
 //! machine that has the frames. A failure prints the measured numbers. It
 //! skips quietly when the variable is unset or no such file is there.
@@ -49,7 +51,7 @@ fn local_entering_game_frames_pass_and_update_bands_fail() {
             .to_lowercase();
         let want = if name.starts_with("entering_game") {
             true
-        } else if name.starts_with("applying_update") {
+        } else if name.contains("applying_update") {
             false
         } else {
             continue;
@@ -60,6 +62,11 @@ fn local_entering_game_frames_pass_and_update_bands_fail() {
         let rgb = image::open(&path)
             .unwrap_or_else(|e| panic!("{name}: {e}"))
             .to_rgb8();
+        if want && text_box(&rgb).is_none() {
+            // A fade-in: no glyph at the glyph level yet.
+            assert!(is_loading_screen(&rgb), "{name}: not the loading slab");
+            continue;
+        }
         assert_eq!(
             is_entering_game(&rgb),
             want,

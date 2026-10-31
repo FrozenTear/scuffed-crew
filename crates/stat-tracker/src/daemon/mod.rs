@@ -44,6 +44,8 @@ mod tests_pregame_dump;
 #[cfg(test)]
 mod tests_pregame_reveal;
 #[cfg(test)]
+mod tests_pregame_roster;
+#[cfg(test)]
 mod tests_pregame_staging;
 #[cfg(test)]
 mod tests_query_server;

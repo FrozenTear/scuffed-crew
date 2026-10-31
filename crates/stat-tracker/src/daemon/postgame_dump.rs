@@ -165,15 +165,23 @@ pub(crate) enum EndSeen {
 }
 
 impl EndSeen {
+    /// From the tick's outcome signal `source`, its end-reel hint and
+    /// whether its end-title read was sure (`end_title_seen`, `reader =
+    /// "new"`). A sure end title with no signal is the title's first frame:
+    /// the two-tick rule makes the signal only on the next poll, and the
+    /// end-reel hint that read wakes on is no reel. It is `Title`, not
+    /// `Reel` (nor nothing, which saves as `after_end`).
     pub(crate) fn of(
         source: Option<detect::match_end::OutcomeSource>,
         end_reel: bool,
+        end_title_seen: bool,
     ) -> Option<Self> {
         use detect::match_end::OutcomeSource;
         match source {
             Some(OutcomeSource::EndTitle) => Some(Self::Title),
             Some(OutcomeSource::ResultWord) => Some(Self::Accolades),
             Some(OutcomeSource::RankScreen) => Some(Self::Rank),
+            None if end_title_seen => Some(Self::Title),
             None => end_reel.then_some(Self::Reel),
         }
     }
@@ -221,7 +229,7 @@ impl PostWant {
 }
 
 /// A tick's pre-game read with the frame, when the read keeps it.
-pub(crate) type PreKept<T> = (super::pregame_dump::Seen, Option<Arc<T>>);
+pub(crate) type PreKept<T> = (super::pregame_dump::Classified, Option<Arc<T>>);
 
 /// One polled frame split between the two saves, one `Arc` for both, made
 /// only when a save keeps it: the pre-game read with the frame when `pre`
@@ -230,7 +238,7 @@ pub(crate) type PreKept<T> = (super::pregame_dump::Seen, Option<Arc<T>>);
 /// and the frame is dropped here.
 pub(crate) fn kept_frames<T>(
     img: T,
-    pre: Option<(super::pregame_dump::Seen, bool)>,
+    pre: Option<(super::pregame_dump::Classified, bool)>,
     post: Option<PostWant>,
     end_seen: bool,
 ) -> (Option<PreKept<T>>, Option<Arc<T>>) {
@@ -497,8 +505,14 @@ impl PostgameTracker {
                 // frame showed the same rank word: when that tick saved it
                 // as `after_end`, it is the rank update (before the window
                 // ends, so the final note has it).
-                if std::mem::take(&mut w.unread_last) && tick.end == Some(EndSeen::Rank) {
-                    sink.relabel_last(EndSeen::Rank.label());
+                // The end title likewise: under ocr-v1 its word reads only
+                // once its crop held still since the previous poll, and
+                // under `reader = "new"` a fading title reads unsure, so a
+                // title frame right before the read saves as `after_end`.
+                if std::mem::take(&mut w.unread_last)
+                    && let Some(end @ (EndSeen::Rank | EndSeen::Title)) = tick.end
+                {
+                    sink.relabel_last(end.label());
                 }
                 if tick.new_screen {
                     // The next game is here: its ticks arm the ring again.

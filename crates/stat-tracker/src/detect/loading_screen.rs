@@ -145,6 +145,20 @@ pub struct TextBox {
     pub words: usize,
     /// The second word's width over the first's, with exactly two words.
     pub word_ratio: Option<f32>,
+    /// An end cluster of three was left out as the spinner.
+    pub spinner: bool,
+}
+
+impl TextBox {
+    /// Whether the box sits as the `ENTERING GAME` text does and is not the
+    /// two `APPLYING UPDATE` words: the text half of [`is_entering_game`].
+    pub fn is_entering_game_text(&self) -> bool {
+        (self.centre_x - 0.5).abs() <= TEXT_CENTRE_X_TOL
+            && self.width <= TEXT_WIDTH_MAX
+            && !self.word_ratio.is_some_and(|r| r >= WORD_RATIO_REJECT)
+            && (TEXT_CENTRE_Y_MIN..=TEXT_CENTRE_Y_MAX).contains(&self.centre_y)
+            && self.height <= TEXT_HEIGHT_MAX
+    }
 }
 
 /// One run of glyph samples on a sampled row.
@@ -257,7 +271,7 @@ pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
         .map(|&(x, y, _)| (x, y))
         .collect();
     lit.sort_unstable();
-    let words = words(&lit, gw, gh);
+    let (words, spinner) = words(&lit, gw, gh);
     let word_ratio = match words[..] {
         [(a0, a1), (b0, b1)] if a1 > a0 => Some((b1 - b0) as f32 / (a1 - a0) as f32),
         _ => None,
@@ -272,6 +286,7 @@ pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
         samples,
         words: words.len(),
         word_ratio,
+        spinner,
     })
 }
 
@@ -282,8 +297,9 @@ pub fn text_box(rgb: &RgbImage) -> Option<TextBox> {
 /// across the wider gap is the spinner and is left out when it is
 /// spinner-sized ([`SPINNER_WIDTH_MAX`], [`SPINNER_HEIGHT_MAX`], any
 /// shape); otherwise all three are kept, since a stray gap in a word can
-/// leave a letter or two at the other end as small.
-fn words(lit: &[(u32, u32)], gw: u32, gh: u32) -> Vec<(u32, u32)> {
+/// leave a letter or two at the other end as small. True with it: the
+/// spinner was left out.
+fn words(lit: &[(u32, u32)], gw: u32, gh: u32) -> (Vec<(u32, u32)>, bool) {
     let gap = gw as f32 * WORD_GAP;
     // First and last column, top and bottom row.
     let mut words: Vec<(u32, u32, u32, u32)> = Vec::new();
@@ -297,6 +313,7 @@ fn words(lit: &[(u32, u32)], gw: u32, gh: u32) -> Vec<(u32, u32)> {
             _ => words.push((x, x, y, y)),
         }
     }
+    let mut spinner_out = false;
     if let [(_, a1, ..), (b0, b1, ..), (c0, ..)] = words[..] {
         let spinner = |(x0, x1, y0, y1): (u32, u32, u32, u32)| {
             let (w, h) = ((x1 - x0) as f32, (y1 - y0) as f32);
@@ -307,21 +324,17 @@ fn words(lit: &[(u32, u32)], gw: u32, gh: u32) -> Vec<(u32, u32)> {
         let end = if b0 - a1 > c0 - b1 { 0 } else { 2 };
         if spinner(words[end]) {
             words.remove(end);
+            spinner_out = true;
         }
     }
-    words.into_iter().map(|(x0, x1, ..)| (x0, x1)).collect()
+    let words = words.into_iter().map(|(x0, x1, ..)| (x0, x1)).collect();
+    (words, spinner_out)
 }
 
 /// Whether the white glyphs of the middle band sit as the `ENTERING GAME`
 /// text does, and are not the two `APPLYING UPDATE` words.
 fn entering_game_text(rgb: &RgbImage) -> bool {
-    text_box(rgb).is_some_and(|t| {
-        (t.centre_x - 0.5).abs() <= TEXT_CENTRE_X_TOL
-            && t.width <= TEXT_WIDTH_MAX
-            && !t.word_ratio.is_some_and(|r| r >= WORD_RATIO_REJECT)
-            && (TEXT_CENTRE_Y_MIN..=TEXT_CENTRE_Y_MAX).contains(&t.centre_y)
-            && t.height <= TEXT_HEIGHT_MAX
-    })
+    text_box(rgb).is_some_and(|t| t.is_entering_game_text())
 }
 
 /// Whether `rgb` looks like the loading screen.
@@ -606,7 +619,7 @@ mod tests {
                 .chain(cluster(1090, 1090 + sw, 536 - sh / 2, 536 + sh / 2))
                 .collect();
             lit.sort_unstable();
-            words(&lit, 1920, 1080).len()
+            words(&lit, 1920, 1080).0.len()
         };
         for ((sw, sh), n) in [((86, 72), 2), ((88, 72), 3), ((80, 108), 2), ((80, 110), 3)] {
             assert_eq!(count(sw, sh), n, "{sw} x {sh}");

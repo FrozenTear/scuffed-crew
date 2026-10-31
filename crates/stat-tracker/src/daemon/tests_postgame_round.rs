@@ -517,7 +517,7 @@ fn loop_tick(
     let seen = classify_with(want, &detect::GamePhase::Unknown, &rgb, no_title, no_title);
     let (pre, frame) = kept_frames(
         image::DynamicImage::ImageRgb8(rgb),
-        Some((seen, keeps_frame(want, seen))),
+        Some((seen.into(), keeps_frame(want, seen))),
         Some(post_want),
         tick.end.is_some(),
     );
@@ -677,4 +677,61 @@ async fn the_sidecar_labels_the_rank_screens_first_frame_rank_update() {
         .map(|f| f["label"].as_str().unwrap())
         .collect();
     assert_eq!(labels, vec!["end_title", "accolades", "rank_update"]);
+}
+
+#[test]
+fn a_sure_end_title_with_no_signal_yet_is_the_end_title() {
+    use detect::match_end::OutcomeSource;
+    // The title's first frame: the two-tick rule gives no signal yet, and
+    // the end-reel hint wakes on the same read.
+    assert_eq!(EndSeen::of(None, true, true), Some(EndSeen::Title));
+    assert_eq!(EndSeen::of(None, false, true), Some(EndSeen::Title));
+    // The reel hint alone, or nothing.
+    assert_eq!(EndSeen::of(None, true, false), Some(EndSeen::Reel));
+    assert_eq!(EndSeen::of(None, false, false), None);
+    // A signal names its own source.
+    assert_eq!(
+        EndSeen::of(Some(OutcomeSource::RankScreen), false, true),
+        Some(EndSeen::Rank)
+    );
+    assert_eq!(
+        EndSeen::of(Some(OutcomeSource::EndTitle), false, false),
+        Some(EndSeen::Title)
+    );
+}
+
+#[test]
+fn a_window_opened_on_the_titles_first_frame_labels_it_end_title() {
+    // A Tab read finished the game, and the next poll is the title's first
+    // frame: the window opens on it (time zero), before any signal.
+    let mut run = Run::new();
+    run.play_until(10_000);
+    let first = EndSeen::of(None, true, true).expect("an end");
+    run.tick(10_500, ended(AFTER, first, false), banner());
+    assert!(run.tracker.window_open());
+    // The ring's earlier play frames are before it.
+    assert_eq!(run.rec.labels().last(), Some(&"end_title"));
+    assert_eq!(run.rec.times().last(), Some(&0.0));
+    assert!(
+        run.rec
+            .labels()
+            .iter()
+            .rev()
+            .skip(1)
+            .all(|l| *l == "before_end")
+    );
+}
+
+#[test]
+fn an_unread_frame_right_before_an_end_title_read_is_relabelled_end_title() {
+    let mut run = open_window();
+    // The title fading: no sure read, saved as `after_end`...
+    run.tick(2_500, AFTER, moving(1));
+    assert_eq!(run.rec.labels().last(), Some(&"after_end"));
+    // ...then read on the next tick: that frame was the title too.
+    run.tick(3_500, ended(AFTER, EndSeen::Title, false), moving(2));
+    assert_eq!(
+        run.rec.labels(),
+        vec!["end_title", "end_title", "end_title"]
+    );
 }
