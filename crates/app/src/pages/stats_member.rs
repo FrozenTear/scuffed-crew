@@ -7,7 +7,7 @@ use super::stats::role::{
     RolePanel, hide_member_role_error, member_roles_path, role_aggs_from_rows, role_panel,
     role_result,
 };
-use crate::components::ui::{SeasonSelect, use_stats_season};
+use crate::components::ui::{SeasonSelect, TabButton, use_stats_season};
 use crate::components::{DataTable, member_pending};
 use crate::hooks::use_api_with;
 use crate::sample::{
@@ -269,21 +269,24 @@ pub fn StatsMember(id: String) -> Element {
                 }
             }
 
-            div { class: "stats-tabs",
-                button {
-                    class: if tab() == MemberStatsTab::Overview { "stats-tab active" } else { "stats-tab" },
+            div { class: "stats-tabs", role: "tablist", aria_label: "Stats sections",
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Overview".to_string(),
+                    selected: tab() == MemberStatsTab::Overview,
                     onclick: move |_| tab.set(MemberStatsTab::Overview),
-                    "Overview"
                 }
-                button {
-                    class: if tab() == MemberStatsTab::Heroes { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Heroes".to_string(),
+                    selected: tab() == MemberStatsTab::Heroes,
                     onclick: move |_| tab.set(MemberStatsTab::Heroes),
-                    "Heroes"
                 }
-                button {
-                    class: if tab() == MemberStatsTab::Maps { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Maps".to_string(),
+                    selected: tab() == MemberStatsTab::Maps,
                     onclick: move |_| tab.set(MemberStatsTab::Maps),
-                    "Maps"
                 }
             }
 

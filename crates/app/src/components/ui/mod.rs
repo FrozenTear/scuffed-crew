@@ -7,6 +7,7 @@ pub mod label;
 pub mod pill;
 pub mod season_select;
 pub mod shell;
+pub mod toggle;
 #[allow(unused_imports)]
 pub use button::BtnSize;
 pub use button::{BtnVariant, Button};
@@ -25,6 +26,7 @@ pub use pill::{Pill, PillTone};
 pub use season_select::{SeasonSelect, use_season_change, use_stats_season};
 #[allow(unused_imports)]
 pub use shell::PageShell;
+pub use toggle::{ChipButton, TabButton};
 
 /// Concatenated CSS for every ui/ component, injected once at the app root.
 pub fn ui_css() -> String {

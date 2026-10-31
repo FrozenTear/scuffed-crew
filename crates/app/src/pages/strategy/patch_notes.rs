@@ -1325,8 +1325,10 @@ fn render_filter_chip(label: &str, current: &str, signal: &mut Signal<String>) -
 
     rsx! {
         button {
+            r#type: "button",
             class: "{class}",
             title: "{label}",
+            aria_pressed: if is_active { "true" } else { "false" },
             onclick: move |_| sig.set(label_owned.clone()),
             span { class: "patch-chip-full", "{label}" }
             span { class: "patch-chip-short", "{compact}" }

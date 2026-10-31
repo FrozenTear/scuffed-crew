@@ -96,7 +96,7 @@ const GAME_CSS: &str = r#"
         min-width: 0;
     }
     .game-stat dt {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         font-weight: 600;
         letter-spacing: 0.04em;
         text-transform: uppercase;

@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use serde::Deserialize;
 
+use crate::components::ui::ChipButton;
 use crate::routes::Route;
 use crate::util::encode_query;
 use scuffed_api_client::ApiClient;
@@ -304,18 +305,17 @@ pub fn StrategyBrowse() -> Element {
             }
 
             // Filter chips
-            div { class: "strategy-filters",
+            div { class: "strategy-filters", role: "group", aria_label: "Filter by mode",
                 for mode in GAME_MODES.iter() {
                     {
                         let mode_str = mode.to_string();
-                        let is_active = selected_mode() == *mode;
-                        let chip_class = if is_active { "filter-chip active" } else { "filter-chip" };
                         rsx! {
-                            button {
+                            ChipButton {
                                 key: "{mode}",
-                                class: "{chip_class}",
+                                class: "filter-chip".to_string(),
+                                label: mode.to_string(),
+                                pressed: selected_mode() == *mode,
                                 onclick: move |_| selected_mode.set(mode_str.clone()),
-                                "{mode}"
                             }
                         }
                     }

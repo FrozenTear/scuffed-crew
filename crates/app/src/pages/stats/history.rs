@@ -1,5 +1,6 @@
 use dioxus::prelude::*;
 
+use crate::components::ui::ChipButton;
 use crate::hooks::ApiResource;
 
 use super::game::{match_path, open_match};
@@ -156,52 +157,54 @@ pub(super) fn history_tab(
             rsx! {
                 crate::styles::StyleOnce { id: "stats-history-p2", css: HISTORY_CSS }
                 div { class: "stats-filters",
-                    div { class: "filter-group",
-                        span { class: "filter-label", "Outcome" }
+                    div { class: "filter-group", role: "group", aria_labelledby: "history-filter-outcome",
+                        span { class: "filter-label", id: "history-filter-outcome", "Outcome" }
                         {[["all", "All"], ["win", "Win"], ["loss", "Loss"], ["draw", "Draw"]].iter().map(|&[k, label]| {
-                            let active = of == k;
                             rsx! {
-                                button {
+                                ChipButton {
                                     key: "{k}",
-                                    class: if active { "filter-chip active" } else { "filter-chip" },
+                                    class: "filter-chip".to_string(),
+                                    label: label.to_string(),
+                                    pressed: of == k,
                                     onclick: move |_| outcome_filter.set(k),
-                                    "{label}"
                                 }
                             }
                         })}
                     }
-                    div { class: "filter-group",
-                        span { class: "filter-label", "Role" }
+                    div { class: "filter-group", role: "group", aria_labelledby: "history-filter-role",
+                        span { class: "filter-label", id: "history-filter-role", "Role" }
                         {[["all", "All"], ["Tank", "Tank"], ["Damage", "Damage"], ["Support", "Support"]].iter().map(|&[k, label]| {
-                            let active = rf.eq_ignore_ascii_case(k);
                             rsx! {
-                                button {
+                                ChipButton {
                                     key: "{k}",
-                                    class: if active { "filter-chip active" } else { "filter-chip" },
+                                    class: "filter-chip".to_string(),
+                                    label: label.to_string(),
+                                    pressed: rf.eq_ignore_ascii_case(k),
                                     onclick: move |_| role_filter.set(k),
-                                    "{label}"
                                 }
                             }
                         })}
                     }
-                    div { class: "filter-group",
-                        span { class: "filter-label", "Mode" }
-                        button {
+                    div { class: "filter-group", role: "group", aria_labelledby: "history-filter-mode",
+                        span { class: "filter-label", id: "history-filter-mode", "Mode" }
+                        ChipButton {
                             key: "{ALL}",
-                            class: if mf == ALL { "filter-chip active" } else { "filter-chip" },
+                            class: "filter-chip".to_string(),
+                            label: "All".to_string(),
+                            pressed: mf == ALL,
                             onclick: move |_| mode_filter.set(ALL.to_string()),
-                            "All"
                         }
                         for mode in modes {
                             {
                                 let active = mf.eq_ignore_ascii_case(&mode);
                                 let pick = mode.clone();
                                 rsx! {
-                                    button {
+                                    ChipButton {
                                         key: "{mode}",
-                                        class: if active { "filter-chip active" } else { "filter-chip" },
+                                        class: "filter-chip".to_string(),
+                                        label: mode.clone(),
+                                        pressed: active,
                                         onclick: move |_| mode_filter.set(pick.clone()),
-                                        "{mode}"
                                     }
                                 }
                             }

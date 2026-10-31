@@ -5,7 +5,9 @@ use serde::Deserialize;
 
 use scuffed_api_client::ApiClient;
 
-use crate::components::ui::{Card, HeroSelect, Pill, PillTone, SeasonSelect, use_stats_season};
+use crate::components::ui::{
+    Card, HeroSelect, Pill, PillTone, SeasonSelect, TabButton, use_stats_season,
+};
 use crate::routes::Route;
 use crate::sample::{
     LIST_RULE_NOTE, ListResult, RATE_MIN_DECIDED, TOO_FEW_GAMES, list_decided, list_result,
@@ -380,21 +382,24 @@ pub fn Leaderboards() -> Element {
                 p { class: "lb-updated", "{updated}" }
             }
 
-            div { class: "lb-tabs",
-                button {
-                    class: if metric() == "winrate" { "lb-tab active" } else { "lb-tab" },
+            div { class: "lb-tabs", role: "tablist", aria_label: "Ranking metric",
+                TabButton {
+                    class: "lb-tab".to_string(),
+                    label: "Win rate".to_string(),
+                    selected: metric() == "winrate",
                     onclick: move |_| metric.set("winrate".into()),
-                    "Win rate"
                 }
-                button {
-                    class: if metric() == "kd" { "lb-tab active" } else { "lb-tab" },
+                TabButton {
+                    class: "lb-tab".to_string(),
+                    label: "K/D".to_string(),
+                    selected: metric() == "kd",
                     onclick: move |_| metric.set("kd".into()),
-                    "K/D"
                 }
-                button {
-                    class: if metric() == "games" { "lb-tab active" } else { "lb-tab" },
+                TabButton {
+                    class: "lb-tab".to_string(),
+                    label: "Games".to_string(),
+                    selected: metric() == "games",
                     onclick: move |_| metric.set("games".into()),
-                    "Games"
                 }
             }
 

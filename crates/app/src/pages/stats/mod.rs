@@ -16,7 +16,7 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 
-use crate::components::ui::{SeasonSelect, use_season_change, use_stats_season};
+use crate::components::ui::{SeasonSelect, TabButton, use_season_change, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::use_api_with;
 use crate::routes::Route;
@@ -1416,30 +1416,34 @@ pub fn Stats() -> Element {
             }
 
             // Tabs
-            div { class: "stats-tabs",
-                button {
-                    class: if tab() == StatsTab::Overview { "stats-tab active" } else { "stats-tab" },
+            div { class: "stats-tabs", role: "tablist", aria_label: "My Stats sections",
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Overview".to_string(),
+                    selected: tab() == StatsTab::Overview,
                     onclick: move |_| tab.set(StatsTab::Overview),
-                    "Overview"
                 }
-                button {
-                    class: if tab() == StatsTab::Heroes { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Heroes".to_string(),
+                    selected: tab() == StatsTab::Heroes,
                     onclick: move |_| tab.set(StatsTab::Heroes),
-                    "Heroes"
                 }
-                button {
-                    class: if tab() == StatsTab::Maps { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Maps".to_string(),
+                    selected: tab() == StatsTab::Maps,
                     onclick: move |_| tab.set(StatsTab::Maps),
-                    "Maps"
                 }
-                button {
-                    class: if tab() == StatsTab::History { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "History".to_string(),
+                    selected: tab() == StatsTab::History,
                     onclick: move |_| {
                         tab.set(StatsTab::History);
                         page_cursor.set(None);
                         cursor_history.set(vec![None]);
                     },
-                    "History"
                 }
             }
 

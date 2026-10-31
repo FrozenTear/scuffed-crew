@@ -16,7 +16,7 @@ pub fn theme_css(brand: &BrandConfig) -> String {
   --font-body: 'Inter', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, monospace;
 
-  --text-xs: 11px;  --text-sm: 12.5px; --text-base: 14px; --text-lg: 15.5px;
+  --text-xs: 12px;  --text-sm: 12.5px; --text-base: 14px; --text-lg: 15.5px;
   --text-xl: 18px;  --text-2xl: 21px;  --text-3xl: 30px;
 
   --space-1: 4px;  --space-2: 8px;  --space-3: 12px; --space-4: 16px;
@@ -183,6 +183,12 @@ mod tests {
         assert!(css.contains("--text-2:"));
         assert!(css.contains("--space-1:"));
         assert!(css.contains("[data-accent=\"strategy\"]"));
+    }
+
+    #[test]
+    fn smallest_text_token_is_twelve_px() {
+        let css = theme_css(&BrandConfig::product_default());
+        assert!(css.contains("--text-xs: 12px;"), "{css}");
     }
 
     #[test]
