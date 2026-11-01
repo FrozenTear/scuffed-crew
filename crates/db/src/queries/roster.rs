@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::any::Any;
 use surrealdb::types::Datetime as SurrealDatetime;
@@ -117,6 +119,40 @@ fn is_plays_on_pair_conflict_text(text: &str) -> bool {
         || msg.contains("indexexists")
         || msg.contains("can be retried")
         || msg.contains("write conflict")
+}
+
+/// The error to report from a failed BEGIN/COMMIT query, if any.
+///
+/// SurrealDB 3.x rewrites every slot before the failing one to a generic
+/// "not executed due to a failed transaction", and puts a commit conflict
+/// only on the COMMIT row, so the first error (what `check()` returns) can
+/// hide the conflict. Prefer a pair conflict so [`ADD_ATTEMPTS`] still
+/// retries, then the first specific error, then the first error.
+fn pick_txn_error(errors: HashMap<usize, surrealdb::Error>) -> Option<surrealdb::Error> {
+    if errors.is_empty() {
+        return None;
+    }
+    let mut errors: Vec<(usize, surrealdb::Error)> = errors.into_iter().collect();
+    errors.sort_by_key(|(slot, _)| *slot);
+    let pos = errors
+        .iter()
+        .position(|(_, e)| is_plays_on_pair_conflict(e))
+        .or_else(|| {
+            errors
+                .iter()
+                .position(|(_, e)| !is_txn_not_executed_text(&e.to_string()))
+        })
+        .unwrap_or(0);
+    Some(errors.swap_remove(pos).1)
+}
+
+/// True for the placeholder SurrealDB 3.x writes into the slots of a failed
+/// or cancelled transaction that did not cause the failure.
+fn is_txn_not_executed_text(text: &str) -> bool {
+    let msg = text.to_ascii_lowercase();
+    msg.contains("not executed due to a failed transaction")
+        || msg.contains("not executed due to a cancelled transaction")
+        || msg.contains("cannot commit: the transaction was aborted")
 }
 
 /// State of [`PLAYS_ON_PAIR_INDEX`] as `INFO FOR TABLE plays_on` reports it.
@@ -390,8 +426,10 @@ impl Database {
     /// - an active edge (a double click, or a re-add) keeps its `joined_at`
     ///   and takes the requested role.
     ///
-    /// Two concurrent adds can both see no edge; the unique index rejects the
-    /// second RELATE, and that call retries once and then finds the edge.
+    /// The read and the write run in one transaction. Two concurrent adds can
+    /// both see no edge; the unique index or a commit conflict fails the
+    /// second, and that call retries once and then finds the edge. Every
+    /// success re-reads the edge for the pair, so all callers get its id.
     pub async fn add_to_roster(
         &self,
         member_id: &str,
@@ -432,10 +470,15 @@ impl Database {
         //
         // LIMIT 1 without ORDER BY is safe because PLAYS_ON_PAIR_INDEX
         // (UNIQUE on in, out) allows at most one row for the pair.
-        let mut result = self
+        //
+        // The transaction makes the read and the write commit together or
+        // not at all, so a losing add fails (and retries) instead of
+        // reporting an edge that did not survive.
+        let mut response = self
             .client
             .query(
-                r#"LET $existing = (SELECT VALUE id FROM plays_on
+                r#"BEGIN TRANSACTION;
+                   LET $existing = (SELECT VALUE id FROM plays_on
                        WHERE in = $member_rid AND out = $team_rid LIMIT 1);
                    LET $entry = IF array::len($existing) > 0 {
                        UPDATE $existing[0] SET
@@ -447,19 +490,41 @@ impl Database {
                        SET team_role = $role, joined_at = time::now(), is_active = true
                    };
                    SELECT *, meta::id(id) as id, <string>in as in, <string>out as out
-                   FROM $entry"#,
+                   FROM $entry;
+                   COMMIT TRANSACTION;"#,
             )
             .bind(("member_rid", member_rid(member_id)))
             .bind(("team_rid", team_rid(team_id)))
             .bind(("role", role.to_string()))
+            .await?;
+        if let Some(e) = pick_txn_error(response.take_errors()) {
+            return Err(e.into());
+        }
+        // Return the edge stored for the pair, not the one this call wrote,
+        // so every caller gets the surviving edge id.
+        self.get_roster_edge(member_id, team_id)
+            .await?
+            .ok_or_else(|| crate::DbError::NotFound("Failed to create roster entry".into()))
+    }
+
+    /// The single `plays_on` edge for (member, team), active or not.
+    async fn get_roster_edge(
+        &self,
+        member_id: &str,
+        team_id: &str,
+    ) -> DbResult<Option<RosterEntry>> {
+        let mut result = self
+            .client
+            .query(
+                "SELECT *, meta::id(id) as id, <string>in as in, <string>out as out \
+                 FROM plays_on WHERE in = $member_rid AND out = $team_rid LIMIT 1",
+            )
+            .bind(("member_rid", member_rid(member_id)))
+            .bind(("team_rid", team_rid(team_id)))
             .await?
             .check()?;
-        let entries: Vec<DbRosterEntry> = result.take(2)?;
-        entries
-            .into_iter()
-            .next()
-            .map(db_to_roster_entry)
-            .ok_or_else(|| crate::DbError::NotFound("Failed to create roster entry".into()))
+        let entries: Vec<DbRosterEntry> = result.take(0)?;
+        Ok(entries.into_iter().next().map(db_to_roster_entry))
     }
 
     /// Get a team's roster: active edges to active members who are not banned.
@@ -1001,33 +1066,49 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn many_concurrent_adds_on_threads_keep_one_edge() {
-        let db = std::sync::Arc::new(seeded_db().await);
-        let mut tasks = Vec::new();
-        for _ in 0..16 {
-            let db = db.clone();
-            tasks.push(tokio::spawn(async move {
-                db.add_to_roster("alice", "t1", TeamRole::Player).await
-            }));
-        }
-        let mut ok_ids = Vec::new();
-        for task in tasks {
-            match task.await.expect("join") {
-                Ok(entry) => ok_ids.push(entry.id),
-                // A call that loses twice may surface the conflict; that is
-                // a retryable error, never a second edge.
-                Err(crate::DbError::Surreal(e)) => {
-                    assert!(is_plays_on_pair_conflict(&e), "unexpected error: {e}")
-                }
-                Err(other) => panic!("unexpected error: {other}"),
+        // One race can pass by luck, so run it 20 times on a fresh DB.
+        for run in 0..20 {
+            let db = std::sync::Arc::new(seeded_db().await);
+            let mut tasks = Vec::new();
+            for _ in 0..16 {
+                let db = db.clone();
+                tasks.push(tokio::spawn(async move {
+                    db.add_to_roster("alice", "t1", TeamRole::Player).await
+                }));
             }
+            let mut ok_ids = Vec::new();
+            for task in tasks {
+                match task.await.expect("join") {
+                    Ok(entry) => ok_ids.push(entry.id),
+                    // A call that loses twice may surface the conflict; that
+                    // is a retryable error, never a second edge.
+                    Err(crate::DbError::Surreal(e)) => {
+                        assert!(
+                            is_plays_on_pair_conflict(&e),
+                            "run {run}: unexpected error: {e}"
+                        )
+                    }
+                    Err(other) => panic!("run {run}: unexpected error: {other}"),
+                }
+            }
+            assert!(!ok_ids.is_empty(), "run {run}: at least one add succeeds");
+            // Count first: a second edge is a real duplicate, while one edge
+            // with mismatched ids means a call returned the wrong edge.
+            assert_eq!(
+                edge_count(&db, "alice", "t1").await,
+                1,
+                "run {run}: one edge for the pair"
+            );
+            let kept = edge_keys(&db, "alice", "t1").await;
+            assert!(
+                ok_ids
+                    .iter()
+                    .all(|id| Some(id.as_str()) == kept[0].id.as_deref()),
+                "run {run}: every add returns the surviving edge {:?}: {ok_ids:?}",
+                kept[0].id
+            );
+            assert_eq!(db.get_team_roster("t1").await.unwrap().len(), 1);
         }
-        assert!(!ok_ids.is_empty(), "at least one add succeeds");
-        assert!(
-            ok_ids.windows(2).all(|w| w[0] == w[1]),
-            "every add returns the same edge: {ok_ids:?}"
-        );
-        assert_eq!(edge_count(&db, "alice", "t1").await, 1);
-        assert_eq!(db.get_team_roster("t1").await.unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1103,6 +1184,25 @@ mod tests {
             "db7 injected write failure"
         ));
         assert!(!is_plays_on_pair_conflict_text("Operation timed out"));
+    }
+
+    #[test]
+    fn txn_placeholder_text_is_not_the_cause() {
+        assert!(is_txn_not_executed_text(
+            "The query was not executed due to a failed transaction"
+        ));
+        assert!(is_txn_not_executed_text(
+            "The query was not executed due to a cancelled transaction"
+        ));
+        assert!(is_txn_not_executed_text(
+            "Cannot COMMIT: the transaction was aborted due to a prior error"
+        ));
+        assert!(!is_txn_not_executed_text(
+            "Cannot COMMIT: Transaction conflict: write conflict. This transaction can be retried"
+        ));
+        assert!(!is_txn_not_executed_text(
+            "An error occurred: db7 injected write failure"
+        ));
     }
 
     #[test]
