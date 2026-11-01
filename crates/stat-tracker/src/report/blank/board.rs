@@ -116,7 +116,6 @@ pub(super) struct Board {
     #[allow(dead_code)]
     pub(super) r: u32,
     /// First row under the header strip.
-    #[allow(dead_code)]
     pub(super) hb: u32,
     /// Digit column centres `R - OFF * s` and their windows (midpoints).
     pub(super) cols: [f64; 6],
@@ -190,7 +189,7 @@ pub(super) fn measure(img: &RgbImage, team: usize) -> Result<Board, Fail> {
 }
 
 /// Light header pixel: every channel >= 150 and channel spread <= 40.
-fn header_light(p: [u8; 3]) -> bool {
+pub(super) fn header_light(p: [u8; 3]) -> bool {
     let mn = p[0].min(p[1]).min(p[2]);
     let mx = p[0].max(p[1]).max(p[2]);
     mn >= 150 && mx - mn <= 40

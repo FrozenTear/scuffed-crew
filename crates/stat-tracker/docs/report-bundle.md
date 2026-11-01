@@ -285,7 +285,7 @@ The scoreboard crop, as fractions of the playfield, matches the crop the tracker
 | width | 650/1000 |
 | height | 700/1000 |
 
-`crops/scoreboard.png` is an allowlist. It starts as the solid colour, and only two kinds of pixel are copied from the frame: a row's portrait cell and a row's digit glyphs. Each comes from a structure measured on that board and checked by a second cue. Nothing is placed by a fixed fraction of the crop. The in-match table sits at four widths and offsets (perk icons move it by up to 57 px at 1440p) and the post-match table is centred, so revision 3's fixed columns cut through portraits and left names visible. Everything that is not copied stays filled: the header, the name column with its badge, rank icon, name, and title, the ult and perk icons, the voice icons, the gap between the teams, the hero card, and the game world behind and beside the table, where in-world nameplates show.
+`crops/scoreboard.png` is an allowlist. It starts as the solid colour, and only two kinds of pixel are copied from the frame: a row's portrait cell and a row's digit glyphs. Each comes from a structure measured on that board and checked by a second cue. Nothing is placed by a fixed fraction of the crop. The in-match table sits at four widths and offsets (perk icons move it by up to 57 px at 1440p) and the post-match table is centred, so revision 3's fixed columns cut through portraits and left names visible. From blank table 13, on a board that keeps anything, the stat label span of the light header strip is copied as well: from 30 `s` left of the E column to 30 `s` right of the MIT column (inside the table), over the strip's light rows, unless chat may reach the header. That span is the one the label check holds free of any other label, so it shows only E, A, D, DMG, H and MIT. Everything that is not copied stays filled: the rest of the header, the name column with its badge, rank icon, name, and title, the ult and perk icons, the voice icons, the gap between the teams, the hero card, and the game world behind and beside the table, where in-world nameplates show.
 
 Geometry, measured per board. Lengths are in the 1664 px crop of a 2560x1440 frame, times `s` = crop width / 1664.
 
@@ -337,7 +337,7 @@ Known limits:
 - Text drawn exactly like the game's digits (same font, size, baseline, and spacing) is read as a number.
 - 5v5, Stadium, FFA, custom and spectator boards, non-English thousands separators, other HUD scales, and resolutions other than 1440p and 1080p keep nothing until a real board is measured.
 
-A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 12 for this revision), and a kit from another version is never reported.
+A kit stores the blank table version it was blanked with (`BLANK_TABLE_VERSION`, 13 for this revision), and a kit from another version is never reported.
 
 ### Other name regions
 
@@ -529,7 +529,7 @@ Tests use synthetic images drawn for the test, including the post-match boards i
 
 Scoreboard fixtures: synthetic 6v6 boards in each measured layout (the four in-match widths and the centred post-match table), with the measured geometry, white strokes in every name cell, and digits drawn from the reader's own templates, including the committed post-match boards. After blanking:
 
-- Every name stroke is the solid colour, and the header and the world are filled.
+- Every name stroke is the solid colour, the header outside the stat label span and the world are filled.
 - This revision copies no portrait pixel: on every synthetic layout, after a matching earlier capture, every portrait cell is fill and no portrait cell is held in memory. With `COPY_PORTRAITS` on (the tests switch it on for the rest of this list), every portrait passes on a clean synthetic board blanked after an earlier live capture, except the bottom row whose separator the crop cuts off, and none passes on the first capture; on the post-match fixtures all 12 rows keep their numbers, read back the same.
 - Each gate has a test that drops what it guards and copies none of the drawn pixels: a name in a stat cell, a notice across the columns, a grey row tint, a stroke over the role bar, a menu box laid across a portrait, touching glyphs joined by a thick stroke, chat on the frame (one line, and a stack), a crop with no frame, a board that is not 6v6, and a board whose header is gone.
 - The portrait content check, each against a clean earlier capture: a dark menu opened inside a portrait, a menu caught mid fade-in, and orange, grey and blue text across the portrait edge copy nothing of the overlay; a changed portrait and an earlier capture under a minute old keep no portrait. With the overlay on both captures: a box over the portrait column hides the separators, and a panel in the bar colour hides the role icon. A board at another scale keeps no portrait.
