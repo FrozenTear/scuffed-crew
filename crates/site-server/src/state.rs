@@ -41,6 +41,10 @@ pub struct AppState {
     /// Each request re-reads the directory, so a later permission fix does not
     /// need a restart unless startup dropped the path.
     pub packs_dir: Option<PathBuf>,
+    /// Private `HERO_ICONS_DIR` for contributed hero icons, plus the per-member
+    /// upload limiter. Disabled (routes answer 503) when the directory is
+    /// missing, not writable, or overlaps uploads, reports or the web root.
+    pub hero_icons: crate::hero_icons::HeroIconStore,
     /// Fan-out Matrix + Discord notifications. `None` when neither is configured.
     pub notifier: Option<Notifier>,
     /// 32-byte key for HMAC-signing Nostr challenge tokens.

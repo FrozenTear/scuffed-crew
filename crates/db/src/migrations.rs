@@ -815,6 +815,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE stats_visibility ON member_settings TYPE string
             DEFAULT 'public'
             ASSERT $value IN ['public', 'members', 'private'];
+        -- Opted in to contributing hero icons. Off by default; legacy rows read false.
+        DEFINE FIELD OVERWRITE hero_icon_opt_in ON member_settings TYPE bool DEFAULT false;
 
         DEFINE INDEX IF NOT EXISTS ms_member_idx ON member_settings COLUMNS member_id UNIQUE;
 
@@ -946,6 +948,21 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE completed_at ON data_migration TYPE datetime;
         DEFINE FIELD OVERWRITE scanned ON data_migration TYPE int DEFAULT 0;
         DEFINE FIELD OVERWRITE updated ON data_migration TYPE int DEFAULT 0;
+
+        -- ================================================
+        -- Contributed hero icons (metadata only)
+        -- PNG bytes live under HERO_ICONS_DIR as file_name, not in this table
+        -- and not in uploads. Only the owner and officers can read them.
+        -- ================================================
+        DEFINE TABLE IF NOT EXISTS hero_icon SCHEMAFULL;
+        DEFINE FIELD OVERWRITE member_id ON hero_icon TYPE string;
+        DEFINE FIELD OVERWRITE hero ON hero_icon TYPE string;
+        DEFINE FIELD OVERWRITE file_name ON hero_icon TYPE string;
+        DEFINE FIELD OVERWRITE size_bytes ON hero_icon TYPE int;
+        DEFINE FIELD OVERWRITE width ON hero_icon TYPE int;
+        DEFINE FIELD OVERWRITE height ON hero_icon TYPE int;
+        DEFINE FIELD OVERWRITE created_at ON hero_icon TYPE datetime;
+        DEFINE INDEX IF NOT EXISTS hero_icon_member_idx ON hero_icon COLUMNS member_id;
     "#,
             )
             .await?

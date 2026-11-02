@@ -504,6 +504,12 @@ async fn main() {
         &upload_dir,
         &reports_dir,
     );
+    let hero_icons = scuffed_site_server::hero_icons::open_hero_icons_dir(
+        &scuffed_site_server::hero_icons::hero_icons_dir_from_env(),
+        &upload_dir,
+        &reports_dir,
+    )
+    .await;
 
     let notifier = Notifier::from_env();
     if notifier.is_none() {
@@ -563,6 +569,7 @@ async fn main() {
         reports_dir: reports_dir.clone(),
         reports_enabled,
         packs_dir,
+        hero_icons,
         notifier,
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),

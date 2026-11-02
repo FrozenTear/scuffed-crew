@@ -2,6 +2,7 @@ pub mod calendar;
 pub mod challenge_store;
 pub mod dm_subscriber;
 pub mod extractors;
+pub mod hero_icons;
 pub mod leaderboard_cache;
 pub mod link_attempts;
 pub mod link_cleanup;
@@ -155,6 +156,11 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid stat-report governor config"),
     );
+
+    // POST /api/hero-icons: up to HERO_ICON_MAX_FILES_PER_UPLOAD parts of
+    // HERO_ICON_MAX_BYTES each, plus multipart headers. The per-member limiter
+    // runs in the handler before the body is read.
+    let hero_icon_body_limit = DefaultBodyLimit::max(scuffed_types::HERO_ICON_MAX_REQUEST_BYTES);
 
     // Same per-IP budget as avatar and image uploads (burst 8, then 1 every
     // 10s), but a separate bucket. Using up one does not block the other.
@@ -630,6 +636,38 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route(
             "/api/stats/daemon-config",
             get(routes::stats::daemon_config),
+        )
+        // Contributed hero icons. Private storage, session only. See
+        // routes::hero_icons for the access rules.
+        .route(
+            "/api/hero-icons",
+            post(routes::hero_icons::upload_hero_icons)
+                .layer::<_, std::convert::Infallible>(hero_icon_body_limit)
+                .get(routes::hero_icons::list_hero_icons),
+        )
+        .route(
+            "/api/hero-icons/mine",
+            get(routes::hero_icons::list_mine).delete(routes::hero_icons::delete_mine),
+        )
+        .route(
+            "/api/hero-icons/opt-in",
+            get(routes::hero_icons::get_opt_in).put(routes::hero_icons::put_opt_in),
+        )
+        .route(
+            "/api/hero-icons/members",
+            get(routes::hero_icons::hero_icon_member_counts),
+        )
+        .route(
+            "/api/hero-icons/members/{member_id}",
+            get(routes::hero_icons::member_hero_icons),
+        )
+        .route(
+            "/api/hero-icons/{id}/image",
+            get(routes::hero_icons::hero_icon_image),
+        )
+        .route(
+            "/api/hero-icons/{id}",
+            delete(routes::hero_icons::delete_hero_icon),
         )
         // Calendar ICS feeds moved into `public_routes` (NS2-6) — they are
         // unauthenticated and now share the public per-IP governor.

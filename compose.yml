@@ -189,6 +189,9 @@ services:
       UPLOAD_DIR: /app/data/uploads
       # Private member bug-report zips. The entrypoint gives this path to scuffed.
       REPORTS_DIR: /app/data/reports
+      # Private member-contributed hero icon PNGs (owner and officers only,
+      # never served as static files). The entrypoint gives this path to scuffed.
+      HERO_ICONS_DIR: /app/data/hero-icons
       # Private recognizer packs. Read-only. See docs/tracker-packs.md.
       PACKS_DIR: /app/data/packs
       # Rate-limiter trusted proxies (comma-separated IPs/CIDRs). Forwarded
@@ -239,6 +242,7 @@ services:
     volumes:
       - uploads-data:/app/data/uploads
       - reports-data:/app/data/reports
+      - hero-icons-data:/app/data/hero-icons
       - packs-data:/app/data/packs:ro
     networks:
       - internal
@@ -256,5 +260,6 @@ volumes:
   surrealdb-data:
   uploads-data:
   reports-data:
+  hero-icons-data:
   packs-data:
   strfry-data:

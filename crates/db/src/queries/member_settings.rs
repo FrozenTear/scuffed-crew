@@ -18,6 +18,10 @@ struct DbMemberSettings {
     #[serde(default)]
     #[surreal(default)]
     stats_visibility: Option<String>,
+    /// Absent on rows written before `hero_icon_opt_in` existed. Reads as false.
+    #[serde(default)]
+    #[surreal(default)]
+    hero_icon_opt_in: Option<bool>,
 }
 
 fn parse_visibility(raw: Option<&str>) -> StatsVisibility {
@@ -33,6 +37,7 @@ fn db_to_settings(db: DbMemberSettings) -> MemberSettings {
         member_id: db.member_id,
         player_name: db.player_name,
         stats_visibility: parse_visibility(db.stats_visibility.as_deref()),
+        hero_icon_opt_in: db.hero_icon_opt_in.unwrap_or(false),
     }
 }
 
@@ -127,6 +132,8 @@ impl Database {
                         member_id: member_id.to_string(),
                         player_name: player_name.map(|s| s.to_string()),
                         stats_visibility: Some(visibility.as_str().to_string()),
+                        // `.content()` replaces the whole row, so keep the opt-in.
+                        hero_icon_opt_in: Some(existing.hero_icon_opt_in.unwrap_or(false)),
                     })
                     .await?;
                 Ok(db_to_settings(updated.ok_or_else(|| {
@@ -142,12 +149,92 @@ impl Database {
                         member_id: member_id.to_string(),
                         player_name: player_name.map(|s| s.to_string()),
                         stats_visibility: Some(visibility.as_str().to_string()),
+                        hero_icon_opt_in: Some(false),
                     })
                     .await?;
                 Ok(db_to_settings(created.ok_or_else(|| {
                     crate::DbError::NotFound("failed to create member_settings".into())
                 })?))
             }
+        })
+        .await
+    }
+
+    /// Hero icon contribution opt-in. False when the member has no row.
+    pub async fn get_hero_icon_opt_in(&self, member_id: &str) -> DbResult<bool> {
+        Ok(self
+            .get_member_settings(member_id)
+            .await?
+            .is_some_and(|s| s.hero_icon_opt_in))
+    }
+
+    /// Set only `hero_icon_opt_in` and return the stored value.
+    ///
+    /// Player name and stats visibility are kept. A member without a row gets
+    /// one with no player name and public stats, like a first
+    /// [`Self::upsert_member_settings`] call.
+    pub async fn set_hero_icon_opt_in(&self, member_id: &str, opt_in: bool) -> DbResult<bool> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT * FROM member_settings WHERE member_id = $mid LIMIT 1")
+                .bind(("mid", member_id.to_string()))
+                .await?;
+            let rows: Vec<DbMemberSettings> = result.take(0)?;
+
+            if let Some(existing) = rows.into_iter().next() {
+                // A row from before `stats_visibility` reads as public. Writing that
+                // value keeps every typed field set on the update.
+                let visibility = parse_visibility(existing.stats_visibility.as_deref());
+                let Some(rid) = existing.id else {
+                    return Err(crate::DbError::NotFound("member_settings id".into()));
+                };
+                let mut result = self
+                    .client
+                    .query("UPDATE $rid SET hero_icon_opt_in = $v, stats_visibility = $vis")
+                    .bind(("rid", rid))
+                    .bind(("v", opt_in))
+                    .bind(("vis", visibility.as_str().to_string()))
+                    .await?;
+                let rows: Vec<DbMemberSettings> = result.take(0)?;
+                match rows.into_iter().next() {
+                    Some(updated) => Ok(updated.hero_icon_opt_in.unwrap_or(false)),
+                    None => Err(crate::DbError::NotFound("member_settings update".into())),
+                }
+            } else {
+                let created: Option<DbMemberSettings> = self
+                    .client
+                    .create("member_settings")
+                    .content(DbMemberSettings {
+                        id: None,
+                        member_id: member_id.to_string(),
+                        player_name: None,
+                        stats_visibility: Some(StatsVisibility::Public.as_str().to_string()),
+                        hero_icon_opt_in: Some(opt_in),
+                    })
+                    .await?;
+                match created {
+                    Some(created) => Ok(created.hero_icon_opt_in.unwrap_or(false)),
+                    None => Err(crate::DbError::NotFound("member_settings create".into())),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Member ids that are opted in to contributing hero icons.
+    pub async fn hero_icon_opted_in_member_ids(&self) -> DbResult<Vec<String>> {
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                member_id: String,
+            }
+            let mut result = self
+                .client
+                .query("SELECT member_id FROM member_settings WHERE hero_icon_opt_in = true")
+                .await?;
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows.into_iter().map(|row| row.member_id).collect())
         })
         .await
     }
@@ -224,5 +311,45 @@ mod tests {
         let cleared_name = db.upsert_member_settings("m1", None, None).await.unwrap();
         assert_eq!(cleared_name.player_name, None);
         assert_eq!(cleared_name.stats_visibility, StatsVisibility::Private);
+    }
+
+    #[tokio::test]
+    async fn new_settings_row_starts_opted_out_of_hero_icons() {
+        let db = test_db().await;
+        let created = db
+            .upsert_member_settings("m3", Some("Ana"), None)
+            .await
+            .unwrap();
+        assert!(!created.hero_icon_opt_in);
+        assert!(!db.get_hero_icon_opt_in("m3").await.unwrap());
+        assert!(!db.get_hero_icon_opt_in("nobody").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn hero_icon_opt_in_survives_settings_upsert() {
+        let db = test_db().await;
+        assert!(db.set_hero_icon_opt_in("m2", true).await.unwrap());
+        assert!(db.get_hero_icon_opt_in("m2").await.unwrap());
+        let created = db.get_member_settings("m2").await.unwrap().expect("row");
+        assert_eq!(created.stats_visibility, StatsVisibility::Public);
+        assert_eq!(created.player_name, None);
+
+        let kept = db
+            .upsert_member_settings("m2", Some("Mei"), Some(StatsVisibility::Members))
+            .await
+            .unwrap();
+        assert!(kept.hero_icon_opt_in);
+        assert!(db.get_hero_icon_opt_in("m2").await.unwrap());
+        assert_eq!(
+            db.hero_icon_opted_in_member_ids().await.unwrap(),
+            vec!["m2".to_string()]
+        );
+
+        assert!(!db.set_hero_icon_opt_in("m2", false).await.unwrap());
+        let after = db.get_member_settings("m2").await.unwrap().expect("row");
+        assert!(!after.hero_icon_opt_in);
+        assert_eq!(after.player_name.as_deref(), Some("Mei"));
+        assert_eq!(after.stats_visibility, StatsVisibility::Members);
+        assert!(db.hero_icon_opted_in_member_ids().await.unwrap().is_empty());
     }
 }
