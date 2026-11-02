@@ -474,13 +474,16 @@ fn feed(
     let checked = classify_checked_with(want, &unknown, rgb, no, |_| Default::default());
     let frame = keeps_checked(want, &checked).then(|| Arc::new(1));
     let seen = checked.seen;
-    (seen, tracker.observe_checked(now, checked, frame, || "game1".into()))
+    (
+        seen,
+        tracker.observe_checked(now, checked, frame, || "game1".into()),
+    )
 }
 
 fn staged_pending_roster(ops: &[PregameOp<Arc<u32>>]) -> bool {
-    ops.iter().any(|op| {
-        matches!(op, PregameOp::Stage(s) if s.folder == PENDING_DIR && s.name == ROSTER_NAME)
-    })
+    ops.iter().any(
+        |op| matches!(op, PregameOp::Stage(s) if s.folder == PENDING_DIR && s.name == ROSTER_NAME),
+    )
 }
 
 fn board_game(read_at: Instant) -> crate::ActiveGame {
@@ -560,9 +563,12 @@ fn an_end_signal_or_a_phase_read_ends_the_skip_at_once() {
     // A pre-game phase read (a lone hero select, which opens no folder)
     // ends it too.
     let t3 = t2 + Duration::from_secs(5);
-    let ops = tracker.observe(t3, Seen::Phase(PregamePhase::HeroSelect), Some(Arc::new(2)), || {
-        "game1".into()
-    });
+    let ops = tracker.observe(
+        t3,
+        Seen::Phase(PregamePhase::HeroSelect),
+        Some(Arc::new(2)),
+        || "game1".into(),
+    );
     assert!(ops.is_empty(), "{ops:?}");
     let t4 = t3 + Duration::from_millis(1_500);
     let want = tracker.want(t4);
@@ -575,17 +581,16 @@ fn an_end_signal_or_a_phase_read_ends_the_skip_at_once() {
 fn a_board_read_counts_only_for_an_unfinished_match_in_the_window() {
     let now = Instant::now();
     assert_eq!(match_board_read(None, now), None);
-    let mut game = crate::ActiveGame::open_at(
-        "s1".into(),
-        detect::MatchOutcome::Unknown,
-        Vec::new(),
-        now,
-    );
+    let mut game =
+        crate::ActiveGame::open_at("s1".into(), detect::MatchOutcome::Unknown, Vec::new(), now);
     // Opened at its start screens, no scoreboard read yet: the pre-game.
     assert_eq!(match_board_read(Some(&game), now), None);
     game.session_created = true;
     assert_eq!(match_board_read(Some(&game), now), Some(now));
-    assert_eq!(match_board_read(Some(&game), now + MATCH_SKIP_IDLE), Some(now));
+    assert_eq!(
+        match_board_read(Some(&game), now + MATCH_SKIP_IDLE),
+        Some(now)
+    );
     let past = now + MATCH_SKIP_IDLE + Duration::from_secs(1);
     assert_eq!(match_board_read(Some(&game), past), None);
     // The result is in: the match is over.
