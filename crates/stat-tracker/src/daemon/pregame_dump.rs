@@ -32,7 +32,7 @@
 //! The roster screen ([`roster`]) is saved apart from the others: its first
 //! frame as [`ROSTER_NAME`], its last as [`ROSTER_LAST_NAME`] (staged on
 //! disk, nothing held), so the loading and ban-results frames never stand
-//! in for it, nor it for them. It is accepted after [`ROSTER_SAMPLES`]
+//! in for it, nor it for them. It is accepted after [`roster_samples`]
 //! roster samples in a row, and one seen before any game folder is staged
 //! in the pending slot ([`pending`]) until the next folder opens. Each check's turned-down candidates are
 //! logged and the last one kept as `rejected_<label>.png` ([`rejects`]).
@@ -350,10 +350,14 @@ pub(crate) struct PregameTracker<F> {
     loading: Option<HeldLoading<F>>,
     /// When the roster frame staged in [`PENDING_DIR`] was taken.
     pending_roster: Option<Instant>,
-    /// Roster samples in a row ([`ROSTER_SAMPLES`]), and when the last
+    /// Roster samples in a row ([`roster_samples`]), and when the last
     /// one was taken.
     roster_streak: u8,
     roster_sample_at: Option<Instant>,
+    /// [`roster_samples`] at this tracker's poll interval.
+    roster_samples: u8,
+    /// A match is in progress ([`Self::set_match_running`]).
+    match_running: bool,
     /// When the ban phase was last seen, while a ban-results frame may
     /// still come.
     ban_ended_at: Option<Instant>,
@@ -383,6 +387,8 @@ impl<F> PregameTracker<F> {
             pending_roster: None,
             roster_streak: 0,
             roster_sample_at: None,
+            roster_samples: roster_samples(poll),
+            match_running: false,
             ban_ended_at: None,
             ban_results: None,
             roster: None,
@@ -431,7 +437,11 @@ impl<F: Clone> PregameTracker<F> {
     pub(crate) fn want(&self, now: Instant) -> PregameWant {
         let Some(game) = self.game_open(now) else {
             // No game folder: the loading screen and the roster may come
-            // before the one that opens, for the pending slot.
+            // before the one that opens, for the pending slot; not while a
+            // match is in progress.
+            if self.match_running {
+                return PregameWant::default();
+            }
             return PregameWant {
                 loading: true,
                 other_frame: true,

@@ -33,9 +33,17 @@
 //! file is never attached.
 //!
 //! A roster is accepted only after [`ROSTER_SAMPLES`] roster samples in a
-//! row; any other sample between them starts the count again. The roster
-//! stays up about 7 s, several polls, so this costs at most the first
-//! frame.
+//! row at polls under [`ROSTER_ONE_SAMPLE_POLL`] apart (the new reader's
+//! 1.5 s); any other sample between them starts the count again. The
+//! roster stays up about 7 s, several such polls, so this costs at most
+//! the first frame. At slower polls (ocr-v1's 4 s) one sample is enough:
+//! two in a row would need the roster up for two polls, which it may not
+//! be.
+//!
+//! Neither the loading nor the roster check runs with no game folder open
+//! while a match is in progress ([`PregameTracker::set_match_running`]):
+//! those screens never show mid-match, and the checks would only cost time
+//! and risk a false pass on gameplay. They resume when the match ends.
 
 use super::*;
 
@@ -49,8 +57,22 @@ pub(crate) const PENDING_WINDOW: Duration = Duration::from_secs(3 * 60);
 /// and the per-game sweep leave it alone.
 pub(crate) const PENDING_DIR: &str = ".pending";
 
-/// Consecutive roster samples before a roster frame is accepted.
+/// Consecutive roster samples before a roster frame is accepted, at polls
+/// under [`ROSTER_ONE_SAMPLE_POLL`] apart.
 pub(crate) const ROSTER_SAMPLES: u8 = 2;
+
+/// At polls this far apart or more, one roster sample is accepted: the
+/// roster is up only about 7 s.
+pub(crate) const ROSTER_ONE_SAMPLE_POLL: Duration = Duration::from_secs(3);
+
+/// Roster samples in a row needed at polls `poll` apart.
+pub(crate) fn roster_samples(poll: Duration) -> u8 {
+    if poll < ROSTER_ONE_SAMPLE_POLL {
+        ROSTER_SAMPLES
+    } else {
+        1
+    }
+}
 
 /// The latest loading-check pass, held until a game folder takes it or it
 /// is dropped. Replaced by each later pass.
@@ -62,7 +84,7 @@ pub(super) struct HeldLoading<F> {
 
 impl<F: Clone> PregameTracker<F> {
     /// Count this tick's roster sample; true when the roster is accepted
-    /// ([`ROSTER_SAMPLES`] in a row, this one included). A sample more than
+    /// ([`roster_samples`] in a row, this one included). A sample more than
     /// one and a half poll intervals after the last one (a capture miss or
     /// a tick not fed between them) starts the count again.
     pub(super) fn roster_sample(&mut self, now: Instant, seen: Seen) -> bool {
@@ -80,7 +102,7 @@ impl<F: Clone> PregameTracker<F> {
             1
         };
         self.roster_sample_at = Some(now);
-        self.roster_streak >= ROSTER_SAMPLES
+        self.roster_streak >= self.roster_samples
     }
 
     /// Drop what the pending slot held longer than [`PENDING_WINDOW`].
@@ -186,9 +208,38 @@ impl<F: Clone> PregameTracker<F> {
         });
     }
 
+    /// Whether a match is in progress (the session has a game with no
+    /// result yet whose scoreboard was read): with no game folder open, the
+    /// loading and roster checks are then off ([`Self::want`]).
+    pub(crate) fn set_match_running(&mut self, running: bool) {
+        self.match_running = running;
+    }
+
     /// Whether a roster frame is staged in the pending slot (tests).
     #[cfg(test)]
     pub(crate) fn holds_pending_roster(&self) -> bool {
         self.pending_roster.is_some()
+    }
+}
+
+/// Whether `game` (the session's open game) is a match in progress at
+/// `now`: no result yet, its scoreboard read and stored at least once, and
+/// some activity within [`super::super::session::UNFINISHED_SESSION_IDLE`]
+/// (an unfinished game that went quiet is no match in progress). Before
+/// its first scoreboard read a game is still in its pre-game.
+pub(crate) fn match_in_progress(game: Option<&crate::ActiveGame>, now: Instant) -> bool {
+    game.is_some_and(|g| {
+        !g.finished()
+            && g.session_created
+            && now.saturating_duration_since(g.last_activity)
+                <= super::super::session::UNFINISHED_SESSION_IDLE
+    })
+}
+
+impl PregameDump {
+    /// [`PregameTracker::set_match_running`], from the session state before
+    /// each tick's want ([`match_in_progress`]).
+    pub(crate) fn set_match_running(&mut self, running: bool) {
+        self.tracker.set_match_running(running);
     }
 }

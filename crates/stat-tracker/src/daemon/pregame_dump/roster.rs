@@ -14,7 +14,7 @@ pub(super) struct RosterOnScreen {
 }
 
 impl<F: Clone> PregameTracker<F> {
-    /// The roster screen, once accepted (`accepted`: [`ROSTER_SAMPLES`] roster
+    /// The roster screen, once accepted (`accepted`: [`roster_samples`] roster
     /// samples in a row): its first frame in a game is saved as
     /// [`ROSTER_NAME`], each later one staged as [`ROSTER_LAST_NAME`]
     /// (replacing the one before), and the staged one saved when the screen
@@ -44,7 +44,7 @@ impl<F: Clone> PregameTracker<F> {
         if seen != Seen::Roster {
             return;
         }
-        // A roster sample not accepted yet ([`ROSTER_SAMPLES`]) still keeps
+        // A roster sample not accepted yet ([`roster_samples`]) still keeps
         // the screen on.
         if let Some(r) = self.roster.as_mut() {
             r.last_at = now;

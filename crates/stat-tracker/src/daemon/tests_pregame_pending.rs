@@ -6,6 +6,7 @@
 use super::pregame_dump::*;
 use super::tests_pregame_dump::Run;
 use crate::*;
+use std::time::Duration;
 
 const VOTE: Seen = Seen::Phase(PregamePhase::MapVote);
 const BAN: Seen = Seen::Phase(PregamePhase::HeroBan);
@@ -432,4 +433,80 @@ fn roster_frame(w: u32, h: u32) -> image::RgbImage {
     fill([0.3801, 0.284, 0.4059, 0.75], [107, 22, 145]);
     fill([0.5938, 0.284, 0.6195, 0.75], [255, 210, 4]);
     img
+}
+
+#[test]
+fn the_roster_needs_two_samples_only_at_fast_polls() {
+    let ms = Duration::from_millis;
+    assert_eq!(roster_samples(ms(1_500)), 2, "the new reader");
+    assert_eq!(roster_samples(ROSTER_ONE_SAMPLE_POLL - ms(1)), 2);
+    assert_eq!(roster_samples(ROSTER_ONE_SAMPLE_POLL), 1, "the boundary");
+    assert_eq!(roster_samples(ms(4_000)), 1, "ocr-v1");
+    // Through the tracker: one sample is held at 3 s and 4 s polls, not
+    // just under 3 s.
+    for (poll, held) in [(2_999, false), (3_000, true), (4_000, true)] {
+        let mut run = Run::polled(poll);
+        run.tick(0, Seen::Roster, 1);
+        assert_eq!(run.tracker.holds_pending_roster(), held, "{poll} ms");
+        run.tick(poll, Seen::Roster, 2);
+        assert!(run.tracker.holds_pending_roster(), "{poll} ms, two");
+    }
+    // In a game at 4 s polls: one roster sample is saved.
+    let mut run = Run::polled(4_000);
+    run.tick(0, VOTE, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, Seen::Roster, 3);
+    run.tick(12_000, SELECT, 4);
+    assert_eq!(run.written_in("game1", ROSTER_NAME), [3]);
+}
+
+#[test]
+fn no_check_runs_with_no_folder_while_a_match_is_in_progress() {
+    let start = Instant::now();
+    let mut tracker: PregameTracker<Arc<u32>> = PregameTracker::new(Duration::from_millis(1_500));
+    tracker.set_match_running(true);
+    assert_eq!(tracker.want(start), PregameWant::default());
+    let no = |_: &image::RgbImage| false;
+    let unknown = detect::GamePhase::Unknown;
+    let frames = [
+        roster_frame(1920, 1080),
+        roster_frame(1920, 1080),
+        super::tests_loading_stand_ins::entering_game_slab(1280, 720),
+    ];
+    for (k, rgb) in frames.iter().enumerate() {
+        let now = start + Duration::from_millis(1_500 * k as u64);
+        let want = tracker.want(now);
+        let checked = classify_checked_with(want, &unknown, rgb, no, |_| Default::default());
+        assert_eq!(checked.seen, Seen::Other, "frame {k}");
+        assert_eq!(checked.rejects, Rejects::default(), "frame {k}");
+        let frame = keeps_checked(want, &checked).then(|| Arc::new(k as u32));
+        let ops = tracker.observe_checked(now, checked, frame, || "game1".into());
+        assert!(ops.is_empty(), "frame {k}: {ops:?}");
+    }
+    assert!(!tracker.holds_pending_roster() && !tracker.holds_frame());
+    // The match ended: both checks run again.
+    tracker.set_match_running(false);
+    let now = start + Duration::from_millis(6_000);
+    let want = tracker.want(now);
+    assert!(want.loading && want.roster, "{want:?}");
+    let checked = classify_checked_with(want, &unknown, &frames[0], no, |_| Default::default());
+    assert_eq!(checked.seen, Seen::Roster);
+}
+
+#[test]
+fn a_match_is_in_progress_from_its_first_board_until_its_result() {
+    let now = Instant::now();
+    assert!(!match_in_progress(None, now));
+    let mut game =
+        crate::ActiveGame::open_at("s1".into(), detect::MatchOutcome::Unknown, Vec::new(), now);
+    // Opened at its start screens, no scoreboard read yet: the pre-game.
+    assert!(!match_in_progress(Some(&game), now));
+    game.session_created = true;
+    assert!(match_in_progress(Some(&game), now));
+    // Quiet for longer than an unfinished session stays reusable.
+    let idle = super::session::UNFINISHED_SESSION_IDLE + Duration::from_secs(1);
+    assert!(!match_in_progress(Some(&game), now + idle));
+    // The result is in: the match is over.
+    game.record_outcome_at(detect::MatchOutcome::Victory, now);
+    assert!(!match_in_progress(Some(&game), now));
 }

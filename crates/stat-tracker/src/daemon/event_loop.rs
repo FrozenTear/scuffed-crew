@@ -508,6 +508,14 @@ pub(crate) async fn run_loop(
                         // A copy: a poll that a Tab drops leaves the
                         // session's stability history as it was.
                         let mut stability = st.ocr_stability.clone();
+                        // With no game folder open, the pre-game saves look
+                        // for no loading screen or roster mid-match.
+                        if let Some(dump) = pregame_dump.as_mut() {
+                            dump.set_match_running(daemon::pregame_dump::match_in_progress(
+                                st.active_game.as_ref(),
+                                now,
+                            ));
+                        }
                         // A Tab-busy tick reads no phase, so it is not fed
                         // to the pre-game saves.
                         let pregame_want = pregame_dump
