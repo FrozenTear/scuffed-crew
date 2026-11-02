@@ -742,20 +742,23 @@ Member-contributed hero icon PNGs (opt-in, owner and officers only) stay on
 disk, outside the web root and outside the upload tree. Compose sets
 `HERO_ICONS_DIR` to `/app/data/hero-icons` and mounts the named volume
 `hero-icons-data` there. Without the variable the server uses
-`data/hero-icons` relative to its working directory.
+`data/hero-icons` relative to its working directory when `PRODUCTION` is set,
+and `scuffed-hero-icons` under the system temp dir otherwise, so a dev server
+started from the repo root never writes icons into the repo tree.
 
 The entrypoint prepares this directory the same way as `REPORTS_DIR`: it
 creates it, gives it to `scuffed`, and sets mode 0700. Icon files are written
 with mode 0600 and named by a server-made id only.
 
 If the directory is missing, not writable, or overlaps the upload directory,
-`REPORTS_DIR` or the web root, hero icons turn themselves off. The log line is
+`REPORTS_DIR`, `PACKS_DIR` or the web root, hero icons turn themselves off. The log line is
 `hero icons disabled: ...`, the rest of the site keeps serving, and every
 `/api/hero-icons` route returns 503 with body `{"error":"hero_icons_disabled"}`
 until the directory is fixed and the server is restarted.
 
-`scripts/backup.sh` includes the `hero-icons-data` volume in the restic
-snapshot. Endpoints, caps and the privacy rule are in `docs/api/hero-icons.md`.
+The `hero-icons-data` volume is deliberately not in the backup snapshot: icons
+never leave the server volume. Lost icons can be contributed again. Endpoints,
+caps and the privacy rule are in `docs/api/hero-icons.md`.
 
 ## Recognizer asset packs
 

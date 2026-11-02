@@ -43,7 +43,7 @@ pub struct AppState {
     pub packs_dir: Option<PathBuf>,
     /// Private `HERO_ICONS_DIR` for contributed hero icons, plus the per-member
     /// upload limiter. Disabled (routes answer 503) when the directory is
-    /// missing, not writable, or overlaps uploads, reports or the web root.
+    /// missing, not writable, or overlaps uploads, reports, packs or the web root.
     pub hero_icons: crate::hero_icons::HeroIconStore,
     /// Fan-out Matrix + Discord notifications. `None` when neither is configured.
     pub notifier: Option<Notifier>,

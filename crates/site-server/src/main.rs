@@ -508,6 +508,7 @@ async fn main() {
         &scuffed_site_server::hero_icons::hero_icons_dir_from_env(),
         &upload_dir,
         &reports_dir,
+        packs_dir.as_deref(),
     )
     .await;
 

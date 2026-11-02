@@ -659,7 +659,8 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         )
         .route(
             "/api/hero-icons/members/{member_id}",
-            get(routes::hero_icons::member_hero_icons),
+            get(routes::hero_icons::member_hero_icons)
+                .delete(routes::hero_icons::delete_member_hero_icons),
         )
         .route(
             "/api/hero-icons/{id}/image",

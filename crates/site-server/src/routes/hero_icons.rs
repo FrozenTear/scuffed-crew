@@ -10,7 +10,8 @@
 //!   while the owner is opted in. Anyone else, an unknown id and a malformed
 //!   id all get the same 404 `icon_not_found`.
 //! - `DELETE /api/hero-icons/{id}` is the owner or any officer. Anyone else
-//!   gets the same 404.
+//!   gets the same 404. `DELETE /api/hero-icons/members/{member_id}` lets an
+//!   officer remove every icon of one member, opted in or not.
 //! - Officer lists only carry icons of members who are opted in right now.
 //!   `GET /api/hero-icons/members/{member_id}` is 403 `icon_opt_in_off` for a
 //!   member who is not.
@@ -25,7 +26,7 @@ use std::path::Path;
 
 use axum::Json;
 use axum::body::Body;
-use axum::extract::multipart::{Field, MultipartError};
+use axum::extract::multipart::{Field, MultipartError, MultipartRejection};
 use axum::extract::{Multipart, Path as UrlPath, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -39,8 +40,9 @@ use scuffed_types::api::{
     HERO_ICON_ERR_NO_ICONS, HERO_ICON_ERR_NOT_FOUND, HERO_ICON_ERR_NOT_PNG,
     HERO_ICON_ERR_OPT_IN_OFF, HERO_ICON_ERR_OPT_IN_REQUIRED, HERO_ICON_ERR_TOO_LARGE,
     HERO_ICON_ERR_TOO_MANY_IN_REQUEST, HERO_ICON_ERR_UNEXPECTED_FIELD, HERO_ICON_ERR_UNKNOWN_HERO,
-    HeroIconEntry, HeroIconMemberCount, HeroIconMemberCounts, HeroIconOptIn, HeroIconUploadResponse,
-    HeroIconsDeleted, MyHeroIcons, OfficerHeroIcon, OfficerHeroIconList, PaginationParams,
+    HeroIconEntry, HeroIconMemberCount, HeroIconMemberCounts, HeroIconOptIn,
+    HeroIconUploadResponse, HeroIconsDeleted, MyHeroIcons, OfficerHeroIcon, OfficerHeroIconList,
+    PaginationParams,
 };
 use scuffed_types::{
     HERO_ICON_MAX_BYTES, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_FILES_PER_UPLOAD,
@@ -173,6 +175,37 @@ async fn discard_icon_file(state: &AppState, id: &str) {
     if let Err(error) = remove_icon_file(state, id).await {
         tracing::error!(%error, "hero icon file cleanup failed");
     }
+}
+
+/// Remove every icon of `member_id` and return how many rows went.
+///
+/// Each file goes before its row, as in a single delete. A file that cannot be
+/// removed keeps its row, so the icon stays listed and the call can be
+/// retried. The other icons are still removed, and the result is a 500.
+async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<u32, Reject> {
+    let rows = state
+        .db
+        .list_hero_icons_for_member(member_id)
+        .await
+        .map_err(db_error)?;
+    let mut deleted: u32 = 0;
+    let mut file_failed = false;
+    for icon in &rows {
+        if let Err(error) = remove_icon_file(state, &icon.id).await {
+            tracing::error!(%error, "hero icon file delete failed");
+            file_failed = true;
+            continue;
+        }
+        match state.db.delete_hero_icon(&icon.id).await {
+            Ok(Some(_)) => deleted += 1,
+            Ok(None) => {}
+            Err(error) => return Err(db_error(error)),
+        }
+    }
+    if file_failed {
+        return Err(internal());
+    }
+    Ok(deleted)
 }
 
 /// Best-effort rollback of rows and files this request stored.
@@ -315,12 +348,13 @@ pub struct HeroIconUploadQuery {
 /// Multipart body with one or more parts named `icon`. Order of checks: 503
 /// when disabled, the per-member limiter (429), opt-in (403), hero (400), the
 /// stored cap (409), then each part (signature 415, size 413, dimensions and
-/// decode 400). Nothing is stored unless every part passes.
+/// decode 400). Nothing is stored unless every part passes. A body that is not
+/// multipart is 400 `invalid_multipart` after the stored cap check.
 pub async fn upload_hero_icons(
     State(state): State<AppState>,
     member: OrgMember,
     Query(query): Query<HeroIconUploadQuery>,
-    mut multipart: Multipart,
+    multipart: Result<Multipart, MultipartRejection>,
 ) -> Result<(StatusCode, Json<HeroIconUploadResponse>), UploadReject> {
     configured(&state)?;
     let member_id = member.member.id.clone();
@@ -348,6 +382,9 @@ pub async fn upload_hero_icons(
     if stored_before >= max_icons {
         return Err(reject(StatusCode::CONFLICT, HERO_ICON_ERR_LIMIT_REACHED).into());
     }
+    let Ok(mut multipart) = multipart else {
+        return Err(reject(StatusCode::BAD_REQUEST, HERO_ICON_ERR_INVALID_MULTIPART).into());
+    };
 
     let mut accepted: Vec<CleanIcon> = Vec::new();
     while let Some(mut field) = multipart.next_field().await.map_err(multipart_reject)? {
@@ -409,6 +446,19 @@ pub async fn upload_hero_icons(
         remove_stored(&state, &stored).await;
         return Err(reject(StatusCode::CONFLICT, HERO_ICON_ERR_LIMIT_REACHED).into());
     }
+    // The member may have opted out while the body was read. Icons are kept
+    // only while opted in, so roll this request back.
+    let still_opted_in = match state.db.get_hero_icon_opt_in(&member_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            remove_stored(&state, &stored).await;
+            return Err(db_error(error).into());
+        }
+    };
+    if !still_opted_in {
+        remove_stored(&state, &stored).await;
+        return Err(reject(StatusCode::FORBIDDEN, HERO_ICON_ERR_OPT_IN_REQUIRED).into());
+    }
 
     let icons: Vec<HeroIconEntry> = stored.iter().map(entry).collect();
     Ok((StatusCode::CREATED, Json(HeroIconUploadResponse { icons })))
@@ -448,17 +498,8 @@ pub async fn delete_mine(
     member: OrgMember,
 ) -> Result<Json<HeroIconsDeleted>, Reject> {
     configured(&state)?;
-    let removed = state
-        .db
-        .delete_hero_icons_for_member(&member.member.id)
-        .await
-        .map_err(db_error)?;
-    for icon in &removed {
-        discard_icon_file(&state, &icon.id).await;
-    }
-    Ok(Json(HeroIconsDeleted {
-        deleted: count_u32(removed.len()),
-    }))
+    let deleted = delete_all_icons(&state, &member.member.id).await?;
+    Ok(Json(HeroIconsDeleted { deleted }))
 }
 
 /// GET /api/hero-icons/opt-in
@@ -689,4 +730,30 @@ pub async fn member_hero_icons(
         .map(|icon| officer_entry(icon, &display_names))
         .collect();
     Ok(Json(OfficerHeroIconList { icons }))
+}
+
+/// DELETE /api/hero-icons/members/{member_id} (officer)
+///
+/// Removes every icon of one member, rows and files, also while that member is
+/// opted out. Written to the audit log when the caller is not that member.
+pub async fn delete_member_hero_icons(
+    State(state): State<AppState>,
+    officer: OfficerUser,
+    UrlPath(member_id): UrlPath<String>,
+) -> Result<Json<HeroIconsDeleted>, Reject> {
+    configured(&state)?;
+    let deleted = delete_all_icons(&state, &member_id).await?;
+    if deleted > 0 && member_id != officer.member.id {
+        let details = format!("{deleted} icons");
+        audit(
+            &state.db,
+            &officer.member.id,
+            AuditAction::DeletedAllHeroIcons,
+            AuditTargetType::Member,
+            &member_id,
+            Some(details.as_str()),
+        )
+        .await;
+    }
+    Ok(Json(HeroIconsDeleted { deleted }))
 }

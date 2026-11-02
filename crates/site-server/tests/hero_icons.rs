@@ -13,7 +13,7 @@ use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{HeaderMap, HeaderName, Method, Request, StatusCode, header};
 use axum::response::Response;
-use chrono::DateTime;
+use chrono::{DateTime, Utc};
 use http_body_util::BodyExt;
 use image::{ImageFormat, Rgba, RgbaImage};
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ use tower::ServiceExt;
 use scuffed_auth::SessionConfig;
 use scuffed_auth::crypto::hash_session_token;
 use scuffed_db::migrations::run_migrations;
-use scuffed_db::{Database, MemberSettings};
+use scuffed_db::{Database, MemberSettings, NewHeroIcon};
 use scuffed_site_server::create_router;
 use scuffed_site_server::hero_icons::HeroIconStore;
 use scuffed_site_server::state::{AppState, OAuthConfig};
@@ -471,6 +471,12 @@ async fn wrong_type_bad_png_and_bad_size_are_refused() {
     let got = upload(&w.app, OWNER_SESSION, "ana", &[]).await;
     assert_error(&got, bad, "no_icons");
 
+    // A body that is not multipart at all gets the JSON error body too.
+    let uri = "/api/hero-icons?hero=ana";
+    let body = Some(json!({}));
+    let got = call(&w.app, Method::POST, uri, Some(OWNER_SESSION), body).await;
+    assert_error(&got, bad, "invalid_multipart");
+
     assert!(files_on_disk(w.dir()).is_empty());
     w.cleanup();
 }
@@ -497,6 +503,48 @@ async fn too_big_and_too_many_are_413() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     let stored = files_on_disk(w.dir());
     assert_eq!(stored.len(), HERO_ICON_MAX_FILES_PER_UPLOAD);
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn stored_icon_cap_is_409() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    // Rows only, no files: the cap counts rows.
+    for i in 0..HERO_ICON_MAX_PER_MEMBER - 1 {
+        let id = format!("{i:032x}");
+        let file_name = format!("{id}.png");
+        let row = NewHeroIcon {
+            id,
+            member_id: OWNER.to_string(),
+            hero: "Ana".to_string(),
+            file_name,
+            size_bytes: 10,
+            width: 16,
+            height: 16,
+            created_at: Utc::now(),
+        };
+        w.db().insert_hero_icon(&row).await.expect("seed icon row");
+    }
+    let limit = StatusCode::CONFLICT;
+
+    // This request would pass the cap, so none of it is stored.
+    let two = icons(vec![png(16, 16), png(16, 16)]);
+    let got = upload(&w.app, OWNER_SESSION, "ana", &two).await;
+    assert_error(&got, limit, "icon_limit_reached");
+    assert!(files_on_disk(w.dir()).is_empty());
+
+    // Filling up to the cap exactly is fine.
+    let (status, body) = upload_one(&w.app, OWNER_SESSION, "ana").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    // At the cap the request is refused before the body is read.
+    let got = upload_one(&w.app, OWNER_SESSION, "ana").await;
+    assert_error(&got, limit, "icon_limit_reached");
+    assert_eq!(files_on_disk(w.dir()).len(), 1);
+
+    let (_, mine) = get(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
+    assert_eq!(mine["count"], json!(HERO_ICON_MAX_PER_MEMBER));
     w.cleanup();
 }
 
@@ -714,6 +762,36 @@ async fn delete_all_removes_rows_and_files() {
     let (_, mine) = get(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
     assert_eq!(mine["count"], json!(0));
     assert_eq!(mine["icon_contribution_opt_in"], json!(true));
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn officer_deletes_all_icons_of_an_opted_out_member() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    set_opt_in(&w.app, OTHER_SESSION, true).await;
+    let two = icons(vec![png(16, 16), png(17, 17)]);
+    let (status, body) = upload(&w.app, OWNER_SESSION, "ana", &two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let other_id = first_id(&upload_one(&w.app, OTHER_SESSION, "ana").await);
+    set_opt_in(&w.app, OWNER_SESSION, false).await;
+
+    // Members cannot use the officer route, not even for their own icons.
+    let uri = format!("/api/hero-icons/members/{OWNER}");
+    let got = delete(&w.app, &uri, OWNER_SESSION).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "Officer access required");
+    assert_eq!(files_on_disk(w.dir()).len(), 3);
+
+    let (status, body) = delete(&w.app, &uri, OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(2));
+    assert_eq!(files_on_disk(w.dir()), vec![format!("{other_id}.png")]);
+    let left = w.db().count_hero_icons_for_member(OWNER).await.unwrap();
+    assert_eq!(left, 0);
+
+    let (status, body) = delete(&w.app, &uri, OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(0));
     w.cleanup();
 }
 

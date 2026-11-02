@@ -1048,6 +1048,7 @@ pub enum AuditAction {
     /// An officer read one of another member's matches. Details: the match id.
     ViewedMemberMatch,
     DeletedHeroIcon,
+    DeletedAllHeroIcons,
 }
 
 impl std::fmt::Display for AuditAction {

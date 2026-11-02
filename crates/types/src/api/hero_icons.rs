@@ -75,7 +75,8 @@ pub struct HeroIconUploadResponse {
     pub icons: Vec<HeroIconEntry>,
 }
 
-/// `DELETE /api/hero-icons/mine` and `DELETE /api/hero-icons/{id}`.
+/// `DELETE /api/hero-icons/mine`, `DELETE /api/hero-icons/{id}` and
+/// `DELETE /api/hero-icons/members/{member_id}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeroIconsDeleted {
     pub deleted: u32,

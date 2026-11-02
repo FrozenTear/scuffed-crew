@@ -117,28 +117,28 @@ impl Database {
             let rows: Vec<DbMemberSettings> = result.take(0)?;
 
             if let Some(existing) = rows.into_iter().next() {
-                let visibility = stats_visibility
-                    .unwrap_or_else(|| parse_visibility(existing.stats_visibility.as_deref()));
-                let id = existing
-                    .id
-                    .as_ref()
-                    .map(|r| crate::record_id_key_to_string(r.key.clone()))
-                    .unwrap_or_default();
-                let updated: Option<DbMemberSettings> = self
+                let Some(rid) = existing.id else {
+                    return Err(crate::DbError::NotFound("member_settings id".into()));
+                };
+                // Only the two fields this call owns are written, so a concurrent
+                // hero icon opt-in change is never reverted. `??` keeps the stored
+                // visibility when none is given, and fills fields a legacy row lacks.
+                let mut result = self
                     .client
-                    .update(("member_settings", id.as_str()))
-                    .content(DbMemberSettings {
-                        id: existing.id,
-                        member_id: member_id.to_string(),
-                        player_name: player_name.map(|s| s.to_string()),
-                        stats_visibility: Some(visibility.as_str().to_string()),
-                        // `.content()` replaces the whole row, so keep the opt-in.
-                        hero_icon_opt_in: Some(existing.hero_icon_opt_in.unwrap_or(false)),
-                    })
+                    .query(
+                        "UPDATE $rid SET player_name = $pn, \
+                         stats_visibility = $vis ?? stats_visibility ?? 'public', \
+                         hero_icon_opt_in = hero_icon_opt_in ?? false",
+                    )
+                    .bind(("rid", rid))
+                    .bind(("pn", player_name.map(|s| s.to_string())))
+                    .bind(("vis", stats_visibility.map(|v| v.as_str().to_string())))
                     .await?;
-                Ok(db_to_settings(updated.ok_or_else(|| {
-                    crate::DbError::NotFound("member_settings not found after update".into())
-                })?))
+                let updated: Vec<DbMemberSettings> = result.take(0)?;
+                match updated.into_iter().next() {
+                    Some(row) => Ok(db_to_settings(row)),
+                    None => Err(crate::DbError::NotFound("member_settings update".into())),
+                }
             } else {
                 let visibility = stats_visibility.unwrap_or_default();
                 let created: Option<DbMemberSettings> = self
@@ -183,18 +183,20 @@ impl Database {
             let rows: Vec<DbMemberSettings> = result.take(0)?;
 
             if let Some(existing) = rows.into_iter().next() {
-                // A row from before `stats_visibility` reads as public. Writing that
-                // value keeps every typed field set on the update.
-                let visibility = parse_visibility(existing.stats_visibility.as_deref());
                 let Some(rid) = existing.id else {
                     return Err(crate::DbError::NotFound("member_settings id".into()));
                 };
+                // Only the opt-in is written. `??` fills a visibility that a row from
+                // before `stats_visibility` lacks and keeps every other stored value,
+                // so a concurrent stats settings change is never reverted.
                 let mut result = self
                     .client
-                    .query("UPDATE $rid SET hero_icon_opt_in = $v, stats_visibility = $vis")
+                    .query(
+                        "UPDATE $rid SET hero_icon_opt_in = $v, \
+                         stats_visibility = stats_visibility ?? 'public'",
+                    )
                     .bind(("rid", rid))
                     .bind(("v", opt_in))
-                    .bind(("vis", visibility.as_str().to_string()))
                     .await?;
                 let rows: Vec<DbMemberSettings> = result.take(0)?;
                 match rows.into_iter().next() {
@@ -311,6 +313,47 @@ mod tests {
         let cleared_name = db.upsert_member_settings("m1", None, None).await.unwrap();
         assert_eq!(cleared_name.player_name, None);
         assert_eq!(cleared_name.stats_visibility, StatsVisibility::Private);
+    }
+
+    #[tokio::test]
+    async fn legacy_rows_take_settings_and_opt_in_writes() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"
+                REMOVE FIELD IF EXISTS stats_visibility ON member_settings;
+                REMOVE FIELD IF EXISTS hero_icon_opt_in ON member_settings;
+                CREATE member_settings SET member_id = 'legacy-a', player_name = 'Old';
+                CREATE member_settings SET member_id = 'legacy-b', player_name = 'Old';
+                DEFINE FIELD OVERWRITE stats_visibility ON member_settings TYPE string
+                    DEFAULT 'public'
+                    ASSERT $value IN ['public', 'members', 'private'];
+                DEFINE FIELD OVERWRITE hero_icon_opt_in ON member_settings TYPE bool
+                    DEFAULT false;
+                "#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let kept = db
+            .upsert_member_settings("legacy-a", Some("New"), None)
+            .await
+            .unwrap();
+        assert_eq!(kept.player_name.as_deref(), Some("New"));
+        assert_eq!(kept.stats_visibility, StatsVisibility::Public);
+        assert!(!kept.hero_icon_opt_in);
+
+        assert!(db.set_hero_icon_opt_in("legacy-b", true).await.unwrap());
+        let after = db
+            .get_member_settings("legacy-b")
+            .await
+            .unwrap()
+            .expect("row");
+        assert!(after.hero_icon_opt_in);
+        assert_eq!(after.player_name.as_deref(), Some("Old"));
+        assert_eq!(after.stats_visibility, StatsVisibility::Public);
     }
 
     #[tokio::test]
