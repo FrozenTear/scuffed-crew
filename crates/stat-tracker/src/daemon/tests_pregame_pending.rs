@@ -510,3 +510,24 @@ fn a_match_is_in_progress_from_its_first_board_until_its_result() {
     game.record_outcome_at(detect::MatchOutcome::Victory, now);
     assert!(!match_in_progress(Some(&game), now));
 }
+
+#[test]
+fn entering_pregame_is_replaced_by_entering_game_before_the_start() {
+    // A game shows two loading screens: ENTERING PREGAME before the vote
+    // (frame 1 here) and ENTERING GAME before the roster (frame 3). The
+    // first is saved at the vote; the second replaces it at the start, so
+    // the folder's loading.png is the later frame, with a hero ban or a
+    // hero select as the start.
+    for start in [BAN, SELECT] {
+        let mut run = Run::new();
+        run.tick(0, Seen::Loading, 1);
+        run.tick(3_000, VOTE, 2);
+        run.tick(15_000, Seen::Other, 0);
+        run.tick(16_500, Seen::Loading, 3);
+        run.tick(18_000, start, 4);
+        let loading = run.written_in("game1", LOADING_NAME);
+        assert_eq!(loading, [1, 3], "{start:?}");
+        assert_eq!(loading.last(), Some(&3), "the later frame is on disk");
+        assert!(!run.tracker.holds_loading());
+    }
+}
