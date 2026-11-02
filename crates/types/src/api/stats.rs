@@ -487,7 +487,9 @@ pub enum StatsVisibility {
     Public,
     /// Active signed-in crew members. Signed-out callers do not see the numbers.
     Members,
-    /// The member, and officers. Off every leaderboard, including for the owner.
+    /// The member, and officers on the aggregate stat routes (not on the officer
+    /// match routes, see [`StatsVisibility::officer_match_denial`]). Off every
+    /// leaderboard, including for the owner.
     Private,
 }
 

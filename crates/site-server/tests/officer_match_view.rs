@@ -280,7 +280,10 @@ async fn get(app: &axum::Router, uri: &str, token: Option<&str>) -> (StatusCode,
 async fn own_match_id(app: &axum::Router, session: &str) -> String {
     let (status, body) = get(app, "/api/stats/me/matches", Some(session)).await;
     assert_eq!(status, StatusCode::OK, "{body}");
-    body["data"][0]["id"].as_str().expect("match id").to_string()
+    body["data"][0]["id"]
+        .as_str()
+        .expect("match id")
+        .to_string()
 }
 
 fn assert_status(

@@ -51,7 +51,9 @@ reads exactly as on `/api/stats/me/matches`, so the site can show the
 | Caller                          | Result                                    |
 |---------------------------------|-------------------------------------------|
 | Signed out                      | 401 `{"error":"Authentication required"}` |
+| Signed in, not a crew member    | 403 `{"error":"Not an org member"}`       |
 | Inactive member or officer      | 403 `{"error":"Membership inactive"}`     |
+| Suspended member or officer     | 403 `{"error":"Account suspended"}`       |
 | Member below officer            | 403 `{"error":"Officer access required"}` |
 | Officer, own id                 | 200, whatever their setting               |
 | Officer, unknown member id      | 404 `{"error":"Member not found"}`        |
@@ -61,6 +63,9 @@ reads exactly as on `/api/stats/me/matches`, so the site can show the
 Members read their own games on `/api/stats/me/matches`, not on these routes.
 A member who is not an officer gets 403 `Officer access required` here, even
 for their own id.
+
+The member check does not look at `is_active`, so officers can read a
+deactivated member's games when that member's setting allows it.
 
 On the single-match route, a key that does not exist, a malformed key and a
 game that belongs to another member are all 404 `{"error":"Match not found"}`.
