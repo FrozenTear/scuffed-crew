@@ -552,6 +552,7 @@ const STATS_CSS: &str = r#"
         width: max-content;
         height: auto;
         max-width: min(14rem, 100%);
+        min-width: var(--unsure-note-min, 0);
         margin: 0.15rem 0 0;
         overflow: visible;
         clip-path: none;
@@ -572,6 +573,16 @@ const STATS_CSS: &str = r#"
         flex-wrap: wrap;
     }
     .stat-unsure:has(.stat-unsure-note-open) { flex-wrap: wrap; }
+    /* The stat columns are 2 to 4rem wide, too narrow for a sentence. A cell
+       with an open note sets a minimum note width, which beats the 100% cap, so
+       the note is wider than its cell and spills sideways into the empty space
+       under its neighbours. E, D and A grow it to the right, Dmg and Heal to
+       the left, so it stays inside the stat block. The other cells line up at
+       the top, so no value moves under the note. */
+    .match-stat:has(.stat-unsure-note-open) { --unsure-note-min: 10rem; }
+    .match-stat:not(.match-stat-wide):has(.stat-unsure-note-open) { justify-content: flex-start; }
+    .match-stat:not(.match-stat-wide):has(.stat-unsure-note-open) .stat-value-text { margin-left: auto; }
+    .match-stats:has(.stat-unsure-note-open) { align-items: start; }
     .stat-flagged {
         flex: 0 0 auto;
         max-width: 100%;
@@ -1742,6 +1753,33 @@ mod header_layout_tests {
                 "{selector}: {body}"
             );
         }
+        // A stat cell with an open note gives it a minimum width that beats the
+        // 100% cap, so the note is not squeezed into a 2 to 4rem column.
+        let note_rule = open_rules
+            .iter()
+            .find(|(selector, _)| {
+                selector
+                    .trim()
+                    .ends_with(".stat-unsure-note.stat-unsure-note-open")
+            })
+            .expect("the open note rule")
+            .1;
+        assert!(
+            has_declaration(note_rule, "min-width: var(--unsure-note-min, 0)"),
+            "{note_rule}"
+        );
+        let cell_min = block_after(STATS_CSS, ".match-stat:has(.stat-unsure-note-open) {");
+        let cell_min_head = cell_min.split('}').next().unwrap();
+        assert!(
+            cell_min_head.contains("--unsure-note-min: 10rem"),
+            "{cell_min_head}"
+        );
+        let top = block_after(STATS_CSS, ".match-stats:has(.stat-unsure-note-open) {");
+        let top_head = top.split('}').next().unwrap();
+        assert!(
+            top_head.contains("align-items: start"),
+            "the other cells line up at the top: {top_head}"
+        );
         let last = open_rules.last().unwrap().1;
         assert!(has_declaration(last, "position: relative"), "{last}");
         assert!(has_declaration(last, "z-index: 1"), "{last}");
