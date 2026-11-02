@@ -447,7 +447,7 @@ const STATS_CSS: &str = r#"
     /* The mark and its note sit above the overlay, so tapping either one never
        opens the game. */
     .match-card-link .stat-unsure-mark,
-    .match-card-link .stat-unsure-note { position: relative; z-index: 1; }
+    .match-card-link .stat-unsure-note-open { position: relative; z-index: 1; }
     .match-cards { display: flex; flex-direction: column; gap: 0.3rem; }
     .match-card .match-outcome {
         font-family: var(--font-head);
@@ -526,15 +526,33 @@ const STATS_CSS: &str = r#"
         text-decoration: none;
     }
     .stat-unsure-mark:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-    /* Small note shown after the mark is tapped. It wraps under the value and
-       stays out of the clipped value text. */
+    /* The note is a live region that is always in the page. Closed, it is
+       visually collapsed (out of flow, 1px, clipped), never display: none, so
+       screen readers still announce its text when it fills. */
     .stat-unsure-note {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        border: 0;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+    }
+    /* Open: a small note that wraps under the value and stays out of the
+       clipped value text. */
+    .stat-unsure-note.stat-unsure-note-open {
+        position: static;
         display: block;
         flex: 0 0 100%;
         box-sizing: border-box;
         width: max-content;
+        height: auto;
         max-width: min(14rem, 100%);
-        margin-top: 0.15rem;
+        margin: 0.15rem 0 0;
+        overflow: visible;
+        clip-path: none;
         font-family: var(--font-body, inherit);
         font-size: 0.75rem;
         font-weight: 400;
@@ -546,12 +564,12 @@ const STATS_CSS: &str = r#"
         white-space: normal;
         color: var(--text-2);
     }
-    .match-card .match-outcome:has(.stat-unsure-note),
-    .match-card .match-hero:has(.stat-unsure-note) {
+    .match-card .match-outcome:has(.stat-unsure-note-open),
+    .match-card .match-hero:has(.stat-unsure-note-open) {
         overflow: visible;
         flex-wrap: wrap;
     }
-    .stat-unsure:has(.stat-unsure-note) { flex-wrap: wrap; }
+    .stat-unsure:has(.stat-unsure-note-open) { flex-wrap: wrap; }
     .stat-flagged {
         flex: 0 0 auto;
         max-width: 100%;

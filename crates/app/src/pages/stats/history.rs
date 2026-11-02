@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use dioxus::prelude::*;
 
 use crate::components::ui::ChipButton;
@@ -37,8 +35,24 @@ const UNSURE_DETAIL: &str = "might be misread. Check it in the tracker.";
 /// Screen reader text inside the mark button.
 const UNSURE_SR_TEXT: &str = "(might be misread)";
 
-/// Source of the per-mark note ids.
-static NEXT_NOTE_ID: AtomicU64 = AtomicU64::new(0);
+/// Id of the note a mark controls. Built only from the match id and the stat
+/// name, with anything that is not id-safe turned into an underscore. Ids are
+/// deterministic (no counters or random values), so server rendering and
+/// hydration always agree, and two marks never share an id on one page.
+fn unsure_note_id(match_id: &str, stat_name: &str) -> String {
+    let safe = |text: &str| -> String {
+        text.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    format!("unsure-note-{}-{}", safe(match_id), safe(stat_name))
+}
 
 fn unsure_title(stat_name: &str) -> String {
     format!("{stat_name}: {UNSURE_DETAIL}")
@@ -61,22 +75,25 @@ pub(super) fn cell_is_unsure(suspect_fields: &[String], name: &str) -> bool {
 /// inside a link (History rows use a sibling overlay link), and neither is its
 /// note, so tapping the note does not open the game. Tapping the mark,
 /// clicking it, or pressing Enter or Space on it shows [`unsure_title`] as a
-/// small note (a polite status region, wired with aria-controls) next to the
-/// value, so phones and keyboards get the same words as
+/// small note (a polite status region that is always present and empty while
+/// closed, wired with aria-controls) next to the value, so phones and keyboards get the same words as
 /// the hover tooltip. "(might be misread)" is real text inside the button for
 /// screen readers, which skip aria-label on a plain span. Display only: it
 /// changes no value and no average.
 #[component]
-fn UnsureMark(stat_name: String, start_open: bool) -> Element {
+fn UnsureMark(match_id: String, stat_name: String, start_open: bool) -> Element {
     let mut open = use_signal(move || start_open);
-    // One id per mark, so aria-controls always points at its own note.
-    let note_id = use_hook(|| {
-        format!(
-            "unsure-note-{}",
-            NEXT_NOTE_ID.fetch_add(1, Ordering::Relaxed)
+    let note_id = unsure_note_id(&match_id, &stat_name);
+    // The note is always in the page and empty while closed, so screen readers
+    // register the live region before its text changes and announce it.
+    let (note_class, note) = if open() {
+        (
+            "stat-unsure-note stat-unsure-note-open",
+            unsure_title(&stat_name),
         )
-    });
-    let note = unsure_title(&stat_name);
+    } else {
+        ("stat-unsure-note", String::new())
+    };
     rsx! {
         button {
             class: "stat-unsure-mark",
@@ -87,9 +104,7 @@ fn UnsureMark(stat_name: String, start_open: bool) -> Element {
             span { aria_hidden: "true", "?" }
             span { class: "sr-only", "{UNSURE_SR_TEXT}" }
         }
-        if open() {
-            span { class: "stat-unsure-note", id: "{note_id}", role: "status", "{note}" }
-        }
+        span { class: "{note_class}", id: "{note_id}", role: "status", "{note}" }
     }
 }
 
@@ -97,6 +112,7 @@ fn UnsureMark(stat_name: String, start_open: bool) -> Element {
 /// hidden "(might be misread)" text, and [`unsure_title`]. A sure numeric cell
 /// keeps the stat name as its title.
 pub(super) fn marked_value(
+    match_id: &str,
     class: &str,
     text: &str,
     stat_name: &str,
@@ -127,7 +143,11 @@ pub(super) fn marked_value(
                     class: "{class}",
                     title: "{title}",
                     span { class: "stat-value-text", "{text}" }
-                    UnsureMark { stat_name: stat_name.to_string(), start_open: false }
+                    UnsureMark {
+                        match_id: match_id.to_string(),
+                        stat_name: stat_name.to_string(),
+                        start_open: false,
+                    }
                 }
             }
         } else if class.is_empty() {
@@ -306,6 +326,7 @@ pub(super) fn history_tab(
                                                 span { class: "sr-only", "View game: {m.outcome} on {map_label}, {date}" }
                                             }
                                             {marked_value(
+                                                &m.id,
                                                 &format!("match-outcome {oc}"),
                                                 &m.outcome,
                                                 "Result",
@@ -314,7 +335,7 @@ pub(super) fn history_tab(
                                             )}
                                             div { class: "match-identity match-identity-compact",
                                                 div { class: "match-hero-line",
-                                                    {marked_value("match-hero", &m.hero, "Hero", false, hero_unsure)}
+                                                    {marked_value(&m.id, "match-hero", &m.hero, "Hero", false, hero_unsure)}
                                                     if new_reader {
                                                         span {
                                                             class: "tracker-badge reader-badge",
@@ -325,19 +346,20 @@ pub(super) fn history_tab(
                                                     }
                                                 }
                                                 div { class: "match-map",
-                                                    {marked_value("match-map-name", &map_label, "Map", false, map_unsure)}
+                                                    {marked_value(&m.id, "match-map-name", &map_label, "Map", false, map_unsure)}
                                                     span { class: "match-map-sep", " · " }
-                                                    {marked_value("match-mode", &mode_text, "Mode", false, mode_unsure)}
+                                                    {marked_value(&m.id, "match-mode", &mode_text, "Mode", false, mode_unsure)}
                                                     span { class: "match-map-sep", " · " }
                                                     "{role_label}"
                                                     if mit_unsure {
                                                         span { class: "match-map-sep", " · " }
-                                                        {marked_value("stat-flagged", &mit_text, "Mitigation", false, true)}
+                                                        {marked_value(&m.id, "stat-flagged", &mit_text, "Mitigation", false, true)}
                                                     }
                                                 }
                                             }
                                             div { class: "match-stats",
                                                 {marked_value(
+                                                    &m.id,
                                                     "match-stat",
                                                     &m.elims.to_string(),
                                                     "Eliminations",
@@ -345,6 +367,7 @@ pub(super) fn history_tab(
                                                     cell_is_unsure(fields, "e"),
                                                 )}
                                                 {marked_value(
+                                                    &m.id,
                                                     "match-stat",
                                                     &m.deaths.to_string(),
                                                     "Deaths",
@@ -352,6 +375,7 @@ pub(super) fn history_tab(
                                                     cell_is_unsure(fields, "d"),
                                                 )}
                                                 {marked_value(
+                                                    &m.id,
                                                     "match-stat",
                                                     &m.assists.to_string(),
                                                     "Assists",
@@ -359,6 +383,7 @@ pub(super) fn history_tab(
                                                     cell_is_unsure(fields, "a"),
                                                 )}
                                                 {marked_value(
+                                                    &m.id,
                                                     "match-stat match-stat-wide",
                                                     &m.damage.to_string(),
                                                     "Damage",
@@ -366,6 +391,7 @@ pub(super) fn history_tab(
                                                     cell_is_unsure(fields, "dmg"),
                                                 )}
                                                 {marked_value(
+                                                    &m.id,
                                                     "match-stat match-stat-wide",
                                                     &m.healing.to_string(),
                                                     "Healing",
@@ -703,10 +729,6 @@ mod tests {
                 "a button needs no tabindex: {tag}"
             );
         }
-        assert!(
-            !html.contains("stat-unsure-note"),
-            "the note stays hidden until the mark is used: {html}"
-        );
         assert_no_button_inside_anchor(&html);
         let mut controls: Vec<&str> = html
             .split("aria-controls=\"")
@@ -714,10 +736,6 @@ mod tests {
             .map(|rest| rest.split('"').next().unwrap())
             .collect();
         assert_eq!(controls.len(), marks, "{html}");
-        assert!(
-            controls.iter().all(|id| id.starts_with("unsure-note-")),
-            "{html}"
-        );
         controls.sort_unstable();
         controls.dedup();
         assert_eq!(
@@ -725,6 +743,27 @@ mod tests {
             marks,
             "every mark controls its own note: {html}"
         );
+        let mut expected: Vec<String> = titles
+            .iter()
+            .map(|name| format!("unsure-note-new-{}", name.to_lowercase()))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(
+            controls,
+            expected.iter().map(String::as_str).collect::<Vec<_>>(),
+            "ids come from the match id and the stat name: {html}"
+        );
+        for id in controls {
+            let (tag, body) = note_by_id(&html, id);
+            assert!(tag.starts_with("<span "), "{tag}");
+            assert!(tag.contains("class=\"stat-unsure-note\""), "{tag}");
+            assert!(tag.contains("role=\"status\""), "{tag}");
+            assert!(
+                !tag.contains("stat-unsure-note-open"),
+                "closed note is collapsed: {tag}"
+            );
+            assert_eq!(body, "", "the live region is empty while closed: {html}");
+        }
         assert_eq!(
             html.matches("class=\"match-card-overlay\"").count(),
             3,
@@ -736,6 +775,17 @@ mod tests {
         );
     }
 
+    /// The opening tag and the text of the span with this id.
+    fn note_by_id<'a>(html: &'a str, id: &str) -> (&'a str, &'a str) {
+        let at = html
+            .find(&format!("id=\"{id}\""))
+            .unwrap_or_else(|| panic!("note {id} is missing: {html}"));
+        let start = html[..at].rfind('<').unwrap();
+        let tag_end = start + html[start..].find('>').unwrap();
+        let body_end = tag_end + html[tag_end..].find("</span>").unwrap();
+        (&html[start..tag_end], &html[tag_end + 1..body_end])
+    }
+
     #[test]
     fn open_note_is_a_status_region_that_the_button_controls() {
         fn view() -> Element {
@@ -744,8 +794,16 @@ mod tests {
                     a { class: "match-card-overlay", href: "/stats/match/x",
                         span { class: "sr-only", "View game" }
                     }
-                    UnsureMark { stat_name: "Deaths".to_string(), start_open: true }
-                    UnsureMark { stat_name: "Hero".to_string(), start_open: true }
+                    UnsureMark {
+                        match_id: "x".to_string(),
+                        stat_name: "Deaths".to_string(),
+                        start_open: true,
+                    }
+                    UnsureMark {
+                        match_id: "x".to_string(),
+                        stat_name: "Hero".to_string(),
+                        start_open: false,
+                    }
                 }
             }
         }
@@ -753,27 +811,33 @@ mod tests {
         dom.rebuild_in_place();
         let html = dioxus_ssr::render(&dom);
 
-        assert_eq!(html.matches("aria-expanded=\"true\"").count(), 2, "{html}");
-        let ids: Vec<&str> = html
-            .split("aria-controls=\"")
-            .skip(1)
-            .map(|rest| rest.split('"').next().unwrap())
-            .collect();
-        assert_eq!(ids.len(), 2, "{html}");
-        assert_ne!(ids[0], ids[1], "{html}");
-        for id in ids {
-            let at = html
-                .find(&format!("id=\"{id}\""))
-                .unwrap_or_else(|| panic!("note {id} is missing: {html}"));
-            let start = html[..at].rfind('<').unwrap();
-            let tag = &html[start..start + html[start..].find('>').unwrap()];
-            assert!(tag.starts_with("<span class=\"stat-unsure-note\""), "{tag}");
-            assert!(tag.contains("role=\"status\""), "{tag}");
-        }
+        assert_eq!(html.matches("aria-expanded=\"true\"").count(), 1, "{html}");
+        assert_eq!(html.matches("aria-expanded=\"false\"").count(), 1, "{html}");
         assert!(
-            html.contains("Deaths: might be misread. Check it in the tracker.</span>"),
+            html.contains("aria-controls=\"unsure-note-x-deaths\""),
             "{html}"
         );
+        assert!(
+            html.contains("aria-controls=\"unsure-note-x-hero\""),
+            "{html}"
+        );
+
+        let (open_tag, open_body) = note_by_id(&html, "unsure-note-x-deaths");
+        assert!(open_tag.contains("stat-unsure-note-open"), "{open_tag}");
+        assert!(open_tag.contains("role=\"status\""), "{open_tag}");
+        assert_eq!(
+            open_body,
+            "Deaths: might be misread. Check it in the tracker."
+        );
+
+        let (closed_tag, closed_body) = note_by_id(&html, "unsure-note-x-hero");
+        assert!(
+            !closed_tag.contains("stat-unsure-note-open"),
+            "{closed_tag}"
+        );
+        assert!(closed_tag.contains("role=\"status\""), "{closed_tag}");
+        assert_eq!(closed_body, "", "{html}");
+
         assert_no_button_inside_anchor(&html);
         assert!(
             !html
@@ -783,6 +847,17 @@ mod tests {
                 .contains("stat-unsure-note"),
             "the note is outside the row link: {html}"
         );
+    }
+
+    #[test]
+    fn note_ids_are_deterministic_and_id_safe() {
+        assert_eq!(
+            unsure_note_id("Ab 1/2", "Damage"),
+            "unsure-note-ab_1_2-damage"
+        );
+        assert_eq!(unsure_note_id("m-1", "Hero"), unsure_note_id("m-1", "Hero"));
+        assert_ne!(unsure_note_id("m-1", "Hero"), unsure_note_id("m-2", "Hero"));
+        assert_ne!(unsure_note_id("m-1", "Hero"), unsure_note_id("m-1", "Map"));
     }
 
     #[test]

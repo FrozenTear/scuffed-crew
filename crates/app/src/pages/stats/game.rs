@@ -305,6 +305,7 @@ fn game_detail(row: &GameRow) -> Element {
     rsx! {
         header { class: "game-head",
             {marked_value(
+                &row.id,
                 &format!("game-outcome {oc}"),
                 &row.outcome,
                 "Result",
@@ -312,12 +313,12 @@ fn game_detail(row: &GameRow) -> Element {
                 cell_is_unsure(fields, "result"),
             )}
             h1 { class: "game-title",
-                {marked_value("", &map, "Map", false, cell_is_unsure(fields, "map"))}
+                {marked_value(&row.id, "", &map, "Map", false, cell_is_unsure(fields, "map"))}
             }
             p { class: "game-meta",
-                {marked_value("game-mode", &mode, "Mode", false, cell_is_unsure(fields, "mode"))}
+                {marked_value(&row.id, "game-mode", &mode, "Mode", false, cell_is_unsure(fields, "mode"))}
                 span { aria_hidden: "true", "·" }
-                {marked_value("game-hero", &row.hero, "Hero", false, cell_is_unsure(fields, "hero"))}
+                {marked_value(&row.id, "game-hero", &row.hero, "Hero", false, cell_is_unsure(fields, "hero"))}
                 span { aria_hidden: "true", "·" }
                 span { class: "game-role", "{role}" }
                 span { aria_hidden: "true", "·" }
@@ -339,7 +340,7 @@ fn game_detail(row: &GameRow) -> Element {
                 div { class: "game-stat", key: "{stat.label}",
                     dt { "{stat.label}" }
                     dd {
-                        {marked_value("game-stat-value", &stat.value.to_string(), stat.label, false, stat.unsure)}
+                        {marked_value(&row.id, "game-stat-value", &stat.value.to_string(), stat.label, false, stat.unsure)}
                     }
                 }
             }
@@ -610,7 +611,19 @@ mod tests {
         assert_eq!(html.matches("aria-expanded=\"false\"").count(), 2, "{html}");
         assert_eq!(html.matches("type=\"button\"").count(), 2, "{html}");
         assert_eq!(html.matches("(might be misread)").count(), 2, "{html}");
-        assert!(!html.contains("stat-unsure-note"), "{html}");
+        // Each mark's note is always present, empty, and wired to its button.
+        assert_eq!(html.matches("role=\"status\"").count(), 2, "{html}");
+        assert!(
+            html.contains("aria-controls=\"unsure-note-a-hero\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("aria-controls=\"unsure-note-a-damage\""),
+            "{html}"
+        );
+        assert!(html.contains("id=\"unsure-note-a-hero\""), "{html}");
+        assert!(html.contains("id=\"unsure-note-a-damage\""), "{html}");
+        assert!(!html.contains("stat-unsure-note-open"), "{html}");
         assert!(html.contains("outcome-win"), "{html}");
         assert!(
             !html.contains(NEW_READER_BADGE),
