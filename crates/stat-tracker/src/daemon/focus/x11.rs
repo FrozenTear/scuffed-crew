@@ -2,12 +2,14 @@
 //! window, then that window's `WM_CLASS`. Overwatch under Wine or Proton is
 //! an X11 window, so on a Wayland session this sees it through XWayland.
 //!
-//! The rule on a Wayland session (`WAYLAND_DISPLAY` set): XWayland's
-//! `_NET_ACTIVE_WINDOW` can be empty, or stale and naming another X11
-//! window, while a native Wayland window has focus. So there this source
-//! gives only focused (Overwatch matched) or unreadable, never not
-//! focused. Only a true X11 session may give not focused: another window,
-//! or a window of 0 (None), which EWMH defines as no active window.
+//! The rule unless the session is positively X11
+//! ([`super::DesktopEnv::x11_session`]: `XDG_SESSION_TYPE` is `x11`, or
+//! unset with no `WAYLAND_DISPLAY`): XWayland's `_NET_ACTIVE_WINDOW` can be
+//! empty, or stale and naming another X11 window, while a native Wayland
+//! window has focus. So there this source gives only focused (Overwatch
+//! matched) or unreadable, never not focused. Only a positively X11 session
+//! may give not focused: another window, or a window of 0 (None), which
+//! EWMH defines as no active window.
 //!
 //! One connection per read, as the X11 capture does.
 
@@ -26,7 +28,8 @@ pub(crate) trait X11Query {
     fn wm_class(&self, window: u32) -> Result<Vec<u8>, String>;
 }
 
-/// One focus read through `query`, `wayland` when the session is Wayland.
+/// One focus read through `query`; `wayland` unless the session is
+/// positively X11.
 pub(crate) fn read_x11(query: &impl X11Query, wayland: bool) -> FocusRead {
     let window = match query.active_window() {
         Ok(window) => window,

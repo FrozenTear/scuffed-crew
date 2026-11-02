@@ -280,34 +280,39 @@ pub(crate) fn focus_gate_row<'a>(
             },
         ]),
     );
-    let marked = app.page_state.focus_row_marked(std::time::Instant::now());
-    Some(
-        iced::widget::container(row)
-            .id(crate::focus_status::ROW_ID)
-            .padding(iced::Padding {
-                left: 8.0,
-                ..iced::Padding::ZERO
-            })
-            .style(move |_: &iced::Theme| iced::widget::container::Style {
-                border: iced::Border {
-                    color: if marked {
-                        crate::theme::ACCENT
-                    } else {
-                        iced::Color::TRANSPARENT
-                    },
-                    width: if marked { 3.0 } else { 0.0 },
-                    radius: 0.0.into(),
-                },
+    // Marked: a 3 px accent edge on the left only, as the open Advanced
+    // section's bar; otherwise the row sits flush with the others.
+    let body: Element<'a, Message> = if app.page_state.focus_row_marked(std::time::Instant::now()) {
+        let edge = iced::widget::container(iced::widget::space().width(3))
+            .width(3)
+            .height(iced::Fill)
+            .style(|_: &iced::Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(crate::theme::ACCENT)),
                 ..iced::widget::container::Style::default()
-            })
+            });
+        iced::widget::row![edge, row]
+            .spacing(8)
+            .height(iced::Length::Shrink)
+            .into()
+    } else {
+        row
+    };
+    Some(
+        iced::widget::container(body)
+            .id(crate::focus_status::ROW_ID)
             .into(),
     )
 }
 
 /// The live note shows while the running tracker cannot tell which
-/// window is in front (as the top bar shows it, debounced).
+/// window is in front (as the top bar shows it, debounced), and only while
+/// a game runs, as the top bar's focus words: a value left from the last
+/// game is not shown. A rejected token does not hide it.
 pub(crate) fn focus_note_shown(app: &TrackerApp) -> bool {
-    app.page_state.focus.shown() == stat_tracker::ocr_status::FocusGateStatus::Unreadable
+    app.fixture.is_none()
+        && app.daemon.running()
+        && app.game_running
+        && app.page_state.focus.shown() == stat_tracker::ocr_status::FocusGateStatus::Unreadable
 }
 
 /// The live note: neutral words with an amber dot, as the capture method
@@ -392,6 +397,9 @@ mod tests {
     fn the_focus_row_notes_unreadable_and_is_marked_after_the_pill() {
         use stat_tracker::ocr_status::FocusGateStatus;
         let (_dir, mut app) = crate::fixtures::test_app();
+        app.fixture = None;
+        app.daemon.pid = Some(41);
+        app.game_running = true;
         let t0 = std::time::Instant::now();
         assert!(!focus_note_shown(&app));
         // The note follows the debounced top bar value: 5 s of unreadable.
@@ -404,6 +412,13 @@ mod tests {
             t0 + crate::focus_status::UNREADABLE_AFTER,
         );
         assert!(focus_note_shown(&app));
+        // Only while a game runs: a value left from the last game is not shown.
+        app.game_running = false;
+        assert!(!focus_note_shown(&app));
+        app.game_running = true;
+        app.daemon.pid = None;
+        assert!(!focus_note_shown(&app), "no tracker running");
+        app.daemon.pid = Some(41);
         app.page_state.focus.observe(Some(FocusGateStatus::Off), t0);
         assert!(!focus_note_shown(&app), "Off stops the warning");
         // The pill marks the row for a moment.

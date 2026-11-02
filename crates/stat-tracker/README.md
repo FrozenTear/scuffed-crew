@@ -33,8 +33,10 @@ install paths and the `.desktop` entry stay the same).
     and the tracker tries again every 30 seconds. The script is unloaded
     when the tracker stops.
   - X11 sessions: `_NET_ACTIVE_WINDOW` and the window's `WM_CLASS`. Only a
-    session that is positively X11 (`XDG_SESSION_TYPE=x11`, or no Wayland
-    signal at all) may pause reads from this read.
+    session that is positively X11 (`XDG_SESSION_TYPE=x11`, or
+    `XDG_SESSION_TYPE` unset with no `WAYLAND_DISPLAY`) may pause reads from
+    this read. Any other session type, such as `tty` after `startx`, follows
+    the Wayland rules below: focused or unreadable, never paused.
   - Other Wayland desktops with XWayland (any session with
     `WAYLAND_DISPLAY` set or `XDG_SESSION_TYPE=wayland`): the same X11
     read, but there it reports only focused or unreadable, never paused.
