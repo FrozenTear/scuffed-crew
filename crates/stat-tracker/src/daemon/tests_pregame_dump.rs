@@ -141,7 +141,7 @@ fn the_poll_loop_feeds_and_releases_the_saver_and_shutdown_flushes_it() {
         .split_whitespace()
         .collect();
     // Tab-busy ticks read no phase and are not fed.
-    assert!(run_loop.contains(".filter(|_|!outcome_only)"));
+    assert!(run_loop.contains("pregame_tick_want(pregame_dump.as_mut(),st.active_game"));
     assert!(run_loop.contains("dump.observe(Instant::now(),seen,frame)"));
     // The game gate going false and a failed capture both release it; an
     // expected one-poll miss does not. The game gate also ends the

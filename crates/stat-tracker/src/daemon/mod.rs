@@ -50,6 +50,8 @@ mod tests_pregame_roster;
 #[cfg(test)]
 mod tests_pregame_staging;
 #[cfg(test)]
+mod tests_pregame_tick;
+#[cfg(test)]
 mod tests_query_server;
 #[cfg(test)]
 mod tests_snapshot_policy;
