@@ -82,7 +82,7 @@ impl Database {
         .await
     }
 
-    /// One member's icons, newest first.
+    /// One member's icons, newest first. Ties (one upload request) go by file name.
     pub async fn list_hero_icons_for_member(&self, member_id: &str) -> DbResult<Vec<HeroIcon>> {
         let member_id = member_id.to_string();
         with_timeout(async {
@@ -90,7 +90,7 @@ impl Database {
                 .client
                 .query(
                     "SELECT * FROM hero_icon WHERE member_id = $member_id \
-                     ORDER BY created_at DESC",
+                     ORDER BY created_at DESC, file_name DESC",
                 )
                 .bind(("member_id", member_id))
                 .await?;
@@ -117,7 +117,7 @@ impl Database {
                 .client
                 .query(
                     "SELECT * FROM hero_icon WHERE member_id IN $ids \
-                     ORDER BY created_at DESC LIMIT $lim START $off",
+                     ORDER BY created_at DESC, file_name DESC LIMIT $lim START $off",
                 )
                 .bind(("ids", ids))
                 .bind(("lim", limit + 1))
@@ -268,5 +268,29 @@ mod tests {
         assert_eq!(removed[0].id, b);
         assert_eq!(db.count_hero_icons_for_member("m1").await.unwrap(), 0);
         assert_eq!(db.count_hero_icons_for_member("m2").await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn rows_from_one_upload_have_a_stable_order() {
+        let db = test_db().await;
+        let at = Utc::now();
+        let d = "dddddddddddddddddddddddddddddddd";
+        let e = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+        for id in [d, e] {
+            let mut icon = new_icon(id, "m1", 0);
+            icon.created_at = at;
+            db.insert_hero_icon(&icon).await.unwrap();
+        }
+
+        let mine = db.list_hero_icons_for_member("m1").await.unwrap();
+        let ids: Vec<&str> = mine.iter().map(|icon| icon.id.as_str()).collect();
+        assert_eq!(ids, vec![e, d]);
+
+        let second_page = db
+            .list_hero_icons_for_members(&["m1".to_string()], 1, 1)
+            .await
+            .unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].id, d);
     }
 }

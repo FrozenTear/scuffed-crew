@@ -1,6 +1,6 @@
 //! Private storage and the per-member upload limiter for contributed hero icons.
 //!
-//! Files live under `HERO_ICONS_DIR` (default `data/hero-icons`) as
+//! Files live under `HERO_ICONS_DIR` (see [`hero_icons_dir_from_env`]) as
 //! `<id>.png`, where `id` is 32 lowercase hex characters made by the server.
 //! No part of a path on disk comes from the request. The directory is not the
 //! upload tree and it is not served as static files: image bytes only leave
@@ -17,11 +17,17 @@ use std::time::Instant;
 
 use scuffed_types::{HERO_ICON_RATE_BURST, HERO_ICON_RATE_REFILL_SECS};
 
-/// `HERO_ICONS_DIR`, or `data/hero-icons` when it is unset or blank.
+/// `HERO_ICONS_DIR`, or a default when it is unset or blank.
+///
+/// The production default is `data/hero-icons` (`/app/data/hero-icons` in the
+/// image). Outside production the default is `scuffed-hero-icons` under the
+/// system temp dir, so a dev server started from the repo root never writes
+/// icons into the repo tree.
 pub fn hero_icons_dir_from_env() -> PathBuf {
     match std::env::var("HERO_ICONS_DIR") {
         Ok(value) if !value.trim().is_empty() => PathBuf::from(value.trim()),
-        _ => PathBuf::from("data/hero-icons"),
+        _ if scuffed_auth::is_production_env() => PathBuf::from("data/hero-icons"),
+        _ => std::env::temp_dir().join("scuffed-hero-icons"),
     }
 }
 
@@ -33,10 +39,17 @@ pub fn is_icon_id(id: &str) -> bool {
     id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
-/// True when the icons directory could be served or could overlap uploads or reports.
-pub fn hero_icons_dir_conflicts(icons: &Path, upload_dir: &Path, reports_dir: &Path) -> bool {
+/// True when the icons directory could be served or could overlap uploads,
+/// reports or recognizer packs.
+pub fn hero_icons_dir_conflicts(
+    icons: &Path,
+    upload_dir: &Path,
+    reports_dir: &Path,
+    packs_dir: Option<&Path>,
+) -> bool {
     crate::stat_reports::reports_dir_conflicts(icons, upload_dir)
         || crate::stat_reports::reports_dir_conflicts(icons, reports_dir)
+        || packs_dir.is_some_and(|packs| crate::stat_reports::reports_dir_conflicts(icons, packs))
 }
 
 /// Create the directory with mode 0700 on unix.
@@ -55,8 +68,9 @@ pub async fn open_hero_icons_dir(
     configured: &Path,
     upload_dir: &Path,
     reports_dir: &Path,
+    packs_dir: Option<&Path>,
 ) -> HeroIconStore {
-    match try_open_hero_icons_dir(configured, upload_dir, reports_dir).await {
+    match try_open_hero_icons_dir(configured, upload_dir, reports_dir, packs_dir).await {
         Ok(dir) => HeroIconStore::new(dir, true),
         Err(reason) => {
             tracing::error!("hero icons disabled: {reason}");
@@ -69,6 +83,7 @@ async fn try_open_hero_icons_dir(
     configured: &Path,
     upload_dir: &Path,
     reports_dir: &Path,
+    packs_dir: Option<&Path>,
 ) -> Result<PathBuf, String> {
     ensure_hero_icons_dir(configured).await.map_err(|error| {
         format!(
@@ -90,9 +105,9 @@ async fn try_open_hero_icons_dir(
             configured.display()
         )
     })?;
-    if hero_icons_dir_conflicts(&icons, upload_dir, reports_dir) {
+    if hero_icons_dir_conflicts(&icons, upload_dir, reports_dir, packs_dir) {
         return Err(format!(
-            "HERO_ICONS_DIR {} overlaps uploads, reports or the web root",
+            "HERO_ICONS_DIR {} overlaps uploads, reports, packs or the web root",
             icons.display()
         ));
     }

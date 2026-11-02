@@ -19,9 +19,8 @@ default, and every route needs a signed-in session. JSON types live in
   still list, read and delete their own icons, and can delete all of them with
   one call.
 - Deleting an icon removes both the database row and the file.
-- The `hero-icons-data` volume is part of the server backup snapshot
-  (`scripts/backup.sh`), like `reports-data`. A deleted icon can stay in an
-  older snapshot until restic prunes it.
+- The `hero-icons-data` volume is deliberately not in the backup snapshot:
+  icons never leave the server volume. Lost icons can be contributed again.
 
 ## Caps
 
@@ -69,7 +68,11 @@ Every error body is `{"error": "<code>"}`. The codes are constants in
 
 | Status | `error` | When |
 |--------|---------|------|
-| 401 | `Authentication required` | No session |
+| 401 | `Authentication required` | No session cookie or bearer token |
+| 401 | `Session expired or invalid` | Expired or unknown session |
+| 403 | `Not an org member` | Signed in, but the user has no member record |
+| 403 | `Membership inactive` | The member record is not active |
+| 403 | `Account suspended` | The member is suspended |
 | 403 | `Officer access required` | Officer route, caller is not an officer |
 | 403 | `icon_opt_in_required` | Upload while the caller is not opted in |
 | 403 | `icon_opt_in_off` | Officer asks for the icons of a member who is not opted in |
@@ -77,7 +80,7 @@ Every error body is `{"error": "<code>"}`. The codes are constants in
 | 400 | `unknown_hero` | `hero` missing or not a known hero |
 | 400 | `no_icons` | Upload with no `icon` part |
 | 400 | `unexpected_field` | A multipart part not named `icon` |
-| 400 | `invalid_multipart` | Body is not readable multipart |
+| 400 | `invalid_multipart` | Body is not `multipart/form-data` or is not readable multipart |
 | 400 | `icon_bad_dimensions` | Width or height outside 8 to 256 |
 | 400 | `invalid_png` | PNG signature present but the image does not decode |
 | 409 | `icon_limit_reached` | The upload would go over `HERO_ICON_MAX_PER_MEMBER` |
@@ -91,8 +94,9 @@ The 429 is the shared rate-limit response: body
 `{"code":"rate_limited","error":"rate_limited","retry_after":N}`, plus the
 headers `Retry-After: N`, `x-ratelimit-after: N` and `Cache-Control: no-store`.
 
-A sign-in check (401, 403 `Membership inactive`, 403 `Officer access required`)
-comes before the 503.
+The sign-in checks (the 401 and the extractor 403 rows above) come before the
+503. One body is not JSON from this API: a PUT to `/api/hero-icons/opt-in`
+whose body is not the JSON object below gets axum's plain-text 400, 415 or 422.
 
 ## Endpoints
 
@@ -105,7 +109,11 @@ format as other API timestamps.
 
 Multipart body, one or more parts named `icon`, each a PNG file. Check order:
 503, 429, 403 `icon_opt_in_required`, 400 `unknown_hero`, 409 when the member is
-already at the cap, then the parts.
+already at the cap, 400 `invalid_multipart` when the body is not multipart, then
+the parts. After storing, the server checks the cap and the opt-in once more:
+if another upload pushed the member over the cap (409) or the member opted out
+while the body was read (403 `icon_opt_in_required`), this request's icons are
+removed again.
 
 `201 Created`:
 
@@ -153,6 +161,9 @@ Lists the caller's icons, newest first, opted in or not.
 `DELETE /api/hero-icons/mine` (any active member)
 
 Deletes every icon of the caller, rows and files. Opt-in is left as it is.
+Each file goes before its row. If a file cannot be removed, its row is kept
+(the icon stays listed), the other icons are still removed, and the answer is
+500 `Internal error`, so the call can simply be repeated.
 
 ```json
 { "deleted": 3 }
@@ -193,9 +204,11 @@ lowercase hex characters, such as `..%2Fetc%2Fpasswd`) all get 404
 
 `DELETE /api/hero-icons/{id}` (owner, or any officer)
 
-Officers can delete any icon, also while its owner is opted out. Anyone else
-gets 404 `icon_not_found`. Officer deletes of another member's icon are written
-to the audit log as `deleted_hero_icon`.
+Officers can delete any icon by id, also while its owner is opted out. Officer
+lists only show opted-in members, so to clear an opted-out member's icons use
+`DELETE /api/hero-icons/members/{member_id}` below. Anyone else gets 404
+`icon_not_found`. Officer deletes of another member's icon are written to the
+audit log as `deleted_hero_icon`.
 
 ```json
 { "deleted": 1 }
@@ -274,16 +287,30 @@ All icons of one member, newest first, not paged (at most 500). 403
 }
 ```
 
+### Officer: delete all of one member's icons
+
+`DELETE /api/hero-icons/members/{member_id}` (officer)
+
+Removes every icon of that member, rows and files, opted in or not. Opt-in is
+left as it is. File failures work as in `DELETE /api/hero-icons/mine`. When at
+least one icon went and the member is not the caller, one audit entry
+`deleted_all_hero_icons` is written with the member as target. A member with no
+icons gives `{ "deleted": 0 }`.
+
+```json
+{ "deleted": 12 }
+```
+
 ## Server configuration
 
 | Variable | Default | Compose value |
 |----------|---------|---------------|
-| `HERO_ICONS_DIR` | `data/hero-icons` | `/app/data/hero-icons` on the named volume `hero-icons-data` |
+| `HERO_ICONS_DIR` | With `PRODUCTION` set: `data/hero-icons` relative to the working directory. Otherwise `scuffed-hero-icons` under the system temp dir, so a dev server never writes icons into the repo tree | `/app/data/hero-icons` on the named volume `hero-icons-data` |
 
 The server creates the directory with mode 0700 and writes each file with mode
 0600. The image entrypoint gives the directory to the `scuffed` user first, as
 it does for `REPORTS_DIR`. If the directory is missing, not writable, or
-overlaps `UPLOAD_DIR`, `REPORTS_DIR` or `dist`, the server logs
+overlaps `UPLOAD_DIR`, `REPORTS_DIR`, `PACKS_DIR` or `dist`, the server logs
 `hero icons disabled: ...`, keeps serving, and every hero icon route answers
 503 `hero_icons_disabled` until the directory is fixed and the server restarts.
 See `docs/deploy.md`.

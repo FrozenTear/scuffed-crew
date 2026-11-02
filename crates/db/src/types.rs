@@ -1044,6 +1044,7 @@ pub enum AuditAction {
     DownloadedStatReport,
     ReadStatReportManifest,
     DeletedHeroIcon,
+    DeletedAllHeroIcons,
 }
 
 impl std::fmt::Display for AuditAction {
