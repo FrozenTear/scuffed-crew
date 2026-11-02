@@ -29,8 +29,11 @@ const NEW_READER_BADGE: &str = "New reader";
 const NEW_READER_BADGE_SHORT: &str = "New";
 /// Tooltip for [`NEW_READER_BADGE`].
 const NEW_READER_TITLE: &str = "Read by the new stat reader";
-/// Shared tail of the unsure-cell tooltip. The stat's display name is the prefix.
-const UNSURE_DETAIL: &str = "unsure read. Check and edit if wrong.";
+/// Shared tail of the unsure-cell tooltip and of the tap-to-show note. The
+/// stat's display name is the prefix.
+const UNSURE_DETAIL: &str = "might be misread. Check it in the tracker.";
+/// Screen reader text inside the mark button.
+const UNSURE_SR_TEXT: &str = "(might be misread)";
 
 fn unsure_title(stat_name: &str) -> String {
     format!("{stat_name}: {UNSURE_DETAIL}")
@@ -49,17 +52,39 @@ pub(super) fn cell_is_unsure(suspect_fields: &[String], name: &str) -> bool {
         && suspect_fields.iter().any(|field| field == name)
 }
 
-/// Question mark stays outside the clipped value. "(unsure)" is real text for
-/// screen readers, which skip aria-label on a plain span.
-fn unsure_note() -> Element {
+/// Question mark button that stays outside the clipped value. Tapping it,
+/// clicking it, or pressing Enter or Space on it shows [`unsure_title`] as a
+/// small note next to the value, so phones and keyboards get the same words as
+/// the hover tooltip. "(might be misread)" is real text inside the button for
+/// screen readers, which skip aria-label on a plain span. Display only: it
+/// changes no value and no average.
+#[component]
+fn UnsureMark(stat_name: String) -> Element {
+    let mut open = use_signal(|| false);
+    let note = unsure_title(&stat_name);
     rsx! {
-        span { class: "stat-unsure-mark", aria_hidden: "true", "?" }
-        span { class: "sr-only", "(unsure)" }
+        button {
+            class: "stat-unsure-mark",
+            r#type: "button",
+            aria_expanded: if open() { "true" } else { "false" },
+            onclick: move |evt: MouseEvent| {
+                // History rows are links. The mark must not open the game.
+                evt.stop_propagation();
+                evt.prevent_default();
+                open.toggle();
+            },
+            span { aria_hidden: "true", "?" }
+            span { class: "sr-only", "{UNSURE_SR_TEXT}" }
+        }
+        if open() {
+            span { class: "stat-unsure-note", "{note}" }
+        }
     }
 }
 
-/// One match-row value. An unsure cell gets a question mark, hidden "(unsure)"
-/// text, and [`unsure_title`]. A sure numeric cell keeps the stat name as its title.
+/// One match-row value. An unsure cell gets the [`UnsureMark`] button, its
+/// hidden "(might be misread)" text, and [`unsure_title`]. A sure numeric cell
+/// keeps the stat name as its title.
 pub(super) fn marked_value(
     class: &str,
     text: &str,
@@ -91,7 +116,7 @@ pub(super) fn marked_value(
                     class: "{class}",
                     title: "{title}",
                     span { class: "stat-value-text", "{text}" }
-                    {unsure_note()}
+                    UnsureMark { stat_name: stat_name.to_string() }
                 }
             }
         } else if class.is_empty() {
@@ -528,7 +553,7 @@ mod tests {
         );
         assert!(
             !html.contains("aria-label="),
-            "unsure text is not an aria-label on a plain span: {html}"
+            "unsure text is real text inside the button, not an aria-label: {html}"
         );
         assert!(html.contains("Reinhardt"), "{html}");
         assert!(
@@ -566,10 +591,12 @@ mod tests {
             "unknown names add no mark: {html}"
         );
         assert_eq!(
-            html.matches("(unsure)").count(),
+            html.matches(UNSURE_SR_TEXT).count(),
             scuffed_types::SUSPECT_FIELD_NAMES.len(),
             "{html}"
         );
+        assert_eq!(UNSURE_SR_TEXT, "(might be misread)");
+        assert!(!html.contains("(unsure)"), "{html}");
         assert!(html.contains("class=\"sr-only\""), "{html}");
         let titles = [
             "Result",
@@ -593,20 +620,20 @@ mod tests {
             );
         }
         assert!(
-            html.contains("Deaths: unsure read. Check and edit if wrong."),
+            html.contains("Deaths: might be misread. Check it in the tracker."),
             "{html}"
         );
         assert!(!UNSURE_DETAIL.contains('\u{2014}'), "{UNSURE_DETAIL}");
         assert!(
-            !html.contains("title=\"Unsure read"),
+            !html.contains("title=\"Might be misread"),
             "the tooltip must name the stat: {html}"
         );
         assert!(
-            !html.contains("the reader was unsure"),
+            !html.contains("the reader was unsure") && !html.contains("unsure read"),
             "old unsure copy must stay off the row: {html}"
         );
         assert!(
-            html.contains("class=\"stat-value-text\">Ana</span><span class=\"stat-unsure-mark\""),
+            html.contains("class=\"stat-value-text\">Ana</span><button class=\"stat-unsure-mark\""),
             "the mark sits outside the clipped hero text: {html}"
         );
         assert!(
@@ -615,5 +642,44 @@ mod tests {
         );
         assert!(html.contains("class=\"match-stat stat-unsure\""), "{html}");
         assert!(html.contains(">11<") || html.contains(">11"), "{html}");
+        let marks = scuffed_types::SUSPECT_FIELD_NAMES.len();
+        let open_tags: Vec<&str> = html
+            .match_indices("<button class=\"stat-unsure-mark\"")
+            .map(|(at, _)| &html[at..at + html[at..].find('>').unwrap()])
+            .collect();
+        assert_eq!(
+            open_tags.len(),
+            marks,
+            "every mark is a real button, so it takes keyboard focus: {html}"
+        );
+        for tag in open_tags {
+            assert!(tag.contains("type=\"button\""), "{tag}");
+            assert!(
+                tag.contains("aria-expanded=\"false\""),
+                "every mark starts collapsed: {tag}"
+            );
+            assert!(
+                !tag.contains("tabindex"),
+                "a button needs no tabindex: {tag}"
+            );
+        }
+        assert!(
+            !html.contains("stat-unsure-note"),
+            "the note stays hidden until the mark is used: {html}"
+        );
+    }
+
+    #[test]
+    fn unsure_note_text_matches_the_tooltip_and_has_no_dashes() {
+        assert_eq!(
+            unsure_title("Deaths"),
+            "Deaths: might be misread. Check it in the tracker."
+        );
+        for text in [UNSURE_DETAIL, UNSURE_SR_TEXT] {
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text}"
+            );
+        }
     }
 }

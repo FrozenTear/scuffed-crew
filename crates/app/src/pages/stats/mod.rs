@@ -496,15 +496,49 @@ const STATS_CSS: &str = r#"
         text-decoration-style: dotted;
         text-underline-offset: 0.18em;
     }
+    /* The mark is a button, so reset the browser look and keep the old size. */
     .stat-unsure-mark {
         flex-shrink: 0;
-        margin-left: 0.1em;
+        margin: 0 0 0 0.1em;
+        padding: 0 0.2em;
+        border: 0;
+        background: none;
+        color: inherit;
+        font-family: inherit;
+        cursor: pointer;
         font-size: 0.7em;
         font-weight: 700;
         vertical-align: super;
         line-height: 0;
         text-decoration: none;
     }
+    .stat-unsure-mark:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    /* Small note shown after the mark is tapped. It wraps under the value and
+       stays out of the clipped value text. */
+    .stat-unsure-note {
+        display: block;
+        flex: 0 0 100%;
+        box-sizing: border-box;
+        width: max-content;
+        max-width: min(14rem, 100%);
+        margin-top: 0.15rem;
+        font-family: var(--font-body, inherit);
+        font-size: 0.75rem;
+        font-weight: 400;
+        line-height: 1.3;
+        letter-spacing: normal;
+        text-transform: none;
+        text-align: left;
+        text-decoration: none;
+        white-space: normal;
+        color: var(--text-2);
+    }
+    .match-card .match-outcome:has(.stat-unsure-note),
+    .match-card .match-hero:has(.stat-unsure-note) {
+        overflow: visible;
+        flex-wrap: wrap;
+    }
+    .stat-unsure:has(.stat-unsure-note) { flex-wrap: wrap; }
     .stat-flagged {
         flex: 0 0 auto;
         max-width: 100%;
