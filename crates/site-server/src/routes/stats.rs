@@ -13,16 +13,17 @@ use scuffed_db::{
 use scuffed_types::api::{
     CreateDaemonTokenRequest, CreateDaemonTokenResponse, CursorResponse, DaemonConfigResponse,
     MemberSettingsResponse, NAME_RECOGNIZER_ID_ERROR, PaginationParams, RECOGNIZER_ID_ERROR,
-    SUSPECT_FIELDS_ERROR, SeasonQuery, StatsUploadBody, StatsUploadResponse, StatsVisibility,
-    TokenCheckResponse, UPLOAD_HERO_UNKNOWN, is_upload_hero_unknown, resolve_name_recognizer,
-    resolve_recognizer, resolve_suspect_fields, validate_deleted_session, validate_upload_entry,
+    SUSPECT_FIELDS_ERROR, SeasonQuery, StatsHiddenError, StatsUploadBody, StatsUploadResponse,
+    StatsVisibility, TokenCheckResponse, UPLOAD_HERO_UNKNOWN, is_upload_hero_unknown,
+    resolve_name_recognizer, resolve_recognizer, resolve_suspect_fields, validate_deleted_session,
+    validate_upload_entry,
 };
 use scuffed_types::{
     STATS_UPLOAD_MAX_DELETED_SESSIONS, STATS_UPLOAD_MAX_MATCHES, hero_key_to_name,
     role_for_hero_name,
 };
 
-use crate::extractors::{DaemonUser, LimitedUploadDaemon, OpaqueDaemonUser, OrgMember};
+use crate::extractors::{DaemonUser, LimitedUploadDaemon, OfficerUser, OpaqueDaemonUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::routes::leaderboards::resolve_season_window;
 use crate::state::AppState;
@@ -581,6 +582,129 @@ pub async fn member_map_stats(
                 }),
             )
         })
+}
+
+/// Rejection from the officer match routes. Most are the usual `{error}`
+/// body. A member whose setting hides their matches gets [`StatsHiddenError`].
+pub(crate) struct OfficerMatchReject(Box<Response>);
+
+impl From<(StatusCode, Json<ErrorResponse>)> for OfficerMatchReject {
+    fn from(err: (StatusCode, Json<ErrorResponse>)) -> Self {
+        Self(Box::new(err.into_response()))
+    }
+}
+
+impl OfficerMatchReject {
+    /// 403 [`StatsHiddenError`]: exactly `{"error":"hidden_by_member","message":"..."}`.
+    fn hidden_by_member() -> Self {
+        let body = Json(StatsHiddenError::hidden_by_member());
+        Self(Box::new((StatusCode::FORBIDDEN, body).into_response()))
+    }
+}
+
+impl IntoResponse for OfficerMatchReject {
+    fn into_response(self) -> Response {
+        *self.0
+    }
+}
+
+/// Gate for the officer match routes. Runs before any match query, so a
+/// blocked read touches no match data and reveals no counts or dates.
+///
+/// The officer's own id is always allowed. Another member must exist (404
+/// `Member not found`), and their `stats_visibility` must allow officers per
+/// [`StatsVisibility::officer_match_denial`]. Otherwise 403 with
+/// [`StatsHiddenError`].
+async fn ensure_officer_match_access(
+    state: &AppState,
+    officer: &OfficerUser,
+    target_id: &str,
+) -> Result<(), OfficerMatchReject> {
+    let owner = officer.member.id == target_id;
+    if !owner {
+        let target = state
+            .db
+            .get_member_safe(target_id)
+            .await
+            .map_err(|_e| internal_error())?;
+        if target.is_none() {
+            let body = Json(ErrorResponse {
+                error: "Member not found".into(),
+            });
+            return Err((StatusCode::NOT_FOUND, body).into());
+        }
+    }
+    let visibility = state
+        .db
+        .get_stats_visibility(target_id)
+        .await
+        .map_err(|_e| internal_error())?;
+    if visibility.officer_match_denial(owner).is_some() {
+        return Err(OfficerMatchReject::hidden_by_member());
+    }
+    Ok(())
+}
+
+/// GET /api/stats/member/{id}/matches: a member's match history, for officers
+/// (session auth, paginated).
+///
+/// Same query, pagination and row shape as [`my_matches`], including
+/// `suspect_fields` and the read-time role fill. 401 without a session, 403
+/// `Officer access required` for non-officers, 403 `Membership inactive` for
+/// inactive callers, 404 `Member not found` for an unknown member, and 403
+/// [`StatsHiddenError`] when the member's `stats_visibility` hides their
+/// matches from officers. Members read their own games on [`my_matches`].
+pub(crate) async fn member_matches(
+    State(state): State<AppState>,
+    officer: OfficerUser,
+    Path(member_id): Path<String>,
+    Query(pagination): Query<PaginationParams>,
+    Query(sq): Query<SeasonQuery>,
+) -> Result<Json<CursorResponse<PersonalMatch>>, OfficerMatchReject> {
+    ensure_officer_match_access(&state, &officer, &member_id).await?;
+    let (limit, offset) = pagination.resolve();
+    let season = resolve_season_window(&state, sq.season.as_deref()).await?;
+    let mut items = state
+        .db
+        .list_personal_matches_in(&member_id, limit, offset, season)
+        .await
+        .map_err(|_e| internal_error())?;
+    // Read-time role fill only: the stored row keeps its role.
+    for m in &mut items {
+        m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    }
+    Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
+}
+
+/// GET /api/stats/member/{id}/matches/{match_id}: one of a member's games,
+/// for officers (session auth).
+///
+/// Same body as [`my_match`], including `suspect_fields`. Auth and the
+/// visibility gate match [`member_matches`], and the gate runs first. A key
+/// that does not exist, a malformed key and another member's game are all
+/// 404 `Match not found`.
+pub(crate) async fn member_match(
+    State(state): State<AppState>,
+    officer: OfficerUser,
+    Path((member_id, match_id)): Path<(String, String)>,
+) -> Result<Json<PersonalMatch>, OfficerMatchReject> {
+    ensure_officer_match_access(&state, &officer, &member_id).await?;
+    let found = state
+        .db
+        .get_personal_match_for_member(&member_id, &match_id)
+        .await
+        .map_err(|_e| internal_error())?;
+    let mut m = found.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "Match not found".into(),
+            }),
+        )
+    })?;
+    // Read-time role fill only, as on the list: the stored row keeps its role.
+    m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    Ok(Json(m))
 }
 
 /// POST /api/stats/tokens — create a daemon token (session auth, for self)
