@@ -354,8 +354,11 @@ pub(crate) struct PregameTracker<F> {
     /// one was taken.
     roster_streak: u8,
     roster_sample_at: Option<Instant>,
-    /// [`roster_samples`] at this tracker's poll interval.
-    roster_samples: u8,
+    /// The configured poll interval, for [`roster_samples`] on the first
+    /// tick, and when the last tick was fed: the actual interval decides
+    /// after that.
+    poll: Duration,
+    last_tick_at: Option<Instant>,
     /// The last scoreboard read of a match that may be in progress, and
     /// the last end signal or pre-game phase read ([`pending`]).
     match_read_at: Option<Instant>,
@@ -389,7 +392,8 @@ impl<F> PregameTracker<F> {
             pending_roster: None,
             roster_streak: 0,
             roster_sample_at: None,
-            roster_samples: roster_samples(poll),
+            poll,
+            last_tick_at: None,
             match_read_at: None,
             match_end_at: None,
             ban_ended_at: None,
@@ -588,6 +592,7 @@ impl<F: Clone> PregameTracker<F> {
         self.drop_pending_roster(why, &mut shots);
         self.roster_streak = 0;
         self.roster_sample_at = None;
+        self.last_tick_at = None;
         shots
     }
 

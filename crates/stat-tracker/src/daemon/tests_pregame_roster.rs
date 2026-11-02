@@ -205,6 +205,7 @@ fn a_game_with_no_loading_screen_still_saves_its_roster() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
     run.tick(20_000, BAN, 3);
+    run.tick(21_500, Seen::Other, 0);
     run.tick(23_000, Seen::Roster, 5);
     run.tick(24_500, Seen::Roster, 6);
     run.tick(26_000, SELECT, 9);
@@ -231,6 +232,7 @@ fn the_roster_is_saved_once_per_game_and_not_looked_for_after_the_select() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
     run.tick(3_000, BAN, 2);
+    run.tick(4_500, Seen::Other, 0);
     run.tick(6_000, Seen::Roster, 3);
     run.tick(7_500, Seen::Roster, 4);
     // A flicker of the layout check inside ROSTER_GONE: the screen goes on,
@@ -252,6 +254,7 @@ fn the_roster_ends_after_a_gap_with_no_roster_frame() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
     run.tick(3_000, BAN, 2);
+    run.tick(4_500, Seen::Other, 0);
     run.tick(6_000, Seen::Roster, 3);
     run.tick(7_500, Seen::Roster, 4);
     run.tick(9_000, Seen::Roster, 5);
@@ -269,6 +272,7 @@ fn the_roster_ends_after_a_gap_with_no_roster_frame() {
 fn a_release_saves_the_staged_roster_frame() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
+    run.tick(1_500, Seen::Other, 0);
     run.tick(3_000, Seen::Roster, 2);
     run.tick(4_500, Seen::Roster, 3);
     run.tick(6_000, Seen::Roster, 4);

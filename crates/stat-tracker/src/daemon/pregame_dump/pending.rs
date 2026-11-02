@@ -38,7 +38,11 @@
 //! roster stays up about 7 s, several such polls, so this costs at most
 //! the first frame. At slower polls (ocr-v1's 4 s) one sample is enough:
 //! two in a row would need the roster up for two polls, which it may not
-//! be.
+//! be. The poll interval is the one actually measured, from the tick fed
+//! before this one, not the configured one, so a route that polls slower
+//! than configured (a screenshot route's slower floor) takes one sample.
+//! With no tick before (the first after start or a release) the
+//! configured interval is used.
 //!
 //! Neither the loading nor the roster check runs with no game folder open
 //! while a match is in progress ([`PregameTracker::set_match_read`]):
@@ -95,10 +99,16 @@ pub(super) struct HeldLoading<F> {
 
 impl<F: Clone> PregameTracker<F> {
     /// Count this tick's roster sample; true when the roster is accepted
-    /// ([`roster_samples`] in a row, this one included). A sample more than
-    /// one and a half poll intervals after the last one (a capture miss or
-    /// a tick not fed between them) starts the count again.
+    /// ([`roster_samples`] in a row, this one included, at the interval
+    /// measured since the tick fed before it, or the configured poll with
+    /// none). A sample more than one and a half configured poll intervals
+    /// after the last one (a capture miss or a tick not fed between them)
+    /// starts the count again.
     pub(super) fn roster_sample(&mut self, now: Instant, seen: Seen) -> bool {
+        let interval = self
+            .last_tick_at
+            .map_or(self.poll, |at| now.saturating_duration_since(at));
+        self.last_tick_at = Some(now);
         if seen != Seen::Roster {
             self.roster_streak = 0;
             self.roster_sample_at = None;
@@ -113,7 +123,7 @@ impl<F: Clone> PregameTracker<F> {
             1
         };
         self.roster_sample_at = Some(now);
-        self.roster_streak >= self.roster_samples
+        self.roster_streak >= roster_samples(interval)
     }
 
     /// Drop what the pending slot held longer than [`PENDING_WINDOW`].

@@ -86,14 +86,53 @@ fn a_pass_before_the_vote_never_shuts_out_the_games_own_loading_screen() {
 
 #[test]
 fn a_roster_sample_after_a_missed_poll_starts_the_count_again() {
-    // Two roster samples with no tick fed between them for more than one
-    // and a half poll intervals are not in a row.
+    // Two roster samples more than one and a half configured poll
+    // intervals apart (here 2.7 s at 1.5 s polls) are not in a row; the gap
+    // is still under 3 s, so two samples are still needed.
     let mut run = Run::new();
     run.tick(0, Seen::Roster, 1);
-    run.tick(3_000, Seen::Roster, 2);
+    run.tick(2_700, Seen::Roster, 2);
     assert!(!run.tracker.holds_pending_roster());
-    run.tick(4_500, Seen::Roster, 3);
+    run.tick(4_200, Seen::Roster, 3);
     assert_eq!(run.staged_pending(), [3]);
+}
+
+#[test]
+fn the_measured_poll_interval_decides_the_roster_samples() {
+    // Configured at 1.5 s, but the route really polls every 4 s (a
+    // screenshot route's slower floor): one roster sample is saved.
+    let mut run = Run::new();
+    run.tick(0, Seen::Other, 0);
+    run.tick(4_000, Seen::Roster, 1);
+    assert_eq!(run.staged_pending(), [1], "one sample after a 4 s gap");
+    // In a game too.
+    let mut run = Run::new();
+    run.tick(0, VOTE, 1);
+    run.tick(4_000, BAN, 2);
+    run.tick(8_000, Seen::Roster, 3);
+    run.tick(12_000, SELECT, 4);
+    assert_eq!(run.written_in("game1", ROSTER_NAME), [3]);
+    // Actual 1.5 s gaps still need two samples.
+    let mut run = Run::new();
+    run.tick(0, Seen::Other, 0);
+    run.tick(1_500, Seen::Roster, 1);
+    assert!(!run.tracker.holds_pending_roster(), "one sample at 1.5 s");
+    run.tick(3_000, Seen::Roster, 2);
+    assert_eq!(run.staged_pending(), [2]);
+    // The first tick has no gap yet: the configured 1.5 s holds, so one
+    // sample is not enough (the safe default against a false pass).
+    let mut run = Run::new();
+    run.tick(0, Seen::Roster, 1);
+    assert!(!run.tracker.holds_pending_roster(), "first tick");
+    // A release forgets the last tick too.
+    let mut run = Run::new();
+    run.tick(0, Seen::Other, 0);
+    run.release(4_000);
+    run.tick(8_000, Seen::Roster, 1);
+    assert!(
+        !run.tracker.holds_pending_roster(),
+        "first tick after a release"
+    );
 }
 
 #[test]
@@ -205,6 +244,7 @@ fn a_roster_needs_two_samples_in_a_row() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
     run.tick(3_000, BAN, 2);
+    run.tick(4_500, Seen::Other, 0);
     run.tick(6_000, Seen::Roster, 3);
     run.tick(7_500, Seen::BanResults, 0);
     run.tick(9_000, Seen::Roster, 4);
