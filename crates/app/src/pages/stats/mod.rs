@@ -432,9 +432,22 @@ const STATS_CSS: &str = r#"
         transition: background 0.15s;
     }
     .match-card:hover { background: var(--surface-2); }
-    /* History rows open the game page. Keep the row's own colors. */
-    a.match-card-link { color: inherit; text-decoration: none; cursor: pointer; }
-    a.match-card-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* History rows open the game page through a stretched link: an empty anchor
+       that covers the whole row. Marked values sit above it, so a button is
+       never inside the link. */
+    .match-card-link { position: relative; isolation: isolate; cursor: pointer; }
+    .match-card-overlay {
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        color: inherit;
+        text-decoration: none;
+    }
+    .match-card-overlay:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* The mark and its note sit above the overlay, so tapping either one never
+       opens the game. */
+    .match-card-link .stat-unsure-mark,
+    .match-card-link .stat-unsure-note { position: relative; z-index: 1; }
     .match-cards { display: flex; flex-direction: column; gap: 0.3rem; }
     .match-card .match-outcome {
         font-family: var(--font-head);

@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use dioxus::prelude::*;
 
 use crate::components::ui::ChipButton;
@@ -35,6 +37,9 @@ const UNSURE_DETAIL: &str = "might be misread. Check it in the tracker.";
 /// Screen reader text inside the mark button.
 const UNSURE_SR_TEXT: &str = "(might be misread)";
 
+/// Source of the per-mark note ids.
+static NEXT_NOTE_ID: AtomicU64 = AtomicU64::new(0);
+
 fn unsure_title(stat_name: &str) -> String {
     format!("{stat_name}: {UNSURE_DETAIL}")
 }
@@ -52,32 +57,38 @@ pub(super) fn cell_is_unsure(suspect_fields: &[String], name: &str) -> bool {
         && suspect_fields.iter().any(|field| field == name)
 }
 
-/// Question mark button that stays outside the clipped value. Tapping it,
+/// Question mark button that stays outside the clipped value and is never
+/// inside a link (History rows use a sibling overlay link), and neither is its
+/// note, so tapping the note does not open the game. Tapping the mark,
 /// clicking it, or pressing Enter or Space on it shows [`unsure_title`] as a
-/// small note next to the value, so phones and keyboards get the same words as
+/// small note (a polite status region, wired with aria-controls) next to the
+/// value, so phones and keyboards get the same words as
 /// the hover tooltip. "(might be misread)" is real text inside the button for
 /// screen readers, which skip aria-label on a plain span. Display only: it
 /// changes no value and no average.
 #[component]
-fn UnsureMark(stat_name: String) -> Element {
-    let mut open = use_signal(|| false);
+fn UnsureMark(stat_name: String, start_open: bool) -> Element {
+    let mut open = use_signal(move || start_open);
+    // One id per mark, so aria-controls always points at its own note.
+    let note_id = use_hook(|| {
+        format!(
+            "unsure-note-{}",
+            NEXT_NOTE_ID.fetch_add(1, Ordering::Relaxed)
+        )
+    });
     let note = unsure_title(&stat_name);
     rsx! {
         button {
             class: "stat-unsure-mark",
             r#type: "button",
             aria_expanded: if open() { "true" } else { "false" },
-            onclick: move |evt: MouseEvent| {
-                // History rows are links. The mark must not open the game.
-                evt.stop_propagation();
-                evt.prevent_default();
-                open.toggle();
-            },
+            aria_controls: "{note_id}",
+            onclick: move |_| open.toggle(),
             span { aria_hidden: "true", "?" }
             span { class: "sr-only", "{UNSURE_SR_TEXT}" }
         }
         if open() {
-            span { class: "stat-unsure-note", "{note}" }
+            span { class: "stat-unsure-note", id: "{note_id}", role: "status", "{note}" }
         }
     }
 }
@@ -116,7 +127,7 @@ pub(super) fn marked_value(
                     class: "{class}",
                     title: "{title}",
                     span { class: "stat-value-text", "{text}" }
-                    UnsureMark { stat_name: stat_name.to_string() }
+                    UnsureMark { stat_name: stat_name.to_string(), start_open: false }
                 }
             }
         } else if class.is_empty() {
@@ -282,11 +293,18 @@ pub(super) fn history_tab(
                                     let href = match_path(&m.id);
                                     let target_id = m.id.clone();
                                     rsx! {
-                                        a {
+                                        // Stretched link: the anchor is an empty overlay that
+                                        // covers the whole row, and the marked values sit
+                                        // above it, so no button is ever inside the link.
+                                        div {
                                             class: "match-card match-card-link match-row-compact",
                                             key: "{m.id}",
-                                            href: "{href}",
-                                            onclick: move |evt: MouseEvent| open_match(evt, target_id.clone()),
+                                            a {
+                                                class: "match-card-overlay",
+                                                href: "{href}",
+                                                onclick: move |evt: MouseEvent| open_match(evt, target_id.clone()),
+                                                span { class: "sr-only", "View game: {m.outcome} on {map_label}, {date}" }
+                                            }
                                             {marked_value(
                                                 &format!("match-outcome {oc}"),
                                                 &m.outcome,
@@ -493,6 +511,28 @@ mod tests {
         }
     }
 
+    /// Fails if any `<button` appears between an `<a ` and its `</a>`.
+    fn assert_no_button_inside_anchor(html: &str) {
+        let mut rest = html;
+        let mut anchors = 0;
+        while let Some(start) = rest.find("<a ") {
+            let after = &rest[start..];
+            let end = after.find("</a>").expect("anchor is closed");
+            let anchor = &after[..end];
+            assert!(
+                !anchor.contains("<button"),
+                "a button inside a link is invalid HTML: {anchor}"
+            );
+            assert!(
+                !anchor[3..].contains("<a "),
+                "anchors do not nest: {anchor}"
+            );
+            anchors += 1;
+            rest = &after[end + 4..];
+        }
+        assert!(anchors > 0, "the page has links to check: {html}");
+    }
+
     #[test]
     fn history_rows_show_the_badge_and_unsure_marks() {
         fn view() -> Element {
@@ -666,6 +706,82 @@ mod tests {
         assert!(
             !html.contains("stat-unsure-note"),
             "the note stays hidden until the mark is used: {html}"
+        );
+        assert_no_button_inside_anchor(&html);
+        let mut controls: Vec<&str> = html
+            .split("aria-controls=\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect();
+        assert_eq!(controls.len(), marks, "{html}");
+        assert!(
+            controls.iter().all(|id| id.starts_with("unsure-note-")),
+            "{html}"
+        );
+        controls.sort_unstable();
+        controls.dedup();
+        assert_eq!(
+            controls.len(),
+            marks,
+            "every mark controls its own note: {html}"
+        );
+        assert_eq!(
+            html.matches("class=\"match-card-overlay\"").count(),
+            3,
+            "one overlay link per row: {html}"
+        );
+        assert!(
+            html.contains("View game: victory on Ilios,"),
+            "the overlay link has a readable name: {html}"
+        );
+    }
+
+    #[test]
+    fn open_note_is_a_status_region_that_the_button_controls() {
+        fn view() -> Element {
+            rsx! {
+                div { class: "match-card match-card-link",
+                    a { class: "match-card-overlay", href: "/stats/match/x",
+                        span { class: "sr-only", "View game" }
+                    }
+                    UnsureMark { stat_name: "Deaths".to_string(), start_open: true }
+                    UnsureMark { stat_name: "Hero".to_string(), start_open: true }
+                }
+            }
+        }
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+
+        assert_eq!(html.matches("aria-expanded=\"true\"").count(), 2, "{html}");
+        let ids: Vec<&str> = html
+            .split("aria-controls=\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect();
+        assert_eq!(ids.len(), 2, "{html}");
+        assert_ne!(ids[0], ids[1], "{html}");
+        for id in ids {
+            let at = html
+                .find(&format!("id=\"{id}\""))
+                .unwrap_or_else(|| panic!("note {id} is missing: {html}"));
+            let start = html[..at].rfind('<').unwrap();
+            let tag = &html[start..start + html[start..].find('>').unwrap()];
+            assert!(tag.starts_with("<span class=\"stat-unsure-note\""), "{tag}");
+            assert!(tag.contains("role=\"status\""), "{tag}");
+        }
+        assert!(
+            html.contains("Deaths: might be misread. Check it in the tracker.</span>"),
+            "{html}"
+        );
+        assert_no_button_inside_anchor(&html);
+        assert!(
+            !html
+                .split("</a>")
+                .next()
+                .unwrap()
+                .contains("stat-unsure-note"),
+            "the note is outside the row link: {html}"
         );
     }
 
