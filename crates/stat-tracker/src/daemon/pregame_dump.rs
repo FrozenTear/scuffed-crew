@@ -356,8 +356,10 @@ pub(crate) struct PregameTracker<F> {
     roster_sample_at: Option<Instant>,
     /// [`roster_samples`] at this tracker's poll interval.
     roster_samples: u8,
-    /// A match is in progress ([`Self::set_match_running`]).
-    match_running: bool,
+    /// The last scoreboard read of a match that may be in progress, and
+    /// the last end signal or pre-game phase read ([`pending`]).
+    match_read_at: Option<Instant>,
+    match_end_at: Option<Instant>,
     /// When the ban phase was last seen, while a ban-results frame may
     /// still come.
     ban_ended_at: Option<Instant>,
@@ -388,7 +390,8 @@ impl<F> PregameTracker<F> {
             roster_streak: 0,
             roster_sample_at: None,
             roster_samples: roster_samples(poll),
-            match_running: false,
+            match_read_at: None,
+            match_end_at: None,
             ban_ended_at: None,
             ban_results: None,
             roster: None,
@@ -439,7 +442,7 @@ impl<F: Clone> PregameTracker<F> {
             // No game folder: the loading screen and the roster may come
             // before the one that opens, for the pending slot; not while a
             // match is in progress.
-            if self.match_running {
+            if self.match_running() {
                 return PregameWant::default();
             }
             return PregameWant {
@@ -530,6 +533,10 @@ impl<F: Clone> PregameTracker<F> {
         new_folder: impl FnOnce() -> String,
     ) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
+        if matches!(seen, Seen::Phase(_)) {
+            // A pre-game read: no match is in progress now.
+            self.match_end_at = Some(now);
+        }
         self.expire_pending(now, &mut shots);
         let accepted = self.roster_sample(now, seen);
         self.observe_roster(now, seen, accepted, roster_frame, &mut shots);

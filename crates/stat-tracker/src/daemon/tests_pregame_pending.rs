@@ -460,14 +460,47 @@ fn the_roster_needs_two_samples_only_at_fast_polls() {
     assert_eq!(run.written_in("game1", ROSTER_NAME), [3]);
 }
 
-#[test]
-fn no_check_runs_with_no_folder_while_a_match_is_in_progress() {
-    let start = Instant::now();
-    let mut tracker: PregameTracker<Arc<u32>> = PregameTracker::new(Duration::from_millis(1_500));
-    tracker.set_match_running(true);
-    assert_eq!(tracker.want(start), PregameWant::default());
+/// Feed `rgb` to `tracker` at `now` the way the poll loop does (its want,
+/// the real classify, the frame kept only when wanted); returns what the
+/// tick classified and the ops it queued.
+fn feed(
+    tracker: &mut PregameTracker<Arc<u32>>,
+    now: Instant,
+    rgb: &image::RgbImage,
+) -> (Seen, Vec<PregameOp<Arc<u32>>>) {
+    let want = tracker.want(now);
     let no = |_: &image::RgbImage| false;
     let unknown = detect::GamePhase::Unknown;
+    let checked = classify_checked_with(want, &unknown, rgb, no, |_| Default::default());
+    let frame = keeps_checked(want, &checked).then(|| Arc::new(1));
+    let seen = checked.seen;
+    (seen, tracker.observe_checked(now, checked, frame, || "game1".into()))
+}
+
+fn staged_pending_roster(ops: &[PregameOp<Arc<u32>>]) -> bool {
+    ops.iter().any(|op| {
+        matches!(op, PregameOp::Stage(s) if s.folder == PENDING_DIR && s.name == ROSTER_NAME)
+    })
+}
+
+fn board_game(read_at: Instant) -> crate::ActiveGame {
+    let mut game = crate::ActiveGame::open_at(
+        "s1".into(),
+        detect::MatchOutcome::Unknown,
+        Vec::new(),
+        read_at,
+    );
+    game.session_created = true;
+    game
+}
+
+#[test]
+fn within_the_skip_window_after_a_board_read_no_check_runs() {
+    // A match in progress: its scoreboard read at the start, then roster
+    // and loading frames with no folder, all within MATCH_SKIP_IDLE.
+    let start = Instant::now();
+    let game = board_game(start);
+    let mut tracker = PregameTracker::new(Duration::from_millis(1_500));
     let frames = [
         roster_frame(1920, 1080),
         roster_frame(1920, 1080),
@@ -475,40 +508,89 @@ fn no_check_runs_with_no_folder_while_a_match_is_in_progress() {
     ];
     for (k, rgb) in frames.iter().enumerate() {
         let now = start + Duration::from_millis(1_500 * k as u64);
-        let want = tracker.want(now);
-        let checked = classify_checked_with(want, &unknown, rgb, no, |_| Default::default());
-        assert_eq!(checked.seen, Seen::Other, "frame {k}");
-        assert_eq!(checked.rejects, Rejects::default(), "frame {k}");
-        let frame = keeps_checked(want, &checked).then(|| Arc::new(k as u32));
-        let ops = tracker.observe_checked(now, checked, frame, || "game1".into());
+        tracker.set_match_read(match_board_read(Some(&game), now));
+        assert_eq!(tracker.want(now), PregameWant::default(), "frame {k}");
+        let (seen, ops) = feed(&mut tracker, now, rgb);
+        assert_eq!(seen, Seen::Other, "frame {k}");
         assert!(ops.is_empty(), "frame {k}: {ops:?}");
     }
+    // Just inside the window: still off.
+    let edge = start + MATCH_SKIP_IDLE;
+    tracker.set_match_read(match_board_read(Some(&game), edge));
+    assert_eq!(tracker.want(edge), PregameWant::default());
     assert!(!tracker.holds_pending_roster() && !tracker.holds_frame());
-    // The match ended: both checks run again.
-    tracker.set_match_running(false);
-    let now = start + Duration::from_millis(6_000);
-    let want = tracker.want(now);
-    assert!(want.loading && want.roster, "{want:?}");
-    let checked = classify_checked_with(want, &unknown, &frames[0], no, |_| Default::default());
-    assert_eq!(checked.seen, Seen::Roster);
 }
 
 #[test]
-fn a_match_is_in_progress_from_its_first_board_until_its_result() {
+fn a_missed_result_holds_the_checks_off_only_for_the_window() {
+    // Scoreboard reads and no result ever read: 3 minutes and more after
+    // the last read, a roster with no folder is checked and staged.
+    let start = Instant::now();
+    let game = board_game(start);
+    let mut tracker = PregameTracker::new(Duration::from_millis(1_500));
+    let late = start + MATCH_SKIP_IDLE + Duration::from_secs(1);
+    let mut staged = false;
+    for k in 0..2u64 {
+        let now = late + Duration::from_millis(1_500 * k);
+        tracker.set_match_read(match_board_read(Some(&game), now));
+        assert!(tracker.want(now).roster, "tick {k}");
+        let (seen, ops) = feed(&mut tracker, now, &roster_frame(1920, 1080));
+        assert_eq!(seen, Seen::Roster, "tick {k}");
+        staged |= staged_pending_roster(&ops);
+    }
+    assert!(staged && tracker.holds_pending_roster());
+}
+
+#[test]
+fn an_end_signal_or_a_phase_read_ends_the_skip_at_once() {
+    let start = Instant::now();
+    let read = Some(start);
+    // An end signal (an outcome, end title or end-reel read) right after a
+    // board read: the checks run again at once.
+    let mut tracker: PregameTracker<Arc<u32>> = PregameTracker::new(Duration::from_millis(1_500));
+    tracker.set_match_read(read);
+    let t1 = start + Duration::from_secs(5);
+    assert_eq!(tracker.want(t1), PregameWant::default());
+    tracker.note_match_end(t1);
+    assert!(tracker.want(t1).roster && tracker.want(t1).loading);
+    // Until the next scoreboard read.
+    let t2 = t1 + Duration::from_secs(5);
+    tracker.set_match_read(Some(t2));
+    assert_eq!(tracker.want(t2), PregameWant::default());
+    // A pre-game phase read (a lone hero select, which opens no folder)
+    // ends it too.
+    let t3 = t2 + Duration::from_secs(5);
+    let ops = tracker.observe(t3, Seen::Phase(PregamePhase::HeroSelect), Some(Arc::new(2)), || {
+        "game1".into()
+    });
+    assert!(ops.is_empty(), "{ops:?}");
+    let t4 = t3 + Duration::from_millis(1_500);
+    let want = tracker.want(t4);
+    assert!(want.roster && want.loading, "{want:?}");
+    let (seen, _) = feed(&mut tracker, t4, &roster_frame(1920, 1080));
+    assert_eq!(seen, Seen::Roster);
+}
+
+#[test]
+fn a_board_read_counts_only_for_an_unfinished_match_in_the_window() {
     let now = Instant::now();
-    assert!(!match_in_progress(None, now));
-    let mut game =
-        crate::ActiveGame::open_at("s1".into(), detect::MatchOutcome::Unknown, Vec::new(), now);
+    assert_eq!(match_board_read(None, now), None);
+    let mut game = crate::ActiveGame::open_at(
+        "s1".into(),
+        detect::MatchOutcome::Unknown,
+        Vec::new(),
+        now,
+    );
     // Opened at its start screens, no scoreboard read yet: the pre-game.
-    assert!(!match_in_progress(Some(&game), now));
+    assert_eq!(match_board_read(Some(&game), now), None);
     game.session_created = true;
-    assert!(match_in_progress(Some(&game), now));
-    // Quiet for longer than an unfinished session stays reusable.
-    let idle = super::session::UNFINISHED_SESSION_IDLE + Duration::from_secs(1);
-    assert!(!match_in_progress(Some(&game), now + idle));
+    assert_eq!(match_board_read(Some(&game), now), Some(now));
+    assert_eq!(match_board_read(Some(&game), now + MATCH_SKIP_IDLE), Some(now));
+    let past = now + MATCH_SKIP_IDLE + Duration::from_secs(1);
+    assert_eq!(match_board_read(Some(&game), past), None);
     // The result is in: the match is over.
     game.record_outcome_at(detect::MatchOutcome::Victory, now);
-    assert!(!match_in_progress(Some(&game), now));
+    assert_eq!(match_board_read(Some(&game), now), None);
 }
 
 #[test]

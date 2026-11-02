@@ -41,9 +41,14 @@
 //! be.
 //!
 //! Neither the loading nor the roster check runs with no game folder open
-//! while a match is in progress ([`PregameTracker::set_match_running`]):
+//! while a match is in progress ([`PregameTracker::set_match_read`]):
 //! those screens never show mid-match, and the checks would only cost time
-//! and risk a false pass on gameplay. They resume when the match ends.
+//! and risk a false pass on gameplay. The skip is short and ends early, so
+//! a missed result never costs the next game's screens: it is on only
+//! within [`MATCH_SKIP_IDLE`] of the open game's last scoreboard read, and
+//! it ends at once, until the next scoreboard read, on an end-of-match
+//! signal ([`PregameTracker::note_match_end`]: an outcome read, a sure end
+//! title, the end-reel hint) and on any pre-game phase read.
 
 use super::*;
 
@@ -56,6 +61,12 @@ pub(crate) const PENDING_WINDOW: Duration = Duration::from_secs(3 * 60);
 /// pre-game root: a hidden folder, never a game folder, so the retention
 /// and the per-game sweep leave it alone.
 pub(crate) const PENDING_DIR: &str = ".pending";
+
+/// The no-folder checks stay off only this long after the open game's last
+/// scoreboard read with no result yet: a match in progress reads its
+/// scoreboard far more often, and a result missed after the match does not
+/// hold them off for long.
+pub(crate) const MATCH_SKIP_IDLE: Duration = Duration::from_secs(180);
 
 /// Consecutive roster samples before a roster frame is accepted, at polls
 /// under [`ROSTER_ONE_SAMPLE_POLL`] apart.
@@ -208,11 +219,26 @@ impl<F: Clone> PregameTracker<F> {
         });
     }
 
-    /// Whether a match is in progress (the session has a game with no
-    /// result yet whose scoreboard was read): with no game folder open, the
-    /// loading and roster checks are then off ([`Self::want`]).
-    pub(crate) fn set_match_running(&mut self, running: bool) {
-        self.match_running = running;
+    /// The open game's last scoreboard read while its match may be in
+    /// progress ([`match_board_read`]), `None` with none. With no game
+    /// folder open the loading and roster checks are off from that read
+    /// until an end signal or a pre-game phase read after it
+    /// ([`Self::match_running`]).
+    pub(crate) fn set_match_read(&mut self, read: Option<Instant>) {
+        self.match_read_at = read;
+    }
+
+    /// An end-of-match signal at `now` (an outcome read, a sure end title,
+    /// the end-reel hint): the skip ends until the next scoreboard read.
+    pub(crate) fn note_match_end(&mut self, now: Instant) {
+        self.match_end_at = Some(now);
+    }
+
+    /// The skip is on: a scoreboard read with no end signal or pre-game
+    /// phase read since.
+    pub(super) fn match_running(&self) -> bool {
+        self.match_read_at
+            .is_some_and(|read| self.match_end_at.is_none_or(|end| read > end))
     }
 
     /// Whether a roster frame is staged in the pending slot (tests).
@@ -222,24 +248,29 @@ impl<F: Clone> PregameTracker<F> {
     }
 }
 
-/// Whether `game` (the session's open game) is a match in progress at
-/// `now`: no result yet, its scoreboard read and stored at least once, and
-/// some activity within [`super::super::session::UNFINISHED_SESSION_IDLE`]
-/// (an unfinished game that went quiet is no match in progress). Before
-/// its first scoreboard read a game is still in its pre-game.
-pub(crate) fn match_in_progress(game: Option<&crate::ActiveGame>, now: Instant) -> bool {
-    game.is_some_and(|g| {
+/// The last scoreboard read of `game` (the session's open game) when its
+/// match may be in progress at `now`: no result yet, its scoreboard read
+/// and stored at least once, and that read (its last activity) within
+/// [`MATCH_SKIP_IDLE`]. Before its first scoreboard read a game is still in
+/// its pre-game; past the window a missed result holds nothing off.
+pub(crate) fn match_board_read(game: Option<&crate::ActiveGame>, now: Instant) -> Option<Instant> {
+    game.filter(|g| {
         !g.finished()
             && g.session_created
-            && now.saturating_duration_since(g.last_activity)
-                <= super::super::session::UNFINISHED_SESSION_IDLE
+            && now.saturating_duration_since(g.last_activity) <= MATCH_SKIP_IDLE
     })
+    .map(|g| g.last_activity)
 }
 
 impl PregameDump {
-    /// [`PregameTracker::set_match_running`], from the session state before
-    /// each tick's want ([`match_in_progress`]).
-    pub(crate) fn set_match_running(&mut self, running: bool) {
-        self.tracker.set_match_running(running);
+    /// [`PregameTracker::set_match_read`], from the session state before
+    /// each tick's want ([`match_board_read`]).
+    pub(crate) fn set_match_read(&mut self, read: Option<Instant>) {
+        self.tracker.set_match_read(read);
+    }
+
+    /// [`PregameTracker::note_match_end`].
+    pub(crate) fn note_match_end(&mut self, now: Instant) {
+        self.tracker.note_match_end(now);
     }
 }

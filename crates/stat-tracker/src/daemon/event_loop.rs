@@ -511,7 +511,7 @@ pub(crate) async fn run_loop(
                         // With no game folder open, the pre-game saves look
                         // for no loading screen or roster mid-match.
                         if let Some(dump) = pregame_dump.as_mut() {
-                            dump.set_match_running(daemon::pregame_dump::match_in_progress(
+                            dump.set_match_read(daemon::pregame_dump::match_board_read(
                                 st.active_game.as_ref(),
                                 now,
                             ));
@@ -722,6 +722,12 @@ pub(crate) async fn run_loop(
                             tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: outcome crop not written");
                         }
                         st.ocr_stability = stability;
+                        if let Some(dump) = pregame_dump.as_mut()
+                            && (signal.is_some() || end_reel || end_title_seen)
+                        {
+                            // The match ended: the no-folder checks resume.
+                            dump.note_match_end(Instant::now());
+                        }
                         if let (Some(dump), Some((seen, frame))) = (pregame_dump.as_mut(), pregame) {
                             dump.observe(Instant::now(), seen, frame);
                         }
