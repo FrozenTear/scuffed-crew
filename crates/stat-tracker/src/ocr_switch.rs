@@ -216,6 +216,7 @@ impl Switch {
             share_open: daemon_share_open(),
             share_notice: share_notice(),
             capture_notice: capture_notice(),
+            focus_gate: crate::ocr_status::focus_gate(),
         }
     }
 

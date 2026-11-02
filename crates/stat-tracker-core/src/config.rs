@@ -232,16 +232,17 @@ pub struct Config {
     /// TODO(0.6): the misread report screen does not read this yet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub share_report_pictures: bool,
-    /// "Only capture while Overwatch is on screen": skip grabs when the game
-    /// window is not visible on the captured output, so no other window is
-    /// captured. On ("Auto" in Settings, also when missing) and not written
-    /// while on; `false` captures whenever a game process runs, as in 0.5.
-    /// When the tracker cannot tell whether the window is visible (most
-    /// Wayland compositors do not say), Auto captures as `false` does: it
-    /// never stops capture on an unknown.
-    ///
-    /// TODO(0.6): capture does not check window visibility yet. The flag is
-    /// read by nothing, so `true` behaves like 0.5 until the check lands.
+    /// "Only capture while Overwatch is on screen", the focus gate: poll and
+    /// Tab reads pause while a good read says another window is focused. On
+    /// ("Auto" in Settings, also when missing) and not written while on;
+    /// `false` turns the gate off, the focused window is never read and
+    /// capture runs whenever a game process runs, as in 0.5. When the
+    /// tracker cannot tell which window is focused (no source for the
+    /// desktop, an error, a timeout), capture goes on as `false` does and
+    /// the status file says `unreadable`, a warning: it never stops capture
+    /// on an unknown. niri is read over its IPC socket, KDE Plasma Wayland
+    /// through a KWin script, X11 through `_NET_ACTIVE_WINDOW`. Read once
+    /// at daemon start.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub capture_only_on_screen: bool,
 }

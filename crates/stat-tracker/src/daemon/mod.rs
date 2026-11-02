@@ -7,6 +7,7 @@
 
 mod debug_dumps;
 mod event_loop;
+pub(crate) mod focus;
 pub(crate) mod gui_presence;
 mod lifecycle;
 pub(crate) mod memtune;
@@ -22,6 +23,14 @@ mod sync_sched;
 mod tab;
 #[cfg(test)]
 mod tests_debug_dumps;
+#[cfg(test)]
+mod tests_focus_gate;
+#[cfg(test)]
+mod tests_focus_layout;
+#[cfg(test)]
+mod tests_focus_pause;
+#[cfg(test)]
+mod tests_focus_sources;
 #[cfg(test)]
 mod tests_frame_copies;
 #[cfg(test)]
@@ -53,6 +62,8 @@ mod tests_pregame_staging;
 mod tests_pregame_tick;
 #[cfg(test)]
 mod tests_query_server;
+#[cfg(test)]
+mod tests_roster_cadence;
 #[cfg(test)]
 mod tests_snapshot_policy;
 

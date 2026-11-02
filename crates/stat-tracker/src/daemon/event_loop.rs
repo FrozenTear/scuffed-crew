@@ -31,6 +31,9 @@ pub(crate) async fn run_loop(
     // Starts false so a boot with the game already closed does not close a
     // share that was never opened. The close runs on the running edge only.
     let mut game_was_running = false;
+    // The poll's own focus pause edge, and the layout check's log edge.
+    let mut focus_paused = false;
+    let mut layout_edge = daemon::focus::layout::LayoutEdge::default();
     // The GUI's Stop button (and systemd) send SIGTERM, shut down as
     // gracefully as Ctrl+C, with a final sync.
     // `early_sigterm` is the same handler, registered before startup's wait
@@ -256,6 +259,12 @@ pub(crate) async fn run_loop(
                             tracing::debug!(target: "scuffed_stat_tracker", "Tab ignored: game process not running");
                             continue;
                         }
+                        // Focus gate: ignored like a closed game, nothing
+                        // in the session changes. Unreadable reads on.
+                        if daemon::focus::check(Instant::now()).await == daemon::focus::GateDecision::Pause {
+                            tracing::debug!(target: "scuffed_stat_tracker", "Tab ignored: another window is focused");
+                            continue;
+                        }
 
                         // A capture whose task is gone without a report (a
                         // panic) must not hold later presses forever. A task
@@ -409,6 +418,13 @@ pub(crate) async fn run_loop(
                     poll_failures.game_stopped();
                     continue;
                 }
+                // Focus gate: a pause skips this read only (see
+                // `daemon::focus::poll_pause`).
+                let focus = daemon::focus::check(Instant::now()).await;
+                if daemon::focus::poll_pause(&mut focus_paused, focus, &mut st) {
+                    tracing::trace!(target: "scuffed_stat_tracker", "poll tick skipped: another window is focused");
+                    continue;
+                }
 
                 // PR-B: adaptive cadence, mid-match, pay the screencopy only
                 // on every SLOW_POLL_DIVISORth tick. The skipped ticks cost
@@ -497,6 +513,9 @@ pub(crate) async fn run_loop(
                             _ => None,
                         };
                         let img = captured.image;
+                        if !layout_edge.passes(img.width(), img.height()) {
+                            continue;
+                        }
                         let dump_dir = dump_poll_frames.then(|| data_dir.join("debug").join("poll"));
                         // On-hit evidence (debug_ocr): confirm + first streak only.
                         // `--dump-poll-frames` still writes every tick as `poll_*`.
