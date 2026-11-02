@@ -375,7 +375,10 @@ pub(crate) async fn handle_capture(
                     held_at: None,
                     map_replaces_text_fallback: false,
                     rejoin_carry: None,
-                    finished_game_tab: None,
+                    // A focus skip read no board: a finished game this Tab
+                    // probed stays open (`settle_tab_probe`).
+                    finished_game_tab: matches!(analysis, FrameAnalysisOutcome::NotFocused)
+                        .then_some(boundary::FinishedGameTab::FocusSkipped),
                 });
             }
             FrameAnalysisOutcome::NotAScoreboard {

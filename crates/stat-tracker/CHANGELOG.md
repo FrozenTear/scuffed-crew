@@ -17,7 +17,7 @@ summary, then the highlights, and tucks the remaining text under Details.
 
 ## Unreleased
 
-The opt-in screen saves around each game (the **Save screens around each game** switch, off by default) catch the roster and the ENTERING GAME loading screen more reliably. Nothing changes unless the switch is on, and the pictures still stay on this PC.
+New for everyone: the tracker pauses its reads while another window is focused and goes on as soon as Overwatch is focused again; where it cannot tell which window is focused, it keeps capturing. The opt-in screen saves around each game (the **Save screens around each game** switch, off by default) catch the roster and the ENTERING GAME loading screen more reliably; they change nothing unless that switch is on, and the pictures still stay on this PC.
 
 ### Highlights
 

@@ -91,7 +91,11 @@ impl KwinState {
         self.error = None;
     }
 
+    /// A failure (no bus, a refused or failed reload): the script may not
+    /// run, so the last report is dropped and reads are unreadable until
+    /// the next report.
     pub(crate) fn note_error(&mut self, why: String) {
+        self.report = None;
         self.error = Some(why);
     }
 
@@ -150,11 +154,14 @@ impl FocusSource for KwinSource {
 }
 
 static CONNECTION: std::sync::OnceLock<zbus::Connection> = std::sync::OnceLock::new();
+/// The reload task, stopped at shutdown before the last unload.
+static RELOADER: std::sync::OnceLock<tokio::task::AbortHandle> = std::sync::OnceLock::new();
 
 /// Start the bus task and return the source it feeds.
 pub(crate) fn start(data_dir: &std::path::Path) -> KwinSource {
     let state = Arc::new(Mutex::new(KwinState::default()));
-    tokio::spawn(run_script(Arc::clone(&state), data_dir.join(SCRIPT_FILE)));
+    let task = tokio::spawn(run_script(Arc::clone(&state), data_dir.join(SCRIPT_FILE)));
+    let _ = RELOADER.set(task.abort_handle());
     KwinSource::from_state(state)
 }
 
@@ -178,7 +185,8 @@ async fn run_script(state: Arc<Mutex<KwinState>>, script: std::path::PathBuf) {
         return note_error(&state, format!("cannot write the KWin focus script: {err}"));
     }
     let _ = CONNECTION.set(conn.clone());
-    tokio::spawn(listen(conn.clone(), Arc::clone(&state)));
+    let listener = tokio::spawn(listen(conn.clone(), Arc::clone(&state)));
+    let _ = LISTENER.set(listener.abort_handle());
     let mut warned = false;
     loop {
         match reload(&conn, &script).await {
@@ -251,8 +259,15 @@ async fn listen(conn: zbus::Connection, state: Arc<Mutex<KwinState>>) {
 /// Longest wait for the unload at shutdown.
 const SHUTDOWN_UNLOAD_WAIT: Duration = Duration::from_secs(1);
 
-/// Unload the script at shutdown. Bounded; nothing to do when it never ran.
+static LISTENER: std::sync::OnceLock<tokio::task::AbortHandle> = std::sync::OnceLock::new();
+
+/// Unload the script at shutdown. The reload task is stopped first, so no
+/// reload can load it again after this. Bounded; nothing to unload when
+/// the bus never connected.
 pub(crate) async fn shutdown() {
+    for task in [RELOADER.get(), LISTENER.get()].into_iter().flatten() {
+        task.abort();
+    }
     if let Some(conn) = CONNECTION.get() {
         let unload = call(conn, "unloadScript", &(PLUGIN,));
         let _ = tokio::time::timeout(SHUTDOWN_UNLOAD_WAIT, unload).await;

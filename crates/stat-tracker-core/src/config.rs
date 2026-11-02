@@ -234,7 +234,8 @@ pub struct Config {
     pub share_report_pictures: bool,
     /// "Only capture while Overwatch is on screen", the focus gate: poll and
     /// Tab reads pause while a good read says another window is focused. On
-    /// ("Auto" in Settings, also when missing) and not written while on;
+    /// (also when missing) and not written while on; the Settings row is
+    /// hidden for now, so it is changed in config.toml only;
     /// `false` turns the gate off, the focused window is never read and
     /// capture runs whenever a game process runs, as in 0.5. When the
     /// tracker cannot tell which window is focused (no source for the

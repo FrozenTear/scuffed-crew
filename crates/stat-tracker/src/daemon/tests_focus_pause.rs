@@ -112,3 +112,37 @@ fn an_unreadable_focus_never_pauses_a_read() {
     }
     assert_eq!(gate.status(), FocusGateStatus::Unreadable);
 }
+
+/// A Tab past a finished game's grace window whose capture the focus gate
+/// skipped (focus lost between the press and the grab) read no board: the
+/// finished game stays open, no fresh session is opened.
+#[tokio::test]
+async fn a_focus_skipped_probe_tab_keeps_the_finished_game() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    let now = test_now();
+    let mut finished = game(detect::MatchOutcome::Victory, Some(200), now);
+    finished.session_id = "finished".into();
+    let mut st = session(Some(finished), now);
+    st.tab_probe = Some(TabProbe {
+        old_session: "finished".into(),
+        fresh_session: "fresh".into(),
+        press: now,
+    });
+    let mut report = crate::main_tests::rejected_report("fresh");
+    report.finished_game_tab = Some(boundary::FinishedGameTab::FocusSkipped);
+    let sid = settle_tab_probe(
+        &mut st,
+        &store,
+        dir.path(),
+        "fresh".into(),
+        &Ok(report),
+        now,
+        || std::future::ready(()),
+    )
+    .await;
+    assert_eq!(sid, "finished");
+    let open = st.active_game.as_ref().expect("still open");
+    assert_eq!(open.session_id, "finished");
+    assert_eq!(open.outcome, detect::MatchOutcome::Victory);
+}

@@ -235,6 +235,13 @@ fn kwin_with_no_report_an_error_or_a_stale_report_is_unreadable() {
         state.read(later),
         FocusRead::Window(vec!["discord".into(), "discord".into()])
     );
+    // A failure after it (a reload KWin refused) drops the report: the
+    // script may not run, so the old verdict is not kept.
+    state.note_error("KWin loadScript did not answer".into());
+    assert_eq!(
+        state.read(later),
+        FocusRead::Unreadable("KWin loadScript did not answer".into())
+    );
     // The refresh keeps a live script well inside the stale limit.
     assert!(KWIN_REFRESH * 2 < KWIN_STALE);
 }

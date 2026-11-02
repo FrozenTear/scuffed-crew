@@ -248,13 +248,16 @@ impl FocusGuard {
         if !self.on {
             return GateDecision::Read;
         }
-        let read = self.read().await;
-        let (before, applied) = {
-            let mut gate = self.gate.lock().unwrap_or_else(|err| err.into_inner());
-            let before = gate.status();
-            (before, gate.apply(&read, now))
+        let Some(read) = self.read().await else {
+            // Another check's read is still running (the Tab capture and
+            // the poll overlap, or a hung source): keep the last verdict.
+            return decision_of(self.status());
         };
+        let mut gate = self.gate.lock().unwrap_or_else(|err| err.into_inner());
+        let before = gate.status();
+        let applied = gate.apply(&read, now);
         log_read(before, &applied, &read);
+        // Under the gate's lock, so status writes land in read order.
         if before != applied.status
             && let Some(dir) = &self.data_dir
         {
@@ -263,28 +266,48 @@ impl FocusGuard {
         applied.decision
     }
 
-    async fn read(&self) -> FocusRead {
+    /// One read, or `None` while another read is still running.
+    async fn read(&self) -> Option<FocusRead> {
         let Some(source) = self.source.clone() else {
-            return FocusRead::Unreadable("no focus source for this desktop".into());
+            return Some(FocusRead::Unreadable(
+                "no focus source for this desktop".into(),
+            ));
         };
-        let flag = Arc::clone(&self.in_flight);
-        if flag.swap(true, std::sync::atomic::Ordering::AcqRel) {
-            return FocusRead::Unreadable("the last focus read is still running".into());
+        if self
+            .in_flight
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            return None;
         }
+        // Cleared when the read ends, a panic in it included.
+        let done = InFlight(Arc::clone(&self.in_flight));
         let task = tokio::task::spawn_blocking(move || {
-            let read = source.read();
-            flag.store(false, std::sync::atomic::Ordering::Release);
-            read
+            let _done = done;
+            source.read()
         });
-        match tokio::time::timeout(FOCUS_READ_TIMEOUT, task).await {
+        Some(match tokio::time::timeout(FOCUS_READ_TIMEOUT, task).await {
             Ok(Ok(read)) => read,
-            Ok(Err(err)) => {
-                self.in_flight
-                    .store(false, std::sync::atomic::Ordering::Release);
-                FocusRead::Unreadable(format!("focus read failed: {err}"))
-            }
+            Ok(Err(err)) => FocusRead::Unreadable(format!("focus read failed: {err}")),
             Err(_) => FocusRead::Unreadable("focus read timed out".into()),
-        }
+        })
+    }
+}
+
+/// Clears the in-flight flag when the read that set it ends.
+struct InFlight(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// The decision a status stands for: only not focused pauses.
+fn decision_of(status: FocusGateStatus) -> GateDecision {
+    if status == FocusGateStatus::NotFocused {
+        GateDecision::Pause
+    } else {
+        GateDecision::Read
     }
 }
 
@@ -327,7 +350,7 @@ pub(crate) fn install(on: bool, data_dir: &std::path::Path) {
             tracing::info!(target: "scuffed_stat_tracker", source = source.name(), "focus gate on: reads pause while another window is focused");
         }
         (true, None) => {
-            tracing::info!(target: "scuffed_stat_tracker", "focus gate on, but no focus source for this desktop (no NIRI_SOCKET or DISPLAY): reads go on, status unreadable");
+            tracing::info!(target: "scuffed_stat_tracker", "focus gate on, but no focus source for this desktop (no NIRI_SOCKET, not KDE Wayland, no DISPLAY): reads go on, status unreadable");
         }
     }
     let guard = FocusGuard::new(on, source, Some(data_dir.to_path_buf()));
