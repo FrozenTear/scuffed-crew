@@ -538,7 +538,7 @@ fn entering_pregame_is_replaced_by_entering_game_before_the_start() {
 /// and with `spinner` a blob 0.012 of the width wide, 0.011 after the
 /// second word. The whole line is centred.
 fn pregame_band(w: u32, h: u32, spinner: bool) -> image::RgbImage {
-    use super::tests_loading_stand_ins::{navy_band, GLYPH};
+    use super::tests_loading_stand_ins::{GLYPH, navy_band};
     let mut img = navy_band(w, h);
     let px = |share: f32| (share * w as f32).round() as u32;
     let (letter_gap, word_gap) = (px(0.0018), px(0.0055));
