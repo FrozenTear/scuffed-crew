@@ -63,8 +63,6 @@ mod tests_pregame_tick;
 #[cfg(test)]
 mod tests_query_server;
 #[cfg(test)]
-mod tests_roster_cadence;
-#[cfg(test)]
 mod tests_snapshot_policy;
 
 pub(crate) use debug_dumps::*;

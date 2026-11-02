@@ -38,12 +38,11 @@
 //! roster stays up about 7 s, several such polls, so this costs at most
 //! the first frame. At slower polls (ocr-v1's 4 s) one sample is enough:
 //! two in a row would need the roster up for two polls, which it may not
-//! be. The poll interval is the median of the last three gaps actually
-//! measured between fed ticks ([`TickGaps`]), not the configured one, so a
-//! route that keeps polling slower than configured (a screenshot route's
-//! slower floor) takes one sample, while one missed 1.5 s poll among
-//! normal ones still needs two. Gaps not measured yet (after start or a
-//! release) count as the configured interval.
+//! be. The poll interval is the one actually measured, from the tick fed
+//! before this one, not the configured one, so a route that polls slower
+//! than configured (a screenshot route's slower floor) takes one sample.
+//! With no tick before (the first after start or a release) the
+//! configured interval is used.
 //!
 //! Neither the loading nor the roster check runs with no game folder open
 //! while a match is in progress ([`PregameTracker::set_match_read`]):
@@ -90,44 +89,6 @@ pub(crate) fn roster_samples(poll: Duration) -> u8 {
     }
 }
 
-/// Gaps between fed ticks that the roster count looks at.
-pub(crate) const TICK_GAPS: usize = 3;
-
-/// The last [`TICK_GAPS`] gaps between fed ticks, and when the last tick
-/// was fed. Their median, not one gap, gives the poll interval for
-/// [`roster_samples`], so one missed poll among normal ones does not drop
-/// the count to one sample, while a cadence that stays slow does.
-#[derive(Debug, Default, Clone)]
-pub(crate) struct TickGaps {
-    gaps: [Option<Duration>; TICK_GAPS],
-    next: usize,
-    last_at: Option<Instant>,
-}
-
-impl TickGaps {
-    /// Note a tick fed at `now`: the gap since the last one, if any.
-    pub(crate) fn tick(&mut self, now: Instant) {
-        if let Some(at) = self.last_at {
-            self.gaps[self.next] = Some(now.saturating_duration_since(at));
-            self.next = (self.next + 1) % TICK_GAPS;
-        }
-        self.last_at = Some(now);
-    }
-
-    /// The median gap, with `poll` (the configured interval) in each slot
-    /// not measured yet.
-    pub(crate) fn median(&self, poll: Duration) -> Duration {
-        let mut gaps = self.gaps.map(|gap| gap.unwrap_or(poll));
-        gaps.sort_unstable();
-        gaps[TICK_GAPS / 2]
-    }
-
-    /// Forget the gaps and the last tick (a release).
-    pub(crate) fn clear(&mut self) {
-        *self = Self::default();
-    }
-}
-
 /// The latest loading-check pass, held until a game folder takes it or it
 /// is dropped. Replaced by each later pass.
 pub(super) struct HeldLoading<F> {
@@ -138,14 +99,16 @@ pub(super) struct HeldLoading<F> {
 
 impl<F: Clone> PregameTracker<F> {
     /// Count this tick's roster sample; true when the roster is accepted
-    /// ([`roster_samples`] in a row, this one included, at the median of
-    /// the last [`TICK_GAPS`] gaps between fed ticks, the configured poll
-    /// filling the gaps not measured yet). A sample more than one and a
-    /// half configured poll intervals after the last one (a capture miss
-    /// or a tick not fed between them) starts the count again.
+    /// ([`roster_samples`] in a row, this one included, at the interval
+    /// measured since the tick fed before it, or the configured poll with
+    /// none). A sample more than one and a half configured poll intervals
+    /// after the last one (a capture miss or a tick not fed between them)
+    /// starts the count again.
     pub(super) fn roster_sample(&mut self, now: Instant, seen: Seen) -> bool {
-        self.ticks.tick(now);
-        let interval = self.ticks.median(self.poll);
+        let interval = self
+            .last_tick_at
+            .map_or(self.poll, |at| now.saturating_duration_since(at));
+        self.last_tick_at = Some(now);
         if seen != Seen::Roster {
             self.roster_streak = 0;
             self.roster_sample_at = None;

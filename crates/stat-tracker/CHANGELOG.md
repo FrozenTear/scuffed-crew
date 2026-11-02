@@ -22,7 +22,7 @@ New for everyone: the tracker pauses its reads while another window is focused a
 ### Highlights
 
 - New roster check: the two white TEAM header bars plus the coloured strips on the inner edges of the team columns, measured as shares of the screen, so it works at any resolution and for 5v5 and 6v6 without counting player rows.
-- The roster is checked before the other pre-game screens, so they no longer hide it, and it must show on two polls in a row (no missed poll between) before it is saved at the default 1.5 s polls; at polls 3 s or more apart (ocr-v1's 4 s) one poll is enough, since the roster is up only about 7 s. The interval is the median of the last three poll gaps, so one missed poll does not count as a slow cadence.
+- The roster is checked before the other pre-game screens, so they no longer hide it, and it must show on two polls in a row (no missed poll between) before it is saved at the default 1.5 s polls; at polls 3 s or more apart (ocr-v1's 4 s) one poll is enough, since the roster is up only about 7 s.
 - A loading screen or roster seen before the game's folder exists is kept and saved into the next game folder that opens, instead of being dropped when the map vote comes after it or the game start is slow.
 - New focus gate (`capture_only_on_screen`, on by default): poll and Tab reads pause while another window is focused and go on when Overwatch is focused again. A short alt-tab pauses reads only; it never ends or splits a game. Where the focused window cannot be read, capture goes on and the status file says `unreadable`. niri is read over its IPC socket, KDE Plasma Wayland through a small KWin script, X11 through `_NET_ACTIVE_WINDOW`. `capture_only_on_screen = false` turns it off. The GUI does not show the status yet.
 
