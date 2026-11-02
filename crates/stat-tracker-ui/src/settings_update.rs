@@ -152,6 +152,12 @@ pub struct PageState {
     /// Whether the website refused the saved token, as last read
     /// ([`crate::tracker_status::sync_token_rejected`]).
     pub(crate) token_rejected: bool,
+    /// The focus gate as the top bar shows it, debounced
+    /// ([`crate::focus_status::FocusDisplay`]).
+    pub(crate) focus: crate::focus_status::FocusDisplay,
+    /// The focus row is marked until then, after the top bar's
+    /// unreadable pill opened it ([`Self::show_focus_row`]).
+    focus_row_until: Option<std::time::Instant>,
     /// What the page fetched when it last opened, and its dialog.
     pub opened: crate::settings_open::OpenState,
     /// The last changes waiting count with the baseline and saved config it
@@ -179,6 +185,8 @@ impl PageState {
             update_checking: false,
             config_path: None,
             token_rejected: false,
+            focus: crate::focus_status::FocusDisplay::default(),
+            focus_row_until: None,
             opened: crate::settings_open::OpenState::default(),
             waiting_memo: RefCell::new(None),
         }
@@ -200,6 +208,21 @@ impl PageState {
 
     pub fn is_open(&self, section: AdvancedSection) -> bool {
         self.advanced_open.is_open(section)
+    }
+
+    /// The top bar's unreadable pill: open Capture and reading (never
+    /// close it) and mark the focus row for
+    /// [`crate::focus_status::HIGHLIGHT_FOR`].
+    pub(crate) fn show_focus_row(&mut self, now: std::time::Instant) {
+        if !self.advanced_open.is_open(AdvancedSection::CaptureReading) {
+            self.advanced_open.toggle(AdvancedSection::CaptureReading);
+        }
+        self.focus_row_until = Some(now + crate::focus_status::HIGHLIGHT_FOR);
+    }
+
+    /// Whether the focus row is marked at `now`.
+    pub(crate) fn focus_row_marked(&self, now: std::time::Instant) -> bool {
+        self.focus_row_until.is_some_and(|until| now < until)
     }
 
     pub fn chip_draft(&self) -> Option<&(ChipList, String)> {

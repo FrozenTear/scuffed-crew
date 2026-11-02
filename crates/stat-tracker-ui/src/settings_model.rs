@@ -74,14 +74,13 @@ pub const APP_ONLY_KEYS: [&str; 5] = [
 
 /// Config keys whose Settings row is not shown because nothing reads the
 /// key yet: the rank reader, stat picture upload, report pictures, the
-/// on-screen capture check, the upload switch and extra in-game names.
+/// upload switch and extra in-game names.
 /// The keys still load and save as before, and a hand-edited value never
 /// shows in a summary, an After restart tag or the waiting count.
-pub const HIDDEN_KEYS: [&str; 6] = [
+pub const HIDDEN_KEYS: [&str; 5] = [
     "rank_reader",
     "share_stat_pictures",
     "share_report_pictures",
-    "capture_only_on_screen",
     "live_upload",
     "player_names",
 ];
@@ -595,7 +594,7 @@ pub enum ConfigEdit {
     ShareStatPictures(bool),
     /// Report pictures (`share_report_pictures`).
     ShareReportPictures(bool),
-    /// Only capture while Overwatch is on screen: Auto (`true`) or Off.
+    /// Only capture while Overwatch is in front: Auto (`true`) or Off.
     CaptureOnlyOnScreen(bool),
     /// Another in-game name, kept in `player_names`.
     AddPlayerName(String),
@@ -1057,8 +1056,8 @@ mod tests {
         }
     }
 
-    /// A hidden row's key (report pictures, the on-screen capture check)
-    /// is inert: a hand-edited value shows in no summary, tag or count.
+    /// A hidden row's key (report pictures, the upload switch) is inert: a
+    /// hand-edited value shows in no summary, tag or count.
     #[test]
     fn hidden_keys_never_show_in_summaries_tags_or_counts() {
         let mut v = values();
@@ -1070,13 +1069,15 @@ mod tests {
         );
         let running = Config::default();
         let mut saved = running.clone();
-        saved.capture_only_on_screen = false;
         saved.share_report_pictures = true;
         saved.live_upload = false;
         saved.player_names = vec!["Alt".into()];
         saved.rank_reader = true;
         saved.share_stat_pictures = true;
         assert_eq!(changes_waiting(&running, &saved), 0);
+        // The focus gate is shown and read now: its change waits.
+        saved.capture_only_on_screen = false;
+        assert_eq!(changes_waiting(&running, &saved), 1);
         for key in HIDDEN_KEYS {
             assert!(!row_shown(key), "{key}");
         }

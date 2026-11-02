@@ -44,9 +44,6 @@ const MONITOR_HELP: &str = "The outputs the tracker can see.";
 const REPORT_PICTURES_HELP: &str = "Stat-area crops in misread reports. Separate from Stat pictures. Default Off: reports show them unticked, so you choose each one. Names are never sent.";
 /// Last line of Capture and reading.
 const CAPTURE_READING_FOOTER: &str = "Choices this desktop cannot use are left out or shown off. Opening this page never captures; only Capture now does.";
-/// Help under "Only capture while Overwatch is on screen".
-const FOCUS_GATE_HELP: &str =
-    "Skips grabs when the game is not visible on this monitor, so no other window is captured.";
 /// Help under the Reader choice (spec wording).
 const READER_HELP: &str = "New reader only never starts classic OCR.";
 /// What New reader only gives up, under the Reader choice while it is picked.
@@ -427,7 +424,7 @@ fn capture_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
     rows.extend(crate::settings_keys::focus_gate_row(
         app,
         demo,
-        FOCUS_GATE_HELP,
+        crate::focus_status::ROW_HELP,
     ));
     rows
 }

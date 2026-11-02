@@ -20,8 +20,8 @@ use crate::icons::{self, Icon};
 use crate::model::{Game, RoleFilter, Screen, SeasonSel, game_card_in_progress};
 use crate::nav_fit::{
     BADGE_PAD_X, CHEVRON, CHIP_GAP, CHIP_GLYPH_GAP, CHIP_PAD_X, DOT, DOT_GAP, ICON, ICON_GAP,
-    MIN_GAP, SIZE_BADGE, SIZE_BRAND, SIZE_CHIP, SIZE_STATUS, SIZE_TAB, TAB_PAD, TAB_PAD_PLAIN,
-    TAB_SPACING, TIME_GAP, TITLE_GAP, TITLE_GAP_WIDE, WARN_ICON,
+    MIN_GAP, QUESTION_BUTTON, SIZE_BADGE, SIZE_BRAND, SIZE_CHIP, SIZE_STATUS, SIZE_TAB, StatusForm,
+    TAB_PAD, TAB_PAD_PLAIN, TAB_SPACING, TIME_GAP, TITLE_GAP, TITLE_GAP_WIDE, WARN_ICON,
 };
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_EXTRABOLD, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_TITLE, TEXT,
@@ -43,6 +43,21 @@ pub const TAB_ICONS_MIN: f32 = 960.0;
 /// last game 00:40"), when it fits. Below it, or when it does not fit, the
 /// status is a short label such as "Ready".
 pub const STATUS_LONG_MIN: f32 = 1200.0;
+/// Window width from which the Capturing states say their long words with
+/// "· last game" (UX Spec focus status: 1440px and up).
+pub const FOCUS_LONG_MIN: f32 = 1440.0;
+/// Window width from which the Capturing states keep their words and time
+/// without "last game", and the pause and unreadable states their long
+/// words (UX Spec: 1100 to 1439px). Below it they take the short form.
+pub const STATUS_MEDIUM_MIN: f32 = 1100.0;
+
+/// The width from which `status` may take its long form.
+pub fn status_long_min(status: HeaderStatus) -> f32 {
+    match status {
+        HeaderStatus::Capturing | HeaderStatus::CapturingAnyWindow => FOCUS_LONG_MIN,
+        _ => STATUS_LONG_MIN,
+    }
+}
 
 /// Page title under the bar (spec: about 24 px, extra bold).
 pub const SIZE_HEADING: f32 = 24.0;
@@ -97,6 +112,9 @@ pub enum Msg {
     ShowNeedsLook,
     /// Clear the "Needs a look" filter on Games.
     ClearNeedsLook,
+    /// The "Can't tell which window is in front" pill: open Settings at
+    /// the focus row, open its section, scroll to it and mark it.
+    ShowFocusSetting,
 }
 
 /// What the chip sends. A later "Review games" button sends the same.
@@ -124,6 +142,16 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
         Msg::ClearNeedsLook => {
             app.needs_look_filter = false;
             Task::none()
+        }
+        Msg::ShowFocusSetting => {
+            app.page_state.show_focus_row(std::time::Instant::now());
+            let open = app.update(Message::Navigate(Screen::Settings));
+            // The scroll runs once the page is laid out.
+            let scroll = Task::future(async {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            })
+            .then(|()| crate::focus_status::scroll_to_row());
+            Task::batch([open, scroll])
         }
     }
 }
@@ -191,15 +219,30 @@ pub fn chip_text(count: usize, compact: bool) -> String {
 pub fn bar_status(
     status: HeaderStatus,
     last_game: Option<&str>,
-    long: bool,
+    form: StatusForm,
 ) -> (String, Option<String>) {
-    if !long {
-        return (tracker_status::short_label(status).to_string(), None);
-    }
+    let short = || (tracker_status::short_label(status).to_string(), None);
     let label = tracker_status::long_label(status);
-    match last_game {
-        Some(at) => (format!("{label} · last game"), Some(at.to_string())),
-        None => (label.to_string(), None),
+    let capturing = matches!(
+        status,
+        HeaderStatus::Capturing | HeaderStatus::CapturingAnyWindow
+    );
+    match form {
+        StatusForm::Short => short(),
+        // The pause and the unreadable pill say the same long and medium,
+        // with no time.
+        _ if !tracker_status::shows_time(status) => (label.to_string(), None),
+        // Medium is for the Capturing states; the others keep the short
+        // label there, as before.
+        StatusForm::Medium if !capturing => short(),
+        StatusForm::Medium => match last_game {
+            Some(at) => (format!("{label} ·"), Some(at.to_string())),
+            None => (label.to_string(), None),
+        },
+        StatusForm::Long => match last_game {
+            Some(at) => (format!("{label} · last game"), Some(at.to_string())),
+            None => (label.to_string(), None),
+        },
     }
 }
 
@@ -231,15 +274,11 @@ pub fn top_bar(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     let count = needs_look_count(&app.games, app.live_game_session.as_deref());
     let status = tracker_status::header_status_for(app);
     let last_game = tracker_status::last_game_when(&app.games, app.clock);
-    let fit = crate::nav_fit::layout(width, status, last_game.as_deref(), count);
-    let (label, time) = bar_status(status, last_game.as_deref(), fit.long_status);
+    let fit = crate::nav_fit::layout_kept(width, status, last_game.as_deref(), count);
+    let (label, time) = bar_status(status, last_game.as_deref(), fit.status);
 
     let mut right = Row::new().spacing(CHIP_GAP).align_y(Alignment::Center);
-    right = right.push(bar_status_line(
-        label,
-        time,
-        tracker_status::header_status_color(status),
-    ));
+    right = right.push(status_slot(status, fit.status, label, time));
     if count > 0 {
         right = right.push(needs_look_chip(count, fit.compact_chip));
     }
@@ -309,11 +348,137 @@ pub fn top_bar(app: &TrackerApp, width: f32) -> Element<'_, Message> {
         .into()
 }
 
+/// The status slot: the words with their dot (or the pause ring), the
+/// unreadable pill or its "?" button, and the detail as a tooltip where
+/// the state has one. iced has no accessibility API, so the words and the
+/// tooltip are the whole message: colour is never the only cue.
+fn status_slot(
+    status: HeaderStatus,
+    form: StatusForm,
+    label: String,
+    time: Option<String>,
+) -> Element<'static, Message> {
+    let color = tracker_status::header_status_color(status);
+    let body = match status {
+        HeaderStatus::FocusUnknown => unreadable_button(form, label),
+        HeaderStatus::Paused => bar_status_line_with(ring(color), label, time),
+        _ => bar_status_line(label, time, color),
+    };
+    let Some(detail) = tracker_status::detail(status) else {
+        return body;
+    };
+    let mut lines = column![].spacing(2);
+    // Under 1100px the "?" hides the words: the tooltip leads with them.
+    if status == HeaderStatus::FocusUnknown && form == StatusForm::Short {
+        lines = lines.push(tooltip_line(crate::focus_status::UNREADABLE_LONG, TEXT));
+    }
+    lines = lines.push(tooltip_line(detail, TEXT_2));
+    if status == HeaderStatus::FocusUnknown {
+        lines = lines.push(tooltip_line(crate::focus_status::UNREADABLE_ACTION, TEXT_2));
+    }
+    let tip = container(lines)
+        .padding(Padding::from([8, 12]))
+        .max_width(320)
+        .style(|_: &Theme| container::Style {
+            background: Some(Background::Color(theme::SURFACE_2)),
+            border: Border {
+                color: BORDER,
+                width: 1.0,
+                radius: theme::RADIUS_INNER.into(),
+            },
+            ..container::Style::default()
+        });
+    iced::widget::tooltip(body, tip, iced::widget::tooltip::Position::Bottom)
+        .gap(6)
+        .into()
+}
+
+fn tooltip_line(words: &'static str, color: Color) -> Element<'static, Message> {
+    text(words)
+        .size(SIZE_STATUS)
+        .font(FONT_MEDIUM)
+        .color(color)
+        .into()
+}
+
+/// The unreadable state: an amber outline pill with a dot, the words and a
+/// chevron, or under 1100px a round "?" button. Both open the setting
+/// ([`Msg::ShowFocusSetting`]).
+fn unreadable_button(form: StatusForm, label: String) -> Element<'static, Message> {
+    if form == StatusForm::Short {
+        let mark = text(label)
+            .size(SIZE_CHIP)
+            .font(FONT_BOLD)
+            .align_x(Alignment::Center)
+            .align_y(Alignment::Center);
+        return button(container(mark).center_x(Fill).center_y(Fill))
+            .width(QUESTION_BUTTON)
+            .height(QUESTION_BUTTON)
+            .padding(0)
+            .style(pill_style)
+            .on_press(Message::Nav(Msg::ShowFocusSetting))
+            .into();
+    }
+    let content = row![
+        dot(WARN),
+        text(label)
+            .size(SIZE_STATUS)
+            .font(FONT_MEDIUM)
+            .color(TEXT)
+            .wrapping(Wrapping::None),
+        text(CHEVRON)
+            .size(SIZE_STATUS)
+            .font(FONT_BOLD)
+            .color(TEXT_2),
+    ]
+    .spacing(CHIP_GLYPH_GAP)
+    .align_y(Alignment::Center);
+    button(content)
+        .padding(Padding {
+            top: 5.0,
+            bottom: 5.0,
+            left: CHIP_PAD_X,
+            right: CHIP_PAD_X,
+        })
+        .style(pill_style)
+        .on_press(Message::Nav(Msg::ShowFocusSetting))
+        .into()
+}
+
+/// Calm amber outline (`WARN_LINE`), never a fill; a light tint on hover.
+fn pill_style(_theme: &Theme, status: button::Status) -> button::Style {
+    let tint = match status {
+        button::Status::Hovered => 0.10,
+        button::Status::Pressed => 0.16,
+        button::Status::Active | button::Status::Disabled => 0.0,
+    };
+    button::Style {
+        background: (tint > 0.0).then_some(Background::Color(Color { a: tint, ..WARN })),
+        text_color: TEXT,
+        border: Border {
+            color: theme::WARN_LINE,
+            width: 1.0,
+            radius: theme::RADIUS_CHIP.into(),
+        },
+        shadow: Shadow::default(),
+        snap: false,
+    }
+}
+
 /// Dot, the status words in TEXT_3, and the time brighter in its own span.
 fn bar_status_line(
     label: String,
     time: Option<String>,
     dot_color: Color,
+) -> Element<'static, Message> {
+    bar_status_line_with(dot(dot_color), label, time)
+}
+
+/// [`bar_status_line`] with any mark in front (the dot, or the pause ring).
+fn bar_status_line_with(
+    mark: Element<'static, Message>,
+    label: String,
+    time: Option<String>,
 ) -> Element<'static, Message> {
     let mut words = Row::new().spacing(TIME_GAP).align_y(Alignment::Center);
     words = words.push(
@@ -332,9 +497,26 @@ fn bar_status_line(
                 .wrapping(Wrapping::None),
         );
     }
-    row![dot(dot_color), words]
+    row![mark, words]
         .spacing(DOT_GAP)
         .align_y(Alignment::Center)
+        .into()
+}
+
+/// The pause mark: a grey ring the size of the dot, no fill.
+fn ring(color: Color) -> Element<'static, Message> {
+    container(space().width(DOT).height(DOT))
+        .width(DOT)
+        .height(DOT)
+        .style(move |_: &Theme| container::Style {
+            background: None,
+            border: Border {
+                color,
+                width: 1.5,
+                radius: 999.0.into(),
+            },
+            ..container::Style::default()
+        })
         .into()
 }
 
@@ -676,44 +858,114 @@ mod tests {
 
     #[test]
     fn status_is_long_only_when_asked_and_never_a_bare_time() {
+        let long = StatusForm::Long;
+        let short = StatusForm::Short;
         assert_eq!(
-            bar_status(HeaderStatus::Waiting, Some("00:40"), true),
+            bar_status(HeaderStatus::Waiting, Some("00:40"), long),
             (
                 "Tracker ready · last game".to_string(),
                 Some("00:40".to_string())
             )
         );
         assert_eq!(
-            bar_status(HeaderStatus::Waiting, None, true),
+            bar_status(HeaderStatus::Waiting, None, long),
             ("Tracker ready".to_string(), None)
         );
         assert_eq!(
-            bar_status(HeaderStatus::Capturing, Some("00:40"), true).0,
+            bar_status(HeaderStatus::Capturing, Some("00:40"), long).0,
             "Watching Overwatch · last game"
         );
         assert_eq!(
-            bar_status(HeaderStatus::TokenRejected, Some("00:40"), true).0,
+            bar_status(HeaderStatus::TokenRejected, Some("00:40"), long).0,
             "Website token rejected · last game"
         );
-        let short = [
+        let short_words = [
             (HeaderStatus::Capturing, "In game"),
+            (HeaderStatus::CapturingAnyWindow, "In game"),
+            (HeaderStatus::Paused, "Paused"),
+            (HeaderStatus::FocusUnknown, "?"),
             (HeaderStatus::Waiting, "Ready"),
             (HeaderStatus::Down, "Stopped"),
             (HeaderStatus::TokenRejected, "Token rejected"),
         ];
-        for (status, word) in short {
+        for (status, word) in short_words {
             assert_eq!(
-                bar_status(status, Some("00:40"), false),
+                bar_status(status, Some("00:40"), short),
                 (word.to_string(), None)
             );
         }
         for status in ALL {
-            for long in [false, true] {
-                let (label, time) = bar_status(status, Some("00:40"), long);
+            for form in [StatusForm::Long, StatusForm::Medium, StatusForm::Short] {
+                let (label, time) = bar_status(status, Some("00:40"), form);
                 assert!(!label.contains("00:40"), "the time is its own span");
-                assert_eq!(time.is_some(), long);
+                if form == StatusForm::Long {
+                    assert_eq!(time.is_some(), tracker_status::shows_time(status));
+                }
+                if form == StatusForm::Short {
+                    assert!(time.is_none());
+                }
             }
         }
+    }
+
+    #[test]
+    fn the_focus_states_read_as_the_spec_at_each_width() {
+        let at = |status, form| bar_status(status, Some("00:40"), form);
+        let words = |status, form| {
+            let (label, time) = at(status, form);
+            match time {
+                Some(time) => format!("{label} {time}"),
+                None => label,
+            }
+        };
+        use HeaderStatus::*;
+        assert_eq!(
+            words(Capturing, StatusForm::Long),
+            "Watching Overwatch · last game 00:40"
+        );
+        assert_eq!(
+            words(Capturing, StatusForm::Medium),
+            "Watching Overwatch · 00:40"
+        );
+        assert_eq!(
+            words(CapturingAnyWindow, StatusForm::Long),
+            "Capturing in any window · last game 00:40"
+        );
+        assert_eq!(
+            words(CapturingAnyWindow, StatusForm::Medium),
+            "Capturing in any window · 00:40"
+        );
+        for form in [StatusForm::Long, StatusForm::Medium] {
+            assert_eq!(words(Paused, form), "Paused while Overwatch isn't in front");
+            assert_eq!(
+                words(FocusUnknown, form),
+                "Can't tell which window is in front"
+            );
+        }
+        // The other states keep the bar as it was: medium is short.
+        assert_eq!(words(Waiting, StatusForm::Medium), "Ready");
+        assert_eq!(words(TokenRejected, StatusForm::Medium), "Token rejected");
+        assert_eq!(status_long_min(Capturing), FOCUS_LONG_MIN);
+        assert_eq!(status_long_min(Waiting), STATUS_LONG_MIN);
+    }
+
+    #[test]
+    fn the_unreadable_pill_opens_the_focus_row_in_settings() {
+        let (_dir, mut app) = app();
+        app.screen = Screen::Overview;
+        let _ = update(&mut app, Msg::ShowFocusSetting);
+        assert_eq!(app.screen, Screen::Settings);
+        assert!(app.page_state.focus_row_marked(std::time::Instant::now()));
+        assert!(
+            app.page_state
+                .is_open(crate::settings_model::AdvancedSection::CaptureReading)
+        );
+        // Opening it again keeps the section open (it never toggles shut).
+        let _ = update(&mut app, Msg::ShowFocusSetting);
+        assert!(
+            app.page_state
+                .is_open(crate::settings_model::AdvancedSection::CaptureReading)
+        );
     }
 
     #[test]

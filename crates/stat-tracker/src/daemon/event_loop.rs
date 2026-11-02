@@ -31,6 +31,8 @@ pub(crate) async fn run_loop(
     // Starts false so a boot with the game already closed does not close a
     // share that was never opened. The close runs on the running edge only.
     let mut game_was_running = false;
+    // The poll's own focus pause edge (`daemon::focus::poll_pause`).
+    let mut focus_paused = false;
     // The GUI's Stop button (and systemd) send SIGTERM, shut down as
     // gracefully as Ctrl+C, with a final sync.
     // `early_sigterm` is the same handler, registered before startup's wait
@@ -243,6 +245,7 @@ pub(crate) async fn run_loop(
                         let press = key.at;
                         let running = game_gate.is_running();
                         capture::note_game_seen(game_was_running, running, data_dir);
+                        daemon::focus::game_edge(game_was_running, running);
                         if capture::share_close_due(
                             capture::stream_route_active(),
                             game_was_running,
@@ -254,6 +257,12 @@ pub(crate) async fn run_loop(
                         game_was_running = running;
                         if !running {
                             tracing::debug!(target: "scuffed_stat_tracker", "Tab ignored: game process not running");
+                            continue;
+                        }
+                        // Focus gate: ignored like a closed game, nothing
+                        // in the session changes. Unreadable reads on.
+                        if daemon::focus::tab_skip(Instant::now()).await {
+                            tracing::debug!(target: "scuffed_stat_tracker", "Tab ignored: another window is focused");
                             continue;
                         }
 
@@ -391,6 +400,7 @@ pub(crate) async fn run_loop(
                 }
                 let running = game_gate.is_running();
                 capture::note_game_seen(game_was_running, running, data_dir);
+                daemon::focus::game_edge(game_was_running, running);
                 if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,
@@ -407,6 +417,12 @@ pub(crate) async fn run_loop(
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
                     poll_failures.game_stopped();
+                    continue;
+                }
+                // Focus gate: a pause skips this read only (see
+                // `daemon::focus::poll_pause`).
+                if daemon::focus::poll_skip(&mut focus_paused, &mut st, Instant::now()).await {
+                    tracing::trace!(target: "scuffed_stat_tracker", "poll tick skipped: another window is focused");
                     continue;
                 }
 
@@ -892,6 +908,7 @@ pub(crate) async fn run_loop(
                 // only when a restore token can reopen it.
                 let running = game_gate.is_running();
                 capture::note_game_seen(game_was_running, running, data_dir);
+                daemon::focus::game_edge(game_was_running, running);
                 if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,
