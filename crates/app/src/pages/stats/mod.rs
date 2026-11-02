@@ -444,10 +444,6 @@ const STATS_CSS: &str = r#"
         text-decoration: none;
     }
     .match-card-overlay:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-    /* The mark and its note sit above the overlay, so tapping either one never
-       opens the game. */
-    .match-card-link .stat-unsure-mark,
-    .match-card-link .stat-unsure-note-open { position: relative; z-index: 1; }
     .match-cards { display: flex; flex-direction: column; gap: 0.3rem; }
     .match-card .match-outcome {
         font-family: var(--font-head);
@@ -509,8 +505,13 @@ const STATS_CSS: &str = r#"
         text-decoration-style: dotted;
         text-underline-offset: 0.18em;
     }
-    /* The mark is a button, so reset the browser look and keep the old size. */
+    /* The mark is a button, so reset the browser look and keep the old size.
+       It and its open note are positioned above the row overlay link, so
+       tapping either one never opens the game. Each sets that in its own single
+       rule, so no other rule can override it by order. */
     .stat-unsure-mark {
+        position: relative;
+        z-index: 1;
         flex-shrink: 0;
         margin: 0 0 0 0.1em;
         padding: 0 0.2em;
@@ -543,7 +544,8 @@ const STATS_CSS: &str = r#"
     /* Open: a small note that wraps under the value and stays out of the
        clipped value text. */
     .stat-unsure-note.stat-unsure-note-open {
-        position: static;
+        position: relative;
+        z-index: 1;
         display: block;
         flex: 0 0 100%;
         box-sizing: border-box;
@@ -1712,6 +1714,38 @@ mod header_layout_tests {
         let mark = block_after(STATS_CSS, ".stat-unsure-mark {");
         let mark_head = mark.split('}').next().unwrap();
         assert!(mark_head.contains("flex-shrink: 0"), "{mark_head}");
+
+        assert!(has_declaration(mark_head, "position: relative"), "{mark_head}");
+        assert!(has_declaration(mark_head, "z-index: 1"), "{mark_head}");
+
+        // The open note must stay above the row overlay link in the final
+        // cascade: every rule for the open class keeps it positioned.
+        let open_rules: Vec<(&str, &str)> = STATS_CSS
+            .split('}')
+            .filter_map(|chunk| chunk.rsplit_once('{'))
+            .map(|(before, body)| (before.rsplit([';', '{']).next().unwrap_or(before), body))
+            .filter(|(selector, _)| {
+                selector.contains("stat-unsure-note-open") && !selector.contains(":has(")
+            })
+            .collect();
+        assert!(!open_rules.is_empty(), "missing the open note rule");
+        for (selector, body) in &open_rules {
+            assert!(
+                !body.contains("position: static"),
+                "{selector} would drop the note under the row link: {body}"
+            );
+            assert!(
+                !body.contains("z-index: 0") && !body.contains("z-index: auto"),
+                "{selector}: {body}"
+            );
+        }
+        let last = open_rules.last().unwrap().1;
+        assert!(has_declaration(last, "position: relative"), "{last}");
+        assert!(has_declaration(last, "z-index: 1"), "{last}");
+        // The row link overlay has no z-index, so a z-index of 1 wins over it.
+        let overlay = block_after(STATS_CSS, ".match-card-overlay {");
+        let overlay_head = overlay.split('}').next().unwrap();
+        assert!(!overlay_head.contains("z-index"), "{overlay_head}");
 
         let map = block_after(STATS_CSS, ".match-card .match-map {");
         let map_head = map.split('}').next().unwrap();

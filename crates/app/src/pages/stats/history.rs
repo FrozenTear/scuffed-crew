@@ -40,6 +40,7 @@ const UNSURE_SR_TEXT: &str = "(might be misread)";
 /// deterministic (no counters or random values), so server rendering and
 /// hydration always agree, and two marks never share an id on one page.
 fn unsure_note_id(match_id: &str, stat_name: &str) -> String {
+    // Mapping to _ could collide (a/b vs a_b), but real match ids are record ids that cannot.
     let safe = |text: &str| -> String {
         text.chars()
             .map(|c| {
