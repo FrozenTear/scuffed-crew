@@ -251,11 +251,7 @@ pub(crate) fn focus_gate_row<'a>(
         return None;
     }
     let auto = app.saved_config.capture_only_on_screen;
-    let pick = |on: bool| {
-        (!demo).then_some(Message::SettingsPage(Msg::Edit(
-            ConfigEdit::CaptureOnlyOnScreen(on),
-        )))
-    };
+    let pick = |on: bool| focus_gate_pick(demo, on);
     let mut lines = vec![hint(help)];
     if focus_note_shown(app) {
         lines.push(focus_note());
@@ -267,18 +263,21 @@ pub(crate) fn focus_gate_row<'a>(
             &[Tag::New, Tag::AfterRestart],
         ),
         lines,
-        segmented(vec![
-            Segment {
-                label: "Auto",
-                selected: auto,
-                msg: pick(true),
-            },
-            Segment {
-                label: "Off",
-                selected: !auto,
-                msg: pick(false),
-            },
-        ]),
+        demo_tooltip(
+            segmented(vec![
+                Segment {
+                    label: "Auto",
+                    selected: auto,
+                    msg: pick(true),
+                },
+                Segment {
+                    label: "Off",
+                    selected: !auto,
+                    msg: pick(false),
+                },
+            ]),
+            demo,
+        ),
     );
     // Marked: a 3 px accent edge on the left only, as the open Advanced
     // section's bar; otherwise the row sits flush with the others.
@@ -302,6 +301,42 @@ pub(crate) fn focus_gate_row<'a>(
             .id(crate::focus_status::ROW_ID)
             .into(),
     )
+}
+
+/// What picking Auto (`true`) or Off in the focus row does: nothing in a
+/// demo, where the control is shown but never changes a setting.
+fn focus_gate_pick(demo: bool, on: bool) -> Option<Message> {
+    (!demo).then_some(Message::SettingsPage(Msg::Edit(
+        ConfigEdit::CaptureOnlyOnScreen(on),
+    )))
+}
+
+/// In a demo `control` carries the tooltip that says why it does nothing.
+/// The help text and the live note stay as they are.
+fn demo_tooltip(control: Element<'static, Message>, demo: bool) -> Element<'static, Message> {
+    use iced::widget::{container, text, tooltip};
+    if !demo {
+        return control;
+    }
+    let tip = container(
+        text(crate::focus_status::DEMO_TOOLTIP)
+            .size(crate::theme::SIZE_LABEL)
+            .font(crate::theme::FONT_MEDIUM)
+            .color(crate::theme::TEXT_2),
+    )
+    .padding(iced::Padding::from([8, 12]))
+    .style(|_: &iced::Theme| container::Style {
+        background: Some(iced::Background::Color(crate::theme::SURFACE_2)),
+        border: iced::Border {
+            color: crate::theme::BORDER,
+            width: 1.0,
+            radius: crate::theme::RADIUS_INNER.into(),
+        },
+        ..container::Style::default()
+    });
+    tooltip(control, tip, tooltip::Position::Bottom)
+        .gap(6)
+        .into()
 }
 
 /// The live note shows while the running tracker cannot tell which
@@ -391,6 +426,23 @@ mod tests {
         // The focus gate is read now: its row shows.
         assert!(row_shown("capture_only_on_screen"));
         assert!(focus_gate_row(&app, false, "d").is_some());
+    }
+
+    #[test]
+    fn the_focus_row_in_a_demo_changes_nothing_and_keeps_its_help_and_note() {
+        for on in [true, false] {
+            assert!(focus_gate_pick(true, on).is_none(), "demo: no message");
+            assert!(focus_gate_pick(false, on).is_some(), "live: a message");
+        }
+        // The row still builds in a demo (help, note and the control), and
+        // the tooltip says why it does nothing.
+        let (_dir, app) = crate::fixtures::test_app();
+        assert!(app.fixture.is_some());
+        assert!(focus_gate_row(&app, true, "help").is_some());
+        assert_eq!(
+            crate::focus_status::DEMO_TOOLTIP,
+            "Settings can't be changed in demo mode."
+        );
     }
 
     #[test]

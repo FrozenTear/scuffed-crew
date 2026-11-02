@@ -152,7 +152,9 @@ impl FocusSource for KwinSource {
     }
 }
 
-static CONNECTION: std::sync::OnceLock<zbus::Connection> = std::sync::OnceLock::new();
+/// The live bus connection, for the unload at shutdown. Replaced when a
+/// failed round drops the connection and a later one makes a new one.
+static CONNECTION: Mutex<Option<zbus::Connection>> = Mutex::new(None);
 /// The reload task, stopped at shutdown before the last unload.
 static RELOADER: std::sync::OnceLock<tokio::task::AbortHandle> = std::sync::OnceLock::new();
 
@@ -213,18 +215,57 @@ async fn refresh(
             bus.request_name(BUS_NAME)
                 .await
                 .map_err(|err| format!("cannot own {BUS_NAME}: {err}"))?;
-            let _ = CONNECTION.set(bus.clone());
+            *CONNECTION.lock().unwrap_or_else(|err| err.into_inner()) = Some(bus.clone());
             let listener = tokio::spawn(listen(bus.clone(), Arc::clone(state), Arc::clone(owner)));
-            let _ = LISTENER.set(listener.abort_handle());
+            *LISTENER.lock().unwrap_or_else(|err| err.into_inner()) = Some(listener.abort_handle());
             *conn = Some(bus.clone());
             bus
         }
     };
     std::fs::write(script, kwin_script())
         .map_err(|err| format!("cannot write the KWin focus script: {err}"))?;
-    let kwin = kwin_owner(&bus).await?;
-    *owner.lock().unwrap_or_else(|err| err.into_inner()) = Some(kwin);
-    reload(&bus, script).await
+    // A failed bus call may mean the connection died (the bus restarted),
+    // and a dead one fails every later round. Drop it on any failure, so the
+    // next round connects again; a round that fails for another reason (no
+    // KWin yet) only costs that reconnect.
+    let round = async {
+        let kwin = kwin_owner(&bus).await?;
+        *owner.lock().unwrap_or_else(|err| err.into_inner()) = Some(kwin);
+        reload(&bus, script).await
+    }
+    .await;
+    drop_on_error(conn, round, forget_bus)
+}
+
+/// `result` as it is, but on an error the cached connection in `slot` is
+/// taken out and handed to `forget`, so the next round makes a new one.
+pub(crate) fn drop_on_error<T>(
+    slot: &mut Option<T>,
+    result: Result<(), String>,
+    forget: impl FnOnce(T),
+) -> Result<(), String> {
+    if result.is_err()
+        && let Some(dead) = slot.take()
+    {
+        forget(dead);
+    }
+    result
+}
+
+/// Stop the listener and clear the shutdown handle of a dropped connection,
+/// then close it, so its bus name is free for the next one.
+fn forget_bus(bus: zbus::Connection) {
+    if let Some(task) = LISTENER
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        task.abort();
+    }
+    *CONNECTION.lock().unwrap_or_else(|err| err.into_inner()) = None;
+    tokio::spawn(async move {
+        let _ = tokio::time::timeout(DBUS_TIMEOUT, bus.graceful_shutdown()).await;
+    });
 }
 
 /// The unique bus name that owns `org.kde.KWin` now.
@@ -329,17 +370,28 @@ async fn listen(
 /// Longest wait for the unload at shutdown.
 const SHUTDOWN_UNLOAD_WAIT: Duration = Duration::from_secs(1);
 
-static LISTENER: std::sync::OnceLock<tokio::task::AbortHandle> = std::sync::OnceLock::new();
+static LISTENER: Mutex<Option<tokio::task::AbortHandle>> = Mutex::new(None);
 
 /// Unload the script at shutdown. The reload task is stopped first, so no
 /// reload can load it again after this. Bounded; nothing to unload when
 /// the bus never connected.
 pub(crate) async fn shutdown() {
-    for task in [RELOADER.get(), LISTENER.get()].into_iter().flatten() {
+    if let Some(task) = RELOADER.get() {
         task.abort();
     }
-    if let Some(conn) = CONNECTION.get() {
-        let unload = call(conn, "unloadScript", &(PLUGIN,));
+    if let Some(task) = LISTENER
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take()
+    {
+        task.abort();
+    }
+    let conn = CONNECTION
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take();
+    if let Some(conn) = conn {
+        let unload = call(&conn, "unloadScript", &(PLUGIN,));
         let _ = tokio::time::timeout(SHUTDOWN_UNLOAD_WAIT, unload).await;
     }
 }

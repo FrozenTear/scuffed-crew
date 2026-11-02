@@ -348,3 +348,32 @@ fn the_script_path_is_cut_to_its_file_name() {
     assert!(!redacted.contains("/home/"));
     assert_eq!(redact_path("no bus", &script), "no bus");
 }
+
+#[test]
+fn a_failed_kwin_round_drops_the_cached_bus_connection() {
+    // A stand-in for the connection: records that it was handed to forget.
+    let mut slot = Some("bus");
+    let mut forgotten = Vec::new();
+    let ok = drop_on_error(&mut slot, Ok(()), |dead| forgotten.push(dead));
+    assert_eq!(ok, Ok(()));
+    assert_eq!(
+        (slot, forgotten.len()),
+        (Some("bus"), 0),
+        "a good round keeps it"
+    );
+
+    let failed = drop_on_error(&mut slot, Err("KWin loadScript: gone".into()), |dead| {
+        forgotten.push(dead)
+    });
+    // The error still goes up (reads fail open), and the next round finds
+    // no connection and makes a new one.
+    assert_eq!(failed, Err("KWin loadScript: gone".to_string()));
+    assert_eq!((slot, forgotten), (None, vec!["bus"]));
+
+    // Already none (the connect itself failed): nothing to forget.
+    let mut none: Option<&str> = None;
+    let again = drop_on_error(&mut none, Err("no session bus".into()), |_| {
+        panic!("nothing cached")
+    });
+    assert!(again.is_err());
+}

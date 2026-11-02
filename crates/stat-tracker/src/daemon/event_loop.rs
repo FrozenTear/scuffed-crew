@@ -245,6 +245,7 @@ pub(crate) async fn run_loop(
                         let press = key.at;
                         let running = game_gate.is_running();
                         capture::note_game_seen(game_was_running, running, data_dir);
+                        daemon::focus::game_edge(game_was_running, running);
                         if capture::share_close_due(
                             capture::stream_route_active(),
                             game_was_running,
@@ -399,6 +400,7 @@ pub(crate) async fn run_loop(
                 }
                 let running = game_gate.is_running();
                 capture::note_game_seen(game_was_running, running, data_dir);
+                daemon::focus::game_edge(game_was_running, running);
                 if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,
@@ -906,6 +908,7 @@ pub(crate) async fn run_loop(
                 // only when a restore token can reopen it.
                 let running = game_gate.is_running();
                 capture::note_game_seen(game_was_running, running, data_dir);
+                daemon::focus::game_edge(game_was_running, running);
                 if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,

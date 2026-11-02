@@ -195,6 +195,45 @@ async fn the_status_file_gets_the_gate_on_change() {
     assert_eq!(status.focus_gate, FocusGateStatus::NotFocused);
 }
 
+#[tokio::test]
+async fn a_game_start_or_close_clears_the_last_games_status() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = FakeSource::new(window("firefox"));
+    let guard = FocusGuard::new(true, Some(source.clone()), Some(dir.path().to_path_buf()));
+    let on_disk = || {
+        stat_tracker::ocr_status::read_status(dir.path())
+            .unwrap()
+            .focus_gate
+    };
+    guard.check(Instant::now()).await;
+    assert_eq!(on_disk(), FocusGateStatus::NotFocused);
+    // No edge: the status stays.
+    game_edge_with(Some(&guard), true, true);
+    game_edge_with(Some(&guard), false, false);
+    assert_eq!(on_disk(), FocusGateStatus::NotFocused);
+    // The game closes: neither the gate nor the file keeps the old state.
+    game_edge_with(Some(&guard), true, false);
+    assert_eq!(guard.status(), FocusGateStatus::Unknown);
+    assert_eq!(on_disk(), FocusGateStatus::Unknown);
+    // The next game's first read lands in the file again, even when it
+    // says what the last game ended on.
+    guard.check(Instant::now()).await;
+    assert_eq!(on_disk(), FocusGateStatus::NotFocused);
+    // A game start clears it too.
+    game_edge_with(Some(&guard), false, true);
+    assert_eq!(on_disk(), FocusGateStatus::Unknown);
+    // No gate set up (tests): nothing to reset.
+    game_edge_with(None, true, false);
+}
+
+#[tokio::test]
+async fn a_reset_keeps_the_opt_out_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let guard = FocusGuard::new(false, None, Some(dir.path().to_path_buf()));
+    guard.reset();
+    assert_eq!(guard.status(), FocusGateStatus::Off);
+}
+
 #[test]
 fn the_status_names_read_across_versions() {
     use stat_tracker::ocr_status::Status;

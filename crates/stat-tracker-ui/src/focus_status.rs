@@ -44,8 +44,11 @@ pub const UNREADABLE_ACTION: &str = "Select to change this in Settings.";
 pub const ROW_TITLE: &str = "Only capture while Overwatch is in front";
 /// Settings row help.
 pub const ROW_HELP: &str = "Pauses capture while another window is in front. Your game keeps going. Where this desktop can't tell, capture keeps running.";
+/// Tooltip on the row's Auto and Off buttons in demo mode, where they do
+/// nothing.
+pub const DEMO_TOOLTIP: &str = "Settings can't be changed in demo mode.";
 /// Live note under the row, only while the focus is unreadable.
-pub const ROW_UNREADABLE_NOTE: &str = "Can't tell which window is in front on this desktop, so the tracker captures all the time. Choose Off to stop this warning.";
+pub const ROW_UNREADABLE_NOTE: &str = "Can't tell which window is in front on this desktop, so the tracker captures all the time. Choose Off and restart the tracker to stop this warning.";
 
 /// A new not focused waits this long before it shows.
 pub const NOT_FOCUSED_AFTER: Duration = Duration::from_secs(2);
@@ -292,6 +295,7 @@ mod tests {
             ROW_TITLE,
             ROW_HELP,
             ROW_UNREADABLE_NOTE,
+            DEMO_TOOLTIP,
         ] {
             assert!(
                 !text.contains('\u{2014}') && !text.contains('\u{2013}'),

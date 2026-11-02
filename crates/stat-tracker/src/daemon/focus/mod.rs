@@ -109,6 +109,14 @@ impl FocusGate {
         self.status
     }
 
+    /// Back to the state before any read: [`FocusGateStatus::Unknown`], or
+    /// [`FocusGateStatus::Off`] when the gate is off. The warn clock stays.
+    pub(crate) fn reset(&mut self) {
+        if self.status != FocusGateStatus::Off {
+            self.status = FocusGateStatus::Unknown;
+        }
+    }
+
     /// Apply one read taken at `now`. Unreadable reads go on and warn on
     /// entry, then at most every [`UNREADABLE_WARN_EVERY`]; a good read
     /// (focused or not) clears the warn clock, so the next entry warns at
@@ -261,6 +269,24 @@ impl FocusGuard {
             .status()
     }
 
+    /// Forget the last verdict, in memory and in the status file, so a game
+    /// that starts or ends does not show the last game's state until its
+    /// first read. Off stays off.
+    pub(crate) fn reset(&self) {
+        if !self.on {
+            return;
+        }
+        let mut gate = self.gate.lock().unwrap_or_else(|err| err.into_inner());
+        let before = gate.status();
+        gate.reset();
+        // Under the gate's lock, like the writes in `check`.
+        if before != gate.status()
+            && let Some(dir) = &self.data_dir
+        {
+            stat_tracker::ocr_status::publish_focus_gate(dir, gate.status());
+        }
+    }
+
     /// One focus check at `now`. Off, it reads nothing and always reads on.
     pub(crate) async fn check(&self, now: Instant) -> GateDecision {
         if !self.on {
@@ -384,6 +410,22 @@ pub(crate) async fn shutdown() {
 /// The daemon's focus check. With no gate set up (tests), reads go on.
 pub(crate) async fn check(now: Instant) -> GateDecision {
     check_with(GUARD.get(), now).await
+}
+
+/// The game process started or stopped (`was` differs from `running`):
+/// reset the gate's status, so the next game does not open on the last
+/// one's state.
+pub(crate) fn game_edge(was: bool, running: bool) {
+    game_edge_with(GUARD.get(), was, running);
+}
+
+/// [`game_edge`] on a given gate.
+pub(crate) fn game_edge_with(guard: Option<&FocusGuard>, was: bool, running: bool) {
+    if was != running
+        && let Some(guard) = guard
+    {
+        guard.reset();
+    }
 }
 
 /// [`check`] on a given gate, `None` meaning none is set up.

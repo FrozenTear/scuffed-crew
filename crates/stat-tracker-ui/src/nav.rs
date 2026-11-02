@@ -274,7 +274,7 @@ pub fn top_bar(app: &TrackerApp, width: f32) -> Element<'_, Message> {
     let count = needs_look_count(&app.games, app.live_game_session.as_deref());
     let status = tracker_status::header_status_for(app);
     let last_game = tracker_status::last_game_when(&app.games, app.clock);
-    let fit = crate::nav_fit::layout(width, status, last_game.as_deref(), count);
+    let fit = crate::nav_fit::layout_kept(width, status, last_game.as_deref(), count);
     let (label, time) = bar_status(status, last_game.as_deref(), fit.status);
 
     let mut right = Row::new().spacing(CHIP_GAP).align_y(Alignment::Center);
