@@ -10,6 +10,7 @@ pub mod events;
 pub mod forum;
 pub mod games;
 pub mod health;
+pub mod hero_icons;
 pub mod integrations;
 pub mod leaderboards;
 pub mod link;

@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod hero_icons;
 pub mod heroes;
 pub mod nostr;
 pub mod org;
@@ -12,6 +13,11 @@ pub mod strategy;
 
 pub use api::*;
 pub use auth::*;
+pub use hero_icons::{
+    HERO_ICON_MAX_BYTES, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_FILES_PER_UPLOAD,
+    HERO_ICON_MAX_PER_MEMBER, HERO_ICON_MAX_REQUEST_BYTES, HERO_ICON_MIN_EDGE, HERO_ICON_RATE_BURST,
+    HERO_ICON_RATE_REFILL_SECS,
+};
 pub use heroes::{
     HERO_NAMES, HERO_PACK_FILES, HERO_PACK_PLACEHOLDERS, HEROES, HeroName, canonical_hero,
     find_hero, hero_for_pack_file, hero_key_to_name, is_placeholder_hero, match_hero_in_text,

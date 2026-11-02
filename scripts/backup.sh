@@ -201,6 +201,10 @@ if REPORTS_PATH="$(resolve_volume reports-data)"; then
     BACKUP_PATHS+=("${REPORTS_PATH}")
     echo "Including reports volume from ${REPORTS_PATH}"
 fi
+if HERO_ICONS_PATH="$(resolve_volume hero-icons-data)"; then
+    BACKUP_PATHS+=("${HERO_ICONS_PATH}")
+    echo "Including hero icons volume from ${HERO_ICONS_PATH}"
+fi
 if STRFRY_PATH="$(resolve_volume strfry-data)"; then
     BACKUP_PATHS+=("${STRFRY_PATH}")
     echo "Including strfry volume from ${STRFRY_PATH}"

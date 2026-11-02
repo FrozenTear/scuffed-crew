@@ -934,6 +934,8 @@ pub struct MemberSettings {
     pub player_name: Option<String>,
     /// Missing on a legacy row. Callers treat that as [`scuffed_types::StatsVisibility::Public`].
     pub stats_visibility: scuffed_types::StatsVisibility,
+    /// Opted in to contributing hero icons. False when the row predates the field.
+    pub hero_icon_opt_in: bool,
 }
 
 /// A daemon authentication token.
@@ -1041,6 +1043,7 @@ pub enum AuditAction {
     WithdrawnStatReportTraining,
     DownloadedStatReport,
     ReadStatReportManifest,
+    DeletedHeroIcon,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -1086,6 +1089,7 @@ pub enum AuditTargetType {
     Integration,
     PatchNote,
     StatReport,
+    HeroIcon,
 }
 
 impl std::fmt::Display for AuditTargetType {
@@ -1629,6 +1633,38 @@ pub struct NewStatReport {
     pub size_bytes: u64,
     pub zip_sha256: String,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Metadata for one contributed hero icon.
+///
+/// The PNG bytes live on disk under `HERO_ICONS_DIR` as `file_name`. This row
+/// does not store them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeroIcon {
+    /// 32 lowercase hex characters, made by the server.
+    pub id: String,
+    pub member_id: String,
+    /// Hero display name from `scuffed_types::hero_key_to_name`.
+    pub hero: String,
+    /// `<id>.png`. Never taken from user input.
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Fields written when an icon is accepted.
+#[derive(Debug, Clone)]
+pub struct NewHeroIcon {
+    pub id: String,
+    pub member_id: String,
+    pub hero: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Build the deterministic conversation key from a pubkey pair.
