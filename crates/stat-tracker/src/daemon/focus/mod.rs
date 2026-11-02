@@ -10,9 +10,10 @@
 //! Sources, in order: niri IPC when `NIRI_SOCKET` is set ([`niri`]); a
 //! KWin script on KDE Plasma Wayland ([`kwin`]); X11 or XWayland when
 //! `DISPLAY` is set ([`x11`]); else none. niri lists its XWayland windows
-//! (xwayland-satellite) itself, so it stays first. On a Wayland session the
-//! X11 source never says not focused (see [`x11`]); niri and the KWin
-//! script can, from a good read.
+//! (xwayland-satellite) itself, so it stays first. The X11 source says not
+//! focused only on a session that is positively X11 ([`DesktopEnv`]); on
+//! any other it gives focused or unreadable (see [`x11`]). niri and the
+//! KWin script can say not focused from a good read.
 //!
 //! A pause only skips a read. It never ends, resets or splits a game or a
 //! session; the poll arm's caller ([`poll_pause`]) drops the poll's frame
@@ -22,7 +23,6 @@ use crate::*;
 use std::time::Duration;
 
 pub(crate) mod kwin;
-pub(crate) mod layout;
 pub(crate) mod niri;
 pub(crate) mod x11;
 
@@ -38,8 +38,10 @@ pub(crate) const OVERWATCH_WINDOW_IDS: &[&str] = &["overwatch.exe", "steam_app_2
 /// While the focus stays unreadable, at most one warn line this often.
 pub(crate) const UNREADABLE_WARN_EVERY: Duration = Duration::from_secs(5 * 60);
 
-/// Longest wait for one focus read. A slower read counts as unreadable.
-pub(crate) const FOCUS_READ_TIMEOUT: Duration = Duration::from_millis(250);
+/// Longest wait for one focus read, inside the event loop. A slower read
+/// counts as unreadable (reads go on). A niri socket round trip, a few X11
+/// requests or the KWin script's last report take far less.
+pub(crate) const FOCUS_READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// One focus read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,22 +149,37 @@ impl FocusGate {
 pub(crate) struct DesktopEnv {
     pub(crate) niri_socket: Option<std::path::PathBuf>,
     pub(crate) display: bool,
+    /// A Wayland signal: `WAYLAND_DISPLAY` set, or `XDG_SESSION_TYPE` is
+    /// `wayland`.
     pub(crate) wayland: bool,
+    /// The session is positively X11: `XDG_SESSION_TYPE` is `x11`, or it is
+    /// unset, with no Wayland signal either way. Only then may the X11
+    /// source say not focused.
+    pub(crate) x11_session: bool,
     /// `XDG_CURRENT_DESKTOP` names KDE.
     pub(crate) kde: bool,
 }
 
 impl DesktopEnv {
-    /// `NIRI_SOCKET`, `DISPLAY`, `WAYLAND_DISPLAY` and
-    /// `XDG_CURRENT_DESKTOP`; an empty value is unset.
+    /// From the process environment ([`Self::from_vars`]).
     pub(crate) fn from_env() -> Self {
-        let set = |key: &str| std::env::var_os(key).filter(|value| !value.is_empty());
-        let desktop = std::env::var("XDG_CURRENT_DESKTOP").unwrap_or_default();
+        Self::from_vars(|key| std::env::var(key).ok())
+    }
+
+    /// `NIRI_SOCKET`, `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE` and
+    /// `XDG_CURRENT_DESKTOP` as `var` gives them; an empty value is unset.
+    pub(crate) fn from_vars(var: impl Fn(&str) -> Option<String>) -> Self {
+        let set = |key: &str| var(key).filter(|value| !value.trim().is_empty());
+        let session = set("XDG_SESSION_TYPE").map(|s| s.trim().to_ascii_lowercase());
+        let wayland_display = set("WAYLAND_DISPLAY").is_some();
+        let wayland = wayland_display || session.as_deref() == Some("wayland");
+        let x11_session = !wayland && matches!(session.as_deref(), None | Some("x11"));
         Self {
             niri_socket: set("NIRI_SOCKET").map(Into::into),
             display: set("DISPLAY").is_some(),
-            wayland: set("WAYLAND_DISPLAY").is_some(),
-            kde: desktop_is_kde(&desktop),
+            wayland,
+            x11_session,
+            kde: desktop_is_kde(&set("XDG_CURRENT_DESKTOP").unwrap_or_default()),
         }
     }
 }
@@ -180,7 +197,8 @@ pub(crate) enum SourceKind {
     Niri(std::path::PathBuf),
     /// The KWin script, on KDE Plasma Wayland.
     Kwin,
-    /// X11, `wayland` when a Wayland session runs it (XWayland).
+    /// X11. `wayland` unless the session is positively X11
+    /// ([`DesktopEnv::x11_session`]): then it never says not focused.
     X11 {
         wayland: bool,
     },
@@ -196,7 +214,7 @@ pub(crate) fn source_kind(env: &DesktopEnv) -> Option<SourceKind> {
         return Some(SourceKind::Kwin);
     }
     env.display.then_some(SourceKind::X11 {
-        wayland: env.wayland,
+        wayland: !env.x11_session,
     })
 }
 
@@ -365,10 +383,38 @@ pub(crate) async fn shutdown() {
 
 /// The daemon's focus check. With no gate set up (tests), reads go on.
 pub(crate) async fn check(now: Instant) -> GateDecision {
-    match GUARD.get() {
+    check_with(GUARD.get(), now).await
+}
+
+/// [`check`] on a given gate, `None` meaning none is set up.
+pub(crate) async fn check_with(guard: Option<&FocusGuard>, now: Instant) -> GateDecision {
+    match guard {
         Some(guard) => guard.check(now).await,
         None => GateDecision::Read,
     }
+}
+
+/// The poll arm's focus step: check, then [`poll_pause`]. True when this
+/// tick reads nothing (another window is focused).
+pub(crate) async fn poll_skip(paused: &mut bool, st: &mut SessionState, now: Instant) -> bool {
+    poll_skip_with(GUARD.get(), paused, st, now).await
+}
+
+/// [`poll_skip`] on a given gate.
+pub(crate) async fn poll_skip_with(
+    guard: Option<&FocusGuard>,
+    paused: &mut bool,
+    st: &mut SessionState,
+    now: Instant,
+) -> bool {
+    let decision = check_with(guard, now).await;
+    poll_pause(paused, decision, st)
+}
+
+/// The Tab arm's and each Tab attempt's focus step: true when the press or
+/// attempt is skipped (another window is focused).
+pub(crate) async fn tab_skip(now: Instant) -> bool {
+    check(now).await == GateDecision::Pause
 }
 
 /// The poll arm's pause, given the focus `decision` for this tick. True

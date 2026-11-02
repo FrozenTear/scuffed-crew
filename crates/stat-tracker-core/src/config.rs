@@ -232,10 +232,10 @@ pub struct Config {
     /// TODO(0.6): the misread report screen does not read this yet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub share_report_pictures: bool,
-    /// "Only capture while Overwatch is on screen", the focus gate: poll and
+    /// The focus gate: poll and
     /// Tab reads pause while a good read says another window is focused. On
-    /// (also when missing) and not written while on; the Settings row is
-    /// hidden for now, so it is changed in config.toml only;
+    /// ("Auto" in Settings, Only capture while Overwatch is in front, also
+    /// when missing) and not written while on;
     /// `false` turns the gate off, the focused window is never read and
     /// capture runs whenever a game process runs, as in 0.5. When the
     /// tracker cannot tell which window is focused (no source for the

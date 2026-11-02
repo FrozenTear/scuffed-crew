@@ -280,3 +280,71 @@ fn kwin_load_results_and_the_script() {
         assert!(script.contains(part), "{part}");
     }
 }
+
+#[test]
+fn niri_with_a_dead_or_silent_socket_is_unreadable() {
+    use super::focus::niri::NiriSource;
+    let dir = tempfile::tempdir().unwrap();
+    // Nothing listens on the path.
+    let dead = NiriSource::new(dir.path().join("gone.sock"));
+    assert!(is_unreadable(&dead.read()), "dead socket");
+    // A socket that takes the connection and never answers: the read
+    // deadline ends it, unreadable.
+    let path = dir.path().join("silent.sock");
+    let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let silent = NiriSource::new(path);
+    let started = Instant::now();
+    assert!(is_unreadable(&silent.read()), "silent socket");
+    assert!(started.elapsed() < FOCUS_READ_TIMEOUT * 10, "bounded");
+}
+
+#[test]
+fn on_kde_wayland_the_kwin_script_is_used_and_an_empty_xwayland_is_unreadable() {
+    let env = DesktopEnv::from_vars(|key| match key {
+        "XDG_CURRENT_DESKTOP" => Some("KDE".into()),
+        "WAYLAND_DISPLAY" => Some("wayland-0".into()),
+        "DISPLAY" => Some(":1".into()),
+        _ => None,
+    });
+    assert_eq!(source_kind(&env), Some(SourceKind::Kwin));
+    // The KWin script with no report yet: unreadable, reads go on.
+    let mut gate = FocusGate::new(true);
+    let now = Instant::now();
+    let read = KwinState::default().read(now);
+    assert_eq!(gate.apply(&read, now).decision, GateDecision::Read);
+    assert_eq!(gate.status(), FocusGateStatus::Unreadable);
+    // XWayland on the same session with no active X11 window: unreadable.
+    let read = read_x11(&x11(Some(0)), true);
+    assert!(is_unreadable(&read));
+    assert_eq!(gate.apply(&read, now).decision, GateDecision::Read);
+}
+
+#[test]
+fn only_kwin_itself_may_report() {
+    assert!(report_from_kwin(Some(":1.42"), Some(":1.42")));
+    assert!(
+        !report_from_kwin(Some(":1.99"), Some(":1.42")),
+        "another client"
+    );
+    assert!(!report_from_kwin(None, Some(":1.42")), "no sender");
+    assert!(
+        !report_from_kwin(Some(":1.42"), None),
+        "KWin owner not known yet"
+    );
+}
+
+#[test]
+fn the_script_path_is_cut_to_its_file_name() {
+    let script = std::path::Path::new("/home/someone/.local/share/tracker").join(SCRIPT_FILE);
+    let why = format!(
+        "KWin loadScript: org.kde.kwin.Error: cannot open {}",
+        script.display()
+    );
+    let redacted = redact_path(&why, &script);
+    assert_eq!(
+        redacted,
+        format!("KWin loadScript: org.kde.kwin.Error: cannot open {SCRIPT_FILE}")
+    );
+    assert!(!redacted.contains("/home/"));
+    assert_eq!(redact_path("no bus", &script), "no bus");
+}

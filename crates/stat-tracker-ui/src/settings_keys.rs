@@ -2,8 +2,9 @@
 //! names as a list (`player_name` first, then `player_names`), Upload
 //! games after each match (`live_upload`), the two Sharing switches
 //! (`rank_reader`, `share_stat_pictures`), Report pictures
-//! (`share_report_pictures`) and Only capture while Overwatch is on screen
-//! (`capture_only_on_screen`). Each applies at once. The tracker will read
+//! (`share_report_pictures`) and Only capture while Overwatch is in front
+//! (`capture_only_on_screen`, with a live note while the tracker cannot
+//! tell which window is in front). Each applies at once. The tracker will read
 //! them when it starts, so each is tagged After restart, except Report
 //! pictures, which only this app will read.
 //!
@@ -236,8 +237,11 @@ pub(crate) fn report_pictures_row<'a>(
     })
 }
 
-/// Only capture while Overwatch is on screen: Auto or Off (spec p7), or
-/// `None` while hidden.
+/// Only capture while Overwatch is in front: Auto or Off (spec p7, UX Spec
+/// focus status), or `None` while hidden. While the tracker cannot tell
+/// which window is in front, a note says so under the help. The row has
+/// the id the top bar's unreadable pill scrolls to, and is marked for a
+/// moment after that pill opened it.
 pub(crate) fn focus_gate_row<'a>(
     app: &'a TrackerApp,
     demo: bool,
@@ -252,13 +256,17 @@ pub(crate) fn focus_gate_row<'a>(
             ConfigEdit::CaptureOnlyOnScreen(on),
         )))
     };
-    Some(setting_row(
+    let mut lines = vec![hint(help)];
+    if focus_note_shown(app) {
+        lines.push(focus_note());
+    }
+    let row = setting_row(
         title_line(
-            "Only capture while Overwatch is on screen",
+            crate::focus_status::ROW_TITLE,
             !auto,
             &[Tag::New, Tag::AfterRestart],
         ),
-        vec![hint(help)],
+        lines,
         segmented(vec![
             Segment {
                 label: "Auto",
@@ -271,7 +279,62 @@ pub(crate) fn focus_gate_row<'a>(
                 msg: pick(false),
             },
         ]),
-    ))
+    );
+    let marked = app.page_state.focus_row_marked(std::time::Instant::now());
+    Some(
+        iced::widget::container(row)
+            .id(crate::focus_status::ROW_ID)
+            .padding(iced::Padding {
+                left: 8.0,
+                ..iced::Padding::ZERO
+            })
+            .style(move |_: &iced::Theme| iced::widget::container::Style {
+                border: iced::Border {
+                    color: if marked {
+                        crate::theme::ACCENT
+                    } else {
+                        iced::Color::TRANSPARENT
+                    },
+                    width: if marked { 3.0 } else { 0.0 },
+                    radius: 0.0.into(),
+                },
+                ..iced::widget::container::Style::default()
+            })
+            .into(),
+    )
+}
+
+/// The live note shows while the running tracker cannot tell which
+/// window is in front (as the top bar shows it, debounced).
+pub(crate) fn focus_note_shown(app: &TrackerApp) -> bool {
+    app.page_state.focus.shown() == stat_tracker::ocr_status::FocusGateStatus::Unreadable
+}
+
+/// The live note: neutral words with an amber dot, as the capture method
+/// notes.
+fn focus_note() -> Element<'static, Message> {
+    use iced::widget::{container, row, space, text};
+    let dot = container(space().width(6).height(6))
+        .width(6)
+        .height(6)
+        .style(|_: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(crate::theme::WARN)),
+            border: iced::Border {
+                radius: 999.0.into(),
+                ..iced::Border::default()
+            },
+            ..container::Style::default()
+        });
+    row![
+        dot,
+        text(crate::focus_status::ROW_UNREADABLE_NOTE)
+            .size(crate::theme::SIZE_LABEL)
+            .font(crate::theme::FONT_MEDIUM)
+            .color(crate::theme::TEXT_3),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
 #[cfg(test)]
@@ -310,7 +373,6 @@ mod tests {
             "rank_reader",
             "share_stat_pictures",
             "share_report_pictures",
-            "capture_only_on_screen",
             "live_upload",
             "player_names",
         ] {
@@ -321,7 +383,37 @@ mod tests {
         assert!(upload_row(&app, false, "help", true).is_none());
         assert!(sharing_rows(&app, false, "a", "b").is_empty());
         assert!(report_pictures_row(&app, false, "c").is_none());
-        assert!(focus_gate_row(&app, false, "d").is_none());
+        // The focus gate is read now: its row shows.
+        assert!(row_shown("capture_only_on_screen"));
+        assert!(focus_gate_row(&app, false, "d").is_some());
+    }
+
+    #[test]
+    fn the_focus_row_notes_unreadable_and_is_marked_after_the_pill() {
+        use stat_tracker::ocr_status::FocusGateStatus;
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let t0 = std::time::Instant::now();
+        assert!(!focus_note_shown(&app));
+        // The note follows the debounced top bar value: 5 s of unreadable.
+        app.page_state
+            .focus
+            .observe(Some(FocusGateStatus::Unreadable), t0);
+        assert!(!focus_note_shown(&app));
+        app.page_state.focus.observe(
+            Some(FocusGateStatus::Unreadable),
+            t0 + crate::focus_status::UNREADABLE_AFTER,
+        );
+        assert!(focus_note_shown(&app));
+        app.page_state.focus.observe(Some(FocusGateStatus::Off), t0);
+        assert!(!focus_note_shown(&app), "Off stops the warning");
+        // The pill marks the row for a moment.
+        assert!(!app.page_state.focus_row_marked(t0));
+        app.page_state.show_focus_row(t0);
+        assert!(app.page_state.focus_row_marked(t0));
+        assert!(
+            !app.page_state
+                .focus_row_marked(t0 + crate::focus_status::HIGHLIGHT_FOR)
+        );
     }
 
     #[test]

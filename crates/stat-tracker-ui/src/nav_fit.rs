@@ -61,13 +61,37 @@ pub struct BarLayout {
     /// Title, tabs and status on one line; otherwise tabs on a second line.
     pub one_line: bool,
     pub icons: bool,
-    /// "Tracker ready · last game 00:40" rather than "Ready".
-    pub long_status: bool,
+    /// How much the status says ([`StatusForm`]).
+    pub status: StatusForm,
     /// "⚠ 159 ›" rather than "⚠ 159 need a look ›".
     pub compact_chip: bool,
     /// Side gutter, the same as the page under the bar.
     pub gutter: f32,
 }
+
+/// How much the status words say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusForm {
+    /// "Tracker ready · last game 00:40".
+    Long,
+    /// "Watching Overwatch · 00:40": the Capturing states only, from
+    /// [`crate::nav::STATUS_MEDIUM_MIN`]. Other states fall back to Short.
+    Medium,
+    /// "Ready", "In game", "Paused", or the "?" button.
+    Short,
+}
+
+impl BarLayout {
+    /// The status says the most it can ([`StatusForm::Long`]).
+    pub fn long_status(&self) -> bool {
+        self.status == StatusForm::Long
+    }
+}
+
+/// The round "?" button that stands for the unreadable pill under 1100px.
+pub const QUESTION_BUTTON: f32 = 28.0;
+/// Border of the unreadable pill, both sides.
+const PILL_BORDER: f32 = 2.0;
 
 /// Text weight for [`text_width`]. `Heavy` covers semibold to extra bold
 /// with the extra bold advances, so it never comes out short.
@@ -155,6 +179,29 @@ pub fn badge_width(count: usize) -> f32 {
     text_width(&count.to_string(), SIZE_BADGE, Weight::Heavy) + 2.0 * BADGE_PAD_X
 }
 
+/// The status slot for `status` in `form`: the unreadable pill or its "?"
+/// button, else [`status_width`] (a dot or the pause ring, words, time).
+pub fn status_slot_width(
+    status: HeaderStatus,
+    form: StatusForm,
+    label: &str,
+    time: Option<&str>,
+) -> f32 {
+    if status != HeaderStatus::FocusUnknown {
+        return status_width(label, time);
+    }
+    if form == StatusForm::Short {
+        return QUESTION_BUTTON;
+    }
+    2.0 * CHIP_PAD_X
+        + PILL_BORDER
+        + DOT
+        + DOT_GAP
+        + text_width(label, SIZE_STATUS, Weight::Medium)
+        + CHIP_GLYPH_GAP
+        + text_width(CHEVRON, SIZE_STATUS, Weight::Heavy)
+}
+
 /// Dot, words, and the time when there is one.
 pub fn status_width(label: &str, time: Option<&str>) -> f32 {
     DOT + DOT_GAP
@@ -182,16 +229,16 @@ fn right_width(
     status: HeaderStatus,
     last_game: Option<&str>,
     count: usize,
-    long: bool,
+    form: StatusForm,
     compact: bool,
 ) -> f32 {
-    let (label, time) = crate::nav::bar_status(status, last_game, long);
+    let (label, time) = crate::nav::bar_status(status, last_game, form);
     let chip = if count > 0 {
         CHIP_GAP + chip_width(count, compact)
     } else {
         0.0
     };
-    status_width(&label, time.as_deref()) + chip
+    status_slot_width(status, form, &label, time.as_deref()) + chip
 }
 
 /// Width the one-line bar needs at window `width` in the form given.
@@ -212,13 +259,7 @@ pub fn one_line_width(
         + title_gap
         + tabs_width(form.icons, count)
         + MIN_GAP
-        + right_width(
-            status,
-            last_game,
-            count,
-            form.long_status,
-            form.compact_chip,
-        )
+        + right_width(status, last_game, count, form.status, form.compact_chip)
 }
 
 /// First line of the two-line bar: title, room, status and chip.
@@ -236,19 +277,33 @@ pub fn layout(
     let width = if width.is_finite() { width } else { 0.0 };
     let gutter = crate::theme::page_gutter(width);
     let icons_allowed = width >= crate::nav::TAB_ICONS_MIN;
-    let long_allowed = width >= crate::nav::STATUS_LONG_MIN;
-    let form = |icons, long_status, compact_chip| BarLayout {
+    let long_allowed = width >= crate::nav::status_long_min(status);
+    let medium_allowed = width >= crate::nav::STATUS_MEDIUM_MIN;
+    let form = |icons, status, compact_chip| BarLayout {
         one_line: true,
         icons,
-        long_status,
+        status,
         compact_chip,
         gutter,
     };
+    let fullest = if long_allowed {
+        StatusForm::Long
+    } else if medium_allowed {
+        StatusForm::Medium
+    } else {
+        StatusForm::Short
+    };
+    let medium = if medium_allowed {
+        StatusForm::Medium
+    } else {
+        StatusForm::Short
+    };
     let tries = [
-        form(icons_allowed, long_allowed, false),
-        form(icons_allowed, false, false),
-        form(false, false, false),
-        form(false, false, true),
+        form(icons_allowed, fullest, false),
+        form(icons_allowed, medium, false),
+        form(icons_allowed, StatusForm::Short, false),
+        form(false, StatusForm::Short, false),
+        form(false, StatusForm::Short, true),
     ];
     if let Some(fit) = tries
         .into_iter()
@@ -256,11 +311,11 @@ pub fn layout(
     {
         return fit;
     }
-    let full = right_width(status, last_game, count, false, false);
+    let full = right_width(status, last_game, count, StatusForm::Short, false);
     BarLayout {
         one_line: false,
         icons: false,
-        long_status: false,
+        status: StatusForm::Short,
         compact_chip: first_line_width(gutter, full) > width,
         gutter,
     }
@@ -323,7 +378,13 @@ mod tests {
                             let need = one_line_width(width, fit, status, time, count);
                             assert!(need <= width, "{width} {status:?} {count}: {need}");
                         } else {
-                            let right = right_width(status, time, count, false, fit.compact_chip);
+                            let right = right_width(
+                                status,
+                                time,
+                                count,
+                                StatusForm::Short,
+                                fit.compact_chip,
+                            );
                             assert!(
                                 first_line_width(fit.gutter, right) <= width,
                                 "{width} {status:?} {count}"
@@ -345,10 +406,10 @@ mod tests {
         // Spec p8: one line with icons, "Ready" and a 3-digit chip at 1024.
         let at_1024 = layout(1024.0, HeaderStatus::Waiting, Some("00:40"), 159);
         assert!(at_1024.one_line && at_1024.icons && !at_1024.compact_chip);
-        assert!(!at_1024.long_status);
+        assert!(!at_1024.long_status());
         // Spec p1: the long status with the time at 1600.
         let at_1600 = layout(1600.0, HeaderStatus::Waiting, Some("00:40"), 159);
-        assert!(at_1600.one_line && at_1600.icons && at_1600.long_status);
+        assert!(at_1600.one_line && at_1600.icons && at_1600.long_status());
         assert!(!at_1600.compact_chip);
         // The long status from the breakpoint, with a 3-digit chip.
         let at_long = layout(
@@ -357,7 +418,7 @@ mod tests {
             Some("00:40"),
             159,
         );
-        assert!(at_long.long_status && at_long.icons);
+        assert!(at_long.long_status() && at_long.icons);
         // No icons under the spec's 960 step, one line down to about 860.
         assert!(!layout(959.0, HeaderStatus::Waiting, None, 0).icons);
         assert!(layout(900.0, HeaderStatus::Waiting, Some("00:40"), 1).one_line);
@@ -374,12 +435,44 @@ mod tests {
                 Some("Oct 18, 23:14"),
                 159,
             );
-            if fit.long_status {
+            if fit.long_status() {
                 assert!(fit.icons || width < crate::nav::TAB_ICONS_MIN);
             }
             if fit.compact_chip && fit.one_line {
-                assert!(!fit.icons && !fit.long_status);
+                assert!(!fit.icons && !fit.long_status());
             }
+        }
+    }
+
+    #[test]
+    fn the_focus_states_take_the_spec_forms() {
+        let fit = |width, status| layout(width, status, Some("00:40"), 159).status;
+        assert_eq!(fit(1600.0, HeaderStatus::Capturing), StatusForm::Long);
+        assert_eq!(fit(1366.0, HeaderStatus::Capturing), StatusForm::Medium);
+        assert_eq!(fit(1024.0, HeaderStatus::Capturing), StatusForm::Short);
+        assert_eq!(
+            fit(1600.0, HeaderStatus::CapturingAnyWindow),
+            StatusForm::Long
+        );
+        for status in [HeaderStatus::Paused, HeaderStatus::FocusUnknown] {
+            assert_ne!(fit(1600.0, status), StatusForm::Short, "{status:?}");
+            assert_eq!(fit(1024.0, status), StatusForm::Short, "{status:?}");
+        }
+        // The pill is wider than the same words with a dot; under 1100px it
+        // is the round "?" button.
+        let words = crate::focus_status::UNREADABLE_LONG;
+        assert!(
+            status_slot_width(HeaderStatus::FocusUnknown, StatusForm::Medium, words, None)
+                > status_width(words, None)
+        );
+        assert_eq!(
+            status_slot_width(HeaderStatus::FocusUnknown, StatusForm::Short, "?", None),
+            QUESTION_BUTTON
+        );
+        // The long focus words measure about 200 to 260 px.
+        for words in [crate::focus_status::PAUSED_LONG, words] {
+            let w = status_width(words, None);
+            assert!((180.0..=280.0).contains(&w), "{words}: {w}");
         }
     }
 }

@@ -264,7 +264,7 @@ pub(crate) async fn handle_capture(
                 async move {
                     // Focus gate, per attempt: no grab while another window
                     // is focused (an Alt+Tab press included).
-                    if daemon::focus::check(Instant::now()).await == daemon::focus::GateDecision::Pause {
+                    if daemon::focus::tab_skip(Instant::now()).await {
                         return Ok(FrameAnalysisOutcome::NotFocused);
                     }
                     let grabbed = grab_tab_attempt(backend, capture_output, attempt).await;

@@ -26,8 +26,6 @@ mod tests_debug_dumps;
 #[cfg(test)]
 mod tests_focus_gate;
 #[cfg(test)]
-mod tests_focus_layout;
-#[cfg(test)]
 mod tests_focus_pause;
 #[cfg(test)]
 mod tests_focus_sources;

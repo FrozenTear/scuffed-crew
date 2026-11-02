@@ -9,9 +9,12 @@
 //! ashpd, no object server and no extra crate) and keeps the last one.
 //!
 //! The script is loaded again every [`KWIN_REFRESH`], which also sends a
-//! fresh report; a report older than [`KWIN_STALE`] is unreadable. No bus,
-//! a rejected script or no report yet is unreadable too, so reads go on.
-//! The script is unloaded at shutdown ([`shutdown`]).
+//! fresh report and brings it back after KWin restarts; a report older
+//! than [`KWIN_STALE`] is unreadable. No bus, a name conflict, a rejected
+//! script or no report yet is unreadable too, so reads go on, and the next
+//! round tries again. Only reports whose sender owns `org.kde.KWin` count
+//! ([`report_from_kwin`]). The script is unloaded at shutdown
+//! ([`shutdown`]).
 
 use super::{FocusRead, FocusSource};
 use ashpd::zbus;
@@ -110,11 +113,7 @@ impl KwinState {
             return FocusRead::Unreadable(why);
         };
         if now.saturating_duration_since(*at) > KWIN_STALE {
-            let why = match &self.error {
-                Some(err) => format!("the KWin focus script's last report is stale ({err})"),
-                None => "the KWin focus script's last report is stale".into(),
-            };
-            return FocusRead::Unreadable(why);
+            return FocusRead::Unreadable("the KWin focus script's last report is stale".into());
         }
         let ids: Vec<String> = [&report.class, &report.name]
             .into_iter()
@@ -172,28 +171,21 @@ fn note_error(state: &Mutex<KwinState>, why: String) {
         .note_error(why);
 }
 
+/// Every [`KWIN_REFRESH`]: connect and own [`BUS_NAME`] if not done yet,
+/// write the script, learn KWin's bus owner and reload the script. Any
+/// failure is noted (unreadable, reads go on) and tried again next time,
+/// with one warn line until a round works.
 async fn run_script(state: Arc<Mutex<KwinState>>, script: std::path::PathBuf) {
-    let conn = match tokio::time::timeout(DBUS_TIMEOUT, zbus::Connection::session()).await {
-        Ok(Ok(conn)) => conn,
-        Ok(Err(err)) => return note_error(&state, format!("no session bus: {err}")),
-        Err(_) => return note_error(&state, "the session bus did not answer".into()),
-    };
-    if let Err(err) = conn.request_name(BUS_NAME).await {
-        return note_error(&state, format!("cannot own {BUS_NAME}: {err}"));
-    }
-    if let Err(err) = std::fs::write(&script, kwin_script()) {
-        return note_error(&state, format!("cannot write the KWin focus script: {err}"));
-    }
-    let _ = CONNECTION.set(conn.clone());
-    let listener = tokio::spawn(listen(conn.clone(), Arc::clone(&state)));
-    let _ = LISTENER.set(listener.abort_handle());
+    let owner = Arc::new(Mutex::new(None::<String>));
+    let mut conn = None;
     let mut warned = false;
     loop {
-        match reload(&conn, &script).await {
+        match refresh(&mut conn, &state, &owner, &script).await {
             Ok(()) => warned = false,
             Err(why) => {
+                let why = redact_path(&why, &script);
                 if !warned {
-                    tracing::warn!(target: "scuffed_stat_tracker", reason = %why, "focus gate: the KWin focus script could not be loaded, reads go on");
+                    tracing::warn!(target: "scuffed_stat_tracker", reason = %why, "focus gate: the KWin focus script could not be loaded, reads go on; trying again every 30 s");
                     warned = true;
                 }
                 note_error(&state, why);
@@ -201,6 +193,75 @@ async fn run_script(state: Arc<Mutex<KwinState>>, script: std::path::PathBuf) {
         }
         tokio::time::sleep(KWIN_REFRESH).await;
     }
+}
+
+/// One round of [`run_script`].
+async fn refresh(
+    conn: &mut Option<zbus::Connection>,
+    state: &Arc<Mutex<KwinState>>,
+    owner: &Arc<Mutex<Option<String>>>,
+    script: &std::path::Path,
+) -> Result<(), String> {
+    let bus = match conn {
+        Some(bus) => bus.clone(),
+        None => {
+            let bus = match tokio::time::timeout(DBUS_TIMEOUT, zbus::Connection::session()).await {
+                Ok(Ok(bus)) => bus,
+                Ok(Err(err)) => return Err(format!("no session bus: {err}")),
+                Err(_) => return Err("the session bus did not answer".into()),
+            };
+            bus.request_name(BUS_NAME)
+                .await
+                .map_err(|err| format!("cannot own {BUS_NAME}: {err}"))?;
+            let _ = CONNECTION.set(bus.clone());
+            let listener = tokio::spawn(listen(bus.clone(), Arc::clone(state), Arc::clone(owner)));
+            let _ = LISTENER.set(listener.abort_handle());
+            *conn = Some(bus.clone());
+            bus
+        }
+    };
+    std::fs::write(script, kwin_script())
+        .map_err(|err| format!("cannot write the KWin focus script: {err}"))?;
+    let kwin = kwin_owner(&bus).await?;
+    *owner.lock().unwrap_or_else(|err| err.into_inner()) = Some(kwin);
+    reload(&bus, script).await
+}
+
+/// The unique bus name that owns `org.kde.KWin` now.
+async fn kwin_owner(conn: &zbus::Connection) -> Result<String, String> {
+    let call = conn.call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus"),
+        "GetNameOwner",
+        &("org.kde.KWin",),
+    );
+    let reply = match tokio::time::timeout(DBUS_TIMEOUT, call).await {
+        Ok(Ok(reply)) => reply,
+        Ok(Err(err)) => return Err(format!("no KWin on the session bus: {err}")),
+        Err(_) => return Err("the session bus did not answer GetNameOwner".into()),
+    };
+    reply
+        .body()
+        .deserialize::<String>()
+        .map_err(|err| format!("GetNameOwner reply: {err}"))
+}
+
+/// A report counts only when it comes from KWin itself: its sender is the
+/// current owner of `org.kde.KWin`. Any other session bus client is
+/// dropped.
+pub(crate) fn report_from_kwin(sender: Option<&str>, kwin: Option<&str>) -> bool {
+    matches!((sender, kwin), (Some(sender), Some(kwin)) if sender == kwin)
+}
+
+/// `text` with the script's full path (it sits in the home folder) cut
+/// down to its file name, for logs and the status.
+pub(crate) fn redact_path(text: &str, script: &std::path::Path) -> String {
+    let full = script.to_string_lossy();
+    if full.is_empty() {
+        return text.to_string();
+    }
+    text.replace(full.as_ref(), SCRIPT_FILE)
 }
 
 async fn call<B>(conn: &zbus::Connection, method: &str, body: &B) -> Result<zbus::Message, String>
@@ -235,7 +296,11 @@ async fn reload(conn: &zbus::Connection, script: &std::path::Path) -> Result<(),
     Ok(())
 }
 
-async fn listen(conn: zbus::Connection, state: Arc<Mutex<KwinState>>) {
+async fn listen(
+    conn: zbus::Connection,
+    state: Arc<Mutex<KwinState>>,
+    owner: Arc<Mutex<Option<String>>>,
+) {
     let mut stream = zbus::MessageStream::from(&conn);
     while let Some(msg) = stream.next().await {
         let Ok(msg) = msg else { continue };
@@ -244,6 +309,11 @@ async fn listen(conn: zbus::Connection, state: Arc<Mutex<KwinState>>) {
             && header.interface().is_some_and(|i| i.as_str() == INTERFACE)
             && header.member().is_some_and(|m| m.as_str() == REPORT_MEMBER);
         if !is_report {
+            continue;
+        }
+        let sender = header.sender().map(|s| s.as_str().to_string());
+        let kwin = owner.lock().unwrap_or_else(|err| err.into_inner()).clone();
+        if !report_from_kwin(sender.as_deref(), kwin.as_deref()) {
             continue;
         }
         if let Ok(body) = msg.body().deserialize::<(String, String)>() {

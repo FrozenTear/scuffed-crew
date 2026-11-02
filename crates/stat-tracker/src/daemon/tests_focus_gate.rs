@@ -222,44 +222,76 @@ fn the_status_names_read_across_versions() {
     assert_eq!(older.focus_gate, FocusGateStatus::Unknown);
 }
 
+/// The environment as `vars` gives it, through [`DesktopEnv::from_vars`].
+fn env_of(vars: &[(&str, &str)]) -> DesktopEnv {
+    let vars: Vec<(String, String)> = vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    DesktopEnv::from_vars(|key| vars.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()))
+}
+
+const NIRI: (&str, &str) = ("NIRI_SOCKET", "/run/user/1000/niri.sock");
+const WAYLAND: (&str, &str) = ("WAYLAND_DISPLAY", "wayland-1");
+const DISPLAY: (&str, &str) = ("DISPLAY", ":0");
+
 #[test]
 fn sources_go_niri_then_kwin_on_kde_wayland_then_x11() {
-    let env = |niri: bool, kde: bool, wayland: bool, display: bool| DesktopEnv {
-        niri_socket: niri.then(|| "/run/user/1000/niri.sock".into()),
-        display,
-        wayland,
-        kde,
-    };
     let niri = SourceKind::Niri("/run/user/1000/niri.sock".into());
+    let kind = |vars: &[(&str, &str)]| source_kind(&env_of(vars));
+    assert_eq!(kind(&[NIRI, WAYLAND, DISPLAY]), Some(niri.clone()));
     assert_eq!(
-        source_kind(&env(true, false, true, true)),
-        Some(niri.clone())
-    );
-    assert_eq!(
-        source_kind(&env(true, true, true, true)),
+        kind(&[NIRI, WAYLAND, DISPLAY, ("XDG_CURRENT_DESKTOP", "KDE")]),
         Some(niri),
         "niri first"
     );
-    assert_eq!(
-        source_kind(&env(false, true, true, true)),
-        Some(SourceKind::Kwin)
-    );
-    assert_eq!(
-        source_kind(&env(false, true, true, false)),
-        Some(SourceKind::Kwin)
-    );
-    // KDE on X11 uses X11.
-    assert_eq!(
-        source_kind(&env(false, true, false, true)),
-        Some(SourceKind::X11 { wayland: false })
-    );
     // Another Wayland desktop with XWayland: the X11 source, Wayland rules.
     assert_eq!(
-        source_kind(&env(false, false, true, true)),
+        kind(&[WAYLAND, DISPLAY, ("XDG_CURRENT_DESKTOP", "GNOME")]),
         Some(SourceKind::X11 { wayland: true })
     );
-    assert_eq!(source_kind(&env(false, false, true, false)), None);
-    assert_eq!(source_kind(&env(false, false, false, false)), None);
+    assert_eq!(kind(&[WAYLAND]), None);
+    assert_eq!(kind(&[]), None);
+    // Empty values are unset.
+    assert_eq!(kind(&[("NIRI_SOCKET", ""), ("DISPLAY", " ")]), None);
+}
+
+/// Environment variables for a table row.
+type Vars = &'static [(&'static str, &'static str)];
+
+#[test]
+fn kde_sessions_pick_the_kwin_script_only_on_wayland() {
+    let kwin = Some(SourceKind::Kwin);
+    let x11_trusted = Some(SourceKind::X11 { wayland: false });
+    let table: [(Vars, Option<SourceKind>); 7] = [
+        (
+            &[("XDG_CURRENT_DESKTOP", "KDE"), WAYLAND, DISPLAY],
+            kwin.clone(),
+        ),
+        (&[("XDG_CURRENT_DESKTOP", "KDE"), WAYLAND], kwin.clone()),
+        (
+            &[
+                ("XDG_CURRENT_DESKTOP", "KDE"),
+                ("XDG_SESSION_TYPE", "wayland"),
+                DISPLAY,
+            ],
+            kwin.clone(),
+        ),
+        (&[("XDG_CURRENT_DESKTOP", "ubuntu:kde"), WAYLAND], kwin),
+        (
+            &[
+                ("XDG_CURRENT_DESKTOP", "KDE"),
+                ("XDG_SESSION_TYPE", "x11"),
+                DISPLAY,
+            ],
+            x11_trusted.clone(),
+        ),
+        (&[("XDG_CURRENT_DESKTOP", "KDE"), DISPLAY], x11_trusted),
+        (&[("XDG_CURRENT_DESKTOP", "KDE")], None),
+    ];
+    for (vars, want) in table {
+        assert_eq!(source_kind(&env_of(vars)), want, "{vars:?}");
+    }
     assert!(desktop_is_kde("KDE"));
     assert!(desktop_is_kde("kde"));
     assert!(desktop_is_kde("ubuntu:KDE"));
@@ -267,4 +299,33 @@ fn sources_go_niri_then_kwin_on_kde_wayland_then_x11() {
     assert!(!desktop_is_kde("niri"));
     assert!(!desktop_is_kde(""));
     assert!(!desktop_is_kde("KDEx"));
+}
+
+#[test]
+fn x11_says_not_focused_only_on_a_positively_x11_session() {
+    // DISPLAY set and no WAYLAND_DISPLAY, but the session says Wayland:
+    // the X11 source runs under the Wayland rules, never not focused.
+    let env = env_of(&[DISPLAY, ("XDG_SESSION_TYPE", "wayland")]);
+    assert!(env.wayland && !env.x11_session);
+    assert_eq!(source_kind(&env), Some(SourceKind::X11 { wayland: true }));
+    // Positively X11: the session says so, or there is no Wayland signal.
+    for vars in [
+        &[DISPLAY, ("XDG_SESSION_TYPE", "x11")][..],
+        &[DISPLAY, ("XDG_SESSION_TYPE", "X11")][..],
+        &[DISPLAY][..],
+    ] {
+        let env = env_of(vars);
+        assert!(env.x11_session, "{vars:?}");
+        assert_eq!(source_kind(&env), Some(SourceKind::X11 { wayland: false }));
+    }
+    // Anything else is not positively X11.
+    for vars in [
+        &[DISPLAY, ("XDG_SESSION_TYPE", "tty")][..],
+        &[DISPLAY, ("XDG_SESSION_TYPE", "x11"), WAYLAND][..],
+        &[DISPLAY, WAYLAND][..],
+    ] {
+        let env = env_of(vars);
+        assert!(!env.x11_session, "{vars:?}");
+        assert_eq!(source_kind(&env), Some(SourceKind::X11 { wayland: true }));
+    }
 }

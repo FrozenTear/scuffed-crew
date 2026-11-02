@@ -146,3 +146,28 @@ async fn a_focus_skipped_probe_tab_keeps_the_finished_game() {
     assert_eq!(open.session_id, "finished");
     assert_eq!(open.outcome, detect::MatchOutcome::Victory);
 }
+
+/// The event loop's poll step on a real gate with a fake source: a good
+/// read of another window skips the read, unreadable keeps reading, and
+/// with no gate set up (the opt-out never builds one in tests) reads go
+/// on.
+#[tokio::test]
+async fn the_poll_step_skips_only_on_another_window() {
+    use super::tests_focus_gate::FakeSource;
+    let now = test_now();
+    let mut st = session(Some(game(detect::MatchOutcome::Unknown, None, now)), now);
+    let mut paused = false;
+    let source = FakeSource::new(window("firefox"));
+    let guard = FocusGuard::new(true, Some(source.clone()), None);
+    assert!(poll_skip_with(Some(&guard), &mut paused, &mut st, now).await);
+    assert!(paused);
+    source.set(FocusRead::Unreadable("no answer".into()));
+    assert!(!poll_skip_with(Some(&guard), &mut paused, &mut st, now).await);
+    assert!(!paused);
+    source.set(window("overwatch.exe"));
+    assert!(!poll_skip_with(Some(&guard), &mut paused, &mut st, now).await);
+    assert!(!poll_skip_with(None, &mut paused, &mut st, now).await);
+    let off = FocusGuard::new(false, Some(source.clone()), None);
+    source.set(window("firefox"));
+    assert!(!poll_skip_with(Some(&off), &mut paused, &mut st, now).await);
+}

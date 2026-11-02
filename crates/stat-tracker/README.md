@@ -26,19 +26,28 @@ install paths and the `.desktop` entry stay the same).
   - niri: the IPC socket (`NIRI_SOCKET`), which also lists XWayland windows.
   - KDE Plasma Wayland: a small KWin script, loaded over D-Bus
     (`org.kde.KWin /Scripting`), reports the active window to the tracker.
-    If KWin refuses it, or the session bus is missing, the gate is
-    unreadable and capture goes on.
-  - X11 sessions: `_NET_ACTIVE_WINDOW` and the window's `WM_CLASS`.
-  - Other Wayland desktops with XWayland: the same X11 read, but there it
-    only tells Overwatch focused from unknown. XWayland's value can be empty
-    or stale while a native Wayland window has focus, so another X11 window
-    never pauses reads there.
+    Only reports sent by KWin itself count. KWin keeps the script only
+    until it restarts (a reboot or a new login): the tracker loads it again
+    every 30 seconds, which is what brings it back. If KWin refuses it, or
+    the session bus is missing, the gate is unreadable, capture goes on,
+    and the tracker tries again every 30 seconds. The script is unloaded
+    when the tracker stops.
+  - X11 sessions: `_NET_ACTIVE_WINDOW` and the window's `WM_CLASS`. Only a
+    session that is positively X11 (`XDG_SESSION_TYPE=x11`, or no Wayland
+    signal at all) may pause reads from this read.
+  - Other Wayland desktops with XWayland (any session with
+    `WAYLAND_DISPLAY` set or `XDG_SESSION_TYPE=wayland`): the same X11
+    read, but there it reports only focused or unreadable, never paused.
+    XWayland's value can be empty or stale while a native Wayland window
+    has focus, so another X11 window, or none, is unreadable and reads go
+    on. A stale value that still names Overwatch reads as focused. Both
+    cases are fail open: capture goes on rather than stop on a guess.
   - Anything else (no `NIRI_SOCKET`, not KDE Wayland, no `DISPLAY`):
     unreadable, capture goes on.
   - Under systemd these variables come from the session environment: run
     `systemctl --user import-environment NIRI_SOCKET DISPLAY WAYLAND_DISPLAY
-    XDG_CURRENT_DESKTOP` and restart the daemon if the log says no focus
-    source was found.
+    XDG_SESSION_TYPE XDG_CURRENT_DESKTOP` and restart the daemon if the log
+    says no focus source was found.
 - **Keyboard access via evdev.** Tab detection (daemon) and the companion
   overlay show/hide shortcut (GUI, default Super+Shift+C) read `/dev/input`.
   The user must be in the `input` group, or have seat `uaccess` on those
@@ -242,7 +251,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `rank_reader` | Read your rank after Comp games. Off by default and not written while off. Not read by this build yet |
 | `share_stat_pictures` | Upload the grayscale stat area after each game to help train the reader (no names, kept 30 days on the server). Off by default and not written while off. Not read by this build yet: nothing is uploaded |
 | `share_report_pictures` | Whether the stat-area pictures on a misread report start ticked. Off by default and not written while off. Not read by this build yet: reports send pictures as before |
-| `capture_only_on_screen` | The focus gate: on by default and not written while on. Settings has no switch for it yet: set `capture_only_on_screen = false` in `config.toml` to turn it off. Poll and Tab reads pause while another window is focused, and go on as soon as Overwatch is focused again; a short alt-tab pauses reads only and never ends or splits a game or session. The window counts as Overwatch when its app id or class is exactly `overwatch.exe` (Battle.net under Wine) or `steam_app_2357570` (Steam under Proton), ignoring case. When the tracker cannot tell which window is focused (no source for this desktop, an error, a timeout), capture goes on as before and the gate reports `unreadable` in the status file, a warning, logged once and then at most every 5 minutes. On KDE Plasma Wayland the active window is read through a small KWin script the tracker loads (and unloads at shutdown); if KWin refuses it, the gate is unreadable and capture goes on. `false` turns the gate off: the focused window is never read and reads go on whatever is focused. Restart the tracker after a change. See Platform requirements, Focus gate |
+| `capture_only_on_screen` | The focus gate: on by default and not written while on. Set it in the file or with **Only capture while Overwatch is in front** (Auto or Off) under Settings, Advanced, Capture and reading in the desktop app (tagged After restart). While a game runs, the desktop app's top bar shows it: Watching Overwatch, Capturing in any window (off), Paused while Overwatch isn't in front, or an amber Can't tell which window is in front that opens the setting. Poll and Tab reads pause while another window is focused, and go on as soon as Overwatch is focused again; a short alt-tab pauses reads only and never ends or splits a game or session. The window counts as Overwatch when its app id or class is exactly `overwatch.exe` (Battle.net under Wine) or `steam_app_2357570` (Steam under Proton), ignoring case. When the tracker cannot tell which window is focused (no source for this desktop, an error, a timeout), capture goes on as before and the gate reports `unreadable` in the status file, a warning, logged once and then at most every 5 minutes. On KDE Plasma Wayland the active window is read through a small KWin script the tracker loads (and unloads at shutdown); if KWin refuses it, the gate is unreadable and capture goes on. `false` turns the gate off: the focused window is never read and reads go on whatever is focused. Restart the tracker after a change. See Platform requirements, Focus gate |
 
 Example low-RAM (a config file must set `data_dir`; the default path is
 only used when there is no file at all, so copy your own path in):
@@ -724,8 +733,9 @@ gate: another window is focused, reads pause` once when that starts. If it
 pauses while Overwatch is in front, the game window's app id or class is not
 one the tracker knows (`overwatch.exe`, `steam_app_2357570`); please send a
 problem report with the id your desktop shows (for example `niri msg
---json focused-window`, or `xprop WM_CLASS` on X11), and set
-`capture_only_on_screen = false` in `config.toml` meanwhile. `focus gate: the
+--json focused-window`, or `xprop WM_CLASS` on X11), and choose Off
+for **Only capture while Overwatch is in front** in Settings (or set
+`capture_only_on_screen = false` in `config.toml`) meanwhile. `focus gate: the
 focused window cannot be read, reads go on` means the gate is unreadable on
 this desktop: capture works as without the gate. On KDE Plasma Wayland that
 line names why the KWin script did not load or report.

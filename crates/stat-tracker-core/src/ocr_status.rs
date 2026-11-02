@@ -589,7 +589,7 @@ pub struct Status {
     /// under the capture method in Settings.
     pub capture_notice: String,
     /// What the focus gate (`capture_only_on_screen`) last saw. The app
-    /// does not show it yet.
+    /// shows it in its top bar while a game runs.
     pub focus_gate: FocusGateStatus,
 }
 
