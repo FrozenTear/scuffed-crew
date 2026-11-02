@@ -1122,7 +1122,8 @@ mod tests {
             let mut tasks = Vec::new();
             // Interleave spawns so the pairs overlap in time.
             for _ in 0..16 {
-                for (p, (member, team)) in PAIRS.iter().enumerate() {
+                for (p, &(member, team)) in PAIRS.iter().enumerate() {
+                    // Copy the &'static str out so the task owns no borrow.
                     let db = db.clone();
                     tasks.push((
                         p,
