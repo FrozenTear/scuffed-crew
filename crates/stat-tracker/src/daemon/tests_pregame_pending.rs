@@ -531,3 +531,68 @@ fn entering_pregame_is_replaced_by_entering_game_before_the_start() {
         assert!(!run.tracker.holds_loading());
     }
 }
+
+/// An ENTERING PREGAME-like band, synthetic: on the navy loading band, two
+/// words of solid letters with small letter gaps and a wider word gap,
+/// the second word about 0.97 as wide as the first (8 and 7 letters),
+/// and with `spinner` a blob 0.012 of the width wide, 0.011 after the
+/// second word. The whole line is centred.
+fn pregame_band(w: u32, h: u32, spinner: bool) -> image::RgbImage {
+    use super::tests_loading_stand_ins::{navy_band, GLYPH};
+    let mut img = navy_band(w, h);
+    let px = |share: f32| (share * w as f32).round() as u32;
+    let (letter_gap, word_gap) = (px(0.0018), px(0.0055));
+    let (first, second) = (px(0.0645), px(0.0625));
+    let (spin_gap, spin) = (px(0.011), px(0.012));
+    let spin_part = if spinner { spin_gap + spin } else { 0 };
+    let line = first + word_gap + second + spin_part;
+    let (y0, y1) = (168 * h / 360, 192 * h / 360);
+    let mut fill = |x0: u32, width: u32| {
+        for y in y0..y1 {
+            for x in x0..x0 + width {
+                img.put_pixel(x, y, image::Rgb(GLYPH));
+            }
+        }
+    };
+    let mut x = (w - line) / 2;
+    for (word, letters) in [(first, 8u32), (second, 7)] {
+        let letter = (word - letter_gap * (letters - 1)) / letters;
+        for k in 0..letters {
+            fill(x + k * (letter + letter_gap), letter);
+        }
+        x += word + word_gap;
+    }
+    if spinner {
+        fill(x - word_gap + spin_gap, spin);
+    }
+    img
+}
+
+#[test]
+fn an_entering_pregame_like_band_is_turned_down_by_the_word_rule() {
+    // Two words of near equal width, as ENTERING PREGAME before the map
+    // vote: the word rule turns it down like APPLYING UPDATE, so it never
+    // fills the loading slot. A spinner after the words is left out.
+    use detect::loading_screen::{is_entering_game, is_loading_screen, text_box};
+    let want = PregameWant {
+        loading: true,
+        other_frame: true,
+        ..PregameWant::default()
+    };
+    let no = |_: &image::RgbImage| false;
+    for (w, h) in [(1920, 1080), (2560, 1440)] {
+        for spinner in [false, true] {
+            let band = pregame_band(w, h, spinner);
+            let at = format!("{w}x{h} spinner {spinner}");
+            // The band itself is the loading slab; only the text fails.
+            assert!(is_loading_screen(&band), "{at}");
+            let t = text_box(&band).expect("text");
+            assert_eq!(t.words, 2, "{at}: {t:?}");
+            let ratio = t.word_ratio.expect("two words");
+            assert!((ratio - 0.97).abs() < 0.03, "{at}: {t:?}");
+            assert!(!is_entering_game(&band), "{at}: {t:?}");
+            let seen = classify_with(want, &detect::GamePhase::Unknown, &band, no, no);
+            assert_eq!(seen, Seen::Other, "{at}");
+        }
+    }
+}
