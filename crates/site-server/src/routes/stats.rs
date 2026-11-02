@@ -23,7 +23,9 @@ use scuffed_types::{
     role_for_hero_name,
 };
 
-use crate::extractors::{DaemonUser, LimitedUploadDaemon, OfficerUser, OpaqueDaemonUser, OrgMember};
+use crate::extractors::{
+    DaemonUser, LimitedUploadDaemon, OfficerUser, OpaqueDaemonUser, OrgMember,
+};
 use crate::routes::audit_log::audit;
 use crate::routes::leaderboards::resolve_season_window;
 use crate::state::AppState;
