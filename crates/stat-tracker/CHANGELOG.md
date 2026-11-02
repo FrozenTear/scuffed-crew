@@ -15,6 +15,18 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+The opt-in screen saves around each game (the **Save screens around each game** switch, off by default) catch the roster and the ENTERING GAME loading screen more reliably. Nothing changes unless the switch is on, and the pictures still stay on this PC.
+
+### Highlights
+
+- New roster check: the two white TEAM header bars plus the coloured strips on the inner edges of the team columns, measured as shares of the screen, so it works at any resolution and for 5v5 and 6v6 without counting player rows.
+- The roster is checked before the other pre-game screens, so they no longer hide it, and it must show on two polls in a row (no missed poll between) before it is saved.
+- A loading screen or roster seen before the game's folder exists is kept and saved into the next game folder that opens, instead of being dropped when the map vote comes after it or the game start is slow.
+
+Technical detail. Roster rule: header bars searched from 0.15 to 0.31 of the height, left bar x 0.067 to 0.361, right bar x 0.64 to 0.93, at least 75 percent near-white rows, bar height 0.02 to 0.065 of the height, clean (non-white) above, below, between and outside the bars, header score at least 0.25; colour strips at x 0.386 to 0.404 and 0.596 to 0.614 under the header, at least 0.30 of their pixels with chroma (max minus min channel) over 55. Both parts must pass; the old bans and map banner parts are gone. Pending slot: the latest loading frame is held in memory (the one frame the saver already held for it) and the latest roster frame seen with no game folder is staged on disk as a hidden `.pending/.roster.png.staged`; each is saved into the next game folder at its first pre-game read (a map vote, hero ban or hero select, not a hero select between rounds; a loading frame saved at a map vote is replaced by a later pass before the game start), counts in the 20-game limit like any other screen, and is dropped (the staged file deleted) after 3 minutes with no game folder, when the game closes or capture stops, and at shutdown. The loading and roster checks now also run with no game folder open, for this slot. The 20 second wait for the game start after the loading screen is gone. Not yet checked on real frames from more PCs, other UI scales or colourblind filters.
+
 ## 0.6.0-alpha.1.4
 
 This alpha improves the opt-in screen saves around each game (the **Save screens around each game** switch, off by default). The tracker now saves the ENTERING GAME loading screen and the roster and map screen as two separate pictures, keeps the frames it nearly saved so the checks can be tuned, and labels real Victory and Defeat titles after a match as the end title. Nothing changes unless the switch is on.

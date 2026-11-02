@@ -14,7 +14,8 @@ pub(super) struct RosterOnScreen {
 }
 
 impl<F: Clone> PregameTracker<F> {
-    /// The roster screen: its first frame in a game is saved as
+    /// The roster screen, once accepted (`accepted`: [`ROSTER_SAMPLES`] roster
+    /// samples in a row): its first frame in a game is saved as
     /// [`ROSTER_NAME`], each later one staged as [`ROSTER_LAST_NAME`]
     /// (replacing the one before), and the staged one saved when the screen
     /// ends: at a phase read, or a frame that is no roster
@@ -29,6 +30,7 @@ impl<F: Clone> PregameTracker<F> {
         &mut self,
         now: Instant,
         seen: Seen,
+        accepted: bool,
         frame: Option<F>,
         shots: &mut Vec<PregameOp<F>>,
     ) {
@@ -39,12 +41,25 @@ impl<F: Clone> PregameTracker<F> {
         {
             self.end_roster(shots);
         }
-        if seen != Seen::Roster || self.game_open(now).is_none() {
+        if seen != Seen::Roster {
+            return;
+        }
+        // A roster sample not accepted yet ([`ROSTER_SAMPLES`]) still keeps
+        // the screen on.
+        if let Some(r) = self.roster.as_mut() {
+            r.last_at = now;
+        }
+        if !accepted {
             return;
         }
         let Some(frame) = frame else {
             return;
         };
+        if self.game_open(now).is_none() {
+            // No game folder yet: held for the next one ([`super::pending`]).
+            self.stage_pending_roster(now, frame, shots);
+            return;
+        }
         match (self.roster.as_mut(), self.game.as_ref()) {
             (Some(r), _) => {
                 r.last_at = now;

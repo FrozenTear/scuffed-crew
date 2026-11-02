@@ -96,6 +96,7 @@ impl Run {
                 PregameOp::Discard { folder, name } => {
                     self.staged.retain(|(f, n, _)| (f, *n) != (&folder, name));
                 }
+                PregameOp::Adopt { folder, name } => self.adopt(folder, name),
             }
         }
         let held = self
@@ -188,8 +189,8 @@ fn each_phase_saves_its_first_and_last_frame_once() {
     run.tick(11_000, Seen::Loading, 12);
     run.tick(12_000, Seen::Loading, 13);
     run.tick(13_000, Seen::Other, 14);
-    // No hero ban or select read within 20 s: the game did not start after
-    // the loading screen, so its held frame is dropped.
+    // No pre-game read after the loading screen: its held frame waits in
+    // the pending slot and is never saved here.
     run.tick(33_000, Seen::Other, 15);
     assert_eq!(
         run.names(),
@@ -571,23 +572,24 @@ fn a_new_game_gets_a_new_folder() {
 }
 
 #[test]
-fn no_frame_is_kept_or_checked_outside_a_pre_game() {
+fn outside_a_pre_game_only_the_pending_slot_looks() {
     let mut run = Run::new();
-    assert_eq!(run.tracker.want(run.start), PregameWant::default());
+    let want = run.tracker.want(run.start);
+    assert!(want.loading && want.roster && !want.ban_title, "{want:?}");
     run.tick(0, Seen::Loading, 1);
     run.tick(1_000, Seen::Other, 2);
-    assert!(run.shots.is_empty());
-    assert!(run.made.is_empty(), "no frame handed over outside a game");
+    assert!(run.shots.is_empty(), "held, no folder yet");
     run.tick(2_000, VOTE, 3);
     run.tick(3_000, Seen::Loading, 4);
     run.tick(4_500, SELECT, 5);
-    // Loading saved: nothing more is wanted from other screens.
     assert_eq!(run.tracker.want(run.at(17_000)), PregameWant::default());
     let later = (PREGAME_GAME_GAP + Duration::from_secs(10)).as_millis() as u64;
     run.tick(later, Seen::Loading, 6);
+    assert!(run.tracker.holds_loading());
     assert_eq!(
         run.names(),
         [
+            ("loading.png", 1),
             ("mapvote_first.png", 3),
             ("loading.png", 4),
             ("heroselect_first.png", 5)
@@ -673,7 +675,7 @@ fn the_hero_select_between_rounds_writes_nothing() {
     run.tick(0, VOTE, 1);
     run.tick(5_000, SELECT, 2);
     run.tick(6_000, SELECT, 3);
-    // No hero ban or select read within 20 s after it: dropped.
+    // Held; a select back late (between rounds) takes nothing.
     run.tick(8_000, Seen::Loading, 4);
     run.tick(10_000, Seen::Other, 5);
     // A short first round, then the select again, inside the game window.

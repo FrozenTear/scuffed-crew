@@ -1,0 +1,435 @@
+//! Tests for the pending slot of the pre-game saves (`pregame_dump/pending.rs`):
+//! the loading and roster frames seen before their game folder opens, the
+//! two-sample roster rule, the slot's window, and its files on disk.
+//! Synthetic frames only.
+
+use super::pregame_dump::*;
+use super::tests_pregame_dump::Run;
+use crate::*;
+
+const VOTE: Seen = Seen::Phase(PregamePhase::MapVote);
+const BAN: Seen = Seen::Phase(PregamePhase::HeroBan);
+const SELECT: Seen = Seen::Phase(PregamePhase::HeroSelect);
+
+impl Run {
+    /// [`PregameOp::Adopt`] on the disk model: the frame staged in the
+    /// pending folder moves into `folder`, saved. Nothing staged, nothing
+    /// moves.
+    pub(crate) fn adopt(&mut self, folder: String, name: &'static str) {
+        let pending = |(f, n, _): &(String, &str, u32)| f == PENDING_DIR && *n == name;
+        if let Some(at) = self.staged.iter().position(pending) {
+            let (_, _, frame) = self.staged.remove(at);
+            self.shots.push((folder, name, frame));
+        }
+    }
+
+    /// The saved files as (folder, name, frame), rejected ones left out.
+    fn files(&self) -> Vec<(&str, &str, u32)> {
+        self.shots
+            .iter()
+            .filter(|(_, n, _)| !n.starts_with("rejected_"))
+            .map(|(f, n, frame)| (f.as_str(), *n, *frame))
+            .collect()
+    }
+
+    fn staged_pending(&self) -> Vec<u32> {
+        self.staged
+            .iter()
+            .filter(|(f, n, _)| f == PENDING_DIR && *n == ROSTER_NAME)
+            .map(|(_, _, frame)| *frame)
+            .collect()
+    }
+}
+
+fn window_ms() -> u64 {
+    PENDING_WINDOW.as_millis() as u64
+}
+
+#[test]
+fn a_loading_frame_before_the_map_vote_is_saved_in_the_votes_folder() {
+    let mut run = Run::new();
+    run.tick(0, Seen::Loading, 1);
+    run.tick(1_500, Seen::Other, 0);
+    assert!(run.tracker.holds_loading());
+    assert!(run.shots.is_empty());
+    // The map vote after it opens the folder and takes it.
+    run.tick(3_000, VOTE, 2);
+    run.tick(6_000, BAN, 3);
+    assert_eq!(
+        run.files(),
+        [
+            ("game1", LOADING_NAME, 1),
+            ("game1", "mapvote_first.png", 2),
+            ("game1", "heroban_first.png", 3),
+        ]
+    );
+    assert!(!run.tracker.holds_loading());
+}
+
+#[test]
+fn a_pass_before_the_vote_never_shuts_out_the_games_own_loading_screen() {
+    // An older pass (the last match, an update band) is saved at the vote;
+    // the game's ENTERING GAME after the vote replaces it at the start.
+    let mut run = Run::new();
+    run.tick(0, Seen::Loading, 1);
+    run.tick(3_000, VOTE, 2);
+    run.tick(6_000, Seen::Loading, 3);
+    run.tick(7_500, Seen::Loading, 4);
+    run.tick(9_000, BAN, 5);
+    assert_eq!(run.written_in("game1", LOADING_NAME), [1, 4]);
+    // Saved at the start: no more passes are wanted in this game.
+    run.tick(10_500, Seen::Loading, 6);
+    run.tick(12_000, SELECT, 7);
+    assert_eq!(run.written_in("game1", LOADING_NAME), [1, 4]);
+}
+
+#[test]
+fn a_roster_sample_after_a_missed_poll_starts_the_count_again() {
+    // Two roster samples with no tick fed between them for more than one
+    // and a half poll intervals are not in a row.
+    let mut run = Run::new();
+    run.tick(0, Seen::Roster, 1);
+    run.tick(3_000, Seen::Roster, 2);
+    assert!(!run.tracker.holds_pending_roster());
+    run.tick(4_500, Seen::Roster, 3);
+    assert_eq!(run.staged_pending(), [3]);
+}
+
+#[test]
+fn a_dropped_pending_stage_empties_the_slot() {
+    let mut run = Run::new();
+    run.tick(0, Seen::Roster, 1);
+    run.tick(1_500, Seen::Roster, 2);
+    // The writer's queue was full: that stage never reached the disk.
+    run.tracker.stage_lost(ROSTER_NAME);
+    assert!(!run.tracker.holds_pending_roster());
+    run.tick(3_000, Seen::Other, 0);
+    run.tick(6_000, VOTE, 3);
+    assert_eq!(run.written_in("game1", ROSTER_NAME), Vec::<u32>::new());
+}
+
+#[test]
+fn a_loading_frame_survives_the_old_twenty_second_wait() {
+    // In an open game: the start read 30 s after the last pass.
+    let mut run = Run::new();
+    run.tick(0, VOTE, 1);
+    run.tick(2_000, Seen::Loading, 2);
+    for ms in (3_500..=30_500).step_by(1_500) {
+        run.tick(ms, Seen::Other, 0);
+    }
+    assert!(run.tracker.holds_loading(), "held past 20 s");
+    run.tick(32_000, BAN, 3);
+    assert_eq!(run.written_in("game1", LOADING_NAME), [2]);
+    // With no game open: the vote a minute later still takes it.
+    let mut run = Run::new();
+    run.tick(0, Seen::Loading, 1);
+    run.tick(60_000, VOTE, 2);
+    assert_eq!(run.written_in("game1", LOADING_NAME), [1]);
+}
+
+#[test]
+fn a_roster_before_any_game_folder_is_attached_when_the_folder_opens() {
+    let mut run = Run::new();
+    run.tick(0, Seen::Roster, 1);
+    assert!(
+        !run.tracker.holds_pending_roster(),
+        "one sample is not enough"
+    );
+    run.tick(1_500, Seen::Roster, 2);
+    assert!(run.tracker.holds_pending_roster());
+    assert_eq!(run.staged_pending(), [2]);
+    // Each later roster frame replaces the staged one; nothing in memory.
+    run.tick(3_000, Seen::Roster, 3);
+    assert_eq!(run.staged_pending(), [3]);
+    assert!(!run.tracker.holds_frame());
+    run.tick(4_500, Seen::Other, 0);
+    assert!(run.shots.is_empty());
+    run.tick(9_000, VOTE, 4);
+    assert_eq!(
+        run.files(),
+        [("game1", ROSTER_NAME, 3), ("game1", "mapvote_first.png", 4),]
+    );
+    assert!(run.staged.is_empty(), "{:?}", run.staged);
+    assert!(!run.tracker.holds_pending_roster());
+    // The next game folder gets nothing more from the slot.
+    run.tick(
+        9_000 + PREGAME_GAME_GAP.as_millis() as u64 + 10_000,
+        VOTE,
+        5,
+    );
+    assert_eq!(run.written_in("game2", ROSTER_NAME), Vec::<u32>::new());
+}
+
+#[test]
+fn roster_and_loading_frames_are_held_apart() {
+    // Either order: each is saved under its own name, neither replaces
+    // the other.
+    for roster_first in [true, false] {
+        let mut run = Run::new();
+        if roster_first {
+            run.tick(0, Seen::Roster, 10);
+            run.tick(1_500, Seen::Roster, 11);
+            run.tick(4_500, Seen::Loading, 20);
+        } else {
+            run.tick(0, Seen::Loading, 20);
+            run.tick(1_500, Seen::Roster, 10);
+            run.tick(3_000, Seen::Roster, 11);
+        }
+        run.tick(9_000, VOTE, 30);
+        let mut files = run.files();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                ("game1", LOADING_NAME, 20),
+                ("game1", "mapvote_first.png", 30),
+                ("game1", ROSTER_NAME, 11),
+            ],
+            "roster first {roster_first}"
+        );
+    }
+}
+
+#[test]
+fn a_roster_needs_two_samples_in_a_row() {
+    // With no game: a gap after each single sample starts the count again.
+    let mut run = Run::new();
+    for k in 0..4u64 {
+        run.tick(3_000 * k, Seen::Roster, 1);
+        run.tick(3_000 * k + 1_500, Seen::Other, 0);
+    }
+    assert!(!run.tracker.holds_pending_roster());
+    assert!(run.staged.is_empty());
+    // In a game: the same, then two in a row are accepted.
+    let mut run = Run::new();
+    run.tick(0, VOTE, 1);
+    run.tick(3_000, BAN, 2);
+    run.tick(6_000, Seen::Roster, 3);
+    run.tick(7_500, Seen::BanResults, 0);
+    run.tick(9_000, Seen::Roster, 4);
+    run.tick(10_500, Seen::Other, 0);
+    assert_eq!(run.written_in("game1", ROSTER_NAME), Vec::<u32>::new());
+    run.tick(12_000, Seen::Roster, 5);
+    run.tick(13_500, Seen::Roster, 6);
+    run.tick(15_000, SELECT, 7);
+    assert_eq!(run.written_in("game1", ROSTER_NAME), [6]);
+}
+
+#[test]
+fn the_pending_slot_drops_its_frames_after_its_window() {
+    let mut run = Run::new();
+    run.tick(0, Seen::Roster, 1);
+    run.tick(1_500, Seen::Roster, 2);
+    run.tick(3_000, Seen::Loading, 3);
+    // Inside the window both are still held.
+    run.tick(window_ms(), Seen::Other, 0);
+    assert!(run.tracker.holds_pending_roster() && run.tracker.holds_loading());
+    // Past it: the loading frame is let go, the staged roster deleted.
+    run.tick(3_000 + window_ms() + 1_500, Seen::Other, 0);
+    assert!(!run.tracker.holds_pending_roster());
+    assert!(!run.tracker.holds_loading());
+    assert!(run.staged.is_empty(), "{:?}", run.staged);
+    // A game folder after that gets neither.
+    run.tick(3_000 + window_ms() + 3_000, VOTE, 4);
+    assert_eq!(run.files(), [("game1", "mapvote_first.png", 4)]);
+}
+
+#[test]
+fn a_release_drops_the_pending_slot() {
+    let mut run = Run::new();
+    run.tick(0, Seen::Roster, 1);
+    run.tick(1_500, Seen::Roster, 2);
+    run.tick(3_000, Seen::Loading, 3);
+    run.release(4_500);
+    assert!(!run.tracker.holds_pending_roster());
+    assert!(!run.tracker.holds_frame());
+    assert!(run.staged.is_empty(), "{:?}", run.staged);
+    // The roster count starts again after a release.
+    run.tick(6_000, Seen::Roster, 4);
+    assert!(!run.tracker.holds_pending_roster());
+    run.tick(10_000, VOTE, 5);
+    assert_eq!(run.files(), [("game1", "mapvote_first.png", 5)]);
+}
+
+#[test]
+fn a_lone_hero_select_with_no_game_does_not_take_the_slot() {
+    // The select between rounds opens no folder: the slot waits for one.
+    let mut run = Run::new();
+    run.tick(0, Seen::Loading, 1);
+    run.tick(3_000, SELECT, 2);
+    assert!(run.tracker.holds_loading());
+    assert!(run.shots.is_empty());
+    run.tick(6_000, BAN, 3);
+    assert_eq!(run.written_in("game1", LOADING_NAME), [1]);
+}
+
+impl Run {
+    /// The frames saved as `name` in `folder`, in order.
+    fn written_in(&self, folder: &str, name: &str) -> Vec<u32> {
+        self.shots
+            .iter()
+            .filter(|(f, n, _)| f == folder && *n == name)
+            .map(|(_, _, frame)| *frame)
+            .collect()
+    }
+}
+
+// The pending files on disk, through the real write ops.
+
+fn frame(w: u32) -> Arc<image::DynamicImage> {
+    Arc::new(image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+        w,
+        4,
+        image::Rgb([40, 60, 200]),
+    )))
+}
+
+fn stage_pending(w: u32) -> PregameOp<Arc<image::DynamicImage>> {
+    PregameOp::Stage(PregameShot {
+        folder: PENDING_DIR.to_string(),
+        name: ROSTER_NAME,
+        frame: frame(w),
+    })
+}
+
+fn adopt(folder: &str) -> PregameOp<Arc<image::DynamicImage>> {
+    PregameOp::Adopt {
+        folder: folder.to_string(),
+        name: ROSTER_NAME,
+    }
+}
+
+fn pending_file(root: &std::path::Path) -> std::path::PathBuf {
+    root.join(PENDING_DIR).join(staged_name(ROSTER_NAME))
+}
+
+#[test]
+fn a_pending_roster_is_staged_apart_and_moved_into_the_game_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut made = Vec::new();
+    write_pregame_ops(root, &[stage_pending(8), stage_pending(9)], 20, &mut made);
+    assert!(pending_file(root).is_file());
+    // The pending folder is no game folder: not in the made order.
+    assert!(made.is_empty(), "{made:?}");
+    let game = "20261102_120000";
+    write_pregame_ops(root, &[adopt(game)], 20, &mut made);
+    assert!(!pending_file(root).exists());
+    let saved = image::open(root.join(game).join(ROSTER_NAME)).unwrap();
+    assert_eq!(saved.width(), 9, "the latest staged frame");
+    assert_eq!(made, [game]);
+}
+
+#[test]
+fn an_adopt_with_nothing_staged_makes_no_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut made = Vec::new();
+    write_pregame_ops(dir.path(), &[adopt("20261102_120000")], 20, &mut made);
+    assert!(!dir.path().join("20261102_120000").exists());
+    assert!(made.is_empty());
+}
+
+#[test]
+fn a_dropped_pending_roster_leaves_no_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let mut made = Vec::new();
+    let discard = PregameOp::Discard {
+        folder: PENDING_DIR.to_string(),
+        name: ROSTER_NAME,
+    };
+    write_pregame_ops(root, &[stage_pending(8), discard], 20, &mut made);
+    assert!(!pending_file(root).exists());
+    // A run that ended with one staged: the sweep at start deletes it, a
+    // new game folder's sweep does not (the slot may still attach it).
+    write_pregame_ops(root, &[stage_pending(8)], 20, &mut made);
+    sweep_staged(root, Some("20261102_120000"));
+    assert!(pending_file(root).is_file());
+    sweep_staged(root, None);
+    assert!(!pending_file(root).exists());
+    assert!(!root.join(PENDING_DIR).exists(), "emptied, then removed");
+}
+
+#[test]
+fn an_attached_pending_roster_counts_in_the_game_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let keep = PREGAME_KEEP_GAMES;
+    let mut made: Vec<String> = (0..keep).map(|i| format!("20260101_0000{i:02}")).collect();
+    for name in &made {
+        std::fs::create_dir_all(root.join(name)).unwrap();
+        std::fs::write(root.join(name).join("mapvote_first.png"), b"x").unwrap();
+    }
+    let game = "20261102_120000";
+    write_pregame_ops(root, &[stage_pending(8), adopt(game)], keep, &mut made);
+    let mut games: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| is_game_folder(n))
+        .collect();
+    games.sort();
+    assert_eq!(games.len(), keep, "{games:?}");
+    assert!(
+        !games.contains(&"20260101_000000".to_string()),
+        "oldest gone"
+    );
+    assert_eq!(games.last().map(String::as_str), Some(game));
+    assert!(root.join(game).join(ROSTER_NAME).is_file());
+}
+
+#[test]
+fn the_roster_is_checked_before_the_other_screens() {
+    // A frame every check passes: the roster comes out, and with the
+    // roster not wanted the select title does.
+    let roster = roster_frame(1920, 1080);
+    assert!(detect::roster_screen::is_roster_screen(&roster));
+    let want = PregameWant {
+        loading: true,
+        other_frame: true,
+        select_title: true,
+        ban_title: true,
+        roster: true,
+        rejected: 0,
+    };
+    let unknown = detect::GamePhase::Unknown;
+    let yes = |_: &image::RgbImage| true;
+    assert_eq!(
+        classify_with(want, &unknown, &roster, yes, yes),
+        Seen::Roster
+    );
+    let no_roster = PregameWant {
+        roster: false,
+        ..want
+    };
+    assert_eq!(
+        classify_with(no_roster, &unknown, &roster, yes, yes),
+        Seen::SelectTitle
+    );
+    // A phase read still comes first.
+    assert_eq!(
+        classify_with(want, &detect::GamePhase::HeroSelect, &roster, yes, yes),
+        SELECT
+    );
+}
+
+/// A plain 5v5 roster layout: the two white header bars and the coloured
+/// strips on the columns' inner edges under them, on a dim backdrop.
+fn roster_frame(w: u32, h: u32) -> image::RgbImage {
+    let mut img = image::RgbImage::from_pixel(w, h, image::Rgb([60, 70, 90]));
+    let mut fill = |b: [f32; 4], c: [u8; 3]| {
+        let (x0, y0) = ((b[0] * w as f32) as u32, (b[1] * h as f32) as u32);
+        let (x1, y1) = ((b[2] * w as f32) as u32, (b[3] * h as f32) as u32);
+        for y in y0..y1.min(h) {
+            for x in x0..x1.min(w) {
+                img.put_pixel(x, y, image::Rgb(c));
+            }
+        }
+    };
+    fill([0.0676, 0.236, 0.4059, 0.278], [247, 246, 246]);
+    fill([0.5938, 0.236, 0.9324, 0.278], [247, 246, 246]);
+    fill([0.3801, 0.284, 0.4059, 0.75], [107, 22, 145]);
+    fill([0.5938, 0.284, 0.6195, 0.75], [255, 210, 4]);
+    img
+}
