@@ -105,6 +105,13 @@ impl Run {
                 PregameOp::Discard { folder, name } => {
                     self.staged.retain(|(f, n, _)| (f, *n) != (&folder, name));
                 }
+                PregameOp::Adopt { folder, name } => {
+                    let pending = |(f, n, _): &(String, &str, u32)| f == PENDING_DIR && *n == name;
+                    if let Some(at) = self.staged.iter().position(pending) {
+                        let (_, _, frame) = self.staged.remove(at);
+                        self.shots.push((folder, name, frame));
+                    }
+                }
             }
         }
         let held = self
@@ -134,10 +141,10 @@ impl Run {
     }
 }
 
-/// A roster near miss: one part passed.
+/// A roster near miss: the header passed, the colour strips did not.
 fn roster_miss() -> Classified {
     let scores = detect::roster_screen::RosterScores {
-        map_logo: 0.2,
+        header: 0.6,
         ..Default::default()
     };
     assert!(scores.near_miss());
@@ -183,7 +190,8 @@ fn loading_ban_results_and_roster_are_separate_files() {
             ("loading.png", 2),
             ("heroban_first.png", 3),
             ("heroban_last.png", 4),
-            ("roster.png", 6),
+            // The first roster sample is not accepted yet.
+            ("roster.png", 7),
             ("roster_last.png", 8),
             ("ban_results.png", 5),
             ("heroselect_first.png", 9),
@@ -197,8 +205,10 @@ fn a_game_with_no_loading_screen_still_saves_its_roster() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
     run.tick(20_000, BAN, 3);
-    run.tick(23_000, Seen::Roster, 6);
-    run.tick(24_500, SELECT, 9);
+    run.tick(21_500, Seen::Other, 0);
+    run.tick(23_000, Seen::Roster, 5);
+    run.tick(24_500, Seen::Roster, 6);
+    run.tick(26_000, SELECT, 9);
     let names: Vec<&str> = run.names().iter().map(|(n, _)| *n).collect();
     assert!(names.contains(&ROSTER_NAME), "{names:?}");
     assert!(!names.contains(&LOADING_NAME), "{names:?}");
@@ -222,16 +232,21 @@ fn the_roster_is_saved_once_per_game_and_not_looked_for_after_the_select() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
     run.tick(3_000, BAN, 2);
+    run.tick(4_500, Seen::Other, 0);
     run.tick(6_000, Seen::Roster, 3);
-    // A flicker of the layout check inside ROSTER_GONE: the screen goes on.
-    run.tick(7_500, Seen::Other, 0);
-    run.tick(9_000, Seen::Roster, 4);
-    run.tick(10_500, SELECT, 5);
-    assert_eq!(run.written(ROSTER_NAME), vec![3]);
-    assert_eq!(run.written(ROSTER_LAST_NAME), vec![4]);
-    assert!(!run.tracker.want(run.at(12_000)).roster);
+    run.tick(7_500, Seen::Roster, 4);
+    // A flicker of the layout check inside ROSTER_GONE: the screen goes on,
+    // and the next roster sample alone is not accepted.
+    run.tick(9_000, Seen::Other, 0);
+    run.tick(10_500, Seen::Roster, 5);
     run.tick(12_000, Seen::Roster, 6);
-    assert_eq!(run.written(ROSTER_NAME), vec![3]);
+    run.tick(13_500, SELECT, 7);
+    assert_eq!(run.written(ROSTER_NAME), vec![4]);
+    assert_eq!(run.written(ROSTER_LAST_NAME), vec![6]);
+    assert!(!run.tracker.want(run.at(15_000)).roster);
+    run.tick(15_000, Seen::Roster, 8);
+    run.tick(16_500, Seen::Roster, 9);
+    assert_eq!(run.written(ROSTER_NAME), vec![4]);
 }
 
 #[test]
@@ -239,34 +254,40 @@ fn the_roster_ends_after_a_gap_with_no_roster_frame() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
     run.tick(3_000, BAN, 2);
+    run.tick(4_500, Seen::Other, 0);
     run.tick(6_000, Seen::Roster, 3);
     run.tick(7_500, Seen::Roster, 4);
-    run.tick(9_000, Seen::Other, 0);
+    run.tick(9_000, Seen::Roster, 5);
+    run.tick(10_500, Seen::Other, 0);
     assert!(
         run.written(ROSTER_LAST_NAME).is_empty(),
         "still within the gap"
     );
-    run.tick(12_000, Seen::Other, 0);
-    assert_eq!(run.written(ROSTER_LAST_NAME), vec![4]);
-    assert!(!run.tracker.want(run.at(13_500)).roster);
+    run.tick(13_500, Seen::Other, 0);
+    assert_eq!(run.written(ROSTER_LAST_NAME), vec![5]);
+    assert!(!run.tracker.want(run.at(15_000)).roster);
 }
 
 #[test]
 fn a_release_saves_the_staged_roster_frame() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
-    run.tick(3_000, Seen::Roster, 3);
-    run.tick(4_500, Seen::Roster, 4);
-    run.release(5_000);
+    run.tick(1_500, Seen::Other, 0);
+    run.tick(3_000, Seen::Roster, 2);
+    run.tick(4_500, Seen::Roster, 3);
+    run.tick(6_000, Seen::Roster, 4);
+    run.release(6_500);
+    assert_eq!(run.written(ROSTER_NAME), vec![3]);
     assert_eq!(run.written(ROSTER_LAST_NAME), vec![4]);
     assert!(!run.tracker.holds_frame());
 }
 
 #[test]
-fn no_roster_is_looked_for_outside_a_pre_game() {
+fn outside_a_pre_game_the_roster_is_looked_for_but_no_reject_kept() {
+    // For the pending slot; a turned-down candidate has no folder to go to.
     let run = Run::new();
     let want = run.tracker.want(run.at(0));
-    assert!(!want.roster && want.rejected == 0);
+    assert!(want.roster && want.rejected == 0);
 }
 
 #[test]
@@ -304,16 +325,12 @@ fn no_turned_down_frame_is_kept_outside_a_pre_game() {
 }
 
 #[test]
-fn a_held_loading_frame_dropped_for_no_game_start_is_kept_as_rejected() {
+fn a_held_loading_frame_dropped_at_a_release_is_kept_as_rejected() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
     run.tick(3_000, Seen::Loading, 2);
-    // No hero ban or select within LOADING_START_WAIT.
-    run.tick(
-        3_000 + LOADING_START_WAIT.as_millis() as u64 + 1_500,
-        Seen::Other,
-        0,
-    );
+    // The game closes before any hero ban or select.
+    run.release(4_500);
     assert!(!run.tracker.holds_loading());
     assert!(run.written(LOADING_NAME).is_empty());
     assert_eq!(run.written(RejectLabel::Loading.file_name()), vec![2]);

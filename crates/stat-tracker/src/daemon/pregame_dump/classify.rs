@@ -65,8 +65,10 @@ pub(crate) fn classify_with(
 
 /// [`classify_with`] with the ban-results title's numbers, and the numbers
 /// of each check it turned down ([`Rejects`]). The roster layout check
-/// ([`detect::roster_screen`]) runs last, only when `want.roster`: the
-/// ban-results title, a select title or the loading screen comes first.
+/// ([`detect::roster_screen`]) runs first after the phase, only when
+/// `want.roster`, so the loading screen, a select title or the ban-results
+/// title never shadows it; its rule needs the white team headers and the
+/// coloured column edges, which none of those screens has.
 pub(crate) fn classify_checked_with(
     want: PregameWant,
     phase: &detect::GamePhase,
@@ -78,6 +80,17 @@ pub(crate) fn classify_checked_with(
         return Seen::Phase(p).into();
     }
     let mut rejects = Rejects::default();
+    // The roster first, so no other check's pass shadows it (the ban
+    // results title rule, say, on the roster's bans).
+    if want.roster {
+        let scores = detect::roster_screen::scores(rgb);
+        if scores.is_roster() {
+            return Seen::Roster.into();
+        }
+        if scores.near_miss() {
+            rejects.roster = Some(scores);
+        }
+    }
     // [`detect::loading_screen::is_entering_game`], with its numbers kept
     // for a frame that passes the slab and fails the text.
     if want.loading && detect::loading_screen::is_loading_screen(rgb) {
@@ -101,18 +114,6 @@ pub(crate) fn classify_checked_with(
         // A near miss only: a roster or plain frame in the wait is no
         // ban-results candidate.
         rejects.ban_results = Some(check).filter(|c| c.near_miss());
-    }
-    if want.roster {
-        let scores = detect::roster_screen::scores(rgb);
-        if scores.is_roster() {
-            return Classified {
-                seen: Seen::Roster,
-                rejects,
-            };
-        }
-        if scores.near_miss() {
-            rejects.roster = Some(scores);
-        }
     }
     Classified {
         seen: Seen::Other,

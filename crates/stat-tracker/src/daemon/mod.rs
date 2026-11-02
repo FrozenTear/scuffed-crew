@@ -42,11 +42,15 @@ mod tests_pregame_ban_title;
 #[cfg(test)]
 mod tests_pregame_dump;
 #[cfg(test)]
+mod tests_pregame_pending;
+#[cfg(test)]
 mod tests_pregame_reveal;
 #[cfg(test)]
 mod tests_pregame_roster;
 #[cfg(test)]
 mod tests_pregame_staging;
+#[cfg(test)]
+mod tests_pregame_tick;
 #[cfg(test)]
 mod tests_query_server;
 #[cfg(test)]

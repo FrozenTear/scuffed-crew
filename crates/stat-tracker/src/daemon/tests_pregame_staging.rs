@@ -426,22 +426,22 @@ fn kept(folders: &[Folder], want: &image::RgbImage) {
 }
 
 #[tokio::test]
-async fn an_update_band_then_the_menu_past_twenty_seconds_saves_no_loading() {
+async fn an_update_band_then_the_menu_then_a_release_saves_no_loading() {
     // The band is held, then the menu for 21 s, then the game closes: the
-    // game never started, so the band is dropped at 23 s.
+    // game never started, so the band is dropped at the release.
     let mut steps = vec![frame_step(2_000, update_band())];
     for ms in (3_500..=23_000).step_by(1_500) {
         steps.push(frame_step(ms, plain()));
     }
     steps.push((24_500, Step::Release));
     nothing_kept(&loading_run(steps).await);
-    // Chosen: a start read more than 20 s after the last pass, with no
-    // tick between, is too late too (the loading screen is long over).
+    // The pending slot: a start read more than 20 s after the last pass,
+    // with no tick between, still saves it.
     let steps = vec![
         frame_step(2_000, update_band()),
         phase_step(22_500, PregamePhase::HeroBan),
     ];
-    nothing_kept(&loading_run(steps).await);
+    kept(&loading_run(steps).await, &update_band().0);
 }
 
 #[tokio::test]
@@ -470,10 +470,12 @@ async fn an_update_band_then_the_game_closing_saves_no_loading() {
 }
 
 #[tokio::test]
-async fn a_requeue_vote_after_an_update_band_drops_it() {
+async fn a_requeue_vote_after_an_update_band_takes_it() {
     // The band 11 s after the vote, then the vote again 2 s later: a
-    // requeue (back after more than 12 s), the next game. The band is
-    // saved in neither folder; the next game's own loading screen is.
+    // requeue (back after more than 12 s), the next game. The pending slot
+    // keeps the band through the vote and saves it in the next game's
+    // folder, and that game's own ENTERING GAME is saved over it at the
+    // ban.
     let steps = vec![
         frame_step(11_000, update_band()),
         (12_000, Step::Folders(1)),
@@ -487,8 +489,7 @@ async fn a_requeue_vote_after_an_update_band_drops_it() {
     assert!(folders[0].files.iter().all(|f| !f.starts_with('.')));
     assert!(folders[1].loading.as_ref() == Some(&entering_game_slab(1280, 720)));
     assert!(folders[1].files.iter().all(|f| !f.starts_with('.')));
-    // The tracker drops the band itself at the vote, writing nothing for
-    // it.
+    // The tracker saves the band at the vote, in the new game's folder.
     let mut run = Run::new();
     run.tick(0, Seen::Phase(PregamePhase::MapVote), 1);
     run.tick(11_000, Seen::Loading, 2);
@@ -497,7 +498,8 @@ async fn a_requeue_vote_after_an_update_band_drops_it() {
     assert_eq!(run.games, 2);
     assert!(!run.tracker.holds_loading());
     assert!(run.staged.is_empty(), "{:?}", run.staged);
-    assert!(run.names().iter().all(|(n, _)| *n != LOADING_NAME));
+    let loading: Vec<_> = run.shots.iter().filter(|s| s.1 == LOADING_NAME).collect();
+    assert_eq!(loading, [&("game2".to_string(), LOADING_NAME, 2)]);
 }
 
 #[tokio::test]
@@ -516,7 +518,7 @@ async fn an_update_band_then_entering_game_then_the_select_saves_entering_game()
 
 // Known limit: an update band that passes the check (not rejected by the
 // word-ratio rule) and is never replaced by an ENTERING GAME frame is saved
-// as loading.png when a ban or select read follows within 20 s. Pinned so a
+// as loading.png when a ban or select read follows. Pinned so a
 // change is deliberate.
 #[tokio::test]
 async fn known_limit_an_update_band_with_no_entering_game_frame_is_saved_when_the_game_starts() {
@@ -630,9 +632,10 @@ async fn entering_game_saves_its_last_pass_when_the_game_starts() {
 }
 
 #[tokio::test]
-async fn entering_game_after_a_dropped_update_band_is_still_saved() {
-    // The band is dropped at 23 s (no start in 20 s); the loading screen
-    // is still looked for, so ENTERING GAME after it is held and saved.
+async fn entering_game_after_a_long_held_update_band_is_still_saved() {
+    // The band is still held at 23 s (no start in 20 s); the loading
+    // screen is still looked for, so ENTERING GAME after it replaces it
+    // and is saved.
     let mut steps = vec![frame_step(2_000, update_band())];
     for ms in (3_500..=23_000).step_by(1_500) {
         steps.push(frame_step(ms, plain()));
@@ -743,22 +746,14 @@ fn dump_holds_loading(dump: &PregameDump) -> bool {
 #[tokio::test]
 async fn a_dropped_loading_frame_writes_nothing() {
     // Each way a held loading frame ends without a game start queues no op
-    // for it at all, and the saver holds no loading frame after it. The
-    // requeue's vote comes inside the 20 s, so the vote itself drops it.
+    // for it at all, and the saver holds no loading frame after it. A
+    // requeue's vote or a late start no longer drop it (the pending slot).
     enum End {
         Timeout,
         Release,
-        Requeue,
-        LateStart,
         Shutdown,
     }
-    for end in [
-        End::Timeout,
-        End::Release,
-        End::Requeue,
-        End::LateStart,
-        End::Shutdown,
-    ] {
+    for end in [End::Timeout, End::Release, End::Shutdown] {
         let dir = tempfile::tempdir().unwrap();
         let (mut dump, queue) = counted_dump(dir.path());
         let start = Instant::now();
@@ -769,17 +764,12 @@ async fn a_dropped_loading_frame_writes_nothing() {
         assert!(dump_holds_loading(&dump));
         match end {
             End::Timeout => {
-                for ms in (4_500..=24_000).step_by(1_500) {
+                let late = 4_500 + PENDING_WINDOW.as_millis() as u64;
+                for ms in [4_500, late] {
                     dump.observe(at(ms), Seen::Other, None);
                 }
             }
             End::Release => dump.release(at(4_500)),
-            End::Requeue => dump.observe(
-                at(16_000),
-                Seen::Phase(PregamePhase::MapVote),
-                Some(frame(11)),
-            ),
-            End::LateStart => dump.observe(at(23_500), BAN, Some(frame(11))),
             End::Shutdown => {
                 // Nothing to look at after it: what it queued is all.
                 assert!(dump.finish(Duration::from_secs(1)).await);
