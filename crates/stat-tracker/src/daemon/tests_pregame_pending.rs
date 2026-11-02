@@ -99,13 +99,16 @@ fn a_roster_sample_after_a_missed_poll_starts_the_count_again() {
 
 #[test]
 fn the_measured_poll_interval_decides_the_roster_samples() {
-    // Configured at 1.5 s, but the route really polls every 4 s (a
-    // screenshot route's slower floor): one roster sample is saved.
+    // Configured at 1.5 s, one 4 s gap (one missed poll, say): the median
+    // of the gaps is still the configured 1.5 s, so one roster sample is
+    // not enough.
     let mut run = Run::new();
     run.tick(0, Seen::Other, 0);
     run.tick(4_000, Seen::Roster, 1);
-    assert_eq!(run.staged_pending(), [1], "one sample after a 4 s gap");
-    // In a game too.
+    assert!(!run.tracker.holds_pending_roster(), "a lone 4 s gap");
+    // The route really polls every 4 s (a screenshot route's slower
+    // floor): once that holds for most of the gaps, one sample is saved,
+    // in a game too.
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
     run.tick(4_000, BAN, 2);
