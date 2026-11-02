@@ -86,7 +86,10 @@ fn db_error(error: DbError) -> Reject {
 /// 503 `hero_icons_disabled` when `HERO_ICONS_DIR` could not be used at startup.
 fn configured(state: &AppState) -> Result<(), Reject> {
     if !state.hero_icons.enabled() {
-        return Err(reject(StatusCode::SERVICE_UNAVAILABLE, HERO_ICON_ERR_DISABLED));
+        return Err(reject(
+            StatusCode::SERVICE_UNAVAILABLE,
+            HERO_ICON_ERR_DISABLED,
+        ));
     }
     Ok(())
 }
@@ -287,14 +290,23 @@ async fn read_icon_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
     while let Some(chunk) = field.chunk().await.map_err(multipart_reject)? {
         data.extend_from_slice(&chunk);
         if data.len() >= PNG_SIGNATURE.len() && !data.starts_with(&PNG_SIGNATURE) {
-            return Err(reject(StatusCode::UNSUPPORTED_MEDIA_TYPE, HERO_ICON_ERR_NOT_PNG));
+            return Err(reject(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                HERO_ICON_ERR_NOT_PNG,
+            ));
         }
         if data.len() > HERO_ICON_MAX_BYTES {
-            return Err(reject(StatusCode::PAYLOAD_TOO_LARGE, HERO_ICON_ERR_TOO_LARGE));
+            return Err(reject(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                HERO_ICON_ERR_TOO_LARGE,
+            ));
         }
     }
     if !data.starts_with(&PNG_SIGNATURE) {
-        return Err(reject(StatusCode::UNSUPPORTED_MEDIA_TYPE, HERO_ICON_ERR_NOT_PNG));
+        return Err(reject(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            HERO_ICON_ERR_NOT_PNG,
+        ));
     }
     Ok(data)
 }
