@@ -1715,7 +1715,10 @@ mod header_layout_tests {
         let mark_head = mark.split('}').next().unwrap();
         assert!(mark_head.contains("flex-shrink: 0"), "{mark_head}");
 
-        assert!(has_declaration(mark_head, "position: relative"), "{mark_head}");
+        assert!(
+            has_declaration(mark_head, "position: relative"),
+            "{mark_head}"
+        );
         assert!(has_declaration(mark_head, "z-index: 1"), "{mark_head}");
 
         // The open note must stay above the row overlay link in the final
