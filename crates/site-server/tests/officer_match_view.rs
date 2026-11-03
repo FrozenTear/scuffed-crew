@@ -163,6 +163,15 @@ fn game(member_id: &str, session_id: &str) -> PersonalMatch {
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
         name_recognizer: None,
         suspect_fields: vec!["dmg".into()],
+        bans_picks: Some(scuffed_types::BansPicks {
+            bans: vec![scuffed_types::HeroBan {
+                hero: Some("mauga".into()),
+                team: Some(scuffed_types::BanTeam::Enemy),
+            }],
+            lobby_ban: None,
+            picks: vec![Some("ana".into()), None],
+            recognizer: Some("cv-v1".into()),
+        }),
     }
 }
 
@@ -329,6 +338,16 @@ async fn officer_reads_public_and_members_matches() {
         assert_eq!(rows.len(), 1, "{uri}: {body}");
         assert_eq!(rows[0]["member_id"], subject, "{uri}: {body}");
         assert_eq!(rows[0]["suspect_fields"], json!(["dmg"]), "{uri}: {body}");
+        assert_eq!(
+            rows[0]["bans_picks"],
+            json!({
+                "bans": [{ "hero": "mauga", "team": "enemy" }],
+                "lobby_ban": null,
+                "picks": ["ana", null],
+                "recognizer": "cv-v1"
+            }),
+            "{uri}: {body}"
+        );
         assert!(body.get("next_cursor").is_none(), "{uri}: {body}");
 
         let match_id = rows[0]["id"].as_str().expect("match id");

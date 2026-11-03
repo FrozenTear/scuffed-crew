@@ -563,6 +563,14 @@ pub struct PersonalMatch {
     /// existed, read as an empty list. Additive on match-list JSON.
     #[serde(default)]
     pub suspect_fields: Vec<String>,
+    /// Bans and picks the tracker read for this game, or `None` (JSON null).
+    ///
+    /// `None` when the upload omitted the field or sent null, and on rows
+    /// written before the column existed. A later upload of the same session
+    /// replaces it, so a re-upload without the field clears it (same as
+    /// `name_recognizer` and `suspect_fields`). Additive on match-list JSON.
+    #[serde(default)]
+    pub bans_picks: Option<scuffed_types::BansPicks>,
 }
 
 /// Aggregated personal stats for a member.
