@@ -27,7 +27,7 @@ use image::{DynamicImage, RgbImage};
 use serde::Serialize;
 use stat_tracker::shadow::bans_picks::{
     BanRead, BanResults, BansPicksSetting, FRAME_H, FRAME_W, HeroSelect, Layout, RECOGNIZER_ID,
-    Read, Reader, TEMPLATE_DIR,
+    Read, Reader, TEMPLATE_DIR, self_ring_colour,
 };
 
 use super::pregame_dump::{BAN_RESULTS_NAME, PregameOp, PregamePhase};
@@ -49,7 +49,7 @@ const ERROR_CHARS: usize = 120;
 pub(crate) trait Engine: Send + Sync {
     fn vote(&self, img: &RgbImage) -> Option<Vec<Read>>;
     fn select(&self, img: &RgbImage) -> Option<HeroSelect>;
-    fn bans(&self, img: &RgbImage, ring: Option<[u8; 3]>) -> Option<BanResults>;
+    fn bans(&self, img: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults>;
 }
 
 impl Engine for Reader {
@@ -59,8 +59,8 @@ impl Engine for Reader {
     fn select(&self, img: &RgbImage) -> Option<HeroSelect> {
         self.read_hero_select(img)
     }
-    fn bans(&self, img: &RgbImage, ring: Option<[u8; 3]>) -> Option<BanResults> {
-        self.read_ban_results(img, ring)
+    fn bans(&self, img: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults> {
+        self.read_ban_results_rings(img, rings)
     }
 }
 
@@ -402,16 +402,24 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
     // The team ring comes from the select's last frame, or else its first.
     // The first frame gives the ring only: its picks are dropped, and a
     // first frame the reader cannot read leaves the ring unset rather than
-    // failing the read.
-    let ring = match &select {
+    // failing the read. The ban vote screen shows the same ring, so its last
+    // frame is the second source, for a select that was missed or faded.
+    let select_ring = match &select {
         Some(s) => Some(s.ring),
         None => frames
             .ring_fallback()
             .and_then(|f| engine.select(&rgb(f)))
             .map(|s| s.ring),
     };
+    let vote_ring = frames
+        .vote
+        .as_ref()
+        .map(rgb)
+        .filter(|f| f.dimensions() == (FRAME_W, FRAME_H))
+        .map(|f| self_ring_colour(&f));
+    let rings: Vec<[u8; 3]> = select_ring.into_iter().chain(vote_ring).collect();
     let results = match &frames.results {
-        Some(f) => Some(engine.bans(&rgb(f), ring)?),
+        Some(f) => Some(engine.bans(&rgb(f), &rings)?),
         None => None,
     };
     let ban_vote = match &frames.vote {
@@ -427,3 +435,7 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
         bans_picks_recognizer: RECOGNIZER_ID,
     })
 }
+
+#[cfg(test)]
+#[path = "tests_bans_picks.rs"]
+mod tests;

@@ -180,8 +180,9 @@ pub enum Team {
 pub struct BanRead {
     #[serde(flatten)]
     pub read: Read,
-    /// `None` when the bar colour is not clearly one side or the own team
-    /// colour is not known.
+    /// `None` when the bars do not split into two colour groups, the own
+    /// team ring colour is unknown, unusable or does not clearly pick one
+    /// group, or this bar is grey.
     pub team: Option<Team>,
 }
 
@@ -350,12 +351,22 @@ impl Reader {
 
     /// The ban results screen. `own_ring` is the own-team ring colour from
     /// the hero select ([`HeroSelect::ring`]); without it every `team` is `None`.
+    /// Same as [`Reader::read_ban_results_rings`] with at most one ring.
     /// `None` when the frame is not 2560x1440.
     pub fn read_ban_results(
         &self,
         img: &RgbImage,
         own_ring: Option<[u8; 3]>,
     ) -> Option<BanResults> {
+        self.read_ban_results_rings(img, own_ring.as_slice())
+    }
+
+    /// The ban results screen with several own-team ring colours to try, best
+    /// source first (see [`slot_teams`]). The hero select ring can be missing
+    /// or faded, so the caller also gives the ring of the ban vote screen,
+    /// which has it at the same place ([`self_ring_colour`]).
+    /// `None` when the frame is not 2560x1440.
+    pub fn read_ban_results_rings(&self, img: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults> {
         if img.dimensions() != (FRAME_W, FRAME_H) {
             return None;
         }
@@ -378,7 +389,7 @@ impl Reader {
             .collect();
         let lobby = probe[1] > probe[0];
         let cy = SLOT_CY[lobby as usize];
-        let teams = slot_teams(img, cy, own_ring);
+        let teams = slot_teams(img, cy, rings);
         let bans = SLOT_X
             .iter()
             .zip(teams)
@@ -493,15 +504,32 @@ fn hue_distance(a: u8, b: u8) -> i32 {
     d.min(180 - d)
 }
 
-/// The team of each ban slot from its ban bar colour against the own-team
-/// ring colour. A bar is own when its hue is within 8 of the closest bar and
-/// under 25 from the ring, enemy when 40 or more from the ring, otherwise
-/// (or when it is grey) unknown.
-fn slot_teams(img: &RgbImage, cy: i32, ring: Option<[u8; 3]>) -> [Option<Team>; 4] {
-    let Some(ring) = ring else {
-        return [None; 4];
-    };
-    let ring_h = hsv(ring)[0];
+/// A bar must be at least this saturated to have a colour (grey: no side).
+const BAR_SAT_MIN: u8 = 80;
+/// Bars of one team are within this many hue steps (of 180) of each other.
+const SAME_TEAM_HUE: i32 = 20;
+/// The two teams' bars are at least this many hue steps apart, or the
+/// colours do not tell the teams apart (a filter, one colour on both).
+const TEAMS_APART_HUE: i32 = 30;
+/// A ring pixel is a team colour only when this saturated and this bright.
+/// A grey or faded ring (a mid fade frame) has a hue that means nothing.
+const RING_SAT_MIN: u8 = 80;
+const RING_VAL_MIN: u8 = 75;
+/// The ring must be this much nearer one team's hue than the other's.
+const RING_LEAD_HUE: i32 = 20;
+/// And no farther than this from that team's hue.
+const RING_NEAR_HUE: i32 = 45;
+
+/// The team of each ban slot. The bars are sorted into two colour groups by
+/// how far apart they are, with no colour assumed: the game's team colours
+/// are a player setting (blue and red, or yellow and purple, or any other
+/// pair). Then the own-team ring colour says which group is own: the group
+/// whose hue the ring is clearly nearer to. Each ring is tried in the order
+/// given and a ring that cannot say (grey, faded, equally far from both
+/// groups, or far from both) is skipped. Rings that do say must agree, or
+/// every slot is `None`. A slot whose bar is grey is `None`. When the bars
+/// do not form two groups every slot is `None`.
+fn slot_teams(img: &RgbImage, cy: i32, rings: &[[u8; 3]]) -> [Option<Team>; 4] {
     let by = cy + 257;
     let bars: Vec<[u8; 2]> = SLOT_X
         .iter()
@@ -522,20 +550,66 @@ fn slot_teams(img: &RgbImage, cy: i32, ring: Option<[u8; 3]>) -> [Option<Team>; 
             [h, s]
         })
         .collect();
-    let d: Vec<i32> = bars.iter().map(|b| hue_distance(b[0], ring_h)).collect();
-    let nearest = *d.iter().min().unwrap_or(&0);
-    let mut out = [None; 4];
-    for i in 0..4 {
-        if bars[i][1] < 80 {
-            continue;
-        }
-        out[i] = if d[i] <= nearest + 8 && d[i] < 25 {
-            Some(Team::Own)
-        } else if d[i] >= 40 {
-            Some(Team::Enemy)
-        } else {
-            None
-        };
+    let hues: [Option<u8>; 4] =
+        std::array::from_fn(|i| (bars[i][1] >= BAR_SAT_MIN).then(|| bars[i][0]));
+    teams_from_hues(hues, rings)
+}
+
+/// [`slot_teams`] from the four bar hues (`None` for a grey bar).
+fn teams_from_hues(hues: [Option<u8>; 4], rings: &[[u8; 3]]) -> [Option<Team>; 4] {
+    let none = [None; 4];
+    // Two groups: the bars like the first coloured bar, and the rest.
+    let Some(a) = hues.iter().flatten().next().copied() else {
+        return none;
+    };
+    let in_a = |h: u8| hue_distance(h, a) <= SAME_TEAM_HUE;
+    let Some(b) = hues.iter().flatten().copied().find(|&h| !in_a(h)) else {
+        return none;
+    };
+    let in_b = |h: u8| hue_distance(h, b) <= SAME_TEAM_HUE;
+    if hue_distance(a, b) < TEAMS_APART_HUE || hues.iter().flatten().any(|&h| !in_a(h) && !in_b(h))
+    {
+        return none;
     }
-    out
+    // Each bar goes to the group it is nearer to; a bar equally near both
+    // (`Some(None)`) or a grey bar (`None`) has no group.
+    let group = hues.map(|h| {
+        h.map(|h| {
+            let (da, db) = (hue_distance(h, a), hue_distance(h, b));
+            (da != db).then_some(da < db)
+        })
+    });
+    // A team has two bars, so neither group may hold more than two. That
+    // rules out three against one, whatever the colours.
+    let size = |g: bool| group.iter().filter(|&&x| x == Some(Some(g))).count();
+    if size(true) > 2 || size(false) > 2 {
+        return none;
+    }
+    // Which group the rings call own (true: the first group).
+    let mut verdicts = rings.iter().filter_map(|&ring| {
+        let [rh, rs, rv] = hsv(ring);
+        if rs < RING_SAT_MIN || rv < RING_VAL_MIN {
+            return None;
+        }
+        let (da, db) = (hue_distance(rh, a), hue_distance(rh, b));
+        if (da - db).abs() < RING_LEAD_HUE || da.min(db) > RING_NEAR_HUE {
+            return None;
+        }
+        Some(da < db)
+    });
+    let Some(own_is_a) = verdicts.next() else {
+        return none;
+    };
+    if verdicts.any(|v| v != own_is_a) {
+        return none;
+    }
+    group.map(|g| {
+        g.flatten().map(|in_a| {
+            if in_a == own_is_a {
+                Team::Own
+            } else {
+                Team::Enemy
+            }
+        })
+    })
 }

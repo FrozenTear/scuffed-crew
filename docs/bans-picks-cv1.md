@@ -58,7 +58,7 @@ preferred hero. Without all 54 hero files there is no reader.
 
 | Screen | Call | Output |
 |---|---|---|
-| Ban results | `read_ban_results` | four bans with team side, the lobby ban when the lobby layout shows |
+| Ban results | `read_ban_results_rings` | four bans with team side, the lobby ban when the lobby layout shows |
 | Hero select | `read_hero_select` | six own-team picks and the own ring colour |
 | Ban vote | `read_ban_vote` | six own-team picks |
 
@@ -67,14 +67,43 @@ Every value is `{value, confidence}`. A position that cannot be read is
 (only when `no-preference.png` is installed). The combined `read` returns
 `bans`, `lobby_ban`, `picks` and `bans_picks_recognizer: "cv-v1"`.
 
+## Team side
+
+The game lets a player pick the team colours (blue and red, yellow and
+purple, and others), so the reader does not assume any colour. The four ban
+bars always form two groups, the outer pair and the middle pair, one group per
+team. The reader sorts the bars into two groups by how far apart their hues
+are (the OpenCV hue scale, 0 to 180). Then the own-team ring colour decides
+which group is own: the group whose hue the ring is clearly nearer to.
+
+The ring comes from the hero select frame (last frame, else first) and from
+the ban vote frame, which shows the same ring at the same place. The daemon
+gives both, in that order. A ring is skipped when it is grey or dark (a fade
+frame has a meaningless hue), when it is about as far from both groups, or
+when it is far from both. Usable rings must agree, or every team is `null`.
+Every team is also `null` when the bars are one colour, two colours that are
+too near, or three colours, and one bar is `null` when it is grey. If both
+bars of one team are grey (that team banned nothing), there is only one
+colour group, so every team is `null`, even for the coloured pair. The
+previous rule still marked that pair from the ring. Three bars of one colour
+against one is `null` too, since a team has two bars.
+
+The ban vote frame's ring is always given to the reader, even on a vote frame
+that shows no ring (the scan then returns whatever pixel it finds). A usable
+select ring and a junk vote ring that points the other way disagree, and
+every team is `null`. That is kept on purpose: a doubtful read gives `null`,
+not a side.
+
 ## Rules for the caller
 
 - Pass the LAST frame of the hero select and ban vote screens. The first
   frame is mid fade or under a wipe band, and a first frame read gave false
   accepts on rows nobody could read.
 - Only 2560x1440 frames are read. Any other size returns `None`.
-- 1080p, other UI scales, colourblind filters and non-English clients are not
-  measured.
+- 1080p, other UI scales and non-English clients are not measured. Team
+  side was measured on the default colours and on yellow and purple only; a
+  colourblind filter that gives other colour pairs reads by the same rule, but
+  no frame of one was measured.
 
 ## What was measured
 
