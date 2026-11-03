@@ -359,6 +359,7 @@ pub fn AdminLayout() -> Element {
                     div { class: "admin-nav-group",
                         p { class: "admin-nav-label", "Stats" }
                         Link { to: Route::AdminReports {}, onclick: close_nav, "Reports" }
+                        Link { to: Route::AdminHeroIcons {}, onclick: close_nav, "Hero icons" }
                         if is_admin {
                             Link { to: Route::AdminSeasons {}, onclick: close_nav, "Seasons" }
                         }

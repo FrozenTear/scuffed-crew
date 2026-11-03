@@ -124,6 +124,8 @@ pub enum Route {
         AdminModeration {},
         #[route("/admin/reports")]
         AdminReports {},
+        #[route("/admin/hero-icons")]
+        AdminHeroIcons {},
         #[route("/admin/relay")]
         AdminRelay {},
         #[route("/admin/settings")]
@@ -238,6 +240,15 @@ mod tests {
             Route::AdminReports {}
         );
         assert_eq!(Route::AdminReports {}.to_string(), "/admin/reports");
+    }
+
+    #[test]
+    fn hero_icons_admin_route_parses() {
+        assert_eq!(
+            Route::from_str("/admin/hero-icons").unwrap(),
+            Route::AdminHeroIcons {}
+        );
+        assert_eq!(Route::AdminHeroIcons {}.to_string(), "/admin/hero-icons");
     }
 
     #[test]

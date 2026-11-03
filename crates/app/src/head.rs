@@ -366,6 +366,7 @@ fn page_label(route: &Route) -> PageLabel {
         Route::AdminAuditLog {} => named("Admin audit log"),
         Route::AdminModeration {} => named("Admin moderation"),
         Route::AdminReports {} => named("Admin reports"),
+        Route::AdminHeroIcons {} => named("Admin hero icons"),
         Route::AdminRelay {} => named("Admin relay"),
         Route::AdminSettings {} => named("Admin settings"),
         Route::StrategyBrowse {} => named("Strategies"),
