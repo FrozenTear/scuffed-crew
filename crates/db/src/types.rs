@@ -1049,6 +1049,7 @@ pub enum AuditAction {
     ViewedMemberMatch,
     DeletedHeroIcon,
     DeletedAllHeroIcons,
+    ViewedHeroIcons,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -1094,7 +1095,6 @@ pub enum AuditTargetType {
     Integration,
     PatchNote,
     StatReport,
-    HeroIcon,
 }
 
 impl std::fmt::Display for AuditTargetType {
