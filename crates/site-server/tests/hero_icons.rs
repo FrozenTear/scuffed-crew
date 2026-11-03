@@ -899,8 +899,6 @@ async fn officers_get_counts_only() {
     w.cleanup();
 }
 
-/// Admin deletes of another member's icons, one and all, and a member's own
-/// delete, side by side.
 /// A delete-all that hits a file error still audits the rows it removed,
 /// answers 500, keeps the icon whose file failed, and can be retried.
 #[tokio::test]
@@ -951,6 +949,8 @@ async fn admin_delete_all_with_a_file_error_audits_the_partial_count() {
     w.cleanup();
 }
 
+/// Admin deletes of another member's icons, one and all, and a member's own
+/// delete, side by side.
 #[tokio::test]
 async fn admin_delete_and_self_delete_work() {
     let w = world().await;
