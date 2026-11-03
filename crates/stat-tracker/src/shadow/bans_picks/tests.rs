@@ -692,3 +692,160 @@ fn every_hero_reads_itself_in_a_row_with_the_fast_search() {
         }
     }
 }
+
+// ---- team side from the relative colours of the ban bars ----
+
+const YELLOW: Rgb<u8> = Rgb([255, 200, 0]);
+const PURPLE: Rgb<u8> = Rgb([128, 0, 128]);
+
+fn teams_of(out: &BanResults) -> Vec<Option<Team>> {
+    out.bans.iter().map(|b| b.team).collect()
+}
+
+/// Outer slots one team, middle slots the other: the shape of a real game.
+const OUTER_MIDDLE: [Rgb<u8>; 4] = [YELLOW, PURPLE, PURPLE, YELLOW];
+
+#[test]
+fn yellow_and_purple_bars_split_by_the_ring_with_either_side_own() {
+    let r = reader();
+    let img = ban_frame(FIVE, OUTER_MIDDLE, None);
+    let own_purple = r.read_ban_results_rings(&img, &[[128, 0, 128]]).unwrap();
+    assert_eq!(
+        teams_of(&own_purple),
+        vec![
+            Some(Team::Enemy),
+            Some(Team::Own),
+            Some(Team::Own),
+            Some(Team::Enemy)
+        ]
+    );
+    let own_yellow = r.read_ban_results_rings(&img, &[[255, 200, 0]]).unwrap();
+    assert_eq!(
+        teams_of(&own_yellow),
+        vec![
+            Some(Team::Own),
+            Some(Team::Enemy),
+            Some(Team::Enemy),
+            Some(Team::Own)
+        ]
+    );
+    // the single-ring entry point agrees
+    let one = r.read_ban_results(&img, Some([128, 0, 128])).unwrap();
+    assert_eq!(teams_of(&one), teams_of(&own_purple));
+}
+
+#[test]
+fn a_ring_off_the_bar_hue_still_picks_the_nearer_team() {
+    let r = reader();
+    let img = ban_frame(FIVE, OUTER_MIDDLE, None);
+    // violet (hue 135) is 15 from the purple bars and 110 from the yellow
+    let violet = r.read_ban_results_rings(&img, &[[150, 0, 255]]).unwrap();
+    assert_eq!(violet.bans[1].team, Some(Team::Own));
+    assert_eq!(violet.bans[0].team, Some(Team::Enemy));
+    // orange (hue 12) is 13 from the yellow bars
+    let orange = r.read_ban_results_rings(&img, &[[255, 100, 0]]).unwrap();
+    assert_eq!(orange.bans[0].team, Some(Team::Own));
+    assert_eq!(orange.bans[2].team, Some(Team::Enemy));
+}
+
+#[test]
+fn the_default_blue_and_red_still_read_and_the_other_way_round() {
+    let r = reader();
+    let img = ban_frame(FIVE, [ENEMY, OWN, OWN, ENEMY], None);
+    let blue = r.read_ban_results_rings(&img, &[[40, 160, 255]]).unwrap();
+    assert_eq!(blue.bans[1].team, Some(Team::Own));
+    assert_eq!(blue.bans[0].team, Some(Team::Enemy));
+    let red = r.read_ban_results_rings(&img, &[[235, 50, 60]]).unwrap();
+    assert_eq!(red.bans[1].team, Some(Team::Enemy));
+    assert_eq!(red.bans[0].team, Some(Team::Own));
+}
+
+#[test]
+fn an_ambiguous_or_far_ring_gives_no_team_never_a_guess() {
+    let r = reader();
+    let img = ban_frame(FIVE, OUTER_MIDDLE, None);
+    // hue 0: 25 from yellow and 30 from purple, too close to call
+    for ring in [[255, 0, 0], [120, 120, 120], [40, 0, 40], [0, 200, 255]] {
+        let out = r.read_ban_results_rings(&img, &[ring]).unwrap();
+        assert!(out.bans.iter().all(|b| b.team.is_none()), "{ring:?}");
+    }
+    let none = r.read_ban_results_rings(&img, &[]).unwrap();
+    assert!(none.bans.iter().all(|b| b.team.is_none()));
+}
+
+#[test]
+fn an_unusable_ring_is_skipped_for_the_next_one_and_disagreeing_rings_give_none() {
+    let r = reader();
+    let img = ban_frame(FIVE, OUTER_MIDDLE, None);
+    // a faded select ring, then the ban vote ring
+    let out = r
+        .read_ban_results_rings(&img, &[[40, 0, 40], [128, 0, 128]])
+        .unwrap();
+    assert_eq!(out.bans[1].team, Some(Team::Own));
+    // a grey one, then the ambiguous red, then a good one
+    let out = r
+        .read_ban_results_rings(&img, &[[120, 120, 120], [255, 0, 0], [255, 200, 0]])
+        .unwrap();
+    assert_eq!(out.bans[0].team, Some(Team::Own));
+    // two usable rings that name different teams
+    let out = r
+        .read_ban_results_rings(&img, &[[128, 0, 128], [255, 200, 0]])
+        .unwrap();
+    assert!(out.bans.iter().all(|b| b.team.is_none()));
+    // two usable rings that agree
+    let out = r
+        .read_ban_results_rings(&img, &[[128, 0, 128], [150, 0, 255]])
+        .unwrap();
+    assert_eq!(out.bans[1].team, Some(Team::Own));
+}
+
+#[test]
+fn bars_that_do_not_form_two_groups_give_no_team() {
+    let r = reader();
+    let ring = [[128, 0, 128]];
+    // one colour on all four bars
+    let img = ban_frame(FIVE, [PURPLE; 4], None);
+    let out = r.read_ban_results_rings(&img, &ring).unwrap();
+    assert!(out.bans.iter().all(|b| b.team.is_none()));
+    // two colours too near to be two teams (hue 150 and 165)
+    let img = ban_frame(
+        FIVE,
+        [PURPLE, PURPLE, Rgb([128, 0, 90]), Rgb([128, 0, 90])],
+        None,
+    );
+    let out = r.read_ban_results_rings(&img, &ring).unwrap();
+    assert!(out.bans.iter().all(|b| b.team.is_none()));
+    // three colours
+    let img = ban_frame(FIVE, [YELLOW, PURPLE, PURPLE, Rgb([0, 200, 80])], None);
+    let out = r.read_ban_results_rings(&img, &ring).unwrap();
+    assert!(out.bans.iter().all(|b| b.team.is_none()));
+}
+
+#[test]
+fn a_grey_bar_loses_only_its_own_team() {
+    let r = reader();
+    let grey = Rgb([120, 120, 120]);
+    let img = ban_frame(FIVE, [YELLOW, PURPLE, PURPLE, grey], None);
+    let out = r.read_ban_results_rings(&img, &[[128, 0, 128]]).unwrap();
+    assert_eq!(
+        teams_of(&out),
+        vec![Some(Team::Enemy), Some(Team::Own), Some(Team::Own), None]
+    );
+    // the grey bar may even be the first one
+    let img = ban_frame(FIVE, [grey, YELLOW, PURPLE, PURPLE], None);
+    let out = r.read_ban_results_rings(&img, &[[128, 0, 128]]).unwrap();
+    assert_eq!(
+        teams_of(&out),
+        vec![None, Some(Team::Enemy), Some(Team::Own), Some(Team::Own)]
+    );
+}
+
+#[test]
+fn the_lobby_layout_reads_yellow_and_purple_too() {
+    let r = reader();
+    let img = ban_frame(FIVE, OUTER_MIDDLE, Some("mei"));
+    let out = r.read_ban_results_rings(&img, &[[255, 200, 0]]).unwrap();
+    assert_eq!(out.layout, Layout::Lobby);
+    assert_eq!(out.bans[0].team, Some(Team::Own));
+    assert_eq!(out.bans[1].team, Some(Team::Enemy));
+}

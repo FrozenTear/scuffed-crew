@@ -27,7 +27,7 @@ use image::{DynamicImage, RgbImage};
 use serde::Serialize;
 use stat_tracker::shadow::bans_picks::{
     BanRead, BanResults, BansPicksSetting, FRAME_H, FRAME_W, HeroSelect, Layout, RECOGNIZER_ID,
-    Read, Reader, TEMPLATE_DIR,
+    Read, Reader, TEMPLATE_DIR, self_ring_colour,
 };
 
 use super::pregame_dump::{BAN_RESULTS_NAME, PregameOp, PregamePhase};
@@ -49,7 +49,7 @@ const ERROR_CHARS: usize = 120;
 pub(crate) trait Engine: Send + Sync {
     fn vote(&self, img: &RgbImage) -> Option<Vec<Read>>;
     fn select(&self, img: &RgbImage) -> Option<HeroSelect>;
-    fn bans(&self, img: &RgbImage, ring: Option<[u8; 3]>) -> Option<BanResults>;
+    fn bans(&self, img: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults>;
 }
 
 impl Engine for Reader {
@@ -59,8 +59,8 @@ impl Engine for Reader {
     fn select(&self, img: &RgbImage) -> Option<HeroSelect> {
         self.read_hero_select(img)
     }
-    fn bans(&self, img: &RgbImage, ring: Option<[u8; 3]>) -> Option<BanResults> {
-        self.read_ban_results(img, ring)
+    fn bans(&self, img: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults> {
+        self.read_ban_results_rings(img, rings)
     }
 }
 
@@ -402,16 +402,24 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
     // The team ring comes from the select's last frame, or else its first.
     // The first frame gives the ring only: its picks are dropped, and a
     // first frame the reader cannot read leaves the ring unset rather than
-    // failing the read.
-    let ring = match &select {
+    // failing the read. The ban vote screen shows the same ring, so its last
+    // frame is the second source, for a select that was missed or faded.
+    let select_ring = match &select {
         Some(s) => Some(s.ring),
         None => frames
             .ring_fallback()
             .and_then(|f| engine.select(&rgb(f)))
             .map(|s| s.ring),
     };
+    let vote_ring = frames
+        .vote
+        .as_ref()
+        .map(|f| f.to_rgb8())
+        .filter(|f| f.dimensions() == (FRAME_W, FRAME_H))
+        .map(|f| self_ring_colour(&f));
+    let rings: Vec<[u8; 3]> = select_ring.into_iter().chain(vote_ring).collect();
     let results = match &frames.results {
-        Some(f) => Some(engine.bans(&rgb(f), ring)?),
+        Some(f) => Some(engine.bans(&rgb(f), &rings)?),
         None => None,
     };
     let ban_vote = match &frames.vote {
@@ -426,4 +434,74 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
         ban_vote,
         bans_picks_recognizer: RECOGNIZER_ID,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use image::Rgb;
+
+    use super::*;
+
+    /// Records the rings the ban results are read with.
+    struct Spy(Mutex<Vec<Vec<[u8; 3]>>>);
+
+    impl Engine for Spy {
+        fn vote(&self, _: &RgbImage) -> Option<Vec<Read>> {
+            Some(Vec::new())
+        }
+        fn select(&self, _: &RgbImage) -> Option<HeroSelect> {
+            Some(HeroSelect {
+                picks: Vec::new(),
+                ring: [1, 2, 3],
+            })
+        }
+        fn bans(&self, _: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults> {
+            self.0.lock().unwrap().push(rings.to_vec());
+            Some(BanResults {
+                layout: Layout::Plain,
+                bans: Vec::new(),
+                lobby_ban: None,
+            })
+        }
+    }
+
+    /// A frame with a team ring of colour `c` where the game draws it.
+    fn ringed(w: u32, h: u32, c: [u8; 3]) -> Arc<DynamicImage> {
+        let mut img = RgbImage::new(w, h);
+        for y in 430..475.min(h) {
+            for x in 64..70.min(w) {
+                img.put_pixel(x, y, Rgb(c));
+            }
+        }
+        Arc::new(DynamicImage::ImageRgb8(img))
+    }
+
+    #[test]
+    fn the_ban_vote_ring_is_given_to_the_ban_results_as_a_second_ring() {
+        let spy = Spy(Mutex::new(Vec::new()));
+        let frames = Frames {
+            vote: Some(ringed(FRAME_W, FRAME_H, [128, 0, 128])),
+            results: Some(ringed(FRAME_W, FRAME_H, [0, 0, 0])),
+            ..Frames::default()
+        };
+        assert!(read_with(&spy, &frames).is_some());
+        // no select frame: the vote ring is the only one
+        assert_eq!(spy.0.lock().unwrap()[0], vec![[128, 0, 128]]);
+        // with a select frame its ring comes first
+        let frames = Frames {
+            select: Some(ringed(FRAME_W, FRAME_H, [0, 0, 0])),
+            ..frames
+        };
+        assert!(read_with(&spy, &frames).is_some());
+        assert_eq!(spy.0.lock().unwrap()[1], vec![[1, 2, 3], [128, 0, 128]]);
+        // a vote frame of another size gives no ring
+        let frames = Frames {
+            vote: Some(ringed(8, 8, [128, 0, 128])),
+            ..frames
+        };
+        assert!(read_with(&spy, &frames).is_some());
+        assert_eq!(spy.0.lock().unwrap()[2], vec![[1, 2, 3]]);
+    }
 }
