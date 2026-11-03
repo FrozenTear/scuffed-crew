@@ -526,7 +526,28 @@ const STATS_CSS: &str = r#"
         line-height: 0;
         text-decoration: none;
     }
-    .stat-unsure-mark:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    /* The glyph is about 9px with a zero-height box, far below a tap target.
+       The hit box is a 24 by 24px ::after centered on the glyph. It is part of
+       the button, so it sits above the row overlay link with the button's
+       z-index, and a tap a little off the glyph still lands on the mark. The
+       focus ring is drawn on that box, not on the collapsed button. */
+    .stat-unsure-mark::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: 24px;
+        height: 24px;
+        transform: translate(-50%, -50%);
+        border-radius: 4px;
+    }
+    .stat-unsure-mark:focus-visible {
+        outline: none;
+    }
+    .stat-unsure-mark:focus-visible::after {
+        outline: 2px solid var(--accent);
+        outline-offset: 0;
+    }
     /* The note is a live region that is always in the page. Closed, it is
        visually collapsed (out of flow, 1px, clipped), never display: none, so
        screen readers still announce its text when it fills. */
@@ -573,6 +594,15 @@ const STATS_CSS: &str = r#"
         flex-wrap: wrap;
     }
     .stat-unsure:has(.stat-unsure-note-open) { flex-wrap: wrap; }
+    /* The outcome and hero cells clip their overflow, which would cut the
+       mark's 24px hit box off at the cell edge, and a tap on the cut part would
+       open the game. A cell that holds a mark does not clip: the ellipsis lives
+       on the value text, which shrinks on its own, so the cell stays inside its
+       column either way. */
+    .match-card .match-outcome:has(.stat-unsure-mark),
+    .match-card .match-hero:has(.stat-unsure-mark) {
+        overflow: visible;
+    }
     /* The stat columns are 2 to 4rem wide, too narrow for a sentence. A cell
        with an open note sets a minimum note width, which beats the 100% cap, so
        the note is wider than its cell and spills sideways into the empty space
@@ -1779,6 +1809,52 @@ mod header_layout_tests {
         assert!(
             top_head.contains("align-items: start"),
             "the other cells line up at the top: {top_head}"
+        );
+        // The mark's tap target is a 24 by 24px ::after box that carries the
+        // focus ring, so the tiny glyph is not the only thing a tap can hit.
+        let hit = block_after(STATS_CSS, ".stat-unsure-mark::after {");
+        let hit_head = hit.split('}').next().unwrap();
+        assert!(has_declaration(hit_head, "content: \"\""), "{hit_head}");
+        assert!(
+            has_declaration(hit_head, "position: absolute"),
+            "{hit_head}"
+        );
+        assert!(has_declaration(hit_head, "width: 24px"), "{hit_head}");
+        assert!(has_declaration(hit_head, "height: 24px"), "{hit_head}");
+        assert!(
+            !hit_head.contains("pointer-events"),
+            "the hit box must take the tap: {hit_head}"
+        );
+        assert!(
+            !hit_head.contains("z-index"),
+            "the box inherits the button's z-index, above the row link: {hit_head}"
+        );
+        // The outcome and hero cells clip overflow; a cell with a mark must not,
+        // or the hit box is cut at the cell edge.
+        let unclipped = block_after(
+            STATS_CSS,
+            ".match-card .match-hero:has(.stat-unsure-mark) {",
+        );
+        let unclipped_head = unclipped.split('}').next().unwrap();
+        assert!(
+            has_declaration(unclipped_head, "overflow: visible"),
+            "a cell with a mark does not clip its hit box: {unclipped_head}"
+        );
+        assert!(
+            STATS_CSS.contains(".match-card .match-outcome:has(.stat-unsure-mark),"),
+            "the outcome cell is unclipped too"
+        );
+        let focus = block_after(STATS_CSS, ".stat-unsure-mark:focus-visible {");
+        let focus_head = focus.split('}').next().unwrap();
+        assert!(
+            has_declaration(focus_head, "outline: none"),
+            "the collapsed button draws no ring of its own: {focus_head}"
+        );
+        let ring = block_after(STATS_CSS, ".stat-unsure-mark:focus-visible::after {");
+        let ring_head = ring.split('}').next().unwrap();
+        assert!(
+            ring_head.contains("outline: 2px solid var(--accent)"),
+            "{ring_head}"
         );
         let last = open_rules.last().unwrap().1;
         assert!(has_declaration(last, "position: relative"), "{last}");

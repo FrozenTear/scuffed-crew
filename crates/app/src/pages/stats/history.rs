@@ -32,8 +32,9 @@ const NEW_READER_TITLE: &str = "Read by the new stat reader";
 /// Shared tail of the unsure-cell tooltip and of the tap-to-show note. The
 /// stat's display name is the prefix.
 const UNSURE_DETAIL: &str = "might be misread. Check it in the tracker.";
-/// Screen reader text inside the mark button.
-const UNSURE_SR_TEXT: &str = "(might be misread)";
+/// Tail of the screen reader text inside the mark button. The stat's display
+/// name is the prefix, so every mark in a row has its own accessible name.
+const UNSURE_SR_DETAIL: &str = "might be misread";
 
 /// Id of the note a mark controls. Built only from the match id and the stat
 /// name, with anything that is not id-safe turned into an underscore. Ids are
@@ -59,6 +60,12 @@ fn unsure_title(stat_name: &str) -> String {
     format!("{stat_name}: {UNSURE_DETAIL}")
 }
 
+/// Screen reader text inside the mark button, for example "Damage might be
+/// misread".
+fn unsure_sr_text(stat_name: &str) -> String {
+    format!("{stat_name} {UNSURE_SR_DETAIL}")
+}
+
 /// `true` when this row should show the new-reader badge.
 /// Empty and missing ids count as `ocr-v1`.
 pub(super) fn show_new_reader_badge(recognizer: &str) -> bool {
@@ -78,8 +85,10 @@ pub(super) fn cell_is_unsure(suspect_fields: &[String], name: &str) -> bool {
 /// clicking it, or pressing Enter or Space on it shows [`unsure_title`] as a
 /// small note (a polite status region that is always present and empty while
 /// closed, wired with aria-controls) next to the value, so phones and keyboards get the same words as
-/// the hover tooltip. "(might be misread)" is real text inside the button for
-/// screen readers, which skip aria-label on a plain span. Display only: it
+/// the hover tooltip. "{stat} might be misread" is real text inside the button
+/// for screen readers (which skip aria-label on a plain span), so each mark
+/// has its own accessible name. Its hit box is a 24 by 24 pixel `::after` box,
+/// so a tap a little off the small glyph still lands on the mark. Display only: it
 /// changes no value and no average.
 #[component]
 fn UnsureMark(match_id: String, stat_name: String, start_open: bool) -> Element {
@@ -103,6 +112,7 @@ fn UnsureMark(match_id: String, stat_name: String, start_open: bool) -> Element 
         ("stat-unsure-note", String::new())
     };
     let toggled_name = stat_name.clone();
+    let sr_text = unsure_sr_text(&stat_name);
     rsx! {
         button {
             class: "stat-unsure-mark",
@@ -117,7 +127,7 @@ fn UnsureMark(match_id: String, stat_name: String, start_open: bool) -> Element 
                 None => local_open.toggle(),
             },
             span { aria_hidden: "true", "?" }
-            span { class: "sr-only", "{UNSURE_SR_TEXT}" }
+            span { class: "sr-only", "{sr_text}" }
         }
         span { class: "{note_class}", id: "{note_id}", role: "status", "{note}" }
     }
@@ -149,7 +159,7 @@ fn RowNotesScope(#[props(default)] open: Option<String>, children: Element) -> E
 }
 
 /// One match-row value. An unsure cell gets the [`UnsureMark`] button, its
-/// hidden "(might be misread)" text, and [`unsure_title`]. A sure numeric cell
+/// hidden "{stat} might be misread" text, and [`unsure_title`]. A sure numeric cell
 /// keeps the stat name as its title.
 pub(super) fn marked_value(
     match_id: &str,
@@ -362,6 +372,7 @@ pub(super) fn history_tab(
                                                 a {
                                                     class: "match-card-overlay",
                                                     href: "{href}",
+                                                    title: "{abs}",
                                                     onclick: move |evt: MouseEvent| open_match(evt, target_id.clone()),
                                                     span { class: "sr-only", "View game: {m.outcome} on {map_label}, {date}" }
                                                 }
@@ -697,13 +708,9 @@ mod tests {
             scuffed_types::SUSPECT_FIELD_NAMES.len(),
             "unknown names add no mark: {html}"
         );
-        assert_eq!(
-            html.matches(UNSURE_SR_TEXT).count(),
-            scuffed_types::SUSPECT_FIELD_NAMES.len(),
-            "{html}"
-        );
-        assert_eq!(UNSURE_SR_TEXT, "(might be misread)");
+        assert_eq!(UNSURE_SR_DETAIL, "might be misread");
         assert!(!html.contains("(unsure)"), "{html}");
+        assert!(!html.contains("(might be misread)"), "{html}");
         assert!(html.contains("class=\"sr-only\""), "{html}");
         let titles = [
             "Result",
@@ -719,6 +726,12 @@ mod tests {
         ];
         assert_eq!(titles.len(), scuffed_types::SUSPECT_FIELD_NAMES.len());
         for name in titles {
+            let sr = format!("<span class=\"sr-only\">{name} might be misread</span>");
+            assert_eq!(
+                html.matches(&sr).count(),
+                1,
+                "each mark names its stat for screen readers: {html}"
+            );
             let title = unsure_title(name);
             assert_eq!(
                 html.matches(&format!("title=\"{title}\"")).count(),
@@ -814,6 +827,17 @@ mod tests {
             html.contains("View game: victory on Ilios,"),
             "the overlay link has a readable name: {html}"
         );
+        let overlay_tags: Vec<&str> = html
+            .match_indices("<a class=\"match-card-overlay\"")
+            .map(|(at, _)| &html[at..at + html[at..].find('>').unwrap()])
+            .collect();
+        assert_eq!(overlay_tags.len(), 3, "{html}");
+        for tag in overlay_tags {
+            assert!(
+                tag.contains("title=\"2026-03-15 12:00 UTC\""),
+                "the overlay link carries the exact time as its hover title: {tag}"
+            );
+        }
     }
 
     /// The opening tag and the text of the span with this id.
@@ -993,7 +1017,8 @@ mod tests {
             unsure_title("Deaths"),
             "Deaths: might be misread. Check it in the tracker."
         );
-        for text in [UNSURE_DETAIL, UNSURE_SR_TEXT] {
+        assert_eq!(unsure_sr_text("Damage"), "Damage might be misread");
+        for text in [UNSURE_DETAIL, UNSURE_SR_DETAIL] {
             assert!(
                 !text.contains('\u{2014}') && !text.contains('\u{2013}'),
                 "{text}"

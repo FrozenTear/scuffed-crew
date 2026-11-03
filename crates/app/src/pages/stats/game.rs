@@ -610,7 +610,15 @@ mod tests {
         assert_eq!(html.matches("<button").count(), 2, "{html}");
         assert_eq!(html.matches("aria-expanded=\"false\"").count(), 2, "{html}");
         assert_eq!(html.matches("type=\"button\"").count(), 2, "{html}");
-        assert_eq!(html.matches("(might be misread)").count(), 2, "{html}");
+        for text in ["Hero might be misread", "Damage might be misread"] {
+            assert_eq!(
+                html.matches(&format!("<span class=\"sr-only\">{text}</span>"))
+                    .count(),
+                1,
+                "{text}: {html}"
+            );
+        }
+        assert!(!html.contains("(might be misread)"), "{html}");
         // Each mark's note is always present, empty, and wired to its button.
         assert_eq!(html.matches("role=\"status\"").count(), 2, "{html}");
         assert!(
