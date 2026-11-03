@@ -61,6 +61,10 @@ struct DbPersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     suspect_fields: Option<Vec<String>>,
+    /// Absent when the upload omitted bans and picks, or the row predates the column.
+    #[serde(default)]
+    #[surreal(default)]
+    bans_picks: Option<serde_json::Value>,
 }
 
 fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
@@ -90,7 +94,17 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
             .to_string(),
         name_recognizer: stored_name_recognizer(db.name_recognizer),
         suspect_fields: db.suspect_fields.unwrap_or_default(),
+        bans_picks: db
+            .bans_picks
+            .as_ref()
+            .and_then(scuffed_types::bans_picks_from_stored),
     }
+}
+
+/// JSON object to store for `bans_picks`. `None` binds NONE, which removes
+/// the field on an update.
+fn bans_picks_value(value: Option<&scuffed_types::BansPicks>) -> Option<serde_json::Value> {
+    value.and_then(|b| serde_json::to_value(b).ok())
 }
 
 /// Empty is unknown. The upload route never stores `""`, and a missing column
@@ -401,7 +415,7 @@ const UPSERT_BY_ID_SQL: &str = r#"UPSERT $rid SET
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
     edited = $edited, recognizer = $recognizer, name_recognizer = $name_recognizer,
-    suspect_fields = $suspect_fields,
+    suspect_fields = $suspect_fields, bans_picks = $bans_picks,
     played_at = $played, uploaded_at = time::now()
     RETURN AFTER"#;
 
@@ -411,7 +425,7 @@ const UPDATE_BY_SESSION_SQL: &str = r#"UPDATE personal_match SET
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
     edited = $edited, recognizer = $recognizer, name_recognizer = $name_recognizer,
-    suspect_fields = $suspect_fields,
+    suspect_fields = $suspect_fields, bans_picks = $bans_picks,
     played_at = $played, uploaded_at = time::now()
     WHERE member_id = $mid AND session_id = $sid
     RETURN AFTER"#;
@@ -529,6 +543,7 @@ impl Database {
                     stored_name_recognizer(m.name_recognizer.clone()),
                 ))
                 .bind(("suspect_fields", m.suspect_fields.clone()))
+                .bind(("bans_picks", bans_picks_value(m.bans_picks.as_ref())))
                 .bind(("played", SurrealDatetime::from(m.played_at)))
                 .await?
                 .check()?;
@@ -1181,7 +1196,7 @@ const PERSONAL_MATCH_MIGRATION_BATCH: u32 = 2_000;
 
 const PERSONAL_MATCH_MIGRATION_COLS: &str =
     "id, member_id, session_id, hero, map_name, game_mode, \
-     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, recognizer, name_recognizer, suspect_fields, played_at, \
+     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, recognizer, name_recognizer, suspect_fields, bans_picks, played_at, \
      uploaded_at";
 
 #[cfg(test)]
@@ -1710,7 +1725,7 @@ async fn relocate_personal_match(
                 elims = $elims, deaths = $deaths, assists = $assists,
                 damage = $damage, healing = $healing, mitigation = $mit,
                 edited = $edited, recognizer = $recognizer, name_recognizer = $name_recognizer,
-                suspect_fields = $suspect_fields,
+                suspect_fields = $suspect_fields, bans_picks = $bans_picks,
                 played_at = $played, uploaded_at = $uploaded"#,
         )
         .bind(("rid", rid))
@@ -1741,6 +1756,7 @@ async fn relocate_personal_match(
             "suspect_fields",
             row.suspect_fields.clone().unwrap_or_default(),
         ))
+        .bind(("bans_picks", row.bans_picks.clone()))
         .bind(("played", row.played_at))
         .bind(("uploaded", row.uploaded_at))
         .await?
@@ -1783,6 +1799,7 @@ mod tests {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             name_recognizer: None,
             suspect_fields: Vec::new(),
+            bans_picks: None,
         }
     }
 
@@ -1908,6 +1925,80 @@ mod tests {
         let stats = db.get_personal_stats("m-legacy").await.unwrap();
         assert_eq!(stats.total_matches, 2);
         assert_eq!(stats.wins, 2);
+    }
+
+    /// A row written before `bans_picks` existed reads back as None, and a
+    /// full object (null entries included) round trips through the
+    /// SCHEMAFULL table.
+    #[tokio::test]
+    async fn bans_picks_legacy_none_and_full_object_round_trip() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"REMOVE FIELD IF EXISTS bans_picks ON personal_match;
+                   CREATE personal_match SET
+                       member_id = 'm-bp',
+                       session_id = 'legacy-bp',
+                       hero = 'Ana',
+                       map_name = 'Oasis',
+                       game_mode = 'control',
+                       role = 'Support',
+                       outcome = 'victory',
+                       played_at = d'2026-07-01T20:00:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   DEFINE FIELD OVERWRITE bans_picks ON personal_match TYPE option<object> FLEXIBLE;"#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let legacy = db.list_personal_matches("m-bp", 10, 0).await.unwrap();
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].bans_picks, None);
+
+        let full = scuffed_types::BansPicks {
+            bans: vec![
+                scuffed_types::HeroBan {
+                    hero: Some("mauga".into()),
+                    team: Some(scuffed_types::BanTeam::Own),
+                },
+                scuffed_types::HeroBan {
+                    hero: None,
+                    team: None,
+                },
+            ],
+            lobby_ban: Some("ana".into()),
+            picks: vec![
+                Some("wrecking-ball".into()),
+                None,
+                Some("no_preference".into()),
+            ],
+            ban_vote: vec![
+                Some("dva".into()),
+                Some("no_preference".into()),
+                None,
+                Some("ana".into()),
+            ],
+            recognizer: Some("cv-v1".into()),
+        };
+        let mut uploaded = entry("s-bp", "victory", 9);
+        uploaded.member_id = "m-bp".into();
+        uploaded.bans_picks = Some(full.clone());
+        db.upsert_personal_matches("m-bp", &[uploaded])
+            .await
+            .unwrap();
+        let rows = db.list_personal_matches("m-bp", 10, 0).await.unwrap();
+        let row = rows.iter().find(|r| r.session_id == "s-bp").unwrap();
+        assert_eq!(row.bans_picks.as_ref(), Some(&full));
+
+        let cleared = entry("s-bp", "victory", 4);
+        db.upsert_personal_matches("m-bp", &[cleared])
+            .await
+            .unwrap();
+        let rows = db.list_personal_matches("m-bp", 10, 0).await.unwrap();
+        let row = rows.iter().find(|r| r.session_id == "s-bp").unwrap();
+        assert_eq!(row.bans_picks, None);
+        assert_eq!(row.elims, 4);
     }
 
     /// A row inserted before `name_recognizer` existed reads back as None.

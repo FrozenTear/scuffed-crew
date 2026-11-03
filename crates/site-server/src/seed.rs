@@ -500,6 +500,7 @@ async fn seed_personal_matches(
                 recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
                 name_recognizer: None,
                 suspect_fields: Vec::new(),
+                bans_picks: None,
             }
         })
         .collect();

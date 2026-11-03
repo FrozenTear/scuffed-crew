@@ -15,8 +15,8 @@ use scuffed_types::api::{
     MemberSettingsResponse, NAME_RECOGNIZER_ID_ERROR, PaginationParams, RECOGNIZER_ID_ERROR,
     SUSPECT_FIELDS_ERROR, SeasonQuery, StatsHiddenError, StatsUploadBody, StatsUploadResponse,
     StatsVisibility, TokenCheckResponse, UPLOAD_HERO_UNKNOWN, is_upload_hero_unknown,
-    resolve_name_recognizer, resolve_recognizer, resolve_suspect_fields, validate_deleted_session,
-    validate_upload_entry,
+    resolve_bans_picks, resolve_name_recognizer, resolve_recognizer, resolve_suspect_fields,
+    validate_deleted_session, validate_upload_entry,
 };
 use scuffed_types::{
     STATS_UPLOAD_MAX_DELETED_SESSIONS, STATS_UPLOAD_MAX_MATCHES, hero_key_to_name,
@@ -69,6 +69,16 @@ fn bad_request(error: String) -> UploadReject {
     (StatusCode::BAD_REQUEST, Json(ErrorResponse { error })).into()
 }
 
+/// 422 for a `bans_picks` value that cannot be stored. Same `{error}` body as
+/// the other upload checks.
+fn unprocessable(error: String) -> UploadReject {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(ErrorResponse { error }),
+    )
+        .into()
+}
+
 fn batch_over_cap(body: &StatsUploadBody) -> bool {
     body.matches.len() > STATS_UPLOAD_MAX_MATCHES
         || body.deleted_sessions.len() > STATS_UPLOAD_MAX_DELETED_SESSIONS
@@ -118,6 +128,12 @@ pub(crate) async fn upload_stats(
     // numeric ceilings. The message keeps the `matches[n]: ` prefix so the
     // tracker can isolate the one bad row. A long deleted_sessions entry is
     // a 400 for the whole request.
+    //
+    // `bans_picks` is checked after `suspect_fields` and before
+    // `validate_upload_entry`. An unknown hero key is stored as null. A
+    // wrong shape, more than 4 bans, more than 6 picks, a bad team, or a
+    // bad recognizer is a 422 for the whole batch, with the same
+    // `matches[n]: ` prefix.
     for (i, session_id) in body.deleted_sessions.iter().enumerate() {
         if let Err(message) = validate_deleted_session(session_id) {
             return Err(bad_request(format!("deleted_sessions[{i}]: {message}")));
@@ -127,6 +143,7 @@ pub(crate) async fn upload_stats(
     let mut recognizers = Vec::with_capacity(body.matches.len());
     let mut name_recognizers = Vec::with_capacity(body.matches.len());
     let mut suspect_lists = Vec::with_capacity(body.matches.len());
+    let mut bans_picks_list = Vec::with_capacity(body.matches.len());
     for (i, entry) in body.matches.iter().enumerate() {
         match resolve_recognizer(&entry.recognizer) {
             Ok(id) => recognizers.push(id),
@@ -164,6 +181,10 @@ pub(crate) async fn upload_stats(
                     .into());
             }
         }
+        match resolve_bans_picks(entry.bans_picks.as_ref()) {
+            Ok(bans_picks) => bans_picks_list.push(bans_picks),
+            Err(message) => return Err(unprocessable(format!("matches[{i}]: {message}"))),
+        }
         if let Err(message) = validate_upload_entry(&entry.entry, now) {
             return Err(bad_request(format!("matches[{i}]: {message}")));
         }
@@ -181,36 +202,48 @@ pub(crate) async fn upload_stats(
         .zip(recognizers)
         .zip(name_recognizers)
         .zip(suspect_lists)
-        .map(|(((entry, recognizer), name_recognizer), suspect_fields)| {
-            (entry, recognizer, name_recognizer, suspect_fields)
-        })
-        .filter(|(e, _, _, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
-        .map(|(e, recognizer, name_recognizer, suspect_fields)| {
-            let e = e.entry;
-            let (hero, role) = normalize_hero(e.hero, e.role);
-            PersonalMatch {
-                id: String::new(),
-                member_id: daemon.member.id.clone(),
-                session_id: e.session_id,
-                hero,
-                map_name: e.map_name,
-                game_mode: e.game_mode,
-                role,
-                outcome: e.outcome,
-                elims: e.elims,
-                deaths: e.deaths,
-                assists: e.assists,
-                damage: e.damage,
-                healing: e.healing,
-                mitigation: e.mitigation,
-                played_at: e.played_at,
-                uploaded_at: chrono::Utc::now(),
-                edited: e.edited,
-                recognizer,
-                name_recognizer,
-                suspect_fields,
-            }
-        })
+        .zip(bans_picks_list)
+        .map(
+            |((((entry, recognizer), name_recognizer), suspect_fields), bans_picks)| {
+                (
+                    entry,
+                    recognizer,
+                    name_recognizer,
+                    suspect_fields,
+                    bans_picks,
+                )
+            },
+        )
+        .filter(|(e, _, _, _, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
+        .map(
+            |(e, recognizer, name_recognizer, suspect_fields, bans_picks)| {
+                let e = e.entry;
+                let (hero, role) = normalize_hero(e.hero, e.role);
+                PersonalMatch {
+                    id: String::new(),
+                    member_id: daemon.member.id.clone(),
+                    session_id: e.session_id,
+                    hero,
+                    map_name: e.map_name,
+                    game_mode: e.game_mode,
+                    role,
+                    outcome: e.outcome,
+                    elims: e.elims,
+                    deaths: e.deaths,
+                    assists: e.assists,
+                    damage: e.damage,
+                    healing: e.healing,
+                    mitigation: e.mitigation,
+                    played_at: e.played_at,
+                    uploaded_at: chrono::Utc::now(),
+                    edited: e.edited,
+                    recognizer,
+                    name_recognizer,
+                    suspect_fields,
+                    bans_picks,
+                }
+            },
+        )
         .collect();
     let dropped = total - stub_matches.len() as u32;
     if dropped > 0 {
@@ -2054,6 +2087,7 @@ mod tests {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             name_recognizer: None,
             suspect_fields: Vec::new(),
+            bans_picks: None,
         };
         let seeded = [
             ("kept", "Ana", "Damage", "Damage"),
@@ -2126,6 +2160,7 @@ mod tests {
             recognizer: "cv-v1".into(),
             name_recognizer: Some("names-v1".into()),
             suspect_fields: vec!["dmg".into(), "map".into()],
+            bans_picks: None,
         }
     }
 
@@ -2359,6 +2394,226 @@ mod tests {
             rows[0].suspect_fields.is_empty(),
             "omitting suspect_fields clears the stored list, got {:?}",
             rows[0].suspect_fields
+        );
+    }
+
+    fn full_bans_picks() -> serde_json::Value {
+        serde_json::json!({
+            "bans": [
+                { "hero": "mauga", "team": "own" },
+                { "hero": "wrecking-ball", "team": "enemy" },
+                { "hero": null, "team": null }
+            ],
+            "lobby_ban": "ana",
+            "picks": ["wrecking-ball", "no_preference", null, "dva"],
+            "ban_vote": ["no_preference", "ana", null, "wrecking-ball", "no_preference", null],
+            "recognizer": "cv-v1"
+        })
+    }
+
+    #[tokio::test]
+    async fn upload_bans_picks_round_trips_on_me_matches_and_absent_is_null() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let mut full = match_object("sess-bp-full", 4);
+        full["bans_picks"] = full_bans_picks();
+        let omitted = match_object("sess-bp-omitted", 5);
+        let mut null_field = match_object("sess-bp-null", 6);
+        null_field["bans_picks"] = serde_json::Value::Null;
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [full, omitted, null_field] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 3);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        assert_eq!(
+            row_by_session(&page, "sess-bp-full")["bans_picks"],
+            full_bans_picks()
+        );
+        for sid in ["sess-bp-omitted", "sess-bp-null"] {
+            let row = row_by_session(&page, sid);
+            assert!(
+                row.get("bans_picks")
+                    .is_some_and(serde_json::Value::is_null),
+                "{sid}: {row}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn upload_bans_picks_unknown_hero_key_is_stored_as_null() {
+        let (state, member_id, token) = daemon().await;
+        let mut game = match_object("sess-bp-unknown", 3);
+        game["bans_picks"] = serde_json::json!({
+            "bans": [{ "hero": "not-a-hero", "team": "enemy" }],
+            "lobby_ban": "zzz",
+            "picks": ["Wrecking Ball", "nobody", "no_preference"],
+            "ban_vote": ["nobody", "no_preference", "ana", "Not_A_Hero"]
+        });
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [game] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(
+            parsed["inserted"], 1,
+            "an unknown hero does not reject the game"
+        );
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        let stored = rows[0].bans_picks.clone().expect("bans_picks stored");
+        assert_eq!(stored.bans[0].hero, None);
+        assert_eq!(stored.bans[0].team, Some(scuffed_types::BanTeam::Enemy));
+        assert_eq!(stored.lobby_ban, None);
+        assert_eq!(
+            stored.picks,
+            vec![
+                Some("wrecking-ball".to_string()),
+                None,
+                Some("no_preference".to_string())
+            ]
+        );
+        assert_eq!(
+            stored.ban_vote,
+            vec![
+                None,
+                Some("no_preference".to_string()),
+                Some("ana".to_string()),
+                None
+            ]
+        );
+        assert_eq!(stored.recognizer, None);
+    }
+
+    #[tokio::test]
+    async fn upload_bad_bans_picks_is_422_and_stores_nothing() {
+        let (state, member_id, token) = daemon().await;
+        let cases = [
+            (
+                serde_json::json!({ "bans": [
+                    { "hero": "ana" }, { "hero": "ana" }, { "hero": "ana" },
+                    { "hero": "ana" }, { "hero": "ana" }
+                ]}),
+                "bans_picks.bans must have at most 4 entries, got 5".to_string(),
+            ),
+            (
+                serde_json::json!({ "picks": ["ana", "ana", "ana", "ana", "ana", "ana", "ana"] }),
+                "bans_picks.picks must have at most 6 entries, got 7".to_string(),
+            ),
+            (
+                serde_json::json!({ "ban_vote": ["ana", "ana", "ana", "ana", "ana", "ana", "ana"] }),
+                "bans_picks.ban_vote must have at most 6 entries, got 7".to_string(),
+            ),
+            (
+                serde_json::json!({ "ban_vote": ["no_preference", 3] }),
+                "bans_picks.ban_vote[1] must be a hero key string or null".to_string(),
+            ),
+            (
+                serde_json::json!({ "recognizer": "CV V1" }),
+                scuffed_types::BANS_PICKS_RECOGNIZER_ERROR.to_string(),
+            ),
+        ];
+        for (bans_picks, message) in cases {
+            let mut bad = match_object("sess-bp-bad", 2);
+            bad["bans_picks"] = bans_picks.clone();
+            let sibling = match_object("sess-bp-sibling", 1);
+            let (status, parsed) = post_raw(
+                create_router(state.clone()),
+                &token,
+                serde_json::json!({ "matches": [sibling, bad], "deleted_sessions": [] }),
+            )
+            .await;
+            assert_eq!(
+                status,
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "{bans_picks}: {parsed}"
+            );
+            assert_eq!(
+                parsed["error"],
+                format!("matches[1]: {message}"),
+                "{parsed}"
+            );
+        }
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(rows.is_empty(), "a rejected batch writes nothing: {rows:?}");
+    }
+
+    async fn stored_bans_picks(
+        state: &crate::state::AppState,
+        member_id: &str,
+    ) -> Option<scuffed_types::BansPicks> {
+        let rows = state
+            .db
+            .list_personal_matches(member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "re-upload updates the same session");
+        rows[0].bans_picks.clone()
+    }
+
+    #[tokio::test]
+    async fn reupload_replaces_bans_picks_and_omitting_it_clears_like_suspect_fields() {
+        let (state, member_id, token) = daemon().await;
+
+        let mut first = match_object("sess-bp-reup", 4);
+        first["bans_picks"] = full_bans_picks();
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [first] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(
+            stored_bans_picks(&state, &member_id)
+                .await
+                .unwrap()
+                .lobby_ban
+                .as_deref(),
+            Some("ana")
+        );
+
+        let mut second = match_object("sess-bp-reup", 5);
+        second["bans_picks"] = serde_json::json!({ "lobby_ban": "mercy" });
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [second] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        let replaced = stored_bans_picks(&state, &member_id).await.unwrap();
+        assert_eq!(replaced.lobby_ban.as_deref(), Some("mercy"));
+        assert!(
+            replaced.bans.is_empty(),
+            "the whole object is replaced: {replaced:?}"
+        );
+        assert!(replaced.picks.is_empty());
+
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &token,
+            serde_json::json!({ "matches": [match_object("sess-bp-reup", 6)] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(
+            stored_bans_picks(&state, &member_id).await,
+            None,
+            "omitting bans_picks clears the stored object"
         );
     }
 
