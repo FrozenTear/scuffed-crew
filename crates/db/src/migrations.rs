@@ -952,7 +952,7 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- ================================================
         -- Contributed hero icons (metadata only)
         -- PNG bytes live under HERO_ICONS_DIR as file_name, not in this table
-        -- and not in uploads. Only the owner and officers can read them.
+        -- and not in uploads. Only the owner and admins can read them.
         -- ================================================
         DEFINE TABLE IF NOT EXISTS hero_icon SCHEMAFULL;
         DEFINE FIELD OVERWRITE member_id ON hero_icon TYPE string;

@@ -276,13 +276,33 @@ async fn discard_icon_file(state: &AppState, id: &str) {
     }
 }
 
-/// Remove every icon of `member_id` and return how many rows went.
+/// What [`delete_all_icons`] did.
+///
+/// `deleted` counts the rows removed even when `failure` is set, so a caller
+/// can audit a partial delete before it answers with the failure.
+struct DeleteAllOutcome {
+    deleted: u32,
+    failure: Option<Reject>,
+}
+
+impl DeleteAllOutcome {
+    /// The count, or the failure when one happened.
+    fn into_result(self) -> Result<u32, Reject> {
+        match self.failure {
+            Some(failure) => Err(failure),
+            None => Ok(self.deleted),
+        }
+    }
+}
+
+/// Remove every icon of `member_id`.
 ///
 /// Each file goes before its row, as in a single delete. A file that cannot be
 /// removed keeps its row, so the icon stays listed and the call can be
-/// retried. The other icons are still removed, and the result is a 500.
-/// Opt-in is not checked: the owner and admins delete hidden icons too.
-async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<u32, Reject> {
+/// retried. The other icons are still removed, and the outcome carries a 500.
+/// A database error stops the loop and is carried the same way. Opt-in is not
+/// checked: the owner and admins delete hidden icons too.
+async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<DeleteAllOutcome, Reject> {
     let rows = state
         .db
         .list_hero_icons_for_member(member_id)
@@ -290,6 +310,7 @@ async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<u32, Reje
         .map_err(db_error)?;
     let mut deleted: u32 = 0;
     let mut file_failed = false;
+    let mut failure = None;
     for icon in &rows {
         if let Err(error) = remove_icon_file(state, &icon.id).await {
             tracing::error!(%error, "hero icon file delete failed");
@@ -299,13 +320,16 @@ async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<u32, Reje
         match state.db.delete_hero_icon(&icon.id).await {
             Ok(Some(_)) => deleted += 1,
             Ok(None) => {}
-            Err(error) => return Err(db_error(error)),
+            Err(error) => {
+                failure = Some(db_error(error));
+                break;
+            }
         }
     }
-    if file_failed {
-        return Err(internal());
+    if failure.is_none() && file_failed {
+        failure = Some(internal());
     }
-    Ok(deleted)
+    Ok(DeleteAllOutcome { deleted, failure })
 }
 
 /// Best-effort rollback of rows and files this request stored.
@@ -624,7 +648,9 @@ pub async fn delete_mine(
     member: OrgMember,
 ) -> Result<Json<HeroIconsDeleted>, Reject> {
     configured(&state)?;
-    let deleted = delete_all_icons(&state, &member.member.id).await?;
+    let deleted = delete_all_icons(&state, &member.member.id)
+        .await?
+        .into_result()?;
     Ok(Json(HeroIconsDeleted { deleted }))
 }
 
@@ -925,7 +951,9 @@ pub async fn member_hero_icons(
 /// active, opted in or not: this is how an admin removes an opted-out
 /// member's hidden icons. 404 `member_not_found` for an unknown or inactive
 /// member, and nothing is deleted then. Written to the audit log as
-/// `deleted_all_hero_icons` when the caller is not that member.
+/// `deleted_all_hero_icons` when the caller is not that member and at least
+/// one icon went, also when a later icon failed and the answer is a 500. The
+/// details then say `partial`.
 pub async fn delete_member_hero_icons(
     State(state): State<AppState>,
     admin: AdminUser,
@@ -936,9 +964,14 @@ pub async fn delete_member_hero_icons(
     if !own {
         admin_target(&state, &member_id, AdminAccess::Delete).await?;
     }
-    let deleted = delete_all_icons(&state, &member_id).await?;
+    let outcome = delete_all_icons(&state, &member_id).await?;
+    let deleted = outcome.deleted;
     if deleted > 0 && !own {
-        let details = format!("{deleted} icons");
+        let details = if outcome.failure.is_some() {
+            format!("{deleted} icons, partial")
+        } else {
+            format!("{deleted} icons")
+        };
         audit(
             &state.db,
             &admin.member.id,
@@ -949,6 +982,7 @@ pub async fn delete_member_hero_icons(
         )
         .await;
     }
+    let deleted = outcome.into_result()?;
     Ok(Json(HeroIconsDeleted { deleted }))
 }
 

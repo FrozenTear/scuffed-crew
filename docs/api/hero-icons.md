@@ -291,8 +291,8 @@ to the audit log as `deleted_hero_icon` (see [Audit log](#audit-log)).
 
 Icons of members who are active and opted in right now, newest first, in the
 usual cursor page (`limit` 1 to 100, default 25). `next_cursor` is left out on
-the last page. Each request writes one audit entry `viewed_hero_icons` with
-target member `all`.
+the last page. The cursor is an offset, see [Paging](#paging). Each request
+writes one audit entry `viewed_hero_icons` with target member `all`.
 
 ```json
 {
@@ -322,8 +322,8 @@ has no icon ids, images or thumbnail URLs.
 
 Active members with how many icons each has stored, sorted by display name
 (case folded), then member id. The usual cursor page (`limit` 1 to 100,
-default 25). Inactive members are never listed. Counts are not audited: they
-carry no icon.
+default 25). The cursor is an offset, see [Paging](#paging). Inactive members
+are never listed. Counts are not audited: they carry no icon.
 
 - **Officers** get members who are opted in right now (`icon_count` 0 is
   possible). An opted-out member is never listed, so no hidden icon is
@@ -401,12 +401,24 @@ and members clear their own icons with `DELETE /api/hero-icons/mine`. Opt-in
 is left as it is. File
 failures work as in `DELETE /api/hero-icons/mine`. When at least one
 icon went and the member is not the caller, one audit entry
-`deleted_all_hero_icons` is written. A member with no icons gives
+`deleted_all_hero_icons` is written with that count. This also holds when a
+file or database error stopped part of the delete: the entry says
+`"<n> icons, partial"` and the answer is still 500. A member with no icons gives
 `{ "deleted": 0 }`.
 
 ```json
 { "deleted": 12 }
 ```
+
+## Paging
+
+`GET /api/hero-icons` and `GET /api/hero-icons/members` use the usual cursor,
+which is an offset into the sorted list. When a row before the cursor goes
+away between two page requests (an icon or a member's last hidden icon is
+deleted, or a member opts out or goes inactive), every later row moves up by
+one and the next page skips one row. A row added before the cursor shows one
+row twice instead. After a delete, refetch the current page rather than
+following the old `next_cursor`.
 
 ## Audit log
 
@@ -420,7 +432,7 @@ these.
 | `viewed_hero_icons` | `all` | `"<n> icons"` on the page | `GET /api/hero-icons` |
 | `viewed_hero_icons` | member id | `"<n> icons"` | `GET /api/hero-icons/members/{member_id}` |
 | `deleted_hero_icon` | owner member id | `"icon <id>"` | `DELETE /api/hero-icons/{id}` |
-| `deleted_all_hero_icons` | member id | `"<n> icons"` | `DELETE /api/hero-icons/members/{member_id}`, when n > 0 |
+| `deleted_all_hero_icons` | member id | `"<n> icons"`, or `"<n> icons, partial"` when a later icon failed | `DELETE /api/hero-icons/members/{member_id}`, when n > 0, also when the answer is a 500 |
 
 Thumbnail fetches and the per-member counts are not audited.
 

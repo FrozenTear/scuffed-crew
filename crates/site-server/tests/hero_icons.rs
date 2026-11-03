@@ -658,7 +658,9 @@ async fn admin_lists_reads_and_deletes_visible_icons() {
     let mut owner_ids = ids_of(&body["icons"]);
     owner_ids.sort();
     let other_id = first_id(&upload_one(&w.app, OTHER_SESSION, "mercy").await);
-    // Opted out: kept, but not counted, listed, read or deletable by staff.
+    // Opted out: kept and hidden from officers and from admin lists and
+    // reads. Admin counts still list the member with `opted_in` false, and
+    // admins can still delete the icon.
     set_opt_in(&w.app, OTHER_SESSION, false).await;
 
     let (status, list) = get(&w.app, "/api/hero-icons", ADMIN_SESSION).await;
@@ -823,7 +825,7 @@ async fn members_and_officers_are_refused_on_staff_routes() {
     w.cleanup();
 }
 
-/// Robert's rule: officers get per-member counts and nothing else of another
+/// The rule: officers get per-member counts and nothing else of another
 /// member's icons. Their own icons work like any member's.
 #[tokio::test]
 async fn officers_get_counts_only() {
@@ -899,6 +901,56 @@ async fn officers_get_counts_only() {
 
 /// Admin deletes of another member's icons, one and all, and a member's own
 /// delete, side by side.
+/// A delete-all that hits a file error still audits the rows it removed,
+/// answers 500, keeps the icon whose file failed, and can be retried.
+#[tokio::test]
+async fn admin_delete_all_with_a_file_error_audits_the_partial_count() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    let two = icons(vec![png(16, 16), png(17, 17)]);
+    let (status, body) = upload(&w.app, OWNER_SESSION, "ana", &two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let uploaded = ids_of(&body["icons"]);
+    // A directory with something in it where one icon file was: removing it
+    // as a file fails with an error that is not "not found".
+    let stuck = w.dir().join(format!("{}.png", uploaded[0]));
+    std::fs::remove_file(&stuck).unwrap();
+    std::fs::create_dir(&stuck).unwrap();
+    std::fs::write(stuck.join("keep"), b"x").unwrap();
+
+    let owner_icons = format!("/api/hero-icons/members/{OWNER}");
+    let got = delete(&w.app, &owner_icons, ADMIN_SESSION).await;
+    assert_error(&got, StatusCode::INTERNAL_SERVER_ERROR, "Internal error");
+    // The other icon went; the stuck one keeps its row for a retry.
+    assert!(w.db().get_hero_icon(&uploaded[1]).await.unwrap().is_none());
+    assert!(w.db().get_hero_icon(&uploaded[0]).await.unwrap().is_some());
+    let audited = audits_of(w.db(), "deleted_all_hero_icons").await;
+    let partial = (
+        "member".to_string(),
+        OWNER.to_string(),
+        Some("1 icons, partial".to_string()),
+    );
+    assert_eq!(audited, vec![partial.clone()]);
+
+    // Fixed on disk, the retry removes the rest and audits that too.
+    std::fs::remove_dir_all(&stuck).unwrap();
+    let (status, body) = delete(&w.app, &owner_icons, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    let audited = audits_of(w.db(), "deleted_all_hero_icons").await;
+    assert_eq!(audited.len(), 2, "{audited:?}");
+    let full = (
+        "member".to_string(),
+        OWNER.to_string(),
+        Some("1 icons".to_string()),
+    );
+    assert!(
+        audited.contains(&partial) && audited.contains(&full),
+        "{audited:?}"
+    );
+    w.cleanup();
+}
+
 #[tokio::test]
 async fn admin_delete_and_self_delete_work() {
     let w = world().await;
@@ -1164,7 +1216,7 @@ async fn admin_counts_include_opted_out_members_with_hidden_icons() {
     w.cleanup();
 }
 
-/// Robert's rule: admins delete an opted-out member's hidden icons. They still
+/// The rule: admins delete an opted-out member's hidden icons. They still
 /// cannot list or read them, and officers still cannot delete them.
 #[tokio::test]
 async fn admin_deletes_an_opted_out_members_hidden_icon() {
