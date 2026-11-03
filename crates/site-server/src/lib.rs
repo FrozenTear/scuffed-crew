@@ -199,14 +199,16 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     #[cfg(not(test))]
     let stats_token_governor = stats_upload_limits::StatsUploadGovernor::new();
 
-    // Own per-IP bucket, same budget as token-check (burst 8, then 1 every
-    // 10s). Filling this bucket does not block uploads or token-check.
-    // The governor calls `rate_limited_response` for the JSON 429.
+    // Own per-IP bucket (burst `PACK_IP_BURST`, then 1 every
+    // `PACK_IP_REPLENISH_SECS`), sized so a first install of every pack plus
+    // the list fits in the burst. Filling this bucket does not block uploads
+    // or token-check. The governor calls `rate_limited_response` for the
+    // JSON 429.
     let pack_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
-            .per_second(10)
-            .burst_size(8)
+            .per_second(scuffed_types::PACK_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::PACK_IP_BURST)
             .finish()
             .expect("valid pack governor config"),
     );

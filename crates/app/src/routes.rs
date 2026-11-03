@@ -96,6 +96,8 @@ pub enum Route {
         AdminDashboard {},
         #[route("/admin/members")]
         AdminMembers {},
+        #[route("/admin/members/:id/matches")]
+        AdminMemberMatches { id: String },
         #[route("/admin/games")]
         AdminGames {},
         #[route("/admin/teams")]
@@ -187,6 +189,7 @@ mod tests {
             "/patch-notes",
             "/admin",
             "/admin/members",
+            "/admin/members/abc/matches",
             "/strategy",
             "/strategy/editor/abc",
             "/login",
@@ -249,6 +252,18 @@ mod tests {
             Route::AdminHeroIcons {}
         );
         assert_eq!(Route::AdminHeroIcons {}.to_string(), "/admin/hero-icons");
+    }
+
+    #[test]
+    fn admin_member_matches_route_parses() {
+        assert_eq!(
+            Route::from_str("/admin/members/m1/matches").unwrap(),
+            Route::AdminMemberMatches { id: "m1".into() }
+        );
+        assert_eq!(
+            Route::AdminMemberMatches { id: "m1".into() }.to_string(),
+            "/admin/members/m1/matches"
+        );
     }
 
     #[test]

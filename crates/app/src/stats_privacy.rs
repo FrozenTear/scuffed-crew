@@ -31,7 +31,7 @@ pub fn hint(v: StatsVisibility) -> &'static str {
             "Only signed-in crew members can see your stats. You stay off public leaderboards."
         }
         StatsVisibility::Private => {
-            "Only you and officers can see your stats. You are off every leaderboard."
+            "Only you can see your single matches. Officers can see your totals."
         }
     }
 }
@@ -41,7 +41,9 @@ pub fn notice(v: StatsVisibility) -> &'static str {
     match v {
         StatsVisibility::Public => "Your stats are public.",
         StatsVisibility::Members => "Only signed-in crew members can see these stats.",
-        StatsVisibility::Private => "Only you and officers can see these stats.",
+        StatsVisibility::Private => {
+            "Only you can see your single matches. Officers can see your totals."
+        }
     }
 }
 
@@ -120,6 +122,13 @@ mod tests {
                 assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'));
             }
         }
+    }
+
+    #[test]
+    fn private_copy_is_the_agreed_text() {
+        let text = "Only you can see your single matches. Officers can see your totals.";
+        assert_eq!(hint(StatsVisibility::Private), text);
+        assert_eq!(notice(StatsVisibility::Private), text);
     }
 
     #[test]

@@ -460,8 +460,8 @@ More detail on a sync, for the tracker on main:
   after it for that run. Their folders are kept, and a pack that is already
   current is still reported as current. The setup guide tries again on the
   next click. The daemon's background job tries again by itself.
-- A first install of all six is seven requests (the list and six files),
-  inside the burst of 8.
+- A first install of all eight is nine requests (the list and eight files),
+  inside the burst of 16 (`PACK_IP_BURST` in `crates/types`).
 - Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
   `templates/` by a killed sync are removed by the next sync once they are
   an hour old.
@@ -805,7 +805,7 @@ response. Do not add that header in Caddy. A second line is sent beside the
 one from the app. See `docs/deploy.md`.
 
 These routes do not write to the database and do not log the token. They are
-rate limited per client IP (burst 8, then one request every 10 seconds), in
+rate limited per client IP (burst 16, then one request every 10 seconds), in
 their own bucket. A limited call returns 429:
 
 ```json
