@@ -760,8 +760,9 @@ is restarted.
 At startup the server removes icon files older than one hour that have no
 database row, and logs `hero icon orphan sweep done` with the count.
 
-The `hero-icons-data` volume is deliberately not in the backup snapshot: icons
-never leave the server volume. Lost icons can be contributed again. Endpoints,
+The `hero-icons-data` volume is not in `scripts/backup.sh`, by decision: the
+current server is a temporary dev platform and backups are dropped for it.
+Lost icons can be contributed again. Endpoints,
 caps and the privacy rule are in `docs/api/hero-icons.md`.
 
 ## Recognizer asset packs

@@ -10,18 +10,22 @@
 //! - Only an admin reads, lists or deletes another member's icons. Officers
 //!   get the per-member counts (`GET /api/hero-icons/members`) and nothing
 //!   else: no images, no icon lists, no deletes.
-//! - Opt-out keeps the icons and hides them. An admin sees and deletes an icon
-//!   only while its owner is active and opted in. Only the owner deletes the
-//!   icons of an opted-out member. Counts list only those members too.
-//! - `GET /api/hero-icons/{id}/image` and `DELETE /api/hero-icons/{id}` serve
-//!   the owner, and an admin only while the owner is visible as above. For
-//!   any other id, an officer gets 403 `Admin access required` and everyone
-//!   else gets 404 `icon_not_found`. Unknown and malformed ids get the same
-//!   answer, so neither leaks whether an icon exists.
+//! - Opt-out keeps the icons and hides them. An admin reads or lists an icon
+//!   only while its owner is active and opted in. Deletes are different: an
+//!   admin deletes an active member's icons opted in or not, so hidden icons
+//!   can still be removed. Officer counts list opted-in members only; admin
+//!   counts add opted-out members who still have hidden icons.
+//! - `GET /api/hero-icons/{id}/image` serves the owner, and an admin while the
+//!   owner is active and opted in. `DELETE /api/hero-icons/{id}` serves the
+//!   owner, and an admin while the owner is active. For any other id, an
+//!   officer gets 403 `Admin access required` and everyone else gets 404
+//!   `icon_not_found`. Unknown and malformed ids get the same answer, so
+//!   neither leaks whether an icon exists.
 //! - `GET /api/hero-icons` and `GET` and `DELETE
 //!   /api/hero-icons/members/{member_id}` are admin only. The per-member routes
-//!   are 404 `member_not_found` for an unknown or inactive member and 403
-//!   `icon_opt_in_off` for a member who is not opted in.
+//!   are 404 `member_not_found` for an unknown or inactive member. The `GET`
+//!   is 403 `icon_opt_in_off` for a member who is not opted in. The `DELETE`
+//!   works either way.
 //! - Admin reads of icon lists and admin deletes are written to the audit log.
 //!   Single thumbnail fetches are not, since one list page loads many of them.
 //! - Opt-in `GET` and `PUT` only touch the flag and work while the store is
@@ -31,7 +35,7 @@
 //! the server. Ids from a URL must pass [`is_icon_id`] before any database or
 //! file call. See `docs/api/hero-icons.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
 
@@ -167,8 +171,7 @@ fn officer_entry(icon: &HeroIcon, names: &HashMap<String, String>) -> OfficerHer
 
 /// Members whose icons staff may see: active and opted in right now.
 ///
-/// Admins list and read icons of these members only. Officer counts list
-/// these members only.
+/// Admin icon lists and reads cover these members only.
 ///
 /// Maps member id to display name. This is a visibility filter, so a failed
 /// lookup is a 500, never an empty or unfiltered answer.
@@ -185,16 +188,18 @@ async fn visible_members(state: &AppState) -> Result<HashMap<String, String>, Re
         .map_err(db_error)
 }
 
-/// True when an admin may see `member_id`'s icons: active and opted in.
-async fn member_visible(state: &AppState, member_id: &str) -> Result<bool, Reject> {
-    let opted_in = state
-        .db
-        .get_hero_icon_opt_in(member_id)
-        .await
-        .map_err(db_error)?;
-    if !opted_in {
-        return Ok(false);
-    }
+/// What an admin wants to do with another member's icons.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminAccess {
+    /// List or read: the member must be active and opted in.
+    Read,
+    /// Delete: the member must be active. Opt-in does not matter, so an admin
+    /// can remove the hidden icons of an opted-out member.
+    Delete,
+}
+
+/// True when `member_id` is an active member.
+async fn member_active(state: &AppState, member_id: &str) -> Result<bool, Reject> {
     let active = state
         .db
         .active_member_display_names(&[member_id.to_string()])
@@ -203,12 +208,31 @@ async fn member_visible(state: &AppState, member_id: &str) -> Result<bool, Rejec
     Ok(active.contains_key(member_id))
 }
 
+/// True when an admin may do `access` on `member_id`'s icons.
+async fn admin_may(state: &AppState, member_id: &str, access: AdminAccess) -> Result<bool, Reject> {
+    if access == AdminAccess::Read {
+        let opted_in = state
+            .db
+            .get_hero_icon_opt_in(member_id)
+            .await
+            .map_err(db_error)?;
+        if !opted_in {
+            return Ok(false);
+        }
+    }
+    member_active(state, member_id).await
+}
+
 /// Checks for the admin per-member routes when the target is not the caller.
 ///
-/// 404 `member_not_found` for an unknown or inactive member, then 403
-/// `icon_opt_in_off` while that member is not opted in. Returns the display
-/// name.
-async fn admin_target(state: &AppState, member_id: &str) -> Result<String, Reject> {
+/// 404 `member_not_found` for an unknown or inactive member. For
+/// [`AdminAccess::Read`], then 403 `icon_opt_in_off` while that member is not
+/// opted in. Returns the display name.
+async fn admin_target(
+    state: &AppState,
+    member_id: &str,
+    access: AdminAccess,
+) -> Result<String, Reject> {
     let names = state
         .db
         .active_member_display_names(&[member_id.to_string()])
@@ -220,13 +244,15 @@ async fn admin_target(state: &AppState, member_id: &str) -> Result<String, Rejec
             HERO_ICON_ERR_MEMBER_NOT_FOUND,
         ));
     };
-    let opted_in = state
-        .db
-        .get_hero_icon_opt_in(member_id)
-        .await
-        .map_err(db_error)?;
-    if !opted_in {
-        return Err(reject(StatusCode::FORBIDDEN, HERO_ICON_ERR_OPT_IN_OFF));
+    if access == AdminAccess::Read {
+        let opted_in = state
+            .db
+            .get_hero_icon_opt_in(member_id)
+            .await
+            .map_err(db_error)?;
+        if !opted_in {
+            return Err(reject(StatusCode::FORBIDDEN, HERO_ICON_ERR_OPT_IN_OFF));
+        }
     }
     Ok(name.clone())
 }
@@ -255,17 +281,8 @@ async fn discard_icon_file(state: &AppState, id: &str) {
 /// Each file goes before its row, as in a single delete. A file that cannot be
 /// removed keeps its row, so the icon stays listed and the call can be
 /// retried. The other icons are still removed, and the result is a 500.
-///
-/// With `admin_recheck` (an admin clearing another member), visibility is
-/// checked again before each icon. When the member opts out or
-/// goes inactive mid-loop, the loop stops at the next icon and the rest stay
-/// stored. Nothing deleted by then is 403 `icon_opt_in_off`, otherwise the
-/// partial count is returned.
-async fn delete_all_icons(
-    state: &AppState,
-    member_id: &str,
-    admin_recheck: bool,
-) -> Result<u32, Reject> {
+/// Opt-in is not checked: the owner and admins delete hidden icons too.
+async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<u32, Reject> {
     let rows = state
         .db
         .list_hero_icons_for_member(member_id)
@@ -274,12 +291,6 @@ async fn delete_all_icons(
     let mut deleted: u32 = 0;
     let mut file_failed = false;
     for icon in &rows {
-        if admin_recheck && !member_visible(state, member_id).await? {
-            if deleted == 0 && !file_failed {
-                return Err(reject(StatusCode::FORBIDDEN, HERO_ICON_ERR_OPT_IN_OFF));
-            }
-            break;
-        }
         if let Err(error) = remove_icon_file(state, &icon.id).await {
             tracing::error!(%error, "hero icon file delete failed");
             file_failed = true;
@@ -613,7 +624,7 @@ pub async fn delete_mine(
     member: OrgMember,
 ) -> Result<Json<HeroIconsDeleted>, Reject> {
     configured(&state)?;
-    let deleted = delete_all_icons(&state, &member.member.id, false).await?;
+    let deleted = delete_all_icons(&state, &member.member.id).await?;
     Ok(Json(HeroIconsDeleted { deleted }))
 }
 
@@ -655,14 +666,20 @@ pub async fn put_opt_in(
     }))
 }
 
-/// The icon when `viewer` may read or delete it: the owner, or an admin while
-/// the owner is active and opted in.
+/// The icon when `viewer` may do `access` on it: the owner, or an admin as
+/// [`admin_may`] allows (read: owner active and opted in; delete: owner
+/// active).
 ///
 /// Every other case gets one answer that does not depend on the id: 403
 /// `Admin access required` for an officer who is not an admin, 404
 /// `icon_not_found` for everyone else. So an officer cannot tell another
 /// member's icon from an unknown id.
-async fn visible_icon(state: &AppState, viewer: &OrgMember, id: &str) -> Result<HeroIcon, Reject> {
+async fn visible_icon(
+    state: &AppState,
+    viewer: &OrgMember,
+    id: &str,
+    access: AdminAccess,
+) -> Result<HeroIcon, Reject> {
     let role = viewer.member.org_role;
     let is_admin = role == OrgRole::Admin;
     let refuse = || {
@@ -681,7 +698,7 @@ async fn visible_icon(state: &AppState, viewer: &OrgMember, id: &str) -> Result<
     if icon.member_id == viewer.member.id {
         return Ok(icon);
     }
-    if is_admin && member_visible(state, &icon.member_id).await? {
+    if is_admin && admin_may(state, &icon.member_id, access).await? {
         Ok(icon)
     } else {
         Err(refuse())
@@ -695,7 +712,7 @@ pub async fn hero_icon_image(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Response, Reject> {
     configured(&state)?;
-    let icon = visible_icon(&state, &member, &id).await?;
+    let icon = visible_icon(&state, &member, &id, AdminAccess::Read).await?;
     let path = state.hero_icons.icon_path(&icon.id);
     let bytes = match tokio::fs::read(path).await {
         Ok(bytes) => bytes,
@@ -720,17 +737,17 @@ pub async fn hero_icon_image(
 
 /// DELETE /api/hero-icons/{id}
 ///
-/// The owner, or an admin while the owner is active and opted in. An icon of
-/// an opted-out member is the same 404 for admins and stays stored. Officers
-/// get 403 for any icon that is not their own. The file goes first, so a
-/// failed file delete keeps the row for a retry.
+/// The owner, or an admin while the owner is active, opted in or not: an admin
+/// can remove an opted-out member's hidden icon, and the delete is audited.
+/// Officers get 403 for any icon that is not their own. The file goes first,
+/// so a failed file delete keeps the row for a retry.
 pub async fn delete_hero_icon(
     State(state): State<AppState>,
     member: OrgMember,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<HeroIconsDeleted>, Reject> {
     configured(&state)?;
-    let icon = visible_icon(&state, &member, &id).await?;
+    let icon = visible_icon(&state, &member, &id, AdminAccess::Delete).await?;
     let own = icon.member_id == member.member.id;
     if let Err(error) = remove_icon_file(&state, &icon.id).await {
         tracing::error!(%error, "hero icon file delete failed");
@@ -799,27 +816,53 @@ pub async fn list_hero_icons(
 /// The only hero icon route open to officers. Counts only: no ids, images or
 /// thumbnails.
 ///
-/// Active members who are opted in, with their stored icon count, sorted by
-/// display name (case folded), then member id. Paged in memory with the usual
-/// cursor: the list is at most one row per member. Opted-out and inactive
-/// members are not listed.
+/// Active members with their stored icon count, sorted by display name (case
+/// folded), then member id. Paged in memory with the usual cursor: the list is
+/// at most one row per member. Inactive members are never listed.
+///
+/// - Officers get opted-in members only, so no hidden icon is revealed.
+/// - Admins also get opted-out members who still have at least one hidden
+///   icon, with `opted_in` false, since admins may delete those icons.
 pub async fn hero_icon_member_counts(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    staff: OfficerUser,
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<CursorResponse<HeroIconMemberCount>>, Reject> {
     configured(&state)?;
     let (limit, offset) = pagination.resolve();
-    let visible = visible_members(&state).await?;
+    let is_admin = staff.member.org_role == OrgRole::Admin;
     let counts = state.db.hero_icon_counts().await.map_err(db_error)?;
-    let mut members: Vec<HeroIconMemberCount> = visible
+    let opted_in: HashSet<String> = state
+        .db
+        .hero_icon_opted_in_member_ids()
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .collect();
+    let mut candidates: Vec<String> = opted_in.iter().cloned().collect();
+    if is_admin {
+        let hidden = counts
+            .iter()
+            .filter(|(member_id, count)| **count > 0 && !opted_in.contains(*member_id))
+            .map(|(member_id, _)| member_id.clone());
+        candidates.extend(hidden);
+    }
+    // A visibility filter: a failed lookup is a 500, never an unfiltered list.
+    let active = state
+        .db
+        .active_member_display_names(&candidates)
+        .await
+        .map_err(db_error)?;
+    let mut members: Vec<HeroIconMemberCount> = active
         .into_iter()
         .map(|(member_id, display_name)| {
             let icon_count = counts.get(&member_id).copied().unwrap_or(0);
+            let member_opted_in = opted_in.contains(&member_id);
             HeroIconMemberCount {
                 display_name,
                 icon_count: u32::try_from(icon_count).unwrap_or(u32::MAX),
-                icon_contribution_opt_in: true,
+                opted_in: member_opted_in,
+                icon_contribution_opt_in: member_opted_in,
                 member_id,
             }
         })
@@ -849,7 +892,7 @@ pub async fn member_hero_icons(
     let display_name = if own {
         admin.member.display_name.clone()
     } else {
-        admin_target(&state, &member_id).await?
+        admin_target(&state, &member_id, AdminAccess::Read).await?
     };
     let rows = state
         .db
@@ -879,11 +922,10 @@ pub async fn member_hero_icons(
 /// DELETE /api/hero-icons/members/{member_id} (admin)
 ///
 /// Removes every icon of one member, rows and files, while that member is
-/// active and opted in. 404 `member_not_found` and 403 `icon_opt_in_off` as in
-/// [`member_hero_icons`], and nothing is deleted then: an opted-out member's
-/// icons are deleted only by that member. An admin may clear their own icons
-/// here opted in or not. Written to the audit log as `deleted_all_hero_icons`
-/// when the caller is not that member.
+/// active, opted in or not: this is how an admin removes an opted-out
+/// member's hidden icons. 404 `member_not_found` for an unknown or inactive
+/// member, and nothing is deleted then. Written to the audit log as
+/// `deleted_all_hero_icons` when the caller is not that member.
 pub async fn delete_member_hero_icons(
     State(state): State<AppState>,
     admin: AdminUser,
@@ -892,9 +934,9 @@ pub async fn delete_member_hero_icons(
     configured(&state)?;
     let own = member_id == admin.member.id;
     if !own {
-        admin_target(&state, &member_id).await?;
+        admin_target(&state, &member_id, AdminAccess::Delete).await?;
     }
-    let deleted = delete_all_icons(&state, &member_id, !own).await?;
+    let deleted = delete_all_icons(&state, &member_id).await?;
     if deleted > 0 && !own {
         let details = format!("{deleted} icons");
         audit(
@@ -913,7 +955,7 @@ pub async fn delete_member_hero_icons(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{must_err, must_ok, seed_user, test_state};
+    use crate::test_support::{must_err, must_ok, test_state};
 
     fn png_bytes(edge: u32) -> Vec<u8> {
         let canvas = image::RgbaImage::from_pixel(edge, edge, image::Rgba([10, 200, 90, 255]));
@@ -977,54 +1019,6 @@ mod tests {
         for icon in &earlier {
             assert!(state.db.get_hero_icon(&icon.id).await.unwrap().is_some());
             assert!(state.hero_icons.icon_path(&icon.id).exists());
-        }
-        let _ = std::fs::remove_dir_all(state.hero_icons.dir());
-    }
-
-    /// An admin clear that passed the first check stops at the next icon
-    /// once the member has opted out, and keeps every icon not yet removed.
-    #[tokio::test]
-    async fn admin_clear_rechecks_opt_in_before_each_icon() {
-        let state = test_state().await;
-        seed_user(&state, "targetuser", "tgt_login").await;
-        let target = state
-            .db
-            .create_member("targetuser", "TargetTerry", OrgRole::Member)
-            .await
-            .expect("target member");
-        state
-            .db
-            .set_hero_icon_opt_in(&target.id, true)
-            .await
-            .unwrap();
-        let stored = store_two(&state, &target.id).await;
-        // The member opts out after the admin route checked them.
-        state
-            .db
-            .set_hero_icon_opt_in(&target.id, false)
-            .await
-            .unwrap();
-
-        let (status, body) = must_err(
-            delete_all_icons(&state, &target.id, true).await,
-            "opted out before the first icon",
-        );
-        assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body.error, HERO_ICON_ERR_OPT_IN_OFF);
-        for icon in &stored {
-            assert!(state.db.get_hero_icon(&icon.id).await.unwrap().is_some());
-            assert!(state.hero_icons.icon_path(&icon.id).exists());
-        }
-
-        // The owner path does not recheck: the member deletes their own icons.
-        let deleted = must_ok(
-            delete_all_icons(&state, &target.id, false).await,
-            "owner clear while opted out",
-        );
-        assert_eq!(deleted, 2);
-        for icon in &stored {
-            assert!(state.db.get_hero_icon(&icon.id).await.unwrap().is_none());
-            assert!(!state.hero_icons.icon_path(&icon.id).exists());
         }
         let _ = std::fs::remove_dir_all(state.hero_icons.dir());
     }

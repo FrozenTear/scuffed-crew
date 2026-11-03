@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const HERO_ICON_ERR_DISABLED: &str = "hero_icons_disabled";
 /// The member has not opted in to contributing icons. 403 on upload.
 pub const HERO_ICON_ERR_OPT_IN_REQUIRED: &str = "icon_opt_in_required";
-/// The member an admin asked about is not opted in. 403. Their icons are
-/// kept but hidden from everyone except the member.
+/// The member whose icon list an admin asked for is not opted in. 403. Their
+/// icons are kept and hidden from reads. Admin deletes do not answer this.
 pub const HERO_ICON_ERR_OPT_IN_OFF: &str = "icon_opt_in_off";
 /// A part does not start with the PNG signature. 415.
 pub const HERO_ICON_ERR_NOT_PNG: &str = "not_png";
@@ -114,14 +114,18 @@ pub struct OfficerHeroIconList {
 /// One row of `GET /api/hero-icons/members` (officer or admin), sent as a
 /// `CursorResponse` page sorted by display name, then member id.
 ///
-/// Only active members who are opted in are listed, so
-/// `icon_contribution_opt_in` is always true. It stays in the shape so a
-/// client can show it without a second call.
+/// Only active members are listed. Officers get opted-in members only. Admins
+/// also get opted-out members who still have hidden icons, with `opted_in`
+/// false, so those icons can be found and deleted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeroIconMemberCount {
     pub member_id: String,
     /// Empty when the member record has no name.
     pub display_name: String,
     pub icon_count: u32,
+    /// The member's opt-in right now. Always true in an officer's list.
+    #[serde(default)]
+    pub opted_in: bool,
+    /// Same value as `opted_in`. Kept from the first version of this shape.
     pub icon_contribution_opt_in: bool,
 }

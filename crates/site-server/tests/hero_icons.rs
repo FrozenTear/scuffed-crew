@@ -681,15 +681,20 @@ async fn admin_lists_reads_and_deletes_visible_icons() {
     );
     assert_eq!(viewed, vec![all]);
 
-    // Officers and admins get the same counts.
+    // Officers see opted-in members only. Admins also see the opted-out
+    // member with a hidden icon (covered in
+    // `admin_counts_include_opted_out_members_with_hidden_icons`).
     let (status, counts) = get(&w.app, "/api/hero-icons/members", OFFICER_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{counts}");
     let (status, admin_counts) = get(&w.app, "/api/hero-icons/members", ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{admin_counts}");
-    assert_eq!(admin_counts, counts);
+    let both = vec![OTHER.to_string(), OWNER.to_string()];
+    assert_eq!(member_ids_of(&admin_counts), both);
+    assert_eq!(admin_counts["data"][1], counts["data"][0]);
     assert_eq!(member_ids_of(&counts), vec![OWNER.to_string()]);
     let row = &counts["data"][0];
     assert_eq!(row["icon_count"], json!(2));
+    assert_eq!(row["opted_in"], json!(true));
     assert_eq!(row["icon_contribution_opt_in"], json!(true));
     assert_eq!(row["display_name"], json!(OWNER));
     assert!(counts.get("next_cursor").is_none(), "{counts}");
@@ -731,9 +736,11 @@ async fn admin_lists_reads_and_deletes_visible_icons() {
     );
     assert_eq!(deleted, vec![expected]);
 
-    // An opted-out member's icon is hidden from admins and stays stored.
-    let uri = format!("/api/hero-icons/{other_id}");
-    let got = delete(&w.app, &uri, ADMIN_SESSION).await;
+    // An opted-out member's icon is hidden from admin reads and stays stored.
+    // Admins can still delete it; see
+    // `admin_deletes_an_opted_out_members_hidden_icon`.
+    let image = format!("/api/hero-icons/{other_id}/image");
+    let got = get(&w.app, &image, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
     assert!(w.dir().join(format!("{other_id}.png")).exists());
     assert!(w.db().get_hero_icon(&other_id).await.unwrap().is_some());
@@ -987,12 +994,9 @@ async fn opting_out_hides_icons_from_staff_but_keeps_them() {
     assert_eq!(status, StatusCode::OK, "{counts}");
     assert!(member_ids_of(&counts).is_empty(), "{counts}");
 
-    // Admins cannot delete them, one by one or all at once.
+    // Admins can still delete hidden icons; that is covered in
+    // `admin_deletes_an_opted_out_members_hidden_icons`. Nothing here deletes.
     let one = format!("/api/hero-icons/{id}");
-    let got = delete(&w.app, &one, ADMIN_SESSION).await;
-    assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
-    let got = delete(&w.app, &uri, ADMIN_SESSION).await;
-    assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
     assert_eq!(files_on_disk(w.dir()).len(), 2);
     assert_eq!(w.db().count_hero_icons_for_member(OWNER).await.unwrap(), 2);
     assert!(audits_of(w.db(), "deleted_hero_icon").await.is_empty());
@@ -1047,7 +1051,7 @@ async fn delete_all_removes_rows_and_files() {
 }
 
 #[tokio::test]
-async fn admin_delete_all_needs_the_member_opted_in() {
+async fn admin_delete_all_works_opted_in_or_out() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
     set_opt_in(&w.app, OTHER_SESSION, true).await;
@@ -1061,13 +1065,7 @@ async fn admin_delete_all_needs_the_member_opted_in() {
     let owner_uri = format!("/api/hero-icons/members/{OWNER}");
     let got = delete(&w.app, &owner_uri, OWNER_SESSION).await;
     assert_error(&got, StatusCode::FORBIDDEN, "Admin access required");
-
-    // Opted out: refused, nothing deleted.
-    let got = delete(&w.app, &owner_uri, ADMIN_SESSION).await;
-    assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
     assert_eq!(files_on_disk(w.dir()).len(), 3);
-    let left = w.db().count_hero_icons_for_member(OWNER).await.unwrap();
-    assert_eq!(left, 2);
 
     // Opted in: every icon of that member goes, and the delete is audited.
     let other_uri = format!("/api/hero-icons/members/{OTHER}");
@@ -1084,10 +1082,133 @@ async fn admin_delete_all_needs_the_member_opted_in() {
     );
     assert_eq!(audited, vec![expected]);
 
+    // Nothing left: 0, and no second audit entry.
     let (status, body) = delete(&w.app, &other_uri, ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["deleted"], json!(0));
     assert_eq!(audits_of(w.db(), "deleted_all_hero_icons").await.len(), 1);
+
+    // Opted out: the hidden icons go too, and the delete is audited.
+    let (status, body) = delete(&w.app, &owner_uri, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(2));
+    assert!(files_on_disk(w.dir()).is_empty());
+    assert_eq!(w.db().count_hero_icons_for_member(OWNER).await.unwrap(), 0);
+    let audited = audits_of(w.db(), "deleted_all_hero_icons").await;
+    let expected = (
+        "member".to_string(),
+        OWNER.to_string(),
+        Some("2 icons".to_string()),
+    );
+    assert!(audited.contains(&expected), "{audited:?}");
+    // The opt-in is left as it was.
+    assert!(!settings_of(w.db(), OWNER).await.hero_icon_opt_in);
+    w.cleanup();
+}
+
+/// Site needs this: an admin's counts list opted-out members who still have
+/// hidden icons, with `opted_in` false. An officer's counts never do.
+#[tokio::test]
+async fn admin_counts_include_opted_out_members_with_hidden_icons() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    set_opt_in(&w.app, OTHER_SESSION, true).await;
+    let two = icons(vec![png(16, 16), png(17, 17)]);
+    let (status, body) = upload(&w.app, OWNER_SESSION, "ana", &two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    set_opt_in(&w.app, OWNER_SESSION, false).await;
+    // OTHER is opted in with no icons. The officer is opted out with none, so
+    // is not listed for anyone.
+    let counts_uri = "/api/hero-icons/members";
+
+    let (status, admin) = get(&w.app, counts_uri, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{admin}");
+    let both = vec![OTHER.to_string(), OWNER.to_string()];
+    assert_eq!(member_ids_of(&admin), both);
+    let hidden = &admin["data"][1];
+    assert_eq!(hidden["member_id"], json!(OWNER));
+    assert_eq!(hidden["icon_count"], json!(2));
+    assert_eq!(hidden["opted_in"], json!(false));
+    assert_eq!(hidden["icon_contribution_opt_in"], json!(false));
+    let shown = &admin["data"][0];
+    assert_eq!(shown["icon_count"], json!(0));
+    assert_eq!(shown["opted_in"], json!(true));
+    assert!(admin.get("next_cursor").is_none(), "{admin}");
+
+    // Same paged shape for admins.
+    let (status, page) = get(&w.app, &format!("{counts_uri}?limit=1"), ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(member_ids_of(&page), vec![OTHER.to_string()]);
+    let cursor = page["next_cursor"]
+        .as_str()
+        .expect("next_cursor")
+        .to_string();
+    let next = format!("{counts_uri}?limit=1&cursor={cursor}");
+    let (status, page) = get(&w.app, &next, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(member_ids_of(&page), vec![OWNER.to_string()]);
+
+    // The officer's list leaves the opted-out member out.
+    let (status, officer) = get(&w.app, counts_uri, OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{officer}");
+    assert_eq!(member_ids_of(&officer), vec![OTHER.to_string()]);
+    assert_eq!(officer["data"][0]["opted_in"], json!(true));
+
+    // Once the admin deletes the hidden icons, the row goes away.
+    let owner_icons = format!("/api/hero-icons/members/{OWNER}");
+    let (status, body) = delete(&w.app, &owner_icons, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(2));
+    let (_, admin) = get(&w.app, counts_uri, ADMIN_SESSION).await;
+    assert_eq!(member_ids_of(&admin), vec![OTHER.to_string()]);
+    w.cleanup();
+}
+
+/// Robert's rule: admins delete an opted-out member's hidden icons. They still
+/// cannot list or read them, and officers still cannot delete them.
+#[tokio::test]
+async fn admin_deletes_an_opted_out_members_hidden_icon() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    let two = icons(vec![png(16, 16), png(17, 17)]);
+    let (status, body) = upload(&w.app, OWNER_SESSION, "ana", &two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let uploaded = ids_of(&body["icons"]);
+    let id = uploaded[0].clone();
+    set_opt_in(&w.app, OWNER_SESSION, false).await;
+
+    // Hidden from admin reads.
+    let image = format!("/api/hero-icons/{id}/image");
+    let got = get(&w.app, &image, ADMIN_SESSION).await;
+    assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
+    let owner_icons = format!("/api/hero-icons/members/{OWNER}");
+    let got = get(&w.app, &owner_icons, ADMIN_SESSION).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
+
+    // Officers still cannot delete it.
+    let one = format!("/api/hero-icons/{id}");
+    let got = delete(&w.app, &one, OFFICER_SESSION).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "Admin access required");
+    assert_eq!(files_on_disk(w.dir()).len(), 2);
+
+    // The admin deletes it: 200, row and file gone, audited.
+    let (status, body) = delete(&w.app, &one, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    assert!(!w.dir().join(format!("{id}.png")).exists());
+    assert!(w.db().get_hero_icon(&id).await.unwrap().is_none());
+    let audited = audits_of(w.db(), "deleted_hero_icon").await;
+    let expected = (
+        "member".to_string(),
+        OWNER.to_string(),
+        Some(format!("icon {id}")),
+    );
+    assert_eq!(audited, vec![expected]);
+
+    // The other icon stays, and the owner still sees it, opted out.
+    let (_, mine) = get(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
+    assert_eq!(ids_of(&mine["icons"]), vec![uploaded[1].clone()]);
+    assert_eq!(mine["icon_contribution_opt_in"], json!(false));
     w.cleanup();
 }
 
