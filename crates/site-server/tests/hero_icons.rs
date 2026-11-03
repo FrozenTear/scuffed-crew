@@ -771,7 +771,9 @@ async fn icons_of_one_request_list_last_part_first() {
     assert_eq!(status, StatusCode::CREATED, "{body}");
     // The upload answer is in part order.
     let uploaded = ids_of(&body["icons"]);
-    let widths: Vec<Value> = (0..3usize).map(|i| body["icons"][i]["width"].clone()).collect();
+    let widths: Vec<Value> = (0..3usize)
+        .map(|i| body["icons"][i]["width"].clone())
+        .collect();
     assert_eq!(widths, vec![json!(16), json!(17), json!(18)]);
 
     // Lists are newest first, and the last part is the newest.

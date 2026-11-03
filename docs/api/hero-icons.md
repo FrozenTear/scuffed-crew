@@ -46,6 +46,14 @@ icon store is disabled, since it only reads or flips the flag.
 Inactive members are treated the same way for officers: their icons are kept
 and hidden, and the per-member routes answer 404 `member_not_found`.
 
+An officer delete that races with an opt-out: the officer delete-all checks the
+member again before each icon and stops at the next icon once the member has
+opted out or gone inactive. It answers 403 `icon_opt_in_off` when nothing was
+deleted yet, otherwise the count deleted so far, and the rest stay stored. A
+single officer delete checks once, so an opt-out landing in the few
+milliseconds between that check and the file delete does not stop it. The
+icon was visible to officers when the delete was accepted.
+
 ## Caps
 
 | Constant | Value | Meaning |
@@ -342,7 +350,9 @@ Removes every icon of that member, rows and files, while that member is active
 and opted in. 404 `member_not_found` for an unknown or inactive member and 403
 `icon_opt_in_off` for an opted-out member, and nothing is deleted then. An
 officer may clear their own icons here opted in or not. Opt-in is left as it
-is. File failures work as in `DELETE /api/hero-icons/mine`. When at least one
+is. Visibility is checked again before each icon, so a member who opts out
+mid-call keeps the icons not yet removed (see [Opt-out](#opt-out)). File
+failures work as in `DELETE /api/hero-icons/mine`. When at least one
 icon went and the member is not the caller, one audit entry
 `deleted_all_hero_icons` is written. A member with no icons gives
 `{ "deleted": 0 }`.

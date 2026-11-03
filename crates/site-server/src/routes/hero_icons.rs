@@ -243,7 +243,17 @@ async fn discard_icon_file(state: &AppState, id: &str) {
 /// Each file goes before its row, as in a single delete. A file that cannot be
 /// removed keeps its row, so the icon stays listed and the call can be
 /// retried. The other icons are still removed, and the result is a 500.
-async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<u32, Reject> {
+///
+/// With `officer_recheck` (an officer clearing another member), officer
+/// visibility is checked again before each icon. When the member opts out or
+/// goes inactive mid-loop, the loop stops at the next icon and the rest stay
+/// stored. Nothing deleted by then is 403 `icon_opt_in_off`, otherwise the
+/// partial count is returned.
+async fn delete_all_icons(
+    state: &AppState,
+    member_id: &str,
+    officer_recheck: bool,
+) -> Result<u32, Reject> {
     let rows = state
         .db
         .list_hero_icons_for_member(member_id)
@@ -252,6 +262,12 @@ async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<u32, Reje
     let mut deleted: u32 = 0;
     let mut file_failed = false;
     for icon in &rows {
+        if officer_recheck && !officer_may_see(state, member_id).await? {
+            if deleted == 0 && !file_failed {
+                return Err(reject(StatusCode::FORBIDDEN, HERO_ICON_ERR_OPT_IN_OFF));
+            }
+            break;
+        }
         if let Err(error) = remove_icon_file(state, &icon.id).await {
             tracing::error!(%error, "hero icon file delete failed");
             file_failed = true;
@@ -585,7 +601,7 @@ pub async fn delete_mine(
     member: OrgMember,
 ) -> Result<Json<HeroIconsDeleted>, Reject> {
     configured(&state)?;
-    let deleted = delete_all_icons(&state, &member.member.id).await?;
+    let deleted = delete_all_icons(&state, &member.member.id, false).await?;
     Ok(Json(HeroIconsDeleted { deleted }))
 }
 
@@ -850,7 +866,7 @@ pub async fn delete_member_hero_icons(
     if !own {
         officer_target(&state, &member_id).await?;
     }
-    let deleted = delete_all_icons(&state, &member_id).await?;
+    let deleted = delete_all_icons(&state, &member_id, !own).await?;
     if deleted > 0 && !own {
         let details = format!("{deleted} icons");
         audit(
@@ -869,7 +885,7 @@ pub async fn delete_member_hero_icons(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{must_err, must_ok, test_state};
+    use crate::test_support::{must_err, must_ok, seed_user, test_state};
 
     fn png_bytes(edge: u32) -> Vec<u8> {
         let canvas = image::RgbaImage::from_pixel(edge, edge, image::Rgba([10, 200, 90, 255]));
@@ -933,6 +949,54 @@ mod tests {
         for icon in &earlier {
             assert!(state.db.get_hero_icon(&icon.id).await.unwrap().is_some());
             assert!(state.hero_icons.icon_path(&icon.id).exists());
+        }
+        let _ = std::fs::remove_dir_all(state.hero_icons.dir());
+    }
+
+    /// An officer clear that passed the first check stops at the next icon
+    /// once the member has opted out, and keeps every icon not yet removed.
+    #[tokio::test]
+    async fn officer_clear_rechecks_opt_in_before_each_icon() {
+        let state = test_state().await;
+        seed_user(&state, "targetuser", "tgt_login").await;
+        let target = state
+            .db
+            .create_member("targetuser", "TargetTerry", OrgRole::Member)
+            .await
+            .expect("target member");
+        state
+            .db
+            .set_hero_icon_opt_in(&target.id, true)
+            .await
+            .unwrap();
+        let stored = store_two(&state, &target.id).await;
+        // The member opts out after the officer route checked them.
+        state
+            .db
+            .set_hero_icon_opt_in(&target.id, false)
+            .await
+            .unwrap();
+
+        let (status, body) = must_err(
+            delete_all_icons(&state, &target.id, true).await,
+            "opted out before the first icon",
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.error, HERO_ICON_ERR_OPT_IN_OFF);
+        for icon in &stored {
+            assert!(state.db.get_hero_icon(&icon.id).await.unwrap().is_some());
+            assert!(state.hero_icons.icon_path(&icon.id).exists());
+        }
+
+        // The owner path does not recheck: the member deletes their own icons.
+        let deleted = must_ok(
+            delete_all_icons(&state, &target.id, false).await,
+            "owner clear while opted out",
+        );
+        assert_eq!(deleted, 2);
+        for icon in &stored {
+            assert!(state.db.get_hero_icon(&icon.id).await.unwrap().is_none());
+            assert!(!state.hero_icons.icon_path(&icon.id).exists());
         }
         let _ = std::fs::remove_dir_all(state.hero_icons.dir());
     }
