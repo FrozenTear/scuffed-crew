@@ -738,11 +738,11 @@ fn yellow_and_purple_bars_split_by_the_ring_with_either_side_own() {
 fn a_ring_off_the_bar_hue_still_picks_the_nearer_team() {
     let r = reader();
     let img = ban_frame(FIVE, OUTER_MIDDLE, None);
-    // violet (hue 135) is 15 from the purple bars and 110 from the yellow
+    // violet (hue 138) is 12 from the purple bars and 114 from the yellow
     let violet = r.read_ban_results_rings(&img, &[[150, 0, 255]]).unwrap();
     assert_eq!(violet.bans[1].team, Some(Team::Own));
     assert_eq!(violet.bans[0].team, Some(Team::Enemy));
-    // orange (hue 12) is 13 from the yellow bars
+    // orange (hue 12) is 12 from the yellow bars
     let orange = r.read_ban_results_rings(&img, &[[255, 100, 0]]).unwrap();
     assert_eq!(orange.bans[0].team, Some(Team::Own));
     assert_eq!(orange.bans[2].team, Some(Team::Enemy));
@@ -764,7 +764,8 @@ fn the_default_blue_and_red_still_read_and_the_other_way_round() {
 fn an_ambiguous_or_far_ring_gives_no_team_never_a_guess() {
     let r = reader();
     let img = ban_frame(FIVE, OUTER_MIDDLE, None);
-    // hue 0: 25 from yellow and 30 from purple, too close to call
+    // hue 0: 24 from yellow (23.5 before rounding, 24 as read) and 30 from
+    // purple, too close to call
     for ring in [[255, 0, 0], [120, 120, 120], [40, 0, 40], [0, 200, 255]] {
         let out = r.read_ban_results_rings(&img, &[ring]).unwrap();
         assert!(out.bans.iter().all(|b| b.team.is_none()), "{ring:?}");
@@ -807,7 +808,7 @@ fn bars_that_do_not_form_two_groups_give_no_team() {
     let img = ban_frame(FIVE, [PURPLE; 4], None);
     let out = r.read_ban_results_rings(&img, &ring).unwrap();
     assert!(out.bans.iter().all(|b| b.team.is_none()));
-    // two colours too near to be two teams (hue 150 and 165)
+    // two colours too near to be two teams (hue 150 and 159)
     let img = ban_frame(
         FIVE,
         [PURPLE, PURPLE, Rgb([128, 0, 90]), Rgb([128, 0, 90])],
@@ -815,7 +816,7 @@ fn bars_that_do_not_form_two_groups_give_no_team() {
     );
     let out = r.read_ban_results_rings(&img, &ring).unwrap();
     assert!(out.bans.iter().all(|b| b.team.is_none()));
-    // three colours
+    // three colours (hue 24, 150 and 72)
     let img = ban_frame(FIVE, [YELLOW, PURPLE, PURPLE, Rgb([0, 200, 80])], None);
     let out = r.read_ban_results_rings(&img, &ring).unwrap();
     assert!(out.bans.iter().all(|b| b.team.is_none()));
@@ -848,4 +849,62 @@ fn the_lobby_layout_reads_yellow_and_purple_too() {
     assert_eq!(out.layout, Layout::Lobby);
     assert_eq!(out.bans[0].team, Some(Team::Own));
     assert_eq!(out.bans[1].team, Some(Team::Enemy));
+}
+
+#[test]
+fn a_three_against_one_split_gives_no_team() {
+    let r = reader();
+    let ring = [[128, 0, 128]];
+    for bars in [
+        [YELLOW, PURPLE, PURPLE, PURPLE],
+        [PURPLE, YELLOW, YELLOW, YELLOW],
+    ] {
+        let img = ban_frame(FIVE, bars, None);
+        let out = r.read_ban_results_rings(&img, &ring).unwrap();
+        assert!(out.bans.iter().all(|b| b.team.is_none()), "{bars:?}");
+    }
+    // a team has two bars: with one grey the coloured ones still read
+    let img = ban_frame(FIVE, [YELLOW, PURPLE, PURPLE, Rgb([120, 120, 120])], None);
+    assert!(
+        r.read_ban_results_rings(&img, &ring)
+            .unwrap()
+            .bans
+            .iter()
+            .any(|b| b.team.is_some())
+    );
+}
+
+#[test]
+fn a_bar_near_both_groups_goes_to_the_nearer_one() {
+    // groups at hue 20 and 55 (35 apart); a bar at 40 is within 20 of both
+    // (20 and 15) and belongs with 55, not with the bar checked first
+    let ring_at_20 = [[255, 170, 0]];
+    assert_eq!(hsv(ring_at_20[0])[0], 20);
+    let teams = teams_from_hues([Some(20), Some(55), Some(40), Some(20)], &ring_at_20);
+    assert_eq!(
+        teams,
+        [
+            Some(Team::Own),
+            Some(Team::Enemy),
+            Some(Team::Enemy),
+            Some(Team::Own)
+        ]
+    );
+    // the bar the other way round: at 35 it is 15 from 20 and 20 from 55
+    let teams = teams_from_hues([Some(20), Some(55), Some(35), Some(55)], &ring_at_20);
+    assert_eq!(
+        teams,
+        [
+            Some(Team::Own),
+            Some(Team::Enemy),
+            Some(Team::Own),
+            Some(Team::Enemy)
+        ]
+    );
+    // equally near both (18 and 18, groups 36 apart): that slot has no team
+    let teams = teams_from_hues([Some(20), Some(56), Some(38), Some(20)], &ring_at_20);
+    assert_eq!(
+        teams,
+        [Some(Team::Own), Some(Team::Enemy), None, Some(Team::Own)]
+    );
 }

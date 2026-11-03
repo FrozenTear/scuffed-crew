@@ -571,6 +571,20 @@ fn teams_from_hues(hues: [Option<u8>; 4], rings: &[[u8; 3]]) -> [Option<Team>; 4
     {
         return none;
     }
+    // Each bar goes to the group it is nearer to; a bar equally near both
+    // (`Some(None)`) or a grey bar (`None`) has no group.
+    let group = hues.map(|h| {
+        h.map(|h| {
+            let (da, db) = (hue_distance(h, a), hue_distance(h, b));
+            (da != db).then_some(da < db)
+        })
+    });
+    // A team has two bars, so neither group may hold more than two. That
+    // rules out three against one, whatever the colours.
+    let size = |g: bool| group.iter().filter(|&&x| x == Some(Some(g))).count();
+    if size(true) > 2 || size(false) > 2 {
+        return none;
+    }
     // Which group the rings call own (true: the first group).
     let mut verdicts = rings.iter().filter_map(|&ring| {
         let [rh, rs, rv] = hsv(ring);
@@ -589,9 +603,9 @@ fn teams_from_hues(hues: [Option<u8>; 4], rings: &[[u8; 3]]) -> [Option<Team>; 4
     if verdicts.any(|v| v != own_is_a) {
         return none;
     }
-    hues.map(|h| {
-        h.map(|h| {
-            if in_a(h) == own_is_a {
+    group.map(|g| {
+        g.flatten().map(|in_a| {
+            if in_a == own_is_a {
                 Team::Own
             } else {
                 Team::Enemy

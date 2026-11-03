@@ -82,7 +82,17 @@ gives both, in that order. A ring is skipped when it is grey or dark (a fade
 frame has a meaningless hue), when it is about as far from both groups, or
 when it is far from both. Usable rings must agree, or every team is `null`.
 Every team is also `null` when the bars are one colour, two colours that are
-too near, or three colours, and one bar is `null` when it is grey.
+too near, or three colours, and one bar is `null` when it is grey. If both
+bars of one team are grey (that team banned nothing), there is only one
+colour group, so every team is `null`, even for the coloured pair. The
+previous rule still marked that pair from the ring. Three bars of one colour
+against one is `null` too, since a team has two bars.
+
+The ban vote frame's ring is always given to the reader, even on a vote frame
+that shows no ring (the scan then returns whatever pixel it finds). A usable
+select ring and a junk vote ring that points the other way disagree, and
+every team is `null`. That is kept on purpose: a doubtful read gives `null`,
+not a side.
 
 ## Rules for the caller
 

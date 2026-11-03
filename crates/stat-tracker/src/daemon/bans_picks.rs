@@ -414,7 +414,7 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
     let vote_ring = frames
         .vote
         .as_ref()
-        .map(|f| f.to_rgb8())
+        .map(rgb)
         .filter(|f| f.dimensions() == (FRAME_W, FRAME_H))
         .map(|f| self_ring_colour(&f));
     let rings: Vec<[u8; 3]> = select_ring.into_iter().chain(vote_ring).collect();
