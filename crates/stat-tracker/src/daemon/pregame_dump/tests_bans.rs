@@ -8,6 +8,7 @@ use stat_tracker::ocr_status::{publish_bans_picks_notice, read_status};
 use stat_tracker::shadow::bans_picks::{
     BanResults, BansPicksSetting, Choice, HeroSelect, Layout, Read,
 };
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const POLL: Duration = Duration::from_millis(1_500);
@@ -20,9 +21,13 @@ enum Mode {
     Nothing,
 }
 
+/// The team rings the ban results were read with, in call order.
+type Rings = Arc<Mutex<Vec<Option<[u8; 3]>>>>;
+
 struct Fake {
     mode: Mode,
     calls: Arc<AtomicUsize>,
+    rings: Rings,
 }
 
 fn read(hero: &str) -> Read {
@@ -55,7 +60,8 @@ impl Engine for Fake {
             ring: [1, 2, 3],
         })
     }
-    fn bans(&self, _: &RgbImage, _: Option<[u8; 3]>) -> Option<BanResults> {
+    fn bans(&self, _: &RgbImage, ring: Option<[u8; 3]>) -> Option<BanResults> {
+        self.rings.lock().unwrap().push(ring);
         self.go().then(|| BanResults {
             layout: Layout::Plain,
             bans: Vec::new(),
@@ -69,15 +75,18 @@ fn loader(
     result: Result<Mode, LoadFailure>,
     loads: &Arc<AtomicUsize>,
     reads: &Arc<AtomicUsize>,
+    rings: &Rings,
 ) -> Loader {
     let loads = Arc::clone(loads);
     let reads = Arc::clone(reads);
+    let rings = Arc::clone(rings);
     Arc::new(move || {
         loads.fetch_add(1, Ordering::SeqCst);
         result.clone().map(|mode| {
             Arc::new(Fake {
                 mode,
                 calls: Arc::clone(&reads),
+                rings: Arc::clone(&rings),
             }) as Arc<dyn Engine>
         })
     })
@@ -108,6 +117,7 @@ struct Rig {
     dir: tempfile::TempDir,
     loads: Arc<AtomicUsize>,
     reads: Arc<AtomicUsize>,
+    rings: Rings,
 }
 
 impl Rig {
@@ -116,6 +126,7 @@ impl Rig {
             dir: tempfile::tempdir().expect("tempdir"),
             loads: Arc::default(),
             reads: Arc::default(),
+            rings: Arc::default(),
         }
     }
 
@@ -123,7 +134,7 @@ impl Rig {
         BansPicksFeed::with_loader(
             self.dir.path().to_path_buf(),
             linked,
-            loader(result, &self.loads, &self.reads),
+            loader(result, &self.loads, &self.reads, &self.rings),
         )
     }
 
@@ -261,6 +272,67 @@ async fn a_frame_that_is_not_1440p_is_a_note_and_the_reader_is_not_called() {
         0,
         "the pack was not loaded"
     );
+}
+
+#[tokio::test]
+async fn a_select_with_only_a_first_frame_gives_the_ring_and_nothing_else() {
+    // A one-tick hero select (game 20261101_205808): no last frame.
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let f = frame(2560, 1440);
+    let batch = vec![
+        PregameOp::Save(shot(PregamePhase::HeroBan.last_name(), &f)),
+        PregameOp::Save(shot(PregamePhase::HeroSelect.first_name(), &f)),
+        PregameOp::Save(shot(BAN_RESULTS_NAME, &f)),
+    ];
+    let (_, stored) = game_then_read(&rig, &mut dump, batch).await;
+    let stored = stored.expect("a result");
+    assert_eq!(
+        *rig.rings.lock().unwrap(),
+        vec![Some([1, 2, 3])],
+        "the ban results got the first frame's ring"
+    );
+    assert!(
+        stored.contains("genji") && stored.contains("ana"),
+        "{stored}"
+    );
+    assert!(
+        !stored.contains("mercy"),
+        "the first frame's picks are not stored: {stored}"
+    );
+    assert_eq!(rig.health(), None);
+    assert_eq!(rig.reads.load(Ordering::SeqCst), 3);
+}
+
+#[tokio::test]
+async fn a_last_frame_of_the_select_wins_over_its_first() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let mut batch = three(2560, 1440);
+    batch.push(PregameOp::Save(shot(
+        PregamePhase::HeroSelect.first_name(),
+        &frame(2560, 1440),
+    )));
+    let (_, stored) = game_then_read(&rig, &mut dump, batch).await;
+    assert!(stored.expect("a result").contains("mercy"));
+    assert_eq!(
+        rig.reads.load(Ordering::SeqCst),
+        3,
+        "the first frame is not read"
+    );
+    assert_eq!(*rig.rings.lock().unwrap(), vec![Some([1, 2, 3])]);
+}
+
+#[test]
+fn a_first_frame_of_the_select_alone_is_nothing_to_read() {
+    let rig = Rig::new();
+    let mut feed = rig.feed(Ok(Mode::Fine), true);
+    let f = frame(8, 8);
+    feed.observe(&[PregameOp::Save(shot(
+        PregamePhase::HeroSelect.first_name(),
+        &f,
+    ))]);
+    assert!(!feed.has_frames(), "no ban results, so no ring to give");
 }
 
 #[test]

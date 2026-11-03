@@ -984,6 +984,7 @@ mod tests {
         config.ocr_threads = Some(2);
         config.name_reader = false;
         config.shadow_recognizer = true;
+        config.bans_picks_reader = false;
         config.sync = Some(stat_tracker::config::SyncConfig {
             server_url: "https://example.org".into(),
             token: "t".into(),

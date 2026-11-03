@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use stat_tracker::config::{CAPTURE_ENV, Config, EnvOverlay, OCR_ENV, OcrControl};
+use stat_tracker::shadow::bans_picks::BansPicksSetting;
 
 use crate::app::TrackerApp;
 
@@ -135,6 +136,9 @@ pub(crate) fn sync_fields_to_write(
 /// The variable that turns debug images on outside the app.
 pub(crate) const DEBUG_OCR_ENV: &str = "STAT_TRACKER_DEBUG_OCR";
 
+/// The variable that turns the bans and picks reader off outside the app.
+pub(crate) const BANS_PICKS_ENV: &str = stat_tracker::shadow::bans_picks::ENV;
+
 /// The variables that set the website token (and URL) outside the app,
 /// for a lock line. `None` when no token comes from outside: a server
 /// without a token changes nothing.
@@ -198,6 +202,18 @@ impl TrackerApp {
         } else {
             shown_from_file(file, path)
         }
+    }
+
+    /// The "Read bans and picks" switch as the tracker runs it: whether it
+    /// reads on, and whether [`BANS_PICKS_ENV`] turns the reader off (the
+    /// row then shows Off, a lock line, and cannot be switched). The
+    /// variable can only turn the reader off: any other value leaves the
+    /// saved key in charge, as the tracker does.
+    pub(crate) fn bans_picks_switch(&self) -> (bool, bool) {
+        let env_off = self
+            .outside_var(BANS_PICKS_ENV)
+            .is_some_and(|v| !BansPicksSetting::parse(&v).is_on());
+        (self.saved_config.bans_picks_reader && !env_off, env_off)
     }
 
     /// `SCUFFED_TOKEN` (or `--token`) sets the website token outside the
@@ -379,6 +395,37 @@ mod tests {
         let loaded = load(Some(&path), false);
         assert_eq!(loaded.file, Config::read_at(&path).expect("missing file"));
         assert!(!path.exists(), "loading never writes the file");
+    }
+
+    /// The env var can turn the reader off, never on: the switch reads
+    /// what the tracker runs, and locks only when the variable decides.
+    #[test]
+    fn the_bans_picks_switch_shows_the_reader_in_effect() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let fixture = app.fixture.take();
+        assert!(fixture.is_some());
+        let mut with = |saved: bool, env: Option<&str>| {
+            app.saved_config.bans_picks_reader = saved;
+            app.outside_env = Some(OutsideEnv {
+                vars: env
+                    .map(|v| vec![(BANS_PICKS_ENV, v.to_string())])
+                    .unwrap_or_default(),
+                ..OutsideEnv::default()
+            });
+            app.bans_picks_switch()
+        };
+        assert_eq!(with(true, None), (true, false));
+        assert_eq!(with(false, None), (false, false));
+        for off in ["off", "OFF", "0", "false", "no"] {
+            assert_eq!(with(true, Some(off)), (false, true), "{off}");
+            assert_eq!(with(false, Some(off)), (false, true), "{off}");
+        }
+        assert_eq!(with(true, Some("cv-v1")), (true, false));
+        assert_eq!(with(false, Some("1")), (false, false), "on never forces");
+        // A fixture never reads the variable.
+        app.fixture = fixture;
+        app.saved_config.bans_picks_reader = true;
+        assert_eq!(app.bans_picks_switch(), (true, false));
     }
 
     #[test]

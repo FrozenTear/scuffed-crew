@@ -183,7 +183,7 @@ impl PregamePhase {
         }
     }
 
-    fn first_name(self) -> &'static str {
+    pub(crate) fn first_name(self) -> &'static str {
         match self {
             Self::MapVote => "mapvote_first.png",
             Self::HeroBan => "heroban_first.png",

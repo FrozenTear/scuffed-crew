@@ -21,7 +21,7 @@ folder on the machine that made them, and `PACKS_DIR` on the server.
 | `maps-v1.tar` | map-name glyphs | 40 KiB |
 | `words-v1.tar` | result words | 90 KiB |
 | `names-v1.tar` | optional. Single-letter templates only, no member data. Version `full-20261019`. The name reader uses it for the player's own row and falls back to Tesseract until it has loaded | 1.9 MB |
-| `bans-picks-v1.tar` | optional. Hero icons for the bans and picks reader (cv-v1): one 100 by 96 `<hero>.png` for each of the 54 heroes, plus an optional `no-preference.png`. Game art, built from real frames, so it is private like the others | not published yet |
+| `bans-picks-v1.tar` | optional. Hero icons for the bans and picks reader (cv-v1): one 100 by 96 `<hero>.png` for each of the 54 heroes, plus an optional `no-preference.png`. Game art, built from real frames, so it is private like the others | live |
 
 Which folder each one lands in, what may be inside, and which reader uses it
 are in [Reference: inside a pack](#reference-inside-a-pack).

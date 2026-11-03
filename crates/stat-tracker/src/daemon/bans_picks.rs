@@ -5,7 +5,10 @@
 //! The pre-game saver ([`super::pregame_dump`]) already finds the three
 //! screens: the ban vote, the ban results and the hero select, each as its
 //! last frame (the first frame of a screen is mid transition, which the
-//! reader must not be given). [`BansPicksFeed`] sees every batch the saver
+//! reader must not be given). One exception: a game whose hero select has
+//! only a first frame (a one-tick select) gives that frame for the team
+//! ring of the ban results, and for nothing else: its picks are not
+//! stored. [`BansPicksFeed`] sees every batch the saver
 //! sends, keeps those three frames of the current game, and reads them when
 //! the game is first recorded. Nothing here can stop a game from being
 //! recorded: every failure is a sentence for the app's Tracker health and
@@ -107,6 +110,9 @@ struct Stored {
 struct Frames {
     vote: Option<Arc<DynamicImage>>,
     select: Option<Arc<DynamicImage>>,
+    /// The hero select's first frame. Read only for the team ring, and
+    /// only when there is no `select`.
+    select_first: Option<Arc<DynamicImage>>,
     results: Option<Arc<DynamicImage>>,
     /// Ban results the saver staged and has not promoted yet.
     staged: Option<Arc<DynamicImage>>,
@@ -115,6 +121,15 @@ struct Frames {
 impl Frames {
     fn any(&self) -> bool {
         self.vote.is_some() || self.select.is_some() || self.results.is_some()
+    }
+
+    /// The hero select's first frame, when it is to be read for the team
+    /// ring: there are ban results and no last frame of the select.
+    fn ring_fallback(&self) -> Option<&Arc<DynamicImage>> {
+        match (&self.select, &self.results) {
+            (None, Some(_)) => self.select_first.as_ref(),
+            _ => None,
+        }
     }
 }
 
@@ -191,6 +206,8 @@ impl BansPicksFeed {
                         self.frames.vote = Some(frame);
                     } else if shot.name == PregamePhase::HeroSelect.last_name() {
                         self.frames.select = Some(frame);
+                    } else if shot.name == PregamePhase::HeroSelect.first_name() {
+                        self.frames.select_first = Some(frame);
                     } else if shot.name == BAN_RESULTS_NAME && staged {
                         self.frames.staged = Some(frame);
                     } else if shot.name == BAN_RESULTS_NAME {
@@ -326,7 +343,12 @@ fn read_frames(
             },
         )
     };
-    let shown = [&frames.vote, &frames.select, &frames.results];
+    let shown = [
+        frames.vote.as_ref(),
+        frames.select.as_ref(),
+        frames.results.as_ref(),
+        frames.ring_fallback(),
+    ];
     // The reader refuses any other size, so ask before loading it.
     if let Some(odd) = shown
         .iter()
@@ -377,8 +399,19 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
         Some(f) => Some(engine.select(&rgb(f))?),
         None => None,
     };
+    // The team ring comes from the select's last frame, or else its first.
+    // The first frame gives the ring only: its picks are dropped, and a
+    // first frame the reader cannot read leaves the ring unset rather than
+    // failing the read.
+    let ring = match &select {
+        Some(s) => Some(s.ring),
+        None => frames
+            .ring_fallback()
+            .and_then(|f| engine.select(&rgb(f)))
+            .map(|s| s.ring),
+    };
     let results = match &frames.results {
-        Some(f) => Some(engine.bans(&rgb(f), select.as_ref().map(|s| s.ring))?),
+        Some(f) => Some(engine.bans(&rgb(f), ring)?),
         None => None,
     };
     let ban_vote = match &frames.vote {

@@ -4038,10 +4038,8 @@ mod tests {
             .into_iter()
             .filter(|entry| entry["name"] != "words-v1.tar")
             .collect();
-        files.insert(
-            "heroes-v2.tar".to_string(),
-            (429, br#"{"error":"rate_limited"}"#.to_vec()),
-        );
+        let limit = (429, br#"{"error":"rate_limited"}"#.to_vec());
+        files.insert("heroes-v2.tar".to_string(), limit);
         let served = serve(list, files);
         let dir = tempfile::tempdir().expect("tempdir");
         let report = sync(&served, dir.path()).await;
@@ -4053,6 +4051,7 @@ mod tests {
             "bans-v1.tar",
             "maps-v1.tar",
             "names-v1.tar",
+            "bans-picks-v1.tar",
         ] {
             assert_eq!(outcome(&report, name), &limited, "{name}");
         }

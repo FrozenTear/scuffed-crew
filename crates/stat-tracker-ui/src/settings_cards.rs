@@ -494,12 +494,22 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
         ),
     );
     // The tracker reads the key once at start: After restart.
+    // STAT_TRACKER_BANS_PICKS_RECOGNIZER set to off turns the reader off
+    // whatever the file says, so the row shows Off and locks.
+    let (bans_on, bans_env_off) = app.bans_picks_switch();
+    let mut bans_help = vec![hint(BANS_PICKS_HELP)];
+    if bans_env_off {
+        bans_help.push(crate::capture_reading::lock_line(
+            crate::settings_env::BANS_PICKS_ENV,
+        ));
+        bans_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
+    }
     let bans_picks = setting_row(
         title_line(BANS_PICKS_LABEL, false, &[Tag::AfterRestart]),
-        vec![hint(BANS_PICKS_HELP)],
+        bans_help,
         crate::settings_keys::edit_switch(
-            app.saved_config.bans_picks_reader,
-            demo,
+            bans_on,
+            demo || bans_env_off,
             ConfigEdit::BansPicksReader,
         ),
     );

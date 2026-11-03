@@ -12,8 +12,11 @@ separate change.
 On by default. Settings > Troubleshooting has **Read bans and picks**
 (`bans_picks_reader` in `config.toml`). `STAT_TRACKER_BANS_PICKS_RECOGNIZER=off`
 (or `0`, `false`, `no`) turns it off whatever the setting says
-(`BansPicksSetting`), and Settings shows that row as set outside the app.
-Anything else, or nothing, leaves the setting in charge. Off means the reader
+(`BansPicksSetting`). Settings then shows that row as Off whatever the
+setting says, with the switch locked and the line "Set outside the app:
+STAT_TRACKER_BANS_PICKS_RECOGNIZER" under it. Anything else, or nothing,
+leaves the setting in charge, and the row shows the setting and stays
+unlocked. Off means the reader
 is never loaded or called and no warning shows. Without the templates below
 it reads nothing.
 
