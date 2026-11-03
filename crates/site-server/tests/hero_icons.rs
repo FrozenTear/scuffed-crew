@@ -329,6 +329,57 @@ async fn settings_of(db: &Database, member: &str) -> MemberSettings {
     found.expect("settings row")
 }
 
+async fn deactivate(db: &Database, member: &str) {
+    db.client
+        .query(format!("UPDATE member:{member} SET is_active = false"))
+        .await
+        .expect("deactivate")
+        .check()
+        .expect("deactivate");
+}
+
+/// Audit rows as (action, target_type, target_id, details), oldest first.
+async fn audit_rows(db: &Database) -> Vec<(String, String, String, Option<String>)> {
+    let mut rows: Vec<_> = db
+        .list_audit_log(100, 0)
+        .await
+        .expect("audit log")
+        .into_iter()
+        .map(|e| {
+            (
+                e.created_at,
+                e.action,
+                e.target_type,
+                e.target_id,
+                e.details,
+            )
+        })
+        .collect();
+    rows.sort_by_key(|row| row.0);
+    rows.into_iter()
+        .map(|(_, action, target_type, target_id, details)| {
+            (action, target_type, target_id, details)
+        })
+        .collect()
+}
+
+/// Audit rows with this action, as (target_type, target_id, details).
+async fn audits_of(db: &Database, action: &str) -> Vec<(String, String, Option<String>)> {
+    audit_rows(db)
+        .await
+        .into_iter()
+        .filter(|row| row.0 == action)
+        .map(|(_, target_type, target_id, details)| (target_type, target_id, details))
+        .collect()
+}
+
+fn member_ids_of(page: &Value) -> Vec<String> {
+    let rows = page["data"].as_array().expect("data");
+    rows.iter()
+        .map(|row| row["member_id"].as_str().expect("member_id").to_string())
+        .collect()
+}
+
 #[tokio::test]
 async fn upload_then_list_mine_with_thumbnail_and_rfc3339_time() {
     let w = world().await;
@@ -591,7 +642,7 @@ async fn upload_rate_limit_is_json_429() {
 }
 
 #[tokio::test]
-async fn officer_lists_counts_and_deletes_any_icon() {
+async fn officer_lists_counts_and_deletes_visible_icons() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
     set_opt_in(&w.app, OTHER_SESSION, true).await;
@@ -601,7 +652,7 @@ async fn officer_lists_counts_and_deletes_any_icon() {
     let mut owner_ids = ids_of(&body["icons"]);
     owner_ids.sort();
     let other_id = first_id(&upload_one(&w.app, OTHER_SESSION, "mercy").await);
-    // Opted out: counted, but not listed or readable.
+    // Opted out: kept, but not counted, listed, read or deletable by officers.
     set_opt_in(&w.app, OTHER_SESSION, false).await;
 
     let (status, list) = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
@@ -616,31 +667,43 @@ async fn officer_lists_counts_and_deletes_any_icon() {
     assert!(first["size_bytes"].as_u64().unwrap() > 0);
     let when = first["uploaded_at"].as_str().unwrap();
     assert!(DateTime::parse_from_rfc3339(when).is_ok(), "{when}");
+    let viewed = audits_of(w.db(), "viewed_hero_icons").await;
+    let all = (
+        "member".to_string(),
+        "all".to_string(),
+        Some("2 icons".to_string()),
+    );
+    assert_eq!(viewed, vec![all]);
 
     let (status, counts) = get(&w.app, "/api/hero-icons/members", OFFICER_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{counts}");
-    let members = counts["members"].as_array().expect("members").clone();
-    let row = |id: &str| {
-        let found = members.iter().find(|m| m["member_id"] == json!(id));
-        found.cloned().unwrap_or(Value::Null)
-    };
-    assert_eq!(row(OWNER)["icon_count"], json!(2));
-    assert_eq!(row(OWNER)["icon_contribution_opt_in"], json!(true));
-    assert_eq!(row(OWNER)["display_name"], json!(OWNER));
-    assert_eq!(row(OTHER)["icon_count"], json!(1));
-    assert_eq!(row(OTHER)["icon_contribution_opt_in"], json!(false));
-    assert_eq!(row(OFFICER), Value::Null);
+    assert_eq!(member_ids_of(&counts), vec![OWNER.to_string()]);
+    let row = &counts["data"][0];
+    assert_eq!(row["icon_count"], json!(2));
+    assert_eq!(row["icon_contribution_opt_in"], json!(true));
+    assert_eq!(row["display_name"], json!(OWNER));
+    assert!(counts.get("next_cursor").is_none(), "{counts}");
 
     let uri = format!("/api/hero-icons/members/{OWNER}");
     let (status, per_member) = get(&w.app, &uri, OFFICER_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{per_member}");
     assert_eq!(ids_of(&per_member["icons"]).len(), 2);
+    let viewed = audits_of(w.db(), "viewed_hero_icons").await;
+    assert_eq!(viewed.len(), 2, "{viewed:?}");
+    let owner_view = (
+        "member".to_string(),
+        OWNER.to_string(),
+        Some("2 icons".to_string()),
+    );
+    assert!(viewed.contains(&owner_view), "{viewed:?}");
 
+    // Thumbnail fetches are not audited.
     let target = owner_ids[0].clone();
     let uri = format!("/api/hero-icons/{target}/image");
     let (status, _, bytes) = get_raw(&w.app, &uri, OFFICER_SESSION).await;
     assert_eq!(status, StatusCode::OK);
     assert!(bytes.starts_with(&PNG_SIGNATURE));
+    assert_eq!(audits_of(w.db(), "viewed_hero_icons").await.len(), 2);
 
     // Officer delete is a real removal of the row and the file.
     let uri = format!("/api/hero-icons/{target}");
@@ -650,16 +713,74 @@ async fn officer_lists_counts_and_deletes_any_icon() {
     assert!(!w.dir().join(format!("{target}.png")).exists());
     let row_left = w.db().get_hero_icon(&target).await.unwrap();
     assert!(row_left.is_none());
+    let deleted = audits_of(w.db(), "deleted_hero_icon").await;
+    let expected = (
+        "member".to_string(),
+        OWNER.to_string(),
+        Some(format!("icon {target}")),
+    );
+    assert_eq!(deleted, vec![expected]);
 
-    // Officers may delete an opted-out member's icon too.
+    // An opted-out member's icon is hidden from officers and stays stored.
     let uri = format!("/api/hero-icons/{other_id}");
-    let (status, body) = delete(&w.app, &uri, OFFICER_SESSION).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert!(!w.dir().join(format!("{other_id}.png")).exists());
+    let got = delete(&w.app, &uri, OFFICER_SESSION).await;
+    assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
+    assert!(w.dir().join(format!("{other_id}.png")).exists());
+    assert!(w.db().get_hero_icon(&other_id).await.unwrap().is_some());
 
     let (_, mine) = get(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
     assert_eq!(mine["count"], json!(1));
-    assert_eq!(files_on_disk(w.dir()).len(), 1);
+    assert_eq!(files_on_disk(w.dir()).len(), 2);
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn member_counts_are_paged_by_name() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    set_opt_in(&w.app, OTHER_SESSION, true).await;
+    let (status, body) = upload_one(&w.app, OWNER_SESSION, "ana").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+
+    let uri = "/api/hero-icons/members?limit=1";
+    let (status, page) = get(&w.app, uri, OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    // "iconother" sorts before "iconowner".
+    assert_eq!(member_ids_of(&page), vec![OTHER.to_string()]);
+    assert_eq!(page["data"][0]["icon_count"], json!(0));
+    let cursor = page["next_cursor"]
+        .as_str()
+        .expect("next_cursor")
+        .to_string();
+
+    let uri = format!("/api/hero-icons/members?limit=1&cursor={cursor}");
+    let (status, page) = get(&w.app, &uri, OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(member_ids_of(&page), vec![OWNER.to_string()]);
+    assert_eq!(page["data"][0]["icon_count"], json!(1));
+    assert!(page.get("next_cursor").is_none(), "{page}");
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn icons_of_one_request_list_last_part_first() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    let three = icons(vec![png(16, 16), png(17, 17), png(18, 18)]);
+    let (status, body) = upload(&w.app, OWNER_SESSION, "ana", &three).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    // The upload answer is in part order.
+    let uploaded = ids_of(&body["icons"]);
+    let widths: Vec<Value> = (0..3usize).map(|i| body["icons"][i]["width"].clone()).collect();
+    assert_eq!(widths, vec![json!(16), json!(17), json!(18)]);
+
+    // Lists are newest first, and the last part is the newest.
+    let (_, mine) = get(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
+    let mut expected = uploaded.clone();
+    expected.reverse();
+    assert_eq!(ids_of(&mine["icons"]), expected);
+    let (_, list) = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
+    assert_eq!(ids_of(&list["data"]), expected);
     w.cleanup();
 }
 
@@ -714,7 +835,11 @@ async fn another_members_icon_is_404_for_read_and_delete() {
 async fn opting_out_hides_icons_from_officers_but_keeps_them() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
-    let id = first_id(&upload_one(&w.app, OWNER_SESSION, "ana").await);
+    let two = icons(vec![png(16, 16), png(17, 17)]);
+    let (status, body) = upload(&w.app, OWNER_SESSION, "ana", &two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let uploaded = ids_of(&body["icons"]);
+    let id = uploaded[0].clone();
     set_opt_in(&w.app, OWNER_SESSION, false).await;
 
     let image = format!("/api/hero-icons/{id}/image");
@@ -729,17 +854,44 @@ async fn opting_out_hides_icons_from_officers_but_keeps_them() {
     assert_eq!(status, StatusCode::OK, "{list}");
     assert!(ids_of(&list["data"]).is_empty());
 
-    // Not deleted: the owner still sees and reads it.
+    let (status, counts) = get(&w.app, "/api/hero-icons/members", OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{counts}");
+    assert!(member_ids_of(&counts).is_empty(), "{counts}");
+
+    // Officers cannot delete them, one by one or all at once.
+    let one = format!("/api/hero-icons/{id}");
+    let got = delete(&w.app, &one, OFFICER_SESSION).await;
+    assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
+    let got = delete(&w.app, &uri, OFFICER_SESSION).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
+    assert_eq!(files_on_disk(w.dir()).len(), 2);
+    assert_eq!(w.db().count_hero_icons_for_member(OWNER).await.unwrap(), 2);
+    assert!(audits_of(w.db(), "deleted_hero_icon").await.is_empty());
+    assert!(audits_of(w.db(), "deleted_all_hero_icons").await.is_empty());
+    assert_eq!(audits_of(w.db(), "viewed_hero_icons").await.len(), 1);
+
+    // Not deleted: the owner still lists and reads them.
     let (_, mine) = get(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
-    assert_eq!(mine["count"], json!(1));
+    assert_eq!(mine["count"], json!(2));
     assert_eq!(mine["icon_contribution_opt_in"], json!(false));
     let (status, _, _) = get_raw(&w.app, &image, OWNER_SESSION).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(files_on_disk(w.dir()).len(), 1);
 
     // New uploads stop.
     let got = upload_one(&w.app, OWNER_SESSION, "ana").await;
     assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_required");
+
+    // The owner deletes one, then the rest, while still opted out.
+    let (status, body) = delete(&w.app, &one, OWNER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    assert_eq!(files_on_disk(w.dir()), vec![format!("{}.png", uploaded[1])]);
+    let (status, body) = delete(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    assert!(files_on_disk(w.dir()).is_empty());
+    // Owner deletes are not audited.
+    assert!(audits_of(w.db(), "deleted_hero_icon").await.is_empty());
     w.cleanup();
 }
 
@@ -766,7 +918,7 @@ async fn delete_all_removes_rows_and_files() {
 }
 
 #[tokio::test]
-async fn officer_deletes_all_icons_of_an_opted_out_member() {
+async fn officer_delete_all_needs_the_member_opted_in() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
     set_opt_in(&w.app, OTHER_SESSION, true).await;
@@ -777,21 +929,36 @@ async fn officer_deletes_all_icons_of_an_opted_out_member() {
     set_opt_in(&w.app, OWNER_SESSION, false).await;
 
     // Members cannot use the officer route, not even for their own icons.
-    let uri = format!("/api/hero-icons/members/{OWNER}");
-    let got = delete(&w.app, &uri, OWNER_SESSION).await;
+    let owner_uri = format!("/api/hero-icons/members/{OWNER}");
+    let got = delete(&w.app, &owner_uri, OWNER_SESSION).await;
     assert_error(&got, StatusCode::FORBIDDEN, "Officer access required");
+
+    // Opted out: refused, nothing deleted.
+    let got = delete(&w.app, &owner_uri, OFFICER_SESSION).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
     assert_eq!(files_on_disk(w.dir()).len(), 3);
-
-    let (status, body) = delete(&w.app, &uri, OFFICER_SESSION).await;
-    assert_eq!(status, StatusCode::OK, "{body}");
-    assert_eq!(body["deleted"], json!(2));
-    assert_eq!(files_on_disk(w.dir()), vec![format!("{other_id}.png")]);
     let left = w.db().count_hero_icons_for_member(OWNER).await.unwrap();
-    assert_eq!(left, 0);
+    assert_eq!(left, 2);
 
-    let (status, body) = delete(&w.app, &uri, OFFICER_SESSION).await;
+    // Opted in: every icon of that member goes, and the delete is audited.
+    let other_uri = format!("/api/hero-icons/members/{OTHER}");
+    let (status, body) = delete(&w.app, &other_uri, OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    assert!(!w.dir().join(format!("{other_id}.png")).exists());
+    assert_eq!(files_on_disk(w.dir()).len(), 2);
+    let audited = audits_of(w.db(), "deleted_all_hero_icons").await;
+    let expected = (
+        "member".to_string(),
+        OTHER.to_string(),
+        Some("1 icons".to_string()),
+    );
+    assert_eq!(audited, vec![expected]);
+
+    let (status, body) = delete(&w.app, &other_uri, OFFICER_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["deleted"], json!(0));
+    assert_eq!(audits_of(w.db(), "deleted_all_hero_icons").await.len(), 1);
     w.cleanup();
 }
 
@@ -876,5 +1043,89 @@ async fn disabled_store_answers_503() {
     assert_error(&got, disabled, "hero_icons_disabled");
     let got = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
     assert_error(&got, disabled, "hero_icons_disabled");
+    let got = delete(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
+    assert_error(&got, disabled, "hero_icons_disabled");
+
+    // The opt-in only touches the flag, so it works with the store off.
+    let (status, body) = get(&w.app, "/api/hero-icons/opt-in", OWNER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body, json!({ "icon_contribution_opt_in": false }));
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    set_opt_in(&w.app, OWNER_SESSION, false).await;
+    assert!(!settings_of(w.db(), OWNER).await.hero_icon_opt_in);
     assert!(!w.dir().exists());
+}
+
+#[tokio::test]
+async fn daemon_sync_token_is_not_a_session() {
+    let w = world().await;
+    let daemon = "icons-owner-daemon-token";
+    w.db()
+        .create_daemon_token(OWNER, daemon, "tracker")
+        .await
+        .expect("daemon token");
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    let unauthorized = StatusCode::UNAUTHORIZED;
+
+    let got = get(&w.app, "/api/hero-icons/mine", daemon).await;
+    assert_error(&got, unauthorized, "Session expired or invalid");
+    let parts = icons(vec![png(16, 16)]);
+    let resp = upload_raw(&w.app, Some(daemon), "/api/hero-icons?hero=ana", &parts).await;
+    let got = read_json(resp).await;
+    assert_error(&got, unauthorized, "Session expired or invalid");
+    assert!(files_on_disk(w.dir()).is_empty());
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn inactive_member_is_refused_and_hidden_from_officers() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    let id = first_id(&upload_one(&w.app, OWNER_SESSION, "ana").await);
+    deactivate(w.db(), OWNER).await;
+    let forbidden = StatusCode::FORBIDDEN;
+
+    let got = upload_one(&w.app, OWNER_SESSION, "ana").await;
+    assert_error(&got, forbidden, "Membership inactive");
+    let got = get(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
+    assert_error(&got, forbidden, "Membership inactive");
+
+    // Still opted in, but inactive: not listed, counted, read or deletable.
+    let (status, list) = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert!(ids_of(&list["data"]).is_empty());
+    let (status, counts) = get(&w.app, "/api/hero-icons/members", OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{counts}");
+    assert!(member_ids_of(&counts).is_empty(), "{counts}");
+
+    let not_found = StatusCode::NOT_FOUND;
+    let uri = format!("/api/hero-icons/members/{OWNER}");
+    let got = get(&w.app, &uri, OFFICER_SESSION).await;
+    assert_error(&got, not_found, "member_not_found");
+    let got = delete(&w.app, &uri, OFFICER_SESSION).await;
+    assert_error(&got, not_found, "member_not_found");
+    let image = format!("/api/hero-icons/{id}/image");
+    let got = get(&w.app, &image, OFFICER_SESSION).await;
+    assert_error(&got, not_found, "icon_not_found");
+    let one = format!("/api/hero-icons/{id}");
+    let got = delete(&w.app, &one, OFFICER_SESSION).await;
+    assert_error(&got, not_found, "icon_not_found");
+    assert_eq!(files_on_disk(w.dir()), vec![format!("{id}.png")]);
+
+    // An unknown member id gets the same answer.
+    let got = get(
+        &w.app,
+        "/api/hero-icons/members/nosuchmember",
+        OFFICER_SESSION,
+    )
+    .await;
+    assert_error(&got, not_found, "member_not_found");
+    let got = delete(
+        &w.app,
+        "/api/hero-icons/members/nosuchmember",
+        OFFICER_SESSION,
+    )
+    .await;
+    assert_error(&got, not_found, "member_not_found");
+    w.cleanup();
 }

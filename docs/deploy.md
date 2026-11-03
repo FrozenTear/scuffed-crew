@@ -753,8 +753,12 @@ with mode 0600 and named by a server-made id only.
 If the directory is missing, not writable, or overlaps the upload directory,
 `REPORTS_DIR`, `PACKS_DIR` or the web root, hero icons turn themselves off. The log line is
 `hero icons disabled: ...`, the rest of the site keeps serving, and every
-`/api/hero-icons` route returns 503 with body `{"error":"hero_icons_disabled"}`
-until the directory is fixed and the server is restarted.
+`/api/hero-icons` route except `/api/hero-icons/opt-in` returns 503 with body
+`{"error":"hero_icons_disabled"}` until the directory is fixed and the server
+is restarted.
+
+At startup the server removes icon files older than one hour that have no
+database row, and logs `hero icon orphan sweep done` with the count.
 
 The `hero-icons-data` volume is deliberately not in the backup snapshot: icons
 never leave the server volume. Lost icons can be contributed again. Endpoints,
