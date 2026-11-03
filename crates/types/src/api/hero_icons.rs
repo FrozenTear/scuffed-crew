@@ -1,8 +1,8 @@
 //! JSON shapes for `/api/hero-icons` (contributed hero icon PNGs).
 //!
 //! Icons stay on the server volume. Image bytes are only served to the owner,
-//! and to officers while the owner is active and opted in. See
-//! `docs/api/hero-icons.md`.
+//! and to admins while the owner is active and opted in. Officers get
+//! per-member counts only. See `docs/api/hero-icons.md`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub const HERO_ICON_ERR_DISABLED: &str = "hero_icons_disabled";
 /// The member has not opted in to contributing icons. 403 on upload.
 pub const HERO_ICON_ERR_OPT_IN_REQUIRED: &str = "icon_opt_in_required";
-/// The member an officer asked about is not opted in. 403. Their icons are
+/// The member an admin asked about is not opted in. 403. Their icons are
 /// kept but hidden from everyone except the member.
 pub const HERO_ICON_ERR_OPT_IN_OFF: &str = "icon_opt_in_off";
 /// A part does not start with the PNG signature. 415.
@@ -36,7 +36,7 @@ pub const HERO_ICON_ERR_UNEXPECTED_FIELD: &str = "unexpected_field";
 pub const HERO_ICON_ERR_INVALID_MULTIPART: &str = "invalid_multipart";
 /// Unknown id, malformed id, or an icon the caller may not see. 404.
 pub const HERO_ICON_ERR_NOT_FOUND: &str = "icon_not_found";
-/// Officer per-member route for an unknown or inactive member. 404.
+/// Admin per-member route for an unknown or inactive member. 404.
 pub const HERO_ICON_ERR_MEMBER_NOT_FOUND: &str = "member_not_found";
 
 /// `GET` and `PUT /api/hero-icons/opt-in`. Off by default.
@@ -86,7 +86,8 @@ pub struct HeroIconsDeleted {
     pub deleted: u32,
 }
 
-/// One icon in an officer list.
+/// One icon in an admin list. The name is kept from before the admin-only
+/// rule so clients built on it still compile.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OfficerHeroIcon {
     pub id: String,
@@ -99,18 +100,18 @@ pub struct OfficerHeroIcon {
     pub height: u32,
     /// RFC 3339 UTC.
     pub uploaded_at: DateTime<Utc>,
-    /// `/api/hero-icons/{id}/image`. Needs an officer session.
+    /// `/api/hero-icons/{id}/image`. Needs an admin session.
     pub thumbnail_url: String,
 }
 
-/// `GET /api/hero-icons/members/{member_id}` (officer).
+/// `GET /api/hero-icons/members/{member_id}` (admin).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OfficerHeroIconList {
     /// Newest first.
     pub icons: Vec<OfficerHeroIcon>,
 }
 
-/// One row of `GET /api/hero-icons/members` (officer), sent as a
+/// One row of `GET /api/hero-icons/members` (officer or admin), sent as a
 /// `CursorResponse` page sorted by display name, then member id.
 ///
 /// Only active members who are opted in are listed, so

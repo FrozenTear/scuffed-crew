@@ -2,7 +2,8 @@
 //!
 //! One place so the server, the docs and Scuffed Site cannot drift. Icons are
 //! PNG files that members contribute for icon-matching templates. They stay on
-//! the server volume and are only shown to the owner and to officers.
+//! the server volume and are only shown to the owner and to admins. Officers
+//! get per-member counts only.
 
 /// Largest accepted PNG file in one `icon` part, in bytes (64 KiB).
 pub const HERO_ICON_MAX_BYTES: usize = 64 * 1024;

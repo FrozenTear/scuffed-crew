@@ -487,7 +487,9 @@ pub enum StatsVisibility {
     Public,
     /// Active signed-in crew members. Signed-out callers do not see the numbers.
     Members,
-    /// The member, and officers. Off every leaderboard, including for the owner.
+    /// The member, and officers on the aggregate stat routes (not on the officer
+    /// match routes, see [`StatsVisibility::officer_match_denial`]). Off every
+    /// leaderboard, including for the owner.
     Private,
 }
 
@@ -524,6 +526,45 @@ impl StatsVisibility {
             Self::Members => Some("stats_members_only"),
             Self::Private if owner || officer => None,
             Self::Private => Some("stats_private"),
+        }
+    }
+
+    /// `None` when an officer may read this member's individual matches on
+    /// `GET /api/stats/member/{id}/matches` and `.../matches/{match_id}`.
+    ///
+    /// `owner` is true when the officer reads their own matches, which is
+    /// always allowed. Otherwise `public` and `members` allow officers and
+    /// `private` answers [`STATS_HIDDEN_BY_MEMBER`]. Decided 2026-11-03:
+    /// officers see a private member's totals on the aggregate routes
+    /// ([`StatsVisibility::denial`]) but not their individual matches.
+    pub fn officer_match_denial(self, owner: bool) -> Option<&'static str> {
+        match self {
+            _ if owner => None,
+            Self::Public | Self::Members => None,
+            Self::Private => Some(STATS_HIDDEN_BY_MEMBER),
+        }
+    }
+}
+
+/// `error` value of [`StatsHiddenError`].
+pub const STATS_HIDDEN_BY_MEMBER: &str = "hidden_by_member";
+
+/// 403 body when a member's `stats_visibility` hides their matches from
+/// officers.
+///
+/// Exactly `{"error":"hidden_by_member","message":"..."}`. It carries no
+/// counts or dates, so a blocked read says nothing about the member's games.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatsHiddenError {
+    pub error: String,
+    pub message: String,
+}
+
+impl StatsHiddenError {
+    pub fn hidden_by_member() -> Self {
+        Self {
+            error: STATS_HIDDEN_BY_MEMBER.to_string(),
+            message: "This member keeps their stats private.".to_string(),
         }
     }
 }
@@ -1289,6 +1330,33 @@ mod tests {
         assert!(!StatsVisibility::Members.on_leaderboard(false));
         assert!(StatsVisibility::Members.on_leaderboard(true));
         assert!(StatsVisibility::Public.on_leaderboard(false));
+    }
+
+    #[test]
+    fn officer_match_denial_blocks_only_private_for_others() {
+        assert_eq!(StatsVisibility::Public.officer_match_denial(false), None);
+        assert_eq!(StatsVisibility::Members.officer_match_denial(false), None);
+        assert_eq!(
+            StatsVisibility::Private.officer_match_denial(false),
+            Some(STATS_HIDDEN_BY_MEMBER)
+        );
+        for vis in [
+            StatsVisibility::Public,
+            StatsVisibility::Members,
+            StatsVisibility::Private,
+        ] {
+            assert_eq!(vis.officer_match_denial(true), None, "{vis:?}");
+        }
+    }
+
+    #[test]
+    fn stats_hidden_error_body_is_stable() {
+        let body = serde_json::to_value(StatsHiddenError::hidden_by_member()).unwrap();
+        let expected = serde_json::json!({
+            "error": "hidden_by_member",
+            "message": "This member keeps their stats private.",
+        });
+        assert_eq!(body, expected);
     }
 
     #[test]
