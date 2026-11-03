@@ -46,7 +46,7 @@ pub(super) const UNKNOWN_TEXT: &str = "Unknown";
 
 /// One ban. `team` is `own` or `enemy`; null, missing or anything else means
 /// the side is not known.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub(super) struct BanRead {
     #[serde(default)]
     hero: Option<String>,
@@ -58,7 +58,8 @@ pub(super) struct BanRead {
 #[derive(Debug, Clone, PartialEq, Default, Deserialize)]
 pub(super) struct BansPicks {
     #[serde(default)]
-    bans: Option<Vec<BanRead>>,
+    /// A bare null item is accepted too: it reads as a ban with no hero and no side.
+    bans: Option<Vec<Option<BanRead>>>,
     #[serde(default)]
     lobby_ban: Option<String>,
     /// The uploader's own team only, own row first. Up to 6 entries because the
@@ -149,7 +150,12 @@ fn group(key: &'static str, title: &'static str, items: Vec<Shown>) -> Option<Gr
 impl BansPicks {
     /// The lists to show, in order. Empty when there is nothing to show.
     pub(super) fn groups(&self) -> Vec<Group> {
-        let bans = self.bans.as_deref().unwrap_or(&[]);
+        let bans: Vec<BanRead> = self
+            .bans
+            .iter()
+            .flatten()
+            .map(|ban| ban.clone().unwrap_or_default())
+            .collect();
         let side = |wanted: Option<&str>| -> Vec<Shown> {
             bans.iter()
                 .filter(|ban| ban.team.as_deref() == wanted)
@@ -298,6 +304,113 @@ pub(super) fn bans_picks_section(match_id: &str, field: Option<&BansPicks>) -> E
                                         }
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Short labels for the match list card line.
+fn card_label(g: &Group) -> &'static str {
+    match g.key {
+        "bans-own" => "Your bans",
+        "bans-enemy" => "Enemy bans",
+        "bans-other" if g.title == OTHER_BANS_TITLE => "Bans",
+        "bans-other" => "Other bans",
+        "lobby-ban" => "Lobby ban",
+        _ => "Team picks",
+    }
+}
+
+/// The lists for a match card: only what was read, so no placeholders for
+/// slots that were not. Empty when there is nothing to show.
+pub(super) fn card_groups(field: Option<&BansPicks>) -> Vec<(&'static str, Vec<String>)> {
+    field
+        .map(BansPicks::groups)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|g| {
+            let names: Vec<String> = g
+                .items
+                .iter()
+                .filter(|item| item.is_read())
+                .map(|item| item.text().to_string())
+                .collect();
+            (!names.is_empty()).then(|| (card_label(g), names))
+        })
+        .collect()
+}
+
+pub(super) const BANS_PICKS_CARD_CSS: &str = r#"
+    .match-card .match-bp {
+        grid-column: 1 / -1;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0.2rem 0.9rem;
+        min-width: 0;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        font-size: 0.75rem;
+        color: var(--text-2);
+    }
+    .match-card .match-bp-group {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: baseline;
+        gap: 0.2rem 0.3rem;
+        min-width: 0;
+    }
+    .match-card .match-bp-label {
+        color: var(--text-3);
+        white-space: nowrap;
+    }
+    .match-card .match-bp-pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.2rem;
+        min-width: 0;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+    }
+    .match-card .match-bp-pill {
+        max-width: 100%;
+        padding: 0 0.45rem;
+        background: var(--surface-2);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        color: var(--text);
+        overflow-wrap: anywhere;
+    }
+    .match-card:hover .match-bp-pill { background: var(--surface); }
+    .match-card .match-bp-pill-muted { color: var(--text-3); }
+"#;
+
+/// A compact read-only line for a match list card. Renders nothing when the
+/// field is absent, null, empty or has nothing readable. Nothing in it is
+/// interactive, so it is safe inside a card that is a link.
+pub(super) fn bans_picks_line(match_id: &str, field: Option<&BansPicks>) -> Element {
+    let groups = card_groups(field);
+    if groups.is_empty() {
+        return rsx! {};
+    }
+    let line_id = format!("bans-picks-{}-card", id_part(match_id));
+    rsx! {
+        ul { class: "match-bp", id: "{line_id}", aria_label: "Bans and picks",
+            for (label, names) in groups {
+                li { class: "match-bp-group", key: "{label}",
+                    span { class: "match-bp-label", "{label}:" }
+                    ul { class: "match-bp-pills", aria_label: "{label}",
+                        for (i, name) in names.iter().enumerate() {
+                            li {
+                                class: if name == NO_PREFERENCE_TEXT { "match-bp-pill match-bp-pill-muted" } else { "match-bp-pill" },
+                                key: "{i}",
+                                "{name}"
                             }
                         }
                     }
@@ -483,6 +596,23 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_null_ban_item_does_not_break_the_field() {
+        let got = parse(
+            r#"{"bans_picks": {"bans": [null, {"hero": "ana", "team": "own"}, null],
+            "picks": ["kiriko"]}}"#,
+        )
+        .expect("the field still parses");
+        assert_eq!(titles(&got), [OWN_BANS_TITLE, PICKS_TITLE]);
+        assert_eq!(
+            parse(r#"{"bans_picks": {"bans": [null, null]}}"#)
+                .unwrap()
+                .groups()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
     fn missing_side_gets_its_own_list() {
         let none =
             parse(r#"{"bans_picks": {"bans": [{"hero": "ana"}, {"hero": "mei", "team": null}]}}"#)
@@ -568,5 +698,97 @@ mod tests {
         assert_eq!(one, again, "ids must not depend on render order");
         let other = render("b", parse(FULL));
         assert!(!other.contains("bans-picks-a-"), "{other}");
+    }
+
+    fn render_line(match_id: &str, field: Option<BansPicks>) -> String {
+        #[derive(Clone, PartialEq)]
+        struct Props {
+            id: String,
+            field: Option<BansPicks>,
+        }
+        let mut dom = VirtualDom::new_with_props(
+            |props: Props| bans_picks_line(&props.id, props.field.as_ref()),
+            Props {
+                id: match_id.to_string(),
+                field,
+            },
+        );
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn card_line_renders_nothing_for_absent_null_and_empty() {
+        assert_eq!(render_line("m1", None), "");
+        for json in [
+            r#"{"bans_picks": null}"#,
+            r#"{"bans_picks": {}}"#,
+            r#"{"bans_picks": {"bans": [], "lobby_ban": null, "picks": []}}"#,
+            r#"{"bans_picks": {"bans": [{"hero": null, "team": "own"}], "picks": [null, null]}}"#,
+        ] {
+            assert_eq!(render_line("m1", parse(json)), "", "{json}");
+        }
+    }
+
+    #[test]
+    fn card_line_shows_bans_by_side_the_lobby_ban_and_picks() {
+        let html = render_line("rec:Abc 1", parse(FULL));
+        assert!(html.contains("id=\"bans-picks-rec_abc_1-card\""), "{html}");
+        assert!(html.contains("aria-label=\"Bans and picks\""), "{html}");
+        for label in ["Your bans:", "Enemy bans:", "Lobby ban:", "Team picks:"] {
+            assert!(html.contains(label), "{label}: {html}");
+        }
+        for name in [
+            "Ana",
+            "Wrecking Ball",
+            "Soldier: 76",
+            "Mercy",
+            "Kiriko",
+            "D.Va",
+        ] {
+            assert!(html.contains(name), "{name}: {html}");
+        }
+        // The null ban and the null pick are skipped, never shown as Unknown.
+        assert!(!html.contains(UNKNOWN_TEXT), "{html}");
+        assert_eq!(
+            html.matches("<li class=\"match-bp-pill").count(),
+            6,
+            "{html}"
+        );
+        // Read only: nothing a link could not contain, no dashes.
+        assert!(!html.contains("<button") && !html.contains("<a "), "{html}");
+        assert!(!html.contains("tabindex"), "{html}");
+        assert!(
+            !html.contains('\u{2014}') && !html.contains('\u{2013}'),
+            "{html}"
+        );
+        // ban_vote is not shown here either.
+        assert!(!html.contains("Mei"), "{html}");
+    }
+
+    #[test]
+    fn card_line_shows_no_preference_and_skips_null_picks() {
+        let field =
+            parse(r#"{"bans_picks": {"picks": ["ana", "no_preference", null, "mei"]}}"#).unwrap();
+        let html = render_line("m1", Some(field));
+        assert_eq!(
+            html.matches("<li class=\"match-bp-pill").count(),
+            3,
+            "{html}"
+        );
+        assert_eq!(html.matches("No preference").count(), 1, "{html}");
+        assert_eq!(html.matches("match-bp-pill-muted").count(), 1, "{html}");
+        assert!(!html.contains(UNKNOWN_TEXT), "{html}");
+    }
+
+    #[test]
+    fn card_line_labels_a_bans_list_with_no_side() {
+        let none = parse(r#"{"bans_picks": {"bans": [{"hero": "ana"}]}}"#).unwrap();
+        assert_eq!(card_groups(Some(&none))[0].0, "Bans");
+        let some =
+            parse(r#"{"bans_picks": {"bans": [{"hero": "ana", "team": "own"}, {"hero": "mei"}]}}"#)
+                .unwrap();
+        let labels: Vec<_> = card_groups(Some(&some)).iter().map(|g| g.0).collect();
+        assert_eq!(labels, ["Your bans", "Other bans"]);
     }
 }

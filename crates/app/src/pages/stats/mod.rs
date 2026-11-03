@@ -95,6 +95,10 @@ struct PersonalMatch {
     /// Cell names the reader flagged. Missing or null is None (no marks).
     #[serde(default)]
     suspect_fields: Option<Vec<String>>,
+    /// Bans and picks for the card line. Missing, null or a value that does
+    /// not parse is None. See [`bans_picks`].
+    #[serde(default, deserialize_with = "bans_picks::lenient")]
+    bans_picks: Option<bans_picks::BansPicks>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1621,6 +1625,27 @@ mod match_row_tests {
                 "played_at": "2026-03-15T12:00:00Z"{extra}
             }}"#
         )
+    }
+
+    #[test]
+    fn list_rows_read_bans_and_picks_when_present_and_ignore_them_when_not() {
+        let plain: PersonalMatch = serde_json::from_str(&row_json("")).expect("row");
+        assert!(plain.bans_picks.is_none());
+        for extra in [
+            r#","bans_picks":null"#,
+            r#","bans_picks":"garbled""#,
+            r#","bans_picks":7"#,
+        ] {
+            let row: PersonalMatch = serde_json::from_str(&row_json(extra)).expect(extra);
+            assert!(row.bans_picks.is_none(), "{extra}");
+        }
+        let raw = row_json(
+            r#","bans_picks":{"bans":[{"hero":"ana","team":"own"}],"lobby_ban":"mei","picks":["dva",null,"no_preference"],"ban_vote":[null],"recognizer":"cv-v1"}"#,
+        );
+        let page: MatchPage =
+            serde_json::from_str(&format!(r#"{{"data":[{raw}],"next_cursor":null}}"#))
+                .expect("page");
+        assert!(page.data[0].bans_picks.is_some());
     }
 
     #[test]
