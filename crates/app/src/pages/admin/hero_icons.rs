@@ -20,7 +20,9 @@ use crate::hooks::use_api_list;
 use crate::state::use_auth;
 
 const CSS: &str = r#"
+    .hero-icons-admin__name { overflow-wrap: anywhere; word-break: break-word; }
     .hero-icons-admin__cell-confirm { min-width: 16rem; }
+    .hero-icons-admin__cell-confirm .inline-confirm__title { overflow-wrap: anywhere; word-break: break-word; }
     @media (max-width: 640px) {
         .hero-icons-admin__cell-confirm { min-width: 0; width: 12rem; white-space: normal; }
         .hero-icons-admin__status ~ .data-table-scroll .data-table { min-width: 0; }
@@ -130,7 +132,7 @@ pub fn AdminHeroIcons() -> Element {
                                 let can_delete = row.icon_count > 0;
                                 rsx! {
                                     tr { key: "{row.member_id}",
-                                        td {
+                                        td { class: "hero-icons-admin__name",
                                             "{label}"
                                             if sharing_off {
                                                 " "
@@ -186,5 +188,36 @@ pub fn AdminHeroIcons() -> Element {
                 },
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CSS;
+
+    #[test]
+    fn name_cell_wraps_long_unbroken_names() {
+        let rule = CSS
+            .lines()
+            .find(|l| l.trim_start().starts_with(".hero-icons-admin__name"))
+            .expect("name cell rule");
+        assert!(rule.contains("overflow-wrap: anywhere"), "{rule}");
+        assert!(rule.contains("word-break: break-word"), "{rule}");
+        let confirm = CSS
+            .lines()
+            .find(|l| {
+                l.trim_start()
+                    .starts_with(".hero-icons-admin__cell-confirm .inline-confirm__title")
+            })
+            .expect("confirm title rule");
+        assert!(
+            confirm.contains("overflow-wrap: anywhere"),
+            "the confirm title repeats the name and must wrap too, buttons must not: {confirm}"
+        );
+        let source = include_str!("hero_icons.rs");
+        assert!(
+            source.contains("td { class: \"hero-icons-admin__name\","),
+            "the name cell must carry the wrap class"
+        );
     }
 }
