@@ -491,6 +491,8 @@ pub fn ProfileSettings() -> Element {
                     }
                 }
 
+                super::hero_icon_settings::HeroIconSettings { member_id: member_id() }
+
                 if !accounts.read().is_empty() {
                     div { class: "profile-edit-section",
                         h2 { "Game Accounts" }

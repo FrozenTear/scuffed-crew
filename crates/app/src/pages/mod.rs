@@ -10,6 +10,7 @@ mod events;
 mod feed;
 mod forum;
 mod forum_thread;
+mod hero_icon_settings;
 mod home;
 mod identity;
 mod leaderboards;
