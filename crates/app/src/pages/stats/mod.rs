@@ -1,3 +1,4 @@
+mod bans_picks;
 mod game;
 mod heroes;
 mod history;
