@@ -3,7 +3,7 @@
 //! A member chooses whether the tracker may send hero icons for tracker
 //! training, sees thumbnails of icons already sent, and can delete them. Turning
 //! sharing off asks what to do with icons already sent. Keep is the default.
-//! Icons are private. Officers see only a count.
+//! Icons are private. Officers see only a count. Admins can open them while sharing is on.
 
 use dioxus::prelude::*;
 

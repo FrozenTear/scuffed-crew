@@ -66,7 +66,7 @@ pub fn icons_phrase(n: u32) -> String {
     }
 }
 
-pub const SECTION_INTRO: &str = "Hero icons you send are private training data for the tracker's icon matching. Officers see how many you have sent, not the icons.";
+pub const SECTION_INTRO: &str = "Hero icons you send are private training data for the tracker's icon matching. Officers see only how many you have sent. Admins can open your icons while sharing is on. When sharing is off, they stay hidden from everyone but you.";
 
 pub const STORE_DISABLED: &str = "Hero icon sharing is not switched on for this server.";
 
@@ -80,7 +80,7 @@ pub const SWITCH_HINT_ON: &str =
 pub const SWITCH_HINT_OFF: &str = "Sharing is off. No icons are accepted from you.";
 
 pub const KEPT_HIDDEN_NOTE: &str =
-    "Your icons are kept on the server and hidden from officers while sharing is off.";
+    "Your icons are kept on the server and hidden from officers and admins while sharing is off.";
 
 pub const NONE_SENT: &str = "You have not sent any icons yet.";
 
@@ -91,7 +91,7 @@ pub fn opt_out_question(icon_count: u32) -> String {
     )
 }
 
-pub const KEEP_LABEL: &str = "Keep my icons. They stay hidden from officers.";
+pub const KEEP_LABEL: &str = "Keep my icons. They stay hidden from officers and admins.";
 pub const DELETE_LABEL: &str = "Delete my icons from the server.";
 
 pub fn delete_all_title(icon_count: u32) -> String {
@@ -110,7 +110,7 @@ pub fn status_opted_out(choice: OptOutChoice, kept_or_deleted: u32) -> String {
     match choice {
         OptOutChoice::Keep if kept_or_deleted == 0 => "Sharing is off.".to_string(),
         OptOutChoice::Keep => format!(
-            "Sharing is off. {} kept and hidden from officers.",
+            "Sharing is off. {} kept and hidden from officers and admins.",
             capitalize_first(&icons_phrase(kept_or_deleted))
         ),
         OptOutChoice::Delete => {
@@ -229,7 +229,7 @@ pub fn admin_delete_title(display_name: &str, icon_count: u32) -> String {
 
 pub const ADMIN_DELETE_BODY: &str = "This removes them from the server for good.";
 
-pub const ADMIN_INTRO: &str = "Members who share hero icons for tracker training. You see how many each member has sent, never the images. Members who turned sharing off are not listed, and their icons stay hidden.";
+pub const ADMIN_INTRO: &str = "Members who share hero icons for tracker training. This page shows how many icons each member has sent, not the icons themselves. Members who turned sharing off are not listed, and their icons stay hidden.";
 
 pub const ADMIN_EMPTY: &str = "No member has turned on hero icon sharing yet.";
 
@@ -292,7 +292,7 @@ mod tests {
         assert_eq!(status_opted_out(OptOutChoice::Keep, 0), "Sharing is off.");
         assert_eq!(
             status_opted_out(OptOutChoice::Keep, 3),
-            "Sharing is off. 3 icons kept and hidden from officers."
+            "Sharing is off. 3 icons kept and hidden from officers and admins."
         );
         assert_eq!(
             status_opted_out(OptOutChoice::Delete, 1),
@@ -394,5 +394,28 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn member_counts_parse_as_a_cursor_page() {
+        let page: crate::hooks::CursorPage<scuffed_types::api::HeroIconMemberCount> =
+            serde_json::from_str(
+                r#"{"data":[{"member_id":"m1","display_name":"Frost","icon_count":3,"icon_contribution_opt_in":true}],"next_cursor":"100"}"#,
+            )
+            .unwrap();
+        assert_eq!(page.data.len(), 1);
+        assert_eq!(page.data[0].icon_count, 3);
+        assert_eq!(page.next_cursor.as_deref(), Some("100"));
+        let last: crate::hooks::CursorPage<scuffed_types::api::HeroIconMemberCount> =
+            serde_json::from_str(r#"{"data":[]}"#).unwrap();
+        assert!(last.next_cursor.is_none());
+    }
+
+    #[test]
+    fn member_intro_names_who_can_see_icons() {
+        assert!(SECTION_INTRO.contains("Officers see only how many"));
+        assert!(SECTION_INTRO.contains("Admins can open your icons while sharing is on"));
+        assert!(KEEP_LABEL.contains("officers and admins"));
+        assert!(KEPT_HIDDEN_NOTE.contains("officers and admins"));
     }
 }
