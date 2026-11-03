@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const HERO_ICON_ERR_DISABLED: &str = "hero_icons_disabled";
 /// The member has not opted in to contributing icons. 403 on upload.
 pub const HERO_ICON_ERR_OPT_IN_REQUIRED: &str = "icon_opt_in_required";
-/// The member an admin asked about is not opted in. 403. Their icons are
-/// kept but hidden from everyone except the member.
+/// The member whose icon list an admin asked for is not opted in. 403. Their
+/// icons are kept and hidden from reads. Admin deletes do not answer this.
 pub const HERO_ICON_ERR_OPT_IN_OFF: &str = "icon_opt_in_off";
 /// A part does not start with the PNG signature. 415.
 pub const HERO_ICON_ERR_NOT_PNG: &str = "not_png";

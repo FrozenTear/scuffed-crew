@@ -8,17 +8,20 @@ default, and every route needs a signed-in session. JSON types live in
 
 ## Who can do what
 
-Decision of 2026-11-03: only admins may delete another member's hero icons.
-Officers see per-member counts only.
+Decisions of 2026-11-03: only admins may delete another member's hero icons,
+and they may delete an opted-out member's hidden icons too. Officers see
+per-member counts only.
 
 | Caller | Own icons | Another member's icons |
 |--------|-----------|------------------------|
 | Member | List, read, delete (one or all) | Nothing (404 `icon_not_found`) |
 | Officer | List, read, delete (one or all) | Counts only (`GET /api/hero-icons/members`). Images, icon lists and deletes answer 403 `Admin access required` |
-| Admin | List, read, delete (one or all) | Counts, icon lists, images, delete one or all, only while that member is active and opted in |
+| Admin | List, read, delete (one or all) | Counts, icon lists and images while that member is active and opted in. Delete one or all while that member is active, opted in or not |
 
-The admin routes keep the opt-out rule: an admin cannot read or delete an
-opted-out or inactive member's icons. Only the member deletes those.
+Admin reads keep the opt-out rule: an admin cannot list or read an opted-out
+or inactive member's icons. Admin deletes ignore the opt-in, so hidden icons
+can still be removed. An inactive member's icons cannot be deleted by an
+admin (404), the same as before.
 
 ## Privacy rule
 
@@ -30,46 +33,46 @@ opted-out or inactive member's icons. Only the member deletes those.
   while that member is active and opted in. Officers never get another
   member's image bytes.
 - Deleting an icon removes both the database row and the file.
-- The `hero-icons-data` volume is deliberately not in the backup snapshot:
-  icons never leave the server volume. Lost icons can be contributed again.
+- The `hero-icons-data` volume is not in `scripts/backup.sh`, by decision:
+  the current server is a temporary dev platform and backups are dropped for
+  it. Lost icons can be contributed again.
 
 ## Opt-out
 
 Decision of 2026-11-03: "when a member turns the opt-in off, the icons
-already stored are KEPT and hidden (not served to staff or anyone else).
-They are deleted only when the member explicitly deletes them (single delete
-or delete-all)."
+already stored are KEPT and hidden (not served to staff or anyone else)."
+A later decision the same day: admins and the owning member can delete
+icons, including an opted-out member's hidden icons.
 
 So while a member is opted out:
 
 - New uploads are refused (403 `icon_opt_in_required`).
-- Admins cannot list, read or delete that member's icons, and officers and
-  admins do not see a count for them. The member is left out of
-  `GET /api/hero-icons` and `GET /api/hero-icons/members`. For an admin,
-  `GET` and `DELETE` on `/api/hero-icons/members/{member_id}` answer 403
-  `icon_opt_in_off` and delete nothing, and `GET /api/hero-icons/{id}/image`
-  and `DELETE /api/hero-icons/{id}` answer 404 `icon_not_found`, the same as
-  for an id that does not exist. Officers get 403 `Admin access required` on
-  all of these whether the member is opted in or not.
+- Admins cannot list or read that member's icons, and officers and admins do
+  not see a count for them. The member is left out of `GET /api/hero-icons`
+  and `GET /api/hero-icons/members`. For an admin,
+  `GET /api/hero-icons/members/{member_id}` answers 403 `icon_opt_in_off` and
+  `GET /api/hero-icons/{id}/image` answers 404 `icon_not_found`, the same as
+  for an id that does not exist.
+- Admins can still delete them: `DELETE /api/hero-icons/{id}` and
+  `DELETE /api/hero-icons/members/{member_id}` work as for an opted-in member
+  and are audited the same way.
+- Officers get 403 `Admin access required` on all of these whether the member
+  is opted in or not.
 - The member can still list, read and delete their own icons, one at a time
   with `DELETE /api/hero-icons/{id}` or all at once with
-  `DELETE /api/hero-icons/mine`. Nothing else deletes them.
+  `DELETE /api/hero-icons/mine`.
 - Opting in again makes the kept icons visible to admins, and counted for
   officers, again.
 
 Opting in and out (`GET` and `PUT /api/hero-icons/opt-in`) works even when the
 icon store is disabled, since it only reads or flips the flag.
 
-Inactive members are treated the same way: their icons are kept and hidden,
-and the admin per-member routes answer 404 `member_not_found`.
+Inactive members are hidden for reads and deletes: their icons are kept, the
+admin per-member routes answer 404 `member_not_found`, and the per-icon routes
+answer 404 `icon_not_found` to admins.
 
-An admin delete that races with an opt-out: the admin delete-all checks the
-member again before each icon and stops at the next icon once the member has
-opted out or gone inactive. It answers 403 `icon_opt_in_off` when nothing was
-deleted yet, otherwise the count deleted so far, and the rest stay stored. A
-single admin delete checks once, so an opt-out landing in the few
-milliseconds between that check and the file delete does not stop it. The
-icon was visible to the admin when the delete was accepted.
+Since admin deletes do not depend on the opt-in, an opt-out during an admin
+delete changes nothing: the delete goes ahead.
 
 ## Caps
 
@@ -128,7 +131,7 @@ Every error body is `{"error": "<code>"}`. The codes are constants in
 | 403 | `Officer access required` | `GET /api/hero-icons/members` (counts), caller is not an officer or admin |
 | 403 | `Admin access required` | Admin route (all icons, one member's icons, delete all of a member), caller is not an admin. Also an officer on `GET /api/hero-icons/{id}/image` or `DELETE /api/hero-icons/{id}` for any id that is not one of their own icons, including unknown and malformed ids |
 | 403 | `icon_opt_in_required` | Upload while the caller is not opted in |
-| 403 | `icon_opt_in_off` | Admin per-member route for a member who is not opted in |
+| 403 | `icon_opt_in_off` | `GET /api/hero-icons/members/{member_id}` (admin) for a member who is not opted in. The `DELETE` never answers this |
 | 404 | `icon_not_found` | Unknown id, malformed id, or an icon the caller may not see (members and admins) |
 | 404 | `member_not_found` | Admin per-member route for an unknown or inactive member |
 | 400 | `unknown_hero` | `hero` missing or not a known hero |
@@ -268,12 +271,12 @@ loads up to 100 thumbnails, and the list read itself is audited.
 
 ### Delete one
 
-`DELETE /api/hero-icons/{id}` (owner, or an admin while the owner is active and opted in)
+`DELETE /api/hero-icons/{id}` (owner, or an admin while the owner is active)
 
 The owner can always delete their own icon, officers and admins included. An
-admin can delete another member's icon only while that member is active and
-opted in. Otherwise the icon stays stored and the answer is as for the
-thumbnail: 403 `Admin access required` for an officer, 404 `icon_not_found`
+admin can delete another member's icon while that member is active, opted in
+or not, so an opted-out member's hidden icon can be removed. Otherwise the icon
+stays stored and the answer is as for the thumbnail: 403 `Admin access required` for an officer, 404 `icon_not_found`
 for a member or an admin. Admin deletes of another member's icon are written
 to the audit log as `deleted_hero_icon` (see [Audit log](#audit-log)).
 
@@ -370,13 +373,12 @@ list writes one audit entry `viewed_hero_icons` with that member as target.
 
 `DELETE /api/hero-icons/members/{member_id}` (admin)
 
-Removes every icon of that member, rows and files, while that member is active
-and opted in. 404 `member_not_found` for an unknown or inactive member and 403
-`icon_opt_in_off` for an opted-out member, and nothing is deleted then. An
-admin may clear their own icons here opted in or not. Officers and members
-clear their own icons with `DELETE /api/hero-icons/mine`. Opt-in is left as it
-is. Visibility is checked again before each icon, so a member who opts out
-mid-call keeps the icons not yet removed (see [Opt-out](#opt-out)). File
+Removes every icon of that member, rows and files, while that member is
+active, opted in or not. This is how an admin removes an opted-out member's
+hidden icons. 404 `member_not_found` for an unknown or inactive member, and
+nothing is deleted then. An admin may clear their own icons here too. Officers
+and members clear their own icons with `DELETE /api/hero-icons/mine`. Opt-in
+is left as it is. File
 failures work as in `DELETE /api/hero-icons/mine`. When at least one
 icon went and the member is not the caller, one audit entry
 `deleted_all_hero_icons` is written. A member with no icons gives

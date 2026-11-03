@@ -987,12 +987,9 @@ async fn opting_out_hides_icons_from_staff_but_keeps_them() {
     assert_eq!(status, StatusCode::OK, "{counts}");
     assert!(member_ids_of(&counts).is_empty(), "{counts}");
 
-    // Admins cannot delete them, one by one or all at once.
+    // Admins can still delete hidden icons; that is covered in
+    // `admin_deletes_an_opted_out_members_hidden_icons`. Nothing here deletes.
     let one = format!("/api/hero-icons/{id}");
-    let got = delete(&w.app, &one, ADMIN_SESSION).await;
-    assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
-    let got = delete(&w.app, &uri, ADMIN_SESSION).await;
-    assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
     assert_eq!(files_on_disk(w.dir()).len(), 2);
     assert_eq!(w.db().count_hero_icons_for_member(OWNER).await.unwrap(), 2);
     assert!(audits_of(w.db(), "deleted_hero_icon").await.is_empty());
@@ -1047,7 +1044,7 @@ async fn delete_all_removes_rows_and_files() {
 }
 
 #[tokio::test]
-async fn admin_delete_all_needs_the_member_opted_in() {
+async fn admin_delete_all_works_opted_in_or_out() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
     set_opt_in(&w.app, OTHER_SESSION, true).await;
@@ -1061,13 +1058,7 @@ async fn admin_delete_all_needs_the_member_opted_in() {
     let owner_uri = format!("/api/hero-icons/members/{OWNER}");
     let got = delete(&w.app, &owner_uri, OWNER_SESSION).await;
     assert_error(&got, StatusCode::FORBIDDEN, "Admin access required");
-
-    // Opted out: refused, nothing deleted.
-    let got = delete(&w.app, &owner_uri, ADMIN_SESSION).await;
-    assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
     assert_eq!(files_on_disk(w.dir()).len(), 3);
-    let left = w.db().count_hero_icons_for_member(OWNER).await.unwrap();
-    assert_eq!(left, 2);
 
     // Opted in: every icon of that member goes, and the delete is audited.
     let other_uri = format!("/api/hero-icons/members/{OTHER}");
@@ -1084,10 +1075,75 @@ async fn admin_delete_all_needs_the_member_opted_in() {
     );
     assert_eq!(audited, vec![expected]);
 
+    // Nothing left: 0, and no second audit entry.
     let (status, body) = delete(&w.app, &other_uri, ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["deleted"], json!(0));
     assert_eq!(audits_of(w.db(), "deleted_all_hero_icons").await.len(), 1);
+
+    // Opted out: the hidden icons go too, and the delete is audited.
+    let (status, body) = delete(&w.app, &owner_uri, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(2));
+    assert!(files_on_disk(w.dir()).is_empty());
+    assert_eq!(w.db().count_hero_icons_for_member(OWNER).await.unwrap(), 0);
+    let audited = audits_of(w.db(), "deleted_all_hero_icons").await;
+    let expected = (
+        "member".to_string(),
+        OWNER.to_string(),
+        Some("2 icons".to_string()),
+    );
+    assert!(audited.contains(&expected), "{audited:?}");
+    // The opt-in is left as it was.
+    assert!(!settings_of(w.db(), OWNER).await.hero_icon_opt_in);
+    w.cleanup();
+}
+
+/// Robert's rule: admins delete an opted-out member's hidden icons. They still
+/// cannot list or read them, and officers still cannot delete them.
+#[tokio::test]
+async fn admin_deletes_an_opted_out_members_hidden_icon() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    let two = icons(vec![png(16, 16), png(17, 17)]);
+    let (status, body) = upload(&w.app, OWNER_SESSION, "ana", &two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let uploaded = ids_of(&body["icons"]);
+    let id = uploaded[0].clone();
+    set_opt_in(&w.app, OWNER_SESSION, false).await;
+
+    // Hidden from admin reads.
+    let image = format!("/api/hero-icons/{id}/image");
+    let got = get(&w.app, &image, ADMIN_SESSION).await;
+    assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
+    let owner_icons = format!("/api/hero-icons/members/{OWNER}");
+    let got = get(&w.app, &owner_icons, ADMIN_SESSION).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
+
+    // Officers still cannot delete it.
+    let one = format!("/api/hero-icons/{id}");
+    let got = delete(&w.app, &one, OFFICER_SESSION).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "Admin access required");
+    assert_eq!(files_on_disk(w.dir()).len(), 2);
+
+    // The admin deletes it: 200, row and file gone, audited.
+    let (status, body) = delete(&w.app, &one, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    assert!(!w.dir().join(format!("{id}.png")).exists());
+    assert!(w.db().get_hero_icon(&id).await.unwrap().is_none());
+    let audited = audits_of(w.db(), "deleted_hero_icon").await;
+    let expected = (
+        "member".to_string(),
+        OWNER.to_string(),
+        Some(format!("icon {id}")),
+    );
+    assert_eq!(audited, vec![expected]);
+
+    // The other icon stays, and the owner still sees it, opted out.
+    let (_, mine) = get(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
+    assert_eq!(ids_of(&mine["icons"]), vec![uploaded[1].clone()]);
+    assert_eq!(mine["icon_contribution_opt_in"], json!(false));
     w.cleanup();
 }
 
