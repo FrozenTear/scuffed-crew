@@ -4,6 +4,7 @@ pub mod hero_icons;
 pub mod heroes;
 pub mod nostr;
 pub mod org;
+pub mod pack_limits;
 pub mod patch_notes;
 pub mod role_fill;
 pub mod stat_report;
@@ -25,6 +26,7 @@ pub use heroes::{
 };
 pub use nostr::*;
 pub use org::*;
+pub use pack_limits::{PACK_IP_BURST, PACK_IP_REPLENISH_SECS};
 pub use patch_notes::*;
 pub use role_fill::{fill_game_role, filled_role_label, recognized_stored_role};
 pub use stat_report::*;

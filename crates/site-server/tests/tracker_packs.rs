@@ -514,7 +514,7 @@ async fn rate_limit_json_429() {
     let app = create_router(state);
     let peer = [203, 0, 113, 41];
 
-    for i in 0..8 {
+    for i in 0..scuffed_types::PACK_IP_BURST {
         let (status, _, _) = call(&app, "/api/tracker/packs", peer, None).await;
         assert_eq!(status, StatusCode::UNAUTHORIZED, "burst {i}");
     }
