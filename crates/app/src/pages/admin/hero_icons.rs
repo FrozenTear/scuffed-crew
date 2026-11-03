@@ -2,7 +2,11 @@
 //!
 //! Icons are private training data. Officers see only how many icons each
 //! opted-in member has sent. They never get the images and cannot delete.
-//! Admins see the same count and can delete a member's icons.
+//! Admins see the same count and can delete a member's icons. The server also
+//! sends admins members who turned sharing off but still have hidden icons
+//! (`opted_in` false). Those rows show a "Sharing off" label and the same
+//! delete. No row ever loads an image. Officer lists are filtered by the
+//! server, not here.
 
 use dioxus::prelude::*;
 
@@ -17,7 +21,13 @@ use crate::state::use_auth;
 
 const CSS: &str = r#"
     .hero-icons-admin__cell-confirm { min-width: 16rem; }
-    @media (max-width: 640px) { .hero-icons-admin__cell-confirm { min-width: 0; width: 12rem; white-space: normal; } }
+    @media (max-width: 640px) {
+        .hero-icons-admin__cell-confirm { min-width: 0; width: 12rem; white-space: normal; }
+        .hero-icons-admin__status ~ .data-table-scroll .data-table { min-width: 0; }
+        .hero-icons-admin__status ~ .data-table-scroll .data-table th,
+        .hero-icons-admin__status ~ .data-table-scroll .data-table td { padding-left: 0.5rem; padding-right: 0.5rem; }
+    }
+    .hero-icons-admin__off { display: inline-block; padding: 0 var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: var(--text-sm); color: var(--text-2); white-space: nowrap; }
     .hero-icons-admin__status { min-height: 1.5em; margin: 0 0 var(--space-3); font-size: var(--text-sm); color: var(--text-2); }
 "#;
 
@@ -54,7 +64,10 @@ pub fn AdminHeroIcons() -> Element {
             action_status.read().clone()
         } else {
             match data.as_ref().and_then(|d| d.as_ref()) {
-                Some(rows) => text::admin_loaded(rows.len()),
+                Some(rows) => text::admin_loaded(
+                    rows.len(),
+                    rows.iter().filter(|r| text::sharing_is_off(r)).count(),
+                ),
                 None if failed => "Could not load hero icon counts.".to_string(),
                 None => text::ADMIN_LOADING.to_string(),
             }
@@ -104,13 +117,30 @@ pub fn AdminHeroIcons() -> Element {
                                 let trigger = format!("{prefix}-trigger");
                                 let aria = text::admin_delete_aria(&row.display_name);
                                 let title = text::admin_delete_title(&row.display_name, row.icon_count);
+                                let sharing_off = text::sharing_is_off(row);
+                                let sharing_id = text::admin_sharing_id(&row.member_id);
+                                let confirm_body = if sharing_off {
+                                    text::ADMIN_DELETE_BODY_HIDDEN
+                                } else {
+                                    text::ADMIN_DELETE_BODY
+                                };
                                 let confirming = pending.read().as_deref() == Some(row.member_id.as_str());
                                 let open_id = row.member_id.clone();
                                 let go_row = row.clone();
                                 let can_delete = row.icon_count > 0;
                                 rsx! {
                                     tr { key: "{row.member_id}",
-                                        td { "{label}" }
+                                        td {
+                                            "{label}"
+                                            if sharing_off {
+                                                " "
+                                                span {
+                                                    id: "{sharing_id}",
+                                                    class: "hero-icons-admin__off",
+                                                    "{text::SHARING_OFF_LABEL}"
+                                                }
+                                            }
+                                        }
                                         td { id: "{count_id}", "{row.icon_count}" }
                                         if is_admin {
                                             td {
@@ -119,7 +149,7 @@ pub fn AdminHeroIcons() -> Element {
                                                         InlineConfirm {
                                                             id: prefix.clone(),
                                                             title: title.clone(),
-                                                            body: text::ADMIN_DELETE_BODY.to_string(),
+                                                            body: confirm_body.to_string(),
                                                             confirm_label: "Delete".to_string(),
                                                             busy: busy(),
                                                             on_confirm: move |_| delete_for.call(go_row.clone()),

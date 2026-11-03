@@ -66,7 +66,7 @@ pub fn icons_phrase(n: u32) -> String {
     }
 }
 
-pub const SECTION_INTRO: &str = "Hero icons you send are private training data for the tracker's icon matching. Officers see only how many you have sent. Admins can open your icons while sharing is on. When sharing is off, they stay hidden from everyone but you.";
+pub const SECTION_INTRO: &str = "Hero icons you send are private training data for the tracker's icon matching. Officers see only how many you have sent. Admins can open your icons while sharing is on. When sharing is off, nobody but you can open them. Admins can still delete them.";
 
 pub const STORE_DISABLED: &str = "Hero icon sharing is not switched on for this server.";
 
@@ -79,8 +79,7 @@ pub const SWITCH_HINT_ON: &str =
 
 pub const SWITCH_HINT_OFF: &str = "Sharing is off. No icons are accepted from you.";
 
-pub const KEPT_HIDDEN_NOTE: &str =
-    "Your icons are kept on the server and hidden from officers and admins while sharing is off.";
+pub const KEPT_HIDDEN_NOTE: &str = "Your icons are kept on the server and hidden while sharing is off. Admins can delete them but cannot open them.";
 
 pub const NONE_SENT: &str = "You have not sent any icons yet.";
 
@@ -91,7 +90,7 @@ pub fn opt_out_question(icon_count: u32) -> String {
     )
 }
 
-pub const KEEP_LABEL: &str = "Keep my icons. They stay hidden from officers and admins.";
+pub const KEEP_LABEL: &str = "Keep my icons. Nobody can open them. Admins can still delete them.";
 pub const DELETE_LABEL: &str = "Delete my icons from the server.";
 
 pub fn delete_all_title(icon_count: u32) -> String {
@@ -110,7 +109,7 @@ pub fn status_opted_out(choice: OptOutChoice, kept_or_deleted: u32) -> String {
     match choice {
         OptOutChoice::Keep if kept_or_deleted == 0 => "Sharing is off.".to_string(),
         OptOutChoice::Keep => format!(
-            "Sharing is off. {} kept and hidden from officers and admins.",
+            "Sharing is off. {} kept and hidden.",
             capitalize_first(&icons_phrase(kept_or_deleted))
         ),
         OptOutChoice::Delete => {
@@ -216,7 +215,20 @@ pub fn member_label(display_name: &str) -> String {
 }
 
 pub fn admin_delete_aria(display_name: &str) -> String {
-    format!("Delete icons of {}", member_label(display_name))
+    format!("Delete all icons for {}", member_label(display_name))
+}
+
+/// Id of the visible "Sharing off" label in a row.
+pub fn admin_sharing_id(member_id: &str) -> String {
+    format!("hero-icons-admin-{member_id}-sharing")
+}
+
+pub const SHARING_OFF_LABEL: &str = "Sharing off";
+
+/// True when the server marks the member as not sharing. Admins get these
+/// rows (hidden icons only). Officers never do, so no filtering happens here.
+pub fn sharing_is_off(row: &scuffed_types::api::HeroIconMemberCount) -> bool {
+    !(row.opted_in || row.icon_contribution_opt_in)
 }
 
 pub fn admin_delete_title(display_name: &str, icon_count: u32) -> String {
@@ -229,16 +241,23 @@ pub fn admin_delete_title(display_name: &str, icon_count: u32) -> String {
 
 pub const ADMIN_DELETE_BODY: &str = "This removes them from the server for good.";
 
-pub const ADMIN_INTRO: &str = "Members who share hero icons for tracker training. This page shows how many icons each member has sent, not the icons themselves. Members who turned sharing off are not listed, and their icons stay hidden.";
+pub const ADMIN_DELETE_BODY_HIDDEN: &str = "Sharing is off for this member, so the icons are hidden. This removes them from the server for good.";
+
+pub const ADMIN_INTRO: &str = "This page shows how many hero icons each member has sent for tracker training, not the icons themselves. Only admins can delete them. Admins also see members marked Sharing off who still have icons stored. Admins can delete those hidden icons but cannot open them.";
 
 pub const ADMIN_EMPTY: &str = "No member has turned on hero icon sharing yet.";
 
 pub const ADMIN_LOADING: &str = "Loading hero icon counts...";
 
-pub fn admin_loaded(members: usize) -> String {
-    match members {
+pub fn admin_loaded(members: usize, sharing_off: usize) -> String {
+    let base = match members {
         1 => "1 member listed.".to_string(),
         n => format!("{n} members listed."),
+    };
+    if sharing_off == 0 {
+        base
+    } else {
+        format!("{base} {sharing_off} with sharing off.")
     }
 }
 
@@ -292,7 +311,7 @@ mod tests {
         assert_eq!(status_opted_out(OptOutChoice::Keep, 0), "Sharing is off.");
         assert_eq!(
             status_opted_out(OptOutChoice::Keep, 3),
-            "Sharing is off. 3 icons kept and hidden from officers and admins."
+            "Sharing is off. 3 icons kept and hidden."
         );
         assert_eq!(
             status_opted_out(OptOutChoice::Delete, 1),
@@ -332,7 +351,7 @@ mod tests {
     fn a_member_without_a_name_still_gets_a_readable_label() {
         assert_eq!(member_label("  "), "Unnamed member");
         assert_eq!(member_label(" FrozenTear "), "FrozenTear");
-        assert_eq!(admin_delete_aria(""), "Delete icons of Unnamed member");
+        assert_eq!(admin_delete_aria(""), "Delete all icons for Unnamed member");
         assert_eq!(
             admin_deleted("FrozenTear", 2),
             "Deleted 2 icons of FrozenTear."
@@ -372,6 +391,8 @@ mod tests {
             DELETE_LABEL,
             DELETE_ALL_BODY,
             ADMIN_DELETE_BODY,
+            ADMIN_DELETE_BODY_HIDDEN,
+            SHARING_OFF_LABEL,
             ADMIN_INTRO,
             ADMIN_EMPTY,
             ADMIN_LOADING,
@@ -387,7 +408,7 @@ mod tests {
             delete_all_title(2),
             status_opted_out(OptOutChoice::Keep, 2),
             admin_delete_title("FrozenTear", 2),
-            admin_loaded(2),
+            admin_loaded(2, 1),
         ] {
             assert!(
                 !text.chars().any(|c| matches!(c, '\u{2014}' | '\u{2013}')),
@@ -415,7 +436,41 @@ mod tests {
     fn member_intro_names_who_can_see_icons() {
         assert!(SECTION_INTRO.contains("Officers see only how many"));
         assert!(SECTION_INTRO.contains("Admins can open your icons while sharing is on"));
-        assert!(KEEP_LABEL.contains("officers and admins"));
-        assert!(KEPT_HIDDEN_NOTE.contains("officers and admins"));
+        assert!(SECTION_INTRO.contains("Admins can still delete them"));
+        assert!(KEEP_LABEL.contains("Admins can still delete them"));
+        assert!(KEPT_HIDDEN_NOTE.contains("delete them but cannot open them"));
+    }
+
+    #[test]
+    fn opted_out_rows_parse_and_are_marked() {
+        let page: crate::hooks::CursorPage<scuffed_types::api::HeroIconMemberCount> =
+            serde_json::from_str(
+                r#"{"data":[
+                {"member_id":"m1","display_name":"Frost","icon_count":3,"opted_in":true,"icon_contribution_opt_in":true},
+                {"member_id":"m2","display_name":"Ember","icon_count":2,"opted_in":false,"icon_contribution_opt_in":false}
+                ],"next_cursor":null}"#,
+            )
+            .unwrap();
+        assert!(!sharing_is_off(&page.data[0]));
+        assert!(sharing_is_off(&page.data[1]));
+        assert!(!page.data[1].opted_in);
+    }
+
+    #[test]
+    fn opted_in_rows_from_an_older_server_are_not_marked_off() {
+        let row: scuffed_types::api::HeroIconMemberCount = serde_json::from_str(
+            r#"{"member_id":"m1","display_name":"Frost","icon_count":3,"icon_contribution_opt_in":true}"#,
+        )
+        .unwrap();
+        assert!(!row.opted_in);
+        assert!(!sharing_is_off(&row));
+    }
+
+    #[test]
+    fn admin_labels_and_ids_come_from_the_member() {
+        assert_eq!(admin_delete_aria("Ember"), "Delete all icons for Ember");
+        assert_eq!(admin_sharing_id("k2"), "hero-icons-admin-k2-sharing");
+        assert_eq!(admin_loaded(3, 1), "3 members listed. 1 with sharing off.");
+        assert_eq!(admin_loaded(1, 0), "1 member listed.");
     }
 }
