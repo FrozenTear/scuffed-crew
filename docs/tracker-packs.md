@@ -314,7 +314,7 @@ are checked before anything is published.
 With nothing to publish the same command only runs the check, so it can be
 repeated. Without a token the script says `Authenticated check: SKIPPED`.
 
-The pack routes allow 8 requests in a burst per client IP, then one every
+The pack routes allow 16 requests in a burst per client IP, then one every
 10 seconds, and answer 429 with the seconds to wait. One check is seven
 requests for six packs (a tracker with `names-v1.tar` and `bans-picks-v1.tar` asks for eight, so nine requests). A second check within a minute is not a failure: the
 script waits as long as each 429 asks (up to six times per request) and goes
@@ -461,11 +461,8 @@ More detail on a sync, for the tracker on main:
   after it for that run. Their folders are kept, and a pack that is already
   current is still reported as current. The setup guide tries again on the
   next click. The daemon's background job tries again by itself.
-- A first install of all six is seven requests (the list and six files),
-  inside the burst of 8. A tracker that also asks for `names-v1.tar` and
-  `bans-picks-v1.tar` makes nine (the list and eight files), one over the
-  burst: the last download gets one 429 and the background job asks again
-  after about 11.75 s. Nothing is lost, the last pack arrives a little later.
+- A first install of all eight is nine requests (the list and eight files),
+  inside the burst of 16 (`PACK_IP_BURST` in `crates/types`).
 - An install that is not linked to a site account has no sync token and runs
   no pack sync at all, so `bans-picks-v1.tar` never arrives. The bans and
   picks reader then reads nothing, the game is still recorded, and the app
@@ -814,7 +811,7 @@ response. Do not add that header in Caddy. A second line is sent beside the
 one from the app. See `docs/deploy.md`.
 
 These routes do not write to the database and do not log the token. They are
-rate limited per client IP (burst 8, then one request every 10 seconds), in
+rate limited per client IP (burst 16, then one request every 10 seconds), in
 their own bucket. A limited call returns 429:
 
 ```json

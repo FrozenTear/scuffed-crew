@@ -18,6 +18,8 @@ data/uploads/
 data/reports/
 # Recognizer asset packs (PACKS_DIR). Game art must not be committed.
 data/packs/
+# Member-contributed hero icons (HERO_ICONS_DIR default). Never committed.
+data/hero-icons/
 dist/
 # Exception: prebuilt-release installer sources (not app SPA output)
 !crates/stat-tracker/dist/
