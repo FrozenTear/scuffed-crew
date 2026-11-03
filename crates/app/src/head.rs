@@ -352,6 +352,7 @@ fn page_label(route: &Route) -> PageLabel {
         Route::PatchNotes {} => named("Patch notes"),
         Route::AdminDashboard {} => named("Admin dashboard"),
         Route::AdminMembers {} => named("Admin members"),
+        Route::AdminMemberMatches { .. } => named("Admin member matches"),
         Route::AdminGames {} => named("Admin games"),
         Route::AdminTeams {} => named("Admin teams"),
         Route::AdminSchedule {} => named("Admin schedule"),

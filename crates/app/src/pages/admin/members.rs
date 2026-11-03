@@ -7,6 +7,7 @@ use crate::components::{
     list_cap_notice, use_toast,
 };
 use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
+use crate::routes::Route;
 use crate::state::use_auth;
 use scuffed_api_client::{ApiClient, ClientError};
 use scuffed_types::api::{ChangeRoleRequest, CreateGameAccountRequest, ToggleActiveRequest};
@@ -760,6 +761,12 @@ pub fn AdminMembers() -> Element {
                                                     class: "row-btn",
                                                     onclick: move |_| open_stats(m_stats.clone()),
                                                     "Stats"
+                                                }
+                                                Link {
+                                                    class: "row-btn",
+                                                    to: Route::AdminMemberMatches { id: member.id.clone() },
+                                                    aria_label: "View matches for {member.display_name}",
+                                                    "Matches"
                                                 }
                                                 button {
                                                     class: "row-btn",
