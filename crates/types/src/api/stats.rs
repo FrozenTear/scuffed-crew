@@ -247,6 +247,12 @@ pub fn resolve_suspect_fields(input: &SuspectFieldsInput) -> Result<Vec<String>,
 pub const BANS_PICKS_MAX_BANS: usize = 4;
 /// Max entries accepted in `bans_picks.picks`.
 pub const BANS_PICKS_MAX_PICKS: usize = 6;
+/// Max entries accepted in `bans_picks.ban_vote`.
+pub const BANS_PICKS_MAX_BAN_VOTE: usize = 6;
+/// Literal a `picks` or `ban_vote` entry may carry when a teammate chose no
+/// hero. Stored and returned as sent. It is not a hero key, and it is not
+/// null (null means the entry was unreadable).
+pub const BANS_PICKS_NO_PREFERENCE: &str = "no_preference";
 
 /// Which side placed one hero ban.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -278,7 +284,10 @@ pub struct HeroBan {
 /// - `bans`: at most [`BANS_PICKS_MAX_BANS`] entries.
 /// - `lobby_ban`: pack key or null.
 /// - `picks`: at most [`BANS_PICKS_MAX_PICKS`] entries, own team, local
-///   player first. Null means unreadable or no preference.
+///   player first. Each entry is a pack key, [`BANS_PICKS_NO_PREFERENCE`]
+///   (the teammate chose no hero) or null (unreadable).
+/// - `ban_vote`: at most [`BANS_PICKS_MAX_BAN_VOTE`] entries, the six own
+///   team rows of the ban vote screen, same entry values as `picks`.
 /// - `recognizer`: reader id, same format rule as `name_recognizer`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BansPicks {
@@ -288,6 +297,8 @@ pub struct BansPicks {
     pub lobby_ban: Option<String>,
     #[serde(default)]
     pub picks: Vec<Option<String>>,
+    #[serde(default)]
+    pub ban_vote: Vec<Option<String>>,
     #[serde(default)]
     pub recognizer: Option<String>,
 }
@@ -334,10 +345,21 @@ fn bans_picks_array<'a>(
     }
 }
 
+/// A `picks` or `ban_vote` entry: a pack key, the literal
+/// [`BANS_PICKS_NO_PREFERENCE`] (kept as is) or null. Any other string that is
+/// not a known hero becomes null.
+fn bans_picks_choice(value: &serde_json::Value, field: &str) -> Result<Option<String>, String> {
+    match value {
+        serde_json::Value::String(raw) if raw == BANS_PICKS_NO_PREFERENCE => Ok(Some(raw.clone())),
+        other => bans_picks_hero(Some(other), field),
+    }
+}
+
 /// Turn a raw `bans_picks` upload value into what is stored.
 ///
 /// Omitted or null is `Ok(None)`. An unknown hero key becomes null and does
-/// not reject the game. A wrong shape, an over-long `bans` or `picks`, a
+/// not reject the game. A wrong shape, an over-long `bans`, `picks` or
+/// `ban_vote`, a
 /// `team` other than `own` / `enemy` / null, or a bad `recognizer` is an
 /// error (HTTP 422, message without the `matches[n]: ` prefix).
 pub fn resolve_bans_picks(value: Option<&serde_json::Value>) -> Result<Option<BansPicks>, String> {
@@ -379,9 +401,16 @@ pub fn resolve_bans_picks(value: Option<&serde_json::Value>) -> Result<Option<Ba
         .iter()
         .enumerate()
     {
-        picks.push(bans_picks_hero(
-            Some(item),
-            &format!("bans_picks.picks[{i}]"),
+        picks.push(bans_picks_choice(item, &format!("bans_picks.picks[{i}]"))?);
+    }
+    let mut ban_vote = Vec::new();
+    for (i, item) in bans_picks_array(obj, "ban_vote", BANS_PICKS_MAX_BAN_VOTE)?
+        .iter()
+        .enumerate()
+    {
+        ban_vote.push(bans_picks_choice(
+            item,
+            &format!("bans_picks.ban_vote[{i}]"),
         )?);
     }
     let lobby_ban = bans_picks_hero(obj.get("lobby_ban"), "bans_picks.lobby_ban")?;
@@ -394,6 +423,7 @@ pub fn resolve_bans_picks(value: Option<&serde_json::Value>) -> Result<Option<Ba
         bans,
         lobby_ban,
         picks,
+        ban_vote,
         recognizer,
     }))
 }
@@ -428,10 +458,16 @@ pub fn bans_picks_from_stored(value: &serde_json::Value) -> Option<BansPicks> {
         .and_then(|v| v.as_array())
         .map(|items| items.iter().map(|item| key(Some(item))).collect())
         .unwrap_or_default();
+    let ban_vote = obj
+        .get("ban_vote")
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().map(|item| key(Some(item))).collect())
+        .unwrap_or_default();
     Some(BansPicks {
         bans,
         lobby_ban: key(obj.get("lobby_ban")),
         picks,
+        ban_vote,
         recognizer: key(obj.get("recognizer")),
     })
 }
@@ -1603,6 +1639,7 @@ mod tests {
             ],
             "lobby_ban": "ana",
             "picks": ["wrecking-ball", null, "soldier-76", "dva", "lucio", "mercy"],
+            "ban_vote": ["ana", "no_preference", null, "dva", "Mercy", "no_preference"],
             "recognizer": "cv-v1"
         });
         let got = resolve_bans_picks(Some(&raw)).unwrap().unwrap();
@@ -1629,6 +1666,17 @@ mod tests {
         assert_eq!(got.picks[0].as_deref(), Some("wrecking-ball"));
         assert_eq!(got.picks[1], None);
         assert_eq!(got.picks.len(), 6);
+        assert_eq!(
+            got.ban_vote,
+            vec![
+                Some("ana".to_string()),
+                Some("no_preference".to_string()),
+                None,
+                Some("dva".to_string()),
+                Some("mercy".to_string()),
+                Some("no_preference".to_string()),
+            ]
+        );
         assert_eq!(got.recognizer.as_deref(), Some("cv-v1"));
         let json = serde_json::to_value(&got).unwrap();
         assert_eq!(
@@ -1636,6 +1684,19 @@ mod tests {
             serde_json::json!({ "hero": "mauga", "team": "own" })
         );
         assert_eq!(bans_picks_from_stored(&json), Some(got));
+    }
+
+    #[test]
+    fn stored_object_without_ban_vote_reads_as_empty() {
+        let stored = serde_json::json!({
+            "bans": [],
+            "lobby_ban": null,
+            "picks": ["no_preference", null],
+            "recognizer": "cv-v1"
+        });
+        let got = bans_picks_from_stored(&stored).unwrap();
+        assert!(got.ban_vote.is_empty());
+        assert_eq!(got.picks, vec![Some("no_preference".to_string()), None]);
     }
 
     #[test]
@@ -1653,13 +1714,44 @@ mod tests {
         let raw = serde_json::json!({
             "bans": [{ "hero": "not-a-hero", "team": "own" }],
             "lobby_ban": "Unknown",
-            "picks": ["zzz", "placeholder-1"]
+            "picks": ["zzz", "placeholder-1"],
+            "ban_vote": ["nobody", "No_Preference", "no-preference", "ana"]
         });
         let got = resolve_bans_picks(Some(&raw)).unwrap().unwrap();
         assert_eq!(got.bans[0].hero, None);
         assert_eq!(got.bans[0].team, Some(BanTeam::Own));
         assert_eq!(got.lobby_ban, None);
         assert_eq!(got.picks, vec![None, None]);
+        // Only the exact literal is kept. Near misses are unknown keys.
+        assert_eq!(got.ban_vote, vec![None, None, None, Some("ana".into())]);
+    }
+
+    #[test]
+    fn bans_picks_no_preference_is_kept_in_picks_and_ban_vote_and_never_null() {
+        let raw = serde_json::json!({
+            "picks": ["no_preference", null, "ana"],
+            "ban_vote": ["no_preference", null, "ana"],
+            "bans": [{ "hero": "no_preference", "team": "own" }],
+            "lobby_ban": "no_preference"
+        });
+        let got = resolve_bans_picks(Some(&raw)).unwrap().unwrap();
+        let expected = vec![Some("no_preference".to_string()), None, Some("ana".into())];
+        assert_eq!(got.picks, expected);
+        assert_eq!(got.ban_vote, expected);
+        // The literal is for teammate choices only. A ban or the lobby ban
+        // cannot be "no preference", so those stay unknown keys (null).
+        assert_eq!(got.bans[0].hero, None);
+        assert_eq!(got.lobby_ban, None);
+        let json = serde_json::to_value(&got).unwrap();
+        assert_eq!(
+            json["picks"],
+            serde_json::json!(["no_preference", null, "ana"])
+        );
+        assert_eq!(
+            json["ban_vote"],
+            serde_json::json!(["no_preference", null, "ana"])
+        );
+        assert_eq!(bans_picks_from_stored(&json), Some(got));
     }
 
     #[test]
@@ -1679,6 +1771,14 @@ mod tests {
             err.contains("bans_picks.picks must have at most 6 entries"),
             "{err}"
         );
+        let vote =
+            serde_json::json!({ "ban_vote": ["ana", "ana", "ana", "ana", "ana", "ana", "ana"] });
+        assert_eq!(
+            resolve_bans_picks(Some(&vote)),
+            Err("bans_picks.ban_vote must have at most 6 entries, got 7".to_string())
+        );
+        let six = serde_json::json!({ "ban_vote": ["ana", "ana", "ana", "ana", "ana", "ana"] });
+        assert!(resolve_bans_picks(Some(&six)).is_ok());
         for bad in [
             "CV-V1",
             "",
@@ -1701,6 +1801,9 @@ mod tests {
             serde_json::json!({ "bans": [{ "team": "ally" }] }),
             serde_json::json!({ "bans": [{ "hero": 7 }] }),
             serde_json::json!({ "picks": [1] }),
+            serde_json::json!({ "ban_vote": [1] }),
+            serde_json::json!({ "ban_vote": "ana" }),
+            serde_json::json!({ "ban_vote": [{ "hero": "ana" }] }),
             serde_json::json!({ "lobby_ban": true }),
         ] {
             assert!(resolve_bans_picks(Some(&raw)).is_err(), "{raw}");

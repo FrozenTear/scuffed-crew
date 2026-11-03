@@ -170,6 +170,7 @@ fn game(member_id: &str, session_id: &str) -> PersonalMatch {
             }],
             lobby_ban: None,
             picks: vec![Some("ana".into()), None],
+            ban_vote: vec![Some("no_preference".into()), Some("ana".into()), None],
             recognizer: Some("cv-v1".into()),
         }),
     }
@@ -344,6 +345,7 @@ async fn officer_reads_public_and_members_matches() {
                 "bans": [{ "hero": "mauga", "team": "enemy" }],
                 "lobby_ban": null,
                 "picks": ["ana", null],
+                "ban_vote": ["no_preference", "ana", null],
                 "recognizer": "cv-v1"
             }),
             "{uri}: {body}"

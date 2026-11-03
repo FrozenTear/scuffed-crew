@@ -1968,7 +1968,17 @@ mod tests {
                 },
             ],
             lobby_ban: Some("ana".into()),
-            picks: vec![Some("wrecking-ball".into()), None, Some("dva".into())],
+            picks: vec![
+                Some("wrecking-ball".into()),
+                None,
+                Some("no_preference".into()),
+            ],
+            ban_vote: vec![
+                Some("dva".into()),
+                Some("no_preference".into()),
+                None,
+                Some("ana".into()),
+            ],
             recognizer: Some("cv-v1".into()),
         };
         let mut uploaded = entry("s-bp", "victory", 9);

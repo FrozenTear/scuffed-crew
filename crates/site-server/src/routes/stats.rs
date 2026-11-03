@@ -2405,7 +2405,8 @@ mod tests {
                 { "hero": null, "team": null }
             ],
             "lobby_ban": "ana",
-            "picks": ["wrecking-ball", null, "dva"],
+            "picks": ["wrecking-ball", "no_preference", null, "dva"],
+            "ban_vote": ["no_preference", "ana", null, "wrecking-ball", "no_preference", null],
             "recognizer": "cv-v1"
         })
     }
@@ -2450,7 +2451,8 @@ mod tests {
         game["bans_picks"] = serde_json::json!({
             "bans": [{ "hero": "not-a-hero", "team": "enemy" }],
             "lobby_ban": "zzz",
-            "picks": ["Wrecking Ball", "nobody"]
+            "picks": ["Wrecking Ball", "nobody", "no_preference"],
+            "ban_vote": ["nobody", "no_preference", "ana", "Not_A_Hero"]
         });
         let (status, parsed) = post_raw(
             create_router(state.clone()),
@@ -2472,7 +2474,23 @@ mod tests {
         assert_eq!(stored.bans[0].hero, None);
         assert_eq!(stored.bans[0].team, Some(scuffed_types::BanTeam::Enemy));
         assert_eq!(stored.lobby_ban, None);
-        assert_eq!(stored.picks, vec![Some("wrecking-ball".to_string()), None]);
+        assert_eq!(
+            stored.picks,
+            vec![
+                Some("wrecking-ball".to_string()),
+                None,
+                Some("no_preference".to_string())
+            ]
+        );
+        assert_eq!(
+            stored.ban_vote,
+            vec![
+                None,
+                Some("no_preference".to_string()),
+                Some("ana".to_string()),
+                None
+            ]
+        );
         assert_eq!(stored.recognizer, None);
     }
 
@@ -2490,6 +2508,14 @@ mod tests {
             (
                 serde_json::json!({ "picks": ["ana", "ana", "ana", "ana", "ana", "ana", "ana"] }),
                 "bans_picks.picks must have at most 6 entries, got 7".to_string(),
+            ),
+            (
+                serde_json::json!({ "ban_vote": ["ana", "ana", "ana", "ana", "ana", "ana", "ana"] }),
+                "bans_picks.ban_vote must have at most 6 entries, got 7".to_string(),
+            ),
+            (
+                serde_json::json!({ "ban_vote": ["no_preference", 3] }),
+                "bans_picks.ban_vote[1] must be a hero key string or null".to_string(),
             ),
             (
                 serde_json::json!({ "recognizer": "CV V1" }),

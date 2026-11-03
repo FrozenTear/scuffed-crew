@@ -736,9 +736,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- back as [].
         DEFINE FIELD OVERWRITE suspect_fields ON personal_match TYPE array<string> DEFAULT [];
         -- Bans and picks the tracker read for this game: { bans: [{ hero,
-        -- team }], lobby_ban, picks: [hero | null], recognizer }. Hero values
-        -- are pack keys. Omitted or null is stored as NONE. FLEXIBLE so the
-        -- nested keys and null entries are kept on this SCHEMAFULL table.
+        -- team }], lobby_ban, picks: [hero | null], ban_vote: [hero | null],
+        -- recognizer }. Hero values are pack keys, and picks and ban_vote
+        -- entries may also be the literal "no_preference". Omitted or null is
+        -- stored as NONE. FLEXIBLE so the nested keys and null entries are
+        -- kept on this SCHEMAFULL table.
         -- Additive: rows already on disk are not rewritten and read back as
         -- none.
         DEFINE FIELD OVERWRITE bans_picks ON personal_match TYPE option<object> FLEXIBLE;
