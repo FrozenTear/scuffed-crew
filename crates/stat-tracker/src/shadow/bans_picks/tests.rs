@@ -185,12 +185,13 @@ const FIVE: [&str; 4] = ["ana", "reaper", "wrecking-ball", "soldier-76"];
 // ---- tests ----
 
 #[test]
-fn switch_is_off_by_default_and_only_cv_v1_turns_it_on() {
-    assert_eq!(BansPicksSetting::default(), BansPicksSetting::Off);
-    assert!(!BansPicksSetting::default().is_on());
-    assert_eq!(BansPicksSetting::parse("cv-v1"), BansPicksSetting::CvV1);
-    assert_eq!(BansPicksSetting::parse(" CV-V1 "), BansPicksSetting::CvV1);
-    for off in ["", "off", "ocr-v1", "1", "true", "cv-v2"] {
+fn switch_is_on_by_default_and_only_off_words_turn_it_off() {
+    assert_eq!(BansPicksSetting::default(), BansPicksSetting::CvV1);
+    assert!(BansPicksSetting::default().is_on());
+    for on in ["cv-v1", " CV-V1 ", "", "on", "1", "true", "ocr-v1"] {
+        assert_eq!(BansPicksSetting::parse(on), BansPicksSetting::CvV1, "{on}");
+    }
+    for off in ["off", " OFF ", "0", "false", "No"] {
         assert_eq!(BansPicksSetting::parse(off), BansPicksSetting::Off, "{off}");
     }
     assert_eq!(

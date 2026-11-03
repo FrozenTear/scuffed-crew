@@ -5,10 +5,10 @@
 //! come out, and a value the screen does not show clearly is `None`, never a
 //! guess.
 //!
-//! Off by default. Tesseract `ocr-v1` stays the default reader for
-//! everything it reads today; this module is a second reader for screens
-//! ocr-v1 does not read at all, and nothing here runs unless the switch in
-//! [`BansPicksSetting`] is `cv-v1` and the templates are installed. The
+//! On by default (FrozenTear's call for alpha.2). Tesseract `ocr-v1` stays
+//! the reader for everything it reads today; this module is a second reader
+//! for screens ocr-v1 does not read at all. It runs unless the switch in
+//! [`BansPicksSetting`] is `off`, and only when the templates are installed. The
 //! capture wiring (which frames to keep) and the server field are not part
 //! of this module; see "What a caller must do" below.
 //!
@@ -61,7 +61,7 @@ pub use templates::{
 pub const RECOGNIZER_ID: &str = "cv-v1";
 /// The value of a row that shows the "no preferred hero" icon.
 pub const NO_PREFERENCE: &str = "no_preference";
-/// Environment override for the switch: `cv-v1` turns the reader on.
+/// Environment override for the switch: `off` turns the reader off.
 pub const ENV: &str = "STAT_TRACKER_BANS_PICKS_RECOGNIZER";
 
 /// Lowest best score a read may have.
@@ -74,29 +74,33 @@ pub const BAND_MAX: f32 = 0.4;
 pub const FRAME_W: u32 = 2560;
 pub const FRAME_H: u32 = 1440;
 
-/// Whether the cv-v1 reader runs. Off unless set to `cv-v1`.
+/// Whether the cv-v1 reader runs. On unless set to `off`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BansPicksSetting {
-    #[default]
     #[serde(rename = "off")]
     Off,
+    #[default]
     #[serde(rename = "cv-v1")]
     CvV1,
 }
 
 impl BansPicksSetting {
-    /// `cv-v1` (any case) is on; `off`, empty and anything else is off.
+    /// `off`, `0`, `false` or `no` (any case) is off; anything else is on.
     pub fn parse(s: &str) -> Self {
-        if s.trim().eq_ignore_ascii_case(RECOGNIZER_ID) {
-            Self::CvV1
-        } else {
+        let v = s.trim();
+        if ["off", "0", "false", "no"]
+            .iter()
+            .any(|o| v.eq_ignore_ascii_case(o))
+        {
             Self::Off
+        } else {
+            Self::CvV1
         }
     }
 
-    /// The setting from [`ENV`]; off when it is unset.
+    /// The setting from [`ENV`]; on when it is unset.
     pub fn from_env() -> Self {
-        std::env::var(ENV).map_or(Self::Off, |v| Self::parse(&v))
+        std::env::var(ENV).map_or(Self::default(), |v| Self::parse(&v))
     }
 
     pub fn is_on(self) -> bool {

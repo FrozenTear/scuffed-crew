@@ -2,14 +2,15 @@
 
 `crates/stat-tracker/src/shadow/bans_picks/` reads the ban results, hero
 select and ban vote screens by icon template matching. It sits next to the
-Tesseract reader `ocr-v1`, which stays the default. Nothing in the tracker
+Tesseract reader `ocr-v1`, which still reads everything it read before. Nothing in the tracker
 calls it yet: the capture wiring and the server field come in separate
 changes.
 
 ## Switch
 
-`STAT_TRACKER_BANS_PICKS_RECOGNIZER=cv-v1` turns it on (`BansPicksSetting`).
-Anything else, or nothing, is off. There is no config.toml key yet.
+On by default. `STAT_TRACKER_BANS_PICKS_RECOGNIZER=off` (or `0`, `false`,
+`no`) turns it off (`BansPicksSetting`). Anything else, or nothing, is on.
+Without the templates below it reads nothing. There is no config.toml key yet.
 
 ## What it needs
 
