@@ -65,10 +65,25 @@ A member who is not an officer gets 403 `Officer access required` here, even
 for their own id.
 
 The member check does not look at `is_active`, so officers can read a
-deactivated member's games when that member's setting allows it.
+deactivated member's games when that member's setting allows it. A
+deactivated `private` member still answers 403 `hidden_by_member`.
 
 On the single-match route, a key that does not exist, a malformed key and a
 game that belongs to another member are all 404 `{"error":"Match not found"}`.
+
+### Audit log
+
+Each 200 read of another member's games writes one audit row (fire and
+forget, a failed write is logged and does not fail the read):
+
+| Route                    | `action`                | `target_type` | `target_id` | `details`    |
+|--------------------------|-------------------------|---------------|-------------|--------------|
+| `.../matches`            | `viewed_member_matches` | `member`      | member id   | none         |
+| `.../matches/{match_id}` | `viewed_member_match`   | `member`      | member id   | the match id |
+
+`actor_id` is the officer's member id. The list writes one row per page
+read. An officer reading their own games, and any refused read (401, 403,
+404), writes no row.
 
 ### Visibility to officer mapping
 
@@ -80,12 +95,14 @@ Decided by `StatsVisibility::officer_match_denial`:
 | `members`          | Allowed               |
 | `private`          | Blocked, 403          |
 
-**Question for Robert.** The Settings copy for `private` says "Only you and
-officers can see your stats", and the aggregate member routes above do let
-officers see private members. These new match routes block officers for
-`private` anyway, as the least permissive reading of the setting. If officers
-should see private members' games too, flip the `Self::Private` arm in
-`officer_match_denial` to `None`. That is a one-line change.
+**Decision (2026-11-03, FrozenTear).** For a `private` member, officers keep
+seeing the totals on the aggregate member routes above, but not the
+individual matches: the match routes answer 403 `hidden_by_member`. The
+Settings copy for `private` will read:
+
+> Only you can see your single matches. Officers can see your totals.
+
+The app text changes in its own PR.
 
 ### Blocked body
 

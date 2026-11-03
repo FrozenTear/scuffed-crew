@@ -624,11 +624,14 @@ async fn ensure_officer_match_access(
 ) -> Result<(), OfficerMatchReject> {
     let owner = officer.member.id == target_id;
     if !owner {
-        let target = state
-            .db
-            .get_member_safe(target_id)
-            .await
-            .map_err(|_e| internal_error())?;
+        let target = state.db.get_member_safe(target_id).await.map_err(|e| {
+            tracing::error!(
+                error = %e,
+                member_id = %target_id,
+                "officer match view: member lookup failed"
+            );
+            internal_error()
+        })?;
         if target.is_none() {
             let body = Json(ErrorResponse {
                 error: "Member not found".into(),
@@ -640,7 +643,14 @@ async fn ensure_officer_match_access(
         .db
         .get_stats_visibility(target_id)
         .await
-        .map_err(|_e| internal_error())?;
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                member_id = %target_id,
+                "officer match view: stats visibility lookup failed"
+            );
+            internal_error()
+        })?;
     if visibility.officer_match_denial(owner).is_some() {
         return Err(OfficerMatchReject::hidden_by_member());
     }
@@ -656,6 +666,10 @@ async fn ensure_officer_match_access(
 /// inactive callers, 404 `Member not found` for an unknown member, and 403
 /// [`StatsHiddenError`] when the member's `stats_visibility` hides their
 /// matches from officers. Members read their own games on [`my_matches`].
+///
+/// A 200 read of another member's games writes one `viewed_member_matches`
+/// audit row (target `member`, the member id) per page. Reads of the
+/// officer's own games and refused reads write none.
 pub(crate) async fn member_matches(
     State(state): State<AppState>,
     officer: OfficerUser,
@@ -670,10 +684,28 @@ pub(crate) async fn member_matches(
         .db
         .list_personal_matches_in(&member_id, limit, offset, season)
         .await
-        .map_err(|_e| internal_error())?;
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                member_id = %member_id,
+                "officer match view: match list query failed"
+            );
+            internal_error()
+        })?;
     // Read-time role fill only: the stored row keeps its role.
     for m in &mut items {
         m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    }
+    if officer.member.id != member_id {
+        audit(
+            &state.db,
+            &officer.member.id,
+            AuditAction::ViewedMemberMatches,
+            AuditTargetType::Member,
+            &member_id,
+            None,
+        )
+        .await;
     }
     Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
 }
@@ -685,6 +717,10 @@ pub(crate) async fn member_matches(
 /// visibility gate match [`member_matches`], and the gate runs first. A key
 /// that does not exist, a malformed key and another member's game are all
 /// 404 `Match not found`.
+///
+/// A 200 read of another member's game writes one `viewed_member_match` audit
+/// row (target `member`, the member id, details = the match id). Reads of the
+/// officer's own games and refused reads write none.
 pub(crate) async fn member_match(
     State(state): State<AppState>,
     officer: OfficerUser,
@@ -695,7 +731,14 @@ pub(crate) async fn member_match(
         .db
         .get_personal_match_for_member(&member_id, &match_id)
         .await
-        .map_err(|_e| internal_error())?;
+        .map_err(|e| {
+            tracing::error!(
+                error = %e,
+                member_id = %member_id,
+                "officer match view: match lookup failed"
+            );
+            internal_error()
+        })?;
     let mut m = found.ok_or_else(|| {
         (
             StatusCode::NOT_FOUND,
@@ -706,6 +749,17 @@ pub(crate) async fn member_match(
     })?;
     // Read-time role fill only, as on the list: the stored row keeps its role.
     m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
+    if officer.member.id != member_id {
+        audit(
+            &state.db,
+            &officer.member.id,
+            AuditAction::ViewedMemberMatch,
+            AuditTargetType::Member,
+            &member_id,
+            Some(match_id.as_str()),
+        )
+        .await;
+    }
     Ok(Json(m))
 }
 

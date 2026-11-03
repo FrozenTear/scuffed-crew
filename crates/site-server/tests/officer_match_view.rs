@@ -5,6 +5,8 @@
 //! `public` or `members`. `private` answers 403 with the stable
 //! `hidden_by_member` body before any match query. Officers always read their
 //! own games. Members read their own games on `/api/stats/me/matches`.
+//! Officers still read a private member's totals on the aggregate routes
+//! (decided 2026-11-03). A 200 read of another member's games is audited.
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
@@ -13,7 +15,7 @@ use std::sync::Arc;
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, StatusCode, header};
-use chrono::{TimeZone, Utc};
+use chrono::{Duration, TimeZone, Utc};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -165,7 +167,7 @@ fn game(member_id: &str, session_id: &str) -> PersonalMatch {
 
 /// Officer (private, one game), an inactive officer, three members with one
 /// game each (public, members, private), and a private member with no games.
-async fn app() -> axum::Router {
+async fn seeded_state() -> AppState {
     let state = test_state().await;
     seed_member(
         &state.db,
@@ -251,7 +253,11 @@ async fn app() -> axum::Router {
             .await
             .unwrap();
     }
-    create_router(state)
+    state
+}
+
+async fn app() -> axum::Router {
+    create_router(seeded_state().await)
 }
 
 fn request(uri: &str, token: Option<&str>) -> Request<Body> {
@@ -474,4 +480,257 @@ async fn unknown_member_and_foreign_match_are_404() {
             Some("Match not found"),
         );
     }
+}
+
+#[tokio::test]
+async fn officer_pages_past_the_first_page() {
+    let state = seeded_state().await;
+    // 29 more public games, each a minute apart, so the order is total.
+    let base = Utc.with_ymd_and_hms(2026, 8, 1, 12, 0, 0).unwrap();
+    let extra: Vec<PersonalMatch> = (0..29)
+        .map(|i| {
+            let mut g = game(PUB, &format!("g-page-{i}"));
+            g.played_at = base + Duration::minutes(i);
+            g
+        })
+        .collect();
+    state.db.upsert_personal_matches(PUB, &extra).await.unwrap();
+    let app = create_router(state);
+
+    let first = format!("/api/stats/member/{PUB}/matches?limit=25");
+    let (status, body) = get(&app, &first, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{first}: {body}");
+    let page1 = body["data"].as_array().expect("data array").clone();
+    assert_eq!(page1.len(), 25, "{first}: {body}");
+    let cursor = body["next_cursor"]
+        .as_str()
+        .expect("next_cursor on a full page")
+        .to_string();
+
+    let second = format!("/api/stats/member/{PUB}/matches?limit=25&cursor={cursor}");
+    let (status, body) = get(&app, &second, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{second}: {body}");
+    let page2 = body["data"].as_array().expect("data array").clone();
+    assert_eq!(page2.len(), 5, "{second}: {body}");
+    assert!(body.get("next_cursor").is_none(), "{second}: {body}");
+
+    let mut ids: Vec<&str> = page1
+        .iter()
+        .chain(page2.iter())
+        .map(|r| r["id"].as_str().expect("match id"))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), 30, "pages overlap or miss rows");
+    for row in page1.iter().chain(page2.iter()) {
+        assert_eq!(row["member_id"], PUB, "{row}");
+    }
+}
+
+#[tokio::test]
+async fn officer_season_filter_matches_my_matches() {
+    let state = seeded_state().await;
+    // g-pub is played 2026-07-01. This one falls outside the season below.
+    let mut late = game(PUB, "g-pub-late");
+    late.hero = "Mercy".into();
+    late.played_at = Utc.with_ymd_and_hms(2026, 9, 1, 20, 0, 0).unwrap();
+    state
+        .db
+        .upsert_personal_matches(PUB, &[late])
+        .await
+        .unwrap();
+    let season = state
+        .db
+        .create_season(
+            "Summer",
+            Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap(),
+            Utc.with_ymd_and_hms(2026, 8, 1, 0, 0, 0).unwrap(),
+            false,
+        )
+        .await
+        .unwrap();
+    let app = create_router(state);
+
+    let all = format!("/api/stats/member/{PUB}/matches");
+    let (status, body) = get(&app, &all, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{all}: {body}");
+    assert_eq!(body["data"].as_array().expect("data").len(), 2, "{body}");
+
+    let uri = format!("/api/stats/member/{PUB}/matches?season={}", season.id);
+    let (status, body) = get(&app, &uri, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    let rows = body["data"].as_array().expect("data array");
+    assert_eq!(rows.len(), 1, "{uri}: {body}");
+    assert_eq!(rows[0]["hero"], "Ana", "{uri}: {body}");
+
+    let own = format!("/api/stats/me/matches?season={}", season.id);
+    let (status, owner_body) = get(&app, &own, Some(PUB_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{own}: {owner_body}");
+    assert_eq!(body, owner_body, "officer and owner season pages differ");
+
+    let unknown = format!("/api/stats/member/{PUB}/matches?season=nope");
+    let (status, body) = get(&app, &unknown, Some(OFFICER_SESSION)).await;
+    let (own_status, own_body) =
+        get(&app, "/api/stats/me/matches?season=nope", Some(PUB_SESSION)).await;
+    assert_eq!(own_status, StatusCode::NOT_FOUND, "{own_body}");
+    assert_eq!(status, own_status, "{unknown}: {body}");
+    assert_eq!(body, own_body, "{unknown}");
+}
+
+#[tokio::test]
+async fn officer_reads_inactive_member_per_their_setting() {
+    let state = seeded_state().await;
+    const GONE_PUB: &str = "gonepub";
+    const GONE_PRIV: &str = "gonepriv";
+    seed_member(
+        &state.db,
+        "gonepubuser",
+        GONE_PUB,
+        "GonePub",
+        "member",
+        false,
+        "matchview-gonepub-session",
+    )
+    .await;
+    seed_member(
+        &state.db,
+        "goneprivuser",
+        GONE_PRIV,
+        "GonePriv",
+        "member",
+        false,
+        "matchview-gonepriv-session",
+    )
+    .await;
+    state
+        .db
+        .upsert_member_settings(GONE_PRIV, None, Some(StatsVisibility::Private))
+        .await
+        .unwrap();
+    for (id, sid) in [(GONE_PUB, "g-gonepub"), (GONE_PRIV, "g-gonepriv")] {
+        state
+            .db
+            .upsert_personal_matches(id, &[game(id, sid)])
+            .await
+            .unwrap();
+    }
+    let app = create_router(state);
+
+    let uri = format!("/api/stats/member/{GONE_PUB}/matches");
+    let (status, body) = get(&app, &uri, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    let rows = body["data"].as_array().expect("data array");
+    assert_eq!(rows.len(), 1, "{uri}: {body}");
+    let match_id = rows[0]["id"].as_str().expect("match id");
+    let one = format!("/api/stats/member/{GONE_PUB}/matches/{match_id}");
+    let (status, body) = get(&app, &one, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{one}: {body}");
+    assert_eq!(body["member_id"], GONE_PUB, "{one}: {body}");
+
+    for uri in [
+        format!("/api/stats/member/{GONE_PRIV}/matches"),
+        format!("/api/stats/member/{GONE_PRIV}/matches/{match_id}"),
+    ] {
+        let (status, body) = get(&app, &uri, Some(OFFICER_SESSION)).await;
+        assert_hidden(&uri, status, &body);
+    }
+}
+
+/// Decided 2026-11-03: an officer sees a private member's totals, not their
+/// individual matches.
+#[tokio::test]
+async fn officer_sees_private_totals_but_not_matches() {
+    let app = app().await;
+    let totals = format!("/api/stats/member/{PRIV}");
+    let (status, body) = get(&app, &totals, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{totals}: {body}");
+    assert_eq!(body["total_matches"], 1, "{totals}: {body}");
+
+    for suffix in ["heroes", "roles", "maps"] {
+        let uri = format!("/api/stats/member/{PRIV}/{suffix}");
+        let (status, body) = get(&app, &uri, Some(OFFICER_SESSION)).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    }
+
+    let uri = format!("/api/stats/member/{PRIV}/matches");
+    let (status, body) = get(&app, &uri, Some(OFFICER_SESSION)).await;
+    assert_hidden(&uri, status, &body);
+}
+
+#[tokio::test]
+async fn officer_reads_of_other_members_are_audited() {
+    let state = seeded_state().await;
+    let app = create_router(state.clone());
+    let pub_match = own_match_id(&app, PUB_SESSION).await;
+    let priv_match = own_match_id(&app, PRIV_SESSION).await;
+
+    // Audited: another member's list and one of their games.
+    let list = format!("/api/stats/member/{PUB}/matches");
+    let (status, body) = get(&app, &list, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{list}: {body}");
+    let one = format!("/api/stats/member/{PUB}/matches/{pub_match}");
+    let (status, body) = get(&app, &one, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{one}: {body}");
+
+    // Not audited: own reads, hidden (403), unknown member and match (404),
+    // and a non-officer (403).
+    let own = format!("/api/stats/member/{OFFICER}/matches");
+    let (status, body) = get(&app, &own, Some(OFFICER_SESSION)).await;
+    assert_eq!(status, StatusCode::OK, "{own}: {body}");
+    for (uri, session, expected) in [
+        (
+            format!("/api/stats/member/{PRIV}/matches"),
+            OFFICER_SESSION,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            format!("/api/stats/member/{PRIV}/matches/{priv_match}"),
+            OFFICER_SESSION,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "/api/stats/member/nosuchmember/matches".to_string(),
+            OFFICER_SESSION,
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/api/stats/member/{PUB}/matches/no-such-match"),
+            OFFICER_SESSION,
+            StatusCode::NOT_FOUND,
+        ),
+        (
+            format!("/api/stats/member/{MEM}/matches"),
+            PUB_SESSION,
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let (status, body) = get(&app, &uri, Some(session)).await;
+        assert_eq!(status, expected, "{uri}: {body}");
+    }
+
+    let logs = state.db.list_audit_log(100, 0).await.unwrap();
+    let views: Vec<_> = logs
+        .iter()
+        .filter(|e| e.action == "viewed_member_matches" || e.action == "viewed_member_match")
+        .collect();
+    assert_eq!(views.len(), 2, "{views:?}");
+    for e in &views {
+        assert_eq!(e.actor_id, OFFICER, "{e:?}");
+        assert_eq!(e.target_type, "member", "{e:?}");
+        assert_eq!(e.target_id, PUB, "{e:?}");
+    }
+    let list_row = views
+        .iter()
+        .find(|e| e.action == "viewed_member_matches")
+        .expect("list read audited");
+    assert_eq!(list_row.details, None, "{list_row:?}");
+    let one_row = views
+        .iter()
+        .find(|e| e.action == "viewed_member_match")
+        .expect("single read audited");
+    assert_eq!(
+        one_row.details.as_deref(),
+        Some(pub_match.as_str()),
+        "{one_row:?}"
+    );
 }

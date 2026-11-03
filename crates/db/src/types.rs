@@ -1041,6 +1041,10 @@ pub enum AuditAction {
     WithdrawnStatReportTraining,
     DownloadedStatReport,
     ReadStatReportManifest,
+    /// An officer read another member's match list (one row per page).
+    ViewedMemberMatches,
+    /// An officer read one of another member's matches. Details: the match id.
+    ViewedMemberMatch,
 }
 
 impl std::fmt::Display for AuditAction {

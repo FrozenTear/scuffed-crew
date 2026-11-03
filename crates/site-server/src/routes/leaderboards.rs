@@ -199,7 +199,10 @@ pub async fn resolve_season_window(
         .db
         .get_season(sid)
         .await
-        .map_err(|_e| internal_error())?
+        .map_err(|e| {
+            tracing::error!(error = %e, season_id = %sid, "season lookup failed");
+            internal_error()
+        })?
         .ok_or_else(season_not_found)?;
     Ok(Some((season.starts_at, season.ends_at)))
 }

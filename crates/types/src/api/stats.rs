@@ -534,8 +534,9 @@ impl StatsVisibility {
     ///
     /// `owner` is true when the officer reads their own matches, which is
     /// always allowed. Otherwise `public` and `members` allow officers and
-    /// `private` answers [`STATS_HIDDEN_BY_MEMBER`]. This is the least
-    /// permissive reading of the setting; changing the mapping is one arm.
+    /// `private` answers [`STATS_HIDDEN_BY_MEMBER`]. Decided 2026-11-03:
+    /// officers see a private member's totals on the aggregate routes
+    /// ([`StatsVisibility::denial`]) but not their individual matches.
     pub fn officer_match_denial(self, owner: bool) -> Option<&'static str> {
         match self {
             _ if owner => None,
