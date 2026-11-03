@@ -681,15 +681,20 @@ async fn admin_lists_reads_and_deletes_visible_icons() {
     );
     assert_eq!(viewed, vec![all]);
 
-    // Officers and admins get the same counts.
+    // Officers see opted-in members only. Admins also see the opted-out
+    // member with a hidden icon (covered in
+    // `admin_counts_include_opted_out_members_with_hidden_icons`).
     let (status, counts) = get(&w.app, "/api/hero-icons/members", OFFICER_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{counts}");
     let (status, admin_counts) = get(&w.app, "/api/hero-icons/members", ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{admin_counts}");
-    assert_eq!(admin_counts, counts);
+    let both = vec![OTHER.to_string(), OWNER.to_string()];
+    assert_eq!(member_ids_of(&admin_counts), both);
+    assert_eq!(admin_counts["data"][1], counts["data"][0]);
     assert_eq!(member_ids_of(&counts), vec![OWNER.to_string()]);
     let row = &counts["data"][0];
     assert_eq!(row["icon_count"], json!(2));
+    assert_eq!(row["opted_in"], json!(true));
     assert_eq!(row["icon_contribution_opt_in"], json!(true));
     assert_eq!(row["display_name"], json!(OWNER));
     assert!(counts.get("next_cursor").is_none(), "{counts}");
@@ -1096,6 +1101,64 @@ async fn admin_delete_all_works_opted_in_or_out() {
     assert!(audited.contains(&expected), "{audited:?}");
     // The opt-in is left as it was.
     assert!(!settings_of(w.db(), OWNER).await.hero_icon_opt_in);
+    w.cleanup();
+}
+
+/// Site needs this: an admin's counts list opted-out members who still have
+/// hidden icons, with `opted_in` false. An officer's counts never do.
+#[tokio::test]
+async fn admin_counts_include_opted_out_members_with_hidden_icons() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    set_opt_in(&w.app, OTHER_SESSION, true).await;
+    let two = icons(vec![png(16, 16), png(17, 17)]);
+    let (status, body) = upload(&w.app, OWNER_SESSION, "ana", &two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    set_opt_in(&w.app, OWNER_SESSION, false).await;
+    // OTHER is opted in with no icons. The officer is opted out with none, so
+    // is not listed for anyone.
+    let counts_uri = "/api/hero-icons/members";
+
+    let (status, admin) = get(&w.app, counts_uri, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{admin}");
+    let both = vec![OTHER.to_string(), OWNER.to_string()];
+    assert_eq!(member_ids_of(&admin), both);
+    let hidden = &admin["data"][1];
+    assert_eq!(hidden["member_id"], json!(OWNER));
+    assert_eq!(hidden["icon_count"], json!(2));
+    assert_eq!(hidden["opted_in"], json!(false));
+    assert_eq!(hidden["icon_contribution_opt_in"], json!(false));
+    let shown = &admin["data"][0];
+    assert_eq!(shown["icon_count"], json!(0));
+    assert_eq!(shown["opted_in"], json!(true));
+    assert!(admin.get("next_cursor").is_none(), "{admin}");
+
+    // Same paged shape for admins.
+    let (status, page) = get(&w.app, &format!("{counts_uri}?limit=1"), ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(member_ids_of(&page), vec![OTHER.to_string()]);
+    let cursor = page["next_cursor"]
+        .as_str()
+        .expect("next_cursor")
+        .to_string();
+    let next = format!("{counts_uri}?limit=1&cursor={cursor}");
+    let (status, page) = get(&w.app, &next, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(member_ids_of(&page), vec![OWNER.to_string()]);
+
+    // The officer's list leaves the opted-out member out.
+    let (status, officer) = get(&w.app, counts_uri, OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{officer}");
+    assert_eq!(member_ids_of(&officer), vec![OTHER.to_string()]);
+    assert_eq!(officer["data"][0]["opted_in"], json!(true));
+
+    // Once the admin deletes the hidden icons, the row goes away.
+    let owner_icons = format!("/api/hero-icons/members/{OWNER}");
+    let (status, body) = delete(&w.app, &owner_icons, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(2));
+    let (_, admin) = get(&w.app, counts_uri, ADMIN_SESSION).await;
+    assert_eq!(member_ids_of(&admin), vec![OTHER.to_string()]);
     w.cleanup();
 }
 

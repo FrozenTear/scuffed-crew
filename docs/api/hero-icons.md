@@ -16,7 +16,7 @@ per-member counts only.
 |--------|-----------|------------------------|
 | Member | List, read, delete (one or all) | Nothing (404 `icon_not_found`) |
 | Officer | List, read, delete (one or all) | Counts only (`GET /api/hero-icons/members`). Images, icon lists and deletes answer 403 `Admin access required` |
-| Admin | List, read, delete (one or all) | Counts, icon lists and images while that member is active and opted in. Delete one or all while that member is active, opted in or not |
+| Admin | List, read, delete (one or all) | Counts (including opted-out members who still have hidden icons, with `opted_in` false), icon lists and images while that member is active and opted in. Delete one or all while that member is active, opted in or not |
 
 Admin reads keep the opt-out rule: an admin cannot list or read an opted-out
 or inactive member's icons. Admin deletes ignore the opt-in, so hidden icons
@@ -47,9 +47,10 @@ icons, including an opted-out member's hidden icons.
 So while a member is opted out:
 
 - New uploads are refused (403 `icon_opt_in_required`).
-- Admins cannot list or read that member's icons, and officers and admins do
-  not see a count for them. The member is left out of `GET /api/hero-icons`
-  and `GET /api/hero-icons/members`. For an admin,
+- Admins cannot list or read that member's icons. The member is left out of
+  `GET /api/hero-icons`, and out of an officer's
+  `GET /api/hero-icons/members`. An admin's counts still list the member, with
+  `opted_in` false, while any hidden icon is left. For an admin,
   `GET /api/hero-icons/members/{member_id}` answers 403 `icon_opt_in_off` and
   `GET /api/hero-icons/{id}/image` answers 404 `icon_not_found`, the same as
   for an id that does not exist.
@@ -312,18 +313,27 @@ target member `all`.
 }
 ```
 
-### Officer: per-member counts
+### Officer or admin: per-member counts
 
 `GET /api/hero-icons/members?limit=25&cursor=<next_cursor>` (officer or admin)
 
 The only route that shows officers anything about another member's icons. It
 has no icon ids, images or thumbnail URLs.
 
-Active members who are opted in, with how many icons each has stored (0 is
-possible), sorted by display name (case folded), then member id. The usual
-cursor page (`limit` 1 to 100, default 25). Opted-out and inactive members are
-not listed, so `icon_contribution_opt_in` is always `true`. Counts are not
-audited: they carry no icon.
+Active members with how many icons each has stored, sorted by display name
+(case folded), then member id. The usual cursor page (`limit` 1 to 100,
+default 25). Inactive members are never listed. Counts are not audited: they
+carry no icon.
+
+- **Officers** get members who are opted in right now (`icon_count` 0 is
+  possible). An opted-out member is never listed, so no hidden icon is
+  revealed, and `opted_in` is always `true`.
+- **Admins** get the same rows, plus opted-out members who still have at least
+  one hidden icon, with `opted_in` `false`. An admin can delete those icons
+  (see the delete routes), and the row goes away once none are left.
+
+`opted_in` is the member's opt-in right now. `icon_contribution_opt_in` has the
+same value and is kept from the first version of this shape.
 
 ```json
 {
@@ -332,12 +342,22 @@ audited: they carry no icon.
       "member_id": "k2l9x0q7w1",
       "display_name": "FrozenTear",
       "icon_count": 12,
+      "opted_in": true,
       "icon_contribution_opt_in": true
+    },
+    {
+      "member_id": "p8d3m1c5z0",
+      "display_name": "Quietly",
+      "icon_count": 3,
+      "opted_in": false,
+      "icon_contribution_opt_in": false
     }
   ],
   "next_cursor": "opaque-cursor"
 }
 ```
+
+The second row is only in an admin's list.
 
 `display_name` is an empty string when the member record has no name.
 

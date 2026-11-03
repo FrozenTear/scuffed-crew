@@ -114,14 +114,18 @@ pub struct OfficerHeroIconList {
 /// One row of `GET /api/hero-icons/members` (officer or admin), sent as a
 /// `CursorResponse` page sorted by display name, then member id.
 ///
-/// Only active members who are opted in are listed, so
-/// `icon_contribution_opt_in` is always true. It stays in the shape so a
-/// client can show it without a second call.
+/// Only active members are listed. Officers get opted-in members only. Admins
+/// also get opted-out members who still have hidden icons, with `opted_in`
+/// false, so those icons can be found and deleted.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeroIconMemberCount {
     pub member_id: String,
     /// Empty when the member record has no name.
     pub display_name: String,
     pub icon_count: u32,
+    /// The member's opt-in right now. Always true in an officer's list.
+    #[serde(default)]
+    pub opted_in: bool,
+    /// Same value as `opted_in`. Kept from the first version of this shape.
     pub icon_contribution_opt_in: bool,
 }

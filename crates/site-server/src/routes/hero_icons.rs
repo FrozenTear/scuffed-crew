@@ -11,9 +11,10 @@
 //!   get the per-member counts (`GET /api/hero-icons/members`) and nothing
 //!   else: no images, no icon lists, no deletes.
 //! - Opt-out keeps the icons and hides them. An admin reads or lists an icon
-//!   only while its owner is active and opted in, and counts list only those
-//!   members. Deletes are different: an admin deletes an active member's
-//!   icons opted in or not, so hidden icons can still be removed.
+//!   only while its owner is active and opted in. Deletes are different: an
+//!   admin deletes an active member's icons opted in or not, so hidden icons
+//!   can still be removed. Officer counts list opted-in members only; admin
+//!   counts add opted-out members who still have hidden icons.
 //! - `GET /api/hero-icons/{id}/image` serves the owner, and an admin while the
 //!   owner is active and opted in. `DELETE /api/hero-icons/{id}` serves the
 //!   owner, and an admin while the owner is active. For any other id, an
@@ -34,7 +35,7 @@
 //! the server. Ids from a URL must pass [`is_icon_id`] before any database or
 //! file call. See `docs/api/hero-icons.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
 use std::path::Path;
 
@@ -170,8 +171,7 @@ fn officer_entry(icon: &HeroIcon, names: &HashMap<String, String>) -> OfficerHer
 
 /// Members whose icons staff may see: active and opted in right now.
 ///
-/// Admins list and read icons of these members only. Officer counts list
-/// these members only.
+/// Admin icon lists and reads cover these members only.
 ///
 /// Maps member id to display name. This is a visibility filter, so a failed
 /// lookup is a 500, never an empty or unfiltered answer.
@@ -816,27 +816,53 @@ pub async fn list_hero_icons(
 /// The only hero icon route open to officers. Counts only: no ids, images or
 /// thumbnails.
 ///
-/// Active members who are opted in, with their stored icon count, sorted by
-/// display name (case folded), then member id. Paged in memory with the usual
-/// cursor: the list is at most one row per member. Opted-out and inactive
-/// members are not listed.
+/// Active members with their stored icon count, sorted by display name (case
+/// folded), then member id. Paged in memory with the usual cursor: the list is
+/// at most one row per member. Inactive members are never listed.
+///
+/// - Officers get opted-in members only, so no hidden icon is revealed.
+/// - Admins also get opted-out members who still have at least one hidden
+///   icon, with `opted_in` false, since admins may delete those icons.
 pub async fn hero_icon_member_counts(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    staff: OfficerUser,
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<CursorResponse<HeroIconMemberCount>>, Reject> {
     configured(&state)?;
     let (limit, offset) = pagination.resolve();
-    let visible = visible_members(&state).await?;
+    let is_admin = staff.member.org_role == OrgRole::Admin;
     let counts = state.db.hero_icon_counts().await.map_err(db_error)?;
-    let mut members: Vec<HeroIconMemberCount> = visible
+    let opted_in: HashSet<String> = state
+        .db
+        .hero_icon_opted_in_member_ids()
+        .await
+        .map_err(db_error)?
+        .into_iter()
+        .collect();
+    let mut candidates: Vec<String> = opted_in.iter().cloned().collect();
+    if is_admin {
+        let hidden = counts
+            .iter()
+            .filter(|(member_id, count)| **count > 0 && !opted_in.contains(*member_id))
+            .map(|(member_id, _)| member_id.clone());
+        candidates.extend(hidden);
+    }
+    // A visibility filter: a failed lookup is a 500, never an unfiltered list.
+    let active = state
+        .db
+        .active_member_display_names(&candidates)
+        .await
+        .map_err(db_error)?;
+    let mut members: Vec<HeroIconMemberCount> = active
         .into_iter()
         .map(|(member_id, display_name)| {
             let icon_count = counts.get(&member_id).copied().unwrap_or(0);
+            let member_opted_in = opted_in.contains(&member_id);
             HeroIconMemberCount {
                 display_name,
                 icon_count: u32::try_from(icon_count).unwrap_or(u32::MAX),
-                icon_contribution_opt_in: true,
+                opted_in: member_opted_in,
+                icon_contribution_opt_in: member_opted_in,
                 member_id,
             }
         })
