@@ -41,7 +41,7 @@ impl PregameDump {
     pub(crate) fn post_want(&mut self, now: Instant) -> crate::daemon::postgame_dump::PostWant {
         self.post_polled_at = Some(now);
         crate::daemon::postgame_dump::retry_pending(&mut self.post_log, &mut self.writer);
-        if !self.writer.alive() {
+        if !self.writer.alive() || !self.writer.disk() {
             return crate::daemon::postgame_dump::PostWant::default();
         }
         self.post.want(now)
@@ -86,7 +86,7 @@ impl PregameDump {
         frame: Option<Arc<image::DynamicImage>>,
     ) {
         tick.new_screen |= std::mem::take(&mut self.saw_loading);
-        if !self.writer.alive() {
+        if !self.writer.alive() || !self.writer.disk() {
             self.post.stop();
             return;
         }

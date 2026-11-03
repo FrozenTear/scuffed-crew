@@ -114,6 +114,7 @@ fn every_field_set() -> Config {
         reader: ReaderSetting::OcrV1,
         ocr: OcrSetting::Off,
         name_reader: false,
+        bans_picks_reader: false,
         player_names: vec!["FrozenAlt".to_string(), "TearSmurf".to_string()],
         live_upload: false,
         rank_reader: true,
@@ -162,6 +163,7 @@ reader_pack_url = \"https://crew.example/packs/reader.zip\"
 reader = \"ocr-v1\"
 ocr = \"off\"
 name_reader = false
+bans_picks_reader = false
 player_names = [
     \"FrozenAlt\",
     \"TearSmurf\",
@@ -274,6 +276,7 @@ fn pin_key_order() {
             "reader",
             "ocr",
             "name_reader",
+            "bans_picks_reader",
             "player_names",
             "live_upload",
             "rank_reader",
@@ -338,6 +341,7 @@ fn pin_minimal_file_field_values() {
     assert_eq!(c.reader.as_str(), "new");
     assert_eq!(c.ocr.as_str(), "on");
     assert!(c.name_reader);
+    assert!(c.bans_picks_reader);
 }
 
 #[test]

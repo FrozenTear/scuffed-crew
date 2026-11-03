@@ -1,8 +1,7 @@
 //! Section 9 fixtures for log-only bundles: the log fixture, the manifest
 //! checked against section 2, and the zip rules.
 
-use std::io::Read;
-use std::path::PathBuf;
+use std::{io::Read, path::PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -1443,6 +1442,7 @@ mod game {
                 recognizer: "cv-v7".into(),
                 suspect_fields: Vec::new(),
                 name_recognizer: None,
+                bans_picks: None,
             }],
             ..crate::storage::Snapshot::default()
         };

@@ -452,6 +452,13 @@ pub(crate) const PREGAME_SCREENS_LABEL: &str = "Save screens around each game";
 /// times that at 4K), 20 games.
 pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, roster, hero select and loading screen of each game and the screens after it in debug/pregame, keeping the newest 20 games (up to about 4 to 7 GB at 1440p, about 9 to 15 GB at 4K). They show other players' names and stay on this PC only. Turning it off keeps the saved pictures. Leave it off unless someone asked for them.";
 
+/// The Troubleshooting switch for `bans_picks_reader`.
+pub(crate) const BANS_PICKS_LABEL: &str = "Read bans and picks";
+
+/// Help under [`BANS_PICKS_LABEL`]. The pictures are only held in memory for
+/// the read, none are written, and the result stays on this PC.
+pub(crate) const BANS_PICKS_HELP: &str = "Reads the hero bans and picks from the last ban vote, ban results and hero select screens of each game, with the bans-picks-v1 reader pack, and keeps them with the game on this PC. It needs 2560x1440; other sizes read nothing and the game is still saved. On by default. Turn it off if the game stutters or you do not want the extra reading. The env var STAT_TRACKER_BANS_PICKS_RECOGNIZER set to off also turns it off.";
+
 /// Troubleshooting: debug images, screens around each game, the extra number
 /// reader, then Report a problem, About and Uninstall. Demo draws them
 /// without actions.
@@ -484,6 +491,16 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             app.saved_config.debug_save_pregame_screens,
             demo,
             ConfigEdit::SavePregameScreens,
+        ),
+    );
+    // The tracker reads the key once at start: After restart.
+    let bans_picks = setting_row(
+        title_line(BANS_PICKS_LABEL, false, &[Tag::AfterRestart]),
+        vec![hint(BANS_PICKS_HELP)],
+        crate::settings_keys::edit_switch(
+            app.saved_config.bans_picks_reader,
+            demo,
+            ConfigEdit::BansPicksReader,
         ),
     );
     let locked = app.settings.shadow.locked;
@@ -528,7 +545,7 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             .push(uninstall),
     ]
     .spacing(8);
-    divided(vec![debug, pregame, shadow, actions.into()])
+    divided(vec![debug, pregame, bans_picks, shadow, actions.into()])
 }
 
 /// Stored data keeps the classic body: its buttons are the same.

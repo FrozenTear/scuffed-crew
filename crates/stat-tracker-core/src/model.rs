@@ -269,6 +269,15 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub name_recognizer: Option<String>,
+    /// What the bans and picks reader (`cv-v1`) read around this game, as the
+    /// JSON the tracker writes (`daemon::bans_picks::Stored`): the bans, the
+    /// lobby ban, the six picks, the ban vote picks and the recognizer id.
+    /// `None` when nothing was read (the reader off, no pack, a frame that
+    /// was not 2560x1440). Kept on every snapshot of the match, local only:
+    /// the upload does not carry it. Omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub bans_picks: Option<String>,
 }
 
 /// Count an unconfirmed hero segment toward the majority (it was a real swap).

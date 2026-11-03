@@ -2,15 +2,45 @@
 
 `crates/stat-tracker/src/shadow/bans_picks/` reads the ban results, hero
 select and ban vote screens by icon template matching. It sits next to the
-Tesseract reader `ocr-v1`, which still reads everything it read before. Nothing in the tracker
-calls it yet: the capture wiring and the server field come in separate
-changes.
+Tesseract reader `ocr-v1`, which still reads everything it read before. The
+tracker feeds it the last frame of each game's ban results, hero select and
+ban vote screens (see [Capture wiring](#capture-wiring)). The server field is a
+separate change.
 
 ## Switch
 
-On by default. `STAT_TRACKER_BANS_PICKS_RECOGNIZER=off` (or `0`, `false`,
-`no`) turns it off (`BansPicksSetting`). Anything else, or nothing, is on.
-Without the templates below it reads nothing. There is no config.toml key yet.
+On by default. Settings > Troubleshooting has **Read bans and picks**
+(`bans_picks_reader` in `config.toml`). `STAT_TRACKER_BANS_PICKS_RECOGNIZER=off`
+(or `0`, `false`, `no`) turns it off whatever the setting says
+(`BansPicksSetting`), and Settings shows that row as set outside the app.
+Anything else, or nothing, leaves the setting in charge. Off means the reader
+is never loaded or called and no warning shows. Without the templates below
+it reads nothing.
+
+## Capture wiring
+
+While a game is being captured the daemon keeps the last ban-results frame, the
+last hero-select frame and the last ban-vote frame it saw. When the game gets
+its first record, it reads those frames once and stores the result as one JSON
+string on the game record (`bans_picks`, with `bans_picks_recognizer: "cv-v1"`).
+A game that has no such screens, or whose screens are older than the game by
+more than the 30 minute binding window, gets nothing. The frames are held in
+memory only (about 3 to 4 full frames), and the reader runs even when
+`debug_save_pregame_screens` is off. The result is local for now: it is not in
+the sync upload.
+
+The game is always recorded. When the reader cannot run, `bans_picks` stays
+empty and the app status shows a warning:
+
+| Case | Warning says |
+|---|---|
+| `bans-picks-v1.tar` not installed | the pack is not installed yet, the tracker fetches it in the background |
+| not installed, install not linked to a site account | the same, and to link a site account in Settings, since the pack routes need the sync token |
+| `Reader::load` fails | the pack did not load, with the reason, and to reinstall the pack or turn the setting off |
+| a read fails | the reader failed on this game's screens |
+| frame is not 2560x1440 | the game ran at that size and the reader needs 2560x1440 |
+
+A good read clears the warning.
 
 ## What it needs
 

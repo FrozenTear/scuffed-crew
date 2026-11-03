@@ -58,6 +58,13 @@ impl LocalStore {
         {
             match_data.name_recognizer = Some(kept);
         }
+        // Same for the bans and picks result: it belongs to the game.
+        if match_data.bans_picks.is_none()
+            && !match_data.session_id.is_empty()
+            && let Some(kept) = self.session_bans_picks(&match_data.session_id).await?
+        {
+            match_data.bans_picks = Some(kept);
+        }
         let created: Option<PersonalMatch> =
             self.db.create("personal_match").content(match_data).await?;
         self.drop_if_deleted_meanwhile(created).await?;

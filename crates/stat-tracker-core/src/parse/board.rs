@@ -156,6 +156,7 @@ fn new_match(stats: PlayerStats, hero: String, map_name: String, outcome: &str) 
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
         suspect_fields: Vec::new(),
         name_recognizer: None,
+        bans_picks: None,
     }
 }
 

@@ -10,6 +10,8 @@ pub(crate) struct PregameWriter {
     thread: Option<std::thread::JoinHandle<()>>,
     /// The thread's end was logged (once).
     dead_logged: bool,
+    /// Writes to disk. False for [`Self::memory`].
+    disk: bool,
 }
 
 impl PregameWriter {
@@ -33,7 +35,29 @@ impl PregameWriter {
             tx: Some(tx),
             thread: Some(thread),
             dead_logged: false,
+            disk: true,
         })
+    }
+
+    /// A writer that takes every batch and writes nothing: the saver runs
+    /// for the bans and picks reader alone, with the debug saves off. The
+    /// queue still drains, so a send is never refused for being full.
+    pub(crate) fn memory() -> std::io::Result<Self> {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<WriterJob>(PREGAME_QUEUE);
+        let thread = std::thread::Builder::new()
+            .name("pregame-memory".into())
+            .spawn(move || for _job in rx {})?;
+        Ok(Self {
+            tx: Some(tx),
+            thread: Some(thread),
+            dead_logged: false,
+            disk: false,
+        })
+    }
+
+    /// Whether the batches are written to disk, not just taken.
+    pub(crate) fn disk(&self) -> bool {
+        self.disk
     }
 
     /// Queue `shots`; false when the queue is full or the writer is gone,
@@ -110,6 +134,7 @@ impl PregameWriter {
             tx: Some(tx),
             thread: None,
             dead_logged: false,
+            disk: true,
         };
         (writer, rx)
     }
@@ -126,6 +151,7 @@ impl PregameWriter {
             tx: Some(tx),
             thread: Some(thread),
             dead_logged: false,
+            disk: true,
         }
     }
 

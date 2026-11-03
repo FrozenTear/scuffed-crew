@@ -53,6 +53,7 @@ fn every_key_set() -> Config {
         reader: ReaderSetting::OcrV1,
         ocr: OcrSetting::Off,
         name_reader: false,
+        bans_picks_reader: false,
         player_names: vec!["FrozenAlt".to_string()],
         live_upload: false,
         rank_reader: true,
@@ -102,6 +103,7 @@ fn every_config_key_is_owned_by_the_form_or_kept_from_the_file() {
         setup_completed,
         reader_pack_url,
         name_reader,
+        bans_picks_reader,
         player_names,
         live_upload,
         rank_reader,
@@ -150,6 +152,7 @@ fn every_config_key_is_owned_by_the_form_or_kept_from_the_file() {
     assert_eq!(setup_completed, file.setup_completed);
     assert_eq!(reader_pack_url, file.reader_pack_url);
     assert_eq!(name_reader, file.name_reader);
+    assert_eq!(bans_picks_reader, file.bans_picks_reader);
     assert_eq!(player_names, file.player_names);
     assert_eq!(live_upload, file.live_upload);
     assert_eq!(rank_reader, file.rank_reader);
@@ -185,6 +188,7 @@ fn a_form_saved_over_its_own_file_keeps_every_key() {
         "share_report_pictures = true",
         "capture_only_on_screen = false",
         "name_reader = false",
+        "bans_picks_reader = false",
         "finished_game_close_secs = 240",
         "setup_completed = true",
     ] {
@@ -277,4 +281,40 @@ fn the_screens_around_each_game_copy_is_plain() {
             "{copy}"
         );
     }
+}
+
+/// The Troubleshooting switch Read bans and picks writes `bans_picks_reader`
+/// both ways, through the saved text. It is on by default and written only
+/// when off, and the tracker reads it once at start.
+#[test]
+fn the_bans_picks_switch_maps_to_its_config_key_both_ways() {
+    use crate::settings_model::{AdvancedSection, ConfigEdit};
+
+    let defaults = Config::default();
+    assert!(defaults.bans_picks_reader, "on by default");
+    assert!(
+        AdvancedSection::Troubleshooting
+            .keys()
+            .contains(&"bans_picks_reader")
+    );
+    assert!(crate::settings_model::needs_restart("bans_picks_reader"));
+
+    let mut off = defaults.clone();
+    ConfigEdit::BansPicksReader(false).apply(&mut off);
+    assert!(!off.bans_picks_reader);
+    assert_eq!(crate::settings_model::changes_waiting(&defaults, &off), 1);
+    let text = Config::text_for_save(None, &off).expect("save off");
+    assert!(text.contains("bans_picks_reader = false"), "{text}");
+    let read = Config::parse_file_contents(&text).expect("parse off");
+    assert!(!read.bans_picks_reader);
+
+    let mut on = read.clone();
+    ConfigEdit::BansPicksReader(true).apply(&mut on);
+    let text = Config::text_for_save(Some(&text), &on).expect("save on");
+    assert!(
+        !text.contains("bans_picks_reader"),
+        "back to the default: {text}"
+    );
+    let read = Config::parse_file_contents(&text).expect("parse on");
+    assert_eq!(read, defaults, "only the switch changed");
 }

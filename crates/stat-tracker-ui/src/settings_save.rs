@@ -734,6 +734,7 @@ server_url = \"https://crew.example\"
             (Some(ConfigEdit::FrameRate(Some(2))), None),
             (Some(ConfigEdit::PauseBetweenGrabs(false)), None),
             (Some(ConfigEdit::NameReader(false)), None),
+            (Some(ConfigEdit::BansPicksReader(false)), None),
             (Some(ConfigEdit::OcrWorkers(Some(2))), None),
             (Some(ConfigEdit::LiveUpload(false)), None),
             (Some(ConfigEdit::RankReader(true)), None),
