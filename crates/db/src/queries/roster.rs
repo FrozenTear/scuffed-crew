@@ -464,8 +464,8 @@ impl Database {
     /// [`pair_edge_key`], so two concurrent adds that both see no edge write
     /// the same record key: a commit conflict on that key (or the unique
     /// index) fails the second, and that call retries once and then finds the
-    /// edge. Every
-    /// success re-reads the edge for the pair, so all callers get its id.
+    /// edge. Every success re-reads the edge for the pair, so all callers get
+    /// its id.
     pub async fn add_to_roster(
         &self,
         member_id: &str,
@@ -1184,7 +1184,13 @@ mod tests {
             assert_eq!(total_edges(&db).await, 3, "run {run}: one edge per pair");
             assert_eq!(db.get_team_roster("t1").await.unwrap().len(), 2);
             assert_eq!(db.get_team_roster("t2").await.unwrap().len(), 1);
-            assert_eq!(db.get_member_teams("alice").await.unwrap().len(), 2);
+            assert_eq!(
+                db.get_member_teams("alice")
+                    .await
+                    .expect("get_member_teams(alice)")
+                    .len(),
+                2
+            );
         }
     }
 
@@ -1265,7 +1271,10 @@ mod tests {
             pairs.iter().map(|(m, t)| pair_edge_key(m, t)).collect();
         assert_eq!(keys.len(), pairs.len(), "{keys:?}");
         // Never the shape of a SurrealDB random key (20 of [a-z0-9]).
-        assert!(pair_edge_key("q8k2m4x7c1v9b3n5z6ha", "t8k2m4x7c1v9b3n5z6hb").contains('_'));
+        assert_eq!(
+            pair_edge_key("q8k2m4x7c1v9b3n5z6ha", "t8k2m4x7c1v9b3n5z6hb"),
+            "20_q8k2m4x7c1v9b3n5z6ha_t8k2m4x7c1v9b3n5z6hb"
+        );
     }
 
     #[tokio::test]
@@ -1302,7 +1311,13 @@ mod tests {
         db.add_to_roster("bob", "t1", TeamRole::Player)
             .await
             .unwrap();
-        assert_eq!(db.get_member_teams("alice").await.unwrap().len(), 2);
+        assert_eq!(
+            db.get_member_teams("alice")
+                .await
+                .expect("get_member_teams(alice)")
+                .len(),
+            2
+        );
         assert_eq!(total_edges(&db).await, 3);
     }
 
