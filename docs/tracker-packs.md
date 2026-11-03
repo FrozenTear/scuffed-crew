@@ -460,7 +460,7 @@ More detail on a sync, for the tracker on main:
   after it for that run. Their folders are kept, and a pack that is already
   current is still reported as current. The setup guide tries again on the
   next click. The daemon's background job tries again by itself.
-- A first install of all six is seven requests (the list and six files),
+- A first install of all eight is nine requests (the list and eight files),
   inside the burst of 16 (`PACK_IP_BURST` in `crates/types`).
 - Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
   `templates/` by a killed sync are removed by the next sync once they are
