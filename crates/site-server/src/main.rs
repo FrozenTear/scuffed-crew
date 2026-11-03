@@ -504,6 +504,13 @@ async fn main() {
         &upload_dir,
         &reports_dir,
     );
+    let hero_icons = scuffed_site_server::hero_icons::open_hero_icons_dir(
+        &scuffed_site_server::hero_icons::hero_icons_dir_from_env(),
+        &upload_dir,
+        &reports_dir,
+        packs_dir.as_deref(),
+    )
+    .await;
 
     let notifier = Notifier::from_env();
     if notifier.is_none() {
@@ -563,6 +570,7 @@ async fn main() {
         reports_dir: reports_dir.clone(),
         reports_enabled,
         packs_dir,
+        hero_icons,
         notifier,
         nostr_challenge_key,
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -599,6 +607,10 @@ async fn main() {
     if reports_enabled {
         scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
     }
+
+    // Icon files with no row (a crash between file write and row insert) are
+    // removed once at startup. Only runs when HERO_ICONS_DIR is usable.
+    scuffed_site_server::hero_icons::spawn_orphan_sweep(db.clone(), state.hero_icons.clone());
 
     let app = create_router(state);
 
