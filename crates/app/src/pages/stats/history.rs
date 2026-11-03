@@ -3,6 +3,7 @@ use dioxus::prelude::*;
 use crate::components::ui::ChipButton;
 use crate::hooks::ApiResource;
 
+use super::bans_picks::{BANS_PICKS_CARD_CSS, bans_picks_line};
 use super::game::{match_path, open_match};
 use super::history_filter::{
     ALL, HISTORY_CSS, UNKNOWN_MAP, filter_rows, map_rows, map_table, mode_label, page_modes,
@@ -285,6 +286,7 @@ pub(super) fn history_tab(
 
             rsx! {
                 crate::styles::StyleOnce { id: "stats-history-p2", css: HISTORY_CSS }
+                crate::styles::StyleOnce { id: "stats-history-bans-picks", css: BANS_PICKS_CARD_CSS }
                 div { class: "stats-filters",
                     div { class: "filter-group", role: "group", aria_labelledby: "history-filter-outcome",
                         span { class: "filter-label", id: "history-filter-outcome", "Outcome" }
@@ -474,6 +476,7 @@ pub(super) fn history_tab(
                                                     )}
                                                 }
                                                 div { class: "match-date", title: "{abs}", "{date}" }
+                                                {bans_picks_line(&m.id, m.bans_picks.as_ref())}
                                             }
                                         }
                                     }
@@ -550,6 +553,7 @@ mod tests {
             played_at: played_at(),
             recognizer: Some(recognizer.to_string()),
             suspect_fields: Some(suspect.iter().map(|name| (*name).to_string()).collect()),
+            bans_picks: None,
         }
     }
 

@@ -63,8 +63,8 @@ impl Engine for Fake {
             ring: [1, 2, 3],
         })
     }
-    fn bans(&self, _: &RgbImage, ring: Option<[u8; 3]>) -> Option<BanResults> {
-        self.rings.lock().unwrap().push(ring);
+    fn bans(&self, _: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults> {
+        self.rings.lock().unwrap().push(rings.first().copied());
         self.go().then(|| BanResults {
             layout: Layout::Plain,
             bans: Vec::new(),
