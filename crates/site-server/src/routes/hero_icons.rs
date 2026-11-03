@@ -5,22 +5,28 @@
 //!
 //! - Every route needs a session. A daemon sync token is not a session.
 //! - Upload needs the caller's own opt-in (`icon_opt_in_required` otherwise).
-//!   The caller's own icons are always listed and deletable, opted in or not.
-//! - `GET /api/hero-icons/{id}/image` serves the owner, and an officer only
-//!   while the owner is opted in. Anyone else, an unknown id and a malformed
-//!   id all get the same 404 `icon_not_found`.
-//! - `DELETE /api/hero-icons/{id}` is the owner or any officer. Anyone else
-//!   gets the same 404. `DELETE /api/hero-icons/members/{member_id}` lets an
-//!   officer remove every icon of one member, opted in or not.
-//! - Officer lists only carry icons of members who are opted in right now.
-//!   `GET /api/hero-icons/members/{member_id}` is 403 `icon_opt_in_off` for a
-//!   member who is not.
+//!   The caller's own icons are always listed, readable and deletable, opted
+//!   in or not.
+//! - Opt-out keeps the icons and hides them. Officers see and act on an icon
+//!   only while its owner is active and opted in. Only the owner deletes the
+//!   icons of an opted-out member.
+//! - `GET /api/hero-icons/{id}/image` and `DELETE /api/hero-icons/{id}` serve
+//!   the owner, and an officer only while the owner is visible as above.
+//!   Anyone else, an unknown id and a malformed id all get the same 404
+//!   `icon_not_found`.
+//! - `GET` and `DELETE /api/hero-icons/members/{member_id}` are 404
+//!   `member_not_found` for an unknown or inactive member and 403
+//!   `icon_opt_in_off` for a member who is not opted in.
+//! - Officer reads of icon lists are written to the audit log. Single
+//!   thumbnail fetches are not, since one list page loads many of them.
+//! - Opt-in `GET` and `PUT` only touch the flag and work while the store is
+//!   disabled. Every other route answers 503 then.
 //!
 //! Files sit in the private `HERO_ICONS_DIR` as `<id>.png`. The id is made by
 //! the server. Ids from a URL must pass [`is_icon_id`] before any database or
 //! file call. See `docs/api/hero-icons.md`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -37,10 +43,10 @@ use scuffed_db::{AuditAction, AuditTargetType, DbError, HeroIcon, NewHeroIcon, O
 use scuffed_types::api::{
     CursorResponse, HERO_ICON_ERR_BAD_DIMENSIONS, HERO_ICON_ERR_DISABLED,
     HERO_ICON_ERR_INVALID_MULTIPART, HERO_ICON_ERR_INVALID_PNG, HERO_ICON_ERR_LIMIT_REACHED,
-    HERO_ICON_ERR_NO_ICONS, HERO_ICON_ERR_NOT_FOUND, HERO_ICON_ERR_NOT_PNG,
-    HERO_ICON_ERR_OPT_IN_OFF, HERO_ICON_ERR_OPT_IN_REQUIRED, HERO_ICON_ERR_TOO_LARGE,
-    HERO_ICON_ERR_TOO_MANY_IN_REQUEST, HERO_ICON_ERR_UNEXPECTED_FIELD, HERO_ICON_ERR_UNKNOWN_HERO,
-    HeroIconEntry, HeroIconMemberCount, HeroIconMemberCounts, HeroIconOptIn,
+    HERO_ICON_ERR_MEMBER_NOT_FOUND, HERO_ICON_ERR_NO_ICONS, HERO_ICON_ERR_NOT_FOUND,
+    HERO_ICON_ERR_NOT_PNG, HERO_ICON_ERR_OPT_IN_OFF, HERO_ICON_ERR_OPT_IN_REQUIRED,
+    HERO_ICON_ERR_TOO_LARGE, HERO_ICON_ERR_TOO_MANY_IN_REQUEST, HERO_ICON_ERR_UNEXPECTED_FIELD,
+    HERO_ICON_ERR_UNKNOWN_HERO, HeroIconEntry, HeroIconMemberCount, HeroIconOptIn,
     HeroIconUploadResponse, HeroIconsDeleted, MyHeroIcons, OfficerHeroIcon, OfficerHeroIconList,
     PaginationParams,
 };
@@ -150,15 +156,67 @@ fn officer_entry(icon: &HeroIcon, names: &HashMap<String, String>) -> OfficerHer
     }
 }
 
-/// Display names for officer lists. A failed lookup leaves names empty.
-async fn member_names(state: &AppState, member_ids: &[String]) -> HashMap<String, String> {
-    match state.db.member_display_names(member_ids).await {
-        Ok(names) => names,
-        Err(error) => {
-            tracing::warn!(%error, "hero icon display name lookup failed");
-            HashMap::new()
-        }
+/// Members whose icons officers may see: active and opted in right now.
+///
+/// Maps member id to display name. This is a visibility filter, so a failed
+/// lookup is a 500, never an empty or unfiltered answer.
+async fn officer_visible_members(state: &AppState) -> Result<HashMap<String, String>, Reject> {
+    let opted_in = state
+        .db
+        .hero_icon_opted_in_member_ids()
+        .await
+        .map_err(db_error)?;
+    state
+        .db
+        .active_member_display_names(&opted_in)
+        .await
+        .map_err(db_error)
+}
+
+/// True when officers may see `member_id`'s icons: active and opted in.
+async fn officer_may_see(state: &AppState, member_id: &str) -> Result<bool, Reject> {
+    let opted_in = state
+        .db
+        .get_hero_icon_opt_in(member_id)
+        .await
+        .map_err(db_error)?;
+    if !opted_in {
+        return Ok(false);
     }
+    let active = state
+        .db
+        .active_member_display_names(&[member_id.to_string()])
+        .await
+        .map_err(db_error)?;
+    Ok(active.contains_key(member_id))
+}
+
+/// Checks for the officer per-member routes when the target is not the caller.
+///
+/// 404 `member_not_found` for an unknown or inactive member, then 403
+/// `icon_opt_in_off` while that member is not opted in. Returns the display
+/// name.
+async fn officer_target(state: &AppState, member_id: &str) -> Result<String, Reject> {
+    let names = state
+        .db
+        .active_member_display_names(&[member_id.to_string()])
+        .await
+        .map_err(db_error)?;
+    let Some(name) = names.get(member_id) else {
+        return Err(reject(
+            StatusCode::NOT_FOUND,
+            HERO_ICON_ERR_MEMBER_NOT_FOUND,
+        ));
+    };
+    let opted_in = state
+        .db
+        .get_hero_icon_opt_in(member_id)
+        .await
+        .map_err(db_error)?;
+    if !opted_in {
+        return Err(reject(StatusCode::FORBIDDEN, HERO_ICON_ERR_OPT_IN_OFF));
+    }
+    Ok(name.clone())
 }
 
 /// Remove one icon file. A file that is already gone is fine.
@@ -349,6 +407,45 @@ async fn store_icon(
     }
 }
 
+/// Checks that run after an upload stored its icons.
+///
+/// Two uploads can pass the first count together, so the cap is checked
+/// again (409). The member may also have opted out while the body was read:
+/// a new upload is accepted only while opted in, so this request's icons are
+/// removed and the answer is 403 `icon_opt_in_required`. Icons stored by
+/// earlier requests are not touched. On any failure, including a database
+/// error, the rows and files in `stored` are removed.
+pub(crate) async fn recheck_after_store(
+    state: &AppState,
+    member_id: &str,
+    stored: &[HeroIcon],
+) -> Result<(), Reject> {
+    let max_icons = u64::from(HERO_ICON_MAX_PER_MEMBER);
+    let stored_after = match state.db.count_hero_icons_for_member(member_id).await {
+        Ok(count) => count,
+        Err(error) => {
+            remove_stored(state, stored).await;
+            return Err(db_error(error));
+        }
+    };
+    if stored_after > max_icons {
+        remove_stored(state, stored).await;
+        return Err(reject(StatusCode::CONFLICT, HERO_ICON_ERR_LIMIT_REACHED));
+    }
+    let still_opted_in = match state.db.get_hero_icon_opt_in(member_id).await {
+        Ok(value) => value,
+        Err(error) => {
+            remove_stored(state, stored).await;
+            return Err(db_error(error));
+        }
+    };
+    if !still_opted_in {
+        remove_stored(state, stored).await;
+        return Err(reject(StatusCode::FORBIDDEN, HERO_ICON_ERR_OPT_IN_REQUIRED));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct HeroIconUploadQuery {
     /// Hero key or display name, for example `ana`, `lucio` or `Soldier: 76`.
@@ -433,10 +530,14 @@ pub async fn upload_hero_icons(
             internal()
         })?;
     }
-    let now = Utc::now();
+    // Each part gets its own time, one microsecond after the part before, so
+    // lists (newest first) are stable and show the last part first.
+    let base = Utc::now();
     let mut stored: Vec<HeroIcon> = Vec::with_capacity(accepted.len());
-    for icon in accepted {
-        match store_icon(&state, &member_id, hero, icon, now).await {
+    for (index, icon) in accepted.into_iter().enumerate() {
+        let offset = i64::try_from(index).unwrap_or(i64::MAX);
+        let created_at = base + chrono::Duration::microseconds(offset);
+        match store_icon(&state, &member_id, hero, icon, created_at).await {
             Ok(row) => stored.push(row),
             Err(error) => {
                 remove_stored(&state, &stored).await;
@@ -444,33 +545,7 @@ pub async fn upload_hero_icons(
             }
         }
     }
-
-    // Two uploads can pass the first count together. Recount and roll this
-    // request back if the pair went over the cap.
-    let stored_after = match state.db.count_hero_icons_for_member(&member_id).await {
-        Ok(count) => count,
-        Err(error) => {
-            remove_stored(&state, &stored).await;
-            return Err(db_error(error).into());
-        }
-    };
-    if stored_after > max_icons {
-        remove_stored(&state, &stored).await;
-        return Err(reject(StatusCode::CONFLICT, HERO_ICON_ERR_LIMIT_REACHED).into());
-    }
-    // The member may have opted out while the body was read. Icons are kept
-    // only while opted in, so roll this request back.
-    let still_opted_in = match state.db.get_hero_icon_opt_in(&member_id).await {
-        Ok(value) => value,
-        Err(error) => {
-            remove_stored(&state, &stored).await;
-            return Err(db_error(error).into());
-        }
-    };
-    if !still_opted_in {
-        remove_stored(&state, &stored).await;
-        return Err(reject(StatusCode::FORBIDDEN, HERO_ICON_ERR_OPT_IN_REQUIRED).into());
-    }
+    recheck_after_store(&state, &member_id, &stored).await?;
 
     let icons: Vec<HeroIconEntry> = stored.iter().map(entry).collect();
     Ok((StatusCode::CREATED, Json(HeroIconUploadResponse { icons })))
@@ -515,11 +590,12 @@ pub async fn delete_mine(
 }
 
 /// GET /api/hero-icons/opt-in
+///
+/// Works while the store is disabled: it only reads the flag.
 pub async fn get_opt_in(
     State(state): State<AppState>,
     member: OrgMember,
 ) -> Result<Json<HeroIconOptIn>, Reject> {
-    configured(&state)?;
     let opted_in = state
         .db
         .get_hero_icon_opt_in(&member.member.id)
@@ -532,13 +608,14 @@ pub async fn get_opt_in(
 
 /// PUT /api/hero-icons/opt-in
 ///
-/// Turning it off keeps the stored icons. Officer reads stop at once.
+/// Turning it off keeps the stored icons and hides them: officers can no
+/// longer list, read or delete them. Only the member deletes them. Works while
+/// the store is disabled: it only flips the flag.
 pub async fn put_opt_in(
     State(state): State<AppState>,
     member: OrgMember,
     Json(body): Json<HeroIconOptIn>,
 ) -> Result<Json<HeroIconOptIn>, Reject> {
-    configured(&state)?;
     let opted_in = state
         .db
         .set_hero_icon_opt_in(&member.member.id, body.icon_contribution_opt_in)
@@ -550,7 +627,7 @@ pub async fn put_opt_in(
 }
 
 /// The icon when `viewer` may see it: the owner, or an officer while the owner
-/// is opted in. Everything else is the same 404.
+/// is active and opted in. Everything else is the same 404.
 async fn visible_icon(state: &AppState, viewer: &OrgMember, id: &str) -> Result<HeroIcon, Reject> {
     if !is_icon_id(id) {
         return Err(not_found());
@@ -564,12 +641,7 @@ async fn visible_icon(state: &AppState, viewer: &OrgMember, id: &str) -> Result<
     if !viewer.member.org_role.is_at_least(OrgRole::Officer) {
         return Err(not_found());
     }
-    let owner_opted_in = state
-        .db
-        .get_hero_icon_opt_in(&icon.member_id)
-        .await
-        .map_err(db_error)?;
-    if owner_opted_in {
+    if officer_may_see(state, &icon.member_id).await? {
         Ok(icon)
     } else {
         Err(not_found())
@@ -608,37 +680,35 @@ pub async fn hero_icon_image(
 
 /// DELETE /api/hero-icons/{id}
 ///
-/// The owner, or any officer even when the owner is opted out. The file goes
-/// first, so a failed file delete keeps the row for a retry.
+/// The owner, or an officer while the owner is active and opted in. An icon
+/// of an opted-out member is the same 404 for officers and stays stored. The
+/// file goes first, so a failed file delete keeps the row for a retry.
 pub async fn delete_hero_icon(
     State(state): State<AppState>,
     member: OrgMember,
     UrlPath(id): UrlPath<String>,
 ) -> Result<Json<HeroIconsDeleted>, Reject> {
     configured(&state)?;
-    if !is_icon_id(&id) {
-        return Err(not_found());
-    }
-    let Some(icon) = state.db.get_hero_icon(&id).await.map_err(db_error)? else {
-        return Err(not_found());
-    };
+    let icon = visible_icon(&state, &member, &id).await?;
     let own = icon.member_id == member.member.id;
-    if !own && !member.member.org_role.is_at_least(OrgRole::Officer) {
-        return Err(not_found());
-    }
     if let Err(error) = remove_icon_file(&state, &icon.id).await {
         tracing::error!(%error, "hero icon file delete failed");
         return Err(internal());
     }
-    let removed = state.db.delete_hero_icon(&id).await.map_err(db_error)?;
-    if !own {
+    let removed = state
+        .db
+        .delete_hero_icon(&icon.id)
+        .await
+        .map_err(db_error)?;
+    if !own && removed.is_some() {
+        let details = format!("icon {}", icon.id);
         audit(
             &state.db,
             &member.member.id,
             AuditAction::DeletedHeroIcon,
-            AuditTargetType::HeroIcon,
-            &icon.id,
-            Some(icon.member_id.as_str()),
+            AuditTargetType::Member,
+            &icon.member_id,
+            Some(details.as_str()),
         )
         .await;
     }
@@ -649,113 +719,139 @@ pub async fn delete_hero_icon(
 
 /// GET /api/hero-icons (officer)
 ///
-/// Icons of members who are opted in right now, newest first.
+/// Icons of members who are active and opted in right now, newest first. One
+/// audit entry `viewed_hero_icons` per request, target member `all`.
 pub async fn list_hero_icons(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    officer: OfficerUser,
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<CursorResponse<OfficerHeroIcon>>, Reject> {
     configured(&state)?;
     let (limit, offset) = pagination.resolve();
-    let opted_in = state
-        .db
-        .hero_icon_opted_in_member_ids()
-        .await
-        .map_err(db_error)?;
+    let visible = officer_visible_members(&state).await?;
+    let member_ids: Vec<String> = visible.keys().cloned().collect();
     let rows = state
         .db
-        .list_hero_icons_for_members(&opted_in, limit, offset)
+        .list_hero_icons_for_members(&member_ids, limit, offset)
         .await
         .map_err(db_error)?;
-    let ids: Vec<String> = rows.iter().map(|icon| icon.member_id.clone()).collect();
-    let display_names = member_names(&state, &ids).await;
     let items: Vec<OfficerHeroIcon> = rows
         .iter()
-        .map(|icon| officer_entry(icon, &display_names))
+        .map(|icon| officer_entry(icon, &visible))
         .collect();
-    Ok(Json(CursorResponse::from_oversized(items, limit, offset)))
+    let page = CursorResponse::from_oversized(items, limit, offset);
+    let details = format!("{} icons", page.data.len());
+    audit(
+        &state.db,
+        &officer.member.id,
+        AuditAction::ViewedHeroIcons,
+        AuditTargetType::Member,
+        "all",
+        Some(details.as_str()),
+    )
+    .await;
+    Ok(Json(page))
 }
 
 /// GET /api/hero-icons/members (officer)
 ///
-/// Every member with stored icons or an opt-in. Counts include icons of
-/// members who opted out, but those icons are not readable.
+/// Active members who are opted in, with their stored icon count, sorted by
+/// display name (case folded), then member id. Paged in memory with the usual
+/// cursor: the list is at most one row per member. Opted-out and inactive
+/// members are not listed.
 pub async fn hero_icon_member_counts(
     State(state): State<AppState>,
     _officer: OfficerUser,
-) -> Result<Json<HeroIconMemberCounts>, Reject> {
+    Query(pagination): Query<PaginationParams>,
+) -> Result<Json<CursorResponse<HeroIconMemberCount>>, Reject> {
     configured(&state)?;
+    let (limit, offset) = pagination.resolve();
+    let visible = officer_visible_members(&state).await?;
     let counts = state.db.hero_icon_counts().await.map_err(db_error)?;
-    let opted_in: HashSet<String> = state
-        .db
-        .hero_icon_opted_in_member_ids()
-        .await
-        .map_err(db_error)?
+    let mut members: Vec<HeroIconMemberCount> = visible
         .into_iter()
+        .map(|(member_id, display_name)| {
+            let icon_count = counts.get(&member_id).copied().unwrap_or(0);
+            HeroIconMemberCount {
+                display_name,
+                icon_count: u32::try_from(icon_count).unwrap_or(u32::MAX),
+                icon_contribution_opt_in: true,
+                member_id,
+            }
+        })
         .collect();
-    let mut ids: Vec<String> = counts.keys().cloned().collect();
-    for id in &opted_in {
-        if !counts.contains_key(id) {
-            ids.push(id.clone());
-        }
-    }
-    let names = member_names(&state, &ids).await;
-    let mut members: Vec<HeroIconMemberCount> = Vec::with_capacity(ids.len());
-    for member_id in ids {
-        let icon_count = counts.get(&member_id).copied().unwrap_or(0);
-        members.push(HeroIconMemberCount {
-            display_name: names.get(&member_id).cloned().unwrap_or_default(),
-            icon_count: u32::try_from(icon_count).unwrap_or(u32::MAX),
-            icon_contribution_opt_in: opted_in.contains(&member_id),
-            member_id,
-        });
-    }
     members.sort_by_key(|row| (row.display_name.to_lowercase(), row.member_id.clone()));
-    Ok(Json(HeroIconMemberCounts { members }))
+    let page: Vec<HeroIconMemberCount> = members
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize + 1)
+        .collect();
+    Ok(Json(CursorResponse::from_oversized(page, limit, offset)))
 }
 
 /// GET /api/hero-icons/members/{member_id} (officer)
 ///
-/// 403 `icon_opt_in_off` while that member is not opted in.
+/// 404 `member_not_found` for an unknown or inactive member, 403
+/// `icon_opt_in_off` while that member is not opted in. An officer asking for
+/// their own icons gets them opted in or not. Reads of another member's list
+/// are written to the audit log as `viewed_hero_icons`.
 pub async fn member_hero_icons(
     State(state): State<AppState>,
-    _officer: OfficerUser,
+    officer: OfficerUser,
     UrlPath(member_id): UrlPath<String>,
 ) -> Result<Json<OfficerHeroIconList>, Reject> {
     configured(&state)?;
-    let opted_in = state
-        .db
-        .get_hero_icon_opt_in(&member_id)
-        .await
-        .map_err(db_error)?;
-    if !opted_in {
-        return Err(reject(StatusCode::FORBIDDEN, HERO_ICON_ERR_OPT_IN_OFF));
-    }
+    let own = member_id == officer.member.id;
+    let display_name = if own {
+        officer.member.display_name.clone()
+    } else {
+        officer_target(&state, &member_id).await?
+    };
     let rows = state
         .db
         .list_hero_icons_for_member(&member_id)
         .await
         .map_err(db_error)?;
-    let display_names = member_names(&state, std::slice::from_ref(&member_id)).await;
+    let names = HashMap::from([(member_id.clone(), display_name)]);
     let icons: Vec<OfficerHeroIcon> = rows
         .iter()
-        .map(|icon| officer_entry(icon, &display_names))
+        .map(|icon| officer_entry(icon, &names))
         .collect();
+    if !own {
+        let details = format!("{} icons", icons.len());
+        audit(
+            &state.db,
+            &officer.member.id,
+            AuditAction::ViewedHeroIcons,
+            AuditTargetType::Member,
+            &member_id,
+            Some(details.as_str()),
+        )
+        .await;
+    }
     Ok(Json(OfficerHeroIconList { icons }))
 }
 
 /// DELETE /api/hero-icons/members/{member_id} (officer)
 ///
-/// Removes every icon of one member, rows and files, also while that member is
-/// opted out. Written to the audit log when the caller is not that member.
+/// Removes every icon of one member, rows and files, while that member is
+/// active and opted in. 404 `member_not_found` and 403 `icon_opt_in_off` as in
+/// [`member_hero_icons`], and nothing is deleted then: an opted-out member's
+/// icons are deleted only by that member. An officer may clear their own
+/// icons here opted in or not. Written to the audit log as
+/// `deleted_all_hero_icons` when the caller is not that member.
 pub async fn delete_member_hero_icons(
     State(state): State<AppState>,
     officer: OfficerUser,
     UrlPath(member_id): UrlPath<String>,
 ) -> Result<Json<HeroIconsDeleted>, Reject> {
     configured(&state)?;
+    let own = member_id == officer.member.id;
+    if !own {
+        officer_target(&state, &member_id).await?;
+    }
     let deleted = delete_all_icons(&state, &member_id).await?;
-    if deleted > 0 && member_id != officer.member.id {
+    if deleted > 0 && !own {
         let details = format!("{deleted} icons");
         audit(
             &state.db,
@@ -768,4 +864,76 @@ pub async fn delete_member_hero_icons(
         .await;
     }
     Ok(Json(HeroIconsDeleted { deleted }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{must_err, must_ok, test_state};
+
+    fn png_bytes(edge: u32) -> Vec<u8> {
+        let canvas = image::RgbaImage::from_pixel(edge, edge, image::Rgba([10, 200, 90, 255]));
+        let mut out = Cursor::new(Vec::new());
+        canvas.write_to(&mut out, ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    /// Store two icons for `member_id` the way the upload route does.
+    async fn store_two(state: &AppState, member_id: &str) -> Vec<HeroIcon> {
+        ensure_hero_icons_dir(state.hero_icons.dir()).await.unwrap();
+        let mut stored = Vec::new();
+        for edge in [16, 24] {
+            let icon = clean_png(&png_bytes(edge)).expect("clean png");
+            let row = must_ok(
+                store_icon(state, member_id, "Ana", icon, Utc::now()).await,
+                "store icon",
+            );
+            stored.push(row);
+        }
+        stored
+    }
+
+    #[tokio::test]
+    async fn recheck_keeps_icons_while_opted_in() {
+        let state = test_state().await;
+        state.db.set_hero_icon_opt_in("m1", true).await.unwrap();
+        let stored = store_two(&state, "m1").await;
+
+        must_ok(
+            recheck_after_store(&state, "m1", &stored).await,
+            "still opted in",
+        );
+        for icon in &stored {
+            assert!(state.db.get_hero_icon(&icon.id).await.unwrap().is_some());
+            assert!(state.hero_icons.icon_path(&icon.id).exists());
+        }
+        let _ = std::fs::remove_dir_all(state.hero_icons.dir());
+    }
+
+    #[tokio::test]
+    async fn opt_out_during_upload_removes_this_requests_icons() {
+        let state = test_state().await;
+        state.db.set_hero_icon_opt_in("m1", true).await.unwrap();
+        // An icon from an earlier request stays: opt-out keeps stored icons.
+        let earlier = store_two(&state, "m1").await;
+        let stored = store_two(&state, "m1").await;
+        // The member opts out while this request's body is being read.
+        state.db.set_hero_icon_opt_in("m1", false).await.unwrap();
+
+        let (status, body) = must_err(
+            recheck_after_store(&state, "m1", &stored).await,
+            "opted out mid upload",
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.error, HERO_ICON_ERR_OPT_IN_REQUIRED);
+        for icon in &stored {
+            assert!(state.db.get_hero_icon(&icon.id).await.unwrap().is_none());
+            assert!(!state.hero_icons.icon_path(&icon.id).exists());
+        }
+        for icon in &earlier {
+            assert!(state.db.get_hero_icon(&icon.id).await.unwrap().is_some());
+            assert!(state.hero_icons.icon_path(&icon.id).exists());
+        }
+        let _ = std::fs::remove_dir_all(state.hero_icons.dir());
+    }
 }

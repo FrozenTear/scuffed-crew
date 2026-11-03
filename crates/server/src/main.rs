@@ -236,6 +236,10 @@ async fn main() {
         scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
     }
 
+    // Icon files with no row (a crash between file write and row insert) are
+    // removed once at startup. Only runs when HERO_ICONS_DIR is usable.
+    scuffed_site_server::hero_icons::spawn_orphan_sweep(db.clone(), state.hero_icons.clone());
+
     // Build the unified router: existing org routes + strategy routes + chat + WebSocket,
     // then apply production middleware to the combined router.
     // Site CSP is enforcing unless CSP_ENFORCE=0. See `security`.

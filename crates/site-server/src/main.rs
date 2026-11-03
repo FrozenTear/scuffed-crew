@@ -608,6 +608,10 @@ async fn main() {
         scuffed_site_server::stat_reports::spawn_sweeper(db.clone(), reports_dir);
     }
 
+    // Icon files with no row (a crash between file write and row insert) are
+    // removed once at startup. Only runs when HERO_ICONS_DIR is usable.
+    scuffed_site_server::hero_icons::spawn_orphan_sweep(db.clone(), state.hero_icons.clone());
+
     let app = create_router(state);
 
     let port: u16 = std::env::var("PORT")
