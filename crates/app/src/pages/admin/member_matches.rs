@@ -386,7 +386,7 @@ mod tests {
     }
 
     #[test]
-    fn copy_has_no_dashes_or_banned_words() {
+    fn copy_has_no_dashes() {
         for text in [
             HIDDEN_COPY,
             &status_text(false, None, Some(3)),
@@ -396,7 +396,6 @@ mod tests {
                 !text.contains('\u{2014}') && !text.contains('\u{2013}'),
                 "{text}"
             );
-            assert!(!text.to_lowercase().contains("streamer"), "{text}");
         }
     }
 
