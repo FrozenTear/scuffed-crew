@@ -20,6 +20,24 @@ unlocked. Off means the reader
 is never loaded or called and no warning shows. Without the templates below
 it reads nothing.
 
+## In the upload
+
+Each uploaded match gets an optional `bans_picks` object, plain values only:
+
+- `bans`: up to 4 of `{hero, team}`, `team` is `own`, `enemy` or null (the side
+  that made the ban)
+- `lobby_ban`: hero key or null
+- `picks`: up to 6, own team, the local player first
+- `ban_vote`: up to 6, same values as `picks`
+- `recognizer`: `cv-v1`
+
+A hero is a pack key or null. `picks` and `ban_vote` may also hold
+`no_preference` (the reader's `no-preference` template name is sent with the
+underscore). Confidence, score, margin and layout are not sent. A game with no
+value read omits the key, so an older server, which ignores fields it does not
+know, takes the upload as before. A server needs the site change that accepts
+`bans_picks` to store it.
+
 ## Capture wiring
 
 While a game is being captured the daemon keeps the last ban-results frame, the
@@ -29,8 +47,9 @@ string on the game record (`bans_picks`, with `bans_picks_recognizer: "cv-v1"`).
 A game that has no such screens, or whose screens are older than the game by
 more than the 30 minute binding window, gets nothing. The frames are held in
 memory only (about 3 to 4 full frames), and the reader runs even when
-`debug_save_pregame_screens` is off. The result is local for now: it is not in
-the sync upload.
+`debug_save_pregame_screens` is off. The upload carries the values of it as an
+optional `bans_picks` object on the match (see the next section). The stored
+JSON, with its confidences, stays on this computer.
 
 The game is always recorded. When the reader cannot run, `bans_picks` stays
 empty and the app status shows a warning:
