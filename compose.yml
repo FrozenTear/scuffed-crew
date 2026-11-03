@@ -189,7 +189,7 @@ services:
       UPLOAD_DIR: /app/data/uploads
       # Private member bug-report zips. The entrypoint gives this path to scuffed.
       REPORTS_DIR: /app/data/reports
-      # Private member-contributed hero icon PNGs (owner and officers only,
+      # Private member-contributed hero icon PNGs (owner and admins only,
       # never served as static files). The entrypoint gives this path to scuffed.
       HERO_ICONS_DIR: /app/data/hero-icons
       # Private recognizer packs. Read-only. See docs/tracker-packs.md.
