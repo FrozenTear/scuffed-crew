@@ -2422,8 +2422,8 @@ impl TrackerApp {
                 self.ocr_switch.health_notice = health;
                 self.refresh_health();
             }
-            self.ocr_switch.capture_notice =
-                settings::daemon_capture_notice(status.as_ref(), self.daemon.pid);
+            // The capture route notice, and the top bar's debounced focus.
+            self.observe_capture_and_focus(status.as_ref(), std::time::Instant::now());
             let seen = (
                 self.daemon.pid,
                 settings::daemon_share_open(status.as_ref(), self.daemon.pid),

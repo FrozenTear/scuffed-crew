@@ -223,6 +223,7 @@ fn page_body<'a>(
         container(main).width(Fill).height(Fill).into()
     } else {
         iced::widget::scrollable(main)
+            .id(crate::focus_status::PANE_SCROLL_ID)
             .width(Fill)
             .height(Fill)
             .into()

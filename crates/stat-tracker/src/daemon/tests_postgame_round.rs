@@ -539,18 +539,20 @@ async fn a_loading_screen_after_the_rank_screen_ends_the_window_at_its_first_fra
         end: Some(end),
         ..PostTick::default()
     };
-    // No window and no pre-game: the loading check does not run.
+    // No window and no pre-game: the loading check runs only for the
+    // pending slot ([`PENDING_WINDOW`]), which keeps no reject.
     let confirm = PostTick {
         confirmed: true,
         ..read(EndSeen::Title)
     };
     let want = loop_tick(&mut dump, at(0), picture(20, Some((0.4, 0.6))), confirm);
-    assert!(!want.loading);
+    assert!(want.loading && want.rejected == 0);
     assert!(dump.post_window_open());
     // The accolades, then the rank screen: the window looks for loading.
     let accolades = picture(70, Some((0.1, 0.3)));
     let want = loop_tick(&mut dump, at(1_000), accolades, read(EndSeen::Accolades));
-    assert!(want.loading && !want.other_frame);
+    // The pending slot keeps a loading frame with no game open.
+    assert!(want.loading && want.other_frame);
     let rank = picture(110, Some((0.6, 0.8)));
     loop_tick(&mut dump, at(2_000), rank, read(EndSeen::Rank));
     assert!(dump.post_window_open());
@@ -559,12 +561,13 @@ async fn a_loading_screen_after_the_rank_screen_ends_the_window_at_its_first_fra
     let want = loop_tick(&mut dump, at(3_000), slab.clone(), PostTick::default());
     assert!(want.loading);
     assert!(!dump.post_window_open());
-    // Later loading frames: no window, no loading check, nothing held.
+    // Later loading frames: no window; the pending slot holds the latest
+    // for a next game folder, and the shutdown drops it, writing nothing.
     for ms in [4_000, 5_000] {
         let want = loop_tick(&mut dump, at(ms), slab.clone(), PostTick::default());
-        assert!(!want.loading, "{ms}");
+        assert!(want.loading, "{ms}");
     }
-    assert!(!dump.tracker().holds_loading());
+    assert!(dump.tracker().holds_loading());
     assert!(dump.finish(Duration::from_secs(30)).await);
 
     let root = pregame_dir(dir.path());

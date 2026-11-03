@@ -3228,7 +3228,7 @@ token = \"not-a-real-token\"
             leptess_created: 0,
             share_open: false,
             share_notice: String::new(),
-            capture_notice: String::new(),
+            ..OcrSwitchStatus::default()
         }
     }
 

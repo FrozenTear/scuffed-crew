@@ -2,8 +2,9 @@
 //! names as a list (`player_name` first, then `player_names`), Upload
 //! games after each match (`live_upload`), the two Sharing switches
 //! (`rank_reader`, `share_stat_pictures`), Report pictures
-//! (`share_report_pictures`) and Only capture while Overwatch is on screen
-//! (`capture_only_on_screen`). Each applies at once. The tracker will read
+//! (`share_report_pictures`) and Only capture while Overwatch is in front
+//! (`capture_only_on_screen`, with a live note while the tracker cannot
+//! tell which window is in front). Each applies at once. The tracker will read
 //! them when it starts, so each is tagged After restart, except Report
 //! pictures, which only this app will read.
 //!
@@ -236,8 +237,11 @@ pub(crate) fn report_pictures_row<'a>(
     })
 }
 
-/// Only capture while Overwatch is on screen: Auto or Off (spec p7), or
-/// `None` while hidden.
+/// Only capture while Overwatch is in front: Auto or Off (spec p7, UX Spec
+/// focus status), or `None` while hidden. While the tracker cannot tell
+/// which window is in front, a note says so under the help. The row has
+/// the id the top bar's unreadable pill scrolls to, and is marked for a
+/// moment after that pill opened it.
 pub(crate) fn focus_gate_row<'a>(
     app: &'a TrackerApp,
     demo: bool,
@@ -247,31 +251,130 @@ pub(crate) fn focus_gate_row<'a>(
         return None;
     }
     let auto = app.saved_config.capture_only_on_screen;
-    let pick = |on: bool| {
-        (!demo).then_some(Message::SettingsPage(Msg::Edit(
-            ConfigEdit::CaptureOnlyOnScreen(on),
-        )))
-    };
-    Some(setting_row(
+    let pick = |on: bool| focus_gate_pick(demo, on);
+    let mut lines = vec![hint(help)];
+    if focus_note_shown(app) {
+        lines.push(focus_note());
+    }
+    let row = setting_row(
         title_line(
-            "Only capture while Overwatch is on screen",
+            crate::focus_status::ROW_TITLE,
             !auto,
             &[Tag::New, Tag::AfterRestart],
         ),
-        vec![hint(help)],
-        segmented(vec![
-            Segment {
-                label: "Auto",
-                selected: auto,
-                msg: pick(true),
+        lines,
+        demo_tooltip(
+            segmented(vec![
+                Segment {
+                    label: "Auto",
+                    selected: auto,
+                    msg: pick(true),
+                },
+                Segment {
+                    label: "Off",
+                    selected: !auto,
+                    msg: pick(false),
+                },
+            ]),
+            demo,
+        ),
+    );
+    // Marked: a 3 px accent edge on the left only, as the open Advanced
+    // section's bar; otherwise the row sits flush with the others.
+    let body: Element<'a, Message> = if app.page_state.focus_row_marked(std::time::Instant::now()) {
+        let edge = iced::widget::container(iced::widget::space().width(3))
+            .width(3)
+            .height(iced::Fill)
+            .style(|_: &iced::Theme| iced::widget::container::Style {
+                background: Some(iced::Background::Color(crate::theme::ACCENT)),
+                ..iced::widget::container::Style::default()
+            });
+        iced::widget::row![edge, row]
+            .spacing(8)
+            .height(iced::Length::Shrink)
+            .into()
+    } else {
+        row
+    };
+    Some(
+        iced::widget::container(body)
+            .id(crate::focus_status::ROW_ID)
+            .into(),
+    )
+}
+
+/// What picking Auto (`true`) or Off in the focus row does: nothing in a
+/// demo, where the control is shown but never changes a setting.
+fn focus_gate_pick(demo: bool, on: bool) -> Option<Message> {
+    (!demo).then_some(Message::SettingsPage(Msg::Edit(
+        ConfigEdit::CaptureOnlyOnScreen(on),
+    )))
+}
+
+/// In a demo `control` carries the tooltip that says why it does nothing.
+/// The help text and the live note stay as they are.
+fn demo_tooltip(control: Element<'static, Message>, demo: bool) -> Element<'static, Message> {
+    use iced::widget::{container, text, tooltip};
+    if !demo {
+        return control;
+    }
+    let tip = container(
+        text(crate::focus_status::DEMO_TOOLTIP)
+            .size(crate::theme::SIZE_LABEL)
+            .font(crate::theme::FONT_MEDIUM)
+            .color(crate::theme::TEXT_2),
+    )
+    .padding(iced::Padding::from([8, 12]))
+    .style(|_: &iced::Theme| container::Style {
+        background: Some(iced::Background::Color(crate::theme::SURFACE_2)),
+        border: iced::Border {
+            color: crate::theme::BORDER,
+            width: 1.0,
+            radius: crate::theme::RADIUS_INNER.into(),
+        },
+        ..container::Style::default()
+    });
+    tooltip(control, tip, tooltip::Position::Bottom)
+        .gap(6)
+        .into()
+}
+
+/// The live note shows while the running tracker cannot tell which
+/// window is in front (as the top bar shows it, debounced), and only while
+/// a game runs, as the top bar's focus words: a value left from the last
+/// game is not shown. A rejected token does not hide it.
+pub(crate) fn focus_note_shown(app: &TrackerApp) -> bool {
+    app.fixture.is_none()
+        && app.daemon.running()
+        && app.game_running
+        && app.page_state.focus.shown() == stat_tracker::ocr_status::FocusGateStatus::Unreadable
+}
+
+/// The live note: neutral words with an amber dot, as the capture method
+/// notes.
+fn focus_note() -> Element<'static, Message> {
+    use iced::widget::{container, row, space, text};
+    let dot = container(space().width(6).height(6))
+        .width(6)
+        .height(6)
+        .style(|_: &iced::Theme| container::Style {
+            background: Some(iced::Background::Color(crate::theme::WARN)),
+            border: iced::Border {
+                radius: 999.0.into(),
+                ..iced::Border::default()
             },
-            Segment {
-                label: "Off",
-                selected: !auto,
-                msg: pick(false),
-            },
-        ]),
-    ))
+            ..container::Style::default()
+        });
+    row![
+        dot,
+        text(crate::focus_status::ROW_UNREADABLE_NOTE)
+            .size(crate::theme::SIZE_LABEL)
+            .font(crate::theme::FONT_MEDIUM)
+            .color(crate::theme::TEXT_3),
+    ]
+    .spacing(6)
+    .align_y(iced::Alignment::Center)
+    .into()
 }
 
 #[cfg(test)]
@@ -310,7 +413,6 @@ mod tests {
             "rank_reader",
             "share_stat_pictures",
             "share_report_pictures",
-            "capture_only_on_screen",
             "live_upload",
             "player_names",
         ] {
@@ -321,7 +423,64 @@ mod tests {
         assert!(upload_row(&app, false, "help", true).is_none());
         assert!(sharing_rows(&app, false, "a", "b").is_empty());
         assert!(report_pictures_row(&app, false, "c").is_none());
-        assert!(focus_gate_row(&app, false, "d").is_none());
+        // The focus gate is read now: its row shows.
+        assert!(row_shown("capture_only_on_screen"));
+        assert!(focus_gate_row(&app, false, "d").is_some());
+    }
+
+    #[test]
+    fn the_focus_row_in_a_demo_changes_nothing_and_keeps_its_help_and_note() {
+        for on in [true, false] {
+            assert!(focus_gate_pick(true, on).is_none(), "demo: no message");
+            assert!(focus_gate_pick(false, on).is_some(), "live: a message");
+        }
+        // The row still builds in a demo (help, note and the control), and
+        // the tooltip says why it does nothing.
+        let (_dir, app) = crate::fixtures::test_app();
+        assert!(app.fixture.is_some());
+        assert!(focus_gate_row(&app, true, "help").is_some());
+        assert_eq!(
+            crate::focus_status::DEMO_TOOLTIP,
+            "Settings can't be changed in demo mode."
+        );
+    }
+
+    #[test]
+    fn the_focus_row_notes_unreadable_and_is_marked_after_the_pill() {
+        use stat_tracker::ocr_status::FocusGateStatus;
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.fixture = None;
+        app.daemon.pid = Some(41);
+        app.game_running = true;
+        let t0 = std::time::Instant::now();
+        assert!(!focus_note_shown(&app));
+        // The note follows the debounced top bar value: 5 s of unreadable.
+        app.page_state
+            .focus
+            .observe(Some(FocusGateStatus::Unreadable), t0);
+        assert!(!focus_note_shown(&app));
+        app.page_state.focus.observe(
+            Some(FocusGateStatus::Unreadable),
+            t0 + crate::focus_status::UNREADABLE_AFTER,
+        );
+        assert!(focus_note_shown(&app));
+        // Only while a game runs: a value left from the last game is not shown.
+        app.game_running = false;
+        assert!(!focus_note_shown(&app));
+        app.game_running = true;
+        app.daemon.pid = None;
+        assert!(!focus_note_shown(&app), "no tracker running");
+        app.daemon.pid = Some(41);
+        app.page_state.focus.observe(Some(FocusGateStatus::Off), t0);
+        assert!(!focus_note_shown(&app), "Off stops the warning");
+        // The pill marks the row for a moment.
+        assert!(!app.page_state.focus_row_marked(t0));
+        app.page_state.show_focus_row(t0);
+        assert!(app.page_state.focus_row_marked(t0));
+        assert!(
+            !app.page_state
+                .focus_row_marked(t0 + crate::focus_status::HIGHLIGHT_FOR)
+        );
     }
 
     #[test]

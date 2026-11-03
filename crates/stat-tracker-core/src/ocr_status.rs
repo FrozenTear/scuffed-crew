@@ -588,6 +588,30 @@ pub struct Status {
     /// asked for, KWin did not answer). Empty otherwise. The app shows it
     /// under the capture method in Settings.
     pub capture_notice: String,
+    /// What the focus gate (`capture_only_on_screen`) last saw. The app
+    /// shows it in its top bar while a game runs.
+    pub focus_gate: FocusGateStatus,
+}
+
+/// The focus gate's state in [`Status`]: whether reads go on because
+/// Overwatch is the focused window. Written in snake case; a name a newer
+/// daemon adds reads as `unknown`, so the rest of the file still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusGateStatus {
+    /// `capture_only_on_screen = false`: no focus check, reads always go on.
+    Off,
+    /// Overwatch is the focused window: reads go on.
+    Focused,
+    /// Another window is focused: reads pause until Overwatch is again.
+    NotFocused,
+    /// The focused window cannot be read on this desktop (no source, an
+    /// error or a timeout). Reads go on: a warning state, not a pause.
+    Unreadable,
+    /// No focus read yet, or a name this build does not know.
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 /// One blocked call site in [`Status`].
@@ -647,6 +671,8 @@ pub fn read_status(data_dir: &Path) -> Option<Status> {
 static DAEMON_SHARE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SHARE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static CAPTURE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static FOCUS_GATE: std::sync::Mutex<FocusGateStatus> =
+    std::sync::Mutex::new(FocusGateStatus::Unknown);
 static STATUS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Held around every read-modify-write of the status file, so the switch's
@@ -684,6 +710,23 @@ pub fn publish_capture_notice(data_dir: &Path, notice: &str) {
         return;
     }
     status.capture_notice = notice.to_string();
+    let _ = write_status(data_dir, &status);
+}
+
+pub fn focus_gate() -> FocusGateStatus {
+    *FOCUS_GATE.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Write the focus gate's state into the status file, keeping everything
+/// else there. Later status writes keep it too.
+pub fn publish_focus_gate(data_dir: &Path, gate: FocusGateStatus) {
+    let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
+    *FOCUS_GATE.lock().unwrap_or_else(|err| err.into_inner()) = gate;
+    let mut status = read_status(data_dir).unwrap_or_default();
+    if status.focus_gate == gate {
+        return;
+    }
+    status.focus_gate = gate;
     let _ = write_status(data_dir, &status);
 }
 
@@ -1100,6 +1143,7 @@ mod tests {
             share_open: false,
             share_notice: String::new(),
             capture_notice: String::new(),
+            focus_gate: FocusGateStatus::Unknown,
         }
     }
 

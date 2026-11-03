@@ -1312,6 +1312,11 @@ mod tests {
                 .finish();
             let _ = tracing::subscriber::set_global_default(sub);
         });
+        // Other tests install scoped subscribers on their own threads at
+        // the same time; a callsite first hit under one of them can keep a
+        // cached interest that leaves this global one out. Rebuild it so
+        // every line here reaches the thread log.
+        tracing::callsite::rebuild_interest_cache();
         THREAD_LOG.with(|log| log.borrow_mut().clear());
         f();
         THREAD_LOG.with(|log| String::from_utf8(std::mem::take(&mut *log.borrow_mut())).unwrap())

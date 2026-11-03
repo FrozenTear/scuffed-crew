@@ -19,25 +19,22 @@
 //!
 //! The loading screen: the latest frame that passes the loading check is
 //! held in memory, replacing the one before (nothing is written for it
-//! yet), and saved once, as an ordinary save, only when the game starts:
-//! a hero ban or hero select read in the same game within
-//! [`LOADING_START_WAIT`] of it, the screen after loading. So an `APPLYING
+//! yet), and saved once, as an ordinary save, at the next phase read in an
+//! open game with no loading frame yet ([`pending`]): so an `APPLYING
 //! UPDATE` band that passes the check is replaced by the `ENTERING GAME`
-//! screen after it, even with a frame between that fails the check. A
-//! loading frame with no game start after it is dropped, and nothing is
-//! written: no start within [`LOADING_START_WAIT`] (the menu, a lobby), a
-//! release (the game closed, capture stopped, a clean shutdown), or a map
-//! vote read after it (a requeue's vote opening the next game; the
-//! loading screen comes after the vote). Dropped, the loading screen is
-//! still looked for, so a later `ENTERING GAME` in the same game is held
-//! and saved. A tracker killed between the loading screen and the game
-//! start (a crash, a kill, power loss) loses that game's loading screen;
-//! its other screens, saved as they happen, are not affected.
+//! screen after it, even with a frame between that fails the check. It is
+//! held with no game open too, and survives a map vote after it and a slow
+//! game start. With no game folder within [`PENDING_WINDOW`], or at a
+//! release (the game closed, capture stopped, a clean shutdown), it is
+//! dropped and nothing is written. A tracker killed before the next phase
+//! read loses it; the game's other screens are not affected.
 //!
 //! The roster screen ([`roster`]) is saved apart from the others: its first
 //! frame as [`ROSTER_NAME`], its last as [`ROSTER_LAST_NAME`] (staged on
 //! disk, nothing held), so the loading and ban-results frames never stand
-//! in for it, nor it for them. Each check's turned-down candidates are
+//! in for it, nor it for them. It is accepted after [`roster_samples`]
+//! roster samples in a row, and one seen before any game folder is staged
+//! in the pending slot ([`pending`]) until the next folder opens. Each check's turned-down candidates are
 //! logged and the last one kept as `rejected_<label>.png` ([`rejects`]).
 //!
 //! Ban results are no phase of their own yet. The candidate is the first
@@ -84,12 +81,14 @@ use crate::*;
 use std::time::Duration;
 
 mod classify;
+mod pending;
 mod post;
 mod rejects;
 mod roster;
 mod writer;
 
 pub(crate) use classify::*;
+pub(crate) use pending::*;
 pub(crate) use rejects::*;
 use roster::RosterOnScreen;
 pub(crate) use writer::PregameWriter;
@@ -124,12 +123,6 @@ pub(crate) const BAN_RESULTS_WINDOW: Duration = Duration::from_secs(15);
 /// phase read waits for the screen to hold still). Longer, and it is a new
 /// screen: a requeue's map vote, or the hero select between rounds.
 pub(crate) const PHASE_FLICKER: Duration = Duration::from_secs(12);
-
-/// The game start (a hero ban or hero select read) must come within this
-/// of the last loading pass for it to be saved; held longer with no start,
-/// it is dropped. Real games read the start about 13.5 s after the last
-/// pass at 1.5 s polls and about 16 s at 4 s polls.
-pub(crate) const LOADING_START_WAIT: Duration = Duration::from_secs(20);
 
 /// Batches of shots waiting for the writer. A full queue drops the whole
 /// batch (logged), so frames pinned by pending writes stay bounded. A
@@ -273,6 +266,9 @@ pub(crate) enum PregameOp<F> {
     Promote { folder: String, name: &'static str },
     /// Delete the staged copy of `name`.
     Discard { folder: String, name: &'static str },
+    /// Move the staged copy of `name` in [`PENDING_DIR`] into `folder` as
+    /// `name` (the pending slot's roster frame).
+    Adopt { folder: String, name: &'static str },
 }
 
 /// The hidden name a frame of `name` is staged under: no game folder, no
@@ -341,14 +337,6 @@ struct BanResults<F> {
     owed_before: Option<String>,
 }
 
-/// The latest loading-check pass of the open game, held until the game
-/// starts (saved) or it is dropped. Replaced by each later pass.
-struct HeldLoading<F> {
-    frame: F,
-    /// When `frame` was taken.
-    at: Instant,
-}
-
 /// Decides which pre-game frames to write. Generic over the frame so tests
 /// use plain values. It holds the latest frame of the phase on screen, the
 /// ban-results candidate, or the loading frame (never two: no phase is on
@@ -358,8 +346,23 @@ struct HeldLoading<F> {
 pub(crate) struct PregameTracker<F> {
     game: Option<PregameGame>,
     on_screen: Option<OnScreen<F>>,
-    /// The loading frame waiting for the game to start.
+    /// The loading frame waiting for a game folder ([`pending`]).
     loading: Option<HeldLoading<F>>,
+    /// When the roster frame staged in [`PENDING_DIR`] was taken.
+    pending_roster: Option<Instant>,
+    /// Roster samples in a row ([`roster_samples`]), and when the last
+    /// one was taken.
+    roster_streak: u8,
+    roster_sample_at: Option<Instant>,
+    /// The configured poll interval, which fills the gaps not measured yet,
+    /// and the last few gaps between fed ticks: their median decides
+    /// [`roster_samples`] ([`TickGaps`]).
+    poll: Duration,
+    ticks: TickGaps,
+    /// The last scoreboard read of a match that may be in progress, and
+    /// the last end signal or pre-game phase read ([`pending`]).
+    match_read_at: Option<Instant>,
+    match_end_at: Option<Instant>,
     /// When the ban phase was last seen, while a ban-results frame may
     /// still come.
     ban_ended_at: Option<Instant>,
@@ -386,6 +389,13 @@ impl<F> PregameTracker<F> {
             game: None,
             on_screen: None,
             loading: None,
+            pending_roster: None,
+            roster_streak: 0,
+            roster_sample_at: None,
+            poll,
+            ticks: TickGaps::default(),
+            match_read_at: None,
+            match_end_at: None,
             ban_ended_at: None,
             ban_results: None,
             roster: None,
@@ -433,7 +443,18 @@ impl<F: Clone> PregameTracker<F> {
     /// What the tick at `now` should hand over.
     pub(crate) fn want(&self, now: Instant) -> PregameWant {
         let Some(game) = self.game_open(now) else {
-            return PregameWant::default();
+            // No game folder: the loading screen and the roster may come
+            // before the one that opens, for the pending slot; not while a
+            // match is in progress.
+            if self.match_running() {
+                return PregameWant::default();
+            }
+            return PregameWant {
+                loading: true,
+                other_frame: true,
+                roster: true,
+                ..PregameWant::default()
+            };
         };
         let loading = !game.loading_saved;
         // From the last ban tick on: the tick after it may be the results.
@@ -516,14 +537,13 @@ impl<F: Clone> PregameTracker<F> {
         new_folder: impl FnOnce() -> String,
     ) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
-        // The select title is no start: it is only looked for while the
-        // ban results may come, and a loading frame ends that wait.
-        let started = matches!(
-            seen,
-            Seen::Phase(PregamePhase::HeroBan | PregamePhase::HeroSelect)
-        );
-        self.settle_loading(now, started, &mut shots);
-        self.observe_roster(now, seen, roster_frame, &mut shots);
+        if matches!(seen, Seen::Phase(_)) {
+            // A pre-game read: no match is in progress now.
+            self.match_end_at = Some(now);
+        }
+        self.expire_pending(now, &mut shots);
+        let accepted = self.roster_sample(now, seen);
+        self.observe_roster(now, seen, accepted, roster_frame, &mut shots);
         match seen {
             Seen::Phase(phase) => self.observe_phase(now, phase, frame, new_folder, &mut shots),
             Seen::Loading | Seen::Other | Seen::BanResults => {
@@ -567,46 +587,18 @@ impl<F: Clone> PregameTracker<F> {
         self.end_phase(now, &mut shots);
         self.settle_ban_results(now, &mut shots);
         self.end_roster(&mut shots);
-        self.drop_loading(
-            now,
-            "no frames (game closed, capture stopped or shutdown)",
-            &mut shots,
-        );
+        let why = "no frames (game closed, capture stopped or shutdown)";
+        self.drop_loading(now, why, &mut shots);
+        self.drop_pending_roster(why, &mut shots);
+        self.roster_streak = 0;
+        self.roster_sample_at = None;
+        self.ticks.clear();
         shots
-    }
-
-    /// Save the held loading frame, once, when the game starts (`started`:
-    /// a hero ban or hero select read, the screen after loading) in the
-    /// game open at `now`, within [`LOADING_START_WAIT`] of the last pass;
-    /// saved, the loading screen is no longer looked for in this game.
-    /// Drop it when no start came within [`LOADING_START_WAIT`] (a start after
-    /// that too), or a start came after the game closed (a hero ban then
-    /// opens the next game; a lone hero select opens none).
-    fn settle_loading(&mut self, now: Instant, started: bool, shots: &mut Vec<PregameOp<F>>) {
-        let open = self.game_open(now).is_some();
-        let Some(at) = self.loading.as_ref().map(|l| l.at) else {
-            return;
-        };
-        let over = now.saturating_duration_since(at) > LOADING_START_WAIT;
-        if started && open && !over {
-            if let (Some(game), Some(held)) = (self.game.as_mut(), self.loading.take()) {
-                game.loading_saved = true;
-                shots.push(PregameOp::Save(PregameShot {
-                    folder: game.folder.clone(),
-                    name: LOADING_NAME,
-                    frame: held.frame,
-                }));
-            }
-        } else if over {
-            self.drop_loading(now, "no hero ban or hero select in time", shots);
-        } else if started {
-            self.drop_loading(now, "the game start came after the game closed", shots);
-        }
     }
 
     /// A batch that staged `name` was dropped (the writer's queue was
     /// full), so the staged file on disk, if any, is an older frame. For
-    /// the ban results (the only frame staged), the owed frame goes back
+    /// the ban results, the owed frame goes back
     /// to what it was before that stage: the earlier confirmed frame
     /// staged for this candidate, still a results frame, or none.
     pub(crate) fn stage_lost(&mut self, name: &str) {
@@ -615,29 +607,11 @@ impl<F: Clone> PregameTracker<F> {
         {
             c.owed = c.owed_before.take();
         }
-    }
-
-    /// Drop the held loading frame, if any; nothing is on disk for it but
-    /// its turned-down copy ([`Self::turned_down`], with the wait timing).
-    /// The loading screen is still looked for, so a later pass in this game
-    /// is held again.
-    fn drop_loading(&mut self, now: Instant, why: &str, shots: &mut Vec<PregameOp<F>>) {
-        let Some(held) = self.loading.take() else {
-            return;
-        };
-        let detail = format!(
-            "held frame dropped: {why}; held {:.1} s, the start must come within {} s",
-            now.saturating_duration_since(held.at).as_secs_f32(),
-            LOADING_START_WAIT.as_secs()
-        );
-        self.turned_down(
-            now,
-            RejectLabel::Loading,
-            &detail,
-            Some(held.frame),
-            true,
-            shots,
-        );
+        // The pending slot's roster (the only `ROSTER_NAME` stage): what is
+        // on disk may be no frame of this stretch, so nothing is attached.
+        if name == ROSTER_NAME {
+            self.pending_roster = None;
+        }
     }
 
     fn observe_phase(
@@ -652,12 +626,6 @@ impl<F: Clone> PregameTracker<F> {
             // The ban is back, late or not: the candidate was a frame
             // inside it, not the results.
             self.drop_ban_results(now, "the hero ban came back", shots);
-        }
-        if phase == PregamePhase::MapVote {
-            // The loading screen comes after the vote, so a pass before
-            // this vote was not this game's loading screen (a requeue's
-            // vote opens the next game).
-            self.drop_loading(now, "a map vote came after it", shots);
         }
         if self.on_screen.as_ref().is_some_and(|s| s.phase != phase) {
             self.end_phase(now, shots);
@@ -700,6 +668,9 @@ impl<F: Clone> PregameTracker<F> {
         if !continues && game.came_back_late(phase, now) {
             return;
         }
+        // A pre-game read: a loading or roster frame seen before it
+        // belongs to this game ([`pending`]).
+        self.attach_pending(phase, shots);
         let Some(game) = self.game.as_mut() else {
             return;
         };
@@ -809,20 +780,13 @@ impl<F: Clone> PregameTracker<F> {
                 }
             }
         }
-        if self.game_open(now).is_none() {
-            return;
-        }
-        let Some(game) = self.game.as_ref() else {
-            return;
-        };
         // Held in memory, replacing an earlier pass (an update band before
         // the ENTERING GAME screen can pass the check too); nothing is
-        // written until the game starts.
+        // written until a phase read in an open game ([`pending`]).
         if seen == Seen::Loading
-            && !game.loading_saved
             && let Some(frame) = frame
         {
-            self.loading = Some(HeldLoading { frame, at: now });
+            self.hold_loading(now, frame);
         }
     }
 
@@ -1163,7 +1127,10 @@ pub(crate) fn sweep_staged(root: &std::path::Path, except: Option<&str>) {
             let _ = std::fs::remove_file(entry.path());
             continue;
         }
-        if !kind.is_dir() || !is_game_folder(&name) || except == Some(name.as_str()) {
+        // The pending slot's staged roster belongs to no game folder yet:
+        // only the sweep at start (no game in progress) deletes it.
+        let pending = name == PENDING_DIR && except.is_none();
+        if !kind.is_dir() || !(pending || is_game_folder(&name)) || except == Some(name.as_str()) {
             continue;
         }
         let Ok(files) = std::fs::read_dir(entry.path()) else {
@@ -1210,7 +1177,8 @@ fn write_frame(
         let _ = std::fs::remove_file(&tmp);
         tracing::debug!(target: "scuffed_stat_tracker", error = %e, "pre-game frame not saved");
     }
-    if new_folder {
+    // The pending slot's folder is no game folder.
+    if new_folder && folder != PENDING_DIR {
         note_new_folder(root, folder, keep, made);
     }
 }
@@ -1295,7 +1263,34 @@ pub(crate) fn write_pregame_ops(
             PregameOp::Discard { folder, name } => {
                 let _ = std::fs::remove_file(root.join(folder).join(staged_name(name)));
             }
+            PregameOp::Adopt { folder, name } => adopt_pending(root, folder, name, keep, made),
         }
+    }
+}
+
+/// [`PregameOp::Adopt`]: move the staged `name` in [`PENDING_DIR`] into
+/// `folder` as `name`; a new folder counts for the retention. With nothing
+/// staged (its stage dropped or failed) no folder is made.
+fn adopt_pending(
+    root: &std::path::Path,
+    folder: &str,
+    name: &str,
+    keep: usize,
+    made: &mut Vec<String>,
+) {
+    let from = root.join(PENDING_DIR).join(staged_name(name));
+    if !from.is_file() {
+        tracing::debug!(target: "scuffed_stat_tracker", "pre-game pending frame not on disk");
+        return;
+    }
+    let dir = root.join(folder);
+    let new_folder = !dir.is_dir();
+    let moved = std::fs::create_dir_all(&dir).and_then(|()| std::fs::rename(&from, dir.join(name)));
+    if let Err(e) = moved {
+        tracing::debug!(target: "scuffed_stat_tracker", error = %e, "pre-game pending frame not saved");
+    }
+    if new_folder && dir.is_dir() {
+        note_new_folder(root, folder, keep, made);
     }
 }
 

@@ -22,6 +22,9 @@ pub enum FinishedGameTab {
     /// except at most one by an OCR-sized step. The recorded result was
     /// false (a mid-match frame taken for an end).
     StillPlaying,
+    /// No board was read: the focus gate skipped the capture because
+    /// another window was focused. The game stays open as it is.
+    FocusSkipped,
 }
 
 /// The last accepted board is far enough into a match that neither a new

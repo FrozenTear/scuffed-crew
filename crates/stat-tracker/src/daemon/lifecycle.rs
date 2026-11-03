@@ -533,6 +533,7 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     let data_dir = config.data_dir.clone();
 
     log_startup_readiness(&config, dump_poll_frames, collect_portraits);
+    daemon::focus::install(config.capture_only_on_screen, &config.data_dir);
 
     let ctx = Arc::new(DaemonCtx {
         backend,
@@ -581,6 +582,7 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         &mut pregame_dump,
     )
     .await;
+    daemon::focus::shutdown().await;
     // The sync task holds a store clone: settle it first, leaving the
     // store's close its own share of the deadline.
     let within = stat_tracker::replace::shutdown_time_left().saturating_sub(STORE_CLOSE_WAIT);

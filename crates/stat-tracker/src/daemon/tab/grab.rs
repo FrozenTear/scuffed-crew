@@ -92,6 +92,7 @@ pub(crate) fn tab_result(
         | FrameAnalysisOutcome::CaptureBusy => TabResult::NoFrameYet,
         FrameAnalysisOutcome::Declined
         | FrameAnalysisOutcome::PortalPaused
+        | FrameAnalysisOutcome::NotFocused
         | FrameAnalysisOutcome::TeamSizeUncertain { .. } => TabResult::Final,
     }
 }
@@ -113,6 +114,7 @@ pub(crate) fn tab_retry_reason(
         FrameAnalysisOutcome::CaptureBusy => "the previous screenshot was still running",
         FrameAnalysisOutcome::Declined
         | FrameAnalysisOutcome::PortalPaused
+        | FrameAnalysisOutcome::NotFocused
         | FrameAnalysisOutcome::TeamSizeUncertain { .. }
         | FrameAnalysisOutcome::Analyzed(_) => "not retried",
     }
@@ -135,7 +137,8 @@ pub(crate) fn tab_outcome_rank(outcome: &FrameAnalysisOutcome, use_new_reader: b
         FrameAnalysisOutcome::ShareOpening
         | FrameAnalysisOutcome::Declined
         | FrameAnalysisOutcome::CaptureBusy
-        | FrameAnalysisOutcome::PortalPaused => 0,
+        | FrameAnalysisOutcome::PortalPaused
+        | FrameAnalysisOutcome::NotFocused => 0,
         FrameAnalysisOutcome::StreamMiss => 1,
         FrameAnalysisOutcome::NotAScoreboard { .. } => 2,
         FrameAnalysisOutcome::TeamSizeUncertain { .. } => 3,
@@ -259,6 +262,11 @@ pub(crate) async fn handle_capture(
                 let own_seeds = own_seeds.clone();
                 let names = names.clone();
                 async move {
+                    // Focus gate, per attempt: no grab while another window
+                    // is focused (an Alt+Tab press included).
+                    if daemon::focus::tab_skip(Instant::now()).await {
+                        return Ok(FrameAnalysisOutcome::NotFocused);
+                    }
                     let grabbed = grab_tab_attempt(backend, capture_output, attempt).await;
                     let img = match grabbed {
                         Ok(captured) => captured.image,
@@ -327,7 +335,11 @@ pub(crate) async fn handle_capture(
             | FrameAnalysisOutcome::ShareOpening
             | FrameAnalysisOutcome::Declined
             | FrameAnalysisOutcome::CaptureBusy
-            | FrameAnalysisOutcome::PortalPaused => {
+            | FrameAnalysisOutcome::PortalPaused
+            | FrameAnalysisOutcome::NotFocused => {
+                if matches!(analysis, FrameAnalysisOutcome::NotFocused) {
+                    tracing::info!(target: "scuffed_stat_tracker", "Tab capture skipped: another window is focused");
+                }
                 if matches!(analysis, FrameAnalysisOutcome::StreamMiss) {
                     tracing::info!(target: "scuffed_stat_tracker", "Tab capture missed: no fresh stream frame");
                 }
@@ -363,7 +375,10 @@ pub(crate) async fn handle_capture(
                     held_at: None,
                     map_replaces_text_fallback: false,
                     rejoin_carry: None,
-                    finished_game_tab: None,
+                    // A focus skip read no board: a finished game this Tab
+                    // probed stays open (`settle_tab_probe`).
+                    finished_game_tab: matches!(analysis, FrameAnalysisOutcome::NotFocused)
+                        .then_some(boundary::FinishedGameTab::FocusSkipped),
                 });
             }
             FrameAnalysisOutcome::NotAScoreboard {

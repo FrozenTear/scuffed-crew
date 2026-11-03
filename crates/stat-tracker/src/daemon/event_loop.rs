@@ -31,6 +31,8 @@ pub(crate) async fn run_loop(
     // Starts false so a boot with the game already closed does not close a
     // share that was never opened. The close runs on the running edge only.
     let mut game_was_running = false;
+    // The poll's own focus pause edge (`daemon::focus::poll_pause`).
+    let mut focus_paused = false;
     // The GUI's Stop button (and systemd) send SIGTERM, shut down as
     // gracefully as Ctrl+C, with a final sync.
     // `early_sigterm` is the same handler, registered before startup's wait
@@ -243,6 +245,7 @@ pub(crate) async fn run_loop(
                         let press = key.at;
                         let running = game_gate.is_running();
                         capture::note_game_seen(game_was_running, running, data_dir);
+                        daemon::focus::game_edge(game_was_running, running);
                         if capture::share_close_due(
                             capture::stream_route_active(),
                             game_was_running,
@@ -254,6 +257,12 @@ pub(crate) async fn run_loop(
                         game_was_running = running;
                         if !running {
                             tracing::debug!(target: "scuffed_stat_tracker", "Tab ignored: game process not running");
+                            continue;
+                        }
+                        // Focus gate: ignored like a closed game, nothing
+                        // in the session changes. Unreadable reads on.
+                        if daemon::focus::tab_skip(Instant::now()).await {
+                            tracing::debug!(target: "scuffed_stat_tracker", "Tab ignored: another window is focused");
                             continue;
                         }
 
@@ -391,6 +400,7 @@ pub(crate) async fn run_loop(
                 }
                 let running = game_gate.is_running();
                 capture::note_game_seen(game_was_running, running, data_dir);
+                daemon::focus::game_edge(game_was_running, running);
                 if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,
@@ -407,6 +417,12 @@ pub(crate) async fn run_loop(
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
                     poll_failures.game_stopped();
+                    continue;
+                }
+                // Focus gate: a pause skips this read only (see
+                // `daemon::focus::poll_pause`).
+                if daemon::focus::poll_skip(&mut focus_paused, &mut st, Instant::now()).await {
+                    tracing::trace!(target: "scuffed_stat_tracker", "poll tick skipped: another window is focused");
                     continue;
                 }
 
@@ -508,12 +524,12 @@ pub(crate) async fn run_loop(
                         // A copy: a poll that a Tab drops leaves the
                         // session's stability history as it was.
                         let mut stability = st.ocr_stability.clone();
-                        // A Tab-busy tick reads no phase, so it is not fed
-                        // to the pre-game saves.
-                        let pregame_want = pregame_dump
-                            .as_ref()
-                            .filter(|_| !outcome_only)
-                            .map(|dump| (dump.want(Instant::now()), dump.examples()));
+                        let pregame_want = pregame_tick_want(
+                            pregame_dump.as_mut(),
+                            st.active_game.as_ref(),
+                            now,
+                            outcome_only,
+                        );
                         // The post-game saves take Tab-busy ticks too: the
                         // end reel is when they matter most. Their samples
                         // count from the tick's start, not the grab's end,
@@ -714,6 +730,12 @@ pub(crate) async fn run_loop(
                             tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: outcome crop not written");
                         }
                         st.ocr_stability = stability;
+                        if let Some(dump) = pregame_dump.as_mut()
+                            && (signal.is_some() || end_reel || end_title_seen)
+                        {
+                            // The match ended: the no-folder checks resume.
+                            dump.note_match_end(Instant::now());
+                        }
                         if let (Some(dump), Some((seen, frame))) = (pregame_dump.as_mut(), pregame) {
                             dump.observe(Instant::now(), seen, frame);
                         }
@@ -886,6 +908,7 @@ pub(crate) async fn run_loop(
                 // only when a restore token can reopen it.
                 let running = game_gate.is_running();
                 capture::note_game_seen(game_was_running, running, data_dir);
+                daemon::focus::game_edge(game_was_running, running);
                 if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,
@@ -1190,6 +1213,29 @@ pub(crate) async fn with_bridge_hold<K, E, H>(
 /// state as well as the awaited copy, which doubled that part of
 /// `handle_capture`'s future (23,280 B in a debug build). `inspect` wraps
 /// it in place.
+/// The pre-game saves' want for the tick polled at `now`, with their
+/// ban-results examples. The match skip is set from the session's open
+/// `game` first ([`daemon::pregame_dump::match_board_read`]), so with no
+/// game folder open the want looks for no loading screen or roster
+/// mid-match. `None` with the switch off, or on a Tab-busy tick
+/// (`outcome_only`), which reads no phase and is not fed to them.
+pub(crate) fn pregame_tick_want(
+    dump: Option<&mut daemon::pregame_dump::PregameDump>,
+    game: Option<&ActiveGame>,
+    now: Instant,
+    outcome_only: bool,
+) -> Option<(
+    daemon::pregame_dump::PregameWant,
+    Arc<super::pregame_ban_title::BanTitleExamples>,
+)> {
+    let dump = dump?;
+    dump.set_match_read(daemon::pregame_dump::match_board_read(game, now));
+    if outcome_only {
+        return None;
+    }
+    Some((dump.want(now), dump.examples()))
+}
+
 pub(crate) fn then_end_tab_hold<F: std::future::Future>(
     retries: F,
 ) -> impl std::future::Future<Output = F::Output> {

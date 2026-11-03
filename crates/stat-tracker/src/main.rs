@@ -515,6 +515,9 @@ enum FrameAnalysisOutcome {
     /// inside the pause gets the same answer), and not an error: the portal
     /// code logged its own WARN.
     PortalPaused,
+    /// The focus gate paused this attempt: another window is focused, so
+    /// nothing was grabbed. Not retried and not an error.
+    NotFocused,
 }
 
 /// What a Tab capture actually did, reported back to the session state machine.
