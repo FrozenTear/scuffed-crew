@@ -736,9 +736,11 @@ async fn admin_lists_reads_and_deletes_visible_icons() {
     );
     assert_eq!(deleted, vec![expected]);
 
-    // An opted-out member's icon is hidden from admins and stays stored.
-    let uri = format!("/api/hero-icons/{other_id}");
-    let got = delete(&w.app, &uri, ADMIN_SESSION).await;
+    // An opted-out member's icon is hidden from admin reads and stays stored.
+    // Admins can still delete it; see
+    // `admin_deletes_an_opted_out_members_hidden_icon`.
+    let image = format!("/api/hero-icons/{other_id}/image");
+    let got = get(&w.app, &image, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
     assert!(w.dir().join(format!("{other_id}.png")).exists());
     assert!(w.db().get_hero_icon(&other_id).await.unwrap().is_some());
