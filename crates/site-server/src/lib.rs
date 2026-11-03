@@ -608,6 +608,14 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             get(routes::stats::member_map_stats),
         )
         .route(
+            "/api/stats/member/{id}/matches",
+            get(routes::stats::member_matches),
+        )
+        .route(
+            "/api/stats/member/{id}/matches/{match_id}",
+            get(routes::stats::member_match),
+        )
+        .route(
             "/api/stats/tokens",
             get(routes::stats::list_daemon_tokens).post(routes::stats::create_daemon_token),
         )
