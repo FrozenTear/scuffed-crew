@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod bans_picks;
 mod commands;
 mod edits;
 mod export;
@@ -166,6 +167,7 @@ impl LocalStore {
             DEFINE FIELD IF NOT EXISTS recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
             DEFINE FIELD IF NOT EXISTS suspect_fields ON personal_match TYPE array<string> DEFAULT [];
             DEFINE FIELD IF NOT EXISTS name_recognizer ON personal_match TYPE option<string>;
+            DEFINE FIELD IF NOT EXISTS bans_picks ON personal_match TYPE option<string>;
             DEFINE TABLE IF NOT EXISTS hero_timeline SCHEMALESS;
             DEFINE INDEX IF NOT EXISTS idx_timeline_session ON hero_timeline FIELDS session_id UNIQUE;
             DEFINE TABLE IF NOT EXISTS store_meta SCHEMALESS;
@@ -300,6 +302,9 @@ async fn lock_released_within(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_bans_picks;
 
 #[cfg(test)]
 mod tests_rows;

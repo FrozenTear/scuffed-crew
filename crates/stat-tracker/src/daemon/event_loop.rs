@@ -344,6 +344,11 @@ pub(crate) async fn run_loop(
                         data_dir,
                         st.capture_count,
                     );
+                    // The bans and picks read for this game, before the live
+                    // snapshot is cut so it carries them.
+                    if let Some(dump) = pregame_dump.as_mut() {
+                        dump.attach_bans_picks(store, &stored_sid).await;
+                    }
                     refresh_snapshot_after_capture(&st, store, data_dir, &stored_sid).await;
                 }
                 // A Tab pressed while that capture ran runs now, unless the

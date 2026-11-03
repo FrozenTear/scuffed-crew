@@ -70,6 +70,7 @@ pub(crate) async fn store_held_board(
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
         suspect_fields: Vec::new(),
         name_recognizer: None,
+        bans_picks: None,
     };
     storage::append_match_log(data_dir, &row);
     store

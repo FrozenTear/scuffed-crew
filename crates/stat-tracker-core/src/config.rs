@@ -185,6 +185,14 @@ pub struct Config {
     /// while on.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub name_reader: bool,
+    /// The bans and picks reader (`cv-v1`, the `bans-picks-v1` pack): on
+    /// unless the file says `false`. The ban results, the hero select and the
+    /// ban vote of each game are read from the screens kept around the game
+    /// and stored with it, locally. Env `STAT_TRACKER_BANS_PICKS_RECOGNIZER`
+    /// set to `off`, `0`, `false` or `no` turns it off for one run and is never
+    /// stored. Not written while on.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub bans_picks_reader: bool,
     /// More in-game names that are all this member's (alts, a renamed
     /// account), as shown in-game without the `#1234`. Every entry counts as
     /// the member's own name, the same as [`Self::player_name`]. Empty (also
@@ -363,6 +371,7 @@ impl Default for Config {
             reader: ReaderSetting::New,
             ocr: OcrSetting::On,
             name_reader: true,
+            bans_picks_reader: true,
             player_names: Vec::new(),
             live_upload: true,
             rank_reader: false,

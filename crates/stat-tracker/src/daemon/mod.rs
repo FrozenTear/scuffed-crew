@@ -5,6 +5,7 @@
 //! `use crate::*;`, and this module re-exports each file's items, so
 //! `main.rs` and `main_tests` name them as before.
 
+pub(crate) mod bans_picks;
 mod debug_dumps;
 mod event_loop;
 pub(crate) mod focus;

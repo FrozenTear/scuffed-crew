@@ -27,6 +27,14 @@ pub fn names_dir_in(data_dir: &Path) -> PathBuf {
     data_dir.join("templates").join(NAMES_PACK_SUBDIR)
 }
 
+/// File name of the bans-picks-v1 pack on the pack list: the 100 by 96 hero
+/// icons the cv-v1 bans and picks reader matches.
+pub const BANS_PICKS_PACK_NAME: &str = "bans-picks-v1.tar";
+
+/// Folder of the bans-picks-v1 pack under the data dir
+/// (`shadow::bans_picks::TEMPLATE_DIR`).
+pub const BANS_PICKS_PACK_DIR: &str = "templates/bans-picks-v1";
+
 /// File name of the hero template pack on the pack list.
 pub const HEROES_PACK_NAME: &str = "heroes-v1.tar";
 
@@ -83,8 +91,9 @@ impl PackSpec {
 /// The hero packs are read by a reader today (heroes-v1 by the shadow log and
 /// as the new reader's fallback, heroes-v2 and heroes-v2-1080 by the new
 /// reader), and so are maps-v1 (the new reader's map banner), words-v1 (its
-/// result words) and names-v1 (the name reader's letter pack). bans-v1 is
-/// not opened by a reader yet.
+/// result words), names-v1 (the name reader's letter pack) and
+/// bans-picks-v1 (the cv-v1 bans and picks reader). bans-v1 is not opened by
+/// a reader yet.
 pub const PACKS: &[PackSpec] = &[
     PackSpec {
         name: HEROES_PACK_NAME,
@@ -126,6 +135,12 @@ pub const PACKS: &[PackSpec] = &[
         name: NAMES_PACK_NAME,
         dir: names_dir_in,
         layout: PackLayout::Names,
+        required: false,
+    },
+    PackSpec {
+        name: BANS_PICKS_PACK_NAME,
+        dir: |data_dir| data_dir.join(BANS_PICKS_PACK_DIR),
+        layout: PackLayout::BanIcons,
         required: false,
     },
 ];

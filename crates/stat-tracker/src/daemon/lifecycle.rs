@@ -569,8 +569,17 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     }
     let mut sync_task = None;
     let mut restart_to = None;
-    let mut pregame_dump = daemon::pregame_dump::PregameDump::new(
+    // The bans and picks reader: on unless the config row or the env var
+    // says off, and it runs the saver even with the debug saves off.
+    let bans_picks = daemon::bans_picks::BansPicksFeed::for_config(
+        config.bans_picks_reader,
+        shadow::bans_picks::BansPicksSetting::from_env(),
+        &ctx.data_dir,
+        ctx.sync_client.is_some(),
+    );
+    let mut pregame_dump = daemon::pregame_dump::PregameDump::with_bans_picks(
         ctx.save_pregame_screens,
+        bans_picks,
         &ctx.data_dir,
         ctx.auto_detect.poll_interval(ctx.use_new_reader),
     );

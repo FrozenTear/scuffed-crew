@@ -171,6 +171,7 @@ fn row(game: usize, capture: usize) -> PersonalMatch {
         recognizer: "cv-v8".into(),
         suspect_fields: Vec::new(),
         name_recognizer: Some("names-v1".into()),
+        bans_picks: None,
     }
 }
 

@@ -187,6 +187,7 @@ impl AdvancedSection {
             AdvancedSection::Troubleshooting => &[
                 "debug_ocr",
                 "debug_save_pregame_screens",
+                "bans_picks_reader",
                 "shadow_recognizer",
             ],
         }
@@ -610,6 +611,8 @@ pub enum ConfigEdit {
     OcrWorkers(Option<u32>),
     /// Save screens around each game (`debug_save_pregame_screens`).
     SavePregameScreens(bool),
+    /// Read bans and picks (`bans_picks_reader`).
+    BansPicksReader(bool),
 }
 
 impl ConfigEdit {
@@ -636,6 +639,7 @@ impl ConfigEdit {
             ConfigEdit::ShareReportPictures(on) => config.share_report_pictures = on,
             ConfigEdit::CaptureOnlyOnScreen(on) => config.capture_only_on_screen = on,
             ConfigEdit::SavePregameScreens(on) => config.debug_save_pregame_screens = on,
+            ConfigEdit::BansPicksReader(on) => config.bans_picks_reader = on,
             ConfigEdit::AddPlayerName(name) => {
                 // The core's rule: trimmed, no #1234 tag, at least 3
                 // characters. Anything else is not a name.
@@ -980,6 +984,7 @@ mod tests {
         config.ocr_threads = Some(2);
         config.name_reader = false;
         config.shadow_recognizer = true;
+        config.bans_picks_reader = false;
         config.sync = Some(stat_tracker::config::SyncConfig {
             server_url: "https://example.org".into(),
             token: "t".into(),

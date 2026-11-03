@@ -138,6 +138,7 @@ pub(crate) fn pm(
         recognizer: String::new(),
         suspect_fields: Vec::new(),
         name_recognizer: None,
+        bans_picks: None,
     }
 }
 
