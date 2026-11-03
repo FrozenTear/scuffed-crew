@@ -18,6 +18,7 @@ use crate::routes::Route;
 use crate::state::use_auth;
 use crate::util::encode_query;
 
+use super::bans_picks::{BANS_PICKS_CSS, BansPicks, bans_picks_section, lenient};
 use super::history::{cell_is_unsure, marked_value, outcome_class, show_new_reader_badge};
 use super::role::game_role_label;
 use super::{format_date, map_game_mode, member_stats_url};
@@ -150,6 +151,11 @@ pub(super) struct GameRow {
     /// Cell names the reader flagged. Missing or null means no marks.
     #[serde(default)]
     suspect_fields: Option<Vec<String>>,
+    /// Bans and picks the tracker read for this game. Optional: older games
+    /// and trackers without the reader send nothing, and a value that does not
+    /// parse reads as None. See [`super::bans_picks`].
+    #[serde(default, deserialize_with = "lenient")]
+    bans_picks: Option<BansPicks>,
 }
 
 impl GameRow {
@@ -348,6 +354,7 @@ fn game_detail(row: &GameRow) -> Element {
         if !summary.is_empty() {
             p { class: "game-unsure-note", "{summary}" }
         }
+        {bans_picks_section(&row.id, row.bans_picks.as_ref())}
     }
 }
 
@@ -386,6 +393,7 @@ pub fn StatsMatch(id: String) -> Element {
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: super::STATS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-game-game-css", css: GAME_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stats-bans-picks-css", css: BANS_PICKS_CSS }
         div { class: "stats-page my-stats game-page",
             if show_back {
                 Link { class: "game-back", to: Route::Stats {}, "Back to My Stats" }
@@ -418,6 +426,7 @@ mod tests {
             edited: false,
             recognizer: Some("ocr-v1".to_string()),
             suspect_fields: Some(suspect.iter().map(|s| (*s).to_string()).collect()),
+            bans_picks: None,
         }
     }
 
@@ -673,5 +682,55 @@ mod tests {
     fn missing_game_offers_back_to_my_stats_once() {
         assert!(!shows_top_back_link(&GameView::Missing));
         assert!(shows_top_back_link(&GameView::Pending));
+    }
+    const OLD_GAME_JSON: &str = r#"{"id":"g1","hero":"Ana","map_name":"Ilios",
+        "game_mode":"control","role":"Support","outcome":"victory","elims":1,
+        "deaths":2,"assists":3,"damage":4,"healing":5,"mitigation":6,
+        "played_at":"2026-03-15T12:00:00Z","edited":false}"#;
+
+    fn game_json(extra: &str) -> GameRow {
+        let mut value: serde_json::Value = serde_json::from_str(OLD_GAME_JSON).unwrap();
+        let extra: serde_json::Value = serde_json::from_str(extra).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).expect("game row")
+    }
+
+    #[test]
+    fn an_old_game_without_bans_and_picks_renders_as_before() {
+        let old: GameRow = serde_json::from_str(OLD_GAME_JSON).expect("old row");
+        assert_eq!(old.bans_picks, None);
+        let html = render(old);
+        assert!(!html.contains("game-bans-picks"), "{html}");
+        for extra in [
+            r#"{"bans_picks": null}"#,
+            r#"{"bans_picks": {}}"#,
+            r#"{"bans_picks": {"bans": [], "picks": []}}"#,
+            r#"{"bans_picks": "garbled"}"#,
+        ] {
+            let html = render(game_json(extra));
+            assert!(!html.contains("game-bans-picks"), "{extra}: {html}");
+        }
+    }
+
+    #[test]
+    fn a_game_with_bans_and_picks_shows_them_after_the_stats() {
+        let game = game_json(
+            r#"{"bans_picks": {"bans": [{"hero": "ana", "team": "own"},
+            {"hero": "genji", "team": "enemy"}],
+            "picks": ["kiriko", null]}}"#,
+        );
+        let html = render(game);
+        assert!(html.contains("Bans and picks"), "{html}");
+        assert!(html.contains("id=\"bans-picks-g1-heading\""), "{html}");
+        for hero in ["Ana", "Genji", "Kiriko"] {
+            assert!(html.contains(hero), "{hero}: {html}");
+        }
+        assert!(
+            html.find("game-bans-picks").unwrap() > html.find("game-stats").unwrap_or(0),
+            "{html}"
+        );
     }
 }

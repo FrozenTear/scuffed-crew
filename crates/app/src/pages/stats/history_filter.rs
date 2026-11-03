@@ -282,6 +282,7 @@ mod tests {
             played_at: Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap(),
             recognizer: None,
             suspect_fields: None,
+            bans_picks: None,
         }
     }
 
