@@ -1,6 +1,9 @@
-//! Contributed hero icons: upload, opt-in, owner and officer reads, deletes.
+//! Contributed hero icons: upload, opt-in, owner and admin reads, deletes,
+//! and officer counts.
 //!
-//! Members: an owner who contributes, another member, and an officer. Icons
+//! Members: an owner who contributes, another member, an officer and an admin.
+//! Only the admin reads or deletes another member's icons. The officer gets
+//! per-member counts only. Icons
 //! are written to a fresh directory under the system temp dir, which each
 //! test removes at the end. Nothing is written into the repo tree.
 
@@ -34,10 +37,12 @@ use scuffed_types::{
 const OWNER: &str = "iconowner";
 const OTHER: &str = "iconother";
 const OFFICER: &str = "iconofficer";
+const ADMIN: &str = "iconadmin";
 
 const OWNER_SESSION: &str = "icons-owner-session";
 const OTHER_SESSION: &str = "icons-other-session";
 const OFFICER_SESSION: &str = "icons-officer-session";
+const ADMIN_SESSION: &str = "icons-admin-session";
 
 const BOUNDARY: &str = "hero-icon-test-boundary";
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
@@ -158,6 +163,7 @@ async fn world_with(hero_icons: HeroIconStore) -> World {
     seed_member(&state.db, OWNER, "member", OWNER_SESSION).await;
     seed_member(&state.db, OTHER, "member", OTHER_SESSION).await;
     seed_member(&state.db, OFFICER, "officer", OFFICER_SESSION).await;
+    seed_member(&state.db, ADMIN, "admin", ADMIN_SESSION).await;
     let app = create_router(state.clone());
     World { app, state }
 }
@@ -642,7 +648,7 @@ async fn upload_rate_limit_is_json_429() {
 }
 
 #[tokio::test]
-async fn officer_lists_counts_and_deletes_visible_icons() {
+async fn admin_lists_reads_and_deletes_visible_icons() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
     set_opt_in(&w.app, OTHER_SESSION, true).await;
@@ -652,10 +658,10 @@ async fn officer_lists_counts_and_deletes_visible_icons() {
     let mut owner_ids = ids_of(&body["icons"]);
     owner_ids.sort();
     let other_id = first_id(&upload_one(&w.app, OTHER_SESSION, "mercy").await);
-    // Opted out: kept, but not counted, listed, read or deletable by officers.
+    // Opted out: kept, but not counted, listed, read or deletable by staff.
     set_opt_in(&w.app, OTHER_SESSION, false).await;
 
-    let (status, list) = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
+    let (status, list) = get(&w.app, "/api/hero-icons", ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{list}");
     let mut listed = ids_of(&list["data"]);
     listed.sort();
@@ -675,8 +681,12 @@ async fn officer_lists_counts_and_deletes_visible_icons() {
     );
     assert_eq!(viewed, vec![all]);
 
+    // Officers and admins get the same counts.
     let (status, counts) = get(&w.app, "/api/hero-icons/members", OFFICER_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{counts}");
+    let (status, admin_counts) = get(&w.app, "/api/hero-icons/members", ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{admin_counts}");
+    assert_eq!(admin_counts, counts);
     assert_eq!(member_ids_of(&counts), vec![OWNER.to_string()]);
     let row = &counts["data"][0];
     assert_eq!(row["icon_count"], json!(2));
@@ -685,7 +695,7 @@ async fn officer_lists_counts_and_deletes_visible_icons() {
     assert!(counts.get("next_cursor").is_none(), "{counts}");
 
     let uri = format!("/api/hero-icons/members/{OWNER}");
-    let (status, per_member) = get(&w.app, &uri, OFFICER_SESSION).await;
+    let (status, per_member) = get(&w.app, &uri, ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{per_member}");
     assert_eq!(ids_of(&per_member["icons"]).len(), 2);
     let viewed = audits_of(w.db(), "viewed_hero_icons").await;
@@ -700,14 +710,14 @@ async fn officer_lists_counts_and_deletes_visible_icons() {
     // Thumbnail fetches are not audited.
     let target = owner_ids[0].clone();
     let uri = format!("/api/hero-icons/{target}/image");
-    let (status, _, bytes) = get_raw(&w.app, &uri, OFFICER_SESSION).await;
+    let (status, _, bytes) = get_raw(&w.app, &uri, ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK);
     assert!(bytes.starts_with(&PNG_SIGNATURE));
     assert_eq!(audits_of(w.db(), "viewed_hero_icons").await.len(), 2);
 
-    // Officer delete is a real removal of the row and the file.
+    // Admin delete is a real removal of the row and the file.
     let uri = format!("/api/hero-icons/{target}");
-    let (status, body) = delete(&w.app, &uri, OFFICER_SESSION).await;
+    let (status, body) = delete(&w.app, &uri, ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["deleted"], json!(1));
     assert!(!w.dir().join(format!("{target}.png")).exists());
@@ -721,9 +731,9 @@ async fn officer_lists_counts_and_deletes_visible_icons() {
     );
     assert_eq!(deleted, vec![expected]);
 
-    // An opted-out member's icon is hidden from officers and stays stored.
+    // An opted-out member's icon is hidden from admins and stays stored.
     let uri = format!("/api/hero-icons/{other_id}");
-    let got = delete(&w.app, &uri, OFFICER_SESSION).await;
+    let got = delete(&w.app, &uri, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
     assert!(w.dir().join(format!("{other_id}.png")).exists());
     assert!(w.db().get_hero_icon(&other_id).await.unwrap().is_some());
@@ -781,24 +791,141 @@ async fn icons_of_one_request_list_last_part_first() {
     let mut expected = uploaded.clone();
     expected.reverse();
     assert_eq!(ids_of(&mine["icons"]), expected);
-    let (_, list) = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
+    let (_, list) = get(&w.app, "/api/hero-icons", ADMIN_SESSION).await;
     assert_eq!(ids_of(&list["data"]), expected);
     w.cleanup();
 }
 
 #[tokio::test]
-async fn members_are_refused_on_officer_routes() {
+async fn members_and_officers_are_refused_on_staff_routes() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
+    let forbidden = StatusCode::FORBIDDEN;
+    let got = get(&w.app, "/api/hero-icons/members", OTHER_SESSION).await;
+    assert_error(&got, forbidden, "Officer access required");
+
     let owner_icons = format!("/api/hero-icons/members/{OWNER}");
-    for uri in [
-        "/api/hero-icons",
-        "/api/hero-icons/members",
-        owner_icons.as_str(),
-    ] {
-        let got = get(&w.app, uri, OTHER_SESSION).await;
-        assert_error(&got, StatusCode::FORBIDDEN, "Officer access required");
+    for token in [OTHER_SESSION, OFFICER_SESSION] {
+        for uri in ["/api/hero-icons", owner_icons.as_str()] {
+            let got = get(&w.app, uri, token).await;
+            assert_error(&got, forbidden, "Admin access required");
+        }
+        let got = delete(&w.app, &owner_icons, token).await;
+        assert_error(&got, forbidden, "Admin access required");
     }
+    w.cleanup();
+}
+
+/// Robert's rule: officers get per-member counts and nothing else of another
+/// member's icons. Their own icons work like any member's.
+#[tokio::test]
+async fn officers_get_counts_only() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    set_opt_in(&w.app, OFFICER_SESSION, true).await;
+    let id = first_id(&upload_one(&w.app, OWNER_SESSION, "ana").await);
+    let forbidden = StatusCode::FORBIDDEN;
+    let admin_required = "Admin access required";
+
+    // Count: 200.
+    let (status, counts) = get(&w.app, "/api/hero-icons/members", OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{counts}");
+    let mut counted = member_ids_of(&counts);
+    counted.sort();
+    assert_eq!(counted, vec![OFFICER.to_string(), OWNER.to_string()]);
+    let owner_row = counts["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["member_id"] == json!(OWNER))
+        .expect("owner row");
+    assert_eq!(owner_row["icon_count"], json!(1));
+
+    // Image read, icon lists, single delete and delete all: 403.
+    let image = format!("/api/hero-icons/{id}/image");
+    let got = get(&w.app, &image, OFFICER_SESSION).await;
+    assert_error(&got, forbidden, admin_required);
+    let got = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
+    assert_error(&got, forbidden, admin_required);
+    let owner_icons = format!("/api/hero-icons/members/{OWNER}");
+    let got = get(&w.app, &owner_icons, OFFICER_SESSION).await;
+    assert_error(&got, forbidden, admin_required);
+    let one = format!("/api/hero-icons/{id}");
+    let got = delete(&w.app, &one, OFFICER_SESSION).await;
+    assert_error(&got, forbidden, admin_required);
+    let got = delete(&w.app, &owner_icons, OFFICER_SESSION).await;
+    assert_error(&got, forbidden, admin_required);
+
+    // An unknown id gets the same 403, so it tells the officer nothing.
+    let missing = "/api/hero-icons/0123456789abcdef0123456789abcdef";
+    let got = get(&w.app, &format!("{missing}/image"), OFFICER_SESSION).await;
+    assert_error(&got, forbidden, admin_required);
+    let got = delete(&w.app, missing, OFFICER_SESSION).await;
+    assert_error(&got, forbidden, admin_required);
+
+    // Nothing was deleted and nothing was audited.
+    assert!(w.dir().join(format!("{id}.png")).exists());
+    assert!(w.db().get_hero_icon(&id).await.unwrap().is_some());
+    for action in [
+        "viewed_hero_icons",
+        "deleted_hero_icon",
+        "deleted_all_hero_icons",
+    ] {
+        assert!(audits_of(w.db(), action).await.is_empty(), "{action}");
+    }
+
+    // The officer's own icons: listed, read and deleted like any member's.
+    let own = first_id(&upload_one(&w.app, OFFICER_SESSION, "mercy").await);
+    let (_, mine) = get(&w.app, "/api/hero-icons/mine", OFFICER_SESSION).await;
+    assert_eq!(ids_of(&mine["icons"]), vec![own.clone()]);
+    let own_image = format!("/api/hero-icons/{own}/image");
+    let (status, _, bytes) = get_raw(&w.app, &own_image, OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(bytes.starts_with(&PNG_SIGNATURE));
+    let own_one = format!("/api/hero-icons/{own}");
+    let (status, body) = delete(&w.app, &own_one, OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    assert_eq!(files_on_disk(w.dir()), vec![format!("{id}.png")]);
+    w.cleanup();
+}
+
+/// Admin deletes of another member's icons, one and all, and a member's own
+/// delete, side by side.
+#[tokio::test]
+async fn admin_delete_and_self_delete_work() {
+    let w = world().await;
+    set_opt_in(&w.app, OWNER_SESSION, true).await;
+    set_opt_in(&w.app, OTHER_SESSION, true).await;
+    let two = icons(vec![png(16, 16), png(17, 17)]);
+    let (status, body) = upload(&w.app, OWNER_SESSION, "ana", &two).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let owner_ids = ids_of(&body["icons"]);
+    let other_id = first_id(&upload_one(&w.app, OTHER_SESSION, "mercy").await);
+
+    // Admin single delete: 200.
+    let one = format!("/api/hero-icons/{}", owner_ids[0]);
+    let (status, body) = delete(&w.app, &one, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    // Admin delete all: 200.
+    let owner_icons = format!("/api/hero-icons/members/{OWNER}");
+    let (status, body) = delete(&w.app, &owner_icons, ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    assert_eq!(w.db().count_hero_icons_for_member(OWNER).await.unwrap(), 0);
+    let audited = audits_of(w.db(), "deleted_hero_icon").await;
+    assert_eq!(audited.len(), 1, "{audited:?}");
+    assert_eq!(audited[0].1, OWNER);
+    assert_eq!(audits_of(w.db(), "deleted_all_hero_icons").await.len(), 1);
+
+    // Self delete: 200, not audited.
+    let mine = format!("/api/hero-icons/{other_id}");
+    let (status, body) = delete(&w.app, &mine, OTHER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["deleted"], json!(1));
+    assert!(files_on_disk(w.dir()).is_empty());
+    assert_eq!(audits_of(w.db(), "deleted_hero_icon").await.len(), 1);
     w.cleanup();
 }
 
@@ -834,7 +961,7 @@ async fn another_members_icon_is_404_for_read_and_delete() {
 }
 
 #[tokio::test]
-async fn opting_out_hides_icons_from_officers_but_keeps_them() {
+async fn opting_out_hides_icons_from_staff_but_keeps_them() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
     let two = icons(vec![png(16, 16), png(17, 17)]);
@@ -845,14 +972,14 @@ async fn opting_out_hides_icons_from_officers_but_keeps_them() {
     set_opt_in(&w.app, OWNER_SESSION, false).await;
 
     let image = format!("/api/hero-icons/{id}/image");
-    let got = get(&w.app, &image, OFFICER_SESSION).await;
+    let got = get(&w.app, &image, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
 
     let uri = format!("/api/hero-icons/members/{OWNER}");
-    let got = get(&w.app, &uri, OFFICER_SESSION).await;
+    let got = get(&w.app, &uri, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
 
-    let (status, list) = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
+    let (status, list) = get(&w.app, "/api/hero-icons", ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{list}");
     assert!(ids_of(&list["data"]).is_empty());
 
@@ -860,11 +987,11 @@ async fn opting_out_hides_icons_from_officers_but_keeps_them() {
     assert_eq!(status, StatusCode::OK, "{counts}");
     assert!(member_ids_of(&counts).is_empty(), "{counts}");
 
-    // Officers cannot delete them, one by one or all at once.
+    // Admins cannot delete them, one by one or all at once.
     let one = format!("/api/hero-icons/{id}");
-    let got = delete(&w.app, &one, OFFICER_SESSION).await;
+    let got = delete(&w.app, &one, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
-    let got = delete(&w.app, &uri, OFFICER_SESSION).await;
+    let got = delete(&w.app, &uri, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
     assert_eq!(files_on_disk(w.dir()).len(), 2);
     assert_eq!(w.db().count_hero_icons_for_member(OWNER).await.unwrap(), 2);
@@ -920,7 +1047,7 @@ async fn delete_all_removes_rows_and_files() {
 }
 
 #[tokio::test]
-async fn officer_delete_all_needs_the_member_opted_in() {
+async fn admin_delete_all_needs_the_member_opted_in() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
     set_opt_in(&w.app, OTHER_SESSION, true).await;
@@ -930,13 +1057,13 @@ async fn officer_delete_all_needs_the_member_opted_in() {
     let other_id = first_id(&upload_one(&w.app, OTHER_SESSION, "ana").await);
     set_opt_in(&w.app, OWNER_SESSION, false).await;
 
-    // Members cannot use the officer route, not even for their own icons.
+    // Members cannot use the admin route, not even for their own icons.
     let owner_uri = format!("/api/hero-icons/members/{OWNER}");
     let got = delete(&w.app, &owner_uri, OWNER_SESSION).await;
-    assert_error(&got, StatusCode::FORBIDDEN, "Officer access required");
+    assert_error(&got, StatusCode::FORBIDDEN, "Admin access required");
 
     // Opted out: refused, nothing deleted.
-    let got = delete(&w.app, &owner_uri, OFFICER_SESSION).await;
+    let got = delete(&w.app, &owner_uri, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::FORBIDDEN, "icon_opt_in_off");
     assert_eq!(files_on_disk(w.dir()).len(), 3);
     let left = w.db().count_hero_icons_for_member(OWNER).await.unwrap();
@@ -944,7 +1071,7 @@ async fn officer_delete_all_needs_the_member_opted_in() {
 
     // Opted in: every icon of that member goes, and the delete is audited.
     let other_uri = format!("/api/hero-icons/members/{OTHER}");
-    let (status, body) = delete(&w.app, &other_uri, OFFICER_SESSION).await;
+    let (status, body) = delete(&w.app, &other_uri, ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["deleted"], json!(1));
     assert!(!w.dir().join(format!("{other_id}.png")).exists());
@@ -957,7 +1084,7 @@ async fn officer_delete_all_needs_the_member_opted_in() {
     );
     assert_eq!(audited, vec![expected]);
 
-    let (status, body) = delete(&w.app, &other_uri, OFFICER_SESSION).await;
+    let (status, body) = delete(&w.app, &other_uri, ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["deleted"], json!(0));
     assert_eq!(audits_of(w.db(), "deleted_all_hero_icons").await.len(), 1);
@@ -979,14 +1106,23 @@ async fn path_traversal_and_malformed_ids_are_404() {
         "..",
         upper.as_str(),
     ];
-    for token in [OWNER_SESSION, OFFICER_SESSION] {
+    let refusals = [
+        (OWNER_SESSION, StatusCode::NOT_FOUND, "icon_not_found"),
+        (ADMIN_SESSION, StatusCode::NOT_FOUND, "icon_not_found"),
+        (
+            OFFICER_SESSION,
+            StatusCode::FORBIDDEN,
+            "Admin access required",
+        ),
+    ];
+    for (token, status, code) in refusals {
         for bad in bad_ids {
             let image = format!("/api/hero-icons/{bad}/image");
             let got = get(&w.app, &image, token).await;
-            assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
+            assert_error(&got, status, code);
             let one = format!("/api/hero-icons/{bad}");
             let got = delete(&w.app, &one, token).await;
-            assert_error(&got, StatusCode::NOT_FOUND, "icon_not_found");
+            assert_error(&got, status, code);
         }
     }
 
@@ -1043,7 +1179,7 @@ async fn disabled_store_answers_503() {
     assert_error(&got, disabled, "hero_icons_disabled");
     let got = upload_one(&w.app, OWNER_SESSION, "ana").await;
     assert_error(&got, disabled, "hero_icons_disabled");
-    let got = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
+    let got = get(&w.app, "/api/hero-icons", ADMIN_SESSION).await;
     assert_error(&got, disabled, "hero_icons_disabled");
     let got = delete(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
     assert_error(&got, disabled, "hero_icons_disabled");
@@ -1080,7 +1216,7 @@ async fn daemon_sync_token_is_not_a_session() {
 }
 
 #[tokio::test]
-async fn inactive_member_is_refused_and_hidden_from_officers() {
+async fn inactive_member_is_refused_and_hidden_from_staff() {
     let w = world().await;
     set_opt_in(&w.app, OWNER_SESSION, true).await;
     let id = first_id(&upload_one(&w.app, OWNER_SESSION, "ana").await);
@@ -1093,7 +1229,7 @@ async fn inactive_member_is_refused_and_hidden_from_officers() {
     assert_error(&got, forbidden, "Membership inactive");
 
     // Still opted in, but inactive: not listed, counted, read or deletable.
-    let (status, list) = get(&w.app, "/api/hero-icons", OFFICER_SESSION).await;
+    let (status, list) = get(&w.app, "/api/hero-icons", ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{list}");
     assert!(ids_of(&list["data"]).is_empty());
     let (status, counts) = get(&w.app, "/api/hero-icons/members", OFFICER_SESSION).await;
@@ -1102,15 +1238,15 @@ async fn inactive_member_is_refused_and_hidden_from_officers() {
 
     let not_found = StatusCode::NOT_FOUND;
     let uri = format!("/api/hero-icons/members/{OWNER}");
-    let got = get(&w.app, &uri, OFFICER_SESSION).await;
+    let got = get(&w.app, &uri, ADMIN_SESSION).await;
     assert_error(&got, not_found, "member_not_found");
-    let got = delete(&w.app, &uri, OFFICER_SESSION).await;
+    let got = delete(&w.app, &uri, ADMIN_SESSION).await;
     assert_error(&got, not_found, "member_not_found");
     let image = format!("/api/hero-icons/{id}/image");
-    let got = get(&w.app, &image, OFFICER_SESSION).await;
+    let got = get(&w.app, &image, ADMIN_SESSION).await;
     assert_error(&got, not_found, "icon_not_found");
     let one = format!("/api/hero-icons/{id}");
-    let got = delete(&w.app, &one, OFFICER_SESSION).await;
+    let got = delete(&w.app, &one, ADMIN_SESSION).await;
     assert_error(&got, not_found, "icon_not_found");
     assert_eq!(files_on_disk(w.dir()), vec![format!("{id}.png")]);
 
@@ -1118,14 +1254,14 @@ async fn inactive_member_is_refused_and_hidden_from_officers() {
     let got = get(
         &w.app,
         "/api/hero-icons/members/nosuchmember",
-        OFFICER_SESSION,
+        ADMIN_SESSION,
     )
     .await;
     assert_error(&got, not_found, "member_not_found");
     let got = delete(
         &w.app,
         "/api/hero-icons/members/nosuchmember",
-        OFFICER_SESSION,
+        ADMIN_SESSION,
     )
     .await;
     assert_error(&got, not_found, "member_not_found");

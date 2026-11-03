@@ -738,7 +738,7 @@ the same way it includes uploads.
 
 ## Hero icon contributions
 
-Member-contributed hero icon PNGs (opt-in, owner and officers only) stay on
+Member-contributed hero icon PNGs (opt-in, owner and admins only) stay on
 disk, outside the web root and outside the upload tree. Compose sets
 `HERO_ICONS_DIR` to `/app/data/hero-icons` and mounts the named volume
 `hero-icons-data` there. Without the variable the server uses
