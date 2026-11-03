@@ -88,11 +88,12 @@ pub(super) fn cell_is_unsure(suspect_fields: &[String], name: &str) -> bool {
 /// the hover tooltip. "{stat} might be misread" is real text inside the button
 /// for screen readers (which skip aria-label on a plain span), so each mark
 /// has its own accessible name. Its hit box is a 24 by 24 pixel `::after` box,
-/// so a tap a little off the small glyph still lands on the mark. Display only: it
-/// changes no value and no average.
+/// so a tap a little off the small glyph still lands on the mark. The open note
+/// starts outside that box, and a click or tap on the note closes it too.
+/// Display only: it changes no value and no average.
 #[component]
 fn UnsureMark(match_id: String, stat_name: String, start_open: bool) -> Element {
-    let mut local_open = use_signal(move || start_open);
+    let local_open = use_signal(move || start_open);
     // Inside a History row the open state lives on the row, so only one note
     // per row is open. Elsewhere (the game page) each mark keeps its own.
     let row = use_hook(try_consume_context::<RowNotes>);
@@ -112,6 +113,7 @@ fn UnsureMark(match_id: String, stat_name: String, start_open: bool) -> Element 
         ("stat-unsure-note", String::new())
     };
     let toggled_name = stat_name.clone();
+    let note_name = stat_name.clone();
     let sr_text = unsure_sr_text(&stat_name);
     rsx! {
         button {
@@ -119,17 +121,38 @@ fn UnsureMark(match_id: String, stat_name: String, start_open: bool) -> Element 
             r#type: "button",
             aria_expanded: if is_open { "true" } else { "false" },
             aria_controls: "{note_id}",
-            onclick: move |_| match row {
-                Some(RowNotes(mut shared)) => {
-                    let next = next_open_note(shared.peek().as_deref(), &toggled_name);
-                    shared.set(next);
-                }
-                None => local_open.toggle(),
-            },
+            onclick: move |_| toggle_note(row, local_open, &toggled_name),
             span { aria_hidden: "true", "?" }
             span { class: "sr-only", "{sr_text}" }
         }
-        span { class: "{note_class}", id: "{note_id}", role: "status", "{note}" }
+        // A click or tap on the open note closes it, like the mark. The note is
+        // never inside the row link, so the click opens nothing. Closed, it is
+        // a clipped 1px region, so it takes no clicks. The mark stays the
+        // keyboard control, so the note gets no role or tab stop for this.
+        span {
+            class: "{note_class}",
+            id: "{note_id}",
+            role: "status",
+            onclick: move |_| {
+                if is_open {
+                    toggle_note(row, local_open, &note_name);
+                }
+            },
+            "{note}"
+        }
+    }
+}
+
+/// Toggles the note of `stat_name`: through the row state inside a History row
+/// (one open note per row), or through the mark's own state elsewhere. The mark
+/// and its open note both call this.
+fn toggle_note(row: Option<RowNotes>, mut local_open: Signal<bool>, stat_name: &str) {
+    match row {
+        Some(RowNotes(mut shared)) => {
+            let next = next_open_note(shared.peek().as_deref(), stat_name);
+            shared.set(next);
+        }
+        None => local_open.toggle(),
     }
 }
 
@@ -932,6 +955,126 @@ mod tests {
             assert!(open.as_deref().is_none_or(|name| name == clicked));
         }
         assert_eq!(open, None);
+    }
+
+    /// Opening state of the note with this id, read from the rendered page.
+    fn is_open(html: &str, match_id: &str, stat: &str) -> bool {
+        let id = unsure_note_id(match_id, stat);
+        let (tag, body) = note_by_id(html, &id);
+        let open = tag.contains("stat-unsure-note-open");
+        assert_eq!(open, !body.is_empty(), "text only while open: {html}");
+        open
+    }
+
+    #[test]
+    fn a_click_on_the_open_note_closes_it() {
+        use std::cell::Cell;
+        thread_local! {
+            static ROW: Cell<Option<RowNotes>> = const { Cell::new(None) };
+        }
+        /// Hands the row state of the surrounding scope to the test.
+        #[component]
+        fn Probe() -> Element {
+            ROW.set(try_consume_context::<RowNotes>());
+            rsx! {}
+        }
+        fn view() -> Element {
+            rsx! {
+                RowNotesScope { open: Some("Hero".to_string()),
+                    div { class: "match-card match-card-link",
+                        UnsureMark {
+                            match_id: "x".to_string(),
+                            stat_name: "Hero".to_string(),
+                            start_open: false,
+                        }
+                        UnsureMark {
+                            match_id: "x".to_string(),
+                            stat_name: "Deaths".to_string(),
+                            start_open: false,
+                        }
+                        Probe {}
+                    }
+                }
+            }
+        }
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        let row = ROW.get().expect("the marks share one row state");
+        assert!(is_open(&dioxus_ssr::render(&dom), "x", "Hero"));
+
+        // The mark and its open note call `toggle_note` with the same arguments,
+        // so a click on the Hero note is this call. It closes the note.
+        dom.in_scope(ScopeId::APP, || {
+            toggle_note(Some(row), Signal::new(false), "Hero");
+        });
+        dom.render_immediate(&mut dioxus_core::NoOpMutations);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!is_open(&html, "x", "Hero"), "{html}");
+        assert!(!is_open(&html, "x", "Deaths"), "{html}");
+        assert_eq!(html.matches("stat-unsure-note-open").count(), 0, "{html}");
+
+        // Another mark opens its own note only, and a click on that note closes it.
+        for expect_open in [true, false] {
+            dom.in_scope(ScopeId::APP, || {
+                toggle_note(Some(row), Signal::new(false), "Deaths");
+            });
+            dom.render_immediate(&mut dioxus_core::NoOpMutations);
+            let html = dioxus_ssr::render(&dom);
+            assert_eq!(is_open(&html, "x", "Deaths"), expect_open, "{html}");
+            assert!(!is_open(&html, "x", "Hero"), "{html}");
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_lone_open_note_closes_it() {
+        // Outside a History row (the game page) the mark keeps its own state.
+        let mut dom = VirtualDom::new(|| rsx! { div {} });
+        dom.rebuild_in_place();
+        dom.in_scope(ScopeId::APP, || {
+            let own = Signal::new(true);
+            toggle_note(None, own, "Hero");
+            assert!(!own(), "a click on the open note closes it");
+            toggle_note(None, own, "Hero");
+            assert!(own(), "the mark opens it again");
+        });
+    }
+
+    #[test]
+    fn the_mark_and_its_note_both_take_clicks() {
+        fn view() -> Element {
+            rsx! {
+                UnsureMark {
+                    match_id: "x".to_string(),
+                    stat_name: "Hero".to_string(),
+                    start_open: true,
+                }
+            }
+        }
+        let mut dom = VirtualDom::new(view);
+        let mut mutations = dioxus_core::Mutations::default();
+        dom.rebuild(&mut mutations);
+        let click_listeners = mutations
+            .edits
+            .iter()
+            .filter(|edit| {
+                matches!(
+                    edit,
+                    dioxus_core::Mutation::NewEventListener { name, .. } if *name == "click"
+                )
+            })
+            .count();
+        assert_eq!(click_listeners, 2, "one on the button, one on the note");
+        // The note is still a status region, and neither it nor the mark is a link.
+        let html = dioxus_ssr::render(&dom);
+        let (tag, _) = note_by_id(&html, "unsure-note-x-hero");
+        assert!(
+            tag.starts_with("<span ") && tag.contains("role=\"status\""),
+            "{tag}"
+        );
+        assert!(
+            !html.contains("<a "),
+            "the mark and note hold no link: {html}"
+        );
     }
 
     #[test]

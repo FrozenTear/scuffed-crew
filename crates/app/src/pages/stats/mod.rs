@@ -526,6 +526,8 @@ const STATS_CSS: &str = r#"
         line-height: 0;
         text-decoration: none;
     }
+    /* One size for the hit box and for the clearance the open note keeps from it. */
+    .stat-unsure { --unsure-hit: 24px; }
     /* The glyph is about 9px with a zero-height box, far below a tap target.
        The hit box is a 24 by 24px ::after centered on the glyph. It is part of
        the button, so it sits above the row overlay link with the button's
@@ -536,8 +538,8 @@ const STATS_CSS: &str = r#"
         position: absolute;
         top: 50%;
         left: 50%;
-        width: 24px;
-        height: 24px;
+        width: var(--unsure-hit);
+        height: var(--unsure-hit);
         transform: translate(-50%, -50%);
         border-radius: 4px;
     }
@@ -563,7 +565,12 @@ const STATS_CSS: &str = r#"
         white-space: nowrap;
     }
     /* Open: a small note that wraps under the value and stays out of the
-       clipped value text. */
+       clipped value text. It starts outside the mark's hit box: when it shares
+       the line with the mark (the hero cell) a left margin of half the box
+       clears the box's right edge, and when it wraps under the value a top
+       margin of a quarter of the box clears the box's bottom edge. The stat
+       cells always wrap it under the value, so they set the left gap to zero
+       and keep their width. A click on the note closes it, like the mark. */
     .stat-unsure-note.stat-unsure-note-open {
         position: relative;
         z-index: 1;
@@ -574,7 +581,8 @@ const STATS_CSS: &str = r#"
         height: auto;
         max-width: min(14rem, 100%);
         min-width: var(--unsure-note-min, 0);
-        margin: 0.15rem 0 0;
+        margin: calc(var(--unsure-hit) / 4) 0 0 var(--unsure-note-gap, calc(var(--unsure-hit) / 2));
+        cursor: pointer;
         overflow: visible;
         clip-path: none;
         font-family: var(--font-body, inherit);
@@ -609,7 +617,10 @@ const STATS_CSS: &str = r#"
        under its neighbours. E, D and A grow it to the right, Dmg and Heal to
        the left, so it stays inside the stat block. The other cells line up at
        the top, so no value moves under the note. */
-    .match-stat:has(.stat-unsure-note-open) { --unsure-note-min: 10rem; }
+    .match-stat:has(.stat-unsure-note-open) {
+        --unsure-note-min: 10rem;
+        --unsure-note-gap: 0px;
+    }
     .match-stat:not(.match-stat-wide):has(.stat-unsure-note-open) { justify-content: flex-start; }
     .match-stat:not(.match-stat-wide):has(.stat-unsure-note-open) .stat-value-text { margin-left: auto; }
     .match-stats:has(.stat-unsure-note-open) { align-items: start; }
@@ -1719,6 +1730,50 @@ mod header_layout_tests {
     }
 
     #[test]
+    fn open_note_starts_outside_the_mark_hit_box_and_takes_clicks() {
+        // The hit box is centered on the glyph and --unsure-hit wide, so it
+        // reaches half that far past the glyph's center. The open note keeps
+        // half a box of left margin (same line, hero cell) and a quarter box of
+        // top margin (wrapped under the value) so it never covers the box.
+        let note = block_after(STATS_CSS, ".stat-unsure-note.stat-unsure-note-open {");
+        let note_head = note.split('}').next().unwrap();
+        assert!(
+            has_declaration(
+                note_head,
+                "margin: calc(var(--unsure-hit) / 4) 0 0 var(--unsure-note-gap, calc(var(--unsure-hit) / 2))"
+            ),
+            "the note starts outside the hit box: {note_head}"
+        );
+        assert!(
+            has_declaration(note_head, "cursor: pointer"),
+            "a click on the open note closes it: {note_head}"
+        );
+        assert!(
+            !note_head.contains("pointer-events"),
+            "the open note takes the click: {note_head}"
+        );
+        // The stat cells always wrap the note under the value, where only the
+        // top margin matters, so they drop the left gap and keep their width.
+        let cell = block_after(STATS_CSS, ".match-stat:has(.stat-unsure-note-open) {");
+        let cell_head = cell.split('}').next().unwrap();
+        assert!(
+            has_declaration(cell_head, "--unsure-note-gap: 0px"),
+            "{cell_head}"
+        );
+        // The gap is a property of the open rule only: no other open-note rule
+        // sets a margin that could undo it.
+        for rule in STATS_CSS
+            .split('}')
+            .filter(|rule| rule.contains("stat-unsure-note-open") && !rule.contains(":has("))
+        {
+            let head = rule.split('{').nth(1).unwrap_or("");
+            if head.contains("margin") {
+                assert!(head.contains("--unsure-hit"), "{rule}");
+            }
+        }
+    }
+
+    #[test]
     fn narrow_history_row_keeps_badge_mark_and_flagged_value() {
         let phone = block_after(STATS_CSS, "@media (max-width: 720px)");
         let full = block_after(phone, ".reader-badge-full");
@@ -1819,8 +1874,18 @@ mod header_layout_tests {
             has_declaration(hit_head, "position: absolute"),
             "{hit_head}"
         );
-        assert!(has_declaration(hit_head, "width: 24px"), "{hit_head}");
-        assert!(has_declaration(hit_head, "height: 24px"), "{hit_head}");
+        assert!(
+            has_declaration(hit_head, "width: var(--unsure-hit)"),
+            "{hit_head}"
+        );
+        assert!(
+            has_declaration(hit_head, "height: var(--unsure-hit)"),
+            "{hit_head}"
+        );
+        assert!(
+            STATS_CSS.contains(".stat-unsure { --unsure-hit: 24px; }"),
+            "the one place that sets the 24px box"
+        );
         assert!(
             !hit_head.contains("pointer-events"),
             "the hit box must take the tap: {hit_head}"
