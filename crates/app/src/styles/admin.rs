@@ -39,6 +39,16 @@ pub const CSS: &str = r#"
             min-height: 2.5rem;
         }
     }
+    /* A row-btn that is a link (a Link renders an anchor). Centered like the
+       buttons beside it, so its label does not sit at the top of the 2.5rem
+       phone height. */
+    .row-btn.row-btn-link {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        box-sizing: border-box;
+        text-decoration: none;
+    }
     .row-btn:disabled { opacity: 0.45; cursor: not-allowed; }
     .row-btn:hover { border-color: var(--accent-soft); color: var(--text); }
     .row-btn.danger:hover { border-color: var(--danger); color: var(--danger); }

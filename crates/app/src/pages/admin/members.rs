@@ -763,7 +763,7 @@ pub fn AdminMembers() -> Element {
                                                     "Stats"
                                                 }
                                                 Link {
-                                                    class: "row-btn",
+                                                    class: "row-btn row-btn-link",
                                                     to: Route::AdminMemberMatches { id: member.id.clone() },
                                                     aria_label: "View matches for {member.display_name}",
                                                     "Matches"
@@ -1550,6 +1550,27 @@ mod tests {
         assert_eq!(
             avatar_upload_failure_message(500),
             "Upload failed: HTTP 500"
+        );
+    }
+
+    #[test]
+    fn matches_link_is_centered_like_the_buttons_beside_it() {
+        let css = crate::styles::admin::CSS;
+        let start = css
+            .find(".row-btn.row-btn-link {")
+            .expect("row-btn-link rule");
+        let block = &css[start..start + css[start..].find('}').unwrap()];
+        for decl in [
+            "display: inline-flex",
+            "align-items: center",
+            "justify-content: center",
+        ] {
+            assert!(block.contains(decl), "{decl} in {block}");
+        }
+        let source = include_str!("members.rs");
+        assert!(
+            source.contains("class: \"row-btn row-btn-link\""),
+            "the Matches link uses the centered modifier"
         );
     }
 }
