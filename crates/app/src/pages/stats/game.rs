@@ -234,11 +234,9 @@ fn unsure_count(fields: &[String]) -> usize {
 fn unsure_summary(count: usize) -> Option<String> {
     match count {
         0 => None,
-        1 => Some(
-            "1 unsure read. The question mark shows which one. Check and edit if wrong.".into(),
-        ),
+        1 => Some("1 value might be misread. The question mark shows which one.".into()),
         n => Some(format!(
-            "{n} unsure reads. Question marks show which ones. Check and edit if wrong."
+            "{n} values might be misread. The question marks show which ones."
         )),
     }
 }
@@ -307,6 +305,7 @@ fn game_detail(row: &GameRow) -> Element {
     rsx! {
         header { class: "game-head",
             {marked_value(
+                &row.id,
                 &format!("game-outcome {oc}"),
                 &row.outcome,
                 "Result",
@@ -314,12 +313,12 @@ fn game_detail(row: &GameRow) -> Element {
                 cell_is_unsure(fields, "result"),
             )}
             h1 { class: "game-title",
-                {marked_value("", &map, "Map", false, cell_is_unsure(fields, "map"))}
+                {marked_value(&row.id, "", &map, "Map", false, cell_is_unsure(fields, "map"))}
             }
             p { class: "game-meta",
-                {marked_value("game-mode", &mode, "Mode", false, cell_is_unsure(fields, "mode"))}
+                {marked_value(&row.id, "game-mode", &mode, "Mode", false, cell_is_unsure(fields, "mode"))}
                 span { aria_hidden: "true", "·" }
-                {marked_value("game-hero", &row.hero, "Hero", false, cell_is_unsure(fields, "hero"))}
+                {marked_value(&row.id, "game-hero", &row.hero, "Hero", false, cell_is_unsure(fields, "hero"))}
                 span { aria_hidden: "true", "·" }
                 span { class: "game-role", "{role}" }
                 span { aria_hidden: "true", "·" }
@@ -341,7 +340,7 @@ fn game_detail(row: &GameRow) -> Element {
                 div { class: "game-stat", key: "{stat.label}",
                     dt { "{stat.label}" }
                     dd {
-                        {marked_value("game-stat-value", &stat.value.to_string(), stat.label, false, stat.unsure)}
+                        {marked_value(&row.id, "game-stat-value", &stat.value.to_string(), stat.label, false, stat.unsure)}
                     }
                 }
             }
@@ -518,8 +517,14 @@ mod tests {
     #[test]
     fn unsure_summary_is_quiet_when_sure() {
         assert_eq!(unsure_summary(0), None);
-        assert!(unsure_summary(1).unwrap().starts_with("1 unsure read."));
-        assert!(unsure_summary(3).unwrap().starts_with("3 unsure reads."));
+        assert_eq!(
+            unsure_summary(1).unwrap(),
+            "1 value might be misread. The question mark shows which one."
+        );
+        assert_eq!(
+            unsure_summary(3).unwrap(),
+            "3 values might be misread. The question marks show which ones."
+        );
     }
 
     #[test]
@@ -584,9 +589,49 @@ mod tests {
             assert!(html.contains(text), "{text} missing: {html}");
         }
         assert_eq!(html.matches("stat-unsure-mark").count(), 2, "{html}");
-        assert!(html.contains("title=\"Hero: unsure read."), "{html}");
-        assert!(html.contains("title=\"Damage: unsure read."), "{html}");
-        assert!(html.contains("2 unsure reads."), "{html}");
+        assert!(
+            html.contains("title=\"Hero: might be misread. Check it in the tracker.\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("title=\"Damage: might be misread. Check it in the tracker.\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("2 values might be misread. The question marks show which ones."),
+            "{html}"
+        );
+        assert_eq!(
+            html.matches("<button class=\"stat-unsure-mark\"").count(),
+            2,
+            "{html}"
+        );
+        // Page body only, so every button here is an unsure mark.
+        assert_eq!(html.matches("<button").count(), 2, "{html}");
+        assert_eq!(html.matches("aria-expanded=\"false\"").count(), 2, "{html}");
+        assert_eq!(html.matches("type=\"button\"").count(), 2, "{html}");
+        for text in ["Hero might be misread", "Damage might be misread"] {
+            assert_eq!(
+                html.matches(&format!("<span class=\"sr-only\">{text}</span>"))
+                    .count(),
+                1,
+                "{text}: {html}"
+            );
+        }
+        assert!(!html.contains("(might be misread)"), "{html}");
+        // Each mark's note is always present, empty, and wired to its button.
+        assert_eq!(html.matches("role=\"status\"").count(), 2, "{html}");
+        assert!(
+            html.contains("aria-controls=\"unsure-note-a-hero\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("aria-controls=\"unsure-note-a-damage\""),
+            "{html}"
+        );
+        assert!(html.contains("id=\"unsure-note-a-hero\""), "{html}");
+        assert!(html.contains("id=\"unsure-note-a-damage\""), "{html}");
+        assert!(!html.contains("stat-unsure-note-open"), "{html}");
         assert!(html.contains("outcome-win"), "{html}");
         assert!(
             !html.contains(NEW_READER_BADGE),
@@ -610,7 +655,18 @@ mod tests {
         assert!(html.contains(EDITED_BADGE), "{html}");
         assert!(html.contains("outcome-loss"), "{html}");
         assert!(!html.contains("stat-unsure-mark"), "{html}");
-        assert!(!html.contains("unsure read"), "{html}");
+        assert!(!html.contains("misread"), "{html}");
+        assert!(!html.contains("<button"), "{html}");
+    }
+
+    #[test]
+    fn unknown_and_row_indexed_names_stay_unmarked() {
+        let html = render(row("a", &["r3.dmg", "nope", "r01.e"]));
+        assert!(!html.contains("stat-unsure"), "{html}");
+        assert!(!html.contains("misread"), "{html}");
+        assert!(!html.contains("<button"), "{html}");
+        assert_eq!(unsure_count(&["r3.dmg".to_string()]), 0);
+        assert_eq!(unsure_summary(unsure_count(&["nope".to_string()])), None);
     }
 
     #[test]
