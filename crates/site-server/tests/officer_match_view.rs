@@ -665,7 +665,7 @@ async fn officer_reads_of_other_members_are_audited() {
     let priv_match = own_match_id(&app, PRIV_SESSION).await;
 
     // Audited: another member's list and one of their games.
-    let list = format!("/api/stats/member/{PUB}/matches");
+    let list = format!("/api/stats/member/{PUB}/matches?limit=10");
     let (status, body) = get(&app, &list, Some(OFFICER_SESSION)).await;
     assert_eq!(status, StatusCode::OK, "{list}: {body}");
     let one = format!("/api/stats/member/{PUB}/matches/{pub_match}");
@@ -723,7 +723,11 @@ async fn officer_reads_of_other_members_are_audited() {
         .iter()
         .find(|e| e.action == "viewed_member_matches")
         .expect("list read audited");
-    assert_eq!(list_row.details, None, "{list_row:?}");
+    assert_eq!(
+        list_row.details.as_deref(),
+        Some("offset=0 limit=10 season=all"),
+        "{list_row:?}"
+    );
     let one_row = views
         .iter()
         .find(|e| e.action == "viewed_member_match")

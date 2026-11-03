@@ -76,10 +76,10 @@ game that belongs to another member are all 404 `{"error":"Match not found"}`.
 Each 200 read of another member's games writes one audit row (fire and
 forget, a failed write is logged and does not fail the read):
 
-| Route                    | `action`                | `target_type` | `target_id` | `details`    |
-|--------------------------|-------------------------|---------------|-------------|--------------|
-| `.../matches`            | `viewed_member_matches` | `member`      | member id   | none         |
-| `.../matches/{match_id}` | `viewed_member_match`   | `member`      | member id   | the match id |
+| Route                    | `action`                | `target_type` | `target_id` | `details`                                    |
+|--------------------------|-------------------------|---------------|-------------|----------------------------------------------|
+| `.../matches`            | `viewed_member_matches` | `member`      | member id   | `offset=<n> limit=<n> season=<id or all>`    |
+| `.../matches/{match_id}` | `viewed_member_match`   | `member`      | member id   | the match id                                 |
 
 `actor_id` is the officer's member id. The list writes one row per page
 read. An officer reading their own games, and any refused read (401, 403,

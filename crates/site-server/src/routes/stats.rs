@@ -627,7 +627,7 @@ async fn ensure_officer_match_access(
         let target = state.db.get_member_safe(target_id).await.map_err(|e| {
             tracing::error!(
                 error = %e,
-                member_id = %target_id,
+                member_id = ?target_id,
                 "officer match view: member lookup failed"
             );
             internal_error()
@@ -646,7 +646,7 @@ async fn ensure_officer_match_access(
         .map_err(|e| {
             tracing::error!(
                 error = %e,
-                member_id = %target_id,
+                member_id = ?target_id,
                 "officer match view: stats visibility lookup failed"
             );
             internal_error()
@@ -668,7 +668,8 @@ async fn ensure_officer_match_access(
 /// matches from officers. Members read their own games on [`my_matches`].
 ///
 /// A 200 read of another member's games writes one `viewed_member_matches`
-/// audit row (target `member`, the member id) per page. Reads of the
+/// audit row (target `member`, the member id, details = the page and season
+/// as `offset=<n> limit=<n> season=<id or all>`) per page. Reads of the
 /// officer's own games and refused reads write none.
 pub(crate) async fn member_matches(
     State(state): State<AppState>,
@@ -687,7 +688,7 @@ pub(crate) async fn member_matches(
         .map_err(|e| {
             tracing::error!(
                 error = %e,
-                member_id = %member_id,
+                member_id = ?member_id,
                 "officer match view: match list query failed"
             );
             internal_error()
@@ -697,13 +698,20 @@ pub(crate) async fn member_matches(
         m.role = scuffed_types::filled_role_label(&m.role, &m.hero);
     }
     if officer.member.id != member_id {
+        // Built only from parsed values: the season id is one that resolved.
+        let season_label = if season.is_some() {
+            sq.season.as_deref().map(str::trim).unwrap_or("all")
+        } else {
+            "all"
+        };
+        let details = format!("offset={offset} limit={limit} season={season_label}");
         audit(
             &state.db,
             &officer.member.id,
             AuditAction::ViewedMemberMatches,
             AuditTargetType::Member,
             &member_id,
-            None,
+            Some(details.as_str()),
         )
         .await;
     }
@@ -734,7 +742,7 @@ pub(crate) async fn member_match(
         .map_err(|e| {
             tracing::error!(
                 error = %e,
-                member_id = %member_id,
+                member_id = ?member_id,
                 "officer match view: match lookup failed"
             );
             internal_error()
