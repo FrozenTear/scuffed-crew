@@ -172,6 +172,7 @@ fn row(game: usize, capture: usize) -> PersonalMatch {
         suspect_fields: Vec::new(),
         name_recognizer: Some("names-v1".into()),
         bans_picks: None,
+        bans_picks_status: None,
     }
 }
 

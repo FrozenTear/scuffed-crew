@@ -3,6 +3,8 @@
 
 use chrono::{DateTime, Utc};
 
+use crate::model::BansPicksStatus;
+
 use super::{LocalStore, rewrite_match_log_session};
 
 impl LocalStore {
@@ -41,6 +43,54 @@ impl LocalStore {
             Some(&|m| m.bans_picks = Some(json.clone())),
         );
         Ok(true)
+    }
+
+    /// Store `status` (`PersonalMatch::bans_picks_status`) on every snapshot
+    /// of `session_id`. `false`, nothing written, when the game is unknown,
+    /// already has a bans and picks result (its status stays), or already
+    /// has this status. A status from an earlier capture of the game, such
+    /// as `no_frames`, is replaced by a later one.
+    pub async fn attach_bans_picks_status(
+        &self,
+        session_id: &str,
+        status: &BansPicksStatus,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
+        let snaps = self.get_session_snapshots(session_id).await?;
+        if snaps.is_empty()
+            || snaps.iter().any(|m| m.bans_picks.is_some())
+            || snaps
+                .iter()
+                .all(|m| m.bans_picks_status.as_ref() == Some(status))
+        {
+            return Ok(false);
+        }
+        self.db
+            .query("UPDATE personal_match SET bans_picks_status = $st WHERE session_id = $sid")
+            .bind(("st", status.clone()))
+            .bind(("sid", session_id.to_string()))
+            .await?
+            .check()?;
+        let status = status.clone();
+        rewrite_match_log_session(
+            &self.data_dir,
+            session_id,
+            Some(&|m| m.bans_picks_status = Some(status.clone())),
+        );
+        Ok(true)
+    }
+
+    /// The status already stored for this match, for a later snapshot that
+    /// has none of its own.
+    pub(super) async fn session_bans_picks_status(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<BansPicksStatus>, Box<dyn std::error::Error + Send + Sync>> {
+        let snaps = self.get_session_snapshots(session_id).await?;
+        Ok(snaps
+            .into_iter()
+            .rev()
+            .find_map(|row| row.bans_picks_status))
     }
 
     /// The result already stored for this match, for a later snapshot that

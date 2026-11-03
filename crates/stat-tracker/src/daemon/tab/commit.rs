@@ -71,6 +71,7 @@ pub(crate) async fn store_held_board(
         suspect_fields: Vec::new(),
         name_recognizer: None,
         bans_picks: None,
+        bans_picks_status: None,
     };
     storage::append_match_log(data_dir, &row);
     store

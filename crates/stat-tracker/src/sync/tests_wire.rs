@@ -47,6 +47,7 @@ fn row(hero: &str, map: &str, mode: &str) -> PersonalMatch {
         suspect_fields: Vec::new(),
         name_recognizer: None,
         bans_picks: None,
+        bans_picks_status: None,
     }
 }
 
