@@ -2,13 +2,15 @@
 //! the first installs and races they run.
 
 use super::*;
+use scuffed_types::{PACK_IP_BURST, PACK_IP_REPLENISH_SECS};
 
 // ---- P1c fix round: against the site's real rate limit (F268-1) ----
 // The fake below keeps the bucket the way the site's limiter does, on a
 // clock that only the trackers' own waits move.
 
-/// The site's pack rate limit as governor 0.10 keeps it (GCRA): 8 in a
-/// burst, one more every 10 s, per address. A refused request costs
+/// The site's pack rate limit as governor 0.10 keeps it (GCRA):
+/// [`PACK_IP_BURST`] in a burst, one more every
+/// [`PACK_IP_REPLENISH_SECS`] s, per address. A refused request costs
 /// nothing and is told the whole seconds to the next allowed time, plus
 /// one (`governor_error_response` in site-server).
 struct Bucket {
@@ -18,8 +20,8 @@ struct Bucket {
 }
 
 impl Bucket {
-    const EVERY: Duration = Duration::from_secs(10);
-    const BURST: u32 = 8;
+    const EVERY: Duration = Duration::from_secs(PACK_IP_REPLENISH_SECS);
+    const BURST: u32 = PACK_IP_BURST;
 
     /// A bucket with `left` requests in it at time zero.
     fn with_left(left: u32) -> Self {
@@ -43,10 +45,10 @@ impl Bucket {
 }
 
 #[test]
-fn the_bucket_model_is_eight_then_one_every_ten_seconds() {
+fn the_bucket_model_is_the_burst_then_one_every_ten_seconds() {
     let mut bucket = Bucket { tat: None };
     let at = Duration::from_secs_f64;
-    for request in 0..8 {
+    for request in 0..Bucket::BURST {
         assert_eq!(bucket.ask(at(0.0)), Ok(()), "request {request}");
     }
     // Empty: the next one is allowed at 10 s. Asking does not cost.
@@ -57,13 +59,15 @@ fn the_bucket_model_is_eight_then_one_every_ten_seconds() {
     assert_eq!(bucket.ask(at(10.0)), Err(11));
     assert_eq!(bucket.ask(at(12.0)), Err(9));
     assert_eq!(bucket.ask(at(20.0)), Ok(()));
-    // After 80 quiet seconds the burst is whole again.
-    for request in 0..8 {
-        assert_eq!(bucket.ask(at(110.0)), Ok(()), "request {request}");
+    // The burst plus the two refills above is 18 requests, so the bucket
+    // is whole again 10 s after the last one was let through.
+    let whole = (f64::from(Bucket::BURST) + 3.0) * 10.0;
+    for request in 0..Bucket::BURST {
+        assert_eq!(bucket.ask(at(whole)), Ok(()), "request {request}");
     }
-    assert_eq!(bucket.ask(at(110.0)), Err(11));
+    assert_eq!(bucket.ask(at(whole)), Err(11));
     // The starting states the tests use.
-    assert_eq!(Bucket::with_left(8).ask(at(0.0)), Ok(()));
+    assert_eq!(Bucket::with_left(Bucket::BURST).ask(at(0.0)), Ok(()));
     let mut four = Bucket::with_left(4);
     for request in 0..4 {
         assert_eq!(four.ask(at(0.0)), Ok(()), "request {request}");
@@ -306,24 +310,22 @@ async fn run_trackers(clock: &Arc<SimClock>, trackers: Vec<Nap>) -> bool {
 const SIM_LIMIT: Duration = Duration::from_secs(3600);
 
 #[tokio::test]
-async fn against_the_real_limit_one_first_install_is_nine_requests_and_the_last_waits_once() {
+async fn against_the_real_limit_one_first_install_is_nine_requests_and_none_is_refused() {
     let clock = SimClock::new(1, SIM_LIMIT);
-    let (site, contents) = serve_limited(&clock, Bucket::with_left(8));
+    let (site, contents) = serve_limited(&clock, Bucket::with_left(Bucket::BURST));
     let dir = tempfile::tempdir().expect("tempdir");
     let (tracker, waits) = tracker(&clock, &site, dir.path(), Duration::ZERO, TEST_JITTER);
     assert!(run_trackers(&clock, vec![tracker]).await);
     // The list and eight packs are nine requests and the bucket holds
-    // eight: the last pack is refused once and comes 11.75 s later.
-    assert_eq!(*waits.lock().unwrap(), [secs(11) + TEST_JITTER]);
+    // the burst of 16: none is refused, the job never waits and the
+    // clock never moves.
+    const { assert!(Bucket::BURST > 9, "the burst must hold a first install") };
+    assert!(waits.lock().unwrap().is_empty());
     assert_all_installed(dir.path(), &contents);
-    let mut expected = list_then(&pack_names());
-    expected.extend(tar_paths(&pack_names()[pack_names().len() - 1..]));
-    assert_eq!(site.paths(), expected);
-    let mut statuses = vec![200; 8];
-    statuses.extend([429, 200]);
-    assert_eq!(site.statuses(), statuses);
-    assert_eq!(site.refused(), 1);
-    assert_eq!(clock.now(), ms(11_750));
+    assert_eq!(site.paths(), list_then(&pack_names()));
+    assert_eq!(site.statuses(), vec![200; 9]);
+    assert_eq!(site.refused(), 0);
+    assert_eq!(clock.now(), Duration::ZERO);
 }
 
 /// F268-1 as reviewed: the bucket runs out in the middle of a first
@@ -368,7 +370,7 @@ async fn against_the_real_limit_a_429_in_the_middle_is_followed_by_the_downloads
 }
 
 #[tokio::test]
-async fn against_the_real_limit_a_bucket_that_starts_empty_is_eight_requests() {
+async fn against_the_real_limit_a_bucket_that_starts_empty_refills_one_request_every_ten_seconds() {
     let clock = SimClock::new(1, SIM_LIMIT);
     let (site, contents) = serve_limited(&clock, Bucket::with_left(0));
     let dir = tempfile::tempdir().expect("tempdir");
@@ -401,7 +403,10 @@ async fn against_the_real_limit_a_bucket_that_starts_empty_is_eight_requests() {
 #[tokio::test]
 async fn against_the_real_limit_two_trackers_behind_one_address_both_finish() {
     let clock = SimClock::new(2, SIM_LIMIT);
-    let (site, contents) = serve_limited(&clock, Bucket::with_left(8));
+    // Other traffic from the same address has already used up half of the
+    // burst, so 8 requests are left: this is the contention case, not a
+    // first install on a full bucket.
+    let (site, contents) = serve_limited(&clock, Bucket::with_left(Bucket::BURST / 2));
     let (dir_a, dir_b) = (
         tempfile::tempdir().expect("tempdir"),
         tempfile::tempdir().expect("tempdir"),
@@ -416,7 +421,7 @@ async fn against_the_real_limit_two_trackers_behind_one_address_both_finish() {
     );
     assert_all_installed(dir_a.path(), &contents);
     assert_all_installed(dir_b.path(), &contents);
-    // A takes the 8 requests the bucket holds, and its last pack is the
+    // A takes the 8 requests the bucket has left, and its last pack is the
     // ninth: refused. B's list is refused too, 3 s in. Both then come back
     // when the bucket refills, B behind A, so A backs off 10.75, 20.75,
     // 40.75 and 80.75 s when B takes the request it wanted.
