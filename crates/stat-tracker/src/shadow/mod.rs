@@ -9,12 +9,18 @@
 //! lives in `reader_apply` and, for the top-bar map ([`read_top_bar`]), in the
 //! capture path, not in this worker. `reader = "new"` also forces the log on.
 //!
+//! The bans and picks reader ([`bans_picks`], `cv-v1`) is a separate, opt-in
+//! recognizer for the ban results, hero select and ban vote screens. It is off
+//! unless `STAT_TRACKER_BANS_PICKS_RECOGNIZER=cv-v1` and needs its own icon
+//! pack under `<data_dir>/templates/bans-picks-v1/`.
+//!
 //! [`reader`] is the single entry point for the main-reader switch
 //! ([`read_board`]: every field with value, confidence and suspect flag). It
 //! adds the map banner ([`banner`]) and result word ([`result`]) readers, whose
 //! templates, like the hero icons, come from an optional local pack.
 
 pub mod banner;
+pub mod bans_picks;
 pub mod confirm;
 pub mod digits;
 pub mod heroes;
