@@ -1,7 +1,8 @@
 //! JSON shapes for `/api/hero-icons` (contributed hero icon PNGs).
 //!
 //! Icons stay on the server volume. Image bytes are only served to the owner,
-//! and to officers while the owner is opted in. See `docs/api/hero-icons.md`.
+//! and to officers while the owner is active and opted in. See
+//! `docs/api/hero-icons.md`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -10,7 +11,8 @@ use serde::{Deserialize, Serialize};
 pub const HERO_ICON_ERR_DISABLED: &str = "hero_icons_disabled";
 /// The member has not opted in to contributing icons. 403 on upload.
 pub const HERO_ICON_ERR_OPT_IN_REQUIRED: &str = "icon_opt_in_required";
-/// The member an officer asked about is not opted in. 403.
+/// The member an officer asked about is not opted in. 403. Their icons are
+/// kept but hidden from everyone except the member.
 pub const HERO_ICON_ERR_OPT_IN_OFF: &str = "icon_opt_in_off";
 /// A part does not start with the PNG signature. 415.
 pub const HERO_ICON_ERR_NOT_PNG: &str = "not_png";
@@ -34,6 +36,8 @@ pub const HERO_ICON_ERR_UNEXPECTED_FIELD: &str = "unexpected_field";
 pub const HERO_ICON_ERR_INVALID_MULTIPART: &str = "invalid_multipart";
 /// Unknown id, malformed id, or an icon the caller may not see. 404.
 pub const HERO_ICON_ERR_NOT_FOUND: &str = "icon_not_found";
+/// Officer per-member route for an unknown or inactive member. 404.
+pub const HERO_ICON_ERR_MEMBER_NOT_FOUND: &str = "member_not_found";
 
 /// `GET` and `PUT /api/hero-icons/opt-in`. Off by default.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,7 +110,12 @@ pub struct OfficerHeroIconList {
     pub icons: Vec<OfficerHeroIcon>,
 }
 
-/// One row of `GET /api/hero-icons/members` (officer).
+/// One row of `GET /api/hero-icons/members` (officer), sent as a
+/// `CursorResponse` page sorted by display name, then member id.
+///
+/// Only active members who are opted in are listed, so
+/// `icon_contribution_opt_in` is always true. It stays in the shape so a
+/// client can show it without a second call.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HeroIconMemberCount {
     pub member_id: String,
@@ -114,10 +123,4 @@ pub struct HeroIconMemberCount {
     pub display_name: String,
     pub icon_count: u32,
     pub icon_contribution_opt_in: bool,
-}
-
-/// `GET /api/hero-icons/members` (officer). Members with icons or opted in.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct HeroIconMemberCounts {
-    pub members: Vec<HeroIconMemberCount>,
 }

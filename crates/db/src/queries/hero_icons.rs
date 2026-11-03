@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use surrealdb::types::Datetime as SurrealDatetime;
@@ -82,7 +82,9 @@ impl Database {
         .await
     }
 
-    /// One member's icons, newest first. Ties (one upload request) go by file name.
+    /// One member's icons, newest first: `created_at` descending, then record id
+    /// descending. Each part of one upload request gets its own `created_at`
+    /// one microsecond after the part before, so the last part comes first.
     pub async fn list_hero_icons_for_member(&self, member_id: &str) -> DbResult<Vec<HeroIcon>> {
         let member_id = member_id.to_string();
         with_timeout(async {
@@ -90,7 +92,7 @@ impl Database {
                 .client
                 .query(
                     "SELECT * FROM hero_icon WHERE member_id = $member_id \
-                     ORDER BY created_at DESC, file_name DESC",
+                     ORDER BY created_at DESC, id DESC",
                 )
                 .bind(("member_id", member_id))
                 .await?;
@@ -100,7 +102,8 @@ impl Database {
         .await
     }
 
-    /// Icons of the given members, newest first. Fetches `limit + 1` rows so the
+    /// Icons of the given members, in the order of
+    /// [`Self::list_hero_icons_for_member`]. Fetches `limit + 1` rows so the
     /// caller can build a cursor page with `CursorResponse::from_oversized`.
     pub async fn list_hero_icons_for_members(
         &self,
@@ -117,7 +120,7 @@ impl Database {
                 .client
                 .query(
                     "SELECT * FROM hero_icon WHERE member_id IN $ids \
-                     ORDER BY created_at DESC, file_name DESC LIMIT $lim START $off",
+                     ORDER BY created_at DESC, id DESC LIMIT $lim START $off",
                 )
                 .bind(("ids", ids))
                 .bind(("lim", limit + 1))
@@ -182,17 +185,32 @@ impl Database {
         .await
     }
 
-    /// Remove every row of one member and return them as they were.
-    pub async fn delete_hero_icons_for_member(&self, member_id: &str) -> DbResult<Vec<HeroIcon>> {
-        let member_id = member_id.to_string();
+    /// The ids among `ids` that have a `hero_icon` row. Used by the orphan
+    /// file sweep. An empty input does not query.
+    pub async fn existing_hero_icon_ids(&self, ids: &[String]) -> DbResult<HashSet<String>> {
+        if ids.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let rids: Vec<RecordId> = ids
+            .iter()
+            .map(|id| RecordId::new("hero_icon", id.as_str()))
+            .collect();
         with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                id: Option<RecordId>,
+            }
             let mut result = self
                 .client
-                .query("DELETE hero_icon WHERE member_id = $member_id RETURN BEFORE")
-                .bind(("member_id", member_id))
+                .query("SELECT id FROM hero_icon WHERE id IN $rids")
+                .bind(("rids", rids))
                 .await?;
-            let rows: Vec<DbHeroIcon> = result.take(0)?;
-            Ok(rows.into_iter().map(db_to_icon).collect())
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|row| row.id)
+                .map(|rid| crate::record_id_key_to_string(rid.key))
+                .collect())
         })
         .await
     }
@@ -262,35 +280,56 @@ mod tests {
         assert_eq!(removed.id, a);
         assert!(db.delete_hero_icon(a).await.unwrap().is_none());
         assert!(db.get_hero_icon(a).await.unwrap().is_none());
-
-        let removed = db.delete_hero_icons_for_member("m1").await.unwrap();
-        assert_eq!(removed.len(), 1);
-        assert_eq!(removed[0].id, b);
-        assert_eq!(db.count_hero_icons_for_member("m1").await.unwrap(), 0);
+        assert_eq!(db.count_hero_icons_for_member("m1").await.unwrap(), 1);
         assert_eq!(db.count_hero_icons_for_member("m2").await.unwrap(), 1);
     }
 
     #[tokio::test]
-    async fn rows_from_one_upload_have_a_stable_order() {
+    async fn existing_ids_are_found_in_one_batch() {
+        let db = test_db().await;
+        let a = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        let b = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        db.insert_hero_icon(&new_icon(a, "m1", 1)).await.unwrap();
+
+        assert!(db.existing_hero_icon_ids(&[]).await.unwrap().is_empty());
+        let found = db
+            .existing_hero_icon_ids(&[a.to_string(), b.to_string()])
+            .await
+            .unwrap();
+        assert_eq!(found.len(), 1);
+        assert!(found.contains(a));
+    }
+
+    #[tokio::test]
+    async fn order_is_newest_first_then_id_descending() {
         let db = test_db().await;
         let at = Utc::now();
         let d = "dddddddddddddddddddddddddddddddd";
         let e = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
-        for id in [d, e] {
+        let f = "ffffffffffffffffffffffffffffffff";
+        // d and e share a time, so the id decides: e before d.
+        for id in [e, d] {
             let mut icon = new_icon(id, "m1", 0);
             icon.created_at = at;
             db.insert_hero_icon(&icon).await.unwrap();
         }
+        // The upload route gives each later part of one request one more
+        // microsecond, so a later part sorts first even with a lower id.
+        let mut later = new_icon(f, "m1", 0);
+        later.created_at = at - Duration::microseconds(1);
+        db.insert_hero_icon(&later).await.unwrap();
+        let mut newest = new_icon("0000000000000000000000000000000a", "m1", 0);
+        newest.created_at = at + Duration::microseconds(1);
+        db.insert_hero_icon(&newest).await.unwrap();
 
         let mine = db.list_hero_icons_for_member("m1").await.unwrap();
         let ids: Vec<&str> = mine.iter().map(|icon| icon.id.as_str()).collect();
-        assert_eq!(ids, vec![e, d]);
+        assert_eq!(ids, vec!["0000000000000000000000000000000a", e, d, f]);
 
         let second_page = db
-            .list_hero_icons_for_members(&["m1".to_string()], 1, 1)
+            .list_hero_icons_for_members(&["m1".to_string()], 1, 2)
             .await
             .unwrap();
-        assert_eq!(second_page.len(), 1);
         assert_eq!(second_page[0].id, d);
     }
 }

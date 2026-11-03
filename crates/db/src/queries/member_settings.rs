@@ -170,58 +170,45 @@ impl Database {
 
     /// Set only `hero_icon_opt_in` and return the stored value.
     ///
+    /// One `UPSERT` keyed on `member_id`, so there is no read before the write.
     /// Player name and stats visibility are kept. A member without a row gets
     /// one with no player name and public stats, like a first
-    /// [`Self::upsert_member_settings`] call.
+    /// [`Self::upsert_member_settings`] call. Two first calls for the same
+    /// member can both try to create the row. The unique `ms_member_idx` lets
+    /// only one through, so a failed attempt is tried once more, and by then it
+    /// finds the row and updates it.
     pub async fn set_hero_icon_opt_in(&self, member_id: &str, opt_in: bool) -> DbResult<bool> {
         with_timeout(async {
-            let mut result = self
-                .client
-                .query("SELECT * FROM member_settings WHERE member_id = $mid LIMIT 1")
-                .bind(("mid", member_id.to_string()))
-                .await?;
-            let rows: Vec<DbMemberSettings> = result.take(0)?;
-
-            if let Some(existing) = rows.into_iter().next() {
-                let Some(rid) = existing.id else {
-                    return Err(crate::DbError::NotFound("member_settings id".into()));
-                };
-                // Only the opt-in is written. `??` fills a visibility that a row from
-                // before `stats_visibility` lacks and keeps every other stored value,
-                // so a concurrent stats settings change is never reverted.
-                let mut result = self
-                    .client
-                    .query(
-                        "UPDATE $rid SET hero_icon_opt_in = $v, \
-                         stats_visibility = stats_visibility ?? 'public'",
-                    )
-                    .bind(("rid", rid))
-                    .bind(("v", opt_in))
-                    .await?;
-                let rows: Vec<DbMemberSettings> = result.take(0)?;
-                match rows.into_iter().next() {
-                    Some(updated) => Ok(updated.hero_icon_opt_in.unwrap_or(false)),
-                    None => Err(crate::DbError::NotFound("member_settings update".into())),
-                }
-            } else {
-                let created: Option<DbMemberSettings> = self
-                    .client
-                    .create("member_settings")
-                    .content(DbMemberSettings {
-                        id: None,
-                        member_id: member_id.to_string(),
-                        player_name: None,
-                        stats_visibility: Some(StatsVisibility::Public.as_str().to_string()),
-                        hero_icon_opt_in: Some(opt_in),
-                    })
-                    .await?;
-                match created {
-                    Some(created) => Ok(created.hero_icon_opt_in.unwrap_or(false)),
-                    None => Err(crate::DbError::NotFound("member_settings create".into())),
+            match self.upsert_hero_icon_opt_in(member_id, opt_in).await {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    tracing::debug!(%error, "hero icon opt-in upsert retried");
+                    self.upsert_hero_icon_opt_in(member_id, opt_in).await
                 }
             }
         })
         .await
+    }
+
+    async fn upsert_hero_icon_opt_in(&self, member_id: &str, opt_in: bool) -> DbResult<bool> {
+        // Only the opt-in is written. `??` fills a visibility that a new row or a
+        // row from before `stats_visibility` lacks and keeps every other stored
+        // value, so a concurrent stats settings change is never reverted.
+        let mut result = self
+            .client
+            .query(
+                "UPSERT member_settings SET member_id = $mid, hero_icon_opt_in = $v, \
+                 stats_visibility = stats_visibility ?? 'public' \
+                 WHERE member_id = $mid",
+            )
+            .bind(("mid", member_id.to_string()))
+            .bind(("v", opt_in))
+            .await?;
+        let rows: Vec<DbMemberSettings> = result.take(0)?;
+        match rows.into_iter().next() {
+            Some(row) => Ok(row.hero_icon_opt_in.unwrap_or(false)),
+            None => Err(crate::DbError::NotFound("member_settings upsert".into())),
+        }
     }
 
     /// Member ids that are opted in to contributing hero icons.
@@ -394,5 +381,36 @@ mod tests {
         assert_eq!(after.player_name.as_deref(), Some("Mei"));
         assert_eq!(after.stats_visibility, StatsVisibility::Members);
         assert!(db.hero_icon_opted_in_member_ids().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_opt_in_writes_leave_one_row() {
+        let db = test_db().await;
+        let (first, second) = tokio::join!(
+            db.set_hero_icon_opt_in("race", true),
+            db.set_hero_icon_opt_in("race", true)
+        );
+        assert!(first.unwrap());
+        assert!(second.unwrap());
+
+        assert!(!db.set_hero_icon_opt_in("race", false).await.unwrap());
+
+        #[derive(Deserialize, SurrealValue)]
+        struct CountResult {
+            count: u64,
+        }
+        let mut result = db
+            .client
+            .query("SELECT count() AS count FROM member_settings WHERE member_id = $mid GROUP ALL")
+            .bind(("mid", "race".to_string()))
+            .await
+            .unwrap();
+        let counts: Vec<CountResult> = result.take(0).unwrap();
+        assert_eq!(counts.first().map(|c| c.count), Some(1));
+
+        let settings = db.get_member_settings("race").await.unwrap().expect("row");
+        assert!(!settings.hero_icon_opt_in);
+        assert_eq!(settings.player_name, None);
+        assert_eq!(settings.stats_visibility, StatsVisibility::Public);
     }
 }
