@@ -17,16 +17,12 @@
 
 use serde::Serialize;
 use serde_json::Value;
+// The limits and the no preference literal are the server's, from the shared
+// contract, so the two sides cannot drift.
+use scuffed_types::{
+    BANS_PICKS_MAX_BAN_VOTE, BANS_PICKS_MAX_BANS, BANS_PICKS_MAX_PICKS, BANS_PICKS_NO_PREFERENCE,
+};
 
-/// Most bans the site takes.
-pub(super) const MAX_BANS: usize = 4;
-/// Most picks the site takes.
-pub(super) const MAX_PICKS: usize = 6;
-/// Most ban vote rows the site takes.
-pub(super) const MAX_BAN_VOTE: usize = 6;
-
-/// The wire literal for a row that shows the no preferred hero icon.
-const NO_PREFERENCE: &str = "no_preference";
 /// The reader's template name for the same icon.
 const NO_PREFERENCE_TEMPLATE: &str = "no-preference";
 /// The reader the stored column comes from, when the JSON does not say.
@@ -64,14 +60,14 @@ fn read_value(entry: &Value) -> Option<&str> {
 /// A pick or ban vote entry: a hero key or `no_preference`.
 fn choice(entry: &Value) -> Option<String> {
     read_value(entry).map(|raw| match raw {
-        NO_PREFERENCE | NO_PREFERENCE_TEMPLATE => NO_PREFERENCE.to_string(),
+        BANS_PICKS_NO_PREFERENCE | NO_PREFERENCE_TEMPLATE => BANS_PICKS_NO_PREFERENCE.to_string(),
         hero => hero.to_string(),
     })
 }
 
 /// A ban or the lobby ban: a hero key only.
 fn hero(entry: &Value) -> Option<String> {
-    choice(entry).filter(|value| value != NO_PREFERENCE)
+    choice(entry).filter(|value| value != BANS_PICKS_NO_PREFERENCE)
 }
 
 fn entries<'a>(stored: &'a Value, key: &str, max: usize) -> &'a [Value] {
@@ -100,13 +96,16 @@ pub(super) fn upload_bans_picks(stored: Option<&str>) -> Option<UploadBansPicks>
         return None;
     }
     let out = UploadBansPicks {
-        bans: entries(&stored, "bans", MAX_BANS).iter().map(ban).collect(),
+        bans: entries(&stored, "bans", BANS_PICKS_MAX_BANS)
+            .iter()
+            .map(ban)
+            .collect(),
         lobby_ban: stored.get("lobby_ban").and_then(hero),
-        picks: entries(&stored, "picks", MAX_PICKS)
+        picks: entries(&stored, "picks", BANS_PICKS_MAX_PICKS)
             .iter()
             .map(choice)
             .collect(),
-        ban_vote: entries(&stored, "ban_vote", MAX_BAN_VOTE)
+        ban_vote: entries(&stored, "ban_vote", BANS_PICKS_MAX_BAN_VOTE)
             .iter()
             .map(choice)
             .collect(),
