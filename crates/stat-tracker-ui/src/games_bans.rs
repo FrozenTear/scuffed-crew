@@ -38,6 +38,10 @@ pub enum Slot {
     NoPreference,
     /// The slot could not be read.
     NotRead,
+    /// A ban vote that was skipped (the circle with a slash).
+    Skipped,
+    /// A ban vote slot with nothing in it.
+    Empty,
 }
 
 /// One chip: a slot, with the words every chip carries (visible name,
@@ -62,6 +66,8 @@ impl Chip {
             Slot::Hero(name) => name,
             Slot::NoPreference => "No preference",
             Slot::NotRead => "Not read",
+            Slot::Skipped => "Skipped",
+            Slot::Empty => "Empty",
         }
     }
 }
@@ -79,7 +85,7 @@ pub enum Body {
 pub struct Row {
     /// "Your team", "Their bans", "Bans" ...
     pub team: &'static str,
-    /// "Ban votes", "Hero select", "Played".
+    /// "Your ban votes", "Hero select", "Played".
     pub line: Option<&'static str>,
     /// A muted note next to the label ("Team not read").
     pub note: Option<&'static str>,
@@ -278,11 +284,50 @@ fn parse(json: &str) -> Option<Stored> {
             .iter()
             .map(slot)
             .collect(),
-        ban_vote: list("ban_vote", BANS_PICKS_MAX_BAN_VOTE)
-            .iter()
-            .map(slot)
-            .collect(),
+        ban_vote: own_votes(&v).unwrap_or_else(|| {
+            list("ban_vote", BANS_PICKS_MAX_BAN_VOTE)
+                .iter()
+                .map(slot)
+                .collect()
+        }),
     })
+}
+
+/// Our own three ban votes from `ban_votes`, in slot order, which tells a
+/// skipped or empty slot apart from one that was not read. `None` when the
+/// key is missing or null (games read before it existed, or a vote screen
+/// that did not look like one), so the flat `ban_vote` list is used.
+fn own_votes(v: &Value) -> Option<Vec<Slot>> {
+    let all = v.get("ban_votes")?.as_array()?;
+    let mut own: Vec<(u64, Slot)> = all
+        .iter()
+        .filter(|e| e.get("voter").and_then(Value::as_u64) == Some(0))
+        .map(|e| {
+            let n = e.get("slot").and_then(Value::as_u64).unwrap_or(u64::MAX);
+            let hero = e
+                .get("hero")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|h| !h.is_empty());
+            let s = match (e.get("state").and_then(Value::as_str), hero) {
+                (Some("hero"), Some(key)) => Slot::Hero(hero_name(key)),
+                (Some("skipped"), _) => Slot::Skipped,
+                (Some("empty"), _) => Slot::Empty,
+                _ => Slot::NotRead,
+            };
+            (n, s)
+        })
+        .collect();
+    if own.is_empty() {
+        return None;
+    }
+    own.sort_by_key(|(n, _)| *n);
+    Some(
+        own.into_iter()
+            .take(BANS_PICKS_MAX_BAN_VOTE)
+            .map(|(_, s)| s)
+            .collect(),
+    )
 }
 
 /// A stored entry: `{value, ..}` or a plain string. A value that is a hero
@@ -342,12 +387,12 @@ impl Stored {
             )),
             (votes, picks) => {
                 rows.push(if votes {
-                    chips("Your team", "Ban votes", vote_chips(&self.ban_vote))
+                    chips("Your team", "Your ban votes", vote_chips(&self.ban_vote))
                 } else {
                     quiet(
                         "Your team",
-                        Some("Ban votes"),
-                        "Ban votes weren't read for this game.",
+                        Some("Your ban votes"),
+                        "Your ban votes weren't read for this game.",
                     )
                 });
                 rows.push(if picks {
@@ -455,10 +500,12 @@ fn not_read_chip(ban: bool, tip: String) -> Chip {
     }
 }
 
-/// Our own three ban votes, in slot order. A slot with no hero (skipped,
-/// empty or not read) is stored as null and shows as not read. Games read
-/// by 0.6.0-alpha.2.1 or older stored the six roster rows here instead,
-/// which are each player's preferred hero and not a vote.
+/// Our own three ban votes, in slot order. Skipped and empty slots show as
+/// such when the game has `ban_votes`; with only the flat `ban_vote` list a
+/// slot with no hero shows as not read. Games read by 0.6.0-alpha.2.1 or
+/// older stored the six roster rows here instead, which are each player's
+/// preferred hero and not a vote. The row says "Your ban votes", so the
+/// chips carry no "You" tag.
 fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
     slots
         .iter()
@@ -467,12 +514,14 @@ fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
             let tip = match slot {
                 Slot::Hero(name) => format!("You voted to ban {name}"),
                 Slot::NoPreference => "You voted no preference".to_string(),
-                Slot::NotRead => format!("Your ban vote {}: no hero read", i + 1),
+                Slot::Skipped => format!("You skipped ban vote {}", i + 1),
+                Slot::Empty => format!("Your ban vote {}: empty", i + 1),
+                Slot::NotRead => format!("Your ban vote {}: not read", i + 1),
             };
             Chip {
                 slot: slot.clone(),
                 ban: false,
-                you: true,
+                you: false,
                 swap: false,
                 tip,
             }
@@ -491,7 +540,9 @@ fn pick_chips(slots: &[Slot]) -> Vec<Chip> {
                 Slot::Hero(name) if you => format!("Shown at hero select: {name}, you"),
                 Slot::Hero(name) => format!("Shown at hero select: {name}"),
                 Slot::NoPreference => "Shown at hero select: no preference".to_string(),
-                Slot::NotRead => format!("Hero select slot {}: not read", i + 1),
+                Slot::NotRead | Slot::Skipped | Slot::Empty => {
+                    format!("Hero select slot {}: not read", i + 1)
+                }
             };
             Chip {
                 slot: slot.clone(),
@@ -578,7 +629,7 @@ mod tests {
                 ("Your team's bans", None),
                 ("Their bans", None),
                 ("Lobby ban", None),
-                ("Your team", Some("Ban votes")),
+                ("Your team", Some("Your ban votes")),
                 ("Your team", Some("Hero select")),
                 ("Your team", Some("Played")),
             ]
@@ -635,8 +686,8 @@ mod tests {
         let Body::Chips(votes) = &rows[1].body else {
             panic!("chips")
         };
-        assert_eq!(votes[1].tip, "Your ban vote 2: no hero read");
-        assert!(votes.iter().all(|c| c.you));
+        assert_eq!(votes[1].tip, "Your ban vote 2: not read");
+        assert!(votes.iter().all(|c| !c.you));
         // We picked Reinhardt and played Wrecking Ball.
         let Body::Chips(played) = &rows[3].body else {
             panic!("chips")
@@ -672,7 +723,10 @@ mod tests {
         assert_eq!(names(&rows[0]).len(), 4);
         let hero_select = rows.iter().find(|r| r.line == Some("Hero select")).unwrap();
         assert_eq!(names(hero_select).len(), 6);
-        let votes = rows.iter().find(|r| r.line == Some("Ban votes")).unwrap();
+        let votes = rows
+            .iter()
+            .find(|r| r.line == Some("Your ban votes"))
+            .unwrap();
         assert_eq!(names(votes), ["No preference"]);
     }
 
@@ -700,7 +754,7 @@ mod tests {
         );
         let rows = rows_of(&g);
         assert!(rows.iter().any(|r| matches!(&r.body,
-            Body::Quiet(t) if t == "Ban votes weren't read for this game.")));
+            Body::Quiet(t) if t == "Your ban votes weren't read for this game.")));
         let g = with(
             r#"{"bans":[{"value":"ana","team":"own"}],"ban_vote":[{"value":"ana"}]}"#,
             None,
@@ -708,6 +762,65 @@ mod tests {
         let rows = rows_of(&g);
         assert!(rows.iter().any(|r| matches!(&r.body,
             Body::Quiet(t) if t == "Hero select wasn't read for this game.")));
+    }
+
+    fn vote_row(g: &Game) -> Vec<Chip> {
+        let rows = rows_of(g);
+        let row = rows
+            .iter()
+            .find(|r| r.line == Some("Your ban votes"))
+            .expect("vote row");
+        match &row.body {
+            Body::Chips(chips) => chips.clone(),
+            Body::Quiet(_) => panic!("chips"),
+        }
+    }
+
+    #[test]
+    fn ban_votes_show_skipped_and_empty_slots() {
+        // Three skips, like the Eichenwalde game: not three Not read chips.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "ban_vote":[{"value":null},{"value":null},{"value":null}],
+                "ban_votes":[
+                  {"voter":0,"slot":3,"state":"empty","hero":null},
+                  {"voter":0,"slot":1,"state":"skipped","hero":null},
+                  {"voter":0,"slot":2,"state":"hero","hero":"ana"},
+                  {"voter":1,"slot":1,"state":"hero","hero":"mei"}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        let votes = vote_row(&g);
+        let slots: Vec<_> = votes.iter().map(|c| c.slot.clone()).collect();
+        assert_eq!(
+            slots,
+            [Slot::Skipped, Slot::Hero("Ana".into()), Slot::Empty]
+        );
+        assert_eq!(votes[0].name(), "Skipped");
+        assert_eq!(votes[0].tip, "You skipped ban vote 1");
+        assert_eq!(votes[2].tip, "Your ban vote 3: empty");
+        assert!(votes.iter().all(|c| !c.you));
+    }
+
+    #[test]
+    fn ban_votes_unread_or_missing_falls_back_to_the_flat_list() {
+        // A hero state with no confident hero is Not read.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "ban_votes":[{"voter":0,"slot":1,"state":"hero","hero":null},
+                             {"voter":0,"slot":2,"state":null,"hero":null},
+                             {"voter":0,"slot":3,"state":"skipped","hero":null}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        let got: Vec<_> = vote_row(&g).iter().map(|c| c.slot.clone()).collect();
+        assert_eq!(got, [Slot::NotRead, Slot::NotRead, Slot::Skipped]);
+        // `ban_votes` null (vote screen not recognised): the flat list.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "ban_vote":[{"value":"mei"}],"ban_votes":null}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        let got: Vec<_> = vote_row(&g).iter().map(|c| c.slot.clone()).collect();
+        assert_eq!(got, [Slot::Hero("Mei".into())]);
     }
 
     fn rows_of(g: &Game) -> Vec<Row> {
