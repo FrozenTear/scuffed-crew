@@ -294,7 +294,7 @@ pub struct PersonalMatch {
 #[serde(rename_all = "snake_case")]
 #[surreal(crate = "::surrealdb_types", rename_all = "snake_case")]
 pub enum BansPicksMissing {
-    /// The ban vote screen (the own team's six votes).
+    /// The ban vote screen (the local player's votes and the team ban score).
     BanVote,
     /// The hero select (the picks).
     HeroSelect,

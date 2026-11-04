@@ -359,32 +359,6 @@ fn hero_select_reads_six_rows_with_no_preference_and_unreadable_rows() {
 }
 
 #[test]
-fn ban_vote_rows_use_their_own_row_positions() {
-    let r = reader();
-    let rows = [
-        Row::Hero("ashe"),
-        Row::Hero("ana"),
-        Row::Hero("mei"),
-        Row::NoPref,
-        Row::Hero("orisa"),
-        Row::Hero("juno"),
-    ];
-    let out = r.read_ban_vote(&row_frame(&HB_Y, rows)).unwrap();
-    let got: Vec<_> = out.iter().map(|p| key(p)).collect();
-    assert_eq!(
-        got,
-        [
-            Some("ashe"),
-            Some("ana"),
-            Some("mei"),
-            Some(NO_PREFERENCE),
-            Some("orisa"),
-            Some("juno")
-        ]
-    );
-}
-
-#[test]
 fn without_a_no_preference_template_that_icon_is_none() {
     let heroes = hero_keys().into_iter().map(|k| {
         let i = icon(seed_of(&k));
@@ -411,6 +385,7 @@ fn a_frame_that_is_not_2560x1440_is_refused() {
     assert!(r.read_ban_results(&small, None).is_none());
     assert!(r.read_hero_select(&small).is_none());
     assert!(r.read_ban_vote(&small).is_none());
+    assert!(r.read_ban_vote(&RgbImage::from_pixel(2560, 1080, BG)).is_none());
     assert!(r.read(&small, &small).is_none());
 }
 
@@ -907,4 +882,362 @@ fn a_bar_near_both_groups_goes_to_the_nearer_one() {
         teams,
         [Some(Team::Own), Some(Team::Enemy), None, Some(Team::Own)]
     );
+}
+
+// ---- the ban vote screen ----
+
+/// Where the ban vote screen's roster column shows each player's preferred
+/// hero (the rows the old reader wrongly took for votes).
+const HB_Y: [i32; 6] = [452, 624, 754, 882, 1012, 1142];
+
+const SLOT_GREY: Rgb<u8> = Rgb([157, 149, 149]);
+const VOTE_RED: Rgb<u8> = Rgb([215, 16, 18]);
+
+/// What one of the local player's vote slots shows.
+#[derive(Clone, Copy)]
+enum Slot<'a> {
+    Hero(&'a str),
+    NoPref,
+    Skipped,
+    Empty,
+}
+
+/// What one strip box shows: a hero with a count, or nothing yet.
+#[derive(Clone, Copy)]
+enum StripBox<'a> {
+    Hero(&'a str, &'a str),
+    Empty,
+}
+
+/// A border `BORDER` (3) pixels thick on the inclusive rectangle `r`.
+fn frame_box(img: &mut RgbImage, r: (u32, u32, u32, u32), c: Rgb<u8>) {
+    let (x0, y0, x1, y1) = (r.0 as i32, r.1 as i32, r.2 as i32, r.3 as i32);
+    fill(img, x0, y0, x1 + 1, y0 + 3, c);
+    fill(img, x0, y1 - 2, x1 + 1, y1 + 1, c);
+    fill(img, x0, y0, x0 + 3, y1 + 1, c);
+    fill(img, x1 - 2, y0, x1 + 1, y1 + 1, c);
+}
+
+fn centre(r: (u32, u32, u32, u32)) -> (i32, i32) {
+    (((r.0 + r.2) / 2) as i32, ((r.1 + r.3) / 2) as i32)
+}
+
+/// The skip icon: a white ring of radius 15 and a slash from lower left to
+/// upper right, centred in the slot.
+fn skip_icon(img: &mut RgbImage, r: (u32, u32, u32, u32)) {
+    let (cx, cy) = ((r.0 + r.2) as f32 / 2.0, (r.1 + r.3) as f32 / 2.0);
+    for y in r.1 + 4..=r.3 - 4 {
+        for x in r.0 + 4..=r.2 - 4 {
+            let (dx, dy) = (x as f32 - cx, y as f32 - cy);
+            let d = (dx * dx + dy * dy).sqrt();
+            let ring = (13.5..=16.5).contains(&d);
+            let slash = d < 14.0 && (dx + dy).abs() <= 1.5;
+            if ring || slash {
+                img.put_pixel(x, y, Rgb([255, 255, 255]));
+            }
+        }
+    }
+}
+
+/// Draw `text` from the digit grids, one pixel per cell, centred on `cx`,
+/// top row at `top` (the strip's counts sit at y 187..203).
+fn draw_count(img: &mut RgbImage, text: &str, cx: u32, top: u32) {
+    let step = digits::GLYPH_W as u32 + 2;
+    let mut x = cx - text.len() as u32 * step / 2;
+    for b in text.bytes() {
+        let g = digits::glyph((b - b'0') as usize);
+        for gy in 0..digits::GLYPH_H {
+            for gx in 0..digits::GLYPH_W {
+                if g[gy * digits::GLYPH_W + gx] > 0.5 {
+                    img.put_pixel(x + gx as u32, top + gy as u32, Rgb([255, 255, 255]));
+                }
+            }
+        }
+        x += step;
+    }
+}
+
+/// The ban vote screen: the local player's three slots, the strip with
+/// its title, and (as in the game) a preferred-hero portrait in every
+/// roster row, which must never be read as a vote.
+fn vote_frame(slots: [Slot; 3], boxes: [StripBox; 3]) -> RgbImage {
+    let portraits = [
+        Row::Hero("ashe"),
+        Row::Hero("ana"),
+        Row::Hero("mei"),
+        Row::NoPref,
+        Row::Hero("orisa"),
+        Row::Hero("juno"),
+    ];
+    let mut img = row_frame(&HB_Y, portraits);
+    for (&r, slot) in vote::OWN_SLOTS.iter().zip(slots) {
+        let (cx, cy) = centre(r);
+        match slot {
+            Slot::Hero(k) => {
+                put(&mut img, &hero_icon(k), 0.465, cx, cy);
+                frame_box(&mut img, r, VOTE_RED);
+            }
+            Slot::NoPref => {
+                put(&mut img, &no_pref_icon(), 0.465, cx, cy);
+                frame_box(&mut img, r, VOTE_RED);
+            }
+            Slot::Skipped => {
+                skip_icon(&mut img, r);
+                frame_box(&mut img, r, SLOT_GREY);
+            }
+            Slot::Empty => frame_box(&mut img, r, SLOT_GREY),
+        }
+    }
+    strip(&mut img, boxes);
+    img
+}
+
+/// The TEAM BAN SCORE strip: a red striped title and three boxes.
+fn strip(img: &mut RgbImage, boxes: [StripBox; 3]) {
+    let (tx0, ty0, tx1, ty1) = vote::STRIP_TITLE;
+    for x in tx0..=tx1 {
+        if (x / 3) % 2 == 0 {
+            fill(img, x as i32, ty0 as i32, x as i32 + 1, ty1 as i32 + 1, VOTE_RED);
+        }
+    }
+    for (&r, b) in vote::STRIP_BOXES.iter().zip(boxes) {
+        let (cx, cy) = centre(r);
+        match b {
+            StripBox::Hero(k, count) => {
+                put(img, &hero_icon(k), 0.70, cx, cy);
+                frame_box(img, r, VOTE_RED);
+                draw_count(img, count, cx as u32, 188);
+            }
+            StripBox::Empty => {
+                frame_box(img, r, SLOT_GREY);
+                fill(img, cx - 3, 197, cx + 3, 200, Rgb([130, 130, 131]));
+            }
+        }
+    }
+}
+
+fn slot_heroes(v: &BanVote) -> Vec<Option<&str>> {
+    v.slots
+        .as_ref()
+        .expect("slots read")
+        .iter()
+        .map(|s| s.hero.as_deref())
+        .collect()
+}
+
+fn slot_states(v: &BanVote) -> Vec<Option<SlotState>> {
+    v.slots
+        .as_ref()
+        .expect("slots read")
+        .iter()
+        .map(|s| s.state)
+        .collect()
+}
+
+const STRIP3: [StripBox<'static>; 3] = [
+    StripBox::Hero("sombra", "15"),
+    StripBox::Hero("roadhog", "12"),
+    StripBox::Hero("junkrat", "7"),
+];
+
+#[test]
+fn a_voted_hero_a_skip_and_an_empty_slot_read_as_such() {
+    let r = reader();
+    let img = vote_frame([Slot::Hero("kiriko"), Slot::Skipped, Slot::Empty], STRIP3);
+    let v = r.read_ban_vote(&img).unwrap();
+    assert_eq!(
+        slot_states(&v),
+        [
+            Some(SlotState::Hero),
+            Some(SlotState::Skipped),
+            Some(SlotState::Empty)
+        ]
+    );
+    assert_eq!(slot_heroes(&v), [Some("kiriko"), None, None]);
+    let slots = v.slots.as_ref().unwrap();
+    assert!(slots.iter().all(|s| s.voter == 0));
+    assert_eq!(slots.iter().map(|s| s.slot).collect::<Vec<_>>(), [1, 2, 3]);
+    assert!(slots[0].confidence > 0.5 && slots[0].confidence <= 1.0);
+    assert!(slots[0].score >= vote::VOTE_MIN_SCORE && slots[0].margin >= vote::VOTE_MIN_MARGIN);
+    assert_eq!(slots[1].confidence, 0.0);
+    // The flat list the game record keeps: the hero, then two nulls.
+    let own = v.own_votes();
+    assert_eq!(own.iter().map(key).collect::<Vec<_>>(), [Some("kiriko"), None, None]);
+}
+
+#[test]
+fn three_voted_heroes_read_in_slot_order() {
+    let r = reader();
+    let img = vote_frame(
+        [Slot::Hero("roadhog"), Slot::Hero("widowmaker"), Slot::Hero("mercy")],
+        STRIP3,
+    );
+    let v = r.read_ban_vote(&img).unwrap();
+    assert_eq!(
+        slot_heroes(&v),
+        [Some("roadhog"), Some("widowmaker"), Some("mercy")]
+    );
+}
+
+#[test]
+fn all_skipped_is_three_skips_and_no_vote_at_all() {
+    // Session dfa4ad870eafb270 (Eichenwalde): every vote skipped, while the
+    // roster column shows six preferred heroes. None of them is a vote.
+    let r = reader();
+    let img = vote_frame([Slot::Skipped; 3], STRIP3);
+    let v = r.read_ban_vote(&img).unwrap();
+    assert_eq!(slot_states(&v), [Some(SlotState::Skipped); 3]);
+    assert!(v.own_votes().iter().all(|read| read.value.is_none()));
+    assert_eq!(v.own_votes().len(), 3);
+}
+
+#[test]
+fn the_no_preference_icon_in_a_slot_is_not_a_vote() {
+    let r = reader();
+    let img = vote_frame([Slot::NoPref, Slot::Empty, Slot::Empty], STRIP3);
+    let v = r.read_ban_vote(&img).unwrap();
+    let slot = &v.slots.as_ref().unwrap()[0];
+    assert_eq!(slot.hero, None);
+    assert_ne!(slot.state, Some(SlotState::Skipped));
+    assert!(v.own_votes()[0].value.is_none());
+}
+
+#[test]
+fn the_strip_reads_heroes_counts_and_ranks() {
+    let r = reader();
+    let img = vote_frame([Slot::Skipped; 3], STRIP3);
+    let v = r.read_ban_vote(&img).unwrap();
+    let score = v.score.expect("strip read");
+    let got: Vec<_> = score
+        .iter()
+        .map(|e| (e.rank, e.hero.as_deref(), e.votes, e.empty))
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (1, Some("sombra"), Some(15), false),
+            (2, Some("roadhog"), Some(12), false),
+            (3, Some("junkrat"), Some(7), false),
+        ]
+    );
+    for e in &score {
+        assert!(e.confidence > 0.5 && e.votes_confidence > 0.5, "{e:?}");
+        assert!(e.score >= vote::STRIP_MIN_SCORE && e.margin >= vote::STRIP_MIN_MARGIN);
+    }
+}
+
+#[test]
+fn an_empty_strip_box_is_empty_with_no_hero_and_no_count() {
+    let r = reader();
+    let img = vote_frame(
+        [Slot::Empty; 3],
+        [StripBox::Hero("mauga", "10"), StripBox::Empty, StripBox::Empty],
+    );
+    let v = r.read_ban_vote(&img).unwrap();
+    let score = v.score.unwrap();
+    assert_eq!(score[0].hero.as_deref(), Some("mauga"));
+    assert_eq!(score[0].votes, Some(10));
+    for e in &score[1..] {
+        assert!(e.empty, "{e:?}");
+        assert_eq!((e.hero.as_deref(), e.votes), (None, None));
+        assert_eq!((e.confidence, e.votes_confidence), (0.0, 0.0));
+    }
+    assert_eq!(slot_states(&v), [Some(SlotState::Empty); 3]);
+}
+
+#[test]
+fn the_roster_portraits_are_never_votes() {
+    // The old reader read these rows (x 125, the ban vote rows) as votes.
+    let r = reader();
+    let rows = [
+        Row::Hero("ashe"),
+        Row::Hero("ana"),
+        Row::Hero("mei"),
+        Row::NoPref,
+        Row::Hero("orisa"),
+        Row::Hero("juno"),
+    ];
+    let img = row_frame(&HB_Y, rows);
+    let v = r.read_ban_vote(&img).unwrap();
+    assert_eq!(v.slots, None);
+    assert_eq!(v.score, None);
+    assert!(v.own_votes().is_empty());
+    // The same portraits beside real slots: only the slots are read.
+    let img = vote_frame([Slot::Skipped, Slot::Empty, Slot::Skipped], STRIP3);
+    let v = r.read_ban_vote(&img).unwrap();
+    for name in ["ashe", "ana", "mei", "orisa", "juno"] {
+        assert!(!slot_heroes(&v).contains(&Some(name)), "{name}");
+    }
+}
+
+#[test]
+fn a_hero_select_frame_has_no_slots_and_no_strip() {
+    let r = reader();
+    let rows = [
+        Row::Hero("kiriko"),
+        Row::Hero("genji"),
+        Row::NoPref,
+        Row::Empty,
+        Row::Hero("zarya"),
+        Row::NoPref,
+    ];
+    let v = r.read_ban_vote(&row_frame(&HS_Y, rows)).unwrap();
+    assert_eq!((v.slots, v.score), (None, None));
+    // nor the ban results screen
+    let v = r
+        .read_ban_vote(&ban_frame(FIVE, [OWN, OWN, ENEMY, ENEMY], Some("mei")))
+        .unwrap();
+    assert_eq!((v.slots, v.score), (None, None));
+}
+
+#[test]
+fn noise_and_flat_frames_have_no_slots_and_no_strip() {
+    let r = reader();
+    let mut g = Lcg(7);
+    let noise = RgbImage::from_fn(FRAME_W, FRAME_H, |_, _| {
+        Rgb([g.below(256) as u8, g.below(256) as u8, g.below(256) as u8])
+    });
+    for img in [
+        noise,
+        blank(),
+        RgbImage::from_pixel(FRAME_W, FRAME_H, SLOT_GREY),
+        RgbImage::from_pixel(FRAME_W, FRAME_H, VOTE_RED),
+    ] {
+        let v = r.read_ban_vote(&img).unwrap();
+        assert_eq!(v.slots, None);
+        assert_eq!(v.score, None);
+    }
+}
+
+#[test]
+fn a_moved_layout_reads_as_none_not_as_votes() {
+    let r = reader();
+    let img = vote_frame([Slot::Hero("ana"), Slot::Hero("mei"), Slot::Skipped], STRIP3);
+    // the whole screen 12 pixels to the right and down
+    let mut moved = blank();
+    imageops::replace(&mut moved, &img, 12, 12);
+    let v = r.read_ban_vote(&moved).unwrap();
+    assert_eq!(v.slots, None);
+    assert_eq!(v.score, None);
+}
+
+#[test]
+fn the_ban_vote_json_has_the_documented_shape() {
+    let r = reader();
+    let img = vote_frame([Slot::Hero("ana"), Slot::Skipped, Slot::Empty], STRIP3);
+    let v = r.read_ban_vote(&img).unwrap();
+    let json = serde_json::to_value(&v).unwrap();
+    assert_eq!(json["slots"][0]["voter"], 0);
+    assert_eq!(json["slots"][0]["slot"], 1);
+    assert_eq!(json["slots"][0]["state"], "hero");
+    assert_eq!(json["slots"][0]["hero"], "ana");
+    assert_eq!(json["slots"][1]["state"], "skipped");
+    assert!(json["slots"][1]["hero"].is_null());
+    assert_eq!(json["slots"][2]["state"], "empty");
+    assert_eq!(json["score"][0]["rank"], 1);
+    assert_eq!(json["score"][0]["hero"], "sombra");
+    assert_eq!(json["score"][0]["votes"], 15);
+    assert_eq!(json["score"][0]["empty"], false);
+    let back: BanVote = serde_json::from_value(json).unwrap();
+    assert_eq!(back, v);
 }

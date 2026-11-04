@@ -24,27 +24,40 @@ pub const NO_PREFERENCE_KEY: &str = "no-preference";
 pub const TEMPLATE_W: u32 = 100;
 pub const TEMPLATE_H: u32 = 96;
 
-/// Where an icon is read, and so at what scale it is matched. The factors
-/// are the template-to-screen ratio times the half-size working plane.
+/// Where an icon is read, and so at what scale it is matched. The factor
+/// is the template-to-screen ratio, times one half for the uses matched on
+/// the half-size working plane (see [`Use::scale`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Use {
     /// A ban result slot (about 1.87 times the grid tile).
     Slot,
     /// The lobby ban icon (1.6 times).
     Lobby,
-    /// A row in the hero select or ban vote left column (0.8 times).
+    /// A row in the hero select left column (0.8 times).
     Row,
+    /// The local player's ban vote slot on the ban vote screen (0.465
+    /// times), matched on the full-size plane.
+    VoteSlot,
+    /// A hero box of the ban vote screen's TEAM BAN SCORE strip (0.70
+    /// times), matched on the full-size plane.
+    Strip,
 }
 
 impl Use {
-    pub const ALL: [Use; 3] = [Use::Slot, Use::Lobby, Use::Row];
+    pub const ALL: [Use; 5] = [Use::Slot, Use::Lobby, Use::Row, Use::VoteSlot, Use::Strip];
 
-    /// Template scale on the half-size plane.
+    /// Template scale on the plane the use is matched on. `Slot`, `Lobby`
+    /// and `Row` are matched on the half-size plane, so their factor is the
+    /// screen ratio times 0.5. `VoteSlot` and `Strip` are small icons
+    /// (about 46 and 70 pixels wide) and are matched on the full-size
+    /// plane, so their factor is the screen ratio itself.
     pub fn scale(self) -> f64 {
         match self {
             Use::Slot => 1.87 * 0.5,
             Use::Lobby => 1.6 * 0.5,
             Use::Row => 0.8 * 0.5,
+            Use::VoteSlot => 0.465,
+            Use::Strip => 0.70,
         }
     }
 
@@ -53,6 +66,8 @@ impl Use {
             Use::Slot => 0,
             Use::Lobby => 1,
             Use::Row => 2,
+            Use::VoteSlot => 3,
+            Use::Strip => 4,
         }
     }
 }
@@ -98,7 +113,7 @@ pub struct TemplateSet {
     keys: Vec<String>,
     heroes: usize,
     /// `prepared[use][class]`.
-    prepared: [Vec<Prepared>; 3],
+    prepared: [Vec<Prepared>; 5],
 }
 
 impl TemplateSet {
