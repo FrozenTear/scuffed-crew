@@ -15,6 +15,19 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.6.0-alpha.2.2
+
+This small alpha fixes two things on the game card. The Played row now lists every hero you played in the game, and your ban votes are read from your own vote slots instead of the lobby portraits.
+
+### Highlights
+
+- **Played** shows every hero you played, in the order you first played them, matching the hero bar. A hero you set by hand still shows as one chip.
+- **Your ban votes** now come from your own three vote slots on the ban vote screen. Skipped votes show as Skipped, and a slot the tracker did not see shows as Not seen.
+- The tracker also reads the team ban score strip (the three heroes and their vote counts) and sends the votes with your match uploads, values only.
+- Games recorded on alpha.2.1 or older show "Your ban votes weren't read for this game." instead of the wrong votes they stored.
+
+Technical detail. Each game record now always has `ban_votes` and `ban_score` (an array, or `null`) when the bans and picks reader runs. The card reads only `ban_votes`; the old flat `ban_vote` list is never used for your votes. The vote reader checks the slot borders, the strip title and the strip boxes first and reads nothing when they are not where they should be. The reader is still 1440p only. Not tested on Linux Mint X11 or KDE CachyOS Wayland in this alpha.
+
 ## 0.6.0-alpha.2.1
 
 This alpha shows the bans and picks the tracker read on each game card in the app, sends them with your match uploads, and warns you when a game's bans and picks could not be read. It also writes a short log of the screens seen before each game, so missed screens can be tracked down.
