@@ -178,6 +178,12 @@ impl BansPicksFeed {
         linked: bool,
     ) -> Option<Self> {
         if !read_bans_picks || !setting.is_on() {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                config = read_bans_picks,
+                env = setting.is_on(),
+                "bans and picks: reader off, no frames will be read"
+            );
             return None;
         }
         let dir = data_dir.to_path_buf();
@@ -209,23 +215,40 @@ impl BansPicksFeed {
             match op {
                 PregameOp::Save(shot) | PregameOp::Stage(shot) => {
                     self.enter(&shot.folder);
+                    let staged = matches!(op, PregameOp::Stage(_));
+                    let read = shot.name == PregamePhase::HeroBan.last_name()
+                        || shot.name == PregamePhase::HeroSelect.last_name()
+                        || shot.name == PregamePhase::HeroSelect.first_name()
+                        || shot.name == BAN_RESULTS_NAME;
                     if self.done {
+                        // One line per frame the reader would have taken; a
+                        // staged frame is replaced every poll, so not those.
+                        if read && !staged {
+                            tracing::info!(target: "scuffed_stat_tracker", name = shot.name, game = %shot.folder, reason = "this game's frames were read already", "bans and picks: frame not held");
+                        }
                         continue;
                     }
-                    let staged = matches!(op, PregameOp::Stage(_));
                     let frame = Arc::clone(&shot.frame);
-                    if shot.name == PregamePhase::HeroBan.last_name() {
+                    let slot = if shot.name == PregamePhase::HeroBan.last_name() {
                         self.frames.vote = Some(frame);
+                        "vote"
                     } else if shot.name == PregamePhase::HeroSelect.last_name() {
                         self.frames.select = Some(frame);
+                        "select"
                     } else if shot.name == PregamePhase::HeroSelect.first_name() {
                         self.frames.select_first = Some(frame);
+                        "select_first"
                     } else if shot.name == BAN_RESULTS_NAME && staged {
                         self.frames.staged = Some(frame);
+                        "staged"
                     } else if shot.name == BAN_RESULTS_NAME {
                         self.frames.results = Some(frame);
+                        "results"
                     } else {
                         continue;
+                    };
+                    if !staged {
+                        tracing::info!(target: "scuffed_stat_tracker", name = shot.name, slot, game = %shot.folder, "bans and picks: frame held for the reader");
                     }
                     self.fed_at = Some(Utc::now());
                 }
@@ -234,6 +257,7 @@ impl BansPicksFeed {
                         && *name == BAN_RESULTS_NAME
                         && let Some(frame) = self.frames.staged.take()
                     {
+                        tracing::info!(target: "scuffed_stat_tracker", name = *name, slot = "results", game = %folder, "bans and picks: frame held for the reader (staged frame saved)");
                         self.frames.results = Some(frame);
                     }
                 }
@@ -249,6 +273,14 @@ impl BansPicksFeed {
 
     fn enter(&mut self, folder: &str) {
         if self.folder.as_deref() != Some(folder) {
+            if self.has_frames() {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    old = self.folder.as_deref().unwrap_or("none"),
+                    new = folder,
+                    "bans and picks: the last game's frames were never read, a new game folder opened"
+                );
+            }
             self.folder = Some(folder.to_string());
             self.frames = Frames::default();
             self.done = false;

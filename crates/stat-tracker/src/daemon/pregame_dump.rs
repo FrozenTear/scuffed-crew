@@ -89,6 +89,7 @@ mod rejects;
 mod roster;
 #[cfg(test)]
 mod tests_bans;
+mod trail;
 mod writer;
 
 pub(crate) use classify::*;
@@ -382,6 +383,13 @@ pub(crate) struct PregameTracker<F> {
     last_seen: Seen,
     /// Rate limits for the turned-down candidates' lines and frames.
     rejects: RejectLimiter,
+    /// The open session, if any, for the log lines only.
+    session: Option<String>,
+    /// The last phase frame skip logged, so it is logged once per screen.
+    skip_logged: Option<(PregamePhase, &'static str)>,
+    /// The last reason a hero-select frame was not kept, for the summary
+    /// ([`trail`]); taken by the saver after each tick.
+    select_skip: Option<&'static str>,
     /// [`BAN_RESULTS_WINDOW`] plus one poll interval.
     window: Duration,
     /// Longest gap after a candidate frame for a select title to count as
@@ -409,6 +417,9 @@ impl<F> PregameTracker<F> {
             roster: None,
             last_seen: Seen::Other,
             rejects: RejectLimiter::default(),
+            session: None,
+            skip_logged: None,
+            select_skip: None,
             window: BAN_RESULTS_WINDOW + poll,
             next_tick: poll + poll / 2,
         }
@@ -550,9 +561,16 @@ impl<F: Clone> PregameTracker<F> {
             // One line per change of screen, no names, so a hero select
             // that was never seen can be told from the journal.
             if seen != Seen::Other {
-                tracing::info!(target: "scuffed_stat_tracker", screen = ?seen, "pre-game screen seen");
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    screen = ?seen,
+                    session = self.session.as_deref().unwrap_or("none"),
+                    game = self.game_open(now).map_or("none", |g| g.folder.as_str()),
+                    "pre-game screen seen"
+                );
             }
             self.last_seen = seen;
+            self.skip_logged = None;
         }
         if matches!(seen, Seen::Phase(_)) {
             // A pre-game read: no match is in progress now.
@@ -678,11 +696,16 @@ impl<F: Clone> PregameTracker<F> {
             });
         }
         let Some(game) = self.game.as_ref().filter(|_| self.game_open(now).is_some()) else {
+            self.skip_phase(
+                phase,
+                "no open game folder (only a map vote or hero ban opens one)",
+            );
             return;
         };
         // A phase back long after it ended (the hero select between
         // rounds, a late ban screen) belongs to no pre-game.
         if !continues && game.came_back_late(phase, now) {
+            self.skip_phase(phase, "back long after it ended (between rounds)");
             return;
         }
         // A pre-game read: a loading or roster frame seen before it
@@ -694,6 +717,7 @@ impl<F: Clone> PregameTracker<F> {
         game.last_event = now;
         game.last_seen[phase.index()] = Some(now);
         let Some(frame) = frame else {
+            self.skip_phase(phase, "the tick handed over no frame");
             return;
         };
         match self.on_screen.as_mut() {
@@ -913,6 +937,39 @@ impl<F: Clone> PregameTracker<F> {
         );
     }
 
+    /// A frame of `phase` is not kept, and why: logged once per screen and
+    /// reason, and noted for the summary when it is the hero select.
+    fn skip_phase(&mut self, phase: PregamePhase, why: &'static str) {
+        if phase == PregamePhase::HeroSelect {
+            self.select_skip = Some(why);
+        }
+        if self.skip_logged == Some((phase, why)) {
+            return;
+        }
+        self.skip_logged = Some((phase, why));
+        tracing::info!(
+            target: "scuffed_stat_tracker",
+            phase = ?phase,
+            session = self.session.as_deref().unwrap_or("none"),
+            reason = why,
+            "pre-game frame skipped"
+        );
+    }
+
+    /// Whether a pre-game is on at `now`, for the log lines only: the last
+    /// tick saw a pre-game screen, or a game folder is open and no match
+    /// read came after it.
+    pub(crate) fn in_pregame(&self, now: Instant) -> bool {
+        self.last_seen != Seen::Other || (self.game_open(now).is_some() && !self.match_running())
+    }
+
+    /// The open session, for the log lines.
+    pub(crate) fn set_session(&mut self, session: Option<&str>) {
+        if self.session.as_deref() != session {
+            self.session = session.map(str::to_string);
+        }
+    }
+
     /// The phase on screen ended: write its last frame when that is not
     /// the first one, and start the ban-results wait after a ban.
     fn end_phase(&mut self, now: Instant, shots: &mut Vec<PregameOp<F>>) {
@@ -965,6 +1022,11 @@ pub(crate) struct PregameDump {
     /// The bans and picks reader's feed: sees every batch, `None` with the
     /// reader off.
     bans: Option<super::bans_picks::BansPicksFeed>,
+    /// Why the game has no hero-select frame or no picks ([`trail`]).
+    trail: trail::PregameTrail,
+    /// Where the summary line is also kept ([`trail::SUMMARY_FILE`]);
+    /// `None` in tests that build the saver by hand.
+    summary_log: Option<std::path::PathBuf>,
 }
 
 impl PregameDump {
@@ -986,6 +1048,10 @@ impl PregameDump {
         poll: Duration,
     ) -> Option<Self> {
         if !on && bans.is_none() {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                "pre-game screens: not watched (debug_save_pregame_screens off and the bans and picks reader off)"
+            );
             return None;
         }
         let root = pregame_dir(data_dir);
@@ -1022,6 +1088,8 @@ impl PregameDump {
                 post_polled_at: None,
                 post_ticked_at: None,
                 bans,
+                trail: trail::PregameTrail::default(),
+                summary_log: Some(data_dir.join(trail::SUMMARY_FILE)),
             }),
             Err(e) => {
                 tracing::warn!(target: "scuffed_stat_tracker", error = %e, "pre-game screens not saved: no writer thread");
@@ -1049,6 +1117,8 @@ impl PregameDump {
             post_polled_at: None,
             post_ticked_at: None,
             bans: None,
+            trail: trail::PregameTrail::default(),
+            summary_log: None,
         }
     }
 
@@ -1083,11 +1153,37 @@ impl PregameDump {
             checked.rejects.loading = None;
         }
         checked.seen = self.pre_seen(now, checked.seen);
+        let seen = checked.seen;
         let root = &self.root;
+        let mut opened = false;
         let shots = self.tracker.observe_checked(now, checked, frame, || {
+            opened = true;
             unique_pregame_folder(root, Utc::now())
         });
+        if opened {
+            self.trail.new_game();
+        }
+        self.trail.screen(seen);
+        if let Some(why) = self.tracker.select_skip.take() {
+            self.trail.select_skipped(why);
+        }
         self.send(shots);
+    }
+
+    /// The open session, for the log lines.
+    pub(crate) fn set_session(&mut self, session: Option<&str>) {
+        self.tracker.set_session(session);
+    }
+
+    /// Whether a pre-game is on at `now` ([`PregameTracker::in_pregame`]).
+    pub(crate) fn in_pregame(&self, now: Instant) -> bool {
+        self.tracker.in_pregame(now)
+    }
+
+    /// The focus gate skipped a poll tick at `now`, for the summary.
+    pub(crate) fn note_focus_pause(&mut self, now: Instant) {
+        let in_pregame = self.in_pregame(now);
+        self.trail.focus_paused(in_pregame);
     }
 
     /// The game closed or capture stopped: write what is owed and hold no
@@ -1113,9 +1209,58 @@ impl PregameDump {
         if let Some(bans) = self.bans.as_mut() {
             bans.observe(&shots);
         }
-        if !self.writer.send(shots) {
+        self.trail.shots(&shots);
+        let saves: Vec<(String, &'static str)> = shots
+            .iter()
+            .filter_map(|op| match op {
+                PregameOp::Save(shot) => Some((shot.folder.clone(), shot.name)),
+                PregameOp::Promote { folder, name } | PregameOp::Adopt { folder, name } => {
+                    Some((folder.clone(), *name))
+                }
+                PregameOp::Stage(_) | PregameOp::Discard { .. } => None,
+            })
+            .collect();
+        let sent = self.writer.send(shots);
+        if !sent {
             for name in staged {
                 self.tracker.stage_lost(name);
+            }
+        }
+        self.log_saves(&saves, sent);
+    }
+
+    /// One line per pre-game frame saved, kept for the reader only, or
+    /// dropped. Saves come only when a screen starts or ends: a few per
+    /// game, not one per poll.
+    fn log_saves(&self, saves: &[(String, &'static str)], sent: bool) {
+        let session = self.tracker.session.as_deref().unwrap_or("none");
+        for (folder, name) in saves {
+            if !sent {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    name,
+                    game = %folder,
+                    session,
+                    reason = "writer queue full or writer gone",
+                    "pre-game frame skipped"
+                );
+            } else if self.writer.disk() {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    name,
+                    game = %folder,
+                    session,
+                    "pre-game frame saved"
+                );
+            } else {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    name,
+                    game = %folder,
+                    session,
+                    reason = "debug_save_pregame_screens off, held for the bans and picks reader only",
+                    "pre-game frame not written"
+                );
             }
         }
     }

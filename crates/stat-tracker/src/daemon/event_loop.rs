@@ -436,8 +436,15 @@ pub(crate) async fn run_loop(
                 }
                 // Focus gate: a pause skips this read only (see
                 // `daemon::focus::poll_pause`).
+                // The pre-game flag is for the focus log lines only.
+                daemon::focus::note_pregame(
+                    pregame_dump.as_ref().is_some_and(|d| d.in_pregame(Instant::now())),
+                );
                 if daemon::focus::poll_skip(&mut focus_paused, &mut st, Instant::now()).await {
                     tracing::trace!(target: "scuffed_stat_tracker", "poll tick skipped: another window is focused");
+                    if let Some(dump) = pregame_dump.as_mut() {
+                        dump.note_focus_pause(Instant::now());
+                    }
                     continue;
                 }
 
@@ -752,6 +759,8 @@ pub(crate) async fn run_loop(
                             dump.note_match_end(Instant::now());
                         }
                         if let (Some(dump), Some((seen, frame))) = (pregame_dump.as_mut(), pregame) {
+                            // The session id is for the log lines only.
+                            dump.set_session(st.active_game.as_ref().map(|g| g.session_id.as_str()));
                             dump.observe(Instant::now(), seen, frame);
                         }
                         if let Some(read) = result_read
