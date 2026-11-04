@@ -355,6 +355,30 @@ fn decision_of(status: FocusGateStatus) -> GateDecision {
     }
 }
 
+/// Whether a game is in its pre-game at the latest poll tick, for the focus
+/// log lines only ([`note_pregame`]). Read by nothing that decides.
+static IN_PREGAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The poll arm says whether a game is in its pre-game now, so the focus
+/// lines can say it. Logging only: no decision reads it.
+pub(crate) fn note_pregame(on: bool) {
+    IN_PREGAME.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn in_pregame() -> bool {
+    IN_PREGAME.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// The focused window's ids for a log line: `none` when no window is
+/// focused or it has no ids.
+pub(crate) fn window_of(read: &FocusRead) -> String {
+    match read {
+        FocusRead::Window(ids) if !ids.is_empty() => ids.join(","),
+        FocusRead::Window(_) | FocusRead::NoWindow => "none".into(),
+        FocusRead::Unreadable(_) => "unknown".into(),
+    }
+}
+
 fn log_read(before: FocusGateStatus, applied: &Applied, read: &FocusRead) {
     if applied.warn
         && let FocusRead::Unreadable(why) = read
@@ -368,12 +392,30 @@ fn log_read(before: FocusGateStatus, applied: &Applied, read: &FocusRead) {
     if before == applied.status {
         return;
     }
+    let pregame = in_pregame();
     match applied.status {
         FocusGateStatus::Focused => {
-            tracing::info!(target: "scuffed_stat_tracker", "focus gate: Overwatch is focused, reads go on");
+            tracing::info!(target: "scuffed_stat_tracker", pregame, "focus gate: Overwatch is focused, reads go on");
         }
         FocusGateStatus::NotFocused => {
-            tracing::info!(target: "scuffed_stat_tracker", "focus gate: another window is focused, reads pause");
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                window = %window_of(read),
+                pregame,
+                "focus gate: another window is focused, reads pause"
+            );
+        }
+        FocusGateStatus::Unreadable => {
+            let reason = match read {
+                FocusRead::Unreadable(why) => why.as_str(),
+                _ => "unknown",
+            };
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                reason,
+                pregame,
+                "focus gate: focus unknown, recording"
+            );
         }
         _ => {}
     }
@@ -468,14 +510,14 @@ pub(crate) fn poll_pause(paused: &mut bool, decision: GateDecision, st: &mut Ses
     match decision {
         GateDecision::Read => {
             if *paused {
-                tracing::info!(target: "scuffed_stat_tracker", "focus gate: poll resumed");
+                tracing::info!(target: "scuffed_stat_tracker", pregame = in_pregame(), "focus gate: poll resumed");
             }
             *paused = false;
             false
         }
         GateDecision::Pause => {
             if !*paused {
-                tracing::info!(target: "scuffed_stat_tracker", "focus gate: poll paused, another window is focused");
+                tracing::info!(target: "scuffed_stat_tracker", pregame = in_pregame(), "focus gate: poll paused, another window is focused");
                 st.ocr_stability.reset();
                 *paused = true;
             }
