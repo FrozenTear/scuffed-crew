@@ -12,20 +12,22 @@
 //! the hero is unknown to the server. `team` is `own`, `enemy` or null. Bans
 //! are up to 4. Picks are the uploader's own team only, own row first, up to 6
 //! because the reader checks six rows (the extra is null in a 5 player game).
-//! `ban_vote` is accepted but not shown. This is the
-//! shape API proposed; the local types below mirror it until API's change
-//! lands, then they should be swapped for the shared ones.
+//! `ban_vote` is accepted but not shown. The shape is the shared
+//! [`scuffed_types::BansPicks`], the same type the server returns.
 //!
 //! The field is optional all the way down. Absent, null, empty, or every slot
 //! unreadable renders nothing, and a value that does not parse is dropped
 //! instead of failing the whole game. Extra keys are ignored, so the server can
 //! add keys later without breaking this page. A string holding the object's
-//! JSON is read too.
+//! JSON is read too. The shared type wants arrays and a known team, so
+//! [`lenient`] first maps a null list to empty, a bare null ban to an empty ban
+//! and an unrecognised team to null.
 //!
 //! Hero art is not shipped with the site yet, so heroes show as names.
 
 use dioxus::prelude::*;
 use scuffed_types::heroes::{canonical_hero, hero_key_to_name, is_placeholder_hero};
+use scuffed_types::{BANS_PICKS_NO_PREFERENCE, BanTeam, BansPicks, HeroBan};
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -37,53 +39,54 @@ const OTHER_BANS_SIDE_UNKNOWN_TITLE: &str = "Bans, side not known";
 const LOBBY_BAN_TITLE: &str = "Lobby ban";
 // Picks are the uploader's own team only.
 const PICKS_TITLE: &str = "Team picks";
-/// The key the server sends when a player showed no preferred hero.
-const NO_PREFERENCE_KEY: &str = "no_preference";
 /// Shown for a slot that holds the no preference key.
 pub(super) const NO_PREFERENCE_TEXT: &str = "No preference";
 /// A slot with no hero: not read, or a hero the server does not know.
 pub(super) const UNKNOWN_TEXT: &str = "Unknown";
 
-/// One ban. `team` is `own` or `enemy`; null, missing or anything else means
-/// the side is not known.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
-pub(super) struct BanRead {
-    #[serde(default)]
-    hero: Option<String>,
-    #[serde(default)]
-    team: Option<String>,
-}
-
-/// The `bans_picks` field.
-#[derive(Debug, Clone, PartialEq, Default, Deserialize)]
-pub(super) struct BansPicks {
-    #[serde(default)]
-    /// A bare null item is accepted too: it reads as a ban with no hero and no side.
-    bans: Option<Vec<Option<BanRead>>>,
-    #[serde(default)]
-    lobby_ban: Option<String>,
-    /// The uploader's own team only, own row first. Up to 6 entries because the
-    /// reader checks six rows, so a 5 player game ends in null.
-    #[serde(default)]
-    picks: Option<Vec<Option<String>>>,
-    /// Accepted so the field parses. Not shown on the page yet.
-    #[serde(default)]
-    #[allow(dead_code)]
-    ban_vote: Option<Vec<Option<String>>>,
-}
-
 /// Read the field leniently: null, an object, or a string holding the
 /// object's JSON. Anything else, or an object of the wrong shape, is None.
 pub(super) fn lenient<'de, D: Deserializer<'de>>(d: D) -> Result<Option<BansPicks>, D::Error> {
     let raw = Value::deserialize(d)?;
-    let object = match raw {
+    let mut object = match raw {
         Value::String(text) => serde_json::from_str::<Value>(&text).unwrap_or(Value::Null),
         other => other,
     };
-    if !object.is_object() {
+    let Some(fields) = object.as_object_mut() else {
         return Ok(None);
-    }
+    };
+    soften(fields);
     Ok(serde_json::from_value(object).ok())
+}
+
+/// Bring a loose object closer to the shared type, so a field the shared type
+/// would refuse still reads. A null list is an empty list, a bare null ban is
+/// a ban with no hero and no side, and a team that is not `own` or `enemy` is
+/// null. Anything else of the wrong type is left alone and drops the field.
+fn soften(fields: &mut serde_json::Map<String, Value>) {
+    for key in ["bans", "picks", "ban_vote"] {
+        if fields.get(key).is_some_and(Value::is_null) {
+            fields.remove(key);
+        }
+    }
+    let Some(Value::Array(bans)) = fields.get_mut("bans") else {
+        return;
+    };
+    for ban in bans {
+        match ban {
+            Value::Null => *ban = Value::Object(serde_json::Map::new()),
+            Value::Object(ban) => {
+                let unknown = matches!(
+                    ban.get("team"),
+                    Some(Value::String(team)) if team != "own" && team != "enemy"
+                );
+                if unknown {
+                    ban.remove("team");
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// What one slot shows.
@@ -99,7 +102,7 @@ impl Shown {
     fn from_key(value: Option<&str>) -> Self {
         match value.map(str::trim) {
             None | Some("") => Shown::Unknown,
-            Some(NO_PREFERENCE_KEY) => Shown::NoPreference,
+            Some(BANS_PICKS_NO_PREFERENCE) => Shown::NoPreference,
             Some(key) if is_placeholder_hero(key) => Shown::Unknown,
             Some(key) => Shown::Hero(
                 hero_key_to_name(key)
@@ -147,28 +150,25 @@ fn group(key: &'static str, title: &'static str, items: Vec<Shown>) -> Option<Gr
         .then_some(Group { key, title, items })
 }
 
-impl BansPicks {
+/// What this page makes of the shared [`BansPicks`]. A trait because the type
+/// lives in another crate.
+trait BansPicksGroups {
     /// The lists to show, in order. Empty when there is nothing to show.
-    pub(super) fn groups(&self) -> Vec<Group> {
-        let bans: Vec<BanRead> = self
-            .bans
-            .iter()
-            .flatten()
-            .map(|ban| ban.clone().unwrap_or_default())
-            .collect();
-        let side = |wanted: Option<&str>| -> Vec<Shown> {
-            bans.iter()
-                .filter(|ban| ban.team.as_deref() == wanted)
-                .map(|ban| Shown::from_key(ban.hero.as_deref()))
+    fn groups(&self) -> Vec<Group>;
+}
+
+impl BansPicksGroups for BansPicks {
+    fn groups(&self) -> Vec<Group> {
+        let side = |wanted: Option<BanTeam>| -> Vec<Shown> {
+            self.bans
+                .iter()
+                .filter(|ban| ban.team == wanted)
+                .map(|ban: &HeroBan| Shown::from_key(ban.hero.as_deref()))
                 .collect()
         };
-        let own = side(Some("own"));
-        let enemy = side(Some("enemy"));
-        let other: Vec<Shown> = bans
-            .iter()
-            .filter(|ban| !matches!(ban.team.as_deref(), Some("own" | "enemy")))
-            .map(|ban| Shown::from_key(ban.hero.as_deref()))
-            .collect();
+        let own = side(Some(BanTeam::Own));
+        let enemy = side(Some(BanTeam::Enemy));
+        let other = side(None);
         let sided = own.iter().chain(&enemy).any(Shown::is_read);
         let other_title = if sided {
             OTHER_BANS_SIDE_UNKNOWN_TITLE
@@ -182,8 +182,6 @@ impl BansPicks {
             .unwrap_or_default();
         let picks = self
             .picks
-            .as_deref()
-            .unwrap_or(&[])
             .iter()
             .map(|key| Shown::from_key(key.as_deref()))
             // The reader checks six rows, so a 5 player game ends in a null.
@@ -279,7 +277,7 @@ pub(super) const BANS_PICKS_CSS: &str = r#"
 /// The section for one game. Renders nothing when the field is absent, empty,
 /// or has no readable slot, so an older game looks exactly as before.
 pub(super) fn bans_picks_section(match_id: &str, field: Option<&BansPicks>) -> Element {
-    let groups = field.map(BansPicks::groups).unwrap_or_default();
+    let groups = field.map(BansPicksGroups::groups).unwrap_or_default();
     if groups.is_empty() {
         return rsx! {};
     }
@@ -329,7 +327,7 @@ fn card_label(g: &Group) -> &'static str {
 /// slots that were not. Empty when there is nothing to show.
 pub(super) fn card_groups(field: Option<&BansPicks>) -> Vec<(&'static str, Vec<String>)> {
     field
-        .map(BansPicks::groups)
+        .map(BansPicksGroups::groups)
         .unwrap_or_default()
         .iter()
         .filter_map(|g| {
@@ -548,7 +546,7 @@ mod tests {
     #[test]
     fn ban_vote_parses_but_is_not_shown() {
         let field = parse(FULL).unwrap();
-        assert_eq!(field.ban_vote.as_ref().map(Vec::len), Some(3));
+        assert_eq!(field.ban_vote.len(), 3);
         let html = render("m1", Some(field));
         assert!(!html.contains("Mei") && !html.contains("vote"), "{html}");
         let only_vote = parse(r#"{"bans_picks": {"ban_vote": ["ana", "mei"]}}"#).unwrap();
@@ -610,6 +608,29 @@ mod tests {
                 .len(),
             0
         );
+    }
+
+    #[test]
+    fn loose_shapes_the_shared_type_would_refuse_still_read() {
+        // A null list is an empty list, not a dropped field.
+        let nulls = parse(r#"{"bans_picks": {"bans": null, "picks": null, "ban_vote": null}}"#)
+            .expect("null lists read as empty");
+        assert_eq!(nulls, BansPicks::default());
+        // An unknown team reads as no side.
+        let odd = parse(r#"{"bans_picks": {"bans": [{"hero": "ana", "team": "Own"}]}}"#).unwrap();
+        assert_eq!(odd.bans[0].team, None);
+        assert_eq!(titles(&odd), [OTHER_BANS_TITLE]);
+        // The team the server sends is kept.
+        let sided =
+            parse(r#"{"bans_picks": {"bans": [{"hero": "ana", "team": "enemy"}]}}"#).unwrap();
+        assert_eq!(sided.bans[0].team, Some(BanTeam::Enemy));
+        // A bare null ban is an empty ban.
+        let bare = parse(r#"{"bans_picks": {"bans": [null]}}"#).unwrap();
+        assert_eq!(bare.bans.len(), 1);
+        assert_eq!(bare.bans[0].hero, None);
+        // A wrong type is still dropped, not softened.
+        assert_eq!(parse(r#"{"bans_picks": {"bans": [{"team": 5}]}}"#), None);
+        assert_eq!(parse(r#"{"bans_picks": {"ban_vote": "ana"}}"#), None);
     }
 
     #[test]
