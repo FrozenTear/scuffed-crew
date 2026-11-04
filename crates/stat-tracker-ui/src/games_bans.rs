@@ -455,23 +455,24 @@ fn not_read_chip(ban: bool, tip: String) -> Chip {
     }
 }
 
-/// Our own ban vote first (the local player is row 0), then teammates.
+/// Our own three ban votes, in slot order. A slot with no hero (skipped,
+/// empty or not read) is stored as null and shows as not read. Games read
+/// by 0.6.0-alpha.2.1 or older stored the six roster rows here instead,
+/// which are each player's preferred hero and not a vote.
 fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
     slots
         .iter()
         .enumerate()
         .map(|(i, slot)| {
-            let you = i == 0;
-            let who = if you { "You" } else { "Teammate" };
             let tip = match slot {
-                Slot::Hero(name) => format!("{who} voted to ban {name}"),
-                Slot::NoPreference => format!("{who} voted no preference"),
-                Slot::NotRead => format!("Ban vote slot {}: not read", i + 1),
+                Slot::Hero(name) => format!("You voted to ban {name}"),
+                Slot::NoPreference => "You voted no preference".to_string(),
+                Slot::NotRead => format!("Your ban vote {}: no hero read", i + 1),
             };
             Chip {
                 slot: slot.clone(),
                 ban: false,
-                you,
+                you: true,
                 swap: false,
                 tip,
             }
@@ -585,7 +586,7 @@ mod tests {
         assert_eq!(names(&rows[0]), ["Sombra", "Mauga"]);
         assert_eq!(names(&rows[1]), ["Ana", "Winston"]);
         assert_eq!(names(&rows[2]), ["Sigma"]);
-        assert_eq!(names(&rows[3]).len(), 6);
+        assert_eq!(names(&rows[3]).len(), 3);
         assert_eq!(names(&rows[4])[0], "Wrecking Ball");
         assert_eq!(names(&rows[5]), ["Wrecking Ball"]);
     }
@@ -600,7 +601,7 @@ mod tests {
         assert_eq!(tip(0, 0), "Banned: Sombra");
         assert_eq!(tip(2, 0), "Lobby ban: Sigma");
         assert_eq!(tip(3, 0), "You voted to ban Reinhardt");
-        assert_eq!(tip(3, 1), "Teammate voted to ban Tracer");
+        assert_eq!(tip(3, 1), "You voted to ban Tracer");
         assert_eq!(tip(4, 0), "Shown at hero select: Wrecking Ball, you");
         assert_eq!(tip(4, 1), "Shown at hero select: Tracer");
         assert_eq!(tip(5, 0), "Played Wrecking Ball, you");
@@ -634,8 +635,8 @@ mod tests {
         let Body::Chips(votes) = &rows[1].body else {
             panic!("chips")
         };
-        assert_eq!(votes[1].tip, "Teammate voted no preference");
-        assert_eq!(votes[3].tip, "Ban vote slot 4: not read");
+        assert_eq!(votes[1].tip, "Your ban vote 2: no hero read");
+        assert!(votes.iter().all(|c| c.you));
         // We picked Reinhardt and played Wrecking Ball.
         let Body::Chips(played) = &rows[3].body else {
             panic!("chips")
