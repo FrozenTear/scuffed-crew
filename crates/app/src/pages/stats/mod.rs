@@ -98,7 +98,7 @@ struct PersonalMatch {
     /// Bans and picks for the card line. Missing, null or a value that does
     /// not parse is None. See [`bans_picks`].
     #[serde(default, deserialize_with = "bans_picks::lenient")]
-    bans_picks: Option<bans_picks::BansPicks>,
+    bans_picks: Option<scuffed_types::BansPicks>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

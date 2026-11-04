@@ -18,10 +18,11 @@ use crate::routes::Route;
 use crate::state::use_auth;
 use crate::util::encode_query;
 
-use super::bans_picks::{BANS_PICKS_CSS, BansPicks, bans_picks_section, lenient};
+use super::bans_picks::{BANS_PICKS_CSS, bans_picks_section, lenient};
 use super::history::{cell_is_unsure, marked_value, outcome_class, show_new_reader_badge};
 use super::role::game_role_label;
 use super::{format_date, map_game_mode, member_stats_url};
+use scuffed_types::BansPicks;
 
 /// Base path for the member's own games. `game_path` appends the id to it as
 /// one encoded path segment.
