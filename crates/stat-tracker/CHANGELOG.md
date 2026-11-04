@@ -15,6 +15,20 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.6.0-alpha.2.1
+
+This alpha shows the bans and picks the tracker read on each game card in the app, sends them with your match uploads, and warns you when a game's bans and picks could not be read. It also writes a short log of the screens seen before each game, so missed screens can be tracked down.
+
+### Highlights
+
+- The open game card now has a **Bans and picks** block: bans by team, the lobby ban, ban votes, hero select and the hero you played. When the reader was off or read nothing, a short line says why, and a link opens the matching row in Settings.
+- Each match upload now carries the bans and picks that were read, values only. Matches with nothing read upload exactly as before.
+- The team side of each ban is worked out from how the ban bar colours differ, so custom colour schemes work too. When it is not clear, the ban is shown with no team instead of a guess.
+- When the reader is on but a game had no pre-game screens, or the bans were read and the hero select was never seen, the app shows a notice. The game is recorded either way.
+- The tracker logs each pre-game screen it sees, each save and skip with the reason, and each focus pause and resume, and keeps a one-line summary per game in `pregame-summary.log` in the data folder (last 200 games). It stays on this PC.
+
+Technical detail. Each game record stores a `bans_picks_status` (ok, partial, no_frames, frame_size, pack_missing, pack_failed, reader_failed, reader_off); older rows read as none. The upload's optional `bans_picks` object holds up to 4 bans (team own, enemy or none), the lobby ban, up to 6 picks, up to 6 ban votes and the recognizer, with no confidences; servers that do not know the field ignore it. Ban team side: the bars must split two and two into hue groups, a bar near both groups goes to the nearer one, and the own-team ring on hero select or ban vote picks the own group; rings that disagree give no team. The bans and picks notice is published once per game. Not tested on Linux Mint X11 or KDE CachyOS Wayland in this alpha.
+
 ## 0.6.0-alpha.2
 
 This alpha adds two things for everyone. The tracker now reads the bans and the hero picks before each game on 1440p screens and keeps them on the game record on this PC, and it pauses its reads while another window is in front of Overwatch. If either one cannot work on your PC, games are still recorded and the app tells you why.
