@@ -286,8 +286,16 @@ pub struct HeroBan {
 /// - `picks`: at most [`BANS_PICKS_MAX_PICKS`] entries, own team, local
 ///   player first. Each entry is a pack key, [`BANS_PICKS_NO_PREFERENCE`]
 ///   (the teammate chose no hero) or null (unreadable).
-/// - `ban_vote`: at most [`BANS_PICKS_MAX_BAN_VOTE`] entries, the six own
-///   team rows of the ban vote screen, same entry values as `picks`.
+/// - `ban_vote`: at most [`BANS_PICKS_MAX_BAN_VOTE`] entries, same entry
+///   values as `picks`. From stat trackers newer than 0.6.0-alpha.2.1:
+///   the uploading player's own three ban votes in slot order (a hero key,
+///   or null for a skipped, empty or unread slot). Older trackers sent the
+///   six own team rows of the ban vote screen, which show each player's
+///   preferred hero, not a vote; treat those as unreliable.
+/// - Newer trackers may also send `ban_votes` (each vote slot's state and
+///   hero) and `ban_score` (the TEAM BAN SCORE strip: rank, hero, vote
+///   count). They are optional and not part of this contract yet:
+///   [`resolve_bans_picks`] ignores them, like any key it does not know.
 /// - `recognizer`: reader id, same format rule as `name_recognizer`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BansPicks {

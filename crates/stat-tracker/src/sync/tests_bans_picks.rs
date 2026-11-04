@@ -306,3 +306,93 @@ fn an_older_server_that_ignores_the_key_still_decodes_the_body() {
     assert_eq!(older.matches[0].hero, "Ana");
     assert_eq!(older.matches[0].map_name, "Busan");
 }
+
+/// What the daemon stores since the ban vote reader reads the vote slots
+/// and the TEAM BAN SCORE strip: `ban_vote` is the three own slots.
+fn vote_read() -> Value {
+    json!({
+        "bans": [stored_ban(Some("ana"), Some("own"))],
+        "lobby_ban": null,
+        "picks": [],
+        "ban_vote": reads(&[Some("roadhog"), None, None]),
+        "ban_votes": [
+            { "voter": 0, "slot": 1, "state": "hero", "hero": "roadhog",
+              "confidence": 0.9, "score": 0.76, "margin": 0.57 },
+            { "voter": 0, "slot": 2, "state": "skipped", "hero": null,
+              "confidence": 0.0, "score": 0.0, "margin": 0.0 },
+            { "voter": 0, "slot": 3, "state": null, "hero": null,
+              "confidence": 0.0, "score": 0.31, "margin": 0.02 },
+        ],
+        "ban_score": [
+            { "rank": 1, "hero": "vendetta", "votes": 15, "empty": false,
+              "confidence": 0.97, "votes_confidence": 1.0, "score": 0.89, "margin": 0.7 },
+            { "rank": 2, "hero": null, "votes": 12, "empty": false,
+              "confidence": 0.0, "votes_confidence": 1.0, "score": 0.4, "margin": 0.05 },
+            { "rank": 3, "hero": null, "votes": null, "empty": true,
+              "confidence": 0.0, "votes_confidence": 0.0, "score": 0.0, "margin": 0.0 },
+        ],
+        "bans_picks_recognizer": "cv-v1",
+    })
+}
+
+#[test]
+fn the_vote_slots_and_the_strip_ride_along_as_plain_values() {
+    let sent = first_match(Some(&vote_read()));
+    let bp = &sent["bans_picks"];
+    assert_eq!(bp["ban_vote"], json!(["roadhog", null, null]));
+    assert_eq!(
+        bp["ban_votes"],
+        json!([
+            { "voter": 0, "slot": 1, "state": "hero", "hero": "roadhog" },
+            { "voter": 0, "slot": 2, "state": "skipped", "hero": null },
+            { "voter": 0, "slot": 3, "state": null, "hero": null },
+        ])
+    );
+    assert_eq!(
+        bp["ban_score"],
+        json!([
+            { "rank": 1, "hero": "vendetta", "votes": 15, "empty": false },
+            { "rank": 2, "hero": null, "votes": 12, "empty": false },
+            { "rank": 3, "hero": null, "votes": null, "empty": true },
+        ])
+    );
+    let wire = bp.to_string();
+    for private in ["confidence", "margin", "\"score\""] {
+        assert!(!wire.contains(private), "{private} leaves the machine: {wire}");
+    }
+}
+
+#[test]
+fn the_new_keys_are_left_out_when_not_read_and_older_servers_ignore_them() {
+    // Not read (null), and a result stored before the keys existed.
+    let mut unread = vote_read();
+    unread["ban_votes"] = Value::Null;
+    unread["ban_score"] = Value::Null;
+    let mut older = vote_read();
+    let obj = older.as_object_mut().unwrap();
+    obj.remove("ban_votes");
+    obj.remove("ban_score");
+    for stored in [unread, older] {
+        let sent = first_match(Some(&stored));
+        let bp = sent["bans_picks"].as_object().unwrap();
+        assert!(!bp.contains_key("ban_votes"), "{sent}");
+        assert!(!bp.contains_key("ban_score"), "{sent}");
+    }
+    // The server's parser reads only the keys it knows.
+    let sent = first_match(Some(&vote_read()));
+    let parsed = scuffed_types::api::resolve_bans_picks(Some(&sent["bans_picks"]))
+        .unwrap()
+        .unwrap();
+    assert_eq!(parsed.ban_vote, vec![Some("roadhog".to_string()), None, None]);
+}
+
+#[test]
+fn a_strip_alone_does_not_send_the_key() {
+    // Only the strip and skipped slots were read: no value of the old
+    // fields, so nothing is sent, as before.
+    let mut stored = vote_read();
+    stored["bans"] = json!([]);
+    stored["ban_vote"] = json!(reads(&[None, None, None]));
+    let sent = first_match(Some(&stored));
+    assert!(sent.get("bans_picks").is_none(), "{sent}");
+}
