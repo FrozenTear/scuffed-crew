@@ -509,7 +509,9 @@ fn pick_chips(slots: &[Slot]) -> Vec<Chip> {
 /// dismissed run folds into the main hero, consecutive runs of one hero are
 /// one chip, and a hero played again later keeps its first place. A game
 /// whose hero was set by hand, or whose runs name no hero, keeps the single
-/// chip from the row's hero. Only the first chip can carry the swap glyph.
+/// chip from the row's hero. Only the first chip can carry the swap glyph, and
+/// only when the hero select pick is not one of the Played chips: a pick that
+/// was played at some point was not swapped away from.
 fn played_chips(g: &Game, own_pick: Option<&Slot>) -> Vec<Chip> {
     let corrected = g.edited_fields.iter().any(|f| f == "hero");
     let mut names: Vec<String> = Vec::new();
@@ -528,6 +530,9 @@ fn played_chips(g: &Game, own_pick: Option<&Slot>) -> Vec<Chip> {
     let Some((first, rest)) = names.split_first() else {
         return played_chip(&g.hero, own_pick).into_iter().collect();
     };
+    let pick_was_played = matches!(own_pick,
+        Some(Slot::Hero(picked)) if names.iter().any(|n| n.eq_ignore_ascii_case(picked)));
+    let own_pick = if pick_was_played { None } else { own_pick };
     played_chip(first, own_pick)
         .into_iter()
         .chain(rest.iter().map(|name| Chip {
@@ -872,7 +877,27 @@ mod tests {
 
     #[test]
     fn only_the_first_played_chip_marks_a_swap() {
-        // UNSURE picked Reinhardt at hero select.
+        // UNSURE picked Reinhardt at hero select, and we never played him.
+        let mut g = game(UNSURE);
+        g.segments[1].confirmed = true;
+        g.segments[1].hero = "Sigma".into();
+        g.segments[2].hero = "Mei".into();
+        let chips = played(&g);
+        let names: Vec<_> = chips.iter().map(Chip::name).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma", "Mei"]);
+        assert!(chips[0].swap && chips[0].you);
+        assert_eq!(
+            chips[0].tip,
+            "Played Wrecking Ball, Reinhardt at hero select, you"
+        );
+        assert!(chips[1..].iter().all(|c| !c.swap && c.you));
+        assert_eq!(chips[2].tip, "Then played Mei, you");
+        assert!(bans_picks(&g).has_swap());
+    }
+
+    #[test]
+    fn no_swap_mark_when_the_pick_is_one_of_the_played_chips() {
+        // UNSURE picked Reinhardt at hero select and went back to him later.
         let mut g = game(UNSURE);
         g.segments[1].confirmed = true;
         g.segments[1].hero = "Sigma".into();
@@ -880,13 +905,12 @@ mod tests {
         let chips = played(&g);
         let names: Vec<_> = chips.iter().map(Chip::name).collect();
         assert_eq!(names, ["Wrecking Ball", "Sigma", "Reinhardt"]);
-        assert!(chips[0].swap && chips[0].you);
-        assert_eq!(
-            chips[0].tip,
-            "Played Wrecking Ball, Reinhardt at hero select, you"
-        );
-        assert!(chips[1..].iter().all(|c| !c.swap && c.you));
-        assert_eq!(chips[2].tip, "Then played Reinhardt, you");
+        assert!(chips.iter().all(|c| !c.swap && c.you));
+        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
+        assert!(!bans_picks(&g).has_swap());
+        // The same holds when the case of the name differs.
+        g.segments[2].hero = "REINHARDT".into();
+        assert!(played(&g).iter().all(|c| !c.swap));
     }
 
     #[test]
