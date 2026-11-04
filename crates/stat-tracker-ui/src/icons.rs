@@ -51,10 +51,14 @@ pub enum Icon {
     TrashInk,
     /// The "Game deleted." line's tick, in TEXT_2.
     Tick,
+    /// A ban in the Bans and picks block: a circle with a slash.
+    Ban,
+    /// Our own Played chip when it differs from hero select.
+    Swap,
 }
 
 const TABS: usize = Screen::all().len();
-const FIXED: [Icon; 14] = [
+const FIXED: [Icon; 16] = [
     Icon::Warn,
     Icon::Check,
     Icon::Lock,
@@ -69,6 +73,8 @@ const FIXED: [Icon; 14] = [
     Icon::Trash,
     Icon::TrashInk,
     Icon::Tick,
+    Icon::Ban,
+    Icon::Swap,
 ];
 const COUNT: usize = TABS * 2 + FIXED.len();
 
@@ -100,6 +106,8 @@ impl Icon {
             Icon::Trash => TABS * 2 + 11,
             Icon::TrashInk => TABS * 2 + 12,
             Icon::Tick => TABS * 2 + 13,
+            Icon::Ban => TABS * 2 + 14,
+            Icon::Swap => TABS * 2 + 15,
         }
     }
 
@@ -128,6 +136,8 @@ impl Icon {
             Icon::Trash => include_bytes!("../assets/trash.png"),
             Icon::TrashInk => include_bytes!("../assets/trash-ink.png"),
             Icon::Tick => include_bytes!("../assets/tick.png"),
+            Icon::Ban => include_bytes!("../assets/ban.png"),
+            Icon::Swap => include_bytes!("../assets/swap.png"),
         }
     }
 
@@ -199,7 +209,9 @@ mod tests {
                 | Icon::Pencil
                 | Icon::Flag
                 | Icon::Picture
-                | Icon::WarnLoss => 24,
+                | Icon::WarnLoss
+                | Icon::Ban
+                | Icon::Swap => 24,
                 Icon::Check | Icon::FoldOpen | Icon::FoldClosed => 28,
             };
             assert_eq!((img.width(), img.height()), (want, want), "{icon:?}");

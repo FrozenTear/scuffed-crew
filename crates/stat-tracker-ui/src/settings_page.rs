@@ -367,7 +367,11 @@ fn advanced_column(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
                 background: open.then_some(Background::Color(ACCENT)),
                 ..container::Style::default()
             });
-        panel = panel.push(row![bar, fold].height(Length::Shrink).width(Fill));
+        panel = panel.push(
+            container(row![bar, fold].height(Length::Shrink).width(Fill))
+                .id(crate::focus_status::section_row_id(section))
+                .width(Fill),
+        );
     }
     column![
         text("ADVANCED")

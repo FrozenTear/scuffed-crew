@@ -137,6 +137,9 @@ pub fn panel<'a>(
     if editing {
         body = body.push(widgets::edit_form(&app.edit, &g.session_id));
     }
+    if let Some(block) = crate::games_bans_view::view(g, narrow) {
+        body = body.push(block);
+    }
     body = body.push(footer(app.fixture.is_some()));
     // The 2px accent edge down the open panel (spec: "2px edge").
     container(
@@ -976,6 +979,7 @@ mod tests {
             crate::fixtures_games::NORMAL,
             crate::fixtures_games::UNSURE,
             crate::fixtures_games::UNDECIDED,
+            crate::fixtures_games::REJECTED_2,
         ] {
             let g = games.iter().find(|g| g.session_id == sid).unwrap();
             for narrow in [false, true] {
