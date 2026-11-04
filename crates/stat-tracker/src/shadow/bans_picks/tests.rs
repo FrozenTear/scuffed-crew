@@ -1134,7 +1134,7 @@ fn an_empty_strip_box_is_empty_with_no_hero_and_no_count() {
         [StripBox::Hero("mauga", "10"), StripBox::Empty, StripBox::Empty],
     );
     let v = r.read_ban_vote(&img).unwrap();
-    let score = v.score.unwrap();
+    let score = v.score.as_ref().unwrap();
     assert_eq!(score[0].hero.as_deref(), Some("mauga"));
     assert_eq!(score[0].votes, Some(10));
     for e in &score[1..] {
