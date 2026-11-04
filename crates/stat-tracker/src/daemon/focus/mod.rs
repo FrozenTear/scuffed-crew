@@ -467,11 +467,15 @@ pub(crate) async fn tab_skip(now: Instant) -> bool {
 pub(crate) fn poll_pause(paused: &mut bool, decision: GateDecision, st: &mut SessionState) -> bool {
     match decision {
         GateDecision::Read => {
+            if *paused {
+                tracing::info!(target: "scuffed_stat_tracker", "focus gate: poll resumed");
+            }
             *paused = false;
             false
         }
         GateDecision::Pause => {
             if !*paused {
+                tracing::info!(target: "scuffed_stat_tracker", "focus gate: poll paused, another window is focused");
                 st.ocr_stability.reset();
                 *paused = true;
             }

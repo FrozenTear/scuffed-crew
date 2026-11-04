@@ -42,6 +42,7 @@ pub(super) fn snap(session_id: &str, elims: u32) -> PersonalMatch {
         suspect_fields: Vec::new(),
         name_recognizer: None,
         bans_picks: None,
+        bans_picks_status: None,
     }
 }
 

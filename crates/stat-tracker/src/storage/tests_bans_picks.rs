@@ -3,6 +3,7 @@
 
 use super::tests::snap;
 use super::*;
+use crate::model::{BansPicksMissing, BansPicksStatus};
 
 const JSON: &str = r#"{"bans_picks_recognizer":"cv-v1"}"#;
 
@@ -65,4 +66,106 @@ async fn the_result_is_not_in_the_upload() {
     assert_eq!(request.matches.len(), 1, "the row is uploaded");
     let wire = serde_json::to_string(&request).expect("request as json");
     assert!(!wire.contains("cv-v1"), "local only: {wire}");
+}
+
+fn every_status() -> Vec<BansPicksStatus> {
+    vec![
+        BansPicksStatus::Ok,
+        BansPicksStatus::Partial {
+            missing: vec![BansPicksMissing::BanVote, BansPicksMissing::HeroSelect],
+        },
+        BansPicksStatus::NoFrames,
+        BansPicksStatus::FrameSize {
+            width: 1920,
+            height: 1080,
+        },
+        BansPicksStatus::PackMissing { linked: false },
+        BansPicksStatus::PackFailed,
+        BansPicksStatus::ReaderFailed,
+        BansPicksStatus::ReaderOff,
+    ]
+}
+
+#[test]
+fn the_status_is_snake_case_json_and_an_old_row_has_none() {
+    let json = |s: &BansPicksStatus| serde_json::to_string(s).unwrap();
+    assert_eq!(json(&BansPicksStatus::NoFrames), r#""no_frames""#);
+    assert_eq!(
+        json(&BansPicksStatus::Partial {
+            missing: vec![BansPicksMissing::HeroSelect]
+        }),
+        r#"{"partial":{"missing":["hero_select"]}}"#
+    );
+    assert_eq!(
+        json(&BansPicksStatus::FrameSize {
+            width: 1,
+            height: 2
+        }),
+        r#"{"frame_size":{"width":1,"height":2}}"#
+    );
+    assert_eq!(
+        json(&BansPicksStatus::PackMissing { linked: true }),
+        r#"{"pack_missing":{"linked":true}}"#
+    );
+    // A match log line from before the field existed.
+    let mut old = serde_json::to_value(snap("g1", 1)).unwrap();
+    assert!(old.get("bans_picks_status").is_none(), "omitted when None");
+    old.as_object_mut().unwrap().remove("bans_picks_status");
+    let row: PersonalMatch = serde_json::from_value(old).unwrap();
+    assert_eq!(row.bans_picks_status, None);
+}
+
+#[tokio::test]
+async fn every_status_survives_the_store_and_a_later_snapshot_carries_it() {
+    for (i, status) in every_status().into_iter().enumerate() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = LocalStore::open(dir.path()).await.expect("open store");
+        let sid = format!("g{i}");
+        store.insert_match(snap(&sid, 1)).await.unwrap();
+        assert!(store.attach_bans_picks_status(&sid, &status).await.unwrap());
+        assert!(
+            !store.attach_bans_picks_status(&sid, &status).await.unwrap(),
+            "the same status is not written twice"
+        );
+        store.insert_match(snap(&sid, 2)).await.unwrap();
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(
+            rows.iter()
+                .all(|r| r.bans_picks_status.as_ref() == Some(&status)),
+            "{status:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_later_status_replaces_no_frames_but_a_stored_result_keeps_its_status() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    store.insert_match(snap("g1", 1)).await.unwrap();
+    assert!(
+        !store
+            .attach_bans_picks_status("nope", &BansPicksStatus::Ok)
+            .await
+            .unwrap()
+    );
+    store
+        .attach_bans_picks_status("g1", &BansPicksStatus::NoFrames)
+        .await
+        .unwrap();
+    assert!(
+        store
+            .attach_bans_picks_status("g1", &BansPicksStatus::Ok)
+            .await
+            .unwrap()
+    );
+    store.attach_bans_picks("g1", JSON).await.unwrap();
+    assert!(
+        !store
+            .attach_bans_picks_status("g1", &BansPicksStatus::ReaderOff)
+            .await
+            .unwrap()
+    );
+    let rows = store.get_all_matches().await.unwrap();
+    assert_eq!(rows[0].bans_picks_status, Some(BansPicksStatus::Ok));
 }

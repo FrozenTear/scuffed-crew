@@ -2,8 +2,11 @@
 //! failure stops a game from being recorded.
 
 use super::*;
-use crate::daemon::bans_picks::{BansPicksFeed, Engine, LoadFailure, Loader, missing_notice};
+use crate::daemon::bans_picks::{
+    BansPicksFeed, Engine, LoadFailure, Loader, NO_SELECT_NOTICE, missing_notice,
+};
 use image::{DynamicImage, RgbImage};
+use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 use stat_tracker::ocr_status::{publish_bans_picks_notice, read_status};
 use stat_tracker::shadow::bans_picks::{
     BanResults, BansPicksSetting, Choice, HeroSelect, Layout, Read,
@@ -454,4 +457,168 @@ fn with_the_screen_saves_off_the_saver_writes_nothing_and_keeps_draining() {
     );
     assert!(dump.bans.as_ref().is_some_and(|f| f.has_frames()));
     assert!(!dump.writer.disk());
+}
+
+/// The status stored on the one game of the test.
+async fn status_of(store: &storage::LocalStore) -> Option<BansPicksStatus> {
+    store.get_all_matches().await.unwrap()[0]
+        .bans_picks_status
+        .clone()
+}
+
+const NO_SCREENS: &str =
+    "Bans and picks were not read: no pre-game screens were seen for this game.";
+
+#[tokio::test]
+async fn bans_without_a_hero_select_store_empty_picks_and_show_a_warning() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let f = frame(2560, 1440);
+    let batch = vec![
+        PregameOp::Save(shot(PregamePhase::HeroBan.last_name(), &f)),
+        PregameOp::Save(shot(BAN_RESULTS_NAME, &f)),
+    ];
+    let (_, stored) = game_then_read(&rig, &mut dump, batch).await;
+    let stored = stored.expect("a result");
+    assert!(stored.contains("genji"), "{stored}");
+    assert!(stored.contains("\"picks\":[]"), "{stored}");
+    assert_eq!(rig.health().as_deref(), Some(NO_SELECT_NOTICE));
+}
+
+#[tokio::test]
+async fn the_samoa_game_is_partial_with_the_hero_select_missing() {
+    // Bans read, hero select never seen: the ban vote and results are there.
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let f = frame(2560, 1440);
+    let batch = vec![
+        PregameOp::Save(shot(PregamePhase::HeroBan.last_name(), &f)),
+        PregameOp::Save(shot(BAN_RESULTS_NAME, &f)),
+    ];
+    let (store, stored) = game_then_read(&rig, &mut dump, batch).await;
+    assert!(stored.is_some());
+    assert_eq!(
+        status_of(&store).await,
+        Some(BansPicksStatus::Partial {
+            missing: vec![BansPicksMissing::HeroSelect]
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_read_of_all_three_screens_is_ok() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let (store, _) = game_then_read(&rig, &mut dump, three(2560, 1440)).await;
+    assert_eq!(status_of(&store).await, Some(BansPicksStatus::Ok));
+}
+
+#[tokio::test]
+async fn a_frame_of_the_wrong_size_is_a_frame_size_status() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let (store, _) = game_then_read(&rig, &mut dump, three(1920, 1080)).await;
+    assert_eq!(
+        status_of(&store).await,
+        Some(BansPicksStatus::FrameSize {
+            width: 1920,
+            height: 1080
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_pack_that_is_missing_or_will_not_load_or_a_reader_that_fails_has_its_status() {
+    for (result, linked, want) in [
+        (
+            Err(LoadFailure::NotInstalled),
+            true,
+            BansPicksStatus::PackMissing { linked: true },
+        ),
+        (
+            Err(LoadFailure::NotInstalled),
+            false,
+            BansPicksStatus::PackMissing { linked: false },
+        ),
+        (
+            Err(LoadFailure::Failed("bad".to_string())),
+            true,
+            BansPicksStatus::PackFailed,
+        ),
+        (Ok(Mode::Panics), true, BansPicksStatus::ReaderFailed),
+        (Ok(Mode::Nothing), true, BansPicksStatus::ReaderFailed),
+    ] {
+        let rig = Rig::new();
+        let mut dump = rig.dump(false, rig.feed(result, linked));
+        let (store, stored) = game_then_read(&rig, &mut dump, three(2560, 1440)).await;
+        assert_eq!(stored, None);
+        assert_eq!(status_of(&store).await, Some(want));
+    }
+}
+
+#[tokio::test]
+async fn a_game_with_no_pregame_screens_is_recorded_and_shows_a_warning() {
+    let rig = Rig::new();
+    publish_bans_picks_notice(rig.dir.path(), "");
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let (store, stored) = game_then_read(&rig, &mut dump, Vec::new()).await;
+    assert_eq!(stored, None);
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    assert_eq!(rig.reads.load(Ordering::SeqCst), 0);
+    assert_eq!(status_of(&store).await, Some(BansPicksStatus::NoFrames));
+}
+
+#[tokio::test]
+async fn a_game_that_does_not_fit_the_held_screens_is_recorded_and_shows_a_warning() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    dump.send(three(2560, 1440));
+    let store = storage::LocalStore::open(rig.dir.path())
+        .await
+        .expect("store");
+    let mut old = crate::main_tests::test_match("g1", "victory");
+    old.played_at = (chrono::Utc::now() - chrono::Duration::minutes(10)).into();
+    store.insert_match(old).await.unwrap();
+    dump.attach_bans_picks(&store, "g1").await;
+    let rows = store.get_all_matches().await.unwrap();
+    assert_eq!(rows.len(), 1, "the game is recorded");
+    assert_eq!(rows[0].bans_picks, None);
+    assert_eq!(rows[0].bans_picks_status, Some(BansPicksStatus::NoFrames));
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    assert_eq!(rig.reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn a_later_capture_of_a_read_game_keeps_its_result_and_adds_no_warning() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let (store, stored) = game_then_read(&rig, &mut dump, three(2560, 1440)).await;
+    assert!(stored.is_some());
+    dump.attach_bans_picks(&store, "g1").await;
+    assert_eq!(rig.health(), None);
+    // The next game has no screens of its own: that one is told.
+    store
+        .insert_match(crate::main_tests::test_match("g2", "defeat"))
+        .await
+        .unwrap();
+    dump.attach_bans_picks(&store, "g2").await;
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+}
+
+#[tokio::test]
+async fn with_the_reader_off_a_game_without_screens_stays_silent() {
+    let rig = Rig::new();
+    let off = BansPicksFeed::for_config(false, BansPicksSetting::CvV1, rig.dir.path(), true);
+    let mut dump = PregameDump::with_bans_picks(true, off, rig.dir.path(), POLL).expect("saver");
+    let store = storage::LocalStore::open(rig.dir.path())
+        .await
+        .expect("store");
+    store
+        .insert_match(crate::main_tests::test_match("g1", "victory"))
+        .await
+        .unwrap();
+    dump.attach_bans_picks(&store, "g1").await;
+    assert_eq!(store.get_all_matches().await.unwrap().len(), 1);
+    assert_eq!(rig.health(), None);
+    assert_eq!(status_of(&store).await, Some(BansPicksStatus::ReaderOff));
 }

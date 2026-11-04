@@ -377,6 +377,9 @@ pub(crate) struct PregameTracker<F> {
     ban_results: Option<BanResults<F>>,
     /// The roster screen, while it shows.
     roster: Option<RosterOnScreen>,
+    /// What the last tick saw, so a change of screen is logged once and a
+    /// screen that stays up is not logged per poll.
+    last_seen: Seen,
     /// Rate limits for the turned-down candidates' lines and frames.
     rejects: RejectLimiter,
     /// [`BAN_RESULTS_WINDOW`] plus one poll interval.
@@ -404,6 +407,7 @@ impl<F> PregameTracker<F> {
             ban_ended_at: None,
             ban_results: None,
             roster: None,
+            last_seen: Seen::Other,
             rejects: RejectLimiter::default(),
             window: BAN_RESULTS_WINDOW + poll,
             next_tick: poll + poll / 2,
@@ -542,6 +546,14 @@ impl<F: Clone> PregameTracker<F> {
         new_folder: impl FnOnce() -> String,
     ) -> Vec<PregameOp<F>> {
         let mut shots = Vec::new();
+        if seen != self.last_seen {
+            // One line per change of screen, no names, so a hero select
+            // that was never seen can be told from the journal.
+            if seen != Seen::Other {
+                tracing::info!(target: "scuffed_stat_tracker", screen = ?seen, "pre-game screen seen");
+            }
+            self.last_seen = seen;
+        }
         if matches!(seen, Seen::Phase(_)) {
             // A pre-game read: no match is in progress now.
             self.match_end_at = Some(now);

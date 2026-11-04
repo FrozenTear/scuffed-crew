@@ -65,6 +65,14 @@ impl LocalStore {
         {
             match_data.bans_picks = Some(kept);
         }
+        if match_data.bans_picks_status.is_none()
+            && !match_data.session_id.is_empty()
+            && let Some(kept) = self
+                .session_bans_picks_status(&match_data.session_id)
+                .await?
+        {
+            match_data.bans_picks_status = Some(kept);
+        }
         let created: Option<PersonalMatch> =
             self.db.create("personal_match").content(match_data).await?;
         self.drop_if_deleted_meanwhile(created).await?;

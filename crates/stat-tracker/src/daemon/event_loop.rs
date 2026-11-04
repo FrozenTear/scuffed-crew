@@ -348,6 +348,16 @@ pub(crate) async fn run_loop(
                     // snapshot is cut so it carries them.
                     if let Some(dump) = pregame_dump.as_mut() {
                         dump.attach_bans_picks(store, &stored_sid).await;
+                    } else if let Err(e) = store
+                        .attach_bans_picks_status(
+                            &stored_sid,
+                            &stat_tracker::model::BansPicksStatus::ReaderOff,
+                        )
+                        .await
+                    {
+                        // No saver runs when the reader is off and the
+                        // pre-game saves are off.
+                        tracing::warn!(target: "scuffed_stat_tracker", error = %e, "bans and picks: status not stored");
                     }
                     refresh_snapshot_after_capture(&st, store, data_dir, &stored_sid).await;
                 }

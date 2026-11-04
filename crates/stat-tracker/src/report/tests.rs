@@ -41,8 +41,7 @@ fn ctx() -> ScrubContext {
         account_name: Some(ACCOUNT.into()),
         hostname: Some(HOSTNAME.into()),
         player_name: Some(SELF_NAME.into()),
-        // FIELD_NAME is deliberately not on the list: only the field drop
-        // can keep it out of log.txt.
+        // FIELD_NAME is not on the list on purpose: only the field drop keeps it out of log.txt.
         names: vec![OTHER_1.into(), OTHER_2.into(), MISREAD.into(), SHORT.into()],
     }
 }
@@ -1443,6 +1442,7 @@ mod game {
                 suspect_fields: Vec::new(),
                 name_recognizer: None,
                 bans_picks: None,
+                bans_picks_status: None,
             }],
             ..crate::storage::Snapshot::default()
         };

@@ -278,6 +278,52 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub bans_picks: Option<String>,
+    /// Why the bans and picks are as they are: read whole, read in part, or
+    /// not read and the reason. Set next to [`Self::bans_picks`] when the
+    /// game is first recorded. `None` on a game recorded before this field
+    /// existed, and on one that was never offered to the reader. Local
+    /// only, omitted from JSON when absent, so an older row reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub bans_picks_status: Option<BansPicksStatus>,
+}
+
+/// A screen of the pre-game the bans and picks reader had no frame for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SurrealValue)]
+#[serde(rename_all = "snake_case")]
+#[surreal(crate = "::surrealdb_types", rename_all = "snake_case")]
+pub enum BansPicksMissing {
+    /// The ban vote screen (the own team's six votes).
+    BanVote,
+    /// The hero select (the picks).
+    HeroSelect,
+    /// The ban results screen (the bans).
+    BanResults,
+}
+
+/// What came of the bans and picks reader for one game
+/// ([`PersonalMatch::bans_picks_status`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SurrealValue)]
+#[serde(rename_all = "snake_case")]
+#[surreal(crate = "::surrealdb_types", rename_all = "snake_case")]
+pub enum BansPicksStatus {
+    /// All three screens were read.
+    Ok,
+    /// Some screens were read, and `missing` were not seen.
+    Partial { missing: Vec<BansPicksMissing> },
+    /// None of this game's pre-game screens were seen.
+    NoFrames,
+    /// A frame was not the size the reader needs (2560x1440).
+    FrameSize { width: u32, height: u32 },
+    /// The pack is not installed; `linked` is whether this install has a
+    /// site account, which is what fetches it.
+    PackMissing { linked: bool },
+    /// The pack is there and did not load.
+    PackFailed,
+    /// The reader failed on this game's screens.
+    ReaderFailed,
+    /// The reader is switched off.
+    ReaderOff,
 }
 
 /// Count an unconfirmed hero segment toward the majority (it was a real swap).

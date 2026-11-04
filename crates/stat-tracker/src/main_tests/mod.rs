@@ -5,9 +5,8 @@
 //! reach them (`use crate::{main_tests::*, *};`); area files use `use super::*;`.
 
 use super::*;
-pub(crate) use std::time::Duration;
-
 pub(crate) use source_text::{daemon_source, fn_source};
+pub(crate) use std::time::Duration;
 
 pub(crate) struct ScriptedWaiter {
     pub(crate) events: Vec<KeyboardWait>,
@@ -320,6 +319,7 @@ pub(crate) fn test_match(session_id: &str, outcome: &str) -> storage::PersonalMa
         suspect_fields: Vec::new(),
         name_recognizer: None,
         bans_picks: None,
+        bans_picks_status: None,
     }
 }
 

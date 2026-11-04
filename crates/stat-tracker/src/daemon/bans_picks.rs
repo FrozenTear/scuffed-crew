@@ -25,6 +25,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration, Utc};
 use image::{DynamicImage, RgbImage};
 use serde::Serialize;
+use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 use stat_tracker::shadow::bans_picks::{
     BanRead, BanResults, BansPicksSetting, FRAME_H, FRAME_W, HeroSelect, Layout, RECOGNIZER_ID,
     Read, Reader, TEMPLATE_DIR, self_ring_colour,
@@ -43,6 +44,11 @@ const CLOCK_SLACK_SECONDS: i64 = 5;
 
 /// The longest the pack's error is repeated in the status sentence.
 const ERROR_CHARS: usize = 120;
+
+/// The sentence for a read that found the bans but never saw the hero
+/// select, so the picks are stored empty.
+pub(crate) const NO_SELECT_NOTICE: &str =
+    "Bans were read but hero select was not seen, so picks are empty.";
 
 /// The reader, as far as this wiring uses it. A trait so a test can count
 /// the calls and make one fail.
@@ -139,6 +145,8 @@ impl Frames {
 pub(crate) struct Outcome {
     pub(crate) stored: Option<String>,
     pub(crate) notice: String,
+    /// Why the game's bans and picks are as they are, for the game record.
+    pub(crate) status: BansPicksStatus,
 }
 
 pub(crate) struct BansPicksFeed {
@@ -154,6 +162,9 @@ pub(crate) struct BansPicksFeed {
     done: bool,
     frames: Frames,
     fed_at: Option<DateTime<Utc>>,
+    /// The game whose frames were read last (the session it was recorded
+    /// under), so a later capture of that game is no game without screens.
+    read_for: Option<String>,
 }
 
 impl BansPicksFeed {
@@ -187,6 +198,7 @@ impl BansPicksFeed {
             done: false,
             frames: Frames::default(),
             fed_at: None,
+            read_for: None,
         }
     }
 
@@ -249,6 +261,24 @@ impl BansPicksFeed {
         !self.done && self.frames.any()
     }
 
+    /// Show "Bans and picks were not read: `why`." in the app's Tracker
+    /// health, for a game that is recorded without them.
+    pub(crate) fn publish_not_read(&self, why: &str) {
+        let notice = not_read(why);
+        tracing::info!(target: "scuffed_stat_tracker", notice = %notice, "bans and picks not read, the game is recorded without them");
+        stat_tracker::ocr_status::publish_bans_picks_notice(&self.data_dir, &notice);
+    }
+
+    /// The frames held were read for `session_id` already.
+    pub(crate) fn was_read_for(&self, session_id: &str) -> bool {
+        self.read_for.as_deref() == Some(session_id)
+    }
+
+    /// Note that the frames were read for `session_id`.
+    pub(crate) fn mark_read_for(&mut self, session_id: &str) {
+        self.read_for = Some(session_id.to_string());
+    }
+
     /// Whether a game whose first record was at `started` is the one these
     /// frames belong to: it began after the last of them, and not long
     /// after.
@@ -268,8 +298,11 @@ impl BansPicksFeed {
         let loader = Arc::clone(&self.loader);
         let engine = self.engine.clone();
         let linked = self.linked;
-        let joined =
-            tokio::task::spawn_blocking(move || read_frames(engine, &loader, frames, linked)).await;
+        let folder = self.folder.clone().unwrap_or_default();
+        let joined = tokio::task::spawn_blocking(move || {
+            read_frames(engine, &loader, frames, linked, &folder)
+        })
+        .await;
         let outcome = match joined {
             Ok((engine, outcome)) => {
                 if engine.is_some() {
@@ -280,6 +313,7 @@ impl BansPicksFeed {
             Err(_) => Outcome {
                 stored: None,
                 notice: not_read("the reader failed on this game's screens"),
+                status: BansPicksStatus::ReaderFailed,
             },
         };
         stat_tracker::ocr_status::publish_bans_picks_notice(&self.data_dir, &outcome.notice);
@@ -333,13 +367,15 @@ fn read_frames(
     loader: &Loader,
     frames: Frames,
     linked: bool,
+    folder: &str,
 ) -> (Option<Arc<dyn Engine>>, Outcome) {
-    let fail = |engine, notice| {
+    let fail = |engine, notice, status| {
         (
             engine,
             Outcome {
                 stored: None,
                 notice,
+                status,
             },
         )
     };
@@ -356,14 +392,29 @@ fn read_frames(
         .flatten()
         .find(|f| (f.width(), f.height()) != (FRAME_W, FRAME_H))
     {
-        return fail(cached, resolution_notice(odd.width(), odd.height()));
+        return fail(
+            cached,
+            resolution_notice(odd.width(), odd.height()),
+            BansPicksStatus::FrameSize {
+                width: odd.width(),
+                height: odd.height(),
+            },
+        );
     }
     let engine = match cached {
         Some(engine) => engine,
         None => match loader() {
             Ok(engine) => engine,
-            Err(LoadFailure::NotInstalled) => return fail(None, missing_notice(linked)),
-            Err(LoadFailure::Failed(e)) => return fail(None, load_notice(&e)),
+            Err(LoadFailure::NotInstalled) => {
+                return fail(
+                    None,
+                    missing_notice(linked),
+                    BansPicksStatus::PackMissing { linked },
+                );
+            }
+            Err(LoadFailure::Failed(e)) => {
+                return fail(None, load_notice(&e), BansPicksStatus::PackFailed);
+            }
         },
     };
     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -372,24 +423,69 @@ fn read_frames(
     match read {
         Ok(Some(stored)) => {
             let json = serde_json::to_string(&stored).ok();
-            let notice = if json.is_some() {
-                String::new()
+            let missing = missing_screens(&frames);
+            let status = if json.is_none() {
+                BansPicksStatus::ReaderFailed
+            } else if missing.is_empty() {
+                BansPicksStatus::Ok
             } else {
+                BansPicksStatus::Partial { missing }
+            };
+            let notice = if json.is_none() {
                 not_read("the result could not be written")
+            } else if select_missing(&frames, &stored) {
+                tracing::warn!(
+                    target: "scuffed_stat_tracker",
+                    game = folder,
+                    "bans and picks: bans were read but the hero select was not seen, picks are empty"
+                );
+                NO_SELECT_NOTICE.to_string()
+            } else {
+                String::new()
             };
             (
                 Some(engine),
                 Outcome {
                     stored: json,
                     notice,
+                    status,
                 },
             )
         }
         _ => fail(
             Some(engine),
             not_read("the reader failed on this game's screens"),
+            BansPicksStatus::ReaderFailed,
         ),
     }
+}
+
+/// The screens this game has no frame for. A hero select with only a first
+/// frame counts as missing: that frame gives the team ring and no picks.
+fn missing_screens(frames: &Frames) -> Vec<BansPicksMissing> {
+    let mut missing = Vec::new();
+    if frames.vote.is_none() {
+        missing.push(BansPicksMissing::BanVote);
+    }
+    if frames.select.is_none() {
+        missing.push(BansPicksMissing::HeroSelect);
+    }
+    if frames.results.is_none() {
+        missing.push(BansPicksMissing::BanResults);
+    }
+    missing
+}
+
+/// The bans were read (or their screens were there) and the hero select
+/// was not seen at all: the picks come out empty with nothing to say why.
+/// A select with only its first frame was seen, and is left as it was.
+fn select_missing(frames: &Frames, stored: &Stored) -> bool {
+    frames.select.is_none()
+        && frames.select_first.is_none()
+        && (frames.results.is_some()
+            || frames.vote.is_some()
+            || !stored.bans.is_empty()
+            || stored.lobby_ban.is_some())
 }
 
 /// `None` when a frame that was there could not be read.
@@ -434,6 +530,131 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
         ban_vote,
         bans_picks_recognizer: RECOGNIZER_ID,
     })
+}
+
+#[cfg(test)]
+mod notice_tests {
+    use super::*;
+    use stat_tracker::shadow::bans_picks::Choice;
+
+    /// Reads the ban results and nothing else is asked of it.
+    struct BansOnly;
+
+    fn hero(name: &str) -> Read {
+        Read {
+            value: Some(Choice::Hero(name.to_string())),
+            confidence: 0.9,
+            score: 0.9,
+            margin: 0.2,
+        }
+    }
+
+    impl Engine for BansOnly {
+        fn vote(&self, _: &RgbImage) -> Option<Vec<Read>> {
+            Some(vec![hero("ana")])
+        }
+        fn select(&self, _: &RgbImage) -> Option<HeroSelect> {
+            Some(HeroSelect {
+                picks: vec![hero("mercy")],
+                ring: [1, 2, 3],
+            })
+        }
+        fn bans(&self, _: &RgbImage, _: &[[u8; 3]]) -> Option<BanResults> {
+            Some(BanResults {
+                layout: Layout::Plain,
+                bans: vec![BanRead {
+                    read: hero("genji"),
+                    team: None,
+                }],
+                lobby_ban: None,
+            })
+        }
+    }
+
+    fn frame() -> Arc<DynamicImage> {
+        Arc::new(DynamicImage::new_rgb8(FRAME_W, FRAME_H))
+    }
+
+    fn run(frames: Frames) -> Outcome {
+        let loader: Loader = Arc::new(|| Ok(Arc::new(BansOnly) as Arc<dyn Engine>));
+        read_frames(None, &loader, frames, true, "20261103_120000").1
+    }
+
+    #[test]
+    fn results_without_a_select_store_empty_picks_and_a_notice() {
+        let outcome = run(Frames {
+            results: Some(frame()),
+            ..Frames::default()
+        });
+        let stored = outcome.stored.expect("a result");
+        assert!(stored.contains("genji"), "{stored}");
+        assert!(stored.contains("\"picks\":[]"), "{stored}");
+        assert!(!outcome.notice.is_empty());
+        assert_eq!(outcome.notice, NO_SELECT_NOTICE);
+        assert!(!outcome.notice.contains('\u{2014}'));
+        assert_eq!(
+            outcome.status,
+            BansPicksStatus::Partial {
+                missing: vec![BansPicksMissing::BanVote, BansPicksMissing::HeroSelect]
+            }
+        );
+    }
+
+    #[test]
+    fn a_ban_vote_without_a_select_gets_the_notice_too() {
+        let outcome = run(Frames {
+            vote: Some(frame()),
+            ..Frames::default()
+        });
+        assert_eq!(outcome.notice, NO_SELECT_NOTICE);
+    }
+
+    #[test]
+    fn a_select_with_the_results_leaves_no_notice() {
+        let outcome = run(Frames {
+            results: Some(frame()),
+            select: Some(frame()),
+            ..Frames::default()
+        });
+        let stored = outcome.stored.expect("a result");
+        assert!(stored.contains("mercy"), "{stored}");
+        assert_eq!(outcome.notice, "");
+        assert_eq!(
+            outcome.status,
+            BansPicksStatus::Partial {
+                missing: vec![BansPicksMissing::BanVote]
+            }
+        );
+    }
+
+    #[test]
+    fn a_select_with_only_its_first_frame_gets_no_notice() {
+        let outcome = run(Frames {
+            vote: Some(frame()),
+            results: Some(frame()),
+            select_first: Some(frame()),
+            ..Frames::default()
+        });
+        assert_eq!(outcome.notice, "");
+        assert_eq!(
+            outcome.status,
+            BansPicksStatus::Partial {
+                missing: vec![BansPicksMissing::HeroSelect]
+            }
+        );
+    }
+
+    #[test]
+    fn all_three_screens_are_ok() {
+        let outcome = run(Frames {
+            vote: Some(frame()),
+            results: Some(frame()),
+            select: Some(frame()),
+            ..Frames::default()
+        });
+        assert_eq!(outcome.status, BansPicksStatus::Ok);
+        assert_eq!(outcome.notice, "");
+    }
 }
 
 #[cfg(test)]

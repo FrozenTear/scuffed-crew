@@ -157,6 +157,7 @@ fn new_match(stats: PlayerStats, hero: String, map_name: String, outcome: &str) 
         suspect_fields: Vec::new(),
         name_recognizer: None,
         bans_picks: None,
+        bans_picks_status: None,
     }
 }
 
