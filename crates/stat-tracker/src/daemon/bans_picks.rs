@@ -559,7 +559,7 @@ mod notice_tests {
                 ring: [1, 2, 3],
             })
         }
-        fn bans(&self, _: &RgbImage, _: Option<[u8; 3]>) -> Option<BanResults> {
+        fn bans(&self, _: &RgbImage, _: &[[u8; 3]]) -> Option<BanResults> {
             Some(BanResults {
                 layout: Layout::Plain,
                 bans: vec![BanRead {
