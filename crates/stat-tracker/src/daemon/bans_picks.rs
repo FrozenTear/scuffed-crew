@@ -113,6 +113,10 @@ struct Stored {
     /// player's preferred hero and are not votes.)
     ban_vote: Vec<Read>,
     /// The vote slots in full (state, hero, scores); null when not read.
+    /// Always written, as an array or an explicit null, whenever this
+    /// reader stores a result. A stored game with no `ban_votes` key was
+    /// read by 0.6.0-alpha.2.1 or older, whose `ban_vote` holds roster
+    /// portraits, so readers treat a missing key as not read.
     ban_votes: Option<Vec<VoteSlotRead>>,
     /// The TEAM BAN SCORE strip: the team's three most voted heroes with
     /// their vote counts; null when not read.
@@ -744,6 +748,40 @@ mod notice_tests {
                 missing: vec![BansPicksMissing::HeroSelect]
             }
         );
+    }
+
+    /// The stored JSON as a value, to look at its keys.
+    fn stored_json(frames: Frames) -> serde_json::Value {
+        let stored = run(frames).stored.expect("a result");
+        serde_json::from_str(&stored).expect("json")
+    }
+
+    #[test]
+    fn ban_votes_is_always_written_array_or_null() {
+        // Vote screen read: an array of slots, and the strip key too.
+        let v = stored_json(Frames {
+            vote: Some(frame()),
+            results: Some(frame()),
+            select: Some(frame()),
+            ..Frames::default()
+        });
+        assert!(v["ban_votes"].is_array(), "{v}");
+        assert!(v.get("ban_score").is_some(), "{v}");
+        // No vote screen: the key is there and null, not left out.
+        let v = stored_json(Frames {
+            results: Some(frame()),
+            select: Some(frame()),
+            ..Frames::default()
+        });
+        assert!(
+            v.get("ban_votes").is_some_and(serde_json::Value::is_null),
+            "{v}"
+        );
+        assert!(
+            v.get("ban_score").is_some_and(serde_json::Value::is_null),
+            "{v}"
+        );
+        assert_eq!(v["ban_vote"], serde_json::json!([]));
     }
 
     #[test]

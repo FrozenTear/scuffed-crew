@@ -40,7 +40,9 @@ pub enum Slot {
     NotRead,
     /// A ban vote that was skipped (the circle with a slash).
     Skipped,
-    /// A ban vote slot with nothing in it.
+    /// A ban vote slot with nothing in it when the screen was captured.
+    /// That can be a vote cast after the last frame, so it reads "Not seen",
+    /// never "did not vote".
     Empty,
 }
 
@@ -67,7 +69,7 @@ impl Chip {
             Slot::NoPreference => "No preference",
             Slot::NotRead => "Not read",
             Slot::Skipped => "Skipped",
-            Slot::Empty => "Empty",
+            Slot::Empty => "Not seen",
         }
     }
 }
@@ -284,19 +286,19 @@ fn parse(json: &str) -> Option<Stored> {
             .iter()
             .map(slot)
             .collect(),
-        ban_vote: own_votes(&v).unwrap_or_else(|| {
-            list("ban_vote", BANS_PICKS_MAX_BAN_VOTE)
-                .iter()
-                .map(slot)
-                .collect()
-        }),
+        // Only `ban_votes` is read for our votes. The flat `ban_vote` list is
+        // never a source: games stored by 0.6.0-alpha.2.1 or older hold the
+        // six roster preferred heroes there, which are not votes. A game
+        // with no `ban_votes` key (or a null one) has its votes not read.
+        ban_vote: own_votes(&v).unwrap_or_default(),
     })
 }
 
 /// Our own three ban votes from `ban_votes`, in slot order, which tells a
 /// skipped or empty slot apart from one that was not read. `None` when the
-/// key is missing or null (games read before it existed, or a vote screen
-/// that did not look like one), so the flat `ban_vote` list is used.
+/// key is missing (games read before it existed), null (a vote screen that
+/// did not look like one) or has no entry for us: the votes are then not
+/// read. The flat `ban_vote` list is not a fallback.
 fn own_votes(v: &Value) -> Option<Vec<Slot>> {
     let all = v.get("ban_votes")?.as_array()?;
     let mut own: Vec<(u64, Slot)> = all
@@ -500,12 +502,10 @@ fn not_read_chip(ban: bool, tip: String) -> Chip {
     }
 }
 
-/// Our own three ban votes, in slot order. Skipped and empty slots show as
-/// such when the game has `ban_votes`; with only the flat `ban_vote` list a
-/// slot with no hero shows as not read. Games read by 0.6.0-alpha.2.1 or
-/// older stored the six roster rows here instead, which are each player's
-/// preferred hero and not a vote. The row says "Your ban votes", so the
-/// chips carry no "You" tag.
+/// Our own three ban votes, in slot order, from `ban_votes`. A skipped slot
+/// shows as "Skipped" (the explicit skip icon), an empty one as "Not seen"
+/// (the vote may have come after the last frame). The row says "Your ban
+/// votes", so the chips carry no "You" tag.
 fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
     slots
         .iter()
@@ -513,9 +513,15 @@ fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
         .map(|(i, slot)| {
             let tip = match slot {
                 Slot::Hero(name) => format!("You voted to ban {name}"),
+                // Legacy only: `ban_votes` has no no-preference state, and
+                // this row no longer reads the flat `ban_vote` list where
+                // alpha.2.1 stored it. Kept so the match stays exhaustive.
                 Slot::NoPreference => "You voted no preference".to_string(),
                 Slot::Skipped => format!("You skipped ban vote {}", i + 1),
-                Slot::Empty => format!("Your ban vote {}: empty", i + 1),
+                Slot::Empty => format!(
+                    "Your ban vote {}: not seen, it may have come after the last frame",
+                    i + 1
+                ),
                 Slot::NotRead => format!("Your ban vote {}: not read", i + 1),
             };
             Chip {
@@ -723,11 +729,11 @@ mod tests {
         assert_eq!(names(&rows[0]).len(), 4);
         let hero_select = rows.iter().find(|r| r.line == Some("Hero select")).unwrap();
         assert_eq!(names(hero_select).len(), 6);
-        let votes = rows
-            .iter()
-            .find(|r| r.line == Some("Your ban votes"))
-            .unwrap();
-        assert_eq!(names(votes), ["No preference"]);
+        // The flat `ban_vote` list is legacy and is not shown as our votes.
+        assert!(
+            rows.iter()
+                .all(|r| r.line != Some("Your ban votes") || matches!(&r.body, Body::Quiet(_)))
+        );
     }
 
     #[test]
@@ -756,7 +762,8 @@ mod tests {
         assert!(rows.iter().any(|r| matches!(&r.body,
             Body::Quiet(t) if t == "Your ban votes weren't read for this game.")));
         let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],"ban_vote":[{"value":"ana"}]}"#,
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "ban_votes":[{"voter":0,"slot":1,"state":"hero","hero":"ana"}]}"#,
             None,
         );
         let rows = rows_of(&g);
@@ -797,13 +804,17 @@ mod tests {
         );
         assert_eq!(votes[0].name(), "Skipped");
         assert_eq!(votes[0].tip, "You skipped ban vote 1");
-        assert_eq!(votes[2].tip, "Your ban vote 3: empty");
+        assert!(
+            votes[2].tip.starts_with("Your ban vote 3: not seen"),
+            "{}",
+            votes[2].tip
+        );
         assert!(votes.iter().all(|c| !c.you));
     }
 
     #[test]
-    fn ban_votes_unread_or_missing_falls_back_to_the_flat_list() {
-        // A hero state with no confident hero is Not read.
+    fn an_unclear_slot_is_not_read() {
+        // A hero state with no confident hero, or no state, is Not read.
         let g = with(
             r#"{"bans":[{"value":"ana","team":"own"}],
                 "ban_votes":[{"voter":0,"slot":1,"state":"hero","hero":null},
@@ -813,14 +824,91 @@ mod tests {
         );
         let got: Vec<_> = vote_row(&g).iter().map(|c| c.slot.clone()).collect();
         assert_eq!(got, [Slot::NotRead, Slot::NotRead, Slot::Skipped]);
-        // `ban_votes` null (vote screen not recognised): the flat list.
+    }
+
+    /// Votes are never taken from the flat `ban_vote` list, which holds the
+    /// six roster preferred heroes in games stored by alpha.2.1 or older.
+    fn no_vote_row(g: &Game) {
+        let rows = rows_of(g);
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(&r.body, Body::Chips(_)) || r.line != Some("Your ban votes")),
+            "no ban vote chips"
+        );
+        assert!(
+            rows.iter().any(|r| matches!(&r.body,
+                Body::Quiet(t) if t == "Your ban votes weren't read for this game.")),
+            "the votes show as not read"
+        );
+    }
+
+    #[test]
+    fn legacy_flat_ban_vote_without_ban_votes_shows_no_votes() {
+        // What alpha.2.1 stored: the six roster rows, no `ban_votes` key.
         let g = with(
             r#"{"bans":[{"value":"ana","team":"own"}],
+                "picks":[{"value":"ana"}],
+                "ban_vote":[{"value":"mei"},{"value":"tracer"},{"value":"genji"},
+                            {"value":"sigma"},{"value":"zarya"},{"value":"mercy"}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        no_vote_row(&g);
+        let rows = rows_of(&g);
+        let names: Vec<_> = rows.iter().flat_map(|r| names(r)).collect();
+        assert!(
+            !names.contains(&"Mei") && !names.contains(&"Tracer") && !names.contains(&"Genji"),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_null_ban_votes_is_not_read() {
+        // Null (vote screen not recognised), with a flat list beside it.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],"picks":[{"value":"ana"}],
                 "ban_vote":[{"value":"mei"}],"ban_votes":null}"#,
             Some(BansPicksStatus::Ok),
         );
-        let got: Vec<_> = vote_row(&g).iter().map(|c| c.slot.clone()).collect();
-        assert_eq!(got, [Slot::Hero("Mei".into())]);
+        no_vote_row(&g);
+        // Only teammates' slots: none of ours, so not read either.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],"picks":[{"value":"ana"}],
+                "ban_votes":[{"voter":1,"slot":1,"state":"hero","hero":"mei"}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        no_vote_row(&g);
+        // A game that only has a flat list reads as nothing at all there.
+        let g = with(
+            r#"{"ban_vote":[{"value":"mei"}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        assert!(
+            !parse(g.bans_picks.as_deref().unwrap())
+                .unwrap()
+                .read_something()
+        );
+    }
+
+    #[test]
+    fn an_empty_slot_is_not_seen_not_a_missing_vote() {
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "ban_votes":[{"voter":0,"slot":1,"state":"empty","hero":null},
+                             {"voter":0,"slot":2,"state":"skipped","hero":null},
+                             {"voter":0,"slot":3,"state":"empty","hero":null}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        let votes = vote_row(&g);
+        assert_eq!(
+            votes.iter().map(Chip::name).collect::<Vec<_>>(),
+            ["Not seen", "Skipped", "Not seen"]
+        );
+        for c in &votes {
+            let tip = c.tip.to_lowercase();
+            assert!(!tip.contains("didn't") && !tip.contains("did not"), "{tip}");
+        }
+        assert_eq!(votes[1].tip, "You skipped ban vote 2");
+        assert!(votes[0].tip.contains("not seen"), "{}", votes[0].tip);
     }
 
     fn rows_of(g: &Game) -> Vec<Row> {

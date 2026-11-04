@@ -119,7 +119,9 @@ pub enum SlotState {
     Hero,
     /// The vote was skipped (circle with a slash).
     Skipped,
-    /// Nothing yet (flat inside).
+    /// Nothing in the slot when the frame was captured (flat inside). The
+    /// vote may have been cast after that frame, so this means "not seen",
+    /// not "did not vote".
     Empty,
 }
 
@@ -212,6 +214,11 @@ impl BanVote {
     /// has always kept under `ban_vote`: one per slot, in slot order, the
     /// hero when one was read and an unread value otherwise (skipped,
     /// empty or not clear). Empty when the slots were not read.
+    ///
+    /// This never yields [`Choice::NoPreference`]. A `no_preference` value in
+    /// a stored `ban_vote` can only come from games read by 0.6.0-alpha.2.1
+    /// or older, which read the roster column. The app does not use that
+    /// list for the "Your ban votes" row, only `ban_votes`.
     pub fn own_votes(&self) -> Vec<Read> {
         self.slots
             .iter()

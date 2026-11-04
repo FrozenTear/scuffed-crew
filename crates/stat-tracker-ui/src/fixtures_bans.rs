@@ -20,6 +20,26 @@ fn reads(values: &[Option<&str>]) -> Vec<Value> {
     values.iter().map(|v| read(*v)).collect()
 }
 
+/// Our own vote slots as the tracker stores them in `ban_votes`: a hero
+/// when one is given, otherwise a slot that was not read (state null).
+fn vote_slots(values: &[Option<&str>]) -> Vec<Value> {
+    values
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            json!({
+                "voter": 0,
+                "slot": i + 1,
+                "state": v.map(|_| "hero"),
+                "hero": v,
+                "confidence": 0.93,
+                "score": 0.81,
+                "margin": 0.31,
+            })
+        })
+        .collect()
+}
+
 fn stored(
     bans: Vec<Value>,
     lobby: Option<&str>,
@@ -32,6 +52,7 @@ fn stored(
         "lobby_ban": read(lobby),
         "picks": reads(picks),
         "ban_vote": reads(votes),
+        "ban_votes": vote_slots(votes),
         "bans_picks_recognizer": "cv-v1",
     })
     .to_string()

@@ -49,6 +49,8 @@
 //! rank 1..3). Either part is `None` when the frame does not look like it.
 //! [`BanVote::own_votes`] gives the votes as the flat list of reads the
 //! game record keeps under `ban_vote`.
+//! A `no_preference` there can only come from legacy data (alpha.2.1 and
+//! older); the slot reader has no such state.
 
 mod digits;
 mod imaging;
