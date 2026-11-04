@@ -9,7 +9,8 @@ use image::{DynamicImage, RgbImage};
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 use stat_tracker::ocr_status::{publish_bans_picks_notice, read_status};
 use stat_tracker::shadow::bans_picks::{
-    BanResults, BansPicksSetting, Choice, HeroSelect, Layout, Read,
+    BanResults, BanVote, BansPicksSetting, Choice, HeroSelect, Layout, Read, SlotState,
+    VoteSlotRead,
 };
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -54,8 +55,19 @@ impl Fake {
 }
 
 impl Engine for Fake {
-    fn vote(&self, _: &RgbImage) -> Option<Vec<Read>> {
-        self.go().then(|| vec![read("ana")])
+    fn vote(&self, _: &RgbImage) -> Option<BanVote> {
+        self.go().then(|| BanVote {
+            slots: Some(vec![VoteSlotRead {
+                voter: 0,
+                slot: 1,
+                state: Some(SlotState::Hero),
+                hero: Some("ana".to_string()),
+                confidence: 0.9,
+                score: 0.9,
+                margin: 0.2,
+            }]),
+            score: None,
+        })
     }
     fn select(&self, _: &RgbImage) -> Option<HeroSelect> {
         self.go().then(|| HeroSelect {

@@ -1,9 +1,9 @@
 //! cv-v1: the bans and picks reader. Reads the ban results screen (four
 //! banned heroes, the team each ban belongs to, the lobby ban), the hero
-//! select picks and the ban vote picks by matching hero icon templates on
-//! gradient planes. A crop of the screen goes in; a value and a confidence
-//! come out, and a value the screen does not show clearly is `None`, never a
-//! guess.
+//! select picks and the ban vote screen (the local player's three votes and
+//! the TEAM BAN SCORE strip) by matching hero icon templates on gradient
+//! planes. A crop of the screen goes in; a value and a confidence come out,
+//! and a value the screen does not show clearly is `None`, never a guess.
 //!
 //! On by default (FrozenTear's call for alpha.2). Tesseract `ocr-v1` stays
 //! the reader for everything it reads today; this module is a second reader
@@ -18,7 +18,9 @@
 //! pregame games at 2560x1440. It reads icons with a masked correlation of
 //! blurred Sobel gradients (see [`matcher`]) and accepts a read only when
 //! the best score is at least [`MIN_SCORE`] and leads the second best by at
-//! least [`MIN_MARGIN`].
+//! least [`MIN_MARGIN`]. The ban vote screen's icons are small and are
+//! matched on the full-size plane with their own thresholds, and its vote
+//! counts are read with digit grids, no OCR; see [`vote`] and [`digits`].
 //!
 //! # What a caller must do
 //!
@@ -30,6 +32,9 @@
 //!   positions, scales and thresholds were measured at that size only.
 //! * Install the templates ([`templates`]); without them [`Reader::load`]
 //!   fails and the reader is off.
+//! * Never take the ban vote screen's left roster column for votes: it
+//!   shows each player's preferred heroes. [`Reader::read_ban_vote`] reads
+//!   the vote slots and the strip only.
 //!
 //! # Output
 //!
@@ -37,10 +42,21 @@
 //! `bans_picks_recognizer: "cv-v1"`. A value is a hero pack key, the string
 //! `no_preference` when the screen shows the "no preferred hero" icon, or
 //! null when it cannot be read.
+//!
+//! [`BanVote`] (from [`Reader::read_ban_vote`]) carries `slots`, the local
+//! player's three [`VoteSlotRead`]s (a hero, skipped, empty, or unread),
+//! and `score`, the strip's three [`BanScoreEntry`]s (hero, vote count,
+//! rank 1..3). Either part is `None` when the frame does not look like it.
+//! [`BanVote::own_votes`] gives the votes as the flat list of reads the
+//! game record keeps under `ban_vote`.
+//! A `no_preference` there can only come from legacy data (alpha.2.1 and
+//! older); the slot reader has no such state.
 
+mod digits;
 mod imaging;
 mod matcher;
 mod templates;
+mod vote;
 
 #[cfg(test)]
 mod tests;
@@ -56,6 +72,7 @@ pub use templates::{
     NO_PREFERENCE_KEY, TEMPLATE_DIR, TEMPLATE_H, TEMPLATE_W, TemplateError, TemplateSet, Use,
     hero_keys,
 };
+pub use vote::{BanScoreEntry, BanVote, SlotState, VoteSlotRead};
 
 /// The recognizer id written next to the values.
 pub const RECOGNIZER_ID: &str = "cv-v1";
@@ -233,7 +250,6 @@ const SLOT_CY: [i32; 2] = [645, 850];
 const LOBBY_XY: (i32, i32) = (1160, 452);
 const ROW_X: i32 = 125;
 const HS_Y: [i32; 6] = [452, 622, 750, 878, 1006, 1134];
-const HB_Y: [i32; 6] = [452, 624, 754, 882, 1012, 1142];
 const HALF_SLOT: i32 = 115;
 const HALF_PROBE: i32 = 135;
 const HALF_LOBBY: i32 = 100;
@@ -241,13 +257,19 @@ const HALF_ROW: i32 = 100;
 /// Margin, in half-size pixels, kept around a computed region so blur and
 /// Sobel see the same neighbours they would on the whole frame.
 const EDGE: i32 = 4;
+/// The same margin, in native pixels, for a full-size field.
+const FULL_EDGE: i32 = 8;
 
-/// A gradient plane of part of the half-size frame.
+/// A gradient plane of part of the frame: of the half-size frame (from
+/// [`Field::of`]) or of the full-size frame (from [`Field::full`]).
 struct Field {
     plane: Plane,
-    /// Half-size coordinates of `plane`'s top-left pixel.
+    /// Coordinates of `plane`'s top-left pixel, in half-size pixels for a
+    /// half-size field and native pixels for a full-size one.
     ox: i32,
     oy: i32,
+    /// Built from the half-size frame.
+    half: bool,
 }
 
 impl Field {
@@ -266,17 +288,53 @@ impl Field {
             plane: gradient(&grey),
             ox: hx0,
             oy: hy0,
+            half: true,
+        }
+    }
+
+    /// The full-size gradient of the native rectangle `x0..x1`, `y0..y1`
+    /// (end exclusive), with [`FULL_EDGE`] native pixels kept around it.
+    /// For the small icons of the ban vote screen, which lose too much
+    /// at half size.
+    fn full(img: &RgbImage, x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
+        let fx0 = (x0 - FULL_EDGE).max(0);
+        let fy0 = (y0 - FULL_EDGE).max(0);
+        let fx1 = (x1 + FULL_EDGE).min(img.width() as i32);
+        let fy1 = (y1 + FULL_EDGE).min(img.height() as i32);
+        let (w, h) = ((fx1 - fx0).max(0) as u32, (fy1 - fy0).max(0) as u32);
+        let rect = image::imageops::crop_imm(img, fx0 as u32, fy0 as u32, w, h).to_image();
+        Field {
+            plane: gradient(&gray_from_rgb(&rect)),
+            ox: fx0,
+            oy: fy0,
+            half: false,
         }
     }
 
     /// Window for a native centre and half size, clipped like the prototype:
     /// `x0 = max(int((cx - half) / 2), 0)`, `x1 = int((cx + half) / 2)`.
+    /// Half-size fields only.
     fn window(&self, cx: i32, cy: i32, half: i32) -> Window {
+        debug_assert!(self.half, "window() is for a half-size field");
         let x0 = (((cx - half) / 2).max(0) - self.ox).max(0) as usize;
         let y0 = (((cy - half) / 2).max(0) - self.oy).max(0) as usize;
         let x1 = ((cx + half) / 2 - self.ox).max(0) as usize;
         let y1 = ((cy + half) / 2 - self.oy).max(0) as usize;
         Window::cut(&self.plane, x0, y0, x1, y1)
+    }
+
+    /// Window over the native rectangle `x0..x1`, `y0..y1` (end exclusive).
+    /// Full-size fields only.
+    fn native(&self, x0: i32, y0: i32, x1: i32, y1: i32) -> Window {
+        debug_assert!(!self.half, "native() is for a full-size field");
+        let at = |v: i32, o: i32| (v - o).max(0) as usize;
+        Window::cut(
+            &self.plane,
+            at(x0, self.ox),
+            at(y0, self.oy),
+            at(x1, self.ox),
+            at(y1, self.oy),
+        )
     }
 }
 
@@ -415,6 +473,9 @@ impl Reader {
         })
     }
 
+    /// The six rows of the hero select's left column. Hero select only: on
+    /// the ban vote screen that column shows each player's preferred hero,
+    /// not a vote, so the ban vote has its own reader ([`vote`]).
     fn read_rows(&self, img: &RgbImage, ys: &[i32; 6]) -> Option<Vec<Read>> {
         if img.dimensions() != (FRAME_W, FRAME_H) {
             return None;
@@ -441,11 +502,6 @@ impl Reader {
             picks: self.read_rows(img, &HS_Y)?,
             ring: self_ring_colour(img),
         })
-    }
-
-    /// The six own-team rows of the ban vote screen. Pass the last frame.
-    pub fn read_ban_vote(&self, img: &RgbImage) -> Option<Vec<Read>> {
-        self.read_rows(img, &HB_Y)
     }
 
     /// Ban results and hero select picks together, from the ban results

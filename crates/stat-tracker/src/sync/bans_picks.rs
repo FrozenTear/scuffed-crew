@@ -14,6 +14,15 @@
 //!
 //! Nothing read, which is no stored result, one that does not parse, or one
 //! with no value in it, gives `None`, and the upload omits the key.
+//!
+//! `ban_vote` is the local player's three ban votes in slot order (a hero
+//! key, or null for a skipped, empty or unread slot). Two optional keys
+//! ride along when the stored result has them: `ban_votes`, each slot's
+//! state (`hero`, `skipped`, `empty` or null) and hero, and `ban_score`,
+//! the TEAM BAN SCORE strip (rank, hero, vote count, empty). They are left
+//! out when not read, and a server that does not know them ignores them
+//! (`scuffed_types::api::resolve_bans_picks` reads only the keys it
+//! knows). They never decide whether the `bans_picks` key is sent.
 
 use serde::Serialize;
 use serde_json::Value;
@@ -36,6 +45,29 @@ pub(super) struct UploadBan {
     pub team: Option<&'static str>,
 }
 
+/// One ban vote slot: whose, which, what it showed, and the hero.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct UploadVoteSlot {
+    /// 0 for the local player.
+    pub voter: u8,
+    /// 1..=3.
+    pub slot: u8,
+    /// `hero`, `skipped`, `empty` or null (unread).
+    pub state: Option<&'static str>,
+    pub hero: Option<String>,
+}
+
+/// One box of the TEAM BAN SCORE strip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct UploadBanScore {
+    /// 1..=3, most votes first.
+    pub rank: u8,
+    pub hero: Option<String>,
+    pub votes: Option<u32>,
+    /// The box showed no hero yet.
+    pub empty: bool,
+}
+
 /// The `bans_picks` object of one uploaded match.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(super) struct UploadBansPicks {
@@ -43,8 +75,18 @@ pub(super) struct UploadBansPicks {
     pub lobby_ban: Option<String>,
     pub picks: Vec<Option<String>>,
     pub ban_vote: Vec<Option<String>>,
+    /// Optional, newer than the server contract: left out when not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ban_votes: Option<Vec<UploadVoteSlot>>,
+    /// Optional, newer than the server contract: left out when not read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ban_score: Option<Vec<UploadBanScore>>,
     pub recognizer: String,
 }
+
+/// At most this many vote slots and strip boxes are sent.
+const MAX_VOTE_SLOTS: usize = 18;
+const MAX_SCORE_BOXES: usize = 3;
 
 /// The value a stored read carries: its `value` field, or the entry itself
 /// when it is already a plain string. Empty is no value.
@@ -78,6 +120,55 @@ fn entries<'a>(stored: &'a Value, key: &str, max: usize) -> &'a [Value] {
     &all[..all.len().min(max)]
 }
 
+/// A small whole number field.
+fn small(entry: &Value, key: &str) -> Option<u8> {
+    entry.get(key)?.as_u64().and_then(|n| u8::try_from(n).ok())
+}
+
+/// The stored `ban_votes` list, or `None` when it is missing or null.
+fn vote_slots(stored: &Value) -> Option<Vec<UploadVoteSlot>> {
+    let all = stored.get("ban_votes")?.as_array()?;
+    Some(
+        all.iter()
+            .take(MAX_VOTE_SLOTS)
+            .filter_map(|e| {
+                Some(UploadVoteSlot {
+                    voter: small(e, "voter")?,
+                    slot: small(e, "slot")?,
+                    state: match e.get("state").and_then(Value::as_str) {
+                        Some("hero") => Some("hero"),
+                        Some("skipped") => Some("skipped"),
+                        Some("empty") => Some("empty"),
+                        _ => None,
+                    },
+                    hero: e.get("hero").and_then(hero),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The stored `ban_score` list, or `None` when it is missing or null.
+fn score_boxes(stored: &Value) -> Option<Vec<UploadBanScore>> {
+    let all = stored.get("ban_score")?.as_array()?;
+    Some(
+        all.iter()
+            .take(MAX_SCORE_BOXES)
+            .filter_map(|e| {
+                Some(UploadBanScore {
+                    rank: small(e, "rank")?,
+                    hero: e.get("hero").and_then(hero),
+                    votes: e
+                        .get("votes")
+                        .and_then(Value::as_u64)
+                        .and_then(|n| u32::try_from(n).ok()),
+                    empty: e.get("empty").and_then(Value::as_bool).unwrap_or(false),
+                })
+            })
+            .collect(),
+    )
+}
+
 fn ban(entry: &Value) -> UploadBan {
     UploadBan {
         hero: hero(entry),
@@ -109,6 +200,8 @@ pub(super) fn upload_bans_picks(stored: Option<&str>) -> Option<UploadBansPicks>
             .iter()
             .map(choice)
             .collect(),
+        ban_votes: vote_slots(&stored),
+        ban_score: score_boxes(&stored),
         recognizer: stored
             .get("bans_picks_recognizer")
             .and_then(Value::as_str)

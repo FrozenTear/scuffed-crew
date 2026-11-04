@@ -11,8 +11,11 @@ use super::*;
 struct Spy(Mutex<Vec<Vec<[u8; 3]>>>);
 
 impl Engine for Spy {
-    fn vote(&self, _: &RgbImage) -> Option<Vec<Read>> {
-        Some(Vec::new())
+    fn vote(&self, _: &RgbImage) -> Option<BanVote> {
+        Some(BanVote {
+            slots: None,
+            score: None,
+        })
     }
     fn select(&self, _: &RgbImage) -> Option<HeroSelect> {
         Some(HeroSelect {
