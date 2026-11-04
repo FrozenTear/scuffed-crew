@@ -1,7 +1,7 @@
 //! Tests of the `bans_picks` object in the upload body: the stored cv-v1
 //! JSON as plain values, and the key left out when nothing was read.
 
-use super::bans_picks::{MAX_BAN_VOTE, MAX_BANS, MAX_PICKS, upload_bans_picks};
+use super::bans_picks::upload_bans_picks;
 use super::tests_wire::row;
 use super::*;
 use serde_json::{Value, json};
@@ -239,7 +239,14 @@ fn a_row_with_no_read_uploads_the_same_bytes_as_before() {
 
 #[test]
 fn the_lists_are_capped_at_4_6_and_6() {
-    assert_eq!((MAX_BANS, MAX_PICKS, MAX_BAN_VOTE), (4, 6, 6));
+    assert_eq!(
+        (
+            scuffed_types::BANS_PICKS_MAX_BANS,
+            scuffed_types::BANS_PICKS_MAX_PICKS,
+            scuffed_types::BANS_PICKS_MAX_BAN_VOTE
+        ),
+        (4, 6, 6)
+    );
     let names: Vec<String> = (0..9).map(|i| format!("hero-{i}")).collect();
     let some: Vec<Option<&str>> = names.iter().map(|n| Some(n.as_str())).collect();
     let stored = json!({
