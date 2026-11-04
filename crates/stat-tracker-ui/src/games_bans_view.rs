@@ -7,10 +7,11 @@ use iced::widget::{Row, button, column, container, image, row, space, text, tool
 use iced::{Alignment, Background, Border, Element, Fill, Length, Padding, Theme};
 
 use crate::app::Message;
-use crate::games_bans::{BansPicks, Body, Chip, HEADER, Row as BlockRow, Slot};
+use crate::games_bans::{BansPicks, Body, Chip, HEADER, Row as BlockRow, SettingsLink, Slot};
 use crate::games_table::{pill_box, portrait};
 use crate::icons::{self, Icon};
-use crate::model::{Game, Screen};
+use crate::model::Game;
+use crate::settings_model::AdvancedSection;
 use crate::theme::{
     self, ACCENT, BG, BORDER, FONT_BOLD, FONT_SEMIBOLD, SIZE_LABEL, TEXT, TEXT_2, TEXT_3,
 };
@@ -28,17 +29,15 @@ const LABEL_LINE_W: f32 = 84.0;
 
 /// The block for a game, or `None` when nothing is to be drawn.
 pub fn view(g: &Game, narrow: bool) -> Option<Element<'static, Message>> {
-    let block = match crate::games_bans::bans_picks(g) {
+    let block = crate::games_bans::bans_picks(g);
+    let rows = match &block {
         BansPicks::Hidden => return None,
         BansPicks::Reason {
             line,
             tip,
-            settings_tip,
-        } => return Some(reason(line, tip, settings_tip)),
-        block @ BansPicks::Block(_) => block,
-    };
-    let BansPicks::Block(rows) = &block else {
-        return None;
+            settings,
+        } => return Some(reason(line.clone(), *tip, *settings)),
+        BansPicks::Block(rows) => rows,
     };
     let mut col = column![rule(), header(&block)].spacing(8);
     for r in rows {
@@ -257,7 +256,7 @@ fn hollow_circle() -> Element<'static, Message> {
 fn reason(
     line: String,
     tip: Option<&'static str>,
-    settings_tip: Option<&'static str>,
+    settings: Option<SettingsLink>,
 ) -> Element<'static, Message> {
     let line: Element<'static, Message> = text(line)
         .size(SMALL)
@@ -277,16 +276,22 @@ fn reason(
         None => line,
     };
     let mut r = row![label(), line].spacing(16).align_y(Alignment::Center);
-    if let Some(tip) = settings_tip {
-        r = r.push(settings_button(tip));
+    if let Some(link) = settings {
+        r = r.push(settings_button(link));
     }
     column![rule(), container(r).height(28).align_y(Alignment::Center)]
         .spacing(12)
         .into()
 }
 
+/// What "Open Settings" sends: Settings with the row that holds the fix open
+/// and in view.
+fn settings_message(open: AdvancedSection) -> Message {
+    Message::Nav(crate::nav::Msg::ShowAdvancedSection(open))
+}
+
 /// "Open Settings": an accent outline, so it is not colour alone.
-fn settings_button(tip: &'static str) -> Element<'static, Message> {
+fn settings_button(link: SettingsLink) -> Element<'static, Message> {
     let b = button(
         text("Open Settings")
             .size(SMALL)
@@ -304,10 +309,10 @@ fn settings_button(tip: &'static str) -> Element<'static, Message> {
         },
         ..button::Style::default()
     })
-    .on_press(Message::Navigate(Screen::Settings));
+    .on_press(settings_message(link.open));
     tooltip(
         b,
-        container(text(tip).size(SMALL).color(TEXT))
+        container(text(link.tip).size(SMALL).color(TEXT))
             .padding(Padding::from([4, 8]))
             .max_width(320)
             .style(pill_box(BORDER)),
@@ -315,4 +320,25 @@ fn settings_button(tip: &'static str) -> Element<'static, Message> {
     )
     .gap(4)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_settings_targets_the_row_that_holds_the_fix() {
+        assert!(matches!(
+            settings_message(AdvancedSection::Troubleshooting),
+            Message::Nav(crate::nav::Msg::ShowAdvancedSection(
+                AdvancedSection::Troubleshooting
+            ))
+        ));
+        assert!(matches!(
+            settings_message(AdvancedSection::WebsiteConnection),
+            Message::Nav(crate::nav::Msg::ShowAdvancedSection(
+                AdvancedSection::WebsiteConnection
+            ))
+        ));
+    }
 }

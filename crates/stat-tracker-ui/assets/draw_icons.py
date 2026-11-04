@@ -15,8 +15,9 @@ sign in the loss colour, 12 px). For Delete game it draws trash.png (in
 the loss colour) and trash-ink.png (in BG, for the solid confirm
 button), and tick.png (the "Game deleted." line's tick, TEXT_2), each
 16 px. For the Bans and picks block it draws ban.png (a circle with a
-slash) and swap.png (two opposite arrows), 12 px, TEXT_2. Each is drawn at 2x for a 1x box, from an 8x supersampled mask,
-so a rerun gives the same files.
+slash) and swap.png (two opposite arrows), each 24 px (a 12 px box at
+2x), TEXT_2. Each is drawn at 2x for a 1x box, from an 8x supersampled
+mask, so a rerun gives the same files.
 
 The other five tab masks (games, heroes, maps, seasons, settings) are not
 drawn here. They were rasterised once at 2x (32 x 32, white on alpha)

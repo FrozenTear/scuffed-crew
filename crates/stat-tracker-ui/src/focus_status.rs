@@ -18,6 +18,7 @@ use iced::advanced::widget::{Id, operation::scrollable::AbsoluteOffset};
 use iced::{Rectangle, Task, Vector};
 
 use crate::app::{Message, TrackerApp};
+use crate::settings_model::AdvancedSection;
 use stat_tracker::ocr_status::FocusGateStatus;
 use stat_tracker::ocr_switch::Status as OcrSwitchStatus;
 
@@ -135,12 +136,35 @@ impl TrackerApp {
 /// Scroll the Settings pane so the focus row is in view. Runs after the
 /// page is shown; nothing happens when the row is not there.
 pub fn scroll_to_row() -> Task<Message> {
-    iced::advanced::widget::operate(RevealRow::default())
+    scroll_to(ROW_ID)
+}
+
+/// The layout id of an Advanced row on the Settings page, for scrolling
+/// to it.
+pub fn section_row_id(section: AdvancedSection) -> &'static str {
+    match section {
+        AdvancedSection::CaptureReading => "settings-advanced-capture-reading",
+        AdvancedSection::TrackerService => "settings-advanced-tracker-service",
+        AdvancedSection::StoredData => "settings-advanced-stored-data",
+        AdvancedSection::WebsiteConnection => "settings-advanced-website-connection",
+        AdvancedSection::Troubleshooting => "settings-advanced-troubleshooting",
+    }
+}
+
+/// Scroll the Settings pane so the container with `row_id` is in view.
+/// Nothing happens when it is not there.
+pub fn scroll_to(row_id: &'static str) -> Task<Message> {
+    iced::advanced::widget::operate(RevealRow {
+        row_id,
+        pane_top: None,
+        row_top: None,
+    })
 }
 
 /// Finds the pane and the row, then scrolls the pane to the row.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct RevealRow {
+    row_id: &'static str,
     pane_top: Option<f32>,
     row_top: Option<f32>,
 }
@@ -151,7 +175,7 @@ impl<T: Send + 'static> Operation<T> for RevealRow {
     }
 
     fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
-        if id == Some(&Id::new(ROW_ID)) {
+        if id == Some(&Id::new(self.row_id)) {
             self.row_top = Some(bounds.y);
         }
     }
@@ -195,6 +219,16 @@ mod tests {
 
     fn at(t0: Instant, ms: u64) -> Instant {
         t0 + Duration::from_millis(ms)
+    }
+
+    #[test]
+    fn every_advanced_row_has_its_own_layout_id() {
+        let ids: std::collections::HashSet<_> = AdvancedSection::ALL
+            .into_iter()
+            .map(section_row_id)
+            .collect();
+        assert_eq!(ids.len(), AdvancedSection::ALL.len());
+        assert!(!ids.contains(ROW_ID));
     }
 
     #[test]

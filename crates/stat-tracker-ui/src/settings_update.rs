@@ -220,6 +220,14 @@ impl PageState {
         self.focus_row_until = Some(now + crate::focus_status::HIGHLIGHT_FOR);
     }
 
+    /// Open an Advanced row, never close it: how another screen sends the
+    /// user to a row.
+    pub(crate) fn show_section(&mut self, section: AdvancedSection) {
+        if !self.advanced_open.is_open(section) {
+            self.advanced_open.toggle(section);
+        }
+    }
+
     /// Whether the focus row is marked at `now`.
     pub(crate) fn focus_row_marked(&self, now: std::time::Instant) -> bool {
         self.focus_row_until.is_some_and(|until| now < until)

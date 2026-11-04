@@ -13,18 +13,18 @@
 //! misread" state (the tracker stores no suspect paths for bans or picks),
 //! and the Their team Played row (the tracker stores only our own hero).
 
+use scuffed_types::{
+    BANS_PICKS_MAX_BAN_VOTE, BANS_PICKS_MAX_BANS, BANS_PICKS_MAX_PICKS, BANS_PICKS_NO_PREFERENCE,
+};
 use serde_json::Value;
 use stat_tracker::model::BansPicksStatus;
 
 use crate::model::Game;
+use crate::settings_model::AdvancedSection;
 
-/// A stored value that shows the "no preferred hero" icon.
-const NO_PREFERENCE: &str = "no_preference";
-/// The reader's template spelling of the same icon.
+/// The reader's template spelling of the "no preferred hero" icon
+/// ([`BANS_PICKS_NO_PREFERENCE`] is the stored spelling).
 const NO_PREFERENCE_TEMPLATE: &str = "no-preference";
-/// The most entries a list shows (the upload's limits: 4 bans, 6 picks, 6 votes).
-const MAX_BANS: usize = 4;
-const MAX_PICKS: usize = 6;
 
 pub const HEADER: &str = "Bans and picks";
 pub const TEAM_NOT_READ: &str = "Team not read";
@@ -87,6 +87,14 @@ pub struct Row {
 }
 
 /// What the open row shows for bans and picks.
+/// Where "Open Settings" goes and what its tooltip says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SettingsLink {
+    pub tip: &'static str,
+    /// The Advanced row the button opens.
+    pub open: AdvancedSection,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BansPicks {
     /// Nothing was read and no reason is stored: no block.
@@ -96,8 +104,8 @@ pub enum BansPicks {
         line: String,
         /// The line's tooltip, when the spec gives one.
         tip: Option<&'static str>,
-        /// "Open Settings" goes with the line, with this tooltip.
-        settings_tip: Option<&'static str>,
+        /// "Open Settings" goes with the line.
+        settings: Option<SettingsLink>,
     },
     Block(Vec<Row>),
 }
@@ -141,7 +149,7 @@ pub fn bans_picks(g: &Game) -> BansPicks {
         Some((line, settings)) => BansPicks::Reason {
             line,
             tip: reason_tip(g.bans_picks_status.as_ref()),
-            settings_tip: settings.then(|| settings_tip(g.bans_picks_status.as_ref())),
+            settings: settings.then(|| settings_link(g.bans_picks_status.as_ref())),
         },
         None => BansPicks::Hidden,
     }
@@ -193,15 +201,19 @@ fn reason(status: &BansPicksStatus) -> Option<(String, bool)> {
     Some((line, settings))
 }
 
-/// The tooltip of the "Open Settings" button.
-fn settings_tip(status: Option<&BansPicksStatus>) -> &'static str {
+/// The "Open Settings" button: its tooltip and the row it opens. A missing
+/// pack is fixed by linking an account (Website connection), everything else
+/// by the Read bans and picks switch (Troubleshooting).
+fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
     match status {
-        Some(BansPicksStatus::PackMissing { .. }) => {
-            "Settings, website connection. Linking an account lets the tracker download the pack."
-        }
-        _ => {
-            "Settings, Troubleshooting, Read bans and picks. It takes effect after a restart. Games already played stay unread."
-        }
+        Some(BansPicksStatus::PackMissing { .. }) => SettingsLink {
+            tip: "Settings, website connection. Linking an account lets the tracker download the pack.",
+            open: AdvancedSection::WebsiteConnection,
+        },
+        _ => SettingsLink {
+            tip: "Settings, Troubleshooting, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
+            open: AdvancedSection::Troubleshooting,
+        },
     }
 }
 
@@ -243,7 +255,7 @@ fn parse(json: &str) -> Option<Stored> {
             .unwrap_or_default()
     };
     Some(Stored {
-        bans: list("bans", MAX_BANS)
+        bans: list("bans", BANS_PICKS_MAX_BANS)
             .iter()
             .map(|e| Ban {
                 // A ban is a hero or nothing; no preference there is not read.
@@ -262,8 +274,14 @@ fn parse(json: &str) -> Option<Stored> {
             Some(Slot::Hero(name)) => Some(name),
             _ => None,
         },
-        picks: list("picks", MAX_PICKS).iter().map(slot).collect(),
-        ban_vote: list("ban_vote", MAX_PICKS).iter().map(slot).collect(),
+        picks: list("picks", BANS_PICKS_MAX_PICKS)
+            .iter()
+            .map(slot)
+            .collect(),
+        ban_vote: list("ban_vote", BANS_PICKS_MAX_BAN_VOTE)
+            .iter()
+            .map(slot)
+            .collect(),
     })
 }
 
@@ -277,7 +295,7 @@ fn slot(entry: &Value) -> Slot {
     };
     match raw.map(str::trim).filter(|r| !r.is_empty()) {
         None => Slot::NotRead,
-        Some(NO_PREFERENCE | NO_PREFERENCE_TEMPLATE) => Slot::NoPreference,
+        Some(BANS_PICKS_NO_PREFERENCE | NO_PREFERENCE_TEMPLATE) => Slot::NoPreference,
         Some(key) => Slot::Hero(hero_name(key)),
     }
 }
@@ -448,7 +466,7 @@ fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
             let tip = match slot {
                 Slot::Hero(name) => format!("{who} voted to ban {name}"),
                 Slot::NoPreference => format!("{who} voted no preference"),
-                Slot::NotRead => "Ban vote not read".to_string(),
+                Slot::NotRead => format!("Ban vote slot {}: not read", i + 1),
             };
             Chip {
                 slot: slot.clone(),
@@ -617,7 +635,7 @@ mod tests {
             panic!("chips")
         };
         assert_eq!(votes[1].tip, "Teammate voted no preference");
-        assert_eq!(votes[3].tip, "Ban vote not read");
+        assert_eq!(votes[3].tip, "Ban vote slot 4: not read");
         // We picked Reinhardt and played Wrecking Ball.
         let Body::Chips(played) = &rows[3].body else {
             panic!("chips")
@@ -722,19 +740,21 @@ mod tests {
         let BansPicks::Reason {
             line,
             tip,
-            settings_tip,
+            settings,
         } = bans_picks(&game(UNDECIDED))
         else {
             panic!("reason")
         };
         assert_eq!(line, "Not read: the Read bans and picks setting is off.");
         assert!(tip.is_none());
-        assert!(settings_tip.unwrap().contains("Read bans and picks"));
+        let link = settings.unwrap();
+        assert!(link.tip.contains("Read bans and picks"));
+        assert_eq!(link.open, AdvancedSection::Troubleshooting);
 
         let BansPicks::Reason {
             line,
             tip,
-            settings_tip,
+            settings,
         } = bans_picks(&game(REJECTED_2))
         else {
             panic!("reason")
@@ -744,7 +764,7 @@ mod tests {
             "Not read: this game ran at 1920x1080. Bans and picks need 2560x1440."
         );
         assert_eq!(tip, Some("Only 2560x1440 is read. 1080p and 4K are not."));
-        assert!(settings_tip.is_none());
+        assert!(settings.is_none());
     }
 
     #[test]
@@ -754,9 +774,7 @@ mod tests {
             g.bans_picks = None;
             g.bans_picks_status = Some(s);
             match bans_picks(&g) {
-                BansPicks::Reason {
-                    line, settings_tip, ..
-                } => (line, settings_tip.is_some()),
+                BansPicks::Reason { line, settings, .. } => (line, settings.is_some()),
                 other => panic!("{other:?}"),
             }
         };
@@ -790,6 +808,32 @@ mod tests {
         let (text, button) = line(BansPicksStatus::ReaderFailed);
         assert_eq!(text, "Not read: the reader failed on this game's screens.");
         assert!(!button);
+    }
+
+    #[test]
+    fn open_settings_opens_the_row_that_holds_the_fix() {
+        let open = |s: BansPicksStatus| {
+            let mut g = game(HELD);
+            g.bans_picks = None;
+            g.bans_picks_status = Some(s);
+            match bans_picks(&g) {
+                BansPicks::Reason { settings, .. } => settings.map(|l| l.open),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(
+            open(BansPicksStatus::ReaderOff),
+            Some(AdvancedSection::Troubleshooting)
+        );
+        assert_eq!(
+            open(BansPicksStatus::PackFailed),
+            Some(AdvancedSection::Troubleshooting)
+        );
+        assert_eq!(
+            open(BansPicksStatus::PackMissing { linked: false }),
+            Some(AdvancedSection::WebsiteConnection)
+        );
+        assert_eq!(open(BansPicksStatus::NoFrames), None);
     }
 
     #[test]

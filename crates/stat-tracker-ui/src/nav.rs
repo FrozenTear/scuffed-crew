@@ -115,6 +115,9 @@ pub enum Msg {
     /// The "Can't tell which window is in front" pill: open Settings at
     /// the focus row, open its section, scroll to it and mark it.
     ShowFocusSetting,
+    /// A button elsewhere that points at one Advanced row in Settings: open
+    /// Settings, open the row (never close it) and scroll to it.
+    ShowAdvancedSection(crate::settings_model::AdvancedSection),
 }
 
 /// What the chip sends. A later "Review games" button sends the same.
@@ -151,6 +154,17 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
                 tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             })
             .then(|()| crate::focus_status::scroll_to_row());
+            Task::batch([open, scroll])
+        }
+        Msg::ShowAdvancedSection(section) => {
+            app.page_state.show_section(section);
+            let open = app.update(Message::Navigate(Screen::Settings));
+            // The scroll runs once the page is laid out.
+            let row_id = crate::focus_status::section_row_id(section);
+            let scroll = Task::future(async {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            })
+            .then(move |()| crate::focus_status::scroll_to(row_id));
             Task::batch([open, scroll])
         }
     }
@@ -968,6 +982,26 @@ mod tests {
             app.page_state
                 .is_open(crate::settings_model::AdvancedSection::CaptureReading)
         );
+    }
+
+    #[test]
+    fn an_advanced_section_message_opens_settings_at_that_row() {
+        use crate::settings_model::AdvancedSection;
+        let (_dir, mut app) = app();
+        app.screen = Screen::Games;
+        let _ = update(
+            &mut app,
+            Msg::ShowAdvancedSection(AdvancedSection::Troubleshooting),
+        );
+        assert_eq!(app.screen, Screen::Settings);
+        assert!(app.page_state.is_open(AdvancedSection::Troubleshooting));
+        // Opening it again keeps it open, and no other row opens.
+        let _ = update(
+            &mut app,
+            Msg::ShowAdvancedSection(AdvancedSection::Troubleshooting),
+        );
+        assert!(app.page_state.is_open(AdvancedSection::Troubleshooting));
+        assert!(!app.page_state.is_open(AdvancedSection::CaptureReading));
     }
 
     #[test]
