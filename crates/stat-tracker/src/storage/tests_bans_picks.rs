@@ -52,7 +52,7 @@ async fn the_game_start_is_its_first_snapshot_and_unknown_for_a_stranger() {
 }
 
 #[tokio::test]
-async fn the_result_is_not_in_the_upload() {
+async fn a_result_with_no_value_in_it_is_not_in_the_upload() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = LocalStore::open(dir.path()).await.expect("open store");
     let mut m = snap("g1", 1);
@@ -65,7 +65,7 @@ async fn the_result_is_not_in_the_upload() {
     let request = crate::sync::upload_request(&rows, &[]);
     assert_eq!(request.matches.len(), 1, "the row is uploaded");
     let wire = serde_json::to_string(&request).expect("request as json");
-    assert!(!wire.contains("cv-v1"), "local only: {wire}");
+    assert!(!wire.contains("cv-v1"), "nothing read, so no key: {wire}");
 }
 
 fn every_status() -> Vec<BansPicksStatus> {

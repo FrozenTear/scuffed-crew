@@ -1,9 +1,48 @@
 //! The upload wire mapping: a stored [`PersonalMatch`] to the site's
 //! `StatsUploadEntry`.
 
+use std::ops::{Deref, DerefMut};
+
 use crate::storage::PersonalMatch;
 
-use scuffed_types::api::{StatsUploadEntry, StatsUploadRequest};
+use scuffed_types::api::StatsUploadEntry;
+use serde::Serialize;
+
+use super::bans_picks::{UploadBansPicks, upload_bans_picks};
+
+/// One uploaded match: the site's [`StatsUploadEntry`] and the bans and
+/// picks the tracker read for the game. The key is left out when nothing
+/// was read, so an older server, which ignores a field it does not know,
+/// and a game with no read see the same body as before.
+#[derive(Debug, Clone, Serialize)]
+pub struct UploadEntry {
+    #[serde(flatten)]
+    entry: StatsUploadEntry,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bans_picks: Option<UploadBansPicks>,
+}
+
+impl Deref for UploadEntry {
+    type Target = StatsUploadEntry;
+
+    fn deref(&self) -> &StatsUploadEntry {
+        &self.entry
+    }
+}
+
+impl DerefMut for UploadEntry {
+    fn deref_mut(&mut self) -> &mut StatsUploadEntry {
+        &mut self.entry
+    }
+}
+
+/// The body `upload_matches` posts: the site's `StatsUploadRequest` with
+/// [`UploadEntry`] matches.
+#[derive(Debug, Clone, Serialize)]
+pub struct UploadRequest {
+    pub matches: Vec<UploadEntry>,
+    pub deleted_sessions: Vec<String>,
+}
 
 /// True when this row must stay on the machine until the member picks
 /// a map or hero. See [`crate::parse::review_suspect_fields`].
@@ -20,11 +59,8 @@ pub fn row_needs_review(row: &PersonalMatch) -> bool {
 /// required string for `map_name` and `hero`, so an empty map and the
 /// literal `Unknown` are what showed up in stats. Null and omitted `hero`
 /// both fail decode, so the match is omitted instead of either of those.
-pub fn upload_request(
-    matches: &[PersonalMatch],
-    deleted_sessions: &[String],
-) -> StatsUploadRequest {
-    let entries: Vec<StatsUploadEntry> = matches
+pub fn upload_request(matches: &[PersonalMatch], deleted_sessions: &[String]) -> UploadRequest {
+    let entries: Vec<UploadEntry> = matches
         .iter()
         .filter(|m| !row_needs_review(m))
         // Upload the effective (corrected-if-present, else OCR) values so
@@ -38,7 +74,7 @@ pub fn upload_request(
             if crate::parse::upload_identity_blank(&map_name, &game_mode, &hero) {
                 return None;
             }
-            Some(StatsUploadEntry {
+            let entry = StatsUploadEntry {
                 session_id: m.session_id.clone(),
                 hero,
                 map_name,
@@ -64,10 +100,15 @@ pub fn upload_request(
                     .as_deref()
                     .filter(|id| !id.is_empty())
                     .map(str::to_string),
+            };
+            Some(UploadEntry {
+                entry,
+                // Plain values only, None (no key) when nothing was read.
+                bans_picks: upload_bans_picks(m.bans_picks.as_deref()),
             })
         })
         .collect();
-    StatsUploadRequest {
+    UploadRequest {
         matches: entries,
         deleted_sessions: deleted_sessions.to_vec(),
     }

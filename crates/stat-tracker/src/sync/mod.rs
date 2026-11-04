@@ -13,6 +13,7 @@
 
 mod auth_pause;
 mod backoff;
+mod bans_picks;
 mod batching;
 mod client;
 mod errors;
@@ -42,7 +43,7 @@ pub use client::{
 };
 pub use errors::{SyncUploadError, server_error_text};
 pub use visibility::{StatsVisibility, parse_stats_visibility};
-pub use wire::{row_needs_review, upload_request};
+pub use wire::{UploadEntry, UploadRequest, row_needs_review, upload_request};
 
 // Names the test files saw through `use super::*` before the split: two of
 // the old file's imports and two private items.
@@ -60,6 +61,9 @@ mod tests;
 
 #[cfg(test)]
 mod tests_wire;
+
+#[cfg(test)]
+mod tests_bans_picks;
 
 #[cfg(test)]
 mod tests_http;
