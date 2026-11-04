@@ -143,7 +143,7 @@ pub fn bans_picks(g: &Game) -> BansPicks {
     if let Some(stored) = g.bans_picks.as_deref().and_then(parse)
         && stored.read_something()
     {
-        return BansPicks::Block(stored.rows(&g.hero));
+        return BansPicks::Block(stored.rows(g));
     }
     match g.bans_picks_status.as_ref().and_then(reason) {
         Some((line, settings)) => BansPicks::Reason {
@@ -322,7 +322,7 @@ impl Stored {
         self.bans_read() || self.lobby_ban.is_some() || read(&self.picks) || read(&self.ban_vote)
     }
 
-    fn rows(&self, own_hero: &str) -> Vec<Row> {
+    fn rows(&self, g: &Game) -> Vec<Row> {
         let mut rows = self.ban_rows();
         if let Some(name) = &self.lobby_ban {
             rows.push(Row {
@@ -361,8 +361,9 @@ impl Stored {
                 });
             }
         }
-        if let Some(played) = played_chip(own_hero, self.picks.first()) {
-            rows.push(chips("Your team", "Played", vec![played]));
+        let played = played_chips(g, self.picks.first());
+        if !played.is_empty() {
+            rows.push(chips("Your team", "Played", played));
         }
         rows
     }
@@ -503,7 +504,48 @@ fn pick_chips(slots: &[Slot]) -> Vec<Chip> {
         .collect()
 }
 
-/// Our own Played chip, from the game data. `None` when the game has no
+/// Every hero we played, in the order played, from the same runs the hero
+/// bar draws (`games_detail::hero_split`), so the two never disagree: a
+/// dismissed run folds into the main hero, consecutive runs of one hero are
+/// one chip, and a hero played again later keeps its first place. A game
+/// whose hero was set by hand, or whose runs name no hero, keeps the single
+/// chip from the row's hero. Only the first chip can carry the swap glyph, and
+/// only when the hero select pick is not one of the Played chips: a pick that
+/// was played at some point was not swapped away from.
+fn played_chips(g: &Game, own_pick: Option<&Slot>) -> Vec<Chip> {
+    let corrected = g.edited_fields.iter().any(|f| f == "hero");
+    let mut names: Vec<String> = Vec::new();
+    if !corrected && !g.segments.is_empty() {
+        for part in crate::games_detail::hero_split(g).bar {
+            let hero = part.hero.trim();
+            if hero.is_empty() || hero.eq_ignore_ascii_case("unknown") {
+                continue;
+            }
+            let name = hero_name(hero);
+            if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                names.push(name);
+            }
+        }
+    }
+    let Some((first, rest)) = names.split_first() else {
+        return played_chip(&g.hero, own_pick).into_iter().collect();
+    };
+    let pick_was_played = matches!(own_pick,
+        Some(Slot::Hero(picked)) if names.iter().any(|n| n.eq_ignore_ascii_case(picked)));
+    let own_pick = if pick_was_played { None } else { own_pick };
+    played_chip(first, own_pick)
+        .into_iter()
+        .chain(rest.iter().map(|name| Chip {
+            slot: Slot::Hero(name.clone()),
+            ban: false,
+            you: true,
+            swap: false,
+            tip: format!("Then played {name}, you"),
+        }))
+        .collect()
+}
+
+/// Our own first Played chip, from the game data. `None` when the game has no
 /// hero. It carries the swap glyph when it is a real hero that differs from
 /// our own hero select hero, which must be a real hero too.
 fn played_chip(own_hero: &str, own_pick: Option<&Slot>) -> Option<Chip> {
@@ -733,6 +775,142 @@ mod tests {
         assert!(!played_chip("Wrecking Ball", None).unwrap().swap);
         assert!(played_chip("Unknown", None).is_none());
         assert!(played_chip("  ", None).is_none());
+    }
+
+    /// The normal game, played as the given runs (hero, snapshots), all
+    /// confirmed, like the Eichenwalde game that showed only its first hero.
+    fn played_as(runs: &[(&str, u32)]) -> Game {
+        let mut g = game(NORMAL);
+        let base = g.segments[0].clone();
+        g.segments = runs
+            .iter()
+            .enumerate()
+            .map(|(i, (hero, snapshots))| crate::model::SegmentView {
+                index: i as u32,
+                hero: (*hero).into(),
+                snapshots: *snapshots,
+                confirmed: true,
+                ..base.clone()
+            })
+            .collect();
+        g
+    }
+
+    fn played(g: &Game) -> Vec<Chip> {
+        let rows = rows_of(g);
+        let row = rows.iter().find(|r| r.line == Some("Played")).unwrap();
+        match &row.body {
+            Body::Chips(chips) => chips.clone(),
+            Body::Quiet(_) => panic!("chips"),
+        }
+    }
+
+    #[test]
+    fn played_lists_every_hero_in_the_order_played() {
+        let g = played_as(&[("Wrecking Ball", 12), ("Sigma", 6), ("Sierra", 6)]);
+        let chips = played(&g);
+        let names: Vec<_> = chips.iter().map(Chip::name).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma", "Sierra"]);
+        assert!(chips.iter().all(|c| c.you && !c.ban));
+        assert!(chips.iter().all(|c| !c.swap), "we picked Wrecking Ball");
+        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
+        assert_eq!(chips[1].tip, "Then played Sigma, you");
+        assert_eq!(chips[2].tip, "Then played Sierra, you");
+        assert!(!bans_picks(&g).has_swap());
+        // The hero bar shows the same heroes in the same order.
+        let bar: Vec<_> = crate::games_detail::hero_split(&g)
+            .bar
+            .into_iter()
+            .map(|b| b.hero)
+            .collect();
+        assert_eq!(bar, ["Wrecking Ball", "Sigma", "Sierra"]);
+    }
+
+    #[test]
+    fn played_merges_repeats_and_keeps_a_return_in_first_place() {
+        let g = played_as(&[
+            ("Wrecking Ball", 4),
+            ("Wrecking Ball", 3),
+            ("Sigma", 6),
+            ("Unknown", 2),
+            ("Wrecking Ball", 5),
+            ("Sierra", 2),
+        ]);
+        let names: Vec<_> = played(&g).iter().map(|c| c.name().to_string()).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma", "Sierra"]);
+    }
+
+    #[test]
+    fn played_follows_the_hero_bar_for_dismissed_and_unconfirmed_runs() {
+        // UNSURE: Wrecking Ball, a one-snapshot unconfirmed Sigma, Wrecking
+        // Ball again. The bar shows the Sigma run, so the card does too.
+        let g = game(UNSURE);
+        let names: Vec<_> = played(&g).iter().map(|c| c.name().to_string()).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma"]);
+        // Dismissed, the run folds into Wrecking Ball on the bar and the card.
+        let mut g = g;
+        g.segments[1].dismissed = true;
+        let names: Vec<_> = played(&g).iter().map(|c| c.name().to_string()).collect();
+        assert_eq!(names, ["Wrecking Ball"]);
+    }
+
+    #[test]
+    fn a_corrected_hero_keeps_the_single_played_chip() {
+        let mut g = played_as(&[("Wrecking Ball", 12), ("Sigma", 6), ("Sierra", 6)]);
+        g.edited_fields.push("hero".into());
+        g.hero = "Sigma".into();
+        let chips = played(&g);
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].name(), "Sigma");
+        assert!(chips[0].you && chips[0].swap);
+        assert_eq!(
+            chips[0].tip,
+            "Played Sigma, Wrecking Ball at hero select, you"
+        );
+        // No runs at all: the row's hero, as before.
+        let mut g = game(NORMAL);
+        g.segments.clear();
+        let chips = played(&g);
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
+    }
+
+    #[test]
+    fn only_the_first_played_chip_marks_a_swap() {
+        // UNSURE picked Reinhardt at hero select, and we never played him.
+        let mut g = game(UNSURE);
+        g.segments[1].confirmed = true;
+        g.segments[1].hero = "Sigma".into();
+        g.segments[2].hero = "Mei".into();
+        let chips = played(&g);
+        let names: Vec<_> = chips.iter().map(Chip::name).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma", "Mei"]);
+        assert!(chips[0].swap && chips[0].you);
+        assert_eq!(
+            chips[0].tip,
+            "Played Wrecking Ball, Reinhardt at hero select, you"
+        );
+        assert!(chips[1..].iter().all(|c| !c.swap && c.you));
+        assert_eq!(chips[2].tip, "Then played Mei, you");
+        assert!(bans_picks(&g).has_swap());
+    }
+
+    #[test]
+    fn no_swap_mark_when_the_pick_is_one_of_the_played_chips() {
+        // UNSURE picked Reinhardt at hero select and went back to him later.
+        let mut g = game(UNSURE);
+        g.segments[1].confirmed = true;
+        g.segments[1].hero = "Sigma".into();
+        g.segments[2].hero = "Reinhardt".into();
+        let chips = played(&g);
+        let names: Vec<_> = chips.iter().map(Chip::name).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma", "Reinhardt"]);
+        assert!(chips.iter().all(|c| !c.swap && c.you));
+        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
+        assert!(!bans_picks(&g).has_swap());
+        // The same holds when the case of the name differs.
+        g.segments[2].hero = "REINHARDT".into();
+        assert!(played(&g).iter().all(|c| !c.swap));
     }
 
     #[test]
