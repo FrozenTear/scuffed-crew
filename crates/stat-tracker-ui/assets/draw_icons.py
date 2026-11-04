@@ -14,7 +14,8 @@ flag.png and picture.png (12 px, TEXT_2) and warn-loss.png (the warning
 sign in the loss colour, 12 px). For Delete game it draws trash.png (in
 the loss colour) and trash-ink.png (in BG, for the solid confirm
 button), and tick.png (the "Game deleted." line's tick, TEXT_2), each
-16 px. Each is drawn at 2x for a 1x box, from an 8x supersampled mask,
+16 px. For the Bans and picks block it draws ban.png (a circle with a
+slash) and swap.png (two opposite arrows), 12 px, TEXT_2. Each is drawn at 2x for a 1x box, from an 8x supersampled mask,
 so a rerun gives the same files.
 
 The other five tab masks (games, heroes, maps, seasons, settings) are not
@@ -190,6 +191,32 @@ def picture_mask():
     return mask
 
 
+def ban_mask():
+    """A circle with a slash, 24 px."""
+    s, mask, draw, stroke = _canvas()
+    draw.ellipse((3 * s, 3 * s, 21 * s - 1, 21 * s - 1), outline=255, width=stroke)
+    slash = [(6 * s, 18 * s), (18 * s, 6 * s)]
+    draw.line(slash, fill=255, width=stroke)
+    _caps(draw, slash, stroke)
+    return mask
+
+
+def swap_mask():
+    """Two arrows pointing opposite ways, one over the other, 24 px."""
+    s, mask, draw, stroke = _canvas()
+    top = [(4 * s, 8 * s), (20 * s, 8 * s)]
+    top_head = [(16 * s, 4 * s), (20 * s, 8 * s), (16 * s, 12 * s)]
+    bottom = [(20 * s, 16 * s), (4 * s, 16 * s)]
+    bottom_head = [(8 * s, 12 * s), (4 * s, 16 * s), (8 * s, 20 * s)]
+    for line in (top, bottom):
+        draw.line(line, fill=255, width=stroke)
+    for head in (top_head, bottom_head):
+        draw.line(head, fill=255, width=stroke, joint="curve")
+        _caps(draw, head, stroke)
+    _caps(draw, top + bottom, stroke)
+    return mask
+
+
 def _canvas16():
     """A 16 px box at 2x (32 px) with the spec's 1.5 px stroke."""
     s = SUPER * 2
@@ -238,6 +265,8 @@ def main():
     paint(trash_mask(), 32, DANGER).save("trash.png", optimize=True)
     paint(trash_mask(), 32, INK).save("trash-ink.png", optimize=True)
     paint(tick_mask(), 32, TEXT_2).save("tick.png", optimize=True)
+    paint(ban_mask(), 24, TEXT_2).save("ban.png", optimize=True)
+    paint(swap_mask(), 24, TEXT_2).save("swap.png", optimize=True)
 
 
 if __name__ == "__main__":

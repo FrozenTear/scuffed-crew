@@ -222,6 +222,12 @@ pub struct Game {
     pub synced: bool,
     /// The reader that read the scoreboard, e.g. "cv-v1" or "ocr-v1".
     pub recognizer: String,
+    /// The stored bans and picks JSON (`PersonalMatch::bans_picks`), as the
+    /// daemon wrote it. The open row's Bans and picks block reads it.
+    pub bans_picks: Option<String>,
+    /// Why the bans and picks are as they are. `None` for a game recorded
+    /// before the status existed.
+    pub bans_picks_status: Option<crate::model::BansPicksStatus>,
 }
 
 /// The six stats a "N stats unsure" count covers, as flat names.
@@ -269,6 +275,8 @@ impl Game {
             suspect_fields: crate::reader_apply::upload_suspect_fields(&m.suspect_fields),
             synced: m.synced,
             recognizer: m.stored_recognizer().to_string(),
+            bans_picks: m.bans_picks.clone(),
+            bans_picks_status: m.bans_picks_status.clone(),
         }
     }
 
@@ -584,6 +592,8 @@ mod tests {
             suspect_fields: vec!["dmg".into(), "hero".into()],
             synced: false,
             recognizer: String::new(),
+            bans_picks: None,
+            bans_picks_status: None,
         };
         assert!(game.field_unsure("dmg"));
         assert!(game.field_unsure("hero"));
@@ -617,6 +627,8 @@ mod tests {
             suspect_fields: Vec::new(),
             synced: false,
             recognizer: String::new(),
+            bans_picks: None,
+            bans_picks_status: None,
         };
         for field in [
             "hero", "result", "map", "mode", "e", "a", "d", "dmg", "h", "mit",
@@ -653,6 +665,8 @@ mod review_tests {
             suspect_fields: Vec::new(),
             synced: false,
             recognizer: String::new(),
+            bans_picks: None,
+            bans_picks_status: None,
         }
     }
 

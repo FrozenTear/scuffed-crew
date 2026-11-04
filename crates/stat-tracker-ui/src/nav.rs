@@ -742,6 +742,8 @@ mod tests {
             suspect_fields: Vec::new(),
             synced: false,
             recognizer: String::new(),
+            bans_picks: None,
+            bans_picks_status: None,
         }
     }
 

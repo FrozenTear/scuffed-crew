@@ -189,6 +189,13 @@ pub fn snapshot() -> Snapshot {
     rejected_2.recognizer = "cv-v0".into();
     rejected_2.upload_reject = Some(REJECT.into());
 
+    // The open row's Bans and picks block: all read, read in part, and
+    // two ways of reading nothing.
+    crate::fixtures_bans::full(&mut normal);
+    crate::fixtures_bans::partial(&mut unsure);
+    crate::fixtures_bans::reader_off(&mut undecided);
+    crate::fixtures_bans::frame_size(&mut rejected_2);
+
     let mut matches = vec![
         held,
         rejected_2,

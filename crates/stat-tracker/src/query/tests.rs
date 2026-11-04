@@ -26,6 +26,8 @@ fn game(sid: &str, hero: &str, role: Role, outcome: Outcome, mins: i64) -> Game 
         suspect_fields: Vec::new(),
         synced: true,
         recognizer: "cv-v8".into(),
+        bans_picks: None,
+        bans_picks_status: None,
     }
 }
 

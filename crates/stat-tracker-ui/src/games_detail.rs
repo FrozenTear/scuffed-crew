@@ -630,6 +630,8 @@ mod tests {
             suspect_fields: Vec::new(),
             synced: false,
             recognizer: "cv-v1".into(),
+            bans_picks: None,
+            bans_picks_status: None,
         }
     }
 

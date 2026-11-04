@@ -817,6 +817,8 @@ mod tests {
             suspect_fields: suspect.iter().map(|s| s.to_string()).collect(),
             synced: false,
             recognizer: String::new(),
+            bans_picks: None,
+            bans_picks_status: None,
         }
     }
 
