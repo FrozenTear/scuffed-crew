@@ -194,7 +194,7 @@ fn reason(status: &BansPicksStatus) -> Option<(String, bool)> {
             false,
         ),
         BansPicksStatus::ReaderOff => (
-            "Not read: the Read bans and picks setting is off.".to_string(),
+            "Not read: Read bans and picks was off for this game.".to_string(),
             true,
         ),
     };
@@ -745,7 +745,7 @@ mod tests {
         else {
             panic!("reason")
         };
-        assert_eq!(line, "Not read: the Read bans and picks setting is off.");
+        assert_eq!(line, "Not read: Read bans and picks was off for this game.");
         assert!(tip.is_none());
         let link = settings.unwrap();
         assert!(link.tip.contains("Read bans and picks"));
