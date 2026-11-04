@@ -385,7 +385,10 @@ fn a_frame_that_is_not_2560x1440_is_refused() {
     assert!(r.read_ban_results(&small, None).is_none());
     assert!(r.read_hero_select(&small).is_none());
     assert!(r.read_ban_vote(&small).is_none());
-    assert!(r.read_ban_vote(&RgbImage::from_pixel(2560, 1080, BG)).is_none());
+    assert!(
+        r.read_ban_vote(&RgbImage::from_pixel(2560, 1080, BG))
+            .is_none()
+    );
     assert!(r.read(&small, &small).is_none());
 }
 
@@ -997,7 +1000,14 @@ fn strip(img: &mut RgbImage, boxes: [StripBox; 3]) {
     let (tx0, ty0, tx1, ty1) = vote::STRIP_TITLE;
     for x in tx0..=tx1 {
         if (x / 3) % 2 == 0 {
-            fill(img, x as i32, ty0 as i32, x as i32 + 1, ty1 as i32 + 1, VOTE_RED);
+            fill(
+                img,
+                x as i32,
+                ty0 as i32,
+                x as i32 + 1,
+                ty1 as i32 + 1,
+                VOTE_RED,
+            );
         }
     }
     for (&r, b) in vote::STRIP_BOXES.iter().zip(boxes) {
@@ -1062,14 +1072,21 @@ fn a_voted_hero_a_skip_and_an_empty_slot_read_as_such() {
     assert_eq!(slots[1].confidence, 0.0);
     // The flat list the game record keeps: the hero, then two nulls.
     let own = v.own_votes();
-    assert_eq!(own.iter().map(key).collect::<Vec<_>>(), [Some("kiriko"), None, None]);
+    assert_eq!(
+        own.iter().map(key).collect::<Vec<_>>(),
+        [Some("kiriko"), None, None]
+    );
 }
 
 #[test]
 fn three_voted_heroes_read_in_slot_order() {
     let r = reader();
     let img = vote_frame(
-        [Slot::Hero("roadhog"), Slot::Hero("widowmaker"), Slot::Hero("mercy")],
+        [
+            Slot::Hero("roadhog"),
+            Slot::Hero("widowmaker"),
+            Slot::Hero("mercy"),
+        ],
         STRIP3,
     );
     let v = r.read_ban_vote(&img).unwrap();
@@ -1131,7 +1148,11 @@ fn an_empty_strip_box_is_empty_with_no_hero_and_no_count() {
     let r = reader();
     let img = vote_frame(
         [Slot::Empty; 3],
-        [StripBox::Hero("mauga", "10"), StripBox::Empty, StripBox::Empty],
+        [
+            StripBox::Hero("mauga", "10"),
+            StripBox::Empty,
+            StripBox::Empty,
+        ],
     );
     let v = r.read_ban_vote(&img).unwrap();
     let score = v.score.as_ref().unwrap();
@@ -1212,7 +1233,10 @@ fn noise_and_flat_frames_have_no_slots_and_no_strip() {
 #[test]
 fn a_moved_layout_reads_as_none_not_as_votes() {
     let r = reader();
-    let img = vote_frame([Slot::Hero("ana"), Slot::Hero("mei"), Slot::Skipped], STRIP3);
+    let img = vote_frame(
+        [Slot::Hero("ana"), Slot::Hero("mei"), Slot::Skipped],
+        STRIP3,
+    );
     // the whole screen 12 pixels to the right and down
     let mut moved = blank();
     imageops::replace(&mut moved, &img, 12, 12);

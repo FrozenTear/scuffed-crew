@@ -358,7 +358,10 @@ fn the_vote_slots_and_the_strip_ride_along_as_plain_values() {
     );
     let wire = bp.to_string();
     for private in ["confidence", "margin", "\"score\""] {
-        assert!(!wire.contains(private), "{private} leaves the machine: {wire}");
+        assert!(
+            !wire.contains(private),
+            "{private} leaves the machine: {wire}"
+        );
     }
 }
 
@@ -383,7 +386,10 @@ fn the_new_keys_are_left_out_when_not_read_and_older_servers_ignore_them() {
     let parsed = scuffed_types::api::resolve_bans_picks(Some(&sent["bans_picks"]))
         .unwrap()
         .unwrap();
-    assert_eq!(parsed.ban_vote, vec![Some("roadhog".to_string()), None, None]);
+    assert_eq!(
+        parsed.ban_vote,
+        vec![Some("roadhog".to_string()), None, None]
+    );
 }
 
 #[test]

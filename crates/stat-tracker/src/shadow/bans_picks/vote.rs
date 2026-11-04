@@ -269,7 +269,10 @@ impl Reader {
     }
 
     fn read_vote_slots(&self, img: &RgbImage) -> Option<Vec<VoteSlotRead>> {
-        if !OWN_SLOTS.iter().all(|&r| box_in_place(img, r, SLOT_BORDER_MIN)) {
+        if !OWN_SLOTS
+            .iter()
+            .all(|&r| box_in_place(img, r, SLOT_BORDER_MIN))
+        {
             return None;
         }
         let mut field: Option<Field> = None;
@@ -301,7 +304,9 @@ impl Reader {
 
     fn read_ban_score(&self, img: &RgbImage) -> Option<Vec<BanScoreEntry>> {
         let title = share(img, STRIP_TITLE, is_red);
-        let boxes = STRIP_BOXES.iter().all(|&r| box_in_place(img, r, STRIP_BORDER_MIN));
+        let boxes = STRIP_BOXES
+            .iter()
+            .all(|&r| box_in_place(img, r, STRIP_BORDER_MIN));
         if !(TITLE_RED_MIN..=TITLE_RED_MAX).contains(&title) || !boxes {
             return None;
         }
@@ -495,7 +500,11 @@ fn skip_marks(img: &RgbImage, (x0, y0, x1, y1): Rect) -> (f32, f32, f32) {
     let ring = (0..SKIP_POINTS)
         .filter(|&i| {
             let a = 2.0 * std::f64::consts::PI * i as f64 / SKIP_POINTS as f64;
-            is_icon(at(img, cx + SKIP_RADIUS * a.cos(), cy + SKIP_RADIUS * a.sin()))
+            is_icon(at(
+                img,
+                cx + SKIP_RADIUS * a.cos(),
+                cy + SKIP_RADIUS * a.sin(),
+            ))
         })
         .count() as f32
         / SKIP_POINTS as f32;

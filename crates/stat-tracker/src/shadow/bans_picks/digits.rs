@@ -275,8 +275,7 @@ pub(super) fn read_number(img: &RgbImage, x0: u32, y0: u32, x1: u32, y1: u32) ->
             return None;
         }
         value = value * 10 + digit;
-        confidence = confidence
-            .min(0.5 * (score / 0.95).min(1.0) + 0.5 * (margin / 0.3).min(1.0));
+        confidence = confidence.min(0.5 * (score / 0.95).min(1.0) + 0.5 * (margin / 0.3).min(1.0));
     }
     // "07" is not a count the screen shows.
     if glyphs.len() == 2 && value < 10 {
