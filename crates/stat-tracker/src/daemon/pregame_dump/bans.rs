@@ -66,10 +66,18 @@ impl PregameDump {
             Ok(Some(at)) => at,
             Ok(None) => {
                 tracing::info!(target: "scuffed_stat_tracker", session = session_id, "bans and picks: no game start stored, frames not read");
+                self.summarize(
+                    session_id,
+                    &ReaderResult::NoFrames("no game start stored, frames not read"),
+                );
                 return;
             }
             Err(e) => {
                 tracing::warn!(target: "scuffed_stat_tracker", error = %e, "bans and picks: game start not read, nothing attached");
+                self.summarize(
+                    session_id,
+                    &ReaderResult::NoFrames("game start could not be read, frames not read"),
+                );
                 return;
             }
         };

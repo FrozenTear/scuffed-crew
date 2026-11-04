@@ -229,21 +229,26 @@ impl BansPicksFeed {
                         continue;
                     }
                     let frame = Arc::clone(&shot.frame);
-                    if shot.name == PregamePhase::HeroBan.last_name() {
+                    let slot = if shot.name == PregamePhase::HeroBan.last_name() {
                         self.frames.vote = Some(frame);
+                        "vote"
                     } else if shot.name == PregamePhase::HeroSelect.last_name() {
                         self.frames.select = Some(frame);
+                        "select"
                     } else if shot.name == PregamePhase::HeroSelect.first_name() {
                         self.frames.select_first = Some(frame);
+                        "select_first"
                     } else if shot.name == BAN_RESULTS_NAME && staged {
                         self.frames.staged = Some(frame);
+                        "staged"
                     } else if shot.name == BAN_RESULTS_NAME {
                         self.frames.results = Some(frame);
+                        "results"
                     } else {
                         continue;
-                    }
+                    };
                     if !staged {
-                        tracing::info!(target: "scuffed_stat_tracker", name = shot.name, game = %shot.folder, "bans and picks: frame held for the reader");
+                        tracing::info!(target: "scuffed_stat_tracker", name = shot.name, slot, game = %shot.folder, "bans and picks: frame held for the reader");
                     }
                     self.fed_at = Some(Utc::now());
                 }
@@ -252,7 +257,7 @@ impl BansPicksFeed {
                         && *name == BAN_RESULTS_NAME
                         && let Some(frame) = self.frames.staged.take()
                     {
-                        tracing::info!(target: "scuffed_stat_tracker", name = *name, game = %folder, "bans and picks: frame held for the reader (staged frame saved)");
+                        tracing::info!(target: "scuffed_stat_tracker", name = *name, slot = "results", game = %folder, "bans and picks: frame held for the reader (staged frame saved)");
                         self.frames.results = Some(frame);
                     }
                 }

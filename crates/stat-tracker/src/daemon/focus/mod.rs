@@ -405,7 +405,8 @@ fn log_read(before: FocusGateStatus, applied: &Applied, read: &FocusRead) {
                 "focus gate: another window is focused, reads pause"
             );
         }
-        FocusGateStatus::Unreadable => {
+        // The warn line above already names the reason on this tick.
+        FocusGateStatus::Unreadable if !applied.warn => {
             let reason = match read {
                 FocusRead::Unreadable(why) => why.as_str(),
                 _ => "unknown",
