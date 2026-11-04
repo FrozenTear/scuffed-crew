@@ -218,7 +218,7 @@ fn a_row_with_no_read_uploads_the_same_bytes_as_before() {
     let mut unread = plain.clone();
     unread.bans_picks = Some(json!({ "bans_picks_recognizer": "cv-v1" }).to_string());
     let deleted = vec!["gone-1".to_string()];
-    let new_body = upload_request(&[plain.clone()], &deleted);
+    let new_body = upload_request(std::slice::from_ref(&plain), &deleted);
     assert_eq!(new_body.matches.len(), 1, "the row is uploaded");
     // The body the tracker sent before this change: the site's own
     // `StatsUploadRequest`, built from the same entries. This pins that
@@ -228,7 +228,11 @@ fn a_row_with_no_read_uploads_the_same_bytes_as_before() {
         deleted_sessions: deleted.clone(),
     };
     let a = serde_json::to_string(&new_body).unwrap();
-    assert_eq!(a, serde_json::to_string(&old_body).unwrap(), "same bytes as the old request");
+    assert_eq!(
+        a,
+        serde_json::to_string(&old_body).unwrap(),
+        "same bytes as the old request"
+    );
     let b = serde_json::to_string(&upload_request(&[unread], &deleted)).unwrap();
     assert_eq!(a, b, "a recognizer id with no read adds nothing");
 }
