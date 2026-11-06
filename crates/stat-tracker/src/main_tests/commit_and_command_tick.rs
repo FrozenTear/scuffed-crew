@@ -272,6 +272,8 @@ async fn an_offline_delete_survives_restarts_and_its_tombstone_waits_for_the_sit
     // Tracker stopped: the app only queues the delete.
     let store = restart(store).await;
     drop(store);
+    let wait = std::time::Duration::from_secs(5);
+    assert!(storage::wait_for_engine_close(dir.path(), wait).await);
     storage::queue_command(
         dir.path(),
         &storage::StoreCommand::DeleteSession {
