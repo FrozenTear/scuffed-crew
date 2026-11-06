@@ -739,10 +739,12 @@ pub(crate) fn text_fallback_names(
     own_names
 }
 
-/// [`parse::read_scoreboard`] with each of `names` in turn: the first name
-/// whose row is not found passes to the next, so an alt's line on the board
-/// is read too. A name found but unreadable stops there (it is the
-/// member's row). No names is one read with none.
+/// [`parse::read_scoreboard`] with each of `names` in turn until one reads,
+/// so an alt's line on the board is read too. A name found but unreadable
+/// passes to the next as well: the main name can sit in a chat line, which
+/// the text fallback skips, while the member plays on an alt (the own row
+/// set or not). When no name reads, an unreadable miss wins over "row not
+/// found". No names is one read with none.
 pub(crate) fn read_scoreboard_named(
     rows: &[ocr::RowOcrResult],
     player_row_idx: Option<usize>,
@@ -753,11 +755,16 @@ pub(crate) fn read_scoreboard_named(
     let read =
         |name: Option<&str>| parse::read_scoreboard(rows, player_row_idx, raw_text, outcome, name);
     let mut result = read(names.first().map(String::as_str));
+    let mut unreadable = false;
     for name in names.iter().skip(1) {
-        if !matches!(result, Err(parse::ScoreboardMiss::PlayerRowNotFound)) {
-            break;
+        match result {
+            Ok(_) => break,
+            Err(miss) => unreadable |= miss == parse::ScoreboardMiss::CellsUnreadable,
         }
         result = read(Some(name));
+    }
+    if unreadable && matches!(result, Err(parse::ScoreboardMiss::PlayerRowNotFound)) {
+        return Err(parse::ScoreboardMiss::CellsUnreadable);
     }
     result
 }

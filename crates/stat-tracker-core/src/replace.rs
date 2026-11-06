@@ -677,7 +677,14 @@ fn exec_target(target: ExecTarget<'_>) -> std::io::Error {
         }
     };
     cmd.args(args);
-    cmd.exec()
+    // `Command::exec` sets SIGPIPE to its default before execve and leaves
+    // it there when the exec fails. The busy retries and the fallback log
+    // between execs, so put back the ignored SIGPIPE Rust started with, as
+    // `omp::reexec_self` does.
+    let sigpipe = crate::omp::sigpipe_action();
+    let error = cmd.exec();
+    crate::omp::restore_sigpipe(sigpipe);
+    error
 }
 
 /// After [`ExecTarget::Running`] the kernel names the process `exe`, the
@@ -809,6 +816,26 @@ mod tests {
         let (tried, _, _) = run(busy);
         assert_eq!(tried.len(), EXEC_BUSY_TRIES as usize + 1);
         assert_eq!(tried.last().map(String::as_str), Some("self"));
+    }
+
+    /// A failed exec leaves SIGPIPE ignored, as Rust started the process.
+    /// `Command::exec` sets it back to the default before execve and leaves
+    /// it there when the exec fails; a write to a closed stderr pipe would
+    /// then kill the tracker with no log line. A missing path fails in
+    /// execve and runs nothing.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_exec_keeps_sigpipe_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("scuffed-stat-tracker");
+        let before = crate::omp::sigpipe_action().expect("read SIGPIPE");
+        assert_eq!(before.sa_sigaction, libc::SIG_IGN);
+        let err = exec_target(ExecTarget::New(&missing));
+        let after = crate::omp::sigpipe_action().expect("read SIGPIPE");
+        // Put it back for the other tests before an assert can panic.
+        crate::omp::restore_sigpipe(Some(before));
+        assert_eq!(err.raw_os_error(), Some(libc::ENOENT));
+        assert_eq!(after.sa_sigaction, libc::SIG_IGN);
     }
 
     /// The restarted binary waits out the backoff before it tries the new

@@ -457,6 +457,27 @@ fn the_text_fallback_reads_an_alt_names_line() {
     ));
 }
 
+/// The main name in a chat line makes that name "found but unreadable"
+/// (the text fallback skips chat). The next saved name is still tried, so
+/// an alt's stat line is read, with no own row and with a highlighted row
+/// whose cells did not parse (`Some(0)` with no OCR rows). With no alt
+/// line the miss stays "unreadable", not "row not found".
+#[test]
+fn a_main_name_in_chat_does_not_hide_the_alts_line() {
+    let raw = "[Team] FrozenTear: 1 2 3 4 5 6\nÖSTER 10 4 2 3,000 800 400";
+    let names = ["FrozenTear".to_string(), "öster".to_string()];
+    let chat_only = "[Team] FrozenTear: 1 2 3 4 5 6";
+    for row in [None, Some(0)] {
+        let read = read_scoreboard_named(&[], row, raw, "victory", &names).unwrap();
+        assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
+        assert!(!read.trusted_cells);
+        assert!(matches!(
+            read_scoreboard_named(&[], row, chat_only, "victory", &names),
+            Err(parse::ScoreboardMiss::CellsUnreadable)
+        ));
+    }
+}
+
 /// T4 (O9): the vision pass reads names in the per-cell pass only under
 /// ocr-v1 and finds the own row only through `find_own_row` with the
 /// daemon's reader switch. Whitespace is ignored. Hard-wiring the switch,
