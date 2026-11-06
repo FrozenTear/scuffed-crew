@@ -753,18 +753,19 @@ fn row_meets(row: &RowOcrResult, min_confidence: f32) -> bool {
         .is_some_and(|cell| name_meets(cell, min_confidence))
 }
 
-/// Match `rows` against `player`. [`BoardMatch::FullBoard`] refuses a list
-/// that is not both teams.
+/// Match `rows` against `player`: one name, or every saved name of the
+/// member ([`crate::parse::match_player_row_by_names`]).
+/// [`BoardMatch::FullBoard`] refuses a list that is not both teams.
 pub fn match_named_rows(
     rows: &[RowOcrResult],
-    player: &str,
+    player: &(impl crate::parse::NameList + ?Sized),
     team_size: usize,
     policy: BoardMatch,
 ) -> Option<crate::parse::NameMatch> {
     if policy == BoardMatch::FullBoard && rows.len() != team_size * 2 {
         return None;
     }
-    crate::parse::match_player_row_by_name(rows, player)
+    crate::parse::match_player_row_by_names(rows, player)
 }
 
 fn sure_rows(rows: &[RowOcrResult], min_confidence: f32) -> Vec<RowOcrResult> {
@@ -858,7 +859,7 @@ pub(crate) fn player_row(
 /// name came from the pack. A Tesseract row, including one filled in for a
 /// blank or low-confidence row, is [`NameRecognizer::OcrV1`].
 pub fn choose_player_row(
-    player: &str,
+    player: &(impl crate::parse::NameList + ?Sized),
     team_size: usize,
     enabled: bool,
     reader: Option<ReaderNames<'_>>,

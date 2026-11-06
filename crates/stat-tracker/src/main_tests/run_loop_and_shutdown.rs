@@ -715,3 +715,26 @@ async fn close_store_within_runs_out_while_a_store_clone_lives() {
     drop(clone);
     assert!(storage::wait_for_engine_close(dir.path(), Duration::from_secs(5)).await);
 }
+
+/// 559 should-fix 2: the update restart lets go of the run marker and the
+/// pid file before its exec, and puts back only the marker when every exec
+/// failed. It never writes the pid file back: `_pid_guard` removes it when
+/// `run` returns, so a restore did nothing. A failed exec of the new binary
+/// starts this one again (`replace::reexec_or_restart_self`), so a tracker
+/// outside systemd keeps tracking.
+#[test]
+fn the_restart_after_close_hands_off_and_leaves_the_pid_file_alone() {
+    let body = fn_source("restart_after_close");
+    let at = |needle: &str| {
+        body.find(needle)
+            .unwrap_or_else(|| panic!("{needle} missing from restart_after_close"))
+    };
+    let exec = at("restart_for_replaced_binary(");
+    assert!(at("release_run_marker(") < exec);
+    assert!(at("release_own_pid_file(") < exec);
+    assert!(exec < at("restore_run_marker("));
+    assert!(!body.contains("restore_own_pid_file"));
+    // The restarted binary waits out the backoff and takes its name back.
+    assert!(fn_source("run_loop").contains("replace::EXEC_FAILED_ENV"));
+    assert!(fn_source("main").contains("replace::name_after_self_restart();"));
+}

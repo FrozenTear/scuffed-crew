@@ -375,6 +375,12 @@ pub struct SegmentResolution {
     pub segment: u32,
     /// [`SEGMENT_CONFIRM`] or [`SEGMENT_DISMISS`].
     pub action: String,
+    /// A [`SEGMENT_DISMISS`] of a run the member had confirmed by hand: Undo
+    /// ([`SEGMENT_CLEAR`]) puts the confirm back instead of clearing it.
+    /// False (also when missing, on older rows) and not written while false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[surreal(default)]
+    pub after_confirm: bool,
 }
 
 impl PersonalMatch {

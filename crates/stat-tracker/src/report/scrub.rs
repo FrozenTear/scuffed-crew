@@ -90,8 +90,8 @@ pub struct ScrubContext {
 
 impl ScrubContext {
     /// Context for this machine and this config: sync token and URL, player
-    /// name, home directory, account name, and hostname. `names` starts
-    /// empty; the caller adds the names read in the window.
+    /// name, home directory, account name, and hostname. `names` starts with
+    /// the other saved names (`player_names`); the caller adds those read.
     pub fn from_config(config: &crate::config::Config) -> Self {
         let home_dir = dirs::home_dir();
         let account_name = std::env::var("USER")
@@ -111,7 +111,7 @@ impl ScrubContext {
             account_name,
             hostname: local_hostname(),
             player_name: config.player_name.clone(),
-            names: Vec::new(),
+            names: config.player_names.clone(),
         }
     }
 }

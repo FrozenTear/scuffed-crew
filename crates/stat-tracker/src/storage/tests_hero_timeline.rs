@@ -101,10 +101,12 @@ fn derive_applies_confirm_and_dismiss_resolutions() {
         SegmentResolution {
             segment: 1,
             action: SEGMENT_CONFIRM.into(),
+            after_confirm: false,
         },
         SegmentResolution {
             segment: 0,
             action: SEGMENT_DISMISS.into(),
+            after_confirm: false,
         },
     ];
     let segs = derive_hero_segments(&snaps, &res);
@@ -389,6 +391,84 @@ async fn apply_command_resolves_hero_segment() {
         let s = &m.heroes_played[1];
         !s.is_dismissed() && !s.confirmed && s.resolution.is_none()
     }));
+}
+
+/// Item 19: Undo of a Dismiss on a run the member had confirmed by hand
+/// goes back to Confirmed, not to unconfirmed, and it survives a restart
+/// of the store. Undo of a Dismiss on a run nobody confirmed still clears.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn undo_of_a_dismiss_on_a_hand_confirmed_run_restores_the_confirm() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    for (i, hero, role) in [
+        (0, "Ana", "Support"),
+        (1, "Ana", "Support"),
+        (2, "Genji", "Damage"),
+    ] {
+        store
+            .insert_match(snap_h("s1", hero, role, i))
+            .await
+            .unwrap();
+    }
+    store.refresh_session_hero_timeline("s1").await.unwrap();
+    let step = |action: &str| StoreCommand::ResolveSegment {
+        session_id: "s1".into(),
+        segment: 1,
+        action: action.into(),
+    };
+    let lone = |rows: &[PersonalMatch]| rows.last().unwrap().heroes_played[1].clone();
+    for action in [SEGMENT_CONFIRM, SEGMENT_DISMISS] {
+        store.apply_command(&step(action)).await.unwrap();
+    }
+    let rows = store.get_session_snapshots("s1").await.unwrap();
+    assert!(lone(&rows).is_dismissed());
+    store.apply_command(&step(SEGMENT_CLEAR)).await.unwrap();
+    drop(store);
+    assert!(wait_for_engine_close(dir.path(), std::time::Duration::from_secs(5)).await);
+    let store = LocalStore::open(dir.path()).await.expect("reopen store");
+    let rows = store.get_session_snapshots("s1").await.unwrap();
+    let seg = lone(&rows);
+    assert!(seg.confirmed && !seg.is_dismissed(), "{seg:?}");
+    assert_eq!(seg.resolution.as_deref(), Some(SEGMENT_CONFIRM));
+    // Dismiss and Undo again on the restored confirm: still Confirmed.
+    for action in [SEGMENT_DISMISS, SEGMENT_CLEAR] {
+        store.apply_command(&step(action)).await.unwrap();
+    }
+    let rows = store.get_session_snapshots("s1").await.unwrap();
+    assert_eq!(lone(&rows).resolution.as_deref(), Some(SEGMENT_CONFIRM));
+    // Undo of the confirm itself clears it: the lone run is unconfirmed.
+    store.apply_command(&step(SEGMENT_CLEAR)).await.unwrap();
+    let rows = store.get_session_snapshots("s1").await.unwrap();
+    let seg = lone(&rows);
+    assert!(!seg.confirmed && seg.resolution.is_none(), "{seg:?}");
+}
+
+/// The rule behind it, on the resolution list alone.
+#[test]
+fn a_dismiss_remembers_a_hand_confirm_and_undo_puts_it_back() {
+    let mut list = Vec::new();
+    apply_segment_action(&mut list, 2, SEGMENT_DISMISS);
+    assert!(
+        !list[0].after_confirm,
+        "a dismiss of a run nobody confirmed"
+    );
+    apply_segment_action(&mut list, 2, SEGMENT_CLEAR);
+    assert!(list.is_empty());
+    apply_segment_action(&mut list, 2, SEGMENT_CONFIRM);
+    apply_segment_action(&mut list, 0, SEGMENT_DISMISS);
+    apply_segment_action(&mut list, 2, SEGMENT_DISMISS);
+    let two = list.iter().find(|r| r.segment == 2).unwrap();
+    assert_eq!(
+        (two.action.as_str(), two.after_confirm),
+        (SEGMENT_DISMISS, true)
+    );
+    apply_segment_action(&mut list, 2, SEGMENT_CLEAR);
+    let two = list.iter().find(|r| r.segment == 2).unwrap();
+    assert_eq!(
+        (two.action.as_str(), two.after_confirm),
+        (SEGMENT_CONFIRM, false)
+    );
+    assert_eq!(list.iter().map(|r| r.segment).collect::<Vec<_>>(), [0, 2]);
 }
 
 #[test]

@@ -130,7 +130,7 @@ pub(crate) struct FrameFlags {
 pub(crate) fn analyze_frame(
     img: image::DynamicImage,
     matcher: Arc<detect::hero_portrait::PortraitMatcher>,
-    player_name_owned: Option<String>,
+    own_names: Vec<String>,
     game_outcome: detect::MatchOutcome,
     flags: FrameFlags,
     own_seeds: Vec<detect::own_row::Seed>,
@@ -264,18 +264,19 @@ pub(crate) fn analyze_frame(
     } = find_own_row(
         use_new_reader,
         || {
-            player_name_owned.as_deref().and_then(|name| {
-                let hit = names::match_player_row(
-                    &scoreboard,
-                    team_size,
-                    name,
-                    names,
-                    names::BoardMatch::Cells,
-                    || rows.iter().map(names::name_only).collect(),
-                )?;
-                name_recognizer_slot.set(Some(hit.recognizer));
-                Some(hit.name)
-            })
+            if own_names.is_empty() {
+                return None;
+            }
+            let hit = names::match_player_row(
+                &scoreboard,
+                team_size,
+                own_names.as_slice(),
+                names,
+                names::BoardMatch::Cells,
+                || rows.iter().map(names::name_only).collect(),
+            )?;
+            name_recognizer_slot.set(Some(hit.recognizer));
+            Some(hit.name)
         },
         || {
             detect::own_row::read_own_row(
@@ -288,12 +289,10 @@ pub(crate) fn analyze_frame(
             )
         },
         || {
-            own_row_name_fallback(player_name_owned.as_deref(), &scoreboard, team_size, names).map(
-                |hit| {
-                    name_recognizer_slot.set(Some(hit.recognizer));
-                    hit.name
-                },
-            )
+            own_row_name_fallback(&own_names, &scoreboard, team_size, names).map(|hit| {
+                name_recognizer_slot.set(Some(hit.recognizer));
+                hit.name
+            })
         },
         highlight,
         tab_heroes
@@ -529,7 +528,7 @@ pub(crate) struct OwnRowChoice {
 /// panel's hero is then held, with a WARN. That is the limit of
 /// [`stat_tracker::ocr_switch::Read::OwnRow`].
 pub(crate) fn own_row_name_fallback(
-    player_name: Option<&str>,
+    own_names: &[String],
     scoreboard: &image::DynamicImage,
     team_size: usize,
     names: &names::NameSwitch,
@@ -537,11 +536,18 @@ pub(crate) fn own_row_name_fallback(
     if ocr::gate::is_off() {
         return None;
     }
-    let name = player_name.filter(|name| !name.trim().is_empty())?;
+    let own_names: Vec<String> = own_names
+        .iter()
+        .filter(|name| !name.trim().is_empty())
+        .cloned()
+        .collect();
+    if own_names.is_empty() {
+        return None;
+    }
     names::match_player_row(
         scoreboard,
         team_size,
-        name,
+        own_names.as_slice(),
         names,
         names::BoardMatch::FullBoard,
         || ocr::recognize_scoreboard_names_pre_cropped(scoreboard, team_size),
@@ -716,21 +722,44 @@ pub(crate) fn read_own_hero(
     }
 }
 
-/// The name the raw-text stats fallback (OCR site T7) may search for.
+/// The names the raw-text stats fallback (OCR site T7) may search for.
 ///
-/// ocr-v1: the configured name, as before. `reader = "new"`: the configured
-/// name only when the own row was found. With no own row (seed and highlight
-/// disagree, or neither fired) there is no name, so the full-board text
-/// cannot name a row in its place and the capture is held.
-pub(crate) fn text_fallback_name(
+/// ocr-v1: every saved name. `reader = "new"`: the saved names only when
+/// the own row was found. With no own row (seed and highlight disagree, or
+/// neither fired) there is no name, so the full-board text cannot name a
+/// row in its place and the capture is held.
+pub(crate) fn text_fallback_names(
     use_new_reader: bool,
     player_row_idx: Option<usize>,
-    player_name: Option<&str>,
-) -> Option<&str> {
+    own_names: &[String],
+) -> &[String] {
     if use_new_reader && player_row_idx.is_none() {
-        return None;
+        return &[];
     }
-    player_name
+    own_names
+}
+
+/// [`parse::read_scoreboard`] with each of `names` in turn: the first name
+/// whose row is not found passes to the next, so an alt's line on the board
+/// is read too. A name found but unreadable stops there (it is the
+/// member's row). No names is one read with none.
+pub(crate) fn read_scoreboard_named(
+    rows: &[ocr::RowOcrResult],
+    player_row_idx: Option<usize>,
+    raw_text: &str,
+    outcome: &str,
+    names: &[String],
+) -> Result<parse::ScoreboardRead, parse::ScoreboardMiss> {
+    let read =
+        |name: Option<&str>| parse::read_scoreboard(rows, player_row_idx, raw_text, outcome, name);
+    let mut result = read(names.first().map(String::as_str));
+    for name in names.iter().skip(1) {
+        if !matches!(result, Err(parse::ScoreboardMiss::PlayerRowNotFound)) {
+            break;
+        }
+        result = read(Some(name));
+    }
+    result
 }
 
 /// Row id passed into [`boundary::plan_capture`]. `None` when the player

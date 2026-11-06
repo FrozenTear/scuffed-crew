@@ -32,6 +32,18 @@ pub const RESTART_EXIT_CODE: i32 = 75;
 /// cannot restart again in a loop.
 const RESTART_ENV: &str = "STAT_TRACKER_BINARY_RESTART";
 
+/// Set when this binary started itself again because the new one would not
+/// start ([`ExecTarget::Running`]). That process checks the new binary only
+/// after [`EXEC_RETRY_BACKOFF`] ([`exec_failed_at_start`]) and takes the
+/// tracker's process name back ([`name_after_self_restart`]). The exec of a
+/// new binary drops it.
+pub const EXEC_FAILED_ENV: &str = "STAT_TRACKER_EXEC_FAILED";
+
+/// Execs of the new binary while the kernel says a writer still has it open
+/// (`ETXTBSY`, an update not closed yet), [`EXEC_BUSY_PAUSE`] apart.
+pub const EXEC_BUSY_TRIES: u32 = 5;
+pub const EXEC_BUSY_PAUSE: Duration = Duration::from_millis(200);
+
 /// The tracker has a game open. A file not written for [`GAME_FILE_STALE`]
 /// is left over and does not count. A clock that moved backwards counts
 /// as in progress so we do not cut a game we cannot time.
@@ -416,6 +428,13 @@ pub fn game_wait_should_stop(waited: Duration, max: Duration) -> bool {
 /// checking it again.
 pub const EXEC_RETRY_BACKOFF: Duration = Duration::from_secs(600);
 
+/// The event loop's first "last failed start check": now in a process that
+/// [`EXEC_FAILED_ENV`] marks (the new binary failed its exec), so the new
+/// binary is tried again only after the backoff; else none.
+pub fn exec_failed_at_start(marked: bool, now: std::time::Instant) -> Option<std::time::Instant> {
+    marked.then_some(now)
+}
+
 /// True when a failed re-exec may be tried again. `None` means there has
 /// not been a failure.
 pub fn exec_retry_due(
@@ -454,15 +473,6 @@ pub fn release_own_pid_file(data_dir: &Path) -> bool {
         return false;
     }
     std::fs::remove_file(&path).is_ok()
-}
-
-pub fn restore_own_pid_file(data_dir: &Path) {
-    let path = data_dir.join("daemon.pid");
-    let pid = std::process::id();
-    let body = proc_id::format_pid_record(pid, proc_id::proc_start_ticks(pid));
-    if std::fs::write(&path, body).is_ok() {
-        crate::fs_mode::tighten_private_file(&path);
-    }
 }
 
 /// What Restart now in the app should do.
@@ -588,8 +598,106 @@ fn exec_preflight(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// What one exec of [`reexec_or_restart_self`] starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecTarget<'a> {
+    /// The replaced binary on disk.
+    New(&'a Path),
+    /// This running binary again (`/proc/self/exe`, the image this process
+    /// runs even when the path now names the new file), with
+    /// [`EXEC_FAILED_ENV`] set.
+    Running,
+}
+
+/// The execs after the store closed: the new binary, again while it is busy
+/// (`ETXTBSY`, up to [`EXEC_BUSY_TRIES`] tries), then this binary, so a
+/// tracker started outside systemd keeps tracking instead of exiting.
+/// `exec` returns only when the exec failed. Returns the error only when
+/// every exec failed.
+pub fn reexec_or_restart_self(
+    path: &Path,
+    mut exec: impl FnMut(ExecTarget<'_>) -> std::io::Error,
+    mut pause: impl FnMut(Duration),
+) -> anyhow::Error {
+    let mut err = exec(ExecTarget::New(path));
+    for _ in 1..EXEC_BUSY_TRIES {
+        if !exec_busy(&err) {
+            break;
+        }
+        pause(EXEC_BUSY_PAUSE);
+        err = exec(ExecTarget::New(path));
+    }
+    tracing::error!(
+        path = %path.display(),
+        error = %err,
+        "could not start the new tracker; starting this version again, which tries the new one in 10 minutes"
+    );
+    let again = exec(ExecTarget::Running);
+    anyhow::anyhow!("could not re-exec the new tracker ({err}) or this one ({again})")
+}
+
+fn exec_busy(err: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        err.raw_os_error() == Some(libc::ETXTBSY)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = err;
+        false
+    }
+}
+
+/// One real exec for [`reexec_or_restart_self`], with this process's
+/// arguments. Returns only on failure.
+#[cfg(unix)]
+fn exec_target(target: ExecTarget<'_>) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+    let mut args = std::env::args_os();
+    let argv0 = args.next();
+    let mut cmd = match target {
+        ExecTarget::New(path) => {
+            let mut cmd = std::process::Command::new(path);
+            if let Some(stamp) = std::fs::metadata(path)
+                .ok()
+                .and_then(|meta| stamp_of_meta(&meta))
+            {
+                cmd.env(RESTART_ENV, exe_stamp_token(&stamp));
+            }
+            cmd.env_remove(EXEC_FAILED_ENV);
+            cmd
+        }
+        ExecTarget::Running => {
+            let mut cmd = std::process::Command::new("/proc/self/exe");
+            if let Some(argv0) = argv0 {
+                cmd.arg0(argv0);
+            }
+            cmd.env(EXEC_FAILED_ENV, "1");
+            cmd
+        }
+    };
+    cmd.args(args);
+    cmd.exec()
+}
+
+/// After [`ExecTarget::Running`] the kernel names the process `exe`, the
+/// last part of `/proc/self/exe`, and the app and [`proc_id`] look for the
+/// tracker by its name: set it back. Does nothing unless [`EXEC_FAILED_ENV`]
+/// is set. Call first in `main`, before any thread.
+pub fn name_after_self_restart() {
+    #[cfg(target_os = "linux")]
+    if std::env::var_os(EXEC_FAILED_ENV).is_some() {
+        let name = std::ffi::CString::new(proc_id::DAEMON_COMM).expect("no NUL in the name");
+        // SAFETY: PR_SET_NAME reads a NUL-terminated string of at most 16
+        // bytes; `name` outlives the call.
+        unsafe { libc::prctl(libc::PR_SET_NAME, name.as_ptr()) };
+    }
+}
+
 /// Log one line and either exit for systemd or re-exec the on-disk binary.
-/// Does not return on success.
+/// Does not return on success. Outside systemd a failed exec of the new
+/// binary starts this one again ([`reexec_or_restart_self`]); an error
+/// comes back only when that failed too.
 pub fn restart_for_replaced_binary(path: &Path) -> anyhow::Result<()> {
     match restart_how(under_systemd()) {
         RestartHow::SystemdExit => {
@@ -605,17 +713,11 @@ pub fn restart_for_replaced_binary(path: &Path) -> anyhow::Result<()> {
             );
             #[cfg(unix)]
             {
-                use std::os::unix::process::CommandExt;
-                let mut cmd = std::process::Command::new(path);
-                cmd.args(std::env::args_os().skip(1));
-                if let Some(stamp) = std::fs::metadata(path)
-                    .ok()
-                    .and_then(|meta| stamp_of_meta(&meta))
-                {
-                    cmd.env(RESTART_ENV, exe_stamp_token(&stamp));
-                }
-                let err = cmd.exec();
-                anyhow::bail!("could not re-exec the new tracker: {err}");
+                Err(reexec_or_restart_self(
+                    path,
+                    exec_target,
+                    std::thread::sleep,
+                ))
             }
             #[cfg(not(unix))]
             {
@@ -657,6 +759,77 @@ mod tests {
             expected_start: expected,
             actual_start: actual,
         }
+    }
+
+    /// An exec of the new binary that fails outside systemd: the busy one
+    /// is tried again after a pause, then this binary starts again, so
+    /// tracking goes on. The error comes back only when both fail.
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_exec_retries_a_busy_binary_then_restarts_this_one() {
+        let new = Path::new("/opt/scuffed/scuffed-stat-tracker");
+        let err = |code| std::io::Error::from_raw_os_error(code);
+        let run = |mut results: Vec<i32>| {
+            results.reverse();
+            let mut tried = Vec::new();
+            let mut pauses = Vec::new();
+            let out = reexec_or_restart_self(
+                new,
+                |target| {
+                    tried.push(match target {
+                        ExecTarget::New(path) => path.display().to_string(),
+                        ExecTarget::Running => "self".to_string(),
+                    });
+                    err(results.pop().expect("one result per exec"))
+                },
+                |d| pauses.push(d),
+            );
+            (tried, pauses, out.to_string())
+        };
+        // Busy twice, then a plain failure: three tries, then this binary.
+        let (tried, pauses, out) = run(vec![
+            libc::ETXTBSY,
+            libc::ETXTBSY,
+            libc::ENOEXEC,
+            libc::ENOENT,
+        ]);
+        assert!(tried[..3].iter().all(|t| *t == new.display().to_string()));
+        assert_eq!(tried[3], "self");
+        assert_eq!(pauses, [EXEC_BUSY_PAUSE; 2]);
+        assert!(
+            out.contains("new tracker") && out.contains("or this one"),
+            "{out}"
+        );
+        // Not busy: no second try of the new binary.
+        let (tried, pauses, _) = run(vec![libc::EACCES, libc::ENOENT]);
+        assert_eq!(tried, [new.display().to_string(), "self".to_string()]);
+        assert!(pauses.is_empty());
+        // Busy every time: EXEC_BUSY_TRIES tries, then this binary.
+        let busy = vec![libc::ETXTBSY; EXEC_BUSY_TRIES as usize + 1];
+        let (tried, _, _) = run(busy);
+        assert_eq!(tried.len(), EXEC_BUSY_TRIES as usize + 1);
+        assert_eq!(tried.last().map(String::as_str), Some("self"));
+    }
+
+    /// The restarted binary waits out the backoff before it tries the new
+    /// one again; a normal start checks at once.
+    #[test]
+    fn a_self_restart_waits_before_trying_the_new_binary_again() {
+        let now = std::time::Instant::now();
+        let first = exec_failed_at_start(true, now);
+        assert_eq!(first, Some(now));
+        assert!(!exec_retry_due(
+            first,
+            now + Duration::from_secs(1),
+            EXEC_RETRY_BACKOFF
+        ));
+        assert!(exec_retry_due(
+            first,
+            now + EXEC_RETRY_BACKOFF,
+            EXEC_RETRY_BACKOFF
+        ));
+        assert_eq!(exec_failed_at_start(false, now), None);
+        assert!(exec_retry_due(None, now, EXEC_RETRY_BACKOFF));
     }
 
     #[test]

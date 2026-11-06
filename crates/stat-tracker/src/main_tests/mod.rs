@@ -529,7 +529,7 @@ pub(crate) async fn o8_ctx(dir: &std::path::Path, use_new_reader: bool) -> Daemo
         backend: capture::CaptureBackend::None,
         store: storage::LocalStore::open(dir).await.unwrap(),
         sync_client: None,
-        player_name: None,
+        own_names: Vec::new(),
         capture_output: None,
         auto_detect: config::AutoDetectConfig::default(),
         finished_game_close: Duration::from_secs(90),

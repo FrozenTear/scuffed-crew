@@ -257,6 +257,32 @@ fn a_failed_restart_carries_on_without_the_limit() {
     assert_eq!(printed.get("pid"), printed.pid.to_string());
 }
 
+/// 559 should-fix 2: when the new binary will not exec, the tracker starts
+/// itself again through `/proc/self/exe`, and the kernel then names the
+/// process `exe`. The app and the pid check look for the tracker by name, so
+/// with `STAT_TRACKER_EXEC_FAILED` set it takes its name back first thing.
+/// A link called `exe` stands in for the `/proc/self/exe` path.
+#[test]
+fn a_restart_after_a_failed_update_exec_keeps_the_tracker_name() {
+    let dir = tempfile::tempdir_in(Path::new(DAEMON).parent().unwrap()).unwrap();
+    let link = dir.path().join("exe");
+    std::fs::hard_link(DAEMON, &link).unwrap();
+    let comm = |env: &[(&str, &str)]| {
+        let mut cmd = Command::new(&link);
+        cmd.arg("--print-omp-limit");
+        printed_by(cmd, env).get("comm").to_string()
+    };
+    assert_eq!(
+        comm(&[(GUARD, "1")]),
+        "exe",
+        "the kernel names it after the path"
+    );
+    assert_eq!(
+        comm(&[(GUARD, "1"), ("STAT_TRACKER_EXEC_FAILED", "1")]),
+        "scuffed-stat-tr"
+    );
+}
+
 /// Run `cmd` with a stdout nobody reads: the read end of the pipe is closed
 /// before the daemon starts, so its first print gets EPIPE or SIGPIPE.
 fn run_with_closed_stdout(mut cmd: Command) -> Finished {

@@ -282,11 +282,11 @@ fn the_name_fallback_needs_a_configured_name() {
     // no match anyway; the point is that no window is OCRed).
     let board = o9_board(0);
     assert_eq!(
-        own_row_name_fallback(None, &board, 5, &names::NameSwitch::off()),
+        own_row_name_fallback(&[], &board, 5, &names::NameSwitch::off()),
         None
     );
     assert_eq!(
-        own_row_name_fallback(Some("  "), &board, 5, &names::NameSwitch::off()),
+        own_row_name_fallback(&["  ".into()], &board, 5, &names::NameSwitch::off()),
         None
     );
     // With classic OCR off the name read is not asked for at all: no
@@ -294,7 +294,7 @@ fn the_name_fallback_needs_a_configured_name() {
     {
         let off = ocr::gate::scoped(ocr::gate::OcrMode::Off);
         assert_eq!(
-            own_row_name_fallback(Some("PLAYER"), &board, 5, &names::NameSwitch::off()),
+            own_row_name_fallback(&["PLAYER".into()], &board, 5, &names::NameSwitch::off()),
             None
         );
         assert_eq!(off.blocked(), [], "the fallback returns before any OCR");
@@ -381,7 +381,7 @@ fn with_ocr_off_the_career_hero_names_the_own_row_and_without_it_the_tab_is_held
     {
         let off = ocr::gate::scoped(ocr::gate::OcrMode::Off);
         let the_fallback = || {
-            own_row_name_fallback(Some("PLAYER"), &board, 5, &names::NameSwitch::off())
+            own_row_name_fallback(&["PLAYER".into()], &board, 5, &names::NameSwitch::off())
                 .map(|hit| hit.name)
         };
 
@@ -429,15 +429,32 @@ fn with_ocr_off_the_career_hero_names_the_own_row_and_without_it_the_tab_is_held
 
 #[test]
 fn the_text_fallback_gets_no_name_when_the_new_reader_has_no_own_row() {
-    let name = Some("Made Up");
-    // ocr-v1: unchanged, with or without a row
-    assert_eq!(text_fallback_name(false, None, name), name);
-    assert_eq!(text_fallback_name(false, Some(2), name), name);
+    let names = ["Made Up".to_string(), "Alt".to_string()];
+    let none: &[String] = &[];
+    // ocr-v1: every saved name, with or without a row
+    assert_eq!(text_fallback_names(false, None, &names), names);
+    assert_eq!(text_fallback_names(false, Some(2), &names), names);
     // new reader: only beside a row the seeds, the highlight or the
     // name fallback found
-    assert_eq!(text_fallback_name(true, Some(2), name), name);
-    assert_eq!(text_fallback_name(true, None, name), None);
-    assert_eq!(text_fallback_name(true, None, None), None);
+    assert_eq!(text_fallback_names(true, Some(2), &names), names);
+    assert_eq!(text_fallback_names(true, None, &names), none);
+    assert_eq!(text_fallback_names(true, None, none), none);
+}
+
+/// The raw-text fallback tries every saved name: an alt's line is read
+/// when the main name is on no line, and a name with no line stays a
+/// "row not found".
+#[test]
+fn the_text_fallback_reads_an_alt_names_line() {
+    let raw = "Ana\nBusan\nÖSTER 10 4 2 3,000 800 400";
+    let names = ["FrozenTear".to_string(), "öster".to_string()];
+    let read = read_scoreboard_named(&[], None, raw, "victory", &names).unwrap();
+    assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
+    let main_only = ["FrozenTear".to_string()];
+    assert!(matches!(
+        read_scoreboard_named(&[], None, raw, "victory", &main_only),
+        Err(parse::ScoreboardMiss::PlayerRowNotFound)
+    ));
 }
 
 /// T4 (O9): the vision pass reads names in the per-cell pass only under
@@ -492,7 +509,7 @@ fn the_own_row_goes_through_the_reader_switch() {
     ));
     // In src/daemon/tab/grab.rs since 0.6 S10: found by name, wherever it lives.
     let hc_body = norm(fn_source("handle_capture"));
-    assert!(hc_body.contains("text_fallback_name(board_reader, player_row_idx, player_name),"));
+    assert!(hc_body.contains("text_fallback_names(board_reader, player_row_idx, own_names),"));
     assert!(hc_body.contains(
         "note_own_seed_verdict(ctx.own_name.as_ref(), own_seed_verdict, seed_session).await;"
     ));
@@ -597,13 +614,13 @@ async fn the_new_reader_without_an_own_row_is_not_rescued_by_the_name_in_the_tex
     // ocr-v1 takes it, as before
     let dir = tempfile::tempdir().unwrap();
     let mut ctx = o8_ctx(dir.path(), false).await;
-    ctx.player_name = Some("MadeUp".into());
+    ctx.own_names = vec!["MadeUp".into()];
     assert!(o9_tab(&ctx, "o9", "Busan", tab(), None).await.recorded);
     // the new reader holds the capture: a seed names another row than a
     // strong highlight
     let dir = tempfile::tempdir().unwrap();
     let mut ctx = o8_ctx(dir.path(), true).await;
-    ctx.player_name = Some("MadeUp".into());
+    ctx.own_names = vec!["MadeUp".into()];
     let mut analysis = tab();
     analysis.own_row = Some(combine(Some(2), o9_lit(0, 1.5), true));
     assert_eq!(analysis.own_row.unwrap().row, None);

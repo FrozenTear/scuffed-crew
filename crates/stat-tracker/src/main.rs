@@ -24,7 +24,10 @@ struct DaemonCtx {
     backend: capture::CaptureBackend,
     store: storage::LocalStore,
     sync_client: Option<sync::SyncClient>,
-    player_name: Option<String>,
+    /// Every saved in-game name ([`config::Config::own_player_names`]):
+    /// `player_name` first, then `player_names`. The Tab name match tries
+    /// each one.
+    own_names: Vec<String>,
     capture_output: Option<String>,
     auto_detect: config::AutoDetectConfig,
     /// Quiet period before a finished game is closed. Already clamped so it
@@ -143,6 +146,9 @@ struct CaptureRequest {
 }
 
 fn main() -> anyhow::Result<()> {
+    // A restart of this binary after a failed update exec is named `exe`
+    // by the kernel; take the tracker's name back before any thread.
+    stat_tracker::replace::name_after_self_restart();
     // First, before any thread, log line or Tesseract use: libgomp reads
     // OMP_THREAD_LIMIT when it loads, so a start without it (a shell, the
     // app with no unit installed) is replaced here by the same binary with

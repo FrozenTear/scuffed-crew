@@ -249,7 +249,9 @@ pub fn format_delta(stat: Stat, d: f64) -> String {
     }
 }
 
-/// The Time block. alpha.1 shows Tracked only, never a Length line.
+/// The Time block: Tracked, and the Length line from the same span. The
+/// tracker records no game start or end, so the span (first to last Tab
+/// press) is the only length it has, and the game ran at least that long.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tracked {
     /// First to last Tab read, in seconds.
@@ -285,6 +287,27 @@ impl Tracked {
             Tracked::OneRead => "Tracked: one scoreboard read".into(),
             Tracked::NotRecorded => "Tracked: not recorded".into(),
         }
+    }
+
+    /// The span in seconds, when there is one.
+    pub fn span_secs(&self) -> Option<i64> {
+        match self {
+            Tracked::Span(s) => Some(*s),
+            Tracked::OneRead | Tracked::NotRecorded => None,
+        }
+    }
+
+    /// "Length: at least 9:14", or "Length: not recorded" with no span.
+    pub fn length_line(&self) -> String {
+        match self.span_secs() {
+            Some(s) => format!("Length: at least {}", mm_ss(s)),
+            None => "Length: not recorded".into(),
+        }
+    }
+
+    /// The LENGTH cell: "9:14+" (at least), or `None` (drawn "-") with no span.
+    pub fn length_cell(&self) -> Option<String> {
+        self.span_secs().map(|s| format!("{}+", mm_ss(s)))
     }
 
     pub fn note(&self) -> Option<&'static str> {
@@ -777,10 +800,26 @@ mod tests {
         ];
         assert_eq!(tracked(&g), Tracked::Span(665));
         assert_eq!(tracked(&g).line(), "Tracked 11:05");
-        assert!(!tracked(&g).line().contains("Length"));
         g.segments = vec![seg(0, "Mei", 1, true, at(20, 0, 0), at(20, 0, 0))];
         assert_eq!(tracked(&g), Tracked::OneRead);
         assert_eq!(tracked(&g).line(), "Tracked: one scoreboard read");
+    }
+
+    /// Item 19: the Length line and the LENGTH cell show the one length the
+    /// tracker has, the Tab span, as a floor ("at least"), and say "not
+    /// recorded" (the cell "-") when there is no span.
+    #[test]
+    fn length_is_the_tab_span_as_a_floor_or_not_recorded() {
+        let mut g = game("g", "Mei", 24, 1, at(20, 0, 0));
+        assert_eq!(tracked(&g).length_line(), "Length: not recorded");
+        assert_eq!(tracked(&g).length_cell(), None);
+        g.segments = vec![seg(0, "Mei", 1, true, at(20, 0, 0), at(20, 0, 0))];
+        assert_eq!(tracked(&g).length_line(), "Length: not recorded");
+        assert_eq!(tracked(&g).length_cell(), None);
+        g.segments = vec![seg(0, "Mei", 4, true, at(20, 0, 10), at(20, 9, 24))];
+        assert_eq!(tracked(&g).length_line(), "Length: at least 9:14");
+        assert_eq!(tracked(&g).length_cell().as_deref(), Some("9:14+"));
+        assert_eq!(tracked(&g).span_secs(), Some(554));
     }
 
     #[test]
