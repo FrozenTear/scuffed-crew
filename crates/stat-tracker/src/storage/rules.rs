@@ -162,21 +162,50 @@ pub(super) fn apply_match_edit(
     changed
 }
 
+/// Apply one Confirm, Dismiss or Undo (any other action, [`SEGMENT_CLEAR`]
+/// by name) of segment `segment` to `resolutions`, kept sorted by segment.
+/// A Dismiss over a hand confirm remembers it, and Undo of that Dismiss puts
+/// the confirm back; Undo of anything else clears the segment's decision.
+///
+/// [`SEGMENT_CLEAR`]: super::SEGMENT_CLEAR
+pub fn apply_segment_action(resolutions: &mut Vec<SegmentResolution>, segment: u32, action: &str) {
+    let prior = resolutions
+        .iter()
+        .position(|r| r.segment == segment)
+        .map(|i| resolutions.remove(i));
+    let hand_confirmed = prior.as_ref().is_some_and(|r| {
+        r.action == SEGMENT_CONFIRM || (r.action == SEGMENT_DISMISS && r.after_confirm)
+    });
+    let next = match action {
+        SEGMENT_CONFIRM => Some((SEGMENT_CONFIRM, false)),
+        SEGMENT_DISMISS => Some((SEGMENT_DISMISS, hand_confirmed)),
+        _ => prior
+            .filter(|r| r.action == SEGMENT_DISMISS && r.after_confirm)
+            .map(|_| (SEGMENT_CONFIRM, false)),
+    };
+    if let Some((action, after_confirm)) = next {
+        resolutions.push(SegmentResolution {
+            segment,
+            action: action.to_string(),
+            after_confirm,
+        });
+    }
+    resolutions.sort_by_key(|r| r.segment);
+}
+
 /// Gather the union of `segment_resolutions` across a session's snapshots,
 /// deduped by segment index (last row wins) and sorted. The daemon stamps
 /// resolutions uniformly onto every row, so in practice all rows agree — this
 /// merge just tolerates a row that missed a write.
 pub fn collect_segment_resolutions(snapshots: &[PersonalMatch]) -> Vec<SegmentResolution> {
-    let mut by_index: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    let mut by_index: std::collections::BTreeMap<u32, SegmentResolution> =
+        std::collections::BTreeMap::new();
     for m in snapshots {
         for r in &m.segment_resolutions {
-            by_index.insert(r.segment, r.action.clone());
+            by_index.insert(r.segment, r.clone());
         }
     }
-    by_index
-        .into_iter()
-        .map(|(segment, action)| SegmentResolution { segment, action })
-        .collect()
+    by_index.into_values().collect()
 }
 
 /// Aggregate a session's snapshots into consecutive same-hero runs (sorted by

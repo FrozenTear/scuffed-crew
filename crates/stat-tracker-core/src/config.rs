@@ -199,14 +199,14 @@ pub struct Config {
     /// when missing, so a 0.5.0 file loads unchanged) and not written while
     /// empty. [`Self::own_player_names`] is the merged list.
     ///
-    /// TODO(0.6): nothing reads this yet. Before the Tab reader matches
-    /// these names:
-    /// - feed [`Self::own_player_names`] to the name fallback, and when two
-    ///   rows match a saved name, take the highlighted row whose hero
-    ///   matches the hero panel;
-    /// - feed the same list to the report scrubber
-    ///   (`report::scrub::ScrubContext::from_config`, which takes only
-    ///   `player_name` today), so an alt in the log never reaches a report.
+    /// The Tab reader's name match, its name fallback and the raw-text
+    /// fallback try every name of [`Self::own_player_names`] (a whole-name
+    /// hit for any name first, else the best fuzzy one), read once at
+    /// daemon start. The report scrubber drops these names too.
+    ///
+    /// TODO: when two rows each match a different saved name, take the
+    /// highlighted row whose hero matches the hero panel. Today the
+    /// whole-name hit, then the best fuzzy score, wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub player_names: Vec<String>,
     /// Upload each game to the site after it closes ("Upload games after

@@ -539,7 +539,7 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         backend,
         store,
         sync_client,
-        player_name: config.player_name.clone(),
+        own_names: config.own_player_names(),
         capture_output: config.capture_output.clone(),
         auto_detect: config.auto_detect,
         finished_game_close: finished_game_close_after(config.finished_game_close_secs),
@@ -623,19 +623,22 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
 
 /// The update restart, once the store is closed: exit for systemd or exec
 /// the new binary. The run marker and pid file go first, so the new process
-/// does not read this one as a crash or as a live daemon. A failed exec
-/// puts both back and ends this process with an error: the store is closed,
-/// so it cannot go on. [`stat_tracker::replace::restart_preflight`] already
-/// passed, so that takes an exec error the file checks cannot see.
+/// (same pid) does not read this one as a crash or as a live daemon.
+///
+/// The store is closed, so this process cannot go on tracking. An exec of
+/// the new binary that fails anyway ([`stat_tracker::replace::restart_preflight`]
+/// passed, so a busy or broken file) starts this binary again: it opens the
+/// store afresh, takes the pid file, and tries the new one after the
+/// backoff ([`stat_tracker::replace::reexec_or_restart_self`]). Only when
+/// that fails too does this process end with an error, the run marker put
+/// back so the next start offers a crash report. The pid file stays gone:
+/// `_pid_guard` would remove it when `run` returns anyway.
 fn restart_after_close(data_dir: &std::path::Path, path: &std::path::Path) -> anyhow::Result<()> {
     let marker = stat_tracker::report::marker::release_run_marker(data_dir);
-    let released_pid = stat_tracker::replace::release_own_pid_file(data_dir);
+    stat_tracker::replace::release_own_pid_file(data_dir);
     let Err(err) = stat_tracker::replace::restart_for_replaced_binary(path) else {
         return Ok(());
     };
-    if released_pid {
-        stat_tracker::replace::restore_own_pid_file(data_dir);
-    }
     let _ = stat_tracker::report::marker::restore_run_marker(data_dir, marker.as_ref());
     Err(err.context("could not start the new tracker after closing the store"))
 }

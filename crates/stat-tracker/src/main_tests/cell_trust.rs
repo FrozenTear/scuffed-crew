@@ -86,9 +86,17 @@ fn the_cell_ocr_sites_go_through_the_reader_switch() {
         "let looks_like_scoreboard = match &new_board { Some(_) => board_refusal.is_none(), None => parse::looks_like_scoreboard(&rows), };"
     ));
     assert!(hc_body.contains(
-        "let scoreboard_read = match &new_board { Some(board) => reader_apply::read_own_row_stats(board, board_row, &outcome_label) .map(|read| (read.matched, true, read.held)), None => parse::read_scoreboard("
+        "let scoreboard_read = match &new_board { Some(board) => reader_apply::read_own_row_stats(board, board_row, &outcome_label) .map(|read| (read.matched, true, read.held)), None => read_scoreboard_named("
     ));
-    assert_eq!(hc_body.matches("parse::read_scoreboard(").count(), 1);
+    assert_eq!(hc_body.matches("read_scoreboard_named(").count(), 1);
+    assert_eq!(hc_body.matches("parse::read_scoreboard(").count(), 0);
+    // The one raw-text read, once per saved name (`read_scoreboard_named`).
+    assert_eq!(
+        fn_source("read_scoreboard_named")
+            .matches("parse::read_scoreboard(")
+            .count(),
+        1
+    );
     assert!(hc_body.contains(
         "let suspect = if board_reader { held_cols } else { parse::player_row_suspect_mask(&rows, player_row_idx) };"
     ));

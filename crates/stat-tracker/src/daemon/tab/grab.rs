@@ -221,7 +221,7 @@ pub(crate) async fn handle_capture(
     // Ergonomic locals over the context/request (the body predates A1).
     let backend = &ctx.backend;
     let store = &ctx.store;
-    let player_name = ctx.player_name.as_deref();
+    let own_names: &[String] = &ctx.own_names;
     let capture_output = ctx.capture_output.as_deref();
     let collect_portraits = ctx.collect_portraits;
     let data_dir: &std::path::Path = &ctx.data_dir;
@@ -251,8 +251,8 @@ pub(crate) async fn handle_capture(
             |outcome| tab_retry_reason(outcome, use_new_reader),
             |attempt| {
                 let matcher = Arc::clone(&ctx.portrait_matcher);
-                // Clone player_name so the blocking closure can own it.
-                let player_name_owned = player_name.map(|s| s.to_string());
+                // Clone the names so the blocking closure can own them.
+                let own_names_owned = own_names.to_vec();
                 let flags = FrameFlags {
                     allow_banner_recovery,
                     session_map_known: session_map.is_some(),
@@ -297,7 +297,7 @@ pub(crate) async fn handle_capture(
                         let analysis = analyze_frame(
                             img,
                             matcher,
-                            player_name_owned,
+                            own_names_owned,
                             game_outcome,
                             flags,
                             own_seeds,
@@ -629,12 +629,12 @@ pub(crate) async fn handle_capture(
     let scoreboard_read = match &new_board {
         Some(board) => reader_apply::read_own_row_stats(board, board_row, &outcome_label)
             .map(|read| (read.matched, true, read.held)),
-        None => parse::read_scoreboard(
+        None => read_scoreboard_named(
             &rows,
             player_row_idx,
             &ocr_result.raw_text,
             &outcome_label,
-            text_fallback_name(board_reader, player_row_idx, player_name),
+            text_fallback_names(board_reader, player_row_idx, own_names),
         )
         .map(|read| {
             (
@@ -1362,8 +1362,8 @@ pub(crate) async fn handle_capture(
             let reason = match miss {
                 parse::ScoreboardMiss::PlayerRowNotFound if ctx.use_new_reader => {
                     // The new reader finds the row from the own-name seeds,
-                    // the highlight and the career hero; `player_name` only
-                    // feeds the name fallback, so "set player_name" is not
+                    // the highlight and the career hero; the saved names only
+                    // feed the name fallback, so "set player_name" is not
                     // the fix here. With classic OCR off there was no name
                     // read to fall back on, so the line does not claim one.
                     let name_read = if ocr::gate::is_off() {

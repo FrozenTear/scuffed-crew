@@ -92,11 +92,11 @@ impl Col {
         }
     }
 
-    /// Columns whose header sorts. Rank, Length and Crew hold no data yet.
+    /// Columns whose header sorts. Rank and Crew hold no data yet.
     pub fn sortable(self) -> bool {
         matches!(
             self,
-            Col::Result | Col::Map | Col::Hero | Col::Eda | Col::Time
+            Col::Result | Col::Map | Col::Hero | Col::Eda | Col::Length | Col::Time
         )
     }
 
@@ -298,7 +298,8 @@ fn key(g: &Game, col: Col) -> Option<Key> {
         // row last; an unsure D or A still reads amber in the cell.
         Col::Eda => (!g.unsure_now("e")).then_some(Key::Num(i64::from(g.elims))),
         Col::Time => Some(Key::Num(g.started_at().timestamp())),
-        Col::Stripe | Col::Rank | Col::Length | Col::Crew | Col::Unsure => None,
+        Col::Length => crate::games_detail::tracked(g).span_secs().map(Key::Num),
+        Col::Stripe | Col::Rank | Col::Crew | Col::Unsure => None,
     }
 }
 
@@ -749,7 +750,7 @@ where
 }
 
 /// Under the last table (spec p2), after the split rule.
-const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Rank, queue, length and crew are not recorded yet.";
+const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length is your first to last Tab press, so the game ran at least that long. Rank, queue and crew are not recorded yet.";
 /// No games stored at all.
 pub const EMPTY_NONE: &str = "No games yet. A game shows here once the tracker saves it.";
 /// Games stored, none left by the filters.
@@ -1122,6 +1123,32 @@ mod tests {
         assert_eq!(head.summary, "2 games · 1-1 · 50 min");
     }
 
+    /// Item 19: Delete game takes the game out of the list every header is
+    /// built from, so the sitting's span and count follow the delete (no
+    /// stale end time), as PR 556 left it.
+    #[test]
+    fn a_deleted_game_leaves_the_session_span() {
+        let mut games = vec![
+            timed(Outcome::Win, "2026-10-18T20:30:00Z", "2026-10-18T20:50:00Z"),
+            timed(
+                Outcome::Loss,
+                "2026-10-18T20:00:00Z",
+                "2026-10-18T20:20:00Z",
+            ),
+        ];
+        let head = |games: &[Game]| {
+            let shown: Vec<&Game> = games.iter().collect();
+            let state = TabState::default();
+            let out = layout_in(games, &shown, state, Grid::Wide, 1800, None, &utc());
+            out.sections[0].head.clone().expect("a session header")
+        };
+        assert_eq!(head(&games).summary, "2 games · 1-1 · 50 min");
+        games.remove(0);
+        let after = head(&games);
+        assert_eq!(after.title, "Sunday evening · Oct 18, 20:00 to 20:20");
+        assert_eq!(after.summary, "1 game · 0-1 · 20 min");
+    }
+
     fn ids(games: &[&Game]) -> Vec<String> {
         games.iter().map(|g| g.session_id.clone()).collect()
     }
@@ -1365,7 +1392,35 @@ mod tests {
             }
         );
         assert!(!Col::Rank.sortable() && !Col::Crew.sortable());
-        assert!(Col::Hero.sortable());
+        assert!(Col::Hero.sortable() && Col::Length.sortable());
+    }
+
+    /// LENGTH sorts by the Tab span; a game with no span goes last both
+    /// ways. The note says what the span is and what is not recorded.
+    #[test]
+    fn length_sorts_by_the_tab_span_and_the_note_says_what_it_is() {
+        let short = timed(Outcome::Win, "2026-09-02T20:00:00Z", "2026-09-02T20:04:00Z");
+        let long = timed(Outcome::Win, "2026-09-02T21:00:00Z", "2026-09-02T21:09:00Z");
+        let none = game(Outcome::Win, "2026-09-02T22:00:00Z", &[]);
+        for desc in [true, false] {
+            let mut v = vec![&none, &short, &long];
+            sort_games(
+                &mut v,
+                Sort {
+                    col: Col::Length,
+                    desc,
+                },
+            );
+            let order: Vec<&Game> = v.into_iter().collect();
+            let want = if desc {
+                [&long, &short, &none]
+            } else {
+                [&short, &long, &none]
+            };
+            assert_eq!(order, want);
+        }
+        assert!(SORT_NOTE.contains("Rank, queue and crew are not recorded yet"));
+        assert!(SORT_NOTE.contains("Length"));
     }
 
     #[test]

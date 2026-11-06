@@ -552,10 +552,14 @@ fn result(g: &Game, in_progress: bool) -> Element<'static, Message> {
     .into()
 }
 
-/// "Tracked 9:14" with its note. Never a Length line (alpha.1).
+/// "Tracked 9:14", the Length line, and the note.
 fn time(g: &Game) -> Element<'static, Message> {
     let t = detail::tracked(g);
-    let mut col = column![text(t.line()).size(SIZE_BODY).font(FONT_BOLD).color(TEXT)].spacing(4);
+    let mut col = column![
+        text(t.line()).size(SIZE_BODY).font(FONT_BOLD).color(TEXT),
+        text(t.length_line()).size(SIZE_BODY).color(TEXT_2),
+    ]
+    .spacing(4);
     if let Some(note) = t.note() {
         col = col.push(text(note).size(SMALL).color(TEXT_3));
     }

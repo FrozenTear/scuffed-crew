@@ -4,7 +4,7 @@
 use surrealdb_types::Datetime as SurrealDatetime;
 
 use super::{
-    LocalStore, MatchEdit, SEGMENT_CONFIRM, SEGMENT_DISMISS, SegmentResolution, apply_match_edit,
+    LocalStore, MatchEdit, SegmentResolution, apply_match_edit, apply_segment_action,
     collect_segment_resolutions, derive_hero_segments, rewrite_match_log_session,
 };
 
@@ -175,7 +175,9 @@ impl LocalStore {
 
     /// MANUAL confirm/dismiss of one derived hero segment (HS-1). Records the
     /// decision in `segment_resolutions` (keyed by segment index; a repeat on
-    /// the same index replaces it, and an unrecognized action clears it) on
+    /// the same index replaces it, and an unrecognized action clears it,
+    /// except that Undo of a Dismiss over a hand confirm restores the
+    /// confirm: [`apply_segment_action`]) on
     /// EVERY snapshot row — uniform, like `heroes_played` — then re-derives the
     /// timeline via [`Self::refresh_session_hero_timeline`] so the flags and
     /// the effective primary update (and any resulting hero change re-queues
@@ -193,14 +195,7 @@ impl LocalStore {
             return Ok(());
         }
         let mut resolutions = collect_segment_resolutions(&snaps);
-        resolutions.retain(|r| r.segment != segment);
-        if action == SEGMENT_CONFIRM || action == SEGMENT_DISMISS {
-            resolutions.push(SegmentResolution {
-                segment,
-                action: action.to_string(),
-            });
-        }
-        resolutions.sort_by_key(|r| r.segment);
+        apply_segment_action(&mut resolutions, segment, action);
 
         if self.timeline_migrated() {
             // One record holds the decisions; the re-derive below writes the

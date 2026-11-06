@@ -28,7 +28,10 @@ pub use map_text::{
     canonical_map, exact_map_in_text, is_adlersbrunn_alias, map_fuzzy_threshold, match_map_in_text,
     normalize_ocr_glyphs, reject_pve_adlersbrunn,
 };
-pub use names::{NameMatch, find_player_row_by_name, match_player_row_by_name};
+pub use names::{
+    NameList, NameMatch, find_player_row_by_name, match_player_row_by_name,
+    match_player_row_by_names,
+};
 
 #[cfg(test)]
 mod tests_board;
