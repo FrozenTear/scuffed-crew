@@ -2733,10 +2733,10 @@ pub use crate::hero_pack_hint::hero_pack_hint;
 const HEALTH_READY: &str = "Ready";
 const HEALTH_WAITING: &str = "Waiting for a capture";
 
-/// Tracker health with the tracker's classic OCR notice: it runs with OCR
-/// off and holds reads for a missing reader pack, or a read was stopped. A
-/// refused off is not in it (`settings::daemon_health_notice`). The notice
-/// takes the place of the two idle lines and follows a sync problem.
+/// Tracker health with the tracker's own notice: an unread keyboard, then
+/// the classic OCR notice, then a failed bans and picks read
+/// (`settings::daemon_health_notice`). It takes the place of the two idle
+/// lines and follows a sync problem.
 fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
     match notice {
         None => base,

@@ -478,9 +478,15 @@ async fn permission_denied_keyboard_runs_on_and_warns_once() {
     let mut elapsed = Duration::ZERO;
     let step = retry * 3 + retry / 2;
     for _ in 1..=3u32 {
+        // `biased` with the key wait first, as in the live loop (its
+        // keyboard arm is polled before the poll and cmd arms). Round 2
+        // ends at 210 s, the same Instant as the 7th reopen. Polled first,
+        // the key wait runs that open before the sleep arm ends the round,
+        // so ties go to `wait_tab` and the count is exact. Unbiased, tokio
+        // picks the first arm at random and about half the runs saw 6.
         tokio::select! {
+            biased;
             got = input.wait_tab() => panic!("no keyboard yields no key: {:?}", got.map_err(|e| e.to_string())),
-            // Between retry deadlines, so the count is exact.
             _ = tokio::time::sleep(step) => {}
         }
         elapsed += step;
@@ -549,7 +555,9 @@ async fn keyboard_reopen_deadline_survives_frequent_select_cancels() {
     // key wait 200 times. Reopens are due at 30, 60 and 90 s.
     let poll = Duration::from_millis(500);
     for _ in 0..200 {
+        // `biased` with the key wait first, copying the live loop.
         tokio::select! {
+            biased;
             got = input.wait_tab() => panic!("no keyboard yields no key: {:?}", got.map_err(|e| e.to_string())),
             _ = tokio::time::sleep(poll) => {}
         }
@@ -561,6 +569,64 @@ async fn keyboard_reopen_deadline_survives_frequent_select_cancels() {
     );
     assert_eq!(still_unavailable(), 3, "each failed reopen logs at DEBUG");
     assert!(!input.available());
+}
+
+/// The NO_KEYBOARD notice ends with the command, nothing after it, so a
+/// copy of the tail pastes into a shell as is. A trailing comma after
+/// `$USER` made usermod look for a user named "name,".
+#[test]
+fn no_keyboard_notice_ends_with_the_command_exactly() {
+    const COMMAND: &str = "sudo usermod -aG input \"$USER\"";
+    assert!(
+        NO_KEYBOARD_NOTICE.ends_with(&format!(": {COMMAND}")),
+        "the command is last, after a colon: {NO_KEYBOARD_NOTICE}"
+    );
+    assert_eq!(NO_KEYBOARD_NOTICE.matches("usermod").count(), 1);
+    // QA's docs point at these words.
+    assert!(NO_KEYBOARD_NOTICE.contains("cannot read the keyboard"));
+    assert!(NO_KEYBOARD_NOTICE.contains("then log out and back in"));
+}
+
+/// Tab keys that end at once, like a stream whose hotplug scanner died.
+struct EndedKeys;
+
+impl stat_tracker::tab_retry::TabKeySource for EndedKeys {
+    async fn next_key(&mut self) -> Result<detect::TabKey, Box<dyn std::error::Error>> {
+        Err("keyboard stream ended".into())
+    }
+}
+
+/// A stream that ends right after it opens must not spin (open, Ok, Err,
+/// open) without yielding: the reopen waits for the quiet deadline. The
+/// clock is paused.
+#[tokio::test(start_paused = true)]
+async fn an_ended_keyboard_stream_reopens_at_the_deadline_not_at_once() {
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let open = {
+        let opens = opens.clone();
+        move || -> Result<EndedKeys, String> {
+            opens.set(opens.get() + 1);
+            Ok(EndedKeys)
+        }
+    };
+    let retry = Duration::from_secs(30);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut input = KeyboardInput::new(Ok(EndedKeys), open, dir.path().into(), retry);
+    assert!(input.available());
+    // Ends at 100 s; reopens are due at 30, 60 and 90 s.
+    tokio::select! {
+        biased;
+        got = input.wait_tab() => panic!("an ended stream yields no key: {:?}", got.map_err(|e| e.to_string())),
+        _ = tokio::time::sleep(Duration::from_secs(100)) => {}
+    }
+    assert_eq!(opens.get(), 3, "one reopen every {retry:?}, no spin");
+    assert_eq!(
+        stat_tracker::ocr_status::read_status(dir.path())
+            .map(|s| s.input_notice)
+            .unwrap_or_default(),
+        "",
+        "every reopen worked, so no warning"
+    );
 }
 
 #[tokio::test]

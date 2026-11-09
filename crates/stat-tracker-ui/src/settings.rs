@@ -291,10 +291,10 @@ pub(crate) fn daemon_runs_ocr_off(
     live_status(status, daemon_pid).is_some_and(|status| status.effective.is_off())
 }
 
-/// The tracker's notice for Tracker health: only what is wrong while it
-/// runs with classic OCR off. A refused off is not a health problem (the
-/// tracker reads everything with classic OCR), so health stays "Ready" and
-/// the reason is shown in Settings ([`daemon_ocr_notice`]).
+/// The tracker's notice for Tracker health: an unread keyboard first, then
+/// what is wrong with classic OCR off, then a failed bans and picks read.
+/// A refused off is not in it: health stays "Ready" and the reason is
+/// shown in Settings ([`daemon_ocr_notice`]).
 pub(crate) fn daemon_health_notice(
     status: Option<&OcrSwitchStatus>,
     daemon_pid: Option<u32>,

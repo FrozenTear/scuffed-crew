@@ -16,7 +16,9 @@ pub(crate) const KEYBOARD_OPEN_ATTEMPTS: u32 = 3;
 pub(crate) const KEYBOARD_REOPEN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Tracker health while no keyboard can be read (`ocr_status::input_notice`).
-pub(crate) const NO_KEYBOARD_NOTICE: &str = "The tracker cannot read the keyboard, so Tab detection is off. Add yourself to the input group: sudo usermod -aG input $USER, then log out and back in.";
+/// The command is last with nothing after it, so a copy of the tail pastes
+/// as is (a trailing comma made usermod look for user "name,").
+pub(crate) const NO_KEYBOARD_NOTICE: &str = "The tracker cannot read the keyboard, so Tab detection is off. Add yourself to the input group, then log out and back in: sudo usermod -aG input \"$USER\"";
 
 /// Gap between [`KEYBOARD_OPEN_ATTEMPTS`]. This wait also polls SIGTERM
 /// and Ctrl+C, without that, `systemctl --user stop` sits until
@@ -210,7 +212,7 @@ where
                 tracing::warn!(
                     target: "scuffed_stat_tracker",
                     error = %e,
-                    "{NO_KEYBOARD_NOTICE} Capture and recording go on without Tab; retrying quietly."
+                    "Capture and recording go on without Tab; retrying quietly. {NO_KEYBOARD_NOTICE}"
                 );
                 self.schedule_reopen();
             }
@@ -221,8 +223,12 @@ where
         }
     }
 
-    /// The next Tab key event. Never an error: a lost keyboard is reopened
-    /// here, and while none opens this waits until `reopen_at`.
+    /// The next Tab key event. Never an error: while no keyboard is open
+    /// this waits until `reopen_at` and tries again. An open stream only
+    /// ends if its hotplug scanner task dies (the scanner holds a sender
+    /// for the stream's whole life); then the stream is dropped and
+    /// reopened at the next deadline. Unplugging every keyboard does not
+    /// end the stream: it stays open with zero devices.
     pub(crate) async fn wait_tab(&mut self) -> Result<detect::TabKey, Box<dyn std::error::Error>> {
         loop {
             match self.stream.as_mut() {
@@ -232,19 +238,20 @@ where
                     Err(e) => {
                         tracing::info!(target: "scuffed_stat_tracker", error = %e, "keyboard devices lost: attempting to reopen");
                         self.stream = None;
-                        // Same-process loss: try once now, then the quiet deadline.
-                        let result = (self.open)();
-                        self.opened(result);
+                        // Reopen at the quiet deadline, not at once: a stream
+                        // that ended again right after opening would
+                        // otherwise spin (open, Ok, Err, open) without
+                        // ever yielding.
+                        self.schedule_reopen();
                     }
                 },
                 None => {
-                    let deadline = match self.reopen_at {
-                        Some(at) => at,
-                        None => {
-                            self.schedule_reopen();
-                            self.reopen_at.expect("just scheduled")
-                        }
-                    };
+                    // Every path that leaves `stream` empty has scheduled a
+                    // reopen already; the insert is only a fallback.
+                    let retry = self.retry;
+                    let deadline = *self
+                        .reopen_at
+                        .get_or_insert_with(|| tokio::time::Instant::now() + retry);
                     tokio::time::sleep_until(deadline).await;
                     let result = (self.open)();
                     self.opened(result);

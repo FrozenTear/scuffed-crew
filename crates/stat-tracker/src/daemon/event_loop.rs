@@ -305,6 +305,7 @@ pub(crate) async fn run_loop(
                     // `KeyboardInput` reopens a lost keyboard itself and
                     // never ends the loop: input is optional, recording
                     // goes on without it.
+                    // Dead arm: kept only because `TabKeySource` returns a Result.
                     Err(e) => {
                         tracing::debug!(target: "scuffed_stat_tracker", error = %e, "keyboard read failed");
                     }

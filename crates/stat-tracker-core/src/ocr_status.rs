@@ -600,7 +600,8 @@ pub struct Status {
     /// Why Tab presses cannot reach the tracker: no keyboard device could be
     /// opened (most often the user is not in the `input` group). Capture and
     /// recording go on. Empty while a keyboard is read. The app shows it in
-    /// Tracker health, before any other line.
+    /// Tracker health, first among the tracker's own notices (a sync
+    /// problem the app finds itself still comes before it).
     pub input_notice: String,
 }
 
@@ -658,7 +659,8 @@ impl Status {
         }
     }
 
-    /// The part of [`Self::notice`] that belongs in Tracker health, then the
+    /// The keyboard line ([`Self::input_notice`]) first, then the part of
+    /// [`Self::notice`] that belongs in Tracker health, then the
     /// bans and picks line ([`Self::bans_picks_notice`]), which has nothing
     /// to do with the OCR switch: only
     /// what is wrong while the tracker runs with OCR off (a pack on hold, a
