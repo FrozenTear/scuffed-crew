@@ -15,8 +15,8 @@ use scuffed_types::api::{
     MemberSettingsResponse, NAME_RECOGNIZER_ID_ERROR, PaginationParams, RECOGNIZER_ID_ERROR,
     SUSPECT_FIELDS_ERROR, SeasonQuery, StatsHiddenError, StatsUploadBody, StatsUploadResponse,
     StatsVisibility, TokenCheckResponse, UPLOAD_HERO_UNKNOWN, is_upload_hero_unknown,
-    resolve_bans_picks, resolve_name_recognizer, resolve_recognizer, resolve_suspect_fields,
-    validate_deleted_session, validate_upload_entry,
+    resolve_bans_picks, resolve_name_recognizer, resolve_rank, resolve_recognizer,
+    resolve_suspect_fields, validate_deleted_session, validate_upload_entry,
 };
 use scuffed_types::{
     STATS_UPLOAD_MAX_DELETED_SESSIONS, STATS_UPLOAD_MAX_MATCHES, hero_key_to_name,
@@ -134,6 +134,9 @@ pub(crate) async fn upload_stats(
     // wrong shape, more than 4 bans, more than 6 picks, a bad team, or a
     // bad recognizer is a 422 for the whole batch, with the same
     // `matches[n]: ` prefix.
+    //
+    // `rank` is never checked here: `resolve_rank` turns bad or unknown parts
+    // into null when the row is built, so rank data cannot reject a game.
     for (i, session_id) in body.deleted_sessions.iter().enumerate() {
         if let Err(message) = validate_deleted_session(session_id) {
             return Err(bad_request(format!("deleted_sessions[{i}]: {message}")));
@@ -217,6 +220,8 @@ pub(crate) async fn upload_stats(
         .filter(|(e, _, _, _, _)| matches!(e.entry.outcome.as_str(), "victory" | "defeat" | "draw"))
         .map(
             |(e, recognizer, name_recognizer, suspect_fields, bans_picks)| {
+                // Rank data is best effort: bad parts become null, never a reject.
+                let rank = resolve_rank(e.rank.as_ref());
                 let e = e.entry;
                 let (hero, role) = normalize_hero(e.hero, e.role);
                 PersonalMatch {
@@ -241,6 +246,7 @@ pub(crate) async fn upload_stats(
                     name_recognizer,
                     suspect_fields,
                     bans_picks,
+                    rank,
                 }
             },
         )
@@ -2088,6 +2094,7 @@ mod tests {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         };
         let seeded = [
             ("kept", "Ana", "Damage", "Damage"),
@@ -2161,6 +2168,7 @@ mod tests {
             name_recognizer: Some("names-v1".into()),
             suspect_fields: vec!["dmg".into(), "map".into()],
             bans_picks: None,
+            rank: None,
         }
     }
 
@@ -2615,6 +2623,287 @@ mod tests {
             None,
             "omitting bans_picks clears the stored object"
         );
+    }
+
+    /// A tracker rank-v1 read as sent: every field has a bbox, and there are
+    /// keys the server does not know.
+    fn full_rank_upload() -> serde_json::Value {
+        let bbox = serde_json::json!([10, 20, 110, 40]);
+        serde_json::json!({
+            "role": { "value": "Support", "confidence": 0.9, "bbox": bbox },
+            "role_rank": { "value": "Diamond", "confidence": 0.95, "bbox": bbox },
+            "division": { "value": 2, "confidence": 0.875, "bbox": bbox },
+            "progress_pct": { "value": -15, "confidence": 0.5, "bbox": null },
+            "progress_change": { "value": 23, "confidence": 0.75, "bbox": bbox },
+            "change_tags": { "value": ["WIN", "UPHILL BATTLE"], "confidence": 0.6, "bbox": bbox },
+            "higher_than_pct": { "value": 47, "confidence": 1.0, "bbox": bbox },
+            "hero_sr": { "value": 3125, "confidence": 0.25, "bbox": bbox },
+            "hero_sr_change": { "value": -17, "confidence": 0.0, "bbox": bbox },
+            "next_mode_hint": { "value": null, "confidence": 0.0, "bbox": null },
+            "queue_title": { "value": "COMPETITIVE: ROLE QUEUE", "confidence": 0.8 },
+            "rank_recognizer": "rank-v1",
+            "future_field": { "value": 1, "confidence": 0.5 }
+        })
+    }
+
+    /// What the server stores and returns for [`full_rank_upload`].
+    fn full_rank_read() -> serde_json::Value {
+        serde_json::json!({
+            "role": { "value": "Support", "confidence": 0.9 },
+            "role_rank": { "value": "Diamond", "confidence": 0.95 },
+            "division": { "value": 2, "confidence": 0.875 },
+            "progress_pct": { "value": -15, "confidence": 0.5 },
+            "progress_change": { "value": 23, "confidence": 0.75 },
+            "change_tags": { "value": ["WIN", "UPHILL BATTLE"], "confidence": 0.6 },
+            "higher_than_pct": { "value": 47, "confidence": 1.0 },
+            "hero_sr": { "value": 3125, "confidence": 0.25 },
+            "hero_sr_change": { "value": -17, "confidence": 0.0 },
+            "next_mode_hint": { "value": null, "confidence": 0.0 },
+            "queue_title": { "value": "COMPETITIVE: ROLE QUEUE", "confidence": 0.8 },
+            "rank_recognizer": "rank-v1"
+        })
+    }
+
+    /// The raw `rank` objects on the member's stored rows.
+    async fn stored_rank_objects(state: &crate::state::AppState) -> Vec<serde_json::Value> {
+        let mut res = state
+            .db
+            .client
+            .query("SELECT VALUE rank FROM personal_match WHERE rank != NONE")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        res.take(0).unwrap()
+    }
+
+    #[tokio::test]
+    async fn upload_full_rank_round_trips_on_me_reads_and_drops_bbox() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let mut game = match_object("sess-rank-full", 4);
+        game["rank"] = full_rank_upload();
+        game["some_new_top_level_key"] = serde_json::json!({ "x": 1 });
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [game] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 1);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let row = row_by_session(&page, "sess-rank-full");
+        assert_eq!(row["rank"], full_rank_read());
+        let id = row["id"].as_str().unwrap().to_string();
+        let (status, body) =
+            get_my_match(create_router(state.clone()), Some(&session_token), &id).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let one: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(one["rank"], full_rank_read());
+
+        let stored = stored_rank_objects(&state).await;
+        assert_eq!(stored.len(), 1);
+        assert!(
+            !stored[0].to_string().contains("bbox"),
+            "bbox is not stored: {}",
+            stored[0]
+        );
+        assert!(
+            stored[0].get("future_field").is_none(),
+            "unknown rank keys are not stored: {}",
+            stored[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn upload_without_rank_is_unchanged_and_reads_null() {
+        let (state, member_id, daemon_token, session_token) = member_reader().await;
+        let omitted = match_object("sess-rank-omitted", 5);
+        let mut null_rank = match_object("sess-rank-null", 6);
+        null_rank["rank"] = serde_json::Value::Null;
+        let mut not_object = match_object("sess-rank-string", 7);
+        not_object["rank"] = serde_json::json!("Diamond 2");
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [omitted, null_rank, not_object] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 3);
+        assert_eq!(parsed["skipped"], 0);
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        for (sid, elims) in [
+            ("sess-rank-omitted", 5),
+            ("sess-rank-null", 6),
+            ("sess-rank-string", 7),
+        ] {
+            let row = row_by_session(&page, sid);
+            assert!(
+                row.get("rank").is_some_and(serde_json::Value::is_null),
+                "{sid}: {row}"
+            );
+            assert_eq!(row["elims"], elims, "{sid}");
+            assert_eq!(row["hero"], "Ana", "{sid}");
+            assert_eq!(row["recognizer"], "ocr-v1", "{sid}");
+            assert!(row["bans_picks"].is_null(), "{sid}");
+        }
+        assert!(stored_rank_objects(&state).await.is_empty());
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert!(rows.iter().all(|r| r.rank.is_none()), "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn upload_out_of_range_rank_parts_are_null_and_the_game_is_stored() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let long = "a".repeat(scuffed_types::RANK_STRING_MAX_CHARS + 1);
+        let tags: Vec<String> = (0..=scuffed_types::RANK_MAX_CHANGE_TAGS)
+            .map(|i| format!("T{i}"))
+            .collect();
+        let mut bad = match_object("sess-rank-bad", 3);
+        bad["rank"] = serde_json::json!({
+            "role": { "value": "Healer", "confidence": 1.5 },
+            "role_rank": { "value": long, "confidence": -0.1 },
+            "division": { "value": 6, "confidence": 0.5 },
+            "progress_pct": { "value": 4_294_967_296_i64, "confidence": "high" },
+            "progress_change": { "value": 1.5, "confidence": 0.5 },
+            "change_tags": { "value": tags, "confidence": 0.5 },
+            "higher_than_pct": { "value": 101, "confidence": 0.5 },
+            "hero_sr": { "value": -1, "confidence": 0.5 },
+            "hero_sr_change": "not an object",
+            "next_mode_hint": { "value": ["x"], "confidence": null },
+            "queue_title": { "value": 7, "confidence": 0.5 },
+            "rank_recognizer": "Rank V1"
+        });
+        let mut zero = match_object("sess-rank-zero", 3);
+        zero["rank"] = serde_json::json!({
+            "division": { "value": 0, "confidence": 0.5 },
+            "change_tags": { "value": ["ok", 3], "confidence": 0.5 },
+            "rank_recognizer": 5
+        });
+        let edge_tags: Vec<String> = (0..scuffed_types::RANK_MAX_CHANGE_TAGS)
+            .map(|i| format!("T{i}"))
+            .collect();
+        let edge_string = "b".repeat(scuffed_types::RANK_STRING_MAX_CHARS);
+        let mut edges = match_object("sess-rank-edges", 3);
+        edges["rank"] = serde_json::json!({
+            "role": { "value": "Open", "confidence": 0.0 },
+            "role_rank": { "value": edge_string, "confidence": 1.0 },
+            "division": { "value": 5, "confidence": 0.5 },
+            "change_tags": { "value": edge_tags, "confidence": 0.5 },
+            "higher_than_pct": { "value": 100, "confidence": 0.5 },
+            "hero_sr": { "value": 4_294_967_295_u64, "confidence": 0.5 }
+        });
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [bad, zero, edges] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 3, "rank never rejects the game");
+
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let null_field = serde_json::json!({ "value": null, "confidence": null });
+        let half = |v: serde_json::Value| serde_json::json!({ "value": v, "confidence": 0.5 });
+        let bad_row = row_by_session(&page, "sess-rank-bad");
+        assert_eq!(bad_row["elims"], 3);
+        assert_eq!(
+            bad_row["rank"],
+            serde_json::json!({
+                "role": null_field,
+                "role_rank": null_field,
+                "division": half(serde_json::Value::Null),
+                "progress_pct": null_field,
+                "progress_change": half(serde_json::Value::Null),
+                "change_tags": half(serde_json::Value::Null),
+                "higher_than_pct": half(serde_json::Value::Null),
+                "hero_sr": half(serde_json::Value::Null),
+                "hero_sr_change": null_field,
+                "next_mode_hint": null_field,
+                "queue_title": half(serde_json::Value::Null),
+                "rank_recognizer": null
+            })
+        );
+        let zero_row = &row_by_session(&page, "sess-rank-zero")["rank"];
+        assert_eq!(zero_row["division"], half(serde_json::Value::Null));
+        assert_eq!(zero_row["change_tags"], half(serde_json::Value::Null));
+        assert_eq!(zero_row["rank_recognizer"], serde_json::Value::Null);
+        assert_eq!(
+            zero_row["role"], null_field,
+            "an omitted field reads as null"
+        );
+
+        let edge_row = &row_by_session(&page, "sess-rank-edges")["rank"];
+        assert_eq!(
+            edge_row["role"],
+            serde_json::json!({ "value": "Open", "confidence": 0.0 })
+        );
+        assert_eq!(edge_row["role_rank"]["confidence"], 1.0);
+        assert_eq!(
+            edge_row["role_rank"]["value"]
+                .as_str()
+                .map(|s| s.chars().count()),
+            Some(scuffed_types::RANK_STRING_MAX_CHARS)
+        );
+        assert_eq!(edge_row["division"], half(serde_json::json!(5)));
+        assert_eq!(
+            edge_row["change_tags"]["value"].as_array().map(Vec::len),
+            Some(scuffed_types::RANK_MAX_CHANGE_TAGS)
+        );
+        assert_eq!(edge_row["higher_than_pct"], half(serde_json::json!(100)));
+        assert_eq!(edge_row["hero_sr"], half(serde_json::json!(u32::MAX)));
+    }
+
+    #[tokio::test]
+    async fn upload_empty_rank_object_reads_back_all_null_not_null() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let mut empty = match_object("sess-rank-empty", 2);
+        empty["rank"] = serde_json::json!({});
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [empty] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 1);
+
+        let null_field = serde_json::json!({ "value": null, "confidence": null });
+        let all_null = serde_json::json!({
+            "role": null_field,
+            "role_rank": null_field,
+            "division": null_field,
+            "progress_pct": null_field,
+            "progress_change": null_field,
+            "change_tags": null_field,
+            "higher_than_pct": null_field,
+            "hero_sr": null_field,
+            "hero_sr_change": null_field,
+            "next_mode_hint": null_field,
+            "queue_title": null_field,
+            "rank_recognizer": null
+        });
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let row = row_by_session(&page, "sess-rank-empty");
+        assert_eq!(row["elims"], 2);
+        assert_eq!(
+            row["rank"], all_null,
+            "rank: {{}} is an all-null object, not null"
+        );
+        let id = row["id"].as_str().unwrap().to_string();
+        let (status, body) =
+            get_my_match(create_router(state.clone()), Some(&session_token), &id).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let one: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(one["rank"], all_null);
+        assert_eq!(stored_rank_objects(&state).await.len(), 1);
     }
 
     async fn assert_suspect_fields_rejected(

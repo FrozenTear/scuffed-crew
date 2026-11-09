@@ -173,6 +173,18 @@ fn game(member_id: &str, session_id: &str) -> PersonalMatch {
             ban_vote: vec![Some("no_preference".into()), Some("ana".into()), None],
             recognizer: Some("cv-v1".into()),
         }),
+        rank: Some(scuffed_types::MatchRank {
+            role: scuffed_types::RankField {
+                value: Some(scuffed_types::RankRole::Tank),
+                confidence: Some(0.5),
+            },
+            division: scuffed_types::RankField {
+                value: Some(4),
+                confidence: Some(0.75),
+            },
+            rank_recognizer: Some("rank-v1".into()),
+            ..Default::default()
+        }),
     }
 }
 
@@ -350,6 +362,14 @@ async fn officer_reads_public_and_members_matches() {
             }),
             "{uri}: {body}"
         );
+        let rank = &rows[0]["rank"];
+        assert_eq!(rank["role"], json!({ "value": "Tank", "confidence": 0.5 }));
+        assert_eq!(rank["division"], json!({ "value": 4, "confidence": 0.75 }));
+        assert_eq!(
+            rank["hero_sr"],
+            json!({ "value": null, "confidence": null })
+        );
+        assert_eq!(rank["rank_recognizer"], "rank-v1", "{uri}: {body}");
         assert!(body.get("next_cursor").is_none(), "{uri}: {body}");
 
         let match_id = rows[0]["id"].as_str().expect("match id");

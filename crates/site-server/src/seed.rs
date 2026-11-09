@@ -501,6 +501,7 @@ async fn seed_personal_matches(
                 name_recognizer: None,
                 suspect_fields: Vec::new(),
                 bans_picks: None,
+                rank: None,
             }
         })
         .collect();
