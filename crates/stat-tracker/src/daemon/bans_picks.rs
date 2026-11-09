@@ -5,10 +5,12 @@
 //! The pre-game saver ([`super::pregame_dump`]) already finds the three
 //! screens: the ban vote, the ban results and the hero select, each as its
 //! last frame (the first frame of a screen is mid transition, which the
-//! reader must not be given). One exception: a game whose hero select has
-//! only a first frame (a one-tick select) gives that frame for the team
-//! ring of the ban results, and for nothing else: its picks are not
-//! stored. [`BansPicksFeed`] sees every batch the saver
+//! reader must not be given). Two exceptions. A one-tick hero ban (the
+//! focus gate paused right after its first tick) still emits its last
+//! frame, which may be the same pixels as its first, so the vote is still
+//! read. A game whose hero select has only a first frame (a one-tick
+//! select) gives that frame for the team ring of the ban results, and for
+//! nothing else: its picks are not stored. [`BansPicksFeed`] sees every batch the saver
 //! sends, keeps those three frames of the current game, and reads them when
 //! the game is first recorded. Nothing here can stop a game from being
 //! recorded: every failure is a sentence for the app's Tracker health and

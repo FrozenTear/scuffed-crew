@@ -519,18 +519,6 @@ fn a_ban_back_after_a_long_gap_drops_the_candidate() {
 }
 
 #[test]
-fn a_one_tick_phase_writes_only_its_first_frame() {
-    let mut run = Run::new();
-    run.tick(0, VOTE, 1);
-    run.tick(1_000, SELECT, 2);
-    run.tick(2_000, Seen::Other, 3);
-    assert_eq!(
-        run.names(),
-        [("mapvote_first.png", 1), ("heroselect_first.png", 2)]
-    );
-}
-
-#[test]
 fn a_phase_back_after_a_flicker_writes_no_second_first() {
     let mut run = Run::new();
     run.tick(0, VOTE, 1);
@@ -551,9 +539,14 @@ fn hero_select_right_after_the_ban_takes_no_ban_results_frame() {
     run.tick(0, BAN, 1);
     run.tick(1_000, SELECT, 2);
     run.tick(3_000, Seen::Other, 3);
+    // The one ban tick still writes its last frame (the same pixels).
     assert_eq!(
         run.names(),
-        [("heroban_first.png", 1), ("heroselect_first.png", 2)]
+        [
+            ("heroban_first.png", 1),
+            ("heroban_last.png", 1),
+            ("heroselect_first.png", 2)
+        ]
     );
 }
 

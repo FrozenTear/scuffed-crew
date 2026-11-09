@@ -50,6 +50,8 @@ mod tests_pregame_ban_title;
 #[cfg(test)]
 mod tests_pregame_dump;
 #[cfg(test)]
+mod tests_pregame_one_tick;
+#[cfg(test)]
 mod tests_pregame_pending;
 #[cfg(test)]
 mod tests_pregame_reveal;
