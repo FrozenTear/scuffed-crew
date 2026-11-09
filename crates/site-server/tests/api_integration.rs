@@ -9374,6 +9374,118 @@ async fn unpublished_article_hidden_from_non_editors() {
     assert!(list.as_array().unwrap().is_empty());
 }
 
+const COVER_IMAGE_URL_ERROR: &str =
+    "cover_image_url must be empty, an https URL, or an /uploads/images/ path";
+
+async fn article_create(app: &axum::Router, slug: &str, cover: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/articles",
+            OFFICER_TOKEN,
+            json!({
+                "slug": slug,
+                "title": "Cover test",
+                "content_markdown": "body",
+                "cover_image_url": cover,
+            }),
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+async fn article_update(app: &axum::Router, slug: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/articles/{slug}"),
+            OFFICER_TOKEN,
+            body,
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+/// Create rejects script / odd cover URLs before writing anything, and stores
+/// accepted values trimmed. Blank means no cover.
+#[tokio::test]
+async fn article_create_validates_cover_image_url() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let (status, body) = article_create(&app, "cover-js", json!("javascript:alert(1)")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], COVER_IMAGE_URL_ERROR);
+    let (status, _) = article_get(&app, "cover-js", Some(OFFICER_TOKEN)).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "rejected create wrote nothing"
+    );
+
+    let upload = "/uploads/images/member_officer/cover.png";
+    let (status, body) = article_create(&app, "cover-upload", json!(format!(" {upload} "))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["cover_image_url"], upload);
+
+    let https = "HTTPS://cdn.example.com/cover.png";
+    let (status, body) = article_create(&app, "cover-https", json!(https)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["cover_image_url"], https);
+    let (_, stored) = article_get(&app, "cover-https", Some(OFFICER_TOKEN)).await;
+    assert_eq!(stored["cover_image_url"], https);
+
+    let (status, body) = article_create(&app, "cover-blank", json!("")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(body["cover_image_url"].is_null(), "{body}");
+}
+
+/// Update rejects a bad cover without touching the row; blank clears it and
+/// omitting the field keeps it.
+#[tokio::test]
+async fn article_update_validates_cover_image_url() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let cover = "https://cdn.example.com/cover.png";
+    let (status, _) = article_create(&app, "cover-edit", json!(cover)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = article_update(
+        &app,
+        "cover-edit",
+        json!({ "title": "Changed", "cover_image_url": "data:image/png;base64,AAAA" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], COVER_IMAGE_URL_ERROR);
+    let (_, stored) = article_get(&app, "cover-edit", Some(OFFICER_TOKEN)).await;
+    assert_eq!(stored["cover_image_url"], cover);
+    assert_eq!(
+        stored["title"], "Cover test",
+        "rejected update wrote nothing"
+    );
+
+    let (status, body) = article_update(&app, "cover-edit", json!({ "title": "Renamed" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["cover_image_url"], cover, "omitted field keeps cover");
+
+    let (status, body) =
+        article_update(&app, "cover-edit", json!({ "cover_image_url": "  " })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["cover_image_url"].is_null(), "{body}");
+    let (_, stored) = article_get(&app, "cover-edit", Some(OFFICER_TOKEN)).await;
+    assert!(stored["cover_image_url"].is_null(), "{stored}");
+}
+
 /// Clock time is `HH:MM` (what the schedule form's time input sends). Duration
 /// is 1 to 1440 minutes. A zero duration ends when it starts and is rejected.
 /// The form omits duration, so the server default of 120 must still save.
