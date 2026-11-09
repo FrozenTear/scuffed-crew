@@ -193,15 +193,23 @@ pub fn Apply() -> Element {
             } else if let Some(s) = s {
                 {
                     let org_name = s.org_name.clone();
+                    let logged_in = auth().is_logged_in();
+                    let is_member = already_member(
+                        auth().is_org_member(),
+                        mine,
+                        status_app.as_ref().map(|a| a.status.as_str()),
+                    );
+                    // The status region below stays mounted; only its text follows this slot.
+                    let mine_slot = s.recruitment_open && logged_in && !is_member && status_app.is_none();
 
-                    if !s.recruitment_open {
+                    let body = if !s.recruitment_open {
                         rsx! {
                             Card {
                                 h2 { class: "apply-card-title", "Recruitment Closed" }
                                 p { class: "apply-card-desc", "{s.recruitment_message}" }
                             }
                         }
-                    } else if !auth().is_logged_in() {
+                    } else if !logged_in {
                         rsx! {
                             Card {
                                 h2 { class: "apply-card-title", "Log In to Apply" }
@@ -220,11 +228,7 @@ pub fn Apply() -> Element {
                                 }
                             }
                         }
-                    } else if already_member(
-                        auth().is_org_member(),
-                        mine,
-                        status_app.as_ref().map(|a| a.status.as_str()),
-                    ) {
+                    } else if is_member {
                         rsx! {
                             Card {
                                 h2 { class: "apply-card-title", "You are already in {org_name}" }
@@ -315,20 +319,18 @@ pub fn Apply() -> Element {
                                 }
                             }
                         }
-                    } else if mine == MineView::Pending || mine == MineView::Failed {
+                    } else if mine == MineView::Pending {
+                        rsx! {}
+                    } else if mine == MineView::Failed {
+                        // Retry stays outside the status region above.
                         rsx! {
-                            div { class: "fetch-error-wrap", role: "status",
-                                if mine == MineView::Pending {
-                                    p { class: "apply-loading", "Loading..." }
-                                } else {
-                                    p { class: "fetch-error", "Couldn't load your application." }
-                                    button {
-                                        r#type: "button",
-                                        class: "fetch-error__retry",
-                                        aria_label: "Retry loading your application",
-                                        onclick: move |_| my_app.refresh += 1,
-                                        "Retry"
-                                    }
+                            div { class: "fetch-error-wrap",
+                                button {
+                                    r#type: "button",
+                                    class: "fetch-error__retry",
+                                    aria_label: "Retry loading your application",
+                                    onclick: move |_| my_app.refresh += 1,
+                                    "Retry"
                                 }
                             }
                         }
@@ -352,22 +354,23 @@ pub fn Apply() -> Element {
 
                                 div { class: "apply-field",
                                     label { class: "apply-label", "Games" }
-                                    if games_phase == SlotPhase::Loading || games_phase == SlotPhase::Failed {
-                                        div { role: "status",
-                                            if games_phase == SlotPhase::Loading {
-                                                p { class: "apply-loading", "Loading..." }
-                                            } else {
-                                                p { class: "muted", "Couldn't load games." }
-                                                button {
-                                                    r#type: "button",
-                                                    class: "fetch-error__retry is-compact",
-                                                    aria_label: "Retry loading games",
-                                                    onclick: move |_| games.refresh += 1,
-                                                    "Retry"
-                                                }
-                                            }
+                                    // Always mounted so screen readers hear the text change.
+                                    div { role: "status",
+                                        if games_phase == SlotPhase::Loading {
+                                            p { class: "apply-loading", "Loading..." }
+                                        } else if games_phase == SlotPhase::Failed {
+                                            p { class: "muted", "Couldn't load games." }
                                         }
-                                    } else {
+                                    }
+                                    if games_phase == SlotPhase::Failed {
+                                        button {
+                                            r#type: "button",
+                                            class: "fetch-error__retry is-compact",
+                                            aria_label: "Retry loading games",
+                                            onclick: move |_| games.refresh += 1,
+                                            "Retry"
+                                        }
+                                    } else if games_phase != SlotPhase::Loading {
                                         div { class: "apply-game-grid",
                                             for g in game_list.iter() {
                                                 {
@@ -449,6 +452,18 @@ pub fn Apply() -> Element {
                                 }
                             }
                         }
+                    };
+
+                    rsx! {
+                        // Always mounted; only the text changes (Loading..., Couldn't load ...).
+                        div { class: "fetch-error-wrap", role: "status",
+                            if mine_slot && mine == MineView::Pending {
+                                p { class: "apply-loading", "Loading..." }
+                            } else if mine_slot && mine == MineView::Failed {
+                                p { class: "fetch-error", "Couldn't load your application." }
+                            }
+                        }
+                        {body}
                     }
                 }
             } else {

@@ -1,8 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use dioxus::prelude::*;
-
-static INPUT_IDS: AtomicU64 = AtomicU64::new(1);
 
 pub const FIELD_CSS: &str = r#"
 .ui-field { width: 100%; font-family: var(--font-body); font-size: var(--text-sm); font-weight: 500;
@@ -24,17 +20,44 @@ fn field_class(invalid: bool) -> &'static str {
     }
 }
 
-/// `id` written onto the input. A built-in label always gets an id so `for` matches.
-fn input_dom_id(explicit: Option<&str>, show_label: bool, generated: &str) -> Option<String> {
-    let explicit = explicit
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    if show_label {
-        Some(explicit.unwrap_or_else(|| generated.to_string()))
-    } else {
-        explicit
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// Lowercase ASCII slug: runs of anything not alphanumeric become one `-`.
+fn slug(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch.to_ascii_lowercase());
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
     }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+/// `id` written onto the input. Ids come from data, never a counter, so they stay
+/// stable across renders and navigation. With a built-in label the id is the
+/// explicit `id`, else the field `name`, else `field-<label slug>`. Pass an
+/// explicit id when two inputs on one page share a label and have no `name`.
+fn input_dom_id(explicit: Option<&str>, label: Option<&str>, name: Option<&str>) -> Option<String> {
+    if let Some(id) = non_blank(explicit) {
+        return Some(id.to_string());
+    }
+    let label = non_blank(label)?;
+    if let Some(name) = non_blank(name) {
+        return Some(name.to_string());
+    }
+    let slug = slug(label);
+    Some(if slug.is_empty() {
+        "field".to_string()
+    } else {
+        format!("field-{slug}")
+    })
 }
 
 /// Explicit `aria_invalid` wins. Otherwise an invalid field exposes `true`.
@@ -67,12 +90,9 @@ pub fn Input(
     #[props(default)]
     name: Option<String>,
 ) -> Element {
-    // Always run: hook order must not depend on whether a label was passed.
-    let generated_id: String =
-        use_hook(|| format!("ui-input-{}", INPUT_IDS.fetch_add(1, Ordering::Relaxed)));
     let show_label = label.as_ref().is_some_and(|text| !text.trim().is_empty());
     let label_text = label.clone().unwrap_or_default();
-    let dom_id = input_dom_id(id.as_deref(), show_label, &generated_id);
+    let dom_id = input_dom_id(id.as_deref(), label.as_deref(), name.as_deref());
     let aria_invalid_attr = aria_bool(resolved_aria_invalid(invalid, aria_invalid));
     let aria_required_attr = aria_bool(aria_required);
     let class = field_class(invalid);
@@ -167,20 +187,48 @@ mod tests {
 
     #[test]
     fn input_id_stays_off_until_a_caller_associates_a_label() {
-        assert_eq!(input_dom_id(None, false, "ui-input-1"), None);
-        assert_eq!(input_dom_id(Some("  "), false, "ui-input-1"), None);
+        assert_eq!(input_dom_id(None, None, None), None);
+        assert_eq!(input_dom_id(Some("  "), None, None), None);
+        assert_eq!(input_dom_id(None, Some("   "), Some("email")), None);
         assert_eq!(
-            input_dom_id(Some("email"), false, "ui-input-1").as_deref(),
+            input_dom_id(Some("email"), None, None).as_deref(),
             Some("email")
         );
+    }
+
+    #[test]
+    fn labelled_input_id_comes_from_data() {
+        // Explicit id wins over name and label.
         assert_eq!(
-            input_dom_id(None, true, "ui-input-4").as_deref(),
-            Some("ui-input-4")
+            input_dom_id(Some(" member-42-email "), Some("Email"), Some("email")).as_deref(),
+            Some("member-42-email")
+        );
+        // Then the field name.
+        assert_eq!(
+            input_dom_id(None, Some("Email"), Some("contact-email")).as_deref(),
+            Some("contact-email")
+        );
+        // Then a slug of the label text.
+        assert_eq!(
+            input_dom_id(None, Some("Display name"), None).as_deref(),
+            Some("field-display-name")
         );
         assert_eq!(
-            input_dom_id(Some("email"), true, "ui-input-4").as_deref(),
-            Some("email")
+            input_dom_id(None, Some("  Discord / Battle.net tag! "), Some(" ")).as_deref(),
+            Some("field-discord-battle-net-tag")
         );
+        assert_eq!(
+            input_dom_id(None, Some("!!"), None).as_deref(),
+            Some("field")
+        );
+    }
+
+    #[test]
+    fn labelled_input_id_is_stable_across_renders() {
+        let first = input_dom_id(None, Some("Org name"), None);
+        assert_eq!(first, input_dom_id(None, Some("Org name"), None));
+        assert_eq!(first.as_deref(), Some("field-org-name"));
+        assert_ne!(first, input_dom_id(None, Some("Org tag"), None));
     }
 
     #[test]

@@ -106,6 +106,8 @@ const REPORTS_CSS: &str = r#"
 .reports-intro { color: var(--text-2); font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem; }
 .reports-status { color: var(--text-3); padding: 1.5rem 0; }
 .reports-error { color: var(--danger); }
+/* The download status region stays mounted; take no space while it is empty. */
+.reports-error:empty { margin-top: 0; }
 /* The table scrolls here. max-width and min-width keep that scroll off the page. */
 .reports-scroll {
     display: grid; grid-template-columns: minmax(0, 1fr);
@@ -1425,8 +1427,11 @@ fn ReportDownload(path: String, filename: String, control_id: String, label: Str
                 if busy() { "{COPY_DOWNLOADING}" } else { "Download" }
             }
         }
-        if let Some(message) = failure() {
-            span { class: "reports-sub reports-error", role: "status", "{message}" }
+        // Always mounted so the failure text is announced; empty when there is none.
+        span {
+            class: "reports-sub reports-error",
+            role: "status",
+            "{failure().unwrap_or_default()}"
         }
     }
 }
