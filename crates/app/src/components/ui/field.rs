@@ -24,40 +24,20 @@ fn non_blank(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|s| !s.is_empty())
 }
 
-/// Lowercase ASCII slug: runs of anything not alphanumeric become one `-`.
-fn slug(text: &str) -> String {
-    let mut out = String::new();
-    for ch in text.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
-        } else if !out.is_empty() && !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    while out.ends_with('-') {
-        out.pop();
-    }
-    out
-}
-
-/// `id` written onto the input. Ids come from data, never a counter, so they stay
-/// stable across renders and navigation. With a built-in label the id is the
-/// explicit `id`, else the field `name`, else `field-<label slug>`. Pass an
-/// explicit id when two inputs on one page share a label and have no `name`.
-fn input_dom_id(explicit: Option<&str>, label: Option<&str>, name: Option<&str>) -> Option<String> {
-    if let Some(id) = non_blank(explicit) {
-        return Some(id.to_string());
-    }
-    let label = non_blank(label)?;
-    if let Some(name) = non_blank(name) {
-        return Some(name.to_string());
-    }
-    let slug = slug(label);
-    Some(if slug.is_empty() {
-        "field".to_string()
-    } else {
-        format!("field-{slug}")
-    })
+/// `id` written onto the input: the explicit `id` when it is non-blank, else
+/// none. There is no fallback to `name` or a label slug, because two inputs that
+/// share a label or a name (or a name with spaces) would collide or be invalid.
+/// Callers that set `label` must pass an `id` built from data (record id plus
+/// field name), never a global counter, so it stays stable across renders.
+/// A labelled input without one gets no id (its label is unassociated) and
+/// panics in debug builds so the missing id is caught in development.
+fn input_dom_id(explicit: Option<&str>, labelled: bool) -> Option<String> {
+    let id = non_blank(explicit).map(str::to_string);
+    debug_assert!(
+        !labelled || id.is_some(),
+        "Input with a label needs an explicit non-blank id"
+    );
+    id
 }
 
 /// Explicit `aria_invalid` wins. Otherwise an invalid field exposes `true`.
@@ -76,10 +56,13 @@ pub fn Input(
     #[props(default = false)] invalid: bool,
     #[props(default = false)] disabled: bool,
     #[props(default)] oninput: Option<EventHandler<FormEvent>>,
-    /// Associates an external `<label for>`. Omitted when empty and no built-in label.
+    /// Input `id`. Omitted when blank. Required when `label` is set: build it
+    /// from data (record id plus field name) so it is unique on the page.
     #[props(default)]
     id: Option<String>,
     /// Visible label rendered above the input and wired with `for` / `id`.
+    /// Needs a non-blank `id`; without one the label is not associated and
+    /// debug builds panic.
     #[props(default)]
     label: Option<String>,
     #[props(default)] aria_label: Option<String>,
@@ -92,16 +75,15 @@ pub fn Input(
 ) -> Element {
     let show_label = label.as_ref().is_some_and(|text| !text.trim().is_empty());
     let label_text = label.clone().unwrap_or_default();
-    let dom_id = input_dom_id(id.as_deref(), label.as_deref(), name.as_deref());
+    let dom_id = input_dom_id(id.as_deref(), show_label);
     let aria_invalid_attr = aria_bool(resolved_aria_invalid(invalid, aria_invalid));
     let aria_required_attr = aria_bool(aria_required);
     let class = field_class(invalid);
 
     if show_label {
-        let id_for = dom_id.clone().unwrap_or_default();
         rsx! {
             div { class: "ui-field-wrap",
-                label { class: "ui-field-label", r#for: "{id_for}", "{label_text}" }
+                label { class: "ui-field-label", r#for: dom_id.clone(), "{label_text}" }
                 input {
                     class: "{class}",
                     id: dom_id,
@@ -186,49 +168,78 @@ mod tests {
     }
 
     #[test]
-    fn input_id_stays_off_until_a_caller_associates_a_label() {
-        assert_eq!(input_dom_id(None, None, None), None);
-        assert_eq!(input_dom_id(Some("  "), None, None), None);
-        assert_eq!(input_dom_id(None, Some("   "), Some("email")), None);
+    fn input_id_is_only_the_explicit_id() {
+        assert_eq!(input_dom_id(None, false), None);
+        assert_eq!(input_dom_id(Some("  "), false), None);
+        assert_eq!(input_dom_id(Some("email"), false).as_deref(), Some("email"));
         assert_eq!(
-            input_dom_id(Some("email"), None, None).as_deref(),
-            Some("email")
-        );
-    }
-
-    #[test]
-    fn labelled_input_id_comes_from_data() {
-        // Explicit id wins over name and label.
-        assert_eq!(
-            input_dom_id(Some(" member-42-email "), Some("Email"), Some("email")).as_deref(),
+            input_dom_id(Some(" member-42-email "), true).as_deref(),
             Some("member-42-email")
         );
-        // Then the field name.
-        assert_eq!(
-            input_dom_id(None, Some("Email"), Some("contact-email")).as_deref(),
-            Some("contact-email")
-        );
-        // Then a slug of the label text.
-        assert_eq!(
-            input_dom_id(None, Some("Display name"), None).as_deref(),
-            Some("field-display-name")
-        );
-        assert_eq!(
-            input_dom_id(None, Some("  Discord / Battle.net tag! "), Some(" ")).as_deref(),
-            Some("field-discord-battle-net-tag")
-        );
-        assert_eq!(
-            input_dom_id(None, Some("!!"), None).as_deref(),
-            Some("field")
-        );
     }
 
     #[test]
-    fn labelled_input_id_is_stable_across_renders() {
-        let first = input_dom_id(None, Some("Org name"), None);
-        assert_eq!(first, input_dom_id(None, Some("Org name"), None));
-        assert_eq!(first.as_deref(), Some("field-org-name"));
-        assert_ne!(first, input_dom_id(None, Some("Org tag"), None));
+    fn explicit_input_id_is_stable_across_renders() {
+        let first = input_dom_id(Some("org-7-name"), true);
+        assert_eq!(first, input_dom_id(Some("org-7-name"), true));
+        assert_ne!(first, input_dom_id(Some("org-7-tag"), true));
+    }
+
+    fn render(app: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn labelled_input_uses_the_explicit_id_for_label_and_input() {
+        fn view() -> Element {
+            rsx! {
+                Input {
+                    value: String::new(),
+                    id: "member-42-email".to_string(),
+                    name: "email".to_string(),
+                    label: "Email".to_string(),
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains(r#"for="member-42-email""#), "{html}");
+        assert!(html.contains(r#"id="member-42-email""#), "{html}");
+        assert!(!html.contains(r#"id="email""#), "{html}");
+        assert!(!html.contains("field-email"), "{html}");
+    }
+
+    #[test]
+    fn unlabelled_input_without_id_gets_no_id() {
+        fn view() -> Element {
+            rsx! {
+                Input {
+                    value: String::new(),
+                    name: "contact email".to_string(),
+                    aria_label: "Email".to_string(),
+                }
+            }
+        }
+        let html = render(view);
+        assert!(!html.contains(" id="), "{html}");
+        assert!(!html.contains(" for="), "{html}");
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "explicit non-blank id")]
+    fn labelled_input_without_id_panics_in_debug() {
+        // No fallback to the name or a label slug.
+        input_dom_id(None, true);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "explicit non-blank id")]
+    fn labelled_input_with_blank_id_panics_in_debug() {
+        input_dom_id(Some("   "), true);
     }
 
     #[test]

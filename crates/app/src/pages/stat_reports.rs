@@ -2210,6 +2210,31 @@ mod tests {
     }
 
     #[test]
+    fn report_download_keeps_an_empty_status_span_until_a_failure() {
+        fn view() -> Element {
+            rsx! {
+                ReportDownload {
+                    path: format!("/api/stat-reports/{REPORT_A}/download"),
+                    filename: format!("{REPORT_A}.zip"),
+                    control_id: control_id("download", REPORT_A),
+                    label: "Download report".to_string(),
+                }
+            }
+        }
+        let html = html_of(view);
+        assert_eq!(html.matches(r#"role="status""#).count(), 1, "{html}");
+        assert!(
+            html.contains(r#"<span class="reports-sub reports-error" role="status"></span>"#),
+            "{html}"
+        );
+        // The Download button sits outside the status span.
+        let status = html.find(r#"role="status""#).unwrap();
+        let button = html.find("<button").unwrap();
+        assert!(button < status, "{html}");
+        assert!(html.contains(">Download</button>"), "{html}");
+    }
+
+    #[test]
     fn officer_list_shows_type_note_member_and_local_time() {
         const MEMBER_ID: &str = "member-0123456789abcdef";
         fn named() -> Element {
