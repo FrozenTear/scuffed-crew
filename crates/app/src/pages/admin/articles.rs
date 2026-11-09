@@ -67,16 +67,17 @@ fn article_field_id(record_id: Option<&str>, field: &str) -> String {
     format!("article-{}-{}", clean(key), clean(field))
 }
 
-/// Source for the cover preview: an uploaded `/uploads/...` path or an
-/// `http(s)` URL. Anything else (empty, `javascript:`, `//host`) has no preview.
+/// Source for the cover preview: an `/uploads/images/...` path the server
+/// accepts for `cover_image_url`, or an `http(s)` URL. Avatar paths, `..`
+/// segments, and other `/uploads/` values the server refuses have no preview.
 fn cover_preview_src(url: &str) -> Option<&str> {
     let url = url.trim();
-    if let Some(rest) = url.strip_prefix("/uploads/") {
-        let clean = !rest.is_empty()
-            && !rest
-                .chars()
-                .any(|c| c.is_whitespace() || c.is_control() || c == '\\');
-        return clean.then_some(url);
+    if crate::upload::is_cover_image_upload_path(url) {
+        // img src needs a rooted path; the no-slash form heals on save only.
+        return url.starts_with('/').then_some(url);
+    }
+    if url.starts_with("/uploads/") {
+        return None;
     }
     crate::util::http_href(url)
 }
@@ -596,15 +597,30 @@ mod tests {
     }
 
     #[test]
+    fn preview_rejects_dotdot_and_avatar_paths() {
+        for bad in [
+            "/uploads/images/m1/../x.png",
+            "/uploads/images/../avatars/m/x.png",
+            "/uploads/avatars/member_abc/a.png",
+        ] {
+            assert_eq!(cover_preview_src(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn preview_rejects_other_values() {
         for bad in [
             "",
             "/uploads/",
+            "/uploads/images/",
+            "/uploads/images/a.png",
             "javascript:alert(1)",
             "data:image/png;base64,AA",
             "//evil.example/x.png",
             "/uploads/a b.png",
+            "/uploads/other/m/x.png",
             "/other/x.png",
+            "uploads/images/m1/x.png",
         ] {
             assert_eq!(cover_preview_src(bad), None, "{bad}");
         }

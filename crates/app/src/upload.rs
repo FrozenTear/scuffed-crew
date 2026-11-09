@@ -104,6 +104,65 @@ pub async fn post_file(url: &str, file: &web_sys::File) -> Result<String, Upload
         .map_err(|_| UploadFailure::Message("Failed to parse upload response."))
 }
 
+/// Relative path under an upload category folder.
+///
+/// Mirrors site-server `upload_rel_is_safe` in `routes/uploads.rs` (PR 628 /
+/// `183741f2`, around line 184): reject empty, `\`, NUL, `?`, `#`, `%`,
+/// empty / `.` / `..` segments, and any char outside `[A-Za-z0-9._-]`.
+pub fn upload_rel_is_safe(rel: &str) -> bool {
+    if rel.is_empty()
+        || rel.contains('\\')
+        || rel.contains('\0')
+        || rel.contains('?')
+        || rel.contains('#')
+        || rel.contains('%')
+    {
+        return false;
+    }
+    let mut any = false;
+    for seg in rel.split('/') {
+        if seg.is_empty() || seg == "." || seg == ".." {
+            return false;
+        }
+        if !seg
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            return false;
+        }
+        any = true;
+    }
+    any
+}
+
+/// True when `raw` is an uploads cover path the server accepts for
+/// `cover_image_url`.
+///
+/// Mirrors the uploads branch of site-server `normalize_cover_image_url` in
+/// `routes/articles.rs` (PR 628 / `183741f2`, around line 128): after trim,
+/// no control / whitespace / backslash; prefix `/uploads/images/` or
+/// `uploads/images/`; relative part contains `/` and passes
+/// [`upload_rel_is_safe`].
+pub fn is_cover_image_upload_path(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return false;
+    }
+    let Some(rel) = trimmed
+        .strip_prefix("/uploads/images/")
+        .or_else(|| trimmed.strip_prefix("uploads/images/"))
+    else {
+        return false;
+    };
+    rel.contains('/') && upload_rel_is_safe(rel)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,5 +215,69 @@ mod tests {
                     .contains('\u{2014}')
             );
         }
+    }
+
+    #[test]
+    fn cover_upload_path_accepts_valid_images_path() {
+        assert!(is_cover_image_upload_path(
+            "/uploads/images/member_abc/cover.png"
+        ));
+        assert!(is_cover_image_upload_path(
+            " /uploads/images/member_other/sub/c-1_x.webp "
+        ));
+        assert!(is_cover_image_upload_path(
+            "uploads/images/member_abc/a.png"
+        ));
+    }
+
+    #[test]
+    fn cover_upload_path_rejects_dotdot_segment() {
+        for bad in [
+            "/uploads/images/member_abc/../x.png",
+            "/uploads/images/../avatars/m/x.png",
+            "uploads/images/member_abc/../x.png",
+        ] {
+            assert!(!is_cover_image_upload_path(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn cover_upload_path_rejects_avatar_path() {
+        assert!(!is_cover_image_upload_path(
+            "/uploads/avatars/member_abc/a.png"
+        ));
+    }
+
+    #[test]
+    fn cover_upload_path_rejects_other_server_rejects() {
+        for bad in [
+            "/uploads/",
+            "/uploads/images/",
+            "/uploads/images/a.png",
+            "/uploads/images/member_abc/",
+            "/uploads/images/member_abc/./x.png",
+            "/uploads/images/member_abc//x.png",
+            "/uploads/images/member_abc/x.png?v=1",
+            "/uploads/images/member_abc/x.png#f",
+            "/uploads/images/member_abc/%2e%2e/x.png",
+            "/uploads/images/member_abc\\x.png",
+            "/uploads/images/member abc/x.png",
+            "/uploads/other/member_abc/a.png",
+            "/assets/a.png",
+        ] {
+            assert!(!is_cover_image_upload_path(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn upload_rel_is_safe_matches_server_rules() {
+        assert!(upload_rel_is_safe("member_abc/cover.png"));
+        assert!(upload_rel_is_safe("member_other/sub/c-1_x.webp"));
+        assert!(!upload_rel_is_safe(""));
+        assert!(!upload_rel_is_safe("member_abc/../x.png"));
+        assert!(!upload_rel_is_safe("member_abc/./x.png"));
+        assert!(!upload_rel_is_safe("member_abc//x.png"));
+        assert!(!upload_rel_is_safe("member_abc/x.png?v=1"));
+        assert!(!upload_rel_is_safe("a b/x.png"));
     }
 }
