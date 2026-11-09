@@ -617,7 +617,7 @@ async fn new_reader_flags_a_rate_cap_hold_and_ocr_v1_does_not() {
 #[test]
 fn analyze_frame_under_the_new_reader_reads_no_cell_and_no_board_text() {
     let dir = tempfile::tempdir().unwrap();
-    for name in [None, Some("  ".to_string())] {
+    for name in [Vec::new(), vec!["  ".to_string()]] {
         let matcher = std::sync::Arc::new(detect::hero_portrait::PortraitMatcher::load(dir.path()));
         let flags = FrameFlags {
             allow_banner_recovery: false,

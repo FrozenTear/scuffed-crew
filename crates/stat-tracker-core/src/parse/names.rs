@@ -40,16 +40,65 @@ pub fn find_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Opti
 /// per table layout). The first row, in board order, with a substring hit in
 /// any window wins outright; otherwise the best fuzzy row at or above 0.55.
 pub fn match_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Option<NameMatch> {
-    let name_lower = player_name.to_lowercase();
+    scored_match(rows, &player_name.to_lowercase()).map(|(found, _)| found)
+}
 
+/// One in-game name, or every saved name of the member
+/// (`Config::own_player_names`), for the row matchers.
+pub trait NameList {
+    fn each_name(&self) -> impl Iterator<Item = &str>;
+}
+
+impl NameList for str {
+    fn each_name(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self)
+    }
+}
+
+impl NameList for [String] {
+    fn each_name(&self) -> impl Iterator<Item = &str> {
+        self.iter().map(String::as_str)
+    }
+}
+
+impl NameList for Vec<String> {
+    fn each_name(&self) -> impl Iterator<Item = &str> {
+        self.iter().map(String::as_str)
+    }
+}
+
+/// [`match_player_row_by_name`] over every name in `names`. A substring hit
+/// for any name wins (the first such name in list order); otherwise the
+/// best fuzzy row of any name (the earlier name on a tie). Each name is
+/// matched in lowercase, so "öster" and "Öster" read the same row.
+pub fn match_player_row_by_names(
+    rows: &[RowOcrResult],
+    names: &(impl NameList + ?Sized),
+) -> Option<NameMatch> {
+    let mut fuzzy: Option<(NameMatch, f64)> = None;
+    for name in names.each_name() {
+        match scored_match(rows, &name.to_lowercase()) {
+            Some((found, None)) => return Some(found),
+            Some((found, Some(score))) if fuzzy.is_none_or(|(_, best)| score > best) => {
+                fuzzy = Some((found, score));
+            }
+            _ => {}
+        }
+    }
+    fuzzy.map(|(found, _)| found)
+}
+
+/// The match for one lowercased name, and its fuzzy score (`None` for a
+/// substring hit).
+fn scored_match(rows: &[RowOcrResult], name_lower: &str) -> Option<(NameMatch, Option<f64>)> {
     let mut best: Option<(usize, f64)> = None;
 
     for (i, row) in rows.iter().enumerate() {
-        let scores = row_window_scores(row, &name_lower);
+        let scores = row_window_scores(row, name_lower);
         if let Some(&(window, _)) = scores.iter().find(|(_, s)| s.is_substring()) {
             // `name` so the report log scrub drops the field (report-bundle §6).
             tracing::debug!(row = i, window, "player name found via substring in row");
-            return Some(name_match(i, window, &scores));
+            return Some((name_match(i, window, &scores), None));
         }
         let row_best = scores
             .iter()
@@ -68,7 +117,7 @@ pub fn match_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Opt
     if score < NAME_MATCH_MIN {
         return None;
     }
-    let scores = row_window_scores(&rows[row], &name_lower);
+    let scores = row_window_scores(&rows[row], name_lower);
     let window = scores
         .iter()
         .filter(|(_, s)| s.fuzzy() == Some(score))
@@ -76,7 +125,7 @@ pub fn match_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Opt
         .min()
         .unwrap_or(0);
     tracing::debug!(row, window, score, "player name fuzzy-matched in row");
-    Some(name_match(row, window, &scores))
+    Some((name_match(row, window, &scores), Some(score)))
 }
 
 fn name_match(row: usize, window: usize, scores: &[(usize, NameRead)]) -> NameMatch {

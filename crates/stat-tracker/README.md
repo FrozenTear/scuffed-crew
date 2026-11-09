@@ -119,7 +119,7 @@ Pin a tag by fetching that tag's bootstrap (the assignment has to be on
 `bash`, because `VAR=x curl … | bash` does not pass `VAR` to `bash`):
 
 ```sh
-TAG=stat-tracker-v0.6.0-alpha.2.1
+TAG=stat-tracker-v0.6.0-alpha.2.3
 curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
@@ -195,6 +195,31 @@ An AppImage is removed like any other copy, including the AppImage file.
 A copy outside your home folder is left alone. The app lists the paths and
 says to remove them manually.
 
+### First-run checklist
+
+Two setup steps are easy to miss and cause most first-run problems:
+
+1. **Join the `input` group, then log out and back in.** Without it the
+   daemon cannot read Tab presses from `/dev/input`. Older builds crash on
+   start; newer ones show a warning and keep running without Tab detection.
+   See Platform requirements above for the commands and a check.
+2. **Install Ayatana AppIndicator for Hide-to-tray.** Without it the app
+   starts with no tray icon and a "missing library" notice, and closing the
+   window quits. From 0.6.0-alpha.3 the alpha AUR package pulls it in; for
+   the stable AUR package or the tarball, install it yourself:
+
+   ```sh
+   # Arch / CachyOS
+   sudo pacman -S libayatana-appindicator
+   # Debian / Ubuntu / Mint
+   sudo apt install libayatana-appindicator3-1
+   # Fedora
+   sudo dnf install libayatana-appindicator-gtk3
+   ```
+
+   Then restart `stat-tracker-gui`. Your desktop also needs a tray: KDE and
+   Cinnamon have one built in, plain GNOME needs the AppIndicator extension.
+
 ## Running
 
 ```sh
@@ -248,7 +273,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `ocr` | `"on"` (default) or `"off"`, in any case. Off: the tracker reads every screen with its own reader and does not start Tesseract for reading (no Tesseract instance, no OCR workers, no tessdata lookup). Install or Rebuild reading model in Settings still runs the Tesseract tools when you press it. Off implies the new reader, so `reader` is not consulted and keeps its value. The tracker turns OCR off only when nothing would go unread. That needs a tracker version that reads everything without Tesseract, and three reader packs: a hero pack (heroes-v2 or heroes-v1; heroes-v2-1080 alone is not enough), maps-v1, and a words-v1 with the result words for the end screens, the match-start titles and the end-of-match titles. Otherwise it keeps OCR on for that run and logs why, and Settings refuses the switch with the same reason. With OCR off the map name on the scoreboard has no second reader, so a game whose map is never read is saved without a map until you pick one. For the same reason a co-op event scoreboard (Junkenstein on Adlersbrunn, stats on one team only) is dropped only when its map name is read sure; when it is not, that scoreboard can be saved as a game (not seen on a real frame so far). With OCR off, a Tab is not stored when you have never had the highlight, your hero icon is dead or covered, and no seed is trusted yet (a seed is a learned crop of your name, see `private/own-name` below; with OCR on, the name read finds your row on such a Tab). Two more costs come with the new reader that off implies: a game that ends with a stat never read is not stored (see `debug/unrecorded_games.jsonl` below), and a result screen takes longer to read (about 65 ms against 25 ms per check). Turning OCR back on in the middle of a game keeps what the game has: a stat with no sure read yet stays open until a scoreboard reads it, and the game has no row before that (see `debug/unrecorded_games.jsonl` below). If a pack goes away while the tracker runs with OCR off, what that pack reads is held and the app says which pack it is; the tracker does not go back to OCR by itself. Settings toggle: Use classic OCR (Tesseract). Also env `STAT_TRACKER_OCR=on` or `off` for one run, which is not written to this file. A config from before this key has no `ocr` line and behaves as before (on); nothing needs migrating. The tracker reads the file when it starts, so restart it after saving. What the running tracker decided, and the OCR calls it stopped, are in `{data_dir}/ocr_switch.json` |
 | `setup_completed` | Set when the first-run guide is finished or skipped. Missing or false shows the guide on launch. |
 | `reader_pack_url` | Not used. Reader packs come from the signed-in site, and the setup guide always shows its reader pack step. Older files that still set it load fine. |
-| `player_names` | More in-game names that are all yours (alts, a renamed account). A `#1234` tag is dropped and names under 3 characters are ignored. Empty by default and not written while empty. Not read by this build yet: your row is still found with `player_name` only |
+| `player_names` | More in-game names that are all yours (alts, a renamed account). A `#1234` tag is dropped and names under 3 characters are ignored. Empty by default and not written while empty. Read when the tracker starts: the Tab reader tries `player_name` and every name here (case does not matter, so `öster` and `Öster` are one name), and bug reports drop them like `player_name` |
 | `live_upload` | Upload each game to the site after it closes. On by default and not written while on; `false` is meant to keep games on this computer, queued. Not read by this build yet: games still upload as before |
 | `rank_reader` | Read your rank after Comp games. Off by default and not written while off. Not read by this build yet |
 | `share_stat_pictures` | Upload the grayscale stat area after each game to help train the reader (no names, kept 30 days on the server). Off by default and not written while off. Not read by this build yet: nothing is uploaded |
@@ -621,6 +646,13 @@ it.
 
 ## Troubleshooting
 
+**The tracker crashes or keeps restarting right after start, or warns that it
+cannot read the keyboard.** Check that you are in the `input` group in the
+current session: `groups | grep -qw input && echo ok`. If nothing prints, run
+`sudo usermod -aG input "$USER"`, then log out and back in (a new terminal is
+not enough). `journalctl --user -u scuffed-stat-tracker -n 50` shows the
+daemon's last log lines.
+
 **App launcher does not start `stat-tracker-gui` (works from a terminal).**
 Graphical sessions (GNOME, Cosmic, **AerynOS**) often have a PATH that
 does not include `~/.local/bin`. Through **v0.4.2** the `.desktop` `Exec=`
@@ -636,7 +668,7 @@ update-desktop-database ~/.local/share/applications
 theme name, not a file we install). Log out/in if the launcher still
 caches the old entry.
 
-**`stat-tracker-gui` panics with `Failed to load ayatana-appindicator3` (v0.4.0 / v0.4.1).**
+**No tray icon, or `stat-tracker-gui` panics with `Failed to load ayatana-appindicator3` (v0.4.0 / v0.4.1).**
 `tray-icon` loads `libayatana-appindicator3.so.1` or `libappindicator3.so.1`
 at runtime. Distros that do not ship Ayatana AppIndicator (including
 **AerynOS**) used to abort the GUI. **v0.4.2** starts the Iced window
@@ -648,7 +680,7 @@ install the optional package (if your distro has it):
 sudo apt install libayatana-appindicator3-1
 # Fedora
 sudo dnf install libayatana-appindicator-gtk3
-# Arch
+# Arch / CachyOS
 sudo pacman -S libayatana-appindicator
 ```
 

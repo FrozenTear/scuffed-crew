@@ -15,6 +15,32 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## 0.6.0-alpha.2.3
+
+This small alpha lets you save more than one in-game name, and the tracker now uses every saved name to find your row on the scoreboard. It also keeps a tracker started from the app running when an update cannot start, and fixes two things on the Games tab.
+
+### Highlights
+
+- **In-game names** in Settings now shows your extra names after the main one. "+ Add name" adds another name instead of replacing the main one, and names that differ only in capitals count as one name.
+- The **Tab reader tries every saved name**, so a game on an alt account finds your row too.
+- **Read my rank after Comp games**, **Share stat pictures** and **Report pictures** are visible again in Settings, each marked "Not read by this build yet, so this changes nothing for now."
+- On the **Games** tab, Undo of a Dismiss on a run you confirmed by hand puts it back to Confirmed, and the new **Length** column shows the shortest the game could have run (for example `9:14+`).
+
+Technical detail. Names are matched in lowercase, a whole-name hit for any saved name wins over a fuzzy one, and there is still one read per board. Bug reports scrub the extra names like the main one. When an update's new binary cannot start after the store has closed, the tracker tries it again while the kernel reports it busy, then starts this version again under the same pid and waits the usual 10 minutes before the next try; under systemd nothing changes. Undo uses a new `after_confirm` field on segment resolutions, which older builds ignore. Length is the span from your first to last Tab press, so it is a lower bound, and rank, queue and crew are still not recorded. Not tested on Linux Mint X11 or KDE CachyOS Wayland in this alpha.
+
+## 0.6.0-alpha.2.2
+
+This small alpha fixes two things on the game card. The Played row now lists every hero you played in the game, and your ban votes are read from your own vote slots instead of the lobby portraits.
+
+### Highlights
+
+- **Played** shows every hero you played, in the order you first played them, matching the hero bar. A hero you set by hand still shows as one chip.
+- **Your ban votes** now come from your own three vote slots on the ban vote screen. Skipped votes show as Skipped, and a slot the tracker did not see shows as Not seen.
+- The tracker also reads the team ban score strip (the three heroes and their vote counts) and sends the votes with your match uploads, values only.
+- Games recorded on alpha.2.1 or older show "Your ban votes weren't read for this game." instead of the wrong votes they stored.
+
+Technical detail. Each game record now always has `ban_votes` and `ban_score` (an array, or `null`) when the bans and picks reader runs. The card reads only `ban_votes`; the old flat `ban_vote` list is never used for your votes. The vote reader checks the slot borders, the strip title and the strip boxes first and reads nothing when they are not where they should be. The reader is still 1440p only. Not tested on Linux Mint X11 or KDE CachyOS Wayland in this alpha.
+
 ## 0.6.0-alpha.2.1
 
 This alpha shows the bans and picks the tracker read on each game card in the app, sends them with your match uploads, and warns you when a game's bans and picks could not be read. It also writes a short log of the screens seen before each game, so missed screens can be tracked down.

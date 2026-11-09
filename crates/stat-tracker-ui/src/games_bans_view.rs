@@ -188,7 +188,7 @@ fn chip(c: &Chip, narrow: bool) -> Element<'static, Message> {
     match &c.slot {
         Slot::Hero(_) => inner = inner.push(portrait(20.0, 12.0)),
         Slot::NoPreference => inner = inner.push(hollow_circle()),
-        Slot::NotRead => {}
+        Slot::NotRead | Slot::Skipped | Slot::Empty => {}
     }
     inner = inner.push(
         text(c.name().to_string())

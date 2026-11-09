@@ -4,14 +4,14 @@
 //! (`rank_reader`, `share_stat_pictures`), Report pictures
 //! (`share_report_pictures`) and Only capture while Overwatch is in front
 //! (`capture_only_on_screen`, with a live note while the tracker cannot
-//! tell which window is in front). Each applies at once. The tracker will read
-//! them when it starts, so each is tagged After restart, except Report
-//! pictures, which only this app will read.
+//! tell which window is in front). Each applies at once. The tracker reads
+//! names and the focus gate when it starts, so those rows are tagged After
+//! restart.
 //!
-//! Rows whose key nothing reads yet are not shown
-//! ([`crate::settings_model::HIDDEN_KEYS`]): their keys still load and save
-//! as before, and In-game names keeps one name while `player_names` is
-//! hidden.
+//! The upload row is not shown ([`crate::settings_model::HIDDEN_KEYS`]);
+//! its key still loads and saves as before. The rows whose key nothing
+//! reads yet ([`crate::settings_model::NOT_READ_KEYS`]) show
+//! [`NOT_READ_NOTE`] and no After restart tag.
 
 use iced::Element;
 use iced::widget::Row;
@@ -19,11 +19,23 @@ use iced::widget::Row;
 use crate::app::{Message, TrackerApp};
 use crate::form_widgets::hint;
 use crate::settings::SettingsField;
-use crate::settings_model::{ChipList, ConfigEdit, row_shown, same_name};
+use crate::settings_model::{ChipList, ConfigEdit, needs_restart, row_shown, same_name};
 use crate::settings_rows::{
     Segment, Tag, add_chip, chip, chip_control, segmented, setting_row, switch, title_line,
 };
 use crate::settings_update::Msg;
+
+/// Under a row whose key nothing reads yet.
+const NOT_READ_NOTE: &str = "Not read by this build yet, so this changes nothing for now.";
+
+/// The row's tags for `key`: After restart only when the tracker reads it.
+fn read_tags(key: &str) -> &'static [Tag] {
+    if needs_restart(key) {
+        &[Tag::AfterRestart]
+    } else {
+        &[]
+    }
+}
 
 /// Help under In-game names (spec).
 const NAMES_HELP: &str = "As shown in-game, without the #1234.";
@@ -123,7 +135,7 @@ pub(crate) fn names_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
         chips = chips.push(add_chip(app, ChipList::Names, "+ Add name", "Name", demo));
     }
     setting_row(
-        title_line("In-game names", false, &[Tag::AfterRestart]),
+        title_line("In-game names", false, read_tags("player_names")),
         vec![hint(NAMES_HELP)],
         chip_control(chips),
     )
@@ -202,15 +214,23 @@ pub(crate) fn sharing_rows<'a>(
     let mut rows = Vec::new();
     if row_shown("rank_reader") {
         rows.push(setting_row(
-            title_line("Read my rank after Comp games", false, &[Tag::AfterRestart]),
-            vec![hint(rank_help)],
+            title_line(
+                "Read my rank after Comp games",
+                false,
+                read_tags("rank_reader"),
+            ),
+            vec![hint(rank_help), hint(NOT_READ_NOTE)],
             edit_switch(c.rank_reader, demo, ConfigEdit::RankReader),
         ));
     }
     if row_shown("share_stat_pictures") {
         rows.push(setting_row(
-            title_line("Share stat pictures", false, &[Tag::AfterRestart]),
-            vec![hint(pictures_help)],
+            title_line(
+                "Share stat pictures",
+                false,
+                read_tags("share_stat_pictures"),
+            ),
+            vec![hint(pictures_help), hint(NOT_READ_NOTE)],
             edit_switch(c.share_stat_pictures, demo, ConfigEdit::ShareStatPictures),
         ));
     }
@@ -227,7 +247,7 @@ pub(crate) fn report_pictures_row<'a>(
     row_shown("share_report_pictures").then(|| {
         setting_row(
             title_line("Report pictures", false, &[Tag::New]),
-            vec![hint(help)],
+            vec![hint(help), hint(NOT_READ_NOTE)],
             edit_switch(
                 app.saved_config.share_report_pictures,
                 demo,
@@ -380,7 +400,7 @@ fn focus_note() -> Element<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings_model::HIDDEN_KEYS;
+    use crate::settings_model::{HIDDEN_KEYS, NOT_READ_KEYS};
     use stat_tracker::config::{Config, SyncConfig};
 
     /// A live (not demo) app whose page writes `config.toml` in a temp
@@ -407,25 +427,26 @@ mod tests {
         Message::SettingsPage(msg)
     }
 
+    /// Only the upload switch stays hidden (PR 560 wires it). The rows
+    /// nothing reads yet show, each saying so, with no After restart tag.
     #[test]
-    fn rows_nothing_reads_yet_are_hidden() {
-        for key in [
-            "rank_reader",
-            "share_stat_pictures",
-            "share_report_pictures",
-            "live_upload",
-            "player_names",
-        ] {
-            assert!(HIDDEN_KEYS.contains(&key), "{key}");
-            assert!(!row_shown(key), "{key}");
+    fn only_the_upload_row_is_hidden_and_unread_rows_say_so() {
+        assert_eq!(HIDDEN_KEYS, ["live_upload"]);
+        for key in ["player_names", "capture_only_on_screen"]
+            .into_iter()
+            .chain(NOT_READ_KEYS)
+        {
+            assert!(row_shown(key), "{key}");
         }
         let (_dir, app) = crate::fixtures::test_app();
         assert!(upload_row(&app, false, "help", true).is_none());
-        assert!(sharing_rows(&app, false, "a", "b").is_empty());
-        assert!(report_pictures_row(&app, false, "c").is_none());
-        // The focus gate is read now: its row shows.
-        assert!(row_shown("capture_only_on_screen"));
+        assert_eq!(not_connected_note(false), Some(UPLOAD_NO_SITE));
+        assert_eq!(sharing_rows(&app, false, "a", "b").len(), 2);
+        assert!(report_pictures_row(&app, false, "c").is_some());
         assert!(focus_gate_row(&app, false, "d").is_some());
+        assert_eq!(read_tags("rank_reader"), &[] as &[Tag]);
+        assert_eq!(read_tags("player_names"), &[Tag::AfterRestart]);
+        assert!(NOT_READ_NOTE.starts_with("Not read by this build yet"));
     }
 
     #[test]
@@ -483,20 +504,26 @@ mod tests {
         );
     }
 
+    /// Extra names show after the main one, "öster" beside "Öster" is one
+    /// name, and "+ Add name" adds another instead of replacing.
     #[test]
-    fn hidden_extra_names_never_show_and_one_name_is_kept() {
+    fn extra_names_show_and_a_new_name_joins_them() {
         let (_dir, mut app) = crate::fixtures::test_app();
-        app.settings.player_name = "Main".into();
-        app.saved_config.player_names = vec!["Alt".into()];
-        assert_eq!(shown_names(&app), ["Main"], "player_names is hidden");
-        assert!(
-            !add_name_shown(&app),
-            "one name: + Add name waits for an empty slot"
-        );
-        assert_eq!(name_added(&mut app, "Other".into()), None);
-        assert_eq!(app.settings.player_name, "Other", "a new name replaces it");
-        app.settings.player_name.clear();
+        app.settings.player_name = "Öster".into();
+        app.saved_config.player_names = vec!["öster".into(), "Alt".into()];
+        assert_eq!(shown_names(&app), ["Öster", "Alt"]);
         assert!(add_name_shown(&app));
+        assert_eq!(
+            name_added(&mut app, "Other".into()),
+            Some(ConfigEdit::AddPlayerName("Other".into()))
+        );
+        assert_eq!(app.settings.player_name, "Öster", "the main name stays");
+        app.settings.player_name.clear();
+        assert_eq!(name_added(&mut app, "New".into()), None);
+        assert_eq!(
+            app.settings.player_name, "New",
+            "an empty main name is filled"
+        );
     }
 
     #[test]
@@ -530,6 +557,7 @@ mod tests {
         let mut c = app.saved_config.clone();
         ConfigEdit::RemovePlayerNames(vec!["Main".into()]).apply(&mut c);
         assert!(c.player_names.is_empty());
+        app.saved_config = c;
         assert_eq!(name_removed(&mut app, 0), None, "no names left to remove");
     }
 
@@ -612,14 +640,20 @@ mod tests {
         )));
         let _ = app.update(page(Msg::ChipAdd));
         assert_eq!(on_disk(&dir).player_name.as_deref(), Some("Main"));
-        // Extra names are hidden, so another name replaces it.
-        let _ = app.update(page(Msg::ChipDraft(ChipList::Names, Some("Other".into()))));
-        let _ = app.update(page(Msg::ChipAdd));
+        // Another name joins the extra names; the same name in other case
+        // is not added twice.
+        for typed in ["Other", "OTHER"] {
+            let _ = app.update(page(Msg::ChipDraft(ChipList::Names, Some(typed.into()))));
+            let _ = app.update(page(Msg::ChipAdd));
+        }
+        let saved = on_disk(&dir);
+        assert_eq!(saved.player_name.as_deref(), Some("Main"));
+        assert_eq!(saved.player_names, ["Other"]);
+        assert_eq!(saved.own_player_names(), ["Main", "Other"]);
+        // Removing the main name moves the next one up.
+        let _ = app.update(page(Msg::ChipRemove(ChipList::Names, 0)));
         let saved = on_disk(&dir);
         assert_eq!(saved.player_name.as_deref(), Some("Other"));
         assert!(saved.player_names.is_empty());
-        // Removing the only name clears it.
-        let _ = app.update(page(Msg::ChipRemove(ChipList::Names, 0)));
-        assert_eq!(on_disk(&dir).player_name, None);
     }
 }

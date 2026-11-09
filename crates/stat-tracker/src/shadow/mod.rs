@@ -14,6 +14,13 @@
 //! by default; `STAT_TRACKER_BANS_PICKS_RECOGNIZER=off` turns it off. It needs
 //! its own icon pack under `<data_dir>/templates/bans-picks-v1/`.
 //!
+//! The queue title reader ([`queue_title`], `rank-v1`) reads the queue title
+//! (for example OPEN QUEUE or ROLE QUEUE) at the top left of the map vote,
+//! hero ban and hero select screens. It is off by default;
+//! `STAT_TRACKER_QUEUE_TITLE_RECOGNIZER=on` turns it on. It needs its own
+//! template pack under `<data_dir>/templates/queue-title-v1/` and returns
+//! `None` for any title the pack does not know.
+//!
 //! The rank update reader ([`rank`], `rank-v1`) reads the competitive rank
 //! screen after a game. It is off by default; `STAT_TRACKER_RANK_RECOGNIZER=on`
 //! turns it on, and it needs its own pack under `<data_dir>/templates/rank-v1/`.
@@ -30,6 +37,7 @@ pub mod digits;
 pub mod heroes;
 pub mod log;
 mod ncc;
+pub mod queue_title;
 pub mod rank;
 pub mod reader;
 pub mod result;

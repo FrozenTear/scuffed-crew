@@ -72,7 +72,7 @@ pub fn read_names(board: &DynamicImage, team_size: usize, pack: Option<&NamePack
     }
 }
 
-/// Find `player` on `board`. `tesseract_rows` is the tracker's current name
+/// Find `player` (one name, or every saved name) on `board`. `tesseract_rows` is the tracker's current name
 /// read for this cv mode (cell rows under ocr-v1, name windows under the
 /// new reader). See [`choose_player_row`].
 ///
@@ -85,7 +85,7 @@ pub fn read_names(board: &DynamicImage, team_size: usize, pack: Option<&NamePack
 pub fn match_player_row(
     board: &DynamicImage,
     team_size: usize,
-    player: &str,
+    player: &(impl crate::parse::NameList + ?Sized),
     switch: &NameSwitch,
     policy: BoardMatch,
     tesseract_rows: impl FnOnce() -> Vec<RowOcrResult>,

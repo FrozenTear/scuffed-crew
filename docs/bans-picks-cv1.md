@@ -79,12 +79,50 @@ preferred hero. Without all 54 hero files there is no reader.
 |---|---|---|
 | Ban results | `read_ban_results_rings` | four bans with team side, the lobby ban when the lobby layout shows |
 | Hero select | `read_hero_select` | six own-team picks and the own ring colour |
-| Ban vote | `read_ban_vote` | six own-team picks |
+| Ban vote | `read_ban_vote` | the local player's three vote slots (hero, skipped, empty) and the TEAM BAN SCORE strip (three heroes with vote counts) |
 
 Every value is `{value, confidence}`. A position that cannot be read is
 `null`, never a guess. The "no preferred hero" icon reads `no_preference`
 (only when `no-preference.png` is installed). The combined `read` returns
 `bans`, `lobby_ban`, `picks` and `bans_picks_recognizer: "cv-v1"`.
+
+## Ban vote screen
+
+The left roster column of the ban vote screen shows each player's
+preferred heroes, not their votes, so it is never read on this screen
+(alpha.2.1 and older did, and stored those portraits as votes). The reader
+reads two parts instead, each `None` when the frame does not look like it:
+
+- The local player's three vote slots, the small boxes under their name
+  (outer borders x 193..243, 255..304 and 316..366, y 456..506). A slot is
+  `hero` (red border, hero art, matched at 0.465 of the template size on
+  the full-size gradient plane), `skipped` (a circle with a slash), `empty`
+  (a flat inside) or unread. An `empty` slot means nothing was in it on
+  that frame, which can be a vote cast after the last frame, so the app
+  shows it as "Not seen" and never as a missing vote. The layout check
+  needs a red or grey border at each box and nothing border-like 6 pixels
+  outside it.
+- The TEAM BAN SCORE strip: the red title, three hero boxes (x 1154..1229,
+  1242..1317 and 1330..1405, y 97..171, matched at 0.70) and the vote
+  count under each, read with ten digit grids kept in code (no OCR). An
+  empty box has a grey dash and reads as `empty`.
+
+Teammates' vote slots sit at the same x in their rows and are not read
+yet; the stored shape has a `voter` index so they can be added later.
+
+The game record keeps `ban_vote` as the local player's three votes in slot
+order (a hero, or null for skipped, empty or unread), plus `ban_votes`
+(every slot with its state) and `ban_score` (the strip). The upload sends
+`ban_vote` as before and `ban_votes` and `ban_score` as optional plain
+values, which a server that does not know them ignores.
+
+The tracker always writes `ban_votes` (an array, or an explicit null when
+the vote screen was not read) whenever the bans and picks reader stores a
+result, and `ban_score` the same way. The app reads our votes only from
+`ban_votes`. A game with no `ban_votes` key was stored by alpha.2.1 or
+older, where `ban_vote` holds the roster preferred heroes and not votes, so
+the app shows its votes as not read and never falls back to that list.
+`no_preference` in `ban_vote` is legacy data only.
 
 ## Team side
 

@@ -108,6 +108,50 @@ fn a_failed_read_keeps_the_window_index() {
     assert_eq!((m.row, m.window, m.sole_window), (0, 2, true));
 }
 
+/// Every saved name is tried: an alt finds its row when the main name is
+/// on no row, and "öster" finds "ÖSTER" (Unicode case folds both ways).
+#[test]
+fn any_saved_name_finds_the_row() {
+    let rows = vec![
+        valid_row("Stranger"),
+        valid_row("ÖSTER"),
+        valid_row("Other"),
+    ];
+    let names = ["FrozenTear".to_string(), "öster".to_string()];
+    assert_eq!(
+        match_player_row_by_names(&rows, &names[..]).map(|m| m.row),
+        Some(1)
+    );
+    assert_eq!(
+        match_player_row_by_names(&rows, "öster").map(|m| m.row),
+        Some(1)
+    );
+    let none: [String; 0] = [];
+    assert_eq!(match_player_row_by_names(&rows, &none[..]), None);
+    // One name behaves as the single-name matcher.
+    assert_eq!(
+        match_player_row_by_names(&rows, "Other"),
+        match_player_row_by_name(&rows, "Other")
+    );
+}
+
+/// A whole-name hit for any saved name beats a fuzzy hit for another,
+/// whatever the order; between two fuzzy hits the better score wins.
+#[test]
+fn a_substring_hit_for_any_name_beats_a_fuzzy_one() {
+    let rows = vec![valid_row("FrozenTeer"), valid_row("AltName")];
+    let names = ["FrozenTear".to_string(), "AltName".to_string()];
+    assert_eq!(
+        match_player_row_by_names(&rows, &names[..]).map(|m| m.row),
+        Some(1)
+    );
+    let rows = vec![valid_row("FrozenTeer"), valid_row("AltNome")];
+    assert_eq!(
+        match_player_row_by_names(&rows, &names[..]).map(|m| m.row),
+        Some(0)
+    );
+}
+
 /// Reads the extra 5v5 windows produce on rows that are not the player's:
 /// digits from the E/A columns, perk-icon and ult-ring junk, rank badge
 /// numerals, and clipped plate edges.

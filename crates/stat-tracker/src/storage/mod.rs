@@ -32,8 +32,8 @@ pub use files::{
     read_snapshot,
 };
 pub use rules::{
-    MatchEdit, carry_member_hero_edit, collect_segment_resolutions, derive_hero_segments,
-    latest_per_game, majority_hero, majority_map, member_hero_edit,
+    MatchEdit, apply_segment_action, carry_member_hero_edit, collect_segment_resolutions,
+    derive_hero_segments, latest_per_game, majority_hero, majority_map, member_hero_edit,
 };
 
 pub use migrate_timeline::{

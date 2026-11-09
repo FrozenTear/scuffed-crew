@@ -72,17 +72,17 @@ pub const APP_ONLY_KEYS: [&str; 5] = [
     "share_report_pictures",
 ];
 
-/// Config keys whose Settings row is not shown because nothing reads the
-/// key yet: the rank reader, stat picture upload, report pictures, the
-/// upload switch and extra in-game names.
-/// The keys still load and save as before, and a hand-edited value never
-/// shows in a summary, an After restart tag or the waiting count.
-pub const HIDDEN_KEYS: [&str; 5] = [
+/// Config keys whose Settings row is not shown: the upload switch, which
+/// PR 560 wires. The key still loads and saves as before, and a hand-edited
+/// value never shows in a summary, an After restart tag or the waiting count.
+pub const HIDDEN_KEYS: [&str; 1] = ["live_upload"];
+
+/// Shown rows whose key nothing reads yet: the row says so, has no After
+/// restart tag, and a change to it is not counted as waiting.
+pub const NOT_READ_KEYS: [&str; 3] = [
     "rank_reader",
     "share_stat_pictures",
     "share_report_pictures",
-    "live_upload",
-    "player_names",
 ];
 
 /// Whether the Settings row for config key `key` is shown.
@@ -105,7 +105,7 @@ pub fn same_name(a: &str, b: &str) -> bool {
 /// True when `key` reaches the tracker only after it restarts: the tracker
 /// reads config.toml once, at start.
 pub fn needs_restart(key: &str) -> bool {
-    !APP_ONLY_KEYS.contains(&key)
+    !APP_ONLY_KEYS.contains(&key) && !NOT_READ_KEYS.contains(&key)
 }
 
 /// Left column, top to bottom.
@@ -526,11 +526,12 @@ fn as_form_would_save(config: &Config) -> Config {
 /// How many settings differ between `running` (what the tracker started
 /// with) and `saved` (config.toml now), leaving out [`APP_ONLY_KEYS`]. Each
 /// changed setting counts once: one Reader pick changes `reader` and `ocr`
-/// but counts as one.
+/// but counts as one, and so do the names ([`Config::own_player_names`]).
 pub fn changes_waiting(running: &Config, saved: &Config) -> usize {
     let running = as_form_would_save(running);
     let saved = as_form_would_save(saved);
-    let reader = usize::from(ReaderChoice::of(&running) != ReaderChoice::of(&saved));
+    let reader = usize::from(ReaderChoice::of(&running) != ReaderChoice::of(&saved))
+        + usize::from(running.own_player_names() != saved.own_player_names());
     let (Ok(a), Ok(b)) = (serde_json::to_value(&running), serde_json::to_value(&saved)) else {
         return usize::from(running != saved);
     };
@@ -539,7 +540,8 @@ pub fn changes_waiting(running: &Config, saved: &Config) -> usize {
             for key in APP_ONLY_KEYS
                 .iter()
                 .chain(&HIDDEN_KEYS)
-                .chain(&["reader", "ocr"])
+                .chain(&NOT_READ_KEYS)
+                .chain(&["reader", "ocr", "player_name", "player_names"])
             {
                 a.remove(*key);
                 b.remove(*key);
@@ -1061,32 +1063,33 @@ mod tests {
         }
     }
 
-    /// A hidden row's key (report pictures, the upload switch) is inert: a
-    /// hand-edited value shows in no summary, tag or count.
+    /// Only the upload switch (PR 560) stays hidden and inert. Report
+    /// pictures is in its summary again; extra names count as waiting (the
+    /// Tab reader reads them at start); keys nothing reads count as none,
+    /// and "öster" after "Öster" is no change.
     #[test]
-    fn hidden_keys_never_show_in_summaries_tags_or_counts() {
+    fn summaries_and_counts_follow_what_is_shown_and_read() {
+        assert_eq!(HIDDEN_KEYS, ["live_upload"]);
         let mut v = values();
         v.report_pictures = true;
         assert!(
-            !AdvancedSection::CaptureReading
+            AdvancedSection::CaptureReading
                 .summary(&v)
-                .contains("report pictures")
+                .ends_with(", report pictures on")
         );
         let running = Config::default();
         let mut saved = running.clone();
-        saved.share_report_pictures = true;
-        saved.live_upload = false;
-        saved.player_names = vec!["Alt".into()];
-        saved.rank_reader = true;
-        saved.share_stat_pictures = true;
+        (saved.live_upload, saved.share_report_pictures) = (false, true);
+        (saved.rank_reader, saved.share_stat_pictures) = (true, true);
         assert_eq!(changes_waiting(&running, &saved), 0);
-        // The focus gate is shown and read now: its change waits.
-        saved.capture_only_on_screen = false;
+        saved.player_names = vec!["Alt".into()];
         assert_eq!(changes_waiting(&running, &saved), 1);
-        for key in HIDDEN_KEYS {
-            assert!(!row_shown(key), "{key}");
-        }
-        // Capture and reading keeps its tag from the keys it shows.
+        let mut main = running.clone();
+        main.player_name = Some("Öster".into());
+        let mut same = main.clone();
+        same.player_names = vec!["öster".into()];
+        assert_eq!(changes_waiting(&main, &same), 0, "one name");
+        assert!(needs_restart("player_names") && !needs_restart("rank_reader"));
         assert!(AdvancedSection::CaptureReading.after_restart());
     }
 
@@ -1095,7 +1098,7 @@ mod tests {
         let mut v = values();
         assert_eq!(
             AdvancedSection::CaptureReading.summary(&v),
-            "Automatic capture on DP-3, new reader with OCR backup"
+            "Automatic capture on DP-3, new reader with OCR backup, report pictures off"
         );
         assert_eq!(
             AdvancedSection::TrackerService.summary(&v),

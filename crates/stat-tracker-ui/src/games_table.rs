@@ -570,7 +570,12 @@ fn game_row(
                     TEXT_2
                 })
                 .into(),
-            Col::Rank | Col::Length | Col::Crew => text("-").size(SIZE_META).color(TEXT_3).into(),
+            Col::Length => match crate::games_detail::tracked(g).length_cell() {
+                Some(len) => text(len).size(SIZE_META).color(TEXT_2).into(),
+                None => text("-").size(SIZE_META).color(TEXT_3).into(),
+            },
+            // Not recorded by the tracker (the Sort note says so).
+            Col::Rank | Col::Crew => text("-").size(SIZE_META).color(TEXT_3).into(),
             Col::Time => {
                 let (date, hm) = games_rows::time_cell_in(g, state.grouping, &chrono::Local);
                 let hm = text(hm).size(SIZE_META).color(TEXT_2);

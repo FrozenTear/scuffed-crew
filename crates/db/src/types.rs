@@ -571,6 +571,13 @@ pub struct PersonalMatch {
     /// `name_recognizer` and `suspect_fields`). Additive on match-list JSON.
     #[serde(default)]
     pub bans_picks: Option<scuffed_types::BansPicks>,
+    /// Rank update screen read for this game, or `None` (JSON null).
+    ///
+    /// Same lifecycle as `bans_picks`: `None` when the upload omitted it or
+    /// sent something other than an object, and on older rows. A re-upload of
+    /// the session replaces it. See [`scuffed_types::MatchRank`] for the shape.
+    #[serde(default)]
+    pub rank: Option<scuffed_types::MatchRank>,
 }
 
 /// Aggregated personal stats for a member.

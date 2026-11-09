@@ -25,6 +25,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", features = ["json"] }
+url = "2.5"
 urlencoding = "2"
 # Keep in lockstep with scuffed-chat (0.44.2 yanked; fixes land in >=0.44.7).
 nostr = { version = "0.44.8", default-features = false, features = ["std"] }

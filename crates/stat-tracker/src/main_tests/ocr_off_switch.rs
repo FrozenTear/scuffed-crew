@@ -22,7 +22,7 @@ fn with_ocr_off_a_tab_frame_is_analysed_without_ocr_and_is_not_a_failed_capture(
     let analysed = analyze_frame(
         frame,
         matcher,
-        Some("PLAYER".into()),
+        vec!["PLAYER".into()],
         detect::MatchOutcome::Unknown,
         FrameFlags {
             allow_banner_recovery: true,
@@ -225,7 +225,7 @@ async fn own_process_tab_pass_with_ocr_off() {
     let analysed = analyze_frame(
         s1_tab_frame(),
         matcher,
-        Some("PLAYER".into()),
+        vec!["PLAYER".into()],
         detect::MatchOutcome::Unknown,
         FrameFlags {
             allow_banner_recovery: true,
@@ -309,7 +309,7 @@ async fn own_process_tab_pass_with_ocr_off() {
     let analysed = analyze_frame(
         s1_tab_frame_lit(LIT),
         matcher,
-        Some("PLAYER".into()),
+        vec!["PLAYER".into()],
         detect::MatchOutcome::Unknown,
         FrameFlags {
             allow_banner_recovery: true,

@@ -86,9 +86,17 @@ fn the_cell_ocr_sites_go_through_the_reader_switch() {
         "let looks_like_scoreboard = match &new_board { Some(_) => board_refusal.is_none(), None => parse::looks_like_scoreboard(&rows), };"
     ));
     assert!(hc_body.contains(
-        "let scoreboard_read = match &new_board { Some(board) => reader_apply::read_own_row_stats(board, board_row, &outcome_label) .map(|read| (read.matched, true, read.held)), None => parse::read_scoreboard("
+        "let scoreboard_read = match &new_board { Some(board) => reader_apply::read_own_row_stats(board, board_row, &outcome_label) .map(|read| (read.matched, true, read.held)), None => read_scoreboard_named("
     ));
-    assert_eq!(hc_body.matches("parse::read_scoreboard(").count(), 1);
+    assert_eq!(hc_body.matches("read_scoreboard_named(").count(), 1);
+    assert_eq!(hc_body.matches("parse::read_scoreboard(").count(), 0);
+    // The one raw-text read, once per saved name (`read_scoreboard_named`).
+    assert_eq!(
+        fn_source("read_scoreboard_named")
+            .matches("parse::read_scoreboard(")
+            .count(),
+        1
+    );
     assert!(hc_body.contains(
         "let suspect = if board_reader { held_cols } else { parse::player_row_suspect_mask(&rows, player_row_idx) };"
     ));
@@ -406,6 +414,199 @@ async fn a_held_cell_stores_its_unsure_read_not_the_older_value() {
     let gate = st.active_game.as_ref().unwrap().gate.unwrap();
     assert_eq!(gate.accepted.healing, 5600);
     assert!(!gate.has_unsure_shown.iter().any(|&shown| shown));
+}
+
+/// A held kill column on the final board, read twice. The first held Tab
+/// stores the unsure 39 (other columns moved, so the dry run takes it).
+/// The second held Tab of the same board has every other column unchanged,
+/// so the dry run sees a quiet single-field jump past the kill-column jump
+/// limit and gives no fresh read. The stored row must keep the unsure 39,
+/// flagged, not fall back to the older accepted 31.
+#[tokio::test]
+async fn a_second_held_kill_column_keeps_the_stored_unsure_read() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let held_e = [
+        Some((39, true)),
+        sure(18),
+        sure(5),
+        sure(12707),
+        sure(1821),
+        sure(4412),
+    ];
+    let (st, seen) = o10_run(
+        &ctx,
+        vec![
+            (0, all_sure([31, 17, 5, 10584, 1510, 3911])),
+            (60, held_e),
+            (15, held_e),
+        ],
+    )
+    .await;
+    assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+    let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(o10_stats(&rows[0])[0], 31);
+    assert!(rows[0].suspect_fields.is_empty());
+    assert_eq!(o10_stats(&rows[1]), [39, 18, 5, 12707, 1821, 4412]);
+    assert_eq!(rows[1].suspect_fields, vec!["e".to_string()]);
+    assert_eq!(
+        o10_stats(&rows[2]),
+        [39, 18, 5, 12707, 1821, 4412],
+        "the second held Tab keeps the stored unsure read, not the accepted 31"
+    );
+    assert_eq!(rows[2].suspect_fields, vec!["e".to_string()]);
+    let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+    assert_eq!(gate.accepted.elims, 31, "the gate keeps its accepted value");
+    assert!(gate.has_unsure_shown[0]);
+    assert_eq!(gate.unsure_shown[0], 39);
+}
+
+/// A held kill column on the final board, then a Tab where that cell has
+/// no number. An unread cell carries no new information, so the stored
+/// row must keep the unsure 39, flagged, not fall back to the older
+/// accepted 31.
+#[tokio::test]
+async fn a_second_unread_kill_column_keeps_the_stored_unsure_read() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let held_e = [
+        Some((39, true)),
+        sure(18),
+        sure(5),
+        sure(12707),
+        sure(1821),
+        sure(4412),
+    ];
+    let unread_e = [None, sure(18), sure(5), sure(12707), sure(1821), sure(4412)];
+    let (st, seen) = o10_run(
+        &ctx,
+        vec![
+            (0, all_sure([31, 17, 5, 10584, 1510, 3911])),
+            (60, held_e),
+            (15, unread_e),
+        ],
+    )
+    .await;
+    assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+    let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(o10_stats(&rows[1]), [39, 18, 5, 12707, 1821, 4412]);
+    assert_eq!(rows[1].suspect_fields, vec!["e".to_string()]);
+    assert_eq!(
+        o10_stats(&rows[2]),
+        [39, 18, 5, 12707, 1821, 4412],
+        "an unread second Tab keeps the stored unsure read, not the accepted 31"
+    );
+    assert_eq!(rows[2].suspect_fields, vec!["e".to_string()]);
+    let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+    assert_eq!(gate.accepted.elims, 31, "the gate keeps its accepted value");
+    assert!(gate.has_unsure_shown[0]);
+    assert_eq!(gate.unsure_shown[0], 39);
+}
+
+/// A held kill column stores unsure 39, then a later Tab reads a different
+/// refused number (38). The newer refused read replaces the old unsure
+/// shown value, still flagged, rather than keeping 39 or falling back to
+/// the older accepted 31.
+#[tokio::test]
+async fn a_second_refused_kill_column_replaces_the_stored_unsure_read() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let held_39 = [
+        Some((39, true)),
+        sure(18),
+        sure(5),
+        sure(12707),
+        sure(1821),
+        sure(4412),
+    ];
+    let held_38 = [
+        Some((38, true)),
+        sure(18),
+        sure(5),
+        sure(12707),
+        sure(1821),
+        sure(4412),
+    ];
+    let (st, seen) = o10_run(
+        &ctx,
+        vec![
+            (0, all_sure([31, 17, 5, 10584, 1510, 3911])),
+            (60, held_39),
+            (15, held_38),
+        ],
+    )
+    .await;
+    assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+    let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(o10_stats(&rows[1]), [39, 18, 5, 12707, 1821, 4412]);
+    assert_eq!(rows[1].suspect_fields, vec!["e".to_string()]);
+    assert_eq!(
+        o10_stats(&rows[2]),
+        [38, 18, 5, 12707, 1821, 4412],
+        "a newer refused read replaces the older unsure shown value"
+    );
+    assert_eq!(rows[2].suspect_fields, vec!["e".to_string()]);
+    let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+    assert_eq!(gate.accepted.elims, 31, "the gate keeps its accepted value");
+    assert!(gate.has_unsure_shown[0]);
+    assert_eq!(gate.unsure_shown[0], 38);
+}
+
+/// A held kill column stores unsure 39, then a later Tab reads a jump past
+/// the kill-column jump limit and rate cap (399). Measured from the stored
+/// unsure value that jump is not plausible, so the stored row keeps 39,
+/// flagged, rather than replace it with the refused 399.
+#[tokio::test]
+async fn a_second_refused_jump_keeps_the_stored_unsure_read() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let held_39 = [
+        Some((39, true)),
+        sure(18),
+        sure(5),
+        sure(12707),
+        sure(1821),
+        sure(4412),
+    ];
+    let held_399 = [
+        Some((399, true)),
+        sure(18),
+        sure(5),
+        sure(12707),
+        sure(1821),
+        sure(4412),
+    ];
+    let (st, seen) = o10_run(
+        &ctx,
+        vec![
+            (0, all_sure([31, 17, 5, 10584, 1510, 3911])),
+            (60, held_39),
+            (15, held_399),
+        ],
+    )
+    .await;
+    assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+    let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(o10_stats(&rows[1]), [39, 18, 5, 12707, 1821, 4412]);
+    assert_eq!(rows[1].suspect_fields, vec!["e".to_string()]);
+    assert_eq!(
+        o10_stats(&rows[2]),
+        [39, 18, 5, 12707, 1821, 4412],
+        "a refused jump from the stored unsure read keeps 39, not 399"
+    );
+    assert_eq!(rows[2].suspect_fields, vec!["e".to_string()]);
+    let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+    assert_eq!(gate.accepted.elims, 31, "the gate keeps its accepted value");
+    assert!(gate.has_unsure_shown[0]);
+    assert_eq!(gate.unsure_shown[0], 39);
 }
 
 /// An unsure read the gate would not take keeps the accepted value,

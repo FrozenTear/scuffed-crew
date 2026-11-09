@@ -10775,6 +10775,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -10970,6 +10971,7 @@ dependencies = [
  "tower_governor",
  "tracing",
  "tracing-subscriber",
+ "url",
  "urlencoding",
  "uuid",
  "zeroize",
@@ -10978,7 +10980,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker"
-version = "0.6.0-alpha.2.1"
+version = "0.6.0-alpha.2.3"
 dependencies = [
  "ab_glyph",
  "anyhow",
@@ -11015,7 +11017,7 @@ dependencies = [
 
 [[package]]
 name = "scuffed-stat-tracker-core"
-version = "0.6.0-alpha.2.1"
+version = "0.6.0-alpha.2.3"
 dependencies = [
  "anyhow",
  "chrono",

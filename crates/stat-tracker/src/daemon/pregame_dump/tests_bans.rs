@@ -9,7 +9,8 @@ use image::{DynamicImage, RgbImage};
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 use stat_tracker::ocr_status::{publish_bans_picks_notice, read_status};
 use stat_tracker::shadow::bans_picks::{
-    BanResults, BansPicksSetting, Choice, HeroSelect, Layout, Read,
+    BanResults, BanVote, BansPicksSetting, Choice, HeroSelect, Layout, Read, SlotState,
+    VoteSlotRead,
 };
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -54,8 +55,19 @@ impl Fake {
 }
 
 impl Engine for Fake {
-    fn vote(&self, _: &RgbImage) -> Option<Vec<Read>> {
-        self.go().then(|| vec![read("ana")])
+    fn vote(&self, _: &RgbImage) -> Option<BanVote> {
+        self.go().then(|| BanVote {
+            slots: Some(vec![VoteSlotRead {
+                voter: 0,
+                slot: 1,
+                state: Some(SlotState::Hero),
+                hero: Some("ana".to_string()),
+                confidence: 0.9,
+                score: 0.9,
+                margin: 0.2,
+            }]),
+            score: None,
+        })
     }
     fn select(&self, _: &RgbImage) -> Option<HeroSelect> {
         self.go().then(|| HeroSelect {
@@ -621,4 +633,57 @@ async fn with_the_reader_off_a_game_without_screens_stays_silent() {
     assert_eq!(store.get_all_matches().await.unwrap().len(), 1);
     assert_eq!(rig.health(), None);
     assert_eq!(status_of(&store).await, Some(BansPicksStatus::ReaderOff));
+}
+
+// A game whose screens were read never shows the no-screens notice: see
+// a_read_stores_the_result_on_the_game_and_clears_the_warning and
+// a_later_capture_of_a_read_game_keeps_its_result_and_adds_no_warning.
+#[tokio::test]
+async fn the_no_pregame_screens_notice_is_shown_once_per_game() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let (store, stored) = game_then_read(&rig, &mut dump, Vec::new()).await;
+    assert_eq!(stored, None);
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    // The notice is dismissed; a later capture of the same game does not
+    // bring it back.
+    publish_bans_picks_notice(rig.dir.path(), "");
+    dump.attach_bans_picks(&store, "g1").await;
+    assert_eq!(rig.health(), None, "not told again for the same game");
+    // The next game without screens is told.
+    store
+        .insert_match(crate::main_tests::test_match("g2", "defeat"))
+        .await
+        .unwrap();
+    dump.attach_bans_picks(&store, "g2").await;
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    assert_eq!(rig.reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn the_does_not_fit_notice_is_shown_once_per_game() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    dump.send(three(2560, 1440));
+    let store = storage::LocalStore::open(rig.dir.path())
+        .await
+        .expect("store");
+    let mut old = crate::main_tests::test_match("g1", "victory");
+    old.played_at = (chrono::Utc::now() - chrono::Duration::minutes(10)).into();
+    store.insert_match(old).await.unwrap();
+    dump.attach_bans_picks(&store, "g1").await;
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    assert_eq!(status_of(&store).await, Some(BansPicksStatus::NoFrames));
+    // The notice is dismissed; a later capture of the same game does not
+    // bring it back.
+    publish_bans_picks_notice(rig.dir.path(), "");
+    dump.attach_bans_picks(&store, "g1").await;
+    assert_eq!(rig.health(), None, "not told again for the same game");
+    // The next game that also does not fit the held screens is told.
+    let mut next = crate::main_tests::test_match("g2", "defeat");
+    next.played_at = (chrono::Utc::now() - chrono::Duration::minutes(10)).into();
+    store.insert_match(next).await.unwrap();
+    dump.attach_bans_picks(&store, "g2").await;
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    assert_eq!(rig.reads.load(Ordering::SeqCst), 0);
 }

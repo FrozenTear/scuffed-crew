@@ -5,14 +5,16 @@
 //! The pre-game saver ([`super::pregame_dump`]) already finds the three
 //! screens: the ban vote, the ban results and the hero select, each as its
 //! last frame (the first frame of a screen is mid transition, which the
-//! reader must not be given). One exception: a game whose hero select has
-//! only a first frame (a one-tick select) gives that frame for the team
-//! ring of the ban results, and for nothing else: its picks are not
-//! stored. [`BansPicksFeed`] sees every batch the saver
-//! sends, keeps those three frames of the current game, and reads them when
-//! the game is first recorded. Nothing here can stop a game from being
-//! recorded: every failure is a sentence for the app's Tracker health and
-//! an empty result on the game.
+//! reader must not be given). Two exceptions. A one-tick hero ban (the
+//! focus gate paused right after its first tick) still emits its last
+//! frame, which may be the same pixels as its first, so the vote is still
+//! read. A game whose hero select has only a first frame (a one-tick
+//! select) gives that frame for the team ring of the ban results, and for
+//! nothing else: its picks are not stored. [`BansPicksFeed`] sees every
+//! batch the saver sends, keeps those three frames of the current game, and
+//! reads them when the game is first recorded. Nothing here can stop a game
+//! from being recorded: every failure is a sentence for the app's Tracker
+//! health and an empty result on the game.
 //!
 //! Frames are held only between the screen and the game's first record.
 //! A new game's folder drops the old ones. With the pre-game screen saves
@@ -27,8 +29,8 @@ use image::{DynamicImage, RgbImage};
 use serde::Serialize;
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 use stat_tracker::shadow::bans_picks::{
-    BanRead, BanResults, BansPicksSetting, FRAME_H, FRAME_W, HeroSelect, Layout, RECOGNIZER_ID,
-    Read, Reader, TEMPLATE_DIR, self_ring_colour,
+    BanRead, BanResults, BanScoreEntry, BanVote, BansPicksSetting, FRAME_H, FRAME_W, HeroSelect,
+    Layout, RECOGNIZER_ID, Read, Reader, SlotState, TEMPLATE_DIR, VoteSlotRead, self_ring_colour,
 };
 
 use super::pregame_dump::{BAN_RESULTS_NAME, PregameOp, PregamePhase};
@@ -53,13 +55,13 @@ pub(crate) const NO_SELECT_NOTICE: &str =
 /// The reader, as far as this wiring uses it. A trait so a test can count
 /// the calls and make one fail.
 pub(crate) trait Engine: Send + Sync {
-    fn vote(&self, img: &RgbImage) -> Option<Vec<Read>>;
+    fn vote(&self, img: &RgbImage) -> Option<BanVote>;
     fn select(&self, img: &RgbImage) -> Option<HeroSelect>;
     fn bans(&self, img: &RgbImage, rings: &[[u8; 3]]) -> Option<BanResults>;
 }
 
 impl Engine for Reader {
-    fn vote(&self, img: &RgbImage) -> Option<Vec<Read>> {
+    fn vote(&self, img: &RgbImage) -> Option<BanVote> {
         self.read_ban_vote(img)
     }
     fn select(&self, img: &RgbImage) -> Option<HeroSelect> {
@@ -106,8 +108,21 @@ struct Stored {
     bans: Vec<BanRead>,
     lobby_ban: Option<Read>,
     picks: Vec<Read>,
-    /// The six own-team rows of the ban vote screen.
+    /// The local player's three ban votes, in slot order: the hero, or an
+    /// unread value for a skipped, empty or unclear slot. Empty when the
+    /// ban vote screen was not seen or its slots were not read. (Up to
+    /// 0.6.0-alpha.2.1 this held the six roster rows, which show each
+    /// player's preferred hero and are not votes.)
     ban_vote: Vec<Read>,
+    /// The vote slots in full (state, hero, scores); null when not read.
+    /// Always written, as an array or an explicit null, whenever this
+    /// reader stores a result. A stored game with no `ban_votes` key was
+    /// read by 0.6.0-alpha.2.1 or older, whose `ban_vote` holds roster
+    /// portraits, so readers treat a missing key as not read.
+    ban_votes: Option<Vec<VoteSlotRead>>,
+    /// The TEAM BAN SCORE strip: the team's three most voted heroes with
+    /// their vote counts; null when not read.
+    ban_score: Option<Vec<BanScoreEntry>>,
     bans_picks_recognizer: &'static str,
 }
 
@@ -550,9 +565,17 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
         Some(f) => Some(engine.bans(&rgb(f), &rings)?),
         None => None,
     };
-    let ban_vote = match &frames.vote {
-        Some(f) => engine.vote(&rgb(f))?,
-        None => Vec::new(),
+    let vote = match &frames.vote {
+        Some(f) => Some(engine.vote(&rgb(f))?),
+        None => None,
+    };
+    if let Some(v) = &vote {
+        log_vote(v);
+    }
+    let ban_vote = vote.as_ref().map(BanVote::own_votes).unwrap_or_default();
+    let (ban_votes, ban_score) = match vote {
+        Some(v) => (v.slots, v.score),
+        None => (None, None),
     };
     Some(Stored {
         layout: results.as_ref().map(|r| r.layout),
@@ -560,8 +583,50 @@ fn read_with(engine: &dyn Engine, frames: &Frames) -> Option<Stored> {
         lobby_ban: results.and_then(|r| r.lobby_ban),
         picks: select.map(|s| s.picks).unwrap_or_default(),
         ban_vote,
+        ban_votes,
+        ban_score,
         bans_picks_recognizer: RECOGNIZER_ID,
     })
+}
+
+/// One line on what the ban vote screen read: each own slot as
+/// `hero:<key>`, `hero:?`, `skipped`, `empty` or `unread`, and the strip
+/// as `<key or ?>=<count or ?>` per box (`empty` for a box with no hero).
+fn log_vote(v: &BanVote) {
+    let slots = v.slots.as_ref().map_or_else(
+        || "not shown".to_string(),
+        |slots| {
+            slots
+                .iter()
+                .map(|s| match (s.state, s.hero.as_deref()) {
+                    (Some(SlotState::Hero), Some(key)) => format!("hero:{key}"),
+                    (Some(SlotState::Hero), None) => "hero:?".to_string(),
+                    (Some(SlotState::Skipped), _) => "skipped".to_string(),
+                    (Some(SlotState::Empty), _) => "empty".to_string(),
+                    (None, _) => "unread".to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        },
+    );
+    let strip = v.score.as_ref().map_or_else(
+        || "not shown".to_string(),
+        |boxes| {
+            boxes
+                .iter()
+                .map(|e| {
+                    if e.empty {
+                        "empty".to_string()
+                    } else {
+                        let votes = e.votes.map_or_else(|| "?".to_string(), |n| n.to_string());
+                        format!("{}={votes}", e.hero.as_deref().unwrap_or("?"))
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        },
+    );
+    tracing::info!(target: "scuffed_stat_tracker", own_votes = %slots, ban_score = %strip, "bans and picks: ban vote screen read");
 }
 
 #[cfg(test)]
@@ -582,8 +647,19 @@ mod notice_tests {
     }
 
     impl Engine for BansOnly {
-        fn vote(&self, _: &RgbImage) -> Option<Vec<Read>> {
-            Some(vec![hero("ana")])
+        fn vote(&self, _: &RgbImage) -> Option<BanVote> {
+            Some(BanVote {
+                slots: Some(vec![VoteSlotRead {
+                    voter: 0,
+                    slot: 1,
+                    state: Some(SlotState::Hero),
+                    hero: Some("ana".to_string()),
+                    confidence: 0.9,
+                    score: 0.9,
+                    margin: 0.2,
+                }]),
+                score: None,
+            })
         }
         fn select(&self, _: &RgbImage) -> Option<HeroSelect> {
             Some(HeroSelect {
@@ -674,6 +750,40 @@ mod notice_tests {
                 missing: vec![BansPicksMissing::HeroSelect]
             }
         );
+    }
+
+    /// The stored JSON as a value, to look at its keys.
+    fn stored_json(frames: Frames) -> serde_json::Value {
+        let stored = run(frames).stored.expect("a result");
+        serde_json::from_str(&stored).expect("json")
+    }
+
+    #[test]
+    fn ban_votes_is_always_written_array_or_null() {
+        // Vote screen read: an array of slots, and the strip key too.
+        let v = stored_json(Frames {
+            vote: Some(frame()),
+            results: Some(frame()),
+            select: Some(frame()),
+            ..Frames::default()
+        });
+        assert!(v["ban_votes"].is_array(), "{v}");
+        assert!(v.get("ban_score").is_some(), "{v}");
+        // No vote screen: the key is there and null, not left out.
+        let v = stored_json(Frames {
+            results: Some(frame()),
+            select: Some(frame()),
+            ..Frames::default()
+        });
+        assert!(
+            v.get("ban_votes").is_some_and(serde_json::Value::is_null),
+            "{v}"
+        );
+        assert!(
+            v.get("ban_score").is_some_and(serde_json::Value::is_null),
+            "{v}"
+        );
+        assert_eq!(v["ban_vote"], serde_json::json!([]));
     }
 
     #[test]

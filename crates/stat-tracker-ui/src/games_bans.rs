@@ -38,6 +38,12 @@ pub enum Slot {
     NoPreference,
     /// The slot could not be read.
     NotRead,
+    /// A ban vote that was skipped (the circle with a slash).
+    Skipped,
+    /// A ban vote slot with nothing in it when the screen was captured.
+    /// That can be a vote cast after the last frame, so it reads "Not seen",
+    /// never "did not vote".
+    Empty,
 }
 
 /// One chip: a slot, with the words every chip carries (visible name,
@@ -62,6 +68,8 @@ impl Chip {
             Slot::Hero(name) => name,
             Slot::NoPreference => "No preference",
             Slot::NotRead => "Not read",
+            Slot::Skipped => "Skipped",
+            Slot::Empty => "Not seen",
         }
     }
 }
@@ -79,7 +87,7 @@ pub enum Body {
 pub struct Row {
     /// "Your team", "Their bans", "Bans" ...
     pub team: &'static str,
-    /// "Ban votes", "Hero select", "Played".
+    /// "Your ban votes", "Hero select", "Played".
     pub line: Option<&'static str>,
     /// A muted note next to the label ("Team not read").
     pub note: Option<&'static str>,
@@ -143,7 +151,7 @@ pub fn bans_picks(g: &Game) -> BansPicks {
     if let Some(stored) = g.bans_picks.as_deref().and_then(parse)
         && stored.read_something()
     {
-        return BansPicks::Block(stored.rows(&g.hero));
+        return BansPicks::Block(stored.rows(g));
     }
     match g.bans_picks_status.as_ref().and_then(reason) {
         Some((line, settings)) => BansPicks::Reason {
@@ -278,11 +286,50 @@ fn parse(json: &str) -> Option<Stored> {
             .iter()
             .map(slot)
             .collect(),
-        ban_vote: list("ban_vote", BANS_PICKS_MAX_BAN_VOTE)
-            .iter()
-            .map(slot)
-            .collect(),
+        // Only `ban_votes` is read for our votes. The flat `ban_vote` list is
+        // never a source: games stored by 0.6.0-alpha.2.1 or older hold the
+        // six roster preferred heroes there, which are not votes. A game
+        // with no `ban_votes` key (or a null one) has its votes not read.
+        ban_vote: own_votes(&v).unwrap_or_default(),
     })
+}
+
+/// Our own three ban votes from `ban_votes`, in slot order, which tells a
+/// skipped or empty slot apart from one that was not read. `None` when the
+/// key is missing (games read before it existed), null (a vote screen that
+/// did not look like one) or has no entry for us: the votes are then not
+/// read. The flat `ban_vote` list is not a fallback.
+fn own_votes(v: &Value) -> Option<Vec<Slot>> {
+    let all = v.get("ban_votes")?.as_array()?;
+    let mut own: Vec<(u64, Slot)> = all
+        .iter()
+        .filter(|e| e.get("voter").and_then(Value::as_u64) == Some(0))
+        .map(|e| {
+            let n = e.get("slot").and_then(Value::as_u64).unwrap_or(u64::MAX);
+            let hero = e
+                .get("hero")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|h| !h.is_empty());
+            let s = match (e.get("state").and_then(Value::as_str), hero) {
+                (Some("hero"), Some(key)) => Slot::Hero(hero_name(key)),
+                (Some("skipped"), _) => Slot::Skipped,
+                (Some("empty"), _) => Slot::Empty,
+                _ => Slot::NotRead,
+            };
+            (n, s)
+        })
+        .collect();
+    if own.is_empty() {
+        return None;
+    }
+    own.sort_by_key(|(n, _)| *n);
+    Some(
+        own.into_iter()
+            .take(BANS_PICKS_MAX_BAN_VOTE)
+            .map(|(_, s)| s)
+            .collect(),
+    )
 }
 
 /// A stored entry: `{value, ..}` or a plain string. A value that is a hero
@@ -322,7 +369,7 @@ impl Stored {
         self.bans_read() || self.lobby_ban.is_some() || read(&self.picks) || read(&self.ban_vote)
     }
 
-    fn rows(&self, own_hero: &str) -> Vec<Row> {
+    fn rows(&self, g: &Game) -> Vec<Row> {
         let mut rows = self.ban_rows();
         if let Some(name) = &self.lobby_ban {
             rows.push(Row {
@@ -342,12 +389,12 @@ impl Stored {
             )),
             (votes, picks) => {
                 rows.push(if votes {
-                    chips("Your team", "Ban votes", vote_chips(&self.ban_vote))
+                    chips("Your team", "Your ban votes", vote_chips(&self.ban_vote))
                 } else {
                     quiet(
                         "Your team",
-                        Some("Ban votes"),
-                        "Ban votes weren't read for this game.",
+                        Some("Your ban votes"),
+                        "Your ban votes weren't read for this game.",
                     )
                 });
                 rows.push(if picks {
@@ -361,8 +408,9 @@ impl Stored {
                 });
             }
         }
-        if let Some(played) = played_chip(own_hero, self.picks.first()) {
-            rows.push(chips("Your team", "Played", vec![played]));
+        let played = played_chips(g, self.picks.first());
+        if !played.is_empty() {
+            rows.push(chips("Your team", "Played", played));
         }
         rows
     }
@@ -455,23 +503,32 @@ fn not_read_chip(ban: bool, tip: String) -> Chip {
     }
 }
 
-/// Our own ban vote first (the local player is row 0), then teammates.
+/// Our own three ban votes, in slot order, from `ban_votes`. A skipped slot
+/// shows as "Skipped" (the explicit skip icon), an empty one as "Not seen"
+/// (the vote may have come after the last frame). The row says "Your ban
+/// votes", so the chips carry no "You" tag.
 fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
     slots
         .iter()
         .enumerate()
         .map(|(i, slot)| {
-            let you = i == 0;
-            let who = if you { "You" } else { "Teammate" };
             let tip = match slot {
-                Slot::Hero(name) => format!("{who} voted to ban {name}"),
-                Slot::NoPreference => format!("{who} voted no preference"),
-                Slot::NotRead => format!("Ban vote slot {}: not read", i + 1),
+                Slot::Hero(name) => format!("You voted to ban {name}"),
+                // Legacy only: `ban_votes` has no no-preference state, and
+                // this row no longer reads the flat `ban_vote` list where
+                // alpha.2.1 stored it. Kept so the match stays exhaustive.
+                Slot::NoPreference => "You voted no preference".to_string(),
+                Slot::Skipped => format!("You skipped ban vote {}", i + 1),
+                Slot::Empty => format!(
+                    "Your ban vote {}: not seen, it may have come after the last frame",
+                    i + 1
+                ),
+                Slot::NotRead => format!("Your ban vote {}: not read", i + 1),
             };
             Chip {
                 slot: slot.clone(),
                 ban: false,
-                you,
+                you: false,
                 swap: false,
                 tip,
             }
@@ -490,7 +547,9 @@ fn pick_chips(slots: &[Slot]) -> Vec<Chip> {
                 Slot::Hero(name) if you => format!("Shown at hero select: {name}, you"),
                 Slot::Hero(name) => format!("Shown at hero select: {name}"),
                 Slot::NoPreference => "Shown at hero select: no preference".to_string(),
-                Slot::NotRead => format!("Hero select slot {}: not read", i + 1),
+                Slot::NotRead | Slot::Skipped | Slot::Empty => {
+                    format!("Hero select slot {}: not read", i + 1)
+                }
             };
             Chip {
                 slot: slot.clone(),
@@ -503,7 +562,48 @@ fn pick_chips(slots: &[Slot]) -> Vec<Chip> {
         .collect()
 }
 
-/// Our own Played chip, from the game data. `None` when the game has no
+/// Every hero we played, in the order played, from the same runs the hero
+/// bar draws (`games_detail::hero_split`), so the two never disagree: a
+/// dismissed run folds into the main hero, consecutive runs of one hero are
+/// one chip, and a hero played again later keeps its first place. A game
+/// whose hero was set by hand, or whose runs name no hero, keeps the single
+/// chip from the row's hero. Only the first chip can carry the swap glyph, and
+/// only when the hero select pick is not one of the Played chips: a pick that
+/// was played at some point was not swapped away from.
+fn played_chips(g: &Game, own_pick: Option<&Slot>) -> Vec<Chip> {
+    let corrected = g.edited_fields.iter().any(|f| f == "hero");
+    let mut names: Vec<String> = Vec::new();
+    if !corrected && !g.segments.is_empty() {
+        for part in crate::games_detail::hero_split(g).bar {
+            let hero = part.hero.trim();
+            if hero.is_empty() || hero.eq_ignore_ascii_case("unknown") {
+                continue;
+            }
+            let name = hero_name(hero);
+            if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
+                names.push(name);
+            }
+        }
+    }
+    let Some((first, rest)) = names.split_first() else {
+        return played_chip(&g.hero, own_pick).into_iter().collect();
+    };
+    let pick_was_played = matches!(own_pick,
+        Some(Slot::Hero(picked)) if names.iter().any(|n| n.eq_ignore_ascii_case(picked)));
+    let own_pick = if pick_was_played { None } else { own_pick };
+    played_chip(first, own_pick)
+        .into_iter()
+        .chain(rest.iter().map(|name| Chip {
+            slot: Slot::Hero(name.clone()),
+            ban: false,
+            you: true,
+            swap: false,
+            tip: format!("Then played {name}, you"),
+        }))
+        .collect()
+}
+
+/// Our own first Played chip, from the game data. `None` when the game has no
 /// hero. It carries the swap glyph when it is a real hero that differs from
 /// our own hero select hero, which must be a real hero too.
 fn played_chip(own_hero: &str, own_pick: Option<&Slot>) -> Option<Chip> {
@@ -577,7 +677,7 @@ mod tests {
                 ("Your team's bans", None),
                 ("Their bans", None),
                 ("Lobby ban", None),
-                ("Your team", Some("Ban votes")),
+                ("Your team", Some("Your ban votes")),
                 ("Your team", Some("Hero select")),
                 ("Your team", Some("Played")),
             ]
@@ -585,7 +685,7 @@ mod tests {
         assert_eq!(names(&rows[0]), ["Sombra", "Mauga"]);
         assert_eq!(names(&rows[1]), ["Ana", "Winston"]);
         assert_eq!(names(&rows[2]), ["Sigma"]);
-        assert_eq!(names(&rows[3]).len(), 6);
+        assert_eq!(names(&rows[3]).len(), 3);
         assert_eq!(names(&rows[4])[0], "Wrecking Ball");
         assert_eq!(names(&rows[5]), ["Wrecking Ball"]);
     }
@@ -600,7 +700,7 @@ mod tests {
         assert_eq!(tip(0, 0), "Banned: Sombra");
         assert_eq!(tip(2, 0), "Lobby ban: Sigma");
         assert_eq!(tip(3, 0), "You voted to ban Reinhardt");
-        assert_eq!(tip(3, 1), "Teammate voted to ban Tracer");
+        assert_eq!(tip(3, 1), "You voted to ban Tracer");
         assert_eq!(tip(4, 0), "Shown at hero select: Wrecking Ball, you");
         assert_eq!(tip(4, 1), "Shown at hero select: Tracer");
         assert_eq!(tip(5, 0), "Played Wrecking Ball, you");
@@ -634,8 +734,8 @@ mod tests {
         let Body::Chips(votes) = &rows[1].body else {
             panic!("chips")
         };
-        assert_eq!(votes[1].tip, "Teammate voted no preference");
-        assert_eq!(votes[3].tip, "Ban vote slot 4: not read");
+        assert_eq!(votes[1].tip, "Your ban vote 2: not read");
+        assert!(votes.iter().all(|c| !c.you));
         // We picked Reinhardt and played Wrecking Ball.
         let Body::Chips(played) = &rows[3].body else {
             panic!("chips")
@@ -671,8 +771,11 @@ mod tests {
         assert_eq!(names(&rows[0]).len(), 4);
         let hero_select = rows.iter().find(|r| r.line == Some("Hero select")).unwrap();
         assert_eq!(names(hero_select).len(), 6);
-        let votes = rows.iter().find(|r| r.line == Some("Ban votes")).unwrap();
-        assert_eq!(names(votes), ["No preference"]);
+        // The flat `ban_vote` list is legacy and is not shown as our votes.
+        assert!(
+            rows.iter()
+                .all(|r| r.line != Some("Your ban votes") || matches!(&r.body, Body::Quiet(_)))
+        );
     }
 
     #[test]
@@ -699,14 +802,155 @@ mod tests {
         );
         let rows = rows_of(&g);
         assert!(rows.iter().any(|r| matches!(&r.body,
-            Body::Quiet(t) if t == "Ban votes weren't read for this game.")));
+            Body::Quiet(t) if t == "Your ban votes weren't read for this game.")));
         let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],"ban_vote":[{"value":"ana"}]}"#,
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "ban_votes":[{"voter":0,"slot":1,"state":"hero","hero":"ana"}]}"#,
             None,
         );
         let rows = rows_of(&g);
         assert!(rows.iter().any(|r| matches!(&r.body,
             Body::Quiet(t) if t == "Hero select wasn't read for this game.")));
+    }
+
+    fn vote_row(g: &Game) -> Vec<Chip> {
+        let rows = rows_of(g);
+        let row = rows
+            .iter()
+            .find(|r| r.line == Some("Your ban votes"))
+            .expect("vote row");
+        match &row.body {
+            Body::Chips(chips) => chips.clone(),
+            Body::Quiet(_) => panic!("chips"),
+        }
+    }
+
+    #[test]
+    fn ban_votes_show_skipped_and_empty_slots() {
+        // Three skips, like the Eichenwalde game: not three Not read chips.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "ban_vote":[{"value":null},{"value":null},{"value":null}],
+                "ban_votes":[
+                  {"voter":0,"slot":3,"state":"empty","hero":null},
+                  {"voter":0,"slot":1,"state":"skipped","hero":null},
+                  {"voter":0,"slot":2,"state":"hero","hero":"ana"},
+                  {"voter":1,"slot":1,"state":"hero","hero":"mei"}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        let votes = vote_row(&g);
+        let slots: Vec<_> = votes.iter().map(|c| c.slot.clone()).collect();
+        assert_eq!(
+            slots,
+            [Slot::Skipped, Slot::Hero("Ana".into()), Slot::Empty]
+        );
+        assert_eq!(votes[0].name(), "Skipped");
+        assert_eq!(votes[0].tip, "You skipped ban vote 1");
+        assert!(
+            votes[2].tip.starts_with("Your ban vote 3: not seen"),
+            "{}",
+            votes[2].tip
+        );
+        assert!(votes.iter().all(|c| !c.you));
+    }
+
+    #[test]
+    fn an_unclear_slot_is_not_read() {
+        // A hero state with no confident hero, or no state, is Not read.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "ban_votes":[{"voter":0,"slot":1,"state":"hero","hero":null},
+                             {"voter":0,"slot":2,"state":null,"hero":null},
+                             {"voter":0,"slot":3,"state":"skipped","hero":null}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        let got: Vec<_> = vote_row(&g).iter().map(|c| c.slot.clone()).collect();
+        assert_eq!(got, [Slot::NotRead, Slot::NotRead, Slot::Skipped]);
+    }
+
+    /// Votes are never taken from the flat `ban_vote` list, which holds the
+    /// six roster preferred heroes in games stored by alpha.2.1 or older.
+    fn no_vote_row(g: &Game) {
+        let rows = rows_of(g);
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(&r.body, Body::Chips(_)) || r.line != Some("Your ban votes")),
+            "no ban vote chips"
+        );
+        assert!(
+            rows.iter().any(|r| matches!(&r.body,
+                Body::Quiet(t) if t == "Your ban votes weren't read for this game.")),
+            "the votes show as not read"
+        );
+    }
+
+    #[test]
+    fn legacy_flat_ban_vote_without_ban_votes_shows_no_votes() {
+        // What alpha.2.1 stored: the six roster rows, no `ban_votes` key.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "picks":[{"value":"ana"}],
+                "ban_vote":[{"value":"mei"},{"value":"tracer"},{"value":"genji"},
+                            {"value":"sigma"},{"value":"zarya"},{"value":"mercy"}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        no_vote_row(&g);
+        let rows = rows_of(&g);
+        let names: Vec<_> = rows.iter().flat_map(|r| names(r)).collect();
+        assert!(
+            !names.contains(&"Mei") && !names.contains(&"Tracer") && !names.contains(&"Genji"),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_null_ban_votes_is_not_read() {
+        // Null (vote screen not recognised), with a flat list beside it.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],"picks":[{"value":"ana"}],
+                "ban_vote":[{"value":"mei"}],"ban_votes":null}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        no_vote_row(&g);
+        // Only teammates' slots: none of ours, so not read either.
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],"picks":[{"value":"ana"}],
+                "ban_votes":[{"voter":1,"slot":1,"state":"hero","hero":"mei"}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        no_vote_row(&g);
+        // A game that only has a flat list reads as nothing at all there.
+        let g = with(
+            r#"{"ban_vote":[{"value":"mei"}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        assert!(
+            !parse(g.bans_picks.as_deref().unwrap())
+                .unwrap()
+                .read_something()
+        );
+    }
+
+    #[test]
+    fn an_empty_slot_is_not_seen_not_a_missing_vote() {
+        let g = with(
+            r#"{"bans":[{"value":"ana","team":"own"}],
+                "ban_votes":[{"voter":0,"slot":1,"state":"empty","hero":null},
+                             {"voter":0,"slot":2,"state":"skipped","hero":null},
+                             {"voter":0,"slot":3,"state":"empty","hero":null}]}"#,
+            Some(BansPicksStatus::Ok),
+        );
+        let votes = vote_row(&g);
+        assert_eq!(
+            votes.iter().map(Chip::name).collect::<Vec<_>>(),
+            ["Not seen", "Skipped", "Not seen"]
+        );
+        for c in &votes {
+            let tip = c.tip.to_lowercase();
+            assert!(!tip.contains("didn't") && !tip.contains("did not"), "{tip}");
+        }
+        assert_eq!(votes[1].tip, "You skipped ban vote 2");
+        assert!(votes[0].tip.contains("not seen"), "{}", votes[0].tip);
     }
 
     fn rows_of(g: &Game) -> Vec<Row> {
@@ -733,6 +977,142 @@ mod tests {
         assert!(!played_chip("Wrecking Ball", None).unwrap().swap);
         assert!(played_chip("Unknown", None).is_none());
         assert!(played_chip("  ", None).is_none());
+    }
+
+    /// The normal game, played as the given runs (hero, snapshots), all
+    /// confirmed, like the Eichenwalde game that showed only its first hero.
+    fn played_as(runs: &[(&str, u32)]) -> Game {
+        let mut g = game(NORMAL);
+        let base = g.segments[0].clone();
+        g.segments = runs
+            .iter()
+            .enumerate()
+            .map(|(i, (hero, snapshots))| crate::model::SegmentView {
+                index: i as u32,
+                hero: (*hero).into(),
+                snapshots: *snapshots,
+                confirmed: true,
+                ..base.clone()
+            })
+            .collect();
+        g
+    }
+
+    fn played(g: &Game) -> Vec<Chip> {
+        let rows = rows_of(g);
+        let row = rows.iter().find(|r| r.line == Some("Played")).unwrap();
+        match &row.body {
+            Body::Chips(chips) => chips.clone(),
+            Body::Quiet(_) => panic!("chips"),
+        }
+    }
+
+    #[test]
+    fn played_lists_every_hero_in_the_order_played() {
+        let g = played_as(&[("Wrecking Ball", 12), ("Sigma", 6), ("Sierra", 6)]);
+        let chips = played(&g);
+        let names: Vec<_> = chips.iter().map(Chip::name).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma", "Sierra"]);
+        assert!(chips.iter().all(|c| c.you && !c.ban));
+        assert!(chips.iter().all(|c| !c.swap), "we picked Wrecking Ball");
+        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
+        assert_eq!(chips[1].tip, "Then played Sigma, you");
+        assert_eq!(chips[2].tip, "Then played Sierra, you");
+        assert!(!bans_picks(&g).has_swap());
+        // The hero bar shows the same heroes in the same order.
+        let bar: Vec<_> = crate::games_detail::hero_split(&g)
+            .bar
+            .into_iter()
+            .map(|b| b.hero)
+            .collect();
+        assert_eq!(bar, ["Wrecking Ball", "Sigma", "Sierra"]);
+    }
+
+    #[test]
+    fn played_merges_repeats_and_keeps_a_return_in_first_place() {
+        let g = played_as(&[
+            ("Wrecking Ball", 4),
+            ("Wrecking Ball", 3),
+            ("Sigma", 6),
+            ("Unknown", 2),
+            ("Wrecking Ball", 5),
+            ("Sierra", 2),
+        ]);
+        let names: Vec<_> = played(&g).iter().map(|c| c.name().to_string()).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma", "Sierra"]);
+    }
+
+    #[test]
+    fn played_follows_the_hero_bar_for_dismissed_and_unconfirmed_runs() {
+        // UNSURE: Wrecking Ball, a one-snapshot unconfirmed Sigma, Wrecking
+        // Ball again. The bar shows the Sigma run, so the card does too.
+        let g = game(UNSURE);
+        let names: Vec<_> = played(&g).iter().map(|c| c.name().to_string()).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma"]);
+        // Dismissed, the run folds into Wrecking Ball on the bar and the card.
+        let mut g = g;
+        g.segments[1].dismissed = true;
+        let names: Vec<_> = played(&g).iter().map(|c| c.name().to_string()).collect();
+        assert_eq!(names, ["Wrecking Ball"]);
+    }
+
+    #[test]
+    fn a_corrected_hero_keeps_the_single_played_chip() {
+        let mut g = played_as(&[("Wrecking Ball", 12), ("Sigma", 6), ("Sierra", 6)]);
+        g.edited_fields.push("hero".into());
+        g.hero = "Sigma".into();
+        let chips = played(&g);
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].name(), "Sigma");
+        assert!(chips[0].you && chips[0].swap);
+        assert_eq!(
+            chips[0].tip,
+            "Played Sigma, Wrecking Ball at hero select, you"
+        );
+        // No runs at all: the row's hero, as before.
+        let mut g = game(NORMAL);
+        g.segments.clear();
+        let chips = played(&g);
+        assert_eq!(chips.len(), 1);
+        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
+    }
+
+    #[test]
+    fn only_the_first_played_chip_marks_a_swap() {
+        // UNSURE picked Reinhardt at hero select, and we never played him.
+        let mut g = game(UNSURE);
+        g.segments[1].confirmed = true;
+        g.segments[1].hero = "Sigma".into();
+        g.segments[2].hero = "Mei".into();
+        let chips = played(&g);
+        let names: Vec<_> = chips.iter().map(Chip::name).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma", "Mei"]);
+        assert!(chips[0].swap && chips[0].you);
+        assert_eq!(
+            chips[0].tip,
+            "Played Wrecking Ball, Reinhardt at hero select, you"
+        );
+        assert!(chips[1..].iter().all(|c| !c.swap && c.you));
+        assert_eq!(chips[2].tip, "Then played Mei, you");
+        assert!(bans_picks(&g).has_swap());
+    }
+
+    #[test]
+    fn no_swap_mark_when_the_pick_is_one_of_the_played_chips() {
+        // UNSURE picked Reinhardt at hero select and went back to him later.
+        let mut g = game(UNSURE);
+        g.segments[1].confirmed = true;
+        g.segments[1].hero = "Sigma".into();
+        g.segments[2].hero = "Reinhardt".into();
+        let chips = played(&g);
+        let names: Vec<_> = chips.iter().map(Chip::name).collect();
+        assert_eq!(names, ["Wrecking Ball", "Sigma", "Reinhardt"]);
+        assert!(chips.iter().all(|c| !c.swap && c.you));
+        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
+        assert!(!bans_picks(&g).has_swap());
+        // The same holds when the case of the name differs.
+        g.segments[2].hero = "REINHARDT".into();
+        assert!(played(&g).iter().all(|c| !c.swap));
     }
 
     #[test]

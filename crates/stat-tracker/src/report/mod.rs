@@ -20,6 +20,8 @@ pub mod scrub;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_alt_names;
 
 pub use bundle::{
     GameCategory, GameReportInput, LogOnlyCategory, LogReportInput, ReportError, ReportFile,

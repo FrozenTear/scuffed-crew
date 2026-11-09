@@ -124,7 +124,7 @@ impl LogReportInput {
             marker::last_crash_seen(&config.data_dir),
         );
         let mut scrub = ScrubContext::from_config(config);
-        scrub.names = names;
+        scrub.names.extend(names);
         Self {
             category,
             text,
@@ -249,7 +249,7 @@ impl GameReportInput {
                 height: 1080,
             });
         let mut scrub = ScrubContext::from_config(config);
-        scrub.names = names;
+        scrub.names.extend(names);
         Ok(Self {
             session_id: session_id.to_string(),
             category,

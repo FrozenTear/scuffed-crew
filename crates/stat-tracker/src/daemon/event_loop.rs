@@ -167,7 +167,12 @@ pub(crate) async fn run_loop(
     let mut idle_sync_checked = Instant::now();
     let mut binary_checked = tokio::time::Instant::now();
     let mut logged_binary_wait = false;
-    let mut exec_failed_at: Option<std::time::Instant> = None;
+    // A restart of this binary after the new one failed its exec waits out
+    // the backoff before trying it again (`replace::EXEC_FAILED_ENV`).
+    let mut exec_failed_at = stat_tracker::replace::exec_failed_at_start(
+        std::env::var_os(stat_tracker::replace::EXEC_FAILED_ENV).is_some(),
+        std::time::Instant::now(),
+    );
     let mut seen_stream: Option<capture::SeenStream> = None;
     let mut poll_failures = PollFailureStreak::default();
 
