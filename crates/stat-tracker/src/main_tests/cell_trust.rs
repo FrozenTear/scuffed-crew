@@ -416,6 +416,53 @@ async fn a_held_cell_stores_its_unsure_read_not_the_older_value() {
     assert!(!gate.has_unsure_shown.iter().any(|&shown| shown));
 }
 
+/// A held kill column on the final board, read twice. The first held Tab
+/// stores the unsure 39 (other columns moved, so the dry run takes it).
+/// The second held Tab of the same board has every other column unchanged,
+/// so the dry run sees a quiet single-field jump past the kill-column jump
+/// limit and gives no fresh read. The stored row must keep the unsure 39,
+/// flagged, not fall back to the older accepted 31.
+#[tokio::test]
+async fn a_second_held_kill_column_keeps_the_stored_unsure_read() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let held_e = [
+        Some((39, true)),
+        sure(18),
+        sure(5),
+        sure(12707),
+        sure(1821),
+        sure(4412),
+    ];
+    let (st, seen) = o10_run(
+        &ctx,
+        vec![
+            (0, all_sure([31, 17, 5, 10584, 1510, 3911])),
+            (60, held_e),
+            (15, held_e),
+        ],
+    )
+    .await;
+    assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+    let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(o10_stats(&rows[0])[0], 31);
+    assert!(rows[0].suspect_fields.is_empty());
+    assert_eq!(o10_stats(&rows[1]), [39, 18, 5, 12707, 1821, 4412]);
+    assert_eq!(rows[1].suspect_fields, vec!["e".to_string()]);
+    assert_eq!(
+        o10_stats(&rows[2]),
+        [39, 18, 5, 12707, 1821, 4412],
+        "the second held Tab keeps the stored unsure read, not the accepted 31"
+    );
+    assert_eq!(rows[2].suspect_fields, vec!["e".to_string()]);
+    let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+    assert_eq!(gate.accepted.elims, 31, "the gate keeps its accepted value");
+    assert!(gate.has_unsure_shown[0]);
+    assert_eq!(gate.unsure_shown[0], 39);
+}
+
 /// An unsure read the gate would not take keeps the accepted value,
 /// flagged: one below it (a stat never falls in a game) and one past the
 /// suspect rate cap (an injected digit).

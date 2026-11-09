@@ -146,6 +146,10 @@ pub struct GateState {
     /// by the gate). Only valid where [`Self::has_unsure_shown`] is set. The
     /// gate never reads it; the capture path compares the next row with it,
     /// so a stat never goes down unflagged from one stored row to the next.
+    /// A later capture where the cell is still held and the reader gives no
+    /// fresh unsure read keeps this value in the stored row (flagged), so a
+    /// repeat read of the same board never drops the row back to the older
+    /// accepted value.
     /// Missing on an older save means the stored row showed `accepted`.
     #[serde(default)]
     pub unsure_shown: [u32; GATE_COLS],
