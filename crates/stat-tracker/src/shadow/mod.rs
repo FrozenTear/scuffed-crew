@@ -26,6 +26,7 @@ pub mod digits;
 pub mod heroes;
 pub mod log;
 mod ncc;
+pub mod queue_title;
 pub mod reader;
 pub mod result;
 pub mod worker;
