@@ -122,7 +122,8 @@ pub(crate) const COVER_IMAGE_URL_ERROR: &str =
 /// `Ok(None)` clears the field (empty / whitespace). `Ok(Some)` is the trimmed
 /// value: either an absolute `https://` URL with a host, or a file under
 /// `/uploads/images/<folder>/` (what `POST /api/upload/image` returns; any
-/// member's folder, since officers co-edit articles). Mirrors
+/// member's folder, since officers co-edit articles). A missing leading
+/// slash is added. Mirrors
 /// `normalize_avatar_url`.
 pub(crate) fn normalize_cover_image_url(raw: &str) -> Result<Option<String>, &'static str> {
     let trimmed = raw.trim();
@@ -151,11 +152,15 @@ pub(crate) fn normalize_cover_image_url(raw: &str) -> Result<Option<String>, &'s
             Err(COVER_IMAGE_URL_ERROR)
         };
     }
-    if let Some(rel) = trimmed.strip_prefix("/uploads/images/")
+    // A missing leading slash (`uploads/images/...`, hand-typed in older
+    // covers) is fixed up rather than rejected, so those rows heal on save.
+    if let Some(rel) = trimmed
+        .strip_prefix("/uploads/images/")
+        .or_else(|| trimmed.strip_prefix("uploads/images/"))
         && rel.contains('/')
         && upload_rel_is_safe(rel)
     {
-        return Ok(Some(trimmed.to_string()));
+        return Ok(Some(format!("/uploads/images/{rel}")));
     }
     Err(COVER_IMAGE_URL_ERROR)
 }
@@ -449,6 +454,14 @@ mod tests {
                 " /uploads/images/member_other/sub/c-1_x.webp ",
                 "/uploads/images/member_other/sub/c-1_x.webp",
             ),
+            (
+                "uploads/images/member_abc/a.png",
+                "/uploads/images/member_abc/a.png",
+            ),
+            (
+                " uploads/images/member_abc/a.png ",
+                "/uploads/images/member_abc/a.png",
+            ),
         ] {
             assert_eq!(
                 normalize_cover_image_url(raw),
@@ -480,7 +493,9 @@ mod tests {
             "/uploads/avatars/member_abc/a.png",
             "/uploads/other/member_abc/a.png",
             "/assets/a.png",
-            "uploads/images/member_abc/a.png",
+            "uploads/images/",
+            "uploads/images/a.png",
+            "uploads/images/member_abc/../x.png",
             "/uploads/images/",
             "/uploads/images/a.png",
             "/uploads/images/member_abc/",
