@@ -13,6 +13,10 @@
 //!
 //! # How it reads
 //!
+//! The role (Tank, Damage, Support) is read from the role icon shown left of
+//! the role name above the emblem. Open queue screens show no role line, so
+//! a clean, empty role band reads as [`Role::Open`] (at [`OPEN_CONFIDENCE`]).
+//!
 //! Every field has a fixed place at the 2560x1440 reference ([`layout`]),
 //! scaled to other 16:9 sizes by height/1440 (and width/2560). The hero
 //! entry is found as the first "name line over a taller SR line" in the
@@ -70,6 +74,9 @@ pub const MIN_WORD_SCORE: f32 = 0.60;
 pub const MIN_WORD_MARGIN: f32 = 0.05;
 /// The class name of the "RANK PROGRESS:" label in [`Family::Gate`].
 pub const GATE_CLASS: &str = "rank_progress";
+/// Confidence of [`Role::Open`]: it is read from the absence of a role line,
+/// not from an icon, so it never claims more than this.
+pub const OPEN_CONFIDENCE: f32 = 0.75;
 /// Reference frame width the layout was measured at. Other 16:9 sizes are
 /// scaled from this ([`layout::Scale`]).
 pub const FRAME_W: u32 = 2560;
@@ -111,6 +118,36 @@ impl RankSetting {
     }
 }
 
+/// The queue role a rank update is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Role {
+    Tank,
+    Damage,
+    Support,
+    /// Open queue: the screen shows no role line.
+    Open,
+}
+
+impl Role {
+    pub const ICONS: [Role; 3] = [Role::Tank, Role::Damage, Role::Support];
+
+    /// The template class name (`Tank`, `Damage`, `Support`, `Open`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Role::Tank => "Tank",
+            Role::Damage => "Damage",
+            Role::Support => "Support",
+            Role::Open => "Open",
+        }
+    }
+
+    pub fn from_class(s: &str) -> Option<Self> {
+        [Role::Tank, Role::Damage, Role::Support, Role::Open]
+            .into_iter()
+            .find(|r| r.as_str() == s)
+    }
+}
+
 /// One field: a value, how sure, and where it was read.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Field<T> {
@@ -135,6 +172,8 @@ impl<T> Field<T> {
 /// Everything rank-v1 reads from one rank update screen.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RankRead {
+    /// Queue role, from the role icon above the emblem.
+    pub role: Field<Role>,
     /// Tier name as the template pack spells it (`Master`, `Diamond`).
     pub role_rank: Field<String>,
     pub division: Field<u8>,
@@ -162,6 +201,7 @@ impl RankRead {
     /// `(field name, value)` for every field, values as JSON.
     pub fn values(&self) -> Vec<(&'static str, Option<serde_json::Value>)> {
         vec![
+            ("role", json(&self.role.value)),
             ("role_rank", json(&self.role_rank.value)),
             ("division", json(&self.division.value)),
             ("progress_pct", json(&self.progress_pct.value)),
@@ -177,6 +217,7 @@ impl RankRead {
     /// `(field name, confidence)` for the fields that have a value.
     pub fn confidences(&self) -> Vec<(&'static str, f32)> {
         let c = [
+            ("role", self.role.confidence),
             ("role_rank", self.role_rank.confidence),
             ("division", self.division.confidence),
             ("progress_pct", self.progress_pct.confidence),
@@ -200,6 +241,9 @@ impl RankRead {
 /// learn templates ([`Learner::add_frame`]) and to score reads.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct Labels {
+    /// Absent from the main label file; merged from a separate role file.
+    #[serde(default)]
+    pub role: Option<Role>,
     pub role_rank: Option<String>,
     pub division: Option<u8>,
     pub progress_pct: Option<i32>,
@@ -212,7 +256,8 @@ pub struct Labels {
 }
 
 impl Labels {
-    pub const NAMES: [&'static str; 9] = [
+    pub const NAMES: [&'static str; 10] = [
+        "role",
         "role_rank",
         "division",
         "progress_pct",
@@ -227,6 +272,7 @@ impl Labels {
     /// `(field name, value)` in [`Labels::NAMES`] order, values as JSON.
     pub fn values(&self) -> Vec<(&'static str, Option<serde_json::Value>)> {
         let v = [
+            json(&self.role),
             json(&self.role_rank),
             json(&self.division),
             json(&self.progress_pct),
@@ -385,7 +431,10 @@ impl Reader {
             None => (Field::none(), Field::none()),
         };
 
+        let role = self.role(img);
+
         Some(RankRead {
+            role,
             role_rank,
             division,
             progress_pct,
@@ -397,6 +446,29 @@ impl Reader {
             next_mode_hint,
             rank_recognizer: RECOGNIZER_ID.to_string(),
         })
+    }
+
+    /// The role icon matched against [`Family::Role`]; an empty role band is
+    /// [`Role::Open`]. A line whose icon matches no role well is `None`.
+    fn role(&self, img: &RgbImage) -> Field<Role> {
+        match layout::role_icon(img) {
+            layout::RoleLine::Empty => Field {
+                value: Some(Role::Open),
+                confidence: OPEN_CONFIDENCE,
+                bbox: None,
+            },
+            layout::RoleLine::Unclear => Field::none(),
+            layout::RoleLine::Icon(g) => self
+                .templates
+                .best(Family::Role, &g.ink, None)
+                .filter(|m| m.score >= MIN_SCORE && m.margin >= MIN_MARGIN)
+                .and_then(|m| Some((Role::from_class(&m.class)?, m)))
+                .map_or_else(Field::none, |(r, m)| Field {
+                    value: Some(r),
+                    confidence: r3(confidence(m.score, m.margin)),
+                    bbox: Some(g.bbox),
+                }),
+        }
     }
 
     /// Read glyphs as one string (classes in `strip` are matched but left

@@ -55,6 +55,8 @@ pub enum Family {
     Tier,
     /// The division digit after the tier word.
     Division,
+    /// The role icon above the emblem (classes `Tank`, `Damage`, `Support`).
+    Role,
 }
 
 impl Family {
@@ -281,6 +283,12 @@ impl Learner {
         }
         if let (Some(b), Some(g)) = (&labels.next_mode_hint, layout::banner_word(img)) {
             self.add(Family::Banner, b, &g.ink);
+            n += 1;
+        }
+        if let (Some(r), layout::RoleLine::Icon(g)) = (labels.role, layout::role_icon(img))
+            && r != super::Role::Open
+        {
+            self.add(Family::Role, r.as_str(), &g.ink);
             n += 1;
         }
         if let Some((word, digit)) = layout::rank_text(img) {

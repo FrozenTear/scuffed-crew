@@ -75,11 +75,7 @@ pub struct Entry {
 pub fn gate_word(img: &RgbImage) -> Option<Glyph> {
     let s = Scale::from_img(img)?;
     let (x0, y0) = (s.x(840), s.y(1066));
-    tight_glyph(
-        &plane(img, x0, y0, s.x(975), s.y(1092), ink::white),
-        x0,
-        y0,
-    )
+    tight_glyph(&plane(img, x0, y0, s.x(975), s.y(1092), ink::white), x0, y0)
 }
 
 /// Rank progress glyphs (digits, `%`, a leading `-`), and whether the text
@@ -294,21 +290,17 @@ pub fn tag_words(img: &RgbImage) -> Vec<Glyph> {
     let mut out = Vec::new();
     for (k, &(_, b)) in icons.iter().enumerate() {
         let start = b + s.n(4) as usize;
-        let end = icons.get(k + 1).map_or(
-            (b + s.n(420) as usize).min(w.w),
-            |n| n.0.saturating_sub(s.n(4) as usize),
-        );
+        let end = icons
+            .get(k + 1)
+            .map_or((b + s.n(420) as usize).min(w.w), |n| {
+                n.0.saturating_sub(s.n(4) as usize)
+            });
         if start >= end {
             continue;
         }
         let part = w.cols(start, end);
-        if let Some((p, q)) =
-            first_cluster(&runs(&part.col_sums(), 0.5, 1), s.n(20) as usize)
-            && let Some(gl) = tight_glyph(
-                &part.cols(p, q),
-                x0 + (start + p) as u32,
-                ty0 + s.n(9),
-            )
+        if let Some((p, q)) = first_cluster(&runs(&part.col_sums(), 0.5, 1), s.n(20) as usize)
+            && let Some(gl) = tight_glyph(&part.cols(p, q), x0 + (start + p) as u32, ty0 + s.n(9))
         {
             out.push(gl);
         }
@@ -354,4 +346,58 @@ pub fn rank_text(img: &RgbImage) -> Option<(Glyph, Glyph)> {
         oy,
     )?;
     Some((word, digit))
+}
+
+/// What the role band above the emblem shows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RoleLine {
+    /// No text: an open queue screen.
+    Empty,
+    /// Some ink, but not a role line (glow, an overlay, a fading line).
+    Unclear,
+    /// The role icon (left of the role name).
+    Icon(Glyph),
+}
+
+/// The role line (icon, then the role name) centred above the emblem, about
+/// rows 284 to 321 at 1440p (the band stops at 326, above the glow of a tall
+/// emblem). A line is a band of 18 to 46 rows with at least 12
+/// white pixels per row; the icon is everything left of the widest column
+/// gap. Fewer than 12 white pixels in every row of the band is
+/// [`RoleLine::Empty`].
+pub fn role_icon(img: &RgbImage) -> RoleLine {
+    let Some(s) = Scale::from_img(img) else {
+        return RoleLine::Unclear;
+    };
+    let (x0, y0) = (s.x(1060), s.y(236));
+    let w = plane(img, x0, y0, s.x(1500), s.y(326), ink::white);
+    let counts = w.row_counts(ON);
+    let min_px = s.nx(12) as f32;
+    if counts.iter().all(|&c| c < min_px) {
+        return RoleLine::Empty;
+    }
+    let (h0, h1) = (s.n(18) as usize, s.n(46) as usize);
+    let Some((a, b)) = runs(&counts, min_px, s.n(3) as usize)
+        .into_iter()
+        .find(|(a, b)| (h0..=h1).contains(&(b - a)))
+    else {
+        return RoleLine::Unclear;
+    };
+    let band = w.sub(0, a, w.w, b);
+    let cr: Vec<(usize, usize)> = runs(&band.col_sums(), 0.5, 1)
+        .into_iter()
+        .filter(|&(p, q)| p > 0 && q < band.w)
+        .collect();
+    if cr.len() < 2 {
+        return RoleLine::Unclear;
+    }
+    let Some(k) = (0..cr.len() - 1).max_by_key(|&k| (cr[k + 1].0 - cr[k].1, usize::MAX - k)) else {
+        return RoleLine::Unclear;
+    };
+    tight_glyph(
+        &band.cols(cr[0].0, cr[k].1),
+        x0 + cr[0].0 as u32,
+        y0 + a as u32,
+    )
+    .map_or(RoleLine::Unclear, RoleLine::Icon)
 }

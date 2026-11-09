@@ -149,6 +149,8 @@ struct Scene {
     division: Option<u8>,
     /// Hero SR text grey level (250 = bright, about 80 = under a chat overlay).
     hero_level: u8,
+    /// Role line above the emblem; `None` paints none (open queue).
+    role: Option<Role>,
 }
 
 impl Default for Scene {
@@ -164,6 +166,7 @@ impl Default for Scene {
             tier: Some("HELLO"),
             division: Some(5),
             hero_level: 250,
+            role: None,
         }
     }
 }
@@ -205,6 +208,10 @@ fn paint(sc: &Scene) -> RgbImage {
         fill(&mut img, 1952, 120, 2540, 200, RED);
         draw(&mut img, b, 2068, 150, 3, WHITE);
     }
+    if let Some(r) = sc.role {
+        let right = draw(&mut img, &role_icon(r).to_string(), 1190, 290, 4, WHITE);
+        draw(&mut img, "TEL", right + 20, 290, 4, WHITE);
+    }
     if let (Some(t), Some(d)) = (sc.tier, sc.division) {
         let right = draw(&mut img, t, 1160, 900, 6, WHITE);
         draw(&mut img, &d.to_string(), right + 30, 900, 6, WHITE);
@@ -225,9 +232,20 @@ fn paint(sc: &Scene) -> RgbImage {
     img
 }
 
+/// Stand-in role icons in the dot font.
+fn role_icon(r: Role) -> char {
+    match r {
+        Role::Support => '+',
+        Role::Damage => 'E',
+        Role::Tank => 'O',
+        Role::Open => 'L',
+    }
+}
+
 /// Labels for `sc`, in the bench's JSON shape.
 fn labels(sc: &Scene) -> Labels {
     Labels {
+        role: Some(sc.role.unwrap_or(Role::Open)),
         role_rank: sc.tier.map(str::to_string),
         division: sc.division,
         progress_pct: Some(sc.pct),
@@ -250,6 +268,7 @@ fn training() -> Vec<Scene> {
             change: Some(45),
             sr: Some(6789),
             sr_change: Some(10),
+            role: Some(Role::Support),
             ..d.clone()
         },
         Scene {
@@ -260,6 +279,7 @@ fn training() -> Vec<Scene> {
             sr_change: Some(-23),
             tags: vec!["TOT", "EH"],
             division: Some(4),
+            role: Some(Role::Damage),
             ..d.clone()
         },
         Scene {
@@ -268,6 +288,7 @@ fn training() -> Vec<Scene> {
             change: Some(89),
             sr: Some(5012),
             sr_change: Some(45),
+            role: Some(Role::Tank),
             ..d.clone()
         },
         Scene {
@@ -426,6 +447,10 @@ fn learning_covers_every_field_family() {
         }
     }
     assert!(set.has_class(Family::Pill, "+"));
+    for r in Role::ICONS {
+        assert!(set.has_class(Family::Role, r.as_str()), "{r:?}");
+    }
+    assert!(!set.has_class(Family::Role, Role::Open.as_str()));
     assert!(set.has_class(Family::Tag, "EH"));
     assert!(set.has_class(Family::Banner, "HELLO 6V6"));
     assert!(set.has_class(Family::Tier, "HELLO"));
@@ -577,6 +602,61 @@ fn a_1080p_downscale_of_the_synthetic_screen_still_reads() {
     assert_eq!(r.next_mode_hint.value.as_deref(), Some("HELLO 6V6"));
 }
 
+// ---- role ----
+
+#[test]
+fn the_role_comes_from_its_icon() {
+    let r = reader();
+    for role in Role::ICONS {
+        let sc = Scene {
+            role: Some(role),
+            ..Scene::default()
+        };
+        let read = r.read(&paint(&sc)).expect("rank screen");
+        assert_eq!(read.role.value, Some(role), "{role:?}");
+        assert!(read.role.confidence > OPEN_CONFIDENCE, "{role:?}");
+        assert!(read.role.bbox.is_some());
+    }
+}
+
+#[test]
+fn no_role_line_is_open_queue_at_a_capped_confidence() {
+    let read = reader()
+        .read(&paint(&Scene::default()))
+        .expect("rank screen");
+    assert_eq!(read.role.value, Some(Role::Open));
+    assert_eq!(read.role.confidence, OPEN_CONFIDENCE);
+    assert!(read.role.bbox.is_none());
+}
+
+#[test]
+fn an_unknown_role_icon_is_none_not_a_guess() {
+    let mut img = paint(&Scene::default());
+    // a solid block icon no template was learned from
+    let right = draw(&mut img, "#", 1190, 290, 4, WHITE);
+    draw(&mut img, "TEL", right + 20, 290, 4, WHITE);
+    let read = reader().read(&img).expect("rank screen");
+    assert_eq!(read.role.value, None);
+    assert_eq!(read.role.confidence, 0.0);
+}
+
+#[test]
+fn ink_in_the_role_band_that_is_not_a_line_is_none() {
+    let mut img = paint(&Scene::default());
+    // a glow blob too tall to be a role line
+    fill(&mut img, 1200, 240, 1360, 320, WHITE);
+    let read = reader().read(&img).expect("rank screen");
+    assert_eq!(read.role.value, None);
+}
+
+#[test]
+fn role_labels_read_from_their_own_json_shape() {
+    let l: Labels = serde_json::from_str(r#"{"role": "Support"}"#).unwrap();
+    assert_eq!(l.role, Some(Role::Support));
+    let l: Labels = serde_json::from_str(r#"{"division": 3}"#).unwrap();
+    assert_eq!(l.role, None);
+}
+
 // ---- local bench (never in CI) ----
 
 /// Local bench on labelled rank screens: set `SCUFFED_RANK_BENCH` to the
@@ -605,12 +685,29 @@ fn bench_labelled_rank_screens() {
         #[serde(flatten)]
         labels: Labels,
     }
-    let rows: Vec<Row> = std::fs::read_to_string(&jsonl)
+    let mut rows: Vec<Row> = std::fs::read_to_string(&jsonl)
         .unwrap()
         .lines()
         .filter(|l| !l.trim().is_empty())
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
+    // roles live in a separate file (`game`, `role`), merged by game
+    if let Ok(p) = std::env::var("SCUFFED_RANK_ROLE_LABELS") {
+        #[derive(serde::Deserialize)]
+        struct RoleRow {
+            game: String,
+            role: Option<Role>,
+        }
+        let roles: Vec<RoleRow> = std::fs::read_to_string(p)
+            .unwrap()
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        for r in &mut rows {
+            r.labels.role = roles.iter().find(|x| x.game == r.game).and_then(|x| x.role);
+        }
+    }
     let imgs: Vec<RgbImage> = rows
         .iter()
         .map(|r| {
