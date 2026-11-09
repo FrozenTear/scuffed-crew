@@ -171,16 +171,17 @@ pub(crate) fn normalize_avatar_url(
     }
     let prefix = member_avatar_prefix(member_id);
     if let Some(rel) = trimmed.strip_prefix(&prefix)
-        && avatar_rel_is_safe(rel)
+        && upload_rel_is_safe(rel)
     {
         return Ok(Some(trimmed.to_string()));
     }
     Err("avatar_url must be empty, an https URL, or a file under your own avatars folder")
 }
 
-/// Relative path under `avatars/<key>/`. Rejects empty segments, `.`, `..`,
-/// and characters that would let a later join escape the folder.
-fn avatar_rel_is_safe(rel: &str) -> bool {
+/// Relative path under an uploads folder (`avatars/<key>/`, `images/`).
+/// Rejects empty segments, `.`, `..`, and characters that would let a later
+/// join escape the folder.
+pub(crate) fn upload_rel_is_safe(rel: &str) -> bool {
     if rel.is_empty()
         || rel.contains('\\')
         || rel.contains('\0')
@@ -241,7 +242,7 @@ async fn owned_avatar_file(
 ) -> Option<std::path::PathBuf> {
     let prefix = member_avatar_prefix(member_id);
     let rel = url.strip_prefix(&prefix)?;
-    if !avatar_rel_is_safe(rel) {
+    if !upload_rel_is_safe(rel) {
         return None;
     }
     let base = upload_dir.join("avatars").join(member_dir_key(member_id));

@@ -10,6 +10,7 @@ use scuffed_db::{Article, AuditAction, AuditTargetType};
 
 use crate::extractors::{AdminUser, OfficerUser, OptionalOrgMember};
 use crate::routes::audit_log::audit;
+use crate::routes::uploads::upload_rel_is_safe;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -113,6 +114,64 @@ fn article_not_found() -> (StatusCode, Json<ErrorResponse>) {
     )
 }
 
+pub(crate) const COVER_IMAGE_URL_ERROR: &str =
+    "cover_image_url must be empty, an https URL, or an /uploads/images/ path";
+
+/// Accept an article cover image URL on create / update.
+///
+/// `Ok(None)` clears the field (empty / whitespace). `Ok(Some)` is the trimmed
+/// value: either an absolute `https://` URL with a host, or a file under
+/// `/uploads/images/<folder>/` (what `POST /api/upload/image` returns; any
+/// member's folder, since officers co-edit articles). A missing leading
+/// slash is added. Mirrors
+/// `normalize_avatar_url`.
+pub(crate) fn normalize_cover_image_url(raw: &str) -> Result<Option<String>, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return Err(COVER_IMAGE_URL_ERROR);
+    }
+    if let Some(rest) = trimmed
+        .get(..8)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("https://"))
+        .map(|_| &trimmed[8..])
+    {
+        // `url` folds `https:///x` into host `x`; require the authority here.
+        let host_ok = !rest.starts_with('/')
+            && url::Url::parse(trimmed).is_ok_and(|u| {
+                u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty())
+            });
+        return if host_ok {
+            Ok(Some(trimmed.to_string()))
+        } else {
+            Err(COVER_IMAGE_URL_ERROR)
+        };
+    }
+    // A missing leading slash (`uploads/images/...`, hand-typed in older
+    // covers) is fixed up rather than rejected, so those rows heal on save.
+    if let Some(rel) = trimmed
+        .strip_prefix("/uploads/images/")
+        .or_else(|| trimmed.strip_prefix("uploads/images/"))
+        && rel.contains('/')
+        && upload_rel_is_safe(rel)
+    {
+        return Ok(Some(format!("/uploads/images/{rel}")));
+    }
+    Err(COVER_IMAGE_URL_ERROR)
+}
+
+fn bad_cover_image_url(msg: &'static str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse { error: msg.into() }),
+    )
+}
+
 #[derive(Deserialize)]
 pub struct CreateArticleRequest {
     pub slug: String,
@@ -128,6 +187,10 @@ pub async fn create_article(
     officer: OfficerUser,
     Json(body): Json<CreateArticleRequest>,
 ) -> Result<(StatusCode, Json<Article>), (StatusCode, Json<ErrorResponse>)> {
+    let cover_image_url = match body.cover_image_url.as_deref() {
+        Some(raw) => normalize_cover_image_url(raw).map_err(bad_cover_image_url)?,
+        None => None,
+    };
     let article = state
         .db
         .create_article(
@@ -135,7 +198,7 @@ pub async fn create_article(
             &body.title,
             &body.content_markdown,
             body.summary.as_deref(),
-            body.cover_image_url.as_deref(),
+            cover_image_url.as_deref(),
             &officer.member.id,
         )
         .await
@@ -176,6 +239,13 @@ pub async fn update_article(
     Path(slug): Path<String>,
     Json(body): Json<UpdateArticleRequest>,
 ) -> Result<Json<Article>, (StatusCode, Json<ErrorResponse>)> {
+    // Omitted keeps the stored value; null or blank clears it.
+    let cover_image_url = match body.cover_image_url {
+        Some(Some(raw)) => Some(normalize_cover_image_url(&raw).map_err(bad_cover_image_url)?),
+        Some(None) => Some(None),
+        None => None,
+    };
+
     // Look up the article by slug to get its ID
     let existing = state
         .db
@@ -198,7 +268,7 @@ pub async fn update_article(
             body.title.as_deref(),
             body.content_markdown.as_deref(),
             body.summary.as_ref().map(|s| s.as_deref()),
-            body.cover_image_url.as_ref().map(|s| s.as_deref()),
+            cover_image_url.as_ref().map(|s| s.as_deref()),
         )
         .await
         .map_err(|_e| {
@@ -351,4 +421,99 @@ pub async fn delete_article(
     .await;
 
     Ok(StatusCode::OK)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cover_image_url_accepts_blank_https_and_image_uploads() {
+        for blank in ["", "   ", "\t\n"] {
+            assert_eq!(normalize_cover_image_url(blank), Ok(None), "{blank:?}");
+        }
+        for (raw, want) in [
+            (
+                "https://cdn.example.com/a.png",
+                "https://cdn.example.com/a.png",
+            ),
+            (
+                "HTTPS://cdn.example.com/a.png",
+                "HTTPS://cdn.example.com/a.png",
+            ),
+            ("HtTpS://cdn.example.com", "HtTpS://cdn.example.com"),
+            (
+                "  https://cdn.example.com/a.png?w=1#x  ",
+                "https://cdn.example.com/a.png?w=1#x",
+            ),
+            (
+                "/uploads/images/member_abc/cover.png",
+                "/uploads/images/member_abc/cover.png",
+            ),
+            (
+                " /uploads/images/member_other/sub/c-1_x.webp ",
+                "/uploads/images/member_other/sub/c-1_x.webp",
+            ),
+            (
+                "uploads/images/member_abc/a.png",
+                "/uploads/images/member_abc/a.png",
+            ),
+            (
+                " uploads/images/member_abc/a.png ",
+                "/uploads/images/member_abc/a.png",
+            ),
+        ] {
+            assert_eq!(
+                normalize_cover_image_url(raw),
+                Ok(Some(want.to_string())),
+                "{raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cover_image_url_rejects_everything_else() {
+        for bad in [
+            "http://cdn.example.com/a.png",
+            "javascript:alert(1)",
+            "JavaScript:alert(1)",
+            "data:image/png;base64,AAAA",
+            "vbscript:msgbox(1)",
+            "//cdn.example.com/a.png",
+            "https:cdn.example.com/a.png",
+            "https:/cdn.example.com/a.png",
+            "https://",
+            "https:///a.png",
+            "https://?x",
+            "https://#x",
+            "https://cdn.example.com/a b.png",
+            "https://cdn.example.com/a\tb.png",
+            "https://cdn.example.com/a\u{0}.png",
+            "https://cdn.example.com\\a.png",
+            "/uploads/avatars/member_abc/a.png",
+            "/uploads/other/member_abc/a.png",
+            "/assets/a.png",
+            "uploads/images/",
+            "uploads/images/a.png",
+            "uploads/images/member_abc/../x.png",
+            "/uploads/images/",
+            "/uploads/images/a.png",
+            "/uploads/images/member_abc/",
+            "/uploads/images/member_abc/../x.png",
+            "/uploads/images/../avatars/m/x.png",
+            "/uploads/images/member_abc/./x.png",
+            "/uploads/images/member_abc//x.png",
+            "/uploads/images/member_abc/x.png?v=1",
+            "/uploads/images/member_abc/x.png#f",
+            "/uploads/images/member_abc/%2e%2e/x.png",
+            "/uploads/images/member_abc\\x.png",
+            "/uploads/images/member abc/x.png",
+        ] {
+            assert_eq!(
+                normalize_cover_image_url(bad),
+                Err(COVER_IMAGE_URL_ERROR),
+                "{bad:?}"
+            );
+        }
+    }
 }
