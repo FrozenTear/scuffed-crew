@@ -480,14 +480,7 @@ async fn a_second_unread_kill_column_keeps_the_stored_unsure_read() {
         sure(1821),
         sure(4412),
     ];
-    let unread_e = [
-        None,
-        sure(18),
-        sure(5),
-        sure(12707),
-        sure(1821),
-        sure(4412),
-    ];
+    let unread_e = [None, sure(18), sure(5), sure(12707), sure(1821), sure(4412)];
     let (st, seen) = o10_run(
         &ctx,
         vec![
