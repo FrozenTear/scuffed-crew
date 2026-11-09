@@ -1,8 +1,10 @@
 //! Where each field is on the rank screen, and how its text is cut out.
-//! Positions were measured on saved rank screens at 2560x1440; at other 16:9
-//! sizes (1080p, …) every box and pixel threshold is scaled by
-//! [`Scale`] (`width/2560`, `height/1440`). The colour tests are in
-//! [`super::ink`].
+//! Positions were measured on saved rank screens at 2560x1440; at 1080p
+//! every box and most pixel thresholds are scaled by [`Scale`]
+//! (`width/2560`, `height/1440`). A few small thresholds are fixed pixel
+//! counts ([`ink::split_two`]'s width, [`ink::strip_minus`]'s bar size, the
+//! hero line brightness), which is one reason [`Scale`] takes only the two
+//! sizes the reader is tested at. The colour tests are in [`super::ink`].
 
 use image::RgbImage;
 
@@ -19,11 +21,17 @@ pub struct Scale {
     pub sy: f32,
 }
 
+/// Frame heights the layout is tested at (1080p and 1440p). [`Scale`]
+/// takes these within 2%, so a client area a few rows short still reads;
+/// 720p, 4K and anything between are refused rather than read with
+/// untested thresholds.
+pub const HEIGHTS: [u32; 2] = [1080, 1440];
+
 impl Scale {
-    /// Accept ~16:9 frames whose height is in 720..=2160 (covers 1080p and
-    /// 1440p; other aspect ratios are refused).
+    /// Accept 16:9 frames (aspect within 0.02) whose height is within 2% of
+    /// one of [`HEIGHTS`].
     pub fn from_dims(w: u32, h: u32) -> Option<Self> {
-        if !(720..=2160).contains(&h) || w == 0 {
+        if w == 0 || !HEIGHTS.iter().any(|&t| h.abs_diff(t) * 50 <= t) {
             return None;
         }
         let aspect = w as f32 / h as f32;
@@ -64,11 +72,15 @@ impl Scale {
     }
 }
 
-/// The topmost hero entry: its name line and SR line, as row spans.
+/// The topmost hero entry: its name line and SR line, as row spans, and the
+/// right edge of the name, which the SR and its change are right aligned to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Entry {
     pub name: (u32, u32),
     pub sr: (u32, u32),
+    /// Right edge of the hero name (scaled to its local peak, so an overlay
+    /// edge crossing it does not end it early), frame x.
+    pub right: u32,
 }
 
 /// The "RANK PROGRESS:" label: present on every rank update screen.
@@ -114,7 +126,9 @@ pub fn higher_glyphs(img: &RgbImage) -> Vec<Glyph> {
 /// pill's sign. A column belongs to the pill when the rows just above and
 /// below the text are pill coloured; the pill's white rim and the white
 /// bar fill fail that test. On a red pill a minus bar merged into the first
-/// digit is cut off ([`strip_minus`]).
+/// digit is cut off ([`strip_minus`]). The minus sits before the first digit,
+/// which is the first cut, or the second when the chevrons come first
+/// ("<<< -29%"), so only those two are checked.
 pub fn pill_glyphs(img: &RgbImage) -> (Vec<Glyph>, Option<i32>) {
     let Some(s) = Scale::from_img(img) else {
         return (Vec::new(), None);
@@ -169,7 +183,12 @@ pub fn pill_glyphs(img: &RgbImage) -> (Vec<Glyph>, Option<i32>) {
     if gm > rm {
         (gl, Some(1))
     } else {
-        (gl.into_iter().map(strip_minus).collect(), Some(-1))
+        let gl = gl
+            .into_iter()
+            .enumerate()
+            .map(|(k, g)| if k < 2 { strip_minus(g) } else { g })
+            .collect();
+        (gl, Some(-1))
     }
 }
 
@@ -200,7 +219,7 @@ pub fn first_entry(img: &RgbImage) -> Option<Entry> {
     let (hs0, hs1) = (s.n(19), s.n(34));
     let taller = s.n(3);
     let (gap0, gap1) = (s.n(4), s.n(22));
-    ls.windows(2).find_map(|w| {
+    let (name, sr) = ls.windows(2).find_map(|w| {
         let (n, sr) = (w[0], w[1]);
         let (hn, hs) = (n.1 - n.0, sr.1 - sr.0);
         let gap = sr.0 - n.1;
@@ -208,7 +227,12 @@ pub fn first_entry(img: &RgbImage) -> Option<Entry> {
             && (hs0..=hs1).contains(&hs)
             && hs >= hn + taller
             && (gap0..=gap1).contains(&gap))
-        .then_some(Entry { name: n, sr })
+        .then_some((n, sr))
+    })?;
+    Some(Entry {
+        name,
+        sr,
+        right: name_right(img, s, name),
     })
 }
 
@@ -219,13 +243,13 @@ fn band_ink(img: &RgbImage, s: Scale, y0: u32, y1: u32, x1: u32) -> Plane {
 
 /// Right edge of the hero name. The SR digits and the change are right
 /// aligned to it; placement pips further right are not part of the entry.
-fn name_right(img: &RgbImage, s: Scale, e: &Entry) -> u32 {
+fn name_right(img: &RgbImage, s: Scale, name: (u32, u32)) -> u32 {
     let (hx0, _, hx1, _) = hero_box(s);
     // scaled to the local peak within 6 columns ([`adaptive_local`]): a
     // chat overlay edge can cross the name, and scaled as one the dimmed
     // part would vanish and cut the SR and change windows short
     let ink = adaptive_local(
-        &neutral_plane(img, hx0, e.name.0, hx1, e.name.1),
+        &neutral_plane(img, hx0, name.0, hx1, name.1),
         s.n(6) as usize,
         25.0,
     );
@@ -233,14 +257,18 @@ fn name_right(img: &RgbImage, s: Scale, e: &Entry) -> u32 {
         .map_or(hx1, |(_, b)| hx0 + b as u32)
 }
 
-/// The hero SR glyphs (the rank icon left of them may be included; the
-/// reader keeps the rightmost four).
+/// The hero SR glyphs. A rank icon left of the digits that is taller or
+/// lower than they are is left out by shape: the digits share their top and
+/// bottom rows (within 2 reference rows), so cuts are kept from the right
+/// while they line up with the rightmost digit. An icon of digit height
+/// stays and is matched as [`super::SR_ICON`] by the reader. Two touching
+/// digits stay one cut here.
 pub fn sr_glyphs(img: &RgbImage, e: &Entry) -> Vec<Glyph> {
     let Some(s) = Scale::from_img(img) else {
         return Vec::new();
     };
     let (hx0, _, hx1, _) = hero_box(s);
-    let x1 = hx1.min(name_right(img, s, e) + s.n(3));
+    let x1 = hx1.min(e.right + s.n(3));
     let y0 = e.sr.0.saturating_sub(s.n(2));
     let gl = glyphs(
         &band_ink(img, s, y0, e.sr.1 + s.n(2), x1),
@@ -249,7 +277,14 @@ pub fn sr_glyphs(img: &RgbImage, e: &Entry) -> Vec<Glyph> {
         1.0,
         s.n(4),
     );
-    cluster_right(gl, (0.75 * (e.sr.1 - e.sr.0) as f32) as u32)
+    let mut gl = cluster_right(gl, (0.75 * (e.sr.1 - e.sr.0) as f32) as u32);
+    let Some(&[_, top, _, bottom]) = gl.last().map(|g| &g.bbox) else {
+        return gl;
+    };
+    let tol = s.n(2);
+    let aligned = |g: &Glyph| g.bbox[1].abs_diff(top) <= tol && g.bbox[3].abs_diff(bottom) <= tol;
+    let k = gl.iter().rposition(|g| !aligned(g)).map_or(0, |k| k + 1);
+    gl.split_off(k)
 }
 
 /// The hero SR change digits under the SR line and their sign (green up,
@@ -259,7 +294,7 @@ pub fn change_glyphs(img: &RgbImage, e: &Entry) -> (Vec<Glyph>, Option<i32>) {
         return (Vec::new(), None);
     };
     let (hx0, _, hx1, _) = hero_box(s);
-    let x1 = hx1.min(name_right(img, s, e) + s.n(3));
+    let x1 = hx1.min(e.right + s.n(3));
     let y0 = e.sr.1;
     let gs = plane(img, hx0, y0, x1, y0 + s.n(30), ink::green_score);
     let rs = plane(img, hx0, y0, x1, y0 + s.n(30), ink::red_score);
@@ -355,6 +390,10 @@ pub fn rank_text(img: &RgbImage) -> Option<(Glyph, Glyph)> {
     Some((word, digit))
 }
 
+/// Neutral level ([`ink::neutral`]) of faint ink: white text dimmed to
+/// about a third still has more.
+pub const FAINT: f32 = 20.0;
+
 /// What the role band above the emblem shows.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoleLine {
@@ -370,18 +409,27 @@ pub enum RoleLine {
 /// rows 284 to 321 at 1440p (the band stops at 326, above the glow of a tall
 /// emblem). A line is a band of 18 to 46 rows with at least 12
 /// white pixels per row; the icon is everything left of the widest column
-/// gap. Fewer than 12 white pixels in every row of the band is
-/// [`RoleLine::Empty`].
+/// gap. [`RoleLine::Empty`] needs fewer than 12 pixels per row even of
+/// faint ink (neutral above [`FAINT`], well under the white threshold): a
+/// role line dimmed by an overlay or still fading in is then
+/// [`RoleLine::Unclear`], not an open queue. Open queue bands on the
+/// saved screens hold no such pixel at all.
 pub fn role_icon(img: &RgbImage) -> RoleLine {
     let Some(s) = Scale::from_img(img) else {
         return RoleLine::Unclear;
     };
     let (x0, y0) = (s.x(1060), s.y(236));
-    let w = plane(img, x0, y0, s.x(1500), s.y(326), ink::white);
+    let (x1, y1) = (s.x(1500), s.y(326));
+    let w = plane(img, x0, y0, x1, y1, ink::white);
     let counts = w.row_counts(ON);
     let min_px = s.nx(12) as f32;
     if counts.iter().all(|&c| c < min_px) {
-        return RoleLine::Empty;
+        let faint = neutral_plane(img, x0, y0, x1, y1).row_counts(FAINT);
+        return if faint.iter().all(|&c| c < min_px) {
+            RoleLine::Empty
+        } else {
+            RoleLine::Unclear
+        };
     }
     let (h0, h1) = (s.n(18) as usize, s.n(46) as usize);
     let Some((a, b)) = runs(&counts, min_px, s.n(3) as usize)
@@ -411,7 +459,7 @@ pub fn role_icon(img: &RgbImage) -> RoleLine {
 
 /// The division digits on the two small emblems at the ends of the progress
 /// bar: the left one shows the division below the current one, the right
-/// one the division above (see [`super::division_from_neighbours`]). Each is
+/// one the division above (see [`super::neighbours`]). Each is
 /// a white digit about 13 rows tall and at most 12 wide in a dark hexagon,
 /// centred near x 560 (left) and x 2000 (right), rows 1147 to 1162 at
 /// 1440p (Master digits sit 3 rows lower). The window is the centre plus

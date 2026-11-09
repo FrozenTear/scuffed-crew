@@ -9,11 +9,13 @@
 //! The bench at the bottom (`bench_labelled_rank_screens`) is ignored: it
 //! needs private labelled frames that never leave the bench box.
 
+use std::sync::OnceLock;
+
 use image::{Rgb, RgbImage};
 
 use super::ink::{Plane, first_cluster, runs, tight};
 use super::layout;
-use super::templates::{Family, Learner, TemplateSet};
+use super::templates::{Family, Learner, TemplateError, TemplateSet};
 use super::*;
 
 // ---- 5x7 dot font ----
@@ -74,6 +76,12 @@ fn rows_of(c: char) -> [&'static str; 7] {
         'O' => [
             ".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###.",
         ],
+        '<' => [
+            "....#", "...#.", "..#..", ".#...", "..#..", "...#.", "....#",
+        ],
+        '>' => [
+            "#....", ".#...", "..#..", "...#.", "..#..", ".#...", "#....",
+        ],
         _ => [
             "#####", "#####", "#####", "#####", "#####", "#####", "#####",
         ],
@@ -114,6 +122,16 @@ fn width(text: &str, s: u32) -> u32 {
         - s
 }
 
+/// Three chevrons (`c` is `<` or `>`) at two-pixel dots, each one dot
+/// over the last so they cut as one glyph [`CHEVRONS_W`] wide.
+fn chevrons(img: &mut RgbImage, c: char, x: u32, y: u32) {
+    for k in 0..3 {
+        draw(img, &c.to_string(), x + k * 8, y, 2, WHITE);
+    }
+}
+
+const CHEVRONS_W: u32 = 26;
+
 fn fill(img: &mut RgbImage, x0: u32, y0: u32, x1: u32, y1: u32, col: Rgb<u8>) {
     for y in y0..y1 {
         for x in x0..x1 {
@@ -151,6 +169,11 @@ struct Scene {
     hero_level: u8,
     /// Role line above the emblem; `None` paints none (open queue).
     role: Option<Role>,
+    /// Chevrons on the pill: `>>>` after a green pill's text, `<<<` before a
+    /// red pill's minus.
+    chevrons: bool,
+    /// A rank icon left of the hero SR.
+    sr_icon: Icon,
 }
 
 impl Default for Scene {
@@ -167,7 +190,34 @@ impl Default for Scene {
             division: Some(5),
             hero_level: 250,
             role: None,
+            chevrons: false,
+            sr_icon: Icon::None,
         }
+    }
+}
+
+/// The rank icon left of the hero SR.
+#[derive(Clone, Copy, PartialEq)]
+enum Icon {
+    None,
+    /// Taller than the digits, its bottom below theirs.
+    Tall,
+    /// A disc of digit height (a block with a dark bar), as some tiers show.
+    Level,
+}
+
+/// Where the pill text starts.
+const PILL_X: u32 = 730;
+/// The pill text's top row (two-pixel dots, 14 rows).
+const PILL_Y: u32 = 1135;
+
+/// Left edge of the pill's digits for `sc` (a red pill keeps room for its
+/// chevrons and minus bar).
+fn pill_digits_x(sc: &Scene) -> u32 {
+    match (sc.change, sc.chevrons) {
+        (Some(c), true) if c < 0 => PILL_X + CHEVRONS_W + 12 + 10,
+        (Some(c), false) if c < 0 => PILL_X + 10,
+        _ => PILL_X,
     }
 }
 
@@ -192,9 +242,31 @@ fn paint(sc: &Scene) -> RgbImage {
         } else {
             (GREEN, format!("+{ch}%"))
         };
-        let w = width(&text, 2);
-        fill(&mut img, 700, 1123, 700 + w + 60, 1161, col);
-        draw(&mut img, &text, 730, 1135, 2, WHITE);
+        let x = pill_digits_x(sc);
+        let trail = if ch > 0 && sc.chevrons {
+            12 + CHEVRONS_W
+        } else {
+            0
+        };
+        fill(
+            &mut img,
+            700,
+            1123,
+            x + width(&text, 2) + trail + 30,
+            1161,
+            col,
+        );
+        let right = draw(&mut img, &text, x, PILL_Y, 2, WHITE);
+        if ch < 0 {
+            // a two-row minus bar at mid height touching the first digit,
+            // as the game draws it ("<<< -29%")
+            fill(&mut img, x - 10, PILL_Y + 6, x + 2, PILL_Y + 8, WHITE);
+            if sc.chevrons {
+                chevrons(&mut img, '<', PILL_X, PILL_Y);
+            }
+        } else if sc.chevrons {
+            chevrons(&mut img, '>', right + 12, PILL_Y);
+        }
     }
     // tags: an icon disc stand-in then a word
     let mut x = 640;
@@ -228,7 +300,16 @@ fn paint(sc: &Scene) -> RgbImage {
         let name = "HELLO";
         draw(&mut img, name, 2333 - width(name, 2), 700, 2, g);
         let s = sr.to_string();
-        draw(&mut img, &s, 2333 - width(&s, 3), 724, 3, g);
+        let left = 2333 - width(&s, 3);
+        draw(&mut img, &s, left, 724, 3, g);
+        match sc.sr_icon {
+            Icon::None => {}
+            Icon::Tall => fill(&mut img, left - 30, 722, left - 12, 751, g),
+            Icon::Level => {
+                fill(&mut img, left - 30, 724, left - 12, 745, g);
+                fill(&mut img, left - 26, 733, left - 16, 736, BG);
+            }
+        }
         if let Some(c) = sc.sr_change {
             let col = if c < 0 { Rgb([220, 30, 30]) } else { SR_GREEN };
             let t = c.abs().to_string();
@@ -275,6 +356,7 @@ fn training() -> Vec<Scene> {
             sr: Some(6789),
             sr_change: Some(10),
             role: Some(Role::Support),
+            chevrons: true,
             ..d.clone()
         },
         Scene {
@@ -286,6 +368,7 @@ fn training() -> Vec<Scene> {
             tags: vec!["TOT", "EH"],
             division: Some(4),
             role: Some(Role::Damage),
+            chevrons: true,
             ..d.clone()
         },
         Scene {
@@ -295,6 +378,7 @@ fn training() -> Vec<Scene> {
             sr: Some(5012),
             sr_change: Some(45),
             role: Some(Role::Tank),
+            sr_icon: Icon::Tall,
             ..d.clone()
         },
         Scene {
@@ -304,6 +388,7 @@ fn training() -> Vec<Scene> {
             sr: Some(3456),
             sr_change: Some(-67),
             division: Some(1),
+            banner: Some("TOT 5V5"),
             ..d.clone()
         },
         Scene {
@@ -312,21 +397,27 @@ fn training() -> Vec<Scene> {
             change: Some(23),
             sr: Some(7890),
             sr_change: Some(89),
+            sr_icon: Icon::Level,
             ..d
         },
     ]
 }
 
-fn trained() -> TemplateSet {
-    let mut l = Learner::new();
-    for sc in training() {
-        l.add_frame(&paint(&sc), &labels(&sc));
-    }
-    l.build()
+/// The pack learned from [`training`], built once for all tests.
+fn trained() -> &'static TemplateSet {
+    static SET: OnceLock<TemplateSet> = OnceLock::new();
+    SET.get_or_init(|| {
+        let mut l = Learner::new();
+        for sc in training() {
+            l.add_frame(&paint(&sc), &labels(&sc));
+        }
+        l.build()
+    })
 }
 
-fn reader() -> Reader {
-    Reader::new(trained())
+fn reader() -> &'static Reader {
+    static READER: OnceLock<Reader> = OnceLock::new();
+    READER.get_or_init(|| Reader::new(trained().clone()))
 }
 
 // ---- the switch ----
@@ -470,9 +561,46 @@ fn a_template_pack_round_trips_through_its_file() {
     let dir = tempfile::tempdir().unwrap();
     set.save_dir(dir.path()).unwrap();
     let back = TemplateSet::load_dir(dir.path()).unwrap();
-    assert_eq!(back, set);
-    assert!(TemplateSet::load_dir(&dir.path().join("missing")).is_err());
+    assert_eq!(&back, set);
+    assert!(matches!(
+        TemplateSet::load_dir(&dir.path().join("missing")),
+        Err(TemplateError::Missing(_))
+    ));
     assert!(Reader::load(&dir.path().join("nowhere")).is_err());
+}
+
+#[test]
+fn a_pack_of_another_shape_is_refused_on_load() {
+    let bad = |edit: &dyn Fn(&mut TemplateSet)| {
+        let mut set = trained().clone();
+        edit(&mut set);
+        let dir = tempfile::tempdir().unwrap();
+        set.save_dir(dir.path()).unwrap();
+        match TemplateSet::load_dir(dir.path()) {
+            Err(TemplateError::Bad(_, e)) => e,
+            other => panic!("loaded: {:?}", other.map(|_| ())),
+        }
+    };
+    let e = bad(&|s| s.recognizer = "cv-v1".to_string());
+    assert!(e.contains("recognizer"), "{e}");
+    let e = bad(&|s| {
+        let v = &mut s.families.get_mut(&Family::Sr).unwrap()[0].vector;
+        v.truncate(100);
+    });
+    assert!(e.contains("want 576"), "{e}");
+    let e = bad(&|s| s.families.get_mut(&Family::Pct).unwrap()[0].aspect = -1.0);
+    assert!(e.contains("finite"), "{e}");
+    let e = bad(&|s| {
+        s.families.remove(&Family::Gate);
+    });
+    assert!(e.contains("gate"), "{e}");
+    // a file that is there but cannot be read is not "missing"
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join(super::templates::PACK_FILE)).unwrap();
+    assert!(matches!(
+        TemplateSet::load_dir(dir.path()),
+        Err(TemplateError::Bad(..))
+    ));
 }
 
 // ---- reading ----
@@ -560,16 +688,116 @@ fn an_unknown_glyph_makes_the_field_none_not_a_guess() {
 }
 
 #[test]
-fn other_screens_and_sizes_are_refused() {
+fn another_screen_is_not_a_rank_screen() {
     let r = reader();
-    assert!(r.read(&blank()).is_none(), "no RANK PROGRESS label");
-    // blank 1080p has no gate label, so it is refused for content, not size
-    assert!(r.read(&RgbImage::from_pixel(1920, 1080, BG)).is_none());
-    // non-16:9 is refused for size
-    assert!(r.read(&RgbImage::from_pixel(800, 600, BG)).is_none());
+    for img in [blank(), RgbImage::from_pixel(1920, 1080, BG)] {
+        assert_eq!(r.read(&img).err(), Some(ReadError::NotRankScreen));
+        assert_eq!(r.is_rank_screen(&img), Err(ReadError::NotRankScreen));
+    }
     let mut img = paint(&Scene::default());
     fill(&mut img, 830, 1060, 980, 1100, BG);
-    assert!(r.read(&img).is_none(), "label gone");
+    assert_eq!(
+        r.read(&img).err(),
+        Some(ReadError::NotRankScreen),
+        "label gone"
+    );
+    // another white word where the label goes
+    draw(&mut img, "HEH 6", 842, 1068, 3, WHITE);
+    assert_eq!(r.is_rank_screen(&img), Err(ReadError::NotRankScreen));
+    assert_eq!(r.read(&img).err(), Some(ReadError::NotRankScreen));
+}
+
+#[test]
+fn unsupported_sizes_are_their_own_error() {
+    use image::imageops::{self, FilterType};
+    let r = reader();
+    let painted = paint(&Scene::default());
+    // a crop of the screen, other aspect ratios, untested heights
+    let crop = imageops::crop_imm(&painted, 560, 820, 1440, 480).to_image();
+    for img in [
+        crop,
+        RgbImage::from_pixel(800, 600, BG),
+        RgbImage::from_pixel(1920, 1200, BG),
+        RgbImage::from_pixel(2560, 1080, BG),
+        imageops::resize(&painted, 1280, 720, FilterType::Triangle),
+        imageops::resize(&painted, 3840, 2160, FilterType::Nearest),
+    ] {
+        let (width, height) = img.dimensions();
+        let want = ReadError::Unsupported { width, height };
+        assert_eq!(r.read(&img).err(), Some(want), "{width}x{height}");
+        assert_eq!(r.is_rank_screen(&img), Err(want), "{width}x{height}");
+        assert!(want.to_string().contains("16:9"));
+    }
+}
+
+#[test]
+fn the_gate_alone_gives_its_score() {
+    let r = reader();
+    let img = paint(&Scene::default());
+    let score = r.is_rank_screen(&img).expect("rank screen");
+    assert!((MIN_WORD_SCORE..=1.0).contains(&score), "{score}");
+    assert!(r.read(&img).is_ok());
+}
+
+/// Every size near the supported ones and the common unsupported ones, blank
+/// and painted: nothing panics, and only the supported sizes get past the
+/// size check.
+#[test]
+fn odd_sizes_never_panic() {
+    use image::imageops::{self, FilterType};
+    let r = reader();
+    let painted = paint(&Scene {
+        change: Some(-31),
+        chevrons: true,
+        sr_icon: Icon::Tall,
+        role: Some(Role::Damage),
+        ..Scene::default()
+    });
+    let mut sizes = vec![
+        (0, 0),
+        (1, 1),
+        (16, 9),
+        (1280, 720),
+        (1366, 768),
+        (1600, 900),
+        (1920, 1080),
+        (2560, 1440),
+        (3840, 2160),
+    ];
+    // the edges of the height and aspect tolerances around 1080p and 1440p
+    for h in [1058, 1059, 1080, 1101, 1102, 1411, 1412, 1440, 1468, 1469] {
+        let w = h as f32 * 16.0 / 9.0;
+        for a in [-0.021f32, -0.019, 0.0, 0.019, 0.021] {
+            sizes.push(((w + a * h as f32).round() as u32, h));
+        }
+    }
+    for (w, h) in sizes {
+        let supported = layout::Scale::from_dims(w, h).is_some();
+        let blank = RgbImage::from_pixel(w, h, BG);
+        let mut imgs = vec![blank];
+        // a painted copy only where the reader gets past the size check
+        if supported {
+            imgs.push(imageops::resize(&painted, w, h, FilterType::Nearest));
+        }
+        for img in imgs {
+            let gate = r.is_rank_screen(&img);
+            let read = r.read(&img);
+            assert_eq!(
+                matches!(gate, Err(ReadError::Unsupported { .. })),
+                !supported,
+                "{w}x{h}"
+            );
+            assert_eq!(gate.is_ok(), read.is_ok(), "{w}x{h}");
+            Learner::new().add_frame(&img, &labels(&Scene::default()));
+        }
+    }
+    // the sizes the reader is built for
+    for (w, h) in [(1920, 1080), (2560, 1440), (1884, 1060), (2524, 1420)] {
+        assert!(layout::Scale::from_dims(w, h).is_some(), "{w}x{h}");
+    }
+    for (w, h) in [(1280, 720), (3840, 2160), (2560, 1600), (3440, 1440)] {
+        assert!(layout::Scale::from_dims(w, h).is_none(), "{w}x{h}");
+    }
 }
 
 #[test]
@@ -607,6 +835,41 @@ fn a_1080p_downscale_of_the_synthetic_screen_still_reads() {
         Some(vec!["EH".to_string(), "TOT".to_string()])
     );
     assert_eq!(r.next_mode_hint.value.as_deref(), Some("HELLO 6V6"));
+}
+
+/// A 1080p frame made with a soft filter, as the game's own scaling is:
+/// glyph edges blur and neighbours can touch. Whatever does not read cleanly
+/// must be `None`, never another value.
+#[test]
+fn a_soft_1080p_downscale_reads_right_or_none() {
+    use image::imageops::{self, FilterType};
+    let soft = |img: &RgbImage| imageops::resize(img, 1920, 1080, FilterType::Triangle);
+    let mut l = Learner::new();
+    for tr in training() {
+        l.add_frame(&soft(&paint(&tr)), &labels(&tr));
+    }
+    let reader = Reader::new(l.build());
+    let sc = Scene {
+        pct: 58,
+        higher: 47,
+        change: Some(-36),
+        chevrons: true,
+        sr: Some(2481),
+        sr_change: Some(-90),
+        sr_icon: Icon::Tall,
+        role: Some(Role::Support),
+        ..Scene::default()
+    };
+    let r = reader.read(&soft(&paint(&sc))).expect("1080p rank screen");
+    let want = labels(&sc);
+    let mut read = 0;
+    for ((name, got), (_, want)) in r.values().into_iter().zip(want.values()) {
+        if let Some(got) = got {
+            assert_eq!(Some(got), want, "{name}");
+            read += 1;
+        }
+    }
+    assert!(read >= 6, "only {read} fields read: {r:?}");
 }
 
 // ---- small glyphs ----
@@ -658,6 +921,123 @@ fn a_hero_name_dimmed_halfway_still_bounds_the_sr() {
     let read = r.read(&img).expect("rank screen");
     assert_eq!(read.hero_sr.value, Some(3597));
     assert_eq!(read.hero_sr_change.value, Some(12));
+}
+
+// ---- pill signs, chevrons and merged cuts ----
+
+#[test]
+fn chevrons_and_the_minus_bar_read_on_both_pills() {
+    assert!(trained().has_class(Family::Pill, CHEV_LEFT));
+    assert!(trained().has_class(Family::Pill, CHEV_RIGHT));
+    for change in [27, -31] {
+        let sc = Scene {
+            change: Some(change),
+            chevrons: true,
+            ..Scene::default()
+        };
+        let read = reader().read(&paint(&sc)).expect("rank screen");
+        assert_eq!(read.progress_change.value, Some(change), "{change}");
+    }
+    // the minus bar touching the first digit is cut off, the digits read
+    let img = paint(&Scene {
+        change: Some(-31),
+        ..Scene::default()
+    });
+    let (gl, sign) = layout::pill_glyphs(&img);
+    assert_eq!((gl.len(), sign), (3, Some(-1)), "3, 1, %");
+    assert_eq!(gl[0].bbox[0], pill_digits_x(&Scene::default()) + 10);
+}
+
+/// The review's case: at 1080p the "+" and the first digit can touch. The
+/// merged cut must not be read as the "+" and dropped, leaving "7%".
+#[test]
+fn a_digit_merged_into_the_plus_is_not_dropped() {
+    let sc = Scene {
+        change: Some(27),
+        ..Scene::default()
+    };
+    let mut img = paint(&sc);
+    // join the + (its arm ends at x 740) to the 2 (from x 742)
+    fill(
+        &mut img,
+        PILL_X + 10,
+        PILL_Y + 6,
+        PILL_X + 12,
+        PILL_Y + 8,
+        WHITE,
+    );
+    assert_eq!(layout::pill_glyphs(&img).0.len(), 3, "+2, 7, %");
+    let read = reader().read(&img).expect("rank screen");
+    // the old reader dropped the cut as "+" and read 7 at full confidence
+    assert_ne!(read.progress_change.value, Some(7));
+    assert!(matches!(read.progress_change.value, None | Some(27)));
+}
+
+/// "<<<" merged with the minus and the first digit: the cut must not be read
+/// as the chevrons and dropped, leaving "1%".
+#[test]
+fn a_digit_merged_into_the_chevrons_is_not_dropped() {
+    let sc = Scene {
+        change: Some(-31),
+        chevrons: true,
+        ..Scene::default()
+    };
+    let mut img = paint(&sc);
+    let bar = pill_digits_x(&sc) - 10;
+    fill(
+        &mut img,
+        PILL_X + CHEVRONS_W,
+        PILL_Y + 6,
+        bar,
+        PILL_Y + 8,
+        WHITE,
+    );
+    assert_eq!(layout::pill_glyphs(&img).0.len(), 3, "<<<-3, 1, %");
+    let read = reader().read(&img).expect("rank screen");
+    assert_ne!(read.progress_change.value, Some(-1));
+    assert!(matches!(read.progress_change.value, None | Some(-31)));
+}
+
+// ---- hero SR icon ----
+
+#[test]
+fn the_sr_icon_left_of_a_short_sr_is_not_read_as_a_digit() {
+    assert!(trained().has_class(Family::Sr, SR_ICON));
+    for icon in [Icon::Tall, Icon::Level] {
+        for sr in [987, 3597] {
+            let sc = Scene {
+                sr: Some(sr),
+                sr_icon: icon,
+                ..Scene::default()
+            };
+            let img = paint(&sc);
+            let e = layout::first_entry(&img).expect("entry");
+            // a tall icon is dropped by shape, a level one kept for the reader
+            let cuts = layout::sr_glyphs(&img, &e).len();
+            let extra = usize::from(icon == Icon::Level);
+            assert_eq!(cuts, sr.to_string().len() + extra, "{sr}");
+            let read = reader().read(&img).expect("rank screen");
+            assert_eq!(read.hero_sr.value, Some(sr), "{sr}");
+            assert_eq!(read.hero_sr_change.value, Some(12), "{sr}");
+        }
+    }
+}
+
+/// An icon of digit height in a shape the pack never saw is neither dropped
+/// nor read as a digit: the SR is `None`.
+#[test]
+fn an_unknown_sr_icon_makes_the_sr_none() {
+    let sc = Scene {
+        sr: Some(987),
+        ..Scene::default()
+    };
+    let mut img = paint(&sc);
+    let left = 2333 - width("987", 3);
+    // a hollow box
+    fill(&mut img, left - 30, 724, left - 12, 745, WHITE);
+    fill(&mut img, left - 27, 727, left - 15, 742, BG);
+    let read = reader().read(&img).expect("rank screen");
+    assert_eq!(read.hero_sr.value, None);
 }
 
 // ---- division ----
@@ -733,8 +1113,82 @@ fn a_division_missing_from_the_pack_reads_from_its_emblems() {
         division: Some(3),
         ..Scene::default()
     };
-    let r = Reader::new(set).read(&paint(&sc)).expect("rank screen");
+    let r = reader().read(&paint(&sc)).expect("rank screen");
     assert_eq!(r.division.value, Some(3));
+}
+
+#[test]
+fn the_emblems_read_the_division_without_the_tier_line() {
+    let sc = Scene {
+        tier: None,
+        division: Some(3),
+        ..Scene::default()
+    };
+    let img = paint(&sc);
+    assert!(layout::rank_text(&img).is_none());
+    let r = reader().read(&img).expect("rank screen");
+    assert_eq!(r.role_rank.value, None);
+    assert_eq!(r.division.value, Some(3));
+}
+
+#[test]
+fn only_divisions_1_to_5_are_learned() {
+    let mut l = Learner::new();
+    let sc = Scene {
+        division: Some(7),
+        ..Scene::default()
+    };
+    l.add_frame(&paint(&sc), &labels(&sc));
+    let set = l.build();
+    assert!(set.has_class(Family::Tier, "HELLO"));
+    assert!(!set.has_class(Family::Division, "7"));
+}
+
+// ---- mode banner ----
+
+/// A banner that matches two classes about equally is `None`, not the one
+/// that wins by a hair. Here the pack holds two classes learned from the
+/// same banner, so their lead over each other is nil.
+#[test]
+fn a_banner_without_a_clear_lead_is_none() {
+    let mut l = Learner::new();
+    for (k, tr) in training().into_iter().enumerate() {
+        let lab = Labels {
+            next_mode_hint: Some(["A", "B"][k % 2].to_string()),
+            ..labels(&tr)
+        };
+        l.add_frame(
+            &paint(&Scene {
+                banner: Some("HELLO 6V6"),
+                ..tr
+            }),
+            &lab,
+        );
+    }
+    let r = Reader::new(l.build());
+    let read = r.read(&paint(&Scene::default())).expect("rank screen");
+    assert_eq!(read.next_mode_hint.value, None);
+    // a known banner with a clear lead still reads
+    let read = reader()
+        .read(&paint(&Scene::default()))
+        .expect("rank screen");
+    assert_eq!(read.next_mode_hint.value.as_deref(), Some("HELLO 6V6"));
+}
+
+// ---- field ranges ----
+
+#[test]
+fn values_out_of_their_range_are_none() {
+    let mut img = paint(&Scene::default());
+    // "Higher ranked than 120%" and a progress of 150%
+    fill(&mut img, 1715, 1076, 1800, 1104, BG);
+    draw(&mut img, "120%", 1730, 1082, 2, YELLOW);
+    fill(&mut img, 960, 1058, 1140, 1100, BG);
+    draw(&mut img, "150%", 978, 1068, 3, CYAN);
+    let r = reader().read(&img).expect("rank screen");
+    assert_eq!(r.higher_than_pct.value, None);
+    assert_eq!(r.progress_pct.value, None);
+    assert_eq!(r.progress_change.value, Some(27));
 }
 
 // ---- role ----
@@ -762,6 +1216,21 @@ fn no_role_line_is_open_queue_at_a_capped_confidence() {
     assert_eq!(read.role.value, Some(Role::Open));
     assert_eq!(read.role.confidence, OPEN_CONFIDENCE);
     assert!(read.role.bbox.is_none());
+    // below the weakest icon read that is accepted
+    assert!(OPEN_CONFIDENCE < confidence(MIN_SCORE, MIN_MARGIN));
+}
+
+/// A role line dimmed by an overlay (or still fading in) is not an empty
+/// band: it is unreadable, not Open.
+#[test]
+fn a_dimmed_role_line_is_not_open_queue() {
+    let mut img = paint(&Scene::default());
+    let dim = Rgb([90, 90, 90]);
+    let right = draw(&mut img, "+", 1190, 290, 4, dim);
+    draw(&mut img, "TEL", right + 20, 290, 4, dim);
+    assert_eq!(layout::role_icon(&img), layout::RoleLine::Unclear);
+    let read = reader().read(&img).expect("rank screen");
+    assert_eq!(read.role.value, None);
 }
 
 #[test]
@@ -872,6 +1341,10 @@ fn bench_labelled_rank_screens() {
                 continue;
             }
             let read = reader.read(img);
+            if let Err(e @ ReadError::Unsupported { .. }) = read {
+                eprintln!("UNSUPPORTED {} {}: {e}", r.game, r.file);
+            }
+            let read = read.ok();
             gate[usize::from(read.is_some() != r.readable)] += 1;
             out.push_str(
                 &serde_json::json!({"game": r.game, "file": r.file, "fold": d, "read": read})

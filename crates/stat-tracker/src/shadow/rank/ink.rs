@@ -364,14 +364,30 @@ pub fn drop_short_columns(ink: &Plane, minext: usize) -> Plane {
 }
 
 /// Drop a leading minus bar (at least 4 columns at most 3 rows tall) that
-/// touches the next glyph.
+/// touches the next glyph. The bar must sit in the middle third of the rest
+/// of the cut, as a minus does: the top bar of a 7 is not a minus.
 pub fn strip_minus(g: Glyph) -> Glyph {
     let ext = extents(&g.ink);
     let k = ext.iter().take_while(|&&e| e <= 3).count();
     if k < 4 || k >= g.ink.w {
         return g;
     }
-    tight_glyph(&g.ink.cols(k, g.ink.w), g.bbox[0] + k as u32, g.bbox[1]).unwrap_or(g)
+    let bar: Vec<usize> = (0..g.ink.h)
+        .filter(|&y| (0..k).any(|x| g.ink.get(x, y) > 0.4))
+        .collect();
+    let (Some(&a), Some(&b)) = (bar.first(), bar.last()) else {
+        return g;
+    };
+    let Some(rest) = tight_glyph(&g.ink.cols(k, g.ink.w), g.bbox[0] + k as u32, g.bbox[1]) else {
+        return g;
+    };
+    let mid = g.bbox[1] as f32 + (a + b + 1) as f32 / 2.0;
+    let (r0, r1) = (rest.bbox[1] as f32, rest.bbox[3] as f32);
+    let third = (r1 - r0) / 3.0;
+    if mid < r0 + third || mid > r1 - third {
+        return g;
+    }
+    rest
 }
 
 /// Area-average resample to `w` by `h` (each output pixel is the mean of the
@@ -423,7 +439,7 @@ const PAD: usize = 2;
 
 /// The vector a cut is compared as: `w` by `h`, zero mean, unit length.
 /// A glyph-shaped target (`w <= 1.5 h`) keeps the cut's aspect: it is scaled
-/// to height `h - 4` and centred with a [`PAD`] border. A word-shaped target
+/// to height `h - 4` and centred with a two pixel empty border. A word-shaped target
 /// stretches the cut.
 pub fn vector(ink: &Plane, w: usize, h: usize) -> Vec<f32> {
     unit(canvas(ink, w, h).px)

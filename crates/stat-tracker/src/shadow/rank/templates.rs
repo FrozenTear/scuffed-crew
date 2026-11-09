@@ -26,6 +26,10 @@ pub const CHEV_RIGHT: &str = "chev_right";
 /// touches them).
 pub const CHEV_LEFT: &str = "chev_left";
 
+/// The class of the rank icon left of the hero SR, when its colour is
+/// neutral enough to be cut with the digits (a grey disc, for one).
+pub const SR_ICON: &str = "sr_icon";
+
 /// Folder under the tracker's data dir.
 pub const TEMPLATE_DIR: &str = "templates/rank-v1";
 /// The pack file in that folder.
@@ -119,7 +123,10 @@ pub struct Match {
 
 #[derive(Debug)]
 pub enum TemplateError {
+    /// No pack file.
     Missing(PathBuf),
+    /// The file could not be read, is not a pack, or is a pack of another
+    /// recognizer or another vector shape ([`TemplateSet::check`]).
     Bad(PathBuf, String),
 }
 
@@ -142,10 +149,56 @@ impl TemplateSet {
         Self::load_dir(&data_dir.join(TEMPLATE_DIR))
     }
 
+    /// Load `<dir>/templates.json` and [`check`](Self::check) it.
     pub fn load_dir(dir: &Path) -> Result<Self, TemplateError> {
         let p = dir.join(PACK_FILE);
-        let s = std::fs::read_to_string(&p).map_err(|_| TemplateError::Missing(p.clone()))?;
-        serde_json::from_str(&s).map_err(|e| TemplateError::Bad(p, e.to_string()))
+        let s = match std::fs::read_to_string(&p) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(TemplateError::Missing(p));
+            }
+            Err(e) => return Err(TemplateError::Bad(p, e.to_string())),
+        };
+        let set: Self =
+            serde_json::from_str(&s).map_err(|e| TemplateError::Bad(p.clone(), e.to_string()))?;
+        set.check().map_err(|e| TemplateError::Bad(p, e))?;
+        Ok(set)
+    }
+
+    /// A pack this reader can use: written for [`super::RECOGNIZER_ID`],
+    /// every vector the size its family compares at ([`Family::shape`]),
+    /// finite values, a positive aspect, and the gate template. A pack of
+    /// another shape would otherwise load and score garbage.
+    pub fn check(&self) -> Result<(), String> {
+        if self.recognizer != super::RECOGNIZER_ID {
+            return Err(format!(
+                "recognizer {:?}, want {:?}",
+                self.recognizer,
+                super::RECOGNIZER_ID
+            ));
+        }
+        for (f, ts) in &self.families {
+            let (w, h, _) = f.shape();
+            for t in ts {
+                if t.vector.len() != w * h {
+                    return Err(format!(
+                        "{f:?} {:?}: {} values, want {}",
+                        t.class,
+                        t.vector.len(),
+                        w * h
+                    ));
+                }
+                if !(t.aspect.is_finite() && t.aspect > 0.0)
+                    || t.vector.iter().any(|v| !v.is_finite())
+                {
+                    return Err(format!("{f:?} {:?}: not a finite template", t.class));
+                }
+            }
+        }
+        if !self.has_class(Family::Gate, super::GATE_CLASS) {
+            return Err("no gate template".to_string());
+        }
+        Ok(())
     }
 
     pub fn save_dir(&self, dir: &Path) -> std::io::Result<()> {
@@ -286,9 +339,15 @@ impl Learner {
         if let (Some(v), Some(e)) = (labels.hero_sr, entry.as_ref()) {
             let ds = digits(v.into());
             let gl = layout::sr_glyphs(img, e);
-            // the rank icon (one or two cuts) may sit left of the digits
+            // the rank icon (one or two cuts) may sit left of the digits;
+            // a single cut there is learned as the icon
             if gl.len() >= ds.len() && gl.len() - ds.len() <= 2 {
-                n += self.pair(Family::Sr, &ds, &gl[gl.len() - ds.len()..]);
+                let k = gl.len() - ds.len();
+                n += self.pair(Family::Sr, &ds, &gl[k..]);
+                if k == 1 {
+                    self.add(Family::Sr, SR_ICON, &gl[0].ink);
+                    n += 1;
+                }
             }
         }
         if let (Some(v), Some(e)) = (labels.hero_sr_change, entry.as_ref()) {
@@ -316,7 +375,7 @@ impl Learner {
                 self.add(Family::Tier, t, &word.ink);
                 n += 1;
             }
-            if let Some(d) = labels.division {
+            if let Some(d) = labels.division.filter(|d| (1..=5).contains(d)) {
                 self.add(Family::Division, &d.to_string(), &digit.ink);
                 n += 1;
             }

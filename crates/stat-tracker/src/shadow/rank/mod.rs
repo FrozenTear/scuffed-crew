@@ -6,19 +6,23 @@
 //! frame goes in; each field comes out as a value with a confidence, and a
 //! value the screen does not show clearly is `None`, never a guess.
 //!
-//! Off by default. It runs only when [`ENV`] (or the setting it feeds) is
-//! switched on ([`RankSetting::parse`]) and a template pack is installed
-//! ([`templates`]). The capture wiring (which frame to keep) and any upload
-//! field are not part of this module; see "What a caller must do" below.
+//! Off by default, and not wired yet: nothing outside the tests calls
+//! [`RankSetting::from_env`] or [`Reader::read`], so setting [`ENV`] changes
+//! nothing until the capture wiring lands. That wiring will run the reader
+//! only when [`ENV`] (or the setting it feeds) is switched on
+//! ([`RankSetting::parse`]) and a template pack is installed ([`templates`]).
+//! The capture wiring (which frame to keep) and any upload field are not part
+//! of this module; see "What a caller must do" below.
 //!
 //! # How it reads
 //!
 //! The role (Tank, Damage, Support) is read from the role icon shown left of
 //! the role name above the emblem. Open queue screens show no role line, so
-//! a clean, empty role band reads as [`Role::Open`] (at [`OPEN_CONFIDENCE`]).
+//! a role band with no ink, not even faint ink, reads as [`Role::Open`] (at
+//! [`OPEN_CONFIDENCE`], below any accepted icon read).
 //!
 //! Every field has a fixed place at the 2560x1440 reference ([`layout`]),
-//! scaled to other 16:9 sizes by height/1440 (and width/2560). The hero
+//! scaled to 1080p by height/1440 (and width/2560). The hero
 //! entry is found as the first "name line over a taller SR line" in the
 //! right column, and the pill is found by its colour on the bar.
 //! Text is turned into an ink plane by colour ([`ink`]): cyan or orange for
@@ -31,20 +35,33 @@
 //! is split at its thinnest column and both halves are read (two digits
 //! that touch at 1080p). A field is accepted only when every
 //! glyph's best score is at least [`MIN_SCORE`] and leads the next class by
-//! [`MIN_MARGIN`]. Signs come from colour (orange progress, red pill, red SR
-//! change), not from a minus glyph.
+//! [`MIN_MARGIN`]; that holds for the pill's `+` and chevrons too, which are
+//! matched to the same bar and then left out of the value. Signs come from
+//! colour (orange progress, red pill, red SR change), not from a minus glyph.
+//! Each value must also be in its field's range (percentages within 100, a
+//! division 1 to 5, a hero SR of 3 or 4 digits).
 //!
 //! # What a caller must do
 //!
-//! * Pass the **last** frame of the rank update, when the pill and the hero
-//!   SR have settled. Mid-animation frames have a fading pill or a scaled SR
-//!   and read as `None`.
-//! * Pass a 16:9 frame (1080p or 1440p). Other aspect ratios are refused.
+//! * Pass the **full game client frame**, 16:9, at 1920x1080 or 2560x1440
+//!   (height within 2%, [`layout::Scale`]). Not a crop: every box is a
+//!   fixed place in the full frame. Any other size (a crop, 16:10, 21:9,
+//!   720p, 4K) is [`ReadError::Unsupported`], so a wiring mistake shows up
+//!   as such and not as "no rank screen".
+//! * Check frames with [`Reader::is_rank_screen`] (the "RANK PROGRESS:"
+//!   label only, cheap) and call [`Reader::read`] once, on the **last**
+//!   frame of the rank update, when the pill and the hero SR have settled.
+//!   Nothing here detects the animation. What is caught: text that is not
+//!   drawn yet reads `None`, and a glyph caught mid-fade that matches no
+//!   class well makes its field `None`. What is not caught: a frame taken
+//!   while the pill or the SR is still counting shows clean digits of a
+//!   value that is not final yet, and reads as that value with full
+//!   confidence.
 //! * Install a pack ([`templates::TemplateSet::load`]); without it
 //!   [`Reader::load`] fails and the reader is off.
 //!
-//! A frame that does not show the "RANK PROGRESS:" label (another screen, the
-//! placement screen) reads as `None` as a whole.
+//! A supported frame that does not show the "RANK PROGRESS:" label (another
+//! screen, the placement screen) is [`ReadError::NotRankScreen`].
 
 pub mod ink;
 pub mod layout;
@@ -60,7 +77,7 @@ use serde::{Deserialize, Serialize};
 
 use ink::Glyph;
 pub use templates::{
-    CHEV_LEFT, CHEV_RIGHT, Family, Learner, TEMPLATE_DIR, TemplateError, TemplateSet,
+    CHEV_LEFT, CHEV_RIGHT, Family, Learner, SR_ICON, TEMPLATE_DIR, TemplateError, TemplateSet,
 };
 
 /// The recognizer id written next to the values.
@@ -78,15 +95,17 @@ pub const MIN_WORD_MARGIN: f32 = 0.05;
 /// The class name of the "RANK PROGRESS:" label in [`Family::Gate`].
 pub const GATE_CLASS: &str = "rank_progress";
 /// Confidence of [`Role::Open`]: it is read from the absence of a role line,
-/// not from an icon, so it never claims more than this.
-pub const OPEN_CONFIDENCE: f32 = 0.75;
+/// not from an icon, so it stays below the lowest confidence an accepted icon
+/// read can have (about 0.53, at [`MIN_SCORE`] and [`MIN_MARGIN`]).
+pub const OPEN_CONFIDENCE: f32 = 0.5;
 /// Reference frame width the layout was measured at. Other 16:9 sizes are
 /// scaled from this ([`layout::Scale`]).
 pub const FRAME_W: u32 = 2560;
 /// Reference frame height the layout was measured at.
 pub const FRAME_H: u32 = 1440;
 
-/// Whether rank-v1 runs. Off unless switched on.
+/// Whether rank-v1 runs. Off unless switched on. Not read by the tracker
+/// yet (see the module docs): the capture wiring will.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RankSetting {
     #[default]
@@ -240,6 +259,32 @@ impl RankRead {
     }
 }
 
+/// Why [`Reader::read`] or [`Reader::is_rank_screen`] gave no read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadError {
+    /// The frame is not a size the reader takes: it wants the full game
+    /// client frame, 16:9, at 1080p or 1440p ([`layout::Scale`]). A crop, a
+    /// 16:10 or 21:9 frame or another height lands here. This is a wiring
+    /// problem for the caller to report, not a verdict on the screen.
+    Unsupported { width: u32, height: u32 },
+    /// A supported frame that does not show the "RANK PROGRESS:" label.
+    NotRankScreen,
+}
+
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadError::Unsupported { width, height } => write!(
+                f,
+                "rank-v1 takes the full 16:9 client frame at 1080p or 1440p, got {width}x{height}"
+            ),
+            ReadError::NotRankScreen => write!(f, "not a rank update screen"),
+        }
+    }
+}
+
+impl std::error::Error for ReadError {}
+
 /// Labels of one rank screen, as the bench's JSONL spells them. Used to
 /// learn templates ([`Learner::add_frame`]) and to score reads.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -309,23 +354,35 @@ impl Reader {
         &self.templates
     }
 
-    /// Read a rank update screen. `None` when the frame is not a supported
-    /// 16:9 size ([`layout::Scale`]) or does not show the "RANK PROGRESS:"
-    /// label.
-    pub fn read(&self, img: &RgbImage) -> Option<RankRead> {
-        let _scale = layout::Scale::from_img(img)?;
-        let t = &self.templates;
-        let gate = layout::gate_word(img)?;
-        let m = t.best(Family::Gate, &gate.ink, None)?;
-        if m.score < MIN_WORD_SCORE {
-            return None;
+    /// Whether `img` is a rank update screen: the "RANK PROGRESS:" label
+    /// only, no field is read. `Ok` holds the label's match score (at least
+    /// [`MIN_WORD_SCORE`]). Cheap enough to run on every candidate frame, so
+    /// a caller can [`read`](Self::read) once, on the last screen frame.
+    pub fn is_rank_screen(&self, img: &RgbImage) -> Result<f32, ReadError> {
+        if layout::Scale::from_img(img).is_none() {
+            let (width, height) = img.dimensions();
+            return Err(ReadError::Unsupported { width, height });
         }
+        let gate = layout::gate_word(img).ok_or(ReadError::NotRankScreen)?;
+        match self.templates.best(Family::Gate, &gate.ink, None) {
+            Some(m) if m.score >= MIN_WORD_SCORE => Ok(r3(m.score)),
+            _ => Err(ReadError::NotRankScreen),
+        }
+    }
+
+    /// Read a rank update screen from the full client frame (see the module
+    /// docs for the contract). Fields the screen does not show clearly are
+    /// `None`; the whole read is an error when the frame is not a supported
+    /// size or not a rank screen ([`ReadError`]).
+    pub fn read(&self, img: &RgbImage) -> Result<RankRead, ReadError> {
+        self.is_rank_screen(img)?;
+        let t = &self.templates;
 
         let (pct, negative) = layout::pct_glyphs(img);
         let pct_allowed: Vec<&str> = DIGITS.iter().copied().chain(["%", "-", "+"]).collect();
         let progress_pct = self.number(Family::Pct, &pct, &pct_allowed, &[], |s| {
             let v: i32 = s.strip_suffix('%')?.parse().ok()?;
-            Some(if negative && v > 0 { -v } else { v })
+            within(if negative && v > 0 { -v } else { v }, -100..=100)
         });
 
         let higher_allowed: Vec<&str> = DIGITS.iter().copied().chain(["%"]).collect();
@@ -334,7 +391,7 @@ impl Reader {
             &layout::higher_glyphs(img),
             &higher_allowed,
             &[],
-            |s| s.strip_suffix('%')?.parse().ok(),
+            |s| within(s.strip_suffix('%')?.parse().ok()?, 0..=100),
         );
 
         let (pill, sign) = layout::pill_glyphs(img);
@@ -349,23 +406,28 @@ impl Reader {
                 &pill,
                 &pill_allowed,
                 &["+", CHEV_LEFT, CHEV_RIGHT],
-                |s| s.strip_suffix('%')?.parse::<i32>().ok().map(|v| v * sign),
+                |s| within(s.strip_suffix('%')?.parse::<i32>().ok()? * sign, -100..=100),
             ),
             None => Field::none(),
         };
 
         let (hero_sr, hero_sr_change) = match layout::first_entry(img) {
             Some(e) => {
+                // a rank icon taller than the digits is left out by shape
+                // (layout::sr_glyphs); one of digit height is matched as
+                // the SR_ICON class and stripped, at the start only.
+                // Touching digits are split in number().
                 let gl = layout::sr_glyphs(img, &e);
-                // keep the rightmost four: the rank icon sits left of them
-                let gl = &gl[gl.len().saturating_sub(4)..];
-                let sr = self.number(Family::Sr, gl, &DIGITS, &[], |s| {
+                let sr_allowed: Vec<&str> = DIGITS.iter().copied().chain([SR_ICON]).collect();
+                let sr = self.number(Family::Sr, &gl, &sr_allowed, &[SR_ICON], |s| {
                     (3..=4).contains(&s.len()).then(|| s.parse().ok()).flatten()
                 });
                 let (cg, sign) = layout::change_glyphs(img, &e);
                 let change = match sign {
                     Some(sign) => self.number(Family::Change, &cg, &DIGITS, &[], |s| {
-                        s.parse::<i32>().ok().map(|v| v * sign)
+                        // the change is at most three digits
+                        let v: i32 = s.parse().ok()?;
+                        within(v * sign, -999..=999)
                     }),
                     None => Field::none(),
                 };
@@ -402,7 +464,7 @@ impl Reader {
         let next_mode_hint = layout::banner_word(img)
             .and_then(|g| {
                 let m = t.best(Family::Banner, &g.ink, None)?;
-                (m.score >= MIN_WORD_SCORE).then(|| Field {
+                (m.score >= MIN_WORD_SCORE && m.margin >= MIN_WORD_MARGIN).then(|| Field {
                     confidence: r3(confidence(m.score, m.margin)),
                     value: Some(m.class),
                     bbox: Some(g.bbox),
@@ -410,52 +472,44 @@ impl Reader {
             })
             .unwrap_or_else(Field::none);
 
-        let (role_rank, division) = match layout::rank_text(img) {
-            Some((word, digit)) => {
-                let tier = t
+        let text = layout::rank_text(img);
+        let role_rank = text
+            .as_ref()
+            .and_then(|(word, _)| {
+                let m = t
                     .best(Family::Tier, &word.ink, None)
-                    .filter(|m| m.score >= MIN_WORD_SCORE && m.margin >= MIN_WORD_MARGIN)
-                    .map_or_else(Field::none, |m| Field {
-                        confidence: r3(confidence(m.score, m.margin)),
-                        value: Some(m.class),
-                        bbox: Some(word.bbox),
-                    });
-                let big = t
-                    .best(Family::Division, &digit.ink, None)
-                    .filter(|m| m.score >= MIN_SCORE && m.margin >= MIN_MARGIN)
-                    .and_then(|m| {
-                        Some(Vote {
-                            division: m.class.parse::<u8>().ok()?,
-                            confidence: confidence(m.score, m.margin),
-                            bbox: digit.bbox,
-                        })
-                    });
-                let (left, right) = layout::emblem_digits(img);
-                let side = |g: Option<Glyph>, implied: fn(u8) -> u8| {
-                    let g = g?;
-                    let m = t
-                        .best(Family::Emblem, &g.ink, Some(&DIGITS[1..6]))
-                        .filter(|m| m.score >= MIN_SCORE && m.margin >= MIN_MARGIN)?;
-                    let v: u8 = m.class.parse().ok()?;
-                    Some(Vote {
-                        division: implied(v),
-                        confidence: confidence(m.score, m.margin),
-                        bbox: g.bbox,
-                    })
-                };
-                let div = division_from_votes(
-                    big,
-                    side(left, |l| (l + 3) % 5 + 1),
-                    side(right, |r| r % 5 + 1),
-                );
-                (tier, div)
-            }
-            None => (Field::none(), Field::none()),
+                    .filter(|m| m.score >= MIN_WORD_SCORE && m.margin >= MIN_WORD_MARGIN)?;
+                Some(Field {
+                    confidence: r3(confidence(m.score, m.margin)),
+                    value: Some(m.class),
+                    bbox: Some(word.bbox),
+                })
+            })
+            .unwrap_or_else(Field::none);
+        // the division digit, and the neighbour emblems' digits (read even
+        // when the tier line is not found), each only 1 to 5
+        let vote = |f: Family, g: Option<&Glyph>, implied: fn(u8) -> u8| {
+            let g = g?;
+            let m = t
+                .best(f, &g.ink, Some(&DIGITS[1..6]))
+                .filter(|m| m.score >= MIN_SCORE && m.margin >= MIN_MARGIN)?;
+            let v: u8 = m.class.parse().ok()?;
+            Some(Vote {
+                division: implied(v),
+                confidence: confidence(m.score, m.margin),
+                bbox: g.bbox,
+            })
         };
+        let (left, right) = layout::emblem_digits(img);
+        let division = division_from_votes(
+            vote(Family::Division, text.as_ref().map(|(_, d)| d), |d| d),
+            vote(Family::Emblem, left.as_ref(), |l| (l + 3) % 5 + 1),
+            vote(Family::Emblem, right.as_ref(), |r| r % 5 + 1),
+        );
 
         let role = self.role(img);
 
-        Some(RankRead {
+        Ok(RankRead {
             role,
             role_rank,
             division,
@@ -470,8 +524,9 @@ impl Reader {
         })
     }
 
-    /// The role icon matched against [`Family::Role`]; an empty role band is
-    /// [`Role::Open`]. A line whose icon matches no role well is `None`.
+    /// The role icon matched against [`Family::Role`]; an empty role band
+    /// ([`layout::RoleLine::Empty`]) is [`Role::Open`] at
+    /// [`OPEN_CONFIDENCE`]. A line whose icon matches no role well is `None`.
     fn role(&self, img: &RgbImage) -> Field<Role> {
         match layout::role_icon(img) {
             layout::RoleLine::Empty => Field {
@@ -493,9 +548,15 @@ impl Reader {
         }
     }
 
-    /// Read glyphs as one string (classes in `strip` are matched but left
-    /// out) and parse it. Any glyph under [`MIN_SCORE`] or [`MIN_MARGIN`]
-    /// makes the whole field `None`.
+    /// Read glyphs as one string and parse it. Every cut, the `strip`
+    /// classes (`+`, chevrons) included, must score at least [`MIN_SCORE`]
+    /// and lead by [`MIN_MARGIN`]. A cut wider than tall that fails is split
+    /// at its thinnest column and both halves are held to the same bar (two
+    /// touching digits, or a digit merged into the `+`); otherwise the field
+    /// is `None`. A `strip` class (`+`, chevrons, the SR rank icon) is left
+    /// out of the string, and only at either end (before any digit, or after
+    /// the `%`): one in the middle would hide a digit, so it makes the field
+    /// `None`.
     fn number<T>(
         &self,
         f: Family,
@@ -507,34 +568,30 @@ impl Reader {
         if gl.is_empty() {
             return Field::none();
         }
+        let best = |g: &Glyph| {
+            self.templates
+                .best(f, &g.ink, Some(allowed))
+                .filter(|m| m.score >= MIN_SCORE && m.margin >= MIN_MARGIN)
+        };
         let mut s = String::new();
         let mut conf = 1.0f32;
-        let ok = |m: &templates::Match| m.score >= MIN_SCORE && m.margin >= MIN_MARGIN;
         for g in gl {
-            let Some(m) = self.templates.best(f, &g.ink, Some(allowed)) else {
-                return Field::none();
-            };
-            if strip.contains(&m.class.as_str()) {
-                continue;
-            }
-            if ok(&m) {
-                conf = conf.min(confidence(m.score, m.margin));
-                s.push_str(&m.class);
-                continue;
-            }
-            // a cut wider than tall that matches nothing may be two touching
-            // glyphs: read both halves, each held to the same bar
-            let halves = (g.ink.w > g.ink.h).then(|| ink::split_two(g)).flatten();
-            let Some((a, b)) = halves else {
-                return Field::none();
-            };
-            for h in [a, b] {
-                match self.templates.best(f, &h.ink, Some(allowed)) {
-                    Some(m) if ok(&m) && !strip.contains(&m.class.as_str()) => {
-                        conf = conf.min(confidence(m.score, m.margin));
-                        s.push_str(&m.class);
+            let ms = match best(g) {
+                Some(m) => vec![m],
+                None => {
+                    let halves = (g.ink.w > g.ink.h).then(|| ink::split_two(g)).flatten();
+                    match halves.map(|(a, b)| (best(&a), best(&b))) {
+                        Some((Some(a), Some(b))) => vec![a, b],
+                        _ => return Field::none(),
                     }
-                    _ => return Field::none(),
+                }
+            };
+            for m in ms {
+                conf = conf.min(confidence(m.score, m.margin));
+                if !strip.contains(&m.class.as_str()) {
+                    s.push_str(&m.class);
+                } else if !(s.is_empty() || s.ends_with('%')) {
+                    return Field::none();
                 }
             }
         }
@@ -616,6 +673,11 @@ const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 /// the lead (full at 0.25).
 fn confidence(score: f32, margin: f32) -> f32 {
     (0.5 * (score / 0.95).min(1.0) + 0.5 * (margin / 0.25).min(1.0)).clamp(0.0, 1.0)
+}
+
+/// `v` when it is in `r`.
+fn within<T: PartialOrd>(v: T, r: std::ops::RangeInclusive<T>) -> Option<T> {
+    r.contains(&v).then_some(v)
 }
 
 fn r3(v: f32) -> f32 {
