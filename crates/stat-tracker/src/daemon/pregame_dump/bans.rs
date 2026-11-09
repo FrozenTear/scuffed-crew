@@ -55,6 +55,8 @@ impl PregameDump {
         }
         if !feed.has_frames() {
             feed.publish_not_read(NO_SCREENS_WHY);
+            // Told once per game: a later capture of it returns above.
+            feed.mark_read_for(session_id);
             record_status(store, session_id, BansPicksStatus::NoFrames).await;
             self.summarize(
                 session_id,
@@ -83,6 +85,9 @@ impl PregameDump {
         };
         if !feed.fits(started) {
             feed.publish_not_read(NO_SCREENS_WHY);
+            // Told once per game, as above. The held frames stay for the
+            // game they belong to.
+            feed.mark_read_for(session_id);
             record_status(store, session_id, BansPicksStatus::NoFrames).await;
             self.summarize(
                 session_id,
