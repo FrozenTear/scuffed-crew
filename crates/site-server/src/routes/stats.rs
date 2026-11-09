@@ -2861,6 +2861,51 @@ mod tests {
         assert_eq!(edge_row["hero_sr"], half(serde_json::json!(u32::MAX)));
     }
 
+    #[tokio::test]
+    async fn upload_empty_rank_object_reads_back_all_null_not_null() {
+        let (state, _member_id, daemon_token, session_token) = member_reader().await;
+        let mut empty = match_object("sess-rank-empty", 2);
+        empty["rank"] = serde_json::json!({});
+        let (status, parsed) = post_raw(
+            create_router(state.clone()),
+            &daemon_token,
+            serde_json::json!({ "matches": [empty] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{parsed}");
+        assert_eq!(parsed["inserted"], 1);
+
+        let null_field = serde_json::json!({ "value": null, "confidence": null });
+        let all_null = serde_json::json!({
+            "role": null_field,
+            "role_rank": null_field,
+            "division": null_field,
+            "progress_pct": null_field,
+            "progress_change": null_field,
+            "change_tags": null_field,
+            "higher_than_pct": null_field,
+            "hero_sr": null_field,
+            "hero_sr_change": null_field,
+            "next_mode_hint": null_field,
+            "queue_title": null_field,
+            "rank_recognizer": null
+        });
+        let page = get_my_matches(create_router(state.clone()), &session_token).await;
+        let row = row_by_session(&page, "sess-rank-empty");
+        assert_eq!(row["elims"], 2);
+        assert_eq!(
+            row["rank"], all_null,
+            "rank: {{}} is an all-null object, not null"
+        );
+        let id = row["id"].as_str().unwrap().to_string();
+        let (status, body) =
+            get_my_match(create_router(state.clone()), Some(&session_token), &id).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let one: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(one["rank"], all_null);
+        assert_eq!(stored_rank_objects(&state).await.len(), 1);
+    }
+
     async fn assert_suspect_fields_rejected(
         state: &crate::state::AppState,
         token: &str,
