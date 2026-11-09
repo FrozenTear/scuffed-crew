@@ -127,10 +127,15 @@ pub(crate) fn counters_from_cols(a: [u32; capture_gate::GATE_COLS]) -> Counters 
 /// unchanged the dry run sees a quiet single-field jump and refuses it)
 /// keeps storing the unsure read the row before showed, flagged, as long
 /// as it is not below the accepted value; it never drops the stored row
-/// back to the older accepted value. A held cell with no read, or with a
-/// read the gate would hold (lower than the accepted value, a jump, an
-/// injected digit, past the rate cap), and no stored unsure read to keep,
-/// keeps the accepted value, flagged, as before.
+/// back to the older accepted value. An unread cell on that later Tab
+/// carries no new digit either, so it keeps the stored unsure read the
+/// same way. A later held Tab whose digit the dry run refuses, when the
+/// row before already showed an unsure read, stores that newer refused
+/// digit instead (still flagged, still not below the accepted value). A
+/// held cell with no read, or with a read the gate would hold (lower
+/// than the accepted value, a jump, an injected digit, past the rate
+/// cap), and no stored unsure read to keep, keeps the accepted value,
+/// flagged, as before.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hold_new_reader_stats_with_guesses(
     parsed: &mut storage::PersonalMatch,
@@ -212,17 +217,35 @@ pub(crate) fn hold_new_reader_stats_with_guesses(
             stored[col] = value;
             held.state.unsure_shown[col] = value;
             held.state.has_unsure_shown[col] = true;
-        } else if let Some(shown) = prior_shown[col].filter(|&shown| {
-            fresh[col].is_none()
-                && held_cells[col]
+        } else if let Some(value) = guesses[col].filter(|&value| {
+            // A newer refused digit at or above the accepted value, and the
+            // row before already showed an unsure read: store this digit
+            // flagged in place of the older unsure shown value.
+            held_cells[col]
                 && !held.state.unread[col]
-                && shown >= stored[col]
+                && value >= stored[col]
+                && prior_shown[col].is_some()
         }) {
-            // Still held, and no fresh unsure read this time: the same board
-            // read again, every other column unchanged, makes the dry run see
-            // a quiet single-field jump from the accepted value and refuse
-            // it. The row before showed `shown`; keep showing it, flagged,
-            // rather than fall back to the older accepted value.
+            if value != stored[col] {
+                tracing::info!(
+                    target: "scuffed_stat_tracker",
+                    col,
+                    read = value,
+                    kept = stored[col],
+                    "held stat cell stores the newer refused read, flagged, not the older unsure or accepted value"
+                );
+            }
+            stored[col] = value;
+            held.state.unsure_shown[col] = value;
+            held.state.has_unsure_shown[col] = true;
+        } else if let Some(shown) = prior_shown[col].filter(|&shown| {
+            // Still held or unread, and no fresh unsure read this time: the
+            // same board read again, or a cell with no digit, carries no new
+            // information. Keep showing the unsure read the row before
+            // showed, flagged, rather than fall back to the older accepted
+            // value.
+            fresh[col].is_none() && held_cells[col] && shown >= stored[col]
+        }) {
             if shown != stored[col] {
                 tracing::info!(
                     target: "scuffed_stat_tracker",
