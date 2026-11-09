@@ -10,7 +10,7 @@ use crate::version::USER_AGENT;
 use scuffed_types::api::{DaemonConfigResponse, StatsUploadResponse};
 
 use super::backoff::parse_retry_after;
-use super::batching::BatchCaps;
+use super::batching::{BatchCaps, RefusedRows};
 use super::errors::{SyncUploadError, parse_upload_error_body, server_error_text};
 use super::visibility::{MAX_BODY_BYTES, StatsVisibility, parse_stats_visibility};
 use super::wire::upload_request;
@@ -25,6 +25,8 @@ pub struct SyncClient {
     http: reqwest::Client,
     /// Caps learned from HTTP 413. Shared by clones. Never raised.
     batch_caps: Arc<Mutex<BatchCaps>>,
+    /// Rows the next pass sends after the others. Shared by clones.
+    refused_rows: Arc<Mutex<RefusedRows>>,
     /// `stats_delete_scheduled_at` from the latest 409 `stats_delete_pending`.
     /// Kept off [`SyncUploadError`] so that error stays small. Shared by clones.
     delete_scheduled_at: Arc<Mutex<Option<String>>>,
@@ -48,6 +50,7 @@ impl SyncClient {
             http,
             config: Arc::new(Mutex::new(config)),
             batch_caps: Arc::new(Mutex::new(BatchCaps::default())),
+            refused_rows: Arc::new(Mutex::new(RefusedRows::default())),
             delete_scheduled_at: Arc::new(Mutex::new(None)),
         }
     }
@@ -83,6 +86,19 @@ impl SyncClient {
         }
     }
 
+    /// Rows the next pass sends after the others.
+    pub fn refused_rows(&self) -> RefusedRows {
+        self.refused_rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Keep the set a pass ended with.
+    pub fn remember_refused_rows(&self, rows: RefusedRows) {
+        *self.refused_rows.lock().unwrap_or_else(|e| e.into_inner()) = rows;
+    }
+
     pub fn credentials(&self) -> SyncConfig {
         self.config
             .lock()
@@ -101,6 +117,7 @@ impl SyncClient {
         drop(slot);
         if url_changed {
             *self.batch_caps.lock().unwrap_or_else(|e| e.into_inner()) = BatchCaps::default();
+            *self.refused_rows.lock().unwrap_or_else(|e| e.into_inner()) = RefusedRows::default();
         }
     }
 

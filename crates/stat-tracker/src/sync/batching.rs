@@ -110,7 +110,45 @@ pub struct UploadIsolation {
     /// row in the pass was accepted, so nothing was quarantined). Splitting
     /// stops. Already accepted indexes stay accepted. A 409 never quarantines.
     pub stopped: Option<SyncUploadError>,
+    /// Rows refused on their own while no row in the pass was accepted.
+    /// They are also in [`Self::deferred`]: nothing proves the refusal is
+    /// about the row, so they stay queued. See [`RefusedRows`].
+    pub held: Vec<usize>,
     pub requests: usize,
+}
+
+/// Rows the server refused on their own in a pass that accepted no row.
+/// They are not quarantined, because a server-wide refusal looks the same.
+/// The next pass sends them after the other queued rows, so a good row
+/// behind them is tried first. The server allows only a short burst of
+/// requests per token, so without this a few refused rows at the head of
+/// the queue used up every pass and the games behind them never uploaded.
+/// Keys are session ids (or the store id for a row without one). Kept for
+/// the life of the [`SyncClient`], like [`BatchCaps`].
+///
+/// [`SyncClient`]: super::SyncClient
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RefusedRows(std::collections::HashSet<String>);
+
+impl RefusedRows {
+    pub fn contains(&self, key: &str) -> bool {
+        self.0.contains(key)
+    }
+
+    pub fn insert(&mut self, key: String) {
+        self.0.insert(key);
+    }
+
+    pub fn remove(&mut self, key: &str) {
+        self.0.remove(key);
+    }
+
+    /// Forget rows that are no longer queued (uploaded, quarantined, or
+    /// deleted), so the set never outgrows the queue.
+    pub fn retain_queued<'a>(&mut self, queued: impl IntoIterator<Item = &'a str>) {
+        let queued: std::collections::HashSet<&str> = queued.into_iter().collect();
+        self.0.retain(|key| queued.contains(key.as_str()));
+    }
 }
 
 /// Upload `rows`. On HTTP 400 or 422 that names a row (`matches[n]:`), split
@@ -130,6 +168,9 @@ pub struct UploadIsolation {
 /// Request count stays at or under [`isolation_request_budget`]
 /// (about `2 * log2(n) + n`).
 ///
+/// This is [`isolate_rejected_in_pass`] for a pass that has not had a row
+/// accepted yet.
+///
 /// A 5xx, a network error, 401, 403, 409, 413, or 429 does not split. 429
 /// keeps `Retry-After` on [`UploadIsolation::stopped`]. When the chunk
 /// accepted nothing and some rows were already refused, that 429 is reported
@@ -137,7 +178,24 @@ pub struct UploadIsolation {
 /// backoff floor. The rest of the chunk stops and those indexes are
 /// [`UploadIsolation::deferred`]. 409 `stats_delete_pending` is the same
 /// shape: one request, nothing quarantined.
-pub async fn isolate_rejected<T, F, Fut>(rows: &[T], mut upload: F) -> UploadIsolation
+pub async fn isolate_rejected<T, F, Fut>(rows: &[T], upload: F) -> UploadIsolation
+where
+    F: FnMut(&[T]) -> Fut,
+    Fut: std::future::Future<Output = Result<StatsUploadResponse, SyncUploadError>>,
+{
+    isolate_rejected_in_pass(rows, false, upload).await
+}
+
+/// [`isolate_rejected`] for one chunk of a sync pass. `pass_accepted` is
+/// true when an earlier chunk of the same pass already had a row accepted.
+/// That proves the server takes uploads, so the end guard does not apply:
+/// rows refused on their own are quarantined even when this chunk accepted
+/// none, instead of staying at the head of the queue.
+pub async fn isolate_rejected_in_pass<T, F, Fut>(
+    rows: &[T],
+    pass_accepted: bool,
+    mut upload: F,
+) -> UploadIsolation
 where
     F: FnMut(&[T]) -> Fut,
     Fut: std::future::Future<Output = Result<StatsUploadResponse, SyncUploadError>>,
@@ -147,6 +205,7 @@ where
     let mut rejected = Vec::new();
     let mut deferred = Vec::new();
     let mut stopped = None;
+    let mut held = Vec::new();
     let mut requests = 0usize;
     let mut halt = false;
     let mut stack = Vec::new();
@@ -217,8 +276,10 @@ where
     // A 429 that stops the walk is the same refusal: the per-token limit
     // ran out while every row was still being refused. Count that as a
     // failure and keep Retry-After as a floor. 401, 403, 409, and 413 stay.
-    if accepted.is_empty() && !rejected.is_empty() {
-        let mut queued: Vec<usize> = rejected.iter().map(|row| row.index).collect();
+    // A row accepted earlier in the same pass already rules that out.
+    if accepted.is_empty() && !pass_accepted && !rejected.is_empty() {
+        held = rejected.iter().map(|row| row.index).collect();
+        let mut queued = held.clone();
         queued.append(&mut deferred);
         queued.sort_unstable();
         deferred = queued;
@@ -234,6 +295,7 @@ where
         rejected,
         deferred,
         stopped,
+        held,
         requests,
     }
 }

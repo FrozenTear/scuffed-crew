@@ -2,6 +2,8 @@
 
 use super::*;
 
+mod upload_refusals;
+
 #[tokio::test]
 async fn deathmatch_rows_stay_local() {
     let dir = tempfile::tempdir().unwrap();

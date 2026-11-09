@@ -15,6 +15,16 @@ workflow copies from the matching heading through the next `##` heading,
 including `### Install`. The desktop app hides `### Install`, shows the
 summary, then the highlights, and tucks the remaining text under Details.
 
+## Unreleased
+
+A few games the site refuses can no longer hold up the games queued behind them.
+
+### Highlights
+
+- When the site refuses some of your games, the rest upload, and the refused ones are set aside on the Games tab with the site's reason and a Retry button. This now also works when the refused games are the newest in the queue, or are the only ones left after the good games went up.
+
+Technical detail. A refused row is still quarantined only after the site accepted another row in the same sync pass, so a refusal of every row (such as an unknown recognizer) quarantines nothing and backs off as before. That proof now covers the whole pass instead of one chunk, so a later chunk with only refused rows is set aside instead of staying queued on its own. The site allows 10 uploads per token in a burst, then answers 429; rows refused on their own in a pass that accepted nothing are now sent after the other queued rows on the next pass, so a few refused games at the head of the queue no longer use up every pass. That order is kept in memory for the tracker's run and reset when the server URL changes. Request counts per pass are unchanged.
+
 ## 0.6.0-alpha.2.3
 
 This small alpha lets you save more than one in-game name, and the tracker now uses every saved name to find your row on the scoreboard. It also keeps a tracker started from the app running when an update cannot start, and fixes two things on the Games tab.
