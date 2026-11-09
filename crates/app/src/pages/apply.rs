@@ -144,8 +144,8 @@ fn apply_body_view(
 }
 
 /// Retry control for a slot. `None` hides it, `Some(retrying)` keeps it mounted.
-/// After a click it stays on screen, disabled, while the refetch runs, so focus
-/// does not drop to the page body.
+/// After a click it stays on screen, aria-disabled, while the refetch runs, so
+/// focus does not drop to the page body.
 fn retry_control(failed: bool, pending: bool, retrying: bool) -> Option<bool> {
     if failed {
         Some(false)
@@ -197,7 +197,9 @@ fn toggle_game(selected: &mut Vec<String>, id: &str) {
     }
 }
 
-/// Retry kept outside any status region. Mounted and disabled while in flight.
+/// Retry kept outside any status region. Mounted while in flight and marked
+/// `aria-disabled` (not native `disabled`, which blurs the focused button and
+/// drops focus to the page body); clicks are ignored until the refetch ends.
 fn retry_button(
     class: &'static str,
     aria_label: &'static str,
@@ -210,8 +212,12 @@ fn retry_button(
             class,
             aria_label,
             aria_busy: if retrying { "true" },
-            disabled: retrying,
-            onclick: move |_| on_retry.call(()),
+            aria_disabled: if retrying { "true" },
+            onclick: move |_| {
+                if !retrying {
+                    on_retry.call(());
+                }
+            },
             "{retry_label(retrying)}"
         }
     }
@@ -812,7 +818,7 @@ mod tests {
                 retry: Some(false)
             }
         );
-        // A Retry click keeps the button mounted and disabled while in flight.
+        // A Retry click keeps the button mounted and aria-disabled while in flight.
         assert_eq!(
             mine_slot(Some(V::MinePending), true),
             MineSlot {
@@ -902,8 +908,15 @@ mod tests {
         let html = html_of(retrying);
         assert_one_status(&html, "Loading...");
         assert!(html.contains(">Retrying...</button>"), "{html}");
-        assert!(html.contains("disabled"), "{html}");
+        assert_keeps_focus_while_busy(&html);
         assert!(html.contains(r#"aria-busy="true""#), "{html}");
+    }
+
+    /// Busy Retry is `aria-disabled`, never native `disabled`: browsers blur a
+    /// natively disabled button, which drops focus to the page body.
+    fn assert_keeps_focus_while_busy(html: &str) {
+        assert!(html.contains(r#"aria-disabled="true""#), "{html}");
+        assert!(!html.contains(" disabled"), "{html}");
     }
 
     fn games() -> Vec<(String, String)> {
@@ -980,7 +993,7 @@ mod tests {
         let html = html_of(retrying);
         assert_one_status(&html, "Loading...");
         assert!(html.contains(">Retrying...</button>"), "{html}");
-        assert!(html.contains("disabled"), "{html}");
+        assert_keeps_focus_while_busy(&html);
 
         let html = html_of(ready);
         assert_one_status(&html, "");
