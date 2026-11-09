@@ -153,8 +153,71 @@ fn blank_or_tiny_frame_is_none() {
     let r = Reader::new(pack(&[0, 1]));
     let blank = RgbImage::from_pixel(2560, 1440, Rgb(BG));
     assert_eq!(r.read_field(&blank, Screen::HeroBan), Field::none());
-    let tiny = RgbImage::from_pixel(100, 50, Rgb(BG));
-    assert_eq!(r.read_field(&tiny, Screen::HeroBan), Field::none());
+}
+
+#[test]
+fn frame_too_narrow_for_the_title_is_none() {
+    // A real title frame cut to 400 px wide: the title box (528 px with its
+    // margin at 1440p) no longer fits, so plane() refuses it even though
+    // the pixels it would read hold a title.
+    let r = Reader::new(pack(&[0, 1]));
+    let full = frame(0, Screen::HeroBan, 230);
+    assert_eq!(
+        r.read_field(&full, Screen::HeroBan).value.as_deref(),
+        Some(NAMES[0])
+    );
+    let narrow = imageops::crop_imm(&full, 0, 0, 400, 1440).to_image();
+    assert!(plane(&narrow, Screen::HeroBan).is_none());
+    assert_eq!(r.read_field(&narrow, Screen::HeroBan), Field::none());
+}
+
+fn cs(class: &str, score: f32, strip: f32) -> ClassScore {
+    ClassScore {
+        class: class.to_string(),
+        score,
+        strip,
+        dx: 0,
+        dy: 0,
+    }
+}
+
+#[test]
+fn accept_rules_table() {
+    let a = |r: &[ClassScore]| accept(r).map(|c| c.class.clone());
+    // all three rules pass
+    assert_eq!(
+        a(&[cs("A", 0.95, 0.90), cs("B", 0.50, 0.40)]),
+        Some("A".into())
+    );
+    // whole score below MIN_SCORE
+    assert_eq!(
+        a(&[cs("A", MIN_SCORE - 0.01, 0.90), cs("B", 0.30, 0.30)]),
+        None
+    );
+    // weakest strip below MIN_STRIP
+    assert_eq!(
+        a(&[cs("A", 0.95, MIN_STRIP - 0.01), cs("B", 0.30, 0.30)]),
+        None
+    );
+    // lead over the runner-up below MIN_MARGIN
+    assert_eq!(
+        a(&[cs("A", 0.95, 0.90), cs("B", 0.95 - MIN_MARGIN + 0.01, 0.85)]),
+        None
+    );
+    // lead just over MIN_MARGIN passes
+    assert_eq!(
+        a(&[cs("A", 0.95, 0.90), cs("B", 0.95 - MIN_MARGIN - 0.01, 0.85)]),
+        Some("A".into())
+    );
+    // one class pack: no runner-up, the lead is over 0
+    assert_eq!(a(&[cs("A", 0.85, 0.75)]), Some("A".into()));
+    // a negative runner-up counts as 0, so it cannot widen the lead
+    assert_eq!(
+        a(&[cs("A", 0.81, 0.75), cs("B", -0.50, -0.50)]),
+        Some("A".into())
+    );
+    // empty ranking
+    assert_eq!(a(&[]), None);
 }
 
 #[test]

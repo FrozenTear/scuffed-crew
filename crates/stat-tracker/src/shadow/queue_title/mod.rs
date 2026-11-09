@@ -32,8 +32,10 @@
 //! 5. Accept the best class only when its whole score is at least
 //!    [`MIN_SCORE`], its strip score at least [`MIN_STRIP`], and it leads
 //!    the runner-up by [`MIN_MARGIN`]. Otherwise the title is `None`, never
-//!    a guess, so titles the pack does not know (competitive, arcade) come
-//!    back `None`.
+//!    a guess. Titles the pack does not know (competitive, arcade) are
+//!    expected to come back `None` too, but that is extrapolated from the
+//!    held-out runs (each known title left out of the pack in turn), not
+//!    measured on real competitive or arcade frames: the bench has none.
 //!
 //! # Thresholds
 //!
