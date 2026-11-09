@@ -46,7 +46,11 @@ impl PregameDump {
     ) {
         let Some(feed) = self.bans.as_mut() else {
             record_status(store, session_id, BansPicksStatus::ReaderOff).await;
-            self.summarize(session_id, &ReaderResult::Off);
+            // A saver for the queue title reader alone writes no pre-game
+            // summary, as no saver did before it.
+            if !self.queue_only {
+                self.summarize(session_id, &ReaderResult::Off);
+            }
             return;
         };
         // A later capture of a game already read has nothing more to say.

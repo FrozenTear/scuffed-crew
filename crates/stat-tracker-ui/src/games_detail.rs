@@ -319,9 +319,13 @@ impl Tracked {
     }
 }
 
-/// The queue title warning for the map line: the sentence when the read
-/// was weak, `None` when it was confident or never made (reader off).
+/// The queue title warning for the map line: the sentence when the game has
+/// no confident queue, `None` when it has one or was never read (reader
+/// off). A chip and the warning never show together.
 pub fn queue_warning(g: &Game) -> Option<&'static str> {
+    if queue_value(g).is_some() {
+        return None;
+    }
     g.queue_title.as_ref().and_then(|t| t.warning())
 }
 
@@ -1035,10 +1039,11 @@ mod tests {
         assert!(sync_on_for(&with("https://crew.example", "tok")));
     }
 
-    /// The queue title warning shows only for a weak read; the chip only
-    /// for a confident value. The reader off (no title) shows neither.
+    /// The queue title warning shows only for a game with no confident
+    /// value; the chip only for one with it. The reader off (no title)
+    /// shows neither.
     #[test]
-    fn the_queue_warning_shows_only_for_a_weak_read() {
+    fn the_queue_warning_shows_only_without_a_confident_value() {
         use stat_tracker::model::{QUEUE_TITLE_WARNING, QueueTitle};
         let mut g = game("a", "Ana", 1, 1, at(20, 0, 0));
         assert_eq!((queue_warning(&g), queue_value(&g)), (None, None));
@@ -1057,12 +1062,13 @@ mod tests {
         });
         assert_eq!(queue_warning(&g), Some(QUEUE_TITLE_WARNING));
         assert_eq!(queue_value(&g), None);
-        // Weak over a kept value: both.
+        // A value and the flag together (a row stored before the title was
+        // write-once): the chip only, never the warning beside it.
         g.queue_title = Some(QueueTitle {
             unsure: true,
             ..confident
         });
-        assert_eq!(queue_warning(&g), Some(QUEUE_TITLE_WARNING));
+        assert_eq!(queue_warning(&g), None);
         assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
     }
 }

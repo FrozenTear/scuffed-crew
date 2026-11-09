@@ -351,9 +351,11 @@ pub(crate) async fn run_loop(
                     );
                     // The bans and picks and the queue title reads for this
                     // game, before the live snapshot is cut so it carries them.
+                    // The queue title is read only for the open game.
                     if let Some(dump) = pregame_dump.as_mut() {
                         dump.attach_bans_picks(store, &stored_sid).await;
-                        dump.attach_queue_title(store, &stored_sid).await;
+                        let open = st.active_game.as_ref().map(|g| g.session_id.as_str());
+                        dump.attach_queue_title(store, &stored_sid, open).await;
                     } else if let Err(e) = store
                         .attach_bans_picks_status(
                             &stored_sid,

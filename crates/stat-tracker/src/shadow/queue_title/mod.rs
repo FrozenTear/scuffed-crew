@@ -15,9 +15,12 @@
 //!
 //! 1. Crop a fixed region around the title at the 2560x1440 reference
 //!    ([`REF_X`], [`REF_Y_MAPVOTE`], [`REF_Y_SELECT`]), placed in the
-//!    frame's 16:9 game rect and scaled by its height / 1440, so 1080p,
-//!    ultrawide and 16:10 work. Map vote draws the title 27 px higher than
-//!    hero select and hero ban.
+//!    frame's 16:9 game rect and scaled by its height / 1440. The
+//!    thresholds were measured at 1440p and at a synthetic 1080p only.
+//!    Ultrawide and 16:10 frames are placed by the shared game rect
+//!    (`frame::geometry::game_rect_16_9`), checked on synthetic frames only:
+//!    there is no real ultrawide or 16:10 capture in the tests. Map vote
+//!    draws the title 27 px higher than hero select and hero ban.
 //! 2. Turn it into an ink plane: the smallest of R, G, B (the title is grey
 //!    to white, the backdrop is dark red), with strongly saturated pixels
 //!    set to zero. That drops the pink voice chat indicator that overlaps
@@ -61,6 +64,11 @@
 //!
 //! * Pass a whole frame with its [`Screen`]. Only its 16:9 game rect is
 //!   read; a non-16:9 area (ultrawide side bars, 16:10 bands) never is.
+//! * Expect `None` for a game rect under 359 px tall (at 359 px the region
+//!   crops to exactly 124 x 39, at 358 px to less): below that the region
+//!   is smaller than the [`TW`] x [`TH`] template plus its [`PAD`] margin, and
+//!   the reader never scales a region up ([`plane`]). Before the game rect
+//!   placement such a frame was scaled up and read.
 //! * For one value per game, use [`pick`] (hero ban first, then hero
 //!   select last) or [`Reader::read_dump_dir`] on a pregame dump folder.
 //!
@@ -82,13 +90,15 @@ use super::ncc::Gray;
 use crate::frame::geometry::game_rect_16_9;
 pub use templates::{Learner, PACK_FILE, TEMPLATE_DIR, TemplateError, TemplateSet};
 
-/// The recognizer id written next to the value.
-pub const RECOGNIZER_ID: &str = "rank-v1";
+/// The recognizer id written next to the value (`rank-v1`). Defined in
+/// `model` so the upload sends the same id without using the readers.
+pub use crate::model::QUEUE_TITLE_RECOGNIZER_ID as RECOGNIZER_ID;
 /// Environment switch: `on`, `1`, `true`, `yes` or [`RECOGNIZER_ID`] turns
 /// it on. Anything else, or unset, is off.
 pub const ENV: &str = "STAT_TRACKER_QUEUE_TITLE_RECOGNIZER";
-/// Lowest whole title score a read may have.
-pub const MIN_SCORE: f32 = 0.80;
+/// Lowest whole title score a read may have (0.80). Defined in `model` so
+/// the upload checks the same bar.
+pub use crate::model::QUEUE_TITLE_MIN_SCORE as MIN_SCORE;
 /// Lowest score of the worst strip.
 pub const MIN_STRIP: f32 = 0.70;
 /// Least whole score lead over the runner-up class.
@@ -249,8 +259,8 @@ pub struct ClassScore {
 /// (`[x, y, w, h]`). The region is placed in the frame's 16:9 game rect
 /// ([`game_rect_16_9`]), so an ultrawide or 16:10 frame is read from its
 /// playfield and an exact 16:9 frame is read as before. `None` for a game
-/// rect too small to hold the region, or so small that the region would
-/// have to be scaled up to the template size (below 360 px tall).
+/// rect so small that the region would have to be scaled up to the
+/// template size: under 359 px tall, where the crop is 124 x 39.
 pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
     let (gx, gy, gw, gh) = game_rect_16_9(img.width(), img.height());
     let s = gh as f32 / FRAME_H as f32;
@@ -263,6 +273,9 @@ pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
     let y0 = gy + (ry as f32 * s).round() as u32;
     let x1 = gx + ((rx + rw) as f32 * s).round() as u32;
     let y1 = gy + ((ry + rh) as f32 * s).round() as u32;
+    // Defensive: the reference region lies inside the 2560x1440 rect, so
+    // the scaled one lies inside the game rect, and the size check below is
+    // what turns a small rect away. Kept so no subtraction can underflow.
     if x1 > gx + gw || y1 > gy + gh || x1 <= x0 || y1 <= y0 {
         return None;
     }

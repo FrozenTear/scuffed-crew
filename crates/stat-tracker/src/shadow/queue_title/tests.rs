@@ -157,9 +157,9 @@ fn blank_or_tiny_frame_is_none() {
 
 #[test]
 fn frame_too_narrow_for_the_title_is_none() {
-    // A real title frame cut to 400 px wide: the title box (528 px with its
-    // margin at 1440p) no longer fits, so plane() refuses it even though
-    // the pixels it would read hold a title.
+    // A real title frame cut to 400 px wide: its 16:9 game rect is only
+    // 400x225, so the region crops to 78x25, under the 124x39 floor, and
+    // plane() refuses it even though the pixels it would read hold a title.
     let r = Reader::new(pack(&[0, 1]));
     let full = frame(0, Screen::HeroBan, 230);
     assert_eq!(
@@ -224,10 +224,54 @@ fn exact_16_9_frames_cut_the_same_rect_as_before() {
         plane(&small, Screen::HeroBan).unwrap().1,
         [24, 59, 372, 117]
     );
-    // 360 px tall is the smallest game rect read without scaling up.
+    // 359 px tall is the smallest game rect read without scaling up: the
+    // crop is then exactly the 124x39 padded template.
     let tiny = |w, h| imageops::resize(&big, w, h, FilterType::Triangle);
     assert!(plane(&tiny(640, 360), Screen::HeroBan).is_some());
     assert!(plane(&tiny(320, 180), Screen::HeroBan).is_none());
+    assert_eq!(hero_ban_rect(638, 359), Some([8, 20, 124, 39]));
+    assert_eq!(hero_ban_rect(636, 358), None);
+}
+
+/// The HeroBan rect plane() cuts from a blank `w` x `h` frame.
+fn hero_ban_rect(w: u32, h: u32) -> Option<[u32; 4]> {
+    plane(&RgbImage::new(w, h), Screen::HeroBan).map(|(_, rect)| rect)
+}
+
+#[test]
+fn non_16_9_frames_scale_the_offset_and_the_region_by_the_game_rect() {
+    // The game rect's offset is added after scaling, and only the region
+    // scales: a scale above 1 (3840x1600) pins that too.
+    for (w, h, want) in [
+        (2560, 1080, [344, 59, 372, 117]),
+        (1920, 1200, [24, 119, 372, 117]),
+        (3840, 1600, [534, 88, 551, 173]),
+        (3440, 1440, [472, 79, 496, 156]),
+        (2560, 1600, [32, 159, 496, 156]),
+        (5120, 1440, [1312, 79, 496, 156]),
+        (3840, 2160, [48, 119, 744, 234]),
+    ] {
+        assert_eq!(hero_ban_rect(w, h), Some(want), "{w}x{h}");
+    }
+}
+
+#[test]
+fn degenerate_frames_are_none_and_never_panic() {
+    for (w, h) in [
+        (0, 1440),
+        (2560, 0),
+        (1, 1),
+        (100, 2000),
+        (8000, 100),
+        (320, 180),
+    ] {
+        for screen in [Screen::MapVote, Screen::HeroSelect, Screen::HeroBan] {
+            assert!(
+                plane(&RgbImage::new(w, h), screen).is_none(),
+                "{w}x{h} {screen:?}"
+            );
+        }
+    }
 }
 
 fn cs(class: &str, score: f32, strip: f32) -> ClassScore {

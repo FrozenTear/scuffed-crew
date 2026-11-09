@@ -239,7 +239,7 @@ fn map_line(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Mes
     }
     r = with_set(r, g, Field::Map, ctx.editing);
     let line = with_correction(r.into(), detail::read_vs_set_name(g, "map_name"));
-    // The queue title read was weak: say so under the line, in words.
+    // The game's queue is not known: say so under the line, in words.
     match detail::queue_warning(g) {
         Some(w) => column![line, text(w).size(SMALL).color(theme::WARN)]
             .spacing(4)

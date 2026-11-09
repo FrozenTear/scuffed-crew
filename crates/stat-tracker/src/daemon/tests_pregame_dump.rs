@@ -156,7 +156,7 @@ fn the_poll_loop_feeds_and_releases_the_saver_and_shutdown_flushes_it() {
 
     let lifecycle: String = include_str!("lifecycle.rs").split_whitespace().collect();
     let made = lifecycle
-        .find("PregameDump::with_bans_picks(ctx.save_pregame_screens,bans_picks,&ctx.data_dir,ctx.auto_detect.poll_interval(ctx.use_new_reader),)")
+        .find("PregameDump::with_readers(ctx.save_pregame_screens,bans_picks,queue_title,&ctx.data_dir,ctx.auto_detect.poll_interval(ctx.use_new_reader),)")
         .expect("made from the switch");
     let looped = lifecycle.find("letresult=run_loop(").expect("run loop");
     let settle = lifecycle

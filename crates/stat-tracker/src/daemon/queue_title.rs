@@ -9,41 +9,70 @@
 //! With it on, the feed sees every batch the pre-game saver sends (the
 //! same batches the bans and picks feed sees) and holds the frames of the
 //! reader's [`POLICY`] (hero ban last and first, hero select last) for the
-//! current game. When the game is first recorded the frames are read, off
-//! the poll loop's thread, and [`apply_read`] decides what the game record
-//! gets:
+//! current game folder. When the open game is first recorded the frames are
+//! read once, off the poll loop's thread, and [`apply_read`] decides what
+//! the game record gets:
 //!
 //! * a confident read (accepted by the reader, [`confident`]) sets the
 //!   queue;
-//! * a weak, failed or missing read keeps the queue the record has and sets
-//!   the warning ([`stat_tracker::model::QueueTitle::warning`]).
+//! * a weak, failed or missing read sets the warning
+//!   ([`stat_tracker::model::QueueTitle::warning`]).
+//!
+//! What is stored is stored once (`LocalStore::attach_queue_title`): a game
+//! that has a queue title is not read again, so a restart mid-game cannot
+//! turn a confident title into a warning. The feed reads a game folder once
+//! too ([`QueueTitleFeed::read_now`]): a frame of the same folder held after
+//! the read (a late `heroselect_last`) is ignored, so it cannot give the
+//! next game, which may open no folder of its own, this game's queue.
 //!
 //! Nothing here can stop, delay past one read or drop a game: every
 //! failure is a warning on the game and a log line.
 //!
 //! # Next mode hint
 //!
-//! The rank reader reads the mode banner word after a game; it names the
-//! queue of the game that comes next, so it waits here as the pending
-//! [`QueueTitleFeed::pending_hint`], set through
-//! [`super::pregame_dump::PregameDump::set_next_mode_hint`]. The next
-//! game's read settles it: a confident read that agrees confirms it (it is
-//! stored on that game), a confident read that disagrees drops it, and a
-//! weak read leaves it pending. "Agrees" is [`hint_agrees`].
+//! The rank reader reads the mode banner word on a game's rank screen; it
+//! names the queue of the game that comes next, so it waits here as the
+//! pending [`PendingHint`], set through
+//! [`super::pregame_dump::PregameDump::set_next_mode_hint`] with the session
+//! it was read on and the time. It belongs to the next game only
+//! ([`settle_hint`]):
+//!
+//! * the first read of a different game that started after the hint was
+//!   read settles it, whatever the strength of that read: a confident read
+//!   that agrees ([`hint_agrees`]) confirms it (it is stored on that game),
+//!   a confident read that disagrees drops it, and a weak read expires it;
+//! * it is never settled on the game it was read on, nor on a game that
+//!   started before it was read: those leave it waiting;
+//! * it expires once it is older than the game window the frames use
+//!   ([`super::bans_picks::frames_fit`]), so it never lands on a much later
+//!   game.
 
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use image::{DynamicImage, RgbImage};
 use stat_tracker::model::QueueTitle;
 use stat_tracker::shadow::queue_title::{Field, MIN_SCORE, POLICY, Reader, Screen};
 
+use super::bans_picks::{GAME_WINDOW_MINUTES, frames_fit};
 use super::pregame_dump::PregameOp;
 
 /// One frame read, as the reader does it. A function so a test can inject
 /// reads.
 pub(crate) type ReadFn = Arc<dyn Fn(&RgbImage, Screen) -> Field<String> + Send + Sync>;
+
+/// The next mode hint waiting for the next game's read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PendingHint {
+    /// The mode banner word, trimmed and not empty.
+    pub(crate) text: String,
+    /// The session whose rank screen showed it: the hint names the game
+    /// after this one, so this one never settles it.
+    pub(crate) source: String,
+    /// When it was read.
+    pub(crate) at: DateTime<Utc>,
+}
 
 /// What a read did to the pending next mode hint.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,21 +83,37 @@ pub(crate) enum HintOutcome {
     Confirmed(String),
     /// A confident read disagreed: the hint is gone.
     Dropped(String),
-    /// The read was weak: the hint waits for the next read.
+    /// The read was weak, or the hint was older than the game window: the
+    /// hint is gone, stored nowhere.
+    Expired(String),
+    /// Not this game's hint (its source game, or a game that started before
+    /// it was read): it waits for the next game.
     Pending(String),
+}
+
+/// The game a read is for.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ReadGame<'a> {
+    pub(crate) session: &'a str,
+    /// The game's first record.
+    pub(crate) started: DateTime<Utc>,
+    /// When the read is applied.
+    pub(crate) now: DateTime<Utc>,
 }
 
 pub(crate) struct QueueTitleFeed {
     read: ReadFn,
     folder: Option<String>,
+    /// This folder's frames were read: later frames of it are not held.
+    done: bool,
     /// The current game's frames, by [`POLICY`] slot.
     frames: Vec<(Screen, &'static str, Arc<DynamicImage>)>,
-    /// When the last frame was held, for [`super::bans_picks::frames_fit`].
+    /// When the last frame was held, for [`frames_fit`].
     fed_at: Option<DateTime<Utc>>,
     /// The game read last, so a later capture of it is not read again.
     read_for: Option<String>,
     /// The next mode hint waiting for the next game's read.
-    pub(crate) pending_hint: Option<String>,
+    pub(crate) pending_hint: Option<PendingHint>,
 }
 
 impl QueueTitleFeed {
@@ -86,6 +131,7 @@ impl QueueTitleFeed {
         Self {
             read,
             folder: None,
+            done: false,
             frames: Vec::new(),
             fed_at: None,
             read_for: None,
@@ -94,7 +140,8 @@ impl QueueTitleFeed {
     }
 
     /// One batch the saver sends. A shot of a new game folder drops the old
-    /// game's frames.
+    /// game's frames and the read-once mark; a frame of a folder read
+    /// already is not held.
     pub(crate) fn observe(&mut self, ops: &[PregameOp<Arc<DynamicImage>>]) {
         for op in ops {
             let PregameOp::Save(shot) = op else {
@@ -104,10 +151,15 @@ impl QueueTitleFeed {
                 self.folder = Some(shot.folder.clone());
                 self.frames.clear();
                 self.fed_at = None;
+                self.done = false;
             }
             let Some((screen, which)) = policy_slot(shot.name) else {
                 continue;
             };
+            if self.done {
+                tracing::info!(target: "scuffed_stat_tracker", name = shot.name, game = %shot.folder, reason = "this game's frames were read already", "queue title: frame not held");
+                continue;
+            }
             self.frames.retain(|(s, w, _)| (*s, *w) != (screen, which));
             self.frames.push((screen, which, Arc::clone(&shot.frame)));
             self.fed_at = Some(Utc::now());
@@ -122,17 +174,33 @@ impl QueueTitleFeed {
         self.read_for = Some(session_id.to_string());
     }
 
+    /// Undo [`Self::mark_read_for`] for `session_id` (its result was not
+    /// stored), so its next capture is read again.
+    pub(crate) fn forget_read_for(&mut self, session_id: &str) {
+        if self.was_read_for(session_id) {
+            self.read_for = None;
+        }
+    }
+
+    /// When the last frame was held; `None` with nothing held.
+    pub(crate) fn fed_at(&self) -> Option<DateTime<Utc>> {
+        self.fed_at
+    }
+
     /// The held frames belong to a game first recorded at `started`.
     pub(crate) fn fits(&self, started: DateTime<Utc>) -> bool {
-        super::bans_picks::frames_fit(self.fed_at, started)
+        frames_fit(self.fed_at, started)
     }
 
     /// Read the held frames in [`POLICY`] order, off the poll loop's
     /// thread; the first [`confident`] value wins, and with none the read
-    /// has no value. The frames are dropped either way. A
-    /// reader that panics, or no frame at all, is a read with no value.
+    /// has no value. The frames are dropped and the folder is marked read
+    /// either way, so nothing held later in it is read for another game.
+    /// A reader that panics, or no frame at all, is a read with no value.
     pub(crate) async fn read_now(&mut self) -> Field<String> {
         let frames = std::mem::take(&mut self.frames);
+        self.done = true;
+        self.fed_at = None;
         let read = Arc::clone(&self.read);
         tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_frames(&read, &frames)))
@@ -162,7 +230,8 @@ fn read_frames(
         else {
             continue;
         };
-        let f = read(&frame.to_rgb8(), screen);
+        // Borrowed on RGB frames: no full-frame copy for a crop of 2% of it.
+        let f = read(&stat_tracker::frame::rgb_view(frame), screen);
         if confident(&f).is_some() {
             return f;
         }
@@ -172,7 +241,7 @@ fn read_frames(
 
 /// The value of a read the reader accepted: some text at confidence
 /// [`MIN_SCORE`] or more (the reader only returns a value then; an injected
-/// or future read below it counts as weak too).
+/// or future read below it counts as weak too). NaN is weak.
 pub(crate) fn confident(read: &Field<String>) -> Option<&str> {
     read.value
         .as_deref()
@@ -184,6 +253,15 @@ pub(crate) fn confident(read: &Field<String>) -> Option<&str> {
 /// that are not letters or digits as one space, and a last word `QUEUE`
 /// dropped. `OPEN QUEUE`, `Open Queue`, `open_queue` and `OPEN` are all
 /// `OPEN`; `ROLE QUEUE` is `ROLE`; `QUEUE` alone is empty.
+///
+/// This is the one key both readers agree on, and the contract for the
+/// rank reader's hint spelling: a hint must name the queue the way the
+/// queue title pack spells the title (`OPEN QUEUE`, `ROLE QUEUE`, with or
+/// without the last `QUEUE`). A word in front of it is part of the key, so
+/// `COMPETITIVE: ROLE QUEUE` (`COMPETITIVE ROLE`) does not agree with a
+/// quick play `ROLE QUEUE` (`ROLE`); the rank reader maps its own labels to
+/// this spelling before it sets a hint. A spelling that does not match is
+/// dropped, never confirmed: the safe way to fail.
 pub(crate) fn queue_key(text: &str) -> String {
     let upper = text.to_uppercase();
     let mut words: Vec<&str> = upper
@@ -205,31 +283,68 @@ pub(crate) fn hint_agrees(hint: &str, title: &str) -> bool {
     !key.is_empty() && key == queue_key(title)
 }
 
-/// What the game record gets from one read, over what it had (`existing`),
-/// and what becomes of the pending hint (taken when settled).
+/// What becomes of the pending hint on a read of `game` whose confident
+/// value is `value` (`None` for a weak read). Taken when it is settled or
+/// expires; left when it is not this game's.
+pub(crate) fn settle_hint(
+    pending: &mut Option<PendingHint>,
+    value: Option<&str>,
+    game: ReadGame<'_>,
+) -> HintOutcome {
+    let Some(hint) = pending.as_ref() else {
+        return HintOutcome::NoHint;
+    };
+    let text = hint.text.clone();
+    if game.now - hint.at > Duration::minutes(GAME_WINDOW_MINUTES) {
+        *pending = None;
+        return HintOutcome::Expired(text);
+    }
+    if hint.source == game.session {
+        return HintOutcome::Pending(text);
+    }
+    if !frames_fit(Some(hint.at), game.started) {
+        if game.started < hint.at {
+            // A game that was open before the hint was read.
+            return HintOutcome::Pending(text);
+        }
+        // Started more than the window after the hint. The age check above
+        // already covers this unless the game's start is later than `now`
+        // (a clock that moved back): kept so the rule does not lean on that.
+        *pending = None;
+        return HintOutcome::Expired(text);
+    }
+    *pending = None;
+    match value {
+        None => HintOutcome::Expired(text),
+        Some(v) if hint_agrees(&text, v) => HintOutcome::Confirmed(text),
+        Some(_) => HintOutcome::Dropped(text),
+    }
+}
+
+/// What the game record gets from its one read, and what becomes of the
+/// pending hint ([`settle_hint`]).
 pub(crate) fn apply_read(
-    existing: Option<QueueTitle>,
     read: &Field<String>,
-    pending: &mut Option<String>,
+    pending: &mut Option<PendingHint>,
+    game: ReadGame<'_>,
 ) -> (QueueTitle, HintOutcome) {
-    let mut title = existing.unwrap_or_default();
-    let Some(value) = confident(read) else {
-        title.unsure = true;
-        let hint = pending
-            .clone()
-            .map_or(HintOutcome::NoHint, HintOutcome::Pending);
+    let value = confident(read);
+    let hint = settle_hint(pending, value, game);
+    let Some(value) = value else {
+        let title = QueueTitle {
+            unsure: true,
+            ..QueueTitle::default()
+        };
         return (title, hint);
     };
-    title.value = Some(value.to_string());
-    title.confidence = read.confidence.clamp(0.0, 1.0);
-    title.unsure = false;
-    let hint = match pending.take() {
-        None => HintOutcome::NoHint,
-        Some(h) if hint_agrees(&h, value) => {
-            title.mode_hint = Some(h.clone());
-            HintOutcome::Confirmed(h)
-        }
-        Some(h) => HintOutcome::Dropped(h),
+    let title = QueueTitle {
+        value: Some(value.to_string()),
+        confidence: read.confidence.clamp(0.0, 1.0),
+        unsure: false,
+        mode_hint: match &hint {
+            HintOutcome::Confirmed(h) => Some(h.clone()),
+            _ => None,
+        },
     };
     (title, hint)
 }

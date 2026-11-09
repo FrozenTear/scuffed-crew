@@ -20,35 +20,64 @@ pub struct UploadEntry {
     entry: StatsUploadEntry,
     #[serde(skip_serializing_if = "Option::is_none")]
     bans_picks: Option<UploadBansPicks>,
-    /// The queue read on the pre-game screens (`rank-v1`), as
-    /// `{value, confidence}`. Left out unless the game has a confident
-    /// read, so an older server and a game with the reader off see the same
-    /// body as before.
+    /// What the `rank-v1` readers read for the game ([`upload_rank`]). Left
+    /// out when they read nothing, so an older server, a game with the
+    /// readers off and a game with no confident read see the same body as
+    /// before.
     #[serde(skip_serializing_if = "Option::is_none")]
-    queue_title: Option<UploadQueueTitle>,
+    rank: Option<UploadRank>,
 }
 
-/// The `queue_title` object of one uploaded match (`rank-v1`).
+/// One `rank-v1` field of the upload: the value and how sure the reader
+/// was (0..1). The site reads it as `RankField`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-pub struct UploadQueueTitle {
-    pub value: String,
+pub struct UploadRankField<T> {
+    pub value: T,
     pub confidence: f32,
 }
 
-/// The stored queue title as the upload sends it: only a confident value,
-/// `None` (no key) otherwise.
-pub(super) fn upload_queue_title(
-    stored: Option<&crate::model::QueueTitle>,
-) -> Option<UploadQueueTitle> {
-    let stored = stored?;
-    let value = stored
-        .value
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())?;
-    Some(UploadQueueTitle {
-        value: value.to_string(),
-        confidence: stored.confidence,
+/// The `rank` object of one uploaded match, the one the site reads with
+/// `scuffed_types::api::resolve_rank`. The site replaces its stored `rank`
+/// with this object on every upload of the game, so every `rank-v1` field
+/// goes in this one struct, built by the one function [`upload_rank`]: the
+/// rank update screen reader's fields (role, role_rank, division,
+/// progress_pct, progress_change, change_tags, higher_than_pct, hero_sr,
+/// hero_sr_change, next_mode_hint) are added to this struct and that
+/// function, never to a second object or builder, which would wipe this
+/// one's fields on the site. Each field is left out when it was not read.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UploadRank {
+    /// The queue read on the pre-game screens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_title: Option<UploadRankField<String>>,
+    /// The reader id ([`RANK_RECOGNIZER_ID`]), sent with any field.
+    pub rank_recognizer: &'static str,
+}
+
+/// The reader id sent as `rank.rank_recognizer`: the queue title reader's
+/// `RECOGNIZER_ID` (`shadow::queue_title`, defined in `model`).
+pub const RANK_RECOGNIZER_ID: &str = crate::model::QUEUE_TITLE_RECOGNIZER_ID;
+
+/// The game's `rank` object as the upload sends it: each field only when
+/// the reader was confident, and `None` (no key, the old body) when no
+/// field is set.
+///
+/// The local `QueueTitle::mode_hint` is not sent as `rank.next_mode_hint`:
+/// that site field belongs to the game whose rank screen was read (the
+/// banner names the game after it), while the hint is stored on the game
+/// after, once its read confirmed it. The rank reader's wiring sends the
+/// banner word on its own game.
+pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
+    let queue_title = m.queue_title.as_ref().and_then(|t| {
+        Some(UploadRankField {
+            value: t.confident_value()?.to_string(),
+            confidence: t.confidence,
+        })
+    });
+    queue_title.as_ref()?;
+    Some(UploadRank {
+        queue_title,
+        rank_recognizer: RANK_RECOGNIZER_ID,
     })
 }
 
@@ -135,7 +164,8 @@ pub fn upload_request(matches: &[PersonalMatch], deleted_sessions: &[String]) ->
                 entry,
                 // Plain values only, None (no key) when nothing was read.
                 bans_picks: upload_bans_picks(m.bans_picks.as_deref()),
-                queue_title: upload_queue_title(m.queue_title.as_ref()),
+                // Every rank-v1 field, or no key.
+                rank: upload_rank(m),
             })
         })
         .collect();

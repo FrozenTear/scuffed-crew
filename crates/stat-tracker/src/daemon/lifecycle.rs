@@ -577,17 +577,13 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         &ctx.data_dir,
         ctx.sync_client.is_some(),
     );
-    let mut pregame_dump = daemon::pregame_dump::PregameDump::with_bans_picks(
-        ctx.save_pregame_screens,
-        bans_picks,
-        &ctx.data_dir,
-        ctx.auto_detect.poll_interval(ctx.use_new_reader),
-    );
     // The queue title reader: off unless its env switch is on and the pack
     // loads; off leaves the saver as it is.
-    daemon::pregame_dump::PregameDump::add_queue_title(
-        &mut pregame_dump,
-        daemon::queue_title::QueueTitleFeed::from_env(&ctx.data_dir),
+    let queue_title = daemon::queue_title::QueueTitleFeed::from_env(&ctx.data_dir);
+    let mut pregame_dump = daemon::pregame_dump::PregameDump::with_readers(
+        ctx.save_pregame_screens,
+        bans_picks,
+        queue_title,
         &ctx.data_dir,
         ctx.auto_detect.poll_interval(ctx.use_new_reader),
     );
