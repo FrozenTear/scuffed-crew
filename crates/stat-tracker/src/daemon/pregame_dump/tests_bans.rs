@@ -659,3 +659,31 @@ async fn the_no_pregame_screens_notice_is_shown_once_per_game() {
     assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
     assert_eq!(rig.reads.load(Ordering::SeqCst), 0);
 }
+
+#[tokio::test]
+async fn the_does_not_fit_notice_is_shown_once_per_game() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    dump.send(three(2560, 1440));
+    let store = storage::LocalStore::open(rig.dir.path())
+        .await
+        .expect("store");
+    let mut old = crate::main_tests::test_match("g1", "victory");
+    old.played_at = (chrono::Utc::now() - chrono::Duration::minutes(10)).into();
+    store.insert_match(old).await.unwrap();
+    dump.attach_bans_picks(&store, "g1").await;
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    assert_eq!(status_of(&store).await, Some(BansPicksStatus::NoFrames));
+    // The notice is dismissed; a later capture of the same game does not
+    // bring it back.
+    publish_bans_picks_notice(rig.dir.path(), "");
+    dump.attach_bans_picks(&store, "g1").await;
+    assert_eq!(rig.health(), None, "not told again for the same game");
+    // The next game that also does not fit the held screens is told.
+    let mut next = crate::main_tests::test_match("g2", "defeat");
+    next.played_at = (chrono::Utc::now() - chrono::Duration::minutes(10)).into();
+    store.insert_match(next).await.unwrap();
+    dump.attach_bans_picks(&store, "g2").await;
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    assert_eq!(rig.reads.load(Ordering::SeqCst), 0);
+}
