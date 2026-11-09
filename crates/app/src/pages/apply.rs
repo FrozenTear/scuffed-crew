@@ -181,12 +181,41 @@ fn mine_slot(body: Option<ApplyBodyView>, retrying: bool) -> MineSlot {
     }
 }
 
-fn games_status_text(phase: SlotPhase) -> &'static str {
-    match phase {
-        SlotPhase::Loading => "Loading...",
+/// Text of the page-level games status line. `form` is false until the form
+/// screen shows, so the region is mounted from first paint but stays empty;
+/// a games fetch that fails early is announced as a text change once the form
+/// appears, not lost in a region that mounts with the failure already in it.
+fn games_slot(form: bool, phase: SlotPhase, retrying: bool) -> MineSlot {
+    if !form {
+        return MineSlot {
+            text: "",
+            retry: None,
+        };
+    }
+    let text = match phase {
+        SlotPhase::Loading => "Loading games...",
         SlotPhase::Failed => "Couldn't load games.",
         SlotPhase::Ready => "",
+    };
+    MineSlot {
+        text,
+        retry: retry_control(
+            phase == SlotPhase::Failed,
+            phase == SlotPhase::Loading,
+            retrying,
+        ),
     }
+}
+
+/// Games grid rows as `(id, name, selected)`.
+fn game_items(games: Vec<(String, String)>, selected: &[String]) -> Vec<(String, String, bool)> {
+    games
+        .into_iter()
+        .map(|(id, name)| {
+            let on = selected.contains(&id);
+            (id, name, on)
+        })
+        .collect()
 }
 
 fn toggle_game(selected: &mut Vec<String>, id: &str) {
@@ -197,12 +226,19 @@ fn toggle_game(selected: &mut Vec<String>, id: &str) {
     }
 }
 
+/// Accessible name for a Retry button. It starts with the visible text
+/// ("Retry" or "Retrying...") so the label contains what is on screen
+/// (WCAG 2.5.3 label in name), then says what is being loaded.
+fn retry_aria_label(subject: &str, retrying: bool) -> String {
+    format!("{} loading {subject}", retry_label(retrying))
+}
+
 /// Retry kept outside any status region. Mounted while in flight and marked
 /// `aria-disabled` (not native `disabled`, which blurs the focused button and
 /// drops focus to the page body); clicks are ignored until the refetch ends.
 fn retry_button(
     class: &'static str,
-    aria_label: &'static str,
+    subject: &'static str,
     retrying: bool,
     on_retry: EventHandler<()>,
 ) -> Element {
@@ -210,7 +246,7 @@ fn retry_button(
         button {
             r#type: "button",
             class,
-            aria_label,
+            aria_label: retry_aria_label(subject, retrying),
             aria_busy: if retrying { "true" },
             aria_disabled: if retrying { "true" },
             onclick: move |_| {
@@ -231,52 +267,57 @@ fn MineStatus(slot: MineSlot, on_retry: EventHandler<()>) -> Element {
         p { class: "apply-status", role: "status", "{slot.text}" }
         if let Some(retrying) = slot.retry {
             div { class: "fetch-error-wrap",
-                {retry_button("fetch-error__retry", "Retry loading your application", retrying, on_retry)}
+                {retry_button("fetch-error__retry", "your application", retrying, on_retry)}
             }
         }
     }
 }
 
-/// Games picker: a named group of toggle buttons. Its status line is mounted
-/// in every games phase (Loading, Failed, Ready); only the text changes.
-/// `games` is `(id, name)` pairs. `children` follows the grid.
+/// DOM id of the games status line, referenced by the Games fieldset.
+const GAMES_STATUS_ID: &str = "apply-games-status";
+
+/// Always-mounted status line for the games fetch, rendered with the page
+/// like [`MineStatus`]. Only its text changes; Retry sits after it, outside
+/// the region.
+#[component]
+fn GamesStatus(slot: MineSlot, on_retry: EventHandler<()>) -> Element {
+    rsx! {
+        p { class: "apply-status", id: GAMES_STATUS_ID, role: "status", "{slot.text}" }
+        if let Some(retrying) = slot.retry {
+            div { class: "fetch-error-wrap",
+                {retry_button("fetch-error__retry is-compact", "games", retrying, on_retry)}
+            }
+        }
+    }
+}
+
+/// Games picker: a named group of toggle buttons. Its loading and error text
+/// live in the page-level [`GamesStatus`] (mounted from first paint), which
+/// the group references with `aria-describedby`. `games` is `(id, name)`
+/// pairs. `children` follows the grid.
 #[component]
 fn GamesField(
     phase: SlotPhase,
-    retrying: bool,
     games: Vec<(String, String)>,
     selected: Vec<String>,
     on_toggle: EventHandler<String>,
-    on_retry: EventHandler<()>,
     children: Element,
 ) -> Element {
-    let retry = retry_control(
-        phase == SlotPhase::Failed,
-        phase == SlotPhase::Loading,
-        retrying,
-    );
     rsx! {
-        fieldset { class: "apply-field apply-fieldset",
+        fieldset {
+            class: "apply-field apply-fieldset",
+            aria_describedby: GAMES_STATUS_ID,
             legend { class: "apply-label", "Games" }
-            p { class: "apply-status", role: "status", "{games_status_text(phase)}" }
-            if let Some(retrying) = retry {
-                {retry_button("fetch-error__retry is-compact", "Retry loading games", retrying, on_retry)}
-            }
             if phase == SlotPhase::Ready {
                 div { class: "apply-game-grid",
-                    for (id, name) in games {
-                        {
-                            let is_selected = selected.contains(&id);
-                            rsx! {
-                                button {
-                                    key: "{id}",
-                                    r#type: "button",
-                                    class: if is_selected { "apply-game-btn selected" } else { "apply-game-btn" },
-                                    aria_pressed: if is_selected { "true" } else { "false" },
-                                    onclick: move |_| on_toggle.call(id.clone()),
-                                    "{name}"
-                                }
-                            }
+                    for (id, name, is_selected) in game_items(games, &selected) {
+                        button {
+                            key: "{id}",
+                            r#type: "button",
+                            class: if is_selected { "apply-game-btn selected" } else { "apply-game-btn" },
+                            aria_pressed: if is_selected { "true" } else { "false" },
+                            onclick: move |_| on_toggle.call(id.clone()),
+                            "{name}"
                         }
                     }
                 }
@@ -389,6 +430,23 @@ pub fn Apply() -> Element {
             )
         });
     let slot = mine_slot(body_view, mine_retrying());
+    let games_data = games.data.read();
+    let games_phase = apply_fetch_phase(
+        games.data.state()(),
+        games_data.as_ref().is_none(),
+        games.error.read().is_some(),
+    );
+    let game_list: Vec<(String, String)> = games_data
+        .as_ref()
+        .and_then(|g| g.as_ref())
+        .map(|g| g.iter().map(|g| (g.id.clone(), g.name.clone())).collect())
+        .unwrap_or_default();
+    drop(games_data);
+    let games_status = games_slot(
+        body_view == Some(ApplyBodyView::Form),
+        games_phase,
+        games_retrying(),
+    );
 
     rsx! {
         crate::styles::StyleOnce { id: "scuffed-css-pages-apply-apply-css", css: APPLY_CSS }
@@ -408,6 +466,15 @@ pub fn Apply() -> Element {
                 on_retry: move |_| {
                     mine_retrying.set(true);
                     my_app.refresh += 1;
+                },
+            }
+            // Mounted with the page so an early /api/games failure lands in a
+            // region that already exists. Empty until the form shows.
+            GamesStatus {
+                slot: games_status,
+                on_retry: move |_| {
+                    games_retrying.set(true);
+                    games.refresh += 1;
                 },
             }
 
@@ -536,33 +603,17 @@ pub fn Apply() -> Element {
                         (ApplyBodyView::Status, None)
                         | (ApplyBodyView::MinePending | ApplyBodyView::MineFailed, _) => rsx! {},
                         (ApplyBodyView::Form, _) => {
-                            let games_state = games.data.read();
-                            let games_error = games.error.read();
-                            let games_phase = apply_fetch_phase(
-                                games.data.state()(),
-                                games_state.as_ref().is_none(),
-                                games_error.is_some(),
-                            );
-                            let game_list: Vec<(String, String)> = games_state
-                                .as_ref()
-                                .and_then(|g| g.as_ref())
-                                .map(|g| g.iter().map(|g| (g.id.clone(), g.name.clone())).collect())
-                                .unwrap_or_default();
                             rsx! {
                                 Card {
                                     h2 { class: "apply-card-title", "Apply" }
                                     p { class: "apply-card-desc", "Tell us which games you play and a bit about yourself." }
 
+                                    // Games loading / error text lives in `GamesStatus` above.
                                     GamesField {
                                         phase: games_phase,
-                                        retrying: games_retrying(),
                                         games: game_list,
                                         selected: selected_games(),
                                         on_toggle: move |id: String| toggle_game(&mut selected_games.write(), &id),
-                                        on_retry: move |_| {
-                                            games_retrying.set(true);
-                                            games.refresh += 1;
-                                        },
                                         {list_cap_notice(&games, "games")}
                                     }
 
@@ -844,9 +895,85 @@ mod tests {
         assert_eq!(selected, ["ow", "val"]);
         toggle_game(&mut selected, "ow");
         assert_eq!(selected, ["val"]);
-        assert_eq!(games_status_text(SlotPhase::Ready), "");
-        assert_eq!(games_status_text(SlotPhase::Loading), "Loading...");
-        assert_eq!(games_status_text(SlotPhase::Failed), "Couldn't load games.");
+    }
+
+    #[test]
+    fn game_items_mark_the_selected_games() {
+        let items = game_items(games(), &["game-val".to_string()]);
+        assert_eq!(
+            items,
+            [
+                ("game-ow".to_string(), "Overwatch".to_string(), false),
+                ("game-val".to_string(), "Valorant".to_string(), true),
+            ]
+        );
+    }
+
+    #[test]
+    fn games_slot_is_empty_until_the_form_shows() {
+        for phase in [SlotPhase::Loading, SlotPhase::Failed, SlotPhase::Ready] {
+            for retrying in [false, true] {
+                assert_eq!(
+                    games_slot(false, phase, retrying),
+                    MineSlot {
+                        text: "",
+                        retry: None
+                    }
+                );
+            }
+        }
+        assert_eq!(
+            games_slot(true, SlotPhase::Ready, false),
+            MineSlot {
+                text: "",
+                retry: None
+            }
+        );
+        assert_eq!(
+            games_slot(true, SlotPhase::Loading, false),
+            MineSlot {
+                text: "Loading games...",
+                retry: None
+            }
+        );
+        assert_eq!(
+            games_slot(true, SlotPhase::Failed, false),
+            MineSlot {
+                text: "Couldn't load games.",
+                retry: Some(false)
+            }
+        );
+        assert_eq!(
+            games_slot(true, SlotPhase::Loading, true),
+            MineSlot {
+                text: "Loading games...",
+                retry: Some(true)
+            }
+        );
+    }
+
+    #[test]
+    fn retry_accessible_name_contains_the_visible_text() {
+        for subject in ["games", "your application"] {
+            for retrying in [false, true] {
+                let label = retry_aria_label(subject, retrying);
+                assert!(label.starts_with(retry_label(retrying)), "{label}");
+                assert!(label.ends_with(subject), "{label}");
+            }
+        }
+        assert_eq!(retry_aria_label("games", false), "Retry loading games");
+        assert_eq!(retry_aria_label("games", true), "Retrying... loading games");
+    }
+
+    /// The Retry button's `aria-label` contains its visible text.
+    fn assert_retry_label_in_name(html: &str, visible: &str, label: &str) {
+        let end = html
+            .find(&format!(">{visible}</button>"))
+            .unwrap_or_else(|| panic!("{visible} button in {html}"));
+        let start = html[..end].rfind("<button").unwrap();
+        let tag = &html[start..end];
+        assert!(tag.contains(&format!(r#"aria-label="{label}""#)), "{html}");
+        assert!(label.contains(visible), "{label}");
     }
 
     fn html_of(view: fn() -> Element) -> String {
@@ -903,11 +1030,14 @@ mod tests {
         let html = html_of(failed);
         assert_one_status(&html, "Couldn't load your application.");
         assert!(html.contains(">Retry</button>"), "{html}");
+        assert_retry_label_in_name(&html, "Retry", "Retry loading your application");
         assert!(!html.contains("disabled"), "{html}");
 
         let html = html_of(retrying);
         assert_one_status(&html, "Loading...");
         assert!(html.contains(">Retrying...</button>"), "{html}");
+        assert_retry_label_in_name(&html, "Retrying...", "Retrying... loading your application");
+        assert!(!html.contains("Retry loading"), "{html}");
         assert_keeps_focus_while_busy(&html);
         assert!(html.contains(r#"aria-busy="true""#), "{html}");
     }
@@ -927,40 +1057,62 @@ mod tests {
     }
 
     #[test]
-    fn games_field_is_a_named_group_with_one_status_region() {
+    fn games_status_is_one_text_region_with_retry_outside() {
+        fn before_form() -> Element {
+            let slot = games_slot(false, SlotPhase::Failed, false);
+            rsx! { GamesStatus { slot, on_retry: |_| {} } }
+        }
+        fn loading() -> Element {
+            let slot = games_slot(true, SlotPhase::Loading, false);
+            rsx! { GamesStatus { slot, on_retry: |_| {} } }
+        }
+        fn failed() -> Element {
+            let slot = games_slot(true, SlotPhase::Failed, false);
+            rsx! { GamesStatus { slot, on_retry: |_| {} } }
+        }
+        fn retrying() -> Element {
+            let slot = games_slot(true, SlotPhase::Loading, true);
+            rsx! { GamesStatus { slot, on_retry: |_| {} } }
+        }
+        fn ready() -> Element {
+            let slot = games_slot(true, SlotPhase::Ready, false);
+            rsx! { GamesStatus { slot, on_retry: |_| {} } }
+        }
+
+        // Mounted (empty) from first paint, even if games already failed.
+        for idle in [html_of(before_form), html_of(ready)] {
+            assert_one_status(&idle, "");
+            assert!(idle.contains(r#"id="apply-games-status""#), "{idle}");
+            assert!(!idle.contains("<button"), "{idle}");
+        }
+
+        let html = html_of(loading);
+        assert_one_status(&html, "Loading games...");
+        assert!(!html.contains("<button"), "{html}");
+
+        let html = html_of(failed);
+        assert_one_status(&html, "Couldn't load games.");
+        assert!(html.contains(">Retry</button>"), "{html}");
+        assert_retry_label_in_name(&html, "Retry", "Retry loading games");
+        assert!(!html.contains("disabled"), "{html}");
+
+        let html = html_of(retrying);
+        assert_one_status(&html, "Loading games...");
+        assert!(html.contains(">Retrying...</button>"), "{html}");
+        assert_retry_label_in_name(&html, "Retrying...", "Retrying... loading games");
+        assert!(!html.contains("Retry loading"), "{html}");
+        assert_keeps_focus_while_busy(&html);
+    }
+
+    #[test]
+    fn games_field_is_a_named_group_described_by_the_status() {
         fn loading() -> Element {
             rsx! {
                 GamesField {
                     phase: SlotPhase::Loading,
-                    retrying: false,
                     games: vec![],
                     selected: vec![],
                     on_toggle: |_| {},
-                    on_retry: |_| {},
-                }
-            }
-        }
-        fn failed() -> Element {
-            rsx! {
-                GamesField {
-                    phase: SlotPhase::Failed,
-                    retrying: false,
-                    games: vec![],
-                    selected: vec![],
-                    on_toggle: |_| {},
-                    on_retry: |_| {},
-                }
-            }
-        }
-        fn retrying() -> Element {
-            rsx! {
-                GamesField {
-                    phase: SlotPhase::Loading,
-                    retrying: true,
-                    games: vec![],
-                    selected: vec![],
-                    on_toggle: |_| {},
-                    on_retry: |_| {},
                 }
             }
         }
@@ -968,37 +1120,29 @@ mod tests {
             rsx! {
                 GamesField {
                     phase: SlotPhase::Ready,
-                    retrying: false,
                     games: games(),
                     selected: vec!["game-val".to_string()],
                     on_toggle: |_| {},
-                    on_retry: |_| {},
                 }
             }
         }
 
         let html = html_of(loading);
-        assert_one_status(&html, "Loading...");
+        assert!(!html.contains(r#"role="status""#), "{html}");
         assert!(!html.contains("<button"), "{html}");
-
-        let html = html_of(failed);
-        assert_one_status(&html, "Couldn't load games.");
-        assert!(html.contains(">Retry</button>"), "{html}");
         assert!(
-            html.contains(r#"aria-label="Retry loading games""#),
+            html.contains(r#"aria-describedby="apply-games-status""#),
             "{html}"
         );
-        assert!(!html.contains("disabled"), "{html}");
-
-        let html = html_of(retrying);
-        assert_one_status(&html, "Loading...");
-        assert!(html.contains(">Retrying...</button>"), "{html}");
-        assert_keeps_focus_while_busy(&html);
 
         let html = html_of(ready);
-        assert_one_status(&html, "");
+        assert!(!html.contains(r#"role="status""#), "{html}");
         assert!(html.contains("<fieldset"), "{html}");
         assert!(html.contains(">Games</legend>"), "{html}");
+        assert!(
+            html.contains(r#"aria-describedby="apply-games-status""#),
+            "{html}"
+        );
         assert!(!html.contains("<label"), "{html}");
         assert!(!html.contains(">Retry"), "{html}");
         assert_eq!(html.matches(r#"aria-pressed="false""#).count(), 1, "{html}");
