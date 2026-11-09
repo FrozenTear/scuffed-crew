@@ -60,8 +60,9 @@ pub(crate) async fn run_loop(
     // Failed open used to wait only on Ctrl+C. SIGTERM was registered above
     // and never polled, so `systemctl stop` hit TimeoutStopSec then SIGKILL,
     // and exit 0 kept Restart=on-failure from trying again. The pid file
-    // (acquired in main) made the GUI show "running" the whole time.
-    let mut kbd = match open_keyboard_or_shutdown(&mut sigterm).await? {
+    // (acquired in main) made the GUI show "running" the whole time. No
+    // keyboard is not an exit: the loop runs without Tab (`KeyboardInput`).
+    let mut kbd = match open_keyboard_or_shutdown(&mut sigterm, data_dir).await? {
         Some(stream) => stream,
         None => return Ok(()),
     };
@@ -301,29 +302,11 @@ pub(crate) async fn run_loop(
                         }
                         drop(bridge);
                     }
+                    // `KeyboardInput` reopens a lost keyboard itself and
+                    // never ends the loop: input is optional, recording
+                    // goes on without it.
                     Err(e) => {
-                        tracing::error!(target: "scuffed_stat_tracker", error = %e, "keyboard devices lost: attempting to reopen");
-                        match detect::MultiKeyboardStream::open() {
-                            Ok(new_kbd) => {
-                                kbd = new_kbd;
-                                tracing::info!(target: "scuffed_stat_tracker", "keyboard monitoring reopened");
-                            }
-                            Err(e2) => {
-                                tracing::error!(target: "scuffed_stat_tracker", error = %e2, "failed to reopen keyboard: exiting");
-                                drain_capture(capture_task.take()).await;
-                                if let Some(client) = sync_client {
-                                    drain_sync_then(sync_task, || try_sync(store, client, data_dir, None)).await;
-                                } else {
-                                    drain_sync_then(sync_task, || std::future::ready(())).await;
-                                }
-                                // Exit non-zero so Restart=on-failure starts a
-                                // new process once a device is readable again.
-                                // Exit 0 here looked like a clean stop.
-                                anyhow::bail!(
-                                    "keyboard devices lost and could not be reopened: {e2}"
-                                );
-                            }
-                        }
+                        tracing::debug!(target: "scuffed_stat_tracker", error = %e, "keyboard read failed");
                     }
                 }
             }

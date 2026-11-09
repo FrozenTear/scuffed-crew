@@ -338,26 +338,26 @@ async fn keyboard_open_retries_then_becomes_ready() {
 }
 
 #[tokio::test]
-async fn no_keyboard_is_an_error_after_bounded_retries() {
-    // Old startup path returned Ok(()) after Ctrl+C, so Restart=on-failure
-    // never ran. Give-up must be Err, and it must not wait again after
-    // the last failed open (that wait was the SIGTERM-swallowing hang).
+async fn no_keyboard_after_bounded_retries_is_unavailable_not_an_exit() {
+    // Give-up used to be Err, so the daemon exited non-zero and systemd
+    // crash-looped it for a user outside the `input` group (alpha.3 item
+    // 32). It is now `Unavailable` and the daemon runs on without Tab. It
+    // must still not wait again after the last failed open (that wait was
+    // the SIGTERM-swallowing hang).
     let retries = KEYBOARD_OPEN_ATTEMPTS.saturating_sub(1) as usize;
     let mut waiter = ScriptedWaiter {
         events: vec![KeyboardWait::Retry; retries],
     };
-    let err = acquire_keyboard(
+    let got = acquire_keyboard(
         || Err::<(), _>("no keyboard device found: ensure user is in the 'input' group"),
         &mut waiter,
         KEYBOARD_OPEN_ATTEMPTS,
     )
     .await
-    .expect_err("exhausted opens must not look like a clean exit");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("no keyboard available"),
-        "give-up is the non-zero exit path, got: {msg}"
-    );
+    .expect("exhausted opens are no error: the daemon runs on");
+    let KeyboardAcquire::Unavailable(msg) = got else {
+        panic!("exhausted opens must be Unavailable, got {got:?}");
+    };
     assert!(
         msg.contains("input' group"),
         "the open error is preserved, got: {msg}"
@@ -390,6 +390,109 @@ async fn sigterm_during_keyboard_wait_is_clean_shutdown() {
     assert_eq!(got, KeyboardAcquire::Shutdown);
     assert_eq!(opens, 1, "do not keep opening after stop is requested");
     assert!(waiter.events.is_empty());
+}
+
+/// Tab keys scripted for [`KeyboardInput`]; pends forever once empty.
+struct ScriptedKeys(std::collections::VecDeque<detect::TabKey>);
+
+impl stat_tracker::tab_retry::TabKeySource for ScriptedKeys {
+    async fn next_key(&mut self) -> Result<detect::TabKey, Box<dyn std::error::Error>> {
+        match self.0.pop_front() {
+            Some(key) => Ok(key),
+            None => std::future::pending().await,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct KeyboardLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for KeyboardLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for KeyboardLog {
+    type Writer = KeyboardLog;
+    fn make_writer(&'a self) -> KeyboardLog {
+        self.clone()
+    }
+}
+
+/// alpha.3 item 32: a user outside the `input` group (every open is
+/// "Permission denied") crash-looped the systemd service. Now the key wait
+/// runs on without a keyboard, retries quietly, warns once in the log and
+/// once in the status file the app shows in Tracker health, and clears the
+/// warning when a keyboard opens. The open error is injected; no
+/// `/dev/input` is read. The clock is paused, so retries are exact.
+#[tokio::test(start_paused = true)]
+async fn permission_denied_keyboard_runs_on_and_warns_once() {
+    const DENIED: &str = "Permission denied (os error 13)";
+    let log = KeyboardLog::default();
+    let sub = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _sub = tracing::subscriber::set_default(sub);
+    tracing::callsite::rebuild_interest_cache();
+    let warnings = || {
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        text.lines()
+            .filter(|l| l.contains("WARN") && l.contains(NO_KEYBOARD_NOTICE))
+            .count()
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let notice = || {
+        stat_tracker::ocr_status::read_status(dir.path())
+            .map(|s| s.input_notice)
+            .unwrap_or_default()
+    };
+
+    // Every open fails until the script gets a keyboard.
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let script: std::rc::Rc<std::cell::RefCell<Option<ScriptedKeys>>> = Default::default();
+    let open = {
+        let (opens, script) = (opens.clone(), script.clone());
+        move || {
+            opens.set(opens.get() + 1);
+            script.borrow_mut().take().ok_or_else(|| DENIED.to_string())
+        }
+    };
+    let retry = Duration::from_secs(30);
+    let mut input = KeyboardInput::new(Err(DENIED.into()), open, dir.path().into(), retry);
+    assert!(!input.available());
+    assert_eq!(notice(), NO_KEYBOARD_NOTICE, "the warning is set at once");
+    assert_eq!(warnings(), 1);
+
+    // The run loop races the key wait against its other arms: the wait
+    // never ends in an error (the old exit), it only pends and retries.
+    for round in 1..=3u32 {
+        tokio::select! {
+            got = input.wait_tab() => panic!("no keyboard yields no key: {:?}", got.map_err(|e| e.to_string())),
+            // Between retry deadlines, so the count is exact.
+            _ = tokio::time::sleep(retry * 3 + retry / 2) => {}
+        }
+        assert_eq!(opens.get(), round * 3, "one quiet open every {retry:?}");
+        assert!(!input.available());
+        assert_eq!(notice(), NO_KEYBOARD_NOTICE);
+        assert_eq!(warnings(), 1, "logged once across {} retries", opens.get());
+    }
+
+    // The user fixed the group and the next retry opens: Tab works again
+    // and the warning is cleared.
+    let at = Instant::now();
+    *script.borrow_mut() = Some(ScriptedKeys([detect::TabKey { down: true, at }].into()));
+    let key = input.wait_tab().await.expect("a key once a keyboard opens");
+    assert!(key.down);
+    assert!(input.available());
+    assert_eq!(notice(), "", "the warning clears with a keyboard");
+    assert_eq!(warnings(), 1);
 }
 
 #[tokio::test]

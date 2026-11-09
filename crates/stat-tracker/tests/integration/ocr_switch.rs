@@ -947,6 +947,18 @@ fn a_second_start_and_a_vacuum_run_leave_the_status_file_alone() {
     let log = root.path().join("daemon.out");
     let mut live = spawn_daemon(root.path(), &data_dir, Ask::Env("on"), &[], &log);
     assert!(wait_until_ready(&log, &mut live), "output:\n{}", read(&log));
+    // The live daemon writes its own keyboard warning into the file when no
+    // keyboard opens (alpha.3 item 32). Take the bytes after that.
+    let settled = |out: &str| {
+        out.contains("keyboard monitoring active") || out.contains("cannot read the keyboard")
+    };
+    assert!(
+        wait_for("the keyboard open", Duration::from_secs(60), || settled(
+            &read(&log)
+        )),
+        "output:\n{}",
+        read(&log)
+    );
     let status_path = data_dir.join(ocr_switch::STATUS_FILE);
     let before = std::fs::read(&status_path).expect("the live daemon's status file");
     let live_status = ocr_switch::read_status(&data_dir).unwrap();
