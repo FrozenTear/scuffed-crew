@@ -1,6 +1,5 @@
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
-use wasm_bindgen::JsCast;
 
 use crate::components::{
     ConfirmDialog, DataTable, FormModal, RolePill, StatusPill, SummaryCard, Toast, admin_pending,
@@ -9,6 +8,7 @@ use crate::components::{
 use crate::hooks::{ModalController, use_api_list, use_api_list_prefer};
 use crate::routes::Route;
 use crate::state::use_auth;
+use crate::upload::UploadFailure;
 use scuffed_api_client::{ApiClient, ClientError};
 use scuffed_types::api::{ChangeRoleRequest, CreateGameAccountRequest, ToggleActiveRequest};
 use scuffed_types::{AttendanceStats, OrgRole, UserInfo};
@@ -50,11 +50,6 @@ struct ModerationAction {
     reason: String,
     is_active: bool,
     created_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct UploadResponse {
-    url: String,
 }
 
 #[derive(Serialize)]
@@ -571,15 +566,7 @@ pub fn AdminMembers() -> Element {
     };
 
     let on_avatar_file_change = move |_e: Event<FormData>| {
-        // Access the file input via DOM query to get the web_sys::File
-        let Some(document) = web_sys::window().and_then(|w| w.document()) else {
-            return;
-        };
-        if let Some(el) = document.get_element_by_id("avatar-file-input")
-            && let Ok(input) = el.dyn_into::<web_sys::HtmlInputElement>()
-            && let Some(file_list) = input.files()
-            && let Some(file) = file_list.get(0)
-        {
+        if let Some(file) = crate::upload::selected_file("avatar-file-input") {
             avatar_file.set(Some(file));
         }
     };
@@ -599,77 +586,29 @@ pub fn AdminMembers() -> Element {
         let mid = member.id.clone();
         avatar_uploading.set(true);
         spawn(async move {
-            // Upload via FormData
-            let Ok(form_data) = web_sys::FormData::new() else {
-                toast.show(Toast::error("Could not prepare upload."));
-                avatar_uploading.set(false);
-                return;
-            };
-            let _ = form_data.append_with_blob("file", &file);
-
-            let opts = web_sys::RequestInit::new();
-            opts.set_method("POST");
-            opts.set_body(&form_data.into());
-            opts.set_credentials(web_sys::RequestCredentials::SameOrigin);
-
-            let upload_url = admin_avatar_upload_url(&mid);
-            let Ok(request) = web_sys::Request::new_with_str_and_init(&upload_url, &opts) else {
-                toast.show(Toast::error("Could not build upload request."));
-                avatar_uploading.set(false);
-                return;
-            };
-
-            let Some(window) = web_sys::window() else {
-                toast.show(Toast::error("Upload failed: no browser window."));
-                avatar_uploading.set(false);
-                return;
-            };
-            let resp_val =
-                wasm_bindgen_futures::JsFuture::from(window.fetch_with_request(&request)).await;
-
-            match resp_val {
-                Ok(resp_val) => {
-                    let resp: web_sys::Response = resp_val.unchecked_into();
-                    if resp.ok() {
-                        let text_promise = match resp.text() {
-                            Ok(p) => p,
-                            Err(_) => {
-                                toast.show(Toast::error("Failed to read upload response."));
-                                avatar_uploading.set(false);
-                                return;
-                            }
-                        };
-                        let text = wasm_bindgen_futures::JsFuture::from(text_promise).await;
-                        if let Ok(text) = text {
-                            let text_str = text.as_string().unwrap_or_default();
-                            if let Ok(upload) = serde_json::from_str::<UploadResponse>(&text_str) {
-                                let body = UpdateAvatarBody {
-                                    avatar_url: Some(upload.url),
-                                };
-                                match ApiClient::web()
-                                    .put_json_empty(&format!("/api/members/{mid}"), &body)
-                                    .await
-                                {
-                                    Ok(_) => {
-                                        toast.show(Toast::success("Avatar updated."));
-                                        avatar_modal.close();
-                                        members.refresh += 1;
-                                    }
-                                    Err(e) => toast.show(Toast::error(format!(
-                                        "Failed to update profile: {e}"
-                                    ))),
-                                }
-                            } else {
-                                toast.show(Toast::error("Failed to parse upload response."));
-                            }
-                        } else {
-                            toast.show(Toast::error("Failed to read upload response."));
+            match crate::upload::post_file(&admin_avatar_upload_url(&mid), &file).await {
+                Ok(url) => {
+                    let body = UpdateAvatarBody {
+                        avatar_url: Some(url),
+                    };
+                    match ApiClient::web()
+                        .put_json_empty(&format!("/api/members/{mid}"), &body)
+                        .await
+                    {
+                        Ok(_) => {
+                            toast.show(Toast::success("Avatar updated."));
+                            avatar_modal.close();
+                            members.refresh += 1;
                         }
-                    } else {
-                        toast.show(Toast::error(avatar_upload_failure_message(resp.status())));
+                        Err(e) => {
+                            toast.show(Toast::error(format!("Failed to update profile: {e}")))
+                        }
                     }
                 }
-                Err(_) => toast.show(Toast::error("Upload request failed.")),
+                Err(UploadFailure::Status(status)) => {
+                    toast.show(Toast::error(avatar_upload_failure_message(status)))
+                }
+                Err(UploadFailure::Message(msg)) => toast.show(Toast::error(msg)),
             }
             avatar_uploading.set(false);
         });
