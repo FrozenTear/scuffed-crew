@@ -143,6 +143,11 @@ pub(crate) type DaemonKeyboard =
 /// key wait just never returns until a later open works. The first failure
 /// logs one WARN and publishes [`NO_KEYBOARD_NOTICE`]; failed retries log
 /// at DEBUG only. A keyboard that comes back clears the notice.
+///
+/// Quiet reopens use a stored Instant deadline so the live
+/// `select!` in `event_loop` (poll/cmd arms) can cancel `wait_tab` without
+/// resetting the 30 s retry. A plain `sleep(retry)` restarted every cancel
+/// and never fired (QA on PR 641).
 pub(crate) struct KeyboardInput<K, F> {
     stream: Option<K>,
     open: F,
@@ -150,6 +155,8 @@ pub(crate) struct KeyboardInput<K, F> {
     retry: std::time::Duration,
     /// The warning is out (logged and in the status file).
     warned: bool,
+    /// Next quiet reopen. Survives `wait_tab` being dropped mid-wait.
+    reopen_at: Option<tokio::time::Instant>,
 }
 
 impl<K, F> KeyboardInput<K, F>
@@ -169,9 +176,14 @@ where
             data_dir,
             retry,
             warned: false,
+            reopen_at: None,
         };
         input.opened(first);
         input
+    }
+
+    fn schedule_reopen(&mut self) {
+        self.reopen_at = Some(tokio::time::Instant::now() + self.retry);
     }
 
     /// A keyboard is open now.
@@ -184,6 +196,7 @@ where
         match result {
             Ok(stream) => {
                 self.stream = Some(stream);
+                self.reopen_at = None;
                 if self.warned {
                     self.warned = false;
                     stat_tracker::ocr_status::publish_input_notice(&self.data_dir, "");
@@ -199,15 +212,17 @@ where
                     error = %e,
                     "{NO_KEYBOARD_NOTICE} Capture and recording go on without Tab; retrying quietly."
                 );
+                self.schedule_reopen();
             }
             Err(e) => {
                 tracing::debug!(target: "scuffed_stat_tracker", error = %e, "keyboard still unavailable");
+                self.schedule_reopen();
             }
         }
     }
 
     /// The next Tab key event. Never an error: a lost keyboard is reopened
-    /// here, and while none opens this waits, trying again every `retry`.
+    /// here, and while none opens this waits until `reopen_at`.
     pub(crate) async fn wait_tab(&mut self) -> Result<detect::TabKey, Box<dyn std::error::Error>> {
         loop {
             match self.stream.as_mut() {
@@ -217,12 +232,24 @@ where
                     Err(e) => {
                         tracing::info!(target: "scuffed_stat_tracker", error = %e, "keyboard devices lost: attempting to reopen");
                         self.stream = None;
+                        // Same-process loss: try once now, then the quiet deadline.
+                        let result = (self.open)();
+                        self.opened(result);
                     }
                 },
-                None => tokio::time::sleep(self.retry).await,
+                None => {
+                    let deadline = match self.reopen_at {
+                        Some(at) => at,
+                        None => {
+                            self.schedule_reopen();
+                            self.reopen_at.expect("just scheduled")
+                        }
+                    };
+                    tokio::time::sleep_until(deadline).await;
+                    let result = (self.open)();
+                    self.opened(result);
+                }
             }
-            let result = (self.open)();
-            self.opened(result);
         }
     }
 }

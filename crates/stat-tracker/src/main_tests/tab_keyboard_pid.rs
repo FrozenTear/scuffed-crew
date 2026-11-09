@@ -472,13 +472,24 @@ async fn permission_denied_keyboard_runs_on_and_warns_once() {
 
     // The run loop races the key wait against its other arms: the wait
     // never ends in an error (the old exit), it only pends and retries.
-    for round in 1..=3u32 {
+    // Elapsed time (not round*3) sets the open count: the reopen Instant
+    // survives these select cancels, so a cancel mid-interval does not
+    // restart the 30 s wait (that restart was the QA bug).
+    let mut elapsed = Duration::ZERO;
+    let step = retry * 3 + retry / 2;
+    for _ in 1..=3u32 {
         tokio::select! {
             got = input.wait_tab() => panic!("no keyboard yields no key: {:?}", got.map_err(|e| e.to_string())),
             // Between retry deadlines, so the count is exact.
-            _ = tokio::time::sleep(retry * 3 + retry / 2) => {}
+            _ = tokio::time::sleep(step) => {}
         }
-        assert_eq!(opens.get(), round * 3, "one quiet open every {retry:?}");
+        elapsed += step;
+        let expected = (elapsed.as_secs() / retry.as_secs()) as u32;
+        assert_eq!(
+            opens.get(),
+            expected,
+            "one quiet open every {retry:?} over {elapsed:?}"
+        );
         assert!(!input.available());
         assert_eq!(notice(), NO_KEYBOARD_NOTICE);
         assert_eq!(warnings(), 1, "logged once across {} retries", opens.get());
@@ -493,6 +504,63 @@ async fn permission_denied_keyboard_runs_on_and_warns_once() {
     assert!(input.available());
     assert_eq!(notice(), "", "the warning clears with a keyboard");
     assert_eq!(warnings(), 1);
+}
+
+/// QA on PR 641: the live run loop races `wait_tab` against a 500 ms poll
+/// arm (and the command arm), so the key wait is dropped and rebuilt every
+/// iteration. A retry sleep that restarts on each call never reached 30 s
+/// and the quiet reopen never ran. The reopen is a fixed deadline now, so
+/// frequent cancels do not push it back. The clock is paused.
+#[tokio::test(start_paused = true)]
+async fn keyboard_reopen_deadline_survives_frequent_select_cancels() {
+    let log = KeyboardLog::default();
+    let sub = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let _sub = tracing::subscriber::set_default(sub);
+    tracing::callsite::rebuild_interest_cache();
+    let still_unavailable = || {
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        text.lines()
+            .filter(|l| l.contains("DEBUG") && l.contains("keyboard still unavailable"))
+            .count()
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let open = {
+        let opens = opens.clone();
+        move || -> Result<ScriptedKeys, String> {
+            opens.set(opens.get() + 1);
+            Err("Permission denied (os error 13)".to_string())
+        }
+    };
+    let retry = Duration::from_secs(30);
+    let mut input = KeyboardInput::new(
+        Err("Permission denied (os error 13)".into()),
+        open,
+        dir.path().into(),
+        retry,
+    );
+
+    // 100 s of 500 ms polls: the poll arm wins every time, cancelling the
+    // key wait 200 times. Reopens are due at 30, 60 and 90 s.
+    let poll = Duration::from_millis(500);
+    for _ in 0..200 {
+        tokio::select! {
+            got = input.wait_tab() => panic!("no keyboard yields no key: {:?}", got.map_err(|e| e.to_string())),
+            _ = tokio::time::sleep(poll) => {}
+        }
+    }
+    assert_eq!(
+        opens.get(),
+        3,
+        "one quiet reopen every {retry:?} despite a cancel every {poll:?}"
+    );
+    assert_eq!(still_unavailable(), 3, "each failed reopen logs at DEBUG");
+    assert!(!input.available());
 }
 
 #[tokio::test]
