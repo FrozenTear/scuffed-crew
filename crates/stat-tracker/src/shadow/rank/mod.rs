@@ -13,9 +13,10 @@
 //!
 //! # How it reads
 //!
-//! Every field has a fixed place at 2560x1440 ([`layout`]) except the hero
-//! entry, which is found as the first "name line over a taller SR line" in
-//! the right column, and the pill, which is found by its colour on the bar.
+//! Every field has a fixed place at the 2560x1440 reference ([`layout`]),
+//! scaled to other 16:9 sizes by height/1440 (and width/2560). The hero
+//! entry is found as the first "name line over a taller SR line" in the
+//! right column, and the pill is found by its colour on the bar.
 //! Text is turned into an ink plane by colour ([`ink`]): cyan or orange for
 //! the progress, yellow for the percentile, white on the pill, grey-white for
 //! the hero SR (scaled to its own peak so a chat overlay that dims it does
@@ -31,7 +32,7 @@
 //! * Pass the **last** frame of the rank update, when the pill and the hero
 //!   SR have settled. Mid-animation frames have a fading pill or a scaled SR
 //!   and read as `None`.
-//! * Pass 2560x1440 frames. Other sizes are refused.
+//! * Pass a 16:9 frame (1080p or 1440p). Other aspect ratios are refused.
 //! * Install a pack ([`templates::TemplateSet::load`]); without it
 //!   [`Reader::load`] fails and the reader is off.
 //!
@@ -69,8 +70,10 @@ pub const MIN_WORD_SCORE: f32 = 0.60;
 pub const MIN_WORD_MARGIN: f32 = 0.05;
 /// The class name of the "RANK PROGRESS:" label in [`Family::Gate`].
 pub const GATE_CLASS: &str = "rank_progress";
-/// The only frame size the reader accepts.
+/// Reference frame width the layout was measured at. Other 16:9 sizes are
+/// scaled from this ([`layout::Scale`]).
 pub const FRAME_W: u32 = 2560;
+/// Reference frame height the layout was measured at.
 pub const FRAME_H: u32 = 1440;
 
 /// Whether rank-v1 runs. Off unless switched on.
@@ -257,12 +260,11 @@ impl Reader {
         &self.templates
     }
 
-    /// Read a rank update screen. `None` when the frame is not 2560x1440 or
-    /// does not show the "RANK PROGRESS:" label.
+    /// Read a rank update screen. `None` when the frame is not a supported
+    /// 16:9 size ([`layout::Scale`]) or does not show the "RANK PROGRESS:"
+    /// label.
     pub fn read(&self, img: &RgbImage) -> Option<RankRead> {
-        if img.dimensions() != (FRAME_W, FRAME_H) {
-            return None;
-        }
+        let _scale = layout::Scale::from_img(img)?;
         let t = &self.templates;
         let gate = layout::gate_word(img)?;
         let m = t.best(Family::Gate, &gate.ink, None)?;

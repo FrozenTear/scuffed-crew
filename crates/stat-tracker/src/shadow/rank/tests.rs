@@ -531,10 +531,50 @@ fn an_unknown_glyph_makes_the_field_none_not_a_guess() {
 fn other_screens_and_sizes_are_refused() {
     let r = reader();
     assert!(r.read(&blank()).is_none(), "no RANK PROGRESS label");
+    // blank 1080p has no gate label, so it is refused for content, not size
     assert!(r.read(&RgbImage::from_pixel(1920, 1080, BG)).is_none());
+    // non-16:9 is refused for size
+    assert!(r.read(&RgbImage::from_pixel(800, 600, BG)).is_none());
     let mut img = paint(&Scene::default());
     fill(&mut img, 830, 1060, 980, 1100, BG);
     assert!(r.read(&img).is_none(), "label gone");
+}
+
+#[test]
+fn a_1080p_downscale_of_the_synthetic_screen_still_reads() {
+    use image::imageops::{self, FilterType};
+    let sc = Scene {
+        pct: 58,
+        higher: 47,
+        change: Some(27),
+        sr: Some(3597),
+        sr_change: Some(12),
+        ..Scene::default()
+    };
+    // Learn from both native 1440p paints and Nearest-downscaled 1080p copies
+    // so tiny change digits still have a matching template at that scale.
+    let mut l = Learner::new();
+    for tr in training() {
+        let img = paint(&tr);
+        l.add_frame(&img, &labels(&tr));
+        let small = imageops::resize(&img, 1920, 1080, FilterType::Nearest);
+        l.add_frame(&small, &labels(&tr));
+    }
+    let reader = Reader::new(l.build());
+    let img1080 = imageops::resize(&paint(&sc), 1920, 1080, FilterType::Nearest);
+    let r = reader.read(&img1080).expect("1080p rank screen");
+    assert_eq!(r.progress_pct.value, Some(58));
+    assert_eq!(r.higher_than_pct.value, Some(47));
+    assert_eq!(r.progress_change.value, Some(27));
+    assert_eq!(r.hero_sr.value, Some(3597));
+    assert_eq!(r.hero_sr_change.value, Some(12));
+    assert_eq!(r.role_rank.value.as_deref(), Some("HELLO"));
+    assert_eq!(r.division.value, Some(5));
+    assert_eq!(
+        r.change_tags.value,
+        Some(vec!["EH".to_string(), "TOT".to_string()])
+    );
+    assert_eq!(r.next_mode_hint.value.as_deref(), Some("HELLO 6V6"));
 }
 
 // ---- local bench (never in CI) ----

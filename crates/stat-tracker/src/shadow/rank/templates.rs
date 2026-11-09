@@ -209,7 +209,7 @@ impl Learner {
     /// Learn from one rank screen with its labels. Returns how many cuts
     /// were kept.
     pub fn add_frame(&mut self, img: &RgbImage, labels: &Labels) -> usize {
-        if img.dimensions() != (super::FRAME_W, super::FRAME_H) {
+        if layout::Scale::from_img(img).is_none() {
             return 0;
         }
         let digits = |v: i64| -> Vec<String> {
