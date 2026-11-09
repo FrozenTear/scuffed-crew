@@ -2,7 +2,8 @@
 //!
 //! One place so the handler, the per-token governor, and token creation
 //! cannot drift. The batch cap is on unless `STATS_UPLOAD_BATCH_CAP` is
-//! set to an off value such as `0`. The per-token governor and the 180-day expiry are always on.
+//! set to an off value such as `0`. The per-token governor and the
+//! 180-day expiry are always on.
 
 /// Matches allowed in one upload when the batch cap is enabled.
 pub const STATS_UPLOAD_MAX_MATCHES: usize = 200;
