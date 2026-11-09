@@ -10,11 +10,11 @@
 //! frame, which may be the same pixels as its first, so the vote is still
 //! read. A game whose hero select has only a first frame (a one-tick
 //! select) gives that frame for the team ring of the ban results, and for
-//! nothing else: its picks are not stored. [`BansPicksFeed`] sees every batch the saver
-//! sends, keeps those three frames of the current game, and reads them when
-//! the game is first recorded. Nothing here can stop a game from being
-//! recorded: every failure is a sentence for the app's Tracker health and
-//! an empty result on the game.
+//! nothing else: its picks are not stored. [`BansPicksFeed`] sees every
+//! batch the saver sends, keeps those three frames of the current game, and
+//! reads them when the game is first recorded. Nothing here can stop a game
+//! from being recorded: every failure is a sentence for the app's Tracker
+//! health and an empty result on the game.
 //!
 //! Frames are held only between the screen and the game's first record.
 //! A new game's folder drops the old ones. With the pre-game screen saves
