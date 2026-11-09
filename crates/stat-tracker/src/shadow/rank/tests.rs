@@ -212,6 +212,12 @@ fn paint(sc: &Scene) -> RgbImage {
         let right = draw(&mut img, &role_icon(r).to_string(), 1190, 290, 4, WHITE);
         draw(&mut img, "TEL", right + 20, 290, 4, WHITE);
     }
+    if let Some(d) = sc.division {
+        // the neighbour emblems' digits, centred near x 560 and x 2000
+        let (l, r) = neighbours(d);
+        draw(&mut img, &l.to_string(), 556, 1148, 2, WHITE);
+        draw(&mut img, &r.to_string(), 1996, 1148, 2, WHITE);
+    }
     if let (Some(t), Some(d)) = (sc.tier, sc.division) {
         let right = draw(&mut img, t, 1160, 900, 6, WHITE);
         draw(&mut img, &d.to_string(), right + 30, 900, 6, WHITE);
@@ -297,6 +303,7 @@ fn training() -> Vec<Scene> {
             change: Some(-10),
             sr: Some(3456),
             sr_change: Some(-67),
+            division: Some(1),
             ..d.clone()
         },
         Scene {
@@ -600,6 +607,83 @@ fn a_1080p_downscale_of_the_synthetic_screen_still_reads() {
         Some(vec!["EH".to_string(), "TOT".to_string()])
     );
     assert_eq!(r.next_mode_hint.value.as_deref(), Some("HELLO 6V6"));
+}
+
+// ---- division ----
+
+#[test]
+fn neighbour_emblems_show_the_divisions_below_and_above() {
+    assert_eq!(neighbours(5), (1, 4));
+    assert_eq!(neighbours(4), (5, 3));
+    assert_eq!(neighbours(3), (4, 2));
+    assert_eq!(neighbours(2), (3, 1));
+    assert_eq!(neighbours(1), (2, 5));
+}
+
+fn vote(division: u8, confidence: f32) -> Vote {
+    Vote {
+        division,
+        confidence,
+        bbox: [0, 0, 1, 1],
+    }
+}
+
+/// The bench failure: Platinum 3 read by a pack holding only 1, 4 and 5.
+/// The big digit says 5 (score 0.77, confidence 0.84); the emblems show 4
+/// and 2, which both mean 3.
+#[test]
+fn platinum_3_is_not_read_as_5_when_the_emblems_disagree() {
+    let f = division_from_votes(
+        Some(vote(5, 0.84)),
+        Some(vote(3, 0.90)),
+        Some(vote(3, 0.88)),
+    );
+    assert_eq!(f.value, Some(3));
+    assert_eq!(f.confidence, 0.88);
+}
+
+#[test]
+fn division_votes_need_agreement() {
+    let all = division_from_votes(Some(vote(5, 0.9)), Some(vote(5, 0.7)), Some(vote(5, 0.8)));
+    assert_eq!((all.value, all.confidence), (Some(5), 0.9));
+    // the big digit alone reads as before
+    assert_eq!(
+        division_from_votes(Some(vote(4, 0.9)), None, None).value,
+        Some(4)
+    );
+    // one emblem alone is too little
+    assert_eq!(
+        division_from_votes(None, Some(vote(4, 0.9)), None).value,
+        None
+    );
+    // a two-way split is None, not a guess
+    assert_eq!(
+        division_from_votes(Some(vote(5, 0.9)), Some(vote(3, 0.9)), None).value,
+        None
+    );
+    assert_eq!(
+        division_from_votes(Some(vote(5, 0.9)), Some(vote(3, 0.9)), Some(vote(2, 0.9))).value,
+        None
+    );
+    assert_eq!(division_from_votes(None, None, None).value, None);
+}
+
+#[test]
+fn a_division_missing_from_the_pack_reads_from_its_emblems() {
+    let set = trained();
+    for d in ["1", "4", "5"] {
+        assert!(set.has_class(Family::Division, d));
+    }
+    assert!(!set.has_class(Family::Division, "3"));
+    for d in ["1", "2", "3", "4", "5"] {
+        assert!(set.has_class(Family::Emblem, d), "emblem {d}");
+    }
+    let sc = Scene {
+        division: Some(3),
+        ..Scene::default()
+    };
+    let r = Reader::new(set).read(&paint(&sc)).expect("rank screen");
+    assert_eq!(r.division.value, Some(3));
 }
 
 // ---- role ----

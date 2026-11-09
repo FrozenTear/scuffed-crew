@@ -401,3 +401,37 @@ pub fn role_icon(img: &RgbImage) -> RoleLine {
     )
     .map_or(RoleLine::Unclear, RoleLine::Icon)
 }
+
+/// The division digits on the two small emblems at the ends of the progress
+/// bar: the left one shows the division below the current one, the right
+/// one the division above (see [`super::division_from_neighbours`]). Each is
+/// a white digit about 13 rows tall and at most 12 wide in a dark hexagon,
+/// centred near x 560 (left) and x 2000 (right), rows 1147 to 1162 at
+/// 1440p (Master digits sit 3 rows lower). The window is the centre plus
+/// or minus 8 columns, and only its tallest row run is cut: some tiers'
+/// hexagons (Master) have chevron arms that reach down to row 1149 and
+/// would merge into a wider, taller cut. `None` for a
+/// side with no digit (the ends of the ladder show no emblem there).
+pub fn emblem_digits(img: &RgbImage) -> (Option<Glyph>, Option<Glyph>) {
+    let Some(s) = Scale::from_img(img) else {
+        return (None, None);
+    };
+    let one = |xa: u32, xb: u32| -> Option<Glyph> {
+        let (x0, y0) = (s.x(xa), s.y(1147));
+        let w = plane(img, x0, y0, s.x(xb), s.y(1163), ink::white);
+        // the tallest row run: the tip of a chevron above the digit is cut
+        // off at the empty row between them
+        let (a, b) = runs(&w.row_sums(), 0.5, 1)
+            .into_iter()
+            .max_by_key(|&(a, b)| (b - a, usize::MAX - a))?;
+        let band = w.sub(0, a, w.w, b);
+        let cx = (s.x(xa) + s.x(xb)) as f32 / 2.0;
+        glyphs(&band, x0, y0 + a as u32, 0.5, s.n(8))
+            .into_iter()
+            .min_by(|a, b| {
+                let d = |g: &Glyph| ((g.bbox[0] + g.bbox[2]) as f32 / 2.0 - cx).abs();
+                d(a).total_cmp(&d(b))
+            })
+    };
+    (one(552, 569), one(1992, 2009))
+}

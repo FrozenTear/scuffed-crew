@@ -55,6 +55,9 @@ pub enum Family {
     Tier,
     /// The division digit after the tier word.
     Division,
+    /// The division digit on a small neighbour emblem at either end of the
+    /// progress bar.
+    Emblem,
     /// The role icon above the emblem (classes `Tank`, `Damage`, `Support`).
     Role,
 }
@@ -299,6 +302,16 @@ impl Learner {
             if let Some(d) = labels.division {
                 self.add(Family::Division, &d.to_string(), &digit.ink);
                 n += 1;
+            }
+        }
+        if let Some(d) = labels.division.filter(|d| (1..=5).contains(d)) {
+            let (left, right) = layout::emblem_digits(img);
+            let (l, r) = super::neighbours(d);
+            for (g, c) in [(left, l), (right, r)] {
+                if let Some(g) = g {
+                    self.add(Family::Emblem, &c.to_string(), &g.ink);
+                    n += 1;
+                }
             }
         }
         n

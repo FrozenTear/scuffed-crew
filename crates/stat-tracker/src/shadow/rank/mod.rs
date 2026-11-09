@@ -417,15 +417,34 @@ impl Reader {
                         value: Some(m.class),
                         bbox: Some(word.bbox),
                     });
-                let div = t
+                let big = t
                     .best(Family::Division, &digit.ink, None)
                     .filter(|m| m.score >= MIN_SCORE && m.margin >= MIN_MARGIN)
-                    .and_then(|m| Some((m.class.parse::<u8>().ok()?, m)))
-                    .map_or_else(Field::none, |(v, m)| Field {
-                        confidence: r3(confidence(m.score, m.margin)),
-                        value: Some(v),
-                        bbox: Some(digit.bbox),
+                    .and_then(|m| {
+                        Some(Vote {
+                            division: m.class.parse::<u8>().ok()?,
+                            confidence: confidence(m.score, m.margin),
+                            bbox: digit.bbox,
+                        })
                     });
+                let (left, right) = layout::emblem_digits(img);
+                let side = |g: Option<Glyph>, implied: fn(u8) -> u8| {
+                    let g = g?;
+                    let m = t
+                        .best(Family::Emblem, &g.ink, Some(&DIGITS[1..6]))
+                        .filter(|m| m.score >= MIN_SCORE && m.margin >= MIN_MARGIN)?;
+                    let v: u8 = m.class.parse().ok()?;
+                    Some(Vote {
+                        division: implied(v),
+                        confidence: confidence(m.score, m.margin),
+                        bbox: g.bbox,
+                    })
+                };
+                let div = division_from_votes(
+                    big,
+                    side(left, |l| (l + 3) % 5 + 1),
+                    side(right, |r| r % 5 + 1),
+                );
                 (tier, div)
             }
             None => (Field::none(), Field::none()),
@@ -509,6 +528,67 @@ impl Reader {
             None => Field::none(),
         }
     }
+}
+
+/// The divisions the two neighbour emblems show for division `d` (1..=5):
+/// the one below (left; 5 shows the next tier's 1) and the one above
+/// (right; 1 shows the tier above's 5).
+pub fn neighbours(d: u8) -> (u8, u8) {
+    (d % 5 + 1, (d + 3) % 5 + 1)
+}
+
+/// One reading of the division: the big digit, or what a neighbour emblem
+/// implies.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Vote {
+    pub division: u8,
+    pub confidence: f32,
+    pub bbox: [u32; 4],
+}
+
+/// The division from the big digit and the two neighbour emblems.
+///
+/// The big digit alone cannot tell a lookalike from an unseen class: its
+/// score is only compared with the classes the pack holds, so a "3" read
+/// by a pack without a "3" scores 0.77 against "5" and wins. The emblems
+/// are independent glyphs (another size, another place) of other digits,
+/// so the division is what the readings agree on:
+///
+/// * all present readings agree: that value, at the best confidence (one
+///   reading alone is the big digit as before; a single emblem alone is too
+///   little and is `None`);
+/// * two agree and the third differs: the two, at the lower of their two
+///   confidences;
+/// * otherwise `None`.
+pub fn division_from_votes(
+    big: Option<Vote>,
+    left: Option<Vote>,
+    right: Option<Vote>,
+) -> Field<u8> {
+    let votes: Vec<Vote> = [big, left, right].into_iter().flatten().collect();
+    let pick = |v: u8, agree: &[Vote], conf: f32| Field {
+        value: Some(v),
+        confidence: r3(conf),
+        bbox: big
+            .filter(|b| b.division == v)
+            .map(|b| b.bbox)
+            .or_else(|| union(agree.iter().map(|a| a.bbox))),
+    };
+    if votes.is_empty() || (big.is_none() && votes.len() == 1) {
+        return Field::none();
+    }
+    for v in votes.iter().map(|v| v.division) {
+        let agree: Vec<Vote> = votes.iter().copied().filter(|x| x.division == v).collect();
+        let best = agree.iter().map(|a| a.confidence).fold(0.0, f32::max);
+        let worst = agree.iter().map(|a| a.confidence).fold(1.0, f32::min);
+        if agree.len() == votes.len() {
+            return pick(v, &agree, best);
+        }
+        if agree.len() >= 2 {
+            return pick(v, &agree, worst);
+        }
+    }
+    Field::none()
 }
 
 const DIGITS: [&str; 10] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
