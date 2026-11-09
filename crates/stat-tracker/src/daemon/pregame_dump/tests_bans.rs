@@ -634,3 +634,28 @@ async fn with_the_reader_off_a_game_without_screens_stays_silent() {
     assert_eq!(rig.health(), None);
     assert_eq!(status_of(&store).await, Some(BansPicksStatus::ReaderOff));
 }
+
+// A game whose screens were read never shows the no-screens notice: see
+// a_read_stores_the_result_on_the_game_and_clears_the_warning and
+// a_later_capture_of_a_read_game_keeps_its_result_and_adds_no_warning.
+#[tokio::test]
+async fn the_no_pregame_screens_notice_is_shown_once_per_game() {
+    let rig = Rig::new();
+    let mut dump = rig.dump(false, rig.feed(Ok(Mode::Fine), true));
+    let (store, stored) = game_then_read(&rig, &mut dump, Vec::new()).await;
+    assert_eq!(stored, None);
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    // The notice is dismissed; a later capture of the same game does not
+    // bring it back.
+    publish_bans_picks_notice(rig.dir.path(), "");
+    dump.attach_bans_picks(&store, "g1").await;
+    assert_eq!(rig.health(), None, "not told again for the same game");
+    // The next game without screens is told.
+    store
+        .insert_match(crate::main_tests::test_match("g2", "defeat"))
+        .await
+        .unwrap();
+    dump.attach_bans_picks(&store, "g2").await;
+    assert_eq!(rig.health().as_deref(), Some(NO_SCREENS));
+    assert_eq!(rig.reads.load(Ordering::SeqCst), 0);
+}
