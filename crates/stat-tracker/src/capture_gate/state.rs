@@ -151,7 +151,8 @@ pub struct GateState {
     /// (flagged), so a repeat read of the same board never drops the row
     /// back to the older accepted value. A later refused digit at or above
     /// the accepted value replaces it when the row before already showed an
-    /// unsure read.
+    /// unsure read and the digit also passes the jump and rate-cap filter
+    /// measured from that shown value; otherwise the shown value is kept.
     /// Missing on an older save means the stored row showed `accepted`.
     #[serde(default)]
     pub unsure_shown: [u32; GATE_COLS],

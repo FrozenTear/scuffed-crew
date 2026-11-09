@@ -131,11 +131,13 @@ pub(crate) fn counters_from_cols(a: [u32; capture_gate::GATE_COLS]) -> Counters 
 /// carries no new digit either, so it keeps the stored unsure read the
 /// same way. A later held Tab whose digit the dry run refuses, when the
 /// row before already showed an unsure read, stores that newer refused
-/// digit instead (still flagged, still not below the accepted value). A
-/// held cell with no read, or with a read the gate would hold (lower
-/// than the accepted value, a jump, an injected digit, past the rate
-/// cap), and no stored unsure read to keep, keeps the accepted value,
-/// flagged, as before.
+/// digit only when it also passes the same jump and rate-cap filter
+/// measured from the stored unsure value (still flagged, still not
+/// below the accepted value). A jump or injected digit past that filter
+/// keeps the stored unsure read instead. A held cell with no read, or
+/// with a read the gate would hold (lower than the accepted value, a
+/// jump, an injected digit, past the rate cap), and no stored unsure
+/// read to keep, keeps the accepted value, flagged, as before.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn hold_new_reader_stats_with_guesses(
     parsed: &mut storage::PersonalMatch,
@@ -220,11 +222,22 @@ pub(crate) fn hold_new_reader_stats_with_guesses(
         } else if let Some(value) = guesses[col].filter(|&value| {
             // A newer refused digit at or above the accepted value, and the
             // row before already showed an unsure read: store this digit
-            // flagged in place of the older unsure shown value.
-            held_cells[col]
-                && !held.state.unread[col]
-                && value >= stored[col]
-                && prior_shown[col].is_some()
+            // flagged in place of the older unsure shown value only when
+            // it also passes the jump and rate-cap filter from that shown
+            // value. A jump or inject past the filter keeps the shown one.
+            let Some(shown) = prior_shown[col] else {
+                return false;
+            };
+            if !(held_cells[col] && !held.state.unread[col] && value >= stored[col]) {
+                return false;
+            }
+            let elapsed = match prior {
+                Some((ref state, span)) => {
+                    span + std::time::Duration::from_secs(u64::from(state.held_secs[col]))
+                }
+                None => std::time::Duration::ZERO,
+            };
+            capture_gate::plausible_from_shown(col, shown, value, elapsed, true)
         }) {
             if value != stored[col] {
                 tracing::info!(

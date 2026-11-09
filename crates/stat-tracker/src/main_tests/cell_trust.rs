@@ -558,6 +558,57 @@ async fn a_second_refused_kill_column_replaces_the_stored_unsure_read() {
     assert_eq!(gate.unsure_shown[0], 38);
 }
 
+/// A held kill column stores unsure 39, then a later Tab reads a jump past
+/// the kill-column jump limit and rate cap (399). Measured from the stored
+/// unsure value that jump is not plausible, so the stored row keeps 39,
+/// flagged, rather than replace it with the refused 399.
+#[tokio::test]
+async fn a_second_refused_jump_keeps_the_stored_unsure_read() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = o8_ctx(dir.path(), true).await;
+    let held_39 = [
+        Some((39, true)),
+        sure(18),
+        sure(5),
+        sure(12707),
+        sure(1821),
+        sure(4412),
+    ];
+    let held_399 = [
+        Some((399, true)),
+        sure(18),
+        sure(5),
+        sure(12707),
+        sure(1821),
+        sure(4412),
+    ];
+    let (st, seen) = o10_run(
+        &ctx,
+        vec![
+            (0, all_sure([31, 17, 5, 10584, 1510, 3911])),
+            (60, held_39),
+            (15, held_399),
+        ],
+    )
+    .await;
+    assert!(seen.iter().all(|tab| tab.recorded), "{seen:?}");
+    let rows = ctx.store.get_session_snapshots("o10").await.unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(o10_stats(&rows[1]), [39, 18, 5, 12707, 1821, 4412]);
+    assert_eq!(rows[1].suspect_fields, vec!["e".to_string()]);
+    assert_eq!(
+        o10_stats(&rows[2]),
+        [39, 18, 5, 12707, 1821, 4412],
+        "a refused jump from the stored unsure read keeps 39, not 399"
+    );
+    assert_eq!(rows[2].suspect_fields, vec!["e".to_string()]);
+    let gate = st.active_game.as_ref().unwrap().gate.unwrap();
+    assert_eq!(gate.accepted.elims, 31, "the gate keeps its accepted value");
+    assert!(gate.has_unsure_shown[0]);
+    assert_eq!(gate.unsure_shown[0], 39);
+}
+
 /// An unsure read the gate would not take keeps the accepted value,
 /// flagged: one below it (a stat never falls in a game) and one past the
 /// suspect rate cap (an injected digit).

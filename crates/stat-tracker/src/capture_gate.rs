@@ -130,10 +130,10 @@ mod state;
 
 pub use apply::{apply_gate, apply_gate_held, apply_gate_seeded, apply_gate_with_trust};
 pub use fields::{held_fields, lowered_fields, revised_fields, unsure_fields};
-pub use limits::raw_dropped;
 pub(crate) use limits::{
     KILL_RATE_DIVISOR_SECS, KILL_RATE_SLACK, WIDE_RATE_PER_SEC, WIDE_RATE_SLACK,
 };
+pub use limits::{plausible_from_shown, raw_dropped};
 pub use state::{COL_FIELD, Counters, GATE_COLS, GateOutcome, GateState, Hold, HoldKind, Unlatch};
 
 // Names the test files saw through `use super::*` before the split: the old
