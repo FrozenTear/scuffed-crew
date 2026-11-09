@@ -647,8 +647,8 @@ it.
 ## Troubleshooting
 
 **The tracker crashes or keeps restarting right after start, or warns that it
-cannot read the keyboard.** Check that you are in the `input` group in the current session:
-`groups | grep -qw input && echo ok`. If nothing prints, run
+cannot read the keyboard.** Check that you are in the `input` group in the
+current session: `groups | grep -qw input && echo ok`. If nothing prints, run
 `sudo usermod -aG input "$USER"`, then log out and back in (a new terminal is
 not enough). `journalctl --user -u scuffed-stat-tracker -n 50` shows the
 daemon's last log lines.
