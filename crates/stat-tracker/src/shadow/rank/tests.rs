@@ -609,6 +609,57 @@ fn a_1080p_downscale_of_the_synthetic_screen_still_reads() {
     assert_eq!(r.next_mode_hint.value.as_deref(), Some("HELLO 6V6"));
 }
 
+// ---- small glyphs ----
+
+#[test]
+fn two_touching_digits_are_split_and_read() {
+    let r = reader();
+    let sc = Scene {
+        higher: 94,
+        ..Scene::default()
+    };
+    let mut img = paint(&sc);
+    // join the 9 and the 4 (drawn at x 1730, two-pixel dots) across their gap
+    fill(&mut img, 1738, 1088, 1744, 1092, YELLOW);
+    assert_eq!(layout::higher_glyphs(&img).len(), 2, "9 and 4 cut as one");
+    let read = r.read(&img).expect("rank screen");
+    assert_eq!(read.higher_than_pct.value, Some(94));
+}
+
+#[test]
+fn shifted_vectors_start_with_the_plain_vector() {
+    let mut p = Plane::new(6, 10);
+    for y in 0..10 {
+        p.set(2, y, 1.0);
+        p.set(3, y, 1.0);
+    }
+    let vs = super::ink::shifted_vectors(&p, 24, 24);
+    assert_eq!(vs.len(), 9);
+    assert_eq!(vs[0], super::ink::vector(&p, 24, 24));
+    assert!(vs.iter().skip(1).all(|v| v != &vs[0]));
+}
+
+#[test]
+fn a_hero_name_dimmed_halfway_still_bounds_the_sr() {
+    let r = reader();
+    let mut img = paint(&Scene::default());
+    // a longer name: "HEL HELLO", right aligned over the SR as before
+    draw(&mut img, "HEL", 2234, 700, 2, WHITE);
+    // a chat overlay edge at x 2250 crosses the name and dims everything
+    // right of it, the SR and its change included
+    for y in 690..780 {
+        for x in 2250..2345 {
+            let p = img.get_pixel_mut(x, y);
+            for c in p.0.iter_mut() {
+                *c = (*c as f32 * 0.3) as u8;
+            }
+        }
+    }
+    let read = r.read(&img).expect("rank screen");
+    assert_eq!(read.hero_sr.value, Some(3597));
+    assert_eq!(read.hero_sr_change.value, Some(12));
+}
+
 // ---- division ----
 
 #[test]

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
-use super::ink::{Glyph, Plane, aspect, unit, vector};
+use super::ink::{Glyph, Plane, aspect, shifted_vectors, unit, vector};
 use super::{Labels, layout};
 
 /// The class of the chevrons on a green pill (">>>").
@@ -70,6 +70,14 @@ impl Family {
         Family::Sr,
         Family::Change,
     ];
+
+    /// A single glyph (digit, sign, icon) rather than a word.
+    pub fn is_glyph(self) -> bool {
+        !matches!(
+            self,
+            Family::Gate | Family::Tag | Family::Banner | Family::Tier
+        )
+    }
 
     /// Vector width, height and the aspect penalty weight.
     pub fn shape(self) -> (usize, usize, f32) {
@@ -158,13 +166,22 @@ impl TemplateSet {
             return Vec::new();
         };
         let (w, h, k) = f.shape();
-        let v = vector(ink, w, h);
+        // glyphs may sit a vector pixel off their template: best of the
+        // shifts; words are stretched to fill and are compared as they are
+        let vs = if f.is_glyph() {
+            shifted_vectors(ink, w, h)
+        } else {
+            vec![vector(ink, w, h)]
+        };
         let a = aspect(ink);
         let mut out: Vec<(f32, &str)> = ts
             .iter()
             .filter(|t| allowed.is_none_or(|al| al.contains(&t.class.as_str())))
             .map(|t| {
-                let dot: f32 = v.iter().zip(&t.vector).map(|(x, y)| x * y).sum();
+                let dot = vs
+                    .iter()
+                    .map(|v| v.iter().zip(&t.vector).map(|(x, y)| x * y).sum::<f32>())
+                    .fold(f32::MIN, f32::max);
                 (dot - k * (a / t.aspect).ln().abs(), t.class.as_str())
             })
             .collect();

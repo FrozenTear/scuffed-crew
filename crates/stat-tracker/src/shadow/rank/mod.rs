@@ -26,7 +26,10 @@
 //! the hero SR (scaled to its own peak so a chat overlay that dims it does
 //! not hide it), green or red for the deltas. The ink is cut into glyphs at
 //! empty columns, and each glyph is compared, aspect kept, with the class
-//! means of its family by correlation. A field is accepted only when every
+//! means of its family by correlation (for single glyphs, the best of the
+//! cut and its one pixel shifts). A cut wider than tall that matches nothing
+//! is split at its thinnest column and both halves are read (two digits
+//! that touch at 1080p). A field is accepted only when every
 //! glyph's best score is at least [`MIN_SCORE`] and leads the next class by
 //! [`MIN_MARGIN`]. Signs come from colour (orange progress, red pill, red SR
 //! change), not from a minus glyph.
@@ -506,6 +509,7 @@ impl Reader {
         }
         let mut s = String::new();
         let mut conf = 1.0f32;
+        let ok = |m: &templates::Match| m.score >= MIN_SCORE && m.margin >= MIN_MARGIN;
         for g in gl {
             let Some(m) = self.templates.best(f, &g.ink, Some(allowed)) else {
                 return Field::none();
@@ -513,11 +517,26 @@ impl Reader {
             if strip.contains(&m.class.as_str()) {
                 continue;
             }
-            if m.score < MIN_SCORE || m.margin < MIN_MARGIN {
-                return Field::none();
+            if ok(&m) {
+                conf = conf.min(confidence(m.score, m.margin));
+                s.push_str(&m.class);
+                continue;
             }
-            conf = conf.min(confidence(m.score, m.margin));
-            s.push_str(&m.class);
+            // a cut wider than tall that matches nothing may be two touching
+            // glyphs: read both halves, each held to the same bar
+            let halves = (g.ink.w > g.ink.h).then(|| ink::split_two(g)).flatten();
+            let Some((a, b)) = halves else {
+                return Field::none();
+            };
+            for h in [a, b] {
+                match self.templates.best(f, &h.ink, Some(allowed)) {
+                    Some(m) if ok(&m) && !strip.contains(&m.class.as_str()) => {
+                        conf = conf.min(confidence(m.score, m.margin));
+                        s.push_str(&m.class);
+                    }
+                    _ => return Field::none(),
+                }
+            }
         }
         match parse(&s) {
             Some(v) => Field {

@@ -183,6 +183,31 @@ pub fn adaptive(score: &Plane, q: f32, floor: f32) -> Plane {
     score.map(|v| clip((v - 0.25 * p) / (0.5 * p)))
 }
 
+/// Ink scaled column by column to the local peak: the brightest value in
+/// the columns within `r` of it (at least `floor`). A line that an overlay
+/// dims over part of its length (a chat panel edge crossing a hero name)
+/// then reads as one line, where [`adaptive`] would keep only the bright
+/// part.
+pub fn adaptive_local(score: &Plane, r: usize, floor: f32) -> Plane {
+    let colmax: Vec<f32> = (0..score.w)
+        .map(|x| {
+            (0..score.h)
+                .map(|y| score.get(x, y))
+                .fold(f32::MIN, f32::max)
+        })
+        .collect();
+    let mut out = Plane::new(score.w, score.h);
+    for x in 0..score.w {
+        let lo = x.saturating_sub(r);
+        let hi = (x + r + 1).min(score.w);
+        let p = colmax[lo..hi].iter().copied().fold(floor, f32::max);
+        for y in 0..score.h {
+            out.set(x, y, clip((score.get(x, y) - 0.25 * p) / (0.5 * p)));
+        }
+    }
+    out
+}
+
 /// `[a, b)` spans where `prof > thr`; spans closer than `gap` merge.
 pub fn runs(prof: &[f32], thr: f32, gap: usize) -> Vec<(usize, usize)> {
     let mut out: Vec<(usize, usize)> = Vec::new();
@@ -282,25 +307,32 @@ pub fn split_wide(gl: Vec<Glyph>, h: f32) -> Vec<Glyph> {
     let mut out = Vec::new();
     for g in gl {
         let w = (g.bbox[2] - g.bbox[0]) as f32;
-        if w > 1.15 * h && g.ink.w > 8 {
-            let prof = g.ink.col_sums();
-            let m = prof.len() / 2;
-            let lo = (m as f32 * 0.6) as usize;
-            let hi = prof.len() - lo;
-            let k = (lo..hi)
-                .min_by(|&a, &b| prof[a].total_cmp(&prof[b]))
-                .unwrap_or(m);
-            out.extend(tight_glyph(&g.ink.cols(0, k), g.bbox[0], g.bbox[1]));
-            out.extend(tight_glyph(
-                &g.ink.cols(k, g.ink.w),
-                g.bbox[0] + k as u32,
-                g.bbox[1],
-            ));
-        } else {
-            out.push(g);
+        match (w > 1.15 * h).then(|| split_two(&g)).flatten() {
+            Some((a, b)) => out.extend([a, b]),
+            None => out.push(g),
         }
     }
     out
+}
+
+/// Cut a glyph in two at its thinnest column in the middle 40%: two digits
+/// that touch (at 1080p a soft edge often joins them). `None` when the
+/// glyph is too narrow to hold two.
+pub fn split_two(g: &Glyph) -> Option<(Glyph, Glyph)> {
+    if g.ink.w <= 8 {
+        return None;
+    }
+    let prof = g.ink.col_sums();
+    let m = prof.len() / 2;
+    let lo = (m as f32 * 0.6) as usize;
+    let hi = prof.len() - lo;
+    let k = (lo..hi)
+        .min_by(|&a, &b| prof[a].total_cmp(&prof[b]))
+        .unwrap_or(m);
+    Some((
+        tight_glyph(&g.ink.cols(0, k), g.bbox[0], g.bbox[1])?,
+        tight_glyph(&g.ink.cols(k, g.ink.w), g.bbox[0] + k as u32, g.bbox[1])?,
+    ))
 }
 
 /// Rows a column's ink (above 0.4) spans, first to last.
@@ -394,7 +426,11 @@ const PAD: usize = 2;
 /// to height `h - 4` and centred with a [`PAD`] border. A word-shaped target
 /// stretches the cut.
 pub fn vector(ink: &Plane, w: usize, h: usize) -> Vec<f32> {
-    let px = if (w as f32) <= h as f32 * 1.5 {
+    unit(canvas(ink, w, h).px)
+}
+
+fn canvas(ink: &Plane, w: usize, h: usize) -> Plane {
+    if (w as f32) <= h as f32 * 1.5 {
         let (iw, ih) = (w - 2 * PAD, h - 2 * PAD);
         let nw = ((ink.w as f32 * ih as f32 / ink.h.max(1) as f32).round() as usize).clamp(1, iw);
         let g = resize(ink, nw, ih);
@@ -405,11 +441,42 @@ pub fn vector(ink: &Plane, w: usize, h: usize) -> Vec<f32> {
                 can.set(x0 + x, PAD + y, g.get(x, y));
             }
         }
-        can.px
+        can
     } else {
-        resize(ink, w, h).px
-    };
-    unit(px)
+        resize(ink, w, h)
+    }
+}
+
+/// [`vector`] and its copies moved by one vector pixel in each direction
+/// (9 in all, unmoved first). A small glyph (12 rows at 1080p) is placed
+/// in its vector from a tight crop of soft ink, so its cut can sit a pixel
+/// off the template; matching takes the best of these.
+pub fn shifted_vectors(ink: &Plane, w: usize, h: usize) -> Vec<Vec<f32>> {
+    let can = canvas(ink, w, h);
+    let mut out = Vec::with_capacity(9);
+    for (dx, dy) in [
+        (0i32, 0i32),
+        (-1, 0),
+        (1, 0),
+        (0, -1),
+        (0, 1),
+        (-1, -1),
+        (-1, 1),
+        (1, -1),
+        (1, 1),
+    ] {
+        let mut p = Plane::new(w, h);
+        for y in 0..h as i32 {
+            for x in 0..w as i32 {
+                let (sx, sy) = (x - dx, y - dy);
+                if (0..w as i32).contains(&sx) && (0..h as i32).contains(&sy) {
+                    p.set(x as usize, y as usize, can.get(sx as usize, sy as usize));
+                }
+            }
+        }
+        out.push(unit(p.px));
+    }
+    out
 }
 
 /// Zero mean, unit length (all zeros stays zeros).

@@ -7,8 +7,8 @@
 use image::RgbImage;
 
 use super::ink::{
-    self, Glyph, ON, Plane, adaptive, cluster_right, drop_short_columns, first_cluster, glyphs,
-    plane, runs, split_wide, strip_minus, tight_glyph,
+    self, Glyph, ON, Plane, adaptive, adaptive_local, cluster_right, drop_short_columns,
+    first_cluster, glyphs, plane, runs, split_wide, strip_minus, tight_glyph,
 };
 use super::{FRAME_H, FRAME_W};
 
@@ -221,7 +221,14 @@ fn band_ink(img: &RgbImage, s: Scale, y0: u32, y1: u32, x1: u32) -> Plane {
 /// aligned to it; placement pips further right are not part of the entry.
 fn name_right(img: &RgbImage, s: Scale, e: &Entry) -> u32 {
     let (hx0, _, hx1, _) = hero_box(s);
-    let ink = band_ink(img, s, e.name.0, e.name.1, hx1);
+    // scaled to the local peak within 6 columns ([`adaptive_local`]): a
+    // chat overlay edge can cross the name, and scaled as one the dimmed
+    // part would vanish and cut the SR and change windows short
+    let ink = adaptive_local(
+        &neutral_plane(img, hx0, e.name.0, hx1, e.name.1),
+        s.n(6) as usize,
+        25.0,
+    );
     first_cluster(&runs(&ink.col_sums(), 0.5, 1), s.n(14) as usize)
         .map_or(hx1, |(_, b)| hx0 + b as u32)
 }
