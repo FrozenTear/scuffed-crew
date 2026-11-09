@@ -1,23 +1,36 @@
 //! The open Games row's "Bans and picks" block, as a view model: which rows
 //! the block has, which chips are in them and what each says. The drawing is
-//! in `games_bans_view`. The spec is the UX Spec bans and picks v2 with the
+//! in `games_bans_view`. The spec is the UX Spec bans and picks a3b, "chips
+//! stay default" (`redesign/ux-spec/bans-picks-a3.md`), on top of v2 and its
 //! alpha.2.1 addendum (`redesign/ux-spec/bans-picks.md`).
+//!
+//! The block is a header (label, the unsure pill, a one-line legend) and four
+//! rows with their label on the left at every width: Bans, Your ban votes,
+//! Hero select and Played. A row that was not read says so in one quiet line,
+//! so the layout never jumps between games.
 //!
 //! The data is the game's stored cv-v1 JSON (`Game::bans_picks`) and its
 //! status (`Game::bans_picks_status`). The JSON is read leniently: a value
 //! that is not a string, an empty one and a missing list are all "not read",
 //! and a stored result that does not parse is no result. Nothing here ever
-//! hides the game, only the block.
+//! hides the game, only the block. `BansPicksStatus::Partial { missing }`
+//! tells a screen the tracker never saw apart from one it saw and could not
+//! read; a game stored before the status existed keeps the older "weren't
+//! read" wording.
 //!
-//! Not drawn yet, because the data does not exist yet: the "might be
-//! misread" state (the tracker stores no suspect paths for bans or picks),
-//! and the Their team Played row (the tracker stores only our own hero).
+//! Hooks with no data behind them yet: [`Chip::suspect`] (the amber "might be
+//! misread" mark and the "N unsure" pill) and [`Block::weak`] (the "Reads may
+//! be off" pill). The tracker stores no per-read suspect flag for bans, the
+//! lobby ban, ban votes or hero select, and no game-level weak flag: the band
+//! that makes a read "suspect" is still an open question for Vision. Both are
+//! always false today. Also not drawn, as the data does not exist: the Their
+//! team Played row (the tracker stores only our own hero).
 
 use scuffed_types::{
     BANS_PICKS_MAX_BAN_VOTE, BANS_PICKS_MAX_BANS, BANS_PICKS_MAX_PICKS, BANS_PICKS_NO_PREFERENCE,
 };
 use serde_json::Value;
-use stat_tracker::model::BansPicksStatus;
+use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 
 use crate::model::Game;
 use crate::settings_model::AdvancedSection;
@@ -27,7 +40,49 @@ use crate::settings_model::AdvancedSection;
 const NO_PREFERENCE_TEMPLATE: &str = "no-preference";
 
 pub const HEADER: &str = "Bans and picks";
+
+/// The row labels, in the order the rows are drawn.
+pub const LABEL_BANS: &str = "Bans";
+pub const LABEL_VOTES: &str = "Your ban votes";
+pub const LABEL_HERO_SELECT: &str = "Hero select";
+pub const LABEL_PLAYED: &str = "Played";
+
+/// The group labels inside the Bans row.
+pub const GROUP_OWN: &str = "Your team";
+pub const GROUP_ENEMY: &str = "Their team";
+pub const GROUP_LOBBY: &str = "Lobby";
+
 pub const TEAM_NOT_READ: &str = "Team not read";
+const TEAM_NOT_READ_TIP: &str = "Which team made each ban wasn't read for this game.";
+
+/// A screen the status says the tracker never saw (Hero select, Your ban
+/// votes).
+pub const SCREEN_NOT_SEEN: &str = "Screen not seen";
+const HERO_SELECT_NOT_SEEN_TIP: &str = "The tracker didn't see hero select for this game.";
+const BAN_VOTE_NOT_SEEN_TIP: &str = "The tracker didn't see the ban vote for this game.";
+pub const NO_BAN_SCREEN: &str = "No ban screen seen";
+const NO_BAN_SCREEN_TIP: &str = "The tracker didn't see a ban screen for this game. Either the game had none, or the tracker missed it.";
+pub const BANS_NOT_READ: &str = "Ban screen seen, heroes not read";
+const BANS_NOT_READ_TIP: &str = "The ban screen was seen, but its heroes couldn't be read.";
+
+/// The shipped wording, kept for games stored with no screen status.
+pub const LEGACY_BANS: &str = "Bans weren't read for this game.";
+pub const LEGACY_VOTES: &str = "Your ban votes weren't read for this game.";
+pub const LEGACY_HERO_SELECT: &str = "Hero select wasn't read for this game.";
+/// The Played row of a game with no hero (the a3 wording).
+pub const PLAYED_NOT_READ: &str = "Not read";
+
+/// The header pills (both amber, with the warning sign).
+pub const UNSURE_PILL_TIP: &str =
+    "Reads the tracker is not sure about. They count only bans, ban votes and hero select.";
+pub const WEAK_PILL: &str = "Reads may be off";
+pub const WEAK_PILL_TIP: &str = "The reader wasn't sure about this game's screens. Check the names. Use Report misread if one is wrong.";
+
+/// The legend words, one per glyph the card uses.
+pub const LEGEND_BANNED: &str = "Banned";
+pub const LEGEND_UNSURE: &str = "Might be misread";
+pub const LEGEND_SWAP: &str = "Swapped hero";
+pub const LEGEND_OUTLINE: &str = "Not read or not seen";
 
 /// What one slot of the screen read as.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,12 +106,17 @@ pub enum Slot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Chip {
     pub slot: Slot,
-    /// A ban or the lobby ban: ban glyph, no fill.
+    /// A ban or the lobby ban: ban glyph (on a read hero), no fill.
     pub ban: bool,
     /// Our own chip: the "You" tag.
     pub you: bool,
     /// Our own Played chip when it differs from our hero select hero.
     pub swap: bool,
+    /// The reader was not sure of this hero: amber outline and warning sign,
+    /// and it counts toward "N unsure". Hook only: always false today, as
+    /// the tracker stores no per-read suspect flag for bans and picks yet
+    /// (Vision's confidence band is still open). Never set on Played.
+    pub suspect: bool,
     /// The tooltip, which is also the spoken label of the chip.
     pub tip: String,
 }
@@ -72,29 +132,159 @@ impl Chip {
             Slot::Empty => "Not seen",
         }
     }
+
+    /// Whether the chip is drawn unsure: a read hero the reader flagged.
+    pub fn unsure(&self) -> bool {
+        self.suspect && matches!(self.slot, Slot::Hero(_))
+    }
+
+    /// The outline chip shared by Not read and Not seen.
+    pub fn outline(&self) -> bool {
+        matches!(self.slot, Slot::NotRead | Slot::Empty)
+    }
+
+    /// The tooltip as shown and spoken: an unsure chip says so.
+    pub fn tooltip(&self) -> String {
+        if self.unsure() {
+            format!(
+                "{}. {} might be misread. Use Report misread if it is wrong.",
+                self.tip,
+                self.name()
+            )
+        } else {
+            self.tip.clone()
+        }
+    }
 }
 
-/// What a row holds.
+/// One piece of a row's body, drawn left to right.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Body {
+pub enum Part {
+    /// A group label in front of its chips ("Your team", "Their team",
+    /// "Lobby").
+    Key(&'static str),
     Chips(Vec<Chip>),
-    /// One quiet line, in place of chips that were not read.
-    Quiet(String),
+    /// A muted note after the chips ("Team not read"), with its tooltip.
+    Note {
+        text: &'static str,
+        tip: &'static str,
+    },
+    /// One quiet line, in place of chips that were not read or not seen.
+    Quiet {
+        text: &'static str,
+        tip: Option<&'static str>,
+    },
+    /// A thin drawn line between groups (a 1px container, not a character).
+    Divider,
 }
 
-/// One row of the block: a label (team, and a line under it) and its body.
+/// One row of the block: its label on the left and its parts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
-    /// "Your team", "Their bans", "Bans" ...
-    pub team: &'static str,
-    /// "Your ban votes", "Hero select", "Played".
-    pub line: Option<&'static str>,
-    /// A muted note next to the label ("Team not read").
-    pub note: Option<&'static str>,
-    pub body: Body,
+    /// "Bans", "Your ban votes", "Hero select" or "Played".
+    pub label: &'static str,
+    pub parts: Vec<Part>,
 }
 
-/// What the open row shows for bans and picks.
+impl Row {
+    fn chips(&self) -> impl Iterator<Item = &Chip> {
+        self.parts.iter().flat_map(|p| match p {
+            Part::Chips(chips) => chips.as_slice(),
+            _ => &[],
+        })
+    }
+}
+
+/// The amber pill in the header, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pill {
+    /// "N unsure": per-read flags, counting bans, the lobby ban, ban votes
+    /// and hero select (never Played).
+    Unsure(usize),
+    /// "Reads may be off": only a game-level flag exists.
+    Weak,
+}
+
+impl Pill {
+    pub fn words(self) -> String {
+        match self {
+            Pill::Unsure(n) => format!("{n} unsure"),
+            Pill::Weak => WEAK_PILL.to_string(),
+        }
+    }
+
+    pub fn tip(self) -> &'static str {
+        match self {
+            Pill::Unsure(_) => UNSURE_PILL_TIP,
+            Pill::Weak => WEAK_PILL_TIP,
+        }
+    }
+}
+
+/// Which legend items the header shows: only glyphs this card uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Legend {
+    pub banned: bool,
+    pub unsure: bool,
+    pub swap: bool,
+    pub outline: bool,
+}
+
+impl Legend {
+    pub fn is_empty(self) -> bool {
+        !(self.banned || self.unsure || self.swap || self.outline)
+    }
+}
+
+/// The open block: its rows, and the game-level weak flag.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block {
+    pub rows: Vec<Row>,
+    /// The game-level "reader weak" flag, the fallback for the per-read
+    /// flags. Hook only: no such field is stored on the game yet, so it is
+    /// always false today (see [`reader_weak`]).
+    pub weak: bool,
+}
+
+impl Block {
+    fn chips(&self) -> impl Iterator<Item = &Chip> {
+        self.rows.iter().flat_map(Row::chips)
+    }
+
+    /// How many reads are unsure: bans, the lobby ban, ban votes and hero
+    /// select. Played never counts, nor do Not read, Not seen, Skipped and
+    /// No preference.
+    pub fn unsure(&self) -> usize {
+        self.rows
+            .iter()
+            .filter(|r| r.label != LABEL_PLAYED)
+            .flat_map(Row::chips)
+            .filter(|c| c.unsure())
+            .count()
+    }
+
+    /// The header pill. Per-read flags win over the game-level one, which is
+    /// drawn only when no chip is marked.
+    pub fn pill(&self) -> Option<Pill> {
+        match self.unsure() {
+            0 if self.weak => Some(Pill::Weak),
+            0 => None,
+            n => Some(Pill::Unsure(n)),
+        }
+    }
+
+    pub fn legend(&self) -> Legend {
+        Legend {
+            banned: self
+                .chips()
+                .any(|c| c.ban && matches!(c.slot, Slot::Hero(_))),
+            unsure: self.unsure() > 0,
+            swap: self.chips().any(|c| c.swap),
+            outline: self.chips().any(Chip::outline),
+        }
+    }
+}
+
 /// Where "Open Settings" goes and what its tooltip says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SettingsLink {
@@ -103,6 +293,7 @@ pub struct SettingsLink {
     pub open: AdvancedSection,
 }
 
+/// What the open row shows for bans and picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BansPicks {
     /// Nothing was read and no reason is stored: no block.
@@ -115,35 +306,7 @@ pub enum BansPicks {
         /// "Open Settings" goes with the line.
         settings: Option<SettingsLink>,
     },
-    Block(Vec<Row>),
-}
-
-impl BansPicks {
-    /// Whether any chip in the block is a ban.
-    pub fn has_ban(&self) -> bool {
-        self.chips().any(|c| c.ban)
-    }
-
-    /// Whether any chip in the block is a swap chip.
-    pub fn has_swap(&self) -> bool {
-        self.chips().any(|c| c.swap)
-    }
-
-    /// Whether any chip in the block was not read.
-    pub fn has_not_read(&self) -> bool {
-        self.chips().any(|c| c.slot == Slot::NotRead)
-    }
-
-    fn chips(&self) -> impl Iterator<Item = &Chip> {
-        let rows: &[Row] = match self {
-            BansPicks::Block(rows) => rows,
-            _ => &[],
-        };
-        rows.iter().flat_map(|r| match &r.body {
-            Body::Chips(chips) => chips.as_slice(),
-            Body::Quiet(_) => &[],
-        })
-    }
+    Block(Block),
 }
 
 /// The block for one game.
@@ -151,7 +314,10 @@ pub fn bans_picks(g: &Game) -> BansPicks {
     if let Some(stored) = g.bans_picks.as_deref().and_then(parse)
         && stored.read_something()
     {
-        return BansPicks::Block(stored.rows(g));
+        return BansPicks::Block(Block {
+            rows: stored.rows(g),
+            weak: reader_weak(g),
+        });
     }
     match g.bans_picks_status.as_ref().and_then(reason) {
         Some((line, settings)) => BansPicks::Reason {
@@ -161,6 +327,28 @@ pub fn bans_picks(g: &Game) -> BansPicks {
         },
         None => BansPicks::Hidden,
     }
+}
+
+/// The game-level "reads may be off" flag. Hook only: neither the game nor
+/// its status stores one yet (it would be a `bans_picks_weak` flag, the
+/// fallback the spec allows if per-read flags are not done), so this is
+/// always false. Wire it here when the tracker stores it.
+fn reader_weak(_g: &Game) -> bool {
+    false
+}
+
+/// Whether the status says the tracker never saw this screen.
+fn not_seen(status: Option<&BansPicksStatus>, screen: BansPicksMissing) -> bool {
+    matches!(status, Some(BansPicksStatus::Partial { missing }) if missing.contains(&screen))
+}
+
+/// Whether the status says which screens were seen (games stored before the
+/// status existed have none, and keep the older wording).
+fn screens_known(status: Option<&BansPicksStatus>) -> bool {
+    matches!(
+        status,
+        Some(BansPicksStatus::Ok | BansPicksStatus::Partial { .. })
+    )
 }
 
 /// The quiet line for a game that read nothing, and whether "Open Settings"
@@ -369,59 +557,50 @@ impl Stored {
         self.bans_read() || self.lobby_ban.is_some() || read(&self.picks) || read(&self.ban_vote)
     }
 
+    /// The four rows, always in this order and never hidden, so the block
+    /// keeps its height from game to game.
     fn rows(&self, g: &Game) -> Vec<Row> {
-        let mut rows = self.ban_rows();
-        if let Some(name) = &self.lobby_ban {
-            rows.push(Row {
-                team: "Lobby ban",
-                line: None,
-                note: None,
-                body: Body::Chips(vec![ban_chip(name, format!("Lobby ban: {name}"))]),
-            });
-        }
-        let votes = read(&self.ban_vote);
-        let picks = read(&self.picks);
-        match (votes, picks) {
-            (false, false) => rows.push(quiet(
-                "Your team",
-                None,
-                "Ban votes and hero select weren't read for this game.",
-            )),
-            (votes, picks) => {
-                rows.push(if votes {
-                    chips("Your team", "Your ban votes", vote_chips(&self.ban_vote))
-                } else {
-                    quiet(
-                        "Your team",
-                        Some("Your ban votes"),
-                        "Your ban votes weren't read for this game.",
-                    )
-                });
-                rows.push(if picks {
-                    chips("Your team", "Hero select", pick_chips(&self.picks))
-                } else {
-                    quiet(
-                        "Your team",
-                        Some("Hero select"),
-                        "Hero select wasn't read for this game.",
-                    )
-                });
-            }
-        }
+        let status = g.bans_picks_status.as_ref();
         let played = played_chips(g, self.picks.first());
-        if !played.is_empty() {
-            rows.push(chips("Your team", "Played", played));
-        }
-        rows
+        let played = if played.is_empty() {
+            Part::Quiet {
+                text: PLAYED_NOT_READ,
+                tip: None,
+            }
+        } else {
+            Part::Chips(played)
+        };
+        vec![
+            self.bans_row(status),
+            self.votes_row(status),
+            self.hero_select_row(status),
+            Row {
+                label: LABEL_PLAYED,
+                parts: vec![played],
+            },
+        ]
     }
 
-    /// The bans: split by team when every ban has a side, one row when any
-    /// has none, one quiet line when no ban was read.
-    fn ban_rows(&self) -> Vec<Row> {
+    /// Bans of both teams on one row: `Your team` chips, a divider, `Their
+    /// team` chips, a divider, `Lobby` and its chip. When any ban has no
+    /// side, every ban chip then `Team not read`. When nothing on the ban
+    /// screen was read, one quiet line that says whether it was seen. A
+    /// lobby ban read with no team ban is drawn alone, with no quiet line
+    /// that would say no hero was read.
+    fn bans_row(&self, status: Option<&BansPicksStatus>) -> Row {
+        let mut parts = Vec::new();
         if !self.bans_read() {
-            return vec![quiet("Bans", None, "Bans weren't read for this game.")];
-        }
-        if self.bans.iter().any(|b| b.team.is_none()) {
+            if self.lobby_ban.is_none() {
+                let (text, tip) = if not_seen(status, BansPicksMissing::BanResults) {
+                    (NO_BAN_SCREEN, Some(NO_BAN_SCREEN_TIP))
+                } else if screens_known(status) {
+                    (BANS_NOT_READ, Some(BANS_NOT_READ_TIP))
+                } else {
+                    (LEGACY_BANS, None)
+                };
+                parts.push(Part::Quiet { text, tip });
+            }
+        } else if self.bans.iter().any(|b| b.team.is_none()) {
             let chips = self
                 .bans
                 .iter()
@@ -431,55 +610,94 @@ impl Stored {
                     _ => not_read_chip(true, format!("Ban {}: not read", i + 1)),
                 })
                 .collect();
-            return vec![Row {
-                team: "Bans",
-                line: None,
-                note: Some(TEAM_NOT_READ),
-                body: Body::Chips(chips),
-            }];
+            parts.push(Part::Chips(chips));
+            parts.push(Part::Note {
+                text: TEAM_NOT_READ,
+                tip: TEAM_NOT_READ_TIP,
+            });
+        } else {
+            for (team, key, nth) in [
+                (Team::Own, GROUP_OWN, "Your team's ban"),
+                (Team::Enemy, GROUP_ENEMY, "Their ban"),
+            ] {
+                let chips: Vec<Chip> = self
+                    .bans
+                    .iter()
+                    .filter(|b| b.team == Some(team))
+                    .enumerate()
+                    .map(|(i, b)| match &b.slot {
+                        Slot::Hero(name) => ban_chip(name, format!("Banned: {name}")),
+                        _ => not_read_chip(true, format!("{nth} {}: not read", i + 1)),
+                    })
+                    .collect();
+                if chips.is_empty() {
+                    continue;
+                }
+                if !parts.is_empty() {
+                    parts.push(Part::Divider);
+                }
+                parts.push(Part::Key(key));
+                parts.push(Part::Chips(chips));
+            }
         }
-        [
-            (Team::Own, "Your team's bans", "Your team's ban"),
-            (Team::Enemy, "Their bans", "Their ban"),
-        ]
-        .into_iter()
-        .filter_map(|(team, label, nth)| {
-            let chips: Vec<Chip> = self
-                .bans
-                .iter()
-                .filter(|b| b.team == Some(team))
-                .enumerate()
-                .map(|(i, b)| match &b.slot {
-                    Slot::Hero(name) => ban_chip(name, format!("Banned: {name}")),
-                    _ => not_read_chip(true, format!("{nth} {}: not read", i + 1)),
-                })
-                .collect();
-            (!chips.is_empty()).then_some(Row {
-                team: label,
-                line: None,
-                note: None,
-                body: Body::Chips(chips),
-            })
-        })
-        .collect()
+        if let Some(name) = &self.lobby_ban {
+            if !parts.is_empty() {
+                parts.push(Part::Divider);
+            }
+            parts.push(Part::Key(GROUP_LOBBY));
+            parts.push(Part::Chips(vec![ban_chip(
+                name,
+                format!("Lobby ban: {name}"),
+            )]));
+        }
+        Row {
+            label: LABEL_BANS,
+            parts,
+        }
     }
-}
 
-fn chips(team: &'static str, line: &'static str, chips: Vec<Chip>) -> Row {
-    Row {
-        team,
-        line: Some(line),
-        note: None,
-        body: Body::Chips(chips),
+    /// Our own three ban votes, or a quiet line: `Screen not seen` when the
+    /// status says the ban vote was never seen, the older wording otherwise.
+    fn votes_row(&self, status: Option<&BansPicksStatus>) -> Row {
+        let part = if read(&self.ban_vote) {
+            Part::Chips(vote_chips(&self.ban_vote))
+        } else if not_seen(status, BansPicksMissing::BanVote) {
+            Part::Quiet {
+                text: SCREEN_NOT_SEEN,
+                tip: Some(BAN_VOTE_NOT_SEEN_TIP),
+            }
+        } else {
+            Part::Quiet {
+                text: LEGACY_VOTES,
+                tip: None,
+            }
+        };
+        Row {
+            label: LABEL_VOTES,
+            parts: vec![part],
+        }
     }
-}
 
-fn quiet(team: &'static str, line: Option<&'static str>, text: &str) -> Row {
-    Row {
-        team,
-        line,
-        note: None,
-        body: Body::Quiet(text.to_string()),
+    /// All six hero select slots, ours first with the `You` tag, or a quiet
+    /// line as for the votes.
+    fn hero_select_row(&self, status: Option<&BansPicksStatus>) -> Row {
+        let part = if read(&self.picks) {
+            Part::Chips(pick_chips(&self.picks))
+        } else if not_seen(status, BansPicksMissing::HeroSelect) {
+            Part::Quiet {
+                text: SCREEN_NOT_SEEN,
+                tip: Some(HERO_SELECT_NOT_SEEN_TIP),
+            }
+        } else {
+            Part::Quiet {
+                text: LEGACY_HERO_SELECT,
+                tip: None,
+            }
+        };
+        Row {
+            label: LABEL_HERO_SELECT,
+            parts: vec![part],
+        }
     }
 }
 
@@ -489,6 +707,7 @@ fn ban_chip(name: &str, tip: String) -> Chip {
         ban: true,
         you: false,
         swap: false,
+        suspect: false,
         tip,
     }
 }
@@ -499,14 +718,15 @@ fn not_read_chip(ban: bool, tip: String) -> Chip {
         ban,
         you: false,
         swap: false,
+        suspect: false,
         tip,
     }
 }
 
 /// Our own three ban votes, in slot order, from `ban_votes`. A skipped slot
-/// shows as "Skipped" (the explicit skip icon), an empty one as "Not seen"
-/// (the vote may have come after the last frame). The row says "Your ban
-/// votes", so the chips carry no "You" tag.
+/// is a plain neutral chip "Skipped" with no glyph, an empty one an outline
+/// chip "Not seen" (the vote may have come after the last frame). The row
+/// says "Your ban votes", so the chips carry no "You" tag.
 fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
     slots
         .iter()
@@ -530,6 +750,7 @@ fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
                 ban: false,
                 you: false,
                 swap: false,
+                suspect: false,
                 tip,
             }
         })
@@ -556,6 +777,7 @@ fn pick_chips(slots: &[Slot]) -> Vec<Chip> {
                 ban: false,
                 you,
                 swap: false,
+                suspect: false,
                 tip,
             }
         })
@@ -596,8 +818,10 @@ fn played_chips(g: &Game, own_pick: Option<&Slot>) -> Vec<Chip> {
         .chain(rest.iter().map(|name| Chip {
             slot: Slot::Hero(name.clone()),
             ban: false,
-            you: true,
+            // The "You" tag is drawn once, on the first chip of the row.
+            you: false,
             swap: false,
+            suspect: false,
             tip: format!("Then played {name}, you"),
         }))
         .collect()
@@ -625,625 +849,11 @@ fn played_chip(own_hero: &str, own_pick: Option<&Slot>) -> Option<Chip> {
         ban: false,
         you: true,
         swap: swapped_from.is_some(),
+        suspect: false,
         tip,
     })
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::fixtures_games::{HELD, NORMAL, REJECTED_2, UNDECIDED, UNSURE};
-    use crate::snapshot::games_from_snapshot;
-
-    fn game(sid: &str) -> Game {
-        games_from_snapshot(&crate::fixtures_games::snapshot())
-            .into_iter()
-            .find(|g| g.session_id == sid)
-            .expect(sid)
-    }
-
-    fn with(json: &str, status: Option<BansPicksStatus>) -> Game {
-        let mut g = game(NORMAL);
-        g.bans_picks = Some(json.to_string());
-        g.bans_picks_status = status;
-        g
-    }
-
-    fn rows(b: BansPicks) -> Vec<Row> {
-        match b {
-            BansPicks::Block(rows) => rows,
-            other => panic!("not a block: {other:?}"),
-        }
-    }
-
-    fn names(row: &Row) -> Vec<&str> {
-        match &row.body {
-            Body::Chips(chips) => chips.iter().map(Chip::name).collect(),
-            Body::Quiet(_) => Vec::new(),
-        }
-    }
-
-    #[test]
-    fn a_full_read_has_every_row_in_order() {
-        let b = bans_picks(&game(NORMAL));
-        assert!(b.has_ban());
-        assert!(!b.has_swap());
-        assert!(!b.has_not_read());
-        let rows = rows(b);
-        let labels: Vec<_> = rows.iter().map(|r| (r.team, r.line)).collect();
-        assert_eq!(
-            labels,
-            [
-                ("Your team's bans", None),
-                ("Their bans", None),
-                ("Lobby ban", None),
-                ("Your team", Some("Your ban votes")),
-                ("Your team", Some("Hero select")),
-                ("Your team", Some("Played")),
-            ]
-        );
-        assert_eq!(names(&rows[0]), ["Sombra", "Mauga"]);
-        assert_eq!(names(&rows[1]), ["Ana", "Winston"]);
-        assert_eq!(names(&rows[2]), ["Sigma"]);
-        assert_eq!(names(&rows[3]).len(), 3);
-        assert_eq!(names(&rows[4])[0], "Wrecking Ball");
-        assert_eq!(names(&rows[5]), ["Wrecking Ball"]);
-    }
-
-    #[test]
-    fn tooltips_say_what_the_chip_is() {
-        let rows = rows(bans_picks(&game(NORMAL)));
-        let tip = |r: usize, c: usize| match &rows[r].body {
-            Body::Chips(chips) => chips[c].tip.clone(),
-            Body::Quiet(_) => String::new(),
-        };
-        assert_eq!(tip(0, 0), "Banned: Sombra");
-        assert_eq!(tip(2, 0), "Lobby ban: Sigma");
-        assert_eq!(tip(3, 0), "You voted to ban Reinhardt");
-        assert_eq!(tip(3, 1), "You voted to ban Tracer");
-        assert_eq!(tip(4, 0), "Shown at hero select: Wrecking Ball, you");
-        assert_eq!(tip(4, 1), "Shown at hero select: Tracer");
-        assert_eq!(tip(5, 0), "Played Wrecking Ball, you");
-    }
-
-    #[test]
-    fn a_partial_read_keeps_its_gaps_visible() {
-        let b = bans_picks(&game(UNSURE));
-        assert!(b.has_ban());
-        assert!(b.has_swap());
-        assert!(b.has_not_read());
-        let rows = rows(b);
-        // Bans with no side are one row with a note, and no lobby ban row.
-        assert_eq!(rows[0].team, "Bans");
-        assert_eq!(rows[0].note, Some(TEAM_NOT_READ));
-        assert_eq!(names(&rows[0]), ["Sombra", "Mauga", "Not read", "Winston"]);
-        assert!(rows.iter().all(|r| r.team != "Lobby ban"));
-        let Body::Chips(bans) = &rows[0].body else {
-            panic!("chips")
-        };
-        assert_eq!(bans[0].tip, "Banned: Sombra, team not read");
-        assert_eq!(bans[2].tip, "Ban 3: not read");
-        // No preference shows as such, and a null slot as Not read.
-        let Body::Chips(picks) = &rows[2].body else {
-            panic!("chips")
-        };
-        assert_eq!(picks[2].slot, Slot::NoPreference);
-        assert_eq!(picks[2].name(), "No preference");
-        assert_eq!(picks[3].slot, Slot::NotRead);
-        assert_eq!(picks[3].tip, "Hero select slot 4: not read");
-        let Body::Chips(votes) = &rows[1].body else {
-            panic!("chips")
-        };
-        assert_eq!(votes[1].tip, "Your ban vote 2: not read");
-        assert!(votes.iter().all(|c| !c.you));
-        // We picked Reinhardt and played Wrecking Ball.
-        let Body::Chips(played) = &rows[3].body else {
-            panic!("chips")
-        };
-        assert!(played[0].swap && played[0].you);
-        assert_eq!(
-            played[0].tip,
-            "Played Wrecking Ball, Reinhardt at hero select, you"
-        );
-    }
-
-    #[test]
-    fn a_ban_no_preference_is_not_read() {
-        let g = with(
-            r#"{"bans":[{"value":"no_preference","team":"own"},{"value":"ana","team":"enemy"}]}"#,
-            Some(BansPicksStatus::Ok),
-        );
-        let rows = rows(bans_picks(&g));
-        assert_eq!(names(&rows[0]), ["Not read"]);
-        assert_eq!(names(&rows[1]), ["Ana"]);
-    }
-
-    #[test]
-    fn lists_are_capped_and_plain_strings_read() {
-        let g = with(
-            r#"{"bans":["ana","reaper","mauga","sigma","zarya"],
-                "picks":["ana","reaper","mauga","sigma","zarya","mercy","lucio"],
-                "ban_vote":["no-preference"]}"#,
-            Some(BansPicksStatus::Ok),
-        );
-        let rows = rows(bans_picks(&g));
-        // No side on any ban: one row, four chips.
-        assert_eq!(names(&rows[0]).len(), 4);
-        let hero_select = rows.iter().find(|r| r.line == Some("Hero select")).unwrap();
-        assert_eq!(names(hero_select).len(), 6);
-        // The flat `ban_vote` list is legacy and is not shown as our votes.
-        assert!(
-            rows.iter()
-                .all(|r| r.line != Some("Your ban votes") || matches!(&r.body, Body::Quiet(_)))
-        );
-    }
-
-    #[test]
-    fn unread_parts_get_a_quiet_line() {
-        let g = with(r#"{"bans":[],"lobby_ban":{"value":"sigma"}}"#, None);
-        let rows = rows(bans_picks(&g));
-        let quiet: Vec<_> = rows
-            .iter()
-            .filter_map(|r| match &r.body {
-                Body::Quiet(t) => Some(t.as_str()),
-                Body::Chips(_) => None,
-            })
-            .collect();
-        assert_eq!(
-            quiet,
-            [
-                "Bans weren't read for this game.",
-                "Ban votes and hero select weren't read for this game."
-            ]
-        );
-        let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],"picks":[{"value":"ana"}]}"#,
-            None,
-        );
-        let rows = rows_of(&g);
-        assert!(rows.iter().any(|r| matches!(&r.body,
-            Body::Quiet(t) if t == "Your ban votes weren't read for this game.")));
-        let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],
-                "ban_votes":[{"voter":0,"slot":1,"state":"hero","hero":"ana"}]}"#,
-            None,
-        );
-        let rows = rows_of(&g);
-        assert!(rows.iter().any(|r| matches!(&r.body,
-            Body::Quiet(t) if t == "Hero select wasn't read for this game.")));
-    }
-
-    fn vote_row(g: &Game) -> Vec<Chip> {
-        let rows = rows_of(g);
-        let row = rows
-            .iter()
-            .find(|r| r.line == Some("Your ban votes"))
-            .expect("vote row");
-        match &row.body {
-            Body::Chips(chips) => chips.clone(),
-            Body::Quiet(_) => panic!("chips"),
-        }
-    }
-
-    #[test]
-    fn ban_votes_show_skipped_and_empty_slots() {
-        // Three skips, like the Eichenwalde game: not three Not read chips.
-        let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],
-                "ban_vote":[{"value":null},{"value":null},{"value":null}],
-                "ban_votes":[
-                  {"voter":0,"slot":3,"state":"empty","hero":null},
-                  {"voter":0,"slot":1,"state":"skipped","hero":null},
-                  {"voter":0,"slot":2,"state":"hero","hero":"ana"},
-                  {"voter":1,"slot":1,"state":"hero","hero":"mei"}]}"#,
-            Some(BansPicksStatus::Ok),
-        );
-        let votes = vote_row(&g);
-        let slots: Vec<_> = votes.iter().map(|c| c.slot.clone()).collect();
-        assert_eq!(
-            slots,
-            [Slot::Skipped, Slot::Hero("Ana".into()), Slot::Empty]
-        );
-        assert_eq!(votes[0].name(), "Skipped");
-        assert_eq!(votes[0].tip, "You skipped ban vote 1");
-        assert!(
-            votes[2].tip.starts_with("Your ban vote 3: not seen"),
-            "{}",
-            votes[2].tip
-        );
-        assert!(votes.iter().all(|c| !c.you));
-    }
-
-    #[test]
-    fn an_unclear_slot_is_not_read() {
-        // A hero state with no confident hero, or no state, is Not read.
-        let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],
-                "ban_votes":[{"voter":0,"slot":1,"state":"hero","hero":null},
-                             {"voter":0,"slot":2,"state":null,"hero":null},
-                             {"voter":0,"slot":3,"state":"skipped","hero":null}]}"#,
-            Some(BansPicksStatus::Ok),
-        );
-        let got: Vec<_> = vote_row(&g).iter().map(|c| c.slot.clone()).collect();
-        assert_eq!(got, [Slot::NotRead, Slot::NotRead, Slot::Skipped]);
-    }
-
-    /// Votes are never taken from the flat `ban_vote` list, which holds the
-    /// six roster preferred heroes in games stored by alpha.2.1 or older.
-    fn no_vote_row(g: &Game) {
-        let rows = rows_of(g);
-        assert!(
-            rows.iter()
-                .all(|r| !matches!(&r.body, Body::Chips(_)) || r.line != Some("Your ban votes")),
-            "no ban vote chips"
-        );
-        assert!(
-            rows.iter().any(|r| matches!(&r.body,
-                Body::Quiet(t) if t == "Your ban votes weren't read for this game.")),
-            "the votes show as not read"
-        );
-    }
-
-    #[test]
-    fn legacy_flat_ban_vote_without_ban_votes_shows_no_votes() {
-        // What alpha.2.1 stored: the six roster rows, no `ban_votes` key.
-        let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],
-                "picks":[{"value":"ana"}],
-                "ban_vote":[{"value":"mei"},{"value":"tracer"},{"value":"genji"},
-                            {"value":"sigma"},{"value":"zarya"},{"value":"mercy"}]}"#,
-            Some(BansPicksStatus::Ok),
-        );
-        no_vote_row(&g);
-        let rows = rows_of(&g);
-        let names: Vec<_> = rows.iter().flat_map(|r| names(r)).collect();
-        assert!(
-            !names.contains(&"Mei") && !names.contains(&"Tracer") && !names.contains(&"Genji"),
-            "{names:?}"
-        );
-    }
-
-    #[test]
-    fn a_missing_or_null_ban_votes_is_not_read() {
-        // Null (vote screen not recognised), with a flat list beside it.
-        let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],"picks":[{"value":"ana"}],
-                "ban_vote":[{"value":"mei"}],"ban_votes":null}"#,
-            Some(BansPicksStatus::Ok),
-        );
-        no_vote_row(&g);
-        // Only teammates' slots: none of ours, so not read either.
-        let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],"picks":[{"value":"ana"}],
-                "ban_votes":[{"voter":1,"slot":1,"state":"hero","hero":"mei"}]}"#,
-            Some(BansPicksStatus::Ok),
-        );
-        no_vote_row(&g);
-        // A game that only has a flat list reads as nothing at all there.
-        let g = with(
-            r#"{"ban_vote":[{"value":"mei"}]}"#,
-            Some(BansPicksStatus::Ok),
-        );
-        assert!(
-            !parse(g.bans_picks.as_deref().unwrap())
-                .unwrap()
-                .read_something()
-        );
-    }
-
-    #[test]
-    fn an_empty_slot_is_not_seen_not_a_missing_vote() {
-        let g = with(
-            r#"{"bans":[{"value":"ana","team":"own"}],
-                "ban_votes":[{"voter":0,"slot":1,"state":"empty","hero":null},
-                             {"voter":0,"slot":2,"state":"skipped","hero":null},
-                             {"voter":0,"slot":3,"state":"empty","hero":null}]}"#,
-            Some(BansPicksStatus::Ok),
-        );
-        let votes = vote_row(&g);
-        assert_eq!(
-            votes.iter().map(Chip::name).collect::<Vec<_>>(),
-            ["Not seen", "Skipped", "Not seen"]
-        );
-        for c in &votes {
-            let tip = c.tip.to_lowercase();
-            assert!(!tip.contains("didn't") && !tip.contains("did not"), "{tip}");
-        }
-        assert_eq!(votes[1].tip, "You skipped ban vote 2");
-        assert!(votes[0].tip.contains("not seen"), "{}", votes[0].tip);
-    }
-
-    fn rows_of(g: &Game) -> Vec<Row> {
-        rows(bans_picks(g))
-    }
-
-    #[test]
-    fn a_swap_needs_two_real_heroes_that_differ() {
-        let own = Slot::Hero("Wrecking Ball".into());
-        let played = played_chip("Wrecking Ball", Some(&own)).unwrap();
-        assert!(!played.swap);
-        let other = Slot::Hero("Mei".into());
-        assert!(played_chip("Wrecking Ball", Some(&other)).unwrap().swap);
-        assert!(
-            !played_chip("Wrecking Ball", Some(&Slot::NotRead))
-                .unwrap()
-                .swap
-        );
-        assert!(
-            !played_chip("Wrecking Ball", Some(&Slot::NoPreference))
-                .unwrap()
-                .swap
-        );
-        assert!(!played_chip("Wrecking Ball", None).unwrap().swap);
-        assert!(played_chip("Unknown", None).is_none());
-        assert!(played_chip("  ", None).is_none());
-    }
-
-    /// The normal game, played as the given runs (hero, snapshots), all
-    /// confirmed, like the Eichenwalde game that showed only its first hero.
-    fn played_as(runs: &[(&str, u32)]) -> Game {
-        let mut g = game(NORMAL);
-        let base = g.segments[0].clone();
-        g.segments = runs
-            .iter()
-            .enumerate()
-            .map(|(i, (hero, snapshots))| crate::model::SegmentView {
-                index: i as u32,
-                hero: (*hero).into(),
-                snapshots: *snapshots,
-                confirmed: true,
-                ..base.clone()
-            })
-            .collect();
-        g
-    }
-
-    fn played(g: &Game) -> Vec<Chip> {
-        let rows = rows_of(g);
-        let row = rows.iter().find(|r| r.line == Some("Played")).unwrap();
-        match &row.body {
-            Body::Chips(chips) => chips.clone(),
-            Body::Quiet(_) => panic!("chips"),
-        }
-    }
-
-    #[test]
-    fn played_lists_every_hero_in_the_order_played() {
-        let g = played_as(&[("Wrecking Ball", 12), ("Sigma", 6), ("Sierra", 6)]);
-        let chips = played(&g);
-        let names: Vec<_> = chips.iter().map(Chip::name).collect();
-        assert_eq!(names, ["Wrecking Ball", "Sigma", "Sierra"]);
-        assert!(chips.iter().all(|c| c.you && !c.ban));
-        assert!(chips.iter().all(|c| !c.swap), "we picked Wrecking Ball");
-        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
-        assert_eq!(chips[1].tip, "Then played Sigma, you");
-        assert_eq!(chips[2].tip, "Then played Sierra, you");
-        assert!(!bans_picks(&g).has_swap());
-        // The hero bar shows the same heroes in the same order.
-        let bar: Vec<_> = crate::games_detail::hero_split(&g)
-            .bar
-            .into_iter()
-            .map(|b| b.hero)
-            .collect();
-        assert_eq!(bar, ["Wrecking Ball", "Sigma", "Sierra"]);
-    }
-
-    #[test]
-    fn played_merges_repeats_and_keeps_a_return_in_first_place() {
-        let g = played_as(&[
-            ("Wrecking Ball", 4),
-            ("Wrecking Ball", 3),
-            ("Sigma", 6),
-            ("Unknown", 2),
-            ("Wrecking Ball", 5),
-            ("Sierra", 2),
-        ]);
-        let names: Vec<_> = played(&g).iter().map(|c| c.name().to_string()).collect();
-        assert_eq!(names, ["Wrecking Ball", "Sigma", "Sierra"]);
-    }
-
-    #[test]
-    fn played_follows_the_hero_bar_for_dismissed_and_unconfirmed_runs() {
-        // UNSURE: Wrecking Ball, a one-snapshot unconfirmed Sigma, Wrecking
-        // Ball again. The bar shows the Sigma run, so the card does too.
-        let g = game(UNSURE);
-        let names: Vec<_> = played(&g).iter().map(|c| c.name().to_string()).collect();
-        assert_eq!(names, ["Wrecking Ball", "Sigma"]);
-        // Dismissed, the run folds into Wrecking Ball on the bar and the card.
-        let mut g = g;
-        g.segments[1].dismissed = true;
-        let names: Vec<_> = played(&g).iter().map(|c| c.name().to_string()).collect();
-        assert_eq!(names, ["Wrecking Ball"]);
-    }
-
-    #[test]
-    fn a_corrected_hero_keeps_the_single_played_chip() {
-        let mut g = played_as(&[("Wrecking Ball", 12), ("Sigma", 6), ("Sierra", 6)]);
-        g.edited_fields.push("hero".into());
-        g.hero = "Sigma".into();
-        let chips = played(&g);
-        assert_eq!(chips.len(), 1);
-        assert_eq!(chips[0].name(), "Sigma");
-        assert!(chips[0].you && chips[0].swap);
-        assert_eq!(
-            chips[0].tip,
-            "Played Sigma, Wrecking Ball at hero select, you"
-        );
-        // No runs at all: the row's hero, as before.
-        let mut g = game(NORMAL);
-        g.segments.clear();
-        let chips = played(&g);
-        assert_eq!(chips.len(), 1);
-        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
-    }
-
-    #[test]
-    fn only_the_first_played_chip_marks_a_swap() {
-        // UNSURE picked Reinhardt at hero select, and we never played him.
-        let mut g = game(UNSURE);
-        g.segments[1].confirmed = true;
-        g.segments[1].hero = "Sigma".into();
-        g.segments[2].hero = "Mei".into();
-        let chips = played(&g);
-        let names: Vec<_> = chips.iter().map(Chip::name).collect();
-        assert_eq!(names, ["Wrecking Ball", "Sigma", "Mei"]);
-        assert!(chips[0].swap && chips[0].you);
-        assert_eq!(
-            chips[0].tip,
-            "Played Wrecking Ball, Reinhardt at hero select, you"
-        );
-        assert!(chips[1..].iter().all(|c| !c.swap && c.you));
-        assert_eq!(chips[2].tip, "Then played Mei, you");
-        assert!(bans_picks(&g).has_swap());
-    }
-
-    #[test]
-    fn no_swap_mark_when_the_pick_is_one_of_the_played_chips() {
-        // UNSURE picked Reinhardt at hero select and went back to him later.
-        let mut g = game(UNSURE);
-        g.segments[1].confirmed = true;
-        g.segments[1].hero = "Sigma".into();
-        g.segments[2].hero = "Reinhardt".into();
-        let chips = played(&g);
-        let names: Vec<_> = chips.iter().map(Chip::name).collect();
-        assert_eq!(names, ["Wrecking Ball", "Sigma", "Reinhardt"]);
-        assert!(chips.iter().all(|c| !c.swap && c.you));
-        assert_eq!(chips[0].tip, "Played Wrecking Ball, you");
-        assert!(!bans_picks(&g).has_swap());
-        // The same holds when the case of the name differs.
-        g.segments[2].hero = "REINHARDT".into();
-        assert!(played(&g).iter().all(|c| !c.swap));
-    }
-
-    #[test]
-    fn nothing_read_shows_the_reason_and_never_hides_the_game() {
-        let BansPicks::Reason {
-            line,
-            tip,
-            settings,
-        } = bans_picks(&game(UNDECIDED))
-        else {
-            panic!("reason")
-        };
-        assert_eq!(line, "Not read: Read bans and picks was off for this game.");
-        assert!(tip.is_none());
-        let link = settings.unwrap();
-        assert!(link.tip.contains("Read bans and picks"));
-        assert_eq!(link.open, AdvancedSection::Troubleshooting);
-
-        let BansPicks::Reason {
-            line,
-            tip,
-            settings,
-        } = bans_picks(&game(REJECTED_2))
-        else {
-            panic!("reason")
-        };
-        assert_eq!(
-            line,
-            "Not read: this game ran at 1920x1080. Bans and picks need 2560x1440."
-        );
-        assert_eq!(tip, Some("Only 2560x1440 is read. 1080p and 4K are not."));
-        assert!(settings.is_none());
-    }
-
-    #[test]
-    fn every_status_has_its_spec_line() {
-        let line = |s: BansPicksStatus| {
-            let mut g = game(HELD);
-            g.bans_picks = None;
-            g.bans_picks_status = Some(s);
-            match bans_picks(&g) {
-                BansPicks::Reason { line, settings, .. } => (line, settings.is_some()),
-                other => panic!("{other:?}"),
-            }
-        };
-        assert_eq!(
-            line(BansPicksStatus::NoFrames),
-            (
-                "Not read: the tracker didn't see the pre-game screens for this game.".into(),
-                false
-            )
-        );
-        assert_eq!(
-            line(BansPicksStatus::FrameSize {
-                width: 0,
-                height: 0
-            }),
-            (
-                "Not read: bans and picks need a 2560x1440 game.".into(),
-                false
-            )
-        );
-        let (text, button) = line(BansPicksStatus::PackMissing { linked: false });
-        assert!(text.starts_with("Not read: the hero icon pack isn't installed."));
-        assert!(text.contains("Link a site account in Settings"));
-        assert!(button);
-        let (text, button) = line(BansPicksStatus::PackMissing { linked: true });
-        assert!(text.contains("fetches it in the background"));
-        assert!(!button);
-        let (text, button) = line(BansPicksStatus::PackFailed);
-        assert!(text.contains("Reinstall it"));
-        assert!(button);
-        let (text, button) = line(BansPicksStatus::ReaderFailed);
-        assert_eq!(text, "Not read: the reader failed on this game's screens.");
-        assert!(!button);
-    }
-
-    #[test]
-    fn open_settings_opens_the_row_that_holds_the_fix() {
-        let open = |s: BansPicksStatus| {
-            let mut g = game(HELD);
-            g.bans_picks = None;
-            g.bans_picks_status = Some(s);
-            match bans_picks(&g) {
-                BansPicks::Reason { settings, .. } => settings.map(|l| l.open),
-                other => panic!("{other:?}"),
-            }
-        };
-        assert_eq!(
-            open(BansPicksStatus::ReaderOff),
-            Some(AdvancedSection::Troubleshooting)
-        );
-        assert_eq!(
-            open(BansPicksStatus::PackFailed),
-            Some(AdvancedSection::Troubleshooting)
-        );
-        assert_eq!(
-            open(BansPicksStatus::PackMissing { linked: false }),
-            Some(AdvancedSection::WebsiteConnection)
-        );
-        assert_eq!(open(BansPicksStatus::NoFrames), None);
-    }
-
-    #[test]
-    fn an_old_game_with_no_status_has_no_block() {
-        let mut g = game(HELD);
-        g.bans_picks = None;
-        g.bans_picks_status = None;
-        assert_eq!(bans_picks(&g), BansPicks::Hidden);
-        // A good status with nothing in the JSON has no text to show either.
-        g.bans_picks_status = Some(BansPicksStatus::Ok);
-        assert_eq!(bans_picks(&g), BansPicks::Hidden);
-    }
-
-    #[test]
-    fn a_stored_result_that_does_not_parse_falls_back_to_the_status() {
-        for bad in ["", "not json", "[]", "null", r#"{"bans":"x"}"#] {
-            let g = with(bad, Some(BansPicksStatus::ReaderFailed));
-            assert!(matches!(bans_picks(&g), BansPicks::Reason { .. }), "{bad}");
-        }
-        // Nothing read in a result that parses is the same as no result.
-        let g = with(
-            r#"{"bans":[{"value":null}],"picks":[{"value":null}]}"#,
-            Some(BansPicksStatus::ReaderOff),
-        );
-        assert!(matches!(bans_picks(&g), BansPicks::Reason { .. }));
-    }
-
-    #[test]
-    fn unknown_hero_keys_still_read_as_words() {
-        assert_eq!(hero_name("some_new-hero"), "some new hero");
-        assert_eq!(hero_name("wrecking-ball"), "Wrecking Ball");
-    }
-}
+#[path = "games_bans_tests.rs"]
+mod tests;

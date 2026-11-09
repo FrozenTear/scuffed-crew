@@ -1,9 +1,9 @@
 //! Bans and picks for the `--fixture games` snapshot: example data for the
-//! open row's block (UX Spec bans and picks v2, alpha.2.1). Hero choices
-//! only, no member data.
+//! open row's block (UX Spec bans and picks a3b, on v2 and alpha.2.1). Hero
+//! choices only, no member data.
 
 use serde_json::{Value, json};
-use stat_tracker::model::BansPicksStatus;
+use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 use stat_tracker::storage::PersonalMatch;
 
 fn read(value: Option<&str>) -> Value {
@@ -20,18 +20,30 @@ fn reads(values: &[Option<&str>]) -> Vec<Value> {
     values.iter().map(|v| read(*v)).collect()
 }
 
+/// A vote slot value that stands for the skip icon, not a hero.
+const SKIPPED: &str = "<skipped>";
+/// A vote slot value that stands for an empty slot (Not seen), not a hero.
+const EMPTY: &str = "<empty>";
+
 /// Our own vote slots as the tracker stores them in `ban_votes`: a hero
-/// when one is given, otherwise a slot that was not read (state null).
+/// when one is given, [`SKIPPED`] or [`EMPTY`] for those states, otherwise
+/// a slot that was not read (state null).
 fn vote_slots(values: &[Option<&str>]) -> Vec<Value> {
     values
         .iter()
         .enumerate()
         .map(|(i, v)| {
+            let (state, hero) = match *v {
+                Some(SKIPPED) => (Some("skipped"), None),
+                Some(EMPTY) => (Some("empty"), None),
+                Some(hero) => (Some("hero"), Some(hero)),
+                None => (None, None),
+            };
             json!({
                 "voter": 0,
                 "slot": i + 1,
-                "state": v.map(|_| "hero"),
-                "hero": v,
+                "state": state,
+                "hero": hero,
                 "confidence": 0.93,
                 "score": 0.81,
                 "margin": 0.31,
@@ -51,7 +63,8 @@ fn stored(
         "bans": bans,
         "lobby_ban": read(lobby),
         "picks": reads(picks),
-        "ban_vote": reads(votes),
+        // The flat list holds heroes only; it is legacy and never shown.
+        "ban_vote": reads(&votes.iter().map(|v| v.filter(|h| !h.starts_with('<'))).collect::<Vec<_>>()),
         "ban_votes": vote_slots(votes),
         "bans_picks_recognizer": "cv-v1",
     })
@@ -108,6 +121,69 @@ pub fn partial(m: &mut PersonalMatch) {
     m.bans_picks_status = Some(BansPicksStatus::Partial {
         missing: Vec::new(),
     });
+}
+
+/// Samoa: every ban read, but not which team made it, and hero select was
+/// never seen (`Partial` with `missing: [hero_select]`).
+pub fn side(m: &mut PersonalMatch) {
+    m.bans_picks = Some(stored(
+        vec![
+            ban(Some("sombra"), None),
+            ban(Some("mauga"), None),
+            ban(Some("ana"), None),
+            ban(Some("winston"), None),
+        ],
+        None,
+        &[],
+        &[Some("reinhardt"), Some("tracer"), Some(SKIPPED)],
+    ));
+    m.bans_picks_status = Some(BansPicksStatus::Partial {
+        missing: vec![BansPicksMissing::HeroSelect],
+    });
+}
+
+/// Gibraltar: no ban screen and no ban vote seen, hero select read.
+pub fn no_ban_screen(m: &mut PersonalMatch) {
+    m.bans_picks = Some(stored(
+        Vec::new(),
+        None,
+        &[
+            Some("wrecking-ball"),
+            Some("tracer"),
+            Some("cassidy"),
+            Some("kiriko"),
+            Some("lucio"),
+            Some("mercy"),
+        ],
+        &[],
+    ));
+    m.bans_picks_status = Some(BansPicksStatus::Partial {
+        missing: vec![BansPicksMissing::BanResults, BansPicksMissing::BanVote],
+    });
+}
+
+/// Bans of both teams, no lobby ban, and our votes: one hero, one skipped,
+/// one empty (Not seen).
+pub fn skip_votes(m: &mut PersonalMatch) {
+    m.bans_picks = Some(stored(
+        vec![
+            ban(Some("sombra"), Some("own")),
+            ban(Some("mauga"), Some("own")),
+            ban(Some("ana"), Some("enemy")),
+            ban(Some("winston"), Some("enemy")),
+        ],
+        None,
+        &[
+            Some("wrecking-ball"),
+            Some("tracer"),
+            Some("cassidy"),
+            Some("kiriko"),
+            Some("lucio"),
+            Some("mercy"),
+        ],
+        &[Some("reinhardt"), Some(SKIPPED), Some(EMPTY)],
+    ));
+    m.bans_picks_status = Some(BansPicksStatus::Ok);
 }
 
 /// Nothing read, the reader was off: one quiet line and "Open Settings".

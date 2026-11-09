@@ -190,35 +190,45 @@ pub fn snapshot() -> Snapshot {
     rejected_2.upload_reject = Some(REJECT.into());
 
     // The open row's Bans and picks block: all read, read in part, and
-    // two ways of reading nothing.
+    // two ways of reading nothing (more states on history games below).
     crate::fixtures_bans::full(&mut normal);
     crate::fixtures_bans::partial(&mut unsure);
     crate::fixtures_bans::reader_off(&mut undecided);
     crate::fixtures_bans::frame_size(&mut rejected_2);
+
+    // Three more states on the newest history games: the team of each ban
+    // not read with hero select not seen, no ban screen seen, and skipped
+    // and not seen ban votes.
+    let mut side = wb(
+        "sess-g-h01".into(),
+        "Nepal",
+        "defeat",
+        dt(2026, 10, 18, 22, 5),
+    );
+    crate::fixtures_bans::side(&mut side);
+    let mut no_ban = wb(
+        "sess-g-h02".into(),
+        "Lijiang Tower",
+        "victory",
+        dt(2026, 10, 18, 21, 50),
+    );
+    crate::fixtures_bans::no_ban_screen(&mut no_ban);
+    let mut skip = wb(
+        "sess-g-h03".into(),
+        "Busan",
+        "victory",
+        dt(2026, 10, 18, 21, 31),
+    );
+    crate::fixtures_bans::skip_votes(&mut skip);
 
     let mut matches = vec![
         held,
         rejected_2,
         unsure,
         normal,
-        wb(
-            "sess-g-h01".into(),
-            "Nepal",
-            "defeat",
-            dt(2026, 10, 18, 22, 5),
-        ),
-        wb(
-            "sess-g-h02".into(),
-            "Lijiang Tower",
-            "victory",
-            dt(2026, 10, 18, 21, 50),
-        ),
-        wb(
-            "sess-g-h03".into(),
-            "Busan",
-            "victory",
-            dt(2026, 10, 18, 21, 31),
-        ),
+        side,
+        no_ban,
+        skip,
         wb(
             "sess-g-h04".into(),
             "Junkertown",
