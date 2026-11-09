@@ -195,6 +195,31 @@ An AppImage is removed like any other copy, including the AppImage file.
 A copy outside your home folder is left alone. The app lists the paths and
 says to remove them manually.
 
+### First-run checklist
+
+Two setup steps are easy to miss and cause most first-run problems:
+
+1. **Join the `input` group, then log out and back in.** Without it the
+   daemon cannot read Tab presses from `/dev/input`. Older builds crash on
+   start; newer ones show a warning and keep running without Tab detection.
+   See Platform requirements above for the commands and a check.
+2. **Install Ayatana AppIndicator for Hide-to-tray.** Without it the app
+   starts with no tray icon and a "missing library" notice, and closing the
+   window quits. From 0.6.0-alpha.3 the alpha AUR package pulls it in; for
+   the stable AUR package or the tarball, install it yourself:
+
+   ```sh
+   # Arch / CachyOS
+   sudo pacman -S libayatana-appindicator
+   # Debian / Ubuntu / Mint
+   sudo apt install libayatana-appindicator3-1
+   # Fedora
+   sudo dnf install libayatana-appindicator-gtk3
+   ```
+
+   Then restart `stat-tracker-gui`. Your desktop also needs a tray: KDE and
+   Cinnamon have one built in, plain GNOME needs the AppIndicator extension.
+
 ## Running
 
 ```sh
@@ -621,6 +646,13 @@ it.
 
 ## Troubleshooting
 
+**The tracker crashes or keeps restarting right after start, or warns that it
+cannot read the keyboard.** Check that you are in the `input` group in the
+current session: `groups | grep -qw input && echo ok`. If nothing prints, run
+`sudo usermod -aG input "$USER"`, then log out and back in (a new terminal is
+not enough). `journalctl --user -u scuffed-stat-tracker -n 50` shows the
+daemon's last log lines.
+
 **App launcher does not start `stat-tracker-gui` (works from a terminal).**
 Graphical sessions (GNOME, Cosmic, **AerynOS**) often have a PATH that
 does not include `~/.local/bin`. Through **v0.4.2** the `.desktop` `Exec=`
@@ -636,7 +668,7 @@ update-desktop-database ~/.local/share/applications
 theme name, not a file we install). Log out/in if the launcher still
 caches the old entry.
 
-**`stat-tracker-gui` panics with `Failed to load ayatana-appindicator3` (v0.4.0 / v0.4.1).**
+**No tray icon, or `stat-tracker-gui` panics with `Failed to load ayatana-appindicator3` (v0.4.0 / v0.4.1).**
 `tray-icon` loads `libayatana-appindicator3.so.1` or `libappindicator3.so.1`
 at runtime. Distros that do not ship Ayatana AppIndicator (including
 **AerynOS**) used to abort the GUI. **v0.4.2** starts the Iced window
@@ -648,7 +680,7 @@ install the optional package (if your distro has it):
 sudo apt install libayatana-appindicator3-1
 # Fedora
 sudo dnf install libayatana-appindicator-gtk3
-# Arch
+# Arch / CachyOS
 sudo pacman -S libayatana-appindicator
 ```
 

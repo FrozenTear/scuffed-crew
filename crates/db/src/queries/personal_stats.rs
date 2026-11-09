@@ -65,6 +65,10 @@ struct DbPersonalMatch {
     #[serde(default)]
     #[surreal(default)]
     bans_picks: Option<serde_json::Value>,
+    /// Absent when the upload had no rank read, or the row predates the column.
+    #[serde(default)]
+    #[surreal(default)]
+    rank: Option<serde_json::Value>,
 }
 
 fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
@@ -98,6 +102,7 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
             .bans_picks
             .as_ref()
             .and_then(scuffed_types::bans_picks_from_stored),
+        rank: scuffed_types::resolve_rank(db.rank.as_ref()),
     }
 }
 
@@ -105,6 +110,11 @@ fn db_to_personal_match(db: DbPersonalMatch) -> PersonalMatch {
 /// the field on an update.
 fn bans_picks_value(value: Option<&scuffed_types::BansPicks>) -> Option<serde_json::Value> {
     value.and_then(|b| serde_json::to_value(b).ok())
+}
+
+/// JSON object to store for `rank`. `None` binds NONE, like `bans_picks`.
+fn rank_value(value: Option<&scuffed_types::MatchRank>) -> Option<serde_json::Value> {
+    value.and_then(|r| serde_json::to_value(r).ok())
 }
 
 /// Empty is unknown. The upload route never stores `""`, and a missing column
@@ -415,7 +425,7 @@ const UPSERT_BY_ID_SQL: &str = r#"UPSERT $rid SET
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
     edited = $edited, recognizer = $recognizer, name_recognizer = $name_recognizer,
-    suspect_fields = $suspect_fields, bans_picks = $bans_picks,
+    suspect_fields = $suspect_fields, bans_picks = $bans_picks, rank = $rank,
     played_at = $played, uploaded_at = time::now()
     RETURN AFTER"#;
 
@@ -425,7 +435,7 @@ const UPDATE_BY_SESSION_SQL: &str = r#"UPDATE personal_match SET
     elims = $elims, deaths = $deaths, assists = $assists,
     damage = $damage, healing = $healing, mitigation = $mit,
     edited = $edited, recognizer = $recognizer, name_recognizer = $name_recognizer,
-    suspect_fields = $suspect_fields, bans_picks = $bans_picks,
+    suspect_fields = $suspect_fields, bans_picks = $bans_picks, rank = $rank,
     played_at = $played, uploaded_at = time::now()
     WHERE member_id = $mid AND session_id = $sid
     RETURN AFTER"#;
@@ -544,6 +554,7 @@ impl Database {
                 ))
                 .bind(("suspect_fields", m.suspect_fields.clone()))
                 .bind(("bans_picks", bans_picks_value(m.bans_picks.as_ref())))
+                .bind(("rank", rank_value(m.rank.as_ref())))
                 .bind(("played", SurrealDatetime::from(m.played_at)))
                 .await?
                 .check()?;
@@ -1196,7 +1207,7 @@ const PERSONAL_MATCH_MIGRATION_BATCH: u32 = 2_000;
 
 const PERSONAL_MATCH_MIGRATION_COLS: &str =
     "id, member_id, session_id, hero, map_name, game_mode, \
-     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, recognizer, name_recognizer, suspect_fields, bans_picks, played_at, \
+     role, outcome, elims, deaths, assists, damage, healing, mitigation, edited, recognizer, name_recognizer, suspect_fields, bans_picks, rank, played_at, \
      uploaded_at";
 
 #[cfg(test)]
@@ -1725,7 +1736,7 @@ async fn relocate_personal_match(
                 elims = $elims, deaths = $deaths, assists = $assists,
                 damage = $damage, healing = $healing, mitigation = $mit,
                 edited = $edited, recognizer = $recognizer, name_recognizer = $name_recognizer,
-                suspect_fields = $suspect_fields, bans_picks = $bans_picks,
+                suspect_fields = $suspect_fields, bans_picks = $bans_picks, rank = $rank,
                 played_at = $played, uploaded_at = $uploaded"#,
         )
         .bind(("rid", rid))
@@ -1757,6 +1768,7 @@ async fn relocate_personal_match(
             row.suspect_fields.clone().unwrap_or_default(),
         ))
         .bind(("bans_picks", row.bans_picks.clone()))
+        .bind(("rank", row.rank.clone()))
         .bind(("played", row.played_at))
         .bind(("uploaded", row.uploaded_at))
         .await?
@@ -1800,6 +1812,7 @@ mod tests {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         }
     }
 
@@ -1998,6 +2011,91 @@ mod tests {
         let rows = db.list_personal_matches("m-bp", 10, 0).await.unwrap();
         let row = rows.iter().find(|r| r.session_id == "s-bp").unwrap();
         assert_eq!(row.bans_picks, None);
+        assert_eq!(row.elims, 4);
+    }
+
+    /// A row written before `rank` existed reads back as None. A full read
+    /// round trips, a re-upload without it clears it, and the session-index
+    /// migration keeps it when it moves a row to its deterministic key.
+    #[tokio::test]
+    async fn rank_legacy_none_round_trip_and_kept_by_rekey() {
+        let db = test_db().await;
+        drop_session_index(&db).await;
+        db.client
+            .query(
+                r#"REMOVE FIELD IF EXISTS rank ON personal_match;
+                   CREATE personal_match:legacy_rank SET
+                       member_id = 'm-rk', session_id = 'legacy-rk',
+                       hero = 'Ana', map_name = 'Oasis', game_mode = 'control',
+                       role = 'Support', outcome = 'victory',
+                       played_at = d'2026-07-01T20:00:00Z',
+                       uploaded_at = d'2026-07-01T21:00:00Z';
+                   DEFINE FIELD OVERWRITE rank ON personal_match TYPE option<object> FLEXIBLE;
+                   CREATE personal_match:moved_rank SET
+                       member_id = 'm-rk', session_id = 'moved-rk',
+                       hero = 'Ana', map_name = 'Oasis', game_mode = 'control',
+                       role = 'Support', outcome = 'victory',
+                       played_at = d'2026-07-02T20:00:00Z',
+                       uploaded_at = d'2026-07-02T21:00:00Z',
+                       rank = { division: { value: 3, confidence: 0.5 },
+                                rank_recognizer: 'rank-v1' };"#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        run_migrations(&db.client).await.unwrap();
+
+        let rows = db.list_personal_matches("m-rk", 10, 0).await.unwrap();
+        let legacy = rows.iter().find(|r| r.session_id == "legacy-rk").unwrap();
+        assert_eq!(legacy.rank, None);
+        let moved = rows.iter().find(|r| r.session_id == "moved-rk").unwrap();
+        assert_eq!(moved.id, personal_match_record_key("m-rk", "moved-rk"));
+        let kept = moved.rank.as_ref().expect("rank kept by rekey");
+        assert_eq!(kept.division.value, Some(3));
+        assert_eq!(kept.division.confidence, Some(0.5));
+        assert_eq!(kept.rank_recognizer.as_deref(), Some("rank-v1"));
+
+        let full = scuffed_types::MatchRank {
+            role: scuffed_types::RankField {
+                value: Some(scuffed_types::RankRole::Support),
+                confidence: Some(0.9),
+            },
+            role_rank: scuffed_types::RankField {
+                value: Some("Diamond".into()),
+                confidence: Some(0.8),
+            },
+            change_tags: scuffed_types::RankField {
+                value: Some(vec!["WIN".into(), "UPHILL BATTLE".into()]),
+                confidence: Some(0.7),
+            },
+            hero_sr_change: scuffed_types::RankField {
+                value: Some(-17),
+                confidence: Some(1.0),
+            },
+            queue_title: scuffed_types::RankField {
+                value: Some("COMPETITIVE: ROLE QUEUE".into()),
+                confidence: Some(0.95),
+            },
+            rank_recognizer: Some("rank-v1".into()),
+            ..Default::default()
+        };
+        let mut uploaded = entry("s-rk", "victory", 9);
+        uploaded.member_id = "m-rk".into();
+        uploaded.rank = Some(full.clone());
+        db.upsert_personal_matches("m-rk", &[uploaded])
+            .await
+            .unwrap();
+        let rows = db.list_personal_matches("m-rk", 10, 0).await.unwrap();
+        let row = rows.iter().find(|r| r.session_id == "s-rk").unwrap();
+        assert_eq!(row.rank.as_ref(), Some(&full));
+
+        db.upsert_personal_matches("m-rk", &[entry("s-rk", "victory", 4)])
+            .await
+            .unwrap();
+        let rows = db.list_personal_matches("m-rk", 10, 0).await.unwrap();
+        let row = rows.iter().find(|r| r.session_id == "s-rk").unwrap();
+        assert_eq!(row.rank, None);
         assert_eq!(row.elims, 4);
     }
 

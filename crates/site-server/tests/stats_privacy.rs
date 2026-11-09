@@ -158,6 +158,7 @@ fn game(member_id: &str, session_id: &str) -> PersonalMatch {
         name_recognizer: None,
         suspect_fields: Vec::new(),
         bans_picks: None,
+        rank: None,
     }
 }
 
