@@ -385,6 +385,7 @@ mod tests {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         }
     }
 

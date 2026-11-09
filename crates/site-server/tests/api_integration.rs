@@ -6460,6 +6460,7 @@ async fn public_leaderboard_and_hero_scoped_carry_wins_losses_draws() {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         }
     }
 
@@ -6609,6 +6610,7 @@ async fn public_members_hero_scoped_query() {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         },
         PersonalMatch {
             id: String::new(),
@@ -6632,6 +6634,7 @@ async fn public_members_hero_scoped_query() {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         },
         // Different hero must not count toward Ana-scoped games.
         PersonalMatch {
@@ -6656,6 +6659,7 @@ async fn public_members_hero_scoped_query() {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         },
     ];
     state
@@ -8394,6 +8398,7 @@ async fn seasons_crud_and_stats_season_filter() {
         name_recognizer: None,
         suspect_fields: Vec::new(),
         bans_picks: None,
+        rank: None,
     };
     // January game inside season 1, July game outside it.
     let matches = vec![
@@ -8711,6 +8716,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
         name_recognizer: None,
         suspect_fields: Vec::new(),
         bans_picks: None,
+        rank: None,
     };
 
     state

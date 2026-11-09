@@ -480,6 +480,148 @@ pub fn bans_picks_from_stored(value: &serde_json::Value) -> Option<BansPicks> {
     })
 }
 
+/// Max characters in each `rank` string value (`role_rank`,
+/// `next_mode_hint`, `queue_title`, each `change_tags` entry).
+pub const RANK_STRING_MAX_CHARS: usize = 64;
+/// Max entries in `rank.change_tags.value`.
+pub const RANK_MAX_CHANGE_TAGS: usize = 8;
+
+/// Queue role on a rank update screen. `Open` is open queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RankRole {
+    Tank,
+    Damage,
+    Support,
+    Open,
+}
+
+/// One rank-v1 field: the value read and how sure the reader was.
+///
+/// Either part is `None` (JSON null) when it was omitted or failed its
+/// check. The tracker's `bbox` is accepted on upload and dropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RankField<T> {
+    pub value: Option<T>,
+    /// 0..=1.
+    pub confidence: Option<f32>,
+}
+
+impl<T> Default for RankField<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            confidence: None,
+        }
+    }
+}
+
+/// Rank update screen read for one game (`rank` on uploads and match JSON).
+///
+/// Every field is always serialized as `{value, confidence}` so clients see
+/// one fixed shape. `rank_recognizer` is the reader id (`rank-v1`), which
+/// also covers `queue_title`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MatchRank {
+    #[serde(default)]
+    pub role: RankField<RankRole>,
+    #[serde(default)]
+    pub role_rank: RankField<String>,
+    /// 1..=5.
+    #[serde(default)]
+    pub division: RankField<u8>,
+    #[serde(default)]
+    pub progress_pct: RankField<i32>,
+    #[serde(default)]
+    pub progress_change: RankField<i32>,
+    /// At most [`RANK_MAX_CHANGE_TAGS`] entries.
+    #[serde(default)]
+    pub change_tags: RankField<Vec<String>>,
+    /// 0..=100.
+    #[serde(default)]
+    pub higher_than_pct: RankField<u8>,
+    #[serde(default)]
+    pub hero_sr: RankField<u32>,
+    #[serde(default)]
+    pub hero_sr_change: RankField<i32>,
+    #[serde(default)]
+    pub next_mode_hint: RankField<String>,
+    #[serde(default)]
+    pub queue_title: RankField<String>,
+    #[serde(default)]
+    pub rank_recognizer: Option<String>,
+}
+
+fn rank_string(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|s| s.chars().count() <= RANK_STRING_MAX_CHARS)
+        .map(str::to_string)
+}
+
+fn rank_int<T: TryFrom<i64>>(value: &serde_json::Value) -> Option<T> {
+    value.as_i64().and_then(|n| T::try_from(n).ok())
+}
+
+fn rank_field<T>(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    parse: impl Fn(&serde_json::Value) -> Option<T>,
+) -> RankField<T> {
+    let Some(field) = obj.get(key).and_then(serde_json::Value::as_object) else {
+        return RankField::default();
+    };
+    RankField {
+        value: field.get("value").and_then(&parse),
+        confidence: field
+            .get("confidence")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|c| c.is_finite() && (0.0..=1.0).contains(c))
+            .map(|c| c as f32),
+    }
+}
+
+/// Turn a raw `rank` value (upload or stored) into what is stored and returned.
+///
+/// Never an error: rank data must not cost the game. Omitted, null or a
+/// non-object `rank` is `None`. Inside it, a value or confidence that is the
+/// wrong type or out of range becomes null on its own, and unknown keys
+/// (including each field's `bbox`) are dropped. Checks: `division` 1..=5,
+/// `higher_than_pct` at most 100, `confidence` finite in 0..=1, integers in
+/// their type's range, strings at most [`RANK_STRING_MAX_CHARS`] characters,
+/// `change_tags` at most [`RANK_MAX_CHANGE_TAGS`] strings (otherwise the whole
+/// list is null), `role` one of `Tank`, `Damage`, `Support`, `Open`, and
+/// `rank_recognizer` the same id format as `recognizer`.
+pub fn resolve_rank(value: Option<&serde_json::Value>) -> Option<MatchRank> {
+    let obj = value?.as_object()?;
+    Some(MatchRank {
+        role: rank_field(obj, "role", |v| {
+            serde_json::from_value::<RankRole>(v.clone()).ok()
+        }),
+        role_rank: rank_field(obj, "role_rank", rank_string),
+        division: rank_field(obj, "division", |v| {
+            rank_int::<u8>(v).filter(|d| (1..=5).contains(d))
+        }),
+        progress_pct: rank_field(obj, "progress_pct", rank_int::<i32>),
+        progress_change: rank_field(obj, "progress_change", rank_int::<i32>),
+        change_tags: rank_field(obj, "change_tags", |v| {
+            let items = v.as_array().filter(|a| a.len() <= RANK_MAX_CHANGE_TAGS)?;
+            items.iter().map(rank_string).collect()
+        }),
+        higher_than_pct: rank_field(obj, "higher_than_pct", |v| {
+            rank_int::<u8>(v).filter(|p| *p <= 100)
+        }),
+        hero_sr: rank_field(obj, "hero_sr", rank_int::<u32>),
+        hero_sr_change: rank_field(obj, "hero_sr_change", rank_int::<i32>),
+        next_mode_hint: rank_field(obj, "next_mode_hint", rank_string),
+        queue_title: rank_field(obj, "queue_title", rank_string),
+        rank_recognizer: obj
+            .get("rank_recognizer")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| is_recognizer_id(id))
+            .map(str::to_string),
+    })
+}
+
 /// Max characters (not bytes) in each string field of one uploaded match
 /// (`session_id`, `hero`, `map_name`, `game_mode`, `role`, `outcome`) and in
 /// each `deleted_sessions` entry. Tracker session ids are 16 hex characters
@@ -642,13 +784,16 @@ pub struct StatsUploadMatch {
     /// Raw `bans_picks` value, `None` when omitted. Checked by
     /// [`resolve_bans_picks`] in the upload route.
     pub bans_picks: Option<serde_json::Value>,
+    /// Raw `rank` value, `None` when omitted. Read by [`resolve_rank`] in
+    /// the upload route. It never rejects the upload.
+    pub rank: Option<serde_json::Value>,
 }
 
 impl TryFrom<serde_json::Value> for StatsUploadMatch {
     type Error = String;
 
     fn try_from(mut value: serde_json::Value) -> Result<Self, Self::Error> {
-        let (recognizer, name_recognizer, suspect_fields, bans_picks) = {
+        let (recognizer, name_recognizer, suspect_fields, bans_picks, rank) = {
             let Some(obj) = value.as_object_mut() else {
                 return Err("match entry must be a JSON object".into());
             };
@@ -677,7 +822,14 @@ impl TryFrom<serde_json::Value> for StatsUploadMatch {
                 Some(_) => SuspectFieldsInput::NotAnArray,
             };
             let bans_picks = obj.remove("bans_picks");
-            (recognizer, name_recognizer, suspect_fields, bans_picks)
+            let rank = obj.remove("rank");
+            (
+                recognizer,
+                name_recognizer,
+                suspect_fields,
+                bans_picks,
+                rank,
+            )
         };
         let entry = serde_json::from_value(value).map_err(|err| err.to_string())?;
         Ok(Self {
@@ -686,6 +838,7 @@ impl TryFrom<serde_json::Value> for StatsUploadMatch {
             name_recognizer,
             suspect_fields,
             bans_picks,
+            rank,
         })
     }
 }
