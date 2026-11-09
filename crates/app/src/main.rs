@@ -20,6 +20,7 @@ mod state;
 mod stats_privacy;
 mod styles;
 mod theme;
+mod upload;
 mod util;
 
 use dioxus::prelude::*;
