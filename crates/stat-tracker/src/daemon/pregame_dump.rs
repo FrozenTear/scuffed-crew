@@ -732,7 +732,8 @@ impl<F: Clone> PregameTracker<F> {
                     name: phase.first_name(),
                     frame: frame.clone(),
                 }));
-                // Same frame: a one-tick phase writes no last.
+                // Same frame: a one-tick phase writes no last, except a
+                // hero ban (see `end_phase`).
                 self.on_screen = Some(OnScreen {
                     phase,
                     last: frame,
@@ -971,7 +972,8 @@ impl<F: Clone> PregameTracker<F> {
     }
 
     /// The phase on screen ended: write its last frame when that is not
-    /// the first one, and start the ban-results wait after a ban.
+    /// the first one (a hero ban always writes it), and start the
+    /// ban-results wait after a ban.
     fn end_phase(&mut self, now: Instant, shots: &mut Vec<PregameOp<F>>) {
         let Some(s) = self.on_screen.take() else {
             return;
@@ -982,7 +984,11 @@ impl<F: Clone> PregameTracker<F> {
         if s.phase == PregamePhase::HeroBan {
             self.ban_ended_at = game.last_seen[s.phase.index()].or(Some(now));
         }
-        if s.last_is_new {
+        // A one-tick hero ban (the focus gate paused right after its first
+        // tick) still writes heroban_last: the bans reader holds only that
+        // frame as the vote, so skipping it leaves the bans unread. Its
+        // pixels may match heroban_first.
+        if s.last_is_new || s.phase == PregamePhase::HeroBan {
             shots.push(PregameOp::Save(PregameShot {
                 folder: game.folder.clone(),
                 name: s.phase.last_name(),
