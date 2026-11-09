@@ -205,8 +205,8 @@ Two setup steps are easy to miss and cause most first-run problems:
    See Platform requirements above for the commands and a check.
 2. **Install Ayatana AppIndicator for Hide-to-tray.** Without it the app
    starts with no tray icon and a "missing library" notice, and closing the
-   window quits. From 0.6.0-alpha.3 the AUR packages pull it in; for the
-   tarball install it yourself:
+   window quits. From 0.6.0-alpha.3 the alpha AUR package pulls it in; for
+   the stable AUR package or the tarball, install it yourself:
 
    ```sh
    # Arch / CachyOS
