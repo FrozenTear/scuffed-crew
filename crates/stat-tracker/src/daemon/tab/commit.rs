@@ -72,6 +72,7 @@ pub(crate) async fn store_held_board(
         name_recognizer: None,
         bans_picks: None,
         bans_picks_status: None,
+        queue_title: None,
     };
     storage::append_match_log(data_dir, &row);
     store

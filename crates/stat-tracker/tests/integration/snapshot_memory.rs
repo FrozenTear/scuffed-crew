@@ -173,6 +173,7 @@ fn row(game: usize, capture: usize) -> PersonalMatch {
         name_recognizer: Some("names-v1".into()),
         bans_picks: None,
         bans_picks_status: None,
+        queue_title: None,
     }
 }
 

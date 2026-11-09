@@ -14,9 +14,10 @@
 //! The whole title is matched as one picture, no OCR:
 //!
 //! 1. Crop a fixed region around the title at the 2560x1440 reference
-//!    ([`REF_X`], [`REF_Y_MAPVOTE`], [`REF_Y_SELECT`]), scaled by frame
-//!    height / 1440 so 1080p works. Map vote draws the title 27 px higher
-//!    than hero select and hero ban.
+//!    ([`REF_X`], [`REF_Y_MAPVOTE`], [`REF_Y_SELECT`]), placed in the
+//!    frame's 16:9 game rect and scaled by its height / 1440, so 1080p,
+//!    ultrawide and 16:10 work. Map vote draws the title 27 px higher than
+//!    hero select and hero ban.
 //! 2. Turn it into an ink plane: the smallest of R, G, B (the title is grey
 //!    to white, the backdrop is dark red), with strongly saturated pixels
 //!    set to zero. That drops the pink voice chat indicator that overlaps
@@ -58,11 +59,14 @@
 //!
 //! # What a caller must do
 //!
-//! * Pass a 16:9 frame (1080p or 1440p) with its [`Screen`].
+//! * Pass a whole frame with its [`Screen`]. Only its 16:9 game rect is
+//!   read; a non-16:9 area (ultrawide side bars, 16:10 bands) never is.
 //! * For one value per game, use [`pick`] (hero ban first, then hero
 //!   select last) or [`Reader::read_dump_dir`] on a pregame dump folder.
 //!
-//! The live capture path does not call this yet: no stored field, no upload.
+//! The live capture path reads it through `daemon::queue_title` in the
+//! binary, which puts the result on the game record
+//! (`PersonalMatch::queue_title`) and the upload.
 
 pub mod templates;
 
@@ -75,6 +79,7 @@ use image::RgbImage;
 use serde::{Deserialize, Serialize};
 
 use super::ncc::Gray;
+use crate::frame::geometry::game_rect_16_9;
 pub use templates::{Learner, PACK_FILE, TEMPLATE_DIR, TemplateError, TemplateSet};
 
 /// The recognizer id written next to the value.
@@ -241,22 +246,30 @@ pub struct ClassScore {
 
 /// The title region of `img` as a padded ink plane of
 /// `(TW + 2*PAD) x (TH + 2*PAD)`, and the frame rectangle it was cut from
-/// (`[x, y, w, h]`). `None` for a frame too small to hold the region.
+/// (`[x, y, w, h]`). The region is placed in the frame's 16:9 game rect
+/// ([`game_rect_16_9`]), so an ultrawide or 16:10 frame is read from its
+/// playfield and an exact 16:9 frame is read as before. `None` for a game
+/// rect too small to hold the region, or so small that the region would
+/// have to be scaled up to the template size (below 360 px tall).
 pub fn plane(img: &RgbImage, screen: Screen) -> Option<(Gray, [u32; 4])> {
-    let s = img.height() as f32 / FRAME_H as f32;
+    let (gx, gy, gw, gh) = game_rect_16_9(img.width(), img.height());
+    let s = gh as f32 / FRAME_H as f32;
     let pad = PAD as u32 * STEP;
     let rx = REF_X - pad;
     let ry = screen.ref_y() - pad;
     let rw = REF_W + 2 * pad;
     let rh = REF_H + 2 * pad;
-    let x0 = (rx as f32 * s).round() as u32;
-    let y0 = (ry as f32 * s).round() as u32;
-    let x1 = ((rx + rw) as f32 * s).round() as u32;
-    let y1 = ((ry + rh) as f32 * s).round() as u32;
-    if x1 > img.width() || y1 > img.height() || x1 <= x0 || y1 <= y0 {
+    let x0 = gx + (rx as f32 * s).round() as u32;
+    let y0 = gy + (ry as f32 * s).round() as u32;
+    let x1 = gx + ((rx + rw) as f32 * s).round() as u32;
+    let y1 = gy + ((ry + rh) as f32 * s).round() as u32;
+    if x1 > gx + gw || y1 > gy + gh || x1 <= x0 || y1 <= y0 {
         return None;
     }
     let (cw, ch) = ((x1 - x0) as usize, (y1 - y0) as usize);
+    if cw < TW + 2 * PAD || ch < TH + 2 * PAD {
+        return None;
+    }
     let mut g = Gray::new(cw, ch);
     for y in 0..ch {
         for x in 0..cw {

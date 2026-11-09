@@ -937,10 +937,9 @@ fn server_validator_accepts_log_only_manifest() {
 
 const HOST_LINE: &str = "host desktop=KDE session=wayland drm=card0:amdgpu[eDP-1:disconnected];card1:nvidia[DP-1:connected] drm_output_cards=card1 nvidia_drm_modeset=Y";
 
-/// The host line (desktop, GPU topology) is the first line of `log.txt` in
-/// every log-only report, and the manifest's `system` keys do not change,
-/// so the site's validator (unknown `system` keys are invalid) still takes
-/// it.
+/// The host line (desktop, GPU topology) leads `log.txt` in every log-only
+/// report, and the manifest's `system` keys do not change, so the site's
+/// validator (unknown `system` keys are invalid) still takes it.
 #[test]
 fn the_host_line_leads_log_txt_and_leaves_the_manifest_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -1443,6 +1442,7 @@ mod game {
                 name_recognizer: None,
                 bans_picks: None,
                 bans_picks_status: None,
+                queue_title: None,
             }],
             ..crate::storage::Snapshot::default()
         };

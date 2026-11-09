@@ -320,6 +320,7 @@ pub(crate) fn test_match(session_id: &str, outcome: &str) -> storage::PersonalMa
         name_recognizer: None,
         bans_picks: None,
         bans_picks_status: None,
+        queue_title: None,
     }
 }
 
@@ -787,8 +788,7 @@ pub(crate) async fn r9_unlatched_game(
     .await;
     assert_eq!(verdict, None);
     assert_eq!(st.active_game.as_ref().unwrap().session_id, "live");
-    // Past it, 39 s after that board (Tab pressed after the result):
-    // the board decides.
+    // Past it, 39 s after that board (Tab after the result): board decides.
     let press = t0 + Duration::from_secs(150);
     assert!(should_start_fresh_session(st.active_game.as_ref(), press));
     assert!(finished_game_tab_probe(st.active_game.as_ref(), press));

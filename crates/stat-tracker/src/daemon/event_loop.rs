@@ -349,10 +349,11 @@ pub(crate) async fn run_loop(
                         data_dir,
                         st.capture_count,
                     );
-                    // The bans and picks read for this game, before the live
-                    // snapshot is cut so it carries them.
+                    // The bans and picks and the queue title reads for this
+                    // game, before the live snapshot is cut so it carries them.
                     if let Some(dump) = pregame_dump.as_mut() {
                         dump.attach_bans_picks(store, &stored_sid).await;
+                        dump.attach_queue_title(store, &stored_sid).await;
                     } else if let Err(e) = store
                         .attach_bans_picks_status(
                             &stored_sid,

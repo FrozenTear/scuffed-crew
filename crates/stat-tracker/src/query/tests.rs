@@ -28,6 +28,7 @@ fn game(sid: &str, hero: &str, role: Role, outcome: Outcome, mins: i64) -> Game 
         recognizer: "cv-v8".into(),
         bans_picks: None,
         bans_picks_status: None,
+        queue_title: None,
     }
 }
 

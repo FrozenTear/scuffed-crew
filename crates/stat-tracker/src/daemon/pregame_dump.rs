@@ -85,10 +85,13 @@ mod classify;
 mod folders;
 mod pending;
 mod post;
+mod queue;
 mod rejects;
 mod roster;
 #[cfg(test)]
 mod tests_bans;
+#[cfg(test)]
+mod tests_queue;
 mod trail;
 mod writer;
 
@@ -1028,6 +1031,9 @@ pub(crate) struct PregameDump {
     /// The bans and picks reader's feed: sees every batch, `None` with the
     /// reader off.
     bans: Option<super::bans_picks::BansPicksFeed>,
+    /// The queue title reader's feed: sees every batch, `None` with the
+    /// reader off ([`super::queue_title`]).
+    queue: Option<super::queue_title::QueueTitleFeed>,
     /// Why the game has no hero-select frame or no picks ([`trail`]).
     trail: trail::PregameTrail,
     /// Where the summary line is also kept ([`trail::SUMMARY_FILE`]);
@@ -1060,6 +1066,18 @@ impl PregameDump {
             );
             return None;
         }
+        Self::start(on, bans, data_dir, poll)
+    }
+
+    /// The saver, whatever the switches say: [`Self::with_bans_picks`]
+    /// past its check, and the queue title reader's way in
+    /// ([`Self::add_queue_title`]).
+    fn start(
+        on: bool,
+        bans: Option<super::bans_picks::BansPicksFeed>,
+        data_dir: &std::path::Path,
+        poll: Duration,
+    ) -> Option<Self> {
         let root = pregame_dir(data_dir);
         let examples_dir = super::pregame_ban_title::ban_title_dir(data_dir);
         let examples = super::pregame_ban_title::BanTitleExamples::load_dir(&examples_dir);
@@ -1094,6 +1112,7 @@ impl PregameDump {
                 post_polled_at: None,
                 post_ticked_at: None,
                 bans,
+                queue: None,
                 trail: trail::PregameTrail::default(),
                 summary_log: Some(data_dir.join(trail::SUMMARY_FILE)),
             }),
@@ -1123,6 +1142,7 @@ impl PregameDump {
             post_polled_at: None,
             post_ticked_at: None,
             bans: None,
+            queue: None,
             trail: trail::PregameTrail::default(),
             summary_log: None,
         }
@@ -1214,6 +1234,9 @@ impl PregameDump {
             .collect();
         if let Some(bans) = self.bans.as_mut() {
             bans.observe(&shots);
+        }
+        if let Some(queue) = self.queue.as_mut() {
+            queue.observe(&shots);
         }
         self.trail.shots(&shots);
         let saves: Vec<(String, &'static str)> = shots

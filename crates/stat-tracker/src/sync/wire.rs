@@ -20,6 +20,36 @@ pub struct UploadEntry {
     entry: StatsUploadEntry,
     #[serde(skip_serializing_if = "Option::is_none")]
     bans_picks: Option<UploadBansPicks>,
+    /// The queue read on the pre-game screens (`rank-v1`), as
+    /// `{value, confidence}`. Left out unless the game has a confident
+    /// read, so an older server and a game with the reader off see the same
+    /// body as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    queue_title: Option<UploadQueueTitle>,
+}
+
+/// The `queue_title` object of one uploaded match (`rank-v1`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UploadQueueTitle {
+    pub value: String,
+    pub confidence: f32,
+}
+
+/// The stored queue title as the upload sends it: only a confident value,
+/// `None` (no key) otherwise.
+pub(super) fn upload_queue_title(
+    stored: Option<&crate::model::QueueTitle>,
+) -> Option<UploadQueueTitle> {
+    let stored = stored?;
+    let value = stored
+        .value
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())?;
+    Some(UploadQueueTitle {
+        value: value.to_string(),
+        confidence: stored.confidence,
+    })
 }
 
 impl Deref for UploadEntry {
@@ -105,6 +135,7 @@ pub fn upload_request(matches: &[PersonalMatch], deleted_sessions: &[String]) ->
                 entry,
                 // Plain values only, None (no key) when nothing was read.
                 bans_picks: upload_bans_picks(m.bans_picks.as_deref()),
+                queue_title: upload_queue_title(m.queue_title.as_ref()),
             })
         })
         .collect();

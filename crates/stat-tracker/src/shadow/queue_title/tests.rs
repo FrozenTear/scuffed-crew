@@ -171,6 +171,65 @@ fn frame_too_narrow_for_the_title_is_none() {
     assert_eq!(r.read_field(&narrow, Screen::HeroBan), Field::none());
 }
 
+/// `inner` (a 16:9 frame) centred on a `w` x `h` black canvas: the bars
+/// an ultrawide or 16:10 capture has around the game.
+fn boxed(inner: &RgbImage, w: u32, h: u32) -> RgbImage {
+    let mut img = RgbImage::from_pixel(w, h, Rgb([0, 0, 0]));
+    imageops::replace(
+        &mut img,
+        inner,
+        i64::from((w - inner.width()) / 2),
+        i64::from((h - inner.height()) / 2),
+    );
+    img
+}
+
+#[test]
+fn ultrawide_frame_reads_the_title_from_its_16_9_game_rect() {
+    let r = Reader::new(pack(&[0, 1]));
+    let inner = frame(1, Screen::HeroBan, 230);
+    let wide = boxed(&inner, 3440, 1440);
+    // The game rect is the centred 2560 px, 440 px in from the left.
+    let (want, [x, y, w, h]) = plane(&inner, Screen::HeroBan).unwrap();
+    let (got, rect) = plane(&wide, Screen::HeroBan).unwrap();
+    assert_eq!(rect, [x + 440, y, w, h]);
+    assert_eq!(got.px, want.px, "the same pixels as the 16:9 playfield");
+    let f = r.read_field(&wide, Screen::HeroBan);
+    assert_eq!(f.value.as_deref(), Some(NAMES[1]));
+    let [x0, _, x1, _] = f.bbox.unwrap();
+    assert!(x0 >= 440 && x1 <= 440 + 2560, "{x0} {x1}");
+    assert_eq!(f.value, r.read_field(&inner, Screen::HeroBan).value);
+}
+
+#[test]
+fn letterboxed_16_10_frame_reads_the_title_from_its_game_rect() {
+    let r = Reader::new(pack(&[0, 1]));
+    let inner = frame(0, Screen::MapVote, 230);
+    let tall = boxed(&inner, 2560, 1600);
+    let (_, [x, y, ..]) = plane(&inner, Screen::MapVote).unwrap();
+    assert_eq!(plane(&tall, Screen::MapVote).unwrap().1[..2], [x, y + 80]);
+    let f = r.read_field(&tall, Screen::MapVote);
+    assert_eq!(f.value.as_deref(), Some(NAMES[0]));
+}
+
+#[test]
+fn exact_16_9_frames_cut_the_same_rect_as_before() {
+    // The full frame is its own game rect: the rect is the one the reader
+    // cut before the game rect existed, at 1440p and at 1080p.
+    let big = frame(0, Screen::HeroBan, 230);
+    assert_eq!(plane(&big, Screen::HeroBan).unwrap().1, [32, 79, 496, 156]);
+    assert_eq!(plane(&big, Screen::MapVote).unwrap().1, [32, 52, 496, 156]);
+    let small = imageops::resize(&big, 1920, 1080, FilterType::Lanczos3);
+    assert_eq!(
+        plane(&small, Screen::HeroBan).unwrap().1,
+        [24, 59, 372, 117]
+    );
+    // 360 px tall is the smallest game rect read without scaling up.
+    let tiny = |w, h| imageops::resize(&big, w, h, FilterType::Triangle);
+    assert!(plane(&tiny(640, 360), Screen::HeroBan).is_some());
+    assert!(plane(&tiny(320, 180), Screen::HeroBan).is_none());
+}
+
 fn cs(class: &str, score: f32, strip: f32) -> ClassScore {
     ClassScore {
         class: class.to_string(),

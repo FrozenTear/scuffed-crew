@@ -287,6 +287,52 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub bans_picks_status: Option<BansPicksStatus>,
+    /// The queue Scuffed Vision's queue title reader (`rank-v1`) read on
+    /// this game's pre-game screens. Set when the game is first recorded
+    /// with the reader on, kept on every snapshot of the match. `None` with
+    /// the reader off and on games recorded before the field existed.
+    /// Omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub queue_title: Option<QueueTitle>,
+}
+
+/// The game's queue ([`PersonalMatch::queue_title`]): the confident read,
+/// or a warning that the read was weak and the queue is not known.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct QueueTitle {
+    /// The title as the pack spells it (`OPEN QUEUE`). Only a read the
+    /// reader accepted sets it; a weak read never changes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub value: Option<String>,
+    /// The confidence of the read that set `value`, 0..1; 0 without one.
+    #[serde(default)]
+    #[surreal(default)]
+    pub confidence: f32,
+    /// The last read for this game was weak, failed or had no frame, so
+    /// `value` was left as it was. Shown as [`QUEUE_TITLE_WARNING`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[surreal(default)]
+    pub unsure: bool,
+    /// The pending next mode hint this game's read confirmed (the mode
+    /// banner word seen after the game before). `None` when there was none,
+    /// or the read dropped it or left it pending.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub mode_hint: Option<String>,
+}
+
+/// The warning for a game whose queue title read was weak or failed.
+pub const QUEUE_TITLE_WARNING: &str =
+    "Queue not read clearly on the pre-game screens, so this game's queue is not known.";
+
+impl QueueTitle {
+    /// [`QUEUE_TITLE_WARNING`] when the read was weak, else `None`.
+    pub fn warning(&self) -> Option<&'static str> {
+        self.unsure.then_some(QUEUE_TITLE_WARNING)
+    }
 }
 
 /// A screen of the pre-game the bans and picks reader had no frame for.

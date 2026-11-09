@@ -928,6 +928,7 @@ mod tests {
             name_recognizer: None,
             bans_picks: None,
             bans_picks_status: None,
+            queue_title: None,
         }
     }
 

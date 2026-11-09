@@ -776,7 +776,11 @@ pub(crate) fn small_chip(
     small_chip_owned(label.to_string(), color, border)
 }
 
-fn small_chip_owned(label: String, color: Color, border: Color) -> Element<'static, Message> {
+pub(crate) fn small_chip_owned(
+    label: String,
+    color: Color,
+    border: Color,
+) -> Element<'static, Message> {
     container(
         text(label)
             .size(SIZE_LABEL)

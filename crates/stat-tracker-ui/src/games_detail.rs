@@ -319,6 +319,18 @@ impl Tracked {
     }
 }
 
+/// The queue title warning for the map line: the sentence when the read
+/// was weak, `None` when it was confident or never made (reader off).
+pub fn queue_warning(g: &Game) -> Option<&'static str> {
+    g.queue_title.as_ref().and_then(|t| t.warning())
+}
+
+/// The confident queue ("OPEN QUEUE") for the map line's chip, if any.
+pub fn queue_value(g: &Game) -> Option<String> {
+    let value = g.queue_title.as_ref()?.value.as_deref()?.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
 /// One bar segment of the hero timeline, in time order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BarPart {
@@ -655,6 +667,7 @@ mod tests {
             recognizer: "cv-v1".into(),
             bans_picks: None,
             bans_picks_status: None,
+            queue_title: None,
         }
     }
 
@@ -1020,5 +1033,36 @@ mod tests {
         assert!(!sync_on_for(&with("", "tok")));
         assert!(!sync_on_for(&with("https://crew.example", "  ")));
         assert!(sync_on_for(&with("https://crew.example", "tok")));
+    }
+
+    /// The queue title warning shows only for a weak read; the chip only
+    /// for a confident value. The reader off (no title) shows neither.
+    #[test]
+    fn the_queue_warning_shows_only_for_a_weak_read() {
+        use stat_tracker::model::{QUEUE_TITLE_WARNING, QueueTitle};
+        let mut g = game("a", "Ana", 1, 1, at(20, 0, 0));
+        assert_eq!((queue_warning(&g), queue_value(&g)), (None, None));
+        let confident = QueueTitle {
+            value: Some("OPEN QUEUE".into()),
+            confidence: 0.93,
+            ..QueueTitle::default()
+        };
+        g.queue_title = Some(confident.clone());
+        assert_eq!(queue_warning(&g), None);
+        assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
+        // Weak with no earlier value: the warning, no chip.
+        g.queue_title = Some(QueueTitle {
+            unsure: true,
+            ..QueueTitle::default()
+        });
+        assert_eq!(queue_warning(&g), Some(QUEUE_TITLE_WARNING));
+        assert_eq!(queue_value(&g), None);
+        // Weak over a kept value: both.
+        g.queue_title = Some(QueueTitle {
+            unsure: true,
+            ..confident
+        });
+        assert_eq!(queue_warning(&g), Some(QUEUE_TITLE_WARNING));
+        assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
     }
 }

@@ -228,6 +228,10 @@ pub struct Game {
     /// Why the bans and picks are as they are. `None` for a game recorded
     /// before the status existed.
     pub bans_picks_status: Option<crate::model::BansPicksStatus>,
+    /// The queue read on the pre-game screens, with its warning when the
+    /// read was weak ([`crate::model::QueueTitle::warning`]). `None` with
+    /// the queue title reader off.
+    pub queue_title: Option<crate::model::QueueTitle>,
 }
 
 /// The six stats a "N stats unsure" count covers, as flat names.
@@ -277,6 +281,7 @@ impl Game {
             recognizer: m.stored_recognizer().to_string(),
             bans_picks: m.bans_picks.clone(),
             bans_picks_status: m.bans_picks_status.clone(),
+            queue_title: m.queue_title.clone(),
         }
     }
 
@@ -594,6 +599,7 @@ mod tests {
             recognizer: String::new(),
             bans_picks: None,
             bans_picks_status: None,
+            queue_title: None,
         };
         assert!(game.field_unsure("dmg"));
         assert!(game.field_unsure("hero"));
@@ -629,6 +635,7 @@ mod tests {
             recognizer: String::new(),
             bans_picks: None,
             bans_picks_status: None,
+            queue_title: None,
         };
         for field in [
             "hero", "result", "map", "mode", "e", "a", "d", "dmg", "h", "mit",
@@ -667,6 +674,7 @@ mod review_tests {
             recognizer: String::new(),
             bans_picks: None,
             bans_picks_status: None,
+            queue_title: None,
         }
     }
 

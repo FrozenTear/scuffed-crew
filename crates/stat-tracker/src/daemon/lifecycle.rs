@@ -583,6 +583,14 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         &ctx.data_dir,
         ctx.auto_detect.poll_interval(ctx.use_new_reader),
     );
+    // The queue title reader: off unless its env switch is on and the pack
+    // loads; off leaves the saver as it is.
+    daemon::pregame_dump::PregameDump::add_queue_title(
+        &mut pregame_dump,
+        daemon::queue_title::QueueTitleFeed::from_env(&ctx.data_dir),
+        &ctx.data_dir,
+        ctx.auto_detect.poll_interval(ctx.use_new_reader),
+    );
     let result = run_loop(
         Arc::clone(&ctx),
         early_sigterm,
