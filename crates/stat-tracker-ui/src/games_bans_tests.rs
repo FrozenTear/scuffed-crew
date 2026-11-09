@@ -126,7 +126,6 @@ fn a_full_read_has_four_rows_and_the_bans_on_one() {
             ..Legend::default()
         }
     );
-    assert_eq!(b.pill(), None);
 }
 
 #[test]
@@ -154,7 +153,6 @@ fn a_partial_read_keeps_its_gaps_visible() {
         b.legend(),
         Legend {
             banned: true,
-            unsure: false,
             swap: true,
             outline: true,
         }
@@ -295,7 +293,6 @@ fn no_ban_screen_seen_comes_from_the_status() {
         names(row(&b.rows, LABEL_HERO_SELECT)),
         ["Reinhardt", "Tracer"]
     );
-    assert_eq!(b.pill(), None);
     // The fixture game: same words, and a card with no glyphs has no
     // legend.
     let b = block_of(&game(NO_BAN));
@@ -728,79 +725,41 @@ fn no_swap_mark_when_the_pick_is_one_of_the_played_chips() {
     assert!(played(&g).iter().all(|c| !c.swap));
 }
 
-/// No game stores a suspect flag or a weak flag for bans and picks yet,
-/// so no fixture state draws amber.
+/// cv-v1 has no unsure state yet (a3b decisions): tooltips never say
+/// "might be misread", and below-threshold slots show as Not read.
 #[test]
-fn no_stored_game_is_unsure_or_weak_yet() {
+fn nothing_amber_while_cv_v1_has_no_unsure_state() {
     for sid in [NORMAL, UNSURE, SIDE, NO_BAN, SKIP] {
         let b = block_of(&game(sid));
-        assert!(!b.weak, "{sid}");
-        assert!(b.chips().all(|c| !c.suspect), "{sid}");
-        assert_eq!(b.unsure(), 0, "{sid}");
-        assert_eq!(b.pill(), None, "{sid}");
-        assert!(!b.legend().unsure, "{sid}");
+        for r in &b.rows {
+            for c in r
+                .parts
+                .iter()
+                .filter_map(|p| match p {
+                    Part::Chips(chips) => Some(chips.as_slice()),
+                    _ => None,
+                })
+                .flatten()
+            {
+                assert!(
+                    !c.tooltip().contains("might be misread"),
+                    "{sid}: {}",
+                    c.tooltip()
+                );
+            }
+        }
+        let _ = b.legend();
     }
-}
-
-fn mark(b: &mut Block, label: &str, nth: usize) {
-    let r = b.rows.iter_mut().find(|r| r.label == label).unwrap();
-    let chip = r
-        .parts
-        .iter_mut()
-        .filter_map(|p| match p {
-            Part::Chips(chips) => Some(chips),
-            _ => None,
-        })
-        .flat_map(|chips| chips.iter_mut())
-        .nth(nth)
-        .unwrap();
-    chip.suspect = true;
-}
-
-/// The hook: once a read carries the flag, its chip turns unsure and the
-/// header counts it. Played and slots that are not a hero never count.
-#[test]
-fn the_suspect_hook_counts_bans_votes_and_hero_select() {
-    let mut b = block_of(&game(NORMAL));
-    mark(&mut b, LABEL_BANS, 1); // Mauga
-    mark(&mut b, LABEL_VOTES, 2); // Genji
-    mark(&mut b, LABEL_PLAYED, 0);
-    assert_eq!(b.unsure(), 2);
-    assert_eq!(b.pill(), Some(Pill::Unsure(2)));
-    assert_eq!(Pill::Unsure(2).words(), "2 unsure");
     assert_eq!(
-        Pill::Unsure(2).tip(),
-        "Reads the tracker is not sure about. They count only bans, ban votes and hero select."
+        chips(&block_of(&game(NORMAL)).rows, LABEL_BANS)[1].tooltip(),
+        "Banned: Mauga"
     );
-    assert!(b.legend().unsure);
-    let mauga = chips(&b.rows, LABEL_BANS)[1].clone();
-    assert!(mauga.unsure());
-    assert_eq!(
-        mauga.tooltip(),
-        "Banned: Mauga. Mauga might be misread. Use Report misread if it is wrong."
+    // Partial fixture: unread ban slots are Not read, not an amber mark.
+    assert!(
+        chips(&block_of(&game(UNSURE)).rows, LABEL_BANS)
+            .iter()
+            .any(|c| c.name() == "Not read")
     );
-    // A Not read slot with the flag is still only Not read.
-    let mut b = block_of(&game(UNSURE));
-    mark(&mut b, LABEL_BANS, 2);
-    assert_eq!(b.unsure(), 0);
-    assert_eq!(chips(&b.rows, LABEL_BANS)[2].tooltip(), "Ban 3: not read");
-}
-
-/// The fallback hook: the game-level flag draws "Reads may be off" only
-/// when no chip is marked; per-read flags win.
-#[test]
-fn the_weak_hook_is_a_fallback_pill() {
-    let mut b = block_of(&game(NORMAL));
-    b.weak = true;
-    assert_eq!(b.pill(), Some(Pill::Weak));
-    assert_eq!(Pill::Weak.words(), "Reads may be off");
-    assert_eq!(
-        Pill::Weak.tip(),
-        "The reader wasn't sure about this game's screens. Check the names. Use Report misread if one is wrong."
-    );
-    assert!(!b.legend().unsure);
-    mark(&mut b, LABEL_HERO_SELECT, 0);
-    assert_eq!(b.pill(), Some(Pill::Unsure(1)));
 }
 
 #[test]

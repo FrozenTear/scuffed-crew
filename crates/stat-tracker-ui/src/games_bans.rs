@@ -4,10 +4,10 @@
 //! stay default" (`redesign/ux-spec/bans-picks-a3.md`), on top of v2 and its
 //! alpha.2.1 addendum (`redesign/ux-spec/bans-picks.md`).
 //!
-//! The block is a header (label, the unsure pill, a one-line legend) and four
-//! rows with their label on the left at every width: Bans, Your ban votes,
-//! Hero select and Played. A row that was not read says so in one quiet line,
-//! so the layout never jumps between games.
+//! The block is a header (label, a one-line legend) and four rows with their
+//! label on the left at every width: Bans, Your ban votes, Hero select and
+//! Played. A row that was not read says so in one quiet line, so the layout
+//! never jumps between games.
 //!
 //! The data is the game's stored cv-v1 JSON (`Game::bans_picks`) and its
 //! status (`Game::bans_picks_status`). The JSON is read leniently: a value
@@ -18,13 +18,12 @@
 //! read; a game stored before the status existed keeps the older "weren't
 //! read" wording.
 //!
-//! Hooks with no data behind them yet: [`Chip::suspect`] (the amber "might be
-//! misread" mark and the "N unsure" pill) and [`Block::weak`] (the "Reads may
-//! be off" pill). The tracker stores no per-read suspect flag for bans, the
-//! lobby ban, ban votes or hero select, and no game-level weak flag: the band
-//! that makes a read "suspect" is still an open question for Vision. Both are
-//! always false today. Also not drawn, as the data does not exist: the Their
-//! team Played row (the tracker stores only our own hero).
+//! cv-v1 has no unsure / middle state yet: below the accept bar a slot is
+//! stored with no value (Not read here). So nothing amber is drawn: no
+//! warning sign on chips, no "N unsure" pill, no "Reads may be off" pill, and
+//! the legend leaves out "Might be misread". When Vision adds a middle state
+//! between accept and reject, amber marks and pills can return. Also not
+//! drawn: the Their team Played row (the tracker stores only our own hero).
 
 use scuffed_types::{
     BANS_PICKS_MAX_BAN_VOTE, BANS_PICKS_MAX_BANS, BANS_PICKS_MAX_PICKS, BANS_PICKS_NO_PREFERENCE,
@@ -72,15 +71,8 @@ pub const LEGACY_HERO_SELECT: &str = "Hero select wasn't read for this game.";
 /// The Played row of a game with no hero (the a3 wording).
 pub const PLAYED_NOT_READ: &str = "Not read";
 
-/// The header pills (both amber, with the warning sign).
-pub const UNSURE_PILL_TIP: &str =
-    "Reads the tracker is not sure about. They count only bans, ban votes and hero select.";
-pub const WEAK_PILL: &str = "Reads may be off";
-pub const WEAK_PILL_TIP: &str = "The reader wasn't sure about this game's screens. Check the names. Use Report misread if one is wrong.";
-
 /// The legend words, one per glyph the card uses.
 pub const LEGEND_BANNED: &str = "Banned";
-pub const LEGEND_UNSURE: &str = "Might be misread";
 pub const LEGEND_SWAP: &str = "Swapped hero";
 pub const LEGEND_OUTLINE: &str = "Not read or not seen";
 
@@ -112,11 +104,6 @@ pub struct Chip {
     pub you: bool,
     /// Our own Played chip when it differs from our hero select hero.
     pub swap: bool,
-    /// The reader was not sure of this hero: amber outline and warning sign,
-    /// and it counts toward "N unsure". Hook only: always false today, as
-    /// the tracker stores no per-read suspect flag for bans and picks yet
-    /// (Vision's confidence band is still open). Never set on Played.
-    pub suspect: bool,
     /// The tooltip, which is also the spoken label of the chip.
     pub tip: String,
 }
@@ -133,27 +120,15 @@ impl Chip {
         }
     }
 
-    /// Whether the chip is drawn unsure: a read hero the reader flagged.
-    pub fn unsure(&self) -> bool {
-        self.suspect && matches!(self.slot, Slot::Hero(_))
-    }
-
     /// The outline chip shared by Not read and Not seen.
     pub fn outline(&self) -> bool {
         matches!(self.slot, Slot::NotRead | Slot::Empty)
     }
 
-    /// The tooltip as shown and spoken: an unsure chip says so.
+    /// The tooltip as shown and spoken. No "might be misread" wording while
+    /// cv-v1 has no unsure state.
     pub fn tooltip(&self) -> String {
-        if self.unsure() {
-            format!(
-                "{}. {} might be misread. Use Report misread if it is wrong.",
-                self.tip,
-                self.name()
-            )
-        } else {
-            self.tip.clone()
-        }
+        self.tip.clone()
     }
 }
 
@@ -195,55 +170,24 @@ impl Row {
     }
 }
 
-/// The amber pill in the header, if any.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pill {
-    /// "N unsure": per-read flags, counting bans, the lobby ban, ban votes
-    /// and hero select (never Played).
-    Unsure(usize),
-    /// "Reads may be off": only a game-level flag exists.
-    Weak,
-}
-
-impl Pill {
-    pub fn words(self) -> String {
-        match self {
-            Pill::Unsure(n) => format!("{n} unsure"),
-            Pill::Weak => WEAK_PILL.to_string(),
-        }
-    }
-
-    pub fn tip(self) -> &'static str {
-        match self {
-            Pill::Unsure(_) => UNSURE_PILL_TIP,
-            Pill::Weak => WEAK_PILL_TIP,
-        }
-    }
-}
-
 /// Which legend items the header shows: only glyphs this card uses.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Legend {
     pub banned: bool,
-    pub unsure: bool,
     pub swap: bool,
     pub outline: bool,
 }
 
 impl Legend {
     pub fn is_empty(self) -> bool {
-        !(self.banned || self.unsure || self.swap || self.outline)
+        !(self.banned || self.swap || self.outline)
     }
 }
 
-/// The open block: its rows, and the game-level weak flag.
+/// The open block and its rows.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Block {
     pub rows: Vec<Row>,
-    /// The game-level "reader weak" flag, the fallback for the per-read
-    /// flags. Hook only: no such field is stored on the game yet, so it is
-    /// always false today (see [`reader_weak`]).
-    pub weak: bool,
 }
 
 impl Block {
@@ -251,34 +195,11 @@ impl Block {
         self.rows.iter().flat_map(Row::chips)
     }
 
-    /// How many reads are unsure: bans, the lobby ban, ban votes and hero
-    /// select. Played never counts, nor do Not read, Not seen, Skipped and
-    /// No preference.
-    pub fn unsure(&self) -> usize {
-        self.rows
-            .iter()
-            .filter(|r| r.label != LABEL_PLAYED)
-            .flat_map(Row::chips)
-            .filter(|c| c.unsure())
-            .count()
-    }
-
-    /// The header pill. Per-read flags win over the game-level one, which is
-    /// drawn only when no chip is marked.
-    pub fn pill(&self) -> Option<Pill> {
-        match self.unsure() {
-            0 if self.weak => Some(Pill::Weak),
-            0 => None,
-            n => Some(Pill::Unsure(n)),
-        }
-    }
-
     pub fn legend(&self) -> Legend {
         Legend {
             banned: self
                 .chips()
                 .any(|c| c.ban && matches!(c.slot, Slot::Hero(_))),
-            unsure: self.unsure() > 0,
             swap: self.chips().any(|c| c.swap),
             outline: self.chips().any(Chip::outline),
         }
@@ -316,7 +237,6 @@ pub fn bans_picks(g: &Game) -> BansPicks {
     {
         return BansPicks::Block(Block {
             rows: stored.rows(g),
-            weak: reader_weak(g),
         });
     }
     match g.bans_picks_status.as_ref().and_then(reason) {
@@ -327,14 +247,6 @@ pub fn bans_picks(g: &Game) -> BansPicks {
         },
         None => BansPicks::Hidden,
     }
-}
-
-/// The game-level "reads may be off" flag. Hook only: neither the game nor
-/// its status stores one yet (it would be a `bans_picks_weak` flag, the
-/// fallback the spec allows if per-read flags are not done), so this is
-/// always false. Wire it here when the tracker stores it.
-fn reader_weak(_g: &Game) -> bool {
-    false
 }
 
 /// Whether the status says the tracker never saw this screen.
@@ -707,7 +619,6 @@ fn ban_chip(name: &str, tip: String) -> Chip {
         ban: true,
         you: false,
         swap: false,
-        suspect: false,
         tip,
     }
 }
@@ -718,7 +629,6 @@ fn not_read_chip(ban: bool, tip: String) -> Chip {
         ban,
         you: false,
         swap: false,
-        suspect: false,
         tip,
     }
 }
@@ -750,7 +660,6 @@ fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
                 ban: false,
                 you: false,
                 swap: false,
-                suspect: false,
                 tip,
             }
         })
@@ -777,7 +686,6 @@ fn pick_chips(slots: &[Slot]) -> Vec<Chip> {
                 ban: false,
                 you,
                 swap: false,
-                suspect: false,
                 tip,
             }
         })
@@ -821,7 +729,6 @@ fn played_chips(g: &Game, own_pick: Option<&Slot>) -> Vec<Chip> {
             // The "You" tag is drawn once, on the first chip of the row.
             you: false,
             swap: false,
-            suspect: false,
             tip: format!("Then played {name}, you"),
         }))
         .collect()
@@ -849,7 +756,6 @@ fn played_chip(own_hero: &str, own_pick: Option<&Slot>) -> Option<Chip> {
         ban: false,
         you: true,
         swap: swapped_from.is_some(),
-        suspect: false,
         tip,
     })
 }

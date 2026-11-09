@@ -1,17 +1,17 @@
 //! Draws the open Games row's "Bans and picks" block from the view model in
 //! `games_bans` (UX Spec bans and picks a3b, "chips stay default"). The
-//! header is 24px: the label, the amber pill when there is one, then a
-//! one-line legend of the glyphs this card uses. Under it, four rows 26px
-//! high with 6px gaps, each with its label on the left at every width (the
-//! 1024 layout too). Chips are 26px high and as wide as their name, with no
-//! placeholder portrait. Chips are read-only: no focus, no press. The one
-//! button is "Open Settings" on a reason line.
+//! header is 24px: the label, then a one-line legend of the glyphs this card
+//! uses. Under it, four rows 26px high with 6px gaps, each with its label on
+//! the left at every width (the 1024 layout too). Chips are 26px high and as
+//! wide as their name, with no placeholder portrait. Chips are read-only: no
+//! focus, no press. The one button is "Open Settings" on a reason line.
 //!
 //! Glyphs are the PNG icons, never text: Urbanist, the page font, has no
-//! warning sign and no swap arrow glyph, so a text glyph would draw as a
-//! missing-glyph box. The ban mark is `Icon::Ban`, the swap mark
-//! `Icon::Swap`, and the unsure mark `Icon::Warn` (warn.png is painted in
-//! the theme's WARN amber).
+//! swap arrow glyph, so a text glyph would draw as a missing-glyph box. The
+//! ban mark is `Icon::Ban` and the swap mark is `Icon::Swap`. cv-v1 has no
+//! unsure state yet, so nothing amber is drawn: no warning sign, no "N
+//! unsure" / "Reads may be off" pill, and the legend leaves out "Might be
+//! misread".
 
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, button, column, container, image, row, space, text, tooltip};
@@ -19,8 +19,8 @@ use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};
 
 use crate::app::Message;
 use crate::games_bans::{
-    BansPicks, Block, Chip, HEADER, LEGEND_BANNED, LEGEND_OUTLINE, LEGEND_SWAP, LEGEND_UNSURE,
-    Legend, Part, Pill, Row as BlockRow, SettingsLink, Slot,
+    BansPicks, Block, Chip, HEADER, LEGEND_BANNED, LEGEND_OUTLINE, LEGEND_SWAP, Legend, Part,
+    Row as BlockRow, SettingsLink, Slot,
 };
 use crate::games_table::pill_box;
 use crate::icons::{self, Icon};
@@ -28,7 +28,6 @@ use crate::model::Game;
 use crate::settings_model::AdvancedSection;
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_SEMIBOLD, SIZE_LABEL, SURFACE_2, TEXT, TEXT_2, TEXT_3,
-    WARN,
 };
 
 /// The text floor in this block (the label class is 11px).
@@ -100,12 +99,9 @@ fn with_tip(
         .into()
 }
 
-/// The label, the amber pill when there is one, then the legend.
+/// The label, then the legend (no amber pill: cv-v1 has no unsure state).
 fn header(block: &Block) -> Element<'static, Message> {
     let mut h = row![label()].spacing(12).align_y(Alignment::Center);
-    if let Some(p) = block.pill() {
-        h = h.push(pill(p));
-    }
     let legend = block.legend();
     if !legend.is_empty() {
         h = h.push(container(legend_row(legend)).padding(Padding {
@@ -119,43 +115,11 @@ fn header(block: &Block) -> Element<'static, Message> {
         .into()
 }
 
-/// "N unsure" or "Reads may be off": an amber outline with the warning sign,
-/// so it is not colour alone. Amber means unsure, nothing else.
-fn pill(p: Pill) -> Element<'static, Message> {
-    let body = container(
-        row![
-            image(icons::handle(Icon::Warn)).width(GLYPH).height(GLYPH),
-            text(p.words())
-                .size(SMALL)
-                .font(FONT_SEMIBOLD)
-                .color(WARN)
-                .wrapping(Wrapping::None),
-        ]
-        .spacing(6)
-        .align_y(Alignment::Center),
-    )
-    .height(HEADER_H)
-    .padding(Padding::from([0, 10]))
-    .align_y(Alignment::Center)
-    .style(|_: &Theme| container::Style {
-        border: Border {
-            color: WARN,
-            width: 1.0,
-            radius: 999.0.into(),
-        },
-        ..container::Style::default()
-    });
-    with_tip(body, p.tip().to_string())
-}
-
 /// One line, only the glyphs this card uses.
 fn legend_row(legend: Legend) -> Element<'static, Message> {
     let mut r = row![].spacing(14).align_y(Alignment::Center);
     if legend.banned {
         r = r.push(legend_icon(Icon::Ban, LEGEND_BANNED));
-    }
-    if legend.unsure {
-        r = r.push(legend_icon(Icon::Warn, LEGEND_UNSURE));
     }
     if legend.swap {
         r = r.push(legend_icon(Icon::Swap, LEGEND_SWAP));
@@ -289,12 +253,11 @@ fn draw_part(part: &Part) -> Element<'static, Message> {
 /// One chip, as wide as its name, with its tooltip (the spoken label too).
 /// A read hero is bold TEXT on the raised fill; a ban has no fill and TEXT_2 with the
 /// ban glyph; Not read and Not seen are the same plain outline in the dimmer
-/// grey; Skipped and No preference are neutral filled chips in TEXT_2. An
-/// unsure read gets an amber outline and the warning sign. No red.
+/// grey; Skipped and No preference are neutral filled chips in TEXT_2. No amber
+/// and no red: cv-v1 has no unsure state yet.
 fn chip(c: &Chip) -> Element<'static, Message> {
     let hero = matches!(c.slot, Slot::Hero(_));
     let outline = c.outline();
-    let unsure = c.unsure();
     let (font, color) = if outline || !hero {
         (FONT_SEMIBOLD, TEXT_2)
     } else if c.ban {
@@ -328,9 +291,6 @@ fn chip(c: &Chip) -> Element<'static, Message> {
     if c.swap {
         inner = inner.push(image(icons::handle(Icon::Swap)).width(GLYPH).height(GLYPH));
     }
-    if unsure {
-        inner = inner.push(image(icons::handle(Icon::Warn)).width(GLYPH).height(GLYPH));
-    }
     let filled = !c.ban && !outline;
     let body = container(inner)
         .height(CHIP_H)
@@ -339,13 +299,7 @@ fn chip(c: &Chip) -> Element<'static, Message> {
         .style(move |_: &Theme| container::Style {
             background: filled.then_some(Background::Color(SURFACE_2)),
             border: Border {
-                color: if unsure {
-                    WARN
-                } else if outline {
-                    TEXT_3
-                } else {
-                    BORDER
-                },
+                color: if outline { TEXT_3 } else { BORDER },
                 width: 1.0,
                 radius: 8.0.into(),
             },
