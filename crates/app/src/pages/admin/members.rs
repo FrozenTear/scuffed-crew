@@ -1128,7 +1128,7 @@ pub fn AdminMembers() -> Element {
                         div { class: "form-field",
                             label { class: "form-label", "Profile photo" }
                             p { style: "color:var(--text-3);font-size:0.8rem;margin:0 0 0.65rem;",
-                                "PNG or JPEG, max 2MB. Click the area below to choose a file."
+                                "PNG, JPEG, WebP, or GIF, max 2 MB. Click the area below to choose a file."
                             }
                             {
                                 let file_label = match avatar_file() {

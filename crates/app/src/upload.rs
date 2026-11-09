@@ -163,6 +163,38 @@ pub fn is_cover_image_upload_path(raw: &str) -> bool {
     rel.contains('/') && upload_rel_is_safe(rel)
 }
 
+/// True when `raw` is an absolute https cover URL the server accepts for
+/// `cover_image_url`.
+///
+/// Mirrors the https branch of site-server `normalize_cover_image_url` in
+/// `routes/articles.rs` (around line 128 / PR 628): after trim, no control /
+/// whitespace / backslash; prefix `https://` (ASCII case-insensitive); the
+/// remainder must not start with `/` (so `https:///x` is refused); `url::Url`
+/// parses with scheme `https` and a non-empty host.
+pub fn is_cover_https_url(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if trimmed
+        .chars()
+        .any(|c| c.is_control() || c.is_whitespace() || c == '\\')
+    {
+        return false;
+    }
+    let Some(rest) = trimmed
+        .get(..8)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("https://"))
+        .map(|_| &trimmed[8..])
+    else {
+        return false;
+    };
+    // `url` folds `https:///x` into host `x`; require the authority here.
+    !rest.starts_with('/')
+        && url::Url::parse(trimmed)
+            .is_ok_and(|u| u.scheme() == "https" && u.host_str().is_some_and(|h| !h.is_empty()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -279,5 +311,36 @@ mod tests {
         assert!(!upload_rel_is_safe("member_abc//x.png"));
         assert!(!upload_rel_is_safe("member_abc/x.png?v=1"));
         assert!(!upload_rel_is_safe("a b/x.png"));
+    }
+
+    #[test]
+    fn cover_https_url_accepts_https_with_host() {
+        for raw in [
+            "https://cdn.example.com/a.png",
+            "HTTPS://cdn.example.com/a.png",
+            "HtTpS://cdn.example.com",
+            "  https://cdn.example.com/a.png?w=1#x  ",
+        ] {
+            assert!(is_cover_https_url(raw), "{raw}");
+        }
+    }
+
+    #[test]
+    fn cover_https_url_rejects_http_and_no_host() {
+        for bad in [
+            "http://cdn.example.com/a.png",
+            "https://",
+            "https:///a.png",
+            "https://?x",
+            "https://#x",
+            "https:cdn.example.com/a.png",
+            "https:/cdn.example.com/a.png",
+            "javascript:alert(1)",
+            "",
+            "https://cdn.example.com/a b.png",
+            "https://cdn.example.com\\a.png",
+        ] {
+            assert!(!is_cover_https_url(bad), "{bad}");
+        }
     }
 }

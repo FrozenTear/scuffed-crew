@@ -67,19 +67,21 @@ fn article_field_id(record_id: Option<&str>, field: &str) -> String {
     format!("article-{}-{}", clean(key), clean(field))
 }
 
-/// Source for the cover preview: an `/uploads/images/...` path the server
-/// accepts for `cover_image_url`, or an `http(s)` URL. Avatar paths, `..`
-/// segments, and other `/uploads/` values the server refuses have no preview.
+/// Source for the cover preview: an `/uploads/images/...` path or an
+/// absolute `https://` URL with a host, matching the server's
+/// `normalize_cover_image_url`. Plain `http://`, `https://` with no host,
+/// avatar paths, `..` segments, and other values the server refuses have no
+/// preview.
 fn cover_preview_src(url: &str) -> Option<&str> {
     let url = url.trim();
     if crate::upload::is_cover_image_upload_path(url) {
         // img src needs a rooted path; the no-slash form heals on save only.
         return url.starts_with('/').then_some(url);
     }
-    if url.starts_with("/uploads/") {
-        return None;
+    if crate::upload::is_cover_https_url(url) {
+        return Some(url);
     }
-    crate::util::http_href(url)
+    None
 }
 
 /// Toast copy when `POST /api/upload/image` answers with an error status.
@@ -116,6 +118,8 @@ pub fn AdminArticles() -> Element {
     let mut cover_uploading = use_signal(|| false);
     // Text of the always-rendered cover upload status region.
     let mut cover_status = use_signal(String::new);
+    // True when cover_status is a client-side reject (unsupported type / over size).
+    let mut cover_status_error = use_signal(|| false);
     // Bumped whenever the editor opens or closes, so a finished upload from an
     // earlier session of the editor does not overwrite the current cover field.
     let mut editor_session = use_signal(|| 0u64);
@@ -131,6 +135,7 @@ pub fn AdminArticles() -> Element {
         form_id.set(None);
         cover_uploading.set(false);
         cover_status.set(String::new());
+        cover_status_error.set(false);
         editor_session += 1;
         modal.show_empty();
     };
@@ -144,6 +149,7 @@ pub fn AdminArticles() -> Element {
         form_id.set(Some(a.id));
         cover_uploading.set(false);
         cover_status.set(String::new());
+        cover_status_error.set(false);
         editor_session += 1;
         modal.show(a.slug);
     };
@@ -170,10 +176,12 @@ pub fn AdminArticles() -> Element {
             clear_file_input(&input_id);
             if let Err(msg) = validate_image_upload(&file.type_(), file.size()) {
                 cover_status.set(msg.to_string());
+                cover_status_error.set(true);
                 return;
             }
             let session = editor_session();
             cover_uploading.set(true);
+            cover_status_error.set(false);
             cover_status.set("Uploading cover image...".to_string());
             spawn(async move {
                 let result = post_file("/api/upload/image", &file).await;
@@ -521,7 +529,11 @@ pub fn AdminArticles() -> Element {
                 p { id: "{cover_hint_id}", class: "form-hint",
                     "JPEG, PNG, WebP, or GIF, up to 5 MB. The uploaded path fills the URL field above."
                 }
-                p { class: "form-hint", role: "status", "{cover_status}" }
+                p {
+                    class: if cover_status_error() { "name-field-error" } else { "form-hint" },
+                    role: "status",
+                    "{cover_status}"
+                }
                 if let Some(src) = cover_preview_src(&form_cover()) {
                     img {
                         src: "{src}",
@@ -585,7 +597,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_allows_uploads_and_http() {
+    fn preview_allows_uploads_and_https() {
         assert_eq!(
             cover_preview_src(" /uploads/images/m1/x.png "),
             Some("/uploads/images/m1/x.png")
@@ -594,6 +606,24 @@ mod tests {
             cover_preview_src("https://cdn.example.com/c.webp"),
             Some("https://cdn.example.com/c.webp")
         );
+        assert_eq!(
+            cover_preview_src("HTTPS://cdn.example.com/c.webp"),
+            Some("HTTPS://cdn.example.com/c.webp")
+        );
+    }
+
+    #[test]
+    fn preview_rejects_http_and_https_without_host() {
+        for bad in [
+            "http://cdn.example.com/c.webp",
+            "HTTP://cdn.example.com/c.webp",
+            "https://",
+            "https:///a.png",
+            "https://?x",
+            "https://#x",
+        ] {
+            assert_eq!(cover_preview_src(bad), None, "{bad}");
+        }
     }
 
     #[test]

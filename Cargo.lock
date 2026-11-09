@@ -10775,6 +10775,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "wasm-bindgen",
  "wasm-bindgen-futures",
