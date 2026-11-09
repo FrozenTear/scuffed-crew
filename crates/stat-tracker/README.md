@@ -200,12 +200,13 @@ says to remove them manually.
 Two setup steps are easy to miss and cause most first-run problems:
 
 1. **Join the `input` group, then log out and back in.** Without it the
-   daemon cannot read Tab presses from `/dev/input` and will not start
-   properly. See Platform requirements above for the commands and a check.
+   daemon cannot read Tab presses from `/dev/input`. Older builds crash on
+   start; newer ones show a warning and keep running without Tab detection.
+   See Platform requirements above for the commands and a check.
 2. **Install Ayatana AppIndicator for Hide-to-tray.** Without it the app
    starts with no tray icon and a "missing library" notice, and closing the
-   window quits. From 0.6.0-alpha.3 the AUR packages pull it in; for the tarball install it
-   yourself:
+   window quits. From 0.6.0-alpha.3 the AUR packages pull it in; for the
+   tarball install it yourself:
 
    ```sh
    # Arch / CachyOS
@@ -645,8 +646,8 @@ it.
 
 ## Troubleshooting
 
-**The tracker crashes or keeps restarting right after start.**
-Check that you are in the `input` group in the current session:
+**The tracker crashes or keeps restarting right after start, or warns that it
+cannot read the keyboard.** Check that you are in the `input` group in the current session:
 `groups | grep -qw input && echo ok`. If nothing prints, run
 `sudo usermod -aG input "$USER"`, then log out and back in (a new terminal is
 not enough). `journalctl --user -u scuffed-stat-tracker -n 50` shows the
