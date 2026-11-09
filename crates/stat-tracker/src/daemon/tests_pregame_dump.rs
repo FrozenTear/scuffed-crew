@@ -1344,6 +1344,7 @@ fn ban_results_at_a_four_second_poll() {
         run.names(),
         [
             ("heroban_first.png", 1),
+            ("heroban_last.png", 1),
             ("ban_results.png", 2),
             ("heroselect_first.png", 5),
         ]
@@ -1376,6 +1377,7 @@ fn results_then_the_roster_then_loading_inside_the_window_are_saved() {
         [
             ("mapvote_first.png", 1),
             ("heroban_first.png", 2),
+            ("heroban_last.png", 2),
             ("ban_results.png", 3),
             ("loading.png", 6),
             ("heroselect_first.png", 7),
