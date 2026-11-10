@@ -693,10 +693,13 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     log_startup_readiness(&config, dump_poll_frames, collect_portraits);
     daemon::focus::install(config.capture_only_on_screen, &config.data_dir);
 
+    // Linked to a site account, whatever `live_upload` says: the reader
+    // packs still come from the site with uploads off.
+    let site_linked = sync_client.is_some();
     let ctx = Arc::new(DaemonCtx {
         backend,
         store,
-        sync_client,
+        sync_client: upload_client(sync_client, config.live_upload),
         own_names: config.own_player_names(),
         capture_output: config.capture_output.clone(),
         auto_detect: config.auto_detect,
@@ -733,7 +736,7 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
         config.bans_picks_reader,
         shadow::bans_picks::BansPicksSetting::from_env(),
         &ctx.data_dir,
-        ctx.sync_client.is_some(),
+        site_linked,
     );
     // The queue title reader: off unless its env switch is on and the pack
     // loads; off leaves the saver as it is.
