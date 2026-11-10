@@ -20,6 +20,7 @@ mod state;
 mod stats_privacy;
 mod styles;
 mod theme;
+mod training_crops_ui;
 mod upload;
 mod util;
 
