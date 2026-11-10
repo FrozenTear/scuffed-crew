@@ -14,7 +14,7 @@ use scuffed_db::{AuditAction, AuditTargetType};
 use crate::extractors::{OfficerUser, OrgMember};
 use crate::routes::audit_log::audit;
 use crate::state::AppState;
-use crate::uploads::{UploadError, save_upload};
+use crate::uploads::{UploadError, save_upload, sniff_image_ext};
 
 const AVATAR_MAX_BYTES: usize = 2 * 1024 * 1024; // 2 MB
 const IMAGE_MAX_BYTES: usize = 5 * 1024 * 1024; // 5 MB
@@ -71,17 +71,21 @@ pub(crate) fn member_dir_key(member_id: &str) -> String {
 /// canvas size (no pixel data), then rejects oversized / decompression-bomb
 /// images before anything is persisted. The magic-byte sniff in `save_upload`
 /// still runs afterwards.
+///
+/// AVIF is read with `imagesize` (container header only). The `image` crate
+/// is built without AVIF, so it cannot size one.
 fn check_image_dimensions(data: &[u8]) -> Result<(), Reject> {
-    let reader = image::ImageReader::new(Cursor::new(data))
-        .with_guessed_format()
-        .map_err(|_| reject(StatusCode::BAD_REQUEST, "Could not read image"))?;
+    let (w, h) = if sniff_image_ext(data) == Some("avif") {
+        avif_dimensions(data)?
+    } else {
+        let reader = image::ImageReader::new(Cursor::new(data))
+            .with_guessed_format()
+            .map_err(|_| reject(StatusCode::BAD_REQUEST, "Could not read image"))?;
 
-    let (w, h) = reader.into_dimensions().map_err(|_| {
-        reject(
-            StatusCode::BAD_REQUEST,
-            "Invalid or unreadable image dimensions",
-        )
-    })?;
+        reader
+            .into_dimensions()
+            .map_err(|_| unreadable_dimensions())?
+    };
 
     if w > MAX_IMAGE_EDGE || h > MAX_IMAGE_EDGE || (w as u64) * (h as u64) > MAX_IMAGE_PIXELS {
         return Err(reject(
@@ -91,6 +95,32 @@ fn check_image_dimensions(data: &[u8]) -> Result<(), Reject> {
     }
 
     Ok(())
+}
+
+fn unreadable_dimensions() -> Reject {
+    reject(
+        StatusCode::BAD_REQUEST,
+        "Invalid or unreadable image dimensions",
+    )
+}
+
+/// Declared AVIF canvas from the HEIF property boxes (`meta` / `iprp` /
+/// `ipco` / `ispe`). No AV1 data is decoded. When there are several `ispe`
+/// boxes, `imagesize` reports the largest by area, which is the one the
+/// pixel cap needs. A header it cannot parse, or one that declares a zero
+/// side, is refused with the same error as any other unreadable image.
+fn avif_dimensions(data: &[u8]) -> Result<(u32, u32), Reject> {
+    let size = imagesize::ImageType::Heif(imagesize::Compression::Av1)
+        .reader_size(&mut Cursor::new(data))
+        .map_err(|_| unreadable_dimensions())?;
+    if size.width == 0 || size.height == 0 {
+        return Err(unreadable_dimensions());
+    }
+    // `ispe` fields are u32, so these only saturate on a platform where usize
+    // is narrower, and a saturated side is still over the edge cap.
+    let w = u32::try_from(size.width).unwrap_or(u32::MAX);
+    let h = u32::try_from(size.height).unwrap_or(u32::MAX);
+    Ok((w, h))
 }
 
 /// Count files and total bytes already stored in a member's category dir.
@@ -579,6 +609,59 @@ mod tests {
             check_image_dimensions(&wide).unwrap_err().0,
             StatusCode::BAD_REQUEST
         );
+    }
+
+    #[test]
+    fn avif_dimension_guard_reads_header_and_applies_caps() {
+        use crate::uploads::test_avif::{TINY_AVIF, avif_with_dims};
+
+        // The real 2x1 fixture passes.
+        assert!(check_image_dimensions(TINY_AVIF).is_ok());
+        assert!(check_image_dimensions(&avif_with_dims(MAX_IMAGE_EDGE, 1)).is_ok());
+
+        // A header declaring a gigapixel canvas is rejected.
+        let bomb = check_image_dimensions(&avif_with_dims(50_000, 50_000)).unwrap_err();
+        assert_eq!(bomb.0, StatusCode::BAD_REQUEST);
+        assert!(bomb.1.error.contains("too large"), "{}", bomb.1.error);
+        // One side over the edge cap.
+        let wide = check_image_dimensions(&avif_with_dims(MAX_IMAGE_EDGE + 1, 1)).unwrap_err();
+        assert_eq!(wide.0, StatusCode::BAD_REQUEST);
+        assert!(wide.1.error.contains("too large"), "{}", wide.1.error);
+        // Both sides under the edge cap but over the pixel cap.
+        let flood =
+            check_image_dimensions(&avif_with_dims(MAX_IMAGE_EDGE, MAX_IMAGE_EDGE)).unwrap_err();
+        assert_eq!(flood.0, StatusCode::BAD_REQUEST);
+        assert!(flood.1.error.contains("too large"), "{}", flood.1.error);
+    }
+
+    #[test]
+    fn avif_with_unparseable_header_is_refused_like_other_bad_images() {
+        use crate::uploads::test_avif::{TINY_AVIF, avif_with_dims, ftyp};
+
+        let bad_png = check_image_dimensions(&png_with_dims(0, 0)).unwrap_err();
+        assert_eq!(bad_png.0, StatusCode::BAD_REQUEST);
+
+        // Sniffs as AVIF but has no `meta` box at all.
+        let bare = ftyp(b"avif", &[b"mif1", b"miaf"]);
+        // Sniffs as AVIF, then garbage where the boxes should be.
+        let mut garbage = ftyp(b"avif", &[b"mif1"]);
+        garbage.extend_from_slice(&[0xff; 64]);
+        // The real fixture cut off inside its `meta` box.
+        let truncated = TINY_AVIF[..80].to_vec();
+        // A declared zero side.
+        let zero = avif_with_dims(0, 1);
+
+        for (name, data) in [
+            ("bare", bare),
+            ("garbage", garbage),
+            ("truncated", truncated),
+            ("zero", zero),
+        ] {
+            assert_eq!(sniff_image_ext(&data), Some("avif"), "{name}");
+            let err = check_image_dimensions(&data).unwrap_err();
+            assert_eq!(err.0, bad_png.0, "{name}");
+            assert_eq!(err.1.error, bad_png.1.error, "{name}");
+        }
     }
 
     #[test]
