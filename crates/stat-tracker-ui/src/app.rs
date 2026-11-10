@@ -1002,7 +1002,7 @@ impl TrackerApp {
                     match &saved {
                         Some(Ok(saved)) => crate::commands::show_saved(self, &sid, saved),
                         Some(Err(e)) => self.replace_toast(e.clone()),
-                        None => {}
+                        None => self.replace_toast(crate::commands::GAME_GONE),
                     }
                 }
                 self.editing = matches!(saved, Some(Err(_)));

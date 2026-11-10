@@ -46,6 +46,33 @@ pub use upload_queue::{SyncClaim, UPLOAD_REJECTED_BY_SERVER, format_upload_rejec
 use files::{rewrite_match_log_session, snapshot_path};
 use rules::{apply_match_edit, name_recognizer_absent, outcome_is_decided};
 
+/// A command the store will never apply, such as one keyed by an empty
+/// session id. The daemon drops its file instead of retrying it forever.
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Writers that key a game by session id must not run with an empty id.
+/// Imported games all share the empty value, so `WHERE session_id = $sid`
+/// would change every one of them at once.
+pub(super) fn require_session_id(
+    session_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if session_id.is_empty() {
+        return Err(Box::new(Refused(
+            "refused: the session id is empty, and it would match every imported game".into(),
+        )));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct MatchSession {
     pub session_id: String,
@@ -321,6 +348,9 @@ mod tests_tombstones;
 
 #[cfg(test)]
 mod tests_edits;
+
+#[cfg(test)]
+mod tests_empty_session;
 
 #[cfg(test)]
 mod tests_hero_timeline;

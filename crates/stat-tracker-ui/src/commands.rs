@@ -14,7 +14,23 @@ pub fn queue(data_dir: &Path, cmd: &StoreCommand) -> Result<(), String> {
     storage::queue_command(data_dir, cmd).map_err(|e| e.to_string())
 }
 
+/// Why a change to an imported game is refused. Its commands are keyed by
+/// session id, and the empty one would match every imported game.
+pub(crate) const NO_SESSION_ID: &str =
+    "This imported game has no session id, so it can't be changed in the app";
+
+/// A save whose game is no longer in the list.
+pub(crate) const GAME_GONE: &str = "Could not save: this game is no longer in the list";
+
+fn require_session(session_id: &str) -> Result<(), String> {
+    if session_id.is_empty() {
+        return Err(NO_SESSION_ID.into());
+    }
+    Ok(())
+}
+
 pub fn set_outcome(data_dir: &Path, session_id: &str, outcome: Outcome) -> Result<(), String> {
+    require_session(session_id)?;
     queue(
         data_dir,
         &StoreCommand::SetOutcome {
@@ -25,6 +41,7 @@ pub fn set_outcome(data_dir: &Path, session_id: &str, outcome: Outcome) -> Resul
 }
 
 pub fn delete_session(data_dir: &Path, session_id: &str) -> Result<(), String> {
+    require_session(session_id)?;
     queue(
         data_dir,
         &StoreCommand::DeleteSession {
@@ -37,6 +54,7 @@ pub fn edit_match(data_dir: &Path, session_id: &str, edit: MatchEdit) -> Result<
     if edit.is_empty() {
         return Err("No changes to save".into());
     }
+    require_session(session_id)?;
     queue(
         data_dir,
         &StoreCommand::EditMatch {
@@ -47,6 +65,7 @@ pub fn edit_match(data_dir: &Path, session_id: &str, edit: MatchEdit) -> Result<
 }
 
 pub fn retry_upload(data_dir: &Path, session_id: &str) -> Result<(), String> {
+    require_session(session_id)?;
     queue(
         data_dir,
         &StoreCommand::RetryUpload {
@@ -94,6 +113,7 @@ pub fn resolve_segment(
     segment: u32,
     step: SegmentStep,
 ) -> Result<(), String> {
+    require_session(session_id)?;
     queue(
         data_dir,
         &StoreCommand::ResolveSegment {
@@ -819,5 +839,99 @@ mod tests {
         assert_eq!(edit.hero.as_deref(), Some("Kiriko"));
         assert!(edit.deaths.is_none());
         assert!(edit.map_name.is_none());
+    }
+
+    /// What the toasts below must say.
+    const SAYS_NO_SESSION_ID: &str = "no session id";
+    const SAYS_GAME_GONE: &str = "no longer in the list";
+
+    /// Two imported games with no session id, the first one open.
+    fn app_with_imported_games() -> (tempfile::TempDir, crate::app::TrackerApp) {
+        let (dir, mut app) = crate::fixtures::test_app();
+        let mut first = sample_game();
+        first.session_id = String::new();
+        let mut second = sample_game();
+        second.session_id = String::new();
+        second.hero = "Reinhardt".into();
+        app.games = vec![first, second];
+        app.expanded = Some(String::new());
+        (dir, app)
+    }
+
+    fn toast(app: &crate::app::TrackerApp) -> String {
+        app.toast.clone().unwrap_or_default()
+    }
+
+    /// Saving an edit on an imported game queues nothing (the daemon would
+    /// apply it to every imported game) and says why in a toast.
+    #[test]
+    fn an_edit_on_an_imported_game_queues_nothing_and_says_why() {
+        let (_dir, mut app) = app_with_imported_games();
+        let _ = app.update(crate::app::Message::ToggleEdit);
+        assert!(app.editing);
+        app.edit.elims = "21".into();
+        let _ = app.update(crate::app::Message::SaveEdit);
+        assert!(queued(&app.data_dir).is_empty(), "nothing is queued");
+        assert!(
+            toast(&app).contains(SAYS_NO_SESSION_ID),
+            "the toast says why: {:?}",
+            app.toast
+        );
+        assert!(app.editing, "the form stays open with what was typed");
+        assert_eq!(app.edit.elims, "21");
+    }
+
+    /// Outcome, map, hero, retry and delete on an imported game: nothing
+    /// is queued and each one shows why.
+    #[test]
+    fn other_changes_to_an_imported_game_queue_nothing_and_say_why() {
+        use crate::app::Message;
+        let messages = [
+            Message::SetOutcome {
+                session_id: String::new(),
+                outcome: Outcome::Loss,
+            },
+            Message::PickMap {
+                session_id: String::new(),
+                map: "Ilios".into(),
+            },
+            Message::PickHero {
+                session_id: String::new(),
+                hero: "Ana".into(),
+            },
+            Message::RetryUpload(String::new()),
+            Message::DeleteSession(String::new()),
+        ];
+        for msg in messages {
+            let (_dir, mut app) = app_with_imported_games();
+            let shown = format!("{msg:?}");
+            let _ = app.update(msg);
+            assert!(queued(&app.data_dir).is_empty(), "{shown} queued a command");
+            assert!(
+                toast(&app).contains(SAYS_NO_SESSION_ID),
+                "{shown} toast: {:?}",
+                app.toast
+            );
+            assert_eq!(app.games.len(), 2, "{shown} kept both games");
+        }
+    }
+
+    /// An edit whose game left the list says so instead of closing quietly.
+    #[test]
+    fn an_edit_whose_game_is_gone_says_so() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let g = sample_game();
+        app.games = vec![g.clone()];
+        app.expanded = Some(g.session_id.clone());
+        let _ = app.update(crate::app::Message::ToggleEdit);
+        app.edit.elims = "21".into();
+        app.games.clear();
+        let _ = app.update(crate::app::Message::SaveEdit);
+        assert!(queued(&app.data_dir).is_empty());
+        assert!(
+            toast(&app).contains(SAYS_GAME_GONE),
+            "the toast says the game is gone: {:?}",
+            app.toast
+        );
     }
 }

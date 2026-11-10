@@ -1153,6 +1153,10 @@ pub(crate) async fn apply_queued_commands(
                     );
                 }
             }
+            Err(e) if e.downcast_ref::<storage::Refused>().is_some() => {
+                tracing::warn!(target: "scuffed_stat_tracker", error = %e, "GUI command refused; dropped");
+                storage::remove_command_file(cmd_file);
+            }
             Err(e) => {
                 tracing::warn!(target: "scuffed_stat_tracker", error = %e, "GUI command failed; will retry");
             }
