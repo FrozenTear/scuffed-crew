@@ -832,7 +832,7 @@ async fn the_hint_follows_the_folder_from_the_game_its_first_tick_retires() {
 }
 
 #[tokio::test]
-async fn a_game_decided_with_no_read_leaves_a_folder_opened_after_its_first_record() {
+async fn a_game_decided_with_no_read_closes_a_folder_opened_after_its_first_record() {
     let calls = Calls::default();
     let mut rig = Rig::new(reads(Some("OPEN QUEUE"), 0.93, &calls)).await;
     // g1 was first recorded a minute ago (its first read was put off by a
@@ -850,9 +850,43 @@ async fn a_game_decided_with_no_read_leaves_a_folder_opened_after_its_first_reco
     let t = rig.title("g1").await.expect("a queue title");
     assert_eq!((t.value, t.unsure), (None, true));
     assert!(calls.lock().unwrap().is_empty());
-    // g2's folder was left open: g2 reads its own frames.
+    // g1's decision closed the folder: g2 gets the warning, never a value
+    // read from frames the feed cannot tell from g1's.
     rig.dump.set_session(Some("g2"));
     let t = rig.game("g2", false).await.expect("a queue title");
-    assert_eq!(t.value.as_deref(), Some("OPEN QUEUE"));
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    assert_eq!(t.value, None);
+    assert_eq!(t.warning(), Some(QUEUE_TITLE_WARNING));
+    assert!(calls.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_carried_board_does_not_keep_the_decided_games_folder_open() {
+    let calls = Calls::default();
+    let mut rig = Rig::new(reads(Some("OPEN QUEUE"), 0.93, &calls)).await;
+    // A board held on the last session a minute ago is carried into g1 and
+    // written at its old time, so g1 counts as first recorded then.
+    let mut board = crate::main_tests::test_match("g1", "victory");
+    board.played_at = (chrono::Utc::now() - chrono::Duration::minutes(1)).into();
+    rig.store.insert_match(board).await.unwrap();
+    // g1's own pre-game opens g1's folder after that: its frames do not
+    // fit the carried start, so g1 is decided with no read.
+    rig.dump.set_session(Some("g1"));
+    let t = rig.game("g1", true).await.expect("a queue title");
+    assert_eq!(t.warning(), Some(QUEUE_TITLE_WARNING));
+    assert!(calls.lock().unwrap().is_empty());
+    // A late frame lands in g1's folder, then g2 opens no folder.
+    let g1 = folder_of("g1");
+    rig.dump.send(vec![shot(
+        &g1,
+        PregamePhase::HeroSelect.last_name(),
+        SELECT_LAST_W,
+    )]);
+    rig.dump.set_session(Some("g2"));
+    let t = rig.game("g2", false).await.expect("a queue title");
+    assert_eq!(t.value, None, "not g1's queue");
+    assert_eq!(t.warning(), Some(QUEUE_TITLE_WARNING));
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "g1's frames were not read for g2"
+    );
 }

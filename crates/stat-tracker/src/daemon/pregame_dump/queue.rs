@@ -38,14 +38,16 @@ impl PregameDump {
     /// rank screen of `source_session`, which names the queue of the game
     /// after it. `shown_at` is when that rank screen showed: the time of
     /// the frame it was read on, not of this call; the age and fit checks
-    /// use it. The call must come before the next game's first Tab: the
-    /// next game is read once, on that Tab, and its read settles the hint
+    /// use it. The call must come before the next game's read: the next
+    /// game is read once, usually on its first Tab (a store error can put
+    /// it off to a later one), and that read settles the hint
     /// ([`crate::daemon::queue_title::settle_hint`]). A later call is not
-    /// the next game's: it goes to the game after (when that game's read
-    /// agrees) or expires. `source_session` itself never settles it. A blank hint clears it, a new
-    /// one replaces the one pending (a log line says so). Nothing happens
-    /// with the reader off. The rank reader's wiring calls this; until it
-    /// lands only tests do.
+    /// the next game's: it goes to the game after, where a read that agrees
+    /// confirms it, one that disagrees drops it, and a weak read or none
+    /// expires it. `source_session` itself never settles it. A blank hint
+    /// clears it, a new one replaces the one pending (a log line says so).
+    /// Nothing happens with the reader off. The rank reader's wiring calls
+    /// this; until it lands only tests do.
     #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn set_next_mode_hint(
         &mut self,
@@ -157,9 +159,7 @@ impl PregameDump {
             }
             // The game is decided: close its folder as a read does, so a
             // frame of it saved later is not read for the next game.
-            if !feed.close_folder(started) {
-                tracing::info!(target: "scuffed_stat_tracker", session = session_id, "queue title: the game folder opened after this game's first record, left open for the next game");
-            }
+            feed.drop_frames();
             Field::none()
         };
         let game = ReadGame {
