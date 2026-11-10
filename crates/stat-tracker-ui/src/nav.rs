@@ -1066,6 +1066,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn the_chip_opens_games_with_every_counted_game_shown() {
         let (_dir, mut app) = app();
         let mut games = Vec::new();
