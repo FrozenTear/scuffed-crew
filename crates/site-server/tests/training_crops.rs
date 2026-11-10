@@ -1107,13 +1107,15 @@ async fn officer_counts_by_kind_admin_gets_resolutions_and_hidden_kinds() {
     assert_eq!(status, StatusCode::OK, "{totals}");
     assert_eq!(totals, expected);
 
-    // Plain members get 403.
+    // Plain members get 403, with no member or resolution data in the body.
     for uri in [
         "/api/training-crops/members",
         "/api/training-crops/resolutions",
     ] {
         let got = get(&w.app, uri, OTHER_SESSION).await;
         assert_eq!(got.0, StatusCode::FORBIDDEN, "{uri}: {}", got.1);
+        assert!(got.1.get("data").is_none(), "{uri}: {}", got.1);
+        assert!(got.1.get("resolutions").is_none(), "{uri}: {}", got.1);
     }
     w.cleanup();
 }
@@ -1557,8 +1559,9 @@ async fn admin_list_gives_ids_of_every_kind_to_delete() {
     let (status, page) = get(&w.app, "/api/training-crops", ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{page}");
     let items = page["data"].as_array().unwrap();
-    // The order inside an hour is by game token, then id (the db tests pin
-    // it), so compare as a set here.
+    // The order inside an hour is visible crops first (by a hash of the
+    // game token, then id), then hidden crops by id (the db tests pin it),
+    // so compare as a set here.
     let mut listed: Vec<&str> = items.iter().map(|c| c["id"].as_str().unwrap()).collect();
     listed.sort_unstable();
     let mut expected = vec![map[0].as_str(), digits[0].as_str(), hero[0].as_str()];

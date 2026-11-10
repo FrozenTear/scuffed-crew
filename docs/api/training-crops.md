@@ -44,7 +44,8 @@ consent shapes have no `full_screen` field, a `PUT` naming it is 400
 
 Map name banners are wide and the tracker sends them unscaled (a native 4K
 banner is 1036 px wide), so `map_name` has the wider bound and a byte limit
-to match. The whole request
+to match. The 256 KiB cap leaves headroom for 4K banners (measured max
+about 72 KB at 1440p, about 121 KB estimated at 4K). The whole request
 stays capped at 2 MiB (`HERO_ICON_MAX_REQUEST_BYTES`) for every kind, so a
 request of large banners holds fewer than 20 of them. The bounds live on
 `CropKind::max_edges` and `CropKind::max_crop_bytes`.
@@ -82,9 +83,11 @@ logged-in requests to those four routes share the per-IP limit too, admin
 deletes included; a refused request is the shared 429 `rate_limited`. The
 upload also keeps its per-member, per-kind limiter (below).
 
-There is no admin route to delete all of one member's training crops: an
-admin removes them one id at a time, inside that limit. An admin
-delete-all is a Site/API follow-up.
+There is no admin route to delete all of one member's `stat_digits` or
+`map_name` crops: an admin removes those one id at a time, inside that
+limit. For `hero_icon` there is one, `DELETE /api/hero-icons/members/{member_id}`,
+outside this per-IP limit. An admin delete-all of every training kind is a
+Site/API follow-up.
 
 A sync token never acts as staff. On `DELETE /api/training-crops/{id}` an
 admin's or officer's sync token reaches only that member's own crops; any
@@ -149,28 +152,34 @@ Check order:
 
 0. 429 `rate_limited` from the per-IP limit of the sync token routes (see
    Auth), before the credential is checked.
-1. 503 `hero_icons_disabled` when the store is off.
-2. 400 `unknown_crop_kind` for a missing or unknown `kind`.
-3. 422 `full_screen_not_accepted` for `full_screen`. This wins over the 403
+1. 401 `Authentication required` when there is no cookie and no Bearer, or
+   401 `Unauthorized` when the Bearer is neither a session nor a usable
+   sync token (see Auth). 403 membership failures also come from this
+   check. The `CropUploader` extractor runs this after the per-IP limit
+   and before the handler body.
+2. 503 `hero_icons_disabled` when the store is off.
+3. 400 `unknown_crop_kind` for a missing or unknown `kind`.
+4. 422 `full_screen_not_accepted` for `full_screen`. This wins over the 403
    below: a member without consent who sends `full_screen` gets 422, not
    403 `crop_consent_required`. On purpose: `full_screen` is refused for
    everyone whatever the consent (there is no `full_screen` consent to
-   have), so 422 is the true answer, and it comes before the limiter, so
-   nothing is read and no rate limit token is spent.
-4. 429 `rate_limited`: per member and per kind, burst 10 requests then one
+   have), so 422 is the true answer, and it comes before the per-member
+   limiter, so nothing is read and no per-member rate limit token is
+   spent. The per-IP limiter at step 0 has already spent a token.
+5. 429 `rate_limited`: per member and per kind, burst 10 requests then one
    every 60 s (`HERO_ICON_RATE_BURST`, `HERO_ICON_RATE_REFILL_SECS`). Each
    kind has its own bucket; `hero_icon` shares the bucket of
    `POST /api/hero-icons`. Refused requests still spend a token.
-5. 403 `crop_consent_required` when the caller does not consent to the kind.
-6. 409 `crop_limit_reached` when the caller is already at the kind's cap.
-7. 400 `invalid_multipart` when the body is not readable multipart.
-8. The parts, in order. Each `meta`: 400 `invalid_crop_meta` or
+6. 403 `crop_consent_required` when the caller does not consent to the kind.
+7. 409 `crop_limit_reached` when the caller is already at the kind's cap.
+8. 400 `invalid_multipart` when the body is not readable multipart.
+9. The parts, in order. Each `meta`: 400 `invalid_crop_meta` or
    `unknown_hero`. Each `crop`: 415 `not_png`, 413 `icon_too_large` (over
    the kind's byte limit), 400 `icon_bad_dimensions` (outside the kind's
    edges, see Crop size per kind), 400 `invalid_png`. A 21st pair is 413
    `too_many_crops_in_request`. A body over 2 MiB is 413 `icon_too_large`.
-9. 400 `no_crops` when there was no pair.
-10. 409 `crop_limit_reached` when this request would pass the cap.
+10. 400 `no_crops` when there was no pair.
+11. 409 `crop_limit_reached` when this request would pass the cap.
 
 Nothing is stored unless every part passes. After storing, the cap and the
 consent are checked again: if another upload pushed the caller over the cap
@@ -197,7 +206,7 @@ Every field is optional unless noted. Unknown fields are refused (400
 | `screen` | string | 1 to 32 chars of `A-Z a-z 0-9 _ - .` |
 | `slot_type` | string | Same as `screen` |
 | `slot_index` | int | 0 to 63 |
-| `game_token` | string | Exactly 32 lowercase hex characters (`TRAINING_CROP_GAME_TOKEN_LEN`), drawn at random by the tracker per game. Timestamps, UUIDs with dashes and other shapes are refused, so the token cannot carry when or which game it was. The server never links it to a match and never checks it against stored games |
+| `game_token` | string | Exactly 32 lowercase hex characters (`TRAINING_CROP_GAME_TOKEN_LEN`). Must be random (for example UUID v4); the server checks only the shape. A dashless UUIDv7 also matches that shape and would carry a time, so the admin list groups visible crops by a SHA-256 of the token, not the raw value. The server never links it to a match and never checks it against stored games |
 | `score` | float | Finite, absolute value at most 1000 |
 | `runner_up` | float | Same as `score` |
 | `margin` | float | Same as `score` |
@@ -304,18 +313,23 @@ required`. Everyone else: 404 `crop_not_found`.
 `GET /api/training-crops?kind=&cursor=&limit=` (admin). Every stored crop of
 active members, of every kind or of one kind with `?kind=`, so an admin can
 find the id of any crop and delete it. Sorted by the upload hour (newest
-first), then `game_token`, then id: stable, crops of one game stay
-together, and nothing shows the order within an hour. Each item is a
-`TrainingCropEntry` plus `member_id`, `display_name` and `hidden`:
+first), then visible crops before hidden ones, then a SHA-256 of
+`game_token` for visible crops that have one (rows with no token first
+in the hour), then id: stable, visible crops of one game stay together,
+hidden crops are not sorted into that group, and nothing shows the order
+within an hour. Each item is a `TrainingCropEntry` plus `member_id`,
+`display_name` and `hidden`:
 
 - `hidden: false`: the owner consents to this kind right now. Every field is
   sent and the image can be read.
 - `hidden: true`: consent for this kind is off. Only `id`, `kind`,
   `uploaded_at` and `thumbnail_url` carry values. `size_bytes`, `width` and
   `height` are 0, since a crop's size can give away the game resolution
-  (map banners are sent unscaled). `meta` is `{}`, there is no `hero` or
-  `tracker_version`, and the image answers 404. The id is there so the crop
-  can be deleted.
+  (map banners are sent unscaled). `meta` is `{}`, so `game_token` is
+  omitted too, there is no `hero` or `tracker_version`, and the image
+  answers 404. Hidden crops of the same hour sort after the visible ones,
+  by id only, so a shared `game_token` cannot group them with visible
+  crops of that game. The id is there so the crop can be deleted.
 
 `uploaded_at` in this list is cut down to the start of its UTC hour, so the
 times are rough. That does not make a crop unlinkable to a game: admins

@@ -316,10 +316,11 @@ pub struct TrainingCropEntry {
     pub id: String,
     pub kind: CropKind,
     /// Hero key (`soldier-76`, see `scuffed_types::hero_key`). Always set
-    /// for `hero_icon`.
+    /// for a visible `hero_icon`. Absent on a hidden admin-list item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hero: Option<String>,
-    /// Stored PNG size after the server re-encoded it.
+    /// Stored PNG size after the server re-encoded it. 0 on a hidden
+    /// admin-list item, along with `width` and `height`.
     pub size_bytes: u64,
     pub width: u32,
     pub height: u32,
@@ -386,16 +387,19 @@ pub struct MyTrainingCrops {
 /// One crop in the admin list (`GET /api/training-crops`).
 ///
 /// `uploaded_at` is cut down to the start of its UTC hour here, and the list
-/// is sorted by that hour, then `game_token`, then id. That keeps the times
-/// rough, but it does not make a crop unlinkable to a game: admins still see
-/// exact hero icon upload times on `/api/hero-icons`, and stat digit values
-/// may match a game.
+/// is sorted by that hour, then visible crops before hidden ones, then a
+/// SHA-256 of `game_token` for visible crops that have one (rows with no
+/// token first in the hour), then id. That keeps the times rough and keeps
+/// a hidden crop out of a visible game's group, but it does not make a crop
+/// unlinkable to a game: admins still see exact hero icon upload times on
+/// `/api/hero-icons`, and stat digit values may match a game.
 ///
 /// Every stored kind of every active member is listed, so an admin can find
 /// any crop's id to delete it. A crop whose kind the owner does not consent
 /// to right now is `hidden`: only its id, kind, hour and `thumbnail_url` are
-/// sent, with `size_bytes`, `width` and `height` as 0 (no `hero`,
-/// `tracker_version` or `meta` fields), and its image answers 404.
+/// sent, with `size_bytes`, `width` and `height` as 0 (no `hero` or
+/// `tracker_version`, and `meta` is empty so `game_token` is omitted too),
+/// and its image answers 404.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StaffTrainingCrop {
     pub member_id: String,

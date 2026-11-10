@@ -495,14 +495,20 @@ impl Database {
     }
 
     /// Crops staff may list: for each kind, the crops of the given members.
-    /// Sorted by the upload hour (UTC, newest first), then `game_token`,
-    /// then id, so the order is stable and shows nothing of the order within
-    /// an hour, and crops of one game stay together. `limit + 1` rows from
-    /// `offset`. Kinds with no members are left out; with none at all
+    /// Sorted by the upload hour (UTC, newest first), then visible crops
+    /// before hidden ones, then a SHA-256 of `game_token` for visible crops
+    /// that have one (rows with no token first in the hour), then id. The
+    /// hash keeps crops of one game together without letting a time-bearing
+    /// token (a dashless UUIDv7, for example) decide the group order.
+    /// Hidden crops do not sort into that group: `hidden` is the (kind,
+    /// member ids) pairs whose consent is off, and those rows sort by id
+    /// only after the visible crops of the same hour. `limit + 1` rows
+    /// from `offset`. Kinds with no members are left out; with none at all
     /// nothing is queried.
     pub async fn list_training_crops_visible(
         &self,
         visible: &[(CropKind, Vec<String>)],
+        hidden: &[(CropKind, Vec<String>)],
         limit: u32,
         offset: u32,
     ) -> DbResult<Vec<TrainingCrop>> {
@@ -513,15 +519,31 @@ impl Database {
         if groups.is_empty() {
             return Ok(Vec::new());
         }
+        let hidden_groups: Vec<&(CropKind, Vec<String>)> = hidden
+            .iter()
+            .filter(|(kind, ids)| kind.accepts_uploads() && !ids.is_empty())
+            .collect();
         // Fixed fragments with numbered bind names only; no value is
         // written into the query text.
         let clauses: Vec<String> = (0..groups.len())
             .map(|i| format!("(kind = $kind{i} AND member_id IN $ids{i})"))
             .collect();
+        let hidden_expr = if hidden_groups.is_empty() {
+            "false".to_string()
+        } else {
+            (0..hidden_groups.len())
+                .map(|i| format!("(kind = $hkind{i} AND member_id IN $hids{i})"))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        };
         let sql = format!(
-            "SELECT *, time::floor(created_at, 1h) AS upload_hour FROM hero_icon \
+            "SELECT *, time::floor(created_at, 1h) AS upload_hour, \
+             ({hidden_expr}) AS is_hidden, \
+             IF (({hidden_expr}) OR game_token IS NONE) THEN NONE ELSE crypto::sha256(game_token) END AS token_sort \
+             FROM hero_icon \
              WHERE {} \
-             ORDER BY upload_hour DESC, game_token ASC, id ASC LIMIT $lim START $off",
+             ORDER BY upload_hour DESC, is_hidden ASC, token_sort ASC, \
+             id ASC LIMIT $lim START $off",
             clauses.join(" OR ")
         );
         with_timeout(async {
@@ -530,6 +552,11 @@ impl Database {
                 query = query
                     .bind((format!("kind{i}"), kind.as_str().to_string()))
                     .bind((format!("ids{i}"), ids.clone()));
+            }
+            for (i, (kind, ids)) in hidden_groups.iter().enumerate() {
+                query = query
+                    .bind((format!("hkind{i}"), kind.as_str().to_string()))
+                    .bind((format!("hids{i}"), ids.clone()));
             }
             let mut result = query.bind(("lim", limit + 1)).bind(("off", offset)).await?;
             let rows: Vec<DbHeroIcon> = result.take(0)?;
@@ -950,7 +977,7 @@ mod tests {
         }
 
         assert!(db
-            .list_training_crops_visible(&[], 10, 0)
+            .list_training_crops_visible(&[], &[], 10, 0)
             .await
             .unwrap()
             .is_empty());
@@ -962,7 +989,7 @@ mod tests {
             (CropKind::MapName, Vec::new()),
         ];
         let rows = db
-            .list_training_crops_visible(&visible, 10, 0)
+            .list_training_crops_visible(&visible, &[], 10, 0)
             .await
             .unwrap();
         let ids: Vec<&str> = rows.iter().map(|c| c.id.as_str()).collect();
@@ -972,7 +999,7 @@ mod tests {
             (CropKind::MapName, vec!["m1".to_string()]),
         ];
         let rows = db
-            .list_training_crops_visible(&visible, 10, 0)
+            .list_training_crops_visible(&visible, &[], 10, 0)
             .await
             .unwrap();
         let ids: Vec<&str> = rows.iter().map(|c| c.id.as_str()).collect();
@@ -984,16 +1011,19 @@ mod tests {
         use chrono::TimeZone;
         let db = test_db().await;
         let hour = Utc.with_ymd_and_hms(2026, 11, 10, 18, 0, 0).unwrap();
-        let token_a = "0000000000000000000000000000000a";
-        let token_b = "0000000000000000000000000000000b";
+        // Dashless UUIDv7-like tokens: the first 48 bits are a millisecond
+        // timestamp, so raw lex order follows time (early, then late).
+        // SHA-256 order is the reverse, which is what the list must use.
+        let token_early = "01900000000070000000000000000000";
+        let token_late = "01900000000270000000000000000002";
         // (id, minutes into the 18:00 hour, game token). Exact times inside
         // the hour must not decide the order.
         let rows = [
-            ("6666666666666666666666666666666a", 50, Some(token_b)),
-            ("6666666666666666666666666666666b", 5, Some(token_a)),
-            ("6666666666666666666666666666666c", 40, Some(token_a)),
+            ("6666666666666666666666666666666a", 50, Some(token_late)),
+            ("6666666666666666666666666666666b", 5, Some(token_early)),
+            ("6666666666666666666666666666666c", 40, Some(token_early)),
             ("6666666666666666666666666666666d", 59, None),
-            ("6666666666666666666666666666666e", 10, Some(token_b)),
+            ("6666666666666666666666666666666e", 10, Some(token_late)),
         ];
         for (id, minutes, token) in rows {
             let mut crop = new_crop(id, "m1", CropKind::StatDigits, 0);
@@ -1021,7 +1051,7 @@ mod tests {
 
         let visible = vec![(CropKind::StatDigits, vec!["m1".to_string()])];
         let listed = db
-            .list_training_crops_visible(&visible, 10, 0)
+            .list_training_crops_visible(&visible, &[], 10, 0)
             .await
             .unwrap();
         let ids: Vec<&str> = listed.iter().map(|c| c.id.as_str()).collect();
@@ -1029,27 +1059,61 @@ mod tests {
             ids,
             vec![
                 "fffffffffffffffffffffffffffffff1",
-                // No token first, then by token, then by id.
+                // No token first, then by SHA-256 of the token (late, then
+                // early: the reverse of time/lex order), then by id.
                 "6666666666666666666666666666666d",
-                "6666666666666666666666666666666b",
-                "6666666666666666666666666666666c",
                 "6666666666666666666666666666666a",
                 "6666666666666666666666666666666e",
+                "6666666666666666666666666666666b",
+                "6666666666666666666666666666666c",
                 "1111111111111111111111111111111f",
             ]
         );
         // Paging follows the same order.
         let page = db
-            .list_training_crops_visible(&visible, 2, 2)
+            .list_training_crops_visible(&visible, &[], 2, 2)
             .await
             .unwrap();
         let ids: Vec<&str> = page.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(
             ids,
             vec![
+                "6666666666666666666666666666666a",
+                "6666666666666666666666666666666e",
+                "6666666666666666666666666666666b",
+            ]
+        );
+
+        // A hidden crop that shares token_early must not land in that
+        // visible group. Its id would sort into the early group if
+        // game_token were still used. Same member, other kind: the
+        // realistic case, when consent is off for one kind of a game.
+        let hidden_id = "666666666666666666666666666666bf";
+        let mut hidden_crop = new_crop(hidden_id, "m1", CropKind::MapName, 0);
+        hidden_crop.created_at = hour + Duration::minutes(20);
+        hidden_crop.meta.game_token = Some(token_early.to_string());
+        db.insert_training_crop(&hidden_crop).await.unwrap();
+        let listed_kinds = vec![
+            (CropKind::StatDigits, vec!["m1".to_string()]),
+            (CropKind::MapName, vec!["m1".to_string()]),
+        ];
+        let hidden = vec![(CropKind::MapName, vec!["m1".to_string()])];
+        let listed = db
+            .list_training_crops_visible(&listed_kinds, &hidden, 10, 0)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = listed.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "fffffffffffffffffffffffffffffff1",
+                "6666666666666666666666666666666d",
+                "6666666666666666666666666666666a",
+                "6666666666666666666666666666666e",
                 "6666666666666666666666666666666b",
                 "6666666666666666666666666666666c",
-                "6666666666666666666666666666666a",
+                hidden_id,
+                "1111111111111111111111111111111f",
             ]
         );
     }
@@ -1197,9 +1261,9 @@ mod tests {
         let db = test_db().await;
         let icon = "8888888888888888888888888888888a";
         let crop = "8888888888888888888888888888888b";
-        let mut legacy_spelling = new_icon(icon, "m1", 2);
-        legacy_spelling.hero = "soldier-76".into();
-        db.insert_hero_icon(&legacy_spelling).await.unwrap();
+        let mut icon_from_key = new_icon(icon, "m1", 2);
+        icon_from_key.hero = "soldier-76".into();
+        db.insert_hero_icon(&icon_from_key).await.unwrap();
         let mut digits = new_crop(crop, "m1", CropKind::StatDigits, 1);
         digits.hero = Some("Lúcio".into());
         db.insert_training_crop(&digits).await.unwrap();

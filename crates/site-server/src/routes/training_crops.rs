@@ -168,6 +168,8 @@ fn to_the_hour(at: DateTime<Utc>) -> DateTime<Utc> {
 /// The admin list item for `crop`. A hidden crop (no consent for its kind)
 /// carries no hero, tracker version or metadata, and its size and
 /// dimensions are 0, since a crop's size can give away the game resolution.
+/// Clearing `meta` also drops `game_token`, so the response does not tie a
+/// hidden crop to a visible game.
 fn staff_item(crop: &TrainingCrop, display_name: String, hidden: bool) -> StaffTrainingCrop {
     let mut item = entry(crop);
     item.uploaded_at = to_the_hour(item.uploaded_at);
@@ -346,8 +348,10 @@ struct PendingCrop {
 /// `HERO_ICON_MAX_FILES_PER_UPLOAD` pairs: a `meta` part (JSON
 /// [`TrainingCropUploadMeta`]) followed by its `crop` part (PNG).
 ///
-/// Order of checks: 503 when disabled, kind (400), `full_screen` (422), the
-/// per-member per-kind limiter (429), consent (403), the stored cap (409),
+/// Order of checks: the per-IP limit (429), then the credential (401, or
+/// 403 for a membership failure), then 503 when disabled, kind (400),
+/// `full_screen` (422), the per-member per-kind limiter (429), consent
+/// (403), the stored cap (409),
 /// then the body: part names and order (400 `unexpected_field`), count (413),
 /// each `meta` (400), each `crop` (signature 415, size 413, dimensions and
 /// decode 400; bounds per kind, see `CropKind::max_edges` and
@@ -798,12 +802,15 @@ pub async fn delete_crop(
 /// GET /api/training-crops?kind=&cursor=&limit= (admin)
 ///
 /// Every stored crop of active members, of every kind or of one kind with
-/// `?kind=`, newest first, so an admin can find any crop's id and delete it
-/// with `DELETE /api/training-crops/{id}`. A crop of a kind the owner does
+/// `?kind=`, so an admin can find any crop's id and delete it with
+/// `DELETE /api/training-crops/{id}`. A crop of a kind the owner does
 /// not consent to right now is `hidden`: no hero, tracker version or
 /// metadata, size and dimensions 0, and its image stays 404. `uploaded_at`
 /// is cut to the hour, and the list is sorted by that hour (newest first),
-/// then `game_token`, then id, so it shows no order within an hour.
+/// then visible crops before hidden ones, then a SHA-256 of `game_token`
+/// for visible crops that have one (rows with no token first in the hour),
+/// then id, so it shows no order within an hour and a hidden crop is not
+/// sorted into a visible game's group.
 ///
 /// One audit entry per request, target `all`: `viewed_hero_icons` when the
 /// list is filtered to `hero_icon`, `viewed_training_crops` otherwise, with
@@ -834,9 +841,20 @@ pub async fn list_training_crops(
         .filter(|kind| only.is_none_or(|only| only == *kind))
         .map(|kind| (kind, active.clone()))
         .collect();
+    let hidden: Vec<(CropKind, Vec<String>)> = groups
+        .iter()
+        .map(|(kind, ids)| {
+            let hidden_ids: Vec<String> = ids
+                .iter()
+                .filter(|id| !consents.get(*id).is_some_and(|consent| consent.get(*kind)))
+                .cloned()
+                .collect();
+            (*kind, hidden_ids)
+        })
+        .collect();
     let rows = state
         .db
-        .list_training_crops_visible(&groups, limit, offset)
+        .list_training_crops_visible(&groups, &hidden, limit, offset)
         .await
         .map_err(db_error)?;
     let items: Vec<StaffTrainingCrop> = rows
