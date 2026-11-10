@@ -12,7 +12,8 @@
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, Stack, button, column, container, image, row, space, stack, text};
 use iced::{
-    Alignment, Background, Border, Color, Element, Fill, Length, Padding, Shadow, Task, Theme,
+    Alignment, Background, Border, Color, Element, Fill, Length, Padding, Shadow, Subscription,
+    Task, Theme,
 };
 
 use crate::app::{Message, TrackerApp};
@@ -134,6 +135,25 @@ pub fn chip_message() -> Message {
 /// Handle a top bar message. [`Msg::ShowNeedsLook`] clears the hero, map,
 /// outcome and role filters, picks All time and turns on the "Needs a
 /// look" filter, so Games shows exactly the games the chip counted.
+/// If the Read bans and picks row is marked, also listen for a click or
+/// scroll that drops the mark at once. This is added on top of the other
+/// subscriptions, not inside the exclusive dialog if/else.
+pub fn with_clear_on_pointer(
+    app: &TrackerApp,
+    mut subs: Vec<Subscription<Message>>,
+) -> Subscription<Message> {
+    if app
+        .page_state
+        .bans_picks_row_marked(std::time::Instant::now())
+    {
+        subs.push(iced::event::listen_with(|event, _, _| {
+            crate::bans_picks_setting::is_click_or_scroll(&event)
+                .then_some(Message::Nav(Msg::ClearBansPicksHighlight))
+        }));
+    }
+    Subscription::batch(subs)
+}
+
 pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
     match msg {
         Msg::ShowNeedsLook => {
