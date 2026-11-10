@@ -2,9 +2,11 @@
 //! `games_bans` (UX Spec bans and picks a3b, "chips stay default"). The
 //! header is 24px: the label, then a one-line legend of the glyphs this card
 //! uses. Under it, four rows 26px high with 6px gaps, each with its label on
-//! the left at every width (the 1024 layout too). Chips are 26px high and as
-//! wide as their name, with no placeholder portrait. Chips are read-only: no
-//! focus, no press. The one button is "Open Settings" on a reason line.
+//! the left at every width (the 1024 layout too). A row too wide for the
+//! panel wraps between its groups onto a second line, 6px below. Chips are
+//! 26px high and as wide as their name, with no placeholder portrait.
+//! Chips are read-only: no focus, no press. The one button is "Open
+//! Settings" on a reason line.
 //!
 //! Glyphs are the PNG icons, never text: Urbanist, the page font, has no
 //! swap arrow glyph, so a text glyph would draw as a missing-glyph box. The
@@ -165,17 +167,9 @@ fn outline_swatch(_: &Theme) -> container::Style {
     }
 }
 
-/// One row: the label on the left, then the parts on one line.
+/// One row: the label on the left, then the parts. The label sits level
+/// with the first line of the body.
 fn block_row(r: &BlockRow) -> Element<'static, Message> {
-    let mut body: Row<'static, Message> = row![].align_y(Alignment::Center);
-    let mut prev: Option<&Part> = None;
-    for part in &r.parts {
-        if let Some(prev) = prev {
-            body = body.push(space().width(gap(prev, part)));
-        }
-        body = body.push(draw_part(part));
-        prev = Some(part);
-    }
     row![
         container(
             text(r.label)
@@ -184,13 +178,41 @@ fn block_row(r: &BlockRow) -> Element<'static, Message> {
                 .color(TEXT_3)
                 .wrapping(Wrapping::None),
         )
-        .width(LABEL_W),
-        body,
+        .width(LABEL_W)
+        .height(CHIP_H)
+        .align_y(Alignment::Center),
+        row_body(&r.parts),
     ]
     .spacing(LABEL_GAP)
-    .height(CHIP_H)
-    .align_y(Alignment::Center)
+    .align_y(Alignment::Start)
     .into()
+}
+
+/// The parts of a row on one line, wrapping onto more lines when the panel
+/// is too narrow (a mixed Bans row with long names at 1024). The pieces
+/// that wrap are the groups, each with the divider after it, so a new line
+/// always starts with a group, never with a divider. Every line is at least
+/// a chip high, with its parts centred in it.
+fn row_body(parts: &[Part]) -> Element<'static, Message> {
+    let line = || -> Row<'static, Message> {
+        row![space().width(0).height(CHIP_H)].align_y(Alignment::Center)
+    };
+    let mut body: Row<'static, Message> = row![].align_y(Alignment::Center);
+    let mut unit = line();
+    let mut prev: Option<&Part> = None;
+    for part in parts {
+        if let Some(prev) = prev {
+            unit = unit.push(space().width(gap(prev, part)));
+        }
+        unit = unit.push(draw_part(part));
+        prev = Some(part);
+        if matches!(part, Part::Divider) {
+            unit = unit.push(space().width(DIVIDER_GAP));
+            body = body.push(std::mem::replace(&mut unit, line()));
+            prev = None;
+        }
+    }
+    body.push(unit).wrap().vertical_spacing(ROW_GAP).into()
 }
 
 /// The space between two parts of a row.
@@ -407,14 +429,14 @@ fn settings_button(link: SettingsLink) -> Element<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures_games::{LOBBY_ONLY, NO_BAN, NORMAL, SIDE, SKIP, UNSURE};
+    use crate::fixtures_games::{LOBBY_ONLY, MIXED, NO_BAN, NORMAL, SIDE, SKIP, UNSURE};
     use crate::snapshot::games_from_snapshot;
 
-    /// Every chip of every fixture block, plus the states no fixture has.
+    /// Every chip of every fixture block.
     fn all_chips() -> Vec<Chip> {
         let games = games_from_snapshot(&crate::fixtures_games::snapshot());
         let mut out: Vec<Chip> = Vec::new();
-        for sid in [NORMAL, UNSURE, SIDE, NO_BAN, SKIP, LOBBY_ONLY] {
+        for sid in [NORMAL, UNSURE, SIDE, NO_BAN, SKIP, LOBBY_ONLY, MIXED] {
             let g = games.iter().find(|g| g.session_id == sid).expect(sid);
             let BansPicks::Block(b) = crate::games_bans::bans_picks(g) else {
                 panic!("{sid}: no block");

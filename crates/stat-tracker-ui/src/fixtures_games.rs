@@ -30,6 +30,9 @@ pub const NO_BAN: &str = "sess-g-h02";
 pub const SKIP: &str = "sess-g-h03";
 /// Junkertown: the lobby ban read, none of the four ban slots read.
 pub const LOBBY_ONLY: &str = "sess-g-h04";
+/// King's Row: a mixed Bans row with long names (both teams, a ban with no
+/// team read and the lobby ban), the widest row the block draws.
+pub const MIXED: &str = "sess-g-h05";
 
 /// The server message on the rejected sample upload.
 pub const REJECT: &str =
@@ -206,9 +209,10 @@ pub fn snapshot() -> Snapshot {
     crate::fixtures_bans::reader_off(&mut undecided);
     crate::fixtures_bans::frame_size(&mut rejected_2);
 
-    // Four more states on the newest history games: the team of each ban
+    // Five more states on the newest history games: the team of each ban
     // not read with hero select not seen, no ban screen seen, skipped and
-    // not seen ban votes, and a lobby ban read with no team ban read.
+    // not seen ban votes, a lobby ban read with no team ban read, and the
+    // mixed Bans row with long names.
     let mut side = wb(SIDE.into(), "Nepal", "defeat", dt(2026, 10, 18, 22, 5));
     crate::fixtures_bans::side(&mut side);
     let mut no_ban = wb(
@@ -227,6 +231,13 @@ pub fn snapshot() -> Snapshot {
         dt(2026, 10, 17, 22, 1),
     );
     crate::fixtures_bans::lobby_only(&mut lobby_only);
+    let mut mixed = wb(
+        MIXED.into(),
+        "King's Row",
+        "victory",
+        dt(2026, 10, 17, 21, 52),
+    );
+    crate::fixtures_bans::mixed(&mut mixed);
 
     let mut matches = vec![
         held,
@@ -237,12 +248,7 @@ pub fn snapshot() -> Snapshot {
         no_ban,
         skip,
         lobby_only,
-        wb(
-            "sess-g-h05".into(),
-            "King's Row",
-            "victory",
-            dt(2026, 10, 17, 21, 52),
-        ),
+        mixed,
         wb(
             "sess-g-h06".into(),
             "Ilios",

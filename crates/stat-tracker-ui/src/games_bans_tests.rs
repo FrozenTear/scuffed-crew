@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::fixtures_games::{
-    HELD, LOBBY_ONLY, NO_BAN, NORMAL, REJECTED_2, SIDE, SKIP, UNDECIDED, UNSURE,
+    HELD, LOBBY_ONLY, MIXED, NO_BAN, NORMAL, REJECTED_2, SIDE, SKIP, UNDECIDED, UNSURE,
 };
 use crate::snapshot::games_from_snapshot;
 
@@ -169,7 +169,7 @@ fn a_partial_read_keeps_its_gaps_visible() {
     }));
     let bans = chips(&rows, LABEL_BANS);
     assert_eq!(bans[0].tip, "Banned: Sombra, team not read");
-    assert_eq!(bans[2].tip, "Ban 3: not read");
+    assert_eq!(bans[2].tip, "Team not read, ban 3: not read");
     assert!(bans[2].outline());
     // No preference shows as such, and a null slot as Not read.
     let picks = chips(&rows, LABEL_HERO_SELECT);
@@ -1097,7 +1097,7 @@ fn only_bans_with_no_team_go_under_team_not_read() {
             "Banned by your team: Sombra",
             "Banned by their team: Ana",
             "Banned by their team: Winston",
-            "Ban 2: not read",
+            "Team not read, ban 1: not read",
             "Lobby ban: Sigma"
         ]
     );
@@ -1116,6 +1116,86 @@ fn only_bans_with_no_team_go_under_team_not_read() {
     for tip in r.chips().map(|c| c.tip.as_str()) {
         assert!(!tip.contains("for this game"), "{tip}");
     }
+}
+
+/// One numbering scheme for ban tips: each Not read slot is numbered inside
+/// its own group, and the group is named, so two slots never share a name.
+#[test]
+fn no_two_ban_slots_share_a_name() {
+    // Stored: own Sombra, no team not read, enemy Ana, enemy not read.
+    let g = with(
+        r#"{"bans":[
+              {"value":"sombra","team":"own"},
+              {"value":null,"team":null},
+              {"value":"ana","team":"enemy"},
+              {"value":null,"team":"enemy"}]}"#,
+        Some(BansPicksStatus::Ok),
+    );
+    let rows = rows_of(&g);
+    let r = row(&rows, LABEL_BANS);
+    assert_eq!(
+        shape(r),
+        [
+            "Your team",
+            "[Sombra]",
+            "|",
+            "Their team",
+            "[Ana, Not read]",
+            "|",
+            "[Not read]",
+            "Team not read"
+        ]
+    );
+    let tips: Vec<_> = r.chips().map(|c| c.tip.as_str()).collect();
+    assert_eq!(
+        tips,
+        [
+            "Banned by your team: Sombra",
+            "Banned by their team: Ana",
+            "Their ban 2: not read",
+            "Team not read, ban 1: not read"
+        ]
+    );
+    let mut unique = tips.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), tips.len(), "{tips:?}");
+}
+
+/// The mixed fixture game: both teams, a read ban with no team and the
+/// lobby ban, with long names (the widest Bans row, which wraps at 1024).
+#[test]
+fn the_mixed_fixture_has_every_ban_group() {
+    let b = block_of(&game(MIXED));
+    let r = row(&b.rows, LABEL_BANS);
+    assert_eq!(
+        shape(r),
+        [
+            "Your team",
+            "[Wrecking Ball, Junker Queen]",
+            "|",
+            "Their team",
+            "[Soldier: 76]",
+            "|",
+            "[Widowmaker]",
+            TEAM_NOT_READ,
+            "|",
+            "Lobby",
+            "[Ramattra]"
+        ]
+    );
+    let tips: Vec<_> = r.chips().map(|c| c.tip.as_str()).collect();
+    assert_eq!(
+        tips,
+        [
+            "Banned by your team: Wrecking Ball",
+            "Banned by your team: Junker Queen",
+            "Banned by their team: Soldier: 76",
+            "Banned: Widowmaker, team not read",
+            "Lobby ban: Ramattra"
+        ]
+    );
+    assert!(r.chips().all(|c| c.ban && !c.outline()));
 }
 
 /// Only cv-v1 (or no tag, as sync reads it) is drawn as chips. Any other
@@ -1218,14 +1298,19 @@ fn fixture_records_have_the_daemon_shape() {
                 assert!(r["confidence"].as_f64().unwrap() > 0.0, "{sid}: {r}");
             }
         }
-        // `ban_votes` and `ban_score` are null together, when the vote
-        // screen was not seen; a slot with no hero ran no match.
-        assert_eq!(v["ban_votes"].is_null(), v["ban_score"].is_null(), "{sid}");
+        // `ban_votes` and `ban_score` are each a list or null: the daemon
+        // reads the slots and the strip apart, so either can be null alone.
+        for list in ["ban_votes", "ban_score"] {
+            assert!(v[list].is_null() || v[list].is_array(), "{sid}: {list}");
+        }
+        // A slot with no hero has confidence 0. A skipped or empty slot ran
+        // no match, so its score and margin are 0 (a slot with state null
+        // may still carry a score: the no-preference icon is matched).
         if let Some(slots) = v["ban_votes"].as_array() {
             for s in slots {
                 if s["hero"].is_null() {
                     assert_eq!(s["confidence"], 0.0, "{sid}: {s}");
-                    if s["state"] != "hero" {
+                    if s["state"] == "skipped" || s["state"] == "empty" {
                         assert_eq!(s["score"], 0.0, "{sid}: {s}");
                         assert_eq!(s["margin"], 0.0, "{sid}: {s}");
                     }

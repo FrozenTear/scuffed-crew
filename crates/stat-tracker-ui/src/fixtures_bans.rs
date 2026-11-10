@@ -6,11 +6,16 @@
 //! (`crates/stat-tracker/src/daemon/bans_picks.rs`, `Stored`): a value is
 //! only stored when its read clears the accept bar (score 0.45, margin
 //! 0.12), so a null value has confidence 0 and a score or margin below the
-//! bar; a skipped, empty or unclear vote slot runs no match and has score
-//! and margin 0; `layout` is `plain` or `lobby` (null when the ban screen
-//! was not seen), `lobby_ban` is null outside the lobby layout; `ban_votes`
-//! and `ban_score` are null when the vote screen was not seen; and the
-//! status is `Partial` only with a screen in `missing`.
+//! bar; `layout` is `plain` or `lobby` (null when the ban screen was not
+//! seen), `lobby_ban` is null outside the lobby layout; and the status is
+//! `Partial` only with a screen in `missing`.
+//!
+//! In these fixtures a vote slot with no hero state (skipped, empty or
+//! unclear) has score and margin 0, and `ban_votes` and `ban_score` are
+//! both null when the vote screen was not seen. The daemon is looser: a
+//! slot showing the no-preference icon has state null but keeps its match
+//! score and margin, and it reads the slots and the strip apart, so either
+//! list can be null alone.
 
 use serde_json::{Value, json};
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
@@ -41,8 +46,8 @@ const EMPTY: &str = "<empty>";
 
 /// Our own vote slots as the tracker stores them in `ban_votes`: a hero
 /// when one is given, [`SKIPPED`] or [`EMPTY`] for those states, otherwise
-/// a slot that was none of the states clearly (state null). Only a hero
-/// slot ran a match, so only it has a score.
+/// an unclear slot (state null). Only a hero slot ran a match here, so
+/// only it has a score (no slot here shows the no-preference icon).
 fn vote_slots(values: &[Option<&str>]) -> Vec<Value> {
     values
         .iter()
@@ -266,6 +271,30 @@ pub fn lobby_only(m: &mut PersonalMatch) {
                 ban(None, Some("enemy")),
             ],
             Some("sigma"),
+        ),
+        &SIX,
+        Some((
+            &[Some("reinhardt"), Some("tracer"), Some("genji")],
+            &[("reinhardt", 2), ("tracer", 2), ("genji", 1)],
+        )),
+    ));
+    m.bans_picks_status = Some(BansPicksStatus::Ok);
+}
+
+/// King's Row: the widest Bans row. Long names in both team groups, one
+/// ban read with no team (so it goes under Team not read), and the lobby
+/// ban: `Your team | Their team | Team not read | Lobby`, which wraps at
+/// 1024.
+pub fn mixed(m: &mut PersonalMatch) {
+    m.bans_picks = Some(stored(
+        Results::Lobby(
+            vec![
+                ban(Some("wrecking-ball"), Some("own")),
+                ban(Some("junker-queen"), Some("own")),
+                ban(Some("soldier-76"), Some("enemy")),
+                ban(Some("widowmaker"), None),
+            ],
+            Some("ramattra"),
         ),
         &SIX,
         Some((

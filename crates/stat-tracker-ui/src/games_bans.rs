@@ -589,7 +589,9 @@ impl Stored {
     /// but the lobby ban was, the stored ban slots come first as Not read
     /// chips (or the quiet line when none is stored), so the row never
     /// reads as "no team bans". When nothing on the ban screen was read, one
-    /// quiet line that says whether it was seen.
+    /// quiet line that says whether it was seen. A Not read tip numbers its
+    /// slot inside its own group and names the group ("Their ban 2", "Team
+    /// not read, ban 1"), so two slots in one row never share a name.
     fn bans_row(&self, status: Option<&BansPicksStatus>) -> Row {
         let mut parts = Vec::new();
         let lobby_read = matches!(self.lobby, Lobby::Hero(_));
@@ -617,14 +619,16 @@ impl Stored {
                 parts.push(Part::Key(key));
                 parts.push(Part::Chips(chips));
             }
+            // Numbered inside their own group, as the team groups are, so
+            // no two ban slots share a name.
             let team_less: Vec<Chip> = self
                 .bans
                 .iter()
+                .filter(|b| b.team.is_none())
                 .enumerate()
-                .filter(|(_, b)| b.team.is_none())
                 .map(|(i, b)| match &b.slot {
                     Slot::Hero(name) => ban_chip(name, format!("Banned: {name}, team not read")),
-                    _ => not_read_chip(format!("Ban {}: not read", i + 1)),
+                    _ => not_read_chip(format!("Team not read, ban {}: not read", i + 1)),
                 })
                 .collect();
             if !team_less.is_empty() {
