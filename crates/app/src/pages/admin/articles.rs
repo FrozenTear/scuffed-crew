@@ -87,8 +87,10 @@ fn cover_preview_src(url: &str) -> Option<&str> {
 /// Toast copy when `POST /api/upload/image` answers with an error status.
 fn image_upload_failure_message(status: u16) -> String {
     match status {
-        400 => "The server could not read that image. Try a different JPEG, PNG, WebP, or GIF."
-            .to_string(),
+        400 => {
+            "The server could not read that image. Try a different JPEG, PNG, WebP, GIF, or AVIF."
+                .to_string()
+        }
         401 => "Your session has ended. Sign in again, then retry the upload.".to_string(),
         403 => "Only officers and admins can upload images.".to_string(),
         413 => "The image is too large, or your upload space is full.".to_string(),
@@ -527,7 +529,7 @@ pub fn AdminArticles() -> Element {
                     onchange: on_cover_file_change,
                 }
                 p { id: "{cover_hint_id}", class: "form-hint",
-                    "JPEG, PNG, WebP, or GIF, up to 5 MB. The uploaded path fills the URL field above."
+                    "JPEG, PNG, WebP, GIF, or AVIF, up to 5 MB. The uploaded path fills the URL field above."
                 }
                 p {
                     class: if cover_status_error() { "name-field-error" } else { "form-hint" },
