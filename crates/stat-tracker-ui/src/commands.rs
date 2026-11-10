@@ -157,8 +157,7 @@ pub fn save_edit(
 
 /// What a queued Edit says, from whether the game is still held, was held,
 /// and which kinds of field changed. A role-only change reads "Role
-/// corrected" but is still filed as Wrong hero, as there is no role
-/// category.
+/// corrected" and offers no training report, as there is no role category.
 fn saved(
     held: bool,
     was_held: bool,
@@ -169,12 +168,15 @@ fn saved(
 ) -> Saved {
     // The training report files the fix under what was fixed: a stat fix
     // first, as the stats are what the reader reads most. A save that
-    // changed nothing fixed nothing, so it offers no report.
+    // changed nothing fixed nothing, so it offers no report. A role-only
+    // fix offers none either: filed as Wrong hero it would count against
+    // the hero icon reader, which read the hero right. With a map fix too,
+    // the report is for the map.
     let category = if stats_changed {
         Some(GameCategory::WrongStats)
     } else if map_changed {
         Some(GameCategory::WrongMap)
-    } else if hero_changed {
+    } else if hero_changed && !role_only {
         Some(GameCategory::WrongHero)
     } else {
         None
@@ -395,7 +397,9 @@ mod tests {
     }
 
     /// A map-only or hero-only Edit on a game that wasn't held names what
-    /// it fixed, never "Stats corrected", and reports that field.
+    /// it fixed, never "Stats corrected", and reports that field. A
+    /// role-only Edit offers no report, so it never counts against the hero
+    /// icon reader.
     #[test]
     fn a_map_or_hero_edit_names_what_it_fixed() {
         let g = sample_game();
@@ -419,7 +423,13 @@ mod tests {
         assert_eq!(both.category, Some(GameCategory::WrongMap));
         let role = save(&|f| f.role = "Tank".into());
         assert_eq!(role.toast, "Role corrected");
-        assert_eq!(role.category, Some(GameCategory::WrongHero));
+        assert_eq!(role.category, None, "a role fix is not a hero misread");
+        let map_role = save(&|f| {
+            f.map_name = "Havana".into();
+            f.role = "Tank".into();
+        });
+        assert_eq!(map_role.toast, "Map and role corrected");
+        assert_eq!(map_role.category, Some(GameCategory::WrongMap));
         let stats = save(&|f| f.elims = "40".into());
         assert_eq!(stats.toast, "Stats corrected");
         assert_eq!(stats.category, Some(GameCategory::WrongStats));
