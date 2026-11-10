@@ -249,6 +249,13 @@ impl LocalStore {
             }
             None => capture_time,
         };
+        // Capture path: the caller passes the open game's id, never an empty
+        // one. Both updates below are keyed by it, and an empty id would bump
+        // every session row that has one.
+        debug_assert!(
+            !session_id.is_empty(),
+            "append_capture with an empty session id"
+        );
         // Fixed fragments only; the outcome is a bind parameter either way.
         let query = if outcome_is_decided(outcome) {
             "UPDATE match_session SET last_capture_at = $time, capture_count += 1, final_outcome = $outcome WHERE session_id = $sid"

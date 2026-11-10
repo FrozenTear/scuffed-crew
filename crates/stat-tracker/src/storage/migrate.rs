@@ -158,6 +158,11 @@ impl LocalStore {
             self.put_timeline(t).await?;
         }
         for session in self.get_all_sessions().await? {
+            // The update below is keyed by session id, and an empty id would
+            // rename every session row that has one.
+            if session.session_id.is_empty() {
+                continue;
+            }
             let Some((hero, role)) = known_hero_role(&session.hero) else {
                 continue;
             };

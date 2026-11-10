@@ -207,3 +207,47 @@ async fn the_bans_and_picks_writers_refuse_an_empty_session_id() {
         assert!(err.downcast_ref::<Refused>().is_some(), "{name}: {err}");
     }
 }
+
+/// Two session rows with an empty id: the hero migration renames one by
+/// `WHERE session_id = $sid`, which would rename the other too. Empty ids
+/// are skipped, so the other row keeps its own hero.
+#[tokio::test]
+async fn the_hero_migration_skips_session_rows_with_an_empty_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    let mut pack_key = super::tests::session_row("", "victory");
+    pack_key.hero = "wrecking-ball".into();
+    pack_key.role = "Damage".into();
+    let mut ana = super::tests::session_row("", "victory");
+    ana.hero = "Ana".into();
+    ana.role = "Support".into();
+    for row in [pack_key, ana] {
+        store
+            .db
+            .query("CREATE match_session CONTENT $s")
+            .bind(("s", row))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+    }
+
+    store.migrate_pack_key_heroes().await.unwrap();
+
+    let mut heroes: Vec<(String, String)> = store
+        .get_all_sessions()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| (s.hero, s.role))
+        .collect();
+    heroes.sort();
+    assert_eq!(
+        heroes,
+        vec![
+            ("Ana".to_string(), "Support".to_string()),
+            ("wrecking-ball".to_string(), "Damage".to_string()),
+        ],
+        "a session row with an empty id was renamed with another one"
+    );
+}
