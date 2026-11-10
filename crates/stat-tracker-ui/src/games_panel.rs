@@ -137,7 +137,7 @@ pub fn panel<'a>(
     if editing {
         body = body.push(widgets::edit_form(&app.edit, &g.session_id));
     }
-    if let Some(block) = crate::games_bans_view::view(g, narrow) {
+    if let Some(block) = crate::games_bans_view::view(g) {
         body = body.push(block);
     }
     body = body.push(footer(app.fixture.is_some()));
