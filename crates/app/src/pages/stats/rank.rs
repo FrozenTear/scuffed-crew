@@ -31,6 +31,9 @@
 //! next queue banner, not this game's) or `game_mode` (the map mode). A
 //! missing role shows as "Role unknown".
 //!
+//! `progress_pct` is -100..=100; a negative value means demotion protection
+//! and shows as is ("-15%").
+//!
 //! `progress_change` is the pill on the progress bar in progress percentage
 //! points, -100..=100, shown as "+23%".
 //!
@@ -142,8 +145,8 @@ pub(super) struct RankShown {
     pub tier: Option<String>,
     /// 1..=5.
     pub division: Option<u8>,
-    /// 0..=100.
-    pub progress: Option<u8>,
+    /// -100..=100. A negative value is demotion protection and shows as is.
+    pub progress: Option<i32>,
     /// Progress points gained or lost this game, -100..=100.
     pub change: Option<i32>,
     /// Queue title as read, single spaced, in capitals (the bucket key).
@@ -159,9 +162,7 @@ impl RankShown {
                 .and_then(|t| clean_text(&t))
                 .map(|t| title_case(&t.to_lowercase())),
             division: value_of(&rank.division).filter(|d| (1..=5).contains(d)),
-            progress: value_of(&rank.progress_pct)
-                .and_then(|p| u8::try_from(p).ok())
-                .filter(|p| *p <= 100),
+            progress: value_of(&rank.progress_pct).filter(|p| (-100..=100).contains(p)),
             change: value_of(&rank.progress_change).filter(|c| (-100..=100).contains(c)),
             queue: value_of(&rank.queue_title)
                 .and_then(|q| clean_text(&q))
@@ -505,16 +506,41 @@ fn default_key(series: &[RankSeries]) -> Option<String> {
 // Plot box, in SVG units. The SVG scales to its width, so these are ratios.
 const VIEW_W: f64 = 320.0;
 const VIEW_H: f64 = 140.0;
-const PAD_L: f64 = 34.0;
+const PAD_L: f64 = 38.0;
 const PAD_R: f64 = 8.0;
 const PAD_T: f64 = 8.0;
 const PAD_B: f64 = 8.0;
 
-/// (x, y) for each plotted point, evenly spaced in play order. Progress is
-/// 0 at the bottom and 100 at the top.
-fn plot_coords(progress: &[u8]) -> Vec<(f64, f64)> {
-    let plot_w = VIEW_W - PAD_L - PAD_R;
+/// Bottom of the y axis: 0, or -100 when any value is negative (demotion
+/// protection), so a negative value is drawn below the 0% line, not hidden.
+fn axis_floor(progress: &[i32]) -> i32 {
+    if progress.iter().any(|p| *p < 0) {
+        -100
+    } else {
+        0
+    }
+}
+
+/// Gridline values for the y axis.
+fn axis_ticks(floor: i32) -> [i32; 3] {
+    if floor < 0 {
+        [-100, 0, 100]
+    } else {
+        [0, 50, 100]
+    }
+}
+
+/// Height of a progress value: `floor` at the bottom and 100 at the top.
+fn plot_y(pct: i32, floor: i32) -> f64 {
     let plot_h = VIEW_H - PAD_T - PAD_B;
+    PAD_T + plot_h * f64::from(100 - pct) / f64::from(100 - floor)
+}
+
+/// (x, y) for each plotted point, evenly spaced in play order. See
+/// [`axis_floor`] for the bottom of the range.
+fn plot_coords(progress: &[i32]) -> Vec<(f64, f64)> {
+    let plot_w = VIEW_W - PAD_L - PAD_R;
+    let floor = axis_floor(progress);
     let n = progress.len();
     progress
         .iter()
@@ -525,8 +551,7 @@ fn plot_coords(progress: &[u8]) -> Vec<(f64, f64)> {
             } else {
                 PAD_L + plot_w * i as f64 / (n - 1) as f64
             };
-            let y = PAD_T + plot_h * (100.0 - f64::from(*p)) / 100.0;
-            (x, y)
+            (x, plot_y(*p, floor))
         })
         .collect()
 }
@@ -574,7 +599,8 @@ pub(super) fn RankChart(series: Vec<RankSeries>) -> Element {
     };
 
     let plotted: Vec<&RankPoint> = current.plotted().collect();
-    let progress: Vec<u8> = plotted.iter().filter_map(|p| p.shown.progress).collect();
+    let progress: Vec<i32> = plotted.iter().filter_map(|p| p.shown.progress).collect();
+    let floor = axis_floor(&progress);
     let coords = plot_coords(&progress);
     let runs = line_runs(&plotted);
     let status = status_text(current);
@@ -622,9 +648,9 @@ pub(super) fn RankChart(series: Vec<RankSeries>) -> Element {
                     view_box: "0 0 {VIEW_W} {VIEW_H}",
                     role: "img",
                     "aria-label": "{svg_label}",
-                    for pct in [0u8, 50, 100] {
+                    for pct in axis_ticks(floor) {
                         {
-                            let y = PAD_T + (VIEW_H - PAD_T - PAD_B) * (100.0 - f64::from(pct)) / 100.0;
+                            let y = plot_y(pct, floor);
                             rsx! {
                                 g { key: "{pct}",
                                     line {
@@ -819,15 +845,15 @@ mod tests {
         let shown = RankShown::from_rank(&r).unwrap();
         assert_eq!(shown.tier.as_deref(), Some("Gold"), "low confidence word");
         assert_eq!(shown.division, Some(3));
-        assert_eq!(shown.progress, None, "negative progress is not a value");
+        assert_eq!(shown.progress, Some(-15), "demotion protection is a value");
         assert_eq!(shown.change, Some(-8), "missing confidence still shows");
         assert_eq!(shown.queue, None);
-        assert_eq!(shown.badge_parts(), ["Gold 3", "-8%"]);
+        assert_eq!(shown.badge_parts(), ["Gold 3", "-15%", "-8%"]);
         assert_eq!(shown.queue_label(), None);
         assert_eq!(shown.role_label(), ROLE_UNKNOWN);
         assert_eq!(
             shown.sentence(),
-            "Rank: Role unknown, Gold 3, -8% this game"
+            "Rank: Role unknown, Gold 3, -15% progress, -8% this game"
         );
     }
 
@@ -837,6 +863,7 @@ mod tests {
         for json in [
             r#"{"hero_sr": {"value": 3125, "confidence": 0.9}}"#,
             r#"{"progress_pct": {"value": 140, "confidence": 0.9}}"#,
+            r#"{"progress_pct": {"value": -101, "confidence": 0.9}}"#,
         ] {
             let r = rank(json).expect(json);
             assert_eq!(RankShown::from_rank(&r), None, "{json}");
@@ -880,7 +907,7 @@ mod tests {
         assert_eq!(change_text(0), "0%");
     }
 
-    fn game(queue: Option<&str>, role: &str, progress: u8) -> MatchRank {
+    fn game(queue: Option<&str>, role: &str, progress: i32) -> MatchRank {
         let queue = queue
             .map(|q| format!(r#""queue_title": {{"value": "{q}", "confidence": 0.9}},"#))
             .unwrap_or_default();
@@ -996,6 +1023,41 @@ mod tests {
         assert_eq!(c[1], (VIEW_W - PAD_R, PAD_T));
         let one = plot_coords(&[50]);
         assert_eq!(one.len(), 1);
+        assert_eq!(axis_ticks(axis_floor(&[0, 100])), [0, 50, 100]);
+    }
+
+    #[test]
+    fn negative_progress_extends_the_axis_below_zero() {
+        let c = plot_coords(&[-100, 0, 100]);
+        assert_eq!(c[0].1, VIEW_H - PAD_B);
+        assert_eq!(c[1].1, PAD_T + (VIEW_H - PAD_T - PAD_B) / 2.0);
+        assert_eq!(c[2].1, PAD_T);
+        assert_eq!(axis_ticks(axis_floor(&[-15, 40])), [-100, 0, 100]);
+    }
+
+    #[test]
+    fn negative_progress_shows_on_badge_chart_and_table() {
+        let r = rank(
+            r#"{"role": {"value": "Support", "confidence": 0.9},
+                "role_rank": {"value": "Gold", "confidence": 0.9},
+                "division": {"value": 3, "confidence": 0.9},
+                "progress_pct": {"value": -15, "confidence": 0.9},
+                "progress_change": {"value": -20, "confidence": 0.9}}"#,
+        )
+        .unwrap();
+        let shown = RankShown::from_rank(&r).unwrap();
+        assert_eq!(shown.progress, Some(-15));
+        assert_eq!(shown.badge_parts(), ["Gold 3", "-15%", "-20%"]);
+        let html = render_badge("m1", Some(r.clone()));
+        assert!(html.contains(">-15%</span>"), "{html}");
+        assert!(
+            html.contains("Gold 3, -15% progress, -20% this game"),
+            "{html}"
+        );
+        let html = render_chart(chart_series(rank_series([("m1", at(2), Some(&r))])));
+        assert!(html.contains("1 game with rank progress"), "{html}");
+        assert!(html.contains(">-100%</text>"), "{html}");
+        assert!(html.contains("<td>-15%</td>"), "{html}");
     }
 
     fn render_badge(id: &str, r: Option<MatchRank>) -> String {
