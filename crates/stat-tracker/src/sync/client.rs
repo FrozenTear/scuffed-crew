@@ -25,7 +25,8 @@ pub struct SyncClient {
     http: reqwest::Client,
     /// Caps learned from HTTP 413. Shared by clones. Never raised.
     batch_caps: Arc<Mutex<BatchCaps>>,
-    /// Rows the next pass sends after the others. Shared by clones.
+    /// Rows the next pass sends after the others, and when the server last
+    /// accepted a row. Shared by clones.
     refused_rows: Arc<Mutex<RefusedRows>>,
     /// `stats_delete_scheduled_at` from the latest 409 `stats_delete_pending`.
     /// Kept off [`SyncUploadError`] so that error stays small. Shared by clones.
@@ -86,7 +87,8 @@ impl SyncClient {
         }
     }
 
-    /// Rows the next pass sends after the others.
+    /// Rows the next pass sends after the others, and when the server last
+    /// accepted a row.
     pub fn refused_rows(&self) -> RefusedRows {
         self.refused_rows
             .lock()
@@ -97,15 +99,15 @@ impl SyncClient {
     /// Keep the set a pass ended with. `ran_with` is the URL and token the
     /// pass started with. When Settings changed the server URL during the
     /// pass, the set is dropped ([`Self::replace_credentials`] already reset
-    /// it). When only the token changed, the rows are kept but the proof that
-    /// the server accepted a row is not: it was earned with the old token.
+    /// it). When only the token changed, the rows are kept but the time the
+    /// server last accepted a row is not: it was earned with the old token.
     pub fn remember_refused_rows(&self, mut rows: RefusedRows, ran_with: &SyncConfig) {
         let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
         if config.server_url != ran_with.server_url {
             return;
         }
         if config.token != ran_with.token {
-            rows.set_accepted_then_cut(false);
+            rows.forget_accepted();
         }
         *self.refused_rows.lock().unwrap_or_else(|e| e.into_inner()) = rows;
     }
@@ -120,7 +122,7 @@ impl SyncClient {
     /// Swap the URL and token after Settings saved a different pair.
     /// The HTTP client (timeout, redirect policy) stays. A different server
     /// URL drops caps and refused rows learned from the previous host. A
-    /// token-only change keeps them, but drops the proof that the server
+    /// token-only change keeps them, but drops the time the server last
     /// accepted a row ([`RefusedRows`]), which was earned with the old token.
     pub fn replace_credentials(&self, config: SyncConfig) {
         let mut slot = self.config.lock().unwrap_or_else(|e| e.into_inner());
@@ -135,7 +137,7 @@ impl SyncClient {
             self.refused_rows
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .set_accepted_then_cut(false);
+                .forget_accepted();
         }
     }
 

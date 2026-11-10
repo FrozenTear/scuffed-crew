@@ -145,8 +145,9 @@ async fn refused_rows_at_the_head_of_the_queue_do_not_starve_later_games() {
 
 /// Fail safe across passes: when the server refuses every row (in real
 /// life a PC clock more than 24 hours fast, or a site bug; here a fake
-/// message), sending refused rows last must never turn into a quarantine. Every game stays queued, unflagged, and each pass stays
-/// inside the request budget.
+/// message), sending refused rows last must never turn into a quarantine.
+/// Every game stays queued, unflagged, and each pass stays inside the
+/// request budget.
 #[tokio::test]
 async fn server_wide_refusal_over_many_passes_quarantines_nothing() {
     let n = 6i64;
@@ -192,15 +193,21 @@ type AcceptCounts = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<St
 /// Run sync passes the way the daemon does, with one `BatchCaps` and one
 /// `RefusedRows` for the whole run. The site answers `budget(pass)` requests
 /// in a pass (pass 1 first) and then 429. A batch with a row in `bad` gets a
-/// 400 that names a row. Returns the passes used and how often each game
-/// was accepted.
+/// 400 that names a row, except on pass `cut_on`, where a batch of only
+/// `bad` rows gets a 503. Returns the passes used, how often each game was
+/// accepted, and the `RefusedRows` the run ended with.
 async fn run_passes_with_budget(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
     bad: &'static [&'static str],
     budget: fn(usize) -> usize,
+    cut_on: Option<usize>,
     max_passes: usize,
-) -> (usize, std::collections::HashMap<String, usize>) {
+) -> (
+    usize,
+    std::collections::HashMap<String, usize>,
+    sync::RefusedRows,
+) {
     let accepted: AcceptCounts = Default::default();
     let mut caps = sync::BatchCaps::default();
     let mut refused = sync::RefusedRows::default();
@@ -222,6 +229,10 @@ async fn run_passes_with_budget(
                 let bad_here = matches
                     .iter()
                     .any(|row| bad.contains(&row.session_id.as_str()));
+                let only_bad = matches
+                    .iter()
+                    .all(|row| bad.contains(&row.session_id.as_str()));
+                let cut = cut_on == Some(passes) && only_bad;
                 let accepted = std::sync::Arc::clone(&accepted_pass);
                 async move {
                     if call > allowed {
@@ -229,6 +240,13 @@ async fn run_passes_with_budget(
                             message: "rate limited".into(),
                             status: Some(429),
                             retry_after: Some(std::time::Duration::from_secs(6)),
+                            ..sync::SyncUploadError::plain("")
+                        });
+                    }
+                    if cut {
+                        return Err(sync::SyncUploadError {
+                            message: "bad gateway".into(),
+                            status: Some(503),
                             ..sync::SyncUploadError::plain("")
                         });
                     }
@@ -251,7 +269,7 @@ async fn run_passes_with_budget(
         );
     }
     let accepted = accepted.lock().unwrap().clone();
-    (passes, accepted)
+    (passes, accepted, refused)
 }
 
 /// Every refused game is set aside with the site's reason, every other game
@@ -297,15 +315,16 @@ async fn refused_games_left_alone_after_a_burst_are_set_aside_next_pass() {
     let dir = tempfile::tempdir().unwrap();
     let store = storage::LocalStore::open(dir.path()).await.unwrap();
     insert_synced_games(&store, n).await;
-    let (passes, accepted) = run_passes_with_budget(&store, dir.path(), BAD, |_| 10, 8).await;
+    let (passes, accepted, _) =
+        run_passes_with_budget(&store, dir.path(), BAD, |_| 10, None, 8).await;
     assert_refused_set_aside_and_the_rest_uploaded_once(&store, n, BAD, passes, &accepted).await;
     assert_eq!(passes, 3, "held, then the good games, then set aside");
 }
 
-/// The site refills one request every 6 s, so a pass after a 429 often gets
-/// only a few requests: 10 on the first pass, then 3. The good games go up a
-/// few per pass, each pass ends on a 429, and the two refused games are set
-/// aside once they are the only ones left.
+/// A stress case: passes a few seconds apart, so after the first burst of
+/// 10 the site's refill of one request every 6 s leaves each pass only 3.
+/// The good games go up a few per pass, each pass ends on a 429, and the two
+/// refused games are set aside once they are the only ones left.
 #[tokio::test]
 async fn refused_games_are_set_aside_when_later_passes_get_three_requests() {
     const BAD: &[&str] = &["s199", "s198"];
@@ -313,15 +332,215 @@ async fn refused_games_are_set_aside_when_later_passes_get_three_requests() {
     let dir = tempfile::tempdir().unwrap();
     let store = storage::LocalStore::open(dir.path()).await.unwrap();
     insert_synced_games(&store, n).await;
-    let (passes, accepted) = run_passes_with_budget(
+    let (passes, accepted, _) = run_passes_with_budget(
         &store,
         dir.path(),
         BAD,
         |pass| if pass == 1 { 10 } else { 3 },
+        None,
         40,
     )
     .await;
     assert_refused_set_aside_and_the_rest_uploaded_once(&store, n, BAD, passes, &accepted).await;
+}
+
+/// Run `n` games with `bad` refused, 10 requests on every pass, and check
+/// every refused game ends set aside, no row is still held, and every good
+/// game went up once. Returns the passes used.
+async fn run_ten_per_pass(
+    n: i64,
+    bad: &'static [&'static str],
+    cut_on: Option<usize>,
+    max_passes: usize,
+) -> usize {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    insert_synced_games(&store, n).await;
+    let (passes, accepted, refused) =
+        run_passes_with_budget(&store, dir.path(), bad, |_| 10, cut_on, max_passes).await;
+    assert_refused_set_aside_and_the_rest_uploaded_once(&store, n, bad, passes, &accepted).await;
+    for id in bad {
+        assert!(!refused.contains(id), "{id} is not held");
+    }
+    passes
+}
+
+/// 20 games, the two oldest (s1, s0) refused. Pass 1 uploads the good games,
+/// sets s1 aside, and hits the 429 on s0, which was never held. The next
+/// pass must still set s0 aside: the site accepted a row minutes ago.
+#[tokio::test]
+async fn the_oldest_refused_game_cut_by_a_429_is_set_aside_next_pass() {
+    const BAD: &[&str] = &["s1", "s0"];
+    let passes = run_ten_per_pass(20, BAD, None, 6).await;
+    assert_eq!(passes, 2, "the good games and s1, then s0");
+}
+
+/// 217 games, the two oldest refused, 10 requests on every pass.
+#[tokio::test]
+async fn the_two_oldest_of_217_refused_games_are_set_aside() {
+    const BAD: &[&str] = &["s1", "s0"];
+    let passes = run_ten_per_pass(217, BAD, None, 8).await;
+    assert_eq!(passes, 2, "the good games, then the refused games left");
+}
+
+/// 217 games, the 10 newest refused. Until a good game goes up, the passes
+/// hold them a couple at a time (no proof yet). After that, every pass sets
+/// aside as many as its 10 requests can isolate, until none is left.
+#[tokio::test]
+async fn ten_refused_games_are_all_set_aside_across_passes() {
+    const BAD: &[&str] = &[
+        "s216", "s215", "s214", "s213", "s212", "s211", "s210", "s209", "s208", "s207",
+    ];
+    let passes = run_ten_per_pass(217, BAD, None, 16).await;
+    assert!(passes <= 8, "set aside within {passes} passes");
+}
+
+/// Pass 1 uploads the good games and is cut by a 503 on the first request
+/// with only refused games (s1, s0), which were never held. The next pass
+/// still sets them aside.
+#[tokio::test]
+async fn a_pass_cut_by_a_5xx_after_the_good_games_still_proves_the_next() {
+    const BAD: &[&str] = &["s1", "s0"];
+    let passes = run_ten_per_pass(20, BAD, Some(1), 6).await;
+    assert_eq!(passes, 2, "the good games, then both refused games");
+}
+
+/// Fail safe: the site refuses every row from the first request and never
+/// accepts one. With 10 requests on every pass, nothing is ever set aside.
+#[tokio::test]
+async fn every_row_refused_from_the_start_sets_nothing_aside() {
+    const ALL: &[&str] = &["s0", "s1", "s2", "s3", "s4", "s5"];
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    insert_synced_games(&store, 6).await;
+    let (passes, accepted, _) =
+        run_passes_with_budget(&store, dir.path(), ALL, |_| 10, None, 5).await;
+    assert_eq!(passes, 5);
+    assert!(accepted.is_empty());
+    let rows = store.get_all_matches().await.unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| !row.synced && row.upload_rejection().is_none())
+    );
+    assert_eq!(store.get_unsynced().await.unwrap().len(), 6);
+}
+
+/// Outside [`sync::ACCEPT_PROOF_WINDOW`] the old rule stands: an accept
+/// older than the window proves nothing, so a lone game refused by name is
+/// held. A fresh accept sets it aside.
+#[tokio::test]
+async fn an_accept_older_than_the_window_is_no_proof() {
+    let now = std::time::Instant::now();
+    let Some(old) = now.checked_sub(sync::ACCEPT_PROOF_WINDOW + Duration::from_secs(1)) else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    insert_synced_games(&store, 1).await;
+    let mut caps = sync::BatchCaps::default();
+    let mut refused = sync::RefusedRows::default();
+    for (accepted_at, set_aside) in [(old, false), (now, true)] {
+        refused.note_accepted(accepted_at);
+        try_sync_with_state(
+            &store,
+            dir.path(),
+            None,
+            &mut caps,
+            &mut refused,
+            |_matches, _| async move { Err(refused_row("matches[0]: hero is not allowed")) },
+        )
+        .await;
+        let rows = store.get_all_matches().await.unwrap();
+        assert_eq!(rows[0].upload_rejection().is_some(), set_aside);
+        assert_eq!(refused.contains("s0"), !set_aside);
+    }
+}
+
+/// A tracker update puts a set-aside game back on the queue but keeps the
+/// site's old reason as proof. The Games tab still shows that reason while
+/// the game waits. When the site refuses it by name again, it is set aside
+/// at once, in a new process where the site has accepted nothing yet. When
+/// the site takes it, it uploads and the reason is gone.
+#[tokio::test]
+async fn a_game_put_back_by_an_update_keeps_its_reason_as_proof() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    insert_synced_games(&store, 1).await;
+    let rows = store.get_all_matches().await.unwrap();
+    store
+        .quarantine_upload(
+            &storage::SyncClaim::capture(&rows),
+            None,
+            "matches[0]: hero is not allowed",
+        )
+        .await
+        .unwrap();
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap()
+    );
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(queued.len(), 1, "back on the queue");
+    assert_eq!(
+        stat_tracker::games::model::Game::from_match(&queued[0])
+            .upload_reject
+            .as_deref(),
+        Some("Upload rejected by server: hero is not allowed"),
+        "the Games tab keeps the old reason while it waits"
+    );
+
+    let mut caps = sync::BatchCaps::default();
+    let mut refused = sync::RefusedRows::default();
+    let attempt = try_sync_with_state(
+        &store,
+        dir.path(),
+        None,
+        &mut caps,
+        &mut refused,
+        |_matches, _| async move { Err(refused_row("matches[0]: hero is still not allowed")) },
+    )
+    .await;
+    assert!(
+        matches!(attempt, sync::SyncAttempt::Uploaded),
+        "{attempt:?}"
+    );
+    let rows = store.get_all_matches().await.unwrap();
+    assert!(!rows[0].synced);
+    assert_eq!(
+        rows[0].upload_rejection(),
+        Some("Upload rejected by server: hero is still not allowed"),
+        "set aside again at once with the new reason"
+    );
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+    assert!(!refused.contains("s0"), "not held");
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.4")
+            .await
+            .unwrap()
+    );
+    let attempt = try_sync_with_state(
+        &store,
+        dir.path(),
+        None,
+        &mut caps,
+        &mut sync::RefusedRows::default(),
+        |_matches, _| async move { Ok(upload_ok()) },
+    )
+    .await;
+    assert!(
+        matches!(attempt, sync::SyncAttempt::Uploaded),
+        "{attempt:?}"
+    );
+    let rows = store.get_all_matches().await.unwrap();
+    assert!(rows[0].synced && rows[0].upload_rejection().is_none());
+    assert_eq!(
+        stat_tracker::games::model::Game::from_match(&rows[0]).upload_reject,
+        None
+    );
 }
 
 /// 250 games and 501 pending deletes, the last delete id one the site
@@ -392,8 +611,8 @@ async fn a_bad_delete_on_a_later_chunk_sets_no_game_aside() {
         assert_eq!(rows.iter().filter(|row| row.synced).count(), 200);
         assert_eq!(store.get_unsynced().await.unwrap().len(), 50);
         assert!(
-            !refused.accepted_then_cut(),
-            "a whole-request refusal is no proof"
+            refused.accepted_recently(std::time::Instant::now()),
+            "chunk 1 was accepted, yet a whole-request refusal sets no game aside"
         );
     }
     let bad = window_two.lock().unwrap().clone().expect("a second window");
@@ -420,7 +639,8 @@ fn refused_rows_last_keeps_order_and_drops_keys_no_longer_queued() {
     for key in ["d", "b", "gone"] {
         refused.insert(key.into());
     }
-    refused.set_accepted_then_cut(true);
+    let at = std::time::Instant::now();
+    refused.note_accepted(at);
     let ordered = refused_rows_last(rows, &mut refused);
     let ids: Vec<&str> = ordered.iter().map(|row| row.session_id.as_str()).collect();
     assert_eq!(ids, ["a", "", "c", "b", "d"]);
@@ -429,7 +649,10 @@ fn refused_rows_last_keeps_order_and_drops_keys_no_longer_queued() {
         !refused.contains("gone"),
         "a key no longer queued is dropped"
     );
-    assert!(refused.accepted_then_cut(), "reordering keeps the proof");
+    assert!(
+        refused.accepted_recently(at),
+        "reordering keeps the accept time"
+    );
 }
 
 /// A loopback site for `try_sync`: answers `budget` requests, then 429. A
@@ -520,7 +743,11 @@ async fn try_sync_keeps_refused_rows_on_the_client_between_passes() {
         "{first:?}"
     );
     assert!(client.refused_rows().contains("s1"), "the client keeps it");
-    assert!(!client.refused_rows().accepted_then_cut());
+    assert!(
+        !client
+            .refused_rows()
+            .accepted_recently(std::time::Instant::now())
+    );
 
     budget.store(2, std::sync::atomic::Ordering::SeqCst);
     let second = try_sync(&store, &client, dir.path(), None).await;
@@ -528,7 +755,11 @@ async fn try_sync_keeps_refused_rows_on_the_client_between_passes() {
         matches!(second, sync::SyncAttempt::RateLimited { .. }),
         "{second:?}"
     );
-    assert!(client.refused_rows().accepted_then_cut());
+    assert!(
+        client
+            .refused_rows()
+            .accepted_recently(std::time::Instant::now())
+    );
     let rows = store.get_all_matches().await.unwrap();
     let good = rows.iter().find(|row| row.session_id == "s0").unwrap();
     assert!(good.synced, "the good game went up on pass 2");
@@ -545,5 +776,4 @@ async fn try_sync_keeps_refused_rows_on_the_client_between_passes() {
     );
     assert!(store.get_unsynced().await.unwrap().is_empty());
     assert!(!client.refused_rows().contains("s1"));
-    assert!(!client.refused_rows().accepted_then_cut());
 }

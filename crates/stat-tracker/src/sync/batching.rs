@@ -61,8 +61,9 @@ fn lowered_cap(current: usize, server_max: Option<u64>) -> usize {
     asked.min(current)
 }
 
-/// Logged when a pass accepts no row. The rows stay queued and the clock
-/// backs off, the same shape as a 5xx.
+/// Logged when refused rows are held ([`UploadIsolation::held`]), whether or
+/// not an earlier chunk of the pass was accepted. The rows stay queued and
+/// the clock backs off, the same shape as a 5xx.
 pub const SERVER_REFUSING_UPLOADS: &str = "Server is refusing uploads";
 
 /// How many HTTP calls one sync pass may spend isolating 400/422 rows.
@@ -106,39 +107,51 @@ pub struct UploadIsolation {
     pub accepted: Vec<usize>,
     pub rejected: Vec<RejectedUpload>,
     pub deferred: Vec<usize>,
-    /// 5xx, network, 401, 403, 409, 429, 413, or a server-wide 400/422 (no
-    /// row in the pass was accepted, so nothing was quarantined). Splitting
-    /// stops. Already accepted indexes stay accepted. A 409 never quarantines.
+    /// 5xx, network, 401, 403, 409, 429, 413, or a 400/422 that proved
+    /// nothing about a row (see [`Self::held`]). Splitting stops. Already
+    /// accepted indexes stay accepted. A 409 never quarantines.
     pub stopped: Option<SyncUploadError>,
-    /// Rows refused on their own while no row in the pass was accepted.
-    /// They are also in [`Self::deferred`]: nothing proves the refusal is
-    /// about the row, so they stay queued. See [`RefusedRows`].
+    /// Rows refused on their own with no proof the refusal is about the
+    /// row: the chunk accepted none, and either no proof covers the row
+    /// ([`isolate_rejected_in_pass`]) or the refusal did not name it. They
+    /// are also in [`Self::deferred`] and stay queued. See [`RefusedRows`].
     pub held: Vec<usize>,
     pub requests: usize,
 }
 
-/// Rows the server refused on their own in a pass that accepted no row.
-/// They are not quarantined, because a server-wide refusal looks the same.
-/// The next pass sends them after the other queued rows, so a good row
-/// behind them is tried first. The server allows only a short burst of
-/// requests per token, so without this a few refused rows at the head of
-/// the queue used up every pass and the games behind them never uploaded.
-/// Keys are session ids (or the store id for a row without one). Kept for
-/// the life of the [`SyncClient`], like [`BatchCaps`].
+/// How long a row the server accepted proves that it takes uploads. Inside
+/// this window a row the server refuses on its own and by name is
+/// quarantined even when its chunk and pass accept no row. Ten minutes
+/// covers the passes that follow a 429 or a 5xx (a minute or two apart,
+/// failure backoff at most 5 minutes). The cost is bounded by the window: a
+/// server-wide refusal that starts inside it (a PC clock pushed more than 24
+/// hours ahead, or a site deploy with a bug) can set aside the rows queued
+/// then. They keep the site's reason and a Retry button, and the next
+/// tracker version puts them back on the queue.
+pub const ACCEPT_PROOF_WINDOW: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Rows the server refused on their own with no proof the refusal is about
+/// the row (see [`UploadIsolation::held`]). They are not quarantined,
+/// because a server-wide refusal looks the same. The next pass sends them
+/// after the other queued rows, so a good row behind them is tried first.
+/// The server allows only a short burst of requests per token, so without
+/// this a few refused rows at the head of the queue used up every pass and
+/// the games behind them never uploaded. Keys are session ids (or the store
+/// id for a row without one). Kept for the life of the [`SyncClient`], like
+/// [`BatchCaps`].
 ///
-/// It also carries one pass of proof. When a pass had a row accepted and
-/// then stopped on a 429 or the request cap, the held rows it never reached
-/// may be the only ones left. The next pass then quarantines a held row the
-/// server refuses on its own again and names in its message, even when that
-/// pass accepts no row, so a refused game left alone after the good games
-/// went up is set aside instead of retried on every pass. The proof is for
-/// one pass only, and for the URL and token it was earned with.
+/// It also keeps when the server last accepted a row. For
+/// [`ACCEPT_PROOF_WINDOW`] after that, a row the server refuses on its own
+/// and names in its message is quarantined right away, held before or not,
+/// and whether or not this pass accepted a row. So a refused game left
+/// alone after the good games went up is set aside instead of retried on
+/// every pass. The time is for the URL and token it was earned with.
 ///
 /// [`SyncClient`]: super::SyncClient
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RefusedRows {
     keys: std::collections::HashSet<String>,
-    accepted_then_cut: bool,
+    last_accepted: Option<std::time::Instant>,
 }
 
 impl RefusedRows {
@@ -161,22 +174,21 @@ impl RefusedRows {
         self.keys.retain(|key| queued.contains(key.as_str()));
     }
 
-    /// Record how a pass ended: true when it had a row accepted and then
-    /// stopped on a 429 or the request cap.
-    pub fn set_accepted_then_cut(&mut self, value: bool) {
-        self.accepted_then_cut = value;
+    /// Record that the server accepted a row at `at`.
+    pub fn note_accepted(&mut self, at: std::time::Instant) {
+        self.last_accepted = Some(at);
     }
 
-    /// Whether the last pass had a row accepted and then stopped on a 429
-    /// or the request cap.
-    pub fn accepted_then_cut(&self) -> bool {
-        self.accepted_then_cut
+    /// Drop the accept time, after the token or URL changed.
+    pub fn forget_accepted(&mut self) {
+        self.last_accepted = None;
     }
 
-    /// Read and clear the proof from the last pass. Each pass takes it once,
-    /// so it never reaches a pass after the next one.
-    pub fn take_accepted_then_cut(&mut self) -> bool {
-        std::mem::take(&mut self.accepted_then_cut)
+    /// True when the server accepted a row less than
+    /// [`ACCEPT_PROOF_WINDOW`] before `now`.
+    pub fn accepted_recently(&self, now: std::time::Instant) -> bool {
+        self.last_accepted
+            .is_some_and(|at| now.saturating_duration_since(at) < ACCEPT_PROOF_WINDOW)
     }
 }
 
@@ -215,21 +227,21 @@ where
     isolate_rejected_in_pass(rows, false, &[], upload).await
 }
 
-/// [`isolate_rejected`] for one chunk of a sync pass. `pass_accepted` is
-/// true when an earlier chunk of the same pass already had a row accepted.
-/// `carried` lists the rows of `rows` that the previous pass held, when that
-/// pass then had a row accepted and stopped on a 429 or the request cap
-/// ([`RefusedRows`]). Either one proves the server takes uploads, so when
-/// this chunk accepts no row, a covered row refused on its own is still
-/// quarantined instead of staying queued. That proof is used only when the
-/// refusal names the row (`matches[n]:`, see [`payload_names_a_row`]). A
-/// refusal of the request as a whole, such as a bad id in `deleted_sessions`
-/// that rides only on this chunk, says nothing about the probed row, so that
-/// row is held and the pass backs off.
+/// [`isolate_rejected`] for one chunk of a sync pass. `server_accepts` is
+/// true when the server accepted a row recently: earlier in this pass, or
+/// within [`ACCEPT_PROOF_WINDOW`] ([`RefusedRows`]). `requeued` lists the
+/// rows of `rows` the server refused before and a tracker update put back on
+/// the queue with that reason kept. Either one proves the refusal is about
+/// the row, so when this chunk accepts no row, a covered row refused on its
+/// own is still quarantined instead of staying queued. That proof is used
+/// only when the refusal names the row (`matches[n]:`, see
+/// [`payload_names_a_row`]). A refusal of the request as a whole, such as a
+/// bad id in `deleted_sessions` that rides only on this chunk, says nothing
+/// about the probed row, so that row is held and the pass backs off.
 pub async fn isolate_rejected_in_pass<T, F, Fut>(
     rows: &[T],
-    pass_accepted: bool,
-    carried: &[usize],
+    server_accepts: bool,
+    requeued: &[usize],
     mut upload: F,
 ) -> UploadIsolation
 where
@@ -312,11 +324,12 @@ where
     // back off. A 429 that stops the walk is the same refusal: the per-token
     // limit ran out while every row was still being refused. Count that as
     // a failure and keep Retry-After as a floor. 401, 403, 409, and 413
-    // stay. A row accepted earlier in the same pass, or a carried proof for
-    // this row, rules that out, but only for a refusal that names the row.
+    // stay. A row the server accepted recently, or an earlier refusal kept
+    // on a requeued row, rules that out, but only for a refusal that names
+    // the row.
     if accepted.is_empty() && !rejected.is_empty() {
         let (proven, unproven): (Vec<_>, Vec<_>) = rejected.into_iter().partition(|row| {
-            payload_names_a_row(&row.message) && (pass_accepted || carried.contains(&row.index))
+            payload_names_a_row(&row.message) && (server_accepts || requeued.contains(&row.index))
         });
         rejected = proven;
         if let Some(first) = unproven.first() {

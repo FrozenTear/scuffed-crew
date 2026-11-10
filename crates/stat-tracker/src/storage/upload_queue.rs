@@ -9,6 +9,7 @@ use surrealdb_types::SurrealValue;
 
 use super::tombstones::DeletedSession;
 use super::{LocalStore, PersonalMatch, rewrite_match_log_session};
+use crate::model::UPLOAD_RETRY_MARK;
 
 /// Identity and payload revision captured when a row was read for upload.
 ///
@@ -71,7 +72,9 @@ impl LocalStore {
     /// releases the row here.
     ///
     /// Rows with [`PersonalMatch::upload_rejection`] set are quarantined.
-    /// They stay local until a retry clears the message.
+    /// They stay local until a retry clears the message, except rows a
+    /// tracker update put back on the queue with the reason kept
+    /// ([`PersonalMatch::upload_retry_pending`]), which are returned.
     pub async fn get_unsynced(
         &self,
     ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
@@ -105,7 +108,7 @@ impl LocalStore {
         } else {
             Ok(matches
                 .into_iter()
-                .filter(|row| row.upload_rejection().is_none())
+                .filter(|row| row.upload_rejection().is_none() || row.upload_retry_pending())
                 .collect())
         }
     }
@@ -227,17 +230,24 @@ impl LocalStore {
 
     /// Set `synced` only when `sync_rev` is still `rev`. Returns whether this
     /// call applied the write. A missing `sync_rev` (legacy row) compares as 0.
+    /// Setting it also clears a reason a tracker update kept on a requeued
+    /// row ([`PersonalMatch::upload_retry_pending`]): the site took it.
     async fn cas_set_synced(
         &self,
         id: &surrealdb_types::RecordId,
         rev: u64,
         synced: bool,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let sql = if synced {
+            "UPDATE $id SET synced = true, upload_reject = '' \
+             WHERE (sync_rev ?? 0) = $rev RETURN AFTER"
+        } else {
+            "UPDATE $id SET synced = false WHERE (sync_rev ?? 0) = $rev RETURN AFTER"
+        };
         let mut response = self
             .db
-            .query("UPDATE $id SET synced = $synced WHERE (sync_rev ?? 0) = $rev RETURN AFTER")
+            .query(sql)
             .bind(("id", id.clone()))
-            .bind(("synced", synced))
             .bind(("rev", rev))
             .await?;
         let updated: Vec<PersonalMatch> = response.take(0)?;
@@ -299,8 +309,11 @@ struct UploadRetryMarker {
 impl LocalStore {
     /// Put every set-aside game back on the upload queue once for each
     /// tracker version, the first time that version opens the store. A game
-    /// the site refused may upload after a site fix or a tracker update; one
-    /// it still refuses is set aside again with the new reason. Returns true
+    /// the site refused may upload after a site fix or a tracker update.
+    /// The site's reason is kept behind [`UPLOAD_RETRY_MARK`], so the Games
+    /// tab still shows it while the game waits, and a sync pass that sees
+    /// the site refuse that game by name again sets it aside at once with
+    /// the new reason, even before any other game uploads. Returns true
     /// when this version had not run it yet. The version is written only
     /// after the games are back on the queue, so a failure tries again on
     /// the next start.
@@ -317,7 +330,20 @@ impl LocalStore {
         if marker.is_some_and(|m| m.version == version) {
             return Ok(false);
         }
-        self.clear_rejected_uploads().await?;
+        {
+            // `matches.jsonl` keeps the plain reason: nothing reads it back.
+            let _rev = self.rev_guard();
+            self.db
+                .query(
+                    "UPDATE personal_match \
+                     SET upload_reject = string::concat($mark, upload_reject) \
+                     WHERE upload_reject != NONE AND upload_reject != '' \
+                     AND !string::starts_with(upload_reject, $mark)",
+                )
+                .bind(("mark", UPLOAD_RETRY_MARK))
+                .await?
+                .check()?;
+        }
         self.db
             .query("UPSERT $rid SET version = $v RETURN NONE")
             .bind(("rid", upload_retry_marker()))

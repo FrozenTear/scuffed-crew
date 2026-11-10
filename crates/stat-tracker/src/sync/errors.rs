@@ -45,10 +45,10 @@ impl SyncUploadError {
     /// A refusal with no HTTP status keeps `Retry-After` as a floor under
     /// the exponential backoff. The sync pass does not observe a 400 or 422
     /// that way: [`isolate_rejected_in_pass`] splits the batch. A bad row
-    /// is quarantined only when some other row in that pass was accepted
-    /// (see [`RefusedRows`] for the proof one pass carries to the next). If
-    /// none was, the rows stay queued and the clock backs off. A 409 is
-    /// never split.
+    /// is quarantined only when the server accepted another row in that
+    /// pass or a few minutes before (see [`RefusedRows`]), or refused that
+    /// row before a tracker update put it back on the queue. Otherwise the
+    /// rows stay queued and the clock backs off. A 409 is never split.
     ///
     /// [`isolate_rejected_in_pass`]: super::isolate_rejected_in_pass
     /// [`RefusedRows`]: super::RefusedRows

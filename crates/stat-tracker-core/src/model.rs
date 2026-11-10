@@ -181,7 +181,9 @@ pub struct PersonalMatch {
     /// `synced = false` and is left out of automatic uploads until the
     /// member edits the game or retries the upload. The string is the
     /// game-list line (`Upload rejected by server: <message>`), including
-    /// the server code when the body sent one. Missing on older rows.
+    /// the server code when the body sent one. Missing on older rows. With
+    /// [`UPLOAD_RETRY_MARK`] in front, a tracker update put the row back on
+    /// the upload queue and kept the reason as proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub upload_reject: Option<String>,
@@ -327,6 +329,10 @@ pub enum BansPicksStatus {
     ReaderOff,
 }
 
+/// Prefix on [`PersonalMatch::upload_reject`] for a row a tracker update put
+/// back on the upload queue. The site's reason follows it.
+pub const UPLOAD_RETRY_MARK: &str = "retry once: ";
+
 /// Count an unconfirmed hero segment toward the majority (it was a real swap).
 pub const SEGMENT_CONFIRM: &str = "confirm";
 /// Mark a hero segment as a misread: excluded from display and from the
@@ -394,13 +400,26 @@ impl PersonalMatch {
         scuffed_types::effective_recognizer(&self.recognizer)
     }
 
-    /// Server message for a quarantined row. Empty and missing both mean
-    /// the row is still eligible for upload.
+    /// Server message for a quarantined row, or for a row a tracker update
+    /// put back on the queue ([`Self::upload_retry_pending`]), without
+    /// [`UPLOAD_RETRY_MARK`]. Empty and missing both mean the row was never
+    /// refused, or a retry or edit cleared it.
     pub fn upload_rejection(&self) -> Option<&str> {
+        let message = self.upload_reject.as_deref()?.trim();
+        let message = message
+            .strip_prefix(UPLOAD_RETRY_MARK)
+            .unwrap_or(message)
+            .trim();
+        (!message.is_empty()).then_some(message)
+    }
+
+    /// True when a tracker update put this refused row back on the upload
+    /// queue with the site's reason kept. It uploads like any queued row,
+    /// and a refusal that names it again sets it aside at once.
+    pub fn upload_retry_pending(&self) -> bool {
         self.upload_reject
             .as_deref()
-            .map(str::trim)
-            .filter(|message| !message.is_empty())
+            .is_some_and(|message| message.trim_start().starts_with(UPLOAD_RETRY_MARK))
     }
 
     /// True when `field` (storage name, e.g. `"map_name"`) was manually edited.

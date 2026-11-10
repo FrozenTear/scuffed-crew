@@ -353,9 +353,10 @@ async fn quarantine(store: &LocalStore, session_id: &str) {
         .unwrap();
 }
 
-/// A new tracker version puts set-aside games back on the queue once. The
-/// same version does not do it again, also after a restart, so a game the
-/// site still refuses stays set aside until the next update or a Retry.
+/// A new tracker version puts set-aside games back on the queue once, with
+/// the site's reason kept as proof. The same version does not do it again,
+/// also after a restart, so a game the site still refuses stays set aside
+/// until the next update or a Retry.
 #[tokio::test]
 async fn set_aside_games_go_back_on_the_queue_once_per_tracker_version() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -372,7 +373,12 @@ async fn set_aside_games_go_back_on_the_queue_once_per_tracker_version() {
     );
     let queued = store.get_unsynced().await.unwrap();
     assert_eq!(queued.len(), 1);
-    assert!(queued[0].upload_rejection().is_none());
+    assert!(queued[0].upload_retry_pending());
+    assert_eq!(
+        queued[0].upload_rejection(),
+        Some("Upload rejected by server: hero must be a known hero or Unknown"),
+        "the reason is kept"
+    );
 
     quarantine(&store, "bad").await;
     assert!(

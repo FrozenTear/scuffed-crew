@@ -689,23 +689,26 @@ fn replace_credentials_resets_learned_caps_when_the_server_url_changes() {
     assert_eq!(c.batch_caps().deletes, SYNC_UPLOAD_MAX_DELETES);
 }
 
-fn refused_with(keys: &[&str], accepted_then_cut: bool) -> RefusedRows {
+fn refused_with(keys: &[&str], accepted_at: Option<std::time::Instant>) -> RefusedRows {
     let mut rows = RefusedRows::default();
     for key in keys {
         rows.insert((*key).to_string());
     }
-    rows.set_accepted_then_cut(accepted_then_cut);
+    if let Some(at) = accepted_at {
+        rows.note_accepted(at);
+    }
     rows
 }
 
 #[test]
 fn replace_credentials_resets_refused_rows_when_the_server_url_changes() {
+    let at = Some(std::time::Instant::now());
     let c = client("https://crew.example");
-    c.remember_refused_rows(refused_with(&["s1"], true), &c.credentials());
-    assert_eq!(c.refused_rows(), refused_with(&["s1"], true));
+    c.remember_refused_rows(refused_with(&["s1"], at), &c.credentials());
+    assert_eq!(c.refused_rows(), refused_with(&["s1"], at));
     assert_eq!(
         c.clone().refused_rows(),
-        refused_with(&["s1"], true),
+        refused_with(&["s1"], at),
         "clones share the set"
     );
     c.replace_credentials(SyncConfig {
@@ -714,10 +717,10 @@ fn replace_credentials_resets_refused_rows_when_the_server_url_changes() {
     });
     assert_eq!(
         c.refused_rows(),
-        refused_with(&["s1"], false),
-        "a new token on the same server keeps the rows to send last, not the proof"
+        refused_with(&["s1"], None),
+        "a new token on the same server keeps the rows to send last, not the accept time"
     );
-    c.remember_refused_rows(refused_with(&["s1"], true), &c.credentials());
+    c.remember_refused_rows(refused_with(&["s1"], at), &c.credentials());
     c.replace_credentials(SyncConfig {
         server_url: "https://other.example".into(),
         token: "other-token".into(),
@@ -727,13 +730,14 @@ fn replace_credentials_resets_refused_rows_when_the_server_url_changes() {
 
 #[test]
 fn a_pass_that_ran_with_other_credentials_is_not_remembered() {
+    let at = Some(std::time::Instant::now());
     let c = client("https://crew.example");
     let ran_with = c.credentials();
     c.replace_credentials(SyncConfig {
         server_url: "https://other.example".into(),
         token: ran_with.token.clone(),
     });
-    c.remember_refused_rows(refused_with(&["s1"], true), &ran_with);
+    c.remember_refused_rows(refused_with(&["s1"], at), &ran_with);
     assert_eq!(
         c.refused_rows(),
         RefusedRows::default(),
@@ -745,21 +749,30 @@ fn a_pass_that_ran_with_other_credentials_is_not_remembered() {
         server_url: ran_with.server_url.clone(),
         token: "new-token".into(),
     });
-    c.remember_refused_rows(refused_with(&["s2"], true), &ran_with);
+    c.remember_refused_rows(refused_with(&["s2"], at), &ran_with);
     assert_eq!(
         c.refused_rows(),
-        refused_with(&["s2"], false),
-        "a proof earned with the old token is dropped"
+        refused_with(&["s2"], None),
+        "an accept time earned with the old token is dropped"
     );
 }
 
 #[test]
-fn the_proof_is_taken_once() {
-    let mut rows = refused_with(&["s1"], true);
-    assert!(rows.accepted_then_cut());
-    assert!(rows.take_accepted_then_cut());
-    assert!(!rows.take_accepted_then_cut());
-    assert!(rows.contains("s1"), "taking the proof keeps the rows");
+fn an_accept_proves_the_server_takes_uploads_for_the_window_only() {
+    let at = std::time::Instant::now();
+    let mut rows = refused_with(&["s1"], None);
+    assert!(!rows.accepted_recently(at), "no accept yet");
+    rows.note_accepted(at);
+    assert!(rows.accepted_recently(at));
+    let second = std::time::Duration::from_secs(1);
+    assert!(rows.accepted_recently(at + ACCEPT_PROOF_WINDOW - second));
+    assert!(!rows.accepted_recently(at + ACCEPT_PROOF_WINDOW));
+    rows.forget_accepted();
+    assert!(!rows.accepted_recently(at));
+    assert!(
+        rows.contains("s1"),
+        "forgetting the accept time keeps the rows"
+    );
 }
 
 fn ok_response() -> scuffed_types::api::StatsUploadResponse {
@@ -770,10 +783,10 @@ fn ok_response() -> scuffed_types::api::StatsUploadResponse {
     }
 }
 
-/// A carried proof covers only the rows it lists, and only a refusal that
-/// names the row. The rest are held and the chunk backs off.
+/// A requeued row's kept reason proves only that row, and only for a
+/// refusal that names it. The rest are held and the chunk backs off.
 #[tokio::test]
-async fn a_carried_proof_quarantines_only_the_listed_rows() {
+async fn a_requeued_row_proof_quarantines_only_the_listed_rows() {
     let rows = [0usize, 1];
     let isolation = isolate_rejected_in_pass(&rows, false, &[0], |_batch| async move {
         Err::<scuffed_types::api::StatsUploadResponse, _>(payload_reject(400))
@@ -795,8 +808,8 @@ async fn a_carried_proof_quarantines_only_the_listed_rows() {
 }
 
 /// A refusal of the request as a whole (here a bad delete id that rides on
-/// this chunk only) says nothing about the probed row. Neither a row
-/// accepted earlier in the pass nor a carried proof sets it aside.
+/// this chunk only) says nothing about the probed row. Neither a recent
+/// accept nor a requeued row's kept reason sets it aside.
 #[tokio::test]
 async fn a_whole_request_refusal_is_never_proof_against_a_row() {
     let rows: Vec<usize> = (0..6).collect();

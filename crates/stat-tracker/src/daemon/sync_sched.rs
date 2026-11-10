@@ -547,7 +547,8 @@ where
 }
 
 /// One sync pass. `caps` and `refused` carry what earlier passes of this
-/// process learned: the 413 batch caps, and the rows to send last.
+/// process learned: the 413 batch caps, the rows to send last, and when the
+/// server last accepted a row.
 pub(crate) async fn try_sync_with_state<F, Fut>(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
@@ -562,9 +563,6 @@ where
             Output = Result<scuffed_types::api::StatsUploadResponse, sync::SyncUploadError>,
         >,
 {
-    // The proof from the last pass is for this pass only, whether or not
-    // this one reaches the server.
-    let carried_proof = refused.take_accepted_then_cut();
     // Errors are stringified immediately: `Box<dyn Error>` isn't `Send`, and
     // this future runs on a spawned task.
     //
@@ -741,7 +739,6 @@ where
         tombstones,
         caps,
         refused,
-        carried_proof,
         &mut upload,
     )
     .await
@@ -862,13 +859,14 @@ pub(crate) fn split_local_only(rows: Vec<storage::PersonalMatch>) -> LocalOnlySp
 /// inside the chunk until a single bad row is found. That row is
 /// quarantined when some other row in the same chunk was accepted. When the
 /// chunk accepts nothing, it is still quarantined if the server named the
-/// row (`matches[n]:`) and either an earlier chunk of this pass had a row
-/// accepted, or `carried_proof` is set and the row is in `refused` (the
-/// last pass held it, then had a row accepted and stopped on a 429 or the
-/// request cap). Otherwise nothing is quarantined, the rows stay queued,
-/// and the pass backs off. Rows refused on their own without that proof
-/// are put in `refused`, and the next pass sends them after the other
-/// queued rows, so they cannot use up every pass ahead of good games. A
+/// row (`matches[n]:`) and either `refused` says the server accepted a row
+/// within [`sync::ACCEPT_PROOF_WINDOW`] (earlier in this pass or in an
+/// earlier one), or the row is one a tracker update put back on the queue
+/// with its old reason kept ([`storage::PersonalMatch::upload_retry_pending`]).
+/// Otherwise nothing is quarantined, the rows stay queued, and the pass
+/// backs off. Rows refused on their own without that proof are put in
+/// `refused`, and the next pass sends them after the other queued rows, so
+/// they cannot use up every pass ahead of good games. A
 /// 400 or 422 that does not name a row blames only the probed row and
 /// retries the rest. HTTP 413 `batch_too_large` lowers those caps (never
 /// below 1, never raised later) and resends immediately; that request wrote
@@ -879,8 +877,7 @@ pub(crate) fn split_local_only(rows: Vec<storage::PersonalMatch>) -> LocalOnlySp
 /// they were sent with, including 400 splits of that chunk, and are cleared
 /// only after a 2xx. A deletes-only 400 still backs off like a 5xx: there
 /// are no match rows to isolate, so one bad id keeps that delete chunk
-/// retrying. At the end, `refused` records whether this pass had a row
-/// accepted and then stopped on a 429 or the request cap.
+/// retrying. Each accepted chunk records the time in `refused`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_chunked<F, Fut>(
     store: &storage::LocalStore,
@@ -890,7 +887,6 @@ pub(crate) async fn upload_chunked<F, Fut>(
     mut tombstones: Vec<String>,
     caps: &mut sync::BatchCaps,
     refused: &mut sync::RefusedRows,
-    carried_proof: bool,
     upload: &mut F,
 ) -> sync::SyncAttempt
 where
@@ -907,9 +903,6 @@ where
     let mut requests = 0usize;
     let mut progress = false;
     let mut stop: Option<sync::SyncAttempt> = None;
-    // The pass stopped on a 429 or the request cap, so rows it never
-    // reached may still be queued.
-    let mut cut_short = false;
 
     loop {
         if remaining.is_empty() && tombstones.is_empty() {
@@ -953,7 +946,6 @@ where
                     );
                 }
                 Err(err) => {
-                    cut_short = err.status == Some(429);
                     stop = Some(sync_attempt_from_error(&err));
                     break;
                 }
@@ -961,25 +953,25 @@ where
             continue;
         }
 
-        // A row accepted by an earlier chunk proves the server takes
-        // uploads, so this chunk's rows refused by name are quarantined even
-        // when the chunk accepts none. So are the rows the last pass held,
-        // when that pass had a row accepted and was then cut short.
-        let carried: Vec<usize> = if carried_proof {
-            chunk_rows
-                .iter()
-                .enumerate()
-                .filter(|(_, row)| upload_row_key(row).is_some_and(|key| refused.contains(&key)))
-                .map(|(local, _)| local)
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // A row the server accepted recently (this pass or an earlier one)
+        // proves it takes uploads, so this chunk's rows refused by name are
+        // quarantined even when the chunk accepts none. So are rows a tracker
+        // update put back on the queue with the site's old reason kept.
+        let server_accepts = refused.accepted_recently(std::time::Instant::now());
+        let requeued: Vec<usize> = chunk_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.upload_retry_pending())
+            .map(|(local, _)| local)
+            .collect();
         let isolation =
-            sync::isolate_rejected_in_pass(&chunk_rows, uploaded > 0, &carried, |batch| {
+            sync::isolate_rejected_in_pass(&chunk_rows, server_accepts, &requeued, |batch| {
                 upload(batch.to_vec(), chunk_deletes.clone())
             })
             .await;
+        if !isolation.accepted.is_empty() {
+            refused.note_accepted(std::time::Instant::now());
+        }
         requests += isolation.requests;
 
         for &local in &isolation.held {
@@ -1083,13 +1075,11 @@ where
                 );
                 continue;
             }
-            cut_short = err.status == Some(429);
             stop = Some(sync_attempt_from_error(&err));
             break;
         }
 
         if !isolation.deferred.is_empty() {
-            cut_short = true;
             tracing::warn!(
                 target: "scuffed_stat_tracker",
                 deferred = isolation.deferred.len(),
@@ -1100,7 +1090,6 @@ where
         }
     }
 
-    refused.set_accepted_then_cut(uploaded > 0 && cut_short);
     if progress {
         refresh_snapshot_force(store, data_dir).await;
     }
