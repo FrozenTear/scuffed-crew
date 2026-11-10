@@ -21,6 +21,19 @@ pub const HELD: &str = "sess-g-held";
 /// A second rejected upload, so the tab offers Retry all.
 pub const REJECTED_2: &str = "sess-g-rejected2";
 
+/// History games that carry the extra bans and picks states.
+/// Nepal: the team of each ban not read, hero select not seen.
+pub const SIDE: &str = "sess-g-h01";
+/// Lijiang Tower: no ban screen and no ban vote seen.
+pub const NO_BAN: &str = "sess-g-h02";
+/// Busan: a skipped and a not seen ban vote.
+pub const SKIP: &str = "sess-g-h03";
+/// Junkertown: the lobby ban read, none of the four ban slots read.
+pub const LOBBY_ONLY: &str = "sess-g-h04";
+/// King's Row: a mixed Bans row with long names (both teams, a ban with no
+/// team read and the lobby ban), the widest row the block draws.
+pub const MIXED: &str = "sess-g-h05";
+
 /// The server message on the rejected sample upload.
 pub const REJECT: &str =
     "reader version cv-v0 is no longer accepted. Update the tracker, then retry.";
@@ -190,47 +203,52 @@ pub fn snapshot() -> Snapshot {
     rejected_2.upload_reject = Some(REJECT.into());
 
     // The open row's Bans and picks block: all read, read in part, and
-    // two ways of reading nothing.
+    // two ways of reading nothing (more states on history games below).
     crate::fixtures_bans::full(&mut normal);
     crate::fixtures_bans::partial(&mut unsure);
     crate::fixtures_bans::reader_off(&mut undecided);
     crate::fixtures_bans::frame_size(&mut rejected_2);
+
+    // Five more states on the newest history games: the team of each ban
+    // not read with hero select not seen, no ban screen seen, skipped and
+    // not seen ban votes, a lobby ban read with no team ban read, and the
+    // mixed Bans row with long names.
+    let mut side = wb(SIDE.into(), "Nepal", "defeat", dt(2026, 10, 18, 22, 5));
+    crate::fixtures_bans::side(&mut side);
+    let mut no_ban = wb(
+        NO_BAN.into(),
+        "Lijiang Tower",
+        "victory",
+        dt(2026, 10, 18, 21, 50),
+    );
+    crate::fixtures_bans::no_ban_screen(&mut no_ban);
+    let mut skip = wb(SKIP.into(), "Busan", "victory", dt(2026, 10, 18, 21, 31));
+    crate::fixtures_bans::skip_votes(&mut skip);
+    let mut lobby_only = wb(
+        LOBBY_ONLY.into(),
+        "Junkertown",
+        "victory",
+        dt(2026, 10, 17, 22, 1),
+    );
+    crate::fixtures_bans::lobby_only(&mut lobby_only);
+    let mut mixed = wb(
+        MIXED.into(),
+        "King's Row",
+        "victory",
+        dt(2026, 10, 17, 21, 52),
+    );
+    crate::fixtures_bans::mixed(&mut mixed);
 
     let mut matches = vec![
         held,
         rejected_2,
         unsure,
         normal,
-        wb(
-            "sess-g-h01".into(),
-            "Nepal",
-            "defeat",
-            dt(2026, 10, 18, 22, 5),
-        ),
-        wb(
-            "sess-g-h02".into(),
-            "Lijiang Tower",
-            "victory",
-            dt(2026, 10, 18, 21, 50),
-        ),
-        wb(
-            "sess-g-h03".into(),
-            "Busan",
-            "victory",
-            dt(2026, 10, 18, 21, 31),
-        ),
-        wb(
-            "sess-g-h04".into(),
-            "Junkertown",
-            "victory",
-            dt(2026, 10, 17, 22, 1),
-        ),
-        wb(
-            "sess-g-h05".into(),
-            "King's Row",
-            "victory",
-            dt(2026, 10, 17, 21, 52),
-        ),
+        side,
+        no_ban,
+        skip,
+        lobby_only,
+        mixed,
         wb(
             "sess-g-h06".into(),
             "Ilios",

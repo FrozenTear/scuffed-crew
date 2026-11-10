@@ -1,8 +1,4 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use dioxus::prelude::*;
-
-static INPUT_IDS: AtomicU64 = AtomicU64::new(1);
 
 pub const FIELD_CSS: &str = r#"
 .ui-field { width: 100%; font-family: var(--font-body); font-size: var(--text-sm); font-weight: 500;
@@ -24,17 +20,18 @@ fn field_class(invalid: bool) -> &'static str {
     }
 }
 
-/// `id` written onto the input. A built-in label always gets an id so `for` matches.
-fn input_dom_id(explicit: Option<&str>, show_label: bool, generated: &str) -> Option<String> {
-    let explicit = explicit
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    if show_label {
-        Some(explicit.unwrap_or_else(|| generated.to_string()))
-    } else {
-        explicit
-    }
+fn non_blank(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+/// `id` written onto the input: the explicit `id` when it is non-blank, else
+/// none. There is no fallback to `name` or a label slug, because two inputs that
+/// share a label or a name (or a name with spaces) would collide or be invalid.
+/// An `id` should be built from data (record id plus field name), never a
+/// global counter, so it stays stable across renders. A labelled input does
+/// not need one: it is nested inside its `<label>`, which links it either way.
+fn input_dom_id(explicit: Option<&str>) -> Option<String> {
+    non_blank(explicit).map(str::to_string)
 }
 
 /// Explicit `aria_invalid` wins. Otherwise an invalid field exposes `true`.
@@ -53,10 +50,13 @@ pub fn Input(
     #[props(default = false)] invalid: bool,
     #[props(default = false)] disabled: bool,
     #[props(default)] oninput: Option<EventHandler<FormEvent>>,
-    /// Associates an external `<label for>`. Omitted when empty and no built-in label.
+    /// Input `id`. Omitted when blank. Build it from data (record id plus
+    /// field name) so it is unique on the page.
     #[props(default)]
     id: Option<String>,
-    /// Visible label rendered above the input and wired with `for` / `id`.
+    /// Visible label rendered above the input. The input is nested inside the
+    /// `<label>`, so it is linked with or without an `id`; when an `id` is set
+    /// the label also carries a matching `for`.
     #[props(default)]
     label: Option<String>,
     #[props(default)] aria_label: Option<String>,
@@ -67,21 +67,17 @@ pub fn Input(
     #[props(default)]
     name: Option<String>,
 ) -> Element {
-    // Always run: hook order must not depend on whether a label was passed.
-    let generated_id: String =
-        use_hook(|| format!("ui-input-{}", INPUT_IDS.fetch_add(1, Ordering::Relaxed)));
     let show_label = label.as_ref().is_some_and(|text| !text.trim().is_empty());
     let label_text = label.clone().unwrap_or_default();
-    let dom_id = input_dom_id(id.as_deref(), show_label, &generated_id);
+    let dom_id = input_dom_id(id.as_deref());
     let aria_invalid_attr = aria_bool(resolved_aria_invalid(invalid, aria_invalid));
     let aria_required_attr = aria_bool(aria_required);
     let class = field_class(invalid);
 
     if show_label {
-        let id_for = dom_id.clone().unwrap_or_default();
         rsx! {
-            div { class: "ui-field-wrap",
-                label { class: "ui-field-label", r#for: "{id_for}", "{label_text}" }
+            label { class: "ui-field-wrap", r#for: dom_id.clone(),
+                span { class: "ui-field-label", "{label_text}" }
                 input {
                     class: "{class}",
                     id: dom_id,
@@ -166,21 +162,100 @@ mod tests {
     }
 
     #[test]
-    fn input_id_stays_off_until_a_caller_associates_a_label() {
-        assert_eq!(input_dom_id(None, false, "ui-input-1"), None);
-        assert_eq!(input_dom_id(Some("  "), false, "ui-input-1"), None);
+    fn input_id_is_only_the_explicit_id() {
+        assert_eq!(input_dom_id(None), None);
+        assert_eq!(input_dom_id(Some("  ")), None);
+        assert_eq!(input_dom_id(Some("email")).as_deref(), Some("email"));
         assert_eq!(
-            input_dom_id(Some("email"), false, "ui-input-1").as_deref(),
-            Some("email")
+            input_dom_id(Some(" member-42-email ")).as_deref(),
+            Some("member-42-email")
         );
-        assert_eq!(
-            input_dom_id(None, true, "ui-input-4").as_deref(),
-            Some("ui-input-4")
-        );
-        assert_eq!(
-            input_dom_id(Some("email"), true, "ui-input-4").as_deref(),
-            Some("email")
-        );
+    }
+
+    #[test]
+    fn explicit_input_id_is_stable_across_renders() {
+        let first = input_dom_id(Some("org-7-name"));
+        assert_eq!(first, input_dom_id(Some("org-7-name")));
+        assert_ne!(first, input_dom_id(Some("org-7-tag")));
+    }
+
+    /// The `<input>` sits between `<label` and `</label>`.
+    fn assert_input_inside_label(html: &str) {
+        let open = html.find("<label").expect("label");
+        let input = html.find("<input").expect("input");
+        let close = html.find("</label>").expect("label close");
+        assert!(open < input && input < close, "{html}");
+    }
+
+    fn render(app: fn() -> Element) -> String {
+        let mut dom = VirtualDom::new(app);
+        dom.rebuild_in_place();
+        dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn labelled_input_uses_the_explicit_id_for_label_and_input() {
+        fn view() -> Element {
+            rsx! {
+                Input {
+                    value: String::new(),
+                    id: "member-42-email".to_string(),
+                    name: "email".to_string(),
+                    label: "Email".to_string(),
+                }
+            }
+        }
+        let html = render(view);
+        assert!(html.contains(r#"for="member-42-email""#), "{html}");
+        assert!(html.contains(r#"id="member-42-email""#), "{html}");
+        assert!(!html.contains(r#"id="email""#), "{html}");
+        assert!(!html.contains("field-email"), "{html}");
+        assert_input_inside_label(&html);
+    }
+
+    #[test]
+    fn unlabelled_input_without_id_gets_no_id() {
+        fn view() -> Element {
+            rsx! {
+                Input {
+                    value: String::new(),
+                    name: "contact email".to_string(),
+                    aria_label: "Email".to_string(),
+                }
+            }
+        }
+        let html = render(view);
+        assert!(!html.contains(" id="), "{html}");
+        assert!(!html.contains(" for="), "{html}");
+    }
+
+    #[test]
+    fn labelled_input_without_id_is_linked_by_nesting() {
+        fn view() -> Element {
+            rsx! {
+                Input {
+                    value: String::new(),
+                    name: "email".to_string(),
+                    label: "Email".to_string(),
+                }
+            }
+        }
+        fn blank_id() -> Element {
+            rsx! {
+                Input {
+                    value: String::new(),
+                    id: "   ".to_string(),
+                    label: "Email".to_string(),
+                }
+            }
+        }
+        for html in [render(view), render(blank_id)] {
+            assert_input_inside_label(&html);
+            assert!(html.contains(">Email</span>"), "{html}");
+            assert!(!html.contains(" id="), "{html}");
+            assert!(!html.contains(" for="), "{html}");
+        }
     }
 
     #[test]

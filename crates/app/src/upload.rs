@@ -7,7 +7,7 @@ use serde::Deserialize;
 use wasm_bindgen::JsCast;
 
 /// Types `POST /api/upload/image` accepts. Used for the `accept` attribute.
-pub const IMAGE_UPLOAD_ACCEPT: &str = "image/jpeg,image/png,image/webp,image/gif";
+pub const IMAGE_UPLOAD_ACCEPT: &str = "image/jpeg,image/png,image/webp,image/gif,image/avif";
 
 /// Same cap as the server's `IMAGE_MAX_BYTES` (5 MB).
 pub const IMAGE_UPLOAD_MAX_BYTES: f64 = 5.0 * 1024.0 * 1024.0;
@@ -31,7 +31,9 @@ pub enum UploadFailure {
 pub fn validate_image_upload(mime: &str, size: f64) -> Result<(), &'static str> {
     let mime = mime.trim().to_ascii_lowercase();
     if !IMAGE_UPLOAD_ACCEPT.split(',').any(|t| t == mime) {
-        return Err("That file type is not supported. Choose a JPEG, PNG, WebP, or GIF image.");
+        return Err(
+            "That file type is not supported. Choose a JPEG, PNG, WebP, GIF, or AVIF image.",
+        );
     }
     if size <= 0.0 {
         return Err("That file is empty. Choose another image.");
@@ -201,7 +203,13 @@ mod tests {
 
     #[test]
     fn accepts_each_allowed_type_at_the_cap() {
-        for mime in ["image/jpeg", "image/png", "image/webp", "image/gif"] {
+        for mime in [
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/gif",
+            "image/avif",
+        ] {
             assert_eq!(validate_image_upload(mime, IMAGE_UPLOAD_MAX_BYTES), Ok(()));
         }
     }
@@ -215,7 +223,7 @@ mod tests {
     fn rejects_other_types() {
         for mime in ["image/svg+xml", "image/bmp", "text/html", "", "image/png;x"] {
             let err = validate_image_upload(mime, 10.0).unwrap_err();
-            assert!(err.contains("JPEG, PNG, WebP, or GIF"), "{mime}");
+            assert!(err.contains("JPEG, PNG, WebP, GIF, or AVIF"), "{mime}");
         }
     }
 
@@ -234,7 +242,7 @@ mod tests {
     fn accept_attribute_matches_server_types() {
         assert_eq!(
             IMAGE_UPLOAD_ACCEPT,
-            "image/jpeg,image/png,image/webp,image/gif"
+            "image/jpeg,image/png,image/webp,image/gif,image/avif"
         );
     }
 

@@ -318,7 +318,7 @@ impl RunMarkerGuard {
 impl Drop for RunMarkerGuard {
     /// Stop the heartbeat and leave the marker. Any exit that did not go
     /// through [`Self::finish`] is not clean: a panic, or an error return
-    /// such as "keyboard devices lost" (exit 1, restarted by systemd). Those
+    /// (exit 1, restarted by systemd). Those
     /// are the "tracking stopped" cases a crash report is for, so the next
     /// start must find the marker and offer one.
     fn drop(&mut self) {

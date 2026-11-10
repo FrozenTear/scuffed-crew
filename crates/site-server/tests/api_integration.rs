@@ -6460,6 +6460,7 @@ async fn public_leaderboard_and_hero_scoped_carry_wins_losses_draws() {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         }
     }
 
@@ -6609,6 +6610,7 @@ async fn public_members_hero_scoped_query() {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         },
         PersonalMatch {
             id: String::new(),
@@ -6632,6 +6634,7 @@ async fn public_members_hero_scoped_query() {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         },
         // Different hero must not count toward Ana-scoped games.
         PersonalMatch {
@@ -6656,6 +6659,7 @@ async fn public_members_hero_scoped_query() {
             name_recognizer: None,
             suspect_fields: Vec::new(),
             bans_picks: None,
+            rank: None,
         },
     ];
     state
@@ -7445,6 +7449,100 @@ async fn upload_avatar_oversized_dimensions_rejected() {
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     // Nothing persisted.
+    assert!(
+        !dir.join("avatars").exists()
+            || std::fs::read_dir(dir.join("avatars"))
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+        "no file should be written for a rejected bomb"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Real 2x1 AVIF (see `tests/data/README.md`).
+const UPL_AVIF: &[u8] = include_bytes!("data/tiny-2x1.avif");
+
+/// `UPL_AVIF` with its single `ispe` box rewritten to declare `w` x `h`.
+fn upl_avif(w: u32, h: u32) -> Vec<u8> {
+    let mut out = UPL_AVIF.to_vec();
+    let at = out
+        .windows(4)
+        .position(|win| win == b"ispe")
+        .expect("fixture has an ispe box");
+    out[at + 8..at + 12].copy_from_slice(&w.to_be_bytes());
+    out[at + 12..at + 16].copy_from_slice(&h.to_be_bytes());
+    out
+}
+
+#[tokio::test]
+async fn upload_avatar_avif_succeeds_and_is_served_inline() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("avif");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+    let app = create_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "a.avif",
+            "image/avif",
+            UPL_AVIF,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let url = body_json(resp).await["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("/uploads/avatars/"), "got {url}");
+    assert!(url.ends_with(".avif"), "got {url}");
+
+    let served = app
+        .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(served.status(), StatusCode::OK);
+    let hdr = |name: header::HeaderName| {
+        served
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(hdr(header::CONTENT_TYPE).as_deref(), Some("image/avif"));
+    assert_eq!(hdr(header::CONTENT_DISPOSITION).as_deref(), Some("inline"));
+    assert_eq!(
+        hdr(header::X_CONTENT_TYPE_OPTIONS).as_deref(),
+        Some("nosniff")
+    );
+    assert!(hdr(header::CONTENT_SECURITY_POLICY).is_none());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn upload_avatar_avif_oversized_dimensions_rejected() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("avif-bomb");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+    let app = create_router(state);
+
+    // 311-byte file whose header declares a 50000x50000 canvas.
+    let resp = app
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "bomb.avif",
+            "image/avif",
+            &upl_avif(50_000, 50_000),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert!(
         !dir.join("avatars").exists()
             || std::fs::read_dir(dir.join("avatars"))
@@ -8394,6 +8492,7 @@ async fn seasons_crud_and_stats_season_filter() {
         name_recognizer: None,
         suspect_fields: Vec::new(),
         bans_picks: None,
+        rank: None,
     };
     // January game inside season 1, July game outside it.
     let matches = vec![
@@ -8711,6 +8810,7 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
         name_recognizer: None,
         suspect_fields: Vec::new(),
         bans_picks: None,
+        rank: None,
     };
 
     state

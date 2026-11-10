@@ -12,6 +12,9 @@ scuffed-types = { path = "../types" }
 axum = { version = "0.8", features = ["multipart"] }
 uuid = { version = "1", features = ["v4"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
+# Header-only AVIF width/height read (pure Rust, no AV1 decoder). The `image`
+# crate stays without its avif feature.
+imagesize = { version = "0.15", default-features = false, features = ["heif"] }
 axum-extra = { version = "0.10", features = ["cookie"] }
 tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
 tower = "0.5"

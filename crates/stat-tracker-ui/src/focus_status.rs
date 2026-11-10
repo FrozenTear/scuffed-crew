@@ -119,9 +119,20 @@ pub fn live_focus(
         .map(|status| status.focus_gate)
 }
 
+/// The running tracker's keyboard sentence (no keyboard device could be
+/// opened). Empty, or a status file from another run, is nothing to show.
+pub(crate) fn daemon_input_notice(
+    status: Option<&OcrSwitchStatus>,
+    daemon_pid: Option<u32>,
+) -> Option<String> {
+    let status = status.filter(|status| daemon_pid == Some(status.pid))?;
+    let notice = status.input_notice.trim();
+    (!notice.is_empty()).then(|| notice.to_string())
+}
+
 impl TrackerApp {
-    /// The tick's read of the status file for the capture route notice and
-    /// the top bar's focus value.
+    /// The tick's read of the status file for the capture route and
+    /// keyboard notices and the top bar's focus value.
     pub(crate) fn observe_capture_and_focus(
         &mut self,
         status: Option<&OcrSwitchStatus>,
@@ -129,6 +140,7 @@ impl TrackerApp {
     ) {
         let pid = self.daemon.pid;
         self.ocr_switch.capture_notice = crate::settings::daemon_capture_notice(status, pid);
+        self.ocr_switch.input_notice = daemon_input_notice(status, pid);
         self.page_state.focus.observe(live_focus(status, pid), now);
     }
 }
@@ -338,5 +350,42 @@ mod tests {
             assert!(!text.contains('\u{2019}'), "straight apostrophes: {text}");
         }
         assert!(PAUSED_SHORT.len() <= 7 && UNREADABLE_SHORT.len() <= 7);
+    }
+
+    #[test]
+    fn the_keyboard_notice_is_shown_for_the_running_tracker() {
+        let mut status = OcrSwitchStatus {
+            pid: 41,
+            input_notice: "Tab detection is off. Run: sudo usermod -aG input \"$USER\"".into(),
+            ..OcrSwitchStatus::default()
+        };
+        assert_eq!(
+            daemon_input_notice(Some(&status), Some(41)).as_deref(),
+            Some(status.input_notice.as_str())
+        );
+        assert_eq!(daemon_input_notice(Some(&status), Some(42)), None);
+        assert_eq!(daemon_input_notice(Some(&status), None), None);
+        status.input_notice = "  ".into();
+        assert_eq!(daemon_input_notice(Some(&status), Some(41)), None);
+    }
+
+    /// The tick copies the running tracker's keyboard notice into the
+    /// field the top tabs layout reads. Pinning only `daemon_input_notice`
+    /// would still pass if that assignment were removed.
+    #[test]
+    fn observe_capture_and_focus_sets_the_keyboard_notice() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.daemon.pid = Some(41);
+        let status = OcrSwitchStatus {
+            pid: 41,
+            input_notice: "Tab detection is off. Run: sudo usermod -aG input \"$USER\"".into(),
+            ..OcrSwitchStatus::default()
+        };
+        assert_eq!(app.ocr_switch.input_notice, None);
+        app.observe_capture_and_focus(Some(&status), Instant::now());
+        assert_eq!(
+            app.ocr_switch.input_notice.as_deref(),
+            Some(status.input_notice.as_str())
+        );
     }
 }

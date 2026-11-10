@@ -6,11 +6,21 @@ use crate::*;
 /// Bounded retries when startup finds zero keyboards. A miss is usually
 /// "not in the `input` group" (only a new login's process credentials can
 /// fix that) or `/dev/input` not enumerated yet (a same-process retry can).
-/// Kept short so the pid file is not held while the GUI shows a daemon
-/// that will never capture. After this, the process exits non-zero and
-/// systemd `Restart=on-failure` tries again; a later graphical-session
-/// start covers re-login.
+/// After this the daemon runs on without Tab ([`KeyboardInput`]): exiting
+/// here made systemd `Restart=on-failure` crash-loop the service for a user
+/// outside the `input` group (alpha.3 item 32), and stopped recording that
+/// needs no keyboard.
 pub(crate) const KEYBOARD_OPEN_ATTEMPTS: u32 = 3;
+
+/// How often the run loop tries the keyboard again while none can be read.
+pub(crate) const KEYBOARD_REOPEN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Tracker health while no keyboard can be read (`ocr_status::input_notice`).
+/// The notice ends with the command, with no punctuation after it (a
+/// trailing comma made usermod look for user "name,"). Tracker health puts
+/// a line break before anything that follows it, and the WARN log line ends
+/// with it.
+pub(crate) const NO_KEYBOARD_NOTICE: &str = "The tracker cannot read the keyboard, so Tab detection is off. Add yourself to the input group, then log out and back in: sudo usermod -aG input \"$USER\"";
 
 /// Gap between [`KEYBOARD_OPEN_ATTEMPTS`]. This wait also polls SIGTERM
 /// and Ctrl+C, without that, `systemctl --user stop` sits until
@@ -28,10 +38,12 @@ pub(crate) enum KeyboardWait {
     Shutdown,
 }
 
-/// Keyboard stream acquired, or a clean shutdown while waiting to retry.
+/// Keyboard stream acquired, none after the bounded retries (the last open
+/// error), or a clean shutdown while waiting to retry.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum KeyboardAcquire<T> {
     Ready(T),
+    Unavailable(String),
     Shutdown,
 }
 
@@ -63,9 +75,10 @@ impl KeyboardWaiter for SignalKeyboardWaiter<'_> {
     }
 }
 
-/// Open a keyboard, retrying on failure. `Err` is "still no keyboard",
-/// callers must propagate it so the process exits non-zero. `Ok(Shutdown)`
-/// is a clean stop during the retry wait.
+/// Open a keyboard, retrying on failure. `Unavailable` is "still no
+/// keyboard": the caller runs on without one. `Ok(Shutdown)` is a clean
+/// stop during the retry wait. `Err` is only a failed wait. Each failed
+/// attempt logs at DEBUG; [`KeyboardInput`] warns once.
 pub(crate) async fn acquire_keyboard<T, E, F, W>(
     mut open_keyboard: F,
     waiter: &mut W,
@@ -82,7 +95,7 @@ where
         match open_keyboard() {
             Ok(stream) => return Ok(KeyboardAcquire::Ready(stream)),
             Err(e) => {
-                tracing::error!(
+                tracing::debug!(
                     target: "scuffed_stat_tracker",
                     error = %e,
                     attempt,
@@ -90,12 +103,8 @@ where
                     "evdev init failed: no keyboard detected"
                 );
                 if attempt >= max_attempts {
-                    anyhow::bail!(
-                        "no keyboard available after {attempt} attempts ({e}): \
-                         exiting so systemd can restart once an input device is readable"
-                    );
+                    return Ok(KeyboardAcquire::Unavailable(e.to_string()));
                 }
-                tracing::info!(target: "scuffed_stat_tracker", "retrying keyboard open; SIGTERM or Ctrl+C will quit");
                 if waiter.wait().await? == KeyboardWait::Shutdown {
                     return Ok(KeyboardAcquire::Shutdown);
                 }
@@ -107,20 +116,169 @@ where
 /// Startup keyboard open: retry while `select!`ing SIGTERM and Ctrl+C.
 ///
 /// `Ok(None)` means the operator stopped us (exit 0, pid file dropped).
-/// `Err` means no keyboard after the bounded retries (exit non-zero).
+/// With no keyboard after the bounded retries the daemon runs on: the
+/// returned [`KeyboardInput`] has published the warning and retries later.
 pub(crate) async fn open_keyboard_or_shutdown(
     sigterm: &mut tokio::signal::unix::Signal,
-) -> anyhow::Result<Option<detect::MultiKeyboardStream>> {
+    data_dir: &std::path::Path,
+) -> anyhow::Result<Option<DaemonKeyboard>> {
     let mut waiter = SignalKeyboardWaiter { sigterm };
-    match acquire_keyboard(
-        detect::MultiKeyboardStream::open,
-        &mut waiter,
-        KEYBOARD_OPEN_ATTEMPTS,
-    )
-    .await?
-    {
-        KeyboardAcquire::Ready(stream) => Ok(Some(stream)),
-        KeyboardAcquire::Shutdown => Ok(None),
+    let open: fn() -> Result<detect::MultiKeyboardStream, String> =
+        || detect::MultiKeyboardStream::open().map_err(|e| e.to_string());
+    let first = match acquire_keyboard(open, &mut waiter, KEYBOARD_OPEN_ATTEMPTS).await? {
+        KeyboardAcquire::Ready(stream) => Ok(stream),
+        KeyboardAcquire::Unavailable(e) => Err(e),
+        KeyboardAcquire::Shutdown => return Ok(None),
+    };
+    Ok(Some(KeyboardInput::new(
+        first,
+        open,
+        data_dir.to_path_buf(),
+        KEYBOARD_REOPEN_INTERVAL,
+    )))
+}
+
+/// The daemon's [`KeyboardInput`].
+pub(crate) type DaemonKeyboard =
+    KeyboardInput<detect::MultiKeyboardStream, fn() -> Result<detect::MultiKeyboardStream, String>>;
+
+/// The Tab keys, or none while no keyboard can be read. Input is optional:
+/// with no keyboard the run loop goes on (polls, end screens, sync), the
+/// key wait just never returns until a later open works. The first failure
+/// logs one WARN and publishes [`NO_KEYBOARD_NOTICE`]; failed retries log
+/// at DEBUG only. A keyboard that comes back clears the notice.
+///
+/// Quiet reopens use a stored Instant deadline so the live
+/// `select!` in `event_loop` (poll/cmd arms) can cancel `wait_tab` without
+/// resetting the 30 s retry. A plain `sleep(retry)` restarted every cancel
+/// and never fired (QA on PR 641).
+pub(crate) struct KeyboardInput<K, F> {
+    stream: Option<K>,
+    open: F,
+    data_dir: std::path::PathBuf,
+    retry: std::time::Duration,
+    /// The warning is out (logged and in the status file).
+    warned: bool,
+    /// Next quiet reopen. Survives `wait_tab` being dropped mid-wait.
+    reopen_at: Option<tokio::time::Instant>,
+}
+
+impl<K, F> KeyboardInput<K, F>
+where
+    K: stat_tracker::tab_retry::TabKeySource,
+    F: FnMut() -> Result<K, String>,
+{
+    pub(crate) fn new(
+        first: Result<K, String>,
+        open: F,
+        data_dir: std::path::PathBuf,
+        retry: std::time::Duration,
+    ) -> Self {
+        let mut input = Self {
+            stream: None,
+            open,
+            data_dir,
+            retry,
+            warned: false,
+            reopen_at: None,
+        };
+        input.opened(first);
+        input
+    }
+
+    fn schedule_reopen(&mut self) {
+        self.reopen_at = Some(tokio::time::Instant::now() + self.retry);
+    }
+
+    /// A keyboard is open now.
+    #[cfg(test)]
+    pub(crate) fn available(&self) -> bool {
+        self.stream.is_some()
+    }
+
+    fn opened(&mut self, result: Result<K, String>) {
+        match result {
+            Ok(stream) => {
+                self.stream = Some(stream);
+                self.reopen_at = None;
+                if self.warned {
+                    self.warned = false;
+                    stat_tracker::ocr_status::publish_input_notice(&self.data_dir, "");
+                    tracing::info!(target: "scuffed_stat_tracker", "keyboard input available: Tab captures can fire");
+                }
+            }
+            // The status file first, so the log line means it is written.
+            Err(e) if !self.warned => {
+                self.warned = true;
+                stat_tracker::ocr_status::publish_input_notice(&self.data_dir, NO_KEYBOARD_NOTICE);
+                // The error is in the message, not a field: fields print
+                // after the message, and the line should end with the command.
+                tracing::warn!(
+                    target: "scuffed_stat_tracker",
+                    "Keyboard open failed ({e}). Capture and recording go on without Tab; retrying quietly. {NO_KEYBOARD_NOTICE}"
+                );
+                self.schedule_reopen();
+            }
+            Err(e) => {
+                tracing::debug!(target: "scuffed_stat_tracker", error = %e, "keyboard still unavailable");
+                self.schedule_reopen();
+            }
+        }
+    }
+
+    /// The next Tab key event. Never an error: while no keyboard is open
+    /// this waits until `reopen_at` and tries again. An open stream only
+    /// ends if its hotplug scanner task dies (the scanner holds a sender
+    /// for the stream's whole life); then the stream is dropped and
+    /// reopened at the next deadline. Unplugging every keyboard does not
+    /// end the stream: it stays open with zero devices.
+    pub(crate) async fn wait_tab(&mut self) -> Result<detect::TabKey, Box<dyn std::error::Error>> {
+        loop {
+            match self.stream.as_mut() {
+                Some(stream) => match stat_tracker::tab_retry::TabKeySource::next_key(stream).await
+                {
+                    Ok(key) => return Ok(key),
+                    Err(e) => {
+                        tracing::info!(
+                            target: "scuffed_stat_tracker",
+                            error = %e,
+                            retry_secs = self.retry.as_secs(),
+                            "keyboard devices lost: reopening in {} s",
+                            self.retry.as_secs()
+                        );
+                        self.stream = None;
+                        // Reopen at the quiet deadline, not at once: a stream
+                        // that ended again right after opening would
+                        // otherwise spin (open, Ok, Err, open) without
+                        // ever yielding.
+                        self.schedule_reopen();
+                    }
+                },
+                None => {
+                    // Every path that leaves `stream` empty has scheduled a
+                    // reopen already; the insert is only a fallback.
+                    let retry = self.retry;
+                    let deadline = *self
+                        .reopen_at
+                        .get_or_insert_with(|| tokio::time::Instant::now() + retry);
+                    tokio::time::sleep_until(deadline).await;
+                    let result = (self.open)();
+                    self.opened(result);
+                }
+            }
+        }
+    }
+}
+
+impl<K, F> stat_tracker::tab_retry::TabKeySource for KeyboardInput<K, F>
+where
+    K: stat_tracker::tab_retry::TabKeySource,
+    F: FnMut() -> Result<K, String>,
+{
+    fn next_key(
+        &mut self,
+    ) -> impl std::future::Future<Output = Result<detect::TabKey, Box<dyn std::error::Error>>> {
+        self.wait_tab()
     }
 }
 
@@ -368,7 +526,7 @@ pub(crate) async fn run(omp: stat_tracker::omp::Startup) -> anyhow::Result<()> {
     // daemon never reaches here. A stale run.marker becomes
     // last_crash.marker with one WARN. run.marker is removed only when the
     // main loop returns Ok (SIGTERM, Ctrl+C, a normal exit). A panic or an
-    // error return (e.g. keyboard devices lost) leaves it, so the next start
+    // error return leaves it, so the next start
     // offers a crash report. `last_seen` is rewritten once a minute until then.
     let run_marker = match stat_tracker::report::marker::start_run(&config.data_dir) {
         Ok((_, guard)) => {
