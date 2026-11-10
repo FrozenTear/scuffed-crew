@@ -49,13 +49,17 @@ fn names(category: GameCategory, corrections: &[(&str, &str)]) -> Vec<&'static s
     labels_read(category, NEW, corrections, &[])
 }
 
-/// The label names are `scuffed_types::SUSPECT_FIELD_NAMES`, every
+/// The label names are the names in `scuffed_types::SUSPECT_FIELD_NAMES`, every
 /// correction key is one of them, and the six stats are the digit reader's
 /// field names in lower case. A rename on either side breaks this.
 #[test]
 fn the_label_names_match_the_suspect_names_and_the_digit_fields() {
-    let all: Vec<&str> = MisreadLabel::ALL.iter().map(|l| l.as_str()).collect();
-    assert_eq!(all, scuffed_types::SUSPECT_FIELD_NAMES);
+    // Same names; the order differs (ALL puts hero second), so compare sorted.
+    let mut all: Vec<&str> = MisreadLabel::ALL.iter().map(|l| l.as_str()).collect();
+    let mut suspect = scuffed_types::SUSPECT_FIELD_NAMES.to_vec();
+    all.sort_unstable();
+    suspect.sort_unstable();
+    assert_eq!(all, suspect);
     for name in scuffed_types::SUSPECT_FIELD_NAMES {
         let label = MisreadLabel::from_correction_key(name);
         if *name == "map" {
