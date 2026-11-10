@@ -21,10 +21,18 @@
 //! [`resolve_rank`] the server uses, so a bad part becomes null on its own and
 //! never costs the game.
 //!
-//! A value shows only when its confidence is at least [`MIN_CONFIDENCE`]. A
-//! value with a missing or lower confidence is hidden, never guessed. The
-//! queue is the read queue title; a missing or unsure title files the game
-//! under "Queue unknown". The same goes for the role ("Role unknown").
+//! Any value that is not null shows, whatever its confidence: rank-v1 and the
+//! tracker never send a value they rejected, and word fields (tier, tags) can
+//! be accepted below 0.5. Out of range numbers are still dropped.
+//!
+//! The queue is the read queue title. The tracker does not send one yet, so
+//! it is null for now; a null title is simply not shown and the game is
+//! grouped by role alone. The queue never comes from `next_mode_hint` (the
+//! next queue banner, not this game's) or `game_mode` (the map mode). A
+//! missing role shows as "Role unknown".
+//!
+//! `progress_change` is the pill on the progress bar in progress percentage
+//! points, -100..=100, shown as "+23%".
 //!
 //! This is opt in: with no rank data on any game, nothing here renders.
 
@@ -37,13 +45,6 @@ use serde_json::Value;
 
 use crate::components::ui::ChipButton;
 
-/// Lowest confidence a rank value needs to show. rank-v1 reads open queue
-/// (no role line) at exactly 0.5 and accepts no icon read below about 0.53,
-/// so this keeps every value the reader accepted and hides weaker ones.
-pub(super) const MIN_CONFIDENCE: f32 = 0.5;
-
-/// Bucket label for a game whose queue title is missing or unsure.
-pub(super) const QUEUE_UNKNOWN: &str = "Queue unknown";
 /// Bucket label for a game whose role is missing or unsure.
 pub(super) const ROLE_UNKNOWN: &str = "Role unknown";
 
@@ -70,7 +71,8 @@ pub(super) fn parse_rank(raw: &Value) -> Option<MatchRank> {
 }
 
 /// True when at least one field holds a value. Confidences alone, or only the
-/// reader id, are no rank.
+/// reader id, are no rank. `next_mode_hint` does not count: it is the next
+/// queue banner, not a rank for this game.
 fn has_any_value(rank: &MatchRank) -> bool {
     rank.role.value.is_some()
         || rank.role_rank.value.is_some()
@@ -81,16 +83,13 @@ fn has_any_value(rank: &MatchRank) -> bool {
         || rank.higher_than_pct.value.is_some()
         || rank.hero_sr.value.is_some()
         || rank.hero_sr_change.value.is_some()
-        || rank.next_mode_hint.value.is_some()
         || rank.queue_title.value.is_some()
 }
 
-/// The value when its confidence clears [`MIN_CONFIDENCE`], else None.
-fn sure<T: Clone>(field: &RankField<T>) -> Option<T> {
-    match field.confidence {
-        Some(c) if c >= MIN_CONFIDENCE => field.value.clone(),
-        _ => None,
-    }
+/// The value when it is not null. No confidence cutoff: the reader only
+/// sends values it accepted.
+fn value_of<T: Clone>(field: &RankField<T>) -> Option<T> {
+    field.value.clone()
 }
 
 /// Trimmed, single spaced, or None when blank.
@@ -135,7 +134,7 @@ fn role_order(role: Option<RankRole>) -> u8 {
     }
 }
 
-/// What one game's rank shows: only values read with enough confidence.
+/// What one game's rank shows: every non-null value that is in range.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(super) struct RankShown {
     pub role: Option<RankRole>,
@@ -152,19 +151,19 @@ pub(super) struct RankShown {
 }
 
 impl RankShown {
-    /// None when nothing clears the confidence bar.
+    /// None when no field has a value to show.
     pub(super) fn from_rank(rank: &MatchRank) -> Option<Self> {
         let shown = Self {
-            role: sure(&rank.role),
-            tier: sure(&rank.role_rank)
+            role: value_of(&rank.role),
+            tier: value_of(&rank.role_rank)
                 .and_then(|t| clean_text(&t))
                 .map(|t| title_case(&t.to_lowercase())),
-            division: sure(&rank.division).filter(|d| (1..=5).contains(d)),
-            progress: sure(&rank.progress_pct)
+            division: value_of(&rank.division).filter(|d| (1..=5).contains(d)),
+            progress: value_of(&rank.progress_pct)
                 .and_then(|p| u8::try_from(p).ok())
                 .filter(|p| *p <= 100),
-            change: sure(&rank.progress_change).filter(|c| (-100..=100).contains(c)),
-            queue: sure(&rank.queue_title)
+            change: value_of(&rank.progress_change).filter(|c| (-100..=100).contains(c)),
+            queue: value_of(&rank.queue_title)
                 .and_then(|q| clean_text(&q))
                 .map(|q| q.to_uppercase()),
         };
@@ -181,15 +180,18 @@ impl RankShown {
         }
     }
 
-    pub(super) fn queue_label(&self) -> String {
-        self.queue
-            .as_deref()
-            .map(title_case_upper)
-            .unwrap_or_else(|| QUEUE_UNKNOWN.to_string())
+    /// The queue in title case, or None while the tracker sends no title.
+    pub(super) fn queue_label(&self) -> Option<String> {
+        self.queue.as_deref().map(title_case_upper)
     }
 
     pub(super) fn role_label(&self) -> &'static str {
         self.role.map(role_name).unwrap_or(ROLE_UNKNOWN)
+    }
+
+    /// "Support, Role Queue", or the role alone. See [`context_label`].
+    pub(super) fn context(&self) -> String {
+        context_label(self.role, self.queue.as_deref())
     }
 
     /// The short visible pieces: rank, progress, change.
@@ -209,7 +211,7 @@ impl RankShown {
 
     /// One sentence for screen readers and the tooltip.
     pub(super) fn sentence(&self) -> String {
-        let mut parts = vec![format!("{}, {}", self.role_label(), self.queue_label())];
+        let mut parts = vec![self.context()];
         if let Some(rank) = self.rank_text() {
             parts.push(rank);
         }
@@ -220,6 +222,17 @@ impl RankShown {
             parts.push(format!("{} this game", change_text(c)));
         }
         format!("Rank: {}", parts.join(", "))
+    }
+}
+
+/// Role and queue for display: "Support, Role Queue". A null queue is left
+/// out, and a queue that only repeats the role ("Open queue" with the title
+/// "OPEN QUEUE") shows once.
+pub(super) fn context_label(role: Option<RankRole>, queue: Option<&str>) -> String {
+    let role = role.map(role_name).unwrap_or(ROLE_UNKNOWN);
+    match queue.map(title_case_upper) {
+        Some(q) if !q.eq_ignore_ascii_case(role) => format!("{role}, {q}"),
+        _ => role.to_string(),
     }
 }
 
@@ -278,7 +291,13 @@ pub(super) const RANK_CSS: &str = r#"
         min-width: 0;
     }
     .game-rank { margin: 0.5rem 0 0; }
-    .game-rank-queue { color: var(--text-3); font-size: 0.8rem; margin-left: 0.4rem; }
+    .game-rank-queue {
+        display: inline-block;
+        white-space: nowrap;
+        color: var(--text-3);
+        font-size: 0.8rem;
+        margin-left: 0.4rem;
+    }
 
     .rank-chart {
         margin: 0 0 1rem;
@@ -295,10 +314,12 @@ pub(super) const RANK_CSS: &str = r#"
         color: var(--text);
     }
     .rank-chart-status { margin: 0.5rem 0; font-size: 0.8rem; color: var(--text-2); }
-    .rank-chart-plot { max-width: 640px; }
+    /* The svg scales to its width, text too. Capped so the axis labels stay
+       about 11 to 13px from a 360px phone up to desktop. */
+    .rank-chart-plot { max-width: 360px; }
     .rank-chart-svg { display: block; width: 100%; height: auto; overflow: visible; }
     .rank-chart-grid { stroke: var(--border); stroke-width: 1; }
-    .rank-chart-axis { fill: var(--text-3); font-size: 9px; }
+    .rank-chart-axis { fill: var(--text-3); font-size: 11.75px; }
     .rank-chart-line { fill: none; stroke: var(--chart-1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
     .rank-chart-dot { fill: var(--chart-1); stroke: var(--surface); stroke-width: 2; }
     .rank-chart-ends {
@@ -366,7 +387,7 @@ pub(super) fn rank_detail(match_id: &str, rank: Option<&MatchRank>) -> Element {
     if parts.is_empty() {
         return rsx! {};
     }
-    let context = format!("{}, {}", shown.role_label(), shown.queue_label());
+    let context = shown.context();
     rsx! {
         p { class: "game-rank",
             {badge(match_id, &shown, &parts)}
@@ -388,7 +409,7 @@ pub(super) struct RankPoint {
 /// Every ranked game of one (queue, role), oldest first.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct RankSeries {
-    /// Queue key in capitals, or None for "Queue unknown".
+    /// Queue key in capitals, or None while no title is read.
     pub queue: Option<String>,
     pub role: Option<RankRole>,
     pub points: Vec<RankPoint>,
@@ -407,13 +428,7 @@ impl RankSeries {
     }
 
     pub(super) fn label(&self) -> String {
-        let queue = self
-            .queue
-            .as_deref()
-            .map(title_case_upper)
-            .unwrap_or_else(|| QUEUE_UNKNOWN.to_string());
-        let role = self.role.map(role_name).unwrap_or(ROLE_UNKNOWN);
-        format!("{role}, {queue}")
+        context_label(self.role, self.queue.as_deref())
     }
 
     /// Points with a progress value, the ones the line draws.
@@ -427,8 +442,9 @@ impl RankSeries {
 }
 
 /// Group games by (queue, role). Games without a rank to show are skipped.
-/// Order: known queues A to Z, then "Queue unknown"; inside a queue, Tank,
-/// Damage, Support, Open queue, then "Role unknown". Points oldest first.
+/// Order: known queues A to Z, then games with no queue title; inside each,
+/// Tank, Damage, Support, Open queue, then "Role unknown". Points oldest
+/// first.
 pub(super) fn rank_series<'a>(
     games: impl IntoIterator<Item = (&'a str, DateTime<Utc>, Option<&'a MatchRank>)>,
 ) -> Vec<RankSeries> {
@@ -489,7 +505,7 @@ fn default_key(series: &[RankSeries]) -> Option<String> {
 // Plot box, in SVG units. The SVG scales to its width, so these are ratios.
 const VIEW_W: f64 = 320.0;
 const VIEW_H: f64 = 140.0;
-const PAD_L: f64 = 30.0;
+const PAD_L: f64 = 34.0;
 const PAD_R: f64 = 8.0;
 const PAD_T: f64 = 8.0;
 const PAD_B: f64 = 8.0;
@@ -764,7 +780,7 @@ mod tests {
     }
 
     #[test]
-    fn full_rank_shows_every_sure_value() {
+    fn full_rank_shows_every_value() {
         let shown = RankShown::from_rank(&rank(FULL).unwrap()).unwrap();
         assert_eq!(
             shown,
@@ -779,7 +795,7 @@ mod tests {
         );
         assert_eq!(shown.rank_text().as_deref(), Some("Diamond 2"));
         assert_eq!(shown.badge_parts(), ["Diamond 2", "45%", "+23%"]);
-        assert_eq!(shown.queue_label(), "Role Queue");
+        assert_eq!(shown.queue_label().as_deref(), Some("Role Queue"));
         assert_eq!(
             shown.sentence(),
             "Rank: Support, Role Queue, Diamond 2, 45% progress, +23% this game"
@@ -787,34 +803,74 @@ mod tests {
     }
 
     #[test]
-    fn partial_rank_hides_low_missing_and_out_of_range_values() {
+    fn any_non_null_value_shows_whatever_its_confidence() {
+        // Word fields pass the reader at about 0.42, so a low or missing
+        // confidence still shows. Out of range numbers do not.
         let r = rank(
             r#"{
-            "role_rank": { "value": "Gold", "confidence": 0.49 },
+            "role_rank": { "value": "Gold", "confidence": 0.42 },
             "division": { "value": 3, "confidence": 0.7 },
             "progress_pct": { "value": -15, "confidence": 0.9 },
             "progress_change": { "value": -8 },
-            "queue_title": { "value": "OPEN QUEUE", "confidence": 0.2 }
+            "queue_title": { "value": null, "confidence": 0.0 }
         }"#,
         )
         .expect("has values");
         let shown = RankShown::from_rank(&r).unwrap();
-        assert_eq!(shown.tier, None, "confidence below the bar");
+        assert_eq!(shown.tier.as_deref(), Some("Gold"), "low confidence word");
         assert_eq!(shown.division, Some(3));
         assert_eq!(shown.progress, None, "negative progress is not a value");
-        assert_eq!(shown.change, None, "no confidence is hidden");
+        assert_eq!(shown.change, Some(-8), "missing confidence still shows");
         assert_eq!(shown.queue, None);
-        assert_eq!(shown.badge_parts(), ["Division 3"]);
-        assert_eq!(shown.queue_label(), QUEUE_UNKNOWN);
+        assert_eq!(shown.badge_parts(), ["Gold 3", "-8%"]);
+        assert_eq!(shown.queue_label(), None);
         assert_eq!(shown.role_label(), ROLE_UNKNOWN);
+        assert_eq!(
+            shown.sentence(),
+            "Rank: Role unknown, Gold 3, -8% this game"
+        );
     }
 
     #[test]
-    fn rank_with_values_but_nothing_sure_shows_nothing() {
-        let r = rank(r#"{"role_rank": {"value": "Gold", "confidence": 0.1}}"#).unwrap();
-        assert_eq!(RankShown::from_rank(&r), None);
-        let html = render_badge("m1", Some(r));
-        assert_eq!(html, "");
+    fn null_values_and_hidden_fields_show_nothing() {
+        // Only fields the badge does not show, or a value out of range.
+        for json in [
+            r#"{"hero_sr": {"value": 3125, "confidence": 0.9}}"#,
+            r#"{"progress_pct": {"value": 140, "confidence": 0.9}}"#,
+        ] {
+            let r = rank(json).expect(json);
+            assert_eq!(RankShown::from_rank(&r), None, "{json}");
+            assert_eq!(render_badge("m1", Some(r)), "", "{json}");
+        }
+    }
+
+    #[test]
+    fn next_mode_hint_alone_is_no_rank_and_never_the_queue() {
+        let hint = r#"{"next_mode_hint": {"value": "OPEN QUEUE", "confidence": 0.9}}"#;
+        assert_eq!(rank(hint), None);
+        let r = rank(
+            r#"{"next_mode_hint": {"value": "OPEN QUEUE", "confidence": 0.9},
+                "role": {"value": "Tank", "confidence": 0.9},
+                "progress_pct": {"value": 10, "confidence": 0.9}}"#,
+        )
+        .unwrap();
+        let shown = RankShown::from_rank(&r).unwrap();
+        assert_eq!(shown.queue, None);
+        assert_eq!(shown.context(), "Tank");
+    }
+
+    #[test]
+    fn open_role_with_open_queue_title_reads_once() {
+        assert_eq!(
+            context_label(Some(RankRole::Open), Some("OPEN QUEUE")),
+            "Open queue"
+        );
+        assert_eq!(context_label(Some(RankRole::Open), None), "Open queue");
+        assert_eq!(
+            context_label(Some(RankRole::Support), Some("ROLE QUEUE")),
+            "Support, Role Queue"
+        );
+        assert_eq!(context_label(None, None), ROLE_UNKNOWN);
     }
 
     #[test]
@@ -839,19 +895,13 @@ mod tests {
     }
 
     #[test]
-    fn buckets_by_queue_and_role_with_queue_unknown_last() {
-        let low_queue = rank(
-            r#"{"queue_title": {"value": "ROLE QUEUE", "confidence": 0.3},
-                "role": {"value": "Tank", "confidence": 0.9},
-                "progress_pct": {"value": 10, "confidence": 0.9}}"#,
-        )
-        .unwrap();
+    fn buckets_by_queue_and_role_with_no_title_last() {
         let ranks = [
             game(Some("ROLE QUEUE"), "Support", 40),
             game(None, "Tank", 20),
             game(Some("role queue"), "Support", 30),
             game(Some("ROLE QUEUE"), "Tank", 50),
-            low_queue,
+            game(None, "Tank", 10),
             game(Some("OPEN QUEUE"), "Open", 70),
         ];
         let games: Vec<(String, DateTime<Utc>)> = (0..ranks.len())
@@ -868,30 +918,42 @@ mod tests {
         assert_eq!(
             labels,
             [
-                "Open queue, Open Queue",
+                "Open queue",
                 "Tank, Role Queue",
                 "Support, Role Queue",
-                "Tank, Queue unknown",
+                "Tank"
             ]
         );
         let support = &series[2];
         // Oldest first: m2 (day 8) before m0 (day 10).
         let ids: Vec<&str> = support.points.iter().map(|p| p.match_id.as_str()).collect();
         assert_eq!(ids, ["m2", "m0"]);
-        let unknown = &series[3];
-        assert_eq!(unknown.queue, None);
-        assert_eq!(
-            unknown.points.len(),
-            2,
-            "missing and unsure queue share a bucket"
-        );
-        assert_eq!(unknown.key(), "q-unknown-r-tank");
+        let untitled = &series[3];
+        assert_eq!(untitled.queue, None);
+        assert_eq!(untitled.points.len(), 2, "null titles share a bucket");
+        assert_eq!(untitled.key(), "q-unknown-r-tank");
         assert_eq!(series[1].key(), "q-role_queue-r-tank");
         // Default pick is the series with the latest game (m0, day 10).
         assert_eq!(
             default_key(&series).as_deref(),
             Some("q-role_queue-r-support")
         );
+    }
+
+    #[test]
+    fn all_null_titles_group_by_role_alone() {
+        // What alpha.3 sends: no queue title on any game.
+        let a = game(None, "Support", 40);
+        let b = game(None, "Support", 50);
+        let c = game(None, "Damage", 30);
+        let series = rank_series([
+            ("m1", at(1), Some(&a)),
+            ("m2", at(2), Some(&b)),
+            ("m3", at(3), Some(&c)),
+        ]);
+        let labels: Vec<String> = series.iter().map(RankSeries::label).collect();
+        assert_eq!(labels, ["Damage", "Support"]);
+        assert_eq!(series[1].points.len(), 2);
     }
 
     #[test]
@@ -953,6 +1015,38 @@ mod tests {
         dioxus_ssr::render(&dom)
     }
 
+    fn render_detail(id: &str, r: Option<MatchRank>) -> String {
+        #[derive(Props, Clone, PartialEq)]
+        struct P {
+            id: String,
+            r: Option<MatchRank>,
+        }
+        let mut dom = VirtualDom::new_with_props(
+            |p: P| rank_detail(&p.id, p.r.as_ref()),
+            P {
+                id: id.to_string(),
+                r,
+            },
+        );
+        dom.rebuild_in_place();
+        dioxus_ssr::render(&dom)
+    }
+
+    #[test]
+    fn detail_hides_a_null_queue_and_shows_a_read_one() {
+        let html = render_detail("m1", Some(game(None, "Support", 40)));
+        assert!(html.contains(r#"class="game-rank-queue""#), "{html}");
+        assert!(html.contains(">Support</span>"), "{html}");
+        assert!(!html.to_lowercase().contains("queue unknown"), "{html}");
+        assert!(html.contains("Rank: Support, Gold 3"), "{html}");
+        let html = render_detail("m1", Some(game(Some("ROLE QUEUE"), "Support", 40)));
+        assert!(html.contains(">Support, Role Queue</span>"), "{html}");
+        let html = render_detail("m1", Some(game(Some("OPEN QUEUE"), "Open", 40)));
+        assert!(!html.contains("Open queue, Open Queue"), "{html}");
+        assert!(html.contains(">Open queue</span>"), "{html}");
+        assert_eq!(render_detail("m1", None), "");
+    }
+
     fn render_chart(series: Vec<RankSeries>) -> String {
         let mut dom = VirtualDom::new_with_props(RankChart, RankChartProps { series });
         dom.rebuild_in_place();
@@ -993,7 +1087,8 @@ mod tests {
             html.contains(r#"aria-labelledby="rank-chart-picker-label""#),
             "{html}"
         );
-        assert!(html.contains(">Tank, Queue unknown</button>"), "{html}");
+        assert!(html.contains(">Tank</button>"), "{html}");
+        assert!(!html.contains("Queue unknown"), "{html}");
         assert!(html.contains(r#"aria-pressed="true""#), "{html}");
         assert!(html.contains(r#"role="img""#), "{html}");
         assert!(html.contains("<table"), "{html}");
