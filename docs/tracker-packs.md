@@ -34,7 +34,8 @@ that are built into it and ignores every other entry.
 **A file name is a format generation.** `<family>-v<generation>[-<variant>].tar`,
 lowercase letters, digits and `-`: `words-v1.tar` is the first layout of the
 result-words pack. The names are compiled into the tracker
-(`PACKS` in `crates/stat-tracker/src/packs.rs`), and a released tracker asks
+(`PACKS` in `crates/stat-tracker/src/packs/layout.rs`, `packs.rs` before
+0.6.0-alpha.1), and a released tracker asks
 for its packs by exactly those names.
 
 **The `version` is the content.** New art for the same layout (a game patch
@@ -59,14 +60,19 @@ Which names each tracker asks for:
 
 | Tracker | Asks for |
 | --- | --- |
-| 0.5.0-alpha.2 to 0.5.0-alpha.6 (released) | `heroes-v1.tar` only |
-| main, to be released as 0.5.0-alpha.7 | the six that follow (names-v1 and bans-picks-v1 come after them): `heroes-v1.tar` first, then `heroes-v2.tar`, `heroes-v2-1080.tar`, `bans-v1.tar`, `maps-v1.tar`, `words-v1.tar` |
+| 0.5.0-alpha.1 | no packs |
+| 0.5.0-alpha.2 to 0.5.0-alpha.6 | `heroes-v1.tar` only |
+| 0.5.0-alpha.7 to 0.5.0-alpha.12 | six: `heroes-v1.tar` first, then `heroes-v2.tar`, `heroes-v2-1080.tar`, `bans-v1.tar`, `maps-v1.tar`, `words-v1.tar` |
+| 0.5.0-rc.1 to 0.5.0-rc.9, 0.5.0, and 0.6.0-alpha.1 to 0.6.0-alpha.1.4 | seven: the six, then `names-v1.tar` (optional) |
+| 0.6.0-alpha.2 to 0.6.0-alpha.2.3, and main | eight: the seven, then `bans-picks-v1.tar` (optional) |
 
-So today `heroes-v1.tar` must be in the list: without it every released
-tracker reports "The reader pack did not match the site" for the hero pack.
-Once alpha.7 is out, all six must stay. A name may leave the list only when
-no tracker release that members still run asks for it. The publish script
-warns when the list has no `heroes-v1.tar`.
+No tracker pins a pack `version`: each one takes the `version` the list
+gives. `heroes-v1.tar` is the only pack every release needs (it is the one
+marked `required` in `PACKS`): without it every released tracker reports
+"The reader pack did not match the site" for the hero pack. All eight names
+are asked for by a released tracker, so all eight must stay. A name may
+leave the list only when no tracker release that members still run asks for
+it. The publish script warns when the list has no `heroes-v1.tar`.
 
 ## Build
 
@@ -413,7 +419,7 @@ depends on the tracker release.
 **Released trackers, 0.5.0-alpha.2 to alpha.6**, know one pack name:
 
 - They read the list and look for `heroes-v1.tar`. Every other entry is
-  ignored. The five newer packs do nothing for these members until they
+  ignored. The seven newer packs do nothing for these members until they
   install a tracker that names them.
 - `heroes-v1.tar` is downloaded when its folder is missing, or when the
   listed `version` differs from the one recorded in
@@ -421,15 +427,16 @@ depends on the tracker release.
 - A list with entries but without `heroes-v1.tar` is reported as "The reader
   pack did not match the site". The hero folder they have is kept.
 
-**The tracker on main, to be released as 0.5.0-alpha.7**, knows all six:
+**The tracker on main** knows all eight (see the table above for which
+names each release asks for):
 
 - **Daemon start** syncs `heroes-v1.tar` only (the list and one file) and
-  then starts capture. The other five packs are synced in the background
+  then starts capture. The other packs are synced in the background
   with the same list, so capture never waits on them.
 - **While the daemon runs**, that background job keeps trying until every
   pack is in place or not on the list. See
   [The daemon's background job](#the-daemons-background-job).
-- **Setup guide** ("Download reader pack") syncs all six, once per click.
+- **Setup guide** ("Download reader pack") syncs all eight, once per click.
 - **`--vacuum`** does the start sync (the list and `heroes-v1.tar`), then
   compacts and exits. It never starts the background job, so nothing is
   tried again, and a pack sync that failed in that run is not logged.
