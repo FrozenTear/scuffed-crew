@@ -392,7 +392,8 @@ fn reason(
 }
 
 /// What "Open Settings" sends: Settings with the section that holds the
-/// fix open. A reader-off game also jumps to the Read bans and picks row.
+/// fix open. A reader-off or pack-failed game also jumps to the Read bans
+/// and picks row.
 fn settings_message(link: SettingsLink) -> Message {
     if link.reveal_row {
         Message::Nav(crate::nav::Msg::ShowBansPicksSetting)
@@ -575,7 +576,7 @@ mod tests {
             settings_message(section(AdvancedSection::CaptureReading, true)),
             Message::Nav(crate::nav::Msg::ShowBansPicksSetting)
         ));
-        // Pack failed opens the section only, no jump to the switch.
+        // A link without the row jump opens the section only.
         assert!(matches!(
             settings_message(section(AdvancedSection::CaptureReading, false)),
             Message::Nav(crate::nav::Msg::ShowAdvancedSection(

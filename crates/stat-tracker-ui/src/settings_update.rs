@@ -158,8 +158,8 @@ pub struct PageState {
     /// The focus row is marked until then, after the top bar's
     /// unreadable pill opened it ([`Self::show_focus_row`]).
     focus_row_until: Option<std::time::Instant>,
-    /// The Read bans and picks row mark, after a reader-off "Open
-    /// Settings" ([`Self::show_bans_picks_row`]).
+    /// The Read bans and picks row mark, after a reader-off or
+    /// pack-failed "Open Settings" ([`Self::show_bans_picks_row`]).
     bans_picks_row: crate::bans_picks_setting::RowMark,
     /// What the page fetched when it last opened, and its dialog.
     pub opened: crate::settings_open::OpenState,
@@ -237,8 +237,8 @@ impl PageState {
         self.focus_row_until.is_some_and(|until| now < until)
     }
 
-    /// A reader-off "Open Settings": open Capture and reading (never
-    /// close it) and mark the Read bans and picks row for
+    /// A reader-off or pack-failed "Open Settings": open Capture and
+    /// reading (never close it) and mark the Read bans and picks row for
     /// [`crate::bans_picks_setting::HIGHLIGHT_FOR`].
     pub(crate) fn show_bans_picks_row(&mut self, now: std::time::Instant) {
         if !self.advanced_open.is_open(AdvancedSection::CaptureReading) {
