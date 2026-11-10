@@ -250,8 +250,9 @@ impl HeroIconStore {
         let mut map = self.limiter.lock().unwrap_or_else(|e| e.into_inner());
         if map.len() > LIMITER_PRUNE_ABOVE {
             // Lossless: a dropped bucket comes back full, which is what it was.
-            // Keys are member ids, so what is left is bounded by the members
-            // who uploaded within the last refill window.
+            // Keys are a member id, or a member id and a crop kind (see
+            // `limiter_key`), so what is left is bounded by the members and
+            // kinds that uploaded within the last refill window.
             map.retain(|_, bucket| !bucket.is_full_at(now));
         }
         let bucket = map

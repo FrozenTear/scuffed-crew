@@ -11,6 +11,7 @@ mod event_loop;
 pub(crate) mod focus;
 pub(crate) mod gui_presence;
 mod lifecycle;
+mod live_upload;
 pub(crate) mod memtune;
 mod poll;
 pub(crate) mod postgame_dump;
@@ -35,6 +36,8 @@ mod tests_focus_sources;
 mod tests_frame_copies;
 #[cfg(test)]
 mod tests_gui_presence;
+#[cfg(test)]
+mod tests_live_upload;
 // The loading stand-ins shared with `detect/loading_screen.rs`'s tests;
 // the lib's test-only module is not built for the bin's tests.
 #[cfg(test)]
@@ -72,6 +75,7 @@ mod tests_snapshot_policy;
 pub(crate) use debug_dumps::*;
 pub(crate) use event_loop::*;
 pub(crate) use lifecycle::*;
+pub(crate) use live_upload::*;
 pub(crate) use poll::*;
 pub(crate) use session::*;
 pub(crate) use shutdown::*;

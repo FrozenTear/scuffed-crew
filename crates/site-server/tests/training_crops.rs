@@ -34,7 +34,8 @@ use scuffed_site_server::hero_icons::HeroIconStore;
 use scuffed_site_server::state::{AppState, OAuthConfig};
 use scuffed_types::{
     CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, HERO_ICON_MAX_REQUEST_BYTES, HERO_ICON_RATE_BURST,
-    MAP_NAME_MAX_BYTES, MAP_NAME_MAX_PER_MEMBER, STATS_UPLOAD_IP_BURST, TrainingCropMeta,
+    MAP_NAME_MAX_BYTES, MAP_NAME_MAX_PER_MEMBER, MAP_NAME_MAX_WIDTH, STATS_UPLOAD_IP_BURST,
+    TrainingCropMeta,
 };
 
 const OWNER: &str = "cropowner";
@@ -909,6 +910,21 @@ async fn body_shape_and_meta_errors() {
     assert_error(&got, bad, "invalid_consent");
     let (_, consent) = get(&w.app, uri, OWNER_TOKEN).await;
     assert_eq!(consent["map_name"], json!(false));
+
+    // null is not a bad value: it counts as leaving the kind out.
+    set_consent(&w.app, OWNER_SESSION, json!({ "map_name": true })).await;
+    let got = call(
+        &w.app,
+        Method::PUT,
+        uri,
+        Some(OWNER_SESSION),
+        Some(json!({ "map_name": null })),
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    assert_eq!(got.1["map_name"], json!(true));
+    let (_, consent) = get(&w.app, uri, OWNER_TOKEN).await;
+    assert_eq!(consent["map_name"], json!(true));
     w.cleanup();
 }
 
@@ -941,8 +957,8 @@ async fn hero_icon_kind_is_the_hero_icon_store() {
     )
     .await;
     let hero_ids = crop_ids(&hero);
-    // Stored and answered as the hero key; the hero icon routes still give
-    // the display name.
+    // Answered as the hero key; the hero icon routes still give the display
+    // name.
     assert_eq!(hero.1["crops"][0]["hero"], json!("lucio"));
     let digits = crop_ids(&upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(1, json!({}))).await);
 
@@ -1025,7 +1041,7 @@ async fn legacy_opt_in_rows_become_hero_icon_consent_only() {
 }
 
 #[tokio::test]
-async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
+async fn officer_counts_by_kind_admin_gets_resolutions_and_hidden_kinds() {
     let w = world().await;
     set_consent(
         &w.app,
@@ -1067,16 +1083,10 @@ async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
         assert!(row.get("resolutions").is_none(), "{row}");
     }
 
-    // Resolutions only as totals across members, consented kinds only:
-    // OWNER's hidden map_name crop is not counted.
-    let expected = json!({ "resolutions": [
-        { "kind": "stat_digits", "screen_width": 1920, "screen_height": 1080, "count": 2 },
-        { "kind": "stat_digits", "screen_width": 2560, "screen_height": 1440, "count": 1 },
-        { "kind": "map_name", "count": 1 }
-    ]});
-    let (status, totals) = get(&w.app, "/api/training-crops/resolutions", OFFICER_SESSION).await;
-    assert_eq!(status, StatusCode::OK, "{totals}");
-    assert_eq!(totals, expected);
+    // Resolution totals are admin only: matched against the per-member
+    // counts above, they would give each member's resolution.
+    let got = get(&w.app, "/api/training-crops/resolutions", OFFICER_SESSION).await;
+    assert_error(&got, StatusCode::FORBIDDEN, "Admin access required");
 
     let (_, page) = get(&w.app, "/api/training-crops/members", ADMIN_SESSION).await;
     let owner = &page["data"][1];
@@ -1086,17 +1096,26 @@ async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
     assert_eq!(owner["kinds"][1]["consented"], json!(false));
     assert_eq!(owner["kinds"][1]["count"], json!(1));
     assert!(owner.get("resolutions").is_none(), "{owner}");
+    // Resolutions only as totals across members, consented kinds only:
+    // OWNER's hidden map_name crop is not counted.
+    let expected = json!({ "resolutions": [
+        { "kind": "stat_digits", "screen_width": 1920, "screen_height": 1080, "count": 2 },
+        { "kind": "stat_digits", "screen_width": 2560, "screen_height": 1440, "count": 1 },
+        { "kind": "map_name", "count": 1 }
+    ]});
     let (status, totals) = get(&w.app, "/api/training-crops/resolutions", ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{totals}");
-    assert_eq!(totals, expected, "admins get the same totals");
+    assert_eq!(totals, expected);
 
-    // Plain members get 403.
+    // Plain members get 403, with no member or resolution data in the body.
     for uri in [
         "/api/training-crops/members",
         "/api/training-crops/resolutions",
     ] {
         let got = get(&w.app, uri, OTHER_SESSION).await;
         assert_eq!(got.0, StatusCode::FORBIDDEN, "{uri}: {}", got.1);
+        assert!(got.1.get("data").is_none(), "{uri}: {}", got.1);
+        assert!(got.1.get("resolutions").is_none(), "{uri}: {}", got.1);
     }
     w.cleanup();
 }
@@ -1140,6 +1159,11 @@ async fn admin_reads_follow_consent_and_officers_get_no_images() {
     assert_eq!(items[0]["hidden"], json!(true));
     assert_eq!(items[0]["meta"], json!({}));
     assert!(items[0].get("tracker_version").is_none());
+    // Size and dimensions are 0, so they give nothing of the resolution.
+    assert_eq!(items[0]["size_bytes"], json!(0));
+    assert_eq!(items[0]["width"], json!(0));
+    assert_eq!(items[0]["height"], json!(0));
+    assert_eq!(items[0]["kind"], json!("stat_digits"));
     let got = get(&w.app, &image, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::NOT_FOUND, "crop_not_found");
     let request = base_request(Method::GET, &image, Some(OWNER_SESSION))
@@ -1305,7 +1329,7 @@ async fn crop_bounds_are_per_kind_and_map_names_may_be_wide() {
     let cases: Vec<(&str, Vec<Part>, StatusCode, &str)> = vec![
         (
             "map_name",
-            vec![meta(json!({})), crop(1025, 16)],
+            vec![meta(json!({})), crop(MAP_NAME_MAX_WIDTH + 1, 16)],
             bad,
             "icon_bad_dimensions",
         ),
@@ -1354,19 +1378,23 @@ async fn crop_bounds_are_per_kind_and_map_names_may_be_wide() {
     }
     assert!(files_on_disk(w.dir()).is_empty());
 
-    // The largest map name banner and a noise one just under its byte limit
-    // are both accepted.
+    // The largest map name banner, a native 4K one (1036 px wide) and a
+    // noise one just under its byte limit are all accepted.
+    assert_eq!(MAP_NAME_MAX_WIDTH, 1536);
     let wide = vec![
         meta(json!({})),
-        crop(1024, 256),
+        crop(MAP_NAME_MAX_WIDTH, 256),
+        meta(json!({})),
+        crop(1036, 120),
         meta(json!({})),
         ("crop", noise_png(250, 256, 3)),
     ];
     let got = upload(&w.app, OWNER_TOKEN, "map_name", &wide).await;
     assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
-    assert_eq!(got.1["crops"][0]["width"], json!(1024));
+    assert_eq!(got.1["crops"][0]["width"], json!(1536));
     assert_eq!(got.1["crops"][0]["height"], json!(256));
-    assert_eq!(files_on_disk(w.dir()).len(), 2);
+    assert_eq!(got.1["crops"][1]["width"], json!(1036));
+    assert_eq!(files_on_disk(w.dir()).len(), 3);
     w.cleanup();
 }
 
@@ -1531,14 +1559,17 @@ async fn admin_list_gives_ids_of_every_kind_to_delete() {
     let (status, page) = get(&w.app, "/api/training-crops", ADMIN_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{page}");
     let items = page["data"].as_array().unwrap();
-    let listed: Vec<&str> = items.iter().map(|c| c["id"].as_str().unwrap()).collect();
-    assert_eq!(
-        listed,
-        vec![map[0].as_str(), digits[0].as_str(), hero[0].as_str()]
-    );
+    // The order inside an hour is visible crops first (by a hash of the
+    // game token, then id), then hidden crops by id (the db tests pin it),
+    // so compare as a set here.
+    let mut listed: Vec<&str> = items.iter().map(|c| c["id"].as_str().unwrap()).collect();
+    listed.sort_unstable();
+    let mut expected = vec![map[0].as_str(), digits[0].as_str(), hero[0].as_str()];
+    expected.sort_unstable();
+    assert_eq!(listed, expected);
     for item in items {
         assert_eq!(item["member_id"], json!(OWNER));
-        // Upload times are cut to the hour, so they cannot be matched to a game.
+        // Upload times are cut to the hour.
         let at = item["uploaded_at"].as_str().unwrap();
         let parsed = chrono::DateTime::parse_from_rfc3339(at).expect("rfc3339");
         assert_eq!(parsed.timestamp() % 3600, 0, "{at}");
@@ -1554,9 +1585,16 @@ async fn admin_list_gives_ids_of_every_kind_to_delete() {
     let map_item = by_kind("map_name");
     assert_eq!(map_item["hidden"], json!(true));
     assert_eq!(map_item["meta"], json!({}));
+    assert_eq!(map_item["id"], json!(map[0]));
+    for field in ["size_bytes", "width", "height"] {
+        assert_eq!(map_item[field], json!(0), "{field}");
+    }
     let digit_item = by_kind("stat_digits");
     assert_eq!(digit_item["hidden"], json!(false));
     assert_eq!(digit_item["meta"]["slot_index"], json!(3));
+    assert_eq!(digit_item["width"], json!(40));
+    assert_eq!(digit_item["height"], json!(16));
+    assert!(digit_item["size_bytes"].as_u64().unwrap() > 0);
     let hero_item = by_kind("hero_icon");
     assert_eq!(hero_item["hero"], json!("soldier-76"));
 
@@ -1608,6 +1646,60 @@ async fn admin_list_gives_ids_of_every_kind_to_delete() {
             "{kind}"
         );
     }
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn inactive_members_leave_every_staff_view() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
+    let meta = json!({ "screen_width": 1920, "screen_height": 1080 });
+    let ids = crop_ids(&upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(1, meta)).await);
+    let image = format!("/api/training-crops/{}/image", ids[0]);
+    let single = format!("/api/training-crops/{}", ids[0]);
+
+    // Active: in all three staff views, and the admin may read the image.
+    let (_, list) = get(&w.app, "/api/training-crops", ADMIN_SESSION).await;
+    assert_eq!(list["data"][0]["id"], json!(ids[0]), "{list}");
+    let (_, members) = get(&w.app, "/api/training-crops/members", ADMIN_SESSION).await;
+    assert_eq!(members["data"][0]["member_id"], json!(OWNER), "{members}");
+    let (_, totals) = get(&w.app, "/api/training-crops/resolutions", ADMIN_SESSION).await;
+    assert_eq!(totals["resolutions"][0]["count"], json!(1), "{totals}");
+    let request = base_request(Method::GET, &image, Some(ADMIN_SESSION))
+        .body(Body::empty())
+        .unwrap();
+    assert_eq!(
+        w.app.clone().oneshot(request).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    w.db()
+        .client
+        .query(format!("UPDATE member:{OWNER} SET is_active = false"))
+        .await
+        .expect("deactivate")
+        .check()
+        .expect("deactivate");
+
+    // Inactive: gone from every staff view, and admin reads and deletes 404.
+    let (status, list) = get(&w.app, "/api/training-crops", ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    assert_eq!(list["data"], json!([]));
+    for session in [OFFICER_SESSION, ADMIN_SESSION] {
+        let (status, members) = get(&w.app, "/api/training-crops/members", session).await;
+        assert_eq!(status, StatusCode::OK, "{members}");
+        assert_eq!(members["data"], json!([]));
+    }
+    let (status, totals) = get(&w.app, "/api/training-crops/resolutions", ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{totals}");
+    assert_eq!(totals, json!({ "resolutions": [] }));
+    let got = get(&w.app, &image, ADMIN_SESSION).await;
+    assert_error(&got, StatusCode::NOT_FOUND, "crop_not_found");
+    let got = delete(&w.app, &single, ADMIN_SESSION).await;
+    assert_error(&got, StatusCode::NOT_FOUND, "crop_not_found");
+    // The crop and its file are still there.
+    assert_eq!(w.rows_of(OWNER).await.len(), 1);
+    assert_eq!(files_on_disk(w.dir()).len(), 1);
     w.cleanup();
 }
 

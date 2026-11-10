@@ -102,8 +102,9 @@ pub struct TrainingCropMeta {
 #[serde(deny_unknown_fields)]
 pub struct TrainingCropUploadMeta {
     /// Hero key or display name. Required for `hero_icon`, optional for the
-    /// other kinds. Checked by the server against the hero list and stored
+    /// other kinds. Checked by the server against the hero list and answered
     /// as the hero key (`soldier-76`, see `scuffed_types::hero_key`).
+    /// `hero_icon` rows store the display name, other kinds the key.
     #[serde(default)]
     pub hero: Option<String>,
     #[serde(default)]
@@ -294,7 +295,8 @@ impl TrainingCropConsent {
 }
 
 /// `PUT /api/training-crops/consent` (session only). Only the kinds given
-/// change. Unknown fields, `full_screen` among them, are refused (400
+/// change; a kind sent as `null` counts as left out. Unknown fields,
+/// `full_screen` among them, and non-bool values are refused (400
 /// `invalid_consent`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -314,10 +316,11 @@ pub struct TrainingCropEntry {
     pub id: String,
     pub kind: CropKind,
     /// Hero key (`soldier-76`, see `scuffed_types::hero_key`). Always set
-    /// for `hero_icon`.
+    /// for a visible `hero_icon`. Absent on a hidden admin-list item.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hero: Option<String>,
-    /// Stored PNG size after the server re-encoded it.
+    /// Stored PNG size after the server re-encoded it. 0 on a hidden
+    /// admin-list item, along with `width` and `height`.
     pub size_bytes: u64,
     pub width: u32,
     pub height: u32,
@@ -383,14 +386,20 @@ pub struct MyTrainingCrops {
 
 /// One crop in the admin list (`GET /api/training-crops`).
 ///
-/// `uploaded_at` is cut down to the start of its UTC hour here, so a crop
-/// cannot be matched to a game by its upload time.
+/// `uploaded_at` is cut down to the start of its UTC hour here, and the list
+/// is sorted by that hour, then visible crops before hidden ones, then a
+/// SHA-256 of `game_token` for visible crops that have one (rows with no
+/// token first in the hour), then id. That keeps the times rough and keeps
+/// a hidden crop out of a visible game's group, but it does not make a crop
+/// unlinkable to a game: admins still see exact hero icon upload times on
+/// `/api/hero-icons`, and stat digit values may match a game.
 ///
 /// Every stored kind of every active member is listed, so an admin can find
 /// any crop's id to delete it. A crop whose kind the owner does not consent
-/// to right now is `hidden`: only its id, kind, size, dimensions and hour are
-/// sent (no `hero`, `tracker_version` or `meta` fields), and its image answers
-/// 404.
+/// to right now is `hidden`: only its id, kind, hour and `thumbnail_url` are
+/// sent, with `size_bytes`, `width` and `height` as 0 (no `hero` or
+/// `tracker_version`, and `meta` is empty so `game_token` is omitted too),
+/// and its image answers 404.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StaffTrainingCrop {
     pub member_id: String,
@@ -409,7 +418,7 @@ pub struct StaffTrainingCrop {
 /// at least one consented kind. Admins also see kinds that are hidden
 /// (consent off) while crops of that kind are still stored. There is no
 /// per-member resolution breakdown: it would show each member's setup. See
-/// [`TrainingCropResolutionTotals`] for totals across members.
+/// [`TrainingCropResolutionTotals`] for totals across members (admin only).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrainingCropMemberCounts {
     pub member_id: String,
@@ -420,9 +429,11 @@ pub struct TrainingCropMemberCounts {
     pub kinds: Vec<TrainingCropKindCount>,
 }
 
-/// `GET /api/training-crops/resolutions` (officer or admin): stored crops
-/// by kind and game resolution, summed across active members, consented
-/// kinds only. Largest count first.
+/// `GET /api/training-crops/resolutions` (admin only): stored crops by kind
+/// and game resolution, summed across active members, consented kinds only.
+/// Largest count first. Officers get 403: matched against the exact
+/// per-member counts of `/members`, these totals would give each member's
+/// resolution.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrainingCropResolutionTotals {
     pub resolutions: Vec<TrainingCropResolutionCount>,
@@ -651,6 +662,10 @@ mod tests {
             serde_json::from_str(r#"{"map_name":true}"#).unwrap();
         assert_eq!(parsed.map_name, Some(true));
         assert_eq!(parsed.hero_icon, None);
+        // null is the same as leaving the kind out.
+        let parsed: TrainingCropConsentUpdate =
+            serde_json::from_str(r#"{"map_name":null}"#).unwrap();
+        assert_eq!(parsed, TrainingCropConsentUpdate::default());
     }
 
     #[test]

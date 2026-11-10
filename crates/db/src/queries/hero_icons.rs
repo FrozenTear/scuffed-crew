@@ -103,13 +103,29 @@ fn to_u32(value: Option<i64>) -> Option<u32> {
     value.and_then(|v| u32::try_from(v).ok())
 }
 
-/// The hero key for a stored `hero` value. Rows written before keys were
-/// stored hold the display name; both map to the key. An unknown value is
-/// kept as written.
+/// The hero key for a stored `hero` value. `hero_icon` rows hold the display
+/// name, other kinds the key; both map to the key. An unknown value is kept
+/// as written.
 fn stored_hero_key(raw: String) -> String {
     match hero_key(&raw) {
         Some(key) => key.to_string(),
         None => raw,
+    }
+}
+
+/// The `hero` value to store. `hero_icon` rows keep the display name
+/// (`Soldier: 76`), as before training crops, so a rolled back build shows
+/// them as it always did. Every other kind stores the hero key
+/// (`soldier-76`). Reads map both spellings to the key, so no answer
+/// depends on which one is stored. An unknown value is kept as written.
+fn stored_hero(kind: CropKind, raw: String) -> String {
+    if kind == CropKind::HeroIcon {
+        match hero_key_to_name(&raw) {
+            Some(name) => name.to_string(),
+            None => raw,
+        }
+    } else {
+        stored_hero_key(raw)
     }
 }
 
@@ -211,8 +227,12 @@ fn crop_to_db(crop: &NewTrainingCrop) -> Result<DbHeroIcon, crate::DbError> {
         id: None,
         member_id: crop.member_id.clone(),
         // The column predates kinds and is a plain string: empty means no
-        // hero. Stored as the hero key, whatever spelling the caller passed.
-        hero: crop.hero.clone().map(stored_hero_key).unwrap_or_default(),
+        // hero. See [`stored_hero`].
+        hero: crop
+            .hero
+            .clone()
+            .map(|raw| stored_hero(crop.kind, raw))
+            .unwrap_or_default(),
         file_name: crop.file_name.clone(),
         size_bytes,
         width: i64::from(crop.width),
@@ -474,30 +494,57 @@ impl Database {
         .await
     }
 
-    /// Crops staff may list: for each kind, the crops of the given members.
-    /// Newest first, `limit + 1` rows from `offset`. Kinds with no members
-    /// are left out; with none at all nothing is queried.
+    /// Crops staff may list: for each kind in `listable`, the crops of the
+    /// given members (visible and hidden alike).
+    /// Sorted by the upload hour (UTC, newest first), then visible crops
+    /// before hidden ones, then a SHA-256 of `game_token` for visible crops
+    /// that have one (rows with no token first in the hour), then id. The
+    /// hash keeps crops of one game together without letting a time-bearing
+    /// token (a dashless UUIDv7, for example) decide the group order.
+    /// Hidden crops do not sort into that group: `hidden` is the (kind,
+    /// member ids) pairs whose consent is off, and those rows sort by id
+    /// only after the visible crops of the same hour. `limit + 1` rows
+    /// from `offset`. Kinds with no members are left out; with none at all
+    /// nothing is queried.
     pub async fn list_training_crops_visible(
         &self,
-        visible: &[(CropKind, Vec<String>)],
+        listable: &[(CropKind, Vec<String>)],
+        hidden: &[(CropKind, Vec<String>)],
         limit: u32,
         offset: u32,
     ) -> DbResult<Vec<TrainingCrop>> {
-        let groups: Vec<&(CropKind, Vec<String>)> = visible
+        let groups: Vec<&(CropKind, Vec<String>)> = listable
             .iter()
             .filter(|(kind, ids)| kind.accepts_uploads() && !ids.is_empty())
             .collect();
         if groups.is_empty() {
             return Ok(Vec::new());
         }
+        let hidden_groups: Vec<&(CropKind, Vec<String>)> = hidden
+            .iter()
+            .filter(|(kind, ids)| kind.accepts_uploads() && !ids.is_empty())
+            .collect();
         // Fixed fragments with numbered bind names only; no value is
         // written into the query text.
         let clauses: Vec<String> = (0..groups.len())
             .map(|i| format!("(kind = $kind{i} AND member_id IN $ids{i})"))
             .collect();
+        let hidden_expr = if hidden_groups.is_empty() {
+            "false".to_string()
+        } else {
+            (0..hidden_groups.len())
+                .map(|i| format!("(kind = $hkind{i} AND member_id IN $hids{i})"))
+                .collect::<Vec<_>>()
+                .join(" OR ")
+        };
         let sql = format!(
-            "SELECT * FROM hero_icon WHERE {} \
-             ORDER BY created_at DESC, id DESC LIMIT $lim START $off",
+            "SELECT *, time::floor(created_at, 1h) AS upload_hour, \
+             ({hidden_expr}) AS is_hidden, \
+             IF (({hidden_expr}) OR game_token IS NONE) THEN NONE ELSE crypto::sha256(game_token) END AS token_sort \
+             FROM hero_icon \
+             WHERE {} \
+             ORDER BY upload_hour DESC, is_hidden ASC, token_sort ASC, \
+             id ASC LIMIT $lim START $off",
             clauses.join(" OR ")
         );
         with_timeout(async {
@@ -506,6 +553,11 @@ impl Database {
                 query = query
                     .bind((format!("kind{i}"), kind.as_str().to_string()))
                     .bind((format!("ids{i}"), ids.clone()));
+            }
+            for (i, (kind, ids)) in hidden_groups.iter().enumerate() {
+                query = query
+                    .bind((format!("hkind{i}"), kind.as_str().to_string()))
+                    .bind((format!("hids{i}"), ids.clone()));
             }
             let mut result = query.bind(("lim", limit + 1)).bind(("off", offset)).await?;
             let rows: Vec<DbHeroIcon> = result.take(0)?;
@@ -914,18 +966,19 @@ mod tests {
         let a = "4444444444444444444444444444444a";
         let b = "4444444444444444444444444444444b";
         let c = "4444444444444444444444444444444c";
-        db.insert_training_crop(&new_crop(a, "m1", CropKind::StatDigits, 3))
-            .await
-            .unwrap();
-        db.insert_training_crop(&new_crop(b, "m1", CropKind::MapName, 2))
-            .await
-            .unwrap();
-        db.insert_training_crop(&new_crop(c, "m2", CropKind::StatDigits, 1))
-            .await
-            .unwrap();
+        // Each in its own hour, so the hour decides the order.
+        for (id, member, kind, hours_ago) in [
+            (a, "m1", CropKind::StatDigits, 3),
+            (b, "m1", CropKind::MapName, 2),
+            (c, "m2", CropKind::StatDigits, 1),
+        ] {
+            db.insert_training_crop(&new_crop(id, member, kind, hours_ago * 60))
+                .await
+                .unwrap();
+        }
 
         assert!(db
-            .list_training_crops_visible(&[], 10, 0)
+            .list_training_crops_visible(&[], &[], 10, 0)
             .await
             .unwrap()
             .is_empty());
@@ -937,7 +990,7 @@ mod tests {
             (CropKind::MapName, Vec::new()),
         ];
         let rows = db
-            .list_training_crops_visible(&visible, 10, 0)
+            .list_training_crops_visible(&visible, &[], 10, 0)
             .await
             .unwrap();
         let ids: Vec<&str> = rows.iter().map(|c| c.id.as_str()).collect();
@@ -947,11 +1000,125 @@ mod tests {
             (CropKind::MapName, vec!["m1".to_string()]),
         ];
         let rows = db
-            .list_training_crops_visible(&visible, 10, 0)
+            .list_training_crops_visible(&visible, &[], 10, 0)
             .await
             .unwrap();
         let ids: Vec<&str> = rows.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec![c, b]);
+    }
+
+    #[tokio::test]
+    async fn visible_list_order_is_hour_visible_first_token_sha256_id() {
+        use chrono::TimeZone;
+        let db = test_db().await;
+        let hour = Utc.with_ymd_and_hms(2026, 11, 10, 18, 0, 0).unwrap();
+        // Dashless UUIDv7-like tokens: the first 48 bits are a millisecond
+        // timestamp, so raw lex order follows time (early, then late).
+        // SHA-256 order is the reverse, which is what the list must use.
+        let token_early = "01900000000070000000000000000000";
+        let token_late = "01900000000270000000000000000002";
+        // (id, minutes into the 18:00 hour, game token). Exact times inside
+        // the hour must not decide the order.
+        let rows = [
+            ("6666666666666666666666666666666a", 50, Some(token_late)),
+            ("6666666666666666666666666666666b", 5, Some(token_early)),
+            ("6666666666666666666666666666666c", 40, Some(token_early)),
+            ("6666666666666666666666666666666d", 59, None),
+            ("6666666666666666666666666666666e", 10, Some(token_late)),
+        ];
+        for (id, minutes, token) in rows {
+            let mut crop = new_crop(id, "m1", CropKind::StatDigits, 0);
+            crop.created_at = hour + Duration::minutes(minutes);
+            crop.meta.game_token = token.map(str::to_string);
+            db.insert_training_crop(&crop).await.unwrap();
+        }
+        // An older hour comes after, a newer one before.
+        let mut older = new_crop(
+            "1111111111111111111111111111111f",
+            "m1",
+            CropKind::StatDigits,
+            0,
+        );
+        older.created_at = hour - Duration::minutes(1);
+        db.insert_training_crop(&older).await.unwrap();
+        let mut newer = new_crop(
+            "fffffffffffffffffffffffffffffff1",
+            "m1",
+            CropKind::StatDigits,
+            0,
+        );
+        newer.created_at = hour + Duration::minutes(60);
+        db.insert_training_crop(&newer).await.unwrap();
+
+        let visible = vec![(CropKind::StatDigits, vec!["m1".to_string()])];
+        let listed = db
+            .list_training_crops_visible(&visible, &[], 10, 0)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = listed.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "fffffffffffffffffffffffffffffff1",
+                // No token first, then by SHA-256 of the token (late, then
+                // early: the reverse of time/lex order), then by id.
+                "6666666666666666666666666666666d",
+                "6666666666666666666666666666666a",
+                "6666666666666666666666666666666e",
+                "6666666666666666666666666666666b",
+                "6666666666666666666666666666666c",
+                "1111111111111111111111111111111f",
+            ]
+        );
+        // Paging follows the same order.
+        let page = db
+            .list_training_crops_visible(&visible, &[], 2, 2)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = page.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "6666666666666666666666666666666a",
+                "6666666666666666666666666666666e",
+                "6666666666666666666666666666666b",
+            ]
+        );
+
+        // A hidden crop that shares token_early must not land in that
+        // visible group. Its id sorts before both early ids (b, c), so
+        // under the old `upload_hour, game_token, id` order it would come
+        // ahead of b; only visible-before-hidden puts it after c. Same
+        // member, other kind: the realistic case, when consent is off for
+        // one kind of a game.
+        let hidden_id = "6666666666666666666666666666665f";
+        let mut hidden_crop = new_crop(hidden_id, "m1", CropKind::MapName, 0);
+        hidden_crop.created_at = hour + Duration::minutes(20);
+        hidden_crop.meta.game_token = Some(token_early.to_string());
+        db.insert_training_crop(&hidden_crop).await.unwrap();
+        let listed_kinds = vec![
+            (CropKind::StatDigits, vec!["m1".to_string()]),
+            (CropKind::MapName, vec!["m1".to_string()]),
+        ];
+        let hidden = vec![(CropKind::MapName, vec!["m1".to_string()])];
+        let listed = db
+            .list_training_crops_visible(&listed_kinds, &hidden, 10, 0)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = listed.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "fffffffffffffffffffffffffffffff1",
+                "6666666666666666666666666666666d",
+                "6666666666666666666666666666666a",
+                "6666666666666666666666666666666e",
+                "6666666666666666666666666666666b",
+                "6666666666666666666666666666666c",
+                hidden_id,
+                "1111111111111111111111111111111f",
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1093,13 +1260,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hero_is_stored_as_the_hero_key() {
+    async fn hero_icons_store_the_name_other_kinds_the_key() {
         let db = test_db().await;
         let icon = "8888888888888888888888888888888a";
         let crop = "8888888888888888888888888888888b";
-        let mut legacy_spelling = new_icon(icon, "m1", 2);
-        legacy_spelling.hero = "Soldier: 76".into();
-        db.insert_hero_icon(&legacy_spelling).await.unwrap();
+        let mut icon_from_key = new_icon(icon, "m1", 2);
+        icon_from_key.hero = "soldier-76".into();
+        db.insert_hero_icon(&icon_from_key).await.unwrap();
         let mut digits = new_crop(crop, "m1", CropKind::StatDigits, 1);
         digits.hero = Some("Lúcio".into());
         db.insert_training_crop(&digits).await.unwrap();
@@ -1108,7 +1275,9 @@ mod tests {
         struct HeroRow {
             hero: String,
         }
-        for (id, key) in [(icon, "soldier-76"), (crop, "lucio")] {
+        // A hero icon keeps the display name whatever spelling came in, as
+        // the build before training crops stored it. Other kinds store the key.
+        for (id, key) in [(icon, "Soldier: 76"), (crop, "lucio")] {
             let mut result = db
                 .client
                 .query(format!("SELECT hero FROM hero_icon:{id}"))
@@ -1122,6 +1291,9 @@ mod tests {
         assert_eq!(icons[0].hero, "Soldier: 76");
         let stored = db.get_training_crop(crop).await.unwrap().expect("row");
         assert_eq!(stored.hero.as_deref(), Some("lucio"));
+        // The crop view reads the stored name as the key.
+        let icon_crop = db.get_training_crop(icon).await.unwrap().expect("row");
+        assert_eq!(icon_crop.hero.as_deref(), Some("soldier-76"));
     }
 
     #[tokio::test]
@@ -1307,9 +1479,9 @@ mod tests {
             Some(id.to_string())
         );
         assert_eq!(row.member_id, "m1");
-        // The hero key, as the rollback doc says: the old build shows it as
-        // written.
-        assert_eq!(row.hero, "soldier-76");
+        // The display name, as the old build wrote it, so a rollback shows
+        // hero icons unchanged.
+        assert_eq!(row.hero, "Soldier: 76");
         assert_eq!(row.file_name, format!("{id}.png"));
         assert_eq!((row.size_bytes, row.width, row.height), (90, 40, 20));
         let one: Option<OldDbHeroIcon> = db.client.select(("hero_icon", id)).await.unwrap();

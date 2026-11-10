@@ -1003,8 +1003,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- hero icons; backfill_training_crop_kind writes 'hero_icon' on them.
         -- Everything else is optional per-crop metadata from the tracker.
         -- full_screen is refused by the server and never stored. `hero`
-        -- keeps its type: rows written from now on hold the hero key (pack
-        -- stem, e.g. 'soldier-76'), older rows the display name; reads take
+        -- keeps its type: hero_icon rows keep the display name, other kinds
+        -- hold the hero key (pack stem, e.g. 'soldier-76'); reads take
         -- both.
         -- Additive only. Rollback: see docs/api/training-crops.md.
         -- ================================================

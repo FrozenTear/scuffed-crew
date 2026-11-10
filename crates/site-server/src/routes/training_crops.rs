@@ -26,10 +26,11 @@
 //!   and so can an admin while the owner is active.
 //! - The admin list covers every stored crop of active members so an admin
 //!   can find any id to delete; crops of a kind without consent come back
-//!   `hidden`, without hero or metadata, and their image stays 404. Times in
-//!   that list are cut to the hour. Officers get per-member counts by kind
-//!   only, for consented kinds only, and game resolutions only as totals
-//!   across members.
+//!   `hidden`, without hero, metadata, size or dimensions, and their image
+//!   stays 404. Times in that list are cut to the hour. Officers get
+//!   per-member counts by kind only, for consented kinds only. Game
+//!   resolution totals across members are admin only, since officers could
+//!   match them against the per-member counts.
 //! - Consent `GET` and `PUT` work while the store is disabled. Every other
 //!   route answers 503 then.
 //!
@@ -155,15 +156,20 @@ fn list_action(filter: Option<CropKind>) -> AuditAction {
     }
 }
 
-/// `at` cut down to the start of its UTC hour. Used in the admin list so an
-/// upload time cannot be matched to a game.
+/// `at` cut down to the start of its UTC hour. Used in the admin list, so
+/// its times are rough. This does not make a crop unlinkable to a game:
+/// admins still see exact hero icon upload times on `/api/hero-icons`, and
+/// stat digit values may match a game.
 fn to_the_hour(at: DateTime<Utc>) -> DateTime<Utc> {
     use chrono::DurationRound;
     at.duration_trunc(chrono::TimeDelta::hours(1)).unwrap_or(at)
 }
 
 /// The admin list item for `crop`. A hidden crop (no consent for its kind)
-/// carries no hero, tracker version or metadata.
+/// carries no hero, tracker version or metadata, and its size and
+/// dimensions are 0, since a crop's size can give away the game resolution.
+/// Clearing `meta` also drops `game_token`, so the response does not tie a
+/// hidden crop to a visible game.
 fn staff_item(crop: &TrainingCrop, display_name: String, hidden: bool) -> StaffTrainingCrop {
     let mut item = entry(crop);
     item.uploaded_at = to_the_hour(item.uploaded_at);
@@ -171,6 +177,9 @@ fn staff_item(crop: &TrainingCrop, display_name: String, hidden: bool) -> StaffT
         item.hero = None;
         item.tracker_version = None;
         item.meta = TrainingCropMeta::default();
+        item.size_bytes = 0;
+        item.width = 0;
+        item.height = 0;
     }
     StaffTrainingCrop {
         member_id: crop.member_id.clone(),
@@ -339,8 +348,10 @@ struct PendingCrop {
 /// `HERO_ICON_MAX_FILES_PER_UPLOAD` pairs: a `meta` part (JSON
 /// [`TrainingCropUploadMeta`]) followed by its `crop` part (PNG).
 ///
-/// Order of checks: 503 when disabled, kind (400), `full_screen` (422), the
-/// per-member per-kind limiter (429), consent (403), the stored cap (409),
+/// Order of checks: the per-IP limit (429), then the credential (401, or
+/// 403 for a membership failure), then 503 when disabled, kind (400),
+/// `full_screen` (422), the per-member per-kind limiter (429), consent
+/// (403), the stored cap (409),
 /// then the body: part names and order (400 `unexpected_field`), count (413),
 /// each `meta` (400), each `crop` (signature 415, size 413, dimensions and
 /// decode 400; bounds per kind, see `CropKind::max_edges` and
@@ -791,10 +802,15 @@ pub async fn delete_crop(
 /// GET /api/training-crops?kind=&cursor=&limit= (admin)
 ///
 /// Every stored crop of active members, of every kind or of one kind with
-/// `?kind=`, newest first, so an admin can find any crop's id and delete it
-/// with `DELETE /api/training-crops/{id}`. A crop of a kind the owner does
+/// `?kind=`, so an admin can find any crop's id and delete it with
+/// `DELETE /api/training-crops/{id}`. A crop of a kind the owner does
 /// not consent to right now is `hidden`: no hero, tracker version or
-/// metadata, and its image stays 404. `uploaded_at` is cut to the hour.
+/// metadata, size and dimensions 0, and its image stays 404. `uploaded_at`
+/// is cut to the hour, and the list is sorted by that hour (newest first),
+/// then visible crops before hidden ones, then a SHA-256 of `game_token`
+/// for visible crops that have one (rows with no token first in the hour),
+/// then id, so it shows no order within an hour and a hidden crop is not
+/// sorted into a visible game's group.
 ///
 /// One audit entry per request, target `all`: `viewed_hero_icons` when the
 /// list is filtered to `hero_icon`, `viewed_training_crops` otherwise, with
@@ -825,9 +841,20 @@ pub async fn list_training_crops(
         .filter(|kind| only.is_none_or(|only| only == *kind))
         .map(|kind| (kind, active.clone()))
         .collect();
+    let hidden: Vec<(CropKind, Vec<String>)> = groups
+        .iter()
+        .map(|(kind, ids)| {
+            let hidden_ids: Vec<String> = ids
+                .iter()
+                .filter(|id| !consents.get(*id).is_some_and(|consent| consent.get(*kind)))
+                .cloned()
+                .collect();
+            (*kind, hidden_ids)
+        })
+        .collect();
     let rows = state
         .db
-        .list_training_crops_visible(&groups, limit, offset)
+        .list_training_crops_visible(&groups, &hidden, limit, offset)
         .await
         .map_err(db_error)?;
     let items: Vec<StaffTrainingCrop> = rows
@@ -867,7 +894,8 @@ pub async fn list_training_crops(
 ///   with `consented` false, since admins may delete those.
 ///
 /// Game resolutions are not broken down per member, since that would show
-/// each member's setup; [`resolution_totals`] sums them across members.
+/// each member's setup. [`resolution_totals`] sums them across members, for
+/// admins only.
 pub async fn member_counts(
     State(state): State<AppState>,
     staff: OfficerUser,
@@ -944,14 +972,19 @@ pub async fn member_counts(
     Ok(Json(CursorResponse::from_oversized(page, limit, offset)))
 }
 
-/// GET /api/training-crops/resolutions (officer or admin)
+/// GET /api/training-crops/resolutions (admin)
 ///
 /// Stored crops by kind and game resolution, summed across active members,
-/// counting only the kinds each member consents to. The same answer for
-/// officers and admins. Largest count first, then kind and resolution.
+/// counting only the kinds each member consents to. Largest count first,
+/// then kind and resolution.
+///
+/// Admin only: officers get exact per-member counts from `/members`, and
+/// matching those against these totals would give each member's
+/// resolution. Admins already see each consented crop's resolution in the
+/// admin list.
 pub async fn resolution_totals(
     State(state): State<AppState>,
-    _staff: OfficerUser,
+    _admin: AdminUser,
 ) -> Result<Json<TrainingCropResolutionTotals>, Reject> {
     configured(&state)?;
     let rows = state.db.training_crop_counts().await.map_err(db_error)?;
@@ -1026,7 +1059,7 @@ mod tests {
             parse_meta(CropKind::HeroIcon, br#"{"hero":"soldier-76"}"#),
             "hero",
         );
-        assert_eq!(ok.0, Some("soldier-76"), "stored as the hero key");
+        assert_eq!(ok.0, Some("soldier-76"), "parsed to the hero key");
         let ok = must_ok(
             parse_meta(CropKind::HeroIcon, br#"{"hero":"Soldier: 76"}"#),
             "display name",
