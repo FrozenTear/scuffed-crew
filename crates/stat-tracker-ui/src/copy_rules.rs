@@ -6,6 +6,10 @@
 /// The modules the 0.6 top tabs and Settings page added or rewrote.
 const SOURCES: &[(&str, &str)] = &[
     ("account_card.rs", include_str!("account_card.rs")),
+    (
+        "bans_picks_setting.rs",
+        include_str!("bans_picks_setting.rs"),
+    ),
     ("capture_reading.rs", include_str!("capture_reading.rs")),
     ("capture_shared.rs", include_str!("capture_shared.rs")),
     ("chrome.rs", include_str!("chrome.rs")),

@@ -796,8 +796,11 @@ fn nothing_read_shows_the_reason_and_never_hides_the_game() {
     assert_eq!(line, "Not read: Read bans and picks was off for this game.");
     assert!(tip.is_none());
     let link = settings.unwrap();
-    assert!(link.tip.contains("Read bans and picks"));
-    assert_eq!(link.open, AdvancedSection::Troubleshooting);
+    assert!(link.tip.contains(crate::settings_cards::BANS_PICKS_LABEL));
+    assert!(link.tip.contains("Capture and reading"), "{}", link.tip);
+    assert!(line.contains(crate::settings_cards::BANS_PICKS_LABEL));
+    assert_eq!(link.open, AdvancedSection::CaptureReading);
+    assert!(link.reveal_row);
 
     let BansPicks::Reason {
         line,
@@ -871,17 +874,37 @@ fn open_settings_opens_the_row_that_holds_the_fix() {
     };
     assert_eq!(
         open(BansPicksStatus::ReaderOff),
-        Some(AdvancedSection::Troubleshooting)
+        Some(AdvancedSection::CaptureReading)
     );
     assert_eq!(
         open(BansPicksStatus::PackFailed),
-        Some(AdvancedSection::Troubleshooting)
+        Some(AdvancedSection::CaptureReading)
     );
     assert_eq!(
         open(BansPicksStatus::PackMissing { linked: false }),
         Some(AdvancedSection::WebsiteConnection)
     );
     assert_eq!(open(BansPicksStatus::NoFrames), None);
+}
+
+#[test]
+fn reader_off_and_pack_failed_open_settings_reveal_the_switch() {
+    let reveal = |s: BansPicksStatus| {
+        let mut g = game(HELD);
+        g.bans_picks = None;
+        g.bans_picks_status = Some(s);
+        match bans_picks(&g) {
+            BansPicks::Reason { settings, .. } => settings.map(|l| l.reveal_row),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(reveal(BansPicksStatus::ReaderOff), Some(true));
+    assert_eq!(reveal(BansPicksStatus::PackFailed), Some(true));
+    assert_eq!(
+        reveal(BansPicksStatus::PackMissing { linked: false }),
+        Some(false)
+    );
+    assert_eq!(reveal(BansPicksStatus::NoFrames), None);
 }
 
 #[test]

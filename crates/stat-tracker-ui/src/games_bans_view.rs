@@ -26,6 +26,7 @@ use crate::games_bans::{
 use crate::games_table::pill_box;
 use crate::icons::{self, Icon};
 use crate::model::Game;
+#[cfg(test)]
 use crate::settings_model::AdvancedSection;
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_SEMIBOLD, SIZE_LABEL, SURFACE_2, TEXT, TEXT_2, TEXT_3,
@@ -390,10 +391,15 @@ fn reason(
         .into()
 }
 
-/// What "Open Settings" sends: Settings with the row that holds the fix open
-/// and in view.
-fn settings_message(open: AdvancedSection) -> Message {
-    Message::Nav(crate::nav::Msg::ShowAdvancedSection(open))
+/// What "Open Settings" sends: Settings with the section that holds the
+/// fix open. A reader-off or pack-failed game also jumps to the Read bans
+/// and picks row.
+fn settings_message(link: SettingsLink) -> Message {
+    if link.reveal_row {
+        Message::Nav(crate::nav::Msg::ShowBansPicksSetting)
+    } else {
+        Message::Nav(crate::nav::Msg::ShowAdvancedSection(link.open))
+    }
 }
 
 /// "Open Settings": an accent outline, so it is not colour alone.
@@ -415,7 +421,7 @@ fn settings_button(link: SettingsLink) -> Element<'static, Message> {
         },
         ..button::Style::default()
     })
-    .on_press(settings_message(link.open));
+    .on_press(settings_message(link));
     tooltip(
         b,
         container(text(link.tip).size(SMALL).color(TEXT))
@@ -549,16 +555,32 @@ mod tests {
 
     #[test]
     fn open_settings_targets_the_row_that_holds_the_fix() {
+        let section = |open, reveal_row| SettingsLink {
+            tip: "",
+            open,
+            reveal_row,
+        };
         assert!(matches!(
-            settings_message(AdvancedSection::Troubleshooting),
+            settings_message(section(AdvancedSection::Troubleshooting, false)),
             Message::Nav(crate::nav::Msg::ShowAdvancedSection(
                 AdvancedSection::Troubleshooting
             ))
         ));
         assert!(matches!(
-            settings_message(AdvancedSection::WebsiteConnection),
+            settings_message(section(AdvancedSection::WebsiteConnection, false)),
             Message::Nav(crate::nav::Msg::ShowAdvancedSection(
                 AdvancedSection::WebsiteConnection
+            ))
+        ));
+        assert!(matches!(
+            settings_message(section(AdvancedSection::CaptureReading, true)),
+            Message::Nav(crate::nav::Msg::ShowBansPicksSetting)
+        ));
+        // A link without the row jump opens the section only.
+        assert!(matches!(
+            settings_message(section(AdvancedSection::CaptureReading, false)),
+            Message::Nav(crate::nav::Msg::ShowAdvancedSection(
+                AdvancedSection::CaptureReading
             ))
         ));
     }

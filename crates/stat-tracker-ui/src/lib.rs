@@ -15,6 +15,7 @@
 mod account_card;
 pub mod aggregate;
 pub mod app;
+mod bans_picks_setting;
 /// Shared with build.rs; the lib only compiles it for its tests.
 #[cfg(test)]
 mod build_id_hash;

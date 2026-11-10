@@ -1,13 +1,14 @@
 //! The 0.6 Settings page's cards and folds, after spec p6 and p7: the
 //! everyday cards on the left (Player and sessions, Companion, Website
-//! account, Updates) and the bodies of the ADVANCED rows other than
+//! account, Updates), the bodies of the ADVANCED rows other than
 //! Capture and reading (Tracker service, Stored data, Website connection,
-//! Troubleshooting). Rows are divided by hairlines with the control on
+//! Troubleshooting), and the Read bans and picks row Capture and reading
+//! ends its CAPTURE rows with. Rows are divided by hairlines with the control on
 //! the right; switches are On/Off. Every control applies at once
 //! ([`crate::settings_update`]).
 
 use iced::widget::{Row, button, checkbox, column, container, image, row, space, text, text_input};
-use iced::{Alignment, Element, Fill, Padding};
+use iced::{Alignment, Border, Element, Fill, Padding, Theme};
 
 use crate::app::{Message, TrackerApp};
 use crate::form_widgets::{
@@ -452,12 +453,71 @@ pub(crate) const PREGAME_SCREENS_LABEL: &str = "Save screens around each game";
 /// times that at 4K), 20 games.
 pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, roster, hero select and loading screen of each game and the screens after it in debug/pregame, keeping the newest 20 games (up to about 4 to 7 GB at 1440p, about 9 to 15 GB at 4K). They show other players' names and stay on this PC only. Turning it off keeps the saved pictures. Leave it off unless someone asked for them.";
 
-/// The Troubleshooting switch for `bans_picks_reader`.
+/// The Capture and reading switch for `bans_picks_reader`, the last row
+/// of CAPTURE ([`crate::capture_reading`]). Game rows that point to it use
+/// this label as it is.
 pub(crate) const BANS_PICKS_LABEL: &str = "Read bans and picks";
 
-/// Help under [`BANS_PICKS_LABEL`]. The pictures are only held in memory for
-/// the read, none are written, and the result stays on this PC.
-pub(crate) const BANS_PICKS_HELP: &str = "Reads the hero bans and picks from the last ban vote, ban results and hero select screens of each game, with the bans-picks-v1 reader pack, and keeps them with the game on this PC. It needs 2560x1440; other sizes read nothing and the game is still saved. On by default. Turn it off if the game stutters or you do not want the extra reading. The env var STAT_TRACKER_BANS_PICKS_RECOGNIZER set to off also turns it off.";
+/// Help under [`BANS_PICKS_LABEL`] (UX Spec). The pictures are only held in
+/// memory for the read, none are written, and the result stays on this PC.
+pub(crate) const BANS_PICKS_HELP: &str =
+    "Reads the ban and hero select screens to fill in bans and picks. Works at 2560x1440 only.";
+
+/// Read bans and picks. The tracker reads the key once at start: After
+/// restart. STAT_TRACKER_BANS_PICKS_RECOGNIZER set to off turns the reader
+/// off whatever the file says, so the row shows Off and locks.
+pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let (bans_on, bans_env_off) = app.bans_picks_switch();
+    let mut bans_help = vec![hint(BANS_PICKS_HELP)];
+    if bans_env_off {
+        bans_help.push(crate::capture_reading::lock_line(
+            crate::settings_env::BANS_PICKS_ENV,
+        ));
+        bans_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
+    }
+    let row = setting_row(
+        title_line(BANS_PICKS_LABEL, false, &[Tag::AfterRestart]),
+        bans_help,
+        crate::settings_keys::edit_switch(
+            bans_on,
+            demo || bans_env_off,
+            ConfigEdit::BansPicksReader,
+        ),
+    );
+    // A 1 px accent outline while marked, drawn ROW_OUTLINE_PAD outside
+    // the row's content so it frames the row instead of hugging the
+    // label and help. A wrapping container with that padding negated
+    // lets the outline sit in the card padding and the gaps around the
+    // row, so the label and toggle stay lined up with the rows around
+    // it. The padding stays when the mark is off (the border is then
+    // transparent), so the row does not jump. iced 0.14's layout
+    // ignores the 1 px border width; that width is not what keeps the
+    // row still. iced 0.14's toggler is mouse and touch only: it has
+    // no keyboard focus, so Space cannot flip the switch from here.
+    let marked = app
+        .page_state
+        .bans_picks_row_marked(std::time::Instant::now());
+    let outlined = container(row)
+        .id(iced::widget::Id::new(crate::bans_picks_setting::ROW_ID))
+        .width(Fill)
+        .padding(crate::bans_picks_setting::ROW_OUTLINE_PAD)
+        .style(move |_: &Theme| iced::widget::container::Style {
+            border: Border {
+                color: if marked {
+                    crate::theme::ACCENT
+                } else {
+                    iced::Color::TRANSPARENT
+                },
+                width: 1.0,
+                radius: crate::theme::RADIUS_INNER.into(),
+            },
+            ..iced::widget::container::Style::default()
+        });
+    container(outlined)
+        .width(Fill)
+        .padding(-crate::bans_picks_setting::ROW_OUTLINE_PAD)
+        .into()
+}
 
 /// Troubleshooting: debug images, screens around each game, the extra number
 /// reader, then Report a problem, About and Uninstall. Demo draws them
@@ -491,26 +551,6 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             app.saved_config.debug_save_pregame_screens,
             demo,
             ConfigEdit::SavePregameScreens,
-        ),
-    );
-    // The tracker reads the key once at start: After restart.
-    // STAT_TRACKER_BANS_PICKS_RECOGNIZER set to off turns the reader off
-    // whatever the file says, so the row shows Off and locks.
-    let (bans_on, bans_env_off) = app.bans_picks_switch();
-    let mut bans_help = vec![hint(BANS_PICKS_HELP)];
-    if bans_env_off {
-        bans_help.push(crate::capture_reading::lock_line(
-            crate::settings_env::BANS_PICKS_ENV,
-        ));
-        bans_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
-    }
-    let bans_picks = setting_row(
-        title_line(BANS_PICKS_LABEL, false, &[Tag::AfterRestart]),
-        bans_help,
-        crate::settings_keys::edit_switch(
-            bans_on,
-            demo || bans_env_off,
-            ConfigEdit::BansPicksReader,
         ),
     );
     let locked = app.settings.shadow.locked;
@@ -555,7 +595,7 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             .push(uninstall),
     ]
     .spacing(8);
-    divided(vec![debug, pregame, bans_picks, shadow, actions.into()])
+    divided(vec![debug, pregame, shadow, actions.into()])
 }
 
 /// Stored data keeps the classic body: its buttons are the same.

@@ -252,6 +252,10 @@ async fn a_pack_that_does_not_load_still_records_the_game_and_warns() {
     let warning = rig.health().expect("a warning");
     assert!(warning.contains("did not load"), "{warning}");
     assert!(warning.contains("new-hero"), "{warning}");
+    assert!(
+        warning.contains("Settings > Capture and reading"),
+        "{warning}"
+    );
 }
 
 #[tokio::test]

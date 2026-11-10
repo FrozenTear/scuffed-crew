@@ -12,7 +12,8 @@
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, Stack, button, column, container, image, row, space, stack, text};
 use iced::{
-    Alignment, Background, Border, Color, Element, Fill, Length, Padding, Shadow, Task, Theme,
+    Alignment, Background, Border, Color, Element, Fill, Length, Padding, Shadow, Subscription,
+    Task, Theme,
 };
 
 use crate::app::{Message, TrackerApp};
@@ -118,11 +119,39 @@ pub enum Msg {
     /// A button elsewhere that points at one Advanced row in Settings: open
     /// Settings, open the row (never close it) and scroll to it.
     ShowAdvancedSection(crate::settings_model::AdvancedSection),
+    /// "Open Settings" on a game whose reader was off, or whose pack
+    /// failed: open Capture and reading, jump to the Read bans and picks
+    /// row if it is not already in view, and mark it for two seconds.
+    ShowBansPicksSetting,
+    /// Drop the Read bans and picks mark at once: a click or a scroll.
+    ClearBansPicksHighlight,
+    /// The 2 s timer for a mark has fired. Clear only if that mark has
+    /// already expired, so an earlier timer cannot drop a newer one.
+    BansPicksHighlightTimedOut,
 }
 
 /// What the chip sends. A later "Review games" button sends the same.
 pub fn chip_message() -> Message {
     Message::Nav(Msg::ShowNeedsLook)
+}
+
+/// If the Read bans and picks row is marked, also listen for a click or
+/// scroll that drops the mark at once. This is added on top of the other
+/// subscriptions, not inside the exclusive dialog if/else.
+pub fn with_clear_on_pointer(
+    app: &TrackerApp,
+    mut subs: Vec<Subscription<Message>>,
+) -> Subscription<Message> {
+    if app
+        .page_state
+        .bans_picks_row_marked(std::time::Instant::now())
+    {
+        subs.push(iced::event::listen_with(|event, _, _| {
+            crate::bans_picks_setting::is_click_or_scroll(&event)
+                .then_some(Message::Nav(Msg::ClearBansPicksHighlight))
+        }));
+    }
+    Subscription::batch(subs)
 }
 
 /// Handle a top bar message. [`Msg::ShowNeedsLook`] clears the hero, map,
@@ -166,6 +195,33 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             })
             .then(move |()| crate::focus_status::scroll_to(row_id));
             Task::batch([open, scroll])
+        }
+        Msg::ShowBansPicksSetting => {
+            let now = std::time::Instant::now();
+            app.page_state
+                .show_section(crate::settings_model::AdvancedSection::CaptureReading);
+            app.page_state.show_bans_picks_row(now);
+            let open = app.update(Message::Navigate(Screen::Settings));
+            let scroll = Task::future(async {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            })
+            .then(|()| crate::bans_picks_setting::scroll_to_row());
+            let expire = Task::future(async {
+                tokio::time::sleep(crate::bans_picks_setting::HIGHLIGHT_FOR).await;
+                Message::Nav(Msg::BansPicksHighlightTimedOut)
+            });
+            Task::batch([open, scroll, expire])
+        }
+        Msg::ClearBansPicksHighlight => {
+            app.page_state.clear_bans_picks_highlight();
+            Task::none()
+        }
+        Msg::BansPicksHighlightTimedOut => {
+            let now = std::time::Instant::now();
+            if !app.page_state.bans_picks_row_marked(now) {
+                app.page_state.clear_bans_picks_highlight();
+            }
+            Task::none()
         }
     }
 }
@@ -1003,6 +1059,65 @@ mod tests {
         );
         assert!(app.page_state.is_open(AdvancedSection::Troubleshooting));
         assert!(!app.page_state.is_open(AdvancedSection::CaptureReading));
+    }
+
+    #[test]
+    fn a_reader_off_open_settings_marks_the_bans_picks_row() {
+        use crate::settings_model::AdvancedSection;
+        let (_dir, mut opened) = app();
+        opened.screen = Screen::Games;
+        let now = std::time::Instant::now();
+        let _ = update(&mut opened, Msg::ShowBansPicksSetting);
+        assert_eq!(opened.screen, Screen::Settings);
+        assert!(opened.page_state.is_open(AdvancedSection::CaptureReading));
+        assert!(opened.page_state.bans_picks_row_marked(now));
+        // Other reasons keep today's behaviour: the section opens, the
+        // switch is not marked.
+        let (_dir_other, mut other) = app();
+        other.screen = Screen::Games;
+        let _ = update(
+            &mut other,
+            Msg::ShowAdvancedSection(AdvancedSection::CaptureReading),
+        );
+        assert!(other.page_state.is_open(AdvancedSection::CaptureReading));
+        assert!(
+            !other
+                .page_state
+                .bans_picks_row_marked(std::time::Instant::now())
+        );
+        // The Settings tab itself stays at the top and does not mark it.
+        let (_dir_tab, mut tab) = app();
+        tab.screen = Screen::Games;
+        let _ = tab.update(Message::Navigate(Screen::Settings));
+        assert_eq!(tab.screen, Screen::Settings);
+        assert!(!tab.page_state.is_open(AdvancedSection::CaptureReading));
+        assert!(
+            !tab.page_state
+                .bans_picks_row_marked(std::time::Instant::now())
+        );
+    }
+
+    #[test]
+    fn an_earlier_timer_does_not_clear_a_newer_mark() {
+        let (_dir, mut app) = app();
+        let now = std::time::Instant::now();
+        app.page_state.show_bans_picks_row(now);
+        // A second Open Settings restarts the mark; the first 2 s
+        // timer can still fire while this one is on.
+        app.page_state.show_bans_picks_row(now);
+        assert!(app.page_state.bans_picks_row_marked(now));
+        let _ = update(&mut app, Msg::BansPicksHighlightTimedOut);
+        assert!(
+            app.page_state
+                .bans_picks_row_marked(std::time::Instant::now()),
+            "timeout must not clear a mark that is still on"
+        );
+        let _ = update(&mut app, Msg::ClearBansPicksHighlight);
+        assert!(
+            !app.page_state
+                .bans_picks_row_marked(std::time::Instant::now()),
+            "a click or scroll still clears at once"
+        );
     }
 
     #[test]

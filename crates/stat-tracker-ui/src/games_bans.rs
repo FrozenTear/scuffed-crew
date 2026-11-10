@@ -250,6 +250,8 @@ pub struct SettingsLink {
     pub tip: &'static str,
     /// The Advanced row the button opens.
     pub open: AdvancedSection,
+    /// A reader-off or pack-failed game jumps to the Read bans and picks row.
+    pub reveal_row: bool,
 }
 
 /// What the open row shows for bans and picks.
@@ -361,16 +363,21 @@ fn reason(status: &BansPicksStatus) -> Option<(String, bool)> {
 
 /// The "Open Settings" button: its tooltip and the row it opens. A missing
 /// pack is fixed by linking an account (Website connection), everything else
-/// by the Read bans and picks switch (Troubleshooting).
+/// by the Read bans and picks switch (Capture and reading).
 fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
+    let reveal_row = crate::bans_picks_setting::scrolls_to_row(status);
     match status {
         Some(BansPicksStatus::PackMissing { .. }) => SettingsLink {
             tip: "Settings, website connection. Linking an account lets the tracker download the pack.",
             open: AdvancedSection::WebsiteConnection,
+            reveal_row,
         },
+        // ReaderOff and PackFailed also jump to the switch (reveal_row).
+        // Other unread reasons that open this section stay at the header.
         _ => SettingsLink {
-            tip: "Settings, Troubleshooting, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
-            open: AdvancedSection::Troubleshooting,
+            tip: "Settings, Capture and reading, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
+            open: AdvancedSection::CaptureReading,
+            reveal_row,
         },
     }
 }

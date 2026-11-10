@@ -788,7 +788,7 @@ impl TrackerApp {
         } else if self.screen == Screen::Games && crate::games_panel::listens(self) {
             subs.push(iced::event::listen_with(crate::games_panel::close_keys));
         }
-        Subscription::batch(subs)
+        crate::nav::with_clear_on_pointer(self, subs)
     }
 
     pub fn season_window(&self) -> Option<crate::aggregate::SeasonWindow> {

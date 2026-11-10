@@ -1,7 +1,7 @@
 //! Capture and reading, the first ADVANCED row of the 0.6 Settings page
 //! (spec p7): a summary of what is in effect, then CAPTURE (method,
 //! monitor, Check the picture, game processes, the stream rows, the focus
-//! gate) and READING (reader, name reader, reading model, OCR workers,
+//! gate, Read bans and picks) and READING (reader, name reader, reading model, OCR workers,
 //! report pictures), each as divided setting rows with the control on the
 //! right. Every change applies at once; the row is tagged After restart.
 //!
@@ -426,6 +426,9 @@ fn capture_rows(app: &TrackerApp, demo: bool) -> Vec<Element<'_, Message>> {
         demo,
         crate::focus_status::ROW_HELP,
     ));
+    // Last in CAPTURE: it reads captured frames, so it sits after every
+    // capture row, the focus gate included (UX Spec).
+    rows.push(crate::settings_cards::bans_picks_row(app, demo));
     rows
 }
 

@@ -9,7 +9,7 @@ separate change.
 
 ## Switch
 
-On by default. Settings > Troubleshooting has **Read bans and picks**
+On by default. Settings > Capture and reading has **Read bans and picks**
 (`bans_picks_reader` in `config.toml`). `STAT_TRACKER_BANS_PICKS_RECOGNIZER=off`
 (or `0`, `false`, `no`) turns it off whatever the setting says
 (`BansPicksSetting`). Settings then shows that row as Off whatever the

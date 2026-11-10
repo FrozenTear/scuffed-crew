@@ -158,6 +158,9 @@ pub struct PageState {
     /// The focus row is marked until then, after the top bar's
     /// unreadable pill opened it ([`Self::show_focus_row`]).
     focus_row_until: Option<std::time::Instant>,
+    /// The Read bans and picks row mark, after a reader-off or
+    /// pack-failed "Open Settings" ([`Self::show_bans_picks_row`]).
+    bans_picks_row: crate::bans_picks_setting::RowMark,
     /// What the page fetched when it last opened, and its dialog.
     pub opened: crate::settings_open::OpenState,
     /// The last changes waiting count with the baseline and saved config it
@@ -187,6 +190,7 @@ impl PageState {
             token_rejected: false,
             focus: crate::focus_status::FocusDisplay::default(),
             focus_row_until: None,
+            bans_picks_row: crate::bans_picks_setting::RowMark::default(),
             opened: crate::settings_open::OpenState::default(),
             waiting_memo: RefCell::new(None),
         }
@@ -231,6 +235,26 @@ impl PageState {
     /// Whether the focus row is marked at `now`.
     pub(crate) fn focus_row_marked(&self, now: std::time::Instant) -> bool {
         self.focus_row_until.is_some_and(|until| now < until)
+    }
+
+    /// A reader-off or pack-failed "Open Settings": open Capture and
+    /// reading (never close it) and mark the Read bans and picks row for
+    /// [`crate::bans_picks_setting::HIGHLIGHT_FOR`].
+    pub(crate) fn show_bans_picks_row(&mut self, now: std::time::Instant) {
+        if !self.advanced_open.is_open(AdvancedSection::CaptureReading) {
+            self.advanced_open.toggle(AdvancedSection::CaptureReading);
+        }
+        self.bans_picks_row.start(now);
+    }
+
+    /// Whether the Read bans and picks row is marked at `now`.
+    pub(crate) fn bans_picks_row_marked(&self, now: std::time::Instant) -> bool {
+        self.bans_picks_row.is_on(now)
+    }
+
+    /// Drop the Read bans and picks mark at once (timeout, click, or scroll).
+    pub(crate) fn clear_bans_picks_highlight(&mut self) {
+        self.bans_picks_row.clear();
     }
 
     pub fn chip_draft(&self) -> Option<&(ChipList, String)> {
