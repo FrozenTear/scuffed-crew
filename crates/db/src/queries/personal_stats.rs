@@ -133,6 +133,12 @@ fn stored_name_recognizer(value: Option<String>) -> Option<String> {
 /// Those are not one session: each distinct (hero, map, played_at) is its own
 /// game. The migration assigns this same id before building the unique index
 /// so those games do not collapse onto a single empty key.
+///
+/// On upload, a legacy game is matched by member and `played_at` only (see
+/// `existing_legacy_session_id`), because an edit changes the hero or map
+/// and so this id. This id is used only when no stored legacy row has that
+/// `played_at`. Two empty-session entries with the same `played_at` (also in
+/// one request) are therefore stored as one game.
 fn legacy_session_id(
     member_id: &str,
     hero: &str,
@@ -440,6 +446,17 @@ const UPDATE_BY_SESSION_SQL: &str = r#"UPDATE personal_match SET
     WHERE member_id = $mid AND session_id = $sid
     RETURN AFTER"#;
 
+/// How an upload without a session id picks its legacy row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyIdReuse {
+    /// Reuse the member's `legacy-*` row at the same `played_at`, so an edit
+    /// of hero or map updates that row (alpha.3 item 22).
+    ByPlayedAt,
+    /// Only the content-derived id: an edited game adds a row and the
+    /// original stays (behaviour before alpha.3).
+    Off,
+}
+
 impl Database {
     /// Upsert uploaded matches, one server row per (member, session).
     ///
@@ -447,7 +464,12 @@ impl Database {
     /// outcome/map corrections update the existing row in place — a game can
     /// never count more than once no matter how many Tab snapshots it produced
     /// or how often the client retries. Entries without a session id get a
-    /// stable content-derived legacy id (see [`legacy_session_id`]).
+    /// stable content-derived legacy id (see [`legacy_session_id`]), unless
+    /// the member already has a `legacy-*` row at the same `played_at`: then
+    /// that row's id is reused (the row with this upload's own content id if
+    /// present, else the newest), so an edit of an old
+    /// game's hero or map updates the row in place instead of adding one
+    /// (alpha.3 item 22).
     ///
     /// Each row is stored at [`personal_match_record_key`], derived from
     /// `(member_id, session_id)`. A concurrent insert that loses the unique
@@ -461,10 +483,32 @@ impl Database {
         member_id: &str,
         matches: &[crate::types::PersonalMatch],
     ) -> DbResult<u32> {
+        self.upsert_personal_matches_with(member_id, matches, LegacyIdReuse::ByPlayedAt)
+            .await
+    }
+
+    /// [`Self::upsert_personal_matches`] with the legacy id rule chosen by the
+    /// caller. The upload route passes [`LegacyIdReuse::Off`] for trackers
+    /// older than `0.6.0-alpha.3` (or with no readable version), which keeps
+    /// the pre-alpha.3 behaviour: an edited legacy game is a new row and the
+    /// original row is never overwritten.
+    pub async fn upsert_personal_matches_with(
+        &self,
+        member_id: &str,
+        matches: &[crate::types::PersonalMatch],
+        reuse: LegacyIdReuse,
+    ) -> DbResult<u32> {
         let mut upserted = 0u32;
         for m in matches {
             let session_id = if m.session_id.is_empty() {
-                legacy_session_id(member_id, &m.hero, &m.map_name, &m.played_at)
+                let exact = legacy_session_id(member_id, &m.hero, &m.map_name, &m.played_at);
+                match reuse {
+                    LegacyIdReuse::ByPlayedAt => self
+                        .existing_legacy_session_id(member_id, &m.played_at, &exact)
+                        .await?
+                        .unwrap_or(exact),
+                    LegacyIdReuse::Off => exact,
+                }
             } else {
                 m.session_id.clone()
             };
@@ -473,6 +517,45 @@ impl Database {
             upserted += 1;
         }
         Ok(upserted)
+    }
+
+    /// Session id of the member's stored `legacy-*` row at `played_at`.
+    ///
+    /// Clients without session ids identify a game only by `played_at`, which
+    /// edits never change. A row whose id is `exact` (the content-derived id
+    /// of this upload) wins, so a plain retry updates its own row even when
+    /// older duplicates share the `played_at`. Otherwise the newest row wins.
+    /// Served by `pm_member_idx (member_id, played_at)`.
+    async fn existing_legacy_session_id(
+        &self,
+        member_id: &str,
+        played_at: &DateTime<Utc>,
+        exact: &str,
+    ) -> DbResult<Option<String>> {
+        #[derive(Deserialize, SurrealValue)]
+        struct Row {
+            session_id: String,
+        }
+        let rows: Vec<Row> = with_timeout(async {
+            let mut res = self
+                .client
+                .query(
+                    "SELECT session_id, uploaded_at FROM personal_match \
+                     WHERE member_id = $mid AND played_at = $played \
+                     AND string::starts_with(session_id, 'legacy-') \
+                     ORDER BY uploaded_at DESC, session_id DESC",
+                )
+                .bind(("mid", member_id.to_string()))
+                .bind(("played", SurrealDatetime::from(*played_at)))
+                .await?
+                .check()?;
+            Ok(res.take(0)?)
+        })
+        .await?;
+        if rows.iter().any(|r| r.session_id == exact) {
+            return Ok(Some(exact.to_string()));
+        }
+        Ok(rows.into_iter().next().map(|r| r.session_id))
     }
 
     async fn upsert_personal_match(
@@ -1778,7 +1861,7 @@ async fn relocate_personal_match(
 
 #[cfg(test)]
 mod tests {
-    use super::{legacy_session_id, personal_match_record_key};
+    use super::{legacy_session_id, personal_match_record_key, LegacyIdReuse};
     use crate::migrations::run_migrations;
     use crate::Database;
     use chrono::{TimeZone, Utc};
@@ -2293,6 +2376,322 @@ mod tests {
         for r in &rows {
             assert_eq!(r.id, personal_match_record_key(&r.member_id, &r.session_id));
         }
+    }
+
+    /// alpha.3 item 22: editing an old (no session id) game's hero updates
+    /// the stored row instead of adding a second one.
+    #[tokio::test]
+    async fn legacy_hero_edit_updates_same_row() {
+        let db = test_db().await;
+        db.upsert_personal_matches("m1", &[entry("", "victory", 10)])
+            .await
+            .unwrap();
+        let before = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        let mut edited = entry("", "victory", 10);
+        edited.hero = "Kiriko".into();
+        edited.edited = true;
+        db.upsert_personal_matches("m1", &[edited]).await.unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "hero edit must not add a row");
+        assert_eq!(rows[0].hero, "Kiriko");
+        assert!(rows[0].edited);
+        assert_eq!(rows[0].id, before[0].id);
+        assert_eq!(rows[0].session_id, before[0].session_id);
+    }
+
+    /// Blocker 1 gate: with reuse off (trackers older than 0.6.0-alpha.3),
+    /// a hero edit keeps the pre-alpha.3 behaviour. The original row stays
+    /// untouched and the edit is a second row.
+    #[tokio::test]
+    async fn legacy_edit_with_reuse_off_adds_row_and_keeps_original() {
+        let db = test_db().await;
+        db.upsert_personal_matches_with("m1", &[entry("", "victory", 10)], LegacyIdReuse::Off)
+            .await
+            .unwrap();
+        let before = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        let mut edited = entry("", "victory", 10);
+        edited.hero = "Kiriko".into();
+        edited.edited = true;
+        db.upsert_personal_matches_with("m1", &[edited], LegacyIdReuse::Off)
+            .await
+            .unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 2, "old tracker edit adds a row");
+        let original = rows
+            .iter()
+            .find(|r| r.id == before[0].id)
+            .expect("original kept");
+        assert_eq!(original.hero, before[0].hero);
+        assert!(!original.edited, "original row is not overwritten");
+        assert!(rows.iter().any(|r| r.hero == "Kiriko" && r.edited));
+
+        // A plain retry with reuse off still dedupes by content.
+        db.upsert_personal_matches_with("m1", &[entry("", "victory", 10)], LegacyIdReuse::Off)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.list_personal_matches("m1", 10, 0).await.unwrap().len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_map_edit_updates_same_row() {
+        let db = test_db().await;
+        db.upsert_personal_matches("m1", &[entry("", "victory", 10)])
+            .await
+            .unwrap();
+        let before = db.list_personal_matches("m1", 10, 0).await.unwrap();
+
+        let mut edited = entry("", "victory", 10);
+        edited.map_name = "Ilios".into();
+        db.upsert_personal_matches("m1", &[edited]).await.unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "map edit must not add a row");
+        assert_eq!(rows[0].map_name, "Ilios");
+        assert_eq!(rows[0].id, before[0].id);
+    }
+
+    #[tokio::test]
+    async fn legacy_different_played_at_stays_separate() {
+        let db = test_db().await;
+        db.upsert_personal_matches("m1", &[entry("", "victory", 10)])
+            .await
+            .unwrap();
+        let mut other = entry("", "victory", 10);
+        other.hero = "Kiriko".into();
+        other.played_at = Utc.with_ymd_and_hms(2026, 7, 1, 20, 0, 1).unwrap();
+        db.upsert_personal_matches("m1", &[other]).await.unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_ne!(rows[0].session_id, rows[1].session_id);
+    }
+
+    #[tokio::test]
+    async fn legacy_lookup_ignores_real_session_rows() {
+        let db = test_db().await;
+        db.upsert_personal_matches("m1", &[entry("s-real", "victory", 10)])
+            .await
+            .unwrap();
+        let mut legacy = entry("", "defeat", 3);
+        legacy.hero = "Kiriko".into();
+        db.upsert_personal_matches("m1", &[legacy]).await.unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 2);
+        let real = rows.iter().find(|r| r.session_id == "s-real").unwrap();
+        assert_eq!(real.hero, "Ana");
+        assert_eq!(real.outcome, "victory");
+        assert_eq!(real.elims, 10);
+        let other = rows.iter().find(|r| r.session_id != "s-real").unwrap();
+        assert!(other.session_id.starts_with("legacy-"));
+        assert_eq!(other.hero, "Kiriko");
+    }
+
+    #[tokio::test]
+    async fn legacy_lookup_is_scoped_per_member() {
+        let db = test_db().await;
+        db.upsert_personal_matches("m1", &[entry("", "victory", 10)])
+            .await
+            .unwrap();
+        let mut m2 = entry("", "defeat", 4);
+        m2.member_id = "m2".into();
+        m2.hero = "Kiriko".into();
+        db.upsert_personal_matches("m2", &[m2]).await.unwrap();
+
+        let m1_rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(m1_rows.len(), 1);
+        assert_eq!(m1_rows[0].hero, "Ana");
+        assert_eq!(m1_rows[0].outcome, "victory");
+        let m2_rows = db.list_personal_matches("m2", 10, 0).await.unwrap();
+        assert_eq!(m2_rows.len(), 1);
+        assert_eq!(m2_rows[0].hero, "Kiriko");
+        assert_ne!(m1_rows[0].session_id, m2_rows[0].session_id);
+    }
+
+    /// Two `legacy-*` rows for one m1 game at the same `played_at`, as the
+    /// old behaviour left them: `older` (Ana) and the newer `newer` (Kiriko).
+    async fn seed_legacy_duplicates(db: &Database) -> (String, String) {
+        let played = entry("", "victory", 10).played_at;
+        let older = legacy_session_id("m1", "Ana", "Oasis", &played);
+        let newer = legacy_session_id("m1", "Kiriko", "Oasis", &played);
+        for (sid, hero, uploaded) in [
+            (&older, "Ana", "2026-07-01T21:00:00Z"),
+            (&newer, "Kiriko", "2026-07-02T21:00:00Z"),
+        ] {
+            db.client
+                .query(
+                    r#"CREATE personal_match SET
+                       member_id = 'm1', session_id = $sid, hero = $hero,
+                       map_name = 'Oasis', game_mode = 'control', role = 'Support',
+                       outcome = 'victory', elims = 10, deaths = 2, assists = 8,
+                       damage = 3000, healing = 9000, mitigation = 0, edited = false,
+                       played_at = d'2026-07-01T20:00:00Z',
+                       uploaded_at = <datetime>$uploaded"#,
+                )
+                .bind(("sid", sid.clone()))
+                .bind(("hero", hero.to_string()))
+                .bind(("uploaded", uploaded.to_string()))
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+        assert_eq!(
+            db.list_personal_matches("m1", 10, 0).await.unwrap().len(),
+            2
+        );
+
+        (older, newer)
+    }
+
+    /// Duplicates left by the old behaviour: the newest is reused and the
+    /// edit does not create a third row.
+    #[tokio::test]
+    async fn legacy_existing_duplicates_reuse_newest() {
+        let db = test_db().await;
+        let (older, newer) = seed_legacy_duplicates(&db).await;
+        let mut edited = entry("", "defeat", 12);
+        edited.hero = "Lucio".into();
+        db.upsert_personal_matches("m1", &[edited]).await.unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 2, "no third row");
+        let updated = rows.iter().find(|r| r.session_id == newer).unwrap();
+        assert_eq!(updated.hero, "Lucio");
+        assert_eq!(updated.outcome, "defeat");
+        let untouched = rows.iter().find(|r| r.session_id == older).unwrap();
+        assert_eq!(untouched.hero, "Ana");
+        assert_eq!(untouched.outcome, "victory");
+    }
+
+    /// With duplicates stored, a plain retry of the older game's content
+    /// updates its own row (exact legacy id first), not the newest one.
+    #[tokio::test]
+    async fn legacy_retry_prefers_exact_content_match_over_newest() {
+        let db = test_db().await;
+        let (older, newer) = seed_legacy_duplicates(&db).await;
+
+        db.upsert_personal_matches("m1", &[entry("", "defeat", 11)])
+            .await
+            .unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 2, "no third row");
+        let retried = rows.iter().find(|r| r.session_id == older).unwrap();
+        assert_eq!(retried.hero, "Ana");
+        assert_eq!(retried.outcome, "defeat");
+        let other = rows.iter().find(|r| r.session_id == newer).unwrap();
+        assert_eq!(other.hero, "Kiriko");
+        assert_eq!(other.outcome, "victory");
+    }
+
+    /// Two empty-session entries with the same `played_at` in one request
+    /// are one game (documented on `legacy_session_id`).
+    #[tokio::test]
+    async fn legacy_same_played_at_in_one_request_is_one_game() {
+        let db = test_db().await;
+        let first = entry("", "victory", 10);
+        let mut second = entry("", "defeat", 3);
+        second.hero = "Kiriko".into();
+        let n = db
+            .upsert_personal_matches("m1", &[first, second])
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "both entries are counted as upserted");
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hero, "Kiriko", "the later entry wins");
+    }
+
+    /// A mass edit of N old games (each its own played_at) leaves N rows,
+    /// each updated in place.
+    #[tokio::test]
+    async fn legacy_mass_edit_of_n_games_leaves_n_rows() {
+        let db = test_db().await;
+        let base = entry("", "victory", 10).played_at;
+        let games: Vec<_> = (0..5)
+            .map(|i| {
+                let mut e = entry("", "victory", 10);
+                e.played_at = base + chrono::Duration::minutes(20 * i);
+                e
+            })
+            .collect();
+        db.upsert_personal_matches("m1", &games).await.unwrap();
+        let before = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(before.len(), 5);
+        let mut ids: Vec<_> = before.iter().map(|r| r.session_id.clone()).collect();
+        ids.sort();
+
+        let edited: Vec<_> = games
+            .iter()
+            .map(|g| {
+                let mut e = g.clone();
+                e.hero = "Lucio".into();
+                e.edited = true;
+                e
+            })
+            .collect();
+        db.upsert_personal_matches("m1", &edited).await.unwrap();
+
+        let after = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(after.len(), 5, "N edits leave N rows");
+        assert!(after.iter().all(|r| r.hero == "Lucio" && r.edited));
+        let mut after_ids: Vec<_> = after.iter().map(|r| r.session_id.clone()).collect();
+        after_ids.sort();
+        assert_eq!(after_ids, ids, "ids are unchanged");
+        for b in &before {
+            let a = after.iter().find(|r| r.id == b.id).expect("row kept");
+            assert_eq!(a.played_at, b.played_at, "each row keeps its own played_at");
+        }
+    }
+
+    /// A row stored with an empty session id before the unique-index
+    /// migration (random record id) gets a `legacy-*` id from the migration;
+    /// a later edit of that game updates the row in place.
+    #[tokio::test]
+    async fn legacy_blank_row_from_before_migration_updates_in_place() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"CREATE personal_match:pre_migration SET
+                   member_id = 'm1', session_id = '', hero = 'Ana',
+                   map_name = 'Oasis', game_mode = 'control', role = 'Support',
+                   outcome = 'victory', elims = 10, deaths = 2, assists = 8,
+                   damage = 3000, healing = 9000, mitigation = 0, edited = false,
+                   played_at = d'2026-07-01T20:00:00Z',
+                   uploaded_at = d'2026-07-01T21:00:00Z'"#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            super::rewrite_blank_session_ids(&db.client).await.unwrap(),
+            1
+        );
+        let before = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(before.len(), 1);
+        assert_eq!(before[0].id, "pre_migration");
+        assert!(before[0].session_id.starts_with("legacy-"));
+
+        let mut edited = entry("", "victory", 10);
+        edited.hero = "Kiriko".into();
+        db.upsert_personal_matches("m1", &[edited]).await.unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 1, "edit must update the migrated row");
+        assert_eq!(rows[0].id, "pre_migration");
+        assert_eq!(rows[0].hero, "Kiriko");
+        assert_eq!(rows[0].session_id, before[0].session_id);
     }
 
     #[tokio::test]

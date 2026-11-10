@@ -38,6 +38,8 @@ base64 = "0.22"
 tower_governor = "0.8.0"
 governor = "0.10"
 ipnet = "2"
+# Tracker User-Agent version gate for legacy id reuse (alpha.3 item 22).
+semver = "1"
 zeroize = "1"
 sha2 = "0.10"
 flate2 = "1"
