@@ -494,7 +494,8 @@ impl Database {
         .await
     }
 
-    /// Crops staff may list: for each kind, the crops of the given members.
+    /// Crops staff may list: for each kind in `listable`, the crops of the
+    /// given members (visible and hidden alike).
     /// Sorted by the upload hour (UTC, newest first), then visible crops
     /// before hidden ones, then a SHA-256 of `game_token` for visible crops
     /// that have one (rows with no token first in the hour), then id. The
@@ -507,12 +508,12 @@ impl Database {
     /// nothing is queried.
     pub async fn list_training_crops_visible(
         &self,
-        visible: &[(CropKind, Vec<String>)],
+        listable: &[(CropKind, Vec<String>)],
         hidden: &[(CropKind, Vec<String>)],
         limit: u32,
         offset: u32,
     ) -> DbResult<Vec<TrainingCrop>> {
-        let groups: Vec<&(CropKind, Vec<String>)> = visible
+        let groups: Vec<&(CropKind, Vec<String>)> = listable
             .iter()
             .filter(|(kind, ids)| kind.accepts_uploads() && !ids.is_empty())
             .collect();
@@ -1007,7 +1008,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn visible_list_sorts_by_hour_then_game_token_then_id() {
+    async fn visible_list_order_is_hour_visible_first_token_sha256_id() {
         use chrono::TimeZone;
         let db = test_db().await;
         let hour = Utc.with_ymd_and_hms(2026, 11, 10, 18, 0, 0).unwrap();
@@ -1085,10 +1086,12 @@ mod tests {
         );
 
         // A hidden crop that shares token_early must not land in that
-        // visible group. Its id would sort into the early group if
-        // game_token were still used. Same member, other kind: the
-        // realistic case, when consent is off for one kind of a game.
-        let hidden_id = "666666666666666666666666666666bf";
+        // visible group. Its id sorts before both early ids (b, c), so
+        // under the old `upload_hour, game_token, id` order it would come
+        // ahead of b; only visible-before-hidden puts it after c. Same
+        // member, other kind: the realistic case, when consent is off for
+        // one kind of a game.
+        let hidden_id = "6666666666666666666666666666665f";
         let mut hidden_crop = new_crop(hidden_id, "m1", CropKind::MapName, 0);
         hidden_crop.created_at = hour + Duration::minutes(20);
         hidden_crop.meta.game_token = Some(token_early.to_string());
