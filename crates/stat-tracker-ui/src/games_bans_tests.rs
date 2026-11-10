@@ -888,7 +888,7 @@ fn open_settings_opens_the_row_that_holds_the_fix() {
 }
 
 #[test]
-fn only_reader_off_open_settings_reveals_the_switch() {
+fn reader_off_and_pack_failed_open_settings_reveal_the_switch() {
     let reveal = |s: BansPicksStatus| {
         let mut g = game(HELD);
         g.bans_picks = None;
@@ -899,7 +899,7 @@ fn only_reader_off_open_settings_reveals_the_switch() {
         }
     };
     assert_eq!(reveal(BansPicksStatus::ReaderOff), Some(true));
-    assert_eq!(reveal(BansPicksStatus::PackFailed), Some(false));
+    assert_eq!(reveal(BansPicksStatus::PackFailed), Some(true));
     assert_eq!(
         reveal(BansPicksStatus::PackMissing { linked: false }),
         Some(false)

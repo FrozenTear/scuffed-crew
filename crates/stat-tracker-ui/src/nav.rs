@@ -119,9 +119,9 @@ pub enum Msg {
     /// A button elsewhere that points at one Advanced row in Settings: open
     /// Settings, open the row (never close it) and scroll to it.
     ShowAdvancedSection(crate::settings_model::AdvancedSection),
-    /// "Open Settings" on a game whose reader was off: open Capture and
-    /// reading, jump to the Read bans and picks row if it is not already
-    /// in view, and mark it for two seconds.
+    /// "Open Settings" on a game whose reader was off, or whose pack
+    /// failed: open Capture and reading, jump to the Read bans and picks
+    /// row if it is not already in view, and mark it for two seconds.
     ShowBansPicksSetting,
     /// Drop the Read bans and picks mark at once: a click or a scroll.
     ClearBansPicksHighlight,

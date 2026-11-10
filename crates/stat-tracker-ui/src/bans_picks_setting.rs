@@ -1,6 +1,6 @@
 //! Opening Settings from a game whose bans were not read because the
-//! reader was off: jump the Settings pane to the Read bans and picks row
-//! and mark it with a 1 px accent outline.
+//! reader was off, or because the pack failed: jump the Settings pane to
+//! the Read bans and picks row and mark it with a 1 px accent outline.
 
 use std::time::{Duration, Instant};
 
@@ -26,10 +26,13 @@ pub const ROW_MARGIN: f32 = 56.0;
 /// toggle stay lined up with the rows around it.
 pub const ROW_OUTLINE_PAD: f32 = 8.0;
 
-/// Only a reader-off game row scrolls to and marks the switch. Other
-/// "Open Settings" reasons open the section and stop there.
+/// A reader-off or pack-failed game row scrolls to and marks the switch.
+/// Other "Open Settings" reasons open the section and stop there.
 pub fn scrolls_to_row(status: Option<&BansPicksStatus>) -> bool {
-    matches!(status, Some(BansPicksStatus::ReaderOff))
+    matches!(
+        status,
+        Some(BansPicksStatus::ReaderOff | BansPicksStatus::PackFailed)
+    )
 }
 
 /// Whether `row` is already fully inside `viewport`.
@@ -184,9 +187,9 @@ mod tests {
     }
 
     #[test]
-    fn only_a_reader_off_game_scrolls_to_the_row() {
+    fn reader_off_and_pack_failed_scroll_to_the_row() {
         assert!(scrolls_to_row(Some(&BansPicksStatus::ReaderOff)));
-        assert!(!scrolls_to_row(Some(&BansPicksStatus::PackFailed)));
+        assert!(scrolls_to_row(Some(&BansPicksStatus::PackFailed)));
         assert!(!scrolls_to_row(Some(&BansPicksStatus::PackMissing {
             linked: false
         })));

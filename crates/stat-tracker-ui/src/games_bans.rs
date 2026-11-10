@@ -250,7 +250,7 @@ pub struct SettingsLink {
     pub tip: &'static str,
     /// The Advanced row the button opens.
     pub open: AdvancedSection,
-    /// Only a reader-off game jumps to the Read bans and picks row.
+    /// A reader-off or pack-failed game jumps to the Read bans and picks row.
     pub reveal_row: bool,
 }
 
@@ -372,8 +372,8 @@ fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
             open: AdvancedSection::WebsiteConnection,
             reveal_row,
         },
-        // PackFailed and the other unread reasons open Capture and
-        // reading but only ReaderOff also jumps to the switch.
+        // ReaderOff and PackFailed also jump to the switch (reveal_row).
+        // Other unread reasons that open this section stay at the header.
         _ => SettingsLink {
             tip: "Settings, Capture and reading, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
             open: AdvancedSection::CaptureReading,
