@@ -1476,6 +1476,7 @@ mod tests {
         assert_eq!(gate(None), Off);
         assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.2")), Off);
         assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.2.3")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.2.10")), Off);
         assert_eq!(gate(Some("scuffed-stat-tracker/0.5.12")), Off);
         assert_eq!(gate(Some("scuffed-stat-tracker/garbage")), Off);
         assert_eq!(gate(Some("other-client/0.7.0")), Off);
@@ -1484,6 +1485,7 @@ mod tests {
             gate(Some("scuffed-stat-tracker/0.6.0-alpha.3.1")),
             ByPlayedAt
         );
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.4")), ByPlayedAt);
         assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-beta.1")), ByPlayedAt);
         assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0")), ByPlayedAt);
         assert_eq!(gate(Some("scuffed-stat-tracker/0.7.2 (linux)")), ByPlayedAt);
