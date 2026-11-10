@@ -650,7 +650,10 @@ mod tests {
     }
 
     /// The mixed Bans row wraps onto two lines in the panel at 1024 (934px
-    /// wide), and nothing in it passes the panel edge.
+    /// wide), and no group is squeezed to fit leftover width on a line.
+    /// Natural widths come from a very wide one-line layout; iced would
+    /// still keep every group's right edge inside the panel if wrap were
+    /// off, so an edge check cannot catch a missing wrap.
     #[test]
     fn the_mixed_bans_row_wraps_inside_the_panel_at_1024() {
         let games = games_from_snapshot(&crate::fixtures_games::snapshot());
@@ -661,16 +664,27 @@ mod tests {
         let r = b.rows.iter().find(|r| r.label == "Bans").expect("Bans row");
         let width = 934.0;
         let node = lay_out_row(r, width);
+        let wide = lay_out_row(r, 10_000.0);
         let [_, body] = node.children() else {
             panic!("a label and a body");
         };
-        let left = body.bounds().x;
+        let [_, wide_body] = wide.children() else {
+            panic!("a label and a body");
+        };
+        let natural: Vec<f32> = wide_body
+            .children()
+            .iter()
+            .map(|unit| unit.bounds().width)
+            .collect();
+        assert_eq!(body.children().len(), natural.len());
         let mut tops: Vec<i32> = Vec::new();
-        for unit in body.children() {
+        for (i, unit) in body.children().iter().enumerate() {
             let u = unit.bounds();
             assert!(
-                left + u.x + u.width <= width + 0.5,
-                "a group passes the edge: {u:?} in a body at {left}"
+                (u.width - natural[i]).abs() < 0.5,
+                "group {i} was squeezed: width {} vs natural {}",
+                u.width,
+                natural[i]
             );
             let top = u.y.round() as i32;
             if !tops.contains(&top) {
@@ -678,5 +692,13 @@ mod tests {
             }
         }
         assert_eq!(tops.len(), 2, "two lines: {tops:?}");
+        let mut wide_tops: Vec<i32> = Vec::new();
+        for unit in wide_body.children() {
+            let top = unit.bounds().y.round() as i32;
+            if !wide_tops.contains(&top) {
+                wide_tops.push(top);
+            }
+        }
+        assert_eq!(wide_tops.len(), 1, "one line when wide: {wide_tops:?}");
     }
 }
