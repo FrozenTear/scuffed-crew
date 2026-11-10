@@ -94,7 +94,10 @@ fn the_saved_key_and_the_env_override_still_gate_the_reader() {
     let feed = |saved: bool, env: &str| {
         BansPicksFeed::for_config(saved, BansPicksSetting::parse(env), dir.path(), false)
     };
-    assert!(feed(old.bans_picks_reader, "cv-v1").is_none(), "alpha.2.3 off stays off");
+    assert!(
+        feed(old.bans_picks_reader, "cv-v1").is_none(),
+        "alpha.2.3 off stays off"
+    );
     assert!(feed(true, "cv-v1").is_some());
     for off in ["off", "OFF", "0", "false", "no"] {
         assert!(feed(true, off).is_none(), "{off} wins over a saved on");

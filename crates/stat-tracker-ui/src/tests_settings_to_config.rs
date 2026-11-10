@@ -345,7 +345,10 @@ fn the_bans_picks_key_moved_to_capture_and_reading() {
             "shadow_recognizer"
         ]
     );
-    assert_eq!(crate::settings_cards::BANS_PICKS_LABEL, "Read bans and picks");
+    assert_eq!(
+        crate::settings_cards::BANS_PICKS_LABEL,
+        "Read bans and picks"
+    );
     assert_eq!(
         crate::settings_cards::BANS_PICKS_HELP,
         "Reads the ban and hero select screens to fill in bans and picks. Works at 2560x1440 only."
@@ -389,7 +392,11 @@ fn an_alpha_2_3_config_with_the_reader_off_opens_off() {
     ConfigEdit::SavePregameScreens(true).apply(&mut saved);
     let text = Config::text_for_save(Some(ALPHA_2_3_READER_OFF), &saved).expect("save");
     assert!(text.contains("bans_picks_reader = false"), "{text}");
-    assert!(!Config::parse_file_contents(&text).expect("parse").bans_picks_reader);
+    assert!(
+        !Config::parse_file_contents(&text)
+            .expect("parse")
+            .bans_picks_reader
+    );
 }
 
 /// STAT_TRACKER_BANS_PICKS_RECOGNIZER=off still wins over the saved key
