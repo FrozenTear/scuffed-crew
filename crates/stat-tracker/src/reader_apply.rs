@@ -283,7 +283,7 @@ pub fn merge_saved_with_authority(
     let map = policy.map.clone();
     let mode = policy.mode.clone();
     if let Some(board_map) = text_on(board, "map")
-        && board_map.trim() != policy.map.trim()
+        && !same_stored_map(&board_map, &policy.map)
     {
         push_suspect(&mut suspect, "map");
     }
@@ -470,6 +470,24 @@ fn canonical_board_hero(raw: &str) -> String {
     crate::parse::canonical_hero(raw)
 }
 
+/// True when both names are the same stored map, including OCR forms that
+/// canonicalize to one display name. "Kings Row" and "KING'S ROW" are
+/// King's Row, so a later Tab must not keep the map warning up.
+fn same_stored_map(a: &str, b: &str) -> bool {
+    let a = a.trim();
+    let b = b.trim();
+    if a == b {
+        return true;
+    }
+    match (
+        crate::parse::canonical_map(a),
+        crate::parse::canonical_map(b),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
+}
+
 /// Non-empty text on a field, including a suspect read. Missing and blank
 /// fields are not a second map name.
 fn text_on(board: &BoardRead, name: &str) -> Option<String> {
@@ -615,6 +633,9 @@ fn order_suspects(names: Vec<String>) -> Vec<String> {
 mod tests_board_merge;
 
 #[cfg(test)]
+mod tests_map_suspect;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::shadow::{FieldRead, Value};
@@ -676,7 +697,7 @@ mod tests {
         assert!(board_refusal(&six, 5).is_some());
     }
 
-    fn ocr() -> PolicyRow {
+    pub(super) fn ocr() -> PolicyRow {
         PolicyRow {
             map: "Busan".into(),
             mode: "Control".into(),
@@ -691,7 +712,7 @@ mod tests {
         }
     }
 
-    fn text_field(name: &str, value: &str, suspect: bool) -> FieldRead {
+    pub(super) fn text_field(name: &str, value: &str, suspect: bool) -> FieldRead {
         FieldRead {
             name: name.into(),
             value: Some(Value::Text(value.into())),
@@ -700,7 +721,7 @@ mod tests {
         }
     }
 
-    fn int_field(name: &str, value: u32, suspect: bool) -> FieldRead {
+    pub(super) fn int_field(name: &str, value: u32, suspect: bool) -> FieldRead {
         FieldRead {
             name: name.into(),
             value: Some(Value::Int(value)),
@@ -745,7 +766,7 @@ mod tests {
     }
 
     /// A Read board whose row `index` is fully confident, plus match fields.
-    fn confident_board(team_size: usize, index: usize) -> BoardRead {
+    pub(super) fn confident_board(team_size: usize, index: usize) -> BoardRead {
         let mut fields = vec![
             text_field("map", "Ilios", false),
             text_field("mode", "Control", false),
@@ -772,7 +793,7 @@ mod tests {
         }
     }
 
-    fn identified(index: usize, team_size: usize) -> OwnRow {
+    pub(super) fn identified(index: usize, team_size: usize) -> OwnRow {
         OwnRow::Identified { index, team_size }
     }
 
@@ -1298,43 +1319,6 @@ mod tests {
         assert_eq!(saved.elims, 21);
         assert_eq!(saved.suspect_fields, vec!["hero".to_string()]);
         assert_eq!(saved.recognizer, RECOGNIZER_ID);
-    }
-
-    #[test]
-    fn agreeing_map_is_not_suspect_and_mode_stays_on_policy() {
-        let mut board = confident_board(5, 0);
-        let map = board
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "map")
-            .unwrap();
-        map.value = Some(Value::Text("Busan".into()));
-        let mode = board
-            .fields
-            .iter_mut()
-            .find(|field| field.name == "mode")
-            .unwrap();
-        mode.value = Some(Value::Text("Escort".into()));
-        let saved = merge_saved(&ocr(), identified(0, 5), Some(&board));
-        assert_eq!(saved.map, "Busan");
-        assert_eq!(saved.mode, "Control");
-        assert!(!saved.suspect_fields.iter().any(|name| name == "map"));
-        assert!(!saved.suspect_fields.iter().any(|name| name == "mode"));
-        assert_eq!(saved.recognizer, RECOGNIZER_ID);
-    }
-
-    #[test]
-    fn deathmatch_policy_stays_when_the_new_reader_names_another_map() {
-        let mut policy = ocr();
-        policy.map = "Château Guillard".into();
-        policy.mode = "Deathmatch".into();
-        let saved = merge_saved(&policy, identified(0, 5), Some(&confident_board(5, 0)));
-        assert_eq!(saved.map, "Château Guillard");
-        assert_eq!(saved.mode, "Deathmatch");
-        assert!(saved.suspect_fields.iter().any(|name| name == "map"));
-        assert!(!saved.suspect_fields.iter().any(|name| name == "mode"));
-        assert!(!crate::parse::stats_row_is_tracked(&saved.map, &saved.mode));
-        assert!(crate::parse::map_is_untracked(&saved.map));
     }
 
     #[test]
