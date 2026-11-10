@@ -218,6 +218,7 @@ impl Switch {
             capture_notice: capture_notice(),
             bans_picks_notice: crate::ocr_status::bans_picks_notice(),
             focus_gate: crate::ocr_status::focus_gate(),
+            input_notice: crate::ocr_status::input_notice(),
         }
     }
 

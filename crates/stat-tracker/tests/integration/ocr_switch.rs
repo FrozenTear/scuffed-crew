@@ -907,8 +907,12 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
         assert!(reason.ends_with(ocr_switch::TURN_BACK_ON), "{reason}");
     }
     assert_eq!(run.status.notice(), Some(reason));
+    // The keyboard line may land a few seconds after the read where no
+    // keyboard opens (a CI runner): it is not what this test is about.
+    let mut health = run.status.clone();
+    health.input_notice.clear();
     assert_eq!(
-        run.status.health_notice(),
+        health.health_notice(),
         None,
         "the tracker reads everything with classic OCR: not a health problem"
     );
@@ -947,6 +951,18 @@ fn a_second_start_and_a_vacuum_run_leave_the_status_file_alone() {
     let log = root.path().join("daemon.out");
     let mut live = spawn_daemon(root.path(), &data_dir, Ask::Env("on"), &[], &log);
     assert!(wait_until_ready(&log, &mut live), "output:\n{}", read(&log));
+    // The live daemon writes its own keyboard warning into the file when no
+    // keyboard opens (alpha.3 item 32). Take the bytes after that.
+    let settled = |out: &str| {
+        out.contains("keyboard monitoring active") || out.contains("cannot read the keyboard")
+    };
+    assert!(
+        wait_for("the keyboard open", Duration::from_secs(60), || settled(
+            &read(&log)
+        )),
+        "output:\n{}",
+        read(&log)
+    );
     let status_path = data_dir.join(ocr_switch::STATUS_FILE);
     let before = std::fs::read(&status_path).expect("the live daemon's status file");
     let live_status = ocr_switch::read_status(&data_dir).unwrap();

@@ -16,6 +16,16 @@ use crate::theme::{
 };
 use scuffed_types::Season;
 
+/// One amber line for a problem that needs the user, such as the keyboard
+/// notice under the top tabs page title.
+pub fn warn_line(notice: &str) -> Element<'static, Message> {
+    text(notice.to_string())
+        .size(SIZE_BODY)
+        .font(FONT_MEDIUM)
+        .color(theme::WARN)
+        .into()
+}
+
 pub fn label_text(s: &str) -> text::Text<'static> {
     text(s.to_ascii_uppercase())
         .size(SIZE_LABEL)

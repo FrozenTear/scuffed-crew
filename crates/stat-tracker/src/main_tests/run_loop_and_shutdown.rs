@@ -344,6 +344,45 @@ fn the_run_loop_keeps_the_preempt_bridge_until_the_keyboard_arm() {
     assert!(wrapped.contains(concat!("capture::stream_", "bridge_hold,")));
 }
 
+/// `KeyboardInput` keeps its quiet reopen deadline in a field. That only
+/// survives the live `select!` cancelling `wait_tab` every turn if
+/// `run_loop` builds one `kbd` before the loop and every keyboard race
+/// borrows it. A `kbd` rebuilt each turn would restart the 30 s wait (the
+/// QA bug on the PR that added the deadline).
+#[test]
+fn the_run_loop_builds_one_keyboard_input_outside_the_loop() {
+    let run_loop = fn_source("run_loop");
+    let build = concat!("let mut kbd = ", "match open_keyboard_or_shutdown(");
+    assert_eq!(run_loop.matches(build).count(), 1, "kbd is built once");
+    assert_eq!(
+        run_loop
+            .matches(concat!("open_keyboard_", "or_shutdown("))
+            .count(),
+        1,
+        "no second keyboard open in run_loop"
+    );
+    assert_eq!(
+        run_loop.matches(concat!("KeyboardInput::", "new(")).count(),
+        0,
+        "no KeyboardInput built inside run_loop"
+    );
+    assert_eq!(run_loop.matches(concat!("let mut ", "kbd")).count(), 1);
+    let built = run_loop.find(build).expect("kbd built");
+    let looped = run_loop
+        .find(concat!("\n    loop ", "{"))
+        .expect("the run loop");
+    assert!(built < looped, "kbd is built before the loop");
+    let after = &run_loop[looped..];
+    assert!(after.contains(concat!("kbd.", "wait_tab()")));
+    assert_eq!(
+        after
+            .matches(concat!("tab_retry::next_press", "(&mut kbd, &mut tabs)"))
+            .count(),
+        2,
+        "both poll races borrow the same kbd"
+    );
+}
+
 /// The pause decision (which can wait seconds for KWin's version) runs
 /// next to the backend probe, not before it.
 #[test]

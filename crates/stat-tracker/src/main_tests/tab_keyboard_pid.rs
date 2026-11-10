@@ -338,26 +338,26 @@ async fn keyboard_open_retries_then_becomes_ready() {
 }
 
 #[tokio::test]
-async fn no_keyboard_is_an_error_after_bounded_retries() {
-    // Old startup path returned Ok(()) after Ctrl+C, so Restart=on-failure
-    // never ran. Give-up must be Err, and it must not wait again after
-    // the last failed open (that wait was the SIGTERM-swallowing hang).
+async fn no_keyboard_after_bounded_retries_is_unavailable_not_an_exit() {
+    // Give-up used to be Err, so the daemon exited non-zero and systemd
+    // crash-looped it for a user outside the `input` group (alpha.3 item
+    // 32). It is now `Unavailable` and the daemon runs on without Tab. It
+    // must still not wait again after the last failed open (that wait was
+    // the SIGTERM-swallowing hang).
     let retries = KEYBOARD_OPEN_ATTEMPTS.saturating_sub(1) as usize;
     let mut waiter = ScriptedWaiter {
         events: vec![KeyboardWait::Retry; retries],
     };
-    let err = acquire_keyboard(
+    let got = acquire_keyboard(
         || Err::<(), _>("no keyboard device found: ensure user is in the 'input' group"),
         &mut waiter,
         KEYBOARD_OPEN_ATTEMPTS,
     )
     .await
-    .expect_err("exhausted opens must not look like a clean exit");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("no keyboard available"),
-        "give-up is the non-zero exit path, got: {msg}"
-    );
+    .expect("exhausted opens are no error: the daemon runs on");
+    let KeyboardAcquire::Unavailable(msg) = got else {
+        panic!("exhausted opens must be Unavailable, got {got:?}");
+    };
     assert!(
         msg.contains("input' group"),
         "the open error is preserved, got: {msg}"
@@ -390,6 +390,249 @@ async fn sigterm_during_keyboard_wait_is_clean_shutdown() {
     assert_eq!(got, KeyboardAcquire::Shutdown);
     assert_eq!(opens, 1, "do not keep opening after stop is requested");
     assert!(waiter.events.is_empty());
+}
+
+/// Tab keys scripted for [`KeyboardInput`]; pends forever once empty.
+struct ScriptedKeys(std::collections::VecDeque<detect::TabKey>);
+
+impl stat_tracker::tab_retry::TabKeySource for ScriptedKeys {
+    async fn next_key(&mut self) -> Result<detect::TabKey, Box<dyn std::error::Error>> {
+        match self.0.pop_front() {
+            Some(key) => Ok(key),
+            None => std::future::pending().await,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct KeyboardLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for KeyboardLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for KeyboardLog {
+    type Writer = KeyboardLog;
+    fn make_writer(&'a self) -> KeyboardLog {
+        self.clone()
+    }
+}
+
+/// alpha.3 item 32: a user outside the `input` group (every open is
+/// "Permission denied") crash-looped the systemd service. Now the key wait
+/// runs on without a keyboard, retries quietly, warns once in the log and
+/// once in the status file the app shows in Tracker health, and clears the
+/// warning when a keyboard opens. The open error is injected; no
+/// `/dev/input` is read. The clock is paused, so retries are exact.
+#[tokio::test(start_paused = true)]
+async fn permission_denied_keyboard_runs_on_and_warns_once() {
+    const DENIED: &str = "Permission denied (os error 13)";
+    let log = KeyboardLog::default();
+    let sub = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _sub = tracing::subscriber::set_default(sub);
+    tracing::callsite::rebuild_interest_cache();
+    let warnings = || {
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        text.lines()
+            .filter(|l| {
+                // The error is in the line, and the command ends it.
+                l.contains("WARN") && l.contains(DENIED) && l.ends_with(NO_KEYBOARD_NOTICE)
+            })
+            .count()
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+    let notice = || {
+        stat_tracker::ocr_status::read_status(dir.path())
+            .map(|s| s.input_notice)
+            .unwrap_or_default()
+    };
+
+    // Every open fails until the script gets a keyboard.
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let script: std::rc::Rc<std::cell::RefCell<Option<ScriptedKeys>>> = Default::default();
+    let open = {
+        let (opens, script) = (opens.clone(), script.clone());
+        move || {
+            opens.set(opens.get() + 1);
+            script.borrow_mut().take().ok_or_else(|| DENIED.to_string())
+        }
+    };
+    let retry = Duration::from_secs(30);
+    let mut input = KeyboardInput::new(Err(DENIED.into()), open, dir.path().into(), retry);
+    assert!(!input.available());
+    assert_eq!(notice(), NO_KEYBOARD_NOTICE, "the warning is set at once");
+    assert_eq!(warnings(), 1);
+
+    // The run loop races the key wait against its other arms: the wait
+    // never ends in an error (the old exit), it only pends and retries.
+    // Elapsed time (not round*3) sets the open count: the reopen Instant
+    // survives these select cancels, so a cancel mid-interval does not
+    // restart the 30 s wait (that restart was the QA bug).
+    let mut elapsed = Duration::ZERO;
+    let step = retry * 3 + retry / 2;
+    for _ in 1..=3u32 {
+        // `biased` with the key wait first, as in the live loop (its
+        // keyboard arm is polled before the poll and cmd arms). Round 2
+        // ends at 210 s, the same Instant as the 7th reopen. Polled first,
+        // the key wait runs that open before the sleep arm ends the round,
+        // so ties go to `wait_tab` and the count is exact. Unbiased, tokio
+        // picks the first arm at random and about half the runs saw 6.
+        tokio::select! {
+            biased;
+            got = input.wait_tab() => panic!("no keyboard yields no key: {:?}", got.map_err(|e| e.to_string())),
+            _ = tokio::time::sleep(step) => {}
+        }
+        elapsed += step;
+        let expected = (elapsed.as_secs() / retry.as_secs()) as u32;
+        assert_eq!(
+            opens.get(),
+            expected,
+            "one quiet open every {retry:?} over {elapsed:?}"
+        );
+        assert!(!input.available());
+        assert_eq!(notice(), NO_KEYBOARD_NOTICE);
+        assert_eq!(warnings(), 1, "logged once across {} retries", opens.get());
+    }
+
+    // The user fixed the group and the next retry opens: Tab works again
+    // and the warning is cleared.
+    let at = Instant::now();
+    *script.borrow_mut() = Some(ScriptedKeys([detect::TabKey { down: true, at }].into()));
+    let key = input.wait_tab().await.expect("a key once a keyboard opens");
+    assert!(key.down);
+    assert!(input.available());
+    assert_eq!(notice(), "", "the warning clears with a keyboard");
+    assert_eq!(warnings(), 1);
+}
+
+/// QA on PR 641: the live run loop races `wait_tab` against a 500 ms poll
+/// arm (and the command arm), so the key wait is dropped and rebuilt every
+/// iteration. A retry sleep that restarts on each call never reached 30 s
+/// and the quiet reopen never ran. The reopen is a fixed deadline now, so
+/// frequent cancels do not push it back. The clock is paused.
+#[tokio::test(start_paused = true)]
+async fn keyboard_reopen_deadline_survives_frequent_select_cancels() {
+    let log = KeyboardLog::default();
+    let sub = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let _sub = tracing::subscriber::set_default(sub);
+    tracing::callsite::rebuild_interest_cache();
+    let still_unavailable = || {
+        let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        text.lines()
+            .filter(|l| l.contains("DEBUG") && l.contains("keyboard still unavailable"))
+            .count()
+    };
+    let dir = tempfile::tempdir().expect("tempdir");
+
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let open = {
+        let opens = opens.clone();
+        move || -> Result<ScriptedKeys, String> {
+            opens.set(opens.get() + 1);
+            Err("Permission denied (os error 13)".to_string())
+        }
+    };
+    let retry = Duration::from_secs(30);
+    let mut input = KeyboardInput::new(
+        Err("Permission denied (os error 13)".into()),
+        open,
+        dir.path().into(),
+        retry,
+    );
+
+    // 100 s of 500 ms polls: the poll arm wins every time, cancelling the
+    // key wait 200 times. Reopens are due at 30, 60 and 90 s.
+    let poll = Duration::from_millis(500);
+    for _ in 0..200 {
+        // `biased` with the key wait first, copying the live loop.
+        tokio::select! {
+            biased;
+            got = input.wait_tab() => panic!("no keyboard yields no key: {:?}", got.map_err(|e| e.to_string())),
+            _ = tokio::time::sleep(poll) => {}
+        }
+    }
+    assert_eq!(
+        opens.get(),
+        3,
+        "one quiet reopen every {retry:?} despite a cancel every {poll:?}"
+    );
+    assert_eq!(still_unavailable(), 3, "each failed reopen logs at DEBUG");
+    assert!(!input.available());
+}
+
+/// The NO_KEYBOARD notice ends with the command, with no punctuation after
+/// it. A trailing comma after `$USER` made usermod look for a user named
+/// "name,". Tracker health breaks the line after it (`ocr_status` and the
+/// app's `health_with_ocr_notice` tests).
+#[test]
+fn no_keyboard_notice_ends_with_the_command_exactly() {
+    const COMMAND: &str = "sudo usermod -aG input \"$USER\"";
+    assert!(
+        NO_KEYBOARD_NOTICE.ends_with(&format!(": {COMMAND}")),
+        "the command is last, after a colon: {NO_KEYBOARD_NOTICE}"
+    );
+    assert_eq!(NO_KEYBOARD_NOTICE.matches("usermod").count(), 1);
+    // QA's docs point at these words.
+    assert!(NO_KEYBOARD_NOTICE.contains("cannot read the keyboard"));
+    assert!(NO_KEYBOARD_NOTICE.contains("then log out and back in"));
+}
+
+/// Tab keys that end at once, like a stream whose hotplug scanner died.
+struct EndedKeys;
+
+impl stat_tracker::tab_retry::TabKeySource for EndedKeys {
+    async fn next_key(&mut self) -> Result<detect::TabKey, Box<dyn std::error::Error>> {
+        Err("keyboard stream ended".into())
+    }
+}
+
+/// A stream that ends right after it opens must not spin (open, Ok, Err,
+/// open) without yielding: the reopen waits for the quiet deadline. The
+/// clock is paused.
+#[tokio::test(start_paused = true)]
+async fn an_ended_keyboard_stream_reopens_at_the_deadline_not_at_once() {
+    let opens = std::rc::Rc::new(std::cell::Cell::new(0u32));
+    let open = {
+        let opens = opens.clone();
+        move || -> Result<EndedKeys, String> {
+            // Fail, not hang: a spin never yields, so the clock never moves.
+            assert!(opens.get() < 10, "reopen spins without yielding");
+            opens.set(opens.get() + 1);
+            Ok(EndedKeys)
+        }
+    };
+    let retry = Duration::from_secs(30);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut input = KeyboardInput::new(Ok(EndedKeys), open, dir.path().into(), retry);
+    assert!(input.available());
+    // Ends at 100 s; reopens are due at 30, 60 and 90 s.
+    tokio::select! {
+        biased;
+        got = input.wait_tab() => panic!("an ended stream yields no key: {:?}", got.map_err(|e| e.to_string())),
+        _ = tokio::time::sleep(Duration::from_secs(100)) => {}
+    }
+    assert_eq!(opens.get(), 3, "one reopen every {retry:?}, no spin");
+    assert_eq!(
+        stat_tracker::ocr_status::read_status(dir.path())
+            .map(|s| s.input_notice)
+            .unwrap_or_default(),
+        "",
+        "every reopen worked, so no warning"
+    );
 }
 
 #[tokio::test]

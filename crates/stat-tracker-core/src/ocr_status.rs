@@ -597,6 +597,12 @@ pub struct Status {
     /// What the focus gate (`capture_only_on_screen`) last saw. The app
     /// shows it in its top bar while a game runs.
     pub focus_gate: FocusGateStatus,
+    /// Why Tab presses cannot reach the tracker: no keyboard device could be
+    /// opened (most often the user is not in the `input` group). Capture and
+    /// recording go on. Empty while a keyboard is read. The app shows it in
+    /// Tracker health, first among the tracker's own notices (a sync
+    /// problem the app finds itself still comes before it).
+    pub input_notice: String,
 }
 
 /// The focus gate's state in [`Status`]: whether reads go on because
@@ -653,19 +659,25 @@ impl Status {
         }
     }
 
-    /// The part of [`Self::notice`] that belongs in Tracker health, then the
-    /// bans and picks line ([`Self::bans_picks_notice`]), which has nothing
-    /// to do with the OCR switch: only
-    /// what is wrong while the tracker runs with OCR off (a pack on hold, a
-    /// read that was stopped). A refused `off` is not a health problem: the
-    /// tracker runs classic OCR and reads everything, so health stays as it
-    /// is and the reason is shown in Settings.
+    /// The keyboard line ([`Self::input_notice`]) first, then the part of
+    /// [`Self::notice`] that is wrong while the tracker runs with OCR off (a
+    /// pack on hold, a read that was stopped), then the bans and picks line
+    /// ([`Self::bans_picks_notice`]), whatever OCR is set to. The keyboard
+    /// line ends with a shell command, so a line break, not a space, comes
+    /// after it. A refused `off` is not a health problem: the tracker runs
+    /// classic OCR and reads everything, so health stays as it is and the
+    /// reason is shown in Settings.
     pub fn health_notice(&self) -> Option<String> {
         let ocr = self.effective.is_off().then(|| self.notice()).flatten();
         let bans = Some(self.bans_picks_notice.clone()).filter(|n| !n.is_empty());
-        match (ocr, bans) {
+        let rest = match (ocr, bans) {
             (Some(ocr), Some(bans)) => Some(format!("{ocr} {bans}")),
             (ocr, bans) => ocr.or(bans),
+        };
+        match (self.input_notice.is_empty(), rest) {
+            (true, rest) => rest,
+            (false, None) => Some(self.input_notice.clone()),
+            (false, Some(rest)) => Some(format!("{}\n{rest}", self.input_notice)),
         }
     }
 }
@@ -685,6 +697,7 @@ static DAEMON_SHARE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::Ato
 static SHARE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static CAPTURE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static BANS_PICKS_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static INPUT_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static FOCUS_GATE: std::sync::Mutex<FocusGateStatus> =
     std::sync::Mutex::new(FocusGateStatus::Unknown);
 static STATUS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -747,6 +760,26 @@ pub fn publish_bans_picks_notice(data_dir: &Path, notice: &str) {
         return;
     }
     status.bans_picks_notice = notice.to_string();
+    let _ = write_status(data_dir, &status);
+}
+
+pub fn input_notice() -> String {
+    INPUT_NOTICE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+/// Write the keyboard input sentence into the status file (empty clears
+/// it), keeping everything else there. Later status writes keep it too.
+pub fn publish_input_notice(data_dir: &Path, notice: &str) {
+    let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
+    *INPUT_NOTICE.lock().unwrap_or_else(|err| err.into_inner()) = notice.to_string();
+    let mut status = read_status(data_dir).unwrap_or_default();
+    if status.input_notice == notice {
+        return;
+    }
+    status.input_notice = notice.to_string();
     let _ = write_status(data_dir, &status);
 }
 
@@ -1182,6 +1215,7 @@ mod tests {
             capture_notice: String::new(),
             bans_picks_notice: String::new(),
             focus_gate: FocusGateStatus::Unknown,
+            input_notice: String::new(),
         }
     }
 
@@ -1207,6 +1241,27 @@ mod tests {
         let old: Status = serde_json::from_str("{\"pid\": 3}").unwrap();
         assert_eq!(old.bans_picks_notice, "");
         assert_eq!(old.health_notice(), None);
+    }
+
+    #[test]
+    fn the_input_line_leads_tracker_health_whatever_ocr_is() {
+        // Like the daemon's notice, it ends with a shell command.
+        let input = "Tab detection is off. Run: sudo usermod -aG input \"$USER\"";
+        let mut on = status(OcrSetting::On, None, None);
+        on.input_notice = input.into();
+        assert_eq!(on.health_notice().as_deref(), Some(input));
+        assert_eq!(on.notice(), None, "it is no OCR notice");
+        on.bans_picks_notice = "Bans and picks were not read.".into();
+        // A line break ends the command: no run-on into the next notice.
+        assert_eq!(
+            on.health_notice().as_deref(),
+            Some(
+                "Tab detection is off. Run: sudo usermod -aG input \"$USER\"\nBans and picks were not read."
+            )
+        );
+        // An old status file has no such field and reads as empty.
+        let old: Status = serde_json::from_str("{\"pid\": 3}").unwrap();
+        assert_eq!(old.input_notice, "");
     }
 
     #[test]
