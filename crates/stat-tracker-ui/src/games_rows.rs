@@ -249,10 +249,11 @@ pub struct GamesTab {
     /// The last snapshot's deletes still waiting for the server; `None`
     /// until a snapshot is read after a delete.
     pub pending_deletes: Option<Vec<String>>,
-    /// Set once "Game deleted." has been drawn over the empty state, so a
-    /// later non-empty list does not show that note at row 0.
-    pub deleted_empty_shown: std::cell::Cell<bool>,
-    /// The held-game picker, when one is open.
+    /// Set by the delete that left the filters no row to show, so its
+    /// "Game deleted." stands over the empty state and a later non-empty
+    /// list does not show that note at row 0.
+    pub deleted_empty_shown: bool,
+    /// The Set map or Set hero picker, when one is open.
     pub picker: Option<crate::games_picker::Picker>,
     /// The grid last drawn (the view sets it), so a delete from the keys
     /// finds the next row in the order the player sees.

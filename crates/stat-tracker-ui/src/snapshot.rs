@@ -14,10 +14,10 @@ use crate::model::Game;
 /// stopped, and the GUI never applies commands itself). The tracker
 /// removes the rows when it applies the delete. A pending tombstone alone
 /// hides nothing (the store keeps some for games it keeps); it only feeds
-/// the "next sync" line, as does a queued delete. A queued map or hero
-/// pick and a queued upload retry show the same way
-/// ([`overlay_queued`]), so a reload brings back neither Needs a look nor
-/// Upload rejected while they wait.
+/// the "next sync" line, as does a queued delete. A queued Edit (from the
+/// edit form or a Set map or Set hero pick) and a queued upload retry
+/// show the same way ([`overlay_queued`]), so a reload brings back
+/// neither Needs a look nor Upload rejected while they wait.
 pub fn load_snapshot(data_dir: &Path) -> Snapshot {
     let mut snap = storage::read_snapshot(data_dir).unwrap_or_default();
     let cmds = queued_commands(data_dir);

@@ -180,7 +180,6 @@ pub fn save_edit(
     let release = was_held.then(|| release_toast(&after, in_progress, sync_on));
     Ok(saved(
         held,
-        was_held,
         stats_changed,
         map_changed,
         hero_fixed,
@@ -190,7 +189,9 @@ pub fn save_edit(
 }
 
 /// [`save_edit`] for the open Edit form: the toast follows whether this
-/// game is still being played and whether a website is linked.
+/// game is still being played and whether a website is linked, read as
+/// the panel reads it ([`crate::games_panel::sync_on`]), so the toast and
+/// the picker's line never disagree.
 pub fn save_edit_for(
     app: &crate::app::TrackerApp,
     game: &Game,
@@ -205,7 +206,7 @@ pub fn save_edit_for(
             game.outcome,
             app.live_game_session.as_deref(),
         ),
-        app.sync_on(),
+        crate::games_panel::sync_on(app),
     )
 }
 
@@ -217,7 +218,6 @@ pub fn save_edit_for(
 /// linked it stays on this computer.
 fn saved(
     held: bool,
-    _was_held: bool,
     stats_changed: bool,
     map_changed: bool,
     hero_fixed: bool,
@@ -382,7 +382,6 @@ mod tests {
 
     fn toast_saved(
         held: bool,
-        was_held: bool,
         stats_changed: bool,
         map_changed: bool,
         hero_fixed: bool,
@@ -390,7 +389,6 @@ mod tests {
     ) -> Saved {
         saved(
             held,
-            was_held,
             stats_changed,
             map_changed,
             hero_fixed,
@@ -538,6 +536,49 @@ mod tests {
             save_edit(&tmp(), &g, &form, false, false).unwrap().toast,
             RELEASED_SYNC_OFF
         );
+    }
+
+    /// Under `--fixture games` the panel reads as with a website linked, so
+    /// releasing the held game from the Edit form toasts what the picker
+    /// line says, never "no website is linked". The app's SaveEdit and the
+    /// panel read one value ([`crate::games_panel::sync_on`]).
+    #[test]
+    fn an_edit_release_under_the_games_fixture_matches_the_picker() {
+        use crate::app::Message;
+        use crate::fixtures_games::HELD;
+        use crate::games_picker::{Field, release_line};
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = crate::fixtures::test_cli(dir.path());
+        cli.fixture = Some(crate::cli::FixtureKind::Games);
+        let mut app = crate::app::TrackerApp::new(cli).0;
+        assert!(!app.sync_on(), "the fixture links no website");
+        assert!(crate::games_panel::sync_on(&app));
+        let g = app
+            .games
+            .iter()
+            .find(|g| g.session_id == HELD)
+            .unwrap()
+            .clone();
+        let picker = release_line(&g, Field::Map, Some("Ilios"), false, true);
+        assert_eq!(
+            release_line(
+                &g,
+                Field::Map,
+                Some("Ilios"),
+                false,
+                crate::games_panel::sync_on(&app)
+            ),
+            picker
+        );
+        assert!(!picker.contains("no website is linked"), "{picker}");
+        app.expanded = Some(HELD.into());
+        let _ = app.update(Message::ToggleEdit);
+        assert!(app.editing);
+        app.edit.map_name = "Ilios".into();
+        app.edit.hero = "Ana".into();
+        let _ = app.update(Message::SaveEdit);
+        assert_eq!(app.toast.as_deref(), Some(RELEASED));
+        assert_ne!(app.toast.as_deref(), Some(RELEASED_SYNC_OFF));
     }
 
     /// Releasing a hold with a stat fixed too still says the stats were
@@ -746,13 +787,11 @@ mod tests {
     /// edit, "No changes to save", which offers none either.)
     #[test]
     fn an_unchanged_save_offers_no_report() {
-        let unchanged = toast_saved(false, false, false, false, false, false);
+        let unchanged = toast_saved(false, false, false, false, false);
         assert_eq!(unchanged.toast, "Saved");
         assert_eq!(unchanged.category, None);
         assert!(!offers_report(unchanged));
-        assert!(offers_report(toast_saved(
-            false, false, false, true, false, false,
-        )));
+        assert!(offers_report(toast_saved(false, false, true, false, false)));
         let app_save = |set: &dyn Fn(&mut EditForm)| {
             let (_dir, mut app) = crate::fixtures::test_app();
             let g = sample_game();
@@ -778,11 +817,11 @@ mod tests {
     #[test]
     fn an_unchanged_save_on_a_held_game_offers_no_report() {
         let held = "Saved. A map or hero is still missing, so this game stays on this computer.";
-        let unchanged = toast_saved(true, true, false, false, false, false);
+        let unchanged = toast_saved(true, false, false, false, false);
         assert_eq!(unchanged.toast, held);
         assert_eq!(unchanged.category, None);
         assert!(!offers_report(unchanged));
-        let fixed = toast_saved(true, true, true, false, false, false);
+        let fixed = toast_saved(true, true, false, false, false);
         assert_eq!(fixed.category, Some(GameCategory::WrongStats));
         assert!(offers_report(fixed));
     }

@@ -845,7 +845,7 @@ impl TrackerApp {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
-        crate::games_delete::drop_stale_note(self);
+        crate::games_table::before_message(self, &message);
         match message {
             Message::Tick => self.on_tick(),
             Message::Navigate(screen) => {

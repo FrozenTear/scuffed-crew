@@ -55,7 +55,7 @@ pub enum Msg {
     RetryAll,
     /// Delete no widget took: the open or focused row's delete confirm.
     DeleteKey,
-    /// The held-game picker.
+    /// The Set map or Set hero picker.
     Picker(crate::games_picker::Msg),
 }
 
@@ -161,21 +161,42 @@ pub fn clear_focus(app: &mut TrackerApp) {
     app.games_tab.picker = None;
 }
 
-/// Drop a row focus the filters hid since, and close an open row they hid,
-/// so a key never acts on a row the player can't see.
-pub(crate) fn drop_hidden_open_row(app: &mut TrackerApp) {
-    let order = row_order(app);
-    if let Focus::Row(sid) = &app.games_tab.focus
-        && !order.contains(sid)
-    {
-        app.games_tab.focus = Focus::None;
+/// Run before each app message: take a stale "Game deleted." down and,
+/// on any message but the 1 s tick, close a row the filters hid. A tick
+/// changes no filter, so it skips that check and the list it reads.
+pub(crate) fn before_message(app: &mut TrackerApp, message: &Message) {
+    crate::games_delete::drop_stale_note(app);
+    if !matches!(message, Message::Tick) {
+        drop_hidden_open_row(app);
     }
+}
+
+/// Drop a row focus the filters hid since, and close an open row they hid,
+/// so a key never acts on a row the player can't see. Only the top tabs
+/// take these keys, so the classic Games page keeps its open card. Hidden
+/// is the filters' call ([`crate::games::shown_games`]), not the row cap,
+/// so a game past the first 500 is not closed for it. An open Edit stays
+/// up even under a filter that hides its row: the keys do nothing to a
+/// row in Edit, and the typed text comes back with the row.
+pub(crate) fn drop_hidden_open_row(app: &mut TrackerApp) {
+    let focused_row = matches!(app.games_tab.focus, Focus::Row(_));
+    if app.nav_style != crate::nav::NavStyle::TopTabs || (app.expanded.is_none() && !focused_row) {
+        return;
+    }
+    let shown = crate::games::shown_games(app);
+    let hidden = |sid: &str| !shown.iter().any(|g| g.session_id == sid);
+    let drop_focus = matches!(&app.games_tab.focus, Focus::Row(sid) if hidden(sid));
     // Only a row the filters hid: a game that left the list stays open so
     // a pending Edit can still say it is gone.
-    if let Some(sid) = &app.expanded
-        && !order.contains(sid)
-        && app.games.iter().any(|g| g.session_id == *sid)
-    {
+    let close = !app.editing
+        && app
+            .expanded
+            .as_deref()
+            .is_some_and(|sid| hidden(sid) && app.games.iter().any(|g| g.session_id == sid));
+    if drop_focus {
+        app.games_tab.focus = Focus::None;
+    }
+    if close {
         app.expanded = None;
         app.editing = false;
         app.confirm_delete = None;
@@ -189,14 +210,9 @@ pub(crate) fn drop_hidden_open_row(app: &mut TrackerApp) {
     }
 }
 
-fn drop_hidden_row_focus(app: &mut TrackerApp) {
-    drop_hidden_open_row(app);
-}
-
 /// Enter or Space on the focused button or row. False when nothing that
 /// takes them has the focus.
 fn press_focused(app: &mut TrackerApp) -> bool {
-    drop_hidden_row_focus(app);
     let open = app.expanded.clone();
     match (app.games_tab.focus.clone(), open) {
         (Focus::Cancel, _) if app.confirm_delete.is_some() => cancel_delete(app),
@@ -228,7 +244,6 @@ fn delete_key(app: &mut TrackerApp) {
     if app.editing {
         return;
     }
-    drop_hidden_row_focus(app);
     let sid = match (&app.expanded, &app.games_tab.focus) {
         (Some(sid), _) | (None, Focus::Row(sid)) => sid.clone(),
         _ => return,
@@ -273,7 +288,8 @@ fn delete(app: &mut TrackerApp, sid: &str) {
                 uploaded,
             });
             app.games_tab.deleted_filters = Some(crate::games_delete::filters_now(app));
-            app.games_tab.deleted_empty_shown.set(false);
+            // The line goes over the empty state when no row is left.
+            app.games_tab.deleted_empty_shown = crate::games::shown_games(app).is_empty();
             app.games_tab.pending_deletes = None;
             // A "Send this fix to help training" for the deleted game would
             // open a report on a game that is gone.
@@ -348,7 +364,6 @@ pub fn view<'a>(
         // Deleting the last row the filters leave still says so.
         if let Some(note) = crate::games_delete::empty_note(app) {
             col = col.push(crate::games_delete::deleted_line(note));
-            app.games_tab.deleted_empty_shown.set(true);
         }
         let copy = if app.games.is_empty() {
             games_rows::EMPTY_NONE
@@ -370,7 +385,7 @@ pub fn view<'a>(
     let deleted = crate::games_delete::note_shows(app);
     // A note already drawn over the empty state must not land on row 0
     // when games come back under the same filters.
-    let note_at = if app.games_tab.deleted_empty_shown.get() {
+    let note_at = if app.games_tab.deleted_empty_shown {
         None
     } else {
         match &app.games_tab.focus {
@@ -1022,5 +1037,124 @@ mod tests {
             assert_ne!(app.games_tab.focus, Focus::DeleteButton, "{key:?}");
             assert_ne!(app.games_tab.focus, Focus::Cancel, "{key:?}");
         }
+    }
+
+    /// `n` older copies of the normal game, so the list runs past the
+    /// top tabs' row cap. Returns the oldest one's session id.
+    fn with_many_games(app: &mut TrackerApp, n: usize) -> String {
+        let base = app
+            .games
+            .iter()
+            .find(|g| g.session_id == NORMAL)
+            .unwrap()
+            .clone();
+        for i in 0..n {
+            let mut g = base.clone();
+            g.session_id = format!("sess-old-{i}");
+            g.played_at = base.played_at - chrono::TimeDelta::hours(1 + i as i64);
+            app.games.push(g);
+        }
+        format!("sess-old-{}", n - 1)
+    }
+
+    /// The classic layout lists every game, so an old card past the top
+    /// tabs' 500 rows keeps its delete confirm and its Edit, with the
+    /// typed text, across ticks and other messages.
+    #[test]
+    fn the_classic_layout_keeps_an_old_open_card_past_the_row_cap() {
+        let (_dir, mut app) = app();
+        app.nav_style = crate::nav::NavStyle::ClassicSidebar;
+        let old = with_many_games(&mut app, games_rows::ROW_CAP + 20);
+        assert!(!row_order(&app).contains(&old), "past the top tabs' cap");
+        app.expanded = Some(old.clone());
+        app.confirm_delete = Some(old.clone());
+        for _ in 0..3 {
+            let _ = app.update(Message::Tick);
+        }
+        let _ = app.update(Message::Navigate(Screen::Games));
+        assert_eq!(app.expanded.as_deref(), Some(old.as_str()));
+        assert_eq!(app.confirm_delete.as_deref(), Some(old.as_str()));
+        app.confirm_delete = None;
+        let _ = app.update(Message::ToggleEdit);
+        let _ = app.update(Message::EditField(
+            crate::model::EditField::Elims,
+            "40".into(),
+        ));
+        for _ in 0..3 {
+            let _ = app.update(Message::Tick);
+        }
+        let _ = app.update(Message::Navigate(Screen::Games));
+        assert!(app.editing);
+        assert_eq!(app.expanded.as_deref(), Some(old.as_str()));
+        assert_eq!(app.edit.elims, "40");
+    }
+
+    /// On the top tabs too, the row cap alone hides nothing: an open row
+    /// past the first 500 that the filters still show keeps its confirm.
+    #[test]
+    fn the_top_tabs_keep_an_open_row_past_the_row_cap() {
+        let (_dir, mut app) = app();
+        let old = with_many_games(&mut app, games_rows::ROW_CAP + 20);
+        assert!(!row_order(&app).contains(&old), "past the cap");
+        app.expanded = Some(old.clone());
+        app.confirm_delete = Some(old.clone());
+        let _ = app.update(Message::Tick);
+        let _ = app.update(Message::Navigate(Screen::Games));
+        assert_eq!(app.expanded.as_deref(), Some(old.as_str()));
+        assert_eq!(app.confirm_delete.as_deref(), Some(old.as_str()));
+    }
+
+    /// The tick never runs the hidden-row check, so it neither closes an
+    /// open row nor builds the list: a row a filter hid stays open until
+    /// the next message from the player.
+    #[test]
+    fn the_tick_does_not_run_the_hidden_row_check() {
+        let (_dir, mut app) = app();
+        app.expanded = Some(UNSURE.into());
+        app.games_tab.focus = Focus::Row(UNSURE.into());
+        app.filter_outcome = Some(Outcome::Loss);
+        for _ in 0..3 {
+            let _ = app.update(Message::Tick);
+        }
+        assert_eq!(app.expanded.as_deref(), Some(UNSURE));
+        assert_eq!(app.games_tab.focus, Focus::Row(UNSURE.into()));
+        let _ = app.update(Message::Navigate(Screen::Games));
+        assert_eq!(app.expanded, None);
+        assert_eq!(app.games_tab.focus, Focus::None);
+    }
+
+    /// A filter change mid-Edit keeps the form and its typed text: under a
+    /// filter that still shows the row, and under one that hides it until
+    /// the row is back.
+    #[test]
+    fn a_filter_change_mid_edit_keeps_the_typed_text() {
+        let (_dir, mut app) = app();
+        app.expanded = Some(UNSURE.into());
+        let _ = app.update(Message::ToggleEdit);
+        assert!(app.editing);
+        let _ = app.update(Message::EditField(
+            crate::model::EditField::Elims,
+            "41".into(),
+        ));
+        for f in [Some(Outcome::Win), Some(Outcome::Loss), None] {
+            let _ = app.update(Message::FilterOutcome(f));
+            let _ = app.update(Message::Tick);
+            assert!(app.editing, "{f:?}");
+            assert_eq!(app.expanded.as_deref(), Some(UNSURE), "{f:?}");
+            assert_eq!(app.edit.elims, "41", "{f:?}");
+        }
+    }
+
+    /// The delete marks whether it left the filters no row, so the view
+    /// only reads it.
+    #[test]
+    fn the_delete_marks_an_empty_list() {
+        let (_dir, mut app) = app();
+        send(&mut app, Msg::Delete(UNSURE.into()));
+        assert!(!app.games_tab.deleted_empty_shown, "rows are left");
+        app.filter_map = Some("Circuit Royal".into());
+        send(&mut app, Msg::Delete(NORMAL.into()));
+        assert!(crate::games::shown_games(&app).is_empty());
+        assert!(app.games_tab.deleted_empty_shown);
     }
 }

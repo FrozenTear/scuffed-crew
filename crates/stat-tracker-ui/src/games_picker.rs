@@ -428,7 +428,8 @@ fn save(app: &mut TrackerApp) {
     app.arm_training_toast(&p.sid, category);
 }
 
-/// The amber outlined "⚠ Set map" / "⚠ Set hero" on a held field.
+/// The amber outlined "⚠ Set map" / "⚠ Set hero" on a missing field
+/// ([`offers_set`]).
 pub fn set_button(sid: &str, field: Field) -> Element<'static, Message> {
     button(
         row![

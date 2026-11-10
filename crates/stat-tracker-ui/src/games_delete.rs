@@ -275,23 +275,21 @@ pub fn empty_note(app: &TrackerApp) -> Option<&'static str> {
 
 /// Take a note down once the filters changed, so it never comes back over
 /// the first table of a later list. Run before each app message. Also
-/// closes an open or focused row the filters have hidden, and drops a
-/// note that was already drawn over the empty state once rows are back.
+/// drops a note that stood over the empty state once rows are back.
 pub fn drop_stale_note(app: &mut TrackerApp) {
     if app.games_tab.deleted_note.is_some() && !note_shows(app) {
         app.games_tab.deleted_note = None;
         app.games_tab.deleted_filters = None;
-        app.games_tab.deleted_empty_shown.set(false);
+        app.games_tab.deleted_empty_shown = false;
     }
-    if app.games_tab.deleted_empty_shown.get()
+    if app.games_tab.deleted_empty_shown
         && app.games_tab.deleted_note.is_some()
         && !crate::games::shown_games(app).is_empty()
     {
         app.games_tab.deleted_note = None;
         app.games_tab.deleted_filters = None;
-        app.games_tab.deleted_empty_shown.set(false);
+        app.games_tab.deleted_empty_shown = false;
     }
-    crate::games_table::drop_hidden_open_row(app);
 }
 
 impl crate::games_rows::GamesTab {
@@ -444,8 +442,10 @@ mod tests {
         send(&mut app, Msg::Delete(sid.into()));
         assert!(app.games.is_empty());
         assert_eq!(empty_note(&app), Some(DELETED));
+        // The delete marks it, not the view: drawing changes nothing.
+        assert!(app.games_tab.deleted_empty_shown);
         let _ = crate::games_table::view(&app, 1366.0, &[], &[]);
-        assert!(app.games_tab.deleted_empty_shown.get());
+        assert!(app.games_tab.deleted_empty_shown);
         // A new game under the same filters: the note does not return at row 0.
         app.games = crate::snapshot::games_from_snapshot(&crate::fixtures_games::snapshot());
         drop_stale_note(&mut app);

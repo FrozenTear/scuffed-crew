@@ -32,6 +32,14 @@ const TILES_W_NARROW: f32 = 420.0;
 /// Every v2-only line (deltas, Read/set, notes, status) is 12px.
 const SMALL: f32 = 12.0;
 
+/// Whether the Games tab treats a website as linked: the panel, its
+/// picker and the Edit save's toast all read it here. The games fixture
+/// stands for a signed-in player: its rows upload, and some were refused,
+/// so it reads as with sync on.
+pub(crate) fn sync_on(app: &TrackerApp) -> bool {
+    app.sync_on() || app.fixture == Some(crate::cli::FixtureKind::Games)
+}
+
 /// The panel under the open row. `narrow` is the 1024 layout.
 pub fn panel<'a>(
     app: &'a TrackerApp,
@@ -42,9 +50,7 @@ pub fn panel<'a>(
     let has_kit = app.sessions_with_kit.contains(&g.session_id);
     // At 1024 the left column takes what the 420px tile column leaves.
     let picker = games_picker::open_picker(app).filter(|p| p.sid == g.session_id);
-    // The games fixture stands for a signed-in player: its rows upload,
-    // and some were refused, so its status reads as with sync on.
-    let sync_on = app.sync_on() || app.fixture == Some(crate::cli::FixtureKind::Games);
+    let sync_on = sync_on(app);
     let ctx = Ctx {
         in_progress,
         sync_on,
