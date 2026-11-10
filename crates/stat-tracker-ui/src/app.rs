@@ -2422,7 +2422,7 @@ impl TrackerApp {
                 self.ocr_switch.health_notice = health;
                 self.refresh_health();
             }
-            // The capture route notice, and the top bar's debounced focus.
+            // The capture route and keyboard notices, and the debounced focus.
             self.observe_capture_and_focus(status.as_ref(), std::time::Instant::now());
             let seen = (
                 self.daemon.pid,
@@ -2432,8 +2432,6 @@ impl TrackerApp {
                 self.kde_direct_recheck = true;
             }
             self.kde_direct_seen = seen;
-            self.ocr_switch.input_notice =
-                settings::daemon_input_notice(status.as_ref(), self.daemon.pid);
             let share = settings::daemon_share_notice(status.as_ref(), self.daemon.pid);
             if share != self.ocr_switch.share_notice {
                 self.ocr_switch.share_notice = share;
