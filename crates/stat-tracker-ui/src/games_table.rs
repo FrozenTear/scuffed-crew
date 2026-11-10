@@ -67,6 +67,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
     {
         app.games_tab.picker = None;
     }
+    drop_hidden_open_row(app);
     match msg {
         Msg::SetGrouping(g) => app.games_tab.view.grouping = g,
         // The click acts on the sort the header shows: under 1100 px a Hero
@@ -160,14 +161,36 @@ pub fn clear_focus(app: &mut TrackerApp) {
     app.games_tab.picker = None;
 }
 
-/// Drop a row focus the filters hid since, so a key never acts on a row
-/// the player can't see.
-fn drop_hidden_row_focus(app: &mut TrackerApp) {
+/// Drop a row focus the filters hid since, and close an open row they hid,
+/// so a key never acts on a row the player can't see.
+pub(crate) fn drop_hidden_open_row(app: &mut TrackerApp) {
+    let order = row_order(app);
     if let Focus::Row(sid) = &app.games_tab.focus
-        && !row_order(app).contains(sid)
+        && !order.contains(sid)
     {
         app.games_tab.focus = Focus::None;
     }
+    // Only a row the filters hid: a game that left the list stays open so
+    // a pending Edit can still say it is gone.
+    if let Some(sid) = &app.expanded
+        && !order.contains(sid)
+        && app.games.iter().any(|g| g.session_id == *sid)
+    {
+        app.expanded = None;
+        app.editing = false;
+        app.confirm_delete = None;
+        app.games_tab.picker = None;
+        if matches!(
+            app.games_tab.focus,
+            Focus::DeleteButton | Focus::Cancel | Focus::ConfirmDelete
+        ) {
+            app.games_tab.focus = Focus::None;
+        }
+    }
+}
+
+fn drop_hidden_row_focus(app: &mut TrackerApp) {
+    drop_hidden_open_row(app);
 }
 
 /// Enter or Space on the focused button or row. False when nothing that
@@ -250,6 +273,7 @@ fn delete(app: &mut TrackerApp, sid: &str) {
                 uploaded,
             });
             app.games_tab.deleted_filters = Some(crate::games_delete::filters_now(app));
+            app.games_tab.deleted_empty_shown.set(false);
             app.games_tab.pending_deletes = None;
             // A "Send this fix to help training" for the deleted game would
             // open a report on a game that is gone.
@@ -324,6 +348,7 @@ pub fn view<'a>(
         // Deleting the last row the filters leave still says so.
         if let Some(note) = crate::games_delete::empty_note(app) {
             col = col.push(crate::games_delete::deleted_line(note));
+            app.games_tab.deleted_empty_shown.set(true);
         }
         let copy = if app.games.is_empty() {
             games_rows::EMPTY_NONE
@@ -343,11 +368,17 @@ pub fn view<'a>(
         .collect();
     // "Game deleted." tops the table of the row the focus moved to.
     let deleted = crate::games_delete::note_shows(app);
-    let note_at = match &app.games_tab.focus {
-        Focus::Row(sid) if deleted => order.iter().position(|s| *s == sid.as_str()),
-        _ => None,
-    }
-    .or(deleted.then_some(0));
+    // A note already drawn over the empty state must not land on row 0
+    // when games come back under the same filters.
+    let note_at = if app.games_tab.deleted_empty_shown.get() {
+        None
+    } else {
+        match &app.games_tab.focus {
+            Focus::Row(sid) if deleted => order.iter().position(|s| *s == sid.as_str()),
+            _ => None,
+        }
+        .or(deleted.then_some(0))
+    };
     let copy = crate::games_delete::deleted_copy(app);
     let mut seen = 0;
     for section in layout.sections {
@@ -973,9 +1004,23 @@ mod tests {
             assert_eq!(app.games_tab.focus, Focus::None, "{key:?}");
         }
         // Still shown: Enter opens it.
-        let (_dir, mut app) = app();
-        app.games_tab.focus = Focus::Row(UNSURE.into());
-        send(&mut app, Msg::Enter);
-        assert_eq!(app.expanded.as_deref(), Some(UNSURE));
+        {
+            let (_dir, mut app) = app();
+            app.games_tab.focus = Focus::Row(UNSURE.into());
+            send(&mut app, Msg::Enter);
+            assert_eq!(app.expanded.as_deref(), Some(UNSURE));
+        }
+        // An open row a filter hid later is closed: Delete, Tab and Enter
+        // never act on a row the player can't see.
+        for key in [Msg::Enter, Msg::Tab, Msg::DeleteKey] {
+            let (_dir, mut app) = app();
+            app.expanded = Some(UNSURE.into());
+            app.filter_outcome = Some(Outcome::Loss);
+            send(&mut app, key.clone());
+            assert_eq!(app.expanded, None, "{key:?}");
+            assert_eq!(app.confirm_delete, None, "{key:?}");
+            assert_ne!(app.games_tab.focus, Focus::DeleteButton, "{key:?}");
+            assert_ne!(app.games_tab.focus, Focus::Cancel, "{key:?}");
+        }
     }
 }

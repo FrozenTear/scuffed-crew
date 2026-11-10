@@ -213,11 +213,40 @@ pub fn shows_filters(app: &TrackerApp) -> bool {
     !crate::games_state::loading(app) && !app.games.is_empty()
 }
 
-/// The latest session of `games` (newest first), split by [`session_gap`].
+/// The latest sitting of all of `app.games`, with only the shown games
+/// (`games`) kept, split by [`session_gap`]. A hero or map filter does
+/// not split a sitting the Games tab keeps together.
 pub fn latest_session(app: &TrackerApp, games: &[&Game]) -> Option<SessionGroup> {
-    group_by_session_gap(games, session_gap(app.saved_config.session_window_secs))
-        .into_iter()
-        .next()
+    latest_session_in(
+        &app.games,
+        games,
+        session_gap(app.saved_config.session_window_secs),
+    )
+}
+
+/// [`latest_session`] for any list and the rows shown from it.
+pub fn latest_session_in(
+    all: &[Game],
+    shown: &[&Game],
+    gap: chrono::TimeDelta,
+) -> Option<SessionGroup> {
+    let shown_at: std::collections::HashSet<*const Game> =
+        shown.iter().map(|g| *g as *const Game).collect();
+    for sitting in crate::games_rows::sittings(all, gap) {
+        let keep: Vec<&Game> = sitting
+            .into_iter()
+            .filter(|g| shown_at.contains(&(*g as *const Game)))
+            .collect();
+        if keep.is_empty() {
+            continue;
+        }
+        // They already share a sitting through any hidden games, so do
+        // not split them again with the same gap.
+        return group_by_session_gap(&keep, chrono::TimeDelta::MAX)
+            .into_iter()
+            .next();
+    }
+    None
 }
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
@@ -355,12 +384,63 @@ mod tests {
             }];
         }
         let refs: Vec<&Game> = games.iter().collect();
-        let overview = latest_session(&app, &refs).unwrap();
-        assert_eq!(overview.games.len(), 2);
         let gap = session_gap(app.saved_config.session_window_secs);
+        let overview = latest_session_in(&games, &refs, gap).unwrap();
+        assert_eq!(overview.games.len(), 2);
         let sittings = crate::games_rows::sittings(&games, gap);
         assert_eq!(sittings.len(), 1);
         assert_eq!(sittings[0].len(), 2);
+    }
+
+    /// A hero or map filter that hides a middle game of the latest sitting
+    /// keeps that sitting together, as Games does; grouping only the shown
+    /// games would split it.
+    #[test]
+    fn a_filter_does_not_split_the_latest_session() {
+        use crate::model::SegmentView;
+        let t = |m: i64| {
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 9, 2, 20, 0, 0).unwrap()
+                + chrono::TimeDelta::minutes(m)
+        };
+        let seg = |start, end, hero: &str| SegmentView {
+            index: 0,
+            hero: hero.into(),
+            role: Role::Damage,
+            snapshots: 4,
+            confirmed: true,
+            dismissed: false,
+            resolution: None,
+            first_seen: t(start),
+            last_seen: t(end),
+        };
+        let one = |hero: &str, start, end| {
+            let mut g = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+                crate::cli::FixtureKind::Sample,
+            ))
+            .remove(0);
+            g.hero = hero.into();
+            g.played_at = t(end);
+            g.segments = vec![seg(start, end, hero)];
+            g
+        };
+        // 10 min between games, 40 min from first end to last start if the
+        // middle game is hidden: over a 30 min window that would split.
+        let games = vec![
+            one("Soldier: 76", 60, 80),
+            one("Ana", 30, 50),
+            one("Soldier: 76", 0, 20),
+        ];
+        let shown: Vec<&Game> = vec![&games[0], &games[2]];
+        let gap = chrono::TimeDelta::minutes(30);
+        assert_eq!(
+            group_by_session_gap(&shown, gap).len(),
+            2,
+            "shown-only grouping would split"
+        );
+        let session = latest_session_in(&games, &shown, gap).unwrap();
+        assert_eq!(session.games.len(), 2);
+        assert_eq!(session.games[0].hero, "Soldier: 76");
+        assert_eq!(session.games[1].hero, "Soldier: 76");
     }
 
     #[test]

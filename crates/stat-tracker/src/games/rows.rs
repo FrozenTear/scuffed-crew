@@ -63,14 +63,15 @@ pub fn queued_deletes(data_dir: &Path) -> Vec<String> {
         .collect()
 }
 
-/// Show the queued map and hero picks and upload retries on `snap`'s rows
-/// as the tracker will apply them, so a reload before it does (or with it
+/// Show the queued edits and upload retries on `snap`'s rows as the
+/// tracker will apply them, so a reload before it does (or with it
 /// stopped) does not bring back Needs a look or Upload rejected while the
-/// command still waits. Only the map and hero of an edit are shown here;
-/// the tracker applies the rest. `cmds` is oldest first, so a later pick
-/// wins.
+/// command still waits. Edits go through [`crate::storage::apply_match_edit`]
+/// and clear `synced` and `upload_reject` as `edit_match` does. `cmds` is
+/// oldest first, so a later pick wins.
 pub fn overlay_queued(snap: &mut Snapshot, cmds: &[crate::storage::StoreCommand]) {
     use crate::storage::StoreCommand;
+    let now = surrealdb_types::Datetime::from(chrono::Utc::now());
     for cmd in cmds {
         match cmd {
             StoreCommand::EditMatch { session_id, edit } if !session_id.is_empty() => {
@@ -79,13 +80,9 @@ pub fn overlay_queued(snap: &mut Snapshot, cmds: &[crate::storage::StoreCommand]
                     .iter_mut()
                     .filter(|m| &m.session_id == session_id)
                 {
-                    if let Some(map) = &edit.map_name {
-                        m.corrected_map_name = Some(map.clone());
-                        mark_edited(&mut m.edited_fields, "map_name");
-                        crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "map_name");
-                    }
-                    if let Some(hero) = &edit.hero {
-                        pick_hero(m, hero, edit.role.is_some());
+                    if crate::storage::apply_match_edit(m, edit, now) {
+                        m.synced = false;
+                        m.upload_reject = None;
                     }
                 }
             }
@@ -108,25 +105,6 @@ pub fn overlay_queued(snap: &mut Snapshot, cmds: &[crate::storage::StoreCommand]
     }
 }
 
-fn mark_edited(fields: &mut Vec<String>, name: &str) {
-    if !fields.iter().any(|f| f == name) {
-        fields.push(name.to_string());
-    }
-}
-
-/// A hero pick as the store applies it: the hero, and the role it implies
-/// when the edit set none and it differs.
-fn pick_hero(m: &mut crate::model::PersonalMatch, hero: &str, role_set: bool) {
-    m.corrected_hero = Some(hero.to_string());
-    mark_edited(&mut m.edited_fields, "hero");
-    crate::suspect::clear_edited_suspects(&mut m.suspect_fields, "hero");
-    let guessed = crate::parse::guess_role_public(hero);
-    if !role_set && !crate::parse::hero_is_unknown_label(hero) && guessed != m.display_role() {
-        m.corrected_role = Some(guessed);
-        mark_edited(&mut m.edited_fields, "role");
-    }
-}
-
 /// Drop the match and session rows of these games.
 pub fn drop_sessions(snap: &mut Snapshot, gone: &[String]) {
     if gone.is_empty() {
@@ -135,4 +113,83 @@ pub fn drop_sessions(snap: &mut Snapshot, gone: &[String]) {
     snap.matches
         .retain(|m| m.session_id.is_empty() || !gone.contains(&m.session_id));
     snap.sessions.retain(|s| !gone.contains(&s.session_id));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::PersonalMatch;
+    use crate::storage::{MatchEdit, StoreCommand};
+
+    fn pm(session_id: &str) -> PersonalMatch {
+        PersonalMatch {
+            id: None,
+            hero: "Mercy".into(),
+            map_name: "Ilios".into(),
+            game_mode: "Competitive".into(),
+            role: "Support".into(),
+            outcome: "win".into(),
+            elims: 1,
+            deaths: 1,
+            assists: 1,
+            damage: 1,
+            healing: 1,
+            mitigation: 0,
+            played_at: surrealdb_types::Datetime::from(
+                chrono::DateTime::parse_from_rfc3339("2026-10-18T20:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+            ),
+            synced: true,
+            sync_rev: 0,
+            upload_reject: Some("server said no".into()),
+            session_id: session_id.into(),
+            corrected_hero: None,
+            corrected_role: None,
+            corrected_map_name: None,
+            corrected_outcome: None,
+            corrected_elims: None,
+            corrected_deaths: None,
+            corrected_assists: None,
+            corrected_damage: None,
+            corrected_healing: None,
+            corrected_mitigation: None,
+            edited_fields: Vec::new(),
+            edited_at: None,
+            heroes_played: Vec::new(),
+            segment_resolutions: Vec::new(),
+            recognizer: String::new(),
+            suspect_fields: Vec::new(),
+            name_recognizer: None,
+            bans_picks: None,
+            bans_picks_status: None,
+            queue_title: None,
+        }
+    }
+
+    /// A queued hero plus role edit shows the role from the edit, not the
+    /// guessed one, and drops synced and a refused upload as the store does.
+    #[test]
+    fn overlay_queued_applies_the_edit_role_and_clears_sync() {
+        let mut snap = Snapshot {
+            matches: vec![pm("s1")],
+            ..Snapshot::default()
+        };
+        overlay_queued(
+            &mut snap,
+            &[StoreCommand::EditMatch {
+                session_id: "s1".into(),
+                edit: MatchEdit {
+                    hero: Some("Ana".into()),
+                    role: Some("Tank".into()),
+                    ..MatchEdit::default()
+                },
+            }],
+        );
+        let m = &snap.matches[0];
+        assert_eq!(m.display_hero(), "Ana");
+        assert_eq!(m.display_role(), "Tank");
+        assert!(!m.synced);
+        assert_eq!(m.upload_reject, None);
+    }
 }

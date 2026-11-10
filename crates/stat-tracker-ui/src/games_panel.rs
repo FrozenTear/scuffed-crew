@@ -61,6 +61,7 @@ pub fn panel<'a>(
         crate::games_delete::strip(
             &g.session_id,
             crate::games_delete::reach(g, in_progress),
+            sync_on,
             &app.games_tab.focus,
         )
     });
@@ -213,7 +214,7 @@ fn section_label(label: &'static str) -> Element<'static, Message> {
 }
 
 /// The map, its mode chip, EDITED when set by hand, and "Set map" (or
-/// the open picker) while the game is held for it.
+/// the open picker) when the field offers Set.
 fn map_line(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Message> {
     if let Some(p) = picker.filter(|p| p.field == Field::Map) {
         return games_picker::view(g, p, ctx.in_progress, ctx.sync_on);
@@ -251,9 +252,9 @@ fn edited(g: &Game, field: Field) -> bool {
     g.edited_fields.iter().any(|f| f == field.edited_name())
 }
 
-/// "Set map" / "Set hero" on a field the game is held for.
+/// "Set map" / "Set hero" on a field that offers Set.
 fn with_set<'a>(r: Row<'a, Message>, g: &Game, field: Field, editing: bool) -> Row<'a, Message> {
-    if !editing && games_picker::held_for(g, field) {
+    if !editing && games_picker::offers_set(g, field) {
         return r.push(games_picker::set_button(&g.session_id, field));
     }
     r

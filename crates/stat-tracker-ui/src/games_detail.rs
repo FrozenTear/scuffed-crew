@@ -595,9 +595,9 @@ pub fn upload(g: &Game, in_progress: bool, sync_on: bool) -> Upload {
 /// The notice under an uploaded game a map or hero is missing from (an
 /// older build sent it blank), as the classic card says it: "Map is
 /// missing. Pick one to fix it on the site." Its Set control is
-/// [`crate::games_picker::held_for`]'s. `None` for any other game.
+/// [`crate::games_picker::offers_set`]'s. `None` for any other game.
 pub fn site_fix_notice(g: &Game, up: &Upload) -> Option<&'static str> {
-    if *up != Upload::Uploaded {
+    if *up != Upload::Uploaded || g.session_id.is_empty() {
         return None;
     }
     g.review_notice()
@@ -1090,6 +1090,11 @@ mod tests {
         let up = upload(&g, false, true);
         assert_eq!(up, Upload::Held("map"));
         assert_eq!(site_fix_notice(&g, &up), None, "the Held box says it");
+        g.synced = true;
+        g.session_id.clear();
+        let up = upload(&g, false, true);
+        assert_eq!(up, Upload::Uploaded);
+        assert_eq!(site_fix_notice(&g, &up), None, "imported: no session id");
     }
 
     /// A game the uploader keeps back says so instead of "Waiting".

@@ -249,6 +249,9 @@ pub struct GamesTab {
     /// The last snapshot's deletes still waiting for the server; `None`
     /// until a snapshot is read after a delete.
     pub pending_deletes: Option<Vec<String>>,
+    /// Set once "Game deleted." has been drawn over the empty state, so a
+    /// later non-empty list does not show that note at row 0.
+    pub deleted_empty_shown: std::cell::Cell<bool>,
     /// The held-game picker, when one is open.
     pub picker: Option<crate::games_picker::Picker>,
     /// The grid last drawn (the view sets it), so a delete from the keys
@@ -686,7 +689,7 @@ where
             });
         }
         Grouping::Sessions => {
-            let ids: HashSet<&str> = shown.iter().map(|g| g.session_id.as_str()).collect();
+            let shown_at: HashSet<*const Game> = shown.iter().map(|g| *g as *const Game).collect();
             // A window of 0 is off: each game is its own session.
             let mut groups = sittings(all, crate::aggregate::session_window_gap(gap_secs));
             if sort.oldest_first() {
@@ -696,7 +699,7 @@ where
                 let mut rows: Vec<&Game> = group
                     .iter()
                     .copied()
-                    .filter(|g| ids.contains(g.session_id.as_str()))
+                    .filter(|g| shown_at.contains(&(*g as *const Game)))
                     .collect();
                 if rows.is_empty() {
                     continue;
@@ -1144,9 +1147,8 @@ mod tests {
         assert_eq!(head.summary, "2 games · 1-1 · 50 min");
     }
 
-    /// Item 19: Delete game takes the game out of the list every header is
-    /// built from, so the sitting's span and count follow the delete (no
-    /// stale end time), as PR 556 left it.
+    /// Delete game takes the game out of every header, so the sitting's
+    /// span and count follow (no stale end time).
     #[test]
     fn a_deleted_game_leaves_the_session_span() {
         let mut games = vec![
@@ -1202,6 +1204,17 @@ mod tests {
         assert_eq!(head.summary, "3 games · 2-1 · 1 h 0 min · 2 shown");
         assert_eq!(s.ticks.len(), 3);
         assert_eq!(l.hidden, 0);
+        // Imported games share an empty session id: keep only the shown ones.
+        let mut imported = all;
+        for g in &mut imported {
+            g.session_id.clear();
+        }
+        let shown = vec![&imported[0], &imported[2]];
+        let state = TabState::default();
+        let l = layout_in(&imported, &shown, state, Grid::Wide, 1800, None, &utc());
+        assert_eq!(l.sections[0].rows.len(), 2);
+        assert!(std::ptr::eq(l.sections[0].rows[0], shown[0]));
+        assert!(std::ptr::eq(l.sections[0].rows[1], shown[1]));
     }
 
     #[test]

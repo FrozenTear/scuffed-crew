@@ -1,11 +1,12 @@
-//! The held-game picker (UX Spec, OQ5 follow-up): a game held for a
-//! missing map or hero shows an amber "Set map" or "Set hero" on that
-//! field in its open row. It opens an inline search box over the known
-//! names only (the map list with mode chips, or the hero list), the read's
-//! best match first. Save stays off until a name is picked; Cancel and Esc
-//! close it. Save queues the same edit as the edit form, so the field gets
-//! its EDITED badge, the row loses Needs a look, and the game waits to
-//! upload once nothing else is missing.
+//! The Set-field picker (UX Spec, OQ5 follow-up): a game missing a map or
+//! hero shows an amber "Set map" or "Set hero" on that field in its open
+//! row, when the game has a session id so a save can run. It opens an
+//! inline search box over the known names only (the map list with mode
+//! chips, or the hero list), the read's best match first. Save stays off
+//! until a name is picked; Cancel and Esc close it. Save queues the same
+//! edit as the edit form, so the field gets its EDITED badge, the row
+//! loses Needs a look, and the game waits to upload once nothing else is
+//! missing.
 
 use iced::widget::{
     Column, button, column, container, image, row, scrollable, space, text, text_input,
@@ -122,12 +123,13 @@ pub fn input_id() -> iced::widget::Id {
     iced::widget::Id::new("games-picker-search")
 }
 
-/// Whether the field gets Set: whenever the game is missing it (its
-/// Needs a look), as the classic card's picks. A held game uploads once it
+/// Whether the field gets Set: the game is missing it (its Needs a look)
+/// and has a session id, so a save can run. An imported row with an empty
+/// session id cannot be changed in the app. A held game uploads once it
 /// is set; an uploaded one an older build sent blank is fixed on the site
 /// ([`crate::games_detail::site_fix_notice`] says so).
-pub fn held_for(g: &Game, field: Field) -> bool {
-    g.review_fields().contains(&field.review_name())
+pub fn offers_set(g: &Game, field: Field) -> bool {
+    !g.session_id.is_empty() && g.review_fields().contains(&field.review_name())
 }
 
 /// The picker of the open row, while neither Edit nor the delete confirm
@@ -328,6 +330,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
                 p.active = 0;
                 p.top = 0;
                 p.picked = None;
+                return scroll_list(0);
             }
         }
         Msg::Move(by) => {
@@ -797,13 +800,13 @@ mod tests {
     fn the_held_game_gets_set_controls_and_others_do_not() {
         let (_dir, app) = app();
         let g = game(&app, HELD);
-        assert!(held_for(g, Field::Map) && held_for(g, Field::Hero));
+        assert!(offers_set(g, Field::Map) && offers_set(g, Field::Hero));
         assert_eq!(
             upload(g, false, true).detail(""),
             "The map and hero are missing. This game stays on this computer until you set them."
         );
         let n = game(&app, NORMAL);
-        assert!(!held_for(n, Field::Map) && !held_for(n, Field::Hero));
+        assert!(!offers_set(n, Field::Map) && !offers_set(n, Field::Hero));
     }
 
     /// Typing filters the known names (any case); the read's match is first.
@@ -879,7 +882,10 @@ mod tests {
         open(&mut app, Field::Map);
         let _ = update(&mut app, Msg::Pick("Ilios".into()));
         assert!(can_save(app.games_tab.picker.as_ref().unwrap()));
-        let _ = update(&mut app, Msg::Query("il".into()));
+        let _ = update(&mut app, Msg::Move(6));
+        assert_eq!(app.games_tab.picker.as_ref().unwrap().top, 1);
+        let task = update(&mut app, Msg::Query("il".into()));
+        assert_eq!(task.units(), 1);
         let p = app.games_tab.picker.clone().unwrap();
         assert_eq!((p.picked, p.active, p.top), (None, 0, 0));
         let _ = update(&mut app, Msg::Save);
@@ -923,7 +929,7 @@ mod tests {
         let _ = crate::games_table::update(&mut app, crate::games_table::Msg::Escape);
         assert!(app.games_tab.picker.is_none());
         assert!(crate::commands::queued(&app.data_dir).is_empty());
-        assert!(held_for(game(&app, HELD), Field::Map));
+        assert!(offers_set(game(&app, HELD), Field::Map));
     }
 
     /// With the hero still unknown, saving the map leaves the game held.
@@ -1031,15 +1037,21 @@ mod tests {
         let mut g = game(&app, HELD).clone();
         g.outcome = crate::model::Outcome::Unknown;
         g.synced = true;
-        assert!(held_for(&g, Field::Map) && held_for(&g, Field::Hero));
+        assert!(offers_set(&g, Field::Map) && offers_set(&g, Field::Hero));
         g.outcome = crate::model::Outcome::Win;
         // Uploaded (an older build sent it with the map and hero blank):
         // not held, but still Set, to fix it on the site.
         assert_eq!(upload(&g, false, true), Upload::Uploaded);
-        assert!(held_for(&g, Field::Map) && held_for(&g, Field::Hero));
+        assert!(offers_set(&g, Field::Map) && offers_set(&g, Field::Hero));
         assert_eq!(
             crate::games_detail::site_fix_notice(&g, &upload(&g, false, true)),
             Some("Map and hero are missing. Pick them to fix this game on the site.")
+        );
+        g.session_id.clear();
+        assert!(!offers_set(&g, Field::Map) && !offers_set(&g, Field::Hero));
+        assert_eq!(
+            crate::games_detail::site_fix_notice(&g, &upload(&g, false, true)),
+            None
         );
     }
 

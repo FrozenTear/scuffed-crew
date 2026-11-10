@@ -40,8 +40,10 @@ pub enum Reach {
     Local,
 }
 
-/// Where deleting `g` reaches. `in_progress` is the open session. The
-/// strip and the "Game deleted." line both come from this one call.
+/// Where deleting `g` reaches. `in_progress` is the open session, kept so
+/// the strip and the "Game deleted." line share one call shape; it does
+/// not change the result. A live game with no result is Local: the
+/// uploader never sends `outcome = unknown`.
 ///
 /// - Site: the row is synced and has a result (the daemon marks a
 ///   no-result row synced without sending it).
@@ -49,8 +51,8 @@ pub enum Reach {
 ///   or hero missing), and no edit or refused upload says an earlier copy
 ///   was sent.
 /// - Maybe: anything else.
-pub fn reach(g: &Game, in_progress: bool) -> Reach {
-    let no_result = g.outcome == crate::model::Outcome::Unknown && !in_progress;
+pub fn reach(g: &Game, _in_progress: bool) -> Reach {
+    let no_result = g.outcome == crate::model::Outcome::Unknown;
     if g.synced && !no_result {
         return Reach::Site;
     }
@@ -63,16 +65,23 @@ pub fn reach(g: &Game, in_progress: bool) -> Reach {
     }
 }
 
-/// The confirm strip's body for where the delete reaches.
-pub fn body(reach: Reach) -> &'static str {
-    match reach {
-        Reach::Site => {
+/// Maybe, with no website linked: do not assume a site copy exists.
+pub const MAYBE_SYNC_OFF: &str =
+    "This game is not known to have been sent. Your stats and averages update without it.";
+
+/// The confirm strip's body for where the delete reaches. `sync_on` is
+/// whether a website is linked: with it off, Maybe does not talk about
+/// a site copy.
+pub fn body(reach: Reach, sync_on: bool) -> &'static str {
+    match (reach, sync_on) {
+        (Reach::Site, _) => {
             "It will also be removed from the site. Your stats and averages update without it."
         }
-        Reach::Maybe => {
+        (Reach::Maybe, false) => MAYBE_SYNC_OFF,
+        (Reach::Maybe, true) => {
             "If a copy reached the site, it's removed there too. Your stats and averages update without it."
         }
-        Reach::Local => {
+        (Reach::Local, _) => {
             "It's only on this computer, so this removes it for good. Your stats and averages update without it."
         }
     }
@@ -143,7 +152,7 @@ pub fn button_for(sid: &str, focused: bool) -> Element<'static, Message> {
 
 /// "Delete this game?", the body for the upload state, Cancel (focused
 /// first) and the solid Delete game, and the "Esc cancels" hint.
-pub fn strip(sid: &str, reach: Reach, focus: &Focus) -> Element<'static, Message> {
+pub fn strip(sid: &str, reach: Reach, sync_on: bool, focus: &Focus) -> Element<'static, Message> {
     let cancel = sized(
         label(None, "Cancel", TEXT),
         |_: &Theme, status| button::Style {
@@ -192,7 +201,7 @@ pub fn strip(sid: &str, reach: Reach, focus: &Focus) -> Element<'static, Message
                 .size(SIZE_META)
                 .font(FONT_SEMIBOLD)
                 .color(TEXT),
-            text(body(reach)).size(SMALL).color(TEXT_2),
+            text(body(reach, sync_on)).size(SMALL).color(TEXT_2),
             buttons,
             hint,
         ]
@@ -265,12 +274,24 @@ pub fn empty_note(app: &TrackerApp) -> Option<&'static str> {
 }
 
 /// Take a note down once the filters changed, so it never comes back over
-/// the first table of a later list. Run before each app message.
+/// the first table of a later list. Run before each app message. Also
+/// closes an open or focused row the filters have hidden, and drops a
+/// note that was already drawn over the empty state once rows are back.
 pub fn drop_stale_note(app: &mut TrackerApp) {
     if app.games_tab.deleted_note.is_some() && !note_shows(app) {
         app.games_tab.deleted_note = None;
         app.games_tab.deleted_filters = None;
+        app.games_tab.deleted_empty_shown.set(false);
     }
+    if app.games_tab.deleted_empty_shown.get()
+        && app.games_tab.deleted_note.is_some()
+        && !crate::games::shown_games(app).is_empty()
+    {
+        app.games_tab.deleted_note = None;
+        app.games_tab.deleted_filters = None;
+        app.games_tab.deleted_empty_shown.set(false);
+    }
+    crate::games_table::drop_hidden_open_row(app);
 }
 
 impl crate::games_rows::GamesTab {
@@ -313,17 +334,17 @@ mod tests {
         let mut held = fixture_game(HELD);
         held.synced = false;
         assert_eq!(
-            body(reach(&held, false)),
+            body(reach(&held, false), true),
             "It's only on this computer, so this removes it for good. Your stats and averages update without it."
         );
         assert_eq!(
-            body(reach(&fixture_game(NORMAL), false)),
+            body(reach(&fixture_game(NORMAL), false), true),
             "It will also be removed from the site. Your stats and averages update without it."
         );
         // Not the uploaded copy, and maybe sent: no "for good" promise.
         for sid in [UNSURE, UNDECIDED] {
             assert_eq!(
-                body(reach(&fixture_game(sid), false)),
+                body(reach(&fixture_game(sid), false), true),
                 "If a copy reached the site, it's removed there too. Your stats and averages update without it.",
                 "{sid}"
             );
@@ -341,31 +362,54 @@ mod tests {
         g.outcome = crate::model::Outcome::Unknown;
         g.synced = true;
         assert_eq!(reach(&g, false), Reach::Local, "never sent");
-        assert_eq!(reach(&g, true), Reach::Site, "live: synced as it is");
+        assert_eq!(reach(&g, true), Reach::Local, "live: never sent");
         let mut g = fixture_game(crate::fixtures_games::NORMAL);
         g.synced = false;
         assert!(!g.edited_fields.is_empty());
         assert_eq!(reach(&g, false), Reach::Maybe, "edited after an upload");
         g.edited_fields.clear();
         assert_eq!(reach(&g, false), Reach::Maybe, "waiting: may be sent");
+        assert_eq!(body(Reach::Maybe, false), MAYBE_SYNC_OFF);
+        assert!(
+            !body(Reach::Maybe, false).contains("site"),
+            "sync off does not assume a site"
+        );
     }
 
-    /// The "Game deleted." line comes from the same reach as the strip: a
-    /// never-sent no-result row the daemon marked synced reads plain.
+    /// The "Game deleted." line comes from the same reach as the strip
+    /// over the fixture states, a live game, and a synced row.
     #[test]
     fn the_deleted_line_follows_the_strip() {
-        let (_dir, mut app) = app();
-        let sid = crate::fixtures_games::NORMAL;
-        let g = app.games.iter_mut().find(|g| g.session_id == sid).unwrap();
-        g.edited_fields.clear();
-        g.outcome = crate::model::Outcome::Unknown;
-        g.synced = true;
-        send(&mut app, Msg::Delete(sid.into()));
-        assert_eq!(
-            app.games_tab.deleted_note.as_ref().map(|d| d.uploaded),
-            Some(false)
-        );
-        assert_eq!(deleted_copy(&app), DELETED);
+        use crate::fixtures_games::{HELD, NORMAL, REJECTED_2, UNDECIDED, UNSURE};
+        for (sid, live) in [
+            (NORMAL, false),
+            (UNSURE, false),
+            (UNDECIDED, false),
+            (HELD, false),
+            (REJECTED_2, false),
+            (NORMAL, true),
+            (UNDECIDED, true),
+        ] {
+            let (_dir, mut app) = app();
+            if live {
+                app.live_game_session = Some(sid.into());
+            }
+            let g = app.games.iter().find(|g| g.session_id == sid).unwrap();
+            let want = reach(
+                g,
+                crate::model::game_card_in_progress(
+                    &g.session_id,
+                    g.outcome,
+                    app.live_game_session.as_deref(),
+                ),
+            ) == Reach::Site;
+            send(&mut app, Msg::Delete(sid.into()));
+            assert_eq!(
+                app.games_tab.deleted_note.as_ref().map(|d| d.uploaded),
+                Some(want),
+                "{sid} live={live}"
+            );
+        }
     }
 
     /// Deleting the only game the filters leave still says "Game
@@ -400,6 +444,13 @@ mod tests {
         send(&mut app, Msg::Delete(sid.into()));
         assert!(app.games.is_empty());
         assert_eq!(empty_note(&app), Some(DELETED));
+        let _ = crate::games_table::view(&app, 1366.0, &[], &[]);
+        assert!(app.games_tab.deleted_empty_shown.get());
+        // A new game under the same filters: the note does not return at row 0.
+        app.games = crate::snapshot::games_from_snapshot(&crate::fixtures_games::snapshot());
+        drop_stale_note(&mut app);
+        assert!(app.games_tab.deleted_note.is_none());
+        assert!(!note_shows(&app));
     }
 
     fn app() -> (tempfile::TempDir, crate::app::TrackerApp) {

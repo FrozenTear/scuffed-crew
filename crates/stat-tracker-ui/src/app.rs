@@ -996,7 +996,7 @@ impl TrackerApp {
                     self.games
                         .iter()
                         .find(|g| &g.session_id == sid)
-                        .map(|g| crate::commands::save_edit(&self.data_dir, g, &self.edit))
+                        .map(|g| crate::commands::save_edit_for(self, g, &self.edit))
                 });
                 if let Some(sid) = sid {
                     match &saved {
