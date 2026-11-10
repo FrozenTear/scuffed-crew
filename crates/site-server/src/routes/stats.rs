@@ -1,7 +1,7 @@
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
 };
 
@@ -98,10 +98,36 @@ fn batch_too_large() -> UploadReject {
     ))
 }
 
+/// First tracker release whose legacy (no session id) uploads may reuse the
+/// stored row at the same `played_at` (alpha.3 item 22, PR 649 blocker 1).
+const LEGACY_REUSE_MIN_TRACKER: &str = "0.6.0-alpha.3";
+
+/// Legacy id rule for this upload, from its `User-Agent`.
+///
+/// Only `scuffed-stat-tracker/<version>` at `0.6.0-alpha.3` or newer (semver
+/// order, so `0.6.0-alpha.2.3` is older and `0.6.0` is newer) reuses the
+/// stored row. A missing, foreign or unparseable User-Agent keeps the
+/// pre-alpha.3 behaviour: an edited game is a new row and the original is
+/// never overwritten.
+fn legacy_id_reuse(headers: &HeaderMap) -> scuffed_db::LegacyIdReuse {
+    let min = semver::Version::parse(LEGACY_REUSE_MIN_TRACKER).expect("valid min tracker version");
+    let version = headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ua| ua.strip_prefix("scuffed-stat-tracker/"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|v| semver::Version::parse(v).ok());
+    match version {
+        Some(v) if v >= min => scuffed_db::LegacyIdReuse::ByPlayedAt,
+        _ => scuffed_db::LegacyIdReuse::Off,
+    }
+}
+
 /// POST /api/stats/upload — bulk upload personal matches (daemon token auth)
 pub(crate) async fn upload_stats(
     State(state): State<AppState>,
     daemon: LimitedUploadDaemon,
+    headers: HeaderMap,
     Json(body): Json<StatsUploadBody>,
 ) -> Result<Json<StatsUploadResponse>, UploadReject> {
     if crate::stats_upload_limits::stats_upload_batch_cap_enabled() && batch_over_cap(&body) {
@@ -265,7 +291,11 @@ pub(crate) async fn upload_stats(
     } else {
         state
             .db
-            .upsert_personal_matches(&daemon.member.id, &stub_matches)
+            .upsert_personal_matches_with(
+                &daemon.member.id,
+                &stub_matches,
+                legacy_id_reuse(&headers),
+            )
             .await
             .map_err(|_e| {
                 (
@@ -1238,11 +1268,27 @@ mod tests {
         token: &str,
         body: serde_json::Value,
     ) -> (StatusCode, serde_json::Value) {
-        let req = upload_request(
+        post_raw_ua(app, token, body, None).await
+    }
+
+    /// The first tracker that reuses legacy rows (PR 649 blocker 1 gate).
+    const GATED_UA: &str = "scuffed-stat-tracker/0.6.0-alpha.3";
+
+    async fn post_raw_ua(
+        app: axum::Router,
+        token: &str,
+        body: serde_json::Value,
+        user_agent: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = upload_request(
             token,
             serde_json::to_vec(&body).unwrap(),
             Ipv4Addr::LOCALHOST,
         );
+        if let Some(ua) = user_agent {
+            req.headers_mut()
+                .insert(header::USER_AGENT, ua.parse().unwrap());
+        }
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -1343,8 +1389,13 @@ mod tests {
         let mut edited = match_object("", 5);
         edited["hero"] = "Kiriko".into();
         edited["edited"] = true.into();
-        let (status, body) =
-            post_raw(app, &token, serde_json::json!({ "matches": [edited] })).await;
+        let (status, body) = post_raw_ua(
+            app,
+            &token,
+            serde_json::json!({ "matches": [edited] }),
+            Some(GATED_UA),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["inserted"], 1, "{body}");
         assert_eq!(body["skipped"], 0, "{body}");
@@ -1361,19 +1412,100 @@ mod tests {
         assert!(rows[0].session_id.starts_with("legacy-"));
     }
 
-    /// The tracker uploads played_at at nanosecond precision. The same
-    /// instant posted twice is one game; 1 µs later is another game.
+    /// PR 649 blocker 1: trackers older than 0.6.0-alpha.3, or with no
+    /// readable version, keep the pre-alpha.3 behaviour. The edit is a new
+    /// row and the original row is not overwritten.
+    #[tokio::test]
+    async fn legacy_edit_from_old_or_unknown_tracker_keeps_original() {
+        for ua in [
+            None,
+            Some("scuffed-stat-tracker/0.6.0-alpha.2.3"),
+            Some("scuffed-stat-tracker/0.5.9"),
+            Some("scuffed-stat-tracker/not-a-version"),
+            Some("curl/8.0"),
+        ] {
+            let (state, member_id, token) = daemon().await;
+            let app = create_router(state.clone());
+            let (status, _) = post_raw_ua(
+                app.clone(),
+                &token,
+                serde_json::json!({ "matches": [match_object("", 5)] }),
+                ua,
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{ua:?}");
+            let before = state
+                .db
+                .list_personal_matches(&member_id, 10, 0)
+                .await
+                .unwrap();
+
+            let mut edited = match_object("", 5);
+            edited["hero"] = "Kiriko".into();
+            edited["edited"] = true.into();
+            let (status, body) =
+                post_raw_ua(app, &token, serde_json::json!({ "matches": [edited] }), ua).await;
+            assert_eq!(status, StatusCode::OK, "{ua:?}");
+            assert_eq!(body["inserted"], 1, "{ua:?} {body}");
+
+            let rows = state
+                .db
+                .list_personal_matches(&member_id, 10, 0)
+                .await
+                .unwrap();
+            assert_eq!(rows.len(), 2, "{ua:?}: old tracker edit adds a row");
+            let original = rows
+                .iter()
+                .find(|r| r.id == before[0].id)
+                .expect("original row kept");
+            assert_eq!(original.hero, "Ana", "{ua:?}: original not overwritten");
+            assert!(!original.edited, "{ua:?}");
+        }
+    }
+
+    #[test]
+    fn legacy_id_reuse_gate_follows_semver_order() {
+        use scuffed_db::LegacyIdReuse::{ByPlayedAt, Off};
+        let gate = |ua: Option<&str>| {
+            let mut h = axum::http::HeaderMap::new();
+            if let Some(ua) = ua {
+                h.insert(header::USER_AGENT, ua.parse().unwrap());
+            }
+            super::legacy_id_reuse(&h)
+        };
+        assert_eq!(gate(None), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.2")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.2.3")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.5.12")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/garbage")), Off);
+        assert_eq!(gate(Some("other-client/0.7.0")), Off);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-alpha.3")), ByPlayedAt);
+        assert_eq!(
+            gate(Some("scuffed-stat-tracker/0.6.0-alpha.3.1")),
+            ByPlayedAt
+        );
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0-beta.1")), ByPlayedAt);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.6.0")), ByPlayedAt);
+        assert_eq!(gate(Some("scuffed-stat-tracker/0.7.2 (linux)")), ByPlayedAt);
+    }
+
+    /// The tracker uploads played_at at nanosecond precision. An edit at the
+    /// same instant is one game; 1 µs later is another game.
     #[tokio::test]
     async fn legacy_game_matches_played_at_to_the_nanosecond() {
         let (state, member_id, token) = daemon().await;
         let app = create_router(state.clone());
         let mut game = match_object("", 5);
         game["played_at"] = "2026-07-01T20:00:00.123456789Z".into();
-        for _ in 0..2 {
-            let (status, body) = post_raw(
+        let mut edit = game.clone();
+        edit["hero"] = "Kiriko".into();
+        edit["edited"] = true.into();
+        for g in [game, edit] {
+            let (status, body) = post_raw_ua(
                 app.clone(),
                 &token,
-                serde_json::json!({ "matches": [game.clone()] }),
+                serde_json::json!({ "matches": [g] }),
+                Some(GATED_UA),
             )
             .await;
             assert_eq!(status, StatusCode::OK, "{body}");
@@ -1383,11 +1515,22 @@ mod tests {
             .list_personal_matches(&member_id, 10, 0)
             .await
             .unwrap();
-        assert_eq!(rows.len(), 1, "same nanosecond instant is one game");
+        assert_eq!(
+            rows.len(),
+            1,
+            "an edit at the same nanosecond instant is one game"
+        );
+        assert_eq!(rows[0].hero, "Kiriko");
 
         let mut later = match_object("", 5);
         later["played_at"] = "2026-07-01T20:00:00.123457789Z".into();
-        let (status, _) = post_raw(app, &token, serde_json::json!({ "matches": [later] })).await;
+        let (status, _) = post_raw_ua(
+            app,
+            &token,
+            serde_json::json!({ "matches": [later] }),
+            Some(GATED_UA),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         let rows = state
             .db

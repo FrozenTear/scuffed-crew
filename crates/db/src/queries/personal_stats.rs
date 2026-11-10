@@ -446,6 +446,17 @@ const UPDATE_BY_SESSION_SQL: &str = r#"UPDATE personal_match SET
     WHERE member_id = $mid AND session_id = $sid
     RETURN AFTER"#;
 
+/// How an upload without a session id picks its legacy row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegacyIdReuse {
+    /// Reuse the member's `legacy-*` row at the same `played_at`, so an edit
+    /// of hero or map updates that row (alpha.3 item 22).
+    ByPlayedAt,
+    /// Only the content-derived id: an edited game adds a row and the
+    /// original stays (behaviour before alpha.3).
+    Off,
+}
+
 impl Database {
     /// Upsert uploaded matches, one server row per (member, session).
     ///
@@ -455,7 +466,8 @@ impl Database {
     /// or how often the client retries. Entries without a session id get a
     /// stable content-derived legacy id (see [`legacy_session_id`]), unless
     /// the member already has a `legacy-*` row at the same `played_at`: then
-    /// that row's id is reused (newest if several), so an edit of an old
+    /// that row's id is reused (the row with this upload's own content id if
+    /// present, else the newest), so an edit of an old
     /// game's hero or map updates the row in place instead of adding one
     /// (alpha.3 item 22).
     ///
@@ -471,13 +483,32 @@ impl Database {
         member_id: &str,
         matches: &[crate::types::PersonalMatch],
     ) -> DbResult<u32> {
+        self.upsert_personal_matches_with(member_id, matches, LegacyIdReuse::ByPlayedAt)
+            .await
+    }
+
+    /// [`Self::upsert_personal_matches`] with the legacy id rule chosen by the
+    /// caller. The upload route passes [`LegacyIdReuse::Off`] for trackers
+    /// older than `0.6.0-alpha.3` (or with no readable version), which keeps
+    /// the pre-alpha.3 behaviour: an edited legacy game is a new row and the
+    /// original row is never overwritten.
+    pub async fn upsert_personal_matches_with(
+        &self,
+        member_id: &str,
+        matches: &[crate::types::PersonalMatch],
+        reuse: LegacyIdReuse,
+    ) -> DbResult<u32> {
         let mut upserted = 0u32;
         for m in matches {
             let session_id = if m.session_id.is_empty() {
                 let exact = legacy_session_id(member_id, &m.hero, &m.map_name, &m.played_at);
-                self.existing_legacy_session_id(member_id, &m.played_at, &exact)
-                    .await?
-                    .unwrap_or(exact)
+                match reuse {
+                    LegacyIdReuse::ByPlayedAt => self
+                        .existing_legacy_session_id(member_id, &m.played_at, &exact)
+                        .await?
+                        .unwrap_or(exact),
+                    LegacyIdReuse::Off => exact,
+                }
             } else {
                 m.session_id.clone()
             };
@@ -1830,7 +1861,7 @@ async fn relocate_personal_match(
 
 #[cfg(test)]
 mod tests {
-    use super::{legacy_session_id, personal_match_record_key};
+    use super::{legacy_session_id, personal_match_record_key, LegacyIdReuse};
     use crate::migrations::run_migrations;
     use crate::Database;
     use chrono::{TimeZone, Utc};
@@ -2371,6 +2402,45 @@ mod tests {
         assert_eq!(rows[0].session_id, before[0].session_id);
     }
 
+    /// Blocker 1 gate: with reuse off (trackers older than 0.6.0-alpha.3),
+    /// a hero edit keeps the pre-alpha.3 behaviour. The original row stays
+    /// untouched and the edit is a second row.
+    #[tokio::test]
+    async fn legacy_edit_with_reuse_off_adds_row_and_keeps_original() {
+        let db = test_db().await;
+        db.upsert_personal_matches_with("m1", &[entry("", "victory", 10)], LegacyIdReuse::Off)
+            .await
+            .unwrap();
+        let before = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(before.len(), 1);
+
+        let mut edited = entry("", "victory", 10);
+        edited.hero = "Kiriko".into();
+        edited.edited = true;
+        db.upsert_personal_matches_with("m1", &[edited], LegacyIdReuse::Off)
+            .await
+            .unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 2, "old tracker edit adds a row");
+        let original = rows
+            .iter()
+            .find(|r| r.id == before[0].id)
+            .expect("original kept");
+        assert_eq!(original.hero, before[0].hero);
+        assert!(!original.edited, "original row is not overwritten");
+        assert!(rows.iter().any(|r| r.hero == "Kiriko" && r.edited));
+
+        // A plain retry with reuse off still dedupes by content.
+        db.upsert_personal_matches_with("m1", &[entry("", "victory", 10)], LegacyIdReuse::Off)
+            .await
+            .unwrap();
+        assert_eq!(
+            db.list_personal_matches("m1", 10, 0).await.unwrap().len(),
+            2
+        );
+    }
+
     #[tokio::test]
     async fn legacy_map_edit_updates_same_row() {
         let db = test_db().await;
@@ -2578,6 +2648,10 @@ mod tests {
         let mut after_ids: Vec<_> = after.iter().map(|r| r.session_id.clone()).collect();
         after_ids.sort();
         assert_eq!(after_ids, ids, "ids are unchanged");
+        for b in &before {
+            let a = after.iter().find(|r| r.id == b.id).expect("row kept");
+            assert_eq!(a.played_at, b.played_at, "each row keeps its own played_at");
+        }
     }
 
     /// A row stored with an empty session id before the unique-index

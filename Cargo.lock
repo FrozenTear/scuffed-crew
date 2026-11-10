@@ -10966,6 +10966,7 @@ dependencies = [
  "scuffed-chat",
  "scuffed-db",
  "scuffed-types",
+ "semver",
  "serde",
  "serde_json",
  "sha2",
