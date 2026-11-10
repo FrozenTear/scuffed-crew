@@ -5,7 +5,9 @@ use surrealdb::types::Datetime as SurrealDatetime;
 use surrealdb_types::RecordId;
 use surrealdb_types::SurrealValue;
 
-use crate::types::{HeroIcon, NewHeroIcon, NewTrainingCrop, TrainingCrop, TrainingCropCountRow};
+use crate::types::{
+    HeroIcon, NewHeroIcon, NewTrainingCrop, TrainingCrop, TrainingCropCountRow, TrainingCropOwner,
+};
 use crate::{with_timeout, Database, DbResult};
 use scuffed_types::{hero_key, hero_key_to_name, CropKind, CropSpot, TrainingCropMeta};
 
@@ -68,9 +70,6 @@ struct DbHeroIcon {
     #[surreal(default)]
     #[serde(default)]
     ui_scale: Option<f64>,
-    #[surreal(default)]
-    #[serde(default)]
-    colorblind_filter: Option<String>,
     #[surreal(default)]
     #[serde(default)]
     tracker_version: Option<String>,
@@ -145,7 +144,6 @@ fn db_to_crop(db: DbHeroIcon) -> Option<TrainingCrop> {
         screen_width: to_u32(db.screen_width),
         screen_height: to_u32(db.screen_height),
         ui_scale: db.ui_scale,
-        colorblind_filter: db.colorblind_filter,
         found_spot,
         found_confidence: db.found_confidence,
     };
@@ -235,7 +233,6 @@ fn crop_to_db(crop: &NewTrainingCrop) -> Result<DbHeroIcon, crate::DbError> {
         screen_width: meta.screen_width.map(i64::from),
         screen_height: meta.screen_height.map(i64::from),
         ui_scale: meta.ui_scale,
-        colorblind_filter: meta.colorblind_filter.clone(),
         tracker_version: crop.tracker_version.clone(),
         found_x: spot.map(|s| i64::from(s.x)),
         found_y: spot.map(|s| i64::from(s.y)),
@@ -581,13 +578,84 @@ impl Database {
         .await
     }
 
-    /// Remove one row of any kind and return it as it was, or `None` when it
-    /// did not exist.
-    pub async fn delete_training_crop(&self, id: &str) -> DbResult<Option<TrainingCrop>> {
-        let id = id.to_string();
+    /// Ids of one member's rows, optionally of one kind. Reads ids only, so
+    /// a row whose other columns fail to parse (an unknown kind, a negative
+    /// `found_*`) is still listed. The delete paths use it; files are
+    /// `<id>.png`, so the id is all they need.
+    pub async fn training_crop_ids_for_member(
+        &self,
+        member_id: &str,
+        kind: Option<CropKind>,
+    ) -> DbResult<Vec<String>> {
+        let member_id = member_id.to_string();
+        let kind_clause = if kind.is_some() {
+            " AND kind = $kind"
+        } else {
+            ""
+        };
         with_timeout(async {
-            let row: Option<DbHeroIcon> = self.client.delete(("hero_icon", id.as_str())).await?;
-            Ok(row.and_then(db_to_crop))
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                id: Option<RecordId>,
+            }
+            let mut result = self
+                .client
+                .query(format!(
+                    "SELECT id FROM hero_icon WHERE member_id = $member_id{kind_clause}"
+                ))
+                .bind(("member_id", member_id))
+                .bind(("kind", kind.map(|k| k.as_str().to_string())))
+                .await?;
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows
+                .into_iter()
+                .filter_map(|row| row.id)
+                .map(|rid| crate::record_id_key_to_string(rid.key))
+                .collect())
+        })
+        .await
+    }
+
+    /// The owner and kind of one row, or `None` when no row has this id.
+    /// Reads only those two columns, so a row that fails to parse in full
+    /// is still found.
+    pub async fn training_crop_owner(&self, id: &str) -> DbResult<Option<TrainingCropOwner>> {
+        let rid = RecordId::new("hero_icon", id);
+        with_timeout(async {
+            #[derive(Deserialize, SurrealValue)]
+            struct Row {
+                member_id: String,
+                #[serde(default)]
+                #[surreal(default)]
+                kind: Option<String>,
+            }
+            let mut result = self
+                .client
+                .query("SELECT member_id, kind FROM $rid")
+                .bind(("rid", rid))
+                .await?;
+            let rows: Vec<Row> = result.take(0)?;
+            Ok(rows.into_iter().next().map(|row| TrainingCropOwner {
+                kind: stored_kind(row.kind.as_deref()),
+                member_id: row.member_id,
+            }))
+        })
+        .await
+    }
+
+    /// Remove one row of any kind by id. `true` when a row was removed. The
+    /// removed row is not parsed, so a row that fails to parse is removed
+    /// and counted like any other.
+    pub async fn delete_training_crop(&self, id: &str) -> DbResult<bool> {
+        let rid = RecordId::new("hero_icon", id);
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("DELETE $rid RETURN BEFORE")
+                .bind(("rid", rid))
+                .await?;
+            let rows: Vec<surrealdb::types::Value> = result.take(0)?;
+            Ok(!rows.is_empty())
         })
         .await
     }
@@ -747,7 +815,6 @@ mod tests {
             screen_width: Some(2560),
             screen_height: Some(1440),
             ui_scale: Some(100.0),
-            colorblind_filter: Some("tritanopia".into()),
             found_spot: Some(CropSpot {
                 x: 5,
                 y: 6,
@@ -768,8 +835,9 @@ mod tests {
         assert!(db.get_hero_icon(id).await.unwrap().is_none());
         assert!(db.delete_hero_icon(id).await.unwrap().is_none());
         assert_eq!(db.get_training_crop(id).await.unwrap(), Some(stored));
-        assert!(db.delete_training_crop(id).await.unwrap().is_some());
+        assert!(db.delete_training_crop(id).await.unwrap());
         assert!(db.get_training_crop(id).await.unwrap().is_none());
+        assert!(!db.delete_training_crop(id).await.unwrap(), "already gone");
     }
 
     #[tokio::test]
@@ -1054,5 +1122,197 @@ mod tests {
         assert_eq!(icons[0].hero, "Soldier: 76");
         let stored = db.get_training_crop(crop).await.unwrap().expect("row");
         assert_eq!(stored.hero.as_deref(), Some("lucio"));
+    }
+
+    #[tokio::test]
+    async fn rows_that_fail_to_parse_are_still_found_and_deleted() {
+        let db = test_db().await;
+        let good = "9999999999999999999999999999999a";
+        let bad_spot = "9999999999999999999999999999999b";
+        let other = "9999999999999999999999999999999c";
+        db.insert_training_crop(&new_crop(good, "m1", CropKind::StatDigits, 3))
+            .await
+            .unwrap();
+        db.insert_training_crop(&new_crop(bad_spot, "m1", CropKind::MapName, 2))
+            .await
+            .unwrap();
+        db.insert_training_crop(&new_crop(other, "m2", CropKind::MapName, 1))
+            .await
+            .unwrap();
+        // A negative found spot passes the schema but not `db_to_crop`.
+        db.client
+            .query(format!(
+                "UPDATE hero_icon:{bad_spot} SET found_x = -1, found_y = 0, found_w = 4, \
+                 found_h = 4, found_confidence = 0.5"
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        // The parsed views hide it.
+        assert!(db.get_training_crop(bad_spot).await.unwrap().is_none());
+        let listed = db
+            .list_training_crops_for_member("m1", None, None)
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, good);
+
+        // The id-only reads still see it.
+        let mut ids = db.training_crop_ids_for_member("m1", None).await.unwrap();
+        ids.sort();
+        assert_eq!(ids, vec![good.to_string(), bad_spot.to_string()]);
+        assert_eq!(
+            db.training_crop_ids_for_member("m1", Some(CropKind::MapName))
+                .await
+                .unwrap(),
+            vec![bad_spot.to_string()]
+        );
+        assert!(db
+            .training_crop_ids_for_member("m1", Some(CropKind::HeroIcon))
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            db.training_crop_owner(bad_spot).await.unwrap(),
+            Some(TrainingCropOwner {
+                member_id: "m1".into(),
+                kind: Some(CropKind::MapName),
+            })
+        );
+        assert_eq!(db.training_crop_owner("nope").await.unwrap(), None);
+
+        // The id-only delete removes and counts it.
+        assert!(db.delete_training_crop(bad_spot).await.unwrap());
+        assert_eq!(
+            db.training_crop_ids_for_member("m1", None).await.unwrap(),
+            vec![good.to_string()]
+        );
+        assert_eq!(
+            db.training_crop_ids_for_member("m2", None).await.unwrap(),
+            vec![other.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_stored_kind_is_found_by_owner_and_deleted() {
+        let db = test_db().await;
+        let id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1";
+        // A kind this build does not know, as a later build might store:
+        // drop the ASSERT for the write, the next boot puts it back.
+        db.client
+            .query(format!(
+                "DEFINE FIELD OVERWRITE kind ON hero_icon TYPE string; \
+                 CREATE hero_icon:{id} SET member_id = 'm1', hero = '', kind = 'replay', \
+                 file_name = '{id}.png', size_bytes = 10, width = 16, height = 16, \
+                 created_at = time::now();"
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        run_migrations(&db.client).await.unwrap();
+        assert!(db.get_training_crop(id).await.unwrap().is_none());
+        assert_eq!(
+            db.training_crop_ids_for_member("m1", None).await.unwrap(),
+            vec![id.to_string()]
+        );
+        assert_eq!(
+            db.training_crop_owner(id).await.unwrap(),
+            Some(TrainingCropOwner {
+                member_id: "m1".into(),
+                kind: None,
+            })
+        );
+        assert!(db.delete_training_crop(id).await.unwrap());
+        assert!(db.training_crop_owner(id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn colorblind_filter_has_no_field() {
+        let db = test_db().await;
+        let mut result = db.client.query("INFO FOR TABLE hero_icon").await.unwrap();
+        let info: Option<serde_json::Value> = result.take(0).unwrap();
+        let info = info.expect("table info");
+        let names: Vec<&String> = info["fields"].as_object().expect("fields").keys().collect();
+        assert!(names.iter().any(|n| n.as_str() == "ui_scale"), "{names:?}");
+        assert!(
+            !names.iter().any(|n| n.as_str() == "colorblind_filter"),
+            "{names:?}"
+        );
+    }
+
+    /// Rollback check: the build before training crops reads hero_icon rows
+    /// with this exact struct (`SELECT *` and `select`). A row this build
+    /// writes, with `kind` and every new metadata column set, must still
+    /// read there; extra columns are ignored by the derive.
+    #[tokio::test]
+    async fn old_build_row_shape_reads_rows_with_kind_and_metadata() {
+        #[derive(Debug, Deserialize, SurrealValue)]
+        struct OldDbHeroIcon {
+            #[surreal(default)]
+            #[serde(default)]
+            id: Option<RecordId>,
+            member_id: String,
+            hero: String,
+            file_name: String,
+            size_bytes: i64,
+            width: i64,
+            height: i64,
+            #[allow(dead_code)]
+            created_at: SurrealDatetime,
+        }
+        let db = test_db().await;
+        let id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb1";
+        let mut icon = new_crop(id, "m1", CropKind::HeroIcon, 0);
+        icon.hero = Some("Soldier: 76".into());
+        icon.tracker_version = Some("0.6.0-alpha.3".into());
+        icon.meta = TrainingCropMeta {
+            screen: Some("scoreboard".into()),
+            slot_type: Some("ally".into()),
+            slot_index: Some(3),
+            game_token: Some("0123456789abcdef0123456789abcdef".into()),
+            score: Some(0.9),
+            runner_up: Some(0.4),
+            margin: Some(0.5),
+            icon_set_version: Some("2026.11".into()),
+            spot_version: Some("v2".into()),
+            vote_card_filled: Some(true),
+            locked_in: Some(false),
+            screen_width: Some(2560),
+            screen_height: Some(1440),
+            ui_scale: Some(100.0),
+            found_spot: Some(CropSpot {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            }),
+            found_confidence: Some(0.5),
+        };
+        db.insert_training_crop(&icon).await.unwrap();
+
+        let mut result = db
+            .client
+            .query("SELECT * FROM hero_icon WHERE member_id = 'm1'")
+            .await
+            .unwrap();
+        let rows: Vec<OldDbHeroIcon> = result.take(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row = &rows[0];
+        assert_eq!(
+            row.id
+                .clone()
+                .map(|r| crate::record_id_key_to_string(r.key)),
+            Some(id.to_string())
+        );
+        assert_eq!(row.member_id, "m1");
+        // The hero key, as the rollback doc says: the old build shows it as
+        // written.
+        assert_eq!(row.hero, "soldier-76");
+        assert_eq!(row.file_name, format!("{id}.png"));
+        assert_eq!((row.size_bytes, row.width, row.height), (90, 40, 20));
+        let one: Option<OldDbHeroIcon> = db.client.select(("hero_icon", id)).await.unwrap();
+        assert!(one.is_some());
     }
 }

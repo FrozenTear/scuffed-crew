@@ -66,6 +66,7 @@ or banned). It is accepted, besides a session, on exactly these routes:
 | `GET /api/training-crops/{id}/image` | yes | no (401) |
 | `GET /api/training-crops` (admin list) | admin | no (401) |
 | `GET /api/training-crops/members` (counts) | officer or admin | no (401) |
+| `GET /api/training-crops/resolutions` (totals) | officer or admin | no (401) |
 | every `/api/hero-icons` route | as before | no (401) |
 
 Setting consent is session only, so a leaked or misused sync token can never
@@ -143,7 +144,12 @@ Check order:
    Auth), before the credential is checked.
 1. 503 `hero_icons_disabled` when the store is off.
 2. 400 `unknown_crop_kind` for a missing or unknown `kind`.
-3. 422 `full_screen_not_accepted` for `full_screen`.
+3. 422 `full_screen_not_accepted` for `full_screen`. This wins over the 403
+   below: a member without consent who sends `full_screen` gets 422, not
+   403 `crop_consent_required`. On purpose: `full_screen` is refused for
+   everyone whatever the consent (there is no `full_screen` consent to
+   have), so 422 is the true answer, and it comes before the limiter, so
+   nothing is read and no rate limit token is spent.
 4. 429 `rate_limited`: per member and per kind, burst 10 requests then one
    every 60 s (`HERO_ICON_RATE_BURST`, `HERO_ICON_RATE_REFILL_SECS`). Each
    kind has its own bucket; `hero_icon` shares the bucket of
@@ -194,12 +200,16 @@ Every field is optional unless noted. Unknown fields are refused (400
 | `locked_in` | bool | |
 | `screen_width`, `screen_height` | int | Game resolution. Both or neither, each 320 to 16384 |
 | `ui_scale` | float | Above 0, at most 200 (same range as the report bundle) |
-| `colorblind_filter` | string | Same as `screen`, for example `off` or `deuteranopia` |
-| `found_spot` | object `{x, y, w, h}` | For unknown screen sizes. Unsigned ints, `w` and `h` at least 1, the box inside the resolution when one is given (inside 16384 otherwise). Unknown keys refused |
+| `found_spot` | object `{x, y, w, h}` | Unsigned ints, `w` and `h` at least 1, the box inside the resolution when one is given (inside 16384 otherwise). Unknown keys refused. Sending it only for unknown screen sizes is the tracker's rule: the server accepts it at any resolution, since it cannot know the tracker's layouts |
 | `found_confidence` | float | 0 to 1. `found_spot` and `found_confidence` come together or not at all |
 
 Any bound failure is the one stable code 400 `invalid_crop_meta`; the server
 logs the field name at debug level.
+
+There is no colourblind filter field. It hints at a member's colour vision
+and is not in the agreed field list or the consent text, so it is not
+accepted (a `meta` naming `colorblind_filter` is 400 `invalid_crop_meta`,
+like any unknown field) and there is no column for it.
 
 Example request (curl):
 
@@ -262,7 +272,10 @@ of every kind, consented or not, newest first, with the usual cursor
 own crop, or every own crop of one kind, rows and files. Consent is left as
 it is. `{"deleted": n}`. Each file goes before its row; a file that cannot be
 removed keeps its row and the answer is a 500 after the others went, so the
-call can be retried.
+call can be retried. The delete reads ids only, never whole rows, so a row
+that would not parse (and so is missing from the lists) is deleted and
+counted too. The same holds for the single delete below and for
+`DELETE /api/hero-icons/mine`.
 
 `DELETE /api/training-crops/{id}` (session or sync token). `{"deleted": 1}`.
 The file goes first. With a session, an admin may also delete another active
@@ -270,7 +283,8 @@ member's crop of any kind, consent or not, using an id from the admin list
 (audited: `deleted_hero_icon` for a hero icon, `deleted_training_crop` for
 any other kind, details `"crop <id> kind <kind>"`); an officer gets 403
 `Admin access required`. Everyone else, and every sync token, gets 404
-`crop_not_found` for an id that is not their own.
+`crop_not_found` for an id that is not their own. A row whose stored kind
+is unknown is audited as `deleted_training_crop` with kind `unknown`.
 
 `GET /api/training-crops/{id}/image` (session only). The PNG, with
 `Content-Type: image/png`, `X-Content-Type-Options: nosniff` and
@@ -301,8 +315,8 @@ is filtered to `hero_icon`, `viewed_training_crops` otherwise, details
 `"<n> training crops, <kind or all kinds>"`.
 
 `GET /api/training-crops/members?cursor=&limit=` (officer or admin). Counts
-only, no ids or images. Active members sorted by display name, then member
-id:
+by kind only, no ids, images or resolutions. Active members sorted by display
+name, then member id:
 
 ```json
 {
@@ -313,10 +327,6 @@ id:
       "total": 3,
       "kinds": [
         { "kind": "stat_digits", "count": 3, "consented": true, "max": 1000 }
-      ],
-      "resolutions": [
-        { "kind": "stat_digits", "screen_width": 1920, "screen_height": 1080, "count": 2 },
-        { "kind": "stat_digits", "screen_width": 2560, "screen_height": 1440, "count": 1 }
       ]
     }
   ]
@@ -328,8 +338,27 @@ id:
 - Admins also get kinds with consent off that still have stored crops, with
   `consented` false. Their ids are in the admin list (`hidden: true`), so
   they can be deleted.
-- `resolutions` covers the listed kinds, largest count first. Crops sent
-  without a resolution are one row with no `screen_width`/`screen_height`.
+- There is no per-member breakdown by game resolution, for officers or
+  admins: it would show each member's setup.
+
+`GET /api/training-crops/resolutions` (officer or admin). Stored crops by
+kind and game resolution, summed across active members, counting only the
+kinds each member consents to. Officers and admins get the same answer.
+Largest count first; crops sent without a resolution are one row with no
+`screen_width`/`screen_height`:
+
+```json
+{
+  "resolutions": [
+    { "kind": "stat_digits", "screen_width": 1920, "screen_height": 1080, "count": 2 },
+    { "kind": "stat_digits", "screen_width": 2560, "screen_height": 1440, "count": 1 },
+    { "kind": "map_name", "count": 1 }
+  ]
+}
+```
+
+With a single contributor of a kind the totals are that member's setup, as
+with any total over few people.
 
 ## Errors
 
@@ -342,9 +371,9 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | Status | `error` | When |
 |--------|---------|------|
 | 400 | `unknown_crop_kind` | `kind` missing or unknown (upload), or unknown (`?kind=` filters) |
-| 422 | `full_screen_not_accepted` | Upload with `kind=full_screen`. Nothing read or stored |
+| 422 | `full_screen_not_accepted` | Upload with `kind=full_screen`, with or without consent (wins over 403, see Check order). Nothing read or stored |
 | 403 | `crop_consent_required` | Upload of a kind the caller does not consent to. Nothing stored |
-| 400 | `invalid_crop_meta` | A `meta` part that is not JSON, over 4 KiB, has an unknown field, or a value out of bounds |
+| 400 | `invalid_crop_meta` | A `meta` part that is not JSON, over 4 KiB, has an unknown field (`colorblind_filter` included), or a value out of bounds |
 | 400 | `unknown_hero` | `hero` not a known hero, or missing on a `hero_icon` crop |
 | 400 | `unexpected_field` | Part named other than `meta`/`crop`, or pairs out of order |
 | 400 | `no_crops` | No `meta`/`crop` pair |
@@ -354,7 +383,7 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 400 | `invalid_consent` | Consent body not JSON, unknown kind (`full_screen` included), or not a bool |
 | 401 | session error (as for every member route) | `PUT /consent` without a session; a sync token is not a session there |
 | 403 | `Admin access required` | Officer session on another member's image or delete; non-admin on the admin list |
-| 403 | `Officer access required` | Member session on `/members` |
+| 403 | `Officer access required` | Member session on `/members` or `/resolutions` |
 | 404 | `crop_not_found` | Unknown id, malformed id, or a crop the caller may not see |
 | 409 | `crop_limit_reached` | The upload would pass the kind's cap |
 | 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB), or the body over 2 MiB |
@@ -377,9 +406,9 @@ Additive only (`crates/db/src/migrations.rs`):
 - New optional `hero_icon` columns: `screen`, `slot_type`, `slot_index`,
   `game_token`, `score`, `runner_up`, `margin`, `icon_set_version`,
   `spot_version`, `vote_card_filled`, `locked_in`, `screen_width`,
-  `screen_height`, `ui_scale`, `colorblind_filter`, `tracker_version`,
-  `found_x`, `found_y`, `found_w`, `found_h`, `found_confidence`. Existing
-  rows leave them NONE. `hero` stays a plain string; crops of other kinds
+  `screen_height`, `ui_scale`, `tracker_version`, `found_x`, `found_y`,
+  `found_w`, `found_h`, `found_confidence`. Existing rows leave them NONE.
+  There is no `colorblind_filter` column. `hero` stays a plain string; crops of other kinds
   store it empty when no hero was sent.
 - Index `hero_icon_member_kind_idx` on `(member_id, kind)`.
 - `member_settings.stat_digits_opt_in`, `map_name_opt_in`: `bool DEFAULT
@@ -406,7 +435,12 @@ Rollback to the build before this change:
    names before deploying the old build.
 3. Deploy the old build. Its migrations redefine only the old fields; the new
    columns, the index and the consent fields stay defined and unused, and
-   hero icon rows keep working.
+   hero icon rows keep working: the old build reads rows with its own row
+   struct, which picks its fields by name and ignores the others, so a row
+   carrying `kind` and the new columns reads as before (checked by the db
+   test `old_build_row_shape_reads_rows_with_kind_and_metadata`, which reads
+   such a row with a copy of the old struct). Hero icons the old build
+   writes get `kind = 'hero_icon'` from the field default.
 4. Optional cleanup:
    `REMOVE INDEX hero_icon_member_kind_idx ON hero_icon;` and
    `REMOVE FIELD <name> ON hero_icon;` / `ON member_settings` for each new

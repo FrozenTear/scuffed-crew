@@ -395,7 +395,6 @@ fn full_meta() -> Value {
         "screen_width": 2560,
         "screen_height": 1440,
         "ui_scale": 100.0,
-        "colorblind_filter": "deuteranopia",
         "found_spot": { "x": 10, "y": 20, "w": 40, "h": 16 },
         "found_confidence": 0.8
     })
@@ -537,6 +536,8 @@ async fn sync_token_is_refused_on_session_only_routes() {
         ("/api/training-crops", ADMIN_TOKEN),
         ("/api/training-crops/members", ADMIN_TOKEN),
         ("/api/training-crops/members", OFFICER_TOKEN),
+        ("/api/training-crops/resolutions", ADMIN_TOKEN),
+        ("/api/training-crops/resolutions", OFFICER_TOKEN),
         ("/api/training-crops/mine", OWNER_TOKEN),
         (image.as_str(), OWNER_TOKEN),
         (image.as_str(), ADMIN_TOKEN),
@@ -1036,11 +1037,12 @@ async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
     let qhd = json!({ "screen_width": 2560, "screen_height": 1440 });
     upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(2, hd.clone())).await;
     upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(1, qhd)).await;
-    upload(&w.app, OWNER_TOKEN, "map_name", &pairs(1, json!({}))).await;
+    upload(&w.app, OWNER_TOKEN, "map_name", &pairs(1, hd)).await;
     // Then map_name consent goes off: its crop is hidden from officers.
     set_consent(&w.app, OWNER_SESSION, json!({ "map_name": false })).await;
-    // OTHER consents to map_name only: listed with nothing stored.
+    // OTHER consents to map_name only and sends one with no resolution.
     set_consent(&w.app, OTHER_SESSION, json!({ "map_name": true })).await;
+    upload(&w.app, OTHER_TOKEN, "map_name", &pairs(1, json!({}))).await;
 
     let (status, page) = get(&w.app, "/api/training-crops/members", OFFICER_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{page}");
@@ -1055,19 +1057,26 @@ async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
         owner["kinds"],
         json!([{ "kind": "stat_digits", "count": 3, "consented": true, "max": 1000 }])
     );
-    assert_eq!(
-        owner["resolutions"],
-        json!([
-            { "kind": "stat_digits", "screen_width": 1920, "screen_height": 1080, "count": 2 },
-            { "kind": "stat_digits", "screen_width": 2560, "screen_height": 1440, "count": 1 }
-        ])
-    );
     assert_eq!(other["member_id"], json!(OTHER));
     assert_eq!(
         other["kinds"],
-        json!([{ "kind": "map_name", "count": 0, "consented": true, "max": 200 }])
+        json!([{ "kind": "map_name", "count": 1, "consented": true, "max": 200 }])
     );
-    assert_eq!(other["resolutions"], json!([]));
+    // No per-member resolution breakdown, for officers or admins.
+    for row in rows {
+        assert!(row.get("resolutions").is_none(), "{row}");
+    }
+
+    // Resolutions only as totals across members, consented kinds only:
+    // OWNER's hidden map_name crop is not counted.
+    let expected = json!({ "resolutions": [
+        { "kind": "stat_digits", "screen_width": 1920, "screen_height": 1080, "count": 2 },
+        { "kind": "stat_digits", "screen_width": 2560, "screen_height": 1440, "count": 1 },
+        { "kind": "map_name", "count": 1 }
+    ]});
+    let (status, totals) = get(&w.app, "/api/training-crops/resolutions", OFFICER_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{totals}");
+    assert_eq!(totals, expected);
 
     let (_, page) = get(&w.app, "/api/training-crops/members", ADMIN_SESSION).await;
     let owner = &page["data"][1];
@@ -1076,17 +1085,19 @@ async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
     assert_eq!(owner["kinds"][1]["kind"], json!("map_name"));
     assert_eq!(owner["kinds"][1]["consented"], json!(false));
     assert_eq!(owner["kinds"][1]["count"], json!(1));
-    let resolutions = owner["resolutions"].as_array().unwrap();
-    assert_eq!(resolutions.len(), 3);
-    assert_eq!(
-        resolutions[2],
-        json!({ "kind": "map_name", "count": 1 }),
-        "no resolution sent"
-    );
+    assert!(owner.get("resolutions").is_none(), "{owner}");
+    let (status, totals) = get(&w.app, "/api/training-crops/resolutions", ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{totals}");
+    assert_eq!(totals, expected, "admins get the same totals");
 
     // Plain members get 403.
-    let got = get(&w.app, "/api/training-crops/members", OTHER_SESSION).await;
-    assert_eq!(got.0, StatusCode::FORBIDDEN, "{}", got.1);
+    for uri in [
+        "/api/training-crops/members",
+        "/api/training-crops/resolutions",
+    ] {
+        let got = get(&w.app, uri, OTHER_SESSION).await;
+        assert_eq!(got.0, StatusCode::FORBIDDEN, "{uri}: {}", got.1);
+    }
     w.cleanup();
 }
 
@@ -1597,5 +1608,95 @@ async fn admin_list_gives_ids_of_every_kind_to_delete() {
             "{kind}"
         );
     }
+    w.cleanup();
+}
+
+/// Break one stored row so it fails to parse: a negative found spot passes
+/// the schema but not the read conversion.
+async fn break_row(db: &Database, id: &str) {
+    db.client
+        .query(format!(
+            "UPDATE hero_icon:{id} SET found_x = -1, found_y = 0, found_w = 4, found_h = 4, \
+             found_confidence = 0.5"
+        ))
+        .await
+        .expect("break row")
+        .check()
+        .expect("break row");
+    assert!(
+        db.get_training_crop(id).await.expect("read").is_none(),
+        "the row no longer parses"
+    );
+}
+
+#[tokio::test]
+async fn rows_that_fail_to_parse_are_still_deleted() {
+    let w = world().await;
+    set_consent(
+        &w.app,
+        OWNER_SESSION,
+        json!({ "hero_icon": true, "stat_digits": true, "map_name": true }),
+    )
+    .await;
+    let digits = crop_ids(&upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(3, json!({}))).await);
+    let maps = crop_ids(&upload(&w.app, OWNER_TOKEN, "map_name", &pairs(1, json!({}))).await);
+    let icons = crop_ids(
+        &upload(
+            &w.app,
+            OWNER_TOKEN,
+            "hero_icon",
+            &pairs(1, json!({ "hero": "ana" })),
+        )
+        .await,
+    );
+    assert_eq!(files_on_disk(w.dir()).len(), 5);
+    for id in [&digits[0], &digits[1], &maps[0], &icons[0]] {
+        break_row(w.db(), id).await;
+    }
+    // The parsed views hide the broken rows from their owner.
+    let rows = w.rows_of(OWNER).await;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, digits[2]);
+
+    // Own single delete with the sync token.
+    let got = delete(
+        &w.app,
+        &format!("/api/training-crops/{}", digits[0]),
+        OWNER_TOKEN,
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    assert_eq!(got.1, json!({ "deleted": 1 }));
+    assert!(!w.dir().join(format!("{}.png", digits[0])).exists());
+
+    // Admin single delete of another member's broken crop.
+    let got = delete(
+        &w.app,
+        &format!("/api/training-crops/{}", maps[0]),
+        ADMIN_SESSION,
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    assert_eq!(got.1, json!({ "deleted": 1 }));
+    assert!(!w.dir().join(format!("{}.png", maps[0])).exists());
+
+    // Site's hero icon delete-all removes a broken hero icon.
+    let got = delete(&w.app, "/api/hero-icons/mine", OWNER_SESSION).await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    assert_eq!(got.1, json!({ "deleted": 1 }));
+    assert!(!w.dir().join(format!("{}.png", icons[0])).exists());
+
+    // Delete-all of every kind: one broken row and one good row.
+    let got = delete(&w.app, "/api/training-crops/mine", OWNER_TOKEN).await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    assert_eq!(got.1, json!({ "deleted": 2 }));
+    assert!(
+        w.db()
+            .training_crop_ids_for_member(OWNER, None)
+            .await
+            .expect("ids")
+            .is_empty()
+    );
+    assert!(files_on_disk(w.dir()).is_empty());
     w.cleanup();
 }

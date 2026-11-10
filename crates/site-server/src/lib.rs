@@ -720,6 +720,10 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             get(routes::training_crops::member_counts),
         )
         .route(
+            "/api/training-crops/resolutions",
+            get(routes::training_crops::resolution_totals),
+        )
+        .route(
             "/api/training-crops/{id}/image",
             get(routes::training_crops::crop_image),
         )

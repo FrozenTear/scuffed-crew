@@ -112,7 +112,7 @@ pub const MAP_NAME_MAX_BYTES: usize = 256 * 1024;
 /// Largest accepted `meta` part, in bytes (4 KiB).
 pub const TRAINING_CROP_META_MAX_BYTES: usize = 4 * 1024;
 
-/// Longest accepted short label (`screen`, `slot_type`, `colorblind_filter`).
+/// Longest accepted short label (`screen`, `slot_type`).
 pub const TRAINING_CROP_LABEL_MAX_LEN: usize = 32;
 
 /// Longest accepted version string (`icon_set_version`, `spot_version`).

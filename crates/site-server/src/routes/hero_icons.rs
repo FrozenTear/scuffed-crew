@@ -60,7 +60,7 @@ use scuffed_types::api::{
     PaginationParams,
 };
 use scuffed_types::{
-    HERO_ICON_MAX_BYTES, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_FILES_PER_UPLOAD,
+    CropKind, HERO_ICON_MAX_BYTES, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_FILES_PER_UPLOAD,
     HERO_ICON_MAX_PER_MEMBER, HERO_ICON_MIN_EDGE, hero_key_to_name,
 };
 use serde::Deserialize;
@@ -303,23 +303,25 @@ impl DeleteAllOutcome {
 /// A database error stops the loop and is carried the same way. Opt-in is not
 /// checked: the owner and admins delete hidden icons too.
 async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<DeleteAllOutcome, Reject> {
-    let rows = state
+    // Ids of hero_icon rows only, so a row that fails to parse is deleted
+    // too and other kinds are left alone.
+    let ids = state
         .db
-        .list_hero_icons_for_member(member_id)
+        .training_crop_ids_for_member(member_id, Some(CropKind::HeroIcon))
         .await
         .map_err(db_error)?;
     let mut deleted: u32 = 0;
     let mut file_failed = false;
     let mut failure = None;
-    for icon in &rows {
-        if let Err(error) = remove_icon_file(state, &icon.id).await {
+    for id in &ids {
+        if let Err(error) = remove_icon_file(state, id).await {
             tracing::error!(%error, "hero icon file delete failed");
             file_failed = true;
             continue;
         }
-        match state.db.delete_hero_icon(&icon.id).await {
-            Ok(Some(_)) => deleted += 1,
-            Ok(None) => {}
+        match state.db.delete_training_crop(id).await {
+            Ok(true) => deleted += 1,
+            Ok(false) => {}
             Err(error) => {
                 failure = Some(db_error(error));
                 break;

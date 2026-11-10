@@ -27,8 +27,9 @@
 //! - The admin list covers every stored crop of active members so an admin
 //!   can find any id to delete; crops of a kind without consent come back
 //!   `hidden`, without hero or metadata, and their image stays 404. Times in
-//!   that list are cut to the hour. Officers get per-member counts only, for
-//!   consented kinds only.
+//!   that list are cut to the hour. Officers get per-member counts by kind
+//!   only, for consented kinds only, and game resolutions only as totals
+//!   across members.
 //! - Consent `GET` and `PUT` work while the store is disabled. Every other
 //!   route answers 503 then.
 //!
@@ -44,7 +45,9 @@ use axum::extract::{Multipart, Path as UrlPath, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use chrono::{DateTime, Utc};
-use scuffed_db::{AuditAction, AuditTargetType, NewTrainingCrop, OrgRole, TrainingCrop};
+use scuffed_db::{
+    AuditAction, AuditTargetType, NewTrainingCrop, OrgRole, TrainingCrop, TrainingCropOwner,
+};
 use scuffed_types::api::{
     CursorResponse, HERO_ICON_ERR_INVALID_MULTIPART, HERO_ICON_ERR_UNEXPECTED_FIELD,
     HERO_ICON_ERR_UNKNOWN_HERO, MyTrainingCrops, PaginationParams, StaffTrainingCrop,
@@ -53,8 +56,8 @@ use scuffed_types::api::{
     TRAINING_CROP_ERR_LIMIT_REACHED, TRAINING_CROP_ERR_NO_CROPS, TRAINING_CROP_ERR_NOT_FOUND,
     TRAINING_CROP_ERR_TOO_MANY_IN_REQUEST, TRAINING_CROP_ERR_UNKNOWN_KIND, TrainingCropConsent,
     TrainingCropConsentUpdate, TrainingCropEntry, TrainingCropKindCount, TrainingCropMemberCounts,
-    TrainingCropMeta, TrainingCropResolutionCount, TrainingCropUploadMeta,
-    TrainingCropUploadResponse, TrainingCropsDeleted,
+    TrainingCropMeta, TrainingCropResolutionCount, TrainingCropResolutionTotals,
+    TrainingCropUploadMeta, TrainingCropUploadResponse, TrainingCropsDeleted,
 };
 use scuffed_types::{
     CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, TRAINING_CROP_META_MAX_BYTES,
@@ -134,10 +137,11 @@ fn stored_tracker_version(headers: &HeaderMap) -> Option<String> {
 
 /// Audit action for an admin act on one crop. `hero_icon` keeps the hero
 /// icon names, so the hero icon audit trail reads the same whichever route
-/// was used. Every other kind gets the training crop names.
-fn delete_action(kind: CropKind) -> AuditAction {
+/// was used. Every other kind, and a row whose stored kind is unknown, gets
+/// the training crop names.
+fn delete_action(kind: Option<CropKind>) -> AuditAction {
     match kind {
-        CropKind::HeroIcon => AuditAction::DeletedHeroIcon,
+        Some(CropKind::HeroIcon) => AuditAction::DeletedHeroIcon,
         _ => AuditAction::DeletedTrainingCrop,
     }
 }
@@ -591,23 +595,24 @@ async fn delete_all_crops(
     member_id: &str,
     kind: Option<CropKind>,
 ) -> Result<DeleteAllOutcome, Reject> {
-    let rows = state
+    // Ids only, so a row that fails to parse is deleted too.
+    let ids = state
         .db
-        .list_training_crops_for_member(member_id, kind, None)
+        .training_crop_ids_for_member(member_id, kind)
         .await
         .map_err(db_error)?;
     let mut deleted: u32 = 0;
     let mut file_failed = false;
     let mut failure = None;
-    for crop in &rows {
-        if let Err(error) = remove_icon_file(state, &crop.id).await {
+    for id in &ids {
+        if let Err(error) = remove_icon_file(state, id).await {
             tracing::error!(%error, "training crop file delete failed");
             file_failed = true;
             continue;
         }
-        match state.db.delete_training_crop(&crop.id).await {
-            Ok(Some(_)) => deleted += 1,
-            Ok(None) => {}
+        match state.db.delete_training_crop(id).await {
+            Ok(true) => deleted += 1,
+            Ok(false) => {}
             Err(error) => {
                 failure = Some(db_error(error));
                 break;
@@ -649,7 +654,11 @@ enum AdminAccess {
     Delete,
 }
 
-/// The crop when the caller may do `access` on it.
+/// The crop's owner and kind when the caller may do `access` on it.
+///
+/// Reads the owner and kind only, never the full row, so a row whose other
+/// columns fail to parse can still be read and deleted by its owner and
+/// deleted by an admin. An unknown stored kind is never readable by staff.
 ///
 /// The owner always may. A session admin may as [`AdminAccess`] says. A
 /// sync token never acts as staff. Every other case gets one answer that
@@ -661,7 +670,7 @@ async fn visible_crop(
     staff_allowed: bool,
     id: &str,
     access: AdminAccess,
-) -> Result<TrainingCrop, Reject> {
+) -> Result<TrainingCropOwner, Reject> {
     let role = member.org_role;
     let is_admin = staff_allowed && role == OrgRole::Admin;
     let refuse = || {
@@ -674,27 +683,30 @@ async fn visible_crop(
     if !is_icon_id(id) {
         return Err(refuse());
     }
-    let Some(crop) = state.db.get_training_crop(id).await.map_err(db_error)? else {
+    let Some(owner) = state.db.training_crop_owner(id).await.map_err(db_error)? else {
         return Err(refuse());
     };
-    if crop.member_id == member.id {
-        return Ok(crop);
+    if owner.member_id == member.id {
+        return Ok(owner);
     }
     if !is_admin {
         return Err(refuse());
     }
     if access == AdminAccess::Read {
+        let Some(kind) = owner.kind else {
+            return Err(refuse());
+        };
         let consent = state
             .db
-            .get_training_crop_consent(&crop.member_id)
+            .get_training_crop_consent(&owner.member_id)
             .await
             .map_err(db_error)?;
-        if !consent.get(crop.kind) {
+        if !consent.get(kind) {
             return Err(refuse());
         }
     }
-    if member_active(state, &crop.member_id).await? {
-        Ok(crop)
+    if member_active(state, &owner.member_id).await? {
+        Ok(owner)
     } else {
         Err(refuse())
     }
@@ -707,8 +719,8 @@ pub async fn crop_image(
     UrlPath(id): UrlPath<String>,
 ) -> Result<Response, Reject> {
     configured(&state)?;
-    let crop = visible_crop(&state, &member.member, true, &id, AdminAccess::Read).await?;
-    let path = state.hero_icons.icon_path(&crop.id);
+    visible_crop(&state, &member.member, true, &id, AdminAccess::Read).await?;
+    let path = state.hero_icons.icon_path(&id);
     let bytes = match tokio::fs::read(path).await {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -744,7 +756,7 @@ pub async fn delete_crop(
 ) -> Result<Json<TrainingCropsDeleted>, Reject> {
     configured(&state)?;
     let staff_allowed = uploader.is_session();
-    let crop = visible_crop(
+    let owner = visible_crop(
         &state,
         &uploader.member,
         staff_allowed,
@@ -752,30 +764,27 @@ pub async fn delete_crop(
         AdminAccess::Delete,
     )
     .await?;
-    let own = crop.member_id == uploader.member.id;
-    if let Err(error) = remove_icon_file(&state, &crop.id).await {
+    let own = owner.member_id == uploader.member.id;
+    if let Err(error) = remove_icon_file(&state, &id).await {
         tracing::error!(%error, "training crop file delete failed");
         return Err(internal());
     }
-    let removed = state
-        .db
-        .delete_training_crop(&crop.id)
-        .await
-        .map_err(db_error)?;
-    if !own && removed.is_some() {
-        let details = format!("crop {} kind {}", crop.id, crop.kind.as_str());
+    let removed = state.db.delete_training_crop(&id).await.map_err(db_error)?;
+    if !own && removed {
+        let kind = owner.kind.map_or("unknown", CropKind::as_str);
+        let details = format!("crop {id} kind {kind}");
         audit(
             &state.db,
             &uploader.member.id,
-            delete_action(crop.kind),
+            delete_action(owner.kind),
             AuditTargetType::Member,
-            &crop.member_id,
+            &owner.member_id,
             Some(details.as_str()),
         )
         .await;
     }
     Ok(Json(TrainingCropsDeleted {
-        deleted: u32::from(removed.is_some()),
+        deleted: u32::from(removed),
     }))
 }
 
@@ -848,8 +857,8 @@ pub async fn list_training_crops(
 
 /// GET /api/training-crops/members (officer or admin)
 ///
-/// Counts only: no ids, images or metadata. Active members, sorted by display
-/// name (case folded), then member id, paged in memory.
+/// Counts only: no ids, images, metadata or resolutions. Active members,
+/// sorted by display name (case folded), then member id, paged in memory.
 ///
 /// - Officers get, per member, the kinds that member consents to (with a
 ///   zero count when nothing is stored), and only members who consent to at
@@ -857,7 +866,8 @@ pub async fn list_training_crops(
 /// - Admins also get kinds with consent off that still have stored crops,
 ///   with `consented` false, since admins may delete those.
 ///
-/// `resolutions` breaks the listed kinds down by game resolution.
+/// Game resolutions are not broken down per member, since that would show
+/// each member's setup; [`resolution_totals`] sums them across members.
 pub async fn member_counts(
     State(state): State<AppState>,
     staff: OfficerUser,
@@ -869,16 +879,13 @@ pub async fn member_counts(
     let rows = state.db.training_crop_counts().await.map_err(db_error)?;
     let consents = state.db.training_crop_consents().await.map_err(db_error)?;
 
-    // member -> kind -> (width, height) -> count
-    type ByResolution = BTreeMap<(Option<u32>, Option<u32>), u64>;
-    let mut stored: HashMap<String, BTreeMap<CropKind, ByResolution>> = HashMap::new();
+    // member -> kind -> count
+    let mut stored: HashMap<String, BTreeMap<CropKind, u64>> = HashMap::new();
     for row in rows {
         *stored
             .entry(row.member_id)
             .or_default()
             .entry(row.kind)
-            .or_default()
-            .entry((row.screen_width, row.screen_height))
             .or_default() += row.count;
     }
     let mut candidates: Vec<String> = consents.keys().cloned().collect();
@@ -903,11 +910,9 @@ pub async fn member_counts(
         let consent = consents.get(&member_id).copied().unwrap_or_default();
         let by_kind = stored.get(&member_id).unwrap_or(&empty);
         let mut kinds = Vec::new();
-        let mut resolutions = Vec::new();
         for kind in stored_kinds() {
             let consented = consent.get(kind);
-            let per_resolution = by_kind.get(&kind);
-            let count: u64 = per_resolution.map(|r| r.values().sum()).unwrap_or(0);
+            let count = by_kind.get(&kind).copied().unwrap_or(0);
             let listed = consented || (is_admin && count > 0);
             if !listed {
                 continue;
@@ -918,34 +923,16 @@ pub async fn member_counts(
                 consented,
                 max: kind.max_per_member(),
             });
-            for ((width, height), n) in per_resolution.into_iter().flatten() {
-                resolutions.push(TrainingCropResolutionCount {
-                    kind,
-                    screen_width: *width,
-                    screen_height: *height,
-                    count: count_u32(*n),
-                });
-            }
         }
         if kinds.is_empty() {
             continue;
         }
-        resolutions.sort_by(|a, b| {
-            b.count.cmp(&a.count).then_with(|| {
-                (a.kind, a.screen_width, a.screen_height).cmp(&(
-                    b.kind,
-                    b.screen_width,
-                    b.screen_height,
-                ))
-            })
-        });
         let total = kinds.iter().map(|k| u64::from(k.count)).sum();
         members.push(TrainingCropMemberCounts {
             member_id,
             display_name,
             total: count_u32(total),
             kinds,
-            resolutions,
         });
     }
     members.sort_by_key(|row| (row.display_name.to_lowercase(), row.member_id.clone()));
@@ -955,6 +942,52 @@ pub async fn member_counts(
         .take(limit as usize + 1)
         .collect();
     Ok(Json(CursorResponse::from_oversized(page, limit, offset)))
+}
+
+/// GET /api/training-crops/resolutions (officer or admin)
+///
+/// Stored crops by kind and game resolution, summed across active members,
+/// counting only the kinds each member consents to. The same answer for
+/// officers and admins. Largest count first, then kind and resolution.
+pub async fn resolution_totals(
+    State(state): State<AppState>,
+    _staff: OfficerUser,
+) -> Result<Json<TrainingCropResolutionTotals>, Reject> {
+    configured(&state)?;
+    let rows = state.db.training_crop_counts().await.map_err(db_error)?;
+    let consents = state.db.training_crop_consents().await.map_err(db_error)?;
+    let candidates: Vec<String> = consents.keys().cloned().collect();
+    // A visibility filter: a failed lookup is a 500, never an unfiltered sum.
+    let active = state
+        .db
+        .active_member_display_names(&candidates)
+        .await
+        .map_err(db_error)?;
+    let mut totals: BTreeMap<(CropKind, Option<u32>, Option<u32>), u64> = BTreeMap::new();
+    for row in rows {
+        let consented = consents
+            .get(&row.member_id)
+            .is_some_and(|consent| consent.get(row.kind));
+        if consented && active.contains_key(&row.member_id) {
+            *totals
+                .entry((row.kind, row.screen_width, row.screen_height))
+                .or_default() += row.count;
+        }
+    }
+    let mut resolutions: Vec<TrainingCropResolutionCount> = totals
+        .into_iter()
+        .map(
+            |((kind, screen_width, screen_height), count)| TrainingCropResolutionCount {
+                kind,
+                screen_width,
+                screen_height,
+                count: count_u32(count),
+            },
+        )
+        .collect();
+    // Stable sort: equal counts keep the key order of the map.
+    resolutions.sort_by_key(|row| std::cmp::Reverse(row.count));
+    Ok(Json(TrainingCropResolutionTotals { resolutions }))
 }
 
 #[cfg(test)]
@@ -1020,6 +1053,7 @@ mod tests {
             br#"{"screen_width":1920}"#,
             br#"{"found_confidence":0.5}"#,
             br#"{"score":"high"}"#,
+            br#"{"colorblind_filter":"off"}"#,
         ] {
             assert_eq!(
                 code(parse_meta(CropKind::StatDigits, body)),
@@ -1036,14 +1070,13 @@ mod tests {
             "game_token":"0123456789abcdef0123456789abcdef","score":0.9,"runner_up":0.3,"margin":0.6,
             "icon_set_version":"7","spot_version":"s1","vote_card_filled":false,
             "locked_in":true,"screen_width":1920,"screen_height":1080,"ui_scale":90,
-            "colorblind_filter":"off","found_spot":{"x":1,"y":2,"w":3,"h":4},
+            "found_spot":{"x":1,"y":2,"w":3,"h":4},
             "found_confidence":0.4}"#;
         let (_, meta) = must_ok(parse_meta(CropKind::StatDigits, body), "full meta");
         assert_eq!(meta.slot_index, Some(2));
         assert_eq!(meta.ui_scale, Some(90.0));
         assert_eq!(meta.locked_in, Some(true));
         assert_eq!(meta.found_spot.map(|s| s.h), Some(4));
-        assert_eq!(meta.colorblind_filter.as_deref(), Some("off"));
     }
 
     #[test]
@@ -1113,11 +1146,14 @@ mod tests {
     #[test]
     fn hero_icon_audit_names_are_kept_and_other_kinds_get_their_own() {
         assert_eq!(
-            delete_action(CropKind::HeroIcon).to_string(),
+            delete_action(Some(CropKind::HeroIcon)).to_string(),
             "deleted_hero_icon"
         );
         for kind in [CropKind::StatDigits, CropKind::MapName] {
-            assert_eq!(delete_action(kind).to_string(), "deleted_training_crop");
+            assert_eq!(
+                delete_action(Some(kind)).to_string(),
+                "deleted_training_crop"
+            );
             assert_eq!(list_action(Some(kind)).to_string(), "viewed_training_crops");
         }
         assert_eq!(
@@ -1125,6 +1161,7 @@ mod tests {
             "viewed_hero_icons"
         );
         assert_eq!(list_action(None).to_string(), "viewed_training_crops");
+        assert_eq!(delete_action(None).to_string(), "deleted_training_crop");
     }
 
     fn clean(width: u32, height: u32) -> CleanIcon {

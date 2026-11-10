@@ -87,8 +87,6 @@ pub struct TrainingCropMeta {
     pub screen_height: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_scale: Option<f64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub colorblind_filter: Option<String>,
     /// For unknown screen sizes. Both `found_spot` and `found_confidence`, or
     /// neither.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,8 +134,6 @@ pub struct TrainingCropUploadMeta {
     pub screen_height: Option<u32>,
     #[serde(default)]
     pub ui_scale: Option<f64>,
-    #[serde(default)]
-    pub colorblind_filter: Option<String>,
     #[serde(default)]
     pub found_spot: Option<CropSpot>,
     #[serde(default)]
@@ -226,9 +222,6 @@ impl TrainingCropUploadMeta {
         if !optional(self.ui_scale, ui_scale_ok) {
             return Err("ui_scale");
         }
-        if !optional(self.colorblind_filter.as_deref(), label_ok) {
-            return Err("colorblind_filter");
-        }
         if self.found_spot.is_some() != self.found_confidence.is_some() {
             return Err("found_spot");
         }
@@ -265,7 +258,6 @@ impl TrainingCropUploadMeta {
             screen_width: self.screen_width,
             screen_height: self.screen_height,
             ui_scale: self.ui_scale,
-            colorblind_filter: self.colorblind_filter,
             found_spot: self.found_spot,
             found_confidence: self.found_confidence,
         };
@@ -415,7 +407,9 @@ pub struct StaffTrainingCrop {
 ///
 /// Officers see only the kinds a member consents to, and only members with
 /// at least one consented kind. Admins also see kinds that are hidden
-/// (consent off) while crops of that kind are still stored.
+/// (consent off) while crops of that kind are still stored. There is no
+/// per-member resolution breakdown: it would show each member's setup. See
+/// [`TrainingCropResolutionTotals`] for totals across members.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrainingCropMemberCounts {
     pub member_id: String,
@@ -424,7 +418,13 @@ pub struct TrainingCropMemberCounts {
     /// Sum of `kinds[].count`.
     pub total: u32,
     pub kinds: Vec<TrainingCropKindCount>,
-    /// The same crops by kind and game resolution, largest count first.
+}
+
+/// `GET /api/training-crops/resolutions` (officer or admin): stored crops
+/// by kind and game resolution, summed across active members, consented
+/// kinds only. Largest count first.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrainingCropResolutionTotals {
     pub resolutions: Vec<TrainingCropResolutionCount>,
 }
 
@@ -449,7 +449,6 @@ mod tests {
             screen_width: Some(1920),
             screen_height: Some(1080),
             ui_scale: Some(100.0),
-            colorblind_filter: Some("deuteranopia".into()),
             found_spot: Some(CropSpot {
                 x: 10,
                 y: 20,
@@ -477,10 +476,7 @@ mod tests {
         assert_eq!(bad(|m| m.screen = Some(String::new())), "screen");
         assert_eq!(bad(|m| m.screen = Some("a".repeat(33))), "screen");
         assert_eq!(bad(|m| m.slot_type = Some("ally team".into())), "slot_type");
-        assert_eq!(
-            bad(|m| m.colorblind_filter = Some("é".into())),
-            "colorblind_filter"
-        );
+        assert_eq!(bad(|m| m.slot_type = Some("é".into())), "slot_type");
         let mut ok = full();
         ok.screen = Some("a".repeat(32));
         ok.validate().unwrap();
@@ -615,6 +611,22 @@ mod tests {
         assert_eq!(parsed, TrainingCropUploadMeta::default());
         let parsed = serde_json::from_str::<TrainingCropUploadMeta>(r#"{"slot_index":-1}"#);
         assert!(parsed.is_err(), "negative slot index");
+    }
+
+    #[test]
+    fn colorblind_filter_is_not_accepted_or_stored() {
+        // It hints at a member's colour vision and is not in the agreed
+        // field list, so the meta refuses it like any unknown field.
+        for body in [
+            r#"{"colorblind_filter":"off"}"#,
+            r#"{"colorblind_filter":"deuteranopia"}"#,
+        ] {
+            let parsed = serde_json::from_str::<TrainingCropUploadMeta>(body);
+            assert!(parsed.is_err(), "{body}");
+        }
+        let (_, meta) = full().split();
+        let json = serde_json::to_value(meta).unwrap();
+        assert!(json.get("colorblind_filter").is_none());
     }
 
     #[test]

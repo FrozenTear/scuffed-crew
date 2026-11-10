@@ -1026,7 +1026,6 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE screen_width ON hero_icon TYPE option<int>;
         DEFINE FIELD OVERWRITE screen_height ON hero_icon TYPE option<int>;
         DEFINE FIELD OVERWRITE ui_scale ON hero_icon TYPE option<float>;
-        DEFINE FIELD OVERWRITE colorblind_filter ON hero_icon TYPE option<string>;
         DEFINE FIELD OVERWRITE tracker_version ON hero_icon TYPE option<string>;
         DEFINE FIELD OVERWRITE found_x ON hero_icon TYPE option<int>;
         DEFINE FIELD OVERWRITE found_y ON hero_icon TYPE option<int>;

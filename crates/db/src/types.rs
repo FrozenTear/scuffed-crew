@@ -1730,6 +1730,15 @@ pub struct TrainingCropCountRow {
     pub count: u64,
 }
 
+/// Who owns a stored crop, read without parsing the rest of the row, so a
+/// row that fails to parse can still be found and deleted. `kind` is `None`
+/// when the stored kind is unknown.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrainingCropOwner {
+    pub member_id: String,
+    pub kind: Option<scuffed_types::CropKind>,
+}
+
 /// Build the deterministic conversation key from a pubkey pair.
 ///
 /// Sorts the two pubkeys lexicographically and joins with a comma, so
