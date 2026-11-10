@@ -81,6 +81,11 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
+        // No Tracker health panel here: without a keyboard Tab is never
+        // seen, so the reason and its fix sit under the title on every tab.
+        if let Some(notice) = top_tabs_input_notice(app) {
+            content = content.push(widgets::warn_line(notice));
+        }
         // Settings has none; Overview, Games, Heroes, Maps and Seasons draw
         // the spec's filter chips themselves.
         if !matches!(
@@ -117,6 +122,14 @@ fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     .width(Fill)
     .height(Fill)
     .into()
+}
+
+/// The keyboard notice the top tabs layout draws under the page title.
+/// The classic layout has it in Tracker health instead.
+fn top_tabs_input_notice(app: &TrackerApp) -> Option<&str> {
+    (app.nav_style == NavStyle::TopTabs)
+        .then_some(app.ocr_switch.input_notice.as_deref())
+        .flatten()
 }
 
 /// Where the toast and the restart bar go.
@@ -227,5 +240,27 @@ fn page_body<'a>(
             .width(Fill)
             .height(Fill)
             .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::top_tabs_input_notice;
+    use crate::nav::NavStyle;
+
+    /// The default layout has no Tracker health panel, so it must draw the
+    /// keyboard notice itself; the classic layout keeps it in the panel.
+    #[test]
+    fn the_top_tabs_layout_shows_the_keyboard_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = crate::fixtures::test_cli(dir.path());
+        let mut app = crate::app::TrackerApp::new(cli).0;
+        app.nav_style = NavStyle::TopTabs;
+        assert_eq!(top_tabs_input_notice(&app), None);
+        let notice = "Tab detection is off. Run: sudo usermod -aG input \"$USER\"";
+        app.ocr_switch.input_notice = Some(notice.into());
+        assert_eq!(top_tabs_input_notice(&app), Some(notice));
+        app.nav_style = NavStyle::ClassicSidebar;
+        assert_eq!(top_tabs_input_notice(&app), None);
     }
 }
