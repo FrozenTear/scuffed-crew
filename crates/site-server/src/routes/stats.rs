@@ -1318,6 +1318,37 @@ mod tests {
         assert_eq!(rows[0].role, "Tank");
     }
 
+    /// alpha.3 item 22: an old game (no session id) posted again with a
+    /// corrected hero updates the stored match instead of adding one.
+    #[tokio::test]
+    async fn legacy_game_reposted_with_new_hero_stays_one_match() {
+        let (state, member_id, token) = daemon().await;
+        let app = create_router(state.clone());
+        let first = match_object("", 5);
+        let (status, _) = post_raw(
+            app.clone(),
+            &token,
+            serde_json::json!({ "matches": [first] }),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let mut edited = match_object("", 5);
+        edited["hero"] = "Kiriko".into();
+        edited["edited"] = true.into();
+        let (status, _) = post_raw(app, &token, serde_json::json!({ "matches": [edited] })).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "same old game must stay one match");
+        assert_eq!(rows[0].hero, "Kiriko");
+        assert!(rows[0].session_id.starts_with("legacy-"));
+    }
+
     #[tokio::test]
     async fn upload_without_recognizer_stores_ocr_v1_and_keeps_response_shape() {
         let (state, member_id, token) = daemon().await;
