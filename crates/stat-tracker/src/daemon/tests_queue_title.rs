@@ -28,6 +28,7 @@ fn hint(text: &str, source: &str) -> Option<PendingHint> {
         source: source.to_string(),
         at: t0(),
         target: None,
+        target_folder: None,
     })
 }
 

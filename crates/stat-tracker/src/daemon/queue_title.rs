@@ -20,19 +20,25 @@
 //!
 //! What is stored is stored once (`LocalStore::attach_queue_title`): a game
 //! that has a queue title is not read again, so a restart mid-game cannot
-//! turn a confident title into a warning. The feed reads a game folder once
-//! too ([`QueueTitleFeed::read_now`]): a frame of the same folder held after
-//! the read (a late `heroselect_last`) is ignored, so it cannot give the
-//! next game, which may open no folder of its own, this game's queue.
+//! turn a confident title into a warning. The feed closes a game folder
+//! when the open game is decided, read or not ([`QueueTitleFeed::read_now`],
+//! [`QueueTitleFeed::close_folder`]): a frame of the same folder held after
+//! that (a late `heroselect_last`, say in quick play, where a Tab as the
+//! hero select closes decides the game before its only policy frame is
+//! saved) is ignored, so it cannot give the next game, which may open no
+//! folder of its own, this game's queue. A folder that opened after the
+//! game's first record is not closed by a decision with no read: it is the
+//! next game's (its start screen came late).
 //!
 //! The held frames are tied to the open game when they were held
 //! ([`QueueTitleFeed::held_for`]). A game that is never read (no Tab, or
 //! first stored as a best guess on close or at shutdown) leaves its frames
 //! behind; the next game's read finds them tied to another game that was
 //! never read and drops them unread, so they cannot give it that game's
-//! queue. Frames held while the open game was one read already are the
-//! next game's (its start screen opened it after they were held) and are
-//! read as before.
+//! queue. Frames held in a new folder while the open game was one decided
+//! already are the next game's (its start screen opened it after they were
+//! held) and are read as before; the decided game's own folder is closed,
+//! so none of its frames is held after its decision.
 //!
 //! A read whose store write fails is kept ([`QueueTitleFeed::unsaved`]) and
 //! written on the game's next capture, so a store error does not turn a
@@ -58,7 +64,10 @@
 //!   started before it was read: those leave it waiting;
 //! * once pre-game frames are held for a game other than its source, it is
 //!   that game's ([`PendingHint::target`]): a read of any other game
-//!   expires it, so a game that is never read does not pass it on;
+//!   expires it, so a game that is never read does not pass it on. Later
+//!   frames of the same folder move it to the game they are held for (the
+//!   tick that opens the next game holds its first frame under the game it
+//!   retires); a new folder does not;
 //! * it expires once it is older than the game window the frames use
 //!   ([`super::bans_picks::frames_fit`]), so it never lands on a much later
 //!   game.
@@ -71,7 +80,7 @@ use image::{DynamicImage, RgbImage};
 use stat_tracker::model::QueueTitle;
 use stat_tracker::shadow::queue_title::{Field, MIN_SCORE, POLICY, Reader, Screen};
 
-use super::bans_picks::{GAME_WINDOW_MINUTES, frames_fit};
+use super::bans_picks::{CLOCK_SLACK_SECONDS, GAME_WINDOW_MINUTES, frames_fit};
 use super::pregame_dump::PregameOp;
 
 /// One frame read, as the reader does it. A function so a test can inject
@@ -89,9 +98,13 @@ pub(crate) struct PendingHint {
     /// When the rank screen it was read on showed (the frame's time, not
     /// the time it was handed over).
     pub(crate) at: DateTime<Utc>,
-    /// The first game other than `source` that pre-game frames were held
-    /// for after the hint was set: the next game. `None` until then.
+    /// The game other than `source` that pre-game frames were held for
+    /// after the hint was set, in the first folder that held such a frame:
+    /// the next game. The last such frame of that folder sets it; frames of
+    /// a later folder do not. `None` until then.
     pub(crate) target: Option<String>,
+    /// The folder `target` was set in.
+    pub(crate) target_folder: Option<String>,
 }
 
 /// What a read did to the pending next mode hint.
@@ -125,7 +138,10 @@ pub(crate) struct ReadGame<'a> {
 pub(crate) struct QueueTitleFeed {
     read: ReadFn,
     folder: Option<String>,
-    /// This folder's frames were read: later frames of it are not held.
+    /// When this folder's first shot was saved.
+    folder_at: Option<DateTime<Utc>>,
+    /// This folder was closed (its game was decided, read or not): later
+    /// frames of it are not held.
     done: bool,
     /// The current game's frames, by [`POLICY`] slot.
     frames: Vec<(Screen, &'static str, Arc<DynamicImage>)>,
@@ -158,6 +174,7 @@ impl QueueTitleFeed {
         Self {
             read,
             folder: None,
+            folder_at: None,
             done: false,
             frames: Vec::new(),
             fed_at: None,
@@ -169,10 +186,11 @@ impl QueueTitleFeed {
     }
 
     /// One batch the saver sends while `open` is the open game. A shot of a
-    /// new game folder drops the old game's frames and the read-once mark;
-    /// a frame of a folder read already is not held. A frame held ties the
-    /// frames to `open` ([`Self::held_for`]) and, when `open` is not the
-    /// pending hint's source, the hint to `open` ([`PendingHint::target`]).
+    /// new game folder drops the old game's frames and the closed mark; a
+    /// frame of a closed folder is not held. A frame held ties the frames
+    /// to `open` ([`Self::held_for`]) and, when `open` is not the pending
+    /// hint's source, the hint to `open` ([`PendingHint::target`]) unless
+    /// the hint was tied in an earlier folder.
     pub(crate) fn observe(&mut self, ops: &[PregameOp<Arc<DynamicImage>>], open: Option<&str>) {
         for op in ops {
             let PregameOp::Save(shot) = op else {
@@ -180,6 +198,7 @@ impl QueueTitleFeed {
             };
             if self.folder.as_deref() != Some(shot.folder.as_str()) {
                 self.folder = Some(shot.folder.clone());
+                self.folder_at = Some(Utc::now());
                 self.frames.clear();
                 self.fed_at = None;
                 self.held_for = None;
@@ -197,10 +216,11 @@ impl QueueTitleFeed {
             self.fed_at = Some(Utc::now());
             self.held_for = open.map(str::to_string);
             if let (Some(hint), Some(open)) = (self.pending_hint.as_mut(), open)
-                && hint.target.is_none()
                 && hint.source != open
+                && (hint.target.is_none() || hint.target_folder == self.folder)
             {
                 hint.target = Some(open.to_string());
+                hint.target_folder = self.folder.clone();
             }
         }
     }
@@ -212,14 +232,29 @@ impl QueueTitleFeed {
         self.held_for.as_deref()
     }
 
-    /// Drop the held frames unread and mark the folder read, so nothing
-    /// held later in it is read either: they are a game's that was never
-    /// read.
+    /// Drop the held frames unread and close the folder, so nothing held
+    /// later in it is read either.
     pub(crate) fn drop_frames(&mut self) {
         self.frames.clear();
         self.fed_at = None;
         self.held_for = None;
         self.done = true;
+    }
+
+    /// The open game, first recorded at `started`, was decided with no
+    /// read: close the folder as a read does ([`Self::drop_frames`]), so a
+    /// frame of it saved later (a late `heroselect_last`) is not read for
+    /// the next game. The open-game gate makes the current folder this
+    /// game's pre-game, except when it opened after `started` (beyond the
+    /// clock slack): then its start screen came late, it is the next
+    /// game's, and it stays open. `true` when closed.
+    pub(crate) fn close_folder(&mut self, started: DateTime<Utc>) -> bool {
+        let slack = Duration::seconds(CLOCK_SLACK_SECONDS);
+        if self.folder_at.is_some_and(|at| at > started + slack) {
+            return false;
+        }
+        self.drop_frames();
+        true
     }
 
     pub(crate) fn was_read_for(&self, session_id: &str) -> bool {
@@ -250,7 +285,7 @@ impl QueueTitleFeed {
 
     /// Read the held frames in [`POLICY`] order, off the poll loop's
     /// thread; the first [`confident`] value wins, and with none the read
-    /// has no value. The frames are dropped and the folder is marked read
+    /// has no value. The frames are dropped and the folder is closed
     /// either way, so nothing held later in it is read for another game.
     /// A reader that panics, or no frame at all, is a read with no value.
     pub(crate) async fn read_now(&mut self) -> Field<String> {

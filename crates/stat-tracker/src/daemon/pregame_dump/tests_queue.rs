@@ -4,6 +4,7 @@
 //! pre-game folder unless a test says otherwise.
 
 use super::*;
+use crate::daemon::bans_picks::GAME_WINDOW_MINUTES;
 use crate::daemon::queue_title::{PendingHint, QueueTitleFeed, ReadFn};
 use image::DynamicImage;
 use stat_tracker::model::{BansPicksStatus, QUEUE_TITLE_WARNING, QueueTitle};
@@ -64,10 +65,12 @@ fn folder_of(sid: &str) -> String {
     format!("20261103_1200_{sid}")
 }
 
-/// The store, with its queue title writes failing while `fail` is set.
+/// The store, with its queue title writes failing while `fail` is set,
+/// and its stored title lookups of `fail_title_of` failing.
 struct FailingWrites<'a> {
     store: &'a storage::LocalStore,
     fail: bool,
+    fail_title_of: Option<&'a str>,
 }
 
 impl super::queue::TitleStore for FailingWrites<'_> {
@@ -75,6 +78,9 @@ impl super::queue::TitleStore for FailingWrites<'_> {
         &self,
         session_id: &str,
     ) -> Result<Option<QueueTitle>, Box<dyn std::error::Error + Send + Sync>> {
+        if self.fail_title_of == Some(session_id) {
+            return Err("queue title lookup refused (test)".into());
+        }
         self.store.session_queue_title(session_id).await
     }
 
@@ -531,6 +537,7 @@ async fn a_store_error_after_the_read_keeps_the_read_for_the_next_capture() {
     let failing = FailingWrites {
         store: &rig.store,
         fail: true,
+        fail_title_of: None,
     };
     rig.dump
         .attach_queue_title(&failing, "g1", Some("g1"))
@@ -542,6 +549,7 @@ async fn a_store_error_after_the_read_keeps_the_read_for_the_next_capture() {
     let failing = FailingWrites {
         store: &rig.store,
         fail: true,
+        fail_title_of: None,
     };
     rig.dump
         .attach_queue_title(&failing, "g1", Some("g1"))
@@ -571,6 +579,7 @@ async fn a_kept_read_is_not_written_on_another_game() {
     let failing = FailingWrites {
         store: &rig.store,
         fail: true,
+        fail_title_of: None,
     };
     rig.dump
         .attach_queue_title(&failing, "g1", Some("g1"))
@@ -585,28 +594,49 @@ async fn a_kept_read_is_not_written_on_another_game() {
 }
 
 #[tokio::test]
-async fn a_hint_handed_over_late_still_belongs_to_the_next_game() {
+async fn a_hint_handed_over_after_the_next_games_tab_goes_to_the_game_after_or_expires() {
     let calls = Calls::default();
     let mut rig = Rig::new(reads(Some("OPEN QUEUE"), 0.93, &calls)).await;
-    // g0's rank screen showed two minutes ago; g1 was first recorded a
-    // minute ago, with no pre-game frames held, and the hint is handed
-    // over only now.
+    // g0's rank screen showed two minutes ago. g1, the next game, is read
+    // on its first Tab before the hint is handed over.
     let now = chrono::Utc::now();
     let shown = now - chrono::Duration::minutes(2);
-    let mut g1 = crate::main_tests::test_match("g1", "victory");
-    g1.played_at = (now - chrono::Duration::minutes(1)).into();
-    rig.store.insert_match(g1).await.unwrap();
+    rig.dump.set_session(Some("g1"));
+    let t = rig.game("g1", true).await.expect("a queue title");
+    assert_eq!(
+        (t.value.as_deref(), t.mode_hint),
+        (Some("OPEN QUEUE"), None)
+    );
     rig.dump.set_next_mode_hint(Some("open"), "g0", shown);
+    // g1 is not read again, so it never settles the hint.
+    rig.record("g1").await;
     rig.dump
         .attach_queue_title(&rig.store, "g1", Some("g1"))
         .await;
-    let t = rig.title("g1").await.expect("a queue title");
-    assert_eq!((t.mode_hint, t.unsure), (None, true));
-    // g1 settled it (a weak read expires it): it does not wait for g2.
-    assert_eq!(rig.pending(), None);
+    assert_eq!(rig.title("g1").await.unwrap().mode_hint, None);
+    assert_eq!(rig.pending().map(|h| h.text).as_deref(), Some("open"));
+    // The game after takes it when its read agrees.
+    rig.dump.set_session(Some("g2"));
     let t = rig.game("g2", true).await.expect("a queue title");
-    assert_eq!(t.value.as_deref(), Some("OPEN QUEUE"));
-    assert_eq!(t.mode_hint, None, "g0's hint was g1's, not g2's");
+    assert_eq!(
+        t.mode_hint.as_deref(),
+        Some("open"),
+        "g0's hint lands on g2"
+    );
+    assert_eq!(rig.pending(), None);
+    // Handed over later than the game window: it expires on the next read.
+    rig.dump.set_next_mode_hint(
+        Some("open"),
+        "g2",
+        now - chrono::Duration::minutes(GAME_WINDOW_MINUTES + 1),
+    );
+    rig.dump.set_session(Some("g3"));
+    let t = rig.game("g3", true).await.expect("a queue title");
+    assert_eq!(
+        (t.value.as_deref(), t.mode_hint),
+        (Some("OPEN QUEUE"), None)
+    );
+    assert_eq!(rig.pending(), None, "expired");
 }
 
 #[tokio::test]
@@ -679,4 +709,150 @@ async fn a_hint_for_a_game_never_read_is_not_passed_to_the_game_after() {
     assert_eq!(t.value.as_deref(), Some("OPEN QUEUE"));
     assert_eq!(t.mode_hint, None, "g2's hint is not g3's");
     assert_eq!(rig.pending(), None, "expired");
+}
+
+/// A reader that gives `value` at 0.93 on every screen.
+fn reads_every_screen(value: &'static str, calls: &Calls) -> ReadFn {
+    let calls = Arc::clone(calls);
+    Arc::new(move |img, screen| {
+        calls.lock().unwrap().push((screen, img.width()));
+        Field {
+            value: Some(value.to_string()),
+            confidence: 0.93,
+            bbox: None,
+        }
+    })
+}
+
+#[tokio::test]
+async fn a_late_frame_of_a_game_decided_with_no_read_is_not_read_for_the_next_game() {
+    let calls = Calls::default();
+    let mut rig = Rig::new(reads_every_screen("OPEN QUEUE", &calls)).await;
+    // Quick play: a map vote and no hero ban. g1's vote opens its folder.
+    rig.dump.set_session(Some("g1"));
+    let g1 = folder_of("g1");
+    rig.dump.send(vec![
+        shot(&g1, PregamePhase::MapVote.first_name(), 48),
+        shot(&g1, PregamePhase::HeroSelect.first_name(), 112),
+    ]);
+    // The Tab as the hero select closes: g1 is decided with nothing held.
+    let t = rig.game("g1", false).await.expect("a queue title");
+    assert_eq!(t.warning(), Some(QUEUE_TITLE_WARNING));
+    assert!(calls.lock().unwrap().is_empty(), "nothing held for g1");
+    // The hero select's last frame lands in g1's folder after that.
+    rig.dump.send(vec![shot(
+        &g1,
+        PregamePhase::HeroSelect.last_name(),
+        SELECT_LAST_W,
+    )]);
+    // g2 opens no folder (its vote missed while alt-tabbed, or a backfill).
+    rig.dump.set_session(Some("g2"));
+    let t = rig.game("g2", false).await.expect("a queue title");
+    assert_eq!(t.value, None, "not g1's queue");
+    assert_eq!(t.warning(), Some(QUEUE_TITLE_WARNING));
+    assert!(
+        calls.lock().unwrap().is_empty(),
+        "g1's late frame was not read for g2"
+    );
+    // The next game with its own folder is read as before.
+    rig.dump.set_session(Some("g3"));
+    let t = rig.game("g3", true).await.expect("a queue title");
+    assert_eq!(t.value.as_deref(), Some("OPEN QUEUE"));
+    assert_eq!(calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_store_error_looking_up_the_held_frames_game_reads_again_on_the_next_capture() {
+    let calls = Calls::default();
+    let mut rig = Rig::new(reads(Some("OPEN QUEUE"), 0.93, &calls)).await;
+    rig.dump.set_session(Some("g1"));
+    rig.game("g1", true).await.expect("a queue title");
+    // After a restart, g2's frames are held while g1, read before it, is
+    // still the open game (g2's start screen came late).
+    rig.dump = Rig::saver(rig.dir.path(), reads(Some("ROLE QUEUE"), 0.93, &calls));
+    rig.dump.set_session(Some("g1"));
+    rig.dump.send(pregame(&folder_of("g2")));
+    rig.dump.set_session(Some("g2"));
+    rig.record("g2").await;
+    // Looking up g1's stored title fails: g2 is left unmarked, unread.
+    let failing = FailingWrites {
+        store: &rig.store,
+        fail: false,
+        fail_title_of: Some("g1"),
+    };
+    rig.dump
+        .attach_queue_title(&failing, "g2", Some("g2"))
+        .await;
+    assert_eq!(rig.title("g2").await, None, "no warning stored");
+    assert_eq!(calls.lock().unwrap().len(), 1, "g2's frames not read yet");
+    // The store works again: g2's next capture reads its own frames.
+    rig.record("g2").await;
+    rig.dump
+        .attach_queue_title(&rig.store, "g2", Some("g2"))
+        .await;
+    let t = rig.title("g2").await.expect("a queue title");
+    assert_eq!(t.value.as_deref(), Some("ROLE QUEUE"));
+    assert_eq!(calls.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn the_hint_follows_the_folder_from_the_game_its_first_tick_retires() {
+    let calls = Calls::default();
+    let mut rig = Rig::new(reads(Some("OPEN QUEUE"), 0.93, &calls)).await;
+    rig.dump.set_session(Some("g1"));
+    rig.game("g1", true).await.expect("a queue title");
+    rig.dump
+        .set_next_mode_hint(Some("open"), "g1", chrono::Utc::now());
+    // An empty Tab game x is open. g2's hero ban splits it on its first
+    // tick, and that tick's frame is held under x.
+    rig.dump.set_session(Some("x"));
+    let g2 = folder_of("g2");
+    rig.dump.send(vec![shot(
+        &g2,
+        PregamePhase::HeroBan.first_name(),
+        BAN_FIRST_W,
+    )]);
+    assert_eq!(rig.pending().and_then(|h| h.target).as_deref(), Some("x"));
+    // The rest of g2's folder is held under g2: the hint moves with it.
+    rig.dump.set_session(Some("g2"));
+    rig.dump.send(vec![shot(
+        &g2,
+        PregamePhase::HeroBan.last_name(),
+        BAN_LAST_W,
+    )]);
+    let pending = rig.pending().expect("pending");
+    assert_eq!(
+        (pending.target.as_deref(), pending.target_folder.as_deref()),
+        (Some("g2"), Some(g2.as_str()))
+    );
+    let t = rig.game("g2", false).await.expect("a queue title");
+    assert_eq!(t.value.as_deref(), Some("OPEN QUEUE"));
+    assert_eq!(t.mode_hint.as_deref(), Some("open"), "confirmed on g2");
+    assert_eq!(rig.pending(), None);
+}
+
+#[tokio::test]
+async fn a_game_decided_with_no_read_leaves_a_folder_opened_after_its_first_record() {
+    let calls = Calls::default();
+    let mut rig = Rig::new(reads(Some("OPEN QUEUE"), 0.93, &calls)).await;
+    // g1 was first recorded a minute ago (its first read was put off by a
+    // store error), and g2's start screen came late: g2's folder opens
+    // while g1 is still the open game.
+    let mut g1 = crate::main_tests::test_match("g1", "victory");
+    g1.played_at = (chrono::Utc::now() - chrono::Duration::minutes(1)).into();
+    rig.store.insert_match(g1).await.unwrap();
+    rig.dump.set_session(Some("g1"));
+    rig.dump.send(pregame(&folder_of("g2")));
+    // g1's next capture decides it with no read: the frames do not fit.
+    rig.dump
+        .attach_queue_title(&rig.store, "g1", Some("g1"))
+        .await;
+    let t = rig.title("g1").await.expect("a queue title");
+    assert_eq!((t.value, t.unsure), (None, true));
+    assert!(calls.lock().unwrap().is_empty());
+    // g2's folder was left open: g2 reads its own frames.
+    rig.dump.set_session(Some("g2"));
+    let t = rig.game("g2", false).await.expect("a queue title");
+    assert_eq!(t.value.as_deref(), Some("OPEN QUEUE"));
+    assert_eq!(calls.lock().unwrap().len(), 1);
 }

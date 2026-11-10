@@ -42,7 +42,7 @@ pub(crate) const GAME_WINDOW_MINUTES: i64 = 30;
 
 /// The clock difference allowed between the last screen and the game's
 /// first record.
-const CLOCK_SLACK_SECONDS: i64 = 5;
+pub(crate) const CLOCK_SLACK_SECONDS: i64 = 5;
 
 /// The longest the pack's error is repeated in the status sentence.
 const ERROR_CHARS: usize = 120;

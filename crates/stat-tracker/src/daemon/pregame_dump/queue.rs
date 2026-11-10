@@ -37,11 +37,12 @@ impl PregameDump {
     /// Set the pending next mode hint: the mode banner word read on the
     /// rank screen of `source_session`, which names the queue of the game
     /// after it. `shown_at` is when that rank screen showed: the time of
-    /// the frame it was read on, not of this call, so a hint handed over
-    /// late (say read from a saved post-game frame after the next game's
-    /// first Tab) still belongs to the next game. The next game's read
-    /// settles it ([`crate::daemon::queue_title::settle_hint`]);
-    /// `source_session` itself never does. A blank hint clears it, a new
+    /// the frame it was read on, not of this call; the age and fit checks
+    /// use it. The call must come before the next game's first Tab: the
+    /// next game is read once, on that Tab, and its read settles the hint
+    /// ([`crate::daemon::queue_title::settle_hint`]). A later call is not
+    /// the next game's: it goes to the game after (when that game's read
+    /// agrees) or expires. `source_session` itself never settles it. A blank hint clears it, a new
     /// one replaces the one pending (a log line says so). Nothing happens
     /// with the reader off. The rank reader's wiring calls this; until it
     /// lands only tests do.
@@ -63,6 +64,7 @@ impl PregameDump {
                 source: source_session.to_string(),
                 at: shown_at,
                 target: None,
+                target_folder: None,
             });
         if let Some(old) = feed.pending_hint.take() {
             tracing::info!(target: "scuffed_stat_tracker", hint = %old.text, source = %old.source, "queue title: next mode hint replaced before a game settled it");
@@ -130,7 +132,13 @@ impl PregameDump {
                 return;
             }
         };
-        let unread = held_for_unread_game(feed, store, session_id).await;
+        let unread = match held_for_unread_game(feed, store, session_id).await {
+            Ok(unread) => unread,
+            Err(e) => {
+                tracing::warn!(target: "scuffed_stat_tracker", error = %e, "queue title: the held frames' game not looked up, the game is read on its next capture");
+                return;
+            }
+        };
         feed.mark_read_for(session_id);
         let read = if let Some(other) = unread {
             feed.drop_frames();
@@ -146,6 +154,11 @@ impl PregameDump {
                 Some(fed_at) => {
                     tracing::info!(target: "scuffed_stat_tracker", session = session_id, %fed_at, %started, "queue title: the frames held are not this game's (game start does not fit), not read");
                 }
+            }
+            // The game is decided: close its folder as a read does, so a
+            // frame of it saved later is not read for the next game.
+            if !feed.close_folder(started) {
+                tracing::info!(target: "scuffed_stat_tracker", session = session_id, "queue title: the game folder opened after this game's first record, left open for the next game");
             }
             Field::none()
         };
@@ -183,22 +196,26 @@ impl PregameDump {
 /// and it was never read: neither the game read last nor one with a stored
 /// queue title (a game read before a restart). Its frames are not
 /// `session_id`'s. `None` when they may be: held for this game, with no
-/// open game, or while a game read already was open (the start screen came
-/// late). A store error counts as never read: the frames are dropped and
-/// the game gets the warning, the safe way to fail.
+/// open game, or in a new folder while a game decided already was open
+/// (the start screen came late; the decided game's own folder was closed
+/// at its decision, read or not, so none of its frames is held after it).
+/// A store error is returned: the caller leaves the game unmarked, so its
+/// next capture tries again, like the other store errors before the read.
 async fn held_for_unread_game(
     feed: &QueueTitleFeed,
     store: &impl TitleStore,
     session_id: &str,
-) -> Option<String> {
-    let other = feed.held_for().filter(|other| *other != session_id)?;
+) -> StoreResult<Option<String>> {
+    let Some(other) = feed.held_for().filter(|other| *other != session_id) else {
+        return Ok(None);
+    };
     if feed.fed_at().is_none() || feed.was_read_for(other) {
-        return None;
+        return Ok(None);
     }
-    match store.session_queue_title(other).await {
-        Ok(Some(_)) => None,
-        Ok(None) | Err(_) => Some(other.to_string()),
-    }
+    Ok(match store.session_queue_title(other).await? {
+        Some(_) => None,
+        None => Some(other.to_string()),
+    })
 }
 
 /// Write `title` on `session_id`. When the store does not take it, keep it
