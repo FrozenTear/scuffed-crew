@@ -204,9 +204,9 @@ pub struct OcrSwitchView {
     /// What the running tracker reports: it kept OCR on, or it runs with
     /// OCR off and holds reads for a missing pack.
     pub notice: Option<String>,
-    /// The running tracker's notice for Tracker health
-    /// ([`daemon_health_notice`]): a hold or a stopped read, never a
-    /// refused off.
+    /// The running tracker's notice for Tracker health: what
+    /// [`daemon_health_notice`] gives (the keyboard line, an OCR hold or a
+    /// stopped read, a failed bans and picks read), never a refused off.
     pub health_notice: Option<String>,
     /// The running tracker decided to run with classic OCR off
     /// ([`daemon_runs_ocr_off`]). The card hides what only classic OCR uses
@@ -218,6 +218,10 @@ pub struct OcrSwitchView {
     /// Why the running tracker is not on the capture method asked for
     /// (KDE direct did not answer). Shown under the capture method.
     pub capture_notice: Option<String>,
+    /// Why Tab presses cannot reach the running tracker
+    /// ([`daemon_input_notice`]). The top tabs layout has no Tracker health
+    /// panel, so it shows this under the page title on every tab.
+    pub input_notice: Option<String>,
 }
 
 /// A click on the classic OCR switch. Turning it on always works. Turning
@@ -309,6 +313,20 @@ pub(crate) fn daemon_share_notice(
     daemon_pid: Option<u32>,
 ) -> Option<String> {
     let notice = live_status(status, daemon_pid)?.share_notice.trim();
+    if notice.is_empty() {
+        None
+    } else {
+        Some(notice.to_string())
+    }
+}
+
+/// The running tracker's keyboard sentence (no keyboard device could be
+/// opened). Empty, or a status file from another run, is nothing to show.
+pub(crate) fn daemon_input_notice(
+    status: Option<&OcrSwitchStatus>,
+    daemon_pid: Option<u32>,
+) -> Option<String> {
+    let notice = live_status(status, daemon_pid)?.input_notice.trim();
     if notice.is_empty() {
         None
     } else {
@@ -3663,6 +3681,20 @@ token = \"not-a-real-token\"
         );
         status.share_notice.clear();
         assert_eq!(daemon_share_notice(Some(&status), Some(41)), None);
+    }
+
+    #[test]
+    fn the_keyboard_notice_is_shown_for_the_running_tracker() {
+        let mut status = switch_status(41, None, ALL_PACKS);
+        status.input_notice = "Tab detection is off. Run: sudo usermod -aG input \"$USER\"".into();
+        assert_eq!(
+            daemon_input_notice(Some(&status), Some(41)).as_deref(),
+            Some(status.input_notice.as_str())
+        );
+        assert_eq!(daemon_input_notice(Some(&status), Some(42)), None);
+        assert_eq!(daemon_input_notice(Some(&status), None), None);
+        status.input_notice = "  ".into();
+        assert_eq!(daemon_input_notice(Some(&status), Some(41)), None);
     }
 
     /// Tracker health takes a hold, not a refusal: a tracker that refused

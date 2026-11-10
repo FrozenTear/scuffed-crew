@@ -907,8 +907,12 @@ fn the_daemon_refuses_ocr_off_while_a_reader_pack_is_missing() {
         assert!(reason.ends_with(ocr_switch::TURN_BACK_ON), "{reason}");
     }
     assert_eq!(run.status.notice(), Some(reason));
+    // The keyboard line may land a few seconds after the read where no
+    // keyboard opens (a CI runner): it is not what this test is about.
+    let mut health = run.status.clone();
+    health.input_notice.clear();
     assert_eq!(
-        run.status.health_notice(),
+        health.health_notice(),
         None,
         "the tracker reads everything with classic OCR: not a health problem"
     );

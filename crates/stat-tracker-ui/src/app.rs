@@ -2432,6 +2432,8 @@ impl TrackerApp {
                 self.kde_direct_recheck = true;
             }
             self.kde_direct_seen = seen;
+            self.ocr_switch.input_notice =
+                settings::daemon_input_notice(status.as_ref(), self.daemon.pid);
             let share = settings::daemon_share_notice(status.as_ref(), self.daemon.pid);
             if share != self.ocr_switch.share_notice {
                 self.ocr_switch.share_notice = share;
