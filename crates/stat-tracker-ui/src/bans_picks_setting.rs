@@ -16,8 +16,13 @@ use stat_tracker::model::BansPicksStatus;
 pub const ROW_ID: &str = "settings-bans-picks-row";
 /// How long the row stays marked after "Open Settings" opened it.
 pub const HIGHLIGHT_FOR: Duration = Duration::from_secs(2);
-/// Room left above the row when the pane jumps to it.
-pub const ROW_MARGIN: f32 = 24.0;
+/// Room left above the row when the pane jumps to it, enough that the
+/// bottom of the row above stays visible and it is clear the pane is
+/// partway down Capture and reading.
+pub const ROW_MARGIN: f32 = 56.0;
+/// Padding on every side of the marked row, so the 1 px accent outline
+/// frames the row instead of hugging the label and help.
+pub const ROW_OUTLINE_PAD: f32 = 8.0;
 
 /// Only a reader-off game row scrolls to and marks the switch. Other
 /// "Open Settings" reasons open the section and stop there.
@@ -191,7 +196,8 @@ mod tests {
     fn a_fully_visible_row_flush_with_the_pane_top_does_not_scroll() {
         let viewport = rect(0.0, 80.0, 640.0, 780.0);
         // The whole row is already in view, sitting at the top of a
-        // tall pane: do not jump, even though the margin is 0.
+        // tall pane: do not jump, even though there is no room above
+        // it for ROW_MARGIN.
         let row = rect(20.0, 80.0, 600.0, 61.0);
         assert!(row_fully_visible(viewport, row));
         assert_eq!(reveal_offset(viewport, row, ROW_MARGIN), None);
@@ -203,11 +209,13 @@ mod tests {
         // Viewport covers y=80..860; the row starts at 1014, as on the
         // default 1280x860 window.
         let row = rect(20.0, 1014.0, 600.0, 61.0);
+        assert_eq!(ROW_MARGIN, 56.0);
         assert!(!row_fully_visible(viewport, row));
         let y = reveal_offset(viewport, row, ROW_MARGIN).expect("row is below the fold");
-        assert_eq!(y, 1014.0 - 80.0 - ROW_MARGIN);
-        // After the jump, the row's top (and its outline) sits `margin`
-        // below the pane top.
+        assert_eq!(y, 1014.0 - 80.0 - 56.0);
+        // After the jump, the row's top (and its outline) sits 56 px
+        // below the pane top, so the bottom of the row above shows.
+        assert_eq!(row.y - y, viewport.y + 56.0);
         assert_eq!(row.y - y, viewport.y + ROW_MARGIN);
     }
 

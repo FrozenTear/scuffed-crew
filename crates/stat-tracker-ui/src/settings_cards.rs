@@ -484,16 +484,19 @@ pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Messag
             ConfigEdit::BansPicksReader,
         ),
     );
-    // A 1 px accent outline while marked. The border width stays 1 px
-    // when it is off (transparent), so the row does not jump. iced 0.14's
-    // toggler is mouse and touch only: it has no keyboard focus, so Space
-    // cannot flip the switch from here.
+    // A 1 px accent outline while marked, around the row plus
+    // ROW_OUTLINE_PAD on every side so it frames the row instead of
+    // hugging the label and help. The padding and the 1 px border width
+    // stay when the mark is off (transparent border), so the row does
+    // not jump. iced 0.14's toggler is mouse and touch only: it has no
+    // keyboard focus, so Space cannot flip the switch from here.
     let marked = app
         .page_state
         .bans_picks_row_marked(std::time::Instant::now());
     container(row)
         .id(iced::widget::Id::new(crate::bans_picks_setting::ROW_ID))
         .width(Fill)
+        .padding(crate::bans_picks_setting::ROW_OUTLINE_PAD)
         .style(move |_: &Theme| iced::widget::container::Style {
             border: Border {
                 color: if marked {
