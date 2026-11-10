@@ -11,6 +11,10 @@
 //! The daemon reads the key once at start, like the other keys it holds in
 //! `DaemonCtx`. Turning it back on and restarting the tracker sends the
 //! queued games on the startup sync.
+//!
+//! With uploads off the event loop also skips its auth pause check (delete
+//! pending, rejected or expired token), since that sits behind the upload
+//! client too; the startup pack block in `run` still logs the reason once.
 
 use crate::*;
 
