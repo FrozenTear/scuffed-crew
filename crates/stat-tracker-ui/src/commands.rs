@@ -494,7 +494,11 @@ mod tests {
         let mut form = EditForm::from_game(&g);
         form.role = "Tank".into();
         let saved = save_edit(&dir, &g, &form).unwrap();
-        assert!(saved.toast.contains("stays on this computer"), "{}", saved.toast);
+        assert!(
+            saved.toast.contains("stays on this computer"),
+            "{}",
+            saved.toast
+        );
         assert_eq!(saved.category, None);
         assert!(!offers_report(saved));
     }
