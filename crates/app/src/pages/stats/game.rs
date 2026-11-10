@@ -20,6 +20,7 @@ use crate::util::encode_query;
 
 use super::bans_picks::{BANS_PICKS_CSS, bans_picks_section, lenient};
 use super::history::{cell_is_unsure, marked_value, outcome_class, show_new_reader_badge};
+use super::rank::{RANK_CSS, rank_detail};
 use super::role::game_role_label;
 use super::{format_date, map_game_mode, member_stats_url};
 use scuffed_types::BansPicks;
@@ -157,6 +158,10 @@ pub(super) struct GameRow {
     /// parse reads as None. See [`super::bans_picks`].
     #[serde(default, deserialize_with = "lenient")]
     bans_picks: Option<BansPicks>,
+    /// Rank update read for this game. Missing, `{}` or all-null reads as
+    /// None. See [`super::rank`].
+    #[serde(default, deserialize_with = "super::rank::lenient")]
+    rank: Option<scuffed_types::MatchRank>,
 }
 
 impl GameRow {
@@ -331,6 +336,7 @@ fn game_detail(row: &GameRow) -> Element {
                 span { aria_hidden: "true", "·" }
                 time { class: "game-date", datetime: "{machine_date}", title: "{abs}", "{date}" }
             }
+            {rank_detail(&row.id, row.rank.as_ref())}
             if new_reader || edited {
                 div { class: "game-badges",
                     if new_reader {
@@ -395,6 +401,7 @@ pub fn StatsMatch(id: String) -> Element {
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-mod-stats-css", css: super::STATS_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-game-game-css", css: GAME_CSS }
         crate::styles::StyleOnce { id: "scuffed-css-pages-stats-bans-picks-css", css: BANS_PICKS_CSS }
+        crate::styles::StyleOnce { id: "scuffed-css-pages-stats-rank-css", css: RANK_CSS }
         div { class: "stats-page my-stats game-page",
             if show_back {
                 Link { class: "game-back", to: Route::Stats {}, "Back to My Stats" }
@@ -428,6 +435,7 @@ mod tests {
             recognizer: Some("ocr-v1".to_string()),
             suspect_fields: Some(suspect.iter().map(|s| (*s).to_string()).collect()),
             bans_picks: None,
+            rank: None,
         }
     }
 
