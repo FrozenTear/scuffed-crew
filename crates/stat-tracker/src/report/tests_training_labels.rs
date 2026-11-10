@@ -142,6 +142,10 @@ fn unknown_keys_and_blank_values_label_nothing() {
         ],
     );
     assert!(got.is_empty(), "{got:?}");
+    assert!(
+        names(GameCategory::Other, &[("hero", " ")]).is_empty(),
+        "a whitespace-only hero correction is not a misread"
+    );
 }
 
 /// A correction equal to what was read is not a misread: names trimmed and
@@ -173,6 +177,21 @@ fn a_correction_equal_to_the_read_labels_nothing() {
         ["hero", "d", "dmg"],
         "a different value, or a key with no read, is a misread"
     );
+}
+
+/// A correction that matches `ocr_v1` but not the selected `value` still
+/// labels the reader: this function does not treat that as a gate miss.
+#[test]
+fn a_correction_equal_to_ocr_v1_still_labels_the_selected_read() {
+    let mut reads = reads(&[("hero", "Mercy"), ("dmg", "9000")]);
+    reads.get_mut("hero").unwrap().ocr_v1 = Some("Ana".into());
+    reads.get_mut("dmg").unwrap().ocr_v1 = Some("8000".into());
+    let corrections = map(&[("hero", "Ana"), ("dmg", "8000")]);
+    let got: Vec<_> = misread_labels(GameCategory::Other, NEW, &corrections, &reads)
+        .into_iter()
+        .map(MisreadLabel::as_str)
+        .collect();
+    assert_eq!(got, ["hero", "dmg"]);
 }
 
 /// Wrong hero after the cutoff labels hero even with no hero correction.

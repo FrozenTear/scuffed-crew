@@ -104,6 +104,10 @@ impl MisreadLabel {
 /// compared trimmed and case-insensitive, stats as numbers (commas and
 /// spaces ignored, falling back to the name rule when either side is not a
 /// number). A correction for a key with no read value counts as a misread.
+/// The comparison uses that selected `value` only, not `ocr_v1`. A
+/// correction that matches `ocr_v1` but not `value` still labels the
+/// reader (a gate miss: the selected read was wrong and the other engine
+/// was right). This function does not classify that further.
 /// The category then adds the reader it names: Wrong map adds map, Wrong
 /// mode adds mode, Wrong result adds result. Wrong stats adds only the stats
 /// corrected, and Missed game and Other add nothing.
