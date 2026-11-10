@@ -1033,16 +1033,16 @@ mod tests {
     #[test]
     fn a_reader_off_open_settings_marks_the_bans_picks_row() {
         use crate::settings_model::AdvancedSection;
-        let (_dir, mut app) = app();
-        app.screen = Screen::Games;
+        let (_dir, mut opened) = app();
+        opened.screen = Screen::Games;
         let now = std::time::Instant::now();
-        let _ = update(&mut app, Msg::ShowBansPicksSetting);
-        assert_eq!(app.screen, Screen::Settings);
-        assert!(app.page_state.is_open(AdvancedSection::CaptureReading));
-        assert!(app.page_state.bans_picks_row_marked(now));
+        let _ = update(&mut opened, Msg::ShowBansPicksSetting);
+        assert_eq!(opened.screen, Screen::Settings);
+        assert!(opened.page_state.is_open(AdvancedSection::CaptureReading));
+        assert!(opened.page_state.bans_picks_row_marked(now));
         // Other reasons keep today's behaviour: the section opens, the
         // switch is not marked.
-        let (_dir, mut other) = app();
+        let (_dir_other, mut other) = app();
         other.screen = Screen::Games;
         let _ = update(
             &mut other,
@@ -1055,7 +1055,7 @@ mod tests {
                 .bans_picks_row_marked(std::time::Instant::now())
         );
         // The Settings tab itself stays at the top and does not mark it.
-        let (_dir, mut tab) = app();
+        let (_dir_tab, mut tab) = app();
         tab.screen = Screen::Games;
         let _ = tab.update(Message::Navigate(Screen::Settings));
         assert_eq!(tab.screen, Screen::Settings);
@@ -1066,7 +1066,6 @@ mod tests {
         );
     }
 
-    #[test]
     fn the_chip_opens_games_with_every_counted_game_shown() {
         let (_dir, mut app) = app();
         let mut games = Vec::new();
