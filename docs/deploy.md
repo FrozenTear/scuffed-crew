@@ -763,7 +763,9 @@ database row, and logs `hero icon orphan sweep done` with the count.
 The `hero-icons-data` volume is not in `scripts/backup.sh`, by decision: the
 current server is a temporary dev platform and backups are dropped for it.
 Lost icons can be contributed again. Endpoints,
-caps and the privacy rule are in `docs/api/hero-icons.md`.
+caps and the privacy rule are in `docs/api/hero-icons.md`. The same directory
+also holds opt-in training crops from the tracker (`/api/training-crops`, see
+`docs/api/training-crops.md`).
 
 ## Recognizer asset packs
 

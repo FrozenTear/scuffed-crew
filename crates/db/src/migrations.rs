@@ -19,6 +19,7 @@ pub(crate) const STEP_SCHEMA: &str = "schema script";
 pub(crate) const STEP_DISPLAY_NAME: &str = "display_name key backfill/unique index";
 pub(crate) const STEP_PERSONAL_MATCH: &str = "personal_match session dedupe/unique index";
 pub(crate) const STEP_DB7: &str = "DB7 roster dedupe/unique index";
+pub(crate) const STEP_CROP_KIND: &str = "hero_icon kind backfill";
 
 /// True for SurrealDB's optimistic transaction conflict, which it reports as
 /// retryable. Unique-index rejections and other errors are not retried.
@@ -83,6 +84,17 @@ pub(crate) async fn backfill_officers_can_edit_teams(client: &Surreal<Any>) -> D
         .query(
             "UPDATE site_settings SET officers_can_edit_teams = officers_can_edit_teams ?? false",
         )
+        .await?
+        .check()?;
+    Ok(())
+}
+
+/// Write `kind = 'hero_icon'` on hero_icon rows stored before the field
+/// existed. Rows that have a kind are not touched, so this is a no-op after
+/// the first boot.
+pub(crate) async fn backfill_training_crop_kind(client: &Surreal<Any>) -> DbResult<()> {
+    client
+        .query("UPDATE hero_icon SET kind = 'hero_icon' WHERE kind = NONE")
         .await?
         .check()?;
     Ok(())
@@ -984,6 +996,47 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE height ON hero_icon TYPE int;
         DEFINE FIELD OVERWRITE created_at ON hero_icon TYPE datetime;
         DEFINE INDEX IF NOT EXISTS hero_icon_member_idx ON hero_icon COLUMNS member_id;
+
+        -- ================================================
+        -- Training crops (alpha.3 item 14). hero_icon is the crop store: a
+        -- row is one crop of one kind. Rows from before `kind` existed are
+        -- hero icons; backfill_training_crop_kind writes 'hero_icon' on them.
+        -- Everything else is optional per-crop metadata from the tracker.
+        -- full_screen is refused by the server and never stored.
+        -- Additive only. Rollback: see docs/api/training-crops.md.
+        -- ================================================
+        DEFINE FIELD OVERWRITE kind ON hero_icon TYPE string DEFAULT 'hero_icon'
+            ASSERT $value IN ['hero_icon', 'stat_digits', 'map_name'];
+        DEFINE FIELD OVERWRITE screen ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE slot_type ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE slot_index ON hero_icon TYPE option<int>;
+        -- Opaque random per-game token from the tracker. Never linked to a match.
+        DEFINE FIELD OVERWRITE game_token ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE score ON hero_icon TYPE option<float>;
+        DEFINE FIELD OVERWRITE runner_up ON hero_icon TYPE option<float>;
+        DEFINE FIELD OVERWRITE margin ON hero_icon TYPE option<float>;
+        DEFINE FIELD OVERWRITE icon_set_version ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE spot_version ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE vote_card_filled ON hero_icon TYPE option<bool>;
+        DEFINE FIELD OVERWRITE locked_in ON hero_icon TYPE option<bool>;
+        DEFINE FIELD OVERWRITE screen_width ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE screen_height ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE ui_scale ON hero_icon TYPE option<float>;
+        DEFINE FIELD OVERWRITE colorblind_filter ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE tracker_version ON hero_icon TYPE option<string>;
+        DEFINE FIELD OVERWRITE found_x ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE found_y ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE found_w ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE found_h ON hero_icon TYPE option<int>;
+        DEFINE FIELD OVERWRITE found_confidence ON hero_icon TYPE option<float>;
+        DEFINE INDEX IF NOT EXISTS hero_icon_member_kind_idx ON hero_icon COLUMNS member_id, kind;
+
+        -- Per-kind training crop consent. hero_icon consent is the existing
+        -- hero_icon_opt_in, so today's opt-ins carry over unchanged. The other
+        -- kinds are off by default; legacy rows read false.
+        DEFINE FIELD OVERWRITE stat_digits_opt_in ON member_settings TYPE bool DEFAULT false;
+        DEFINE FIELD OVERWRITE map_name_opt_in ON member_settings TYPE bool DEFAULT false;
+        DEFINE FIELD OVERWRITE full_screen_opt_in ON member_settings TYPE bool DEFAULT false;
     "#,
             )
             .await?
@@ -991,6 +1044,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         Ok::<(), DbError>(())
     })
     .await?;
+
+    // Training crops: hero_icon rows from before `kind` existed are hero
+    // icons. Fatal so the kind filters never miss a legacy row.
+    run_migration_step(STEP_CROP_KIND, || backfill_training_crop_kind(client)).await?;
 
     // Key every display name and install the UNIQUE index. A clash or an
     // unkeyable stored name fails startup and does not rewrite display_name.

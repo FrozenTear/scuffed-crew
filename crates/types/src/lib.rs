@@ -11,6 +11,7 @@ pub mod stat_report;
 pub mod stats;
 pub mod stats_upload_limits;
 pub mod strategy;
+pub mod training_crops;
 
 pub use api::*;
 pub use auth::*;
@@ -37,3 +38,10 @@ pub use stats_upload_limits::{
     STATS_UPLOAD_TOKEN_REPLENISH_SECS,
 };
 pub use strategy::*;
+pub use training_crops::{
+    CropKind, MAP_NAME_MAX_PER_MEMBER, STAT_DIGITS_MAX_PER_MEMBER,
+    TRAINING_CROP_GAME_TOKEN_MAX_LEN, TRAINING_CROP_GAME_TOKEN_MIN_LEN,
+    TRAINING_CROP_LABEL_MAX_LEN, TRAINING_CROP_META_MAX_BYTES, TRAINING_CROP_SCORE_ABS_MAX,
+    TRAINING_CROP_SCREEN_MAX_EDGE, TRAINING_CROP_SCREEN_MIN_EDGE, TRAINING_CROP_SLOT_INDEX_MAX,
+    TRAINING_CROP_UI_SCALE_MAX, TRAINING_CROP_VERSION_MAX_LEN,
+};

@@ -503,6 +503,33 @@ pub struct ReportCreator {
     pub credential: ReportCredential,
 }
 
+/// Session first, then the tracker sync token. See [`ReportCreator`].
+async fn session_or_sync_token(
+    parts: &mut Parts,
+    state: &AppState,
+) -> Result<(Member, ReportCredential), Box<Response>> {
+    let session_reject = match OrgMember::from_request_parts(parts, state).await {
+        Ok(org) => return Ok((org.member, ReportCredential::Session)),
+        Err(reject) => reject,
+    };
+    let has_bearer = parts
+        .headers
+        .get(AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.starts_with("Bearer "));
+    if session_reject.0 != StatusCode::UNAUTHORIZED || !has_bearer {
+        return Err(Box::new(session_reject.into_response()));
+    }
+    let DaemonUser { member, .. } = authenticate_daemon(
+        parts,
+        state,
+        DaemonUnauthorized::Opaque,
+        DaemonLookup::StampLastUsed,
+    )
+    .await?;
+    Ok((member, ReportCredential::SyncToken))
+}
+
 impl FromRequestParts<AppState> for ReportCreator {
     type Rejection = Response;
 
@@ -510,35 +537,44 @@ impl FromRequestParts<AppState> for ReportCreator {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let session_reject = match OrgMember::from_request_parts(parts, state).await {
-            Ok(org) => {
-                return Ok(ReportCreator {
-                    member: org.member,
-                    credential: ReportCredential::Session,
-                });
-            }
-            Err(reject) => reject,
-        };
-        let has_bearer = parts
-            .headers
-            .get(AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.starts_with("Bearer "));
-        if session_reject.0 != StatusCode::UNAUTHORIZED || !has_bearer {
-            return Err(session_reject.into_response());
-        }
-        let DaemonUser { member, .. } = authenticate_daemon(
-            parts,
-            state,
-            DaemonUnauthorized::Opaque,
-            DaemonLookup::StampLastUsed,
-        )
-        .await
-        .map_err(|err| *err)?;
-        Ok(ReportCreator {
-            member,
-            credential: ReportCredential::SyncToken,
-        })
+        let (member, credential) = session_or_sync_token(parts, state)
+            .await
+            .map_err(|err| *err)?;
+        Ok(ReportCreator { member, credential })
+    }
+}
+
+/// Auth for the training crop routes the tracker calls itself: upload, own
+/// consent (read and set), own delete-all and own single delete.
+///
+/// Same credential rules as [`ReportCreator`]: a session with the
+/// [`OrgMember`] checks, or on a session 401 with `Authorization: Bearer`, the
+/// tracker sync token with the stats sync checks. Every other training crop
+/// and hero icon route keeps [`OrgMember`], [`OfficerUser`] or [`AdminUser`],
+/// so a sync token there is a 401.
+pub struct CropUploader {
+    pub member: Member,
+    pub credential: ReportCredential,
+}
+
+impl CropUploader {
+    /// True for a site session. A sync token never acts as staff.
+    pub fn is_session(&self) -> bool {
+        self.credential == ReportCredential::Session
+    }
+}
+
+impl FromRequestParts<AppState> for CropUploader {
+    type Rejection = Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        let (member, credential) = session_or_sync_token(parts, state)
+            .await
+            .map_err(|err| *err)?;
+        Ok(CropUploader { member, credential })
     }
 }
 

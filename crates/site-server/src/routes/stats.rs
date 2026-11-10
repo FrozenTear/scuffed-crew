@@ -102,6 +102,17 @@ fn batch_too_large() -> UploadReject {
 /// stored row at the same `played_at` (alpha.3 item 22, PR 649 blocker 1).
 const LEGACY_REUSE_MIN_TRACKER: &str = "0.6.0-alpha.3";
 
+/// Tracker version from a `scuffed-stat-tracker/<semver>` User-Agent. `None`
+/// for a missing, foreign or unparseable User-Agent.
+pub(crate) fn tracker_version(headers: &HeaderMap) -> Option<semver::Version> {
+    headers
+        .get(header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|ua| ua.strip_prefix("scuffed-stat-tracker/"))
+        .and_then(|rest| rest.split_whitespace().next())
+        .and_then(|v| semver::Version::parse(v).ok())
+}
+
 /// Legacy id rule for this upload, from its `User-Agent`.
 ///
 /// Only `scuffed-stat-tracker/<version>` at `0.6.0-alpha.3` or newer (semver
@@ -111,13 +122,7 @@ const LEGACY_REUSE_MIN_TRACKER: &str = "0.6.0-alpha.3";
 /// never overwritten.
 fn legacy_id_reuse(headers: &HeaderMap) -> scuffed_db::LegacyIdReuse {
     let min = semver::Version::parse(LEGACY_REUSE_MIN_TRACKER).expect("valid min tracker version");
-    let version = headers
-        .get(header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|ua| ua.strip_prefix("scuffed-stat-tracker/"))
-        .and_then(|rest| rest.split_whitespace().next())
-        .and_then(|v| semver::Version::parse(v).ok());
-    match version {
+    match tracker_version(headers) {
         Some(v) if v >= min => scuffed_db::LegacyIdReuse::ByPlayedAt,
         _ => scuffed_db::LegacyIdReuse::Off,
     }

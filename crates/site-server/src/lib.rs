@@ -672,6 +672,35 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             "/api/hero-icons/{id}",
             delete(routes::hero_icons::delete_hero_icon),
         )
+        // Opt-in training crops from the tracker. Same private store as hero
+        // icons. Upload, own consent and own deletes also take the sync token;
+        // see routes::training_crops for the access rules.
+        .route(
+            "/api/training-crops",
+            post(routes::training_crops::upload_training_crops)
+                .layer::<_, std::convert::Infallible>(hero_icon_body_limit)
+                .get(routes::training_crops::list_training_crops),
+        )
+        .route(
+            "/api/training-crops/consent",
+            get(routes::training_crops::get_consent).put(routes::training_crops::put_consent),
+        )
+        .route(
+            "/api/training-crops/mine",
+            get(routes::training_crops::list_mine).delete(routes::training_crops::delete_mine),
+        )
+        .route(
+            "/api/training-crops/members",
+            get(routes::training_crops::member_counts),
+        )
+        .route(
+            "/api/training-crops/{id}/image",
+            get(routes::training_crops::crop_image),
+        )
+        .route(
+            "/api/training-crops/{id}",
+            delete(routes::training_crops::delete_crop),
+        )
         // Calendar ICS feeds moved into `public_routes` (NS2-6) — they are
         // unauthenticated and now share the public per-IP governor.
         // Audit log

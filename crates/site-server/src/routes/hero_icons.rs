@@ -74,13 +74,13 @@ use crate::state::AppState;
 /// The 8-byte PNG file signature.
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
-type Reject = (StatusCode, Json<ErrorResponse>);
+pub(crate) type Reject = (StatusCode, Json<ErrorResponse>);
 
 /// The 403 body of the `AdminUser` extractor. The per-icon routes give it to
 /// officers so Site handles one string for every admin-only refusal.
-const ADMIN_REQUIRED: &str = "Admin access required";
+pub(crate) const ADMIN_REQUIRED: &str = "Admin access required";
 
-fn reject(status: StatusCode, error_code: &str) -> Reject {
+pub(crate) fn reject(status: StatusCode, error_code: &str) -> Reject {
     (
         status,
         Json(ErrorResponse {
@@ -89,7 +89,7 @@ fn reject(status: StatusCode, error_code: &str) -> Reject {
     )
 }
 
-fn internal() -> Reject {
+pub(crate) fn internal() -> Reject {
     reject(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
 }
 
@@ -97,13 +97,13 @@ fn not_found() -> Reject {
     reject(StatusCode::NOT_FOUND, HERO_ICON_ERR_NOT_FOUND)
 }
 
-fn db_error(error: DbError) -> Reject {
+pub(crate) fn db_error(error: DbError) -> Reject {
     tracing::error!(%error, "hero icon database call failed");
     internal()
 }
 
 /// 503 `hero_icons_disabled` when `HERO_ICONS_DIR` could not be used at startup.
-fn configured(state: &AppState) -> Result<(), Reject> {
+pub(crate) fn configured(state: &AppState) -> Result<(), Reject> {
     if !state.hero_icons.enabled() {
         return Err(reject(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -199,7 +199,7 @@ enum AdminAccess {
 }
 
 /// True when `member_id` is an active member.
-async fn member_active(state: &AppState, member_id: &str) -> Result<bool, Reject> {
+pub(crate) async fn member_active(state: &AppState, member_id: &str) -> Result<bool, Reject> {
     let active = state
         .db
         .active_member_display_names(&[member_id.to_string()])
@@ -258,7 +258,7 @@ async fn admin_target(
 }
 
 /// Remove one icon file. A file that is already gone is fine.
-async fn remove_icon_file(state: &AppState, id: &str) -> std::io::Result<()> {
+pub(crate) async fn remove_icon_file(state: &AppState, id: &str) -> std::io::Result<()> {
     if !is_icon_id(id) {
         return Ok(());
     }
@@ -270,7 +270,7 @@ async fn remove_icon_file(state: &AppState, id: &str) -> std::io::Result<()> {
 }
 
 /// [`remove_icon_file`] for cleanup paths: a failure is logged, not returned.
-async fn discard_icon_file(state: &AppState, id: &str) {
+pub(crate) async fn discard_icon_file(state: &AppState, id: &str) {
     if let Err(error) = remove_icon_file(state, id).await {
         tracing::error!(%error, "hero icon file cleanup failed");
     }
@@ -343,7 +343,7 @@ async fn remove_stored(state: &AppState, icons: &[HeroIcon]) {
 }
 
 /// Create the icon file with mode 0600. Never overwrites.
-async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -360,10 +360,10 @@ async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// One icon after the server decoded and re-encoded it.
-struct CleanIcon {
-    bytes: Vec<u8>,
-    width: u32,
-    height: u32,
+pub(crate) struct CleanIcon {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 fn edge_ok(edge: u32) -> bool {
@@ -374,7 +374,7 @@ fn edge_ok(edge: u32) -> bool {
 ///
 /// The stored file is the re-encoded image, so text chunks and other metadata
 /// in the upload are dropped. `Err` is the 400 error code.
-fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
+pub(crate) fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
     let reader = image::ImageReader::with_format(Cursor::new(data), ImageFormat::Png);
     let Ok((width, height)) = reader.into_dimensions() else {
         return Err(HERO_ICON_ERR_INVALID_PNG);
@@ -396,7 +396,7 @@ fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
     })
 }
 
-fn multipart_reject(error: MultipartError) -> Reject {
+pub(crate) fn multipart_reject(error: MultipartError) -> Reject {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
         return reject(StatusCode::PAYLOAD_TOO_LARGE, HERO_ICON_ERR_TOO_LARGE);
     }
@@ -406,7 +406,7 @@ fn multipart_reject(error: MultipartError) -> Reject {
 
 /// Read one `icon` part. The signature is checked as soon as 8 bytes are in,
 /// and reading stops as soon as the part passes [`HERO_ICON_MAX_BYTES`].
-async fn read_icon_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
+pub(crate) async fn read_icon_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
     let mut data: Vec<u8> = Vec::new();
     while let Some(chunk) = field.chunk().await.map_err(multipart_reject)? {
         data.extend_from_slice(&chunk);

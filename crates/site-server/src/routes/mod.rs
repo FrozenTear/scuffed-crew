@@ -30,5 +30,6 @@ pub mod stat_reports;
 pub mod stats;
 pub mod teams;
 pub mod tournaments;
+pub mod training_crops;
 pub mod uploads;
 pub mod wiki;

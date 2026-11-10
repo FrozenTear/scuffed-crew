@@ -5,7 +5,7 @@ use surrealdb_types::{RecordId, SurrealValue};
 
 use crate::types::MemberSettings;
 use crate::{with_timeout, Database, DbResult};
-use scuffed_types::StatsVisibility;
+use scuffed_types::{StatsVisibility, TrainingCropConsent, TrainingCropConsentUpdate};
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 struct DbMemberSettings {
@@ -22,6 +22,26 @@ struct DbMemberSettings {
     #[serde(default)]
     #[surreal(default)]
     hero_icon_opt_in: Option<bool>,
+    /// Training crop consent for the other kinds. Absent on older rows.
+    /// Reads as false.
+    #[serde(default)]
+    #[surreal(default)]
+    stat_digits_opt_in: Option<bool>,
+    #[serde(default)]
+    #[surreal(default)]
+    map_name_opt_in: Option<bool>,
+    #[serde(default)]
+    #[surreal(default)]
+    full_screen_opt_in: Option<bool>,
+}
+
+fn db_to_consent(db: &DbMemberSettings) -> TrainingCropConsent {
+    TrainingCropConsent {
+        hero_icon: db.hero_icon_opt_in.unwrap_or(false),
+        stat_digits: db.stat_digits_opt_in.unwrap_or(false),
+        map_name: db.map_name_opt_in.unwrap_or(false),
+        full_screen: db.full_screen_opt_in.unwrap_or(false),
+    }
 }
 
 fn parse_visibility(raw: Option<&str>) -> StatsVisibility {
@@ -150,6 +170,9 @@ impl Database {
                         player_name: player_name.map(|s| s.to_string()),
                         stats_visibility: Some(visibility.as_str().to_string()),
                         hero_icon_opt_in: Some(false),
+                        stat_digits_opt_in: Some(false),
+                        map_name_opt_in: Some(false),
+                        full_screen_opt_in: Some(false),
                     })
                     .await?;
                 Ok(db_to_settings(created.ok_or_else(|| {
@@ -209,6 +232,97 @@ impl Database {
             Some(row) => Ok(row.hero_icon_opt_in.unwrap_or(false)),
             None => Err(crate::DbError::NotFound("member_settings upsert".into())),
         }
+    }
+
+    /// Training crop consent per kind. All false when the member has no row.
+    /// `hero_icon` is the same flag as [`Self::get_hero_icon_opt_in`].
+    pub async fn get_training_crop_consent(
+        &self,
+        member_id: &str,
+    ) -> DbResult<TrainingCropConsent> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query("SELECT * FROM member_settings WHERE member_id = $mid LIMIT 1")
+                .bind(("mid", member_id.to_string()))
+                .await?;
+            let rows: Vec<DbMemberSettings> = result.take(0)?;
+            Ok(rows.first().map(db_to_consent).unwrap_or_default())
+        })
+        .await
+    }
+
+    /// Change only the kinds `update` names and return every kind as stored.
+    ///
+    /// One `UPSERT` keyed on `member_id`, like [`Self::set_hero_icon_opt_in`]
+    /// (same one retry for two first writes racing on `ms_member_idx`). A
+    /// kind left out keeps its stored value, or false on a new or legacy row.
+    /// Player name and stats visibility are kept.
+    pub async fn set_training_crop_consent(
+        &self,
+        member_id: &str,
+        update: TrainingCropConsentUpdate,
+    ) -> DbResult<TrainingCropConsent> {
+        with_timeout(async {
+            match self.upsert_training_crop_consent(member_id, update).await {
+                Ok(value) => Ok(value),
+                Err(error) => {
+                    tracing::debug!(%error, "training crop consent upsert retried");
+                    self.upsert_training_crop_consent(member_id, update).await
+                }
+            }
+        })
+        .await
+    }
+
+    async fn upsert_training_crop_consent(
+        &self,
+        member_id: &str,
+        update: TrainingCropConsentUpdate,
+    ) -> DbResult<TrainingCropConsent> {
+        let mut result = self
+            .client
+            .query(
+                "UPSERT member_settings SET member_id = $mid, \
+                 hero_icon_opt_in = $hero ?? hero_icon_opt_in ?? false, \
+                 stat_digits_opt_in = $digits ?? stat_digits_opt_in ?? false, \
+                 map_name_opt_in = $map ?? map_name_opt_in ?? false, \
+                 full_screen_opt_in = $full ?? full_screen_opt_in ?? false, \
+                 stats_visibility = stats_visibility ?? 'public' \
+                 WHERE member_id = $mid",
+            )
+            .bind(("mid", member_id.to_string()))
+            .bind(("hero", update.hero_icon))
+            .bind(("digits", update.stat_digits))
+            .bind(("map", update.map_name))
+            .bind(("full", update.full_screen))
+            .await?;
+        let rows: Vec<DbMemberSettings> = result.take(0)?;
+        match rows.first() {
+            Some(row) => Ok(db_to_consent(row)),
+            None => Err(crate::DbError::NotFound("member_settings upsert".into())),
+        }
+    }
+
+    /// Consent of every member who consents to at least one kind.
+    pub async fn training_crop_consents(&self) -> DbResult<HashMap<String, TrainingCropConsent>> {
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(
+                    "SELECT * FROM member_settings WHERE hero_icon_opt_in = true \
+                     OR stat_digits_opt_in = true OR map_name_opt_in = true \
+                     OR full_screen_opt_in = true",
+                )
+                .await?;
+            let rows: Vec<DbMemberSettings> = result.take(0)?;
+            Ok(rows
+                .iter()
+                .map(|row| (row.member_id.clone(), db_to_consent(row)))
+                .filter(|(_, consent)| consent.any())
+                .collect())
+        })
+        .await
     }
 
     /// Member ids that are opted in to contributing hero icons.
@@ -412,5 +526,131 @@ mod tests {
         assert!(!settings.hero_icon_opt_in);
         assert_eq!(settings.player_name, None);
         assert_eq!(settings.stats_visibility, StatsVisibility::Public);
+    }
+
+    #[tokio::test]
+    async fn crop_consent_is_off_by_default_and_per_kind() {
+        let db = test_db().await;
+        assert_eq!(
+            db.get_training_crop_consent("nobody").await.unwrap(),
+            TrainingCropConsent::default()
+        );
+        let set = db
+            .set_training_crop_consent(
+                "c1",
+                TrainingCropConsentUpdate {
+                    map_name: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            set,
+            TrainingCropConsent {
+                map_name: true,
+                ..Default::default()
+            }
+        );
+        // A later update of another kind keeps map_name.
+        let set = db
+            .set_training_crop_consent(
+                "c1",
+                TrainingCropConsentUpdate {
+                    hero_icon: Some(true),
+                    full_screen: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(set.map_name && set.hero_icon && set.full_screen && !set.stat_digits);
+        // hero_icon consent is the hero icon opt-in.
+        assert!(db.get_hero_icon_opt_in("c1").await.unwrap());
+        assert!(!db.set_hero_icon_opt_in("c1", false).await.unwrap());
+        assert!(!db.get_training_crop_consent("c1").await.unwrap().hero_icon);
+        assert!(db.get_training_crop_consent("c1").await.unwrap().map_name);
+
+        let all = db.training_crop_consents().await.unwrap();
+        assert_eq!(all.len(), 1);
+        assert!(all["c1"].map_name);
+        // Settings writes keep consent.
+        db.upsert_member_settings("c1", Some("Kiriko"), Some(StatsVisibility::Members))
+            .await
+            .unwrap();
+        assert!(
+            db.get_training_crop_consent("c1")
+                .await
+                .unwrap()
+                .full_screen
+        );
+        let row = db.get_member_settings("c1").await.unwrap().expect("row");
+        assert_eq!(row.stats_visibility, StatsVisibility::Members);
+    }
+
+    #[tokio::test]
+    async fn old_hero_icon_opt_in_rows_map_to_hero_icon_consent_only() {
+        let db = test_db().await;
+        db.client
+            .query(
+                r#"
+                REMOVE FIELD IF EXISTS stat_digits_opt_in ON member_settings;
+                REMOVE FIELD IF EXISTS map_name_opt_in ON member_settings;
+                REMOVE FIELD IF EXISTS full_screen_opt_in ON member_settings;
+                CREATE member_settings SET member_id = 'old-in', player_name = 'Old',
+                    stats_visibility = 'public', hero_icon_opt_in = true;
+                CREATE member_settings SET member_id = 'old-out', player_name = 'Old',
+                    stats_visibility = 'public', hero_icon_opt_in = false;
+                "#,
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        run_migrations(&db.client).await.unwrap();
+
+        assert_eq!(
+            db.get_training_crop_consent("old-in").await.unwrap(),
+            TrainingCropConsent {
+                hero_icon: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            db.get_training_crop_consent("old-out").await.unwrap(),
+            TrainingCropConsent::default()
+        );
+        let all = db.training_crop_consents().await.unwrap();
+        assert_eq!(all.keys().collect::<Vec<_>>(), vec!["old-in"]);
+        // The old row takes a new kind without losing the old opt-in.
+        let set = db
+            .set_training_crop_consent(
+                "old-in",
+                TrainingCropConsentUpdate {
+                    stat_digits: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert!(set.hero_icon && set.stat_digits && !set.map_name);
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_consent_writes_leave_one_row() {
+        let db = test_db().await;
+        let update = TrainingCropConsentUpdate {
+            stat_digits: Some(true),
+            ..Default::default()
+        };
+        let (first, second) = tokio::join!(
+            db.set_training_crop_consent("race2", update),
+            db.set_training_crop_consent("race2", update)
+        );
+        assert!(first.unwrap().stat_digits);
+        assert!(second.unwrap().stat_digits);
+        let settings = db.get_member_settings("race2").await.unwrap().expect("row");
+        assert_eq!(settings.stats_visibility, StatsVisibility::Public);
+        assert!(!settings.hero_icon_opt_in);
     }
 }

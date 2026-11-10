@@ -238,6 +238,13 @@ impl HeroIconStore {
         self.check_at(member_id, Instant::now())
     }
 
+    /// [`Self::check`] for one crop kind. Each kind has its own bucket.
+    /// `hero_icon` uses the member's plain bucket, so `/api/hero-icons` and
+    /// `/api/training-crops?kind=hero_icon` share one budget.
+    pub fn check_kind(&self, member_id: &str, kind: scuffed_types::CropKind) -> Result<(), u64> {
+        self.check_at(&limiter_key(member_id, kind), Instant::now())
+    }
+
     fn check_at(&self, member_id: &str, now: Instant) -> Result<(), u64> {
         // A poisoned lock is recovered: the limiter must not take down uploads.
         let mut map = self.limiter.lock().unwrap_or_else(|e| e.into_inner());
@@ -256,6 +263,14 @@ impl HeroIconStore {
     #[cfg(test)]
     fn limiter_len(&self) -> usize {
         self.limiter.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
+/// Limiter key of one member and crop kind. Member ids never hold `:`.
+fn limiter_key(member_id: &str, kind: scuffed_types::CropKind) -> String {
+    match kind {
+        scuffed_types::CropKind::HeroIcon => member_id.to_string(),
+        other => format!("{member_id}:{}", other.as_str()),
     }
 }
 

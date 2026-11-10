@@ -1687,6 +1687,42 @@ pub struct NewHeroIcon {
     pub created_at: DateTime<Utc>,
 }
 
+/// One stored training crop: a row of the `hero_icon` table of any kind.
+///
+/// Hero icons are the `hero_icon` kind; [`HeroIcon`] is that view. The PNG
+/// bytes live on disk under `HERO_ICONS_DIR` as `file_name`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrainingCrop {
+    /// 32 lowercase hex characters, made by the server.
+    pub id: String,
+    pub member_id: String,
+    pub kind: scuffed_types::CropKind,
+    /// Hero display name. Always set for `hero_icon`.
+    pub hero: Option<String>,
+    /// `<id>.png`. Never taken from user input.
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub created_at: DateTime<Utc>,
+    /// Version from a `scuffed-stat-tracker/<semver>` User-Agent.
+    pub tracker_version: Option<String>,
+    pub meta: scuffed_types::TrainingCropMeta,
+}
+
+/// Fields written when a crop is accepted. Same shape as [`TrainingCrop`].
+pub type NewTrainingCrop = TrainingCrop;
+
+/// Stored crop count of one member, kind and game resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrainingCropCountRow {
+    pub member_id: String,
+    pub kind: scuffed_types::CropKind,
+    pub screen_width: Option<u32>,
+    pub screen_height: Option<u32>,
+    pub count: u64,
+}
+
 /// Build the deterministic conversation key from a pubkey pair.
 ///
 /// Sorts the two pubkeys lexicographically and joins with a comma, so
