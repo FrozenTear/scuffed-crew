@@ -19,15 +19,20 @@
 //! read" wording.
 //!
 //! cv-v1 has no unsure / middle state yet: below the accept bar a slot is
-//! stored with no value (Not read here). So nothing amber is drawn: no
-//! warning sign on chips, no "N unsure" pill, no "Reads may be off" pill, and
-//! the legend leaves out "Might be misread". When Vision adds a middle state
-//! between accept and reject, amber marks and pills can return. Also not
-//! drawn: the Their team Played row (the tracker stores only our own hero).
+//! stored with no value, and every such slot the row draws is a Not read
+//! chip: a ban, a ban vote, a hero select slot, and the lobby ban in the
+//! lobby layout (the plain layout has no lobby slot, so no Lobby group). A
+//! row with no read at all says so in one quiet line instead. So nothing
+//! amber is drawn: no warning sign on chips, no "N unsure" pill, no "Reads
+//! may be off" pill, and the legend leaves out "Might be misread". When
+//! Vision adds a middle state between accept and reject, amber marks and
+//! pills can return. Only results tagged cv-v1 (or with no tag, as sync
+//! reads them) are drawn as chips: a result from any other reader is one
+//! quiet line, so a new reader cannot come out as plain sure chips here
+//! until this file learns its states. Also not drawn: the Their team Played
+//! row (the tracker stores only our own hero).
 
-use scuffed_types::{
-    BANS_PICKS_MAX_BAN_VOTE, BANS_PICKS_MAX_BANS, BANS_PICKS_MAX_PICKS, BANS_PICKS_NO_PREFERENCE,
-};
+use scuffed_types::{BANS_PICKS_MAX_BANS, BANS_PICKS_MAX_PICKS, BANS_PICKS_NO_PREFERENCE};
 use serde_json::Value;
 use stat_tracker::model::{BansPicksMissing, BansPicksStatus};
 
@@ -37,6 +42,16 @@ use crate::settings_model::AdvancedSection;
 /// The reader's template spelling of the "no preferred hero" icon
 /// ([`BANS_PICKS_NO_PREFERENCE`] is the stored spelling).
 const NO_PREFERENCE_TEMPLATE: &str = "no-preference";
+
+/// Our own ban vote slots on the vote screen, numbered 1 to this.
+const VOTE_SLOTS: u8 = 3;
+
+/// The only reader whose stored values this block knows how to draw. Kept
+/// here, not taken from the reader crate, so a new reader id has to come
+/// through this file (and its states with it).
+const KNOWN_RECOGNIZER: &str = "cv-v1";
+/// The quiet line for a result stored by any other reader.
+pub const UNKNOWN_READER: &str = "Not shown: this game was read by a reader this version doesn't know. Update the tracker to see it.";
 
 pub const HEADER: &str = "Bans and picks";
 
@@ -52,12 +67,14 @@ pub const GROUP_ENEMY: &str = "Their team";
 pub const GROUP_LOBBY: &str = "Lobby";
 
 pub const TEAM_NOT_READ: &str = "Team not read";
-const TEAM_NOT_READ_TIP: &str = "Which team made each ban wasn't read for this game.";
+const TEAM_NOT_READ_TIP: &str = "The tracker couldn't tell which team made these bans.";
 
 /// A screen the status says the tracker never saw (Hero select, Your ban
 /// votes).
 pub const SCREEN_NOT_SEEN: &str = "Screen not seen";
-const HERO_SELECT_NOT_SEEN_TIP: &str = "The tracker didn't see hero select for this game.";
+/// Softer than "didn't see": the status also counts a hero select whose
+/// first frame was seen, with no picks, as missing.
+const HERO_SELECT_NOT_SEEN_TIP: &str = "The tracker didn't read hero select for this game.";
 const BAN_VOTE_NOT_SEEN_TIP: &str = "The tracker didn't see the ban vote for this game.";
 pub const NO_BAN_SCREEN: &str = "No ban screen seen";
 const NO_BAN_SCREEN_TIP: &str = "The tracker didn't see a ban screen for this game. Either the game had none, or the tracker missed it.";
@@ -75,6 +92,9 @@ pub const PLAYED_NOT_READ: &str = "Not read";
 pub const LEGEND_BANNED: &str = "Banned";
 pub const LEGEND_SWAP: &str = "Swapped hero";
 pub const LEGEND_OUTLINE: &str = "Not read or not seen";
+
+/// The words Played chips add for a run the hero bar marks unconfirmed.
+const UNCONFIRMED: &str = "unconfirmed";
 
 /// What one slot of the screen read as.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,8 +120,10 @@ pub struct Chip {
     pub slot: Slot,
     /// A ban or the lobby ban: ban glyph (on a read hero), no fill.
     pub ban: bool,
-    /// Our own chip: the "You" tag.
-    pub you: bool,
+    /// Draw the "You" tag. Only the first chip of a row of our own chips
+    /// carries it (hero select slot 1, the first Played chip), so later
+    /// Played chips, ours too, have it off.
+    pub you_tag: bool,
     /// Our own Played chip when it differs from our hero select hero.
     pub swap: bool,
     /// The tooltip, which is also the spoken label of the chip.
@@ -123,12 +145,6 @@ impl Chip {
     /// The outline chip shared by Not read and Not seen.
     pub fn outline(&self) -> bool {
         matches!(self.slot, Slot::NotRead | Slot::Empty)
-    }
-
-    /// The tooltip as shown and spoken. No "might be misread" wording while
-    /// cv-v1 has no unsure state.
-    pub fn tooltip(&self) -> String {
-        self.tip.clone()
     }
 }
 
@@ -178,9 +194,31 @@ pub struct Legend {
     pub outline: bool,
 }
 
+/// The mark drawn in front of a legend item's words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LegendMark {
+    Ban,
+    Swap,
+    /// The outline swatch of Not read and Not seen.
+    Outline,
+}
+
 impl Legend {
     pub fn is_empty(self) -> bool {
         !(self.banned || self.swap || self.outline)
+    }
+
+    /// The items to draw, left to right: each mark and its words.
+    pub fn items(self) -> Vec<(LegendMark, &'static str)> {
+        [
+            (self.banned, LegendMark::Ban, LEGEND_BANNED),
+            (self.swap, LegendMark::Swap, LEGEND_SWAP),
+            (self.outline, LegendMark::Outline, LEGEND_OUTLINE),
+        ]
+        .into_iter()
+        .filter(|(on, ..)| *on)
+        .map(|(_, mark, words)| (mark, words))
+        .collect()
     }
 }
 
@@ -217,7 +255,8 @@ pub struct SettingsLink {
 /// What the open row shows for bans and picks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BansPicks {
-    /// Nothing was read and no reason is stored: no block.
+    /// No block: nothing was read and no reason is stored (a game from
+    /// before the reader, or a good status with no stored result).
     Hidden,
     /// Nothing was read and the game says why: one quiet line.
     Reason {
@@ -230,16 +269,27 @@ pub enum BansPicks {
     Block(Block),
 }
 
-/// The block for one game.
+/// The block for one game. A stored result from an unknown reader is one
+/// quiet line. A result that read something is the block. So is one that
+/// read nothing when the status says the reader ran on this game (`Ok` or
+/// `Partial`): its rows then say, per screen, whether it was seen.
 pub fn bans_picks(g: &Game) -> BansPicks {
-    if let Some(stored) = g.bans_picks.as_deref().and_then(parse)
-        && stored.read_something()
-    {
-        return BansPicks::Block(Block {
-            rows: stored.rows(g),
-        });
+    let status = g.bans_picks_status.as_ref();
+    if let Some(stored) = g.bans_picks.as_deref().and_then(parse) {
+        if !stored.known_reader {
+            return BansPicks::Reason {
+                line: UNKNOWN_READER.to_string(),
+                tip: None,
+                settings: None,
+            };
+        }
+        if stored.read_something() || screens_known(status) {
+            return BansPicks::Block(Block {
+                rows: stored.rows(g),
+            });
+        }
     }
-    match g.bans_picks_status.as_ref().and_then(reason) {
+    match status.and_then(reason) {
         Some((line, settings)) => BansPicks::Reason {
             line,
             tip: reason_tip(g.bans_picks_status.as_ref()),
@@ -264,9 +314,9 @@ fn screens_known(status: Option<&BansPicksStatus>) -> bool {
 }
 
 /// The quiet line for a game that read nothing, and whether "Open Settings"
-/// goes with it. `None` for a status that read something (a game that read
-/// whole or in part, but whose JSON holds nothing: no line, as no spec text
-/// covers it).
+/// goes with it. `None` for a status that says the reader ran (`Ok`,
+/// `Partial`): a result it stored is drawn as the block, and with no stored
+/// result there is nothing to say (the daemon never stores that pair).
 fn reason(status: &BansPicksStatus) -> Option<(String, bool)> {
     let (line, settings) = match status {
         BansPicksStatus::Ok | BansPicksStatus::Partial { .. } => return None,
@@ -343,12 +393,26 @@ enum Team {
     Enemy,
 }
 
+/// The lobby ban slot, as stored with the layout.
+#[derive(Clone, PartialEq, Eq)]
+enum Lobby {
+    /// The plain layout (or no ban screen): no lobby slot.
+    None,
+    Hero(String),
+    /// The lobby layout, its slot below the accept bar.
+    NotRead,
+}
+
 /// The stored JSON, as plain slots.
 struct Stored {
+    /// The result was stored by cv-v1 (or carries no tag, which sync also
+    /// takes as cv-v1).
+    known_reader: bool,
     bans: Vec<Ban>,
-    lobby_ban: Option<String>,
+    lobby: Lobby,
     picks: Vec<Slot>,
-    ban_vote: Vec<Slot>,
+    /// Our own ban votes as (stored slot number, slot), in slot order.
+    ban_vote: Vec<(u8, Slot)>,
 }
 
 fn parse(json: &str) -> Option<Stored> {
@@ -362,7 +426,14 @@ fn parse(json: &str) -> Option<Stored> {
             .map(|a| a.iter().take(max).cloned().collect())
             .unwrap_or_default()
     };
+    let known_reader = match v.get("bans_picks_recognizer") {
+        None | Some(Value::Null) => true,
+        Some(Value::String(id)) => id.trim() == KNOWN_RECOGNIZER,
+        Some(_) => false,
+    };
+    let lobby_layout = v.get("layout").and_then(Value::as_str) == Some("lobby");
     Some(Stored {
+        known_reader,
         bans: list("bans", BANS_PICKS_MAX_BANS)
             .iter()
             .map(|e| Ban {
@@ -378,9 +449,12 @@ fn parse(json: &str) -> Option<Stored> {
                 },
             })
             .collect(),
-        lobby_ban: match v.get("lobby_ban").map(slot) {
-            Some(Slot::Hero(name)) => Some(name),
-            _ => None,
+        // The lobby layout always has a lobby slot, read or not; the plain
+        // layout stores `lobby_ban: null`.
+        lobby: match v.get("lobby_ban").map(slot) {
+            Some(Slot::Hero(name)) => Lobby::Hero(name),
+            _ if lobby_layout => Lobby::NotRead,
+            _ => Lobby::None,
         },
         picks: list("picks", BANS_PICKS_MAX_PICKS)
             .iter()
@@ -394,42 +468,50 @@ fn parse(json: &str) -> Option<Stored> {
     })
 }
 
-/// Our own three ban votes from `ban_votes`, in slot order, which tells a
-/// skipped or empty slot apart from one that was not read. `None` when the
-/// key is missing (games read before it existed), null (a vote screen that
-/// did not look like one) or has no entry for us: the votes are then not
-/// read. The flat `ban_vote` list is not a fallback.
-fn own_votes(v: &Value) -> Option<Vec<Slot>> {
+/// Our own three ban votes from `ban_votes`, in slot order, with their
+/// stored slot numbers, which tells a skipped or empty slot apart from one
+/// that was not read. An entry whose slot is not 1 to 3, or repeats one
+/// already taken, is left out. `None` when the key is missing (games read
+/// before it existed), null (a vote screen that did not look like one) or
+/// has no usable entry for us: the votes are then not read. The flat
+/// `ban_vote` list is not a fallback.
+fn own_votes(v: &Value) -> Option<Vec<(u8, Slot)>> {
     let all = v.get("ban_votes")?.as_array()?;
-    let mut own: Vec<(u64, Slot)> = all
+    let mut own: Vec<(u8, Slot)> = Vec::new();
+    for e in all
         .iter()
         .filter(|e| e.get("voter").and_then(Value::as_u64) == Some(0))
-        .map(|e| {
-            let n = e.get("slot").and_then(Value::as_u64).unwrap_or(u64::MAX);
+    {
+        let Some(n) = e
+            .get("slot")
+            .and_then(Value::as_u64)
+            .and_then(|n| u8::try_from(n).ok())
+            .filter(|n| (1..=VOTE_SLOTS).contains(n))
+        else {
+            continue;
+        };
+        if own.iter().any(|(taken, _)| *taken == n) {
+            continue;
+        }
+        own.push((n, {
             let hero = e
                 .get("hero")
                 .and_then(Value::as_str)
                 .map(str::trim)
                 .filter(|h| !h.is_empty());
-            let s = match (e.get("state").and_then(Value::as_str), hero) {
+            match (e.get("state").and_then(Value::as_str), hero) {
                 (Some("hero"), Some(key)) => Slot::Hero(hero_name(key)),
                 (Some("skipped"), _) => Slot::Skipped,
                 (Some("empty"), _) => Slot::Empty,
                 _ => Slot::NotRead,
-            };
-            (n, s)
-        })
-        .collect();
+            }
+        }));
+    }
     if own.is_empty() {
         return None;
     }
     own.sort_by_key(|(n, _)| *n);
-    Some(
-        own.into_iter()
-            .take(BANS_PICKS_MAX_BAN_VOTE)
-            .map(|(_, s)| s)
-            .collect(),
-    )
+    Some(own)
 }
 
 /// A stored entry: `{value, ..}` or a plain string. A value that is a hero
@@ -463,10 +545,17 @@ impl Stored {
         self.bans.iter().any(|b| matches!(b.slot, Slot::Hero(_)))
     }
 
-    /// The block is drawn when a ban, the lobby ban, a hero select slot or
-    /// a ban vote slot was read (a hero, or No preference).
+    fn votes_read(&self) -> bool {
+        self.ban_vote.iter().any(|(_, s)| *s != Slot::NotRead)
+    }
+
+    /// A ban, the lobby ban, a hero select slot or a ban vote slot was read
+    /// (a hero, No preference, or a skipped or empty vote).
     fn read_something(&self) -> bool {
-        self.bans_read() || self.lobby_ban.is_some() || read(&self.picks) || read(&self.ban_vote)
+        self.bans_read()
+            || matches!(self.lobby, Lobby::Hero(_))
+            || read(&self.picks)
+            || self.votes_read()
     }
 
     /// The four rows, always in this order and never hidden, so the block
@@ -494,43 +583,20 @@ impl Stored {
     }
 
     /// Bans of both teams on one row: `Your team` chips, a divider, `Their
-    /// team` chips, a divider, `Lobby` and its chip. When any ban has no
-    /// side, every ban chip then `Team not read`. When nothing on the ban
-    /// screen was read, one quiet line that says whether it was seen. A
-    /// lobby ban read with no team ban is drawn alone, with no quiet line
-    /// that would say no hero was read.
+    /// team` chips, then the bans whose team was not read with a `Team not
+    /// read` note, then a divider, `Lobby` and its chip (Not read in the
+    /// lobby layout when its slot was not read). When no ban hero was read
+    /// but the lobby ban was, the stored ban slots come first as Not read
+    /// chips (or the quiet line when none is stored), so the row never
+    /// reads as "no team bans". When nothing on the ban screen was read, one
+    /// quiet line that says whether it was seen.
     fn bans_row(&self, status: Option<&BansPicksStatus>) -> Row {
         let mut parts = Vec::new();
-        if !self.bans_read() {
-            if self.lobby_ban.is_none() {
-                let (text, tip) = if not_seen(status, BansPicksMissing::BanResults) {
-                    (NO_BAN_SCREEN, Some(NO_BAN_SCREEN_TIP))
-                } else if screens_known(status) {
-                    (BANS_NOT_READ, Some(BANS_NOT_READ_TIP))
-                } else {
-                    (LEGACY_BANS, None)
-                };
-                parts.push(Part::Quiet { text, tip });
-            }
-        } else if self.bans.iter().any(|b| b.team.is_none()) {
-            let chips = self
-                .bans
-                .iter()
-                .enumerate()
-                .map(|(i, b)| match &b.slot {
-                    Slot::Hero(name) => ban_chip(name, format!("Banned: {name}, team not read")),
-                    _ => not_read_chip(true, format!("Ban {}: not read", i + 1)),
-                })
-                .collect();
-            parts.push(Part::Chips(chips));
-            parts.push(Part::Note {
-                text: TEAM_NOT_READ,
-                tip: TEAM_NOT_READ_TIP,
-            });
-        } else {
-            for (team, key, nth) in [
-                (Team::Own, GROUP_OWN, "Your team's ban"),
-                (Team::Enemy, GROUP_ENEMY, "Their ban"),
+        let lobby_read = matches!(self.lobby, Lobby::Hero(_));
+        if self.bans_read() {
+            for (team, key, nth, by) in [
+                (Team::Own, GROUP_OWN, "Your team's ban", "your team"),
+                (Team::Enemy, GROUP_ENEMY, "Their ban", "their team"),
             ] {
                 let chips: Vec<Chip> = self
                     .bans
@@ -538,8 +604,8 @@ impl Stored {
                     .filter(|b| b.team == Some(team))
                     .enumerate()
                     .map(|(i, b)| match &b.slot {
-                        Slot::Hero(name) => ban_chip(name, format!("Banned: {name}")),
-                        _ => not_read_chip(true, format!("{nth} {}: not read", i + 1)),
+                        Slot::Hero(name) => ban_chip(name, format!("Banned by {by}: {name}")),
+                        _ => not_read_chip(format!("{nth} {}: not read", i + 1)),
                     })
                     .collect();
                 if chips.is_empty() {
@@ -551,16 +617,50 @@ impl Stored {
                 parts.push(Part::Key(key));
                 parts.push(Part::Chips(chips));
             }
+            let team_less: Vec<Chip> = self
+                .bans
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| b.team.is_none())
+                .map(|(i, b)| match &b.slot {
+                    Slot::Hero(name) => ban_chip(name, format!("Banned: {name}, team not read")),
+                    _ => not_read_chip(format!("Ban {}: not read", i + 1)),
+                })
+                .collect();
+            if !team_less.is_empty() {
+                if !parts.is_empty() {
+                    parts.push(Part::Divider);
+                }
+                parts.push(Part::Chips(team_less));
+                parts.push(Part::Note {
+                    text: TEAM_NOT_READ,
+                    tip: TEAM_NOT_READ_TIP,
+                });
+            }
+        } else if lobby_read && !self.bans.is_empty() {
+            parts.push(Part::Chips(
+                (1..=self.bans.len())
+                    .map(|n| not_read_chip(format!("Ban {n}: not read")))
+                    .collect(),
+            ));
+        } else {
+            parts.push(bans_quiet(status));
         }
-        if let Some(name) = &self.lobby_ban {
+        // With no ban hero and no lobby hero read, the quiet line already
+        // says the ban screen's heroes were not read, lobby slot included.
+        let lobby = match &self.lobby {
+            Lobby::Hero(name) => Some(ban_chip(name, format!("Lobby ban: {name}"))),
+            Lobby::NotRead if self.bans_read() => {
+                Some(not_read_chip("Lobby ban: not read".to_string()))
+            }
+            Lobby::NotRead | Lobby::None => None,
+        };
+        if let Some(chip) = lobby {
             if !parts.is_empty() {
                 parts.push(Part::Divider);
             }
             parts.push(Part::Key(GROUP_LOBBY));
-            parts.push(Part::Chips(vec![ban_chip(
-                name,
-                format!("Lobby ban: {name}"),
-            )]));
+            parts.push(Part::Chips(vec![chip]));
         }
         Row {
             label: LABEL_BANS,
@@ -571,7 +671,7 @@ impl Stored {
     /// Our own three ban votes, or a quiet line: `Screen not seen` when the
     /// status says the ban vote was never seen, the older wording otherwise.
     fn votes_row(&self, status: Option<&BansPicksStatus>) -> Row {
-        let part = if read(&self.ban_vote) {
+        let part = if self.votes_read() {
             Part::Chips(vote_chips(&self.ban_vote))
         } else if not_seen(status, BansPicksMissing::BanVote) {
             Part::Quiet {
@@ -613,52 +713,65 @@ impl Stored {
     }
 }
 
+/// The quiet line of a Bans row with no hero read: whether the ban screen
+/// was seen, or the older wording for a game with no screen status.
+fn bans_quiet(status: Option<&BansPicksStatus>) -> Part {
+    let (text, tip) = if not_seen(status, BansPicksMissing::BanResults) {
+        (NO_BAN_SCREEN, Some(NO_BAN_SCREEN_TIP))
+    } else if screens_known(status) {
+        (BANS_NOT_READ, Some(BANS_NOT_READ_TIP))
+    } else {
+        (LEGACY_BANS, None)
+    };
+    Part::Quiet { text, tip }
+}
+
 fn ban_chip(name: &str, tip: String) -> Chip {
     Chip {
         slot: Slot::Hero(name.to_string()),
         ban: true,
-        you: false,
+        you_tag: false,
         swap: false,
         tip,
     }
 }
 
-fn not_read_chip(ban: bool, tip: String) -> Chip {
+/// A ban slot (or the lobby slot) below the accept bar.
+fn not_read_chip(tip: String) -> Chip {
     Chip {
         slot: Slot::NotRead,
-        ban,
-        you: false,
+        ban: true,
+        you_tag: false,
         swap: false,
         tip,
     }
 }
 
-/// Our own three ban votes, in slot order, from `ban_votes`. A skipped slot
-/// is a plain neutral chip "Skipped" with no glyph, an empty one an outline
-/// chip "Not seen" (the vote may have come after the last frame). The row
-/// says "Your ban votes", so the chips carry no "You" tag.
-fn vote_chips(slots: &[Slot]) -> Vec<Chip> {
+/// Our own three ban votes, in slot order, from `ban_votes`, each tooltip
+/// numbered by its stored slot. A skipped slot is a plain neutral chip
+/// "Skipped" with no glyph, an empty one an outline chip "Not seen" (the
+/// vote may have come after the last frame). The row says "Your ban votes",
+/// so the chips carry no "You" tag.
+fn vote_chips(slots: &[(u8, Slot)]) -> Vec<Chip> {
     slots
         .iter()
-        .enumerate()
-        .map(|(i, slot)| {
+        .map(|(n, slot)| {
             let tip = match slot {
                 Slot::Hero(name) => format!("You voted to ban {name}"),
                 // Legacy only: `ban_votes` has no no-preference state, and
                 // this row no longer reads the flat `ban_vote` list where
                 // alpha.2.1 stored it. Kept so the match stays exhaustive.
                 Slot::NoPreference => "You voted no preference".to_string(),
-                Slot::Skipped => format!("You skipped ban vote {}", i + 1),
-                Slot::Empty => format!(
-                    "Your ban vote {}: not seen, it may have come after the last frame",
-                    i + 1
-                ),
-                Slot::NotRead => format!("Your ban vote {}: not read", i + 1),
+                Slot::Skipped => format!("You skipped ban vote {n}"),
+                Slot::Empty => {
+                    format!("Your ban vote {n}: not seen, it may have come after the last frame")
+                }
+                Slot::NotRead => format!("Your ban vote {n}: not read"),
             };
             Chip {
                 slot: slot.clone(),
                 ban: false,
-                you: false,
+                you_tag: false,
                 swap: false,
                 tip,
             }
@@ -684,7 +797,7 @@ fn pick_chips(slots: &[Slot]) -> Vec<Chip> {
             Chip {
                 slot: slot.clone(),
                 ban: false,
-                you,
+                you_tag: you,
                 swap: false,
                 tip,
             }
@@ -695,14 +808,17 @@ fn pick_chips(slots: &[Slot]) -> Vec<Chip> {
 /// Every hero we played, in the order played, from the same runs the hero
 /// bar draws (`games_detail::hero_split`), so the two never disagree: a
 /// dismissed run folds into the main hero, consecutive runs of one hero are
-/// one chip, and a hero played again later keeps its first place. A game
-/// whose hero was set by hand, or whose runs name no hero, keeps the single
-/// chip from the row's hero. Only the first chip can carry the swap glyph, and
+/// one chip, and a hero played again later keeps its first place. A hero
+/// whose every run the bar marks unconfirmed says "unconfirmed" in its
+/// tooltip (no amber: Played is not a bans and picks read). A game whose
+/// hero was set by hand, or whose runs name no hero, keeps the single chip
+/// from the row's hero. Only the first chip can carry the swap glyph, and
 /// only when the hero select pick is not one of the Played chips: a pick that
 /// was played at some point was not swapped away from.
 fn played_chips(g: &Game, own_pick: Option<&Slot>) -> Vec<Chip> {
     let corrected = g.edited_fields.iter().any(|f| f == "hero");
-    let mut names: Vec<String> = Vec::new();
+    // (display name, every run of it unconfirmed)
+    let mut runs: Vec<(String, bool)> = Vec::new();
     if !corrected && !g.segments.is_empty() {
         for part in crate::games_detail::hero_split(g).bar {
             let hero = part.hero.trim();
@@ -710,34 +826,43 @@ fn played_chips(g: &Game, own_pick: Option<&Slot>) -> Vec<Chip> {
                 continue;
             }
             let name = hero_name(hero);
-            if !names.iter().any(|n| n.eq_ignore_ascii_case(&name)) {
-                names.push(name);
+            match runs.iter_mut().find(|(n, _)| n.eq_ignore_ascii_case(&name)) {
+                Some((_, unconfirmed)) => *unconfirmed &= part.unconfirmed,
+                None => runs.push((name, part.unconfirmed)),
             }
         }
     }
-    let Some((first, rest)) = names.split_first() else {
-        return played_chip(&g.hero, own_pick).into_iter().collect();
+    let Some(((first, first_unconfirmed), rest)) = runs.split_first() else {
+        return played_chip(&g.hero, own_pick, false).into_iter().collect();
     };
     let pick_was_played = matches!(own_pick,
-        Some(Slot::Hero(picked)) if names.iter().any(|n| n.eq_ignore_ascii_case(picked)));
+        Some(Slot::Hero(picked)) if runs.iter().any(|(n, _)| n.eq_ignore_ascii_case(picked)));
     let own_pick = if pick_was_played { None } else { own_pick };
-    played_chip(first, own_pick)
+    played_chip(first, own_pick, *first_unconfirmed)
         .into_iter()
-        .chain(rest.iter().map(|name| Chip {
+        .chain(rest.iter().map(|(name, unconfirmed)| Chip {
             slot: Slot::Hero(name.clone()),
             ban: false,
             // The "You" tag is drawn once, on the first chip of the row.
-            you: false,
+            you_tag: false,
             swap: false,
-            tip: format!("Then played {name}, you"),
+            tip: format!("Then played {name}{}, you", unconfirmed_words(*unconfirmed)),
         }))
         .collect()
+}
+
+fn unconfirmed_words(unconfirmed: bool) -> String {
+    if unconfirmed {
+        format!(", {UNCONFIRMED}")
+    } else {
+        String::new()
+    }
 }
 
 /// Our own first Played chip, from the game data. `None` when the game has no
 /// hero. It carries the swap glyph when it is a real hero that differs from
 /// our own hero select hero, which must be a real hero too.
-fn played_chip(own_hero: &str, own_pick: Option<&Slot>) -> Option<Chip> {
+fn played_chip(own_hero: &str, own_pick: Option<&Slot>, unconfirmed: bool) -> Option<Chip> {
     let hero = own_hero.trim();
     if hero.is_empty() || hero.eq_ignore_ascii_case("unknown") {
         return None;
@@ -747,14 +872,15 @@ fn played_chip(own_hero: &str, own_pick: Option<&Slot>) -> Option<Chip> {
         Some(Slot::Hero(picked)) if !picked.eq_ignore_ascii_case(&name) => Some(picked),
         _ => None,
     };
+    let unconfirmed = unconfirmed_words(unconfirmed);
     let tip = match swapped_from {
-        Some(picked) => format!("Played {name}, {picked} at hero select, you"),
-        None => format!("Played {name}, you"),
+        Some(picked) => format!("Played {name}, {picked} at hero select{unconfirmed}, you"),
+        None => format!("Played {name}{unconfirmed}, you"),
     };
     Some(Chip {
         slot: Slot::Hero(name),
         ban: false,
-        you: true,
+        you_tag: true,
         swap: swapped_from.is_some(),
         tip,
     })

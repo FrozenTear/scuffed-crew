@@ -15,12 +15,11 @@
 
 use iced::widget::text::Wrapping;
 use iced::widget::{Row, button, column, container, image, row, space, text, tooltip};
-use iced::{Alignment, Background, Border, Element, Fill, Padding, Theme};
+use iced::{Alignment, Background, Border, Color, Element, Fill, Padding, Theme};
 
 use crate::app::Message;
 use crate::games_bans::{
-    BansPicks, Block, Chip, HEADER, LEGEND_BANNED, LEGEND_OUTLINE, LEGEND_SWAP, Legend, Part,
-    Row as BlockRow, SettingsLink, Slot,
+    BansPicks, Block, Chip, HEADER, Legend, LegendMark, Part, Row as BlockRow, SettingsLink, Slot,
 };
 use crate::games_table::pill_box;
 use crate::icons::{self, Icon};
@@ -118,24 +117,21 @@ fn header(block: &Block) -> Element<'static, Message> {
 /// One line, only the glyphs this card uses.
 fn legend_row(legend: Legend) -> Element<'static, Message> {
     let mut r = row![].spacing(14).align_y(Alignment::Center);
-    if legend.banned {
-        r = r.push(legend_icon(Icon::Ban, LEGEND_BANNED));
-    }
-    if legend.swap {
-        r = r.push(legend_icon(Icon::Swap, LEGEND_SWAP));
-    }
-    if legend.outline {
-        r = r.push(
-            row![
+    for (mark, words) in legend.items() {
+        r = r.push(match mark {
+            LegendMark::Ban => legend_icon(Icon::Ban, words),
+            LegendMark::Swap => legend_icon(Icon::Swap, words),
+            LegendMark::Outline => row![
                 container(space().width(16).height(11))
                     .width(16)
                     .height(11)
                     .style(outline_swatch),
-                legend_words(LEGEND_OUTLINE),
+                legend_words(words),
             ]
             .spacing(5)
-            .align_y(Alignment::Center),
-        );
+            .align_y(Alignment::Center)
+            .into(),
+        });
     }
     r.into()
 }
@@ -250,23 +246,45 @@ fn draw_part(part: &Part) -> Element<'static, Message> {
     }
 }
 
-/// One chip, as wide as its name, with its tooltip (the spoken label too).
-/// A read hero is bold TEXT on the raised fill; a ban has no fill and TEXT_2 with the
-/// ban glyph; Not read and Not seen are the same plain outline in the dimmer
-/// grey; Skipped and No preference are neutral filled chips in TEXT_2. No amber
-/// and no red: cv-v1 has no unsure state yet.
-fn chip(c: &Chip) -> Element<'static, Message> {
+/// How a chip is painted: its fill (none for bans and outlines), border and
+/// text colour, and whether the name is bold.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct ChipLook {
+    pub fill: Option<Color>,
+    pub border: Color,
+    pub text: Color,
+    pub bold: bool,
+}
+
+/// The look of one chip. A read hero is bold TEXT on the raised fill; a ban
+/// has no fill and TEXT_2 with the ban glyph; Not read and Not seen are the
+/// same plain outline in the dimmer grey; Skipped and No preference are
+/// neutral filled chips in TEXT_2. No amber and no red: cv-v1 has no unsure
+/// state yet.
+pub(crate) fn chip_look(c: &Chip) -> ChipLook {
     let hero = matches!(c.slot, Slot::Hero(_));
     let outline = c.outline();
-    let (font, color) = if outline || !hero {
-        (FONT_SEMIBOLD, TEXT_2)
+    let (bold, text) = if outline || !hero {
+        (false, TEXT_2)
     } else if c.ban {
-        (FONT_BOLD, TEXT_2)
+        (true, TEXT_2)
     } else {
-        (FONT_BOLD, TEXT)
+        (true, TEXT)
     };
+    ChipLook {
+        fill: (!c.ban && !outline).then_some(SURFACE_2),
+        border: if outline { TEXT_3 } else { BORDER },
+        text,
+        bold,
+    }
+}
+
+/// One chip, as wide as its name, with its tooltip (the spoken label too),
+/// painted as [`chip_look`] says.
+fn chip(c: &Chip) -> Element<'static, Message> {
+    let look = chip_look(c);
     let mut inner = row![].spacing(6).align_y(Alignment::Center);
-    if c.ban && hero {
+    if c.ban && matches!(c.slot, Slot::Hero(_)) {
         inner = inner.push(image(icons::handle(Icon::Ban)).width(GLYPH).height(GLYPH));
     }
     if c.slot == Slot::NoPreference {
@@ -275,11 +293,11 @@ fn chip(c: &Chip) -> Element<'static, Message> {
     inner = inner.push(
         text(c.name().to_string())
             .size(SMALL)
-            .font(font)
-            .color(color)
+            .font(if look.bold { FONT_BOLD } else { FONT_SEMIBOLD })
+            .color(look.text)
             .wrapping(Wrapping::None),
     );
-    if c.you {
+    if c.you_tag {
         inner = inner.push(
             text("You")
                 .size(SMALL)
@@ -291,21 +309,20 @@ fn chip(c: &Chip) -> Element<'static, Message> {
     if c.swap {
         inner = inner.push(image(icons::handle(Icon::Swap)).width(GLYPH).height(GLYPH));
     }
-    let filled = !c.ban && !outline;
     let body = container(inner)
         .height(CHIP_H)
         .padding(Padding::from([0, 9]))
         .align_y(Alignment::Center)
         .style(move |_: &Theme| container::Style {
-            background: filled.then_some(Background::Color(SURFACE_2)),
+            background: look.fill.map(Background::Color),
             border: Border {
-                color: if outline { TEXT_3 } else { BORDER },
+                color: look.border,
                 width: 1.0,
                 radius: 8.0.into(),
             },
             ..container::Style::default()
         });
-    with_tip(body, c.tooltip())
+    with_tip(body, c.tip.clone())
 }
 
 /// The hollow circle that stands in for hero art on a No preference chip.
@@ -390,6 +407,121 @@ fn settings_button(link: SettingsLink) -> Element<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fixtures_games::{LOBBY_ONLY, NO_BAN, NORMAL, SIDE, SKIP, UNSURE};
+    use crate::snapshot::games_from_snapshot;
+
+    /// Every chip of every fixture block, plus the states no fixture has.
+    fn all_chips() -> Vec<Chip> {
+        let games = games_from_snapshot(&crate::fixtures_games::snapshot());
+        let mut out: Vec<Chip> = Vec::new();
+        for sid in [NORMAL, UNSURE, SIDE, NO_BAN, SKIP, LOBBY_ONLY] {
+            let g = games.iter().find(|g| g.session_id == sid).expect(sid);
+            let BansPicks::Block(b) = crate::games_bans::bans_picks(g) else {
+                panic!("{sid}: no block");
+            };
+            for r in &b.rows {
+                for p in &r.parts {
+                    if let Part::Chips(c) = p {
+                        out.extend(c.iter().cloned());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The plain outline of Not read and Not seen: no fill, the dim border.
+    fn is_outline(look: ChipLook) -> bool {
+        look.fill.is_none() && look.border == TEXT_3
+    }
+
+    /// No chip is ever amber or red, and only Not read and Not seen are the
+    /// outline.
+    #[test]
+    fn chips_are_never_amber_and_only_unread_ones_are_outlines() {
+        let chips = all_chips();
+        for slot in [
+            Slot::NotRead,
+            Slot::Empty,
+            Slot::Skipped,
+            Slot::NoPreference,
+        ] {
+            assert!(chips.iter().any(|c| c.slot == slot), "{slot:?} not covered");
+        }
+        assert!(
+            chips
+                .iter()
+                .any(|c| c.ban && matches!(c.slot, Slot::Hero(_)))
+        );
+        assert!(
+            chips
+                .iter()
+                .any(|c| !c.ban && matches!(c.slot, Slot::Hero(_)))
+        );
+        let warm = [theme::WARN, theme::WARN_LINE, theme::DANGER];
+        for c in &chips {
+            let look = chip_look(c);
+            let colours = [Some(look.border), Some(look.text), look.fill];
+            assert!(
+                colours.iter().flatten().all(|col| !warm.contains(col)),
+                "{}: {look:?}",
+                c.tip
+            );
+            assert_eq!(
+                is_outline(look),
+                matches!(c.slot, Slot::NotRead | Slot::Empty),
+                "{}: {look:?}",
+                c.tip
+            );
+        }
+        // The four looks, pinned.
+        let not_read = chips.iter().find(|c| c.slot == Slot::NotRead).unwrap();
+        assert_eq!(
+            chip_look(not_read),
+            ChipLook {
+                fill: None,
+                border: TEXT_3,
+                text: TEXT_2,
+                bold: false
+            }
+        );
+        let ban = chips
+            .iter()
+            .find(|c| c.ban && matches!(c.slot, Slot::Hero(_)))
+            .unwrap();
+        assert_eq!(
+            chip_look(ban),
+            ChipLook {
+                fill: None,
+                border: BORDER,
+                text: TEXT_2,
+                bold: true
+            }
+        );
+        let hero = chips
+            .iter()
+            .find(|c| !c.ban && matches!(c.slot, Slot::Hero(_)))
+            .unwrap();
+        assert_eq!(
+            chip_look(hero),
+            ChipLook {
+                fill: Some(SURFACE_2),
+                border: BORDER,
+                text: TEXT,
+                bold: true
+            }
+        );
+        let skipped = chips.iter().find(|c| c.slot == Slot::Skipped).unwrap();
+        assert_eq!(
+            chip_look(skipped),
+            ChipLook {
+                fill: Some(SURFACE_2),
+                border: BORDER,
+                text: TEXT_2,
+                bold: false
+            }
+        );
+    }
 
     #[test]
     fn open_settings_targets_the_row_that_holds_the_fix() {

@@ -21,6 +21,16 @@ pub const HELD: &str = "sess-g-held";
 /// A second rejected upload, so the tab offers Retry all.
 pub const REJECTED_2: &str = "sess-g-rejected2";
 
+/// History games that carry the extra bans and picks states.
+/// Nepal: the team of each ban not read, hero select not seen.
+pub const SIDE: &str = "sess-g-h01";
+/// Lijiang Tower: no ban screen and no ban vote seen.
+pub const NO_BAN: &str = "sess-g-h02";
+/// Busan: a skipped and a not seen ban vote.
+pub const SKIP: &str = "sess-g-h03";
+/// Junkertown: the lobby ban read, none of the four ban slots read.
+pub const LOBBY_ONLY: &str = "sess-g-h04";
+
 /// The server message on the rejected sample upload.
 pub const REJECT: &str =
     "reader version cv-v0 is no longer accepted. Update the tracker, then retry.";
@@ -196,30 +206,27 @@ pub fn snapshot() -> Snapshot {
     crate::fixtures_bans::reader_off(&mut undecided);
     crate::fixtures_bans::frame_size(&mut rejected_2);
 
-    // Three more states on the newest history games: the team of each ban
-    // not read with hero select not seen, no ban screen seen, and skipped
-    // and not seen ban votes.
-    let mut side = wb(
-        "sess-g-h01".into(),
-        "Nepal",
-        "defeat",
-        dt(2026, 10, 18, 22, 5),
-    );
+    // Four more states on the newest history games: the team of each ban
+    // not read with hero select not seen, no ban screen seen, skipped and
+    // not seen ban votes, and a lobby ban read with no team ban read.
+    let mut side = wb(SIDE.into(), "Nepal", "defeat", dt(2026, 10, 18, 22, 5));
     crate::fixtures_bans::side(&mut side);
     let mut no_ban = wb(
-        "sess-g-h02".into(),
+        NO_BAN.into(),
         "Lijiang Tower",
         "victory",
         dt(2026, 10, 18, 21, 50),
     );
     crate::fixtures_bans::no_ban_screen(&mut no_ban);
-    let mut skip = wb(
-        "sess-g-h03".into(),
-        "Busan",
-        "victory",
-        dt(2026, 10, 18, 21, 31),
-    );
+    let mut skip = wb(SKIP.into(), "Busan", "victory", dt(2026, 10, 18, 21, 31));
     crate::fixtures_bans::skip_votes(&mut skip);
+    let mut lobby_only = wb(
+        LOBBY_ONLY.into(),
+        "Junkertown",
+        "victory",
+        dt(2026, 10, 17, 22, 1),
+    );
+    crate::fixtures_bans::lobby_only(&mut lobby_only);
 
     let mut matches = vec![
         held,
@@ -229,12 +236,7 @@ pub fn snapshot() -> Snapshot {
         side,
         no_ban,
         skip,
-        wb(
-            "sess-g-h04".into(),
-            "Junkertown",
-            "victory",
-            dt(2026, 10, 17, 22, 1),
-        ),
+        lobby_only,
         wb(
             "sess-g-h05".into(),
             "King's Row",
