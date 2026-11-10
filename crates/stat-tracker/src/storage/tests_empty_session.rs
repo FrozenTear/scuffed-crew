@@ -159,7 +159,6 @@ async fn a_delete_with_an_empty_session_id_removes_no_game() {
 async fn an_edit_of_a_game_that_is_gone_changes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = two_imported_games(dir.path()).await;
-
     let before = stored_rows(&store).await;
 
     let _ = store.edit_match("no-such-game", &an_edit()).await;
