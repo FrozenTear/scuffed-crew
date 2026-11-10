@@ -6,7 +6,10 @@ pub struct StatsUploadEntry {
     /// Client-generated game session id. All capture snapshots of one game
     /// share it; the server upserts per (member, session) so re-uploads and
     /// corrections update the same row instead of inserting duplicates.
-    /// Empty for uploads from pre-session daemons (server assigns a legacy id).
+    /// Empty for uploads from pre-session daemons: the server identifies such
+    /// a game by (member, played_at) and reuses its stored legacy row, so an
+    /// edit of hero or map updates it in place. Two empty-session entries with
+    /// the same played_at are stored as one game.
     #[serde(default)]
     pub session_id: String,
     pub hero: String,

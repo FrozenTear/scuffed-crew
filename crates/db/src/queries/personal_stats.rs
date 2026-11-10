@@ -133,6 +133,12 @@ fn stored_name_recognizer(value: Option<String>) -> Option<String> {
 /// Those are not one session: each distinct (hero, map, played_at) is its own
 /// game. The migration assigns this same id before building the unique index
 /// so those games do not collapse onto a single empty key.
+///
+/// On upload, a legacy game is matched by member and `played_at` only (see
+/// `existing_legacy_session_id`), because an edit changes the hero or map
+/// and so this id. This id is used only when no stored legacy row has that
+/// `played_at`. Two empty-session entries with the same `played_at` (also in
+/// one request) are therefore stored as one game.
 fn legacy_session_id(
     member_id: &str,
     hero: &str,
@@ -468,13 +474,10 @@ impl Database {
         let mut upserted = 0u32;
         for m in matches {
             let session_id = if m.session_id.is_empty() {
-                match self
-                    .existing_legacy_session_id(member_id, &m.played_at)
+                let exact = legacy_session_id(member_id, &m.hero, &m.map_name, &m.played_at);
+                self.existing_legacy_session_id(member_id, &m.played_at, &exact)
                     .await?
-                {
-                    Some(existing) => existing,
-                    None => legacy_session_id(member_id, &m.hero, &m.map_name, &m.played_at),
-                }
+                    .unwrap_or(exact)
             } else {
                 m.session_id.clone()
             };
@@ -485,14 +488,18 @@ impl Database {
         Ok(upserted)
     }
 
-    /// Session id of the member's newest `legacy-*` row at `played_at`.
+    /// Session id of the member's stored `legacy-*` row at `played_at`.
     ///
     /// Clients without session ids identify a game only by `played_at`, which
-    /// edits never change. Served by `pm_member_idx (member_id, played_at)`.
+    /// edits never change. A row whose id is `exact` (the content-derived id
+    /// of this upload) wins, so a plain retry updates its own row even when
+    /// older duplicates share the `played_at`. Otherwise the newest row wins.
+    /// Served by `pm_member_idx (member_id, played_at)`.
     async fn existing_legacy_session_id(
         &self,
         member_id: &str,
         played_at: &DateTime<Utc>,
+        exact: &str,
     ) -> DbResult<Option<String>> {
         #[derive(Deserialize, SurrealValue)]
         struct Row {
@@ -505,7 +512,7 @@ impl Database {
                     "SELECT session_id, uploaded_at FROM personal_match \
                      WHERE member_id = $mid AND played_at = $played \
                      AND string::starts_with(session_id, 'legacy-') \
-                     ORDER BY uploaded_at DESC, session_id DESC LIMIT 1",
+                     ORDER BY uploaded_at DESC, session_id DESC",
                 )
                 .bind(("mid", member_id.to_string()))
                 .bind(("played", SurrealDatetime::from(*played_at)))
@@ -514,6 +521,9 @@ impl Database {
             Ok(res.take(0)?)
         })
         .await?;
+        if rows.iter().any(|r| r.session_id == exact) {
+            return Ok(Some(exact.to_string()));
+        }
         Ok(rows.into_iter().next().map(|r| r.session_id))
     }
 
@@ -2437,11 +2447,9 @@ mod tests {
         assert_ne!(m1_rows[0].session_id, m2_rows[0].session_id);
     }
 
-    /// Duplicates left by the old behaviour: the newest is reused and the
-    /// edit does not create a third row.
-    #[tokio::test]
-    async fn legacy_existing_duplicates_reuse_newest() {
-        let db = test_db().await;
+    /// Two `legacy-*` rows for one m1 game at the same `played_at`, as the
+    /// old behaviour left them: `older` (Ana) and the newer `newer` (Kiriko).
+    async fn seed_legacy_duplicates(db: &Database) -> (String, String) {
         let played = entry("", "victory", 10).played_at;
         let older = legacy_session_id("m1", "Ana", "Oasis", &played);
         let newer = legacy_session_id("m1", "Kiriko", "Oasis", &played);
@@ -2472,6 +2480,15 @@ mod tests {
             2
         );
 
+        (older, newer)
+    }
+
+    /// Duplicates left by the old behaviour: the newest is reused and the
+    /// edit does not create a third row.
+    #[tokio::test]
+    async fn legacy_existing_duplicates_reuse_newest() {
+        let db = test_db().await;
+        let (older, newer) = seed_legacy_duplicates(&db).await;
         let mut edited = entry("", "defeat", 12);
         edited.hero = "Lucio".into();
         db.upsert_personal_matches("m1", &[edited]).await.unwrap();
@@ -2484,6 +2501,83 @@ mod tests {
         let untouched = rows.iter().find(|r| r.session_id == older).unwrap();
         assert_eq!(untouched.hero, "Ana");
         assert_eq!(untouched.outcome, "victory");
+    }
+
+    /// With duplicates stored, a plain retry of the older game's content
+    /// updates its own row (exact legacy id first), not the newest one.
+    #[tokio::test]
+    async fn legacy_retry_prefers_exact_content_match_over_newest() {
+        let db = test_db().await;
+        let (older, newer) = seed_legacy_duplicates(&db).await;
+
+        db.upsert_personal_matches("m1", &[entry("", "defeat", 11)])
+            .await
+            .unwrap();
+
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 2, "no third row");
+        let retried = rows.iter().find(|r| r.session_id == older).unwrap();
+        assert_eq!(retried.hero, "Ana");
+        assert_eq!(retried.outcome, "defeat");
+        let other = rows.iter().find(|r| r.session_id == newer).unwrap();
+        assert_eq!(other.hero, "Kiriko");
+        assert_eq!(other.outcome, "victory");
+    }
+
+    /// Two empty-session entries with the same `played_at` in one request
+    /// are one game (documented on `legacy_session_id`).
+    #[tokio::test]
+    async fn legacy_same_played_at_in_one_request_is_one_game() {
+        let db = test_db().await;
+        let first = entry("", "victory", 10);
+        let mut second = entry("", "defeat", 3);
+        second.hero = "Kiriko".into();
+        let n = db
+            .upsert_personal_matches("m1", &[first, second])
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "both entries are counted as upserted");
+        let rows = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].hero, "Kiriko", "the later entry wins");
+    }
+
+    /// A mass edit of N old games (each its own played_at) leaves N rows,
+    /// each updated in place.
+    #[tokio::test]
+    async fn legacy_mass_edit_of_n_games_leaves_n_rows() {
+        let db = test_db().await;
+        let base = entry("", "victory", 10).played_at;
+        let games: Vec<_> = (0..5)
+            .map(|i| {
+                let mut e = entry("", "victory", 10);
+                e.played_at = base + chrono::Duration::minutes(20 * i);
+                e
+            })
+            .collect();
+        db.upsert_personal_matches("m1", &games).await.unwrap();
+        let before = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(before.len(), 5);
+        let mut ids: Vec<_> = before.iter().map(|r| r.session_id.clone()).collect();
+        ids.sort();
+
+        let edited: Vec<_> = games
+            .iter()
+            .map(|g| {
+                let mut e = g.clone();
+                e.hero = "Lucio".into();
+                e.edited = true;
+                e
+            })
+            .collect();
+        db.upsert_personal_matches("m1", &edited).await.unwrap();
+
+        let after = db.list_personal_matches("m1", 10, 0).await.unwrap();
+        assert_eq!(after.len(), 5, "N edits leave N rows");
+        assert!(after.iter().all(|r| r.hero == "Lucio" && r.edited));
+        let mut after_ids: Vec<_> = after.iter().map(|r| r.session_id.clone()).collect();
+        after_ids.sort();
+        assert_eq!(after_ids, ids, "ids are unchanged");
     }
 
     /// A row stored with an empty session id before the unique-index

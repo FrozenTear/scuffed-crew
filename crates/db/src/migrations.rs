@@ -704,7 +704,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE played_at ON personal_match TYPE datetime;
         DEFINE FIELD OVERWRITE uploaded_at ON personal_match TYPE datetime DEFAULT time::now();
         -- Client-generated game session id. Empty client ids are stored as a
-        -- content-derived `legacy-*` id (see `legacy_session_id`), not as ''.
+        -- `legacy-*` id, not as ''. Uploads reuse the member's legacy row at
+        -- the same played_at, else derive one (see `legacy_session_id`).
         -- Pre-session rows that still have '' are rewritten to that id by
         -- `migrate_personal_match_session_index` so distinct historical games
         -- do not share one key under the unique index. The record id itself

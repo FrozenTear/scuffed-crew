@@ -1333,11 +1333,21 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
 
+        let before = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(before.len(), 1);
+
         let mut edited = match_object("", 5);
         edited["hero"] = "Kiriko".into();
         edited["edited"] = true.into();
-        let (status, _) = post_raw(app, &token, serde_json::json!({ "matches": [edited] })).await;
+        let (status, body) =
+            post_raw(app, &token, serde_json::json!({ "matches": [edited] })).await;
         assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["inserted"], 1, "{body}");
+        assert_eq!(body["skipped"], 0, "{body}");
 
         let rows = state
             .db
@@ -1346,7 +1356,45 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1, "same old game must stay one match");
         assert_eq!(rows[0].hero, "Kiriko");
+        assert!(rows[0].edited);
+        assert_eq!(rows[0].session_id, before[0].session_id, "id is unchanged");
         assert!(rows[0].session_id.starts_with("legacy-"));
+    }
+
+    /// The tracker uploads played_at at nanosecond precision. The same
+    /// instant posted twice is one game; 1 µs later is another game.
+    #[tokio::test]
+    async fn legacy_game_matches_played_at_to_the_nanosecond() {
+        let (state, member_id, token) = daemon().await;
+        let app = create_router(state.clone());
+        let mut game = match_object("", 5);
+        game["played_at"] = "2026-07-01T20:00:00.123456789Z".into();
+        for _ in 0..2 {
+            let (status, body) = post_raw(
+                app.clone(),
+                &token,
+                serde_json::json!({ "matches": [game.clone()] }),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+        }
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "same nanosecond instant is one game");
+
+        let mut later = match_object("", 5);
+        later["played_at"] = "2026-07-01T20:00:00.123457789Z".into();
+        let (status, _) = post_raw(app, &token, serde_json::json!({ "matches": [later] })).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = state
+            .db
+            .list_personal_matches(&member_id, 10, 0)
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2, "1 µs later is a separate game");
     }
 
     #[tokio::test]
