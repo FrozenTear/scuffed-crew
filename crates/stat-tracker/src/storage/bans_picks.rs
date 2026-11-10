@@ -25,6 +25,7 @@ impl LocalStore {
         session_id: &str,
         json: &str,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
         let _rev = self.rev_guard();
         let snaps = self.get_session_snapshots(session_id).await?;
         if snaps.is_empty() || snaps.iter().any(|m| m.bans_picks.is_some()) {
@@ -55,6 +56,7 @@ impl LocalStore {
         session_id: &str,
         status: &BansPicksStatus,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
         let _rev = self.rev_guard();
         let snaps = self.get_session_snapshots(session_id).await?;
         if snaps.is_empty()

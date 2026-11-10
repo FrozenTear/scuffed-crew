@@ -175,3 +175,35 @@ async fn the_refusal_is_a_refused_error() {
     let err = store.edit_match("", &an_edit()).await.unwrap_err();
     assert!(err.downcast_ref::<Refused>().is_some(), "{err}");
 }
+
+/// The bans and picks writers are keyed the same way. The capture path
+/// logs their error and records the game anyway.
+#[tokio::test]
+async fn the_bans_and_picks_writers_refuse_an_empty_session_id() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = two_imported_games(dir.path()).await;
+
+    let result = store
+        .attach_bans_picks("", r#"{"bans_picks_recognizer":"cv-v1"}"#)
+        .await;
+    let status = store
+        .attach_bans_picks_status("", &crate::model::BansPicksStatus::ReaderOff)
+        .await;
+
+    let rows = store.get_all_matches().await.unwrap();
+    let touched = rows
+        .iter()
+        .filter(|m| m.bans_picks.is_some() || m.bans_picks_status.is_some())
+        .count();
+    assert_eq!(
+        touched, 0,
+        "bans and picks writers with an empty id changed {touched} imported games"
+    );
+    for (name, result) in [
+        ("attach_bans_picks", result.map(|_| ())),
+        ("attach_bans_picks_status", status.map(|_| ())),
+    ] {
+        let err = result.expect_err(name);
+        assert!(err.downcast_ref::<Refused>().is_some(), "{name}: {err}");
+    }
+}
