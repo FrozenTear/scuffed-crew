@@ -20,6 +20,7 @@ impl LocalStore {
         &self,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
         let _rev = self.rev_guard();
         // Marked before the delete, so a capture insert cannot land between
         // the delete and the mark. A failed delete (the query or any checked
