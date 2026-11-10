@@ -283,9 +283,10 @@ fn the_screens_around_each_game_copy_is_plain() {
     }
 }
 
-/// The Troubleshooting switch Read bans and picks writes `bans_picks_reader`
-/// both ways, through the saved text. It is on by default and written only
-/// when off, and the tracker reads it once at start.
+/// The Capture and reading switch Read bans and picks writes
+/// `bans_picks_reader` both ways, through the saved text. It is on by
+/// default and written only when off, and the tracker reads it once at
+/// start.
 #[test]
 fn the_bans_picks_switch_maps_to_its_config_key_both_ways() {
     use crate::settings_model::{AdvancedSection, ConfigEdit};
@@ -293,7 +294,7 @@ fn the_bans_picks_switch_maps_to_its_config_key_both_ways() {
     let defaults = Config::default();
     assert!(defaults.bans_picks_reader, "on by default");
     assert!(
-        AdvancedSection::Troubleshooting
+        AdvancedSection::CaptureReading
             .keys()
             .contains(&"bans_picks_reader")
     );
@@ -317,4 +318,96 @@ fn the_bans_picks_switch_maps_to_its_config_key_both_ways() {
     );
     let read = Config::parse_file_contents(&text).expect("parse on");
     assert_eq!(read, defaults, "only the switch changed");
+}
+
+/// Read bans and picks moved from Troubleshooting to the end of Capture and
+/// reading. Only Capture and reading lists its key now, and Troubleshooting
+/// keeps the debug switches and the extra number reader.
+#[test]
+fn the_bans_picks_key_moved_to_capture_and_reading() {
+    use crate::settings_model::AdvancedSection;
+
+    let holders: Vec<AdvancedSection> = AdvancedSection::ALL
+        .into_iter()
+        .filter(|s| s.keys().contains(&"bans_picks_reader"))
+        .collect();
+    assert_eq!(holders, [AdvancedSection::CaptureReading]);
+    assert_eq!(
+        AdvancedSection::CaptureReading.keys().last(),
+        Some(&"bans_picks_reader"),
+        "after the capture keys, the focus gate included"
+    );
+    assert_eq!(
+        AdvancedSection::Troubleshooting.keys(),
+        [
+            "debug_ocr",
+            "debug_save_pregame_screens",
+            "shadow_recognizer"
+        ]
+    );
+    assert_eq!(crate::settings_cards::BANS_PICKS_LABEL, "Read bans and picks");
+    assert_eq!(
+        crate::settings_cards::BANS_PICKS_HELP,
+        "Reads the ban and hero select screens to fill in bans and picks. Works at 2560x1440 only."
+    );
+}
+
+/// A config.toml as alpha.2.3 saved it with Read bans and picks turned off
+/// (the switch was under Troubleshooting then).
+const ALPHA_2_3_READER_OFF: &str = "\
+data_dir = \"/home/member/.local/share/scuffed-stat-tracker\"
+capture_route = \"auto\"
+player_name = \"Member\"
+setup_completed = true
+bans_picks_reader = false
+
+[auto_detect]
+enabled = true
+";
+
+/// The key name did not change with the move, so an alpha.2.3 file with
+/// the reader off still opens with the switch Off (not locked), and a save
+/// of another row keeps it off.
+#[test]
+fn an_alpha_2_3_config_with_the_reader_off_opens_off() {
+    use crate::settings_model::ConfigEdit;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("config.toml");
+    std::fs::write(&path, ALPHA_2_3_READER_OFF).expect("seed");
+    let file = Config::read_at(&path).expect("an alpha.2.3 file parses");
+    assert!(!file.bans_picks_reader);
+
+    let (_app_dir, mut app) = crate::fixtures::test_app();
+    // A live app with no variable from outside (the test's OutsideEnv).
+    app.fixture = None;
+    app.take_saved_file(file.clone(), &path);
+    assert_eq!(app.bans_picks_switch(), (false, false), "Off, not locked");
+    let _ = crate::capture_reading::body(&app, false);
+
+    let mut saved = file.clone();
+    ConfigEdit::SavePregameScreens(true).apply(&mut saved);
+    let text = Config::text_for_save(Some(ALPHA_2_3_READER_OFF), &saved).expect("save");
+    assert!(text.contains("bans_picks_reader = false"), "{text}");
+    assert!(!Config::parse_file_contents(&text).expect("parse").bans_picks_reader);
+}
+
+/// STAT_TRACKER_BANS_PICKS_RECOGNIZER=off still wins over the saved key
+/// after the move: the row shows Off and locks, whatever the file says.
+#[test]
+fn the_bans_picks_env_override_still_wins() {
+    use crate::settings_env::{BANS_PICKS_ENV, OutsideEnv};
+
+    let (_dir, mut app) = crate::fixtures::test_app();
+    app.fixture = None;
+    for saved in [true, false] {
+        app.saved_config.bans_picks_reader = saved;
+        app.outside_env = Some(OutsideEnv {
+            vars: vec![(BANS_PICKS_ENV, "off".to_string())],
+            ..OutsideEnv::default()
+        });
+        assert_eq!(app.bans_picks_switch(), (false, true), "saved {saved}");
+        let _ = crate::capture_reading::body(&app, false);
+    }
+    assert_eq!(BANS_PICKS_ENV, "STAT_TRACKER_BANS_PICKS_RECOGNIZER");
 }

@@ -211,7 +211,7 @@ fn reason(status: &BansPicksStatus) -> Option<(String, bool)> {
 
 /// The "Open Settings" button: its tooltip and the row it opens. A missing
 /// pack is fixed by linking an account (Website connection), everything else
-/// by the Read bans and picks switch (Troubleshooting).
+/// by the Read bans and picks switch (Capture and reading).
 fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
     match status {
         Some(BansPicksStatus::PackMissing { .. }) => SettingsLink {
@@ -219,8 +219,8 @@ fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
             open: AdvancedSection::WebsiteConnection,
         },
         _ => SettingsLink {
-            tip: "Settings, Troubleshooting, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
-            open: AdvancedSection::Troubleshooting,
+            tip: "Settings, Capture and reading, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
+            open: AdvancedSection::CaptureReading,
         },
     }
 }
@@ -1128,8 +1128,10 @@ mod tests {
         assert_eq!(line, "Not read: Read bans and picks was off for this game.");
         assert!(tip.is_none());
         let link = settings.unwrap();
-        assert!(link.tip.contains("Read bans and picks"));
-        assert_eq!(link.open, AdvancedSection::Troubleshooting);
+        assert!(link.tip.contains(crate::settings_cards::BANS_PICKS_LABEL));
+        assert!(link.tip.contains("Capture and reading"), "{}", link.tip);
+        assert!(line.contains(crate::settings_cards::BANS_PICKS_LABEL));
+        assert_eq!(link.open, AdvancedSection::CaptureReading);
 
         let BansPicks::Reason {
             line,
@@ -1203,11 +1205,11 @@ mod tests {
         };
         assert_eq!(
             open(BansPicksStatus::ReaderOff),
-            Some(AdvancedSection::Troubleshooting)
+            Some(AdvancedSection::CaptureReading)
         );
         assert_eq!(
             open(BansPicksStatus::PackFailed),
-            Some(AdvancedSection::Troubleshooting)
+            Some(AdvancedSection::CaptureReading)
         );
         assert_eq!(
             open(BansPicksStatus::PackMissing { linked: false }),

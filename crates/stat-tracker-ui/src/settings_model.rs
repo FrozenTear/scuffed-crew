@@ -180,6 +180,7 @@ impl AdvancedSection {
                 "ocr_threads",
                 "share_report_pictures",
                 "capture_only_on_screen",
+                "bans_picks_reader",
             ],
             AdvancedSection::TrackerService => &["auto_detect"],
             AdvancedSection::StoredData => &[],
@@ -187,7 +188,6 @@ impl AdvancedSection {
             AdvancedSection::Troubleshooting => &[
                 "debug_ocr",
                 "debug_save_pregame_screens",
-                "bans_picks_reader",
                 "shadow_recognizer",
             ],
         }

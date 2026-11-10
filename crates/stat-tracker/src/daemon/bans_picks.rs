@@ -396,7 +396,7 @@ pub(crate) fn missing_notice(linked: bool) -> String {
 fn load_notice(error: &str) -> String {
     not_read(&format!(
         "the pack did not load ({}). Reinstall the pack or turn off Read bans and picks in \
-         Settings > Troubleshooting",
+         Settings > Capture and reading",
         short(error)
     ))
 }
