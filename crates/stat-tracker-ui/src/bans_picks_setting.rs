@@ -322,8 +322,15 @@ mod tests {
 
     #[test]
     fn the_copy_has_no_long_dashes() {
-        for text in [ROW_ID] {
-            assert!(!text.contains('\u{2014}') && !text.contains('\u{2013}'));
+        for text in [
+            ROW_ID,
+            crate::settings_cards::BANS_PICKS_LABEL,
+            crate::settings_cards::BANS_PICKS_HELP,
+        ] {
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text:?} has a long dash"
+            );
         }
     }
 }

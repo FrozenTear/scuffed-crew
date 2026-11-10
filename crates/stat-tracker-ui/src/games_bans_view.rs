@@ -26,6 +26,7 @@ use crate::games_bans::{
 use crate::games_table::pill_box;
 use crate::icons::{self, Icon};
 use crate::model::Game;
+#[cfg(test)]
 use crate::settings_model::AdvancedSection;
 use crate::theme::{
     self, ACCENT, BORDER, FONT_BOLD, FONT_SEMIBOLD, SIZE_LABEL, SURFACE_2, TEXT, TEXT_2, TEXT_3,

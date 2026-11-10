@@ -365,21 +365,22 @@ fn reason(status: &BansPicksStatus) -> Option<(String, bool)> {
 /// pack is fixed by linking an account (Website connection), everything else
 /// by the Read bans and picks switch (Capture and reading).
 fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
+    let reveal_row = crate::bans_picks_setting::scrolls_to_row(status);
     match status {
         Some(BansPicksStatus::PackMissing { .. }) => SettingsLink {
             tip: "Settings, website connection. Linking an account lets the tracker download the pack.",
             open: AdvancedSection::WebsiteConnection,
-            reveal_row: false,
+            reveal_row,
         },
         Some(BansPicksStatus::ReaderOff) => SettingsLink {
             tip: "Settings, Capture and reading, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
             open: AdvancedSection::CaptureReading,
-            reveal_row: true,
+            reveal_row,
         },
         _ => SettingsLink {
             tip: "Settings, Capture and reading, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
             open: AdvancedSection::CaptureReading,
-            reveal_row: false,
+            reveal_row,
         },
     }
 }
