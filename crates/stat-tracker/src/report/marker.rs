@@ -474,23 +474,42 @@ mod tests {
             .expect("sleep binary")
     }
 
-    /// Spawn a just-copied `sleep 30`. Another test thread's fork can still
-    /// hold the copy's write fd until its own exec, which fails this exec
-    /// with ETXTBSY ("Text file busy"); retry until that fd is gone.
-    ///
-    /// argv[0] is `sleep`, not the copy's name: on a multicall coreutils
-    /// (uutils, as on some ubuntu-26.04 CI runners) `sleep` is one binary
-    /// that dispatches on argv[0], and under the tracker's name it prints
-    /// "unknown program" and exits at once. The liveness check reads
-    /// `/proc/<pid>/exe` (the copy's path), not argv[0], so this does not
-    /// change what the tests check.
+    /// A 30 s process whose `/proc/<pid>/exe` basename is `path`'s file
+    /// name. Built with rustc so it does not depend on the system
+    /// coreutils: a copy of uutils `sleep` named after the tracker
+    /// dispatches on the exec path (AT_EXECFN), prints "unknown program"
+    /// and exits 1, even when argv[0] is `sleep`.
+    fn write_fake_tracker(path: &Path) {
+        let src = path.with_extension("rs");
+        std::fs::write(
+            &src,
+            "fn main() { std::thread::sleep(std::time::Duration::from_secs(30)); }\n",
+        )
+        .unwrap();
+        let out = std::process::Command::new("rustc")
+            .args(["--edition", "2024", "-o"])
+            .arg(path)
+            .arg(&src)
+            .output()
+            .unwrap_or_else(|e| panic!("rustc {}: {e}", path.display()));
+        assert!(
+            out.status.success(),
+            "rustc {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Spawn `bin`. Another test thread's fork can still hold the file's
+    /// write fd until its own exec, which fails this exec with ETXTBSY
+    /// ("Text file busy"); retry until that fd is gone. Stderr is piped
+    /// so a child that exits at once can be reported.
     fn spawn_retrying_busy(bin: &Path) -> std::process::Child {
-        use std::os::unix::process::CommandExt;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
             match std::process::Command::new(bin)
-                .arg0("sleep")
-                .arg("30")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
                 .spawn()
             {
                 Ok(child) => return child,
@@ -503,6 +522,15 @@ mod tests {
                 Err(e) => panic!("spawn {}: {e}", bin.display()),
             }
         }
+    }
+
+    fn child_stderr(child: &mut std::process::Child) -> String {
+        let mut text = String::new();
+        if let Some(mut stderr) = child.stderr.take() {
+            use std::io::Read;
+            let _ = stderr.read_to_string(&mut text);
+        }
+        text
     }
 
     struct Child(std::process::Child);
@@ -668,7 +696,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin_dir = tempfile::tempdir().unwrap();
         let fake = bin_dir.path().join(crate::proc_id::DAEMON_BIN);
-        std::fs::copy(sleep_bin(), &fake).unwrap();
+        write_fake_tracker(&fake);
         let mut child = Child(spawn_retrying_busy(&fake));
         let pid = child.0.id();
         // The child can still show the test binary in /proc for a moment.
@@ -676,9 +704,10 @@ mod tests {
         while !crate::proc_id::pid_is_live_tracker(pid) {
             assert!(
                 std::time::Instant::now() < deadline,
-                "the fake tracker never showed as live: /proc exe {:?}, try_wait {:?}",
+                "the fake tracker never showed as live: /proc exe {:?}, try_wait {:?}, stderr {:?}",
                 crate::proc_id::proc_exe(pid),
                 child.0.try_wait(),
+                child_stderr(&mut child.0),
             );
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
