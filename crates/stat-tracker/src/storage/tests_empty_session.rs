@@ -20,27 +20,24 @@ async fn two_imported_games(dir: &std::path::Path) -> LocalStore {
     store
 }
 
-/// How many rows no longer look as inserted by [`two_imported_games`].
-async fn changed_rows(store: &LocalStore) -> usize {
-    let rows = store.get_all_matches().await.unwrap();
-    let missing = 2usize.saturating_sub(rows.len());
-    missing
-        + rows
-            .iter()
-            .filter(|m| {
-                let (hero, map) = if m.elims == 10 {
-                    ("Ana", "Ilios")
-                } else {
-                    ("Reinhardt", "Busan")
-                };
-                m.is_edited()
-                    || !m.synced
-                    || m.display_hero() != hero
-                    || m.map_name != map
-                    || m.display_elims() != m.elims
-                    || m.outcome != "victory"
-            })
-            .count()
+/// The imported games as stored after [`two_imported_games`].
+async fn stored_rows(store: &LocalStore) -> Vec<PersonalMatch> {
+    store.get_all_matches().await.unwrap()
+}
+
+/// How many stored games no longer match `before`. Rows are paired by
+/// record id, so a third game or a missing one is counted on its own,
+/// not guessed from an elims value.
+fn changed_rows(before: &[PersonalMatch], after: &[PersonalMatch]) -> usize {
+    let missing_or_changed = before
+        .iter()
+        .filter(|row| after.iter().find(|m| m.id == row.id) != Some(row))
+        .count();
+    let extra = after
+        .iter()
+        .filter(|row| !before.iter().any(|b| b.id == row.id))
+        .count();
+    missing_or_changed + extra
 }
 
 fn an_edit() -> MatchEdit {
@@ -56,10 +53,11 @@ fn an_edit() -> MatchEdit {
 async fn an_edit_with_an_empty_session_id_changes_no_game() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = two_imported_games(dir.path()).await;
+    let before = stored_rows(&store).await;
 
     let result = store.edit_match("", &an_edit()).await;
 
-    let changed = changed_rows(&store).await;
+    let changed = changed_rows(&before, &stored_rows(&store).await);
     assert_eq!(
         changed, 0,
         "an edit with an empty session id changed {changed} imported games"
@@ -72,6 +70,7 @@ async fn an_edit_with_an_empty_session_id_changes_no_game() {
 async fn a_queued_edit_with_an_empty_session_id_changes_no_game() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = two_imported_games(dir.path()).await;
+    let before = stored_rows(&store).await;
 
     let result = store
         .apply_command(&StoreCommand::EditMatch {
@@ -80,7 +79,7 @@ async fn a_queued_edit_with_an_empty_session_id_changes_no_game() {
         })
         .await;
 
-    let changed = changed_rows(&store).await;
+    let changed = changed_rows(&before, &stored_rows(&store).await);
     assert_eq!(
         changed, 0,
         "a queued edit with an empty session id changed {changed} imported games"
@@ -93,6 +92,7 @@ async fn a_queued_edit_with_an_empty_session_id_changes_no_game() {
 async fn the_other_session_writers_refuse_an_empty_session_id() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = two_imported_games(dir.path()).await;
+    let before = stored_rows(&store).await;
 
     let results = [
         (
@@ -122,7 +122,7 @@ async fn the_other_session_writers_refuse_an_empty_session_id() {
         ("clear_upload_reject", store.clear_upload_reject("").await),
     ];
 
-    let changed = changed_rows(&store).await;
+    let changed = changed_rows(&before, &stored_rows(&store).await);
     assert_eq!(
         changed, 0,
         "session writers with an empty id changed {changed} imported games"
@@ -160,9 +160,11 @@ async fn an_edit_of_a_game_that_is_gone_changes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = two_imported_games(dir.path()).await;
 
+    let before = stored_rows(&store).await;
+
     let _ = store.edit_match("no-such-game", &an_edit()).await;
 
-    assert_eq!(changed_rows(&store).await, 0);
+    assert_eq!(changed_rows(&before, &stored_rows(&store).await), 0);
 }
 
 /// The refusal is typed, so the daemon can drop the command file instead

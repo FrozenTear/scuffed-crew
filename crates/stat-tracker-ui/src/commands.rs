@@ -17,7 +17,7 @@ pub fn queue(data_dir: &Path, cmd: &StoreCommand) -> Result<(), String> {
 /// Why a change to an imported game is refused. Its commands are keyed by
 /// session id, and the empty one would match every imported game.
 pub(crate) const NO_SESSION_ID: &str =
-    "this imported game has no session id, so it can't be changed in the app";
+    "This imported game has no session id, so it can't be changed in the app";
 
 /// A save whose game is no longer in the list.
 pub(crate) const GAME_GONE: &str = "Could not save: this game is no longer in the list";
