@@ -142,16 +142,16 @@ pub fn save_edit(
     ];
     let stats_changed = stats.iter().any(Option::is_some);
     let map_changed = edit.map_name.is_some();
-    let hero_changed = edit.hero.is_some() || edit.role.is_some();
-    let role_only = edit.hero.is_none() && edit.role.is_some();
+    let hero_fixed = edit.hero.is_some();
+    let role_changed = edit.role.is_some();
     edit_match(data_dir, &game.session_id, edit)?;
     Ok(saved(
         held,
         was_held,
         stats_changed,
         map_changed,
-        hero_changed,
-        role_only,
+        hero_fixed,
+        role_changed,
     ))
 }
 
@@ -163,20 +163,22 @@ fn saved(
     was_held: bool,
     stats_changed: bool,
     map_changed: bool,
-    hero_changed: bool,
-    role_only: bool,
+    hero_fixed: bool,
+    role_changed: bool,
 ) -> Saved {
+    let hero_changed = hero_fixed || role_changed;
+    let role_only = !hero_fixed && role_changed;
     // The training report files the fix under what was fixed: a stat fix
     // first, as the stats are what the reader reads most. A save that
     // changed nothing fixed nothing, so it offers no report. A role-only
-    // fix offers none either: filed as Wrong hero it would count against
-    // the hero icon reader, which read the hero right. With a map fix too,
-    // the report is for the map.
+    // fix offers none either: there is no role category, and filed as
+    // Wrong hero it would say the hero was misread when only the role was
+    // changed. With a map fix too, the report is for the map.
     let category = if stats_changed {
         Some(GameCategory::WrongStats)
     } else if map_changed {
         Some(GameCategory::WrongMap)
-    } else if hero_changed && !role_only {
+    } else if hero_fixed {
         Some(GameCategory::WrongHero)
     } else {
         None
@@ -398,8 +400,7 @@ mod tests {
 
     /// A map-only or hero-only Edit on a game that wasn't held names what
     /// it fixed, never "Stats corrected", and reports that field. A
-    /// role-only Edit offers no report, so it never counts against the hero
-    /// icon reader.
+    /// role-only Edit offers no report, as only the role changed.
     #[test]
     fn a_map_or_hero_edit_names_what_it_fixed() {
         let g = sample_game();
@@ -433,6 +434,69 @@ mod tests {
         let stats = save(&|f| f.elims = "40".into());
         assert_eq!(stats.toast, "Stats corrected");
         assert_eq!(stats.category, Some(GameCategory::WrongStats));
+    }
+
+    /// A hero and a role fixed together are a hero fix: "Hero corrected",
+    /// filed as Wrong hero.
+    #[test]
+    fn a_hero_and_role_edit_reports_a_wrong_hero() {
+        let dir = tmp();
+        let g = sample_game();
+        let mut form = EditForm::from_game(&g);
+        form.hero = "Reinhardt".into();
+        form.role = "Tank".into();
+        let saved = save_edit(&dir, &g, &form).unwrap();
+        assert_eq!(saved.toast, "Hero corrected");
+        assert_eq!(saved.category, Some(GameCategory::WrongHero));
+        let edit = queued_edit(&dir);
+        assert_eq!(edit.hero.as_deref(), Some("Reinhardt"));
+        assert!(edit.role.is_some());
+    }
+
+    /// Typing the same hero in another case ("ana" for Ana) is no hero
+    /// change, so with a role change it is still role-only: no report.
+    #[test]
+    fn a_retyped_same_hero_with_a_role_change_is_role_only() {
+        let dir = tmp();
+        let g = sample_game();
+        let mut form = EditForm::from_game(&g);
+        form.hero = "ana".into();
+        form.role = "Tank".into();
+        let saved = save_edit(&dir, &g, &form).unwrap();
+        assert_eq!(saved.toast, "Role corrected");
+        assert_eq!(saved.category, None);
+        let edit = queued_edit(&dir);
+        assert_eq!(edit.hero, None, "the hero did not change");
+        assert!(edit.role.is_some());
+    }
+
+    /// In the app, a role-only save shows "Role corrected" with no toast
+    /// action, so no training report is offered.
+    #[test]
+    fn a_role_only_save_in_the_app_offers_no_report() {
+        let (_dir, mut app) = crate::fixtures::test_app();
+        let g = sample_game();
+        app.games = vec![g.clone()];
+        app.expanded = Some(g.session_id.clone());
+        let _ = app.update(crate::app::Message::ToggleEdit);
+        app.edit.role = "Tank".into();
+        let _ = app.update(crate::app::Message::SaveEdit);
+        assert_eq!(app.toast.as_deref(), Some("Role corrected"));
+        assert!(app.toast_action.is_none(), "{:?}", app.toast_action);
+    }
+
+    /// A role-only save on a game held for a missing map still says the
+    /// game stays local, and offers no report.
+    #[test]
+    fn a_role_only_edit_on_a_held_game_offers_no_report() {
+        let dir = tmp();
+        let g = held_game();
+        let mut form = EditForm::from_game(&g);
+        form.role = "Tank".into();
+        let saved = save_edit(&dir, &g, &form).unwrap();
+        assert!(saved.toast.contains("stays on this computer"), "{}", saved.toast);
+        assert_eq!(saved.category, None);
+        assert!(!offers_report(saved));
     }
 
     #[test]
