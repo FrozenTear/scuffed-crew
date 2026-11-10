@@ -283,6 +283,7 @@ mod tests {
             recognizer: None,
             suspect_fields: None,
             bans_picks: None,
+            rank: None,
         }
     }
 

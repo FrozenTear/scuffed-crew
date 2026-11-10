@@ -5,6 +5,7 @@ mod history;
 mod history_filter;
 mod maps;
 mod overview;
+mod rank;
 pub(crate) mod role;
 
 pub use game::StatsMatch;
@@ -99,6 +100,10 @@ struct PersonalMatch {
     /// not parse is None. See [`bans_picks`].
     #[serde(default, deserialize_with = "bans_picks::lenient")]
     bans_picks: Option<scuffed_types::BansPicks>,
+    /// Rank update read for this game. Missing, null, `{}`, all-null or a
+    /// value that does not parse is None. See [`rank`].
+    #[serde(default, deserialize_with = "rank::lenient")]
+    rank: Option<scuffed_types::MatchRank>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

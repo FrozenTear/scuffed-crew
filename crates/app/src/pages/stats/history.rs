@@ -8,6 +8,7 @@ use super::game::{match_path, open_match};
 use super::history_filter::{
     ALL, HISTORY_CSS, UNKNOWN_MAP, filter_rows, map_rows, map_table, mode_label, page_modes,
 };
+use super::rank::{RANK_CSS, RankChart, chart_series, rank_badge_line, rank_series};
 use super::role::game_role_label;
 use super::{MatchPage, format_date, load_error_state};
 
@@ -283,10 +284,20 @@ pub(super) fn history_tab(
             // Map results ignore the outcome chip: filtering to wins would
             // make every map read 100%.
             let maps = map_rows(filter_rows(&page.data, ALL, rf, &mf));
+            // Opt in: empty unless some loaded game has rank progress.
+            let rank_chart = chart_series(rank_series(
+                page.data
+                    .iter()
+                    .map(|m| (m.id.as_str(), m.played_at, m.rank.as_ref())),
+            ));
 
             rsx! {
                 crate::styles::StyleOnce { id: "stats-history-p2", css: HISTORY_CSS }
                 crate::styles::StyleOnce { id: "stats-history-bans-picks", css: BANS_PICKS_CARD_CSS }
+                crate::styles::StyleOnce { id: "scuffed-css-pages-stats-rank-css", css: RANK_CSS }
+                if !rank_chart.is_empty() {
+                    RankChart { series: rank_chart }
+                }
                 div { class: "stats-filters",
                     div { class: "filter-group", role: "group", aria_labelledby: "history-filter-outcome",
                         span { class: "filter-label", id: "history-filter-outcome", "Outcome" }
@@ -476,6 +487,7 @@ pub(super) fn history_tab(
                                                     )}
                                                 }
                                                 div { class: "match-date", title: "{abs}", "{date}" }
+                                                {rank_badge_line(&m.id, m.rank.as_ref())}
                                                 {bans_picks_line(&m.id, m.bans_picks.as_ref())}
                                             }
                                         }
@@ -554,6 +566,7 @@ mod tests {
             recognizer: Some(recognizer.to_string()),
             suspect_fields: Some(suspect.iter().map(|name| (*name).to_string()).collect()),
             bans_picks: None,
+            rank: None,
         }
     }
 
