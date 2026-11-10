@@ -141,8 +141,8 @@ pub(crate) struct ReadGame<'a> {
 pub(crate) struct QueueTitleFeed {
     read: ReadFn,
     folder: Option<String>,
-    /// This folder was closed (its game was decided, read or not): later
-    /// frames of it are not held.
+    /// This folder was closed when the open game was decided, read or not:
+    /// later frames of it are not held.
     done: bool,
     /// The current game's frames, by [`POLICY`] slot.
     frames: Vec<(Screen, &'static str, Arc<DynamicImage>)>,
@@ -207,7 +207,7 @@ impl QueueTitleFeed {
                 continue;
             };
             if self.done {
-                tracing::info!(target: "scuffed_stat_tracker", name = shot.name, game = %shot.folder, reason = "this folder's game was decided already", "queue title: frame not held");
+                tracing::info!(target: "scuffed_stat_tracker", name = shot.name, game = %shot.folder, reason = "closed when the open game was decided", "queue title: frame not held");
                 continue;
             }
             self.frames.retain(|(s, w, _)| (*s, *w) != (screen, which));
