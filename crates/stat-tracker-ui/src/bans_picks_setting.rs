@@ -20,8 +20,10 @@ pub const HIGHLIGHT_FOR: Duration = Duration::from_secs(2);
 /// bottom of the row above stays visible and it is clear the pane is
 /// partway down Capture and reading.
 pub const ROW_MARGIN: f32 = 56.0;
-/// Padding on every side of the marked row, so the 1 px accent outline
-/// frames the row instead of hugging the label and help.
+/// How far the 1 px accent outline sits outside the row's content, so
+/// it frames the row instead of hugging the label and help. The outline
+/// uses the gaps and card padding around the row, so the label and
+/// toggle stay lined up with the rows around it.
 pub const ROW_OUTLINE_PAD: f32 = 8.0;
 
 /// Only a reader-off game row scrolls to and marks the switch. Other
@@ -39,14 +41,26 @@ pub fn row_fully_visible(viewport: Rectangle, row: Rectangle) -> bool {
 
 /// The pane offset that puts `row` in view with `margin` px of space
 /// above its top (the accent outline sits on that top), or `None` when
-/// the whole row is already visible (a taller window). The jump is an
+/// the whole row is already visible at `translation_y` (a taller
+/// window, or the pane already sitting at this offset). The jump is an
 /// absolute offset, not a smooth scroll.
 ///
 /// Layout bounds are untranslated, so a translation of `T` draws the
-/// row at `row.y - T`. We want that to land `margin` px below the
-/// visible pane top (`viewport.y`): `T = row.y - viewport.y - margin`.
-pub fn reveal_offset(viewport: Rectangle, row: Rectangle, margin: f32) -> Option<f32> {
-    if row_fully_visible(viewport, row) {
+/// row at `row.y - T`. Visibility is checked on that drawn position.
+/// The jump target stays absolute: we want the drawn top to land
+/// `margin` px below the visible pane top (`viewport.y`), so
+/// `T = row.y - viewport.y - margin`.
+pub fn reveal_offset(
+    viewport: Rectangle,
+    row: Rectangle,
+    margin: f32,
+    translation_y: f32,
+) -> Option<f32> {
+    let drawn = Rectangle {
+        y: row.y - translation_y,
+        ..row
+    };
+    if row_fully_visible(viewport, drawn) {
         return None;
     }
     Some((row.y - viewport.y - margin).max(0.0))
@@ -93,6 +107,7 @@ pub fn scroll_to_row() -> Task<Message> {
     iced::advanced::widget::operate(RevealRow {
         viewport: None,
         row: None,
+        translation: Vector::ZERO,
     })
 }
 
@@ -102,6 +117,7 @@ pub fn scroll_to_row() -> Task<Message> {
 struct RevealRow {
     viewport: Option<Rectangle>,
     row: Option<Rectangle>,
+    translation: Vector,
 }
 
 impl<T: Send + 'static> Operation<T> for RevealRow {
@@ -120,26 +136,29 @@ impl<T: Send + 'static> Operation<T> for RevealRow {
         id: Option<&Id>,
         bounds: Rectangle,
         _content_bounds: Rectangle,
-        _translation: Vector,
+        translation: Vector,
         _state: &mut dyn operation::Scrollable,
     ) {
         if id == Some(&Id::new(PANE_SCROLL_ID)) {
             self.viewport = Some(bounds);
+            self.translation = translation;
         }
     }
 
     fn finish(&self) -> Outcome<T> {
         match (self.viewport, self.row) {
-            (Some(viewport), Some(row)) => match reveal_offset(viewport, row, ROW_MARGIN) {
-                Some(y) => Outcome::Chain(Box::new(operation::scrollable::scroll_to(
-                    Id::new(PANE_SCROLL_ID),
-                    AbsoluteOffset {
-                        x: None,
-                        y: Some(y),
-                    },
-                ))),
-                None => Outcome::None,
-            },
+            (Some(viewport), Some(row)) => {
+                match reveal_offset(viewport, row, ROW_MARGIN, self.translation.y) {
+                    Some(y) => Outcome::Chain(Box::new(operation::scrollable::scroll_to(
+                        Id::new(PANE_SCROLL_ID),
+                        AbsoluteOffset {
+                            x: None,
+                            y: Some(y),
+                        },
+                    ))),
+                    None => Outcome::None,
+                }
+            }
             _ => Outcome::None,
         }
     }
@@ -189,7 +208,7 @@ mod tests {
         let viewport = rect(0.0, 80.0, 640.0, 780.0);
         let row = rect(20.0, 200.0, 600.0, 61.0);
         assert!(row_fully_visible(viewport, row));
-        assert_eq!(reveal_offset(viewport, row, ROW_MARGIN), None);
+        assert_eq!(reveal_offset(viewport, row, ROW_MARGIN, 0.0), None);
     }
 
     #[test]
@@ -200,7 +219,7 @@ mod tests {
         // it for ROW_MARGIN.
         let row = rect(20.0, 80.0, 600.0, 61.0);
         assert!(row_fully_visible(viewport, row));
-        assert_eq!(reveal_offset(viewport, row, ROW_MARGIN), None);
+        assert_eq!(reveal_offset(viewport, row, ROW_MARGIN, 0.0), None);
     }
 
     #[test]
@@ -209,13 +228,12 @@ mod tests {
         // Viewport covers y=80..860; the row starts at 1014, as on the
         // default 1280x860 window.
         let row = rect(20.0, 1014.0, 600.0, 61.0);
-        assert_eq!(ROW_MARGIN, 56.0);
         assert!(!row_fully_visible(viewport, row));
-        let y = reveal_offset(viewport, row, ROW_MARGIN).expect("row is below the fold");
-        assert_eq!(y, 1014.0 - 80.0 - 56.0);
-        // After the jump, the row's top (and its outline) sits 56 px
-        // below the pane top, so the bottom of the row above shows.
-        assert_eq!(row.y - y, viewport.y + 56.0);
+        let y = reveal_offset(viewport, row, ROW_MARGIN, 0.0).expect("row is below the fold");
+        assert_eq!(y, 1014.0 - 80.0 - ROW_MARGIN);
+        // After the jump, the row's top (and its outline) sits
+        // ROW_MARGIN below the pane top, so the bottom of the row
+        // above shows.
         assert_eq!(row.y - y, viewport.y + ROW_MARGIN);
     }
 
@@ -226,32 +244,31 @@ mod tests {
         let row = rect(20.0, 820.0, 600.0, 61.0);
         assert!(!row_fully_visible(viewport, row));
         assert_eq!(
-            reveal_offset(viewport, row, ROW_MARGIN),
+            reveal_offset(viewport, row, ROW_MARGIN, 0.0),
             Some(820.0 - 80.0 - ROW_MARGIN)
         );
     }
 
     #[test]
-    fn a_row_above_the_viewport_jumps_back() {
-        let viewport = rect(0.0, 80.0, 640.0, 780.0);
-        let row = rect(20.0, 10.0, 600.0, 61.0);
-        assert!(!row_fully_visible(viewport, row));
-        assert_eq!(
-            reveal_offset(viewport, row, ROW_MARGIN),
-            Some((10.0 - 80.0 - ROW_MARGIN).max(0.0))
-        );
+    fn a_shared_pane_offset_is_applied_to_the_visibility_check() {
+        // A tall pane covers y=80..1400. The row at 1014 is in view at
+        // offset 0, but after Games has left the shared pane scrolled
+        // 1000 px the row is drawn at y=14, above the pane top.
+        let viewport = rect(0.0, 80.0, 640.0, 1320.0);
+        let row = rect(20.0, 1014.0, 600.0, 61.0);
+        assert_eq!(reveal_offset(viewport, row, ROW_MARGIN, 0.0), None);
+        let y = reveal_offset(viewport, row, ROW_MARGIN, 1000.0).expect("scrolled away, so jump");
+        assert_eq!(y, 1014.0 - 80.0 - ROW_MARGIN);
     }
 
     #[test]
     fn the_offset_never_goes_above_the_top() {
         let viewport = rect(0.0, 80.0, 640.0, 780.0);
-        let row = rect(20.0, 90.0, 600.0, 61.0);
         // Almost at the top, but the last pixel is clipped, so we jump;
         // the raw y - content - margin would be negative.
         let clipped = rect(20.0, 50.0, 600.0, 61.0);
         assert!(!row_fully_visible(viewport, clipped));
-        assert_eq!(reveal_offset(viewport, clipped, ROW_MARGIN), Some(0.0));
-        let _ = row;
+        assert_eq!(reveal_offset(viewport, clipped, ROW_MARGIN, 0.0), Some(0.0));
     }
 
     #[test]

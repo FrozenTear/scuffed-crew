@@ -484,16 +484,20 @@ pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Messag
             ConfigEdit::BansPicksReader,
         ),
     );
-    // A 1 px accent outline while marked, around the row plus
-    // ROW_OUTLINE_PAD on every side so it frames the row instead of
-    // hugging the label and help. The padding and the 1 px border width
-    // stay when the mark is off (transparent border), so the row does
-    // not jump. iced 0.14's toggler is mouse and touch only: it has no
-    // keyboard focus, so Space cannot flip the switch from here.
+    // A 1 px accent outline while marked, drawn ROW_OUTLINE_PAD outside
+    // the row's content so it frames the row instead of hugging the
+    // label and help. A wrapping container with that padding negated
+    // lets the outline sit in the card padding and the gaps around the
+    // row, so the label and toggle stay lined up with the rows around
+    // it. The padding stays when the mark is off (the border is then
+    // transparent), so the row does not jump. iced 0.14's layout
+    // ignores the 1 px border width; that width is not what keeps the
+    // row still. iced 0.14's toggler is mouse and touch only: it has
+    // no keyboard focus, so Space cannot flip the switch from here.
     let marked = app
         .page_state
         .bans_picks_row_marked(std::time::Instant::now());
-    container(row)
+    let outlined = container(row)
         .id(iced::widget::Id::new(crate::bans_picks_setting::ROW_ID))
         .width(Fill)
         .padding(crate::bans_picks_setting::ROW_OUTLINE_PAD)
@@ -508,7 +512,10 @@ pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Messag
                 radius: crate::theme::RADIUS_INNER.into(),
             },
             ..iced::widget::container::Style::default()
-        })
+        });
+    container(outlined)
+        .width(Fill)
+        .padding(-crate::bans_picks_setting::ROW_OUTLINE_PAD)
         .into()
 }
 

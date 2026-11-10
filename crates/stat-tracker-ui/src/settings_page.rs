@@ -494,8 +494,11 @@ fn meta(copy: impl Into<String>) -> Element<'static, Message> {
 mod tests {
     use super::*;
     use crate::settings_model::{SINGLE_COLUMN_MAX, TWO_COLUMN_MIN};
+    use iced::Rectangle;
+    use iced::advanced::Layout;
     use iced::advanced::layout::{Limits, Node};
-    use iced::advanced::widget::Tree;
+    use iced::advanced::widget::operation::Operation;
+    use iced::advanced::widget::{Id, Tree};
 
     fn app() -> (tempfile::TempDir, TrackerApp) {
         crate::fixtures::test_app()
@@ -651,5 +654,115 @@ mod tests {
     fn a_stopped_tracker_gets_start_not_restart() {
         assert_eq!(strip_action(true), (DaemonVerb::Restart, "Restart tracker"));
         assert_eq!(strip_action(false), (DaemonVerb::Start, "Start tracker"));
+    }
+
+    struct Collect {
+        ids: Vec<(Id, Rectangle)>,
+        texts: Vec<(String, Rectangle)>,
+    }
+
+    impl Operation<()> for Collect {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation<()>)) {
+            operate(self);
+        }
+
+        fn container(&mut self, id: Option<&Id>, bounds: Rectangle) {
+            if let Some(id) = id {
+                self.ids.push((id.clone(), bounds));
+            }
+        }
+
+        fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {
+            self.texts.push((text.to_string(), bounds));
+        }
+    }
+
+    fn operate_page(app: &TrackerApp, width: f32) -> Collect {
+        let renderer = headless();
+        let mut element = view(app, width);
+        let mut tree = Tree::new(&element);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &Limits::new(iced::Size::ZERO, iced::Size::new(width, 4000.0)),
+        );
+        let mut collect = Collect {
+            ids: Vec::new(),
+            texts: Vec::new(),
+        };
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut collect);
+        collect
+    }
+
+    fn bounds_contain(outer: Rectangle, inner: Rectangle) -> bool {
+        inner.x >= outer.x
+            && inner.y >= outer.y
+            && inner.x + inner.width <= outer.x + outer.width + 0.5
+            && inner.y + inner.height <= outer.y + outer.height + 0.5
+    }
+
+    /// The moved switch is the last CAPTURE row, after the focus gate,
+    /// and Troubleshooting no longer has it. With the env override the
+    /// lock line sits inside that row.
+    #[test]
+    fn the_bans_picks_row_is_drawn_in_capture_and_reading() {
+        use crate::bans_picks_setting::ROW_ID;
+        use crate::settings_env::{BANS_PICKS_ENV, OutsideEnv};
+
+        let width = 976.0;
+        let gate_id = Id::new(crate::focus_status::ROW_ID);
+        let row_id = Id::new(ROW_ID);
+
+        let (_dir, mut page) = app();
+        page.fixture = None;
+        page.outside_env = Some(OutsideEnv {
+            vars: vec![(BANS_PICKS_ENV, "off".to_string())],
+            ..OutsideEnv::default()
+        });
+        page.page_state
+            .show_section(AdvancedSection::CaptureReading);
+
+        let found = operate_page(&page, width);
+        let gate = found
+            .ids
+            .iter()
+            .find(|(id, _)| *id == gate_id)
+            .map(|(_, b)| *b)
+            .expect("the focus gate is on the open Capture and reading page");
+        let row = found
+            .ids
+            .iter()
+            .find(|(id, _)| *id == row_id)
+            .map(|(_, b)| *b)
+            .expect("Read bans and picks is on Capture and reading");
+        assert!(
+            gate.y < row.y,
+            "focus gate at y={} should sit above the bans row at y={}",
+            gate.y,
+            row.y
+        );
+        let lock = format!("Set outside the app: {BANS_PICKS_ENV}");
+        let lock_bounds = found
+            .texts
+            .iter()
+            .find(|(text, _)| text == &lock)
+            .map(|(_, b)| *b)
+            .expect("the lock line is drawn");
+        assert!(
+            bounds_contain(row, lock_bounds),
+            "lock line {lock_bounds:?} should sit inside the row {row:?}"
+        );
+
+        let (_dir_ts, mut troubleshooting) = app();
+        troubleshooting
+            .page_state
+            .show_section(AdvancedSection::Troubleshooting);
+        let ts = operate_page(&troubleshooting, width);
+        assert!(
+            ts.ids.iter().all(|(id, _)| *id != row_id),
+            "Troubleshooting must not draw the Read bans and picks row"
+        );
     }
 }

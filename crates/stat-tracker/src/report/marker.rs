@@ -500,10 +500,11 @@ mod tests {
         );
     }
 
-    /// Spawn `bin`. Another test thread's fork can still hold the file's
-    /// write fd until its own exec, which fails this exec with ETXTBSY
-    /// ("Text file busy"); retry until that fd is gone. Stderr is piped
-    /// so a child that exits at once can be reported.
+    /// Spawn `bin`. The retry is only a spawn guard: another test
+    /// thread's fork can still hold the file's write fd until its own
+    /// exec, which fails this exec with ETXTBSY ("Text file busy").
+    /// Stderr is piped so a child that has already exited can be
+    /// reported after wait.
     fn spawn_retrying_busy(bin: &Path) -> std::process::Child {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {
@@ -702,13 +703,19 @@ mod tests {
         // The child can still show the test binary in /proc for a moment.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while !crate::proc_id::pid_is_live_tracker(pid) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the fake tracker never showed as live: /proc exe {:?}, try_wait {:?}, stderr {:?}",
-                crate::proc_id::proc_exe(pid),
-                child.0.try_wait(),
-                child_stderr(&mut child.0),
-            );
+            if std::time::Instant::now() >= deadline {
+                let waited = child.0.try_wait();
+                // Kill first so read_to_string cannot block for the
+                // sleeper's remaining 30 s.
+                let _ = child.0.kill();
+                let _ = child.0.wait();
+                panic!(
+                    "the fake tracker never showed as live: /proc exe {:?}, try_wait {:?}, stderr {:?}",
+                    crate::proc_id::proc_exe(pid),
+                    waited,
+                    child_stderr(&mut child.0),
+                );
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
         let text = marker(pid).format();

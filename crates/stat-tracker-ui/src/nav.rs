@@ -123,8 +123,11 @@ pub enum Msg {
     /// reading, jump to the Read bans and picks row if it is not already
     /// in view, and mark it for two seconds.
     ShowBansPicksSetting,
-    /// Drop the Read bans and picks mark: timeout, a click, or a scroll.
+    /// Drop the Read bans and picks mark at once: a click or a scroll.
     ClearBansPicksHighlight,
+    /// The 2 s timer for a mark has fired. Clear only if that mark has
+    /// already expired, so an earlier timer cannot drop a newer one.
+    BansPicksHighlightTimedOut,
 }
 
 /// What the chip sends. A later "Review games" button sends the same.
@@ -132,9 +135,6 @@ pub fn chip_message() -> Message {
     Message::Nav(Msg::ShowNeedsLook)
 }
 
-/// Handle a top bar message. [`Msg::ShowNeedsLook`] clears the hero, map,
-/// outcome and role filters, picks All time and turns on the "Needs a
-/// look" filter, so Games shows exactly the games the chip counted.
 /// If the Read bans and picks row is marked, also listen for a click or
 /// scroll that drops the mark at once. This is added on top of the other
 /// subscriptions, not inside the exclusive dialog if/else.
@@ -154,6 +154,9 @@ pub fn with_clear_on_pointer(
     Subscription::batch(subs)
 }
 
+/// Handle a top bar message. [`Msg::ShowNeedsLook`] clears the hero, map,
+/// outcome and role filters, picks All time and turns on the "Needs a
+/// look" filter, so Games shows exactly the games the chip counted.
 pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
     match msg {
         Msg::ShowNeedsLook => {
@@ -205,12 +208,19 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             .then(|()| crate::bans_picks_setting::scroll_to_row());
             let expire = Task::future(async {
                 tokio::time::sleep(crate::bans_picks_setting::HIGHLIGHT_FOR).await;
-                Message::Nav(Msg::ClearBansPicksHighlight)
+                Message::Nav(Msg::BansPicksHighlightTimedOut)
             });
             Task::batch([open, scroll, expire])
         }
         Msg::ClearBansPicksHighlight => {
             app.page_state.clear_bans_picks_highlight();
+            Task::none()
+        }
+        Msg::BansPicksHighlightTimedOut => {
+            let now = std::time::Instant::now();
+            if !app.page_state.bans_picks_row_marked(now) {
+                app.page_state.clear_bans_picks_highlight();
+            }
             Task::none()
         }
     }
@@ -1083,6 +1093,29 @@ mod tests {
         assert!(
             !tab.page_state
                 .bans_picks_row_marked(std::time::Instant::now())
+        );
+    }
+
+    #[test]
+    fn an_earlier_timer_does_not_clear_a_newer_mark() {
+        let (_dir, mut app) = app();
+        let now = std::time::Instant::now();
+        app.page_state.show_bans_picks_row(now);
+        // A second Open Settings restarts the mark; the first 2 s
+        // timer can still fire while this one is on.
+        app.page_state.show_bans_picks_row(now);
+        assert!(app.page_state.bans_picks_row_marked(now));
+        let _ = update(&mut app, Msg::BansPicksHighlightTimedOut);
+        assert!(
+            app.page_state
+                .bans_picks_row_marked(std::time::Instant::now()),
+            "timeout must not clear a mark that is still on"
+        );
+        let _ = update(&mut app, Msg::ClearBansPicksHighlight);
+        assert!(
+            !app.page_state
+                .bans_picks_row_marked(std::time::Instant::now()),
+            "a click or scroll still clears at once"
         );
     }
 

@@ -372,11 +372,8 @@ fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
             open: AdvancedSection::WebsiteConnection,
             reveal_row,
         },
-        Some(BansPicksStatus::ReaderOff) => SettingsLink {
-            tip: "Settings, Capture and reading, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
-            open: AdvancedSection::CaptureReading,
-            reveal_row,
-        },
+        // PackFailed and the other unread reasons open Capture and
+        // reading but only ReaderOff also jumps to the switch.
         _ => SettingsLink {
             tip: "Settings, Capture and reading, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
             open: AdvancedSection::CaptureReading,

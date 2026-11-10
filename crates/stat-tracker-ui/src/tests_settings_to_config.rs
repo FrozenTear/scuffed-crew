@@ -387,7 +387,6 @@ fn an_alpha_2_3_config_with_the_reader_off_opens_off() {
     app.fixture = None;
     app.take_saved_file(file.clone(), &path);
     assert_eq!(app.bans_picks_switch(), (false, false), "Off, not locked");
-    let _ = crate::capture_reading::body(&app, false);
 
     let mut saved = file.clone();
     ConfigEdit::SavePregameScreens(true).apply(&mut saved);
@@ -415,7 +414,6 @@ fn the_bans_picks_env_override_still_wins() {
             ..OutsideEnv::default()
         });
         assert_eq!(app.bans_picks_switch(), (false, true), "saved {saved}");
-        let _ = crate::capture_reading::body(&app, false);
     }
     assert_eq!(BANS_PICKS_ENV, "STAT_TRACKER_BANS_PICKS_RECOGNIZER");
 }
