@@ -37,6 +37,9 @@ pub struct DaemonView {
     pub pid: Option<u32>,
     pub service_installed: bool,
     pub autostart: bool,
+    /// The tracker's last training crop warning (`training_crops/status.json`),
+    /// shown under Website account until a send works again.
+    pub training_warning: Option<String>,
 }
 
 impl Default for DaemonView {
@@ -45,6 +48,7 @@ impl Default for DaemonView {
             pid: None,
             service_installed: service_file_installed(),
             autostart: false,
+            training_warning: None,
         }
     }
 }
@@ -108,9 +112,18 @@ pub fn is_daemon_running(data_dir: &Path) -> bool {
 
 pub fn refresh_view(data_dir: &Path, current: &DaemonView) -> DaemonView {
     DaemonView {
+        autostart: current.autostart,
+        ..initial_view(data_dir)
+    }
+}
+
+/// The view at launch: autostart is read later.
+pub fn initial_view(data_dir: &Path) -> DaemonView {
+    DaemonView {
         pid: daemon_running(data_dir),
         service_installed: service_file_installed(),
-        autostart: current.autostart,
+        autostart: false,
+        training_warning: stat_tracker::sync::training_warning(data_dir),
     }
 }
 

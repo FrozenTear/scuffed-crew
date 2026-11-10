@@ -525,11 +525,7 @@ impl TrackerApp {
             .with_installed_version(&saved_config, installed_version.as_deref());
         settings.overlay_hotkey = overlay_hotkey.bind.clone();
         settings.overlay_hotkey_enabled = overlay_hotkey.enabled;
-        let daemon = DaemonView {
-            pid: daemon::daemon_running(&cli.data_dir),
-            service_installed: daemon::service_file_installed(),
-            autostart: false,
-        };
+        let daemon = daemon::initial_view(&cli.data_dir);
         let live = cli.fixture.is_none();
         let (window_id, open) = window::open(window_settings());
         let process_running =

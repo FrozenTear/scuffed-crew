@@ -40,7 +40,7 @@ fn auth_pause_path(data_dir: &Path) -> std::path::PathBuf {
 /// Stable equality token for the bearer. Not a password hash, the file is
 /// mode 0600 beside `config.toml`, which already stores the token. It only
 /// answers "did this exact token change?".
-fn token_fingerprint(token: &str) -> String {
+pub(super) fn token_fingerprint(token: &str) -> String {
     let mut h1: u64 = 0xcbf29ce484222325;
     let mut h2: u64 = 0x84222325cbf29ce4;
     for (i, byte) in token.as_bytes().iter().enumerate() {

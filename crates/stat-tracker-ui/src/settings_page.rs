@@ -765,4 +765,50 @@ mod tests {
             "Troubleshooting must not draw the Read bans and picks row"
         );
     }
+    /// Signed in, the Website account card draws the training crop section:
+    /// the consent per kind, where to change it, the tracker's warning and
+    /// the delete button.
+    #[test]
+    fn the_training_crop_section_is_drawn_under_website_account() {
+        use crate::training_card::TrainingMsg;
+        use scuffed_types::api::training_crops::TrainingCropConsent;
+
+        let (_dir, mut page) = app();
+        page.fixture = None;
+        page.saved_config.sync = Some(stat_tracker::config::SyncConfig {
+            server_url: "https://crew.example".into(),
+            token: "tok".into(),
+        });
+        let _ = crate::settings_open::on_open(&mut page);
+        let _ = page.update(Message::SettingsPage(Msg::Open(
+            crate::settings_open::OpenMsg::Training(TrainingMsg::ConsentRead {
+                key: ("https://crew.example".into(), "tok".into()),
+                value: Ok(TrainingCropConsent {
+                    map_name: true,
+                    ..TrainingCropConsent::default()
+                }),
+            }),
+        )));
+        page.daemon.training_warning = Some("Training crops: could not send them.".into());
+        let texts: Vec<String> = operate_page(&page, 976.0)
+            .texts
+            .into_iter()
+            .map(|(text, _)| text)
+            .collect();
+        for want in [
+            crate::training_card::HEADING,
+            "Hero icons: off",
+            "Stat digits: off",
+            "Map names: on",
+            "Training crops: could not send them.",
+            "Delete my training crops",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want} in {texts:?}");
+        }
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("https://crew.example/profile/edit"))
+        );
+    }
 }

@@ -299,14 +299,41 @@ pub(crate) fn stale_board_debug_dirs(
 /// From an accepted capture it is not gated on `debug_ocr`; a rejected
 /// capture goes through [`archive_rejected_map_label_crop`]. The handle is
 /// for tests.
+///
+/// A crop this call writes is also offered to the training crop outbox
+/// (`sync::keep_map_name_crop`), which keeps a copy only while the site's
+/// last answer has `map_name` consent on.
 pub(crate) fn archive_map_label_crop(
     data_dir: &std::path::Path,
     session_id: &str,
     frame: &image::DynamicImage,
 ) -> Option<tokio::task::JoinHandle<()>> {
+    archive_map_label_crop_as(data_dir, session_id, frame, true)
+}
+
+/// Write the map-label crop on a blocking thread. `for_training` only for
+/// an accepted Tab: a rejected frame may show the kill feed there.
+fn archive_map_label_crop_as(
+    data_dir: &std::path::Path,
+    session_id: &str,
+    frame: &image::DynamicImage,
+    for_training: bool,
+) -> Option<tokio::task::JoinHandle<()>> {
     let job = mapcrops::prepare_mapcrop(data_dir, session_id, frame)?;
+    let training = for_training.then(|| {
+        (
+            data_dir.to_path_buf(),
+            session_id.to_string(),
+            job.path(),
+            (frame.width(), frame.height()),
+        )
+    });
     Some(tokio::task::spawn_blocking(move || {
-        mapcrops::commit_mapcrop(job)
+        if mapcrops::commit_mapcrop(job)
+            && let Some((dir, session, path, (width, height))) = training
+        {
+            sync::keep_map_name_crop(&dir, &session, &path, width, height);
+        }
     }))
 }
 
@@ -324,5 +351,5 @@ pub(crate) fn archive_rejected_map_label_crop(
     if !debug || reason == "preflight" {
         return None;
     }
-    archive_map_label_crop(data_dir, session_id, frame)
+    archive_map_label_crop_as(data_dir, session_id, frame, false)
 }

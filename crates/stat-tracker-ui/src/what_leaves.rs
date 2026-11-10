@@ -1,9 +1,10 @@
 //! "What leaves your PC": the dialog the Website account's link opens
 //! (spec p6). It lists every time this app or the tracker sends anything
 //! off this computer, and what goes with it. Each line follows the code:
-//! the upload body (`StatsUploadEntry` in the types crate), the update
-//! check (GitHub releases), the season list, the token check, and Report
-//! a problem.
+//! the upload body (`StatsUploadEntry` in the types crate), the opt-in
+//! training crops (`stat_tracker::sync::training`), the update check
+//! (GitHub releases), the season list, the token check, and Report a
+//! problem.
 
 use iced::widget::{Column, button, column, container, opaque, row, scrollable, space, text};
 use iced::{Element, Fill, Padding};
@@ -18,7 +19,7 @@ use crate::theme::{
 const TITLE: &str = "What leaves your PC";
 
 /// Heading and lines for each thing that is sent.
-pub(crate) const SECTIONS: [(&str, &[&str]); 5] = [
+pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     (
         "Game uploads, while Upload games is on",
         &[
@@ -29,9 +30,17 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 5] = [
         ],
     ),
     (
+        "Training crops, only the kinds you turn on at the website",
+        &[
+            "Small pictures of what the tracker read. In this version only the map name banner from the Tab screen, at its own size.",
+            "With each: a random number for the game, the screen size and which screen it came from. No names, chat or whole screens.",
+            "Sent with your token while Upload games is on. Delete my training crops, under Website account, removes them from the website.",
+        ],
+    ),
+    (
         "Website account",
         &[
-            "Opening Settings asks the website which account the saved token belongs to. The app also reads the website's season list. Neither sends your games.",
+            "Opening Settings asks the website which account the saved token belongs to and which training crops you allow. The app also reads the website's season list. None of these sends your games.",
         ],
     ),
     (
@@ -47,7 +56,7 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 5] = [
     (
         "Not sent",
         &[
-            "Screen captures, debug images and the stored games stay on this computer. Rank reading, stat pictures and report pictures are not in this version and start off when they come.",
+            "Screen captures, debug images and the stored games stay on this computer, apart from the training crops above. Rank reading, stat pictures and report pictures are not in this version and start off when they come.",
         ],
     ),
 ];
