@@ -283,7 +283,7 @@ pub fn merge_saved_with_authority(
     let map = policy.map.clone();
     let mode = policy.mode.clone();
     if let Some(board_map) = text_on(board, "map")
-        && board_map.trim() != policy.map.trim()
+        && !same_stored_map(&board_map, &policy.map)
     {
         push_suspect(&mut suspect, "map");
     }
@@ -468,6 +468,24 @@ fn board_fallback_reason(board: &BoardRead) -> Option<&'static str> {
 /// raw string compare is not a reason to drop the board.
 fn canonical_board_hero(raw: &str) -> String {
     crate::parse::canonical_hero(raw)
+}
+
+/// True when both names are the same stored map, including OCR forms that
+/// canonicalize to one display name. "Kings Row" and "KING'S ROW" are
+/// King's Row, so a later Tab must not keep the map warning up.
+fn same_stored_map(a: &str, b: &str) -> bool {
+    let a = a.trim();
+    let b = b.trim();
+    if a == b {
+        return true;
+    }
+    match (
+        crate::parse::canonical_map(a),
+        crate::parse::canonical_map(b),
+    ) {
+        (Some(left), Some(right)) => left == right,
+        _ => false,
+    }
 }
 
 /// Non-empty text on a field, including a suspect read. Missing and blank
@@ -1298,6 +1316,42 @@ mod tests {
         assert_eq!(saved.elims, 21);
         assert_eq!(saved.suspect_fields, vec!["hero".to_string()]);
         assert_eq!(saved.recognizer, RECOGNIZER_ID);
+    }
+
+    #[test]
+    fn a_kings_row_alias_on_the_board_does_not_keep_the_map_warning() {
+        // The policy map is the display name. The board often has the OCR
+        // form with no apostrophe, or the banner in all caps. A raw string
+        // compare treated those as a different map, so the map warning
+        // stayed up for the rest of the game.
+        let aliases = ["Kings Row", "KING'S ROW", "kings row", "King’s Row"];
+        for board_name in aliases {
+            let mut policy = ocr();
+            policy.map = "King's Row".into();
+            policy.mode = "Hybrid".into();
+            let mut board = confident_board(5, 0);
+            let map = board
+                .fields
+                .iter_mut()
+                .find(|field| field.name == "map")
+                .unwrap();
+            map.value = Some(Value::Text(board_name.into()));
+            let saved = merge_saved(&policy, identified(0, 5), Some(&board));
+            assert_eq!(saved.map, "King's Row", "{board_name}");
+            assert_eq!(saved.mode, "Hybrid", "{board_name}");
+            assert!(
+                !saved.suspect_fields.iter().any(|name| name == "map"),
+                "board {board_name:?} must clear the map warning"
+            );
+        }
+
+        // A genuinely different map still flags the field and keeps policy.
+        let mut policy = ocr();
+        policy.map = "King's Row".into();
+        policy.mode = "Hybrid".into();
+        let saved = merge_saved(&policy, identified(0, 5), Some(&confident_board(5, 0)));
+        assert_eq!(saved.map, "King's Row");
+        assert!(saved.suspect_fields.iter().any(|name| name == "map"));
     }
 
     #[test]
