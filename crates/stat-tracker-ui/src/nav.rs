@@ -758,6 +758,7 @@ mod tests {
             recognizer: String::new(),
             bans_picks: None,
             bans_picks_status: None,
+            queue_title: None,
         }
     }
 

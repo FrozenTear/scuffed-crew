@@ -330,11 +330,7 @@ impl BansPicksFeed {
     /// frames belong to: it began after the last of them, and not long
     /// after.
     pub(crate) fn fits(&self, started: DateTime<Utc>) -> bool {
-        let Some(fed) = self.fed_at else {
-            return false;
-        };
-        started + Duration::seconds(CLOCK_SLACK_SECONDS) >= fed
-            && started - fed <= Duration::minutes(GAME_WINDOW_MINUTES)
+        frames_fit(self.fed_at, started)
     }
 
     /// Read the held frames, off the poll loop's thread, and publish the
@@ -366,6 +362,18 @@ impl BansPicksFeed {
         stat_tracker::ocr_status::publish_bans_picks_notice(&self.data_dir, &outcome.notice);
         outcome
     }
+}
+
+/// Whether a game whose first record was at `started` is the one whose
+/// last pre-game frame was held at `fed`: it began after it, and not long
+/// after. `None` (nothing held) never fits. The queue title feed uses the
+/// same rule.
+pub(crate) fn frames_fit(fed: Option<DateTime<Utc>>, started: DateTime<Utc>) -> bool {
+    let Some(fed) = fed else {
+        return false;
+    };
+    started + Duration::seconds(CLOCK_SLACK_SECONDS) >= fed
+        && started - fed <= Duration::minutes(GAME_WINDOW_MINUTES)
 }
 
 fn not_read(why: &str) -> String {

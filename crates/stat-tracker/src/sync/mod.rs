@@ -66,6 +66,9 @@ mod tests_wire;
 mod tests_bans_picks;
 
 #[cfg(test)]
+mod tests_queue_title;
+
+#[cfg(test)]
 mod tests_http;
 
 #[cfg(test)]

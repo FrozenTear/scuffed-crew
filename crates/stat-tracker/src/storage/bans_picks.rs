@@ -79,27 +79,4 @@ impl LocalStore {
         );
         Ok(true)
     }
-
-    /// The status already stored for this match, for a later snapshot that
-    /// has none of its own.
-    pub(super) async fn session_bans_picks_status(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<BansPicksStatus>, Box<dyn std::error::Error + Send + Sync>> {
-        let snaps = self.get_session_snapshots(session_id).await?;
-        Ok(snaps
-            .into_iter()
-            .rev()
-            .find_map(|row| row.bans_picks_status))
-    }
-
-    /// The result already stored for this match, for a later snapshot that
-    /// has none of its own.
-    pub(super) async fn session_bans_picks(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let snaps = self.get_session_snapshots(session_id).await?;
-        Ok(snaps.into_iter().rev().find_map(|row| row.bans_picks))
-    }
 }

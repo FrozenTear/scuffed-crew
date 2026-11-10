@@ -333,10 +333,13 @@ pub(crate) async fn run_loop(
                         data_dir,
                         st.capture_count,
                     );
-                    // The bans and picks read for this game, before the live
-                    // snapshot is cut so it carries them.
+                    // The bans and picks and the queue title reads for this
+                    // game, before the live snapshot is cut so it carries them.
+                    // The queue title is read only for the open game.
                     if let Some(dump) = pregame_dump.as_mut() {
                         dump.attach_bans_picks(store, &stored_sid).await;
+                        let open = st.active_game.as_ref().map(|g| g.session_id.as_str());
+                        dump.attach_queue_title(store, &stored_sid, open).await;
                     } else if let Err(e) = store
                         .attach_bans_picks_status(
                             &stored_sid,
@@ -748,7 +751,8 @@ pub(crate) async fn run_loop(
                             dump.note_match_end(Instant::now());
                         }
                         if let (Some(dump), Some((seen, frame))) = (pregame_dump.as_mut(), pregame) {
-                            // The session id is for the log lines only.
+                            // The open game: for the log lines, and the game
+                            // the queue title reader's frames are held for.
                             dump.set_session(st.active_game.as_ref().map(|g| g.session_id.as_str()));
                             dump.observe(Instant::now(), seen, frame);
                         }

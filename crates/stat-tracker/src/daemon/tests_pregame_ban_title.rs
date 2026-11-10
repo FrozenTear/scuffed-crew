@@ -163,7 +163,7 @@ fn the_ban_vote_hero_select_and_roster_fail_the_shape() {
 
 /// A dark frame with a title-like row of bright blocks in the title
 /// region; `shift` moves the blocks (a different title).
-fn titled_frame(w: u32, h: u32, shift: f32) -> image::RgbImage {
+pub(crate) fn titled_frame(w: u32, h: u32, shift: f32) -> image::RgbImage {
     let mut img = image::RgbImage::from_pixel(w, h, [14, 16, 22].into());
     for k in 0..9 {
         let x = (0.06 + 0.1 * k as f32 + shift) % 0.95;

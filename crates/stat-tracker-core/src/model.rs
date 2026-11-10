@@ -287,6 +287,81 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub bans_picks_status: Option<BansPicksStatus>,
+    /// The queue Scuffed Vision's queue title reader (`rank-v1`) read on
+    /// this game's pre-game screens. Set once, when the game is first
+    /// recorded with the reader on, and kept on every snapshot of the match;
+    /// a later read never replaces it. `None` with the reader off, on games
+    /// recorded before the field existed, and on games never offered to the
+    /// reader (first stored outside the Tab path, such as a best guess kept
+    /// when the game closed, a capture landed at shutdown or an imported
+    /// hold, or stored under a session that was not the open game). Omitted
+    /// from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub queue_title: Option<QueueTitle>,
+}
+
+/// The game's queue ([`PersonalMatch::queue_title`]): the confident read,
+/// or a warning that the queue is not known. Written once per game.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct QueueTitle {
+    /// The title as the pack spells it (`OPEN QUEUE`). Only a read the
+    /// reader accepted sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub value: Option<String>,
+    /// The confidence of the read that set `value`, 0..1; 0 without one.
+    #[serde(default)]
+    #[surreal(default)]
+    pub confidence: f32,
+    /// The game's read was weak or failed, or there was no pre-game frame
+    /// of this game to read, so `value` is `None`. Shown as
+    /// [`QUEUE_TITLE_WARNING`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[surreal(default)]
+    pub unsure: bool,
+    /// The pending next mode hint this game's read confirmed (the mode
+    /// banner word seen after the game before). `None` when there was none,
+    /// or the read dropped or expired it, or it was not this game's to
+    /// settle. Local only: never uploaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub mode_hint: Option<String>,
+}
+
+/// The queue title reader's id (`stat_tracker::shadow::queue_title`
+/// re-exports it as `RECOGNIZER_ID`). Here so the upload, which may not use
+/// the readers, sends the same id as `rank.rank_recognizer`.
+pub const QUEUE_TITLE_RECOGNIZER_ID: &str = "rank-v1";
+
+/// Lowest whole title score a queue title read may have
+/// (`stat_tracker::shadow::queue_title` re-exports it as `MIN_SCORE`). Here
+/// so the upload checks the same bar.
+pub const QUEUE_TITLE_MIN_SCORE: f32 = 0.80;
+
+/// The warning for a game whose queue is not known: no confident read, for
+/// whatever reason (a weak or failed read, or no pre-game frame of it).
+pub const QUEUE_TITLE_WARNING: &str = "This game's queue is not known: its title was not seen or not recognized on the pre-game screens.";
+
+impl QueueTitle {
+    /// [`QUEUE_TITLE_WARNING`] when the game has no confident read, else
+    /// `None`.
+    pub fn warning(&self) -> Option<&'static str> {
+        self.unsure.then_some(QUEUE_TITLE_WARNING)
+    }
+
+    /// The value as the upload sends it: trimmed, not empty, and read at a
+    /// finite confidence of [`QUEUE_TITLE_MIN_SCORE`] to 1. `None` otherwise,
+    /// so a title stored some other way is never uploaded as confident.
+    pub fn confident_value(&self) -> Option<&str> {
+        let sure =
+            self.confidence.is_finite() && (QUEUE_TITLE_MIN_SCORE..=1.0).contains(&self.confidence);
+        self.value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| sure && !v.is_empty())
+    }
 }
 
 /// A screen of the pre-game the bans and picks reader had no frame for.

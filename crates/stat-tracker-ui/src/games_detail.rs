@@ -319,6 +319,27 @@ impl Tracked {
     }
 }
 
+/// The queue title warning for the map line: the sentence when the game has
+/// a queue title with no confident value (`QueueTitle::confident_value`,
+/// the same gate as the upload), `None` when it has one or was never read
+/// (reader off). A chip and the warning never show together.
+pub fn queue_warning(g: &Game) -> Option<&'static str> {
+    g.queue_title
+        .as_ref()
+        .filter(|t| t.confident_value().is_none())
+        .map(|_| stat_tracker::model::QUEUE_TITLE_WARNING)
+}
+
+/// The confident queue ("OPEN QUEUE") for the map line's chip, if any:
+/// `QueueTitle::confident_value`, so the chip shows exactly what the upload
+/// sends.
+pub fn queue_value(g: &Game) -> Option<String> {
+    g.queue_title
+        .as_ref()?
+        .confident_value()
+        .map(str::to_string)
+}
+
 /// One bar segment of the hero timeline, in time order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BarPart {
@@ -655,6 +676,7 @@ mod tests {
             recognizer: "cv-v1".into(),
             bans_picks: None,
             bans_picks_status: None,
+            queue_title: None,
         }
     }
 
@@ -1020,5 +1042,71 @@ mod tests {
         assert!(!sync_on_for(&with("", "tok")));
         assert!(!sync_on_for(&with("https://crew.example", "  ")));
         assert!(sync_on_for(&with("https://crew.example", "tok")));
+    }
+
+    /// The queue title warning shows only for a game with no confident
+    /// value; the chip only for one with it. The reader off (no title)
+    /// shows neither.
+    #[test]
+    fn the_queue_warning_shows_only_without_a_confident_value() {
+        use stat_tracker::model::{QUEUE_TITLE_WARNING, QueueTitle};
+        let mut g = game("a", "Ana", 1, 1, at(20, 0, 0));
+        assert_eq!((queue_warning(&g), queue_value(&g)), (None, None));
+        let confident = QueueTitle {
+            value: Some("OPEN QUEUE".into()),
+            confidence: 0.93,
+            ..QueueTitle::default()
+        };
+        g.queue_title = Some(confident.clone());
+        assert_eq!(queue_warning(&g), None);
+        assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
+        // Weak with no earlier value: the warning, no chip.
+        g.queue_title = Some(QueueTitle {
+            unsure: true,
+            ..QueueTitle::default()
+        });
+        assert_eq!(queue_warning(&g), Some(QUEUE_TITLE_WARNING));
+        assert_eq!(queue_value(&g), None);
+        // A value and the flag together (a row stored before the title was
+        // write-once): the chip only, never the warning beside it.
+        g.queue_title = Some(QueueTitle {
+            unsure: true,
+            ..confident
+        });
+        assert_eq!(queue_warning(&g), None);
+        assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
+    }
+
+    /// The chip uses the upload's gate (`QueueTitle::confident_value`): a
+    /// stored value under the bar, at NaN, past 1 or blank shows the
+    /// warning and no chip; exactly at the bar shows the chip.
+    #[test]
+    fn a_stored_value_below_the_bar_shows_the_warning_not_a_chip() {
+        use stat_tracker::model::{QUEUE_TITLE_MIN_SCORE, QUEUE_TITLE_WARNING, QueueTitle};
+        let mut g = game("a", "Ana", 1, 1, at(20, 0, 0));
+        let stored = |value: &str, confidence: f32| QueueTitle {
+            value: Some(value.into()),
+            confidence,
+            ..QueueTitle::default()
+        };
+        for (value, confidence) in [
+            ("OPEN QUEUE", 0.79),
+            ("OPEN QUEUE", 0.5),
+            ("OPEN QUEUE", 0.0),
+            ("OPEN QUEUE", f32::NAN),
+            ("OPEN QUEUE", 1.5),
+            ("  ", 0.93),
+        ] {
+            g.queue_title = Some(stored(value, confidence));
+            assert_eq!(queue_value(&g), None, "{value:?} at {confidence}");
+            assert_eq!(
+                queue_warning(&g),
+                Some(QUEUE_TITLE_WARNING),
+                "{value:?} at {confidence}"
+            );
+        }
+        g.queue_title = Some(stored(" OPEN QUEUE ", QUEUE_TITLE_MIN_SCORE));
+        assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
+        assert_eq!(queue_warning(&g), None);
     }
 }

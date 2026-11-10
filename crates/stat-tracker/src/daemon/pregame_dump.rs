@@ -85,10 +85,13 @@ mod classify;
 mod folders;
 mod pending;
 mod post;
+mod queue;
 mod rejects;
 mod roster;
 #[cfg(test)]
 mod tests_bans;
+#[cfg(test)]
+mod tests_queue;
 mod trail;
 mod writer;
 
@@ -383,7 +386,8 @@ pub(crate) struct PregameTracker<F> {
     last_seen: Seen,
     /// Rate limits for the turned-down candidates' lines and frames.
     rejects: RejectLimiter,
-    /// The open session, if any, for the log lines only.
+    /// The open session, if any, for the log lines and the game the queue
+    /// title reader's frames are held for.
     session: Option<String>,
     /// The last phase frame skip logged, so it is logged once per screen.
     skip_logged: Option<(PregamePhase, &'static str)>,
@@ -1028,6 +1032,13 @@ pub(crate) struct PregameDump {
     /// The bans and picks reader's feed: sees every batch, `None` with the
     /// reader off.
     bans: Option<super::bans_picks::BansPicksFeed>,
+    /// The queue title reader's feed: sees every batch, `None` with the
+    /// reader off ([`super::queue_title`]).
+    queue: Option<super::queue_title::QueueTitleFeed>,
+    /// The saver runs for the queue title reader alone (the saves and the
+    /// bans and picks reader off): no loading, roster or ban-results checks
+    /// per tick, and no pre-game summary per game.
+    queue_only: bool,
     /// Why the game has no hero-select frame or no picks ([`trail`]).
     trail: trail::PregameTrail,
     /// Where the summary line is also kept ([`trail::SUMMARY_FILE`]);
@@ -1047,35 +1058,66 @@ impl PregameDump {
     /// [`Self::new`], also running for the bans and picks reader: with `bans`
     /// the saver exists with `on` false too, and then writes nothing and
     /// keeps no post-game screens.
+    #[cfg(test)]
     pub(crate) fn with_bans_picks(
         on: bool,
         bans: Option<super::bans_picks::BansPicksFeed>,
         data_dir: &std::path::Path,
         poll: Duration,
     ) -> Option<Self> {
-        if !on && bans.is_none() {
+        Self::with_readers(on, bans, None, data_dir, poll)
+    }
+
+    /// [`Self::with_bans_picks`], also running for the queue title reader
+    /// (`queue`, [`super::queue_title`]). `None` with the saves and both
+    /// readers off. A saver that runs for the queue title reader alone
+    /// writes nothing and skips the checks only the saves and the bans and
+    /// picks reader use ([`Self::want`]).
+    pub(crate) fn with_readers(
+        on: bool,
+        bans: Option<super::bans_picks::BansPicksFeed>,
+        queue: Option<super::queue_title::QueueTitleFeed>,
+        data_dir: &std::path::Path,
+        poll: Duration,
+    ) -> Option<Self> {
+        if !on && bans.is_none() && queue.is_none() {
             tracing::info!(
                 target: "scuffed_stat_tracker",
-                "pre-game screens: not watched (debug_save_pregame_screens off and the bans and picks reader off)"
+                "pre-game screens: not watched (debug_save_pregame_screens off, the bans and picks reader off and the queue title reader off)"
             );
             return None;
         }
-        let root = pregame_dir(data_dir);
-        let examples_dir = super::pregame_ban_title::ban_title_dir(data_dir);
-        let examples = super::pregame_ban_title::BanTitleExamples::load_dir(&examples_dir);
-        if examples.len() == 0 {
+        let queue_only = !on && bans.is_none();
+        let mut dump = Self::start(on, bans, data_dir, poll)?;
+        dump.queue = queue;
+        dump.queue_only = queue_only;
+        if queue_only {
             tracing::info!(
                 target: "scuffed_stat_tracker",
-                dir = %examples_dir.display(),
-                "pre-game screens: no ban-results examples, the ban-results title is told by its shape"
-            );
-        } else {
-            tracing::info!(
-                target: "scuffed_stat_tracker",
-                examples = examples.len(),
-                "pre-game screens: ban-results examples loaded"
+                "pre-game screens: watched for the queue title reader only, nothing written"
             );
         }
+        Some(dump)
+    }
+
+    /// The saver, whatever the switches say: [`Self::with_readers`] past
+    /// its check.
+    fn start(
+        on: bool,
+        bans: Option<super::bans_picks::BansPicksFeed>,
+        data_dir: &std::path::Path,
+        poll: Duration,
+    ) -> Option<Self> {
+        let root = pregame_dir(data_dir);
+        // A saver for the queue title reader alone runs no ban-results
+        // check ([`Self::want`]): it loads no examples and logs nothing
+        // about them.
+        let queue_only = !on && bans.is_none();
+        let examples = if queue_only {
+            super::pregame_ban_title::BanTitleExamples::default()
+        } else {
+            Self::load_examples(data_dir)
+        };
         let writer = if on {
             PregameWriter::start(root.clone())
         } else {
@@ -1094,6 +1136,8 @@ impl PregameDump {
                 post_polled_at: None,
                 post_ticked_at: None,
                 bans,
+                queue: None,
+                queue_only: false,
                 trail: trail::PregameTrail::default(),
                 summary_log: Some(data_dir.join(trail::SUMMARY_FILE)),
             }),
@@ -1102,6 +1146,27 @@ impl PregameDump {
                 None
             }
         }
+    }
+
+    /// The ban-results title examples under `data_dir`, with one log line
+    /// saying whether there are any.
+    fn load_examples(data_dir: &std::path::Path) -> super::pregame_ban_title::BanTitleExamples {
+        let examples_dir = super::pregame_ban_title::ban_title_dir(data_dir);
+        let examples = super::pregame_ban_title::BanTitleExamples::load_dir(&examples_dir);
+        if examples.len() == 0 {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                dir = %examples_dir.display(),
+                "pre-game screens: no ban-results examples, the ban-results title is told by its shape"
+            );
+        } else {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                examples = examples.len(),
+                "pre-game screens: ban-results examples loaded"
+            );
+        }
+        examples
     }
 
     /// A saver writing through `writer` with no examples (tests).
@@ -1123,12 +1188,20 @@ impl PregameDump {
             post_polled_at: None,
             post_ticked_at: None,
             bans: None,
+            queue: None,
+            queue_only: false,
             trail: trail::PregameTrail::default(),
             summary_log: None,
         }
     }
 
+    /// The checks the tick at `now` should run. A saver for the queue title
+    /// reader alone wants none of them: the reader takes only hero ban and
+    /// hero select frames, which every tick hands over anyway.
     pub(crate) fn want(&self, now: Instant) -> PregameWant {
+        if self.queue_only {
+            return PregameWant::default();
+        }
         self.with_post_loading(self.tracker.want(now))
     }
 
@@ -1176,7 +1249,9 @@ impl PregameDump {
         self.send(shots);
     }
 
-    /// The open session, for the log lines.
+    /// The open session, for the log lines and for the queue title reader,
+    /// which ties the frames it holds to it
+    /// ([`super::queue_title::QueueTitleFeed::held_for`]).
     pub(crate) fn set_session(&mut self, session: Option<&str>) {
         self.tracker.set_session(session);
     }
@@ -1214,6 +1289,9 @@ impl PregameDump {
             .collect();
         if let Some(bans) = self.bans.as_mut() {
             bans.observe(&shots);
+        }
+        if let Some(queue) = self.queue.as_mut() {
+            queue.observe(&shots, self.tracker.session.as_deref());
         }
         self.trail.shots(&shots);
         let saves: Vec<(String, &'static str)> = shots
@@ -1264,7 +1342,7 @@ impl PregameDump {
                     name,
                     game = %folder,
                     session,
-                    reason = "debug_save_pregame_screens off, held for the bans and picks reader only",
+                    reason = "debug_save_pregame_screens off, held in memory for the readers",
                     "pre-game frame not written"
                 );
             }

@@ -14,7 +14,7 @@ use crate::commands::SegmentStep;
 use crate::games_detail::{self as detail, DeltaLine, Stat, Upload};
 use crate::games_picker::{self, Field, Picker};
 use crate::games_rows::{self, UnsureItem};
-use crate::games_table::{Msg, pill_box, portrait, small_chip, warn_chip};
+use crate::games_table::{Msg, pill_box, portrait, small_chip, small_chip_owned, warn_chip};
 use crate::icons::{self, Icon};
 use crate::model::{Game, Outcome};
 use crate::report::ReportMessage;
@@ -234,8 +234,18 @@ fn map_line(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Mes
     if let Some(mode) = games_rows::mode_chip(&g.map_name) {
         r = r.push(small_chip(mode, TEXT_2, BORDER));
     }
+    if let Some(queue) = detail::queue_value(g) {
+        r = r.push(small_chip_owned(queue, TEXT_2, BORDER));
+    }
     r = with_set(r, g, Field::Map, ctx.editing);
-    with_correction(r.into(), detail::read_vs_set_name(g, "map_name"))
+    let line = with_correction(r.into(), detail::read_vs_set_name(g, "map_name"));
+    // The game's queue is not known: say so under the line, in words.
+    match detail::queue_warning(g) {
+        Some(w) => column![line, text(w).size(SMALL).color(theme::WARN)]
+            .spacing(4)
+            .into(),
+        None => line,
+    }
 }
 
 fn edited(g: &Game, field: Field) -> bool {

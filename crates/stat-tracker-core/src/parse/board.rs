@@ -158,6 +158,7 @@ fn new_match(stats: PlayerStats, hero: String, map_name: String, outcome: &str) 
         name_recognizer: None,
         bans_picks: None,
         bans_picks_status: None,
+        queue_title: None,
     }
 }
 

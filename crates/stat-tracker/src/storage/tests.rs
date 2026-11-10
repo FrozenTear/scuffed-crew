@@ -43,6 +43,7 @@ pub(super) fn snap(session_id: &str, elims: u32) -> PersonalMatch {
         name_recognizer: None,
         bans_picks: None,
         bans_picks_status: None,
+        queue_title: None,
     }
 }
 

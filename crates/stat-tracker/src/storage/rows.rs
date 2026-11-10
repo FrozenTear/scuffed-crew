@@ -49,29 +49,11 @@ impl LocalStore {
                 );
             }
         }
-        // A later snapshot that did not read a name must keep the recognizer
-        // already stored for this match. A resend that omits it clears the
-        // server's copy.
-        if name_recognizer_absent(&match_data.name_recognizer)
-            && !match_data.session_id.is_empty()
-            && let Some(kept) = self.session_name_recognizer(&match_data.session_id).await?
-        {
-            match_data.name_recognizer = Some(kept);
-        }
-        // Same for the bans and picks result: it belongs to the game.
-        if match_data.bans_picks.is_none()
-            && !match_data.session_id.is_empty()
-            && let Some(kept) = self.session_bans_picks(&match_data.session_id).await?
-        {
-            match_data.bans_picks = Some(kept);
-        }
-        if match_data.bans_picks_status.is_none()
-            && !match_data.session_id.is_empty()
-            && let Some(kept) = self
-                .session_bans_picks_status(&match_data.session_id)
-                .await?
-        {
-            match_data.bans_picks_status = Some(kept);
+        // The game's fields a later snapshot did not read itself, read once
+        // for all of them ([`carry_game_fields`]).
+        if !match_data.session_id.is_empty() && lacks_game_fields(&match_data) {
+            let snaps = self.get_session_snapshots(&match_data.session_id).await?;
+            carry_game_fields(&mut match_data, &snaps);
         }
         let created: Option<PersonalMatch> =
             self.db.create("personal_match").content(match_data).await?;
@@ -132,18 +114,6 @@ impl LocalStore {
             .into_iter()
             .map(|row| row.final_outcome)
             .find(|outcome| outcome_is_decided(outcome)))
-    }
-
-    /// The recognizer already stored for this match, newest snapshot first.
-    async fn session_name_recognizer(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let snaps = self.get_session_snapshots(session_id).await?;
-        Ok(snaps.into_iter().rev().find_map(|row| {
-            let id = row.name_recognizer?;
-            (!id.is_empty()).then_some(id)
-        }))
     }
 
     pub async fn match_count(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
@@ -316,6 +286,45 @@ impl LocalStore {
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string()
         })
+    }
+}
+
+/// A new snapshot is missing one of the fields that belong to the whole
+/// game ([`carry_game_fields`]).
+fn lacks_game_fields(m: &PersonalMatch) -> bool {
+    name_recognizer_absent(&m.name_recognizer)
+        || m.bans_picks.is_none()
+        || m.bans_picks_status.is_none()
+        || m.queue_title.is_none()
+}
+
+/// Fill the fields that belong to the whole game, and that a later snapshot
+/// did not read itself, from the game's stored snapshots (oldest first),
+/// newest stored value first:
+///
+/// * the name recognizer (a resend that omits it clears the server's copy);
+/// * the bans and picks result and its status;
+/// * the queue title.
+fn carry_game_fields(m: &mut PersonalMatch, snaps: &[PersonalMatch]) {
+    let newest = || snaps.iter().rev();
+    if name_recognizer_absent(&m.name_recognizer)
+        && let Some(kept) = newest().find_map(|row| {
+            row.name_recognizer
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        })
+    {
+        m.name_recognizer = Some(kept);
+    }
+    if m.bans_picks.is_none() {
+        m.bans_picks = newest().find_map(|row| row.bans_picks.clone());
+    }
+    if m.bans_picks_status.is_none() {
+        m.bans_picks_status = newest().find_map(|row| row.bans_picks_status.clone());
+    }
+    if m.queue_title.is_none() {
+        m.queue_title = newest().find_map(|row| row.queue_title.clone());
     }
 }
 
