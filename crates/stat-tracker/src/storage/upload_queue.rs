@@ -5,8 +5,10 @@
 //! (`synced = false, upload_reject = '', sync_rev = (sync_rev ?? 0) + 1`);
 //! the CAS here relies on that.
 
-use super::tombstones::DeletedSession;
+use surrealdb_types::SurrealValue;
+
 use super::{LocalStore, PersonalMatch, rewrite_match_log_session};
+use crate::model::UPLOAD_RETRY_MARK;
 
 /// Identity and payload revision captured when a row was read for upload.
 ///
@@ -69,7 +71,9 @@ impl LocalStore {
     /// releases the row here.
     ///
     /// Rows with [`PersonalMatch::upload_rejection`] set are quarantined.
-    /// They stay local until a retry clears the message.
+    /// They stay local until a retry clears the message, except rows a
+    /// tracker update put back on the queue with the reason kept
+    /// ([`PersonalMatch::upload_retry_pending`]), which are returned.
     pub async fn get_unsynced(
         &self,
     ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
@@ -103,7 +107,7 @@ impl LocalStore {
         } else {
             Ok(matches
                 .into_iter()
-                .filter(|row| row.upload_rejection().is_none())
+                .filter(|row| row.upload_rejection().is_none() || row.upload_retry_pending())
                 .collect())
         }
     }
@@ -226,17 +230,24 @@ impl LocalStore {
 
     /// Set `synced` only when `sync_rev` is still `rev`. Returns whether this
     /// call applied the write. A missing `sync_rev` (legacy row) compares as 0.
+    /// Setting it also clears a reason a tracker update kept on a requeued
+    /// row ([`PersonalMatch::upload_retry_pending`]): the site took it.
     async fn cas_set_synced(
         &self,
         id: &surrealdb_types::RecordId,
         rev: u64,
         synced: bool,
     ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let sql = if synced {
+            "UPDATE $id SET synced = true, upload_reject = '' \
+             WHERE (sync_rev ?? 0) = $rev RETURN AFTER"
+        } else {
+            "UPDATE $id SET synced = false WHERE (sync_rev ?? 0) = $rev RETURN AFTER"
+        };
         let mut response = self
             .db
-            .query("UPDATE $id SET synced = $synced WHERE (sync_rev ?? 0) = $rev RETURN AFTER")
+            .query(sql)
             .bind(("id", id.clone()))
-            .bind(("synced", synced))
             .bind(("rev", rev))
             .await?;
         let updated: Vec<PersonalMatch> = response.take(0)?;
@@ -244,30 +255,30 @@ impl LocalStore {
     }
 
     /// Clear every quarantined upload and put those rows back on the queue.
+    /// Rows of a session that already has a newer synced snapshot stay set
+    /// aside: putting them back would send older stats after the site already
+    /// has a later snapshot of the same game.
     pub async fn clear_rejected_uploads(
         &self,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let _rev = self.rev_guard();
-        let mut result = self
-            .db
-            .query(
-                "SELECT session_id FROM personal_match \
-                 WHERE upload_reject != NONE AND upload_reject != ''",
-            )
+        let targets = self
+            .set_aside_rows_without_a_newer_synced_snapshot()
             .await?;
-        let rows: Vec<DeletedSession> = result.take(0)?;
-        let mut sessions = Vec::new();
-        for row in rows {
-            if !sessions.iter().any(|id| id == &row.session_id) {
-                sessions.push(row.session_id);
-            }
-        }
-        if sessions.is_empty() {
+        if targets.is_empty() {
             return Ok(());
         }
+        let ids: Vec<surrealdb_types::RecordId> = targets.iter().map(|t| t.id.clone()).collect();
+        let mut sessions = Vec::new();
+        for target in &targets {
+            if !target.session_id.is_empty() && !sessions.iter().any(|id| id == &target.session_id)
+            {
+                sessions.push(target.session_id.clone());
+            }
+        }
         self.db
-            .query("UPDATE personal_match SET upload_reject = '' WHERE session_id IN $sids")
-            .bind(("sids", sessions.clone()))
+            .query("UPDATE personal_match SET upload_reject = '' WHERE id IN $ids")
+            .bind(("ids", ids))
             .await?;
         for session_id in &sessions {
             rewrite_match_log_session(
@@ -279,6 +290,153 @@ impl LocalStore {
             );
         }
         Ok(())
+    }
+}
+
+/// `store_meta` record holding the tracker version that last put the
+/// set-aside games back on the upload queue.
+fn upload_retry_marker() -> surrealdb_types::RecordId {
+    surrealdb_types::RecordId::new("store_meta", "upload_retry")
+}
+
+#[derive(Debug, serde::Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+struct UploadRetryMarker {
+    #[surreal(default)]
+    version: String,
+}
+
+/// A set-aside row that is safe to put back on the upload queue.
+struct SetAsideRow {
+    id: surrealdb_types::RecordId,
+    session_id: String,
+}
+
+impl LocalStore {
+    /// Set-aside rows with no newer synced snapshot of the same game.
+    /// An older set-aside row must stay off the queue when a later
+    /// snapshot is already synced, or the next pass would send the older
+    /// stats after the site already has the newer ones. Rows with no
+    /// session id have no siblings and are always returned.
+    async fn set_aside_rows_without_a_newer_synced_snapshot(
+        &self,
+    ) -> Result<Vec<SetAsideRow>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut result = self
+            .db
+            .query(
+                "SELECT * FROM personal_match \
+                 WHERE upload_reject != NONE AND upload_reject != ''",
+            )
+            .await?;
+        let rejected: Vec<PersonalMatch> = result.take(0)?;
+        if rejected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let sessions: Vec<String> = rejected
+            .iter()
+            .map(|row| row.session_id.clone())
+            .filter(|sid| !sid.is_empty())
+            .collect();
+        let mut newest_synced: std::collections::HashMap<String, chrono::DateTime<chrono::Utc>> =
+            std::collections::HashMap::new();
+        if !sessions.is_empty() {
+            let mut result = self
+                .db
+                .query(
+                    "SELECT * FROM personal_match \
+                     WHERE synced = true AND session_id IN $sids",
+                )
+                .bind(("sids", sessions))
+                .await?;
+            let synced: Vec<PersonalMatch> = result.take(0)?;
+            for row in synced {
+                let at: chrono::DateTime<chrono::Utc> = row.played_at.into();
+                newest_synced
+                    .entry(row.session_id)
+                    .and_modify(|best| {
+                        if at > *best {
+                            *best = at;
+                        }
+                    })
+                    .or_insert(at);
+            }
+        }
+        let mut out = Vec::new();
+        for row in rejected {
+            let Some(id) = row.id else {
+                continue;
+            };
+            if !row.session_id.is_empty() {
+                let at: chrono::DateTime<chrono::Utc> = row.played_at.into();
+                if newest_synced
+                    .get(&row.session_id)
+                    .is_some_and(|synced_at| *synced_at > at)
+                {
+                    continue;
+                }
+            }
+            out.push(SetAsideRow {
+                id,
+                session_id: row.session_id,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Put every set-aside game back on the upload queue once for each
+    /// tracker version, the first time that version opens the store. A game
+    /// the site refused may upload after a site fix or a tracker update.
+    /// The site's reason is kept behind [`UPLOAD_RETRY_MARK`], so the Games
+    /// tab still shows it while the game waits, and a sync pass that sees
+    /// the site refuse that game by name again sets it aside at once with
+    /// the new reason, even before any other game uploads. A set-aside row
+    /// is left alone when a newer snapshot of the same game is already
+    /// synced, so the retry does not send older stats after the site already
+    /// has a later snapshot. Returns true when this version had not run it
+    /// yet. The version is written only after the games are back on the
+    /// queue, so a failure tries again on the next start.
+    pub async fn retry_rejected_uploads_once_per_version(
+        &self,
+        version: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let marker: Option<UploadRetryMarker> = self
+            .db
+            .query("SELECT version FROM $rid")
+            .bind(("rid", upload_retry_marker()))
+            .await?
+            .take(0)?;
+        if marker.is_some_and(|m| m.version == version) {
+            return Ok(false);
+        }
+        {
+            // `matches.jsonl` keeps the plain reason: nothing reads it back.
+            let _rev = self.rev_guard();
+            let targets = self
+                .set_aside_rows_without_a_newer_synced_snapshot()
+                .await?;
+            if !targets.is_empty() {
+                let ids: Vec<surrealdb_types::RecordId> =
+                    targets.iter().map(|t| t.id.clone()).collect();
+                self.db
+                    .query(
+                        "UPDATE personal_match \
+                         SET upload_reject = string::concat($mark, upload_reject) \
+                         WHERE id IN $ids \
+                         AND !string::starts_with(upload_reject, $mark)",
+                    )
+                    .bind(("mark", UPLOAD_RETRY_MARK))
+                    .bind(("ids", ids))
+                    .await?
+                    .check()?;
+            }
+        }
+        self.db
+            .query("UPSERT $rid SET version = $v RETURN NONE")
+            .bind(("rid", upload_retry_marker()))
+            .bind(("v", version.to_string()))
+            .await?
+            .check()?;
+        Ok(true)
     }
 }
 

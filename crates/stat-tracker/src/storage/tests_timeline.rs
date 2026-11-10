@@ -617,12 +617,15 @@ fn every_row_read_is_hydrated_or_named_raw() {
     // migrate_timeline.rs: session_rows_raw, the move reads rows as stored.
     // rows.rs: get_all_matches (hydrated), get_all_matches_raw (vacuum),
     //   get_session_snapshots (hydrated).
-    // upload_queue.rs: pending_upload_rows (hydrated, 2 queries).
+    // upload_queue.rs: pending_upload_rows (hydrated, 2 queries);
+    //   set_aside_rows_without_a_newer_synced_snapshot (raw, 2 queries):
+    //   only id, session_id and played_at are used, to decide which
+    //   set-aside rows can go back on the queue.
     let expected = [
         ("export.rs", 3),
         ("migrate_timeline.rs", 1),
         ("rows.rs", 3),
-        ("upload_queue.rs", 2),
+        ("upload_queue.rs", 4),
         ("edits.rs", 0),
         ("migrate.rs", 0),
         ("tombstones.rs", 0),

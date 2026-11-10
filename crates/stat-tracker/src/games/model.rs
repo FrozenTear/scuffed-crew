@@ -212,8 +212,9 @@ pub struct Game {
     pub edited_fields: Vec<String>,
     pub ocr: GameOcr,
     pub segments: Vec<SegmentView>,
-    /// Server message when this game was refused on upload. `None` when the
-    /// row is synced or still queued.
+    /// Server message when this game was refused on upload, also while a
+    /// tracker update has it queued again. `None` when the row is synced or
+    /// was never refused.
     pub upload_reject: Option<String>,
     /// Flat names the new reader was not sure about.
     pub suspect_fields: Vec<String>,

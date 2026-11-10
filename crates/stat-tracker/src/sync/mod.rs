@@ -33,9 +33,9 @@ pub use backoff::{
     sync_backoff_delay,
 };
 pub use batching::{
-    BatchCaps, RejectedUpload, SERVER_REFUSING_UPLOADS, SYNC_UPLOAD_MAX_DELETES,
-    SYNC_UPLOAD_MAX_MATCHES, UploadIsolation, isolate_rejected, isolation_request_budget,
-    lower_batch_limits, payload_names_a_row,
+    ACCEPT_PROOF_WINDOW, BatchCaps, RefusedRows, RejectedUpload, SERVER_REFUSING_UPLOADS,
+    SYNC_UPLOAD_MAX_DELETES, SYNC_UPLOAD_MAX_MATCHES, UploadIsolation, isolate_rejected,
+    isolate_rejected_in_pass, isolation_request_budget, lower_batch_limits, payload_names_a_row,
 };
 pub use client::{
     REDIRECT_OFF_SITE, REDIRECT_OFF_SITE_ABOVE, SyncClient, WebsiteUrlField, is_off_site_redirect,

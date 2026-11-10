@@ -334,3 +334,189 @@ async fn legacy_row_without_sync_rev_marks_at_revision_zero() {
     let after = store.get_all_matches().await.unwrap();
     assert!(after[0].synced);
 }
+
+async fn quarantine(store: &LocalStore, session_id: &str) {
+    let rows = store.get_unsynced().await.unwrap();
+    let bad: Vec<_> = rows
+        .iter()
+        .filter(|row| row.session_id == session_id)
+        .cloned()
+        .collect();
+    assert!(!bad.is_empty(), "{session_id} is queued");
+    store
+        .quarantine_upload(
+            &SyncClaim::capture(&bad),
+            None,
+            "matches[0]: hero must be a known hero or Unknown",
+        )
+        .await
+        .unwrap();
+}
+
+/// A new tracker version puts set-aside games back on the queue once, with
+/// the site's reason kept as proof. The same version does not do it again,
+/// also after a restart, so a game the site still refuses stays set aside
+/// until the next update or a Retry.
+#[tokio::test]
+async fn set_aside_games_go_back_on_the_queue_once_per_tracker_version() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    store.insert_match(snap("bad", 1)).await.unwrap();
+    quarantine(&store, "bad").await;
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap()
+    );
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(queued.len(), 1);
+    assert!(queued[0].upload_retry_pending());
+    assert_eq!(
+        queued[0].upload_rejection(),
+        Some("Upload rejected by server: hero must be a known hero or Unknown"),
+        "the reason is kept"
+    );
+
+    quarantine(&store, "bad").await;
+    assert!(
+        !store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap(),
+        "the same version runs it once"
+    );
+    drop(store);
+    let store = reopen_store(dir.path()).await;
+    assert!(
+        !store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap(),
+        "a restart on the same version does not run it again"
+    );
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+    let stored = store.get_all_matches().await.unwrap();
+    assert!(stored[0].upload_rejection().is_some(), "still set aside");
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.4")
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+}
+
+/// Two snapshots of one game: the older is set aside and the newer is already
+/// synced (already on the site). A version retry must not put the older
+/// snapshot back on the queue, or the next pass would last-write older
+/// stats over the site's row. A different set-aside game is still retried.
+#[tokio::test]
+async fn a_version_retry_does_not_send_an_older_snapshot_when_a_newer_one_is_synced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    let mut older = snap("g1", 5);
+    older.played_at = SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(30));
+    store.insert_match(older).await.unwrap();
+    quarantine(&store, "g1").await;
+
+    let mut newer = snap("g1", 10);
+    newer.played_at = SurrealDatetime::from(Utc::now());
+    store.insert_match(newer).await.unwrap();
+    let newer_row = store
+        .get_all_matches()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.session_id == "g1" && row.elims == 10)
+        .expect("newer row");
+    store
+        .mark_synced(&SyncClaim::capture(std::slice::from_ref(&newer_row)))
+        .await
+        .unwrap();
+
+    store.insert_match(snap("g2", 1)).await.unwrap();
+    quarantine(&store, "g2").await;
+    assert!(
+        store.get_unsynced().await.unwrap().is_empty(),
+        "both games are set aside, so nothing is queued yet"
+    );
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap()
+    );
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["g2"],
+        "the older g1 snapshot must not be sent; g2 is still retried"
+    );
+    let stored = store.get_all_matches().await.unwrap();
+    let older = stored
+        .iter()
+        .find(|row| row.session_id == "g1" && row.elims == 5)
+        .expect("older row");
+    assert!(
+        older.upload_rejection().is_some() && !older.upload_retry_pending(),
+        "the older snapshot stays set aside, not marked for retry"
+    );
+}
+
+/// Retry all must not put an older set-aside snapshot back on the queue
+/// when a newer snapshot of the same game is already synced.
+#[tokio::test]
+async fn retry_all_does_not_send_an_older_snapshot_when_a_newer_one_is_synced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    let mut older = snap("g1", 5);
+    older.played_at = SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(30));
+    store.insert_match(older).await.unwrap();
+    quarantine(&store, "g1").await;
+
+    let mut newer = snap("g1", 10);
+    newer.played_at = SurrealDatetime::from(Utc::now());
+    store.insert_match(newer).await.unwrap();
+    let newer_row = store
+        .get_all_matches()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.session_id == "g1" && row.elims == 10)
+        .expect("newer row");
+    store
+        .mark_synced(&SyncClaim::capture(std::slice::from_ref(&newer_row)))
+        .await
+        .unwrap();
+
+    store.insert_match(snap("g2", 1)).await.unwrap();
+    quarantine(&store, "g2").await;
+
+    store.clear_rejected_uploads().await.unwrap();
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["g2"],
+        "the older g1 snapshot must not be sent; g2 is still retried"
+    );
+    let stored = store.get_all_matches().await.unwrap();
+    let older = stored
+        .iter()
+        .find(|row| row.session_id == "g1" && row.elims == 5)
+        .expect("older row");
+    assert!(
+        older.upload_rejection().is_some(),
+        "the older snapshot stays set aside"
+    );
+}
