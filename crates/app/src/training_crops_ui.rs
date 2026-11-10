@@ -9,12 +9,19 @@
 //! never shows or sends any other kind. The consent shape is a local struct
 //! with exactly those three fields, so the switch helpers can work on
 //! [`ConsentKind`] alone. Tests pin it to the shared
-//! `scuffed_types::api::TrainingCropConsent` and
-//! `TrainingCropConsentUpdate`, so a change on the server side fails here.
+//! `scuffed_types::api::TrainingCropConsent`, so a change on the server side
+//! fails here.
+//!
+//! A save sends only the kind that changed ([`consent_update`]). The server
+//! keeps the kinds left out, so a stale second tab can never switch a kind
+//! back on that was turned off elsewhere. The page then takes all three
+//! values from the server's answer.
 //!
 //! Every element id is built from the member id plus the kind's wire name, so
 //! ids stay stable across renders and never come from a global counter.
 
+use scuffed_api_client::ClientError;
+use scuffed_types::api::TrainingCropConsentUpdate;
 use serde::{Deserialize, Serialize};
 
 /// Read and write own consent. The site uses the session cookie.
@@ -79,9 +86,9 @@ impl ConsentKind {
     }
 }
 
-/// `GET` answer and `PUT` body for consent. Always all three kinds, so a save
-/// never depends on what the server fills in for a missing key. Unknown keys
-/// in an answer are ignored; none are ever sent.
+/// `GET` and `PUT` answer for consent: always all three kinds as stored.
+/// Unknown keys in an answer are ignored. This is never sent; a save sends
+/// [`consent_update`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CropConsent {
     pub hero_icon: bool,
@@ -109,6 +116,30 @@ impl CropConsent {
     }
 }
 
+/// `PUT` body for one switch: only `kind`, so the server keeps the other kinds
+/// as stored.
+pub fn consent_update(kind: ConsentKind, on: bool) -> TrainingCropConsentUpdate {
+    let mut update = TrainingCropConsentUpdate::default();
+    match kind {
+        ConsentKind::HeroIcon => update.hero_icon = Some(on),
+        ConsentKind::StatDigits => update.stat_digits = Some(on),
+        ConsentKind::MapName => update.map_name = Some(on),
+    }
+    update
+}
+
+/// Plain sentence for a failed consent load or save. Same as the hero icon
+/// copy except a 503, which names training crops rather than hero icons.
+/// Never shows the raw server body.
+pub fn consent_failure_text(what: &str, err: &ClientError) -> String {
+    match err.http_status() {
+        Some(503) => format!("{what} failed. {CONSENT_UNAVAILABLE}"),
+        _ => crate::hero_icons_ui::failure_text(what, err),
+    }
+}
+
+pub const CONSENT_UNAVAILABLE: &str = "Training crops are not switched on for this server.";
+
 pub const HEADING: &str = "Training crops";
 
 pub const INTRO: &str = "The stat tracker can send small PNG crops of what it reads, so its readers can be trained on real games. Crops are sent by the tracker with its sync token. They are never whole screens. Each kind is off by default, and this page is the only place to change it.";
@@ -135,7 +166,7 @@ pub fn saved_status(kind: ConsentKind, on: bool, detail: Option<&str>) -> String
 
 /// Live region text when a save failed and the switch went back.
 pub fn failed_status(kind: ConsentKind, failure: &str) -> String {
-    format!("{failure} {} is back to how it was.", kind.noun())
+    format!("{failure} {} are back to how they were.", kind.noun())
 }
 
 // Ids.
@@ -171,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn put_body_has_exactly_the_three_kinds() {
+    fn answer_shape_has_exactly_the_three_kinds() {
         let body = CropConsent {
             hero_icon: true,
             stat_digits: false,
@@ -224,21 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn put_body_is_a_valid_shared_consent_update() {
-        // The server refuses unknown fields, so this fails if the site ever
-        // sends a key the shared type does not have.
-        for kind in ConsentKind::ALL {
-            let body = CropConsent::default().with(kind, true);
-            let text = serde_json::to_string(&body).unwrap();
-            let update: scuffed_types::api::TrainingCropConsentUpdate =
-                serde_json::from_str(&text).unwrap();
-            assert_eq!(update.hero_icon, Some(body.hero_icon));
-            assert_eq!(update.stat_digits, Some(body.stat_digits));
-            assert_eq!(update.map_name, Some(body.map_name));
-        }
-    }
-
-    #[test]
     fn shared_consent_answer_parses_into_the_local_shape() {
         let shared = scuffed_types::api::TrainingCropConsent {
             hero_icon: true,
@@ -258,10 +274,63 @@ mod tests {
     }
 
     #[test]
+    fn put_body_has_only_the_changed_kind() {
+        for kind in ConsentKind::ALL {
+            for on in [true, false] {
+                let value = serde_json::to_value(consent_update(kind, on)).unwrap();
+                assert_eq!(keys(&value), [kind.key()], "{kind:?} {on}");
+                assert_eq!(value[kind.key()], serde_json::Value::Bool(on));
+            }
+        }
+    }
+
+    #[test]
+    fn put_body_parses_into_the_shared_consent_update() {
+        // The server refuses unknown fields, so this fails if the site ever
+        // sends a key the shared type does not have.
+        for kind in ConsentKind::ALL {
+            let text = serde_json::to_string(&consent_update(kind, true)).unwrap();
+            let update: TrainingCropConsentUpdate = serde_json::from_str(&text).unwrap();
+            let set = [update.hero_icon, update.stat_digits, update.map_name];
+            assert_eq!(set.iter().filter(|v| v.is_some()).count(), 1, "{text}");
+            assert_eq!(update, consent_update(kind, true));
+        }
+    }
+
+    #[test]
     fn put_body_never_carries_removed_fields() {
-        let text = serde_json::to_string(&CropConsent::default()).unwrap();
-        for removed in ["full_screen", "colorblind_filter", "resolutions"] {
-            assert!(!text.contains(removed), "{text}");
+        for kind in ConsentKind::ALL {
+            for on in [true, false] {
+                let text = serde_json::to_string(&consent_update(kind, on)).unwrap();
+                for removed in ["full_screen", "colorblind_filter", "resolutions"] {
+                    assert!(!text.contains(removed), "{text}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn consent_503_names_training_crops_and_other_errors_match_hero_icons() {
+        let off = ClientError::http(503, r#"{"error":"hero_icons_disabled"}"#, None);
+        let text = consent_failure_text("Saving map name banners", &off);
+        assert_eq!(
+            text,
+            "Saving map name banners failed. Training crops are not switched on for this server."
+        );
+        assert!(!text.contains("Hero icons"), "{text}");
+        // The hero icon list keeps its own 503 copy.
+        assert!(
+            crate::hero_icons_ui::failure_text("Loading your hero icons", &off)
+                .contains("Hero icons are not switched on")
+        );
+        for status in [401, 403, 500] {
+            let err = ClientError::http(status, "secret internal detail", None);
+            let text = consent_failure_text("Loading your choices", &err);
+            assert_eq!(
+                text,
+                crate::hero_icons_ui::failure_text("Loading your choices", &err)
+            );
+            assert!(!text.contains("secret"), "{text}");
         }
     }
 
@@ -337,7 +406,7 @@ mod tests {
         );
         assert_eq!(
             failed_status(ConsentKind::HeroIcon, "Saving failed. Try again."),
-            "Saving failed. Try again. Hero icons is back to how it was."
+            "Saving failed. Try again. Hero icons are back to how they were."
         );
     }
 
@@ -354,10 +423,17 @@ mod tests {
 
     #[test]
     fn copy_has_no_long_dashes_or_streamer() {
-        let mut all: Vec<String> = [INTRO, WHO_SEES, GROUP_LEGEND, LOADING, HEADING]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let mut all: Vec<String> = [
+            INTRO,
+            WHO_SEES,
+            GROUP_LEGEND,
+            LOADING,
+            HEADING,
+            CONSENT_UNAVAILABLE,
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
         for kind in ConsentKind::ALL {
             all.extend([
                 kind.label().to_string(),

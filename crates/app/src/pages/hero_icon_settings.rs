@@ -94,7 +94,7 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
             }
             Err(e) => {
                 consent_failed.set(true);
-                consent_status.set(text::failure_text("Loading your choices", &e));
+                consent_status.set(crops::consent_failure_text("Loading your choices", &e));
             }
         }
     });
@@ -138,8 +138,10 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
     let count = mine.read().as_ref().map_or(0, |m| m.count);
     let switches_disabled = current.is_none() || saving();
 
-    // Show the change at once, send all three kinds, then take the server's
-    // answer. On failure the switch goes back.
+    // Show the change at once, send only the kind that changed (the server
+    // keeps the others, so a stale tab cannot turn a kind back on), then take
+    // all three values from the server's answer. On failure the switch goes
+    // back.
     let save_consent = {
         let member_id = member_id.clone();
         use_callback(
@@ -154,7 +156,10 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                 consent_status.set(crops::saving_status(kind));
                 spawn(async move {
                     let saved = ApiClient::web()
-                        .put_json::<_, CropConsent>(crops::CONSENT_PATH, &next)
+                        .put_json::<_, CropConsent>(
+                            crops::CONSENT_PATH,
+                            &crops::consent_update(kind, on),
+                        )
                         .await;
                     match saved {
                         Ok(saved) => {
@@ -203,8 +208,10 @@ pub fn TrainingCropSettings(member_id: String) -> Element {
                         Err(e) => {
                             consent.set(Some(before));
                             let what = format!("Saving {}", kind.noun().to_lowercase());
-                            consent_status
-                                .set(crops::failed_status(kind, &text::failure_text(&what, &e)));
+                            consent_status.set(crops::failed_status(
+                                kind,
+                                &crops::consent_failure_text(&what, &e),
+                            ));
                         }
                     }
                     if kind == ConsentKind::HeroIcon {
