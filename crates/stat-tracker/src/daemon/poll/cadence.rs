@@ -152,6 +152,33 @@ pub(crate) fn poll_divisor(
     1
 }
 
+/// Counts one poll tick toward `divisor` ([`poll_divisor`]); true when the
+/// tick is skipped. The loop restarts the count after a grab
+/// ([`poll_resets_cadence`]).
+pub(crate) fn slow_cadence_skips(skipped: &mut u32, divisor: u32) -> bool {
+    if divisor <= 1 {
+        return false;
+    }
+    *skipped += 1;
+    *skipped < divisor
+}
+
+/// A poll tick the post-game saves brought forward (about one a second in
+/// their window) comes with `regular`, the regular tick it came before.
+/// They bring a tick forward only while every tick polls, so a `divisor`
+/// over 1 here means the cadence slowed since. Counted, that early tick
+/// would bring the next grab up to an interval forward, since the slow
+/// cadence counts ticks. So it returns `regular`: the loop drops the tick,
+/// uncounted, and ticks at `regular` instead, and the grabs come every
+/// `divisor` regular ticks, as with the switch off. `divisor` is read only
+/// for such a tick: with no `regular` (the switch off) nothing is checked.
+pub(crate) fn tick_brought_forward_too_soon<T>(
+    regular: Option<T>,
+    divisor: impl FnOnce() -> u32,
+) -> Option<T> {
+    regular.filter(|_| divisor() > 1)
+}
+
 /// Whether a finished poll grab restarts the slow-cadence count. A grab
 /// turned away because a Tab held the screenshot lock did not look at the
 /// screen, so the next tick must poll.

@@ -199,6 +199,14 @@ where
             );
             probe.old_session
         }
+        Some(boundary::FinishedGameTab::FocusSkipped) => {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                session_id = %probe.old_session,
+                "Tab capture skipped by the focus gate: the finished game stays open"
+            );
+            probe.old_session
+        }
         Some(boundary::FinishedGameTab::StillPlaying) => {
             // A result the member set while this capture ran stays (the
             // report re-seals it on the row).

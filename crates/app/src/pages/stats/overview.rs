@@ -5,14 +5,14 @@ use scuffed_types::RoleStats;
 use crate::components::charts::{DonutChart, DonutSegment};
 use crate::hooks::ApiResource;
 
-use super::role::{RolePanel, role_aggs_from_rows, role_panel};
-use super::{HeroStats, MIN_GAMES, MapStats, MatchPage, load_error_state, map_game_mode};
+use super::role::{RolePanel, role_aggs_from_rows, role_panel, role_result};
+use super::{HeroStats, MapStats, MatchPage, load_error_state, map_game_mode};
 use crate::sample::Tally;
 
-/// Role-card win-rate text: plain text tokens (no traffic light); low-sample
-/// roles render muted.
-fn wr_value_class(matches: u32) -> &'static str {
-    if matches < MIN_GAMES {
+/// Role-card result text: plain text tokens (no traffic light); a role
+/// without a win rate yet (under 10 decided games) renders muted.
+fn wr_value_class(tally: Tally) -> &'static str {
+    if !tally.has_win_rate() {
         "role-card-wr muted"
     } else {
         "role-card-wr"
@@ -131,8 +131,9 @@ pub(super) fn overview_tab(
                             aggs.iter()
                                 .filter(|r| r.matches > 0)
                                 .map(|r| {
-                                    let wr = r.winrate();
-                                    let wr_cls = wr_value_class(r.matches);
+                                    let tally = r.tally();
+                                    let result = role_result(tally);
+                                    let wr_cls = wr_value_class(tally);
                                     let border_color = r.color;
                                     let name = r.name;
                                     let avg_e = r.avg_elims();
@@ -151,7 +152,7 @@ pub(super) fn overview_tab(
                                                     "{m} matches · {avg_e:.1}E {avg_d:.1}D · {avg_dmg:.0}dmg {avg_heal:.0}heal"
                                                 }
                                             }
-                                            div { class: "{wr_cls}", "{wr:.1}%" }
+                                            div { class: "{wr_cls}", "{result}" }
                                         }
                                     }
                                 })

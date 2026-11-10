@@ -24,11 +24,16 @@ pub fn shown_games(app: &TrackerApp) -> Vec<&Game> {
     shown
 }
 
-pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
+/// `window_width` picks the 0.6 table's column set, which the spec keys
+/// to the window, not the padded content.
+pub fn view(app: &TrackerApp, content_width: f32, window_width: f32) -> Element<'_, Message> {
     let header_only = app.header_filter();
     let option_pool = filter_games(&app.games, &header_only);
     let heroes = distinct_heroes(&option_pool);
     let maps = distinct_maps(&option_pool);
+    if app.nav_style == crate::nav::NavStyle::TopTabs {
+        return crate::games_table::view(app, window_width, &heroes, &maps);
+    }
     let shown = shown_games(app);
     let groups = group_by_session_gap(&shown, DEFAULT_SESSION_GAP);
     let cols = games_columns(content_width);
@@ -119,7 +124,7 @@ fn flush_compact(
     pair.into()
 }
 
-fn retry_rejected_uploads_button() -> Element<'static, Message> {
+pub(crate) fn retry_rejected_uploads_button() -> Element<'static, Message> {
     button(
         text("Retry rejected uploads")
             .size(SIZE_META)

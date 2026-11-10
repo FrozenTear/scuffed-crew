@@ -5,6 +5,7 @@
 //! - `backoff`: the periodic sync clock.
 //! - `batching`: the 413 caps and the 400/422 bisection.
 //! - `auth_pause`: `sync_auth.json` and the GUI status text.
+//! - `visibility`: the member's stats visibility, parsed from the site.
 //! - `client`: [`SyncClient`], the only reqwest code.
 //!
 //! Every public item is re-exported here, so `crate::sync::X` paths are
@@ -12,9 +13,11 @@
 
 mod auth_pause;
 mod backoff;
+mod bans_picks;
 mod batching;
 mod client;
 mod errors;
+mod visibility;
 mod wire;
 
 pub use crate::version::USER_AGENT;
@@ -30,16 +33,17 @@ pub use backoff::{
     sync_backoff_delay,
 };
 pub use batching::{
-    BatchCaps, RejectedUpload, SERVER_REFUSING_UPLOADS, SYNC_UPLOAD_MAX_DELETES,
-    SYNC_UPLOAD_MAX_MATCHES, UploadIsolation, isolate_rejected, isolation_request_budget,
-    lower_batch_limits, payload_names_a_row,
+    ACCEPT_PROOF_WINDOW, BatchCaps, RefusedRows, RejectedUpload, SERVER_REFUSING_UPLOADS,
+    SYNC_UPLOAD_MAX_DELETES, SYNC_UPLOAD_MAX_MATCHES, UploadIsolation, isolate_rejected,
+    isolate_rejected_in_pass, isolation_request_budget, lower_batch_limits, payload_names_a_row,
 };
 pub use client::{
     REDIRECT_OFF_SITE, REDIRECT_OFF_SITE_ABOVE, SyncClient, WebsiteUrlField, is_off_site_redirect,
     off_site_redirect_message, token_safe_redirects,
 };
 pub use errors::{SyncUploadError, server_error_text};
-pub use wire::{row_needs_review, upload_request};
+pub use visibility::{StatsVisibility, parse_stats_visibility};
+pub use wire::{UploadEntry, UploadRequest, row_needs_review, upload_request};
 
 // Names the test files saw through `use super::*` before the split: two of
 // the old file's imports and two private items.
@@ -59,6 +63,12 @@ mod tests;
 mod tests_wire;
 
 #[cfg(test)]
+mod tests_bans_picks;
+
+#[cfg(test)]
+mod tests_queue_title;
+
+#[cfg(test)]
 mod tests_http;
 
 #[cfg(test)]
@@ -69,3 +79,6 @@ mod tests_auth_pause;
 
 #[cfg(test)]
 mod tests_batching;
+
+#[cfg(test)]
+mod tests_visibility;

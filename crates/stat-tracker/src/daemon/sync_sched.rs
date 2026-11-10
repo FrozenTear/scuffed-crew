@@ -51,7 +51,9 @@ pub(crate) async fn try_sync(
     settle_session: Option<String>,
 ) -> sync::SyncAttempt {
     let mut caps = client.batch_caps();
-    let outcome = try_sync_with_caps(store, data_dir, settle_session, &mut caps, {
+    let ran_with = client.credentials();
+    let mut refused = client.refused_rows();
+    let outcome = try_sync_with_state(store, data_dir, settle_session, &mut caps, &mut refused, {
         let client = client.clone();
         move |matches, tombstones| {
             let client = client.clone();
@@ -60,6 +62,7 @@ pub(crate) async fn try_sync(
     })
     .await;
     client.remember_batch_caps(caps);
+    client.remember_refused_rows(refused, &ran_with);
     let creds = client.credentials();
     if outcome == sync::SyncAttempt::StatsDeletePending {
         let scheduled_at = client.take_delete_scheduled_at();
@@ -525,11 +528,33 @@ where
     try_sync_with_caps(store, data_dir, settle_session, &mut caps, upload).await
 }
 
+#[cfg(test)]
 pub(crate) async fn try_sync_with_caps<F, Fut>(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
     settle_session: Option<String>,
     caps: &mut sync::BatchCaps,
+    upload: F,
+) -> sync::SyncAttempt
+where
+    F: FnMut(Vec<storage::PersonalMatch>, Vec<String>) -> Fut,
+    Fut: std::future::Future<
+            Output = Result<scuffed_types::api::StatsUploadResponse, sync::SyncUploadError>,
+        >,
+{
+    let mut refused = sync::RefusedRows::default();
+    try_sync_with_state(store, data_dir, settle_session, caps, &mut refused, upload).await
+}
+
+/// One sync pass. `caps` and `refused` carry what earlier passes of this
+/// process learned: the 413 batch caps, the rows to send last, and when the
+/// server last accepted a row.
+pub(crate) async fn try_sync_with_state<F, Fut>(
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    settle_session: Option<String>,
+    caps: &mut sync::BatchCaps,
+    refused: &mut sync::RefusedRows,
     mut upload: F,
 ) -> sync::SyncAttempt
 where
@@ -695,6 +720,7 @@ where
     if to_upload.is_empty() && tombstones.is_empty() {
         return sync::SyncAttempt::NoServerCall;
     }
+    let to_upload = refused_rows_last(to_upload, refused);
     tracing::info!(
         target: "scuffed_stat_tracker",
         rows = claims.len(),
@@ -712,9 +738,34 @@ where
         &to_upload,
         tombstones,
         caps,
+        refused,
         &mut upload,
     )
     .await
+}
+
+/// Key of a queued game in [`sync::RefusedRows`]: the session id, or the
+/// store id for a row without one.
+pub(crate) fn upload_row_key(row: &storage::PersonalMatch) -> Option<String> {
+    if !row.session_id.is_empty() {
+        return Some(row.session_id.clone());
+    }
+    row.id.as_ref().map(|id| format!("{id:?}"))
+}
+
+/// Move rows an earlier pass held in `refused` to the end, keeping the
+/// order inside each part, and forget keys that are no longer queued.
+pub(crate) fn refused_rows_last(
+    to_upload: Vec<storage::PersonalMatch>,
+    refused: &mut sync::RefusedRows,
+) -> Vec<storage::PersonalMatch> {
+    let keys: Vec<String> = to_upload.iter().filter_map(upload_row_key).collect();
+    refused.retain_queued(keys.iter().map(String::as_str));
+    let (mut first, last): (Vec<_>, Vec<_>) = to_upload
+        .into_iter()
+        .partition(|row| upload_row_key(row).is_none_or(|key| !refused.contains(&key)));
+    first.extend(last);
+    first
 }
 
 /// Split pending tombstones into those whose session is in `to_upload`
@@ -806,19 +857,28 @@ pub(crate) fn split_local_only(rows: Vec<storage::PersonalMatch>) -> LocalOnlySp
 /// [`sync::SYNC_UPLOAD_MAX_DELETES`] tombstones go out together, or the
 /// lower caps already learned by this process. HTTP 400 and 422 split
 /// inside the chunk until a single bad row is found. That row is
-/// quarantined only when some other row in the chunk was accepted. If the
-/// chunk accepts nothing, nothing is quarantined, the rows stay queued, and
-/// the pass backs off. A 400 or 422 that does not name a row blames only
-/// the probed row and retries the rest. HTTP 413 `batch_too_large` lowers
-/// those caps (never below 1, never raised later) and resends immediately;
-/// that request wrote nothing. A 413 that repeats the same caps, or sends
-/// none, stops the pass and counts as a failure. HTTP 429, 401, 403, 409,
-/// and other errors stop the pass. 429 keeps `Retry-After`. 409
-/// `stats_delete_pending` keeps every row queued and does not quarantine.
-/// Tombstones ride on the chunk they were sent with, including 400 splits
-/// of that chunk, and are cleared only after a 2xx. A deletes-only 400
-/// still backs off like a 5xx: there are no match rows to isolate, so one
-/// bad id keeps that delete chunk retrying.
+/// quarantined when some other row in the same chunk was accepted. When the
+/// chunk accepts nothing, it is still quarantined if the server named the
+/// row (`matches[n]:`) and either `refused` says the server accepted a row
+/// within [`sync::ACCEPT_PROOF_WINDOW`] (earlier in this pass or in an
+/// earlier one), or the row is one a tracker update put back on the queue
+/// with its old reason kept ([`storage::PersonalMatch::upload_retry_pending`]).
+/// Otherwise nothing is quarantined, the rows stay queued, and the pass
+/// backs off. Rows refused on their own without that proof are put in
+/// `refused`, and the next pass sends them after the other queued rows, so
+/// they cannot use up every pass ahead of good games. A
+/// 400 or 422 that does not name a row blames only the probed row and
+/// retries the rest. HTTP 413 `batch_too_large` lowers those caps (never
+/// below 1, never raised later) and resends immediately; that request wrote
+/// nothing. A 413 that repeats the same caps, or sends none, stops the pass
+/// and counts as a failure. HTTP 429, 401, 403, 409, and other errors stop
+/// the pass. 429 keeps `Retry-After`. 409 `stats_delete_pending` keeps
+/// every row queued and does not quarantine. Tombstones ride on the chunk
+/// they were sent with, including 400 splits of that chunk, and are cleared
+/// only after a 2xx. A deletes-only 400 still backs off like a 5xx: there
+/// are no match rows to isolate, so one bad id keeps that delete chunk
+/// retrying. Each accepted chunk records the time in `refused`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_chunked<F, Fut>(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
@@ -826,6 +886,7 @@ pub(crate) async fn upload_chunked<F, Fut>(
     to_upload: &[storage::PersonalMatch],
     mut tombstones: Vec<String>,
     caps: &mut sync::BatchCaps,
+    refused: &mut sync::RefusedRows,
     upload: &mut F,
 ) -> sync::SyncAttempt
 where
@@ -892,11 +953,41 @@ where
             continue;
         }
 
-        let isolation = sync::isolate_rejected(&chunk_rows, |batch| {
-            upload(batch.to_vec(), chunk_deletes.clone())
-        })
-        .await;
+        // A row the server accepted recently (this pass or an earlier one)
+        // proves it takes uploads, so this chunk's rows refused by name are
+        // quarantined even when the chunk accepts none. So are rows a tracker
+        // update put back on the queue with the site's old reason kept.
+        let server_accepts = refused.accepted_recently(std::time::Instant::now());
+        let requeued: Vec<usize> = chunk_rows
+            .iter()
+            .enumerate()
+            .filter(|(_, row)| row.upload_retry_pending())
+            .map(|(local, _)| local)
+            .collect();
+        let isolation =
+            sync::isolate_rejected_in_pass(&chunk_rows, server_accepts, &requeued, |batch| {
+                upload(batch.to_vec(), chunk_deletes.clone())
+            })
+            .await;
+        if !isolation.accepted.is_empty() {
+            refused.note_accepted(std::time::Instant::now());
+        }
         requests += isolation.requests;
+
+        for &local in &isolation.held {
+            if let Some(key) = chunk_rows.get(local).and_then(upload_row_key) {
+                refused.insert(key);
+            }
+        }
+        let settled = isolation
+            .accepted
+            .iter()
+            .chain(isolation.rejected.iter().map(|row| &row.index));
+        for &local in settled {
+            if let Some(key) = chunk_rows.get(local).and_then(upload_row_key) {
+                refused.remove(&key);
+            }
+        }
 
         for rejected in &isolation.rejected {
             let Some(&global) = chunk_indexes.get(rejected.index) else {

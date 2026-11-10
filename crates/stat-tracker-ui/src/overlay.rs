@@ -162,7 +162,7 @@ pub fn live_active_game_key(
     }
     let last = parse_last_activity(&v)?;
     let age = now.signed_duration_since(last);
-    if age < TimeDelta::zero() || age > TimeDelta::seconds(window_secs as i64) {
+    if age < TimeDelta::zero() || age > crate::aggregate::secs_delta(window_secs) {
         return None;
     }
     Some(id.to_string())
@@ -471,10 +471,7 @@ pub fn spawn_companion(
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit());
     if let Some(kind) = fixture {
-        cmd.arg("--fixture").arg(match kind {
-            FixtureKind::Empty => "empty",
-            FixtureKind::Sample => "sample",
-        });
+        cmd.arg("--fixture").arg(kind.name());
     }
     let child = cmd.spawn()?;
     let _ = std::fs::write(companion_pid_path(data_dir), child.id().to_string());
@@ -862,11 +859,7 @@ impl OverlayApp {
         let seasons = seasons::load_cache(&cli.data_dir);
         let persisted = seasons::load_ui_state(&cli.data_dir);
         let season = seasons::resolve_selection(persisted, &seasons.seasons);
-        let clock = if cli.fixture == Some(FixtureKind::Sample) {
-            games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
-        } else {
-            Utc::now()
-        };
+        let clock = crate::fixtures::clock(cli.fixture, &games);
         let config = stat_tracker::config::Config::load().unwrap_or_default();
         let sync_on = config.sync.is_some();
         let mut model = build_model(

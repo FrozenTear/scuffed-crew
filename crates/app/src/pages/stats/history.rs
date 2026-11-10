@@ -1,11 +1,14 @@
 use dioxus::prelude::*;
 
+use crate::components::ui::ChipButton;
 use crate::hooks::ApiResource;
 
+use super::bans_picks::{BANS_PICKS_CARD_CSS, bans_picks_line};
 use super::game::{match_path, open_match};
 use super::history_filter::{
     ALL, HISTORY_CSS, UNKNOWN_MAP, filter_rows, map_rows, map_table, mode_label, page_modes,
 };
+use super::rank::{RANK_CSS, RankChart, chart_series, rank_badge_line, rank_series};
 use super::role::game_role_label;
 use super::{MatchPage, format_date, load_error_state};
 
@@ -28,11 +31,41 @@ const NEW_READER_BADGE: &str = "New reader";
 const NEW_READER_BADGE_SHORT: &str = "New";
 /// Tooltip for [`NEW_READER_BADGE`].
 const NEW_READER_TITLE: &str = "Read by the new stat reader";
-/// Shared tail of the unsure-cell tooltip. The stat's display name is the prefix.
-const UNSURE_DETAIL: &str = "unsure read. Check and edit if wrong.";
+/// Shared tail of the unsure-cell tooltip and of the tap-to-show note. The
+/// stat's display name is the prefix.
+const UNSURE_DETAIL: &str = "might be misread. Check it in the tracker.";
+/// Tail of the screen reader text inside the mark button. The stat's display
+/// name is the prefix, so every mark in a row has its own accessible name.
+const UNSURE_SR_DETAIL: &str = "might be misread";
+
+/// Id of the note a mark controls. Built only from the match id and the stat
+/// name, with anything that is not id-safe turned into an underscore. Ids are
+/// deterministic (no counters or random values), so server rendering and
+/// hydration always agree, and two marks never share an id on one page.
+fn unsure_note_id(match_id: &str, stat_name: &str) -> String {
+    // Mapping to _ could collide (a/b vs a_b), but real match ids are record ids that cannot.
+    let safe = |text: &str| -> String {
+        text.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect()
+    };
+    format!("unsure-note-{}-{}", safe(match_id), safe(stat_name))
+}
 
 fn unsure_title(stat_name: &str) -> String {
     format!("{stat_name}: {UNSURE_DETAIL}")
+}
+
+/// Screen reader text inside the mark button, for example "Damage might be
+/// misread".
+fn unsure_sr_text(stat_name: &str) -> String {
+    format!("{stat_name} {UNSURE_SR_DETAIL}")
 }
 
 /// `true` when this row should show the new-reader badge.
@@ -48,18 +81,113 @@ pub(super) fn cell_is_unsure(suspect_fields: &[String], name: &str) -> bool {
         && suspect_fields.iter().any(|field| field == name)
 }
 
-/// Question mark stays outside the clipped value. "(unsure)" is real text for
-/// screen readers, which skip aria-label on a plain span.
-fn unsure_note() -> Element {
+/// Question mark button that stays outside the clipped value and is never
+/// inside a link (History rows use a sibling overlay link), and neither is its
+/// note, so tapping the note does not open the game. Tapping the mark,
+/// clicking it, or pressing Enter or Space on it shows [`unsure_title`] as a
+/// small note (a polite status region that is always present and empty while
+/// closed, wired with aria-controls) next to the value, so phones and keyboards get the same words as
+/// the hover tooltip. "{stat} might be misread" is real text inside the button
+/// for screen readers (which skip aria-label on a plain span), so each mark
+/// has its own accessible name. Its hit box is a 24 by 24 pixel `::after` box,
+/// so a tap a little off the small glyph still lands on the mark. The open note
+/// starts outside that box, and a click or tap on the note closes it too.
+/// Display only: it changes no value and no average.
+#[component]
+fn UnsureMark(match_id: String, stat_name: String, start_open: bool) -> Element {
+    let local_open = use_signal(move || start_open);
+    // Inside a History row the open state lives on the row, so only one note
+    // per row is open. Elsewhere (the game page) each mark keeps its own.
+    let row = use_hook(try_consume_context::<RowNotes>);
+    let note_id = unsure_note_id(&match_id, &stat_name);
+    let is_open = match row {
+        Some(RowNotes(shared)) => shared.read().as_deref() == Some(stat_name.as_str()),
+        None => local_open(),
+    };
+    // The note is always in the page and empty while closed, so screen readers
+    // register the live region before its text changes and announce it.
+    let (note_class, note) = if is_open {
+        (
+            "stat-unsure-note stat-unsure-note-open",
+            unsure_title(&stat_name),
+        )
+    } else {
+        ("stat-unsure-note", String::new())
+    };
+    let toggled_name = stat_name.clone();
+    let note_name = stat_name.clone();
+    let sr_text = unsure_sr_text(&stat_name);
     rsx! {
-        span { class: "stat-unsure-mark", aria_hidden: "true", "?" }
-        span { class: "sr-only", "(unsure)" }
+        button {
+            class: "stat-unsure-mark",
+            r#type: "button",
+            aria_expanded: if is_open { "true" } else { "false" },
+            aria_controls: "{note_id}",
+            onclick: move |_| toggle_note(row, local_open, &toggled_name),
+            span { aria_hidden: "true", "?" }
+            span { class: "sr-only", "{sr_text}" }
+        }
+        // A click or tap on the open note closes it, like the mark. The note is
+        // never inside the row link, so the click opens nothing. Closed, it is
+        // a clipped 1px region, so it takes no clicks. The mark stays the
+        // keyboard control, so the note gets no role or tab stop for this.
+        span {
+            class: "{note_class}",
+            id: "{note_id}",
+            role: "status",
+            onclick: move |_| {
+                if is_open {
+                    toggle_note(row, local_open, &note_name);
+                }
+            },
+            "{note}"
+        }
     }
 }
 
-/// One match-row value. An unsure cell gets a question mark, hidden "(unsure)"
-/// text, and [`unsure_title`]. A sure numeric cell keeps the stat name as its title.
+/// Toggles the note of `stat_name`: through the row state inside a History row
+/// (one open note per row), or through the mark's own state elsewhere. The mark
+/// and its open note both call this.
+fn toggle_note(row: Option<RowNotes>, mut local_open: Signal<bool>, stat_name: &str) {
+    match row {
+        Some(RowNotes(mut shared)) => {
+            let next = next_open_note(shared.peek().as_deref(), stat_name);
+            shared.set(next);
+        }
+        None => local_open.toggle(),
+    }
+}
+
+/// The stat whose note is open in one History row, shared with every
+/// [`UnsureMark`] in that row through context.
+#[derive(Clone, Copy)]
+struct RowNotes(Signal<Option<String>>);
+
+/// Which note is open after `clicked` is toggled while `current` is open.
+/// Clicking the open one closes it, clicking another closes the open one and
+/// opens that one, so a row never has two notes open (they would overlap).
+fn next_open_note(current: Option<&str>, clicked: &str) -> Option<String> {
+    if current == Some(clicked) {
+        None
+    } else {
+        Some(clicked.to_string())
+    }
+}
+
+/// Wraps one History row so its marks share the open-note state. It adds no
+/// element of its own, so the row's markup and layout are unchanged.
+#[component]
+fn RowNotesScope(#[props(default)] open: Option<String>, children: Element) -> Element {
+    let shared = use_signal(move || open.clone());
+    use_context_provider(move || RowNotes(shared));
+    children
+}
+
+/// One match-row value. An unsure cell gets the [`UnsureMark`] button, its
+/// hidden "{stat} might be misread" text, and [`unsure_title`]. A sure numeric cell
+/// keeps the stat name as its title.
 pub(super) fn marked_value(
+    match_id: &str,
     class: &str,
     text: &str,
     stat_name: &str,
@@ -90,7 +218,11 @@ pub(super) fn marked_value(
                     class: "{class}",
                     title: "{title}",
                     span { class: "stat-value-text", "{text}" }
-                    {unsure_note()}
+                    UnsureMark {
+                        match_id: match_id.to_string(),
+                        stat_name: stat_name.to_string(),
+                        start_open: false,
+                    }
                 }
             }
         } else if class.is_empty() {
@@ -152,56 +284,69 @@ pub(super) fn history_tab(
             // Map results ignore the outcome chip: filtering to wins would
             // make every map read 100%.
             let maps = map_rows(filter_rows(&page.data, ALL, rf, &mf));
+            // Opt in: empty unless some loaded game has rank progress.
+            let rank_chart = chart_series(rank_series(
+                page.data
+                    .iter()
+                    .map(|m| (m.id.as_str(), m.played_at, m.rank.as_ref())),
+            ));
 
             rsx! {
                 crate::styles::StyleOnce { id: "stats-history-p2", css: HISTORY_CSS }
+                crate::styles::StyleOnce { id: "stats-history-bans-picks", css: BANS_PICKS_CARD_CSS }
+                crate::styles::StyleOnce { id: "scuffed-css-pages-stats-rank-css", css: RANK_CSS }
+                if !rank_chart.is_empty() {
+                    RankChart { series: rank_chart }
+                }
                 div { class: "stats-filters",
-                    div { class: "filter-group",
-                        span { class: "filter-label", "Outcome" }
+                    div { class: "filter-group", role: "group", aria_labelledby: "history-filter-outcome",
+                        span { class: "filter-label", id: "history-filter-outcome", "Outcome" }
                         {[["all", "All"], ["win", "Win"], ["loss", "Loss"], ["draw", "Draw"]].iter().map(|&[k, label]| {
-                            let active = of == k;
                             rsx! {
-                                button {
+                                ChipButton {
                                     key: "{k}",
-                                    class: if active { "filter-chip active" } else { "filter-chip" },
+                                    class: "filter-chip".to_string(),
+                                    label: label.to_string(),
+                                    pressed: of == k,
                                     onclick: move |_| outcome_filter.set(k),
-                                    "{label}"
                                 }
                             }
                         })}
                     }
-                    div { class: "filter-group",
-                        span { class: "filter-label", "Role" }
+                    div { class: "filter-group", role: "group", aria_labelledby: "history-filter-role",
+                        span { class: "filter-label", id: "history-filter-role", "Role" }
                         {[["all", "All"], ["Tank", "Tank"], ["Damage", "Damage"], ["Support", "Support"]].iter().map(|&[k, label]| {
-                            let active = rf.eq_ignore_ascii_case(k);
                             rsx! {
-                                button {
+                                ChipButton {
                                     key: "{k}",
-                                    class: if active { "filter-chip active" } else { "filter-chip" },
+                                    class: "filter-chip".to_string(),
+                                    label: label.to_string(),
+                                    pressed: rf.eq_ignore_ascii_case(k),
                                     onclick: move |_| role_filter.set(k),
-                                    "{label}"
                                 }
                             }
                         })}
                     }
-                    div { class: "filter-group",
-                        span { class: "filter-label", "Mode" }
-                        button {
+                    div { class: "filter-group", role: "group", aria_labelledby: "history-filter-mode",
+                        span { class: "filter-label", id: "history-filter-mode", "Mode" }
+                        ChipButton {
                             key: "{ALL}",
-                            class: if mf == ALL { "filter-chip active" } else { "filter-chip" },
+                            class: "filter-chip".to_string(),
+                            label: "All".to_string(),
+                            pressed: mf == ALL,
                             onclick: move |_| mode_filter.set(ALL.to_string()),
-                            "All"
                         }
                         for mode in modes {
                             {
                                 let active = mf.eq_ignore_ascii_case(&mode);
                                 let pick = mode.clone();
                                 rsx! {
-                                    button {
+                                    ChipButton {
                                         key: "{mode}",
-                                        class: if active { "filter-chip active" } else { "filter-chip" },
+                                        class: "filter-chip".to_string(),
+                                        label: mode.clone(),
+                                        pressed: active,
                                         onclick: move |_| mode_filter.set(pick.clone()),
-                                        "{mode}"
                                     }
                                 }
                             }
@@ -254,80 +399,97 @@ pub(super) fn history_tab(
                                     let href = match_path(&m.id);
                                     let target_id = m.id.clone();
                                     rsx! {
-                                        a {
-                                            class: "match-card match-card-link match-row-compact",
-                                            key: "{m.id}",
-                                            href: "{href}",
-                                            onclick: move |evt: MouseEvent| open_match(evt, target_id.clone()),
-                                            {marked_value(
-                                                &format!("match-outcome {oc}"),
-                                                &m.outcome,
-                                                "Result",
-                                                false,
-                                                result_unsure,
-                                            )}
-                                            div { class: "match-identity match-identity-compact",
-                                                div { class: "match-hero-line",
-                                                    {marked_value("match-hero", &m.hero, "Hero", false, hero_unsure)}
-                                                    if new_reader {
-                                                        span {
-                                                            class: "tracker-badge reader-badge",
-                                                            title: NEW_READER_TITLE,
-                                                            span { class: "reader-badge-full", "{NEW_READER_BADGE}" }
-                                                            span { class: "reader-badge-short", "{NEW_READER_BADGE_SHORT}" }
+                                        // Stretched link: the anchor is an empty overlay that
+                                        // covers the whole row, and the marked values sit
+                                        // above it, so no button is ever inside the link.
+                                        RowNotesScope { key: "{m.id}",
+                                            div {
+                                                class: "match-card match-card-link match-row-compact",
+                                                a {
+                                                    class: "match-card-overlay",
+                                                    href: "{href}",
+                                                    title: "{abs}",
+                                                    onclick: move |evt: MouseEvent| open_match(evt, target_id.clone()),
+                                                    span { class: "sr-only", "View game: {m.outcome} on {map_label}, {date}" }
+                                                }
+                                                {marked_value(
+                                                    &m.id,
+                                                    &format!("match-outcome {oc}"),
+                                                    &m.outcome,
+                                                    "Result",
+                                                    false,
+                                                    result_unsure,
+                                                )}
+                                                div { class: "match-identity match-identity-compact",
+                                                    div { class: "match-hero-line",
+                                                        {marked_value(&m.id, "match-hero", &m.hero, "Hero", false, hero_unsure)}
+                                                        if new_reader {
+                                                            span {
+                                                                class: "tracker-badge reader-badge",
+                                                                title: NEW_READER_TITLE,
+                                                                span { class: "reader-badge-full", "{NEW_READER_BADGE}" }
+                                                                span { class: "reader-badge-short", "{NEW_READER_BADGE_SHORT}" }
+                                                            }
+                                                        }
+                                                    }
+                                                    div { class: "match-map",
+                                                        {marked_value(&m.id, "match-map-name", &map_label, "Map", false, map_unsure)}
+                                                        span { class: "match-map-sep", " · " }
+                                                        {marked_value(&m.id, "match-mode", &mode_text, "Mode", false, mode_unsure)}
+                                                        span { class: "match-map-sep", " · " }
+                                                        "{role_label}"
+                                                        if mit_unsure {
+                                                            span { class: "match-map-sep", " · " }
+                                                            {marked_value(&m.id, "stat-flagged", &mit_text, "Mitigation", false, true)}
                                                         }
                                                     }
                                                 }
-                                                div { class: "match-map",
-                                                    {marked_value("match-map-name", &map_label, "Map", false, map_unsure)}
-                                                    span { class: "match-map-sep", " · " }
-                                                    {marked_value("match-mode", &mode_text, "Mode", false, mode_unsure)}
-                                                    span { class: "match-map-sep", " · " }
-                                                    "{role_label}"
-                                                    if mit_unsure {
-                                                        span { class: "match-map-sep", " · " }
-                                                        {marked_value("stat-flagged", &mit_text, "Mitigation", false, true)}
-                                                    }
+                                                div { class: "match-stats",
+                                                    {marked_value(
+                                                        &m.id,
+                                                        "match-stat",
+                                                        &m.elims.to_string(),
+                                                        "Eliminations",
+                                                        true,
+                                                        cell_is_unsure(fields, "e"),
+                                                    )}
+                                                    {marked_value(
+                                                        &m.id,
+                                                        "match-stat",
+                                                        &m.deaths.to_string(),
+                                                        "Deaths",
+                                                        true,
+                                                        cell_is_unsure(fields, "d"),
+                                                    )}
+                                                    {marked_value(
+                                                        &m.id,
+                                                        "match-stat",
+                                                        &m.assists.to_string(),
+                                                        "Assists",
+                                                        true,
+                                                        cell_is_unsure(fields, "a"),
+                                                    )}
+                                                    {marked_value(
+                                                        &m.id,
+                                                        "match-stat match-stat-wide",
+                                                        &m.damage.to_string(),
+                                                        "Damage",
+                                                        true,
+                                                        cell_is_unsure(fields, "dmg"),
+                                                    )}
+                                                    {marked_value(
+                                                        &m.id,
+                                                        "match-stat match-stat-wide",
+                                                        &m.healing.to_string(),
+                                                        "Healing",
+                                                        true,
+                                                        cell_is_unsure(fields, "h"),
+                                                    )}
                                                 }
+                                                div { class: "match-date", title: "{abs}", "{date}" }
+                                                {rank_badge_line(&m.id, m.rank.as_ref())}
+                                                {bans_picks_line(&m.id, m.bans_picks.as_ref())}
                                             }
-                                            div { class: "match-stats",
-                                                {marked_value(
-                                                    "match-stat",
-                                                    &m.elims.to_string(),
-                                                    "Eliminations",
-                                                    true,
-                                                    cell_is_unsure(fields, "e"),
-                                                )}
-                                                {marked_value(
-                                                    "match-stat",
-                                                    &m.deaths.to_string(),
-                                                    "Deaths",
-                                                    true,
-                                                    cell_is_unsure(fields, "d"),
-                                                )}
-                                                {marked_value(
-                                                    "match-stat",
-                                                    &m.assists.to_string(),
-                                                    "Assists",
-                                                    true,
-                                                    cell_is_unsure(fields, "a"),
-                                                )}
-                                                {marked_value(
-                                                    "match-stat match-stat-wide",
-                                                    &m.damage.to_string(),
-                                                    "Damage",
-                                                    true,
-                                                    cell_is_unsure(fields, "dmg"),
-                                                )}
-                                                {marked_value(
-                                                    "match-stat match-stat-wide",
-                                                    &m.healing.to_string(),
-                                                    "Healing",
-                                                    true,
-                                                    cell_is_unsure(fields, "h"),
-                                                )}
-                                            }
-                                            div { class: "match-date", title: "{abs}", "{date}" }
                                         }
                                     }
                                 }
@@ -403,6 +565,8 @@ mod tests {
             played_at: played_at(),
             recognizer: Some(recognizer.to_string()),
             suspect_fields: Some(suspect.iter().map(|name| (*name).to_string()).collect()),
+            bans_picks: None,
+            rank: None,
         }
     }
 
@@ -465,6 +629,28 @@ mod tests {
         }
     }
 
+    /// Fails if any `<button` appears between an `<a ` and its `</a>`.
+    fn assert_no_button_inside_anchor(html: &str) {
+        let mut rest = html;
+        let mut anchors = 0;
+        while let Some(start) = rest.find("<a ") {
+            let after = &rest[start..];
+            let end = after.find("</a>").expect("anchor is closed");
+            let anchor = &after[..end];
+            assert!(
+                !anchor.contains("<button"),
+                "a button inside a link is invalid HTML: {anchor}"
+            );
+            assert!(
+                !anchor[3..].contains("<a "),
+                "anchors do not nest: {anchor}"
+            );
+            anchors += 1;
+            rest = &after[end + 4..];
+        }
+        assert!(anchors > 0, "the page has links to check: {html}");
+    }
+
     #[test]
     fn history_rows_show_the_badge_and_unsure_marks() {
         fn view() -> Element {
@@ -525,7 +711,7 @@ mod tests {
         );
         assert!(
             !html.contains("aria-label="),
-            "unsure text is not an aria-label on a plain span: {html}"
+            "unsure text is real text inside the button, not an aria-label: {html}"
         );
         assert!(html.contains("Reinhardt"), "{html}");
         assert!(
@@ -562,11 +748,9 @@ mod tests {
             scuffed_types::SUSPECT_FIELD_NAMES.len(),
             "unknown names add no mark: {html}"
         );
-        assert_eq!(
-            html.matches("(unsure)").count(),
-            scuffed_types::SUSPECT_FIELD_NAMES.len(),
-            "{html}"
-        );
+        assert_eq!(UNSURE_SR_DETAIL, "might be misread");
+        assert!(!html.contains("(unsure)"), "{html}");
+        assert!(!html.contains("(might be misread)"), "{html}");
         assert!(html.contains("class=\"sr-only\""), "{html}");
         let titles = [
             "Result",
@@ -582,6 +766,12 @@ mod tests {
         ];
         assert_eq!(titles.len(), scuffed_types::SUSPECT_FIELD_NAMES.len());
         for name in titles {
+            let sr = format!("<span class=\"sr-only\">{name} might be misread</span>");
+            assert_eq!(
+                html.matches(&sr).count(),
+                1,
+                "each mark names its stat for screen readers: {html}"
+            );
             let title = unsure_title(name);
             assert_eq!(
                 html.matches(&format!("title=\"{title}\"")).count(),
@@ -590,20 +780,20 @@ mod tests {
             );
         }
         assert!(
-            html.contains("Deaths: unsure read. Check and edit if wrong."),
+            html.contains("Deaths: might be misread. Check it in the tracker."),
             "{html}"
         );
         assert!(!UNSURE_DETAIL.contains('\u{2014}'), "{UNSURE_DETAIL}");
         assert!(
-            !html.contains("title=\"Unsure read"),
+            !html.contains("title=\"Might be misread"),
             "the tooltip must name the stat: {html}"
         );
         assert!(
-            !html.contains("the reader was unsure"),
+            !html.contains("the reader was unsure") && !html.contains("unsure read"),
             "old unsure copy must stay off the row: {html}"
         );
         assert!(
-            html.contains("class=\"stat-value-text\">Ana</span><span class=\"stat-unsure-mark\""),
+            html.contains("class=\"stat-value-text\">Ana</span><button class=\"stat-unsure-mark\""),
             "the mark sits outside the clipped hero text: {html}"
         );
         assert!(
@@ -612,5 +802,387 @@ mod tests {
         );
         assert!(html.contains("class=\"match-stat stat-unsure\""), "{html}");
         assert!(html.contains(">11<") || html.contains(">11"), "{html}");
+        let marks = scuffed_types::SUSPECT_FIELD_NAMES.len();
+        let open_tags: Vec<&str> = html
+            .match_indices("<button class=\"stat-unsure-mark\"")
+            .map(|(at, _)| &html[at..at + html[at..].find('>').unwrap()])
+            .collect();
+        assert_eq!(
+            open_tags.len(),
+            marks,
+            "every mark is a real button, so it takes keyboard focus: {html}"
+        );
+        for tag in open_tags {
+            assert!(tag.contains("type=\"button\""), "{tag}");
+            assert!(
+                tag.contains("aria-expanded=\"false\""),
+                "every mark starts collapsed: {tag}"
+            );
+            assert!(
+                !tag.contains("tabindex"),
+                "a button needs no tabindex: {tag}"
+            );
+        }
+        assert_no_button_inside_anchor(&html);
+        let mut controls: Vec<&str> = html
+            .split("aria-controls=\"")
+            .skip(1)
+            .map(|rest| rest.split('"').next().unwrap())
+            .collect();
+        assert_eq!(controls.len(), marks, "{html}");
+        controls.sort_unstable();
+        controls.dedup();
+        assert_eq!(
+            controls.len(),
+            marks,
+            "every mark controls its own note: {html}"
+        );
+        let mut expected: Vec<String> = titles
+            .iter()
+            .map(|name| format!("unsure-note-new-{}", name.to_lowercase()))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(
+            controls,
+            expected.iter().map(String::as_str).collect::<Vec<_>>(),
+            "ids come from the match id and the stat name: {html}"
+        );
+        for id in controls {
+            let (tag, body) = note_by_id(&html, id);
+            assert!(tag.starts_with("<span "), "{tag}");
+            assert!(tag.contains("class=\"stat-unsure-note\""), "{tag}");
+            assert!(tag.contains("role=\"status\""), "{tag}");
+            assert!(
+                !tag.contains("stat-unsure-note-open"),
+                "closed note is collapsed: {tag}"
+            );
+            assert_eq!(body, "", "the live region is empty while closed: {html}");
+        }
+        assert_eq!(
+            html.matches("class=\"match-card-overlay\"").count(),
+            3,
+            "one overlay link per row: {html}"
+        );
+        assert!(
+            html.contains("View game: victory on Ilios,"),
+            "the overlay link has a readable name: {html}"
+        );
+        let overlay_tags: Vec<&str> = html
+            .match_indices("<a class=\"match-card-overlay\"")
+            .map(|(at, _)| &html[at..at + html[at..].find('>').unwrap()])
+            .collect();
+        assert_eq!(overlay_tags.len(), 3, "{html}");
+        for tag in overlay_tags {
+            assert!(
+                tag.contains("title=\"2026-03-15 12:00 UTC\""),
+                "the overlay link carries the exact time as its hover title: {tag}"
+            );
+        }
+    }
+
+    /// The opening tag and the text of the span with this id.
+    fn note_by_id<'a>(html: &'a str, id: &str) -> (&'a str, &'a str) {
+        let at = html
+            .find(&format!("id=\"{id}\""))
+            .unwrap_or_else(|| panic!("note {id} is missing: {html}"));
+        let start = html[..at].rfind('<').unwrap();
+        let tag_end = start + html[start..].find('>').unwrap();
+        let body_end = tag_end + html[tag_end..].find("</span>").unwrap();
+        (&html[start..tag_end], &html[tag_end + 1..body_end])
+    }
+
+    #[test]
+    fn open_note_is_a_status_region_that_the_button_controls() {
+        fn view() -> Element {
+            rsx! {
+                div { class: "match-card match-card-link",
+                    a { class: "match-card-overlay", href: "/stats/match/x",
+                        span { class: "sr-only", "View game" }
+                    }
+                    UnsureMark {
+                        match_id: "x".to_string(),
+                        stat_name: "Deaths".to_string(),
+                        start_open: true,
+                    }
+                    UnsureMark {
+                        match_id: "x".to_string(),
+                        stat_name: "Hero".to_string(),
+                        start_open: false,
+                    }
+                }
+            }
+        }
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+
+        assert_eq!(html.matches("aria-expanded=\"true\"").count(), 1, "{html}");
+        assert_eq!(html.matches("aria-expanded=\"false\"").count(), 1, "{html}");
+        assert!(
+            html.contains("aria-controls=\"unsure-note-x-deaths\""),
+            "{html}"
+        );
+        assert!(
+            html.contains("aria-controls=\"unsure-note-x-hero\""),
+            "{html}"
+        );
+
+        let (open_tag, open_body) = note_by_id(&html, "unsure-note-x-deaths");
+        assert!(open_tag.contains("stat-unsure-note-open"), "{open_tag}");
+        assert!(open_tag.contains("role=\"status\""), "{open_tag}");
+        assert_eq!(
+            open_body,
+            "Deaths: might be misread. Check it in the tracker."
+        );
+
+        let (closed_tag, closed_body) = note_by_id(&html, "unsure-note-x-hero");
+        assert!(
+            !closed_tag.contains("stat-unsure-note-open"),
+            "{closed_tag}"
+        );
+        assert!(closed_tag.contains("role=\"status\""), "{closed_tag}");
+        assert_eq!(closed_body, "", "{html}");
+
+        assert_no_button_inside_anchor(&html);
+        assert!(
+            !html
+                .split("</a>")
+                .next()
+                .unwrap()
+                .contains("stat-unsure-note"),
+            "the note is outside the row link: {html}"
+        );
+    }
+
+    #[test]
+    fn opening_a_note_closes_the_other_one_in_the_row() {
+        // Nothing open: the click opens it.
+        assert_eq!(next_open_note(None, "Deaths").as_deref(), Some("Deaths"));
+        // Same mark again: it closes.
+        assert_eq!(next_open_note(Some("Deaths"), "Deaths"), None);
+        // Another mark: the first closes, the new one is the only one open.
+        assert_eq!(
+            next_open_note(Some("Deaths"), "Healing").as_deref(),
+            Some("Healing")
+        );
+        // A run of clicks never leaves more than one open (the state holds one).
+        let mut open: Option<String> = None;
+        for clicked in ["Deaths", "Healing", "Healing", "Damage", "Deaths", "Deaths"] {
+            open = next_open_note(open.as_deref(), clicked);
+            assert!(open.as_deref().is_none_or(|name| name == clicked));
+        }
+        assert_eq!(open, None);
+    }
+
+    /// Opening state of the note with this id, read from the rendered page.
+    fn is_open(html: &str, match_id: &str, stat: &str) -> bool {
+        let id = unsure_note_id(match_id, stat);
+        let (tag, body) = note_by_id(html, &id);
+        let open = tag.contains("stat-unsure-note-open");
+        assert_eq!(open, !body.is_empty(), "text only while open: {html}");
+        open
+    }
+
+    #[test]
+    fn a_click_on_the_open_note_closes_it() {
+        use std::cell::Cell;
+        thread_local! {
+            static ROW: Cell<Option<RowNotes>> = const { Cell::new(None) };
+        }
+        /// Hands the row state of the surrounding scope to the test.
+        #[component]
+        fn Probe() -> Element {
+            ROW.set(try_consume_context::<RowNotes>());
+            rsx! {}
+        }
+        fn view() -> Element {
+            rsx! {
+                RowNotesScope { open: Some("Hero".to_string()),
+                    div { class: "match-card match-card-link",
+                        UnsureMark {
+                            match_id: "x".to_string(),
+                            stat_name: "Hero".to_string(),
+                            start_open: false,
+                        }
+                        UnsureMark {
+                            match_id: "x".to_string(),
+                            stat_name: "Deaths".to_string(),
+                            start_open: false,
+                        }
+                        Probe {}
+                    }
+                }
+            }
+        }
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        let row = ROW.get().expect("the marks share one row state");
+        assert!(is_open(&dioxus_ssr::render(&dom), "x", "Hero"));
+
+        // The mark and its open note call `toggle_note` with the same arguments,
+        // so a click on the Hero note is this call. It closes the note.
+        dom.in_scope(ScopeId::APP, || {
+            toggle_note(Some(row), Signal::new(false), "Hero");
+        });
+        dom.render_immediate(&mut dioxus_core::NoOpMutations);
+        let html = dioxus_ssr::render(&dom);
+        assert!(!is_open(&html, "x", "Hero"), "{html}");
+        assert!(!is_open(&html, "x", "Deaths"), "{html}");
+        assert_eq!(html.matches("stat-unsure-note-open").count(), 0, "{html}");
+
+        // Another mark opens its own note only, and a click on that note closes it.
+        for expect_open in [true, false] {
+            dom.in_scope(ScopeId::APP, || {
+                toggle_note(Some(row), Signal::new(false), "Deaths");
+            });
+            dom.render_immediate(&mut dioxus_core::NoOpMutations);
+            let html = dioxus_ssr::render(&dom);
+            assert_eq!(is_open(&html, "x", "Deaths"), expect_open, "{html}");
+            assert!(!is_open(&html, "x", "Hero"), "{html}");
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_lone_open_note_closes_it() {
+        // Outside a History row (the game page) the mark keeps its own state.
+        let mut dom = VirtualDom::new(|| rsx! { div {} });
+        dom.rebuild_in_place();
+        dom.in_scope(ScopeId::APP, || {
+            let own = Signal::new(true);
+            toggle_note(None, own, "Hero");
+            assert!(!own(), "a click on the open note closes it");
+            toggle_note(None, own, "Hero");
+            assert!(own(), "the mark opens it again");
+        });
+    }
+
+    #[test]
+    fn the_mark_and_its_note_both_take_clicks() {
+        fn view() -> Element {
+            rsx! {
+                UnsureMark {
+                    match_id: "x".to_string(),
+                    stat_name: "Hero".to_string(),
+                    start_open: true,
+                }
+            }
+        }
+        let mut dom = VirtualDom::new(view);
+        let mut mutations = dioxus_core::Mutations::default();
+        dom.rebuild(&mut mutations);
+        let click_listeners = mutations
+            .edits
+            .iter()
+            .filter(|edit| {
+                matches!(
+                    edit,
+                    dioxus_core::Mutation::NewEventListener { name, .. } if *name == "click"
+                )
+            })
+            .count();
+        assert_eq!(click_listeners, 2, "one on the button, one on the note");
+        // The note is still a status region, and neither it nor the mark is a link.
+        let html = dioxus_ssr::render(&dom);
+        let (tag, _) = note_by_id(&html, "unsure-note-x-hero");
+        assert!(
+            tag.starts_with("<span ") && tag.contains("role=\"status\""),
+            "{tag}"
+        );
+        assert!(
+            !html.contains("<a "),
+            "the mark and note hold no link: {html}"
+        );
+    }
+
+    #[test]
+    fn marks_in_one_row_show_at_most_one_open_note() {
+        fn view() -> Element {
+            rsx! {
+                RowNotesScope { open: Some("Healing".to_string()),
+                    div { class: "match-card match-card-link",
+                        a { class: "match-card-overlay", href: "/stats/match/x",
+                            span { class: "sr-only", "View game" }
+                        }
+                        UnsureMark {
+                            match_id: "x".to_string(),
+                            stat_name: "Deaths".to_string(),
+                            start_open: false,
+                        }
+                        UnsureMark {
+                            match_id: "x".to_string(),
+                            stat_name: "Healing".to_string(),
+                            start_open: false,
+                        }
+                    }
+                }
+                RowNotesScope {
+                    div { class: "match-card match-card-link",
+                        UnsureMark {
+                            match_id: "y".to_string(),
+                            stat_name: "Deaths".to_string(),
+                            start_open: false,
+                        }
+                    }
+                }
+            }
+        }
+        let mut dom = VirtualDom::new(view);
+        dom.rebuild_in_place();
+        let html = dioxus_ssr::render(&dom);
+
+        // The scope adds no markup: three marks, three always-rendered notes.
+        assert_eq!(
+            html.matches("class=\"stat-unsure-mark\"").count(),
+            3,
+            "{html}"
+        );
+        assert_eq!(html.matches("role=\"status\"").count(), 3, "{html}");
+        // Only the row that was told to open one has one open; the other row
+        // keeps its own state.
+        assert_eq!(html.matches("stat-unsure-note-open").count(), 1, "{html}");
+        assert_eq!(html.matches("aria-expanded=\"true\"").count(), 1, "{html}");
+        assert_eq!(html.matches("aria-expanded=\"false\"").count(), 2, "{html}");
+        let (healing_tag, healing_body) = note_by_id(&html, "unsure-note-x-healing");
+        assert!(
+            healing_tag.contains("stat-unsure-note-open"),
+            "{healing_tag}"
+        );
+        assert_eq!(
+            healing_body,
+            "Healing: might be misread. Check it in the tracker."
+        );
+        let (deaths_tag, deaths_body) = note_by_id(&html, "unsure-note-x-deaths");
+        assert!(
+            !deaths_tag.contains("stat-unsure-note-open"),
+            "{deaths_tag}"
+        );
+        assert_eq!(deaths_body, "", "{html}");
+        assert_no_button_inside_anchor(&html);
+    }
+
+    #[test]
+    fn note_ids_are_deterministic_and_id_safe() {
+        assert_eq!(
+            unsure_note_id("Ab 1/2", "Damage"),
+            "unsure-note-ab_1_2-damage"
+        );
+        assert_eq!(unsure_note_id("m-1", "Hero"), unsure_note_id("m-1", "Hero"));
+        assert_ne!(unsure_note_id("m-1", "Hero"), unsure_note_id("m-2", "Hero"));
+        assert_ne!(unsure_note_id("m-1", "Hero"), unsure_note_id("m-1", "Map"));
+    }
+
+    #[test]
+    fn unsure_note_text_matches_the_tooltip_and_has_no_dashes() {
+        assert_eq!(
+            unsure_title("Deaths"),
+            "Deaths: might be misread. Check it in the tracker."
+        );
+        assert_eq!(unsure_sr_text("Damage"), "Damage might be misread");
+        for text in [UNSURE_DETAIL, UNSURE_SR_DETAIL] {
+            assert!(
+                !text.contains('\u{2014}') && !text.contains('\u{2013}'),
+                "{text}"
+            );
+        }
     }
 }

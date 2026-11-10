@@ -41,6 +41,9 @@ pub(super) fn snap(session_id: &str, elims: u32) -> PersonalMatch {
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
         suspect_fields: Vec::new(),
         name_recognizer: None,
+        bans_picks: None,
+        bans_picks_status: None,
+        queue_title: None,
     }
 }
 

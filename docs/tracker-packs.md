@@ -21,6 +21,7 @@ folder on the machine that made them, and `PACKS_DIR` on the server.
 | `maps-v1.tar` | map-name glyphs | 40 KiB |
 | `words-v1.tar` | result words | 90 KiB |
 | `names-v1.tar` | optional. Single-letter templates only, no member data. Version `full-20261019`. The name reader uses it for the player's own row and falls back to Tesseract until it has loaded | 1.9 MB |
+| `bans-picks-v1.tar` | optional. Hero icons for the bans and picks reader (cv-v1): one 100 by 96 `<hero>.png` for each of the 54 heroes, plus an optional `no-preference.png`. Game art, built from real frames, so it is private like the others | live |
 
 Which folder each one lands in, what may be inside, and which reader uses it
 are in [Reference: inside a pack](#reference-inside-a-pack).
@@ -59,7 +60,7 @@ Which names each tracker asks for:
 | Tracker | Asks for |
 | --- | --- |
 | 0.5.0-alpha.2 to 0.5.0-alpha.6 (released) | `heroes-v1.tar` only |
-| main, to be released as 0.5.0-alpha.7 | all six: `heroes-v1.tar` first, then `heroes-v2.tar`, `heroes-v2-1080.tar`, `bans-v1.tar`, `maps-v1.tar`, `words-v1.tar` |
+| main, to be released as 0.5.0-alpha.7 | the six that follow (names-v1 and bans-picks-v1 come after them): `heroes-v1.tar` first, then `heroes-v2.tar`, `heroes-v2-1080.tar`, `bans-v1.tar`, `maps-v1.tar`, `words-v1.tar` |
 
 So today `heroes-v1.tar` must be in the list: without it every released
 tracker reports "The reader pack did not match the site" for the hero pack.
@@ -313,9 +314,9 @@ are checked before anything is published.
 With nothing to publish the same command only runs the check, so it can be
 repeated. Without a token the script says `Authenticated check: SKIPPED`.
 
-The pack routes allow 8 requests in a burst per client IP, then one every
+The pack routes allow 16 requests in a burst per client IP, then one every
 10 seconds, and answer 429 with the seconds to wait. One check is seven
-requests for six packs. A second check within a minute is not a failure: the
+requests for six packs (a tracker with `names-v1.tar` and `bans-picks-v1.tar` asks for eight, so nine requests). A second check within a minute is not a failure: the
 script waits as long as each 429 asks (up to six times per request) and goes
 on, so it is slower, about ten seconds per pack.
 
@@ -460,8 +461,12 @@ More detail on a sync, for the tracker on main:
   after it for that run. Their folders are kept, and a pack that is already
   current is still reported as current. The setup guide tries again on the
   next click. The daemon's background job tries again by itself.
-- A first install of all six is seven requests (the list and six files),
-  inside the burst of 8.
+- A first install of all eight is nine requests (the list and eight files),
+  inside the burst of 16 (`PACK_IP_BURST` in `crates/types`).
+- An install that is not linked to a site account has no sync token and runs
+  no pack sync at all, so `bans-picks-v1.tar` never arrives. The bans and
+  picks reader then reads nothing, the game is still recorded, and the app
+  shows a warning that says to link a site account in Settings.
 - Staging (`.<pack>-next-*`) and backup (`.<pack>-prev-*`) folders left under
   `templates/` by a killed sync are removed by the next sync once they are
   an hour old.
@@ -601,6 +606,7 @@ inside `PACKS_DIR`.
 | `heroes-v2.tar` | `templates/heroes-v2/` | `<hero>.png`, `special/<name>.png` | new reader, 1440p-scale boards (when complete); portrait matcher |
 | `heroes-v2-1080.tar` | `templates/heroes-v2-1080/` | `<hero>.png`, `special/<name>.png` | new reader, boards with a crop at most 881 px high (when complete); portrait matcher fills stems the main pack lacks |
 | `bans-v1.tar` | `templates/bans-v1/` | `<hero>.png` | nothing yet |
+| `bans-picks-v1.tar` | `templates/bans-picks-v1/` | `<hero>.png` for all 54 heroes, each 100 by 96, and an optional `no-preference.png` | bans and picks reader (cv-v1). Optional. Loaded when the game ends. A missing hero file refuses the whole folder, so a new hero needs the pack republished. Until then the game is recorded without bans and picks and the app shows a warning |
 | `maps-v1.tar` | `templates/maps-v1/` | `atlas.json`, `g<4 hex digits>.png` | new reader, map and mode from the Tab banner |
 | `words-v1.tar` | `templates/words-v1/` | `<word_id>.png`, `<name>.json` | new reader, match result from result frames, the result word on the accolade and rank screens, and the end title on poll ticks and Tab frames when the pack has end-title templates (hand-installed `templates/result/` is the fallback) |
 | `names-v1.tar` | `templates/names-v1/` | `glyphs.png`, `glyphs.txt`, `marks.png`, `marks.txt`, `compose.txt`, `whiten.f32`. The inner `manifest.json` is kept in the folder too | name reader. Optional. Single-letter templates only, no member data. Loaded at startup, and reloaded after each install by the daemon's pack sync. Until a load finishes, names fall back to Tesseract |
@@ -805,7 +811,7 @@ response. Do not add that header in Caddy. A second line is sent beside the
 one from the app. See `docs/deploy.md`.
 
 These routes do not write to the database and do not log the token. They are
-rate limited per client IP (burst 8, then one request every 10 seconds), in
+rate limited per client IP (burst 16, then one request every 10 seconds), in
 their own bucket. A limited call returns 429:
 
 ```json

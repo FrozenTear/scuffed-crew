@@ -136,7 +136,7 @@ fn detect_phase_polled_with(
     let navy = navy_ratio(rgb);
     let vote_gate = navy >= 0.40;
     let (red_ratio, dark_ratio) = ban_ratios(rgb);
-    let ban_gate = red_ratio >= 0.003 && dark_ratio >= 0.30;
+    let ban_gate = red_ratio >= BAN_RED_MIN && dark_ratio >= BAN_DARK_MIN;
     let select_dark = select_header_dark_ratio(rgb);
     // The grid-variance scan only matters when the header gate passed.
     let select_variance = if select_dark >= 0.50 {
@@ -342,6 +342,16 @@ fn confirm_map_vote(upper: &str, navy_ratio: f32) -> Option<GamePhase> {
     }
 }
 
+/// Hero-ban pixel gate: red-accent and dark ratios in the top sixth.
+const BAN_RED_MIN: f32 = 0.003;
+const BAN_DARK_MIN: f32 = 0.30;
+
+/// Whether `rgb` passes the hero-ban pixel gate (no OCR, no stability).
+pub fn passes_ban_gate(rgb: &RgbImage) -> bool {
+    let (red, dark) = ban_ratios(rgb);
+    red >= BAN_RED_MIN && dark >= BAN_DARK_MIN
+}
+
 /// (red-accent, dark) ratios in the top sixth of the frame (hero-ban gates).
 fn ban_ratios(rgb: &RgbImage) -> (f32, f32) {
     let (w, h) = rgb.dimensions();
@@ -381,7 +391,7 @@ fn detect_hero_ban(img: &DynamicImage, rgb: &RgbImage) -> bool {
     // (~0.5% of the top sixth on the 2026-07 screen), so the red gate is a
     // low bar — the OCR phrase check is what carries specificity.
     let (red_ratio, dark_ratio) = ban_ratios(rgb);
-    if red_ratio < 0.003 || dark_ratio < 0.30 {
+    if red_ratio < BAN_RED_MIN || dark_ratio < BAN_DARK_MIN {
         return false;
     }
 

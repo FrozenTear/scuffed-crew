@@ -1,13 +1,18 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+mod bans_picks;
 mod commands;
 mod edits;
+mod export;
 mod files;
 pub mod maintain;
 mod migrate;
+mod migrate_timeline;
+mod queue_title;
 mod rows;
 mod rules;
+mod timeline;
 mod tombstones;
 mod upload_queue;
 
@@ -18,7 +23,7 @@ use surrealdb_types::Datetime as SurrealDatetime;
 use surrealdb_types::SurrealValue;
 
 pub use crate::model::{
-    HeroSegment, PersonalMatch, SEGMENT_CONFIRM, SEGMENT_DISMISS, SegmentResolution,
+    HeroSegment, PersonalMatch, SEGMENT_CLEAR, SEGMENT_CONFIRM, SEGMENT_DISMISS, SegmentResolution,
     primary_hero_role,
 };
 
@@ -28,14 +33,45 @@ pub use files::{
     read_snapshot,
 };
 pub use rules::{
-    MatchEdit, carry_member_hero_edit, collect_segment_resolutions, derive_hero_segments,
-    latest_per_game, majority_hero, majority_map, member_hero_edit,
+    MatchEdit, apply_segment_action, carry_member_hero_edit, collect_segment_resolutions,
+    derive_hero_segments, latest_per_game, majority_hero, majority_map, member_hero_edit,
 };
 
+pub use migrate_timeline::{
+    PRE_TIMELINE_BACKUP_PREFIX, TimelineBackup, prepare_timeline_migration,
+    remove_pre_timeline_backups,
+};
 pub use upload_queue::{SyncClaim, UPLOAD_REJECTED_BY_SERVER, format_upload_rejection};
 
 use files::{rewrite_match_log_session, snapshot_path};
 use rules::{apply_match_edit, name_recognizer_absent, outcome_is_decided};
+
+/// A command the store will never apply, such as one keyed by an empty
+/// session id. The daemon drops its file instead of retrying it forever.
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Writers that key a game by session id must not run with an empty id.
+/// Imported games all share the empty value, so `WHERE session_id = $sid`
+/// would change every one of them at once.
+pub(super) fn require_session_id(
+    session_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if session_id.is_empty() {
+        return Err(Box::new(Refused(
+            "refused: the session id is empty, and it would match every imported game".into(),
+        )));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct MatchSession {
@@ -65,6 +101,12 @@ pub struct LocalStore {
     /// name a game that stays local. A capture cannot outlive its process,
     /// so this does not need to survive a restart.
     deleted_here: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// The store holds one hero timeline per game (`hero_timeline`, marker
+    /// `store_meta:schema`), so new rows are written without their own copy.
+    /// Read at open; set by [`LocalStore::migrate_timeline_if_needed`].
+    timeline_migrated: Arc<std::sync::atomic::AtomicBool>,
+    /// Stored-data revision ([`LocalStore::rev`]): moves on every write.
+    rev: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Advisory exclusive lock on the store directory inode.
@@ -119,6 +161,15 @@ fn lock_store_dir(
 
 impl LocalStore {
     pub async fn open(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::open_inner(data_dir, true).await
+    }
+
+    /// [`Self::open`]; `pack_keys` false skips the pack-key pass (a quick
+    /// look at the migration marker before the daemon's real open).
+    async fn open_inner(
+        data_dir: &Path,
+        pack_keys: bool,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let db_path = data_dir.join("stats.surrealkv");
         std::fs::create_dir_all(&db_path)?;
         crate::fs_mode::tighten_private_dir(&db_path);
@@ -144,6 +195,10 @@ impl LocalStore {
             DEFINE FIELD IF NOT EXISTS recognizer ON personal_match TYPE string DEFAULT 'ocr-v1';
             DEFINE FIELD IF NOT EXISTS suspect_fields ON personal_match TYPE array<string> DEFAULT [];
             DEFINE FIELD IF NOT EXISTS name_recognizer ON personal_match TYPE option<string>;
+            DEFINE FIELD IF NOT EXISTS bans_picks ON personal_match TYPE option<string>;
+            DEFINE TABLE IF NOT EXISTS hero_timeline SCHEMALESS;
+            DEFINE INDEX IF NOT EXISTS idx_timeline_session ON hero_timeline FIELDS session_id UNIQUE;
+            DEFINE TABLE IF NOT EXISTS store_meta SCHEMALESS;
         ",
         )
         .await?;
@@ -154,9 +209,33 @@ impl LocalStore {
             data_dir: data_dir.to_path_buf(),
             writer_lock,
             deleted_here: Arc::default(),
+            timeline_migrated: Arc::default(),
+            rev: Arc::new(std::sync::atomic::AtomicU64::new(start_rev())),
         };
-        store.migrate_pack_key_heroes().await?;
+        // Read only: `open` never migrates (vacuum, the GUI's clear and the
+        // tools open stores too). The daemon calls migrate_timeline_if_needed.
+        let migrated = store.timeline_marker().await?;
+        store
+            .timeline_migrated
+            .store(migrated, std::sync::atomic::Ordering::Relaxed);
+        if pack_keys {
+            store.migrate_pack_key_heroes().await?;
+        }
         Ok(store)
+    }
+
+    /// The stored-data revision: starts at the open time in unix ms (a new
+    /// process never repeats one) and moves when a method that writes starts
+    /// and again when it returns ([`RevGuard`]), on every path. A reader that
+    /// caches by revision and raced a write cached it under the first bump;
+    /// the second bump, after the write, makes it read again.
+    pub fn rev(&self) -> u64 {
+        self.rev.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    pub(super) fn rev_guard(&self) -> RevGuard {
+        self.rev.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        RevGuard(self.rev.clone())
     }
 
     /// Keep the store-directory flock until this process exits.
@@ -176,6 +255,22 @@ impl LocalStore {
             ),
         }
     }
+}
+
+/// Bumps the store revision again when dropped (see [`LocalStore::rev`]).
+pub(super) struct RevGuard(Arc<std::sync::atomic::AtomicU64>);
+
+impl Drop for RevGuard {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn start_rev() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(1)
 }
 
 /// Wait until SurrealKV has closed the store in `data_dir`, for at most
@@ -237,6 +332,12 @@ async fn lock_released_within(
 mod tests;
 
 #[cfg(test)]
+mod tests_bans_picks;
+
+#[cfg(test)]
+mod tests_queue_title;
+
+#[cfg(test)]
 mod tests_rows;
 
 #[cfg(test)]
@@ -247,6 +348,9 @@ mod tests_tombstones;
 
 #[cfg(test)]
 mod tests_edits;
+
+#[cfg(test)]
+mod tests_empty_session;
 
 #[cfg(test)]
 mod tests_hero_timeline;
@@ -262,3 +366,9 @@ mod tests_commands;
 
 #[cfg(test)]
 mod tests_files;
+
+#[cfg(test)]
+mod tests_export;
+
+#[cfg(test)]
+mod tests_timeline;

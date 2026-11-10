@@ -448,3 +448,144 @@ fn poll_outcome_only_only_when_tab_busy_and_end_reel_wake() {
         now + END_REEL_WAKE
     ));
 }
+
+/// The poll timer as `run_loop` drives it, from time 0 until `until`:
+/// tokio's `Interval` with `MissedTickBehavior::Skip` and no missed tick,
+/// so each tick is the last deadline plus `period`, moved by `reset_after`
+/// and `reset_at`. The cadence slows to `divisor` at `slows_at`. With
+/// `saver` the post-game saves bring a tick forward after each grab while
+/// every tick polls ([`crate::daemon::postgame_dump::sooner_tick`], one
+/// second here), and record the regular tick it comes before; `realign`
+/// false is the loop before [`tick_brought_forward_too_soon`]. Returns
+/// the grab times.
+fn grab_times(
+    period: Duration,
+    divisor: u32,
+    slows_at: Duration,
+    saver: bool,
+    realign: bool,
+    until: Duration,
+) -> Vec<Duration> {
+    let mut next = Duration::ZERO;
+    let mut skipped = 0;
+    let mut regular: Option<Duration> = None;
+    let mut grabs = Vec::new();
+    while next <= until {
+        let ticked = next;
+        next = ticked + period;
+        let now_divisor = if ticked >= slows_at { divisor } else { 1 };
+        let early = regular
+            .take()
+            .filter(|_| realign)
+            .and_then(|at| tick_brought_forward_too_soon(Some(at), || now_divisor));
+        if let Some(at) = early {
+            next = at;
+            continue;
+        }
+        if slow_cadence_skips(&mut skipped, now_divisor) {
+            continue;
+        }
+        skipped = 0;
+        grabs.push(ticked);
+        let sooner = crate::daemon::postgame_dump::sooner_tick(
+            crate::daemon::postgame_dump::POSTGAME_FAST,
+            Duration::ZERO,
+            period,
+        );
+        if let Some(sooner) = sooner.filter(|_| saver && now_divisor == 1) {
+            next = ticked + sooner;
+            regular = Some(ticked + period);
+        }
+    }
+    grabs
+}
+
+/// Post-game window, switch on: ticks come about every second, and when
+/// the cadence slows in between (an end-reel or result-word wake running
+/// out, a game read as still being played), the tick brought forward is
+/// not counted toward the slow cadence. From the last grab before the
+/// slow-down, the grabs then come every `divisor` regular intervals, the
+/// same as with the switch off at the regular interval. Counted, the early
+/// tick brought the first of them forward by up to an interval.
+#[test]
+fn a_tick_brought_forward_never_counts_toward_the_slow_cadence() {
+    let new_reader = stat_tracker::config::NEW_READER_POLL_INTERVAL;
+    let classic = stat_tracker::config::CLASSIC_POLL_INTERVAL;
+    let cases = [
+        (new_reader, idle_shot_divisor(new_reader)),
+        (new_reader, SLOW_POLL_DIVISOR),
+        (classic, SLOW_POLL_DIVISOR),
+        (new_reader, 3),
+        (classic, 3),
+    ];
+    // The gaps from the last grab before the slow-down on.
+    let gaps_after = |grabs: &[Duration], slows_at: Duration| -> Vec<Duration> {
+        let first = grabs.iter().rposition(|&t| t < slows_at).unwrap();
+        grabs[first..].windows(2).map(|w| w[1] - w[0]).collect()
+    };
+    for (period, divisor) in cases {
+        assert!(divisor > 1, "{period:?}");
+        let mut old_differed = false;
+        for ms in (100..=12_000).step_by(50) {
+            let slows_at = Duration::from_millis(ms);
+            let until = slows_at + Duration::from_secs(80);
+            let off = grab_times(period, divisor, slows_at, false, true, until);
+            let on = grab_times(period, divisor, slows_at, true, true, until);
+            // Before the slow-down the switch really ticks once a second.
+            assert!(
+                on.windows(2)
+                    .filter(|w| w[1] < slows_at)
+                    .all(|w| w[1] - w[0] == Duration::from_secs(1)),
+                "{period:?} {ms} ms: {on:?}"
+            );
+            // The first five grabs from there: the simulated span ends
+            // at a different point of each schedule.
+            let (off_gaps, on_gaps) = (gaps_after(&off, slows_at), gaps_after(&on, slows_at));
+            let (off_gaps, on_gaps) = (&off_gaps[..5], &on_gaps[..5]);
+            assert!(
+                off_gaps.iter().all(|&gap| gap == period * divisor),
+                "{period:?} {ms} ms: {off_gaps:?}"
+            );
+            assert_eq!(
+                on_gaps, off_gaps,
+                "{period:?} /{divisor} slowing at {ms} ms"
+            );
+            let counted = grab_times(period, divisor, slows_at, true, false, until);
+            old_differed |= gaps_after(&counted, slows_at)[0] < period * divisor;
+        }
+        assert!(old_differed, "{period:?} /{divisor}: the case is reached");
+    }
+}
+
+/// The count is the loop's: every tick at a divisor of 1, every
+/// `divisor`th tick otherwise, the count restarted after a grab. A tick
+/// that was not brought forward, or one where every tick still polls, is
+/// never held back, and the divisor is not read for a tick that was not
+/// brought forward (switch off: nothing is checked).
+#[test]
+fn the_slow_cadence_count_and_the_brought_forward_check() {
+    let mut skipped = 0;
+    assert!(!slow_cadence_skips(&mut skipped, 1));
+    assert_eq!(skipped, 0);
+    let mut grabbed = Vec::new();
+    for tick in 0..6 {
+        if !slow_cadence_skips(&mut skipped, 3) {
+            grabbed.push(tick);
+            skipped = 0;
+        }
+    }
+    assert_eq!(grabbed, [2, 5]);
+
+    assert_eq!(tick_brought_forward_too_soon(Some(7), || 2), Some(7));
+    assert_eq!(tick_brought_forward_too_soon(Some(7), || 1), None);
+    let read = std::cell::Cell::new(false);
+    let none: Option<u32> = tick_brought_forward_too_soon(None, || {
+        read.set(true);
+        2
+    });
+    assert_eq!(none, None);
+    assert!(
+        !read.get(),
+        "no divisor read without a brought-forward tick"
+    );
+}

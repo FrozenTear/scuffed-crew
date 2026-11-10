@@ -11,6 +11,7 @@ pub mod events;
 pub mod forum;
 pub mod game_accounts;
 pub mod games;
+pub mod hero_icons;
 pub mod matches;
 pub mod member_settings;
 pub mod members;

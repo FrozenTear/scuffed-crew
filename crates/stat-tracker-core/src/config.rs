@@ -102,6 +102,24 @@ pub struct Config {
     /// env `STAT_TRACKER_DEBUG_OCR=1` ([`Self::debug_ocr_enabled`]).
     #[serde(default)]
     pub debug_ocr: bool,
+    /// Save full-size PNGs of the pre-game screens (map vote, hero ban, hero
+    /// select, the ban results, the roster, the loading screen, and the last
+    /// turned-down frame of each check as `rejected_<label>.png`) and the
+    /// screens after
+    /// each match (`postgame_NN.png` and `postgame.json`) under
+    /// `{data_dir}/debug/pregame/<YYYYMMDD_HHMMSS>/` (UTC), newest 20 games
+    /// kept (and apart from them the newest 5 folders holding only
+    /// `rejected_<label>.png`). Off by default and not written while off;
+    /// turning it off leaves the folder. Local only: nothing reads, uploads or syncs the
+    /// files. Also set by Save screens around each game in Settings,
+    /// Troubleshooting (After restart). Read at start. The ban results are
+    /// told by a built-in title shape rule, or, when
+    /// `{data_dir}/templates/pregame/ban_results/` holds example
+    /// screenshots (`.png` only, read at start), by matching those. The
+    /// daemon applies it in `daemon::pregame_dump` and
+    /// `daemon::postgame_dump`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub debug_save_pregame_screens: bool,
     /// Most games whose report pictures are kept in `report-kit/`. Missing
     /// means [`DEFAULT_MAX_GAMES`] (50). Oldest go first.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,20 +185,28 @@ pub struct Config {
     /// while on.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub name_reader: bool,
+    /// The bans and picks reader (`cv-v1`, the `bans-picks-v1` pack): on
+    /// unless the file says `false`. The ban results, the hero select and the
+    /// ban vote of each game are read from the screens kept around the game
+    /// and stored with it, locally. Env `STAT_TRACKER_BANS_PICKS_RECOGNIZER`
+    /// set to `off`, `0`, `false` or `no` turns it off for one run and is never
+    /// stored. Not written while on.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub bans_picks_reader: bool,
     /// More in-game names that are all this member's (alts, a renamed
     /// account), as shown in-game without the `#1234`. Every entry counts as
     /// the member's own name, the same as [`Self::player_name`]. Empty (also
     /// when missing, so a 0.5.0 file loads unchanged) and not written while
     /// empty. [`Self::own_player_names`] is the merged list.
     ///
-    /// TODO(0.6): nothing reads this yet. Before the Tab reader matches
-    /// these names:
-    /// - feed [`Self::own_player_names`] to the name fallback, and when two
-    ///   rows match a saved name, take the highlighted row whose hero
-    ///   matches the hero panel;
-    /// - feed the same list to the report scrubber
-    ///   (`report::scrub::ScrubContext::from_config`, which takes only
-    ///   `player_name` today), so an alt in the log never reaches a report.
+    /// The Tab reader's name match, its name fallback and the raw-text
+    /// fallback try every name of [`Self::own_player_names`] (a whole-name
+    /// hit for any name first, else the best fuzzy one), read once at
+    /// daemon start. The report scrubber drops these names too.
+    ///
+    /// TODO: when two rows each match a different saved name, take the
+    /// highlighted row whose hero matches the hero panel. Today the
+    /// whole-name hit, then the best fuzzy score, wins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub player_names: Vec<String>,
     /// Upload each game to the site after it closes ("Upload games after
@@ -215,16 +241,18 @@ pub struct Config {
     /// TODO(0.6): the misread report screen does not read this yet.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub share_report_pictures: bool,
-    /// "Only capture while Overwatch is on screen": skip grabs when the game
-    /// window is not visible on the captured output, so no other window is
-    /// captured. On ("Auto" in Settings, also when missing) and not written
-    /// while on; `false` captures whenever a game process runs, as in 0.5.
-    /// When the tracker cannot tell whether the window is visible (most
-    /// Wayland compositors do not say), Auto captures as `false` does: it
-    /// never stops capture on an unknown.
-    ///
-    /// TODO(0.6): capture does not check window visibility yet. The flag is
-    /// read by nothing, so `true` behaves like 0.5 until the check lands.
+    /// The focus gate: poll and
+    /// Tab reads pause while a good read says another window is focused. On
+    /// ("Auto" in Settings, Only capture while Overwatch is in front, also
+    /// when missing) and not written while on;
+    /// `false` turns the gate off, the focused window is never read and
+    /// capture runs whenever a game process runs, as in 0.5. When the
+    /// tracker cannot tell which window is focused (no source for the
+    /// desktop, an error, a timeout), capture goes on as `false` does and
+    /// the status file says `unreadable`, a warning: it never stops capture
+    /// on an unknown. niri is read over its IPC socket, KDE Plasma Wayland
+    /// through a KWin script, X11 through `_NET_ACTIVE_WINDOW`. Read once
+    /// at daemon start.
     #[serde(default = "default_true", skip_serializing_if = "is_true")]
     pub capture_only_on_screen: bool,
 }
@@ -333,6 +361,7 @@ impl Default for Config {
             finished_game_close_secs: default_finished_game_close_secs(),
             game_process_names: default_game_process_names(),
             debug_ocr: false,
+            debug_save_pregame_screens: false,
             report_kit_max_games: None,
             report_kit_max_mb: None,
             ocr_threads: None,
@@ -343,6 +372,7 @@ impl Default for Config {
             reader: ReaderSetting::New,
             ocr: OcrSetting::On,
             name_reader: true,
+            bans_picks_reader: true,
             player_names: Vec::new(),
             live_upload: true,
             rank_reader: false,

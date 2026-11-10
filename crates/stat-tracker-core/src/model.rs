@@ -181,7 +181,9 @@ pub struct PersonalMatch {
     /// `synced = false` and is left out of automatic uploads until the
     /// member edits the game or retries the upload. The string is the
     /// game-list line (`Upload rejected by server: <message>`), including
-    /// the server code when the body sent one. Missing on older rows.
+    /// the server code when the body sent one. Missing on older rows. With
+    /// [`UPLOAD_RETRY_MARK`] in front, a tracker update put the row back on
+    /// the upload queue and kept the reason as proof.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub upload_reject: Option<String>,
@@ -269,13 +271,152 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub name_recognizer: Option<String>,
+    /// What the bans and picks reader (`cv-v1`) read around this game, as the
+    /// JSON the tracker writes (`daemon::bans_picks::Stored`): the bans, the
+    /// lobby ban, the six picks, the ban vote picks and the recognizer id.
+    /// `None` when nothing was read (the reader off, no pack, a frame that
+    /// was not 2560x1440). Kept on every snapshot of the match. The upload
+    /// sends the values of it (no confidences) when it holds any, and omits
+    /// the key otherwise. Omitted from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub bans_picks: Option<String>,
+    /// Why the bans and picks are as they are: read whole, read in part, or
+    /// not read and the reason. Set next to [`Self::bans_picks`] when the
+    /// game is first recorded. `None` on a game recorded before this field
+    /// existed, and on one that was never offered to the reader. Local
+    /// only, omitted from JSON when absent, so an older row reads as `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub bans_picks_status: Option<BansPicksStatus>,
+    /// The queue Scuffed Vision's queue title reader (`rank-v1`) read on
+    /// this game's pre-game screens. Set once, when the game is first
+    /// recorded with the reader on, and kept on every snapshot of the match;
+    /// a later read never replaces it. `None` with the reader off, on games
+    /// recorded before the field existed, and on games never offered to the
+    /// reader (first stored outside the Tab path, such as a best guess kept
+    /// when the game closed, a capture landed at shutdown or an imported
+    /// hold, or stored under a session that was not the open game). Omitted
+    /// from JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub queue_title: Option<QueueTitle>,
 }
+
+/// The game's queue ([`PersonalMatch::queue_title`]): the confident read,
+/// or a warning that the queue is not known. Written once per game.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct QueueTitle {
+    /// The title as the pack spells it (`OPEN QUEUE`). Only a read the
+    /// reader accepted sets it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub value: Option<String>,
+    /// The confidence of the read that set `value`, 0..1; 0 without one.
+    #[serde(default)]
+    #[surreal(default)]
+    pub confidence: f32,
+    /// The game's read was weak or failed, or there was no pre-game frame
+    /// of this game to read, so `value` is `None`. Shown as
+    /// [`QUEUE_TITLE_WARNING`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[surreal(default)]
+    pub unsure: bool,
+    /// The pending next mode hint this game's read confirmed (the mode
+    /// banner word seen after the game before). `None` when there was none,
+    /// or the read dropped or expired it, or it was not this game's to
+    /// settle. Local only: never uploaded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub mode_hint: Option<String>,
+}
+
+/// The queue title reader's id (`stat_tracker::shadow::queue_title`
+/// re-exports it as `RECOGNIZER_ID`). Here so the upload, which may not use
+/// the readers, sends the same id as `rank.rank_recognizer`.
+pub const QUEUE_TITLE_RECOGNIZER_ID: &str = "rank-v1";
+
+/// Lowest whole title score a queue title read may have
+/// (`stat_tracker::shadow::queue_title` re-exports it as `MIN_SCORE`). Here
+/// so the upload checks the same bar.
+pub const QUEUE_TITLE_MIN_SCORE: f32 = 0.80;
+
+/// The warning for a game whose queue is not known: no confident read, for
+/// whatever reason (a weak or failed read, or no pre-game frame of it).
+pub const QUEUE_TITLE_WARNING: &str = "This game's queue is not known: its title was not seen or not recognized on the pre-game screens.";
+
+impl QueueTitle {
+    /// [`QUEUE_TITLE_WARNING`] when the game has no confident read, else
+    /// `None`.
+    pub fn warning(&self) -> Option<&'static str> {
+        self.unsure.then_some(QUEUE_TITLE_WARNING)
+    }
+
+    /// The value as the upload sends it: trimmed, not empty, and read at a
+    /// finite confidence of [`QUEUE_TITLE_MIN_SCORE`] to 1. `None` otherwise,
+    /// so a title stored some other way is never uploaded as confident.
+    pub fn confident_value(&self) -> Option<&str> {
+        let sure =
+            self.confidence.is_finite() && (QUEUE_TITLE_MIN_SCORE..=1.0).contains(&self.confidence);
+        self.value
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| sure && !v.is_empty())
+    }
+}
+
+/// A screen of the pre-game the bans and picks reader had no frame for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SurrealValue)]
+#[serde(rename_all = "snake_case")]
+#[surreal(crate = "::surrealdb_types", rename_all = "snake_case")]
+pub enum BansPicksMissing {
+    /// The ban vote screen (the local player's votes and the team ban score).
+    BanVote,
+    /// The hero select (the picks).
+    HeroSelect,
+    /// The ban results screen (the bans).
+    BanResults,
+}
+
+/// What came of the bans and picks reader for one game
+/// ([`PersonalMatch::bans_picks_status`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, SurrealValue)]
+#[serde(rename_all = "snake_case")]
+#[surreal(crate = "::surrealdb_types", rename_all = "snake_case")]
+pub enum BansPicksStatus {
+    /// All three screens were read.
+    Ok,
+    /// Some screens were read, and `missing` were not seen.
+    Partial { missing: Vec<BansPicksMissing> },
+    /// None of this game's pre-game screens were seen.
+    NoFrames,
+    /// A frame was not the size the reader needs (2560x1440).
+    FrameSize { width: u32, height: u32 },
+    /// The pack is not installed; `linked` is whether this install has a
+    /// site account, which is what fetches it.
+    PackMissing { linked: bool },
+    /// The pack is there and did not load.
+    PackFailed,
+    /// The reader failed on this game's screens.
+    ReaderFailed,
+    /// The reader is switched off.
+    ReaderOff,
+}
+
+/// Prefix on [`PersonalMatch::upload_reject`] for a row a tracker update put
+/// back on the upload queue. The site's reason follows it.
+pub const UPLOAD_RETRY_MARK: &str = "retry once: ";
 
 /// Count an unconfirmed hero segment toward the majority (it was a real swap).
 pub const SEGMENT_CONFIRM: &str = "confirm";
 /// Mark a hero segment as a misread: excluded from display and from the
 /// majority vote. The raw snapshots stay untouched.
 pub const SEGMENT_DISMISS: &str = "dismiss";
+/// Undo a confirm or dismiss: the store keeps only [`SEGMENT_CONFIRM`] and
+/// [`SEGMENT_DISMISS`], so any other action, this one by name, drops the
+/// segment's resolution and it reads as derived again.
+pub const SEGMENT_CLEAR: &str = "clear";
 
 /// One consecutive run of the same hero across a session's snapshots, in
 /// capture-time order.
@@ -315,6 +456,12 @@ pub struct SegmentResolution {
     pub segment: u32,
     /// [`SEGMENT_CONFIRM`] or [`SEGMENT_DISMISS`].
     pub action: String,
+    /// A [`SEGMENT_DISMISS`] of a run the member had confirmed by hand: Undo
+    /// ([`SEGMENT_CLEAR`]) puts the confirm back instead of clearing it.
+    /// False (also when missing, on older rows) and not written while false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[surreal(default)]
+    pub after_confirm: bool,
 }
 
 impl PersonalMatch {
@@ -328,13 +475,26 @@ impl PersonalMatch {
         scuffed_types::effective_recognizer(&self.recognizer)
     }
 
-    /// Server message for a quarantined row. Empty and missing both mean
-    /// the row is still eligible for upload.
+    /// Server message for a quarantined row, or for a row a tracker update
+    /// put back on the queue ([`Self::upload_retry_pending`]), without
+    /// [`UPLOAD_RETRY_MARK`]. Empty and missing both mean the row was never
+    /// refused, or a retry or edit cleared it.
     pub fn upload_rejection(&self) -> Option<&str> {
+        let message = self.upload_reject.as_deref()?.trim();
+        let message = message
+            .strip_prefix(UPLOAD_RETRY_MARK)
+            .unwrap_or(message)
+            .trim();
+        (!message.is_empty()).then_some(message)
+    }
+
+    /// True when a tracker update put this refused row back on the upload
+    /// queue with the site's reason kept. It uploads like any queued row,
+    /// and a refusal that names it again sets it aside at once.
+    pub fn upload_retry_pending(&self) -> bool {
         self.upload_reject
             .as_deref()
-            .map(str::trim)
-            .filter(|message| !message.is_empty())
+            .is_some_and(|message| message.trim_start().starts_with(UPLOAD_RETRY_MARK))
     }
 
     /// True when `field` (storage name, e.g. `"map_name"`) was manually edited.

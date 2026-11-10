@@ -350,6 +350,9 @@ fn row(hero: &str, map: &str, mode: &str) -> PersonalMatch {
         recognizer: String::new(),
         suspect_fields: Vec::new(),
         name_recognizer: None,
+        bans_picks: None,
+        bans_picks_status: None,
+        queue_title: None,
     }
 }
 

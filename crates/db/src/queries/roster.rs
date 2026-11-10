@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use surrealdb::engine::any::Any;
 use surrealdb::types::Datetime as SurrealDatetime;
@@ -91,6 +93,33 @@ fn team_rid(id: &str) -> RecordId {
     RecordId::new("team", id)
 }
 
+/// Record key for a NEW `plays_on` edge: `<len>_<member>_<team>`, where
+/// `<len>` is the byte length of the member key in decimal.
+///
+/// Two adds racing for the same pair write the same record key, so the
+/// storage layer rejects the loser on that key (a commit write conflict)
+/// rather than leaning on [`PLAYS_ON_PAIR_INDEX`] alone, which the
+/// in-memory engine did not always enforce under a concurrent commit.
+///
+/// The length prefix makes the key injective over any two strings: the
+/// digits end at the first `_`, then exactly `<len>` bytes are the member
+/// key. A plain separator would not be enough, because the roster routes
+/// pass client strings straight through as keys. Generated member and team
+/// keys are 20 characters of `[a-z0-9]`, so they never contain `_`, which
+/// also means this shape never equals an older random edge key. Injectivity
+/// matters: RELATE onto an existing key with other endpoints rewrites that
+/// edge instead of failing.
+///
+/// Older edges keep their random keys; [`Database::add_to_roster`] looks a
+/// pair up by (in, out) first and reuses whatever edge it finds.
+fn pair_edge_key(member_id: &str, team_id: &str) -> String {
+    format!("{}_{member_id}_{team_id}", member_id.len())
+}
+
+fn pair_edge_rid(member_id: &str, team_id: &str) -> RecordId {
+    RecordId::new("plays_on", pair_edge_key(member_id, team_id))
+}
+
 /// UNIQUE (in, out) on `plays_on`: one roster edge per (member, team) (DB7).
 ///
 /// Not in the schema script: [`migrate_plays_on_pair_index`] defines it only
@@ -99,11 +128,17 @@ fn team_rid(id: &str) -> RecordId {
 pub(crate) const PLAYS_ON_PAIR_INDEX: &str = "plays_on_member_team_idx";
 
 /// A lost add race retries once, then reuses the edge the winner wrote.
+/// Unchanged by the fixed edge key: the retry still only has to find the
+/// edge by (in, out).
 const ADD_ATTEMPTS: u32 = 2;
 
 /// True when `err` is the unique-index rejection for [`PLAYS_ON_PAIR_INDEX`],
-/// or a transaction conflict from two adds writing the same pair at once.
-/// SurrealDB v3 reports the index case as `IndexExists` / "already contains".
+/// a `RecordExists` on a `plays_on` key (two adds relating the same
+/// [`pair_edge_key`]), or a transaction conflict from two adds writing the
+/// same pair at once. SurrealDB v3 reports the index case as `IndexExists` /
+/// "already contains", the record case as "Database record `plays_on:..`
+/// already exists", and a commit race on the shared key as a retryable
+/// "Transaction conflict: Write conflict".
 fn is_plays_on_pair_conflict(err: &surrealdb::Error) -> bool {
     is_plays_on_pair_conflict_text(&err.to_string())
 }
@@ -115,8 +150,43 @@ fn is_plays_on_pair_conflict_text(text: &str) -> bool {
     msg.contains(PLAYS_ON_PAIR_INDEX)
         || msg.contains("already contains")
         || msg.contains("indexexists")
+        || (msg.contains("database record `plays_on:") && msg.contains("already exists"))
         || msg.contains("can be retried")
         || msg.contains("write conflict")
+}
+
+/// The error to report from a failed BEGIN/COMMIT query, if any.
+///
+/// SurrealDB 3.x rewrites every slot before the failing one to a generic
+/// "not executed due to a failed transaction", and puts a commit conflict
+/// only on the COMMIT row, so the first error (what `check()` returns) can
+/// hide the conflict. Prefer a pair conflict so [`ADD_ATTEMPTS`] still
+/// retries, then the first specific error, then the first error.
+fn pick_txn_error(errors: HashMap<usize, surrealdb::Error>) -> Option<surrealdb::Error> {
+    if errors.is_empty() {
+        return None;
+    }
+    let mut errors: Vec<(usize, surrealdb::Error)> = errors.into_iter().collect();
+    errors.sort_by_key(|(slot, _)| *slot);
+    let pos = errors
+        .iter()
+        .position(|(_, e)| is_plays_on_pair_conflict(e))
+        .or_else(|| {
+            errors
+                .iter()
+                .position(|(_, e)| !is_txn_not_executed_text(&e.to_string()))
+        })
+        .unwrap_or(0);
+    Some(errors.swap_remove(pos).1)
+}
+
+/// True for the placeholder SurrealDB 3.x writes into the slots of a failed
+/// or cancelled transaction that did not cause the failure.
+fn is_txn_not_executed_text(text: &str) -> bool {
+    let msg = text.to_ascii_lowercase();
+    msg.contains("not executed due to a failed transaction")
+        || msg.contains("not executed due to a cancelled transaction")
+        || msg.contains("cannot commit: the transaction was aborted")
 }
 
 /// State of [`PLAYS_ON_PAIR_INDEX`] as `INFO FOR TABLE plays_on` reports it.
@@ -390,8 +460,12 @@ impl Database {
     /// - an active edge (a double click, or a re-add) keeps its `joined_at`
     ///   and takes the requested role.
     ///
-    /// Two concurrent adds can both see no edge; the unique index rejects the
-    /// second RELATE, and that call retries once and then finds the edge.
+    /// The read and the write run in one transaction. A new edge gets the key
+    /// [`pair_edge_key`], so two concurrent adds that both see no edge write
+    /// the same record key: a commit conflict on that key (or the unique
+    /// index) fails the second, and that call retries once and then finds the
+    /// edge. Every success re-reads the edge for the pair, so all callers get
+    /// its id.
     pub async fn add_to_roster(
         &self,
         member_id: &str,
@@ -432,10 +506,18 @@ impl Database {
         //
         // LIMIT 1 without ORDER BY is safe because PLAYS_ON_PAIR_INDEX
         // (UNIQUE on in, out) allows at most one row for the pair.
-        let mut result = self
+        //
+        // The lookup is by (in, out), not by key, so an older edge with a
+        // random key is reused. Only a brand new edge gets the fixed key.
+        //
+        // The transaction makes the read and the write commit together or
+        // not at all, so a losing add fails (and retries) instead of
+        // reporting an edge that did not survive.
+        let mut response = self
             .client
             .query(
-                r#"LET $existing = (SELECT VALUE id FROM plays_on
+                r#"BEGIN TRANSACTION;
+                   LET $existing = (SELECT VALUE id FROM plays_on
                        WHERE in = $member_rid AND out = $team_rid LIMIT 1);
                    LET $entry = IF array::len($existing) > 0 {
                        UPDATE $existing[0] SET
@@ -443,23 +525,46 @@ impl Database {
                            team_role = $role,
                            is_active = true
                    } ELSE {
-                       RELATE $member_rid -> plays_on -> $team_rid
+                       RELATE $member_rid -> $edge_rid -> $team_rid
                        SET team_role = $role, joined_at = time::now(), is_active = true
                    };
                    SELECT *, meta::id(id) as id, <string>in as in, <string>out as out
-                   FROM $entry"#,
+                   FROM $entry;
+                   COMMIT TRANSACTION;"#,
             )
             .bind(("member_rid", member_rid(member_id)))
             .bind(("team_rid", team_rid(team_id)))
+            .bind(("edge_rid", pair_edge_rid(member_id, team_id)))
             .bind(("role", role.to_string()))
+            .await?;
+        if let Some(e) = pick_txn_error(response.take_errors()) {
+            return Err(e.into());
+        }
+        // Return the edge stored for the pair, not the one this call wrote,
+        // so every caller gets the surviving edge id.
+        self.get_roster_edge(member_id, team_id)
+            .await?
+            .ok_or_else(|| crate::DbError::NotFound("Failed to create roster entry".into()))
+    }
+
+    /// The single `plays_on` edge for (member, team), active or not.
+    async fn get_roster_edge(
+        &self,
+        member_id: &str,
+        team_id: &str,
+    ) -> DbResult<Option<RosterEntry>> {
+        let mut result = self
+            .client
+            .query(
+                "SELECT *, meta::id(id) as id, <string>in as in, <string>out as out \
+                 FROM plays_on WHERE in = $member_rid AND out = $team_rid LIMIT 1",
+            )
+            .bind(("member_rid", member_rid(member_id)))
+            .bind(("team_rid", team_rid(team_id)))
             .await?
             .check()?;
-        let entries: Vec<DbRosterEntry> = result.take(2)?;
-        entries
-            .into_iter()
-            .next()
-            .map(db_to_roster_entry)
-            .ok_or_else(|| crate::DbError::NotFound("Failed to create roster entry".into()))
+        let entries: Vec<DbRosterEntry> = result.take(0)?;
+        Ok(entries.into_iter().next().map(db_to_roster_entry))
     }
 
     /// Get a team's roster: active edges to active members who are not banned.
@@ -1001,33 +1106,175 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn many_concurrent_adds_on_threads_keep_one_edge() {
-        let db = std::sync::Arc::new(seeded_db().await);
-        let mut tasks = Vec::new();
-        for _ in 0..16 {
-            let db = db.clone();
-            tasks.push(tokio::spawn(async move {
-                db.add_to_roster("alice", "t1", TeamRole::Player).await
-            }));
-        }
-        let mut ok_ids = Vec::new();
-        for task in tasks {
-            match task.await.expect("join") {
-                Ok(entry) => ok_ids.push(entry.id),
-                // A call that loses twice may surface the conflict; that is
-                // a retryable error, never a second edge.
-                Err(crate::DbError::Surreal(e)) => {
-                    assert!(is_plays_on_pair_conflict(&e), "unexpected error: {e}")
+        // Three pairs race at once (two members on one team, one member on
+        // two teams), 16 adds each, so a key mix-up between pairs shows up
+        // as well as a duplicate within a pair. One race can pass by luck,
+        // so run it 20 times on a fresh DB.
+        const PAIRS: [(&str, &str); 3] = [("alice", "t1"), ("bob", "t1"), ("alice", "t2")];
+        for run in 0..20 {
+            let db = std::sync::Arc::new(seeded_db().await);
+            db.client
+                .query("CREATE team:t2 SET name = 'T2', game_id = 'g1'")
+                .await
+                .unwrap()
+                .check()
+                .unwrap();
+            let mut tasks = Vec::new();
+            // Interleave spawns so the pairs overlap in time.
+            for _ in 0..16 {
+                for (p, &(member, team)) in PAIRS.iter().enumerate() {
+                    // Copy the &'static str out so the task owns no borrow.
+                    let db = db.clone();
+                    tasks.push((
+                        p,
+                        tokio::spawn(async move {
+                            db.add_to_roster(member, team, TeamRole::Player).await
+                        }),
+                    ));
                 }
-                Err(other) => panic!("unexpected error: {other}"),
             }
+            let mut ok_ids: Vec<Vec<String>> = vec![Vec::new(); PAIRS.len()];
+            for (p, task) in tasks {
+                match task.await.expect("join") {
+                    Ok(entry) => {
+                        let (member, team) = PAIRS[p];
+                        assert_eq!(
+                            (entry.member_id.as_str(), entry.team_id.as_str()),
+                            (member, team),
+                            "run {run}: add returned another pair's edge"
+                        );
+                        ok_ids[p].push(entry.id)
+                    }
+                    // A call that loses twice may surface the conflict; that
+                    // is a retryable error, never a second edge.
+                    Err(crate::DbError::Surreal(e)) => {
+                        assert!(
+                            is_plays_on_pair_conflict(&e),
+                            "run {run}: unexpected error: {e}"
+                        )
+                    }
+                    Err(other) => panic!("run {run}: unexpected error: {other}"),
+                }
+            }
+            for (p, (member, team)) in PAIRS.iter().enumerate() {
+                let ids = &ok_ids[p];
+                assert!(
+                    !ids.is_empty(),
+                    "run {run} {member}/{team}: at least one add succeeds"
+                );
+                // Count first: a second edge is a real duplicate, while one
+                // edge with mismatched ids means a call returned the wrong edge.
+                assert_eq!(
+                    edge_count(&db, member, team).await,
+                    1,
+                    "run {run} {member}/{team}: one edge for the pair"
+                );
+                let kept = edge_keys(&db, member, team).await;
+                let want = pair_edge_key(member, team);
+                assert_eq!(
+                    kept[0].id.as_deref(),
+                    Some(want.as_str()),
+                    "run {run} {member}/{team}: the new edge has the fixed key"
+                );
+                assert!(
+                    ids.iter().all(|id| *id == want),
+                    "run {run} {member}/{team}: every add returns the surviving edge {want}: {ids:?}"
+                );
+            }
+            assert_eq!(total_edges(&db).await, 3, "run {run}: one edge per pair");
+            assert_eq!(db.get_team_roster("t1").await.unwrap().len(), 2);
+            assert_eq!(db.get_team_roster("t2").await.unwrap().len(), 1);
+            assert_eq!(
+                db.get_member_teams("alice")
+                    .await
+                    .expect("get_member_teams(alice)")
+                    .len(),
+                2
+            );
         }
-        assert!(!ok_ids.is_empty(), "at least one add succeeds");
-        assert!(
-            ok_ids.windows(2).all(|w| w[0] == w[1]),
-            "every add returns the same edge: {ok_ids:?}"
+    }
+
+    #[tokio::test]
+    async fn two_adds_use_the_deterministic_key() {
+        let db = seeded_db().await;
+        let first = db
+            .add_to_roster("alice", "t1", TeamRole::Player)
+            .await
+            .expect("first add");
+        let second = db
+            .add_to_roster("alice", "t1", TeamRole::Coach)
+            .await
+            .expect("second add");
+        assert_eq!(first.id, "5_alice_t1");
+        assert_eq!(second.id, first.id);
+        let rows = edge_keys(&db, "alice", "t1").await;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id.as_deref(), Some("5_alice_t1"));
+        let bob = db
+            .add_to_roster("bob", "t1", TeamRole::Player)
+            .await
+            .expect("bob");
+        assert_eq!(bob.id, pair_edge_key("bob", "t1"));
+        assert_eq!(total_edges(&db).await, 2);
+    }
+
+    #[tokio::test]
+    async fn legacy_random_id_edge_is_reused_by_add() {
+        let db = seeded_db().await;
+        // An edge an older build wrote, with a SurrealDB style random key.
+        seed_legacy_edge(
+            &db,
+            "q8k2m4x7c1v9b3n5z6ha",
+            "alice",
+            "t1",
+            "player",
+            "2026-01-01T00:00:00Z",
+            true,
+        )
+        .await;
+        let again = db
+            .add_to_roster("alice", "t1", TeamRole::Captain)
+            .await
+            .expect("re-add");
+        assert_eq!(
+            again.id, "q8k2m4x7c1v9b3n5z6ha",
+            "the legacy edge is reused"
         );
-        assert_eq!(edge_count(&db, "alice", "t1").await, 1);
-        assert_eq!(db.get_team_roster("t1").await.unwrap().len(), 1);
+        assert_eq!(again.team_role, TeamRole::Captain);
+        let (a, b) = tokio::join!(
+            db.add_to_roster("alice", "t1", TeamRole::Player),
+            db.add_to_roster("alice", "t1", TeamRole::Player),
+        );
+        assert_eq!(a.expect("first click").id, "q8k2m4x7c1v9b3n5z6ha");
+        assert_eq!(b.expect("second click").id, "q8k2m4x7c1v9b3n5z6ha");
+        assert_eq!(edge_count(&db, "alice", "t1").await, 1, "not duplicated");
+        let rows = edge_keys(&db, "alice", "t1").await;
+        assert_eq!(rows[0].id.as_deref(), Some("q8k2m4x7c1v9b3n5z6ha"));
+        assert_eq!(total_edges(&db).await, 1, "no fixed-key edge was added");
+    }
+
+    #[test]
+    fn pair_edge_key_is_injective() {
+        assert_eq!(pair_edge_key("alice", "t1"), "5_alice_t1");
+        // A separator alone would make these collide.
+        let pairs = [
+            ("a_b", "c"),
+            ("a", "b_c"),
+            ("1_a", "b"),
+            ("1", "a_b"),
+            ("", "a"),
+            ("a", ""),
+            ("ab", "c"),
+            ("a", "bc"),
+        ];
+        let keys: std::collections::HashSet<String> =
+            pairs.iter().map(|(m, t)| pair_edge_key(m, t)).collect();
+        assert_eq!(keys.len(), pairs.len(), "{keys:?}");
+        // Never the shape of a SurrealDB random key (20 of [a-z0-9]).
+        assert_eq!(
+            pair_edge_key("q8k2m4x7c1v9b3n5z6ha", "t8k2m4x7c1v9b3n5z6hb"),
+            "20_q8k2m4x7c1v9b3n5z6ha_t8k2m4x7c1v9b3n5z6hb"
+        );
     }
 
     #[tokio::test]
@@ -1064,7 +1311,13 @@ mod tests {
         db.add_to_roster("bob", "t1", TeamRole::Player)
             .await
             .unwrap();
-        assert_eq!(db.get_member_teams("alice").await.unwrap().len(), 2);
+        assert_eq!(
+            db.get_member_teams("alice")
+                .await
+                .expect("get_member_teams(alice)")
+                .len(),
+            2
+        );
         assert_eq!(total_edges(&db).await, 3);
     }
 
@@ -1099,10 +1352,42 @@ mod tests {
         assert!(is_plays_on_pair_conflict_text(
             "Transaction conflict: Write conflict. This transaction can be retried"
         ));
+        // The losing COMMIT when two adds relate the same fixed edge key.
+        assert!(is_plays_on_pair_conflict_text(
+            "Cannot COMMIT: Transaction conflict: Write conflict, retry the transaction. \
+             This transaction can be retried"
+        ));
+        // RecordExists on the fixed edge key.
+        assert!(is_plays_on_pair_conflict_text(
+            "Database record `plays_on:5_alice_t1` already exists"
+        ));
+        // RecordExists on another table is not a roster race.
+        assert!(!is_plays_on_pair_conflict_text(
+            "Database record `member:alice` already exists"
+        ));
         assert!(!is_plays_on_pair_conflict_text(
             "db7 injected write failure"
         ));
         assert!(!is_plays_on_pair_conflict_text("Operation timed out"));
+    }
+
+    #[test]
+    fn txn_placeholder_text_is_not_the_cause() {
+        assert!(is_txn_not_executed_text(
+            "The query was not executed due to a failed transaction"
+        ));
+        assert!(is_txn_not_executed_text(
+            "The query was not executed due to a cancelled transaction"
+        ));
+        assert!(is_txn_not_executed_text(
+            "Cannot COMMIT: the transaction was aborted due to a prior error"
+        ));
+        assert!(!is_txn_not_executed_text(
+            "Cannot COMMIT: Transaction conflict: write conflict. This transaction can be retried"
+        ));
+        assert!(!is_txn_not_executed_text(
+            "An error occurred: db7 injected write failure"
+        ));
     }
 
     #[test]

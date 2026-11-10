@@ -10,9 +10,14 @@ use crate::version::USER_AGENT;
 use scuffed_types::api::{DaemonConfigResponse, StatsUploadResponse};
 
 use super::backoff::parse_retry_after;
-use super::batching::BatchCaps;
+use super::batching::{BatchCaps, RefusedRows};
 use super::errors::{SyncUploadError, parse_upload_error_body, server_error_text};
+use super::visibility::{MAX_BODY_BYTES, StatsVisibility, parse_stats_visibility};
 use super::wire::upload_request;
+
+/// Daemon-token route for the member's config. It carries `player_name` and,
+/// on servers that send it, `stats_visibility`.
+const DAEMON_CONFIG_PATH: &str = "/api/stats/daemon-config";
 
 #[derive(Clone)]
 pub struct SyncClient {
@@ -20,6 +25,9 @@ pub struct SyncClient {
     http: reqwest::Client,
     /// Caps learned from HTTP 413. Shared by clones. Never raised.
     batch_caps: Arc<Mutex<BatchCaps>>,
+    /// Rows the next pass sends after the others, and when the server last
+    /// accepted a row. Shared by clones.
+    refused_rows: Arc<Mutex<RefusedRows>>,
     /// `stats_delete_scheduled_at` from the latest 409 `stats_delete_pending`.
     /// Kept off [`SyncUploadError`] so that error stays small. Shared by clones.
     delete_scheduled_at: Arc<Mutex<Option<String>>>,
@@ -43,6 +51,7 @@ impl SyncClient {
             http,
             config: Arc::new(Mutex::new(config)),
             batch_caps: Arc::new(Mutex::new(BatchCaps::default())),
+            refused_rows: Arc::new(Mutex::new(RefusedRows::default())),
             delete_scheduled_at: Arc::new(Mutex::new(None)),
         }
     }
@@ -78,6 +87,31 @@ impl SyncClient {
         }
     }
 
+    /// Rows the next pass sends after the others, and when the server last
+    /// accepted a row.
+    pub fn refused_rows(&self) -> RefusedRows {
+        self.refused_rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    /// Keep the set a pass ended with. `ran_with` is the URL and token the
+    /// pass started with. When Settings changed the server URL during the
+    /// pass, the set is dropped ([`Self::replace_credentials`] already reset
+    /// it). When only the token changed, the rows are kept but the time the
+    /// server last accepted a row is not: it was earned with the old token.
+    pub fn remember_refused_rows(&self, mut rows: RefusedRows, ran_with: &SyncConfig) {
+        let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
+        if config.server_url != ran_with.server_url {
+            return;
+        }
+        if config.token != ran_with.token {
+            rows.forget_accepted();
+        }
+        *self.refused_rows.lock().unwrap_or_else(|e| e.into_inner()) = rows;
+    }
+
     pub fn credentials(&self) -> SyncConfig {
         self.config
             .lock()
@@ -87,15 +121,23 @@ impl SyncClient {
 
     /// Swap the URL and token after Settings saved a different pair.
     /// The HTTP client (timeout, redirect policy) stays. A different server
-    /// URL drops caps learned from the previous host. A token-only change
-    /// keeps them.
+    /// URL drops caps and refused rows learned from the previous host. A
+    /// token-only change keeps them, but drops the time the server last
+    /// accepted a row ([`RefusedRows`]), which was earned with the old token.
     pub fn replace_credentials(&self, config: SyncConfig) {
         let mut slot = self.config.lock().unwrap_or_else(|e| e.into_inner());
         let url_changed = slot.server_url != config.server_url;
+        let token_changed = slot.token != config.token;
         *slot = config;
         drop(slot);
         if url_changed {
             *self.batch_caps.lock().unwrap_or_else(|e| e.into_inner()) = BatchCaps::default();
+            *self.refused_rows.lock().unwrap_or_else(|e| e.into_inner()) = RefusedRows::default();
+        } else if token_changed {
+            self.refused_rows
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .forget_accepted();
         }
     }
 
@@ -122,7 +164,7 @@ impl SyncClient {
         self.refuse_unsafe_transport()
             .map_err(|e| SyncUploadError::plain(e.to_string()))?;
         let creds = self.credentials();
-        let url = format!("{}/api/stats/daemon-config", creds.server_url);
+        let url = format!("{}{DAEMON_CONFIG_PATH}", creds.server_url);
         let resp = self
             .http
             .get(&url)
@@ -140,15 +182,44 @@ impl SyncClient {
             .map_err(|e| SyncUploadError::plain(e.to_string()))
     }
 
+    /// Who can see this member's stats on the site, for the Settings line.
+    ///
+    /// One GET of the daemon-config route with the saved token, reading only
+    /// `stats_visibility`. Any failure (unsafe URL, network, 401, 5xx, a body
+    /// that is too large or not JSON, a missing field from an older server, an
+    /// unknown value) is `None`: the line stays hidden and the sync state is
+    /// untouched, so this never pauses uploads.
+    pub async fn fetch_stats_visibility(&self) -> Option<StatsVisibility> {
+        self.refuse_unsafe_transport().ok()?;
+        let creds = self.credentials();
+        let url = format!("{}{DAEMON_CONFIG_PATH}", creds.server_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&creds.token)
+            .send()
+            .await
+            .ok()?;
+        let status = resp.status().as_u16();
+        if !resp.status().is_success() {
+            return None;
+        }
+        let bytes = resp.bytes().await.ok()?;
+        if bytes.len() > MAX_BODY_BYTES {
+            return None;
+        }
+        parse_stats_visibility(status, std::str::from_utf8(&bytes).ok()?)
+    }
+
     /// POST `/api/stats/upload`.
     ///
     /// HTTP 400 and 422 are returned as [`SyncUploadError`]. The sync pass
-    /// ([`isolate_rejected`], called from `try_sync_with`) bisects those
-    /// batches. This function sends one request. 413, 401, 403, 409, and 429
+    /// ([`isolate_rejected_in_pass`], called from `upload_chunked`) bisects
+    /// those batches. This function sends one request. 413, 401, 403, 409, and 429
     /// are not payload rejects. 429 and 503 keep `Retry-After`. 409
     /// `stats_delete_pending` stops the pass without a split.
     ///
-    /// [`isolate_rejected`]: super::isolate_rejected
+    /// [`isolate_rejected_in_pass`]: super::isolate_rejected_in_pass
     pub async fn upload_matches(
         &self,
         matches: &[PersonalMatch],

@@ -323,6 +323,37 @@ fn the_switch_off_uses_tesseract_and_does_not_read_the_pack() {
     );
 }
 
+/// Every saved name is matched in one pass over the rows: a sure template
+/// row of the alt is the own row, and Tesseract is read once at most.
+/// `CAB` and `BAC` are synthetic letters, not members' names.
+#[test]
+fn every_saved_name_is_matched_with_one_read() {
+    let min = Params::DEFAULT.min_confidence;
+    let names = vec!["CAB".to_string(), "BAC".to_string()];
+    let rows = [named("OTHER", 90), named("BAC", 90)];
+    let found = choose_player_row(
+        &names,
+        1,
+        true,
+        Some(ReaderNames {
+            rows: &rows,
+            min_confidence: Some(min),
+        }),
+        BoardMatch::FullBoard,
+        || panic!("a full board of sure names does not call Tesseract"),
+    );
+    assert_eq!(
+        found.map(|m| (m.name.row, m.recognizer)),
+        Some((1, NameRecognizer::NamesV1))
+    );
+    let mut reads = 0;
+    let found = choose_player_row(&names, 1, false, None, BoardMatch::Cells, || {
+        reads += 1;
+        vec![named("ZZZ", 40), named("bac", 40)]
+    });
+    assert_eq!((found.map(|m| m.name.row), reads), (Some(1), 1));
+}
+
 #[test]
 fn the_switch_on_with_no_pack_reuses_the_cell_rows() {
     let tmp = tempfile::tempdir().unwrap();

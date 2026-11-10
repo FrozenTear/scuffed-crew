@@ -704,7 +704,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE played_at ON personal_match TYPE datetime;
         DEFINE FIELD OVERWRITE uploaded_at ON personal_match TYPE datetime DEFAULT time::now();
         -- Client-generated game session id. Empty client ids are stored as a
-        -- content-derived `legacy-*` id (see `legacy_session_id`), not as ''.
+        -- `legacy-*` id, not as ''. Uploads from trackers at 0.6.0-alpha.3 or
+        -- newer reuse the member's legacy row at the same played_at; older or
+        -- unknown clients, and any upload with no such row, use the
+        -- content-derived id (see `legacy_session_id`).
         -- Pre-session rows that still have '' are rewritten to that id by
         -- `migrate_personal_match_session_index` so distinct historical games
         -- do not share one key under the unique index. The record id itself
@@ -735,6 +738,24 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- Rows already on disk are not rewritten; a missing value is read
         -- back as [].
         DEFINE FIELD OVERWRITE suspect_fields ON personal_match TYPE array<string> DEFAULT [];
+        -- Bans and picks the tracker read for this game: { bans: [{ hero,
+        -- team }], lobby_ban, picks: [hero | null], ban_vote: [hero | null],
+        -- recognizer }. Hero values are pack keys, and picks and ban_vote
+        -- entries may also be the literal "no_preference". Omitted or null is
+        -- stored as NONE. FLEXIBLE so the nested keys and null entries are
+        -- kept on this SCHEMAFULL table.
+        -- Additive: rows already on disk are not rewritten and read back as
+        -- none.
+        DEFINE FIELD OVERWRITE bans_picks ON personal_match TYPE option<object> FLEXIBLE;
+        -- Rank update screen read for this game: { role, role_rank, division,
+        -- progress_pct, progress_change, change_tags, higher_than_pct,
+        -- hero_sr, hero_sr_change, next_mode_hint, queue_title } each as
+        -- { value, confidence }, plus rank_recognizer. The tracker's bbox is
+        -- not stored. Omitted or null is stored as NONE. FLEXIBLE for the
+        -- nested keys, like bans_picks.
+        -- Additive: rows already on disk are not rewritten and read back as
+        -- none.
+        DEFINE FIELD OVERWRITE rank ON personal_match TYPE option<object> FLEXIBLE;
 
         DEFINE INDEX IF NOT EXISTS pm_member_idx ON personal_match COLUMNS member_id, played_at;
         -- Non-unique placeholder only. `DEFINE INDEX IF NOT EXISTS` will not
@@ -808,6 +829,15 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE TABLE IF NOT EXISTS member_settings SCHEMAFULL;
         DEFINE FIELD OVERWRITE member_id ON member_settings TYPE string;
         DEFINE FIELD OVERWRITE player_name ON member_settings TYPE option<string>;
+        -- Who can see this member's tracker stats.
+        -- public: everyone. members: active signed-in crew only.
+        -- private: owner and officers on per-member routes, and off every leaderboard.
+        -- Legacy rows that predate the field read back as public.
+        DEFINE FIELD OVERWRITE stats_visibility ON member_settings TYPE string
+            DEFAULT 'public'
+            ASSERT $value IN ['public', 'members', 'private'];
+        -- Opted in to contributing hero icons. Off by default; legacy rows read false.
+        DEFINE FIELD OVERWRITE hero_icon_opt_in ON member_settings TYPE bool DEFAULT false;
 
         DEFINE INDEX IF NOT EXISTS ms_member_idx ON member_settings COLUMNS member_id UNIQUE;
 
@@ -939,6 +969,21 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE completed_at ON data_migration TYPE datetime;
         DEFINE FIELD OVERWRITE scanned ON data_migration TYPE int DEFAULT 0;
         DEFINE FIELD OVERWRITE updated ON data_migration TYPE int DEFAULT 0;
+
+        -- ================================================
+        -- Contributed hero icons (metadata only)
+        -- PNG bytes live under HERO_ICONS_DIR as file_name, not in this table
+        -- and not in uploads. Only the owner and admins can read them.
+        -- ================================================
+        DEFINE TABLE IF NOT EXISTS hero_icon SCHEMAFULL;
+        DEFINE FIELD OVERWRITE member_id ON hero_icon TYPE string;
+        DEFINE FIELD OVERWRITE hero ON hero_icon TYPE string;
+        DEFINE FIELD OVERWRITE file_name ON hero_icon TYPE string;
+        DEFINE FIELD OVERWRITE size_bytes ON hero_icon TYPE int;
+        DEFINE FIELD OVERWRITE width ON hero_icon TYPE int;
+        DEFINE FIELD OVERWRITE height ON hero_icon TYPE int;
+        DEFINE FIELD OVERWRITE created_at ON hero_icon TYPE datetime;
+        DEFINE INDEX IF NOT EXISTS hero_icon_member_idx ON hero_icon COLUMNS member_id;
     "#,
             )
             .await?

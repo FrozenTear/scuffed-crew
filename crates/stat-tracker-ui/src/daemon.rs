@@ -832,6 +832,8 @@ Result=start-limit-hit
         );
     }
 
+    /// Also what lets uninstall go on: a stopped or foreign pid does not
+    /// block it.
     #[test]
     fn restart_proceeds_only_when_nothing_live_was_signalled() {
         assert!(StopError::NotRunning.allows_restart());
@@ -839,8 +841,13 @@ Result=start-limit-hit
             StopError::Refused("Saved process id is not the tracker, not stopping it")
                 .allows_restart()
         );
+        assert!(StopError::Refused("Refusing to stop this window's process").allows_restart());
         assert!(
             !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
+                .allows_restart()
+        );
+        assert!(
+            !StopError::Failed("Could not stop the tracker: Permission denied".into())
                 .allows_restart()
         );
     }

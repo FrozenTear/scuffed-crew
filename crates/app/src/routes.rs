@@ -84,6 +84,10 @@ pub enum Route {
         StatsMatch { id: String },
         #[route("/patch-notes")]
         PatchNotes {},
+        #[redirect("/strategies", || Route::StrategyBrowse {})]
+        #[redirect("/matches", || Route::Home {})]
+        #[route("/:..segments")]
+        NotFound { segments: Vec<String> },
     #[end_layout]
 
     // Admin panel (sidebar layout, auth guarded)
@@ -92,6 +96,8 @@ pub enum Route {
         AdminDashboard {},
         #[route("/admin/members")]
         AdminMembers {},
+        #[route("/admin/members/:id/matches")]
+        AdminMemberMatches { id: String },
         #[route("/admin/games")]
         AdminGames {},
         #[route("/admin/teams")]
@@ -120,6 +126,8 @@ pub enum Route {
         AdminModeration {},
         #[route("/admin/reports")]
         AdminReports {},
+        #[route("/admin/hero-icons")]
+        AdminHeroIcons {},
         #[route("/admin/relay")]
         AdminRelay {},
         #[route("/admin/settings")]
@@ -142,16 +150,66 @@ pub enum Route {
         StrategyEditorNew {},
         #[route("/strategy/editor/:id")]
         StrategyEditor { id: String },
-    #[end_layout]
-
-    #[route("/:..segments")]
-    NotFound { segments: Vec<String> },
 }
 
 #[cfg(test)]
 mod tests {
     use super::Route;
     use std::str::FromStr;
+
+    #[test]
+    fn unknown_paths_fall_through_to_the_catch_all() {
+        for (path, segments) in [
+            ("/nope", vec!["nope"]),
+            ("/nope/deeper", vec!["nope", "deeper"]),
+            ("/admin/nope", vec!["admin", "nope"]),
+            ("/strategy/nope", vec!["strategy", "nope"]),
+        ] {
+            assert_eq!(
+                Route::from_str(path).unwrap(),
+                Route::NotFound {
+                    segments: segments.into_iter().map(String::from).collect()
+                },
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn static_and_dynamic_routes_still_win_over_the_catch_all() {
+        for path in [
+            "/",
+            "/members",
+            "/members/abc",
+            "/matches/abc",
+            "/leaderboards",
+            "/stats",
+            "/stats/tokens",
+            "/stats/match/abc",
+            "/patch-notes",
+            "/admin",
+            "/admin/members",
+            "/admin/members/abc/matches",
+            "/strategy",
+            "/strategy/editor/abc",
+            "/login",
+        ] {
+            let route = Route::from_str(path).unwrap_or_else(|e| panic!("{path}: {e:?}"));
+            assert!(
+                !matches!(route, Route::NotFound { .. }),
+                "{path} fell into the catch-all"
+            );
+        }
+    }
+
+    #[test]
+    fn strategies_and_matches_redirect_to_real_pages() {
+        assert_eq!(
+            Route::from_str("/strategies").unwrap(),
+            Route::StrategyBrowse {}
+        );
+        assert_eq!(Route::from_str("/matches").unwrap(), Route::Home {});
+    }
 
     #[test]
     fn patch_notes_has_public_and_strategy_routes() {
@@ -185,6 +243,27 @@ mod tests {
             Route::AdminReports {}
         );
         assert_eq!(Route::AdminReports {}.to_string(), "/admin/reports");
+    }
+
+    #[test]
+    fn hero_icons_admin_route_parses() {
+        assert_eq!(
+            Route::from_str("/admin/hero-icons").unwrap(),
+            Route::AdminHeroIcons {}
+        );
+        assert_eq!(Route::AdminHeroIcons {}.to_string(), "/admin/hero-icons");
+    }
+
+    #[test]
+    fn admin_member_matches_route_parses() {
+        assert_eq!(
+            Route::from_str("/admin/members/m1/matches").unwrap(),
+            Route::AdminMemberMatches { id: "m1".into() }
+        );
+        assert_eq!(
+            Route::AdminMemberMatches { id: "m1".into() }.to_string(),
+            "/admin/members/m1/matches"
+        );
     }
 
     #[test]

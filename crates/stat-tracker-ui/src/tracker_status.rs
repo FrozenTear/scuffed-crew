@@ -11,6 +11,8 @@
 use chrono::{DateTime, Datelike, Local, TimeZone, Utc};
 use iced::Color;
 
+use stat_tracker::ocr_status::FocusGateStatus;
+
 use crate::app::TrackerApp;
 use crate::model::Game;
 use crate::theme;
@@ -19,8 +21,16 @@ use crate::theme;
 /// classic header dot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeaderStatus {
-    /// The tracker runs and Overwatch is open (menus included).
+    /// The tracker runs and Overwatch is open (menus included). The focus
+    /// gate says Overwatch is in front, or has not said yet.
     Capturing,
+    /// Capturing with the focus gate off in Settings.
+    CapturingAnyWindow,
+    /// Capturing, but another window is in front: reads pause.
+    Paused,
+    /// Capturing, and the tracker cannot tell which window is in front:
+    /// reads go on. The only state that opens Settings.
+    FocusUnknown,
     /// The tracker runs and waits for Overwatch, or this is the demo.
     Waiting,
     /// The tracker service is not running.
@@ -30,8 +40,11 @@ pub enum HeaderStatus {
 }
 
 /// Every status, for tests that walk all of them.
-pub const ALL: [HeaderStatus; 4] = [
+pub const ALL: [HeaderStatus; 7] = [
     HeaderStatus::Capturing,
+    HeaderStatus::CapturingAnyWindow,
+    HeaderStatus::Paused,
+    HeaderStatus::FocusUnknown,
     HeaderStatus::Waiting,
     HeaderStatus::Down,
     HeaderStatus::TokenRejected,
@@ -43,6 +56,9 @@ pub struct HeaderStatusInput {
     pub daemon_running: bool,
     pub game_running: bool,
     pub sync_token_rejected: bool,
+    /// The focus gate as the bar shows it (debounced,
+    /// [`crate::focus_status::FocusDisplay`]). Read only while Capturing.
+    pub focus: FocusGateStatus,
 }
 
 /// A failed test capture (Capture now, Check the picture) is not part of
@@ -57,8 +73,29 @@ pub fn classify_header_status(input: HeaderStatusInput) -> HeaderStatus {
     }
     match (input.daemon_running, input.game_running) {
         (false, _) => HeaderStatus::Down,
-        (true, true) => HeaderStatus::Capturing,
+        (true, true) => match input.focus {
+            FocusGateStatus::Off => HeaderStatus::CapturingAnyWindow,
+            FocusGateStatus::NotFocused => HeaderStatus::Paused,
+            FocusGateStatus::Unreadable => HeaderStatus::FocusUnknown,
+            FocusGateStatus::Focused | FocusGateStatus::Unknown => HeaderStatus::Capturing,
+        },
         (true, false) => HeaderStatus::Waiting,
+    }
+}
+
+/// Whether the long and medium words end in the last game's time. The
+/// pause and the unreadable pill drop it.
+pub fn shows_time(status: HeaderStatus) -> bool {
+    !matches!(status, HeaderStatus::Paused | HeaderStatus::FocusUnknown)
+}
+
+/// The detail line (tooltip) for a status, if it has one.
+pub fn detail(status: HeaderStatus) -> Option<&'static str> {
+    match status {
+        HeaderStatus::CapturingAnyWindow => Some(crate::focus_status::OFF_DETAIL),
+        HeaderStatus::Paused => Some(crate::focus_status::PAUSED_DETAIL),
+        HeaderStatus::FocusUnknown => Some(crate::focus_status::UNREADABLE_DETAIL),
+        _ => None,
     }
 }
 
@@ -67,9 +104,13 @@ pub fn header_status_color(status: HeaderStatus) -> Color {
     match status {
         // Running is green, whether Overwatch is open or the tracker waits
         // for it. The words say which.
-        HeaderStatus::Capturing | HeaderStatus::Waiting => theme::OK,
-        // Amber is kept for real warnings only.
-        HeaderStatus::TokenRejected => theme::WARN,
+        HeaderStatus::Capturing | HeaderStatus::CapturingAnyWindow | HeaderStatus::Waiting => {
+            theme::OK
+        }
+        // The pause is neutral: drawn as a grey ring, no warning.
+        HeaderStatus::Paused => theme::TEXT_3,
+        // Amber is kept for real warnings and the unsure focus only.
+        HeaderStatus::TokenRejected | HeaderStatus::FocusUnknown => theme::WARN,
         HeaderStatus::Down => theme::DANGER,
     }
 }
@@ -79,7 +120,10 @@ pub fn header_status_color(status: HeaderStatus) -> Color {
 /// or after a failed capture ([`classify_classic_status`]).
 pub fn classic_status_color(status: HeaderStatus) -> Color {
     match status {
-        HeaderStatus::Capturing => theme::OK,
+        HeaderStatus::Capturing
+        | HeaderStatus::CapturingAnyWindow
+        | HeaderStatus::Paused
+        | HeaderStatus::FocusUnknown => theme::OK,
         HeaderStatus::Waiting | HeaderStatus::TokenRejected => theme::WARN,
         HeaderStatus::Down => theme::DANGER,
     }
@@ -88,7 +132,9 @@ pub fn classic_status_color(status: HeaderStatus) -> Color {
 /// Top bar words on a narrow window: a short label, never a bare time.
 pub fn short_label(status: HeaderStatus) -> &'static str {
     match status {
-        HeaderStatus::Capturing => "In game",
+        HeaderStatus::Capturing | HeaderStatus::CapturingAnyWindow => "In game",
+        HeaderStatus::Paused => crate::focus_status::PAUSED_SHORT,
+        HeaderStatus::FocusUnknown => crate::focus_status::UNREADABLE_SHORT,
         HeaderStatus::Waiting => "Ready",
         HeaderStatus::Down => "Stopped",
         HeaderStatus::TokenRejected => "Token rejected",
@@ -99,6 +145,9 @@ pub fn short_label(status: HeaderStatus) -> &'static str {
 pub fn long_label(status: HeaderStatus) -> &'static str {
     match status {
         HeaderStatus::Capturing => "Watching Overwatch",
+        HeaderStatus::CapturingAnyWindow => crate::focus_status::OFF_LONG,
+        HeaderStatus::Paused => crate::focus_status::PAUSED_LONG,
+        HeaderStatus::FocusUnknown => crate::focus_status::UNREADABLE_LONG,
         HeaderStatus::Waiting => "Tracker ready",
         HeaderStatus::Down => "Tracker stopped",
         HeaderStatus::TokenRejected => "Website token rejected",
@@ -160,6 +209,7 @@ fn header_input(app: &TrackerApp) -> HeaderStatusInput {
         daemon_running: app.daemon.running(),
         game_running: app.game_running,
         sync_token_rejected: sync_token_rejected(app),
+        focus: app.page_state.focus.shown(),
     }
 }
 
@@ -239,6 +289,7 @@ mod tests {
             daemon_running: daemon,
             game_running: game,
             sync_token_rejected: false,
+            focus: FocusGateStatus::Unknown,
         }
     }
 
@@ -296,6 +347,95 @@ mod tests {
             theme::OK,
             "a stopped tracker must not look running"
         );
+    }
+
+    #[test]
+    fn the_focus_words_show_only_while_capturing() {
+        let with = |daemon, game, token, focus| HeaderStatusInput {
+            focus,
+            sync_token_rejected: token,
+            ..input(false, daemon, game)
+        };
+        let cases = [
+            (FocusGateStatus::Unknown, HeaderStatus::Capturing),
+            (FocusGateStatus::Focused, HeaderStatus::Capturing),
+            (FocusGateStatus::Off, HeaderStatus::CapturingAnyWindow),
+            (FocusGateStatus::NotFocused, HeaderStatus::Paused),
+            (FocusGateStatus::Unreadable, HeaderStatus::FocusUnknown),
+        ];
+        for (focus, want) in cases {
+            assert_eq!(classify_header_status(with(true, true, false, focus)), want);
+            // Waiting, Down and a rejected token win the slot.
+            assert_eq!(
+                classify_header_status(with(true, false, false, focus)),
+                HeaderStatus::Waiting
+            );
+            assert_eq!(
+                classify_header_status(with(false, true, false, focus)),
+                HeaderStatus::Down
+            );
+            assert_eq!(
+                classify_header_status(with(true, true, true, focus)),
+                HeaderStatus::TokenRejected
+            );
+        }
+        // Demo never shows a focus state.
+        let demo = HeaderStatusInput {
+            focus: FocusGateStatus::NotFocused,
+            ..input(true, true, true)
+        };
+        assert_eq!(classify_header_status(demo), HeaderStatus::Waiting);
+    }
+
+    #[test]
+    fn the_focus_states_read_as_the_ux_spec_says() {
+        use crate::focus_status::*;
+        let table = [
+            (
+                HeaderStatus::Capturing,
+                "Watching Overwatch",
+                "In game",
+                None,
+                theme::OK,
+            ),
+            (
+                HeaderStatus::CapturingAnyWindow,
+                "Capturing in any window",
+                "In game",
+                Some("Only capture while Overwatch is in front is off in Settings."),
+                theme::OK,
+            ),
+            (
+                HeaderStatus::Paused,
+                "Paused while Overwatch isn't in front",
+                "Paused",
+                Some("Your game keeps going. Reading resumes when you switch back."),
+                theme::TEXT_3,
+            ),
+            (
+                HeaderStatus::FocusUnknown,
+                "Can't tell which window is in front",
+                "?",
+                Some("Capturing all the time on this desktop."),
+                theme::WARN,
+            ),
+        ];
+        for (status, long, short, tip, color) in table {
+            assert_eq!(long_label(status), long);
+            assert_eq!(short_label(status), short);
+            assert_eq!(detail(status), tip);
+            assert_eq!(header_status_color(status), color, "{status:?}");
+        }
+        assert_eq!(UNREADABLE_ACTION, "Select to change this in Settings.");
+        assert!(
+            shows_time(HeaderStatus::Capturing) && shows_time(HeaderStatus::CapturingAnyWindow)
+        );
+        assert!(!shows_time(HeaderStatus::Paused) && !shows_time(HeaderStatus::FocusUnknown));
+        // Red is never a focus colour; the classic header ignores them.
+        for status in [HeaderStatus::Paused, HeaderStatus::FocusUnknown] {
+            assert_ne!(header_status_color(status), theme::DANGER);
+            assert_eq!(classic_status_color(status), theme::OK);
+        }
     }
 
     #[test]

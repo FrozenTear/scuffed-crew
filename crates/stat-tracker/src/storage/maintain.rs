@@ -210,12 +210,17 @@ impl LocalStore {
             std::fs::remove_dir_all(&fresh_dir)?;
         }
 
-        let (matches, sessions, tombstones) = {
+        // Rows as stored (with any per-row timeline copies they carry), plus
+        // the one-per-game timeline records and the migration marker: an
+        // older vacuum that copied only the rows lost them.
+        let (matches, sessions, tombstones, timelines, migrated) = {
             let old = LocalStore::open(data_dir).await?;
             (
-                old.get_all_matches().await?,
+                old.get_all_matches_raw().await?,
                 old.get_all_sessions().await?,
                 old.get_pending_tombstones().await?,
+                old.all_timelines().await?,
+                old.timeline_migrated(),
             )
         };
 
@@ -230,6 +235,12 @@ impl LocalStore {
         }
         for t in &tombstones {
             fresh.insert_tombstone(t).await?;
+        }
+        for t in &timelines {
+            fresh.put_timeline(t).await?;
+        }
+        if migrated {
+            fresh.write_timeline_marker().await?;
         }
         drop(fresh);
         // Dropping a handle only starts SurrealKV's close: the memtable flush

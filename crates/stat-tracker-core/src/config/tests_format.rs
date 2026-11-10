@@ -2,6 +2,26 @@ use super::tests::settings_shaped_without_shadow;
 use super::*;
 
 #[test]
+fn bans_picks_reader_defaults_on_and_is_written_only_when_off() {
+    assert!(Config::default().bans_picks_reader);
+    let raw = toml::to_string_pretty(&Config::default()).unwrap();
+    assert!(!raw.contains("bans_picks_reader"), "{raw}");
+    let old: Config = toml::from_str("data_dir = \"/tmp/x\"\n").unwrap();
+    assert!(
+        old.bans_picks_reader,
+        "a file from before the key reads as on"
+    );
+    let off: Config = toml::from_str("data_dir = \"/tmp/x\"\nbans_picks_reader = false\n").unwrap();
+    assert!(!off.bans_picks_reader);
+    let saved = toml::to_string_pretty(&off).unwrap();
+    assert!(saved.contains("bans_picks_reader = false"), "{saved}");
+    let on_again: Config =
+        toml::from_str("data_dir = \"/tmp/x\"\nbans_picks_reader = true\n").unwrap();
+    assert!(on_again.bans_picks_reader);
+    assert!(on_again.name_reader, "independent of the names reader");
+}
+
+#[test]
 fn name_reader_defaults_on_and_stays_independent_of_the_cv_reader() {
     assert!(Config::default().name_reader);
     let raw = toml::to_string_pretty(&Config::default()).unwrap();
@@ -88,6 +108,7 @@ fn sample(full: bool) -> Config {
             Vec::new()
         },
         debug_ocr: full,
+        debug_save_pregame_screens: full,
         report_kit_max_games: full.then_some(80),
         report_kit_max_mb: full.then_some(1000),
         ocr_threads: full.then_some(2),
@@ -108,6 +129,7 @@ fn sample(full: bool) -> Config {
         // On is the default and is left out of the file. The full sample
         // sets the explicit off so the round trip keeps that line.
         name_reader: !full,
+        bans_picks_reader: !full,
         player_names: if full {
             vec!["FrozenAlt".into()]
         } else {
@@ -132,12 +154,14 @@ fn toml_save_format_roundtrips_optional_fields_set_and_unset() {
             assert!(raw.contains("[sync]"), "{raw}");
             assert!(raw.contains("ocr_threads"), "{raw}");
             assert!(raw.contains("name_reader = false"), "{raw}");
+            assert!(raw.contains("bans_picks_reader = false"), "{raw}");
         } else {
             assert!(!raw.contains("capture_output"), "{raw}");
             assert!(!raw.contains("player_name"), "{raw}");
             assert!(!raw.contains("[sync]"), "{raw}");
             assert!(!raw.contains("ocr_threads"), "{raw}");
             assert!(!raw.contains("name_reader"), "{raw}");
+            assert!(!raw.contains("bans_picks_reader"), "{raw}");
         }
         let back: Config = toml::from_str(&raw).expect("toml 1 output must parse");
         assert_eq!(back, cfg);

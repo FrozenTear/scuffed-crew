@@ -15,6 +15,7 @@
 mod account_card;
 pub mod aggregate;
 pub mod app;
+mod bans_picks_setting;
 /// Shared with build.rs; the lib only compiles it for its tests.
 #[cfg(test)]
 mod build_id_hash;
@@ -29,10 +30,27 @@ pub mod companion_gate;
 #[cfg(test)]
 mod copy_rules;
 pub mod daemon;
+mod filter_chips;
 pub mod fixtures;
+mod fixtures_bans;
+mod fixtures_full;
+mod fixtures_games;
+mod focus_status;
 mod form_widgets;
 pub mod games;
+mod games_bans;
+mod games_bans_view;
+mod games_delete;
+mod games_detail;
+mod games_panel;
+mod games_picker;
+mod games_retry;
+mod games_rows;
+mod games_state;
+mod games_table;
+mod hero_pack_hint;
 pub mod heroes;
+mod heroes_page;
 pub mod hotkey;
 pub mod icons;
 #[cfg(test)]
@@ -40,6 +58,7 @@ mod include_tracked;
 pub mod instance;
 pub mod layout;
 pub mod maps;
+pub mod maps_tab;
 pub mod model;
 pub mod nav;
 pub mod nav_fit;
@@ -48,13 +67,22 @@ pub mod overlay;
 #[cfg(feature = "companion")]
 pub mod overlay_shell;
 pub mod overview;
+mod overview_chips;
+mod overview_heroes;
+mod overview_main;
+mod overview_page;
+mod overview_side;
 pub mod report;
 pub mod restart_prompt;
 pub mod seasons;
+pub mod seasons_tab;
+mod session_bits;
+mod session_window;
 pub mod settings;
 pub mod settings_cards;
 mod settings_env;
 mod settings_fixed;
+mod settings_keys;
 pub mod settings_model;
 mod settings_open;
 pub mod settings_page;
@@ -62,18 +90,26 @@ mod settings_rows;
 pub mod settings_save;
 pub mod settings_update;
 pub mod setup_guide;
+mod small_sample;
 pub mod snapshot;
+mod stat_tiles;
+pub mod tab_bits;
 pub mod theme;
 pub mod tracker_status;
 pub mod tray;
 pub mod uninstall;
 pub mod update;
 mod update_check;
+#[cfg(test)]
+mod update_pretag06_tests;
 mod what_leaves;
 pub mod widgets;
+mod winrate_bar;
 
 #[cfg(test)]
 mod tests_settings_to_config;
+#[cfg(test)]
+mod tests_uninstall_names;
 
 pub use aggregate::{Aggregates, SeasonWindow, aggregate};
 pub use cli::{Cli, FixtureKind};

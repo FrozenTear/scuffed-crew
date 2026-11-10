@@ -61,13 +61,37 @@ pub struct BarLayout {
     /// Title, tabs and status on one line; otherwise tabs on a second line.
     pub one_line: bool,
     pub icons: bool,
-    /// "Tracker ready · last game 00:40" rather than "Ready".
-    pub long_status: bool,
+    /// How much the status says ([`StatusForm`]).
+    pub status: StatusForm,
     /// "⚠ 159 ›" rather than "⚠ 159 need a look ›".
     pub compact_chip: bool,
     /// Side gutter, the same as the page under the bar.
     pub gutter: f32,
 }
+
+/// How much the status words say.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusForm {
+    /// "Tracker ready · last game 00:40".
+    Long,
+    /// "Watching Overwatch · 00:40": the Capturing states only, from
+    /// [`crate::nav::STATUS_MEDIUM_MIN`]. Other states fall back to Short.
+    Medium,
+    /// "Ready", "In game", "Paused", or the "?" button.
+    Short,
+}
+
+impl BarLayout {
+    /// The status says the most it can ([`StatusForm::Long`]).
+    pub fn long_status(&self) -> bool {
+        self.status == StatusForm::Long
+    }
+}
+
+/// The round "?" button that stands for the unreadable pill under 1100px.
+pub const QUESTION_BUTTON: f32 = 28.0;
+/// Border of the unreadable pill, both sides.
+const PILL_BORDER: f32 = 2.0;
 
 /// Text weight for [`text_width`]. `Heavy` covers semibold to extra bold
 /// with the extra bold advances, so it never comes out short.
@@ -155,6 +179,29 @@ pub fn badge_width(count: usize) -> f32 {
     text_width(&count.to_string(), SIZE_BADGE, Weight::Heavy) + 2.0 * BADGE_PAD_X
 }
 
+/// The status slot for `status` in `form`: the unreadable pill or its "?"
+/// button, else [`status_width`] (a dot or the pause ring, words, time).
+pub fn status_slot_width(
+    status: HeaderStatus,
+    form: StatusForm,
+    label: &str,
+    time: Option<&str>,
+) -> f32 {
+    if status != HeaderStatus::FocusUnknown {
+        return status_width(label, time);
+    }
+    if form == StatusForm::Short {
+        return QUESTION_BUTTON;
+    }
+    2.0 * CHIP_PAD_X
+        + PILL_BORDER
+        + DOT
+        + DOT_GAP
+        + text_width(label, SIZE_STATUS, Weight::Medium)
+        + CHIP_GLYPH_GAP
+        + text_width(CHEVRON, SIZE_STATUS, Weight::Heavy)
+}
+
 /// Dot, words, and the time when there is one.
 pub fn status_width(label: &str, time: Option<&str>) -> f32 {
     DOT + DOT_GAP
@@ -182,16 +229,16 @@ fn right_width(
     status: HeaderStatus,
     last_game: Option<&str>,
     count: usize,
-    long: bool,
+    form: StatusForm,
     compact: bool,
 ) -> f32 {
-    let (label, time) = crate::nav::bar_status(status, last_game, long);
+    let (label, time) = crate::nav::bar_status(status, last_game, form);
     let chip = if count > 0 {
         CHIP_GAP + chip_width(count, compact)
     } else {
         0.0
     };
-    status_width(&label, time.as_deref()) + chip
+    status_slot_width(status, form, &label, time.as_deref()) + chip
 }
 
 /// Width the one-line bar needs at window `width` in the form given.
@@ -212,19 +259,20 @@ pub fn one_line_width(
         + title_gap
         + tabs_width(form.icons, count)
         + MIN_GAP
-        + right_width(
-            status,
-            last_game,
-            count,
-            form.long_status,
-            form.compact_chip,
-        )
+        + right_width(status, last_game, count, form.status, form.compact_chip)
 }
 
 /// First line of the two-line bar: title, room, status and chip.
 pub fn first_line_width(gutter: f32, right: f32) -> f32 {
     2.0 * gutter + BRAND_WIDTH + MIN_GAP + right
 }
+
+/// Spare width a fuller form needs beyond what it measures before the bar
+/// goes back to it. Going down to a shorter form is at once, as soon as
+/// the current one does not fit; the 24 px keeps a label from flipping back
+/// and forth when the window width or a ticking time sits right at the
+/// threshold.
+pub const FIT_HYSTERESIS: f32 = 24.0;
 
 /// The fullest bar form that fits `width`.
 pub fn layout(
@@ -233,37 +281,128 @@ pub fn layout(
     last_game: Option<&str>,
     count: usize,
 ) -> BarLayout {
+    layout_after(width, status, last_game, count, None)
+}
+
+/// [`layout`] for a bar drawn again after `prev`, the form it had for the
+/// same status: it keeps `prev` while that still fits, and goes back to a
+/// fuller form only once that one fits with [`FIT_HYSTERESIS`] to spare.
+pub fn layout_after(
+    width: f32,
+    status: HeaderStatus,
+    last_game: Option<&str>,
+    count: usize,
+    prev: Option<BarLayout>,
+) -> BarLayout {
     let width = if width.is_finite() { width } else { 0.0 };
     let gutter = crate::theme::page_gutter(width);
     let icons_allowed = width >= crate::nav::TAB_ICONS_MIN;
-    let long_allowed = width >= crate::nav::STATUS_LONG_MIN;
-    let form = |icons, long_status, compact_chip| BarLayout {
+    let long_allowed = width >= crate::nav::status_long_min(status);
+    let medium_allowed = width >= crate::nav::STATUS_MEDIUM_MIN;
+    let form = |icons, status, compact_chip| BarLayout {
         one_line: true,
         icons,
-        long_status,
+        status,
         compact_chip,
         gutter,
     };
+    let fullest = if long_allowed {
+        StatusForm::Long
+    } else if medium_allowed {
+        StatusForm::Medium
+    } else {
+        StatusForm::Short
+    };
+    let medium = if medium_allowed {
+        StatusForm::Medium
+    } else {
+        StatusForm::Short
+    };
     let tries = [
-        form(icons_allowed, long_allowed, false),
-        form(icons_allowed, false, false),
-        form(false, false, false),
-        form(false, false, true),
+        form(icons_allowed, fullest, false),
+        form(icons_allowed, medium, false),
+        form(icons_allowed, StatusForm::Short, false),
+        form(false, StatusForm::Short, false),
+        form(false, StatusForm::Short, true),
     ];
-    if let Some(fit) = tries
-        .into_iter()
-        .find(|f| one_line_width(width, *f, status, last_game, count) <= width)
-    {
+    let fits = |f: &BarLayout, spare: f32| {
+        one_line_width(width, *f, status, last_game, count) + spare <= width
+    };
+    let first_that_fits = |spare: f32| tries.iter().position(|f| fits(f, spare));
+    let same_form = |a: &BarLayout, b: &BarLayout| {
+        (a.icons, a.status, a.compact_chip) == (b.icons, b.status, b.compact_chip)
+    };
+    let tight = first_that_fits(0.0);
+    let roomy = first_that_fits(FIT_HYSTERESIS);
+    let chosen = match prev {
+        None => tight,
+        // Was one line: keep that form while it fits, else the fullest
+        // that does; a fuller form only with room to spare.
+        Some(prev) if prev.one_line => {
+            let kept = tries
+                .iter()
+                .position(|f| same_form(f, &prev))
+                .filter(|&at| fits(&tries[at], 0.0));
+            match kept {
+                Some(at) => Some(roomy.map_or(at, |fuller| fuller.min(at))),
+                None => tight,
+            }
+        }
+        // Was two lines: one line again only with room to spare.
+        Some(_) => roomy,
+    };
+    if let Some(fit) = chosen.map(|at| tries[at]) {
         return fit;
     }
-    let full = right_width(status, last_game, count, false, false);
+    let full = right_width(status, last_game, count, StatusForm::Short, false);
+    let first_line = first_line_width(gutter, full);
+    // The two-line bar's chip goes back to its words with the same spare.
+    let was_compact = prev.is_some_and(|p| !p.one_line && p.compact_chip);
+    let spare = if was_compact { FIT_HYSTERESIS } else { 0.0 };
     BarLayout {
         one_line: false,
         icons: false,
-        long_status: false,
-        compact_chip: first_line_width(gutter, full) > width,
+        status: StatusForm::Short,
+        compact_chip: first_line + spare > width,
         gutter,
     }
+}
+
+/// The bar's last form and the status it had it for. A status change
+/// starts the form from the measure again, with no hysteresis: the words
+/// changed, so there is no earlier fit to hold, and it is measured once.
+pub type BarMemory = std::cell::Cell<Option<(HeaderStatus, BarLayout)>>;
+
+thread_local! {
+    /// The top bar's form, kept by the thread that draws it.
+    static BAR_FIT: BarMemory = const { std::cell::Cell::new(None) };
+}
+
+/// [`layout_remembering`] with the form the drawing thread kept.
+pub fn layout_kept(
+    width: f32,
+    status: HeaderStatus,
+    last_game: Option<&str>,
+    count: usize,
+) -> BarLayout {
+    BAR_FIT.with(|memory| layout_remembering(memory, width, status, last_game, count))
+}
+
+/// [`layout_after`] with the form kept in `memory` between draws.
+pub fn layout_remembering(
+    memory: &BarMemory,
+    width: f32,
+    status: HeaderStatus,
+    last_game: Option<&str>,
+    count: usize,
+) -> BarLayout {
+    let prev = memory
+        .get()
+        .filter(|(was, _)| *was == status)
+        .map(|(_, fit)| fit);
+    let fit = layout_after(width, status, last_game, count, prev);
+    memory.set(Some((status, fit)));
+    fit
 }
 
 #[cfg(test)]
@@ -323,7 +462,13 @@ mod tests {
                             let need = one_line_width(width, fit, status, time, count);
                             assert!(need <= width, "{width} {status:?} {count}: {need}");
                         } else {
-                            let right = right_width(status, time, count, false, fit.compact_chip);
+                            let right = right_width(
+                                status,
+                                time,
+                                count,
+                                StatusForm::Short,
+                                fit.compact_chip,
+                            );
                             assert!(
                                 first_line_width(fit.gutter, right) <= width,
                                 "{width} {status:?} {count}"
@@ -345,10 +490,10 @@ mod tests {
         // Spec p8: one line with icons, "Ready" and a 3-digit chip at 1024.
         let at_1024 = layout(1024.0, HeaderStatus::Waiting, Some("00:40"), 159);
         assert!(at_1024.one_line && at_1024.icons && !at_1024.compact_chip);
-        assert!(!at_1024.long_status);
+        assert!(!at_1024.long_status());
         // Spec p1: the long status with the time at 1600.
         let at_1600 = layout(1600.0, HeaderStatus::Waiting, Some("00:40"), 159);
-        assert!(at_1600.one_line && at_1600.icons && at_1600.long_status);
+        assert!(at_1600.one_line && at_1600.icons && at_1600.long_status());
         assert!(!at_1600.compact_chip);
         // The long status from the breakpoint, with a 3-digit chip.
         let at_long = layout(
@@ -357,7 +502,7 @@ mod tests {
             Some("00:40"),
             159,
         );
-        assert!(at_long.long_status && at_long.icons);
+        assert!(at_long.long_status() && at_long.icons);
         // No icons under the spec's 960 step, one line down to about 860.
         assert!(!layout(959.0, HeaderStatus::Waiting, None, 0).icons);
         assert!(layout(900.0, HeaderStatus::Waiting, Some("00:40"), 1).one_line);
@@ -374,12 +519,164 @@ mod tests {
                 Some("Oct 18, 23:14"),
                 159,
             );
-            if fit.long_status {
+            if fit.long_status() {
                 assert!(fit.icons || width < crate::nav::TAB_ICONS_MIN);
             }
             if fit.compact_chip && fit.one_line {
-                assert!(!fit.icons && !fit.long_status);
+                assert!(!fit.icons && !fit.long_status());
             }
         }
+    }
+
+    #[test]
+    fn the_focus_states_take_the_spec_forms() {
+        let fit = |width, status| layout(width, status, Some("00:40"), 159).status;
+        assert_eq!(fit(1600.0, HeaderStatus::Capturing), StatusForm::Long);
+        assert_eq!(fit(1366.0, HeaderStatus::Capturing), StatusForm::Medium);
+        assert_eq!(fit(1024.0, HeaderStatus::Capturing), StatusForm::Short);
+        assert_eq!(
+            fit(1600.0, HeaderStatus::CapturingAnyWindow),
+            StatusForm::Long
+        );
+        for status in [HeaderStatus::Paused, HeaderStatus::FocusUnknown] {
+            assert_ne!(fit(1600.0, status), StatusForm::Short, "{status:?}");
+            assert_eq!(fit(1024.0, status), StatusForm::Short, "{status:?}");
+        }
+        // The pill is wider than the same words with a dot; under 1100px it
+        // is the round "?" button.
+        let words = crate::focus_status::UNREADABLE_LONG;
+        assert!(
+            status_slot_width(HeaderStatus::FocusUnknown, StatusForm::Medium, words, None)
+                > status_width(words, None)
+        );
+        assert_eq!(
+            status_slot_width(HeaderStatus::FocusUnknown, StatusForm::Short, "?", None),
+            QUESTION_BUTTON
+        );
+        // The long focus words measure about 200 to 260 px.
+        for words in [crate::focus_status::PAUSED_LONG, words] {
+            let w = status_width(words, None);
+            assert!((180.0..=280.0).contains(&w), "{words}: {w}");
+        }
+    }
+
+    /// The states and times the hysteresis tests walk.
+    fn cases() -> Vec<(HeaderStatus, Option<&'static str>, usize)> {
+        let mut out = Vec::new();
+        for status in ALL {
+            for time in [None, Some("00:40"), Some("Oct 18, 23:14")] {
+                for count in [0, 1, 12, 159] {
+                    out.push((status, time, count));
+                }
+            }
+        }
+        out
+    }
+
+    /// Below every fixed width break (icons from 960, 24 px of spare width
+    /// included) the form only
+    /// changes by what it measures.
+    const MEASURED: std::ops::RangeInclusive<u32> = 720..=935;
+
+    #[test]
+    fn a_narrowing_window_always_gets_a_fitting_form() {
+        for (status, time, count) in cases() {
+            // Walk the window narrower, carrying the form.
+            let mut prev = None;
+            for w in MEASURED.rev() {
+                let width = w as f32;
+                let fit = layout_after(width, status, time, count, prev);
+                if fit.one_line {
+                    let need = one_line_width(width, fit, status, time, count);
+                    assert!(need <= width, "{w} {status:?} {count}: {need}");
+                }
+                prev = Some(fit);
+            }
+            // Shorter is at once: the carried form never overflows (above).
+            // And a form that is already the fullest that fits stays.
+            for w in MEASURED {
+                let width = w as f32;
+                let fresh = layout(width, status, time, count);
+                let held = layout_after(width, status, time, count, Some(fresh));
+                assert_eq!(
+                    held, fresh,
+                    "{w}: a form that fits and is the fullest stays"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_form_does_not_flip_flop_around_a_threshold() {
+        for (status, time, count) in cases() {
+            for w in MEASURED {
+                let width = w as f32;
+                // The form just after the window shrank to `width`: the
+                // fullest that fits there.
+                let shrunk = layout(width, status, time, count);
+                // Up to the spare width wider, it stays.
+                for extra in 0..=(FIT_HYSTERESIS as u32) {
+                    let wider = width + extra as f32;
+                    let again = layout_after(wider, status, time, count, Some(shrunk));
+                    assert_eq!(
+                        (
+                            again.one_line,
+                            again.icons,
+                            again.status,
+                            again.compact_chip
+                        ),
+                        (
+                            shrunk.one_line,
+                            shrunk.icons,
+                            shrunk.status,
+                            shrunk.compact_chip
+                        ),
+                        "{w}+{extra} {status:?} {count} {time:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_jittering_width_changes_the_form_at_most_once_per_crossing() {
+        // Width wobbling 12 px either way around every width in range, with
+        // the form carried, flips at most once: no back and forth.
+        for (status, time, count) in cases() {
+            for centre in (730..=920).step_by(3) {
+                let mut prev = None;
+                let mut forms = Vec::new();
+                for step in 0..40 {
+                    let wobble = if step % 2 == 0 { -12.0 } else { 12.0 };
+                    let fit = layout_after(centre as f32 + wobble, status, time, count, prev);
+                    prev = Some(fit);
+                    let key = (fit.one_line, fit.icons, fit.status, fit.compact_chip);
+                    if forms.last() != Some(&key) {
+                        forms.push(key);
+                    }
+                }
+                assert!(
+                    forms.len() <= 2,
+                    "{centre} {status:?} {count} {time:?}: {forms:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_status_change_measures_fresh_and_a_same_status_keeps_the_form() {
+        let memory = BarMemory::default();
+        let (waiting, paused) = (HeaderStatus::Waiting, HeaderStatus::Paused);
+        let width = 1300.0;
+        let first = layout_remembering(&memory, width, waiting, Some("00:40"), 12);
+        assert_eq!(first, layout(width, waiting, Some("00:40"), 12));
+        assert_eq!(memory.get(), Some((waiting, first)));
+        // A new status ignores the old form: the plain measure, once.
+        let other = layout_remembering(&memory, width, paused, None, 12);
+        assert_eq!(other, layout(width, paused, None, 12));
+        assert_eq!(memory.get(), Some((paused, other)));
+        // The same status again carries the form (see the walks above).
+        let again = layout_remembering(&memory, width, paused, None, 12);
+        assert_eq!(again, other);
     }
 }

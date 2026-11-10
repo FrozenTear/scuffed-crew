@@ -189,6 +189,9 @@ services:
       UPLOAD_DIR: /app/data/uploads
       # Private member bug-report zips. The entrypoint gives this path to scuffed.
       REPORTS_DIR: /app/data/reports
+      # Private member-contributed hero icon PNGs (owner and admins only,
+      # never served as static files). The entrypoint gives this path to scuffed.
+      HERO_ICONS_DIR: /app/data/hero-icons
       # Private recognizer packs. Read-only. See docs/tracker-packs.md.
       PACKS_DIR: /app/data/packs
       # Rate-limiter trusted proxies (comma-separated IPs/CIDRs). Forwarded
@@ -225,13 +228,13 @@ services:
       MATRIX_BOT_ACCESS_TOKEN: ${MATRIX_BOT_ACCESS_TOKEN:-}
       MATRIX_OFFICER_ROOM_ID: ${MATRIX_OFFICER_ROOM_ID:-}
       MATRIX_GENERAL_ROOM_ID: ${MATRIX_GENERAL_ROOM_ID:-}
-      # Off when unset, empty, 0, false, no, or off. Any other value makes
-      # POST /api/stats/upload reject more than 200 matches or 500 deleted
-      # sessions with 413. Leave this blank until tracker builds that send
-      # at most those sizes and handle 413 are in use. The per-token 429,
+      # On by default: POST /api/stats/upload rejects more than 200 matches
+      # or 500 deleted sessions with 413. Blank or unset here passes 1. Set
+      # 0, false, no, or off to turn the cap off (the rollback if trackers
+      # that cannot split batches are still in use). The per-token 429,
       # the per-IP 429 (burst 40, then 1 every 2 seconds, body includes
       # "code":"rate_limited"), and token_expired 401 do not depend on this flag.
-      STATS_UPLOAD_BATCH_CAP: ${STATS_UPLOAD_BATCH_CAP:-}
+      STATS_UPLOAD_BATCH_CAP: ${STATS_UPLOAD_BATCH_CAP:-1}
       BOOTSTRAP_ADMIN_RESET: ${BOOTSTRAP_ADMIN_RESET:-}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-}
@@ -239,6 +242,7 @@ services:
     volumes:
       - uploads-data:/app/data/uploads
       - reports-data:/app/data/reports
+      - hero-icons-data:/app/data/hero-icons
       - packs-data:/app/data/packs:ro
     networks:
       - internal
@@ -256,5 +260,6 @@ volumes:
   surrealdb-data:
   uploads-data:
   reports-data:
+  hero-icons-data:
   packs-data:
   strfry-data:

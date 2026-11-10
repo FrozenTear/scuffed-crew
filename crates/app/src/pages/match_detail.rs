@@ -8,6 +8,7 @@ use crate::routes::Route;
 use crate::util::{StoredUrl, stored_http_url};
 
 use super::public_fetch::{PublicFetch, fetch_public};
+use super::{NotFoundLink, NotFoundPanel};
 
 #[derive(Debug, Clone, Deserialize)]
 struct MatchDetailData {
@@ -160,9 +161,13 @@ pub fn MatchDetail(id: String) -> Element {
                 match data.read().as_ref() {
                     None => rsx! { p { class: "match-status", "Loading..." } },
                     Some(PublicFetch::NotFound) => rsx! {
-                        p { class: "match-status", "Match not found." }
-                        div { class: "match-back",
-                            Link { to: Route::Home {}, "Back home" }
+                        NotFoundPanel {
+                            title: "Match not found",
+                            message: "We could not find that match. It may be private or removed.",
+                            links: vec![
+                                NotFoundLink { label: "Back home", to: Route::Home {} },
+                                NotFoundLink { label: "Members", to: Route::Members {} },
+                            ],
                         }
                     },
                     Some(PublicFetch::Failed) => rsx! {

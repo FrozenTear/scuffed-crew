@@ -320,7 +320,7 @@ fn CommunityFeatures(org_name: Option<String>) -> Element {
                  • NIP-05 verification proves your identity on this org domain\n\
                  • NIP-49 encrypted backups keep your keys safe\n\
                  • NIP-25 reactions let you engage with community content\n\n\
-                 Visit the Identity page to set up your Nostr identity."
+                 Open Account keys from your account menu to set up your key."
             }
         }
     }

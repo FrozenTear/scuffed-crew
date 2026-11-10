@@ -15,9 +15,10 @@ use scuffed_db::{
 use scuffed_types::api::{CursorResponse, PaginationParams};
 use scuffed_types::{
     MatchResult as TypesMatchResult, MatchType as TypesMatchType, PublicMatch, RecentResult,
-    UpcomingMatch, resolve_hero_query,
+    StatsVisibility, UpcomingMatch, resolve_hero_query,
 };
 
+use crate::extractors::OptionalOrgMember;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -319,15 +320,21 @@ fn resolve_members_hero(raw: Option<&str>) -> Result<Option<&'static str>, ()> {
     resolve_hero_query(raw)
 }
 
-/// GET /api/public/members — public member list (cursor-paginated).
+/// GET /api/public/members. Public member list (cursor-paginated).
 ///
 /// Optional `?hero=<name>` (hero-stats W3 B3): attaches `hero_scoped{games,wins,losses,draws,winrate}`
 /// for members who have played that hero. Unknown hero → 400.
 ///
-/// HS-DR P1: hero attach is **page-scoped** (`hero_scoped_for_members` over the
-/// current page's ids only) — not a full-table `member_leaderboard(500)`.
+/// HS-DR P1: hero attach is page-scoped (`hero_scoped_for_members` over the
+/// current page's ids only).
+///
+/// `stats_visibility = private` never gets `hero_scoped`. `members` gets it
+/// only for an active signed-in caller. The member stays on the roster either
+/// way. This list is not a per-member stats route, so it does not answer
+/// `stats_private` or `stats_members_only`.
 pub async fn public_members(
     State(state): State<AppState>,
+    viewer: OptionalOrgMember,
     Query(q): Query<PublicMembersQuery>,
 ) -> Result<Json<CursorResponse<PublicMember>>, (StatusCode, Json<ErrorResponse>)> {
     let pagination = PaginationParams {
@@ -374,7 +381,27 @@ pub async fn public_members(
                     }),
                 )
             })?;
+        let visibility = state
+            .db
+            .stats_visibility_for_ids(&ids)
+            .await
+            .map_err(|_e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "Internal error".into(),
+                    }),
+                )
+            })?;
+        let crew = viewer.0.is_some();
         rows.into_iter()
+            .filter(|r| {
+                visibility
+                    .get(&r.member_id)
+                    .copied()
+                    .unwrap_or(StatsVisibility::Public)
+                    .on_leaderboard(crew)
+            })
             .map(|r| {
                 (
                     r.member_id,

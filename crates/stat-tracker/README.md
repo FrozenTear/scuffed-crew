@@ -20,6 +20,36 @@ install paths and the `.desktop` entry stay the same).
     stream there, so if X11 capture fails nothing captures and the app says
     so. A session that is neither known Wayland nor known X11 may still fall
     back to the portal.
+- **Focus gate (`capture_only_on_screen`, on by default).** Reads pause only
+  when the tracker can read that a window other than Overwatch is focused.
+  Where it cannot tell, capture goes on and the status says `unreadable`.
+  - niri: the IPC socket (`NIRI_SOCKET`), which also lists XWayland windows.
+  - KDE Plasma Wayland: a small KWin script, loaded over D-Bus
+    (`org.kde.KWin /Scripting`), reports the active window to the tracker.
+    Only reports sent by KWin itself count. KWin keeps the script only
+    until it restarts (a reboot or a new login): the tracker loads it again
+    every 30 seconds, which is what brings it back. If KWin refuses it, or
+    the session bus is missing, the gate is unreadable, capture goes on,
+    and the tracker tries again every 30 seconds. The script is unloaded
+    when the tracker stops.
+  - X11 sessions: `_NET_ACTIVE_WINDOW` and the window's `WM_CLASS`. Only a
+    session that is positively X11 (`XDG_SESSION_TYPE=x11`, or
+    `XDG_SESSION_TYPE` unset with no `WAYLAND_DISPLAY`) may pause reads from
+    this read. Any other session type, such as `tty` after `startx`, follows
+    the Wayland rules below: focused or unreadable, never paused.
+  - Other Wayland desktops with XWayland (any session with
+    `WAYLAND_DISPLAY` set or `XDG_SESSION_TYPE=wayland`): the same X11
+    read, but there it reports only focused or unreadable, never paused.
+    XWayland's value can be empty or stale while a native Wayland window
+    has focus, so another X11 window, or none, is unreadable and reads go
+    on. A stale value that still names Overwatch reads as focused. Both
+    cases are fail open: capture goes on rather than stop on a guess.
+  - Anything else (no `NIRI_SOCKET`, not KDE Wayland, no `DISPLAY`):
+    unreadable, capture goes on.
+  - Under systemd these variables come from the session environment: run
+    `systemctl --user import-environment NIRI_SOCKET DISPLAY WAYLAND_DISPLAY
+    XDG_SESSION_TYPE XDG_CURRENT_DESKTOP` and restart the daemon if the log
+    says no focus source was found.
 - **Keyboard access via evdev.** Tab detection (daemon) and the companion
   overlay show/hide shortcut (GUI, default Super+Shift+C) read `/dev/input`.
   The user must be in the `input` group, or have seat `uaccess` on those
@@ -89,10 +119,19 @@ Pin a tag by fetching that tag's bootstrap (the assignment has to be on
 `bash`, because `VAR=x curl … | bash` does not pass `VAR` to `bash`):
 
 ```sh
-TAG=stat-tracker-v0.5.0
+TAG=stat-tracker-v0.6.0-alpha.2.3
 curl --proto '=https' -fsSL "https://raw.githubusercontent.com/FrozenTear/scuffed-crew/${TAG}/crates/stat-tracker/dist/bootstrap.sh" \
   | STAT_TRACKER_TAG="$TAG" STAT_TRACKER_PREFIX="$HOME/.local" bash
 ```
+
+On Arch-based distros the alpha builds are also on the AUR as
+[`scuffed-stat-tracker-alpha-bin`](https://aur.archlinux.org/packages/scuffed-stat-tracker-alpha-bin).
+It provides and conflicts with `scuffed-stat-tracker`, so it replaces
+`scuffed-stat-tracker-bin` and the other way round. Saved games and settings in
+your home folder stay. Both packages use the same
+`scuffed-stat-tracker.service` user unit, so after switching run
+`systemctl --user daemon-reload` and
+`systemctl --user restart scuffed-stat-tracker.service`.
 
 The tarball's `.sha256` is checked before extract. A missing `.sha256` asset
 stops the install. With no minisign public key configured, bootstrap warns and
@@ -156,6 +195,31 @@ An AppImage is removed like any other copy, including the AppImage file.
 A copy outside your home folder is left alone. The app lists the paths and
 says to remove them manually.
 
+### First-run checklist
+
+Two setup steps are easy to miss and cause most first-run problems:
+
+1. **Join the `input` group, then log out and back in.** Without it the
+   daemon cannot read Tab presses from `/dev/input`. Older builds crash on
+   start; newer ones show a warning and keep running without Tab detection.
+   See Platform requirements above for the commands and a check.
+2. **Install Ayatana AppIndicator for Hide-to-tray.** Without it the app
+   starts with no tray icon and a "missing library" notice, and closing the
+   window quits. From 0.6.0-alpha.3 the alpha AUR package pulls it in; for
+   the stable AUR package or the tarball, install it yourself:
+
+   ```sh
+   # Arch / CachyOS
+   sudo pacman -S libayatana-appindicator
+   # Debian / Ubuntu / Mint
+   sudo apt install libayatana-appindicator3-1
+   # Fedora
+   sudo dnf install libayatana-appindicator-gtk3
+   ```
+
+   Then restart `stat-tracker-gui`. Your desktop also needs a tray: KDE and
+   Cinnamon have one built in, plain GNOME needs the AppIndicator extension.
+
 ## Running
 
 ```sh
@@ -200,6 +264,7 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `screencast_pause_between_grabs` | Missing or `true`: the screen stream is paused between grabs on KWin 6.1 or newer and on niri, so the compositor does not draw frames the tracker would throw away (see Screen capture route). Other desktops keep it running. `false` keeps it running everywhere, as before 0.5.0-rc.7. Put it near the top of the file, above any `[section]` line. Env `STAT_TRACKER_SCREENCAST_PAUSE=1` forces pausing on any desktop (for testing) and `=0` turns it off; the env var wins over this key and is not written to this file. Forced on, damage-driven portals (xdg-desktop-portal-wlr, -hyprland, possibly COSMIC) send no frame for a still screen and may trip the fail-safe, and Plasma 5 / KWin 6.0 (and GNOME) get their per-resume signal leak back. Not written unless you set it |
 | `game_process_names` | Only capture, and poll for match start and end, while one of these processes runs, so a Tab press on the desktop or in another app does not record garbage frames (empty disables the gate) |
 | `debug_ocr` | Dump Tab OCR intermediates under `{data_dir}/debug/` and poll Victory/Defeat evidence frames under `{data_dir}/debug/poll/` (confirm + first streak, not every tick) (also env `STAT_TRACKER_DEBUG_OCR=1`). It also turns on `debug/accepted/` (the last 60 accepted scoreboard crops) and `debug/rejected/` (the last 30 rejected frames). Those images are not blanked and show other players' names, so they are off by default. Settings toggle: Save debug images from each capture. With it off, an existing folder is left as it is and the daemon logs once at start that it is no longer written. `debug/mapcrops/` and `debug/mapmiss/` hold only the map-name box and stay on |
+| `debug_save_pregame_screens` | Off by default. Set it in the file or with **Save screens around each game** under Settings, Advanced, Troubleshooting in the desktop app (tagged After restart). Restart the tracker after a change. Saves full-size PNGs of the pre-game screens under `{data_dir}/debug/pregame/<YYYYMMDD_HHMMSS>/` (UTC), one folder per game: the first and last frame of the map vote, the hero ban and the hero select, one ban-results frame, the roster screen (`roster.png` when it first shows, and `roster_last.png`, its last frame, staged on disk as a hidden `.roster_last.png.staged` while it stays up (a full-size PNG written again on every poll the roster shows, through the writer queue of 8 jobs, which drops a job rather than wait when the writer is busy, so the last frame kept can be a poll or more older than the last roster poll) and saved when a phase is read or no roster frame came for 4 seconds; once per game, not looked for after the hero select), and the loading screen within 3 minutes of them. The roster is told by its layout, never by counting player rows, so a 5v5 and a 6v6 roster both count, at any resolution (all as shares of the 16:9 game area): the two near-white TEAM 1 and TEAM 2 header bars (searched from 0.15 to 0.31 of the height, left bar x 0.067 to 0.361, right bar x 0.64 to 0.93, each 0.02 to 0.065 of the height with at least 75 percent white rows, clean above, below, between and outside them, header score at least 0.25) and the coloured strips on the columns' inner edges under them (x 0.386 to 0.404 and 0.596 to 0.614, at least 0.30 of their pixels with chroma, the max minus the min channel, over 55); both must pass. It is checked before the loading, select title and ban-results checks, and at polls under 3 seconds apart (the new reader's 1.5 s) a roster frame is accepted only on the second roster poll in a row with no missed poll between; at 3 seconds or more (ocr-v1's 4 s) one roster poll is enough, since the roster is up only about 7 seconds. The poll interval here is the median of the last three gaps between polls (the configured interval until three are measured), so one missed 1.5 s poll does not drop it to one roster poll, while a cadence that stays slower does. A roster seen before the game's folder exists is staged as a hidden `.pending/.roster.png.staged` and moved into the next game folder as `roster.png` at its first pre-game read (a roster read later in that game is saved over it); with no game folder within 3 minutes, a closed game, stopped capture or a shutdown it is deleted. It is not checked yet on real frames from other PCs, other UI scales or colourblind filters. Each loading, ban-results or roster candidate the checks turn down (a loading slab whose text fails the rule, such as a fade-in or an update band; a frame in the ban-results wait that comes close to the title without passing (at least half the shape rule's bright share, or half the example score), or a held one not saved; a roster near miss with one part passing; a held loading frame dropped, with how long it waited) gets one debug log line with its numbers (at most one a second per label, and the same numbers again only after 30 seconds), and the last one of each label is kept as `rejected_loading.png`, `rejected_ban_results.png` or `rejected_roster.png` in the game's folder, replaced by a newer one at most every 10 seconds (a held loading or ban-results frame that is dropped is always written, once per candidate). They go with their game's folder. A game folder holding only turned-down frames (and maybe staged or temporary files) takes no place in the 20 games, so it never pushes a real game out; at most the newest 5 such folders are kept, older ones deleted. The ban-results frame is taken from the polls after the ban vote ends (from 1.5 s later, or 4 s with ocr-v1) whose title region looks like the ban-results title. The ban icons and scores fill in under the title while the screen stays up, so each later poll that still shows the title replaces the held frame and confirms the one before it, and the latest confirmed one is saved (one frame is held in memory; the confirmed one before it is staged on disk as a hidden `.ban_results.png.staged` until the results end, then renamed or deleted). With no examples this is a built-in shape rule (bright, centred title text on a dark ground), so it works out of the box. Example screenshots of the ban-results screen in `{data_dir}/templates/pregame/ban_results/` replace the shape rule: with any example loaded, the title must match one of them and the shape rule is not used. Examples are read when the tracker starts (restart after adding them), regular `.png` files only (a `.jpg`, which Steam saves by default, is ignored, and so are symlinks), and of those the first 16 by name; none are shipped. The first frame is a candidate only: it is kept when it is confirmed by one more non-phase frame (not a map vote, hero ban or hero select; the loading screen counts), and only within 15 seconds plus one poll interval of the first candidate frame. With `reader = "new"` a frame showing the hero select title also ends the wait (the title mask is loaded only with that reader), and on the very next poll it confirms the held frame, first or later (that title is read with no lag), so a single results frame right before the select title is saved. A later frame that replaced it is confirmed only by the next frame with the results title, or by that select title frame. A plain frame after it means it is not confirmed, since it may be the select sliding in: the confirmed frame before it is then saved when the hero select reads, the game closes or capture stops, inside the window (the window running out drops both). A lone results frame right before a hero select read, or before the game closes, is not saved: nothing tells it from the select sliding in. Staged and temporary files left by a stopped run are deleted when the tracker starts and when the next game folder is made, with any game folder they leave empty; a folder holding only such files never counts toward the 20 games. The loading screen is the ENTERING GAME strip with one line of white text centred on it, at most half the screen wide, with enough white pixels that a strip with no text yet (the fade-in) does not count. There is no minimum width: on real frames the ENTERING GAME text is about 0.17 of the screen width and a game update band (APPLYING UPDATE) about 0.19, too close to tell apart. Instead the text is split into words at the gaps between them (a spinner beside them is left out, only when it is at most 0.045 of the screen width and 0.10 of its height, any shape, since a partly drawn spinner can be flat or thin): exactly two words whose second is at least 0.70 as wide as the first (APPLYING UPDATE, about 0.74; ENTERING GAME is about 0.61) do not count. An update band that does not split that way still counts, and only the game start rule below drops it. The latest frame that passes that check is held in memory (one frame, replaced by each later pass, nothing written for it yet), also with no game folder open (the check then runs on every poll, except while a match is in progress: the open game has no result yet and its scoreboard was read in the last 3 minutes, and no outcome read, sure end title, end-reel hint or map vote, hero ban or hero select read came after that read; the roster check is skipped then too), and saved once, at the next pre-game read in an open game with no loading screen yet: a map vote after it (one that opens the game's folder too), a hero ban or a hero select, but not a hero select between rounds. Saved at a map vote, it is still looked for until the hero ban or hero select, and a later pass is saved over it then, so an older pass before the vote never shuts out the game's own ENTERING GAME. A game start shows two loading screens: ENTERING PREGAME before the map vote or ban vote, and ENTERING GAME just before the roster. The ENTERING PREGAME screen splits into two words of near equal width (about 0.97 on one real frame), so the word rule turns it down like APPLYING UPDATE and it does not fill the loading slot; if it ever passed, it would be saved at the map vote and the later ENTERING GAME frame would replace it at the game start. A slow game start or a map vote after it no longer drops it. A loading frame is dropped and nothing is written when no game folder opens within 3 minutes of it, the game closes, capture stops or the tracker stops (a clean shutdown drops a held loading frame). If the tracker is killed, crashes or loses power before that read, that game's loading screen is lost; its other screens are saved as they happen and are not affected. So an ENTERING GAME frame after an update band replaces it, but an update band that passes the word rule and is not followed by an ENTERING GAME frame before the game starts (the game starting right after it) is saved as the loading screen. On non-English clients only the game start check applies (the word rule is tuned on the English texts). The real-frame check is the opt-in `SCUFFED_LOADING_FRAMES_DIR` run in `tests/integration/loading_frames.rs`. A game starts at its map vote or hero ban; the hero select between rounds is not saved. The same switch saves the screens after each match into the game's folder (the newest pre-game folder when it is that game's own (the first game seen open that opened no earlier than 3 minutes before the folder was first seen, and not passed over by an earlier saving), its last pre-game screen showed within 45 minutes and no earlier saving this run used it, else a new folder, so a game with no pre-game folder of its own never takes an older game's): `postgame_01.png` to at most `postgame_60.png` at full size, and `postgame.json` with each written file's seconds from time zero, a label (`end_title`, `accolades`, `rank_update` or `end_reel` when the tracker's own reads on that frame said so, else `before_end` or `after_end`; a frame with a sure end title read is `end_title` even on the title's first poll, before the second read makes it the signal, and a frame saved with no read right before an end title read is relabelled `end_title`; the rank word is read only once it held still since the poll before, so a frame with no read of its own saved on the poll right before a rank update read is `rank_update` too), time zero as a UTC time (`time_zero_utc`), the confirming poll's time and why the saving ended. Saving starts when the tracker confirms the match end (unchanged: two reads of the same result word) or the game gets its outcome. While a game runs the tracker holds the last few polled frames (about 5 s plus one poll, at most 5 frames), so the first end title frame, a poll or more before the confirmation, is saved too (with no game running, a frame read as an end is held until the next poll); time zero is the first of those frames read as a match end (an outcome read or the end-reel hint) within about 5 s plus one poll before the confirmation, else the confirming poll. The ring and the writer's queue take up to about 144 MB of memory at 1440p and about 323 MB at 4K while the switch is on (at most 5 ring frames plus up to 8 frames waiting to be written, 13 in all; the ring alone about 55 MB and 124 MB; about 192 MB and 431 MB on capture routes with an alpha channel, such as X11); the ring is never written to disk. Then one frame about every second for 30 seconds and about every 2.5 to 3 seconds after, until 90 seconds, 60 frames, or a map vote, hero ban, hero select or loading screen (the ENTERING GAME check of the pre-game saves above, which also runs while saving; the frame showing it is not saved). For one frame a second the poll polls faster while saving: about once a second for up to 90 seconds after each confirmed match end, only with this switch on, and not on a screenshot route that polls less then. These are ordinary polls (the same reads as any poll). A tick is brought forward only after one that handed over a frame and never sooner than 250 ms, so a failing frame falls back to the regular poll. Closing the game or stopping the tracker ends the saving; a failed capture does not. A frame that looks the same as the last saved one (a small grey thumbnail compare) is skipped, except that a still screen is saved again every 5 seconds and every frame is kept in the last 30 seconds, so changed numbers on a still screen are not lost. Each saving logs one info line when it starts and one when it ends (folder, frames, why). After a crash, hidden `.tmp` files of these writes are deleted at start, and a game folder holding only them takes no place in the 20. Nothing looks for these screens' layouts yet (no real frames to tune on), so the labels are best effort. The images are not blanked and show other players' names (the hero select shows your team's), so they are off by default. About 5 to 13 pre-game files (the roster and turned-down frames included) and up to 60 post-game files per game, 3 to 5 MB each at 1440p (about 2.25 times that at 4K): up to about 4 to 7 GB for 20 games at 1440p, about 9 to 15 GB at 4K. The newest 20 game folders are kept and older ones are deleted (a small `.order` file there remembers which are newest, even with a wrong clock). The files stay on this PC: nothing uploads, syncs or reads them. Off means no extra work and no new files; turning it off leaves `debug/pregame/` as it is, and the daemon logs once at start that it is no longer written |
 | `finished_game_close_secs` | Quiet time after the last activity before a finished game is closed and uploaded. Activity is a stored capture, a recorded outcome, an accolade map, or the session open. Never shorter than the 75-second grace. Default 180. Config-file only (no Settings control) |
 | `ocr_threads` | Parallel OCR workers (1–8). Each keeps a ~23 MB Tesseract model in RAM. Omit for auto (`(cores/2)` clamped 2–4). Also env `STAT_TRACKER_OCR_THREADS` or CLI `--ocr-threads N`. Use `1` to minimize RAM; higher speeds Tab OCR. |
 | `shadow_recognizer` | Experimental, off by default. Runs a template digit matcher on each accepted scoreboard in a background thread and logs where it disagrees with OCR to `{data_dir}/shadow/digits.jsonl` (values and confidences only, capped at about 4 MB). With hero icon templates installed in `{data_dir}/templates/heroes/`, the same thread also reads each row's hero and logs it to `{data_dir}/shadow/heroes.jsonl`. It is a log only: with `reader = "ocr-v1"`, stored stats, the capture gate and uploads still come from OCR. When the tracker runs the new reader (`reader = "new"`, or `ocr = "off"` granted), this log runs whatever this key says. Settings toggle: Extra number reader (test). Also env `SCUFFED_SHADOW_RECOGNIZER=1` for one run, which is not written to this file. The tracker reads the file when it starts, so restart it after saving. |
@@ -208,12 +273,12 @@ inherit. See Troubleshooting if capture stays on `CaptureBackend::None`.
 | `ocr` | `"on"` (default) or `"off"`, in any case. Off: the tracker reads every screen with its own reader and does not start Tesseract for reading (no Tesseract instance, no OCR workers, no tessdata lookup). Install or Rebuild reading model in Settings still runs the Tesseract tools when you press it. Off implies the new reader, so `reader` is not consulted and keeps its value. The tracker turns OCR off only when nothing would go unread. That needs a tracker version that reads everything without Tesseract, and three reader packs: a hero pack (heroes-v2 or heroes-v1; heroes-v2-1080 alone is not enough), maps-v1, and a words-v1 with the result words for the end screens, the match-start titles and the end-of-match titles. Otherwise it keeps OCR on for that run and logs why, and Settings refuses the switch with the same reason. With OCR off the map name on the scoreboard has no second reader, so a game whose map is never read is saved without a map until you pick one. For the same reason a co-op event scoreboard (Junkenstein on Adlersbrunn, stats on one team only) is dropped only when its map name is read sure; when it is not, that scoreboard can be saved as a game (not seen on a real frame so far). With OCR off, a Tab is not stored when you have never had the highlight, your hero icon is dead or covered, and no seed is trusted yet (a seed is a learned crop of your name, see `private/own-name` below; with OCR on, the name read finds your row on such a Tab). Two more costs come with the new reader that off implies: a game that ends with a stat never read is not stored (see `debug/unrecorded_games.jsonl` below), and a result screen takes longer to read (about 65 ms against 25 ms per check). Turning OCR back on in the middle of a game keeps what the game has: a stat with no sure read yet stays open until a scoreboard reads it, and the game has no row before that (see `debug/unrecorded_games.jsonl` below). If a pack goes away while the tracker runs with OCR off, what that pack reads is held and the app says which pack it is; the tracker does not go back to OCR by itself. Settings toggle: Use classic OCR (Tesseract). Also env `STAT_TRACKER_OCR=on` or `off` for one run, which is not written to this file. A config from before this key has no `ocr` line and behaves as before (on); nothing needs migrating. The tracker reads the file when it starts, so restart it after saving. What the running tracker decided, and the OCR calls it stopped, are in `{data_dir}/ocr_switch.json` |
 | `setup_completed` | Set when the first-run guide is finished or skipped. Missing or false shows the guide on launch. |
 | `reader_pack_url` | Not used. Reader packs come from the signed-in site, and the setup guide always shows its reader pack step. Older files that still set it load fine. |
-| `player_names` | More in-game names that are all yours (alts, a renamed account). A `#1234` tag is dropped and names under 3 characters are ignored. Empty by default and not written while empty. Not read by this build yet: your row is still found with `player_name` only |
+| `player_names` | More in-game names that are all yours (alts, a renamed account). A `#1234` tag is dropped and names under 3 characters are ignored. Empty by default and not written while empty. Read when the tracker starts: the Tab reader tries `player_name` and every name here (case does not matter, so `öster` and `Öster` are one name), and bug reports drop them like `player_name` |
 | `live_upload` | Upload each game to the site after it closes. On by default and not written while on; `false` keeps games on this computer, queued (read when the tracker starts) |
 | `rank_reader` | Read your rank after Comp games. Off by default and not written while off. Not read by this build yet |
 | `share_stat_pictures` | Upload the grayscale stat area after each game to help train the reader (no names, kept 30 days on the server). Off by default and not written while off. Not read by this build yet: nothing is uploaded |
 | `share_report_pictures` | Whether the stat-area pictures on a misread report start ticked. Off by default and not written while off. Not read by this build yet: reports send pictures as before |
-| `capture_only_on_screen` | Only capture while the game window is visible on the captured screen. On (Auto) by default and not written while on; when the tracker cannot tell (most Wayland desktops), Auto captures. `false` captures whenever the game runs. Not read by this build yet: capture works as in 0.5 |
+| `capture_only_on_screen` | The focus gate: on by default and not written while on. Set it in the file or with **Only capture while Overwatch is in front** (Auto or Off) under Settings, Advanced, Capture and reading in the desktop app (tagged After restart). While a game runs, the desktop app's top bar shows it: Watching Overwatch, Capturing in any window (off), Paused while Overwatch isn't in front, or an amber Can't tell which window is in front that opens the setting. Poll and Tab reads pause while another window is focused, and go on as soon as Overwatch is focused again; a short alt-tab pauses reads only and never ends or splits a game or session. The window counts as Overwatch when its app id or class is exactly `overwatch.exe` (Battle.net under Wine) or `steam_app_2357570` (Steam under Proton), ignoring case. When the tracker cannot tell which window is focused (no source for this desktop, an error, a timeout), capture goes on as before and the gate reports `unreadable` in the status file, a warning, logged once and then at most every 5 minutes. On KDE Plasma Wayland the active window is read through a small KWin script the tracker loads (and unloads at shutdown); if KWin refuses it, the gate is unreadable and capture goes on. `false` turns the gate off: the focused window is never read and reads go on whatever is focused. Restart the tracker after a change. See Platform requirements, Focus gate |
 
 Example low-RAM (a config file must set `data_dir`; the default path is
 only used when there is no file at all, so copy your own path in):
@@ -494,8 +559,8 @@ only these paths are writable:
 | `$XDG_RUNTIME_DIR` (`%t`) | Wayland, X11, D-Bus, and PipeWire sockets |
 
 `{data_dir}` holds `stats.surrealkv`, `commands/`, `debug/` PNGs, portraits,
-`daemon.pid`, `sync_auth.json`, `live_snapshot.json`, `active_game.json`,
-`daemon.log`, and vacuum backups. The default directory is already in the
+`daemon.pid`, `sync_auth.json`, `live_snapshot.json`, `tracker.sock` (the app's query socket while the tracker runs), `active_game.json`,
+`daemon.log`, and vacuum and hero-timeline backups (`stats.surrealkv.pre-*`). The default directory is already in the
 table above. An absolute `data_dir` anywhere else, including another
 folder under `$HOME`, is read-only under the sandbox. `install.sh` writes
 `~/.config/systemd/user/scuffed-stat-tracker.service.d/data-dir.conf` for
@@ -571,12 +636,22 @@ These writes are not the long-running unit, so they are not in
 ## Data & IPC
 
 Single-process SurrealKV store at `{data_dir}/stats.surrealkv`. Because only
-one process can hold it, the daemon exports `live_snapshot.json` after
-mutations (debounced) and appends to `matches.jsonl`; the GUI reads those when
-the daemon holds the lock and sends manual edits through a file command queue
-(`{data_dir}/commands/`).
+one process can hold it, the daemon writes a small `live_snapshot.json` (the
+newest tracked row of each game, every session, pending deletes) while a GUI
+is running, after each finished game, at clean shutdown and at startup. The
+GUI reads that file and sends manual edits through a file command queue
+(`{data_dir}/commands/`). `matches.jsonl` is a record of captures, appended
+per capture and rewritten only for rare corrections; the app does not read
+it.
 
 ## Troubleshooting
+
+**The tracker crashes or keeps restarting right after start, or warns that it
+cannot read the keyboard.** Check that you are in the `input` group in the
+current session: `groups | grep -qw input && echo ok`. If nothing prints, run
+`sudo usermod -aG input "$USER"`, then log out and back in (a new terminal is
+not enough). `journalctl --user -u scuffed-stat-tracker -n 50` shows the
+daemon's last log lines.
 
 **App launcher does not start `stat-tracker-gui` (works from a terminal).**
 Graphical sessions (GNOME, Cosmic, **AerynOS**) often have a PATH that
@@ -593,7 +668,7 @@ update-desktop-database ~/.local/share/applications
 theme name, not a file we install). Log out/in if the launcher still
 caches the old entry.
 
-**`stat-tracker-gui` panics with `Failed to load ayatana-appindicator3` (v0.4.0 / v0.4.1).**
+**No tray icon, or `stat-tracker-gui` panics with `Failed to load ayatana-appindicator3` (v0.4.0 / v0.4.1).**
 `tray-icon` loads `libayatana-appindicator3.so.1` or `libappindicator3.so.1`
 at runtime. Distros that do not ship Ayatana AppIndicator (including
 **AerynOS**) used to abort the GUI. **v0.4.2** starts the Iced window
@@ -605,7 +680,7 @@ install the optional package (if your distro has it):
 sudo apt install libayatana-appindicator3-1
 # Fedora
 sudo dnf install libayatana-appindicator-gtk3
-# Arch
+# Arch / CachyOS
 sudo pacman -S libayatana-appindicator
 ```
 
@@ -685,6 +760,19 @@ In the second case the line names the stats: `never_read` had no sure read on
 any Tab, `read_not_taken` had a read that was not taken because other stats
 had dropped on that Tab. Such a game is stored nowhere and is not uploaded;
 today it shows only in this file and in the journal, not in the app.
+
+**Reads pause while I play, or `focus gate` lines in `daemon.log`.**
+The focus gate pauses reads while another window is focused and logs `focus
+gate: another window is focused, reads pause` once when that starts. If it
+pauses while Overwatch is in front, the game window's app id or class is not
+one the tracker knows (`overwatch.exe`, `steam_app_2357570`); please send a
+problem report with the id your desktop shows (for example `niri msg
+--json focused-window`, or `xprop WM_CLASS` on X11), and choose Off
+for **Only capture while Overwatch is in front** in Settings (or set
+`capture_only_on_screen = false` in `config.toml`) meanwhile. `focus gate: the
+focused window cannot be read, reads go on` means the gate is unreadable on
+this desktop: capture works as without the gate. On KDE Plasma Wayland that
+line names why the KWin script did not load or report.
 
 ## Dev tools
 

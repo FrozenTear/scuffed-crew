@@ -175,7 +175,7 @@ pub fn ReplyInput(
             if needs_server_managed() {
                 div { class: "dm-reply-banner",
                     "Direct messages require a server-managed Nostr identity. "
-                    Link { to: Route::IdentitySettings {}, "Visit identity settings" }
+                    Link { to: Route::IdentitySettings {}, "Open account keys" }
                     " to enable it."
                 }
             }

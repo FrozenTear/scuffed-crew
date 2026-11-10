@@ -15,7 +15,7 @@ Native **Iced 0.14** (wgpu) tracker GUI for the Scuffed Crew stat tracker.
 
 Design: `docs/notes/stat-tracker-gui-redesign-2026-09-02.md` rev 2 tokens + rev 3 responsive layout (branch `docs/tracker-gui-redesign`). Tokens: `radius-card` 16, `radius-inner` 12, page pad 24/32, Urbanist, role tints, `border` / `text-3` / `ok` / `danger`.
 
-0.6 Design: the Scuffed Tracker 0.6 redesign spec FrozenTear approved (variant A, top tabs). The 0.6 layout puts the tabs across the top (Overview, Games, Heroes, Maps, Seasons, Settings) with the tracker status and a "need a look" chip at the right, and a new Settings page. The other screens keep their 0.5 bodies until their own 0.6 PRs.
+0.6 Design: the Scuffed Tracker 0.6 redesign spec FrozenTear approved (variant A, top tabs). The 0.6 layout puts the tabs across the top (Overview, Games, Heroes, Maps, Seasons, Settings) with the tracker status and a "need a look" chip at the right, and a new Settings page. Every tab has its 0.6 screen since 0.6.0-alpha.1.
 
 P0 to P5 are on `main` (PRs #56 to #61). **v0.4.0** is the first Iced-only tracker
 release (Overview / Games / Heroes / Maps / Seasons / Settings + companion
@@ -39,6 +39,9 @@ cargo run -p scuffed-stat-tracker-ui -- --fixture empty
 
 # Sample matches + seasons (picker stays; defaults to the current season)
 cargo run -p scuffed-stat-tracker-ui -- --fixture sample
+
+# 857 games over three seasons, for the 0.6 Maps and Seasons shots
+cargo run -p scuffed-stat-tracker-ui -- --fixture full
 ```
 
 `--fixture` never fetches `GET /api/public/seasons`. It writes a demo `live_snapshot.json` (and sample `seasons.json`) under a temp dir, then reads it back through `storage::read_snapshot`.
@@ -93,11 +96,11 @@ Acceptance: for a **synced** account, season totals on this screen equal My Stat
 
 1. Start the tracker daemon as usual (`stat-tracker` / systemd unit). It owns SurrealKV and polls `<data_dir>/commands/`.
 2. Start this GUI against the same `--data-dir` (or the config/XDG default).
-3. Open **Games**, click a card so it expands, then:
-   - **Victory / Defeat / Draw** → `StoreCommand::SetOutcome`
-   - **Edit stats** → change a field → **Save corrections** → `StoreCommand::EditMatch`
-   - **Delete session** (click twice) → `StoreCommand::DeleteSession`
-   - Hero timeline **Confirm / Dismiss** → `StoreCommand::ResolveSegment` (`confirm` / `dismiss`)
+3. Open **Games** and click a row so it opens, then:
+   - Result **Win / Loss / Draw** → `StoreCommand::SetOutcome`
+   - **Edit** → change a field → **Save corrections** → `StoreCommand::EditMatch` (the map must be one the reader knows; a missing map or hero holds the upload until it is set)
+   - Hero timeline **Confirm / Dismiss**, and **Undo** on a dismissed run → `StoreCommand::ResolveSegment` (`confirm` / `dismiss`, and `clear` for Undo)
+   - Under the 0.6 top tabs the open row ends with **Delete game**, which opens a confirm strip in place of the actions (Cancel first, Esc cancels); deleting writes `StoreCommand::DeleteSession`, and its tombstone goes up on the next sync if the game was uploaded. Under the classic sidebar layout the card still has **Victory / Defeat / Draw** and **Delete session** (click twice) → `StoreCommand::DeleteSession`.
 4. The GUI writes `cmd_<nanos>_<pid>.json` via `storage::queue_command` (tmp + rename).
 5. The daemon applies the file, deletes it, and rewrites `live_snapshot.json`. The GUI polls mtime at 1 Hz and refreshes.
 
@@ -114,14 +117,14 @@ Example payload (same tagged JSON the daemon applies):
 {"op":"set_outcome","session_id":"sess-t1","outcome":"defeat"}
 ```
 
-Fixture mode still writes those files (under the fixture `--data-dir`); there is no daemon to apply them unless you point `--data-dir` at a live tree.
+Fixture mode still writes those files (under the fixture `--data-dir`); there is no daemon to apply them unless you point `--data-dir` at a live tree. A fixture run in its default temp dir starts with no queued commands; one with a `--data-dir` you pass keeps the queued commands there.
 
 ### Flags
 
 | Flag | Meaning |
 |------|---------|
 | `--data-dir PATH` | Daemon data dir (default: config / XDG; temp dir when `--fixture` is set) |
-| `--fixture empty\|sample` | Write a demo `live_snapshot.json` and read it back through `storage::read_snapshot` |
+| `--fixture empty\|sample\|games\|full` | Write a demo `live_snapshot.json` and read it back through `storage::read_snapshot`. `games` is the Games tab set: every row and panel state, with scoreboard pictures. `full`: 857 games for the Maps and Seasons shots. |
 | `--companion` | Run the layer-shell overlay only (needs niri / wlr-layer-shell). |
 | `--seasons-url URL` | `GET /api/public/seasons`; cached to `<data_dir>/seasons.json`. Ignored with `--fixture`. |
 
@@ -141,9 +144,9 @@ cargo run -p scuffed-stat-tracker-ui -- --data-dir "$HOME/.local/share/scuffed-s
 2. **Tracker service**: Start / Stop / Restart (on the 0.6 page Start and Restart are on the status strip). When `~/.config/systemd/user/scuffed-stat-tracker.service` exists, verbs go through `systemctl --user`. Otherwise Start launches `scuffed-stat-tracker` from PATH / next to this binary; Stop reads `daemon.pid` and signals only if `/proc/<pid>/comm` is the tracker.
 3. **Start on login**: `systemctl --user enable --now` / `disable --now` when the unit file is installed.
 4. **Capture**: pick a monitor (or Auto), then **Capture now** for a one-shot preview of what the tracker sees.
-5. On the 0.6 page every change is written to `config.toml` as you make it, with no Save button: switches, chips, dropdowns and radios at once, typed numbers on Enter, Website connection with its own **Apply**. Changes the running tracker reads only at start are tagged **After restart** and counted on the strip until the tracker restarts; the page never restarts it for you. A save edits `config.toml` in place: comments, key order and keys this build does not know stay (a key a save removes takes only its own line; the comment lines above it move onto the entry below, and go with it only when it was the last entry of its table or the entry below is a dotted key, an implicit table such as `[foo.bar]` with no `[foo]`, or an array of tables). Settings shows the values in effect, with the `--token` / `SCUFFED_TOKEN`, `--server` / `SCUFFED_SERVER`, `STAT_TRACKER_DEBUG_OCR` and `STAT_TRACKER_OCR_THREADS` overrides on top (each such row says **Set outside the app**), but a save never writes an override into the file. A change that is refused (a cleartext website URL, a typed number that does not parse) leaves the file and the control as they were and says why. **Show Companion during games** is stored in `<data_dir>/ui_state.json` (`companion_during_games`); off, the Companion never starts and the bar switch, the tray item and the shortcut are off too. The classic layout has no control for it and ignores it. In the classic layout **Save settings** writes today's fields: monitor, in-game name (`player_name`, no `#1234` discriminator), session window, game process names, auto-detect, website URL + token, debug images. **Companion** shortcut is stored in `<data_dir>/ui_state.json` (not `config.toml` / not `StoreCommand`). Restart the service after a change if it is running.
+5. On the 0.6 page every change is written to `config.toml` as you make it, with no Save button: switches, chips, dropdowns and radios at once, typed numbers on Enter, Website connection with its own **Apply**. Capture and reading ends its capture rows with **Read bans and picks** (`bans_picks_reader`, on by default; `STAT_TRACKER_BANS_PICKS_RECOGNIZER=off` overrides it). Troubleshooting holds **Save debug images from each capture** (`debug_ocr`), **Save screens around each game** (`debug_save_pregame_screens`, off by default: the pre-game screens and the screens after each match) and the extra number reader. Changes the running tracker reads only at start are tagged **After restart** and counted on the strip until the tracker restarts; the page never restarts it for you. A save edits `config.toml` in place: comments, key order and keys this build does not know stay (a key a save removes takes only its own line; the comment lines above it move onto the entry below, and go with it only when it was the last entry of its table or the entry below is a dotted key, an implicit table such as `[foo.bar]` with no `[foo]`, or an array of tables). Settings shows the values in effect, with the `--token` / `SCUFFED_TOKEN`, `--server` / `SCUFFED_SERVER`, `STAT_TRACKER_DEBUG_OCR` and `STAT_TRACKER_OCR_THREADS` overrides on top (each such row says **Set outside the app**), but a save never writes an override into the file. A change that is refused (a cleartext website URL, a typed number that does not parse) leaves the file and the control as they were and says why. **Show Companion during games** is stored in `<data_dir>/ui_state.json` (`companion_during_games`); off, the Companion never starts and the bar switch, the tray item and the shortcut are off too. The classic layout has no control for it and ignores it. In the classic layout **Save settings** writes today's fields: monitor, in-game name (`player_name`, no `#1234` discriminator), session window, game process names, auto-detect, website URL + token, debug images. **Companion** shortcut is stored in `<data_dir>/ui_state.json` (not `config.toml` / not `StoreCommand`). Restart the service after a change if it is running.
 6. **Scoreboard reading**: Install puts back the `koverwatch.traineddata` that ships with the release (`restore_bundled_koverwatch`, from `PREFIX/share/scuffed-stat-tracker/tessdata` or `/usr/share/scuffed-stat-tracker/tessdata`). With no bundled copy it shows the reinstall command. It never trains on the host.
-7. **Stored data**: **Compact stored data** (`LocalStore::vacuum`) or **Delete all local match data**. Delete removes the match store, the match log (`matches.jsonl`), `live_snapshot.json`, and `screencast-restore-token` with its `.tmp`, so the next screen share asks for permission again. Settings (`config.toml`), debug images and the logs (`daemon.log`, `perf.log`) stay, and nothing on the website is deleted. Both refuse while the service is running.
+7. **Stored data**: **Compact stored data** (`LocalStore::vacuum`) or **Delete all local match data**. Delete removes the match store, the match log (`matches.jsonl`), `live_snapshot.json`, the hero-timeline backup (`stats.surrealkv.pre-timeline-*`, made when 0.6.0-alpha.1.1 first starts; only the newest is kept), and `screencast-restore-token` with its `.tmp`, so the next screen share asks for permission again. Settings (`config.toml`), debug images and the logs (`daemon.log`, `perf.log`) stay, and nothing on the website is deleted. Both refuse while the service is running.
 8. **Update banner** (Overview + Settings) appears only when GitHub has a newer `stat-tracker-v*` release. It never downloads an installer. The "you're on" version is `SST_RELEASE_VERSION` (runtime or compile-time, set by release CI / packaging) or `scuffed-stat-tracker --version` from the installed daemon, never this crate's `0.1.0`. If none of those resolve, the banner stays hidden.
 9. **Tray**: Show window / Hide window / Hide / show overlay / Quit (`tray-icon`) when Ayatana AppIndicator (or `libappindicator3`) is on the host. Left-click shows the window. The GUI runs as `iced::daemon` so the process stays alive with no window. Hide is `window::close` (destroys the surface, `Mode::Hidden` / minimize stay in niri Alt-Tab); Show is `window::open` and rebinds `window_id`. App state (screen, settings draft, overlay session hold, etc.) is kept in the daemon. Overlay hide is session-scoped: it sticks until the game ends, then the next launch auto-shows. If the system lib is missing, the window still starts (warning + toast); Hide-to-tray does not work and closing the window quits. Optional packages: Debian/Ubuntu `libayatana-appindicator3-1`, Fedora `libayatana-appindicator-gtk3`, Arch `libayatana-appindicator`. AerynOS may not ship it.
 

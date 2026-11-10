@@ -1,5 +1,6 @@
 //! The on-disk files beside the store: the append-only `matches.jsonl` log
-//! and the `live_snapshot.json` export the GUI and report bundle read.
+//! (a record nothing in the app reads) and the `live_snapshot.json` export
+//! the GUI and report bundle read.
 
 use std::path::{Path, PathBuf};
 
@@ -9,12 +10,16 @@ use super::{MatchSession, PersonalMatch};
 
 /// The daemon's live export of the full store, for readers (the GUI) that
 /// can't open SurrealKV while the daemon has it locked.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     /// All matches, newest first (mirrors `get_all_matches`).
     pub matches: Vec<PersonalMatch>,
     /// All sessions, most recently captured first (mirrors `get_all_sessions`).
     pub sessions: Vec<MatchSession>,
+    /// Deleted games whose server delete (tombstone) has not synced yet
+    /// (`get_pending_tombstones`). Absent in older snapshots.
+    #[serde(default)]
+    pub pending_deletes: Vec<String>,
 }
 
 pub(super) fn snapshot_path(data_dir: &Path) -> PathBuf {
@@ -34,10 +39,10 @@ fn match_log_path(data_dir: &Path) -> PathBuf {
 
 /// Rewrite `matches.jsonl` rows of one session (atomic tmp+rename): apply
 /// `update` to each, or drop them entirely when `update` is `None`. The log is
-/// append-only at capture time, so without this back-fills and deletes never
-/// reached the GUI's last-resort fallback — it showed `unknown` outcomes and
-/// deleted games forever (A5). Rare (once per correction), so the O(file)
-/// rewrite is fine; unparseable lines (schema drift) are preserved verbatim.
+/// append-only at capture time; this keeps corrections and deletes in step
+/// (A5). Nothing in the app reads the log, and every call reads, parses and
+/// rewrites the whole file, so call it only for rare corrections, never per
+/// capture. Unparseable lines (schema drift) are preserved verbatim.
 pub(super) fn rewrite_match_log_session(
     data_dir: &Path,
     session_id: &str,
@@ -118,6 +123,7 @@ pub fn force_clear_data_dir(data_dir: &Path) -> Result<(), Box<dyn std::error::E
         std::fs::remove_dir_all(&db_path)?;
     }
     clear_match_log(data_dir);
+    super::remove_pre_timeline_backups(data_dir);
     tracing::info!("force-cleared data directory");
     Ok(())
 }

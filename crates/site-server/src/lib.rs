@@ -2,6 +2,7 @@ pub mod calendar;
 pub mod challenge_store;
 pub mod dm_subscriber;
 pub mod extractors;
+pub mod hero_icons;
 pub mod leaderboard_cache;
 pub mod link_attempts;
 pub mod link_cleanup;
@@ -156,6 +157,11 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .expect("valid stat-report governor config"),
     );
 
+    // POST /api/hero-icons: up to HERO_ICON_MAX_FILES_PER_UPLOAD parts of
+    // HERO_ICON_MAX_BYTES each, plus multipart headers. The per-member limiter
+    // runs in the handler before the body is read.
+    let hero_icon_body_limit = DefaultBodyLimit::max(scuffed_types::HERO_ICON_MAX_REQUEST_BYTES);
+
     // Same per-IP budget as avatar and image uploads (burst 8, then 1 every
     // 10s), but a separate bucket. Using up one does not block the other.
     // The key is the client IP from TrustedProxyIpKeyExtractor, the same
@@ -193,14 +199,16 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
     #[cfg(not(test))]
     let stats_token_governor = stats_upload_limits::StatsUploadGovernor::new();
 
-    // Own per-IP bucket, same budget as token-check (burst 8, then 1 every
-    // 10s). Filling this bucket does not block uploads or token-check.
-    // The governor calls `rate_limited_response` for the JSON 429.
+    // Own per-IP bucket (burst `PACK_IP_BURST`, then 1 every
+    // `PACK_IP_REPLENISH_SECS`), sized so a first install of every pack plus
+    // the list fits in the burst. Filling this bucket does not block uploads
+    // or token-check. The governor calls `rate_limited_response` for the
+    // JSON 429.
     let pack_governor_config = std::sync::Arc::new(
         GovernorConfigBuilder::default()
             .key_extractor(key_extractor.clone())
-            .per_second(10)
-            .burst_size(8)
+            .per_second(scuffed_types::PACK_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::PACK_IP_BURST)
             .finish()
             .expect("valid pack governor config"),
     );
@@ -608,6 +616,14 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             get(routes::stats::member_map_stats),
         )
         .route(
+            "/api/stats/member/{id}/matches",
+            get(routes::stats::member_matches),
+        )
+        .route(
+            "/api/stats/member/{id}/matches/{match_id}",
+            get(routes::stats::member_match),
+        )
+        .route(
             "/api/stats/tokens",
             get(routes::stats::list_daemon_tokens).post(routes::stats::create_daemon_token),
         )
@@ -622,6 +638,39 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route(
             "/api/stats/daemon-config",
             get(routes::stats::daemon_config),
+        )
+        // Contributed hero icons. Private storage, session only. See
+        // routes::hero_icons for the access rules.
+        .route(
+            "/api/hero-icons",
+            post(routes::hero_icons::upload_hero_icons)
+                .layer::<_, std::convert::Infallible>(hero_icon_body_limit)
+                .get(routes::hero_icons::list_hero_icons),
+        )
+        .route(
+            "/api/hero-icons/mine",
+            get(routes::hero_icons::list_mine).delete(routes::hero_icons::delete_mine),
+        )
+        .route(
+            "/api/hero-icons/opt-in",
+            get(routes::hero_icons::get_opt_in).put(routes::hero_icons::put_opt_in),
+        )
+        .route(
+            "/api/hero-icons/members",
+            get(routes::hero_icons::hero_icon_member_counts),
+        )
+        .route(
+            "/api/hero-icons/members/{member_id}",
+            get(routes::hero_icons::member_hero_icons)
+                .delete(routes::hero_icons::delete_member_hero_icons),
+        )
+        .route(
+            "/api/hero-icons/{id}/image",
+            get(routes::hero_icons::hero_icon_image),
+        )
+        .route(
+            "/api/hero-icons/{id}",
+            delete(routes::hero_icons::delete_hero_icon),
         )
         // Calendar ICS feeds moved into `public_routes` (NS2-6) — they are
         // unauthenticated and now share the public per-IP governor.

@@ -135,6 +135,35 @@ pub fn raw_dropped(prev_raw: u32, cur: u32) -> bool {
     cur < prev_raw && !corroborates(prev_raw, cur)
 }
 
+/// True when `value` is a plausible advance from `from` for column `col`
+/// over `elapsed`: within [`JUMP_MAX`] and the rate cap, and not a
+/// trailing-digit inject. A value at or below `from` always passes these
+/// checks; a decrease toward the accepted value is the caller's concern.
+///
+/// Used by the capture path when a later held Tab's refused digit would
+/// replace a stored unsure shown value: that replacement must pass the
+/// same jump and rate-cap filter the gate uses, measured from the shown
+/// value rather than the older accepted one.
+pub fn plausible_from_shown(
+    col: usize,
+    from: u32,
+    value: u32,
+    elapsed: Duration,
+    cur_suspect: bool,
+) -> bool {
+    if value <= from {
+        return true;
+    }
+    if !is_kill_col(col) && is_trailing_digit_inject(from, value, elapsed) {
+        return false;
+    }
+    let delta = value - from;
+    if delta > JUMP_MAX[col] {
+        return false;
+    }
+    value <= from.saturating_add(max_delta(col, elapsed, cur_suspect))
+}
+
 /// True when `col` is the only column past [`JUMP_MAX`] and the others are quiet.
 pub(super) fn sudden_single_field_jump(
     col: usize,

@@ -1,9 +1,11 @@
+mod bans_picks;
 mod game;
 mod heroes;
 mod history;
 mod history_filter;
 mod maps;
 mod overview;
+mod rank;
 pub(crate) mod role;
 
 pub use game::StatsMatch;
@@ -16,12 +18,13 @@ use serde::Deserialize;
 use scuffed_api_client::ApiClient;
 use scuffed_types::api::{MemberSettingsResponse, UpdateMemberSettingsRequest};
 
-use crate::components::ui::{SeasonSelect, use_season_change, use_stats_season};
+use crate::components::ui::{SeasonSelect, TabButton, use_season_change, use_stats_season};
 use crate::components::{Toast, member_pending, use_toast};
 use crate::hooks::use_api_with;
 use crate::routes::Route;
 use crate::sample::Tally;
 use crate::state::{AuthState, use_auth, use_relay_availability_state};
+use crate::stats_privacy;
 
 // -- Shared data models (fetched once here, consumed by the tab modules) --
 
@@ -93,6 +96,14 @@ struct PersonalMatch {
     /// Cell names the reader flagged. Missing or null is None (no marks).
     #[serde(default)]
     suspect_fields: Option<Vec<String>>,
+    /// Bans and picks for the card line. Missing, null or a value that does
+    /// not parse is None. See [`bans_picks`].
+    #[serde(default, deserialize_with = "bans_picks::lenient")]
+    bans_picks: Option<scuffed_types::BansPicks>,
+    /// Rank update read for this game. Missing, null, `{}`, all-null or a
+    /// value that does not parse is None. See [`rank`].
+    #[serde(default, deserialize_with = "rank::lenient")]
+    rank: Option<scuffed_types::MatchRank>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -109,15 +120,20 @@ enum StatsTab {
     History,
 }
 
-// -- Shared helpers --
+/// The one tabpanel under the My Stats tabs.
+const MY_STATS_PANEL: &str = "my-stats-panel";
 
-fn winrate_pct(wins: u32, total: u32) -> f64 {
-    if total == 0 {
-        0.0
-    } else {
-        (wins as f64 / total as f64) * 100.0
+/// Id of a My Stats tab button. The tabpanel is labelled by the selected one.
+fn stats_tab_id(tab: StatsTab) -> &'static str {
+    match tab {
+        StatsTab::Overview => "my-stats-tab-overview",
+        StatsTab::Heroes => "my-stats-tab-heroes",
+        StatsTab::Maps => "my-stats-tab-maps",
+        StatsTab::History => "my-stats-tab-history",
     }
 }
+
+// -- Shared helpers --
 
 /// Class for win-rate TEXT values. Plain text tokens, never a traffic light.
 /// Polarity is carried by the bar against the 50% reference hairline; the only
@@ -152,10 +168,6 @@ pub(super) fn wr_bar_color(tally: Tally) -> &'static str {
         "var(--chart-wr-down)"
     }
 }
-
-/// Role cards mute under this many games. Heroes, maps and seasons follow
-/// the small-sample rule in [`crate::sample`] instead.
-pub(super) const MIN_GAMES: u32 = crate::sample::RECORD_MIN_GAMES;
 
 /// Platform line on `/stats`. Linux supports Wayland and X11. No other OS builds.
 const TRACKER_PLATFORM_COPY: &str =
@@ -285,6 +297,12 @@ const STATS_CSS: &str = r#"
         gap: 1rem;
         margin-bottom: 1.5rem;
     }
+    .my-stats .stats-visibility-note {
+        font-size: 0.8rem;
+        color: var(--text-3);
+        margin: -0.75rem 0 1rem;
+    }
+    .my-stats .stats-visibility-note a { color: var(--accent); }
     .stats-header-actions {
         display: flex;
         flex-wrap: wrap;
@@ -347,7 +365,7 @@ const STATS_CSS: &str = r#"
     }
     .my-stats .stats-wr.muted { color: var(--text-3); font-weight: 400; }
     .stats-gate-note {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: var(--text-3);
         margin: 0 0 0.75rem;
     }
@@ -391,7 +409,7 @@ const STATS_CSS: &str = r#"
         padding-top: 0;
         padding-bottom: 0.15rem;
         border-color: transparent;
-        font-size: 0.65rem;
+        font-size: 0.75rem;
         font-weight: 600;
         letter-spacing: 0.04em;
         text-transform: uppercase;
@@ -424,9 +442,18 @@ const STATS_CSS: &str = r#"
         transition: background 0.15s;
     }
     .match-card:hover { background: var(--surface-2); }
-    /* History rows open the game page. Keep the row's own colors. */
-    a.match-card-link { color: inherit; text-decoration: none; cursor: pointer; }
-    a.match-card-link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    /* History rows open the game page through a stretched link: an empty anchor
+       that covers the whole row. Marked values sit above it, so a button is
+       never inside the link. */
+    .match-card-link { position: relative; isolation: isolate; cursor: pointer; }
+    .match-card-overlay {
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        color: inherit;
+        text-decoration: none;
+    }
+    .match-card-overlay:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
     .match-cards { display: flex; flex-direction: column; gap: 0.3rem; }
     .match-card .match-outcome {
         font-family: var(--font-head);
@@ -488,15 +515,125 @@ const STATS_CSS: &str = r#"
         text-decoration-style: dotted;
         text-underline-offset: 0.18em;
     }
+    /* The mark is a button, so reset the browser look and keep the old size.
+       It and its open note are positioned above the row overlay link, so
+       tapping either one never opens the game. Each sets that in its own single
+       rule, so no other rule can override it by order. */
     .stat-unsure-mark {
+        position: relative;
+        z-index: 1;
         flex-shrink: 0;
-        margin-left: 0.1em;
+        margin: 0 0 0 0.1em;
+        padding: 0 0.2em;
+        border: 0;
+        background: none;
+        color: inherit;
+        font-family: inherit;
+        cursor: pointer;
         font-size: 0.7em;
         font-weight: 700;
         vertical-align: super;
         line-height: 0;
         text-decoration: none;
     }
+    /* One size for the hit box and for the clearance the open note keeps from it. */
+    .stat-unsure { --unsure-hit: 24px; }
+    /* The glyph is about 9px with a zero-height box, far below a tap target.
+       The hit box is a 24 by 24px ::after centered on the glyph. It is part of
+       the button, so it sits above the row overlay link with the button's
+       z-index, and a tap a little off the glyph still lands on the mark. The
+       focus ring is drawn on that box, not on the collapsed button. */
+    .stat-unsure-mark::after {
+        content: "";
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        width: var(--unsure-hit);
+        height: var(--unsure-hit);
+        transform: translate(-50%, -50%);
+        border-radius: 4px;
+    }
+    .stat-unsure-mark:focus-visible {
+        outline: none;
+    }
+    .stat-unsure-mark:focus-visible::after {
+        outline: 2px solid var(--accent);
+        outline-offset: 0;
+    }
+    /* The note is a live region that is always in the page. Closed, it is
+       visually collapsed (out of flow, 1px, clipped), never display: none, so
+       screen readers still announce its text when it fills. */
+    .stat-unsure-note {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        border: 0;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+    }
+    /* Open: a small note that wraps under the value and stays out of the
+       clipped value text. It starts outside the mark's hit box: when it shares
+       the line with the mark (the hero cell) a left margin of half the box
+       clears the box's right edge, and when it wraps under the value a top
+       margin of a quarter of the box clears the box's bottom edge. The stat
+       cells always wrap it under the value, so they set the left gap to zero
+       and keep their width. A click on the note closes it, like the mark. */
+    .stat-unsure-note.stat-unsure-note-open {
+        position: relative;
+        z-index: 1;
+        display: block;
+        flex: 0 0 100%;
+        box-sizing: border-box;
+        width: max-content;
+        height: auto;
+        max-width: min(14rem, 100%);
+        min-width: var(--unsure-note-min, 0);
+        margin: calc(var(--unsure-hit) / 4) 0 0 var(--unsure-note-gap, calc(var(--unsure-hit) / 2));
+        cursor: pointer;
+        overflow: visible;
+        clip-path: none;
+        font-family: var(--font-body, inherit);
+        font-size: 0.75rem;
+        font-weight: 400;
+        line-height: 1.3;
+        letter-spacing: normal;
+        text-transform: none;
+        text-align: left;
+        text-decoration: none;
+        white-space: normal;
+        color: var(--text-2);
+    }
+    .match-card .match-outcome:has(.stat-unsure-note-open),
+    .match-card .match-hero:has(.stat-unsure-note-open) {
+        overflow: visible;
+        flex-wrap: wrap;
+    }
+    .stat-unsure:has(.stat-unsure-note-open) { flex-wrap: wrap; }
+    /* The outcome and hero cells clip their overflow, which would cut the
+       mark's 24px hit box off at the cell edge, and a tap on the cut part would
+       open the game. A cell that holds a mark does not clip: the ellipsis lives
+       on the value text, which shrinks on its own, so the cell stays inside its
+       column either way. */
+    .match-card .match-outcome:has(.stat-unsure-mark),
+    .match-card .match-hero:has(.stat-unsure-mark) {
+        overflow: visible;
+    }
+    /* The stat columns are 2 to 4rem wide, too narrow for a sentence. A cell
+       with an open note sets a minimum note width, which beats the 100% cap, so
+       the note is wider than its cell and spills sideways into the empty space
+       under its neighbours. E, D and A grow it to the right, Dmg and Heal to
+       the left, so it stays inside the stat block. The other cells line up at
+       the top, so no value moves under the note. */
+    .match-stat:has(.stat-unsure-note-open) {
+        --unsure-note-min: 10rem;
+        --unsure-note-gap: 0px;
+    }
+    .match-stat:not(.match-stat-wide):has(.stat-unsure-note-open) { justify-content: flex-start; }
+    .match-stat:not(.match-stat-wide):has(.stat-unsure-note-open) .stat-value-text { margin-left: auto; }
+    .match-stats:has(.stat-unsure-note-open) { align-items: start; }
     .stat-flagged {
         flex: 0 0 auto;
         max-width: 100%;
@@ -847,7 +984,7 @@ const STATS_CSS: &str = r#"
         background: var(--surface-2);
         border: 1px solid var(--warn);
         color: var(--warn);
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.04em;
@@ -906,7 +1043,7 @@ const STATS_CSS: &str = r#"
         align-items: center;
     }
     .filter-label {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         text-transform: uppercase;
         letter-spacing: 0.05em;
         color: var(--text-3);
@@ -927,7 +1064,7 @@ const STATS_CSS: &str = r#"
         background: color-mix(in srgb, var(--accent) 12%, var(--bg));
     }
     .filter-hint {
-        font-size: 0.7rem;
+        font-size: 0.75rem;
         color: var(--text-3);
         margin: 0;
         width: 100%;
@@ -980,15 +1117,15 @@ const STATS_CSS: &str = r#"
         background: var(--bg);
         min-width: 4.5rem;
     }
-    .mode-chip-name { font-size: 0.7rem; color: var(--text-3); text-transform: uppercase; }
+    .mode-chip-name { font-size: 0.75rem; color: var(--text-3); text-transform: uppercase; }
     .mode-chip-wr { font-size: 1.1rem; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
-    .mode-chip-n { font-size: 0.7rem; color: var(--text-3); }
+    .mode-chip-n { font-size: 0.75rem; color: var(--text-3); }
     .form-strip { display: flex; flex-wrap: wrap; gap: 0.35rem; }
     .form-chip {
         width: 1.6rem; height: 1.6rem;
         display: inline-flex; align-items: center; justify-content: center;
         border-radius: 4px;
-        font-size: 0.7rem; font-weight: 700;
+        font-size: 0.75rem; font-weight: 700;
     }
     .form-chip.win { background: color-mix(in srgb, var(--ok) 25%, transparent); color: var(--ok); }
     .form-chip.loss { background: color-mix(in srgb, var(--danger) 25%, transparent); color: var(--danger); }
@@ -1001,7 +1138,7 @@ const STATS_CSS: &str = r#"
     }
     .map-callout.best { border-left: 3px solid var(--ok); }
     .map-callout.worst { border-left: 3px solid var(--danger); }
-    .map-callout-label { font-size: 0.7rem; text-transform: uppercase; color: var(--text-3); }
+    .map-callout-label { font-size: 0.75rem; text-transform: uppercase; color: var(--text-3); }
     .map-callout-name { font-weight: 600; color: var(--text); }
     .map-callout-meta { color: var(--text-2); font-variant-numeric: tabular-nums; }
 
@@ -1142,6 +1279,13 @@ pub fn Stats() -> Element {
         member_stats_url(&auth(), "/api/stats/settings".to_string())
     });
 
+    let visibility = server_settings
+        .data
+        .read()
+        .as_ref()
+        .and_then(|d| d.as_ref())
+        .map(|s| s.stats_visibility);
+
     let mut tab = use_signal(|| StatsTab::Overview);
     let mut toast = use_toast();
 
@@ -1170,6 +1314,8 @@ pub fn Stats() -> Element {
         spawn(async move {
             let body = UpdateMemberSettingsRequest {
                 player_name: if name.is_empty() { None } else { Some(name) },
+                // The name field does not change who can see stats.
+                stats_visibility: None,
             };
             match ApiClient::web()
                 .put_json::<_, MemberSettingsResponse>("/api/stats/settings", &body)
@@ -1288,6 +1434,13 @@ pub fn Stats() -> Element {
                 }
             }
 
+            if let Some(visibility) = visibility {
+                p { class: "stats-visibility-note",
+                    "{stats_privacy::notice(visibility)} "
+                    Link { to: Route::ProfileSettings {}, "Change in settings" }
+                }
+            }
+
             if slim_tracker {
                 div { class: "tracker-slim",
                     {tracker_release_notice(&tracker_notice)}
@@ -1299,7 +1452,7 @@ pub fn Stats() -> Element {
                             onclick: move |_| setup_open.toggle(),
                             if setup_open() { "Hide instructions" } else { "Reinstall instructions" }
                         }
-                        Link { to: Route::StatsTokens {}, "Daemon Tokens" }
+                        Link { to: Route::StatsTokens {}, "Tracker tokens" }
                     }
                 }
             }
@@ -1364,7 +1517,7 @@ pub fn Stats() -> Element {
                     }
                     p {
                         "After installing, start the GUI, then paste this server's URL and a "
-                        Link { to: Route::StatsTokens {}, "daemon token" }
+                        Link { to: Route::StatsTokens {}, "tracker token" }
                         " to begin uploading."
                     }
                     div { class: "tracker-download-links",
@@ -1405,35 +1558,53 @@ pub fn Stats() -> Element {
             }
 
             // Tabs
-            div { class: "stats-tabs",
-                button {
-                    class: if tab() == StatsTab::Overview { "stats-tab active" } else { "stats-tab" },
+            div { class: "stats-tabs", role: "tablist", aria_label: "My Stats sections",
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Overview".to_string(),
+                    id: stats_tab_id(StatsTab::Overview).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
+                    selected: tab() == StatsTab::Overview,
                     onclick: move |_| tab.set(StatsTab::Overview),
-                    "Overview"
                 }
-                button {
-                    class: if tab() == StatsTab::Heroes { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Heroes".to_string(),
+                    id: stats_tab_id(StatsTab::Heroes).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
+                    selected: tab() == StatsTab::Heroes,
                     onclick: move |_| tab.set(StatsTab::Heroes),
-                    "Heroes"
                 }
-                button {
-                    class: if tab() == StatsTab::Maps { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "Maps".to_string(),
+                    id: stats_tab_id(StatsTab::Maps).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
+                    selected: tab() == StatsTab::Maps,
                     onclick: move |_| tab.set(StatsTab::Maps),
-                    "Maps"
                 }
-                button {
-                    class: if tab() == StatsTab::History { "stats-tab active" } else { "stats-tab" },
+                TabButton {
+                    class: "stats-tab".to_string(),
+                    label: "History".to_string(),
+                    id: stats_tab_id(StatsTab::History).to_string(),
+                    controls: MY_STATS_PANEL.to_string(),
+                    selected: tab() == StatsTab::History,
                     onclick: move |_| {
                         tab.set(StatsTab::History);
                         page_cursor.set(None);
                         cursor_history.set(vec![None]);
                     },
-                    "History"
                 }
             }
 
             // Tab content
-            {tab_body}
+            div {
+                id: MY_STATS_PANEL,
+                role: "tabpanel",
+                aria_labelledby: stats_tab_id(tab()),
+                tabindex: "0",
+                {tab_body}
+            }
         }
     }
 }
@@ -1459,6 +1630,27 @@ mod match_row_tests {
                 "played_at": "2026-03-15T12:00:00Z"{extra}
             }}"#
         )
+    }
+
+    #[test]
+    fn list_rows_read_bans_and_picks_when_present_and_ignore_them_when_not() {
+        let plain: PersonalMatch = serde_json::from_str(&row_json("")).expect("row");
+        assert!(plain.bans_picks.is_none());
+        for extra in [
+            r#","bans_picks":null"#,
+            r#","bans_picks":"garbled""#,
+            r#","bans_picks":7"#,
+        ] {
+            let row: PersonalMatch = serde_json::from_str(&row_json(extra)).expect(extra);
+            assert!(row.bans_picks.is_none(), "{extra}");
+        }
+        let raw = row_json(
+            r#","bans_picks":{"bans":[{"hero":"ana","team":"own"}],"lobby_ban":"mei","picks":["dva",null,"no_preference"],"ban_vote":[null],"recognizer":"cv-v1"}"#,
+        );
+        let page: MatchPage =
+            serde_json::from_str(&format!(r#"{{"data":[{raw}],"next_cursor":null}}"#))
+                .expect("page");
+        assert!(page.data[0].bans_picks.is_some());
     }
 
     #[test]
@@ -1569,6 +1761,50 @@ mod header_layout_tests {
     }
 
     #[test]
+    fn open_note_starts_outside_the_mark_hit_box_and_takes_clicks() {
+        // The hit box is centered on the glyph and --unsure-hit wide, so it
+        // reaches half that far past the glyph's center. The open note keeps
+        // half a box of left margin (same line, hero cell) and a quarter box of
+        // top margin (wrapped under the value) so it never covers the box.
+        let note = block_after(STATS_CSS, ".stat-unsure-note.stat-unsure-note-open {");
+        let note_head = note.split('}').next().unwrap();
+        assert!(
+            has_declaration(
+                note_head,
+                "margin: calc(var(--unsure-hit) / 4) 0 0 var(--unsure-note-gap, calc(var(--unsure-hit) / 2))"
+            ),
+            "the note starts outside the hit box: {note_head}"
+        );
+        assert!(
+            has_declaration(note_head, "cursor: pointer"),
+            "a click on the open note closes it: {note_head}"
+        );
+        assert!(
+            !note_head.contains("pointer-events"),
+            "the open note takes the click: {note_head}"
+        );
+        // The stat cells always wrap the note under the value, where only the
+        // top margin matters, so they drop the left gap and keep their width.
+        let cell = block_after(STATS_CSS, ".match-stat:has(.stat-unsure-note-open) {");
+        let cell_head = cell.split('}').next().unwrap();
+        assert!(
+            has_declaration(cell_head, "--unsure-note-gap: 0px"),
+            "{cell_head}"
+        );
+        // The gap is a property of the open rule only: no other open-note rule
+        // sets a margin that could undo it.
+        for rule in STATS_CSS
+            .split('}')
+            .filter(|rule| rule.contains("stat-unsure-note-open") && !rule.contains(":has("))
+        {
+            let head = rule.split('{').nth(1).unwrap_or("");
+            if head.contains("margin") {
+                assert!(head.contains("--unsure-hit"), "{rule}");
+            }
+        }
+    }
+
+    #[test]
     fn narrow_history_row_keeps_badge_mark_and_flagged_value() {
         let phone = block_after(STATS_CSS, "@media (max-width: 720px)");
         let full = block_after(phone, ".reader-badge-full");
@@ -1605,6 +1841,124 @@ mod header_layout_tests {
         let mark = block_after(STATS_CSS, ".stat-unsure-mark {");
         let mark_head = mark.split('}').next().unwrap();
         assert!(mark_head.contains("flex-shrink: 0"), "{mark_head}");
+
+        assert!(
+            has_declaration(mark_head, "position: relative"),
+            "{mark_head}"
+        );
+        assert!(has_declaration(mark_head, "z-index: 1"), "{mark_head}");
+
+        // The open note must stay above the row overlay link in the final
+        // cascade: every rule for the open class keeps it positioned.
+        let open_rules: Vec<(&str, &str)> = STATS_CSS
+            .split('}')
+            .filter_map(|chunk| chunk.rsplit_once('{'))
+            .map(|(before, body)| (before.rsplit([';', '{']).next().unwrap_or(before), body))
+            .filter(|(selector, _)| {
+                selector.contains("stat-unsure-note-open") && !selector.contains(":has(")
+            })
+            .collect();
+        assert!(!open_rules.is_empty(), "missing the open note rule");
+        for (selector, body) in &open_rules {
+            assert!(
+                !body.contains("position: static"),
+                "{selector} would drop the note under the row link: {body}"
+            );
+            assert!(
+                !body.contains("z-index: 0") && !body.contains("z-index: auto"),
+                "{selector}: {body}"
+            );
+        }
+        // A stat cell with an open note gives it a minimum width that beats the
+        // 100% cap, so the note is not squeezed into a 2 to 4rem column.
+        let note_rule = open_rules
+            .iter()
+            .find(|(selector, _)| {
+                selector
+                    .trim()
+                    .ends_with(".stat-unsure-note.stat-unsure-note-open")
+            })
+            .expect("the open note rule")
+            .1;
+        assert!(
+            has_declaration(note_rule, "min-width: var(--unsure-note-min, 0)"),
+            "{note_rule}"
+        );
+        let cell_min = block_after(STATS_CSS, ".match-stat:has(.stat-unsure-note-open) {");
+        let cell_min_head = cell_min.split('}').next().unwrap();
+        assert!(
+            cell_min_head.contains("--unsure-note-min: 10rem"),
+            "{cell_min_head}"
+        );
+        let top = block_after(STATS_CSS, ".match-stats:has(.stat-unsure-note-open) {");
+        let top_head = top.split('}').next().unwrap();
+        assert!(
+            top_head.contains("align-items: start"),
+            "the other cells line up at the top: {top_head}"
+        );
+        // The mark's tap target is a 24 by 24px ::after box that carries the
+        // focus ring, so the tiny glyph is not the only thing a tap can hit.
+        let hit = block_after(STATS_CSS, ".stat-unsure-mark::after {");
+        let hit_head = hit.split('}').next().unwrap();
+        assert!(has_declaration(hit_head, "content: \"\""), "{hit_head}");
+        assert!(
+            has_declaration(hit_head, "position: absolute"),
+            "{hit_head}"
+        );
+        assert!(
+            has_declaration(hit_head, "width: var(--unsure-hit)"),
+            "{hit_head}"
+        );
+        assert!(
+            has_declaration(hit_head, "height: var(--unsure-hit)"),
+            "{hit_head}"
+        );
+        assert!(
+            STATS_CSS.contains(".stat-unsure { --unsure-hit: 24px; }"),
+            "the one place that sets the 24px box"
+        );
+        assert!(
+            !hit_head.contains("pointer-events"),
+            "the hit box must take the tap: {hit_head}"
+        );
+        assert!(
+            !hit_head.contains("z-index"),
+            "the box inherits the button's z-index, above the row link: {hit_head}"
+        );
+        // The outcome and hero cells clip overflow; a cell with a mark must not,
+        // or the hit box is cut at the cell edge.
+        let unclipped = block_after(
+            STATS_CSS,
+            ".match-card .match-hero:has(.stat-unsure-mark) {",
+        );
+        let unclipped_head = unclipped.split('}').next().unwrap();
+        assert!(
+            has_declaration(unclipped_head, "overflow: visible"),
+            "a cell with a mark does not clip its hit box: {unclipped_head}"
+        );
+        assert!(
+            STATS_CSS.contains(".match-card .match-outcome:has(.stat-unsure-mark),"),
+            "the outcome cell is unclipped too"
+        );
+        let focus = block_after(STATS_CSS, ".stat-unsure-mark:focus-visible {");
+        let focus_head = focus.split('}').next().unwrap();
+        assert!(
+            has_declaration(focus_head, "outline: none"),
+            "the collapsed button draws no ring of its own: {focus_head}"
+        );
+        let ring = block_after(STATS_CSS, ".stat-unsure-mark:focus-visible::after {");
+        let ring_head = ring.split('}').next().unwrap();
+        assert!(
+            ring_head.contains("outline: 2px solid var(--accent)"),
+            "{ring_head}"
+        );
+        let last = open_rules.last().unwrap().1;
+        assert!(has_declaration(last, "position: relative"), "{last}");
+        assert!(has_declaration(last, "z-index: 1"), "{last}");
+        // The row link overlay has no z-index, so a z-index of 1 wins over it.
+        let overlay = block_after(STATS_CSS, ".match-card-overlay {");
+        let overlay_head = overlay.split('}').next().unwrap();
+        assert!(!overlay_head.contains("z-index"), "{overlay_head}");
 
         let map = block_after(STATS_CSS, ".match-card .match-map {");
         let map_head = map.split('}').next().unwrap();
@@ -2002,5 +2356,25 @@ mod map_mode_tests {
         assert_eq!(map_game_mode("Watchpoint"), "Escort");
         assert_eq!(map_game_mode("gibraltar"), "Escort");
         assert_eq!(map_game_mode("not a map"), "Other");
+    }
+}
+
+#[cfg(test)]
+mod tab_tests {
+    use super::*;
+
+    #[test]
+    fn my_stats_tab_ids_are_unique_and_differ_from_the_panel() {
+        let tabs = [
+            StatsTab::Overview,
+            StatsTab::Heroes,
+            StatsTab::Maps,
+            StatsTab::History,
+        ];
+        let ids: Vec<&str> = tabs.iter().map(|t| stats_tab_id(*t)).collect();
+        for (i, id) in ids.iter().enumerate() {
+            assert!(!ids[i + 1..].contains(id), "{id}");
+            assert_ne!(*id, MY_STATS_PANEL);
+        }
     }
 }

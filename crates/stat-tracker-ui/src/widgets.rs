@@ -16,6 +16,16 @@ use crate::theme::{
 };
 use scuffed_types::Season;
 
+/// One amber line for a problem that needs the user, such as the keyboard
+/// notice under the top tabs page title.
+pub fn warn_line(notice: &str) -> Element<'static, Message> {
+    text(notice.to_string())
+        .size(SIZE_BODY)
+        .font(FONT_MEDIUM)
+        .color(theme::WARN)
+        .into()
+}
+
 pub fn label_text(s: &str) -> text::Text<'static> {
     text(s.to_ascii_uppercase())
         .size(SIZE_LABEL)
@@ -862,7 +872,7 @@ fn segment_list(game: &Game) -> Element<'static, Message> {
                     Message::ResolveSegment {
                         session_id: sid,
                         segment: seg.index,
-                        confirm: true,
+                        step: crate::commands::SegmentStep::Confirm,
                     },
                 ),
                 button(
@@ -876,7 +886,7 @@ fn segment_list(game: &Game) -> Element<'static, Message> {
                 .on_press(Message::ResolveSegment {
                     session_id: sid2,
                     segment: seg.index,
-                    confirm: false,
+                    step: crate::commands::SegmentStep::Dismiss,
                 }),
             ]
             .spacing(8)
@@ -886,7 +896,7 @@ fn segment_list(game: &Game) -> Element<'static, Message> {
     col.into()
 }
 
-fn edit_form<'a>(form: &'a EditForm, _sid: &str) -> Element<'a, Message> {
+pub(crate) fn edit_form<'a>(form: &'a EditForm, _sid: &str) -> Element<'a, Message> {
     column![
         label_text("Correct stats (blank / unchanged fields keep the OCR read)"),
         row![

@@ -1,14 +1,13 @@
 //! The capture write path and the reads: `insert_match`, sessions,
-//! captures, counts, `export_snapshot`, and the SurrealQL projection rows.
-
-use std::path::Path;
+//! captures, counts, and the SurrealQL projection rows. The live snapshot
+//! export is in `export.rs`.
 
 use serde::Deserialize;
 use surrealdb_types::{Datetime as SurrealDatetime, SurrealValue};
 
 use super::{
-    LocalStore, MatchSession, PersonalMatch, Snapshot, name_recognizer_absent, outcome_is_decided,
-    rewrite_match_log_session, snapshot_path,
+    LocalStore, MatchSession, PersonalMatch, name_recognizer_absent, outcome_is_decided,
+    rewrite_match_log_session,
 };
 
 impl LocalStore {
@@ -16,6 +15,7 @@ impl LocalStore {
         &self,
         mut match_data: PersonalMatch,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         if !match_data.session_id.is_empty() {
             // A capture that was in flight when its game was deleted must not
             // bring the game back. The caller already logged the row to
@@ -36,8 +36,8 @@ impl LocalStore {
                 && let Some(outcome) = self.session_decided_outcome(&match_data.session_id).await?
             {
                 match_data.outcome = outcome.clone();
-                // The caller logged this row as unknown. Keep the fallback
-                // log in step with the store.
+                // The caller logged this row as unknown. Keep the
+                // matches.jsonl record in step with the store.
                 rewrite_match_log_session(
                     &self.data_dir,
                     &match_data.session_id,
@@ -49,14 +49,11 @@ impl LocalStore {
                 );
             }
         }
-        // A later snapshot that did not read a name must keep the recognizer
-        // already stored for this match. A resend that omits it clears the
-        // server's copy.
-        if name_recognizer_absent(&match_data.name_recognizer)
-            && !match_data.session_id.is_empty()
-            && let Some(kept) = self.session_name_recognizer(&match_data.session_id).await?
-        {
-            match_data.name_recognizer = Some(kept);
+        // The game's fields a later snapshot did not read itself, read once
+        // for all of them ([`carry_game_fields`]).
+        if !match_data.session_id.is_empty() && lacks_game_fields(&match_data) {
+            let snaps = self.get_session_snapshots(&match_data.session_id).await?;
+            carry_game_fields(&mut match_data, &snaps);
         }
         let created: Option<PersonalMatch> =
             self.db.create("personal_match").content(match_data).await?;
@@ -119,18 +116,6 @@ impl LocalStore {
             .find(|outcome| outcome_is_decided(outcome)))
     }
 
-    /// The recognizer already stored for this match, newest snapshot first.
-    async fn session_name_recognizer(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-        let snaps = self.get_session_snapshots(session_id).await?;
-        Ok(snaps.into_iter().rev().find_map(|row| {
-            let id = row.name_recognizer?;
-            (!id.is_empty()).then_some(id)
-        }))
-    }
-
     pub async fn match_count(&self) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         let mut result = self
             .db
@@ -147,8 +132,21 @@ impl LocalStore {
             .db
             .query("SELECT * FROM personal_match ORDER BY played_at DESC")
             .await?;
-        let matches: Vec<PersonalMatch> = result.take(0)?;
+        let mut matches: Vec<PersonalMatch> = result.take(0)?;
+        self.hydrate_rows(&mut matches).await?;
         Ok(matches)
+    }
+
+    /// [`Self::get_all_matches`] as stored, without the `hero_timeline`
+    /// records: vacuum copies rows verbatim.
+    pub(super) async fn get_all_matches_raw(
+        &self,
+    ) -> Result<Vec<PersonalMatch>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut result = self
+            .db
+            .query("SELECT * FROM personal_match ORDER BY played_at DESC")
+            .await?;
+        Ok(result.take(0)?)
     }
 
     /// Create the session row, idempotently: if a row with this `session_id`
@@ -159,6 +157,7 @@ impl LocalStore {
         &self,
         session: &MatchSession,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         // A capture that was in flight when its game was deleted must not
         // bring the session row back.
         if self.deleted_here(&session.session_id) {
@@ -198,6 +197,7 @@ impl LocalStore {
         capture_time: SurrealDatetime,
         outcome: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         // A carried board is written after the current row and carries an
         // older timestamp. Do not move last_capture_at backwards. Sessions
         // are listed by that stamp.
@@ -219,6 +219,13 @@ impl LocalStore {
             }
             None => capture_time,
         };
+        // Capture path: the caller passes the open game's id, never an empty
+        // one. Both updates below are keyed by it, and an empty id would bump
+        // every session row that has one.
+        debug_assert!(
+            !session_id.is_empty(),
+            "append_capture with an empty session id"
+        );
         // Fixed fragments only; the outcome is a bind parameter either way.
         let query = if outcome_is_decided(outcome) {
             "UPDATE match_session SET last_capture_at = $time, capture_count += 1, final_outcome = $outcome WHERE session_id = $sid"
@@ -254,38 +261,22 @@ impl LocalStore {
             .query("SELECT * FROM personal_match WHERE session_id = $sid ORDER BY played_at ASC")
             .bind(("sid", session_id.to_string()))
             .await?;
-        let matches: Vec<PersonalMatch> = result.take(0)?;
+        let mut matches: Vec<PersonalMatch> = result.take(0)?;
+        self.hydrate_rows(&mut matches).await?;
         Ok(matches)
     }
 
     pub async fn clear_all_data(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let _rev = self.rev_guard();
         // Local reset only — deliberately does NOT tombstone: clearing a
         // machine must not wipe the account's server history.
         self.db.query("DELETE personal_match").await?;
         self.db.query("DELETE match_session").await?;
         self.db.query("DELETE deleted_session").await?;
+        // The marker stays: an empty store already has the new layout, so
+        // the next start takes no backup and moves nothing.
+        self.db.query("DELETE hero_timeline").await?;
         tracing::info!("cleared all match data from local store");
-        Ok(())
-    }
-
-    /// Export all matches and sessions to `live_snapshot.json` (atomic via
-    /// tmp+rename). SurrealKV is single-process, so while the daemon holds the
-    /// store open the GUI cannot read it — this snapshot is the GUI's live
-    /// data source, refreshed by the daemon after every mutation. Unlike
-    /// `matches.jsonl` (append-only insert log), it reflects back-filled
-    /// outcomes and sync-state changes.
-    pub async fn export_snapshot(
-        &self,
-        data_dir: &Path,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let snapshot = Snapshot {
-            matches: self.get_all_matches().await?,
-            sessions: self.get_all_sessions().await?,
-        };
-        let json = serde_json::to_vec(&snapshot)?;
-        let tmp = data_dir.join("live_snapshot.json.tmp");
-        std::fs::write(&tmp, &json)?;
-        std::fs::rename(&tmp, snapshot_path(data_dir))?;
         Ok(())
     }
 
@@ -302,6 +293,45 @@ impl LocalStore {
                 .format("%Y-%m-%d %H:%M:%S")
                 .to_string()
         })
+    }
+}
+
+/// A new snapshot is missing one of the fields that belong to the whole
+/// game ([`carry_game_fields`]).
+fn lacks_game_fields(m: &PersonalMatch) -> bool {
+    name_recognizer_absent(&m.name_recognizer)
+        || m.bans_picks.is_none()
+        || m.bans_picks_status.is_none()
+        || m.queue_title.is_none()
+}
+
+/// Fill the fields that belong to the whole game, and that a later snapshot
+/// did not read itself, from the game's stored snapshots (oldest first),
+/// newest stored value first:
+///
+/// * the name recognizer (a resend that omits it clears the server's copy);
+/// * the bans and picks result and its status;
+/// * the queue title.
+fn carry_game_fields(m: &mut PersonalMatch, snaps: &[PersonalMatch]) {
+    let newest = || snaps.iter().rev();
+    if name_recognizer_absent(&m.name_recognizer)
+        && let Some(kept) = newest().find_map(|row| {
+            row.name_recognizer
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+        })
+    {
+        m.name_recognizer = Some(kept);
+    }
+    if m.bans_picks.is_none() {
+        m.bans_picks = newest().find_map(|row| row.bans_picks.clone());
+    }
+    if m.bans_picks_status.is_none() {
+        m.bans_picks_status = newest().find_map(|row| row.bans_picks_status.clone());
+    }
+    if m.queue_title.is_none() {
+        m.queue_title = newest().find_map(|row| row.queue_title.clone());
     }
 }
 

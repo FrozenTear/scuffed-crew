@@ -135,7 +135,7 @@ pub enum Message {
     ResolveSegment {
         session_id: String,
         segment: u32,
-        confirm: bool,
+        step: crate::commands::SegmentStep,
     },
     RetryUpload(String),
     RetryRejectedUploads,
@@ -221,6 +221,14 @@ pub enum Message {
     SettingsPage(crate::settings_update::Msg),
     /// A message from the 0.6 top bar ([`crate::nav::update`]).
     Nav(crate::nav::Msg),
+    /// Games tab controls (grouping, time sort, compact rows, filters).
+    Games(crate::games_table::Msg),
+    /// A message from the 0.6 Overview ([`crate::overview_page::update`]).
+    OverviewPage(crate::overview_page::Msg),
+    /// A message from the 0.6 Heroes page ([`crate::heroes_page::update`]).
+    HeroesPage(crate::heroes_page::Msg),
+    /// A message from the 0.6 Maps and Seasons tabs ([`crate::tab_bits::update`]).
+    Pages(crate::tab_bits::PageMsg),
 }
 
 struct NotesDialog {
@@ -335,6 +343,12 @@ pub struct TrackerApp {
     pub filter_outcome: Option<Outcome>,
     /// Games shows only games that need a look (the top bar chip).
     pub needs_look_filter: bool,
+    /// The 0.6 Overview's own state ([`crate::overview_page`]).
+    pub overview_page: crate::overview_page::OverviewPage,
+    /// The 0.6 Heroes page's sort, view and fold ([`crate::heroes_page`]).
+    pub heroes_page: crate::heroes_page::HeroesPage,
+    /// The 0.6 Maps tab's sort and Show row ([`crate::maps_tab`]).
+    pub maps_ui: crate::maps_tab::MapsUi,
     pub toast: Option<String>,
     /// Optional press on the toast. Cleared only when this toast is replaced.
     pub(crate) toast_action: Option<Message>,
@@ -402,7 +416,7 @@ pub struct TrackerApp {
     /// the classic OCR switch.
     pub ocr_switch: settings::OcrSwitchView,
     pub vacuum_busy: bool,
-    snapshot_mtime: Option<SystemTime>,
+    pub(crate) snapshot_mtime: Option<SystemTime>,
     seasons_url: Option<String>,
     last_seasons_attempt: Option<DateTime<Utc>>,
     /// Last update check started (GUI-7). `None` in fixture mode.
@@ -431,6 +445,8 @@ pub struct TrackerApp {
     copy_text: fn(&str) -> Result<crate::clipboard::ClipboardBackend, String>,
     /// Top tabs (0.6 default) or the 0.5 sidebar, from `SCUFFED_TRACKER_LAYOUT`.
     pub nav_style: crate::nav::NavStyle,
+    /// Games tab view state (0.6 top tabs).
+    pub games_tab: crate::games_rows::GamesTab,
     /// The 0.6 Settings page's own state.
     pub(crate) page_state: crate::settings_update::PageState,
 }
@@ -448,14 +464,14 @@ impl TrackerApp {
         let games = games_from_snapshot(&snap);
         let mut seasons = seasons::load_cache(&cli.data_dir);
         if seasons.seasons.is_empty()
-            && cli.fixture == Some(FixtureKind::Sample)
-            && let Ok(list) = serde_json::from_str(crate::fixtures::sample_seasons_json())
+            && let Some(json) = cli.fixture.and_then(crate::fixtures::seasons_json)
+            && let Ok(list) = serde_json::from_str(json)
         {
             seasons.seasons = list;
         }
         let persisted = seasons::load_ui_state(&cli.data_dir);
         let season = seasons::resolve_selection(persisted, &seasons.seasons);
-        let clock = fixture_clock(cli.fixture, &games);
+        let clock = crate::fixtures::clock(cli.fixture, &games);
         let seasons_url = cli.seasons_url.clone();
         let now = Utc::now();
         let (fetch, last_seasons_attempt) =
@@ -591,6 +607,9 @@ impl TrackerApp {
             filter_map: None,
             filter_outcome: None,
             needs_look_filter: false,
+            overview_page: Default::default(),
+            heroes_page: Default::default(),
+            maps_ui: Default::default(),
             toast: None,
             toast_action: None,
             sessions_with_kit: HashSet::new(),
@@ -665,6 +684,7 @@ impl TrackerApp {
                 crate::nav::NavStyle::from_env()
             },
             page_state,
+            games_tab: Default::default(),
         };
         app.refresh_token_rejected();
         app.refresh_kit_sessions();
@@ -765,8 +785,10 @@ impl TrackerApp {
             subs.push(iced::event::listen_with(
                 crate::settings_update::chip_escape,
             ));
+        } else if self.screen == Screen::Games && crate::games_panel::listens(self) {
+            subs.push(iced::event::listen_with(crate::games_panel::close_keys));
         }
-        Subscription::batch(subs)
+        crate::nav::with_clear_on_pointer(self, subs)
     }
 
     pub fn season_window(&self) -> Option<crate::aggregate::SeasonWindow> {
@@ -831,6 +853,7 @@ impl TrackerApp {
                     self.expanded = None;
                     self.editing = false;
                     self.confirm_delete = None;
+                    self.games_tab.deleted_note = None;
                 }
                 if screen != Screen::Settings {
                     self.confirm_clear = false;
@@ -843,9 +866,7 @@ impl TrackerApp {
             }
             Message::SelectSeason(sel) => {
                 self.season = sel;
-                if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
-                    tracing::warn!(error = %e, "failed to write ui_state.json");
-                }
+                seasons::persist_selection(&self.data_dir, &self.season);
                 Task::none()
             }
             Message::ToggleRole(role) => {
@@ -877,9 +898,7 @@ impl TrackerApp {
                             .is_some_and(|id| !self.seasons.seasons.iter().any(|s| s.id == id))
                         {
                             self.season = seasons::default_selection(&self.seasons.seasons);
-                            if let Err(e) = seasons::save_ui_state(&self.data_dir, &self.season) {
-                                tracing::warn!(error = %e, "failed to write ui_state.json");
-                            }
+                            seasons::persist_selection(&self.data_dir, &self.season);
                         }
                         self.refresh_health();
                     }
@@ -962,7 +981,7 @@ impl TrackerApp {
                 } else if let Some(sid) = &self.expanded
                     && let Some(g) = self.games.iter().find(|g| &g.session_id == sid)
                 {
-                    self.edit = EditForm::from_game(g);
+                    self.edit = crate::games_picker::edit_form(&mut self.games_tab, g);
                     self.editing = true;
                 }
                 Task::none()
@@ -980,16 +999,13 @@ impl TrackerApp {
                         .map(|g| crate::commands::save_edit(&self.data_dir, g, &self.edit))
                 });
                 if let Some(sid) = sid {
-                    match saved {
-                        Some(Ok(())) => {
-                            self.replace_toast("Stats corrected");
-                            self.arm_training_toast(&sid, crate::report::GameCategory::WrongStats);
-                        }
-                        Some(Err(e)) => self.replace_toast(e),
-                        None => {}
+                    match &saved {
+                        Some(Ok(saved)) => crate::commands::show_saved(self, &sid, saved),
+                        Some(Err(e)) => self.replace_toast(e.clone()),
+                        None => self.replace_toast(crate::commands::GAME_GONE),
                     }
                 }
-                self.editing = false;
+                self.editing = matches!(saved, Some(Err(_)));
                 Task::none()
             }
             Message::PickMap { session_id, map } => {
@@ -1036,22 +1052,16 @@ impl TrackerApp {
             Message::ResolveSegment {
                 session_id,
                 segment,
-                confirm,
+                step,
             } => {
                 self.replace_toast(
                     match crate::commands::resolve_segment(
                         &self.data_dir,
                         &session_id,
                         segment,
-                        confirm,
+                        step,
                     ) {
-                        Ok(()) => {
-                            if confirm {
-                                "Hero swap confirmed".into()
-                            } else {
-                                "Hero swap dismissed".into()
-                            }
-                        }
+                        Ok(()) => step.toast().into(),
                         Err(e) => format!("Could not update hero swap: {e}"),
                     },
                 );
@@ -1066,6 +1076,10 @@ impl TrackerApp {
             }
             Message::SettingsPage(msg) => crate::settings_update::update(self, msg),
             Message::Nav(msg) => crate::nav::update(self, msg),
+            Message::Games(msg) => crate::games_table::update(self, msg),
+            Message::OverviewPage(msg) => crate::overview_page::update(self, msg),
+            Message::HeroesPage(msg) => crate::heroes_page::update(self, msg),
+            Message::Pages(msg) => crate::tab_bits::update(self, msg),
             Message::SettingsToggle(toggle, value) => {
                 self.settings.set_toggle(toggle, value);
                 Task::none()
@@ -1762,7 +1776,7 @@ impl TrackerApp {
         ))
     }
 
-    fn refresh_kit_sessions(&mut self) {
+    pub(crate) fn refresh_kit_sessions(&mut self) {
         self.sessions_with_kit = self
             .games
             .iter()
@@ -1810,13 +1824,13 @@ impl TrackerApp {
         choices
     }
 
-    fn arm_training_toast(&mut self, session_id: &str, category: crate::report::GameCategory) {
-        if !self.games.iter().any(|g| g.session_id == session_id) {
+    pub(crate) fn arm_training_toast(&mut self, sid: &str, category: crate::report::GameCategory) {
+        if !self.games.iter().any(|g| g.session_id == sid) {
             self.toast_action = None;
             return;
         }
         self.toast_action = Some(Message::Report(crate::report::ReportMessage::OpenGame {
-            session_id: Some(session_id.to_string()),
+            session_id: Some(sid.to_string()),
             category: Some(category),
             training: true,
             choices: Vec::new(),
@@ -2389,7 +2403,7 @@ impl TrackerApp {
             if mtime != self.snapshot_mtime {
                 self.snapshot_mtime = mtime;
                 let snap = snapshot::load_snapshot(&self.data_dir);
-                self.games = games_from_snapshot(&snap);
+                self.games = self.games_tab.games_from(&snap);
                 self.refresh_kit_sessions();
                 self.live_status = crate::tracker_status::classic_live_status(&self.games);
                 self.refresh_health();
@@ -2408,8 +2422,8 @@ impl TrackerApp {
                 self.ocr_switch.health_notice = health;
                 self.refresh_health();
             }
-            self.ocr_switch.capture_notice =
-                settings::daemon_capture_notice(status.as_ref(), self.daemon.pid);
+            // The capture route and keyboard notices, and the debounced focus.
+            self.observe_capture_and_focus(status.as_ref(), std::time::Instant::now());
             let seen = (
                 self.daemon.pid,
                 settings::daemon_share_open(status.as_ref(), self.daemon.pid),
@@ -2706,10 +2720,6 @@ fn check_reader_packs(data_dir: PathBuf, turn_off: bool) -> Task<Message> {
     )
 }
 
-/// Shown under Tracker health when no hero pack is installed and site sync
-/// is off: the hero pack comes from the site, so heroes read as unknown.
-pub const HERO_PACK_SYNC_HINT: &str = "Hero names need site sync. Your stats still track normally.";
-
 /// Site sync is set up in `config`: a URL and a token, neither blank.
 pub fn sync_on_for(config: &Config) -> bool {
     config
@@ -2718,40 +2728,20 @@ pub fn sync_on_for(config: &Config) -> bool {
         .is_some_and(|s| !s.server_url.trim().is_empty() && !s.token.trim().is_empty())
 }
 
-/// [`HERO_PACK_SYNC_HINT`] when site sync is off and the last pack check
-/// found no hero pack. `None` before the first check (and in demo mode,
-/// which never checks), and whenever sync is on: with sync on the tracker
-/// downloads the pack itself.
-pub fn hero_pack_hint(
-    sync_on: bool,
-    packs: Option<&stat_tracker::ocr_switch::PackReadiness>,
-) -> Option<&'static str> {
-    match packs {
-        Some(p) if !sync_on && !p.heroes => Some(HERO_PACK_SYNC_HINT),
-        _ => None,
-    }
-}
+pub use crate::hero_pack_hint::hero_pack_hint;
 
 const HEALTH_READY: &str = "Ready";
 const HEALTH_WAITING: &str = "Waiting for a capture";
 
-/// Tracker health with the tracker's classic OCR notice: it runs with OCR
-/// off and holds reads for a missing reader pack, or a read was stopped. A
-/// refused off is not in it (`settings::daemon_health_notice`). The notice
-/// takes the place of the two idle lines and follows a sync problem.
+/// Tracker health with a notice: the tracker's own (`settings::daemon_health_notice`)
+/// or a declined screen share. It takes the place of the two idle lines;
+/// after a sync problem or an earlier notice it starts a new line, as the
+/// keyboard notice ends with a shell command.
 fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
     match notice {
         None => base,
         Some(notice) if base == HEALTH_READY || base == HEALTH_WAITING => notice.to_string(),
-        Some(notice) => format!("{base} {notice}"),
-    }
-}
-
-fn fixture_clock(fixture: Option<FixtureKind>, games: &[Game]) -> DateTime<Utc> {
-    if fixture == Some(FixtureKind::Sample) {
-        games.first().map(|g| g.played_at).unwrap_or_else(Utc::now)
-    } else {
-        Utc::now()
+        Some(notice) => format!("{base}\n{notice}"),
     }
 }
 
@@ -2949,26 +2939,6 @@ mod tests {
     use iced::window;
     use stat_tracker::config::Config;
     use tracing_subscriber::layer::SubscriberExt;
-
-    #[test]
-    fn a_stopped_or_foreign_pid_does_not_block_uninstall() {
-        use crate::daemon::StopError;
-
-        assert!(StopError::NotRunning.allows_restart());
-        assert!(
-            StopError::Refused("Saved process id is not the tracker, not stopping it")
-                .allows_restart()
-        );
-        assert!(StopError::Refused("Refusing to stop this window's process").allows_restart());
-        assert!(
-            !StopError::Failed("Tracker is still shutting down, not starting another copy".into())
-                .allows_restart()
-        );
-        assert!(
-            !StopError::Failed("Could not stop the tracker: Permission denied".into())
-                .allows_restart()
-        );
-    }
 
     #[test]
     fn setup_guide_keys_do_not_dismiss_notes_underneath() {
@@ -3428,33 +3398,6 @@ mod tests {
     }
 
     #[test]
-    fn hero_pack_hint_shows_only_without_sync_and_without_a_hero_pack() {
-        use stat_tracker::ocr_switch::PackReadiness;
-        let none = PackReadiness::default();
-        let heroes = PackReadiness {
-            heroes: true,
-            ..PackReadiness::default()
-        };
-        assert_eq!(
-            super::hero_pack_hint(false, Some(&none)),
-            Some(super::HERO_PACK_SYNC_HINT)
-        );
-        assert_eq!(super::hero_pack_hint(true, Some(&none)), None, "sync on");
-        assert_eq!(
-            super::hero_pack_hint(false, Some(&heroes)),
-            None,
-            "pack there"
-        );
-        assert_eq!(super::hero_pack_hint(true, Some(&heroes)), None);
-        assert_eq!(super::hero_pack_hint(false, None), None, "not checked yet");
-        assert_eq!(
-            super::HERO_PACK_SYNC_HINT,
-            "Hero names need site sync. Your stats still track normally."
-        );
-        assert!(!super::HERO_PACK_SYNC_HINT.contains('\u{2014}'));
-    }
-
-    #[test]
     fn sync_counts_as_on_only_with_a_url_and_a_token() {
         use stat_tracker::config::SyncConfig;
         let with = |url: &str, token: &str| Config {
@@ -3484,7 +3427,7 @@ mod tests {
         assert_eq!(super::health_with_ocr_notice(paused.into(), None), paused);
         assert_eq!(
             super::health_with_ocr_notice(paused.into(), Some(notice)),
-            format!("{paused} {notice}")
+            format!("{paused}\n{notice}")
         );
         let declined = "Screen share was declined: no captures until Overwatch is restarted";
         let idle = super::health_with_ocr_notice(super::HEALTH_READY.into(), None);

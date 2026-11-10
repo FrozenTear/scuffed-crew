@@ -10,7 +10,7 @@ fn played() -> surrealdb_types::Datetime {
     )
 }
 
-fn row(hero: &str, map: &str, mode: &str) -> PersonalMatch {
+pub(super) fn row(hero: &str, map: &str, mode: &str) -> PersonalMatch {
     PersonalMatch {
         id: None,
         hero: hero.into(),
@@ -46,6 +46,9 @@ fn row(hero: &str, map: &str, mode: &str) -> PersonalMatch {
         recognizer: String::new(),
         suspect_fields: Vec::new(),
         name_recognizer: None,
+        bans_picks: None,
+        bans_picks_status: None,
+        queue_title: None,
     }
 }
 

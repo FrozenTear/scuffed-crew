@@ -331,7 +331,7 @@ pub fn DmComposeModal(
                     if needs_server_managed() {
                         div { class: "dm-compose-banner",
                             "Direct messages require a server-managed Nostr identity. "
-                            Link { to: Route::IdentitySettings {}, "Visit identity settings" }
+                            Link { to: Route::IdentitySettings {}, "Open account keys" }
                             " to enable it."
                         }
                     }

@@ -13,6 +13,9 @@ pub(crate) async fn run_loop(
     // Set when the binary on disk was replaced: `run` restarts into it
     // after the store's close.
     restart_to: &mut Option<std::path::PathBuf>,
+    // `debug_save_pregame_screens`: `None` while off, so no check runs and
+    // no frame is kept. The caller flushes it after the loop.
+    pregame_dump: &mut Option<daemon::pregame_dump::PregameDump>,
 ) -> anyhow::Result<()> {
     // Ergonomic locals over the shared context; spawned tasks clone the Arc.
     let backend = &ctx.backend;
@@ -28,6 +31,8 @@ pub(crate) async fn run_loop(
     // Starts false so a boot with the game already closed does not close a
     // share that was never opened. The close runs on the running edge only.
     let mut game_was_running = false;
+    // The poll's own focus pause edge (`daemon::focus::poll_pause`).
+    let mut focus_paused = false;
     // The GUI's Stop button (and systemd) send SIGTERM, shut down as
     // gracefully as Ctrl+C, with a final sync.
     // `early_sigterm` is the same handler, registered before startup's wait
@@ -55,8 +60,9 @@ pub(crate) async fn run_loop(
     // Failed open used to wait only on Ctrl+C. SIGTERM was registered above
     // and never polled, so `systemctl stop` hit TimeoutStopSec then SIGKILL,
     // and exit 0 kept Restart=on-failure from trying again. The pid file
-    // (acquired in main) made the GUI show "running" the whole time.
-    let mut kbd = match open_keyboard_or_shutdown(&mut sigterm).await? {
+    // (acquired in main) made the GUI show "running" the whole time. No
+    // keyboard is not an exit: the loop runs without Tab (`KeyboardInput`).
+    let mut kbd = match open_keyboard_or_shutdown(&mut sigterm, data_dir).await? {
         Some(stream) => stream,
         None => return Ok(()),
     };
@@ -151,6 +157,9 @@ pub(crate) async fn run_loop(
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Set when the post-game saves bring the next poll tick forward: the
+    // regular tick it comes before ([`tick_brought_forward_too_soon`]).
+    let mut post_regular_tick: Option<tokio::time::Instant> = None;
 
     // GUI command queue (manual outcome edits, session deletion), checked on
     // its own timer so edits apply even while no game is running.
@@ -159,7 +168,12 @@ pub(crate) async fn run_loop(
     let mut idle_sync_checked = Instant::now();
     let mut binary_checked = tokio::time::Instant::now();
     let mut logged_binary_wait = false;
-    let mut exec_failed_at: Option<std::time::Instant> = None;
+    // A restart of this binary after the new one failed its exec waits out
+    // the backoff before trying it again (`replace::EXEC_FAILED_ENV`).
+    let mut exec_failed_at = stat_tracker::replace::exec_failed_at_start(
+        std::env::var_os(stat_tracker::replace::EXEC_FAILED_ENV).is_some(),
+        std::time::Instant::now(),
+    );
     let mut seen_stream: Option<capture::SeenStream> = None;
     let mut poll_failures = PollFailureStreak::default();
 
@@ -237,6 +251,7 @@ pub(crate) async fn run_loop(
                         let press = key.at;
                         let running = game_gate.is_running();
                         capture::note_game_seen(game_was_running, running, data_dir);
+                        daemon::focus::game_edge(game_was_running, running);
                         if capture::share_close_due(
                             capture::stream_route_active(),
                             game_was_running,
@@ -248,6 +263,12 @@ pub(crate) async fn run_loop(
                         game_was_running = running;
                         if !running {
                             tracing::debug!(target: "scuffed_stat_tracker", "Tab ignored: game process not running");
+                            continue;
+                        }
+                        // Focus gate: ignored like a closed game, nothing
+                        // in the session changes. Unreadable reads on.
+                        if daemon::focus::tab_skip(Instant::now()).await {
+                            tracing::debug!(target: "scuffed_stat_tracker", "Tab ignored: another window is focused");
                             continue;
                         }
 
@@ -281,29 +302,12 @@ pub(crate) async fn run_loop(
                         }
                         drop(bridge);
                     }
+                    // `KeyboardInput` reopens a lost keyboard itself and
+                    // never ends the loop: input is optional, recording
+                    // goes on without it.
+                    // Dead arm: kept only because `TabKeySource` returns a Result.
                     Err(e) => {
-                        tracing::error!(target: "scuffed_stat_tracker", error = %e, "keyboard devices lost: attempting to reopen");
-                        match detect::MultiKeyboardStream::open() {
-                            Ok(new_kbd) => {
-                                kbd = new_kbd;
-                                tracing::info!(target: "scuffed_stat_tracker", "keyboard monitoring reopened");
-                            }
-                            Err(e2) => {
-                                tracing::error!(target: "scuffed_stat_tracker", error = %e2, "failed to reopen keyboard: exiting");
-                                drain_capture(capture_task.take()).await;
-                                if let Some(client) = sync_client {
-                                    drain_sync_then(sync_task, || try_sync(store, client, data_dir, None)).await;
-                                } else {
-                                    drain_sync_then(sync_task, || std::future::ready(())).await;
-                                }
-                                // Exit non-zero so Restart=on-failure starts a
-                                // new process once a device is readable again.
-                                // Exit 0 here looked like a clean stop.
-                                anyhow::bail!(
-                                    "keyboard devices lost and could not be reopened: {e2}"
-                                );
-                            }
-                        }
+                        tracing::debug!(target: "scuffed_stat_tracker", error = %e, "keyboard read failed");
                     }
                 }
             }
@@ -316,6 +320,7 @@ pub(crate) async fn run_loop(
                     std::future::ready(())
                 })
                 .await;
+                let stored_sid = stored_session(&sid, &result);
                 // The report handler is the same function the night harness
                 // calls. Sync stays here so a slow upload cannot hide inside it.
                 if apply_capture_report(&mut st, store, data_dir, &sid, result, Instant::now()).await {
@@ -328,7 +333,25 @@ pub(crate) async fn run_loop(
                         data_dir,
                         st.capture_count,
                     );
-                    refresh_snapshot(store, data_dir).await;
+                    // The bans and picks and the queue title reads for this
+                    // game, before the live snapshot is cut so it carries them.
+                    // The queue title is read only for the open game.
+                    if let Some(dump) = pregame_dump.as_mut() {
+                        dump.attach_bans_picks(store, &stored_sid).await;
+                        let open = st.active_game.as_ref().map(|g| g.session_id.as_str());
+                        dump.attach_queue_title(store, &stored_sid, open).await;
+                    } else if let Err(e) = store
+                        .attach_bans_picks_status(
+                            &stored_sid,
+                            &stat_tracker::model::BansPicksStatus::ReaderOff,
+                        )
+                        .await
+                    {
+                        // No saver runs when the reader is off and the
+                        // pre-game saves are off.
+                        tracing::warn!(target: "scuffed_stat_tracker", error = %e, "bans and picks: status not stored");
+                    }
+                    refresh_snapshot_after_capture(&st, store, data_dir, &stored_sid).await;
                 }
                 // A Tab pressed while that capture ran runs now, unless the
                 // capture took its board (it would read the same board). A
@@ -350,7 +373,19 @@ pub(crate) async fn run_loop(
                     capture_task = Some(task);
                 }
             }
-            _ = poll_timer.tick(), if auto_detect.enabled => {
+            ticked = poll_timer.tick(), if auto_detect.enabled => {
+                // A tick brought forward for the post-game saves that finds
+                // the cadence slowed since: dropped before anything runs,
+                // and the regular tick comes instead, so the slow cadence
+                // counts regular ticks only.
+                if let Some(regular) = tick_brought_forward_too_soon(
+                    post_regular_tick.take(),
+                    || poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval),
+                ) {
+                    tracing::trace!(target: "scuffed_stat_tracker", "poll tick skipped: brought forward, the cadence slowed since");
+                    poll_timer.reset_at(regular);
+                    continue;
+                }
                 // Mid-match: a Tab capture saturates the OCR pool, skip the
                 // full poll so we do not contend (H3). During end-reel wake
                 // that skip starves the ~3s Victory/Defeat window (2026-09-06:
@@ -372,6 +407,7 @@ pub(crate) async fn run_loop(
                 }
                 let running = game_gate.is_running();
                 capture::note_game_seen(game_was_running, running, data_dir);
+                daemon::focus::game_edge(game_was_running, running);
                 if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,
@@ -382,9 +418,25 @@ pub(crate) async fn run_loop(
                 }
                 game_was_running = running;
                 if !running {
+                    if let Some(dump) = pregame_dump.as_mut() {
+                        dump.game_closed(Instant::now());
+                    }
                     clear_cadence_wakes(&mut st);
                     st.ocr_stability.reset();
                     poll_failures.game_stopped();
+                    continue;
+                }
+                // Focus gate: a pause skips this read only (see
+                // `daemon::focus::poll_pause`).
+                // The pre-game flag is for the focus log lines only.
+                daemon::focus::note_pregame(
+                    pregame_dump.as_ref().is_some_and(|d| d.in_pregame(Instant::now())),
+                );
+                if daemon::focus::poll_skip(&mut focus_paused, &mut st, Instant::now()).await {
+                    tracing::trace!(target: "scuffed_stat_tracker", "poll tick skipped: another window is focused");
+                    if let Some(dump) = pregame_dump.as_mut() {
+                        dump.note_focus_pause(Instant::now());
+                    }
                     continue;
                 }
 
@@ -395,12 +447,9 @@ pub(crate) async fn run_loop(
                 // On Older screenshot and KDE direct the same skip runs out
                 // of a match too, down to IDLE_SHOT_POLL_FLOOR.
                 let divisor = poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval);
-                if divisor > 1 {
-                    st.poll_ticks_skipped += 1;
-                    if st.poll_ticks_skipped < divisor {
-                        tracing::trace!(target: "scuffed_stat_tracker", divisor, "poll tick skipped: adaptive slow cadence");
-                        continue;
-                    }
+                if slow_cadence_skips(&mut st.poll_ticks_skipped, divisor) {
+                    tracing::trace!(target: "scuffed_stat_tracker", divisor, "poll tick skipped: adaptive slow cadence");
+                    continue;
                 }
 
                 // A Tab press preempts the poll's grab and analysis: the poll
@@ -489,6 +538,18 @@ pub(crate) async fn run_loop(
                         // A copy: a poll that a Tab drops leaves the
                         // session's stability history as it was.
                         let mut stability = st.ocr_stability.clone();
+                        let pregame_want = pregame_tick_want(
+                            pregame_dump.as_mut(),
+                            st.active_game.as_ref(),
+                            now,
+                            outcome_only,
+                        );
+                        // The post-game saves take Tab-busy ticks too: the
+                        // end reel is when they matter most. Their samples
+                        // count from the tick's start, not the grab's end,
+                        // so the 1 s steps do not drift.
+                        let postgame_want =
+                            daemon::pregame_dump::PregameDump::post_want_of(pregame_dump.as_mut(), now);
                         // Dropping this join detaches the blocking OCR. That
                         // task does not write a match row. The row is written
                         // below, and only when shutdown has not begun and no
@@ -499,9 +560,12 @@ pub(crate) async fn run_loop(
                             if let Some(dir) = &dump_dir {
                                 save_frame_ring(dir, "poll", &img, POLL_DUMP_KEEP);
                             }
-                            // One RGBA→RGB conversion shared by the outcome + phase
-                            // detectors (P6); title OCR still uses the original frame.
-                            let rgb = img.to_rgb8();
+                            // One RGB view shared by the outcome + phase detectors
+                            // (P6): borrowed for RGB frames (the PipeWire stream and
+                            // KWin), so no full-frame copy per tick there; RGBA
+                            // backends (X11, portal screenshots) still convert once.
+                            // Title OCR still uses the original frame.
+                            let rgb = stat_tracker::frame::rgb_view(&img);
                             // PR-A: the polled variants gate their OCR on the
                             // crop holding still across consecutive ticks,
                             // combat frames stop paying a Tesseract call per
@@ -567,6 +631,14 @@ pub(crate) async fn run_loop(
                             // the title card's phrase OCR does not run.
                             let end_reel =
                                 detect::match_end::detect_end_reel_with(&img, &rgb, &titles);
+                            // A sure end-title read labels a post-game
+                            // frame `end_title` before the two-tick rule
+                            // makes it the signal.
+                            let end_title_seen = titles.sure_end_title().is_some();
+                            let pregame_seen = pregame_want.map(|(want, examples)| {
+                                let seen = daemon::pregame_dump::classify_checked(want, &phase, &rgb, &examples);
+                                (seen, daemon::pregame_dump::keeps_checked(want, &seen))
+                            });
                             // Result templates are not on the Tab frame. A
                             // polled outcome frame feeds the new reader's
                             // result. The read the signal came from is that
@@ -599,7 +671,15 @@ pub(crate) async fn run_loop(
                                 stat_tracker::perf::Stage::PollAnalyze,
                                 analyze_started.elapsed(),
                             );
-                            (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png)
+                            // The frame moves into the tick's result, no copy,
+                            // one `Arc` for both saves.
+                            let (pregame, postgame) = daemon::postgame_dump::kept_frames(
+                                img,
+                                pregame_seen,
+                                postgame_want,
+                                signal.is_some() || end_reel,
+                            );
+                            (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_outcome_png, pregame, postgame)
                         }),
                             stat_tracker::replace::shutdown_notified(),
                             stat_tracker::tab_retry::next_press(&mut kbd, &mut tabs),
@@ -617,7 +697,7 @@ pub(crate) async fn run_loop(
                         if let Some(seen) = kept_frame {
                             seen_stream = Some(seen);
                         }
-                        let (signal, phase, accolade_map, end_reel, stability, result_read, rank_outcome_png) = match analyzed {
+                        let (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_outcome_png, pregame, postgame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
                                     &mut st,
@@ -633,7 +713,7 @@ pub(crate) async fn run_loop(
                                 return Ok(());
                             }
                             Ok(joined) => joined.unwrap_or_else(|_| {
-                                (None, detect::GamePhase::Unknown, None, false, detect::stability::FrameStability::default(), None, None)
+                                (None, detect::GamePhase::Unknown, None, false, false, detect::stability::FrameStability::default(), None, None, None, None)
                             }),
                         };
                         if stat_tracker::replace::shutdown_requested() {
@@ -664,6 +744,18 @@ pub(crate) async fn run_loop(
                             tracing::debug!(target: "scuffed_stat_tracker", error = %e, "report kit: outcome crop not written");
                         }
                         st.ocr_stability = stability;
+                        if let Some(dump) = pregame_dump.as_mut()
+                            && (signal.is_some() || end_reel || end_title_seen)
+                        {
+                            // The match ended: the no-folder checks resume.
+                            dump.note_match_end(Instant::now());
+                        }
+                        if let (Some(dump), Some((seen, frame))) = (pregame_dump.as_mut(), pregame) {
+                            // The open game: for the log lines, and the game
+                            // the queue title reader's frames are held for.
+                            dump.set_session(st.active_game.as_ref().map(|g| g.session_id.as_str()));
+                            dump.observe(Instant::now(), seen, frame);
+                        }
                         if let Some(read) = result_read
                             && let Some(game) = st.active_game.as_mut()
                         {
@@ -756,12 +848,59 @@ pub(crate) async fn run_loop(
                             .await;
                             return Ok(());
                         }
+                        // The post-game saves see the tick after the
+                        // decision, so a confirmed outcome opens their
+                        // window. Switch off: nothing is checked.
+                        // About one frame a second in the window: bring
+                        // the next tick forward (an ordinary poll), only
+                        // after a tick that handed over a frame, never
+                        // under 250 ms, and only where the route polls
+                        // every tick now (a screenshot route's slower
+                        // floor stays). A panicked or frameless tick
+                        // keeps the regular interval.
+                        let sooner = daemon::pregame_dump::PregameDump::post_after_decision(
+                            pregame_dump.as_mut(),
+                            Instant::now,
+                            || {
+                                let game = st.active_game.as_ref();
+                                daemon::postgame_dump::PostTick {
+                                    end: daemon::postgame_dump::EndSeen::of(signal.map(|(_, source)| source), end_reel, end_title_seen),
+                                    confirmed: tick.signal_confirmed,
+                                    running: game.is_some_and(|g| !g.finished()),
+                                    finished: game.is_some_and(|g| g.finished()),
+                                    new_screen: matches!(
+                                        phase,
+                                        detect::GamePhase::MapVote { .. } | detect::GamePhase::HeroBan | detect::GamePhase::HeroSelect
+                                    ),
+                                    game_opened: game.map(|g| g.opened_at),
+                                }
+                            },
+                            postgame,
+                            poll_interval,
+                            || poll_divisor(&st, Instant::now(), capture::shot_route(), poll_interval) == 1,
+                        );
+                        if let Some(next) = sooner {
+                            poll_timer.reset_after(next);
+                            post_regular_tick = Some(ticked + poll_interval);
+                        }
                     }
                     Ok(Err(e)) => {
                         // The game gate ran first: the game is running. A
                         // known state (a held lock, a share opening, declined
                         // or closed) is no failure and has its own log line.
-                        match poll_failures.on_error(&e.to_string(), Instant::now()) {
+                        let failure = poll_failures.on_error(&e.to_string(), Instant::now());
+                        // Capture failed: the pre-game saves hold no frame
+                        // either. An expected one-poll miss leaves them be,
+                        // but not one that can last the game (a declined
+                        // share, paused screenshot requests). Switch off:
+                        // nothing is checked.
+                        if let Some(dump) = pregame_dump.as_mut()
+                            && (failure != PollErrorLog::Expected
+                                || capture::is_lasting_poll_miss(&e.to_string()))
+                        {
+                            dump.release(Instant::now());
+                        }
+                        match failure {
                             PollErrorLog::Expected => {
                                 tracing::trace!(target: "scuffed_stat_tracker", error = %e, "poll capture skipped");
                             }
@@ -786,6 +925,7 @@ pub(crate) async fn run_loop(
                 // only when a restore token can reopen it.
                 let running = game_gate.is_running();
                 capture::note_game_seen(game_was_running, running, data_dir);
+                daemon::focus::game_edge(game_was_running, running);
                 if capture::share_close_due(
                     capture::stream_route_active(),
                     game_was_running,
@@ -1013,6 +1153,10 @@ pub(crate) async fn apply_queued_commands(
                     );
                 }
             }
+            Err(e) if e.downcast_ref::<storage::Refused>().is_some() => {
+                tracing::warn!(target: "scuffed_stat_tracker", error = %e, "GUI command refused; dropped");
+                storage::remove_command_file(cmd_file);
+            }
             Err(e) => {
                 tracing::warn!(target: "scuffed_stat_tracker", error = %e, "GUI command failed; will retry");
             }
@@ -1090,6 +1234,29 @@ pub(crate) async fn with_bridge_hold<K, E, H>(
 /// state as well as the awaited copy, which doubled that part of
 /// `handle_capture`'s future (23,280 B in a debug build). `inspect` wraps
 /// it in place.
+/// The pre-game saves' want for the tick polled at `now`, with their
+/// ban-results examples. The match skip is set from the session's open
+/// `game` first ([`daemon::pregame_dump::match_board_read`]), so with no
+/// game folder open the want looks for no loading screen or roster
+/// mid-match. `None` with the switch off, or on a Tab-busy tick
+/// (`outcome_only`), which reads no phase and is not fed to them.
+pub(crate) fn pregame_tick_want(
+    dump: Option<&mut daemon::pregame_dump::PregameDump>,
+    game: Option<&ActiveGame>,
+    now: Instant,
+    outcome_only: bool,
+) -> Option<(
+    daemon::pregame_dump::PregameWant,
+    Arc<super::pregame_ban_title::BanTitleExamples>,
+)> {
+    let dump = dump?;
+    dump.set_match_read(daemon::pregame_dump::match_board_read(game, now));
+    if outcome_only {
+        return None;
+    }
+    Some((dump.want(now), dump.examples()))
+}
+
 pub(crate) fn then_end_tab_hold<F: std::future::Future>(
     retries: F,
 ) -> impl std::future::Future<Output = F::Output> {
@@ -1154,5 +1321,41 @@ where
             Err(_elapsed) => Err(()),
         },
         value = &mut work => Ok(value),
+    }
+}
+
+/// The session a capture report stored its row in: a split's new game, or
+/// else the session the Tab was settled to. Read before the report moves.
+pub(crate) fn stored_session(sid: &str, result: &Result<CaptureReport, String>) -> String {
+    match result {
+        Ok(report) if report.split => report.session_id.clone(),
+        _ => sid.to_owned(),
+    }
+}
+
+/// Whether the snapshot write after a stored capture is owed whatever the
+/// GUI: the board went to a game that already has its result (the final
+/// scoreboard, pressed after the result, or a split's new game opened with
+/// its result). `sid` is the session that stored the row
+/// ([`stored_session`]), not whichever game is active now.
+pub(crate) fn capture_owes_snapshot_write(st: &SessionState, sid: &str) -> bool {
+    st.active_game
+        .as_ref()
+        .filter(|g| g.session_id == sid)
+        .is_some_and(|g| g.finished())
+}
+
+/// Mark the live snapshot after a capture report stored a row (the run
+/// loop, and the shutdown drain of reports that landed late).
+pub(crate) async fn refresh_snapshot_after_capture(
+    st: &SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    sid: &str,
+) {
+    if capture_owes_snapshot_write(st, sid) {
+        refresh_snapshot_game_finished(store, data_dir).await;
+    } else {
+        refresh_snapshot(store, data_dir).await;
     }
 }

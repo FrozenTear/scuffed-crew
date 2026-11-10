@@ -244,6 +244,83 @@ async fn a_delete_command_sends_its_tombstone_on_the_same_tick() {
     );
 }
 
+/// Item 19: a game deleted in the app while the tracker is stopped and the
+/// site is out of reach. The next start applies the queued delete with no
+/// site: the rows go and the tombstone waits. Another restart keeps both
+/// (the game stays gone, the tombstone still waits), and the next sync that
+/// reaches the site sends the tombstone once and clears it. The game kept
+/// next to it is untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_offline_delete_survives_restarts_and_its_tombstone_waits_for_the_site() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().to_path_buf();
+    let restart = |store: storage::LocalStore| {
+        let path = path.clone();
+        async move {
+            drop(store);
+            let wait = std::time::Duration::from_secs(5);
+            assert!(storage::wait_for_engine_close(&path, wait).await);
+            storage::LocalStore::open(&path).await.unwrap()
+        }
+    };
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    for sid in ["gone", "kept"] {
+        store.insert_match(tracked_row(sid, 0)).await.unwrap();
+    }
+    let claims = storage::SyncClaim::capture(&store.get_unsynced().await.unwrap());
+    store.mark_synced(&claims).await.unwrap();
+    // Tracker stopped: the app only queues the delete.
+    let store = restart(store).await;
+    drop(store);
+    let wait = std::time::Duration::from_secs(5);
+    assert!(storage::wait_for_engine_close(dir.path(), wait).await);
+    storage::queue_command(
+        dir.path(),
+        &storage::StoreCommand::DeleteSession {
+            session_id: "gone".into(),
+        },
+    )
+    .unwrap();
+    // The next start, offline.
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
+    let mut sync_task = None;
+    let mut st = session(None, test_now());
+    apply_queued_commands(&mut st, &store, dir.path(), &mut sync_task, &backoff, None).await;
+    assert!(
+        storage::read_commands(dir.path()).is_empty(),
+        "applied once"
+    );
+    assert!(
+        store
+            .get_session_snapshots("gone")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.get_pending_tombstones().await.unwrap(), ["gone"]);
+    // Another restart: still gone, the tombstone still waits.
+    let store = restart(store).await;
+    assert!(
+        store
+            .get_session_snapshots("gone")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(store.get_session_snapshots("kept").await.unwrap().len(), 1);
+    assert_eq!(store.get_pending_tombstones().await.unwrap(), ["gone"]);
+    // The site is back: one sync sends it and clears it.
+    let mut sent = Vec::new();
+    try_sync_with(&store, dir.path(), None, |_, tombstones| {
+        sent.push(tombstones);
+        async { Ok(upload_ok()) }
+    })
+    .await;
+    assert_eq!(sent, [vec!["gone".to_string()]]);
+    assert!(store.get_pending_tombstones().await.unwrap().is_empty());
+}
+
 /// DATA-4: a game uploaded as Control and later re-read as a Deathmatch
 /// map must be deleted on the site. Before the fix the new snapshot was
 /// only marked synced locally and the Control copy stayed online.
@@ -783,4 +860,79 @@ fn only_an_empty_tab_game_closes_after_twenty_minutes() {
         seen_at: now - UNFINISHED_SESSION_IDLE,
     });
     assert_eq!(quiet_close_reason(&idle(hinted), now, quiet), None);
+}
+
+/// Item 22: a command queued for an imported game (no session id) used to
+/// rewrite every imported game. The store now refuses it, and the daemon
+/// drops the command file instead of retrying it on every tick. Every
+/// session-keyed command the GUI can queue is covered here.
+#[tokio::test]
+async fn a_command_queued_with_an_empty_session_id_is_dropped_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    for secs in [0, 60] {
+        store.insert_match(tracked_row("", secs)).await.unwrap();
+    }
+    let claims = storage::SyncClaim::capture(&store.get_unsynced().await.unwrap());
+    store.mark_synced(&claims).await.unwrap();
+    let before = store.get_all_matches().await.unwrap();
+    let commands = [
+        (
+            "EditMatch",
+            storage::StoreCommand::EditMatch {
+                session_id: String::new(),
+                edit: storage::MatchEdit {
+                    elims: Some(99),
+                    ..Default::default()
+                },
+            },
+        ),
+        (
+            "SetOutcome",
+            storage::StoreCommand::SetOutcome {
+                session_id: String::new(),
+                outcome: "defeat".into(),
+            },
+        ),
+        (
+            "DeleteSession",
+            storage::StoreCommand::DeleteSession {
+                session_id: String::new(),
+            },
+        ),
+        (
+            "RetryUpload",
+            storage::StoreCommand::RetryUpload {
+                session_id: String::new(),
+            },
+        ),
+        (
+            "ResolveSegment",
+            storage::StoreCommand::ResolveSegment {
+                session_id: String::new(),
+                segment: 0,
+                action: storage::SEGMENT_DISMISS.to_string(),
+            },
+        ),
+    ];
+    for (name, cmd) in commands {
+        storage::queue_command(dir.path(), &cmd).unwrap();
+        let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
+        let mut sync_task = None;
+        let mut st = session(None, test_now());
+        apply_queued_commands(&mut st, &store, dir.path(), &mut sync_task, &backoff, None).await;
+        let after = store.get_all_matches().await.unwrap();
+        assert_eq!(
+            after, before,
+            "{name} with an empty session id changed imported games"
+        );
+        assert!(
+            store.get_pending_tombstones().await.unwrap().is_empty(),
+            "{name} queued a server delete"
+        );
+        assert!(
+            storage::read_commands(dir.path()).is_empty(),
+            "{name}: a refused command is dropped, not retried"
+        );
+    }
 }

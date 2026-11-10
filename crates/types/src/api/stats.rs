@@ -6,7 +6,13 @@ pub struct StatsUploadEntry {
     /// Client-generated game session id. All capture snapshots of one game
     /// share it; the server upserts per (member, session) so re-uploads and
     /// corrections update the same row instead of inserting duplicates.
-    /// Empty for uploads from pre-session daemons (server assigns a legacy id).
+    /// Empty for uploads from pre-session daemons. When the User-Agent is
+    /// `scuffed-stat-tracker/<version>` at 0.6.0-alpha.3 or newer, the server
+    /// identifies such a game by (member, played_at) and reuses its stored
+    /// legacy row, so an edit of hero or map updates it in place and two
+    /// empty-session entries with the same played_at are stored as one game.
+    /// Older or unknown clients keep the content-derived legacy id, so only an
+    /// identical re-upload dedupes.
     #[serde(default)]
     pub session_id: String,
     pub hero: String,
@@ -243,6 +249,385 @@ pub fn resolve_suspect_fields(input: &SuspectFieldsInput) -> Result<Vec<String>,
     }
 }
 
+/// Max entries accepted in `bans_picks.bans`.
+pub const BANS_PICKS_MAX_BANS: usize = 4;
+/// Max entries accepted in `bans_picks.picks`.
+pub const BANS_PICKS_MAX_PICKS: usize = 6;
+/// Max entries accepted in `bans_picks.ban_vote`.
+pub const BANS_PICKS_MAX_BAN_VOTE: usize = 6;
+/// Literal a `picks` or `ban_vote` entry may carry when a teammate chose no
+/// hero. Stored and returned as sent. It is not a hero key, and it is not
+/// null (null means the entry was unreadable).
+pub const BANS_PICKS_NO_PREFERENCE: &str = "no_preference";
+
+/// Which side placed one hero ban.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BanTeam {
+    Own,
+    Enemy,
+}
+
+/// One hero ban read from the bans screen.
+///
+/// `hero` is a hero pack key (`wrecking-ball`). `None` means the icon was
+/// not readable or the key was not a known hero. `team` is `None` when the
+/// side was not read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeroBan {
+    #[serde(default)]
+    pub hero: Option<String>,
+    #[serde(default)]
+    pub team: Option<BanTeam>,
+}
+
+/// Bans and picks the tracker read for one game.
+///
+/// Optional `bans_picks` object on each uploaded match and on match-list
+/// JSON. Hero values are pack keys. Every field is always serialized (null
+/// or `[]` when empty) so clients see one fixed shape.
+///
+/// - `bans`: at most [`BANS_PICKS_MAX_BANS`] entries.
+/// - `lobby_ban`: pack key or null.
+/// - `picks`: at most [`BANS_PICKS_MAX_PICKS`] entries, own team, local
+///   player first. Each entry is a pack key, [`BANS_PICKS_NO_PREFERENCE`]
+///   (the teammate chose no hero) or null (unreadable).
+/// - `ban_vote`: at most [`BANS_PICKS_MAX_BAN_VOTE`] entries, same entry
+///   values as `picks`. From stat trackers newer than 0.6.0-alpha.2.1:
+///   the uploading player's own three ban votes in slot order (a hero key,
+///   or null for a skipped, empty or unread slot). Older trackers sent the
+///   six own team rows of the ban vote screen, which show each player's
+///   preferred hero, not a vote; treat those as unreliable.
+/// - Newer trackers may also send `ban_votes` (each vote slot's state and
+///   hero) and `ban_score` (the TEAM BAN SCORE strip: rank, hero, vote
+///   count). They are optional and not part of this contract yet:
+///   [`resolve_bans_picks`] ignores them, like any key it does not know.
+/// - `recognizer`: reader id, same format rule as `name_recognizer`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BansPicks {
+    #[serde(default)]
+    pub bans: Vec<HeroBan>,
+    #[serde(default)]
+    pub lobby_ban: Option<String>,
+    #[serde(default)]
+    pub picks: Vec<Option<String>>,
+    #[serde(default)]
+    pub ban_vote: Vec<Option<String>>,
+    #[serde(default)]
+    pub recognizer: Option<String>,
+}
+
+/// Returned with HTTP 422 when `bans_picks.recognizer` is present but not a usable id.
+pub const BANS_PICKS_RECOGNIZER_ERROR: &str = "bans_picks.recognizer must be a string of 1-32 characters in [a-z0-9.-] including a letter or digit";
+
+/// Canonical pack key for a hero value, or `None` when it is not a known hero.
+///
+/// Accepts what [`crate::hero_key_to_name`] accepts (pack key, portrait
+/// stem, display name) and returns the pack key (`wrecking-ball`).
+pub fn canonical_hero_pack_key(raw: &str) -> Option<String> {
+    let display = crate::hero_key_to_name(raw)?;
+    crate::heroes::HERO_NAMES
+        .iter()
+        .find(|hero| hero.display == display)
+        .map(|hero| crate::heroes::pack_file_stem(hero.file).to_string())
+}
+
+fn bans_picks_hero(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(raw)) => Ok(canonical_hero_pack_key(raw)),
+        Some(_) => Err(format!("{field} must be a hero key string or null")),
+    }
+}
+
+fn bans_picks_array<'a>(
+    obj: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    max: usize,
+) -> Result<&'a [serde_json::Value], String> {
+    match obj.get(key) {
+        None | Some(serde_json::Value::Null) => Ok(&[]),
+        Some(serde_json::Value::Array(items)) if items.len() > max => Err(format!(
+            "bans_picks.{key} must have at most {max} entries, got {}",
+            items.len()
+        )),
+        Some(serde_json::Value::Array(items)) => Ok(items),
+        Some(_) => Err(format!("bans_picks.{key} must be an array or null")),
+    }
+}
+
+/// A `picks` or `ban_vote` entry: a pack key, the literal
+/// [`BANS_PICKS_NO_PREFERENCE`] (kept as is) or null. Any other string that is
+/// not a known hero becomes null.
+fn bans_picks_choice(value: &serde_json::Value, field: &str) -> Result<Option<String>, String> {
+    match value {
+        serde_json::Value::String(raw) if raw == BANS_PICKS_NO_PREFERENCE => Ok(Some(raw.clone())),
+        other => bans_picks_hero(Some(other), field),
+    }
+}
+
+/// Turn a raw `bans_picks` upload value into what is stored.
+///
+/// Omitted or null is `Ok(None)`. An unknown hero key becomes null and does
+/// not reject the game. A wrong shape, an over-long `bans`, `picks` or
+/// `ban_vote`, a
+/// `team` other than `own` / `enemy` / null, or a bad `recognizer` is an
+/// error (HTTP 422, message without the `matches[n]: ` prefix).
+pub fn resolve_bans_picks(value: Option<&serde_json::Value>) -> Result<Option<BansPicks>, String> {
+    let obj = match value {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::Object(obj)) => obj,
+        Some(_) => return Err("bans_picks must be an object or null".into()),
+    };
+    let mut bans = Vec::new();
+    for (i, item) in bans_picks_array(obj, "bans", BANS_PICKS_MAX_BANS)?
+        .iter()
+        .enumerate()
+    {
+        let ban = match item {
+            serde_json::Value::Null => HeroBan {
+                hero: None,
+                team: None,
+            },
+            serde_json::Value::Object(ban) => {
+                let hero = bans_picks_hero(ban.get("hero"), &format!("bans_picks.bans[{i}].hero"))?;
+                let team = match ban.get("team") {
+                    None | Some(serde_json::Value::Null) => None,
+                    Some(serde_json::Value::String(t)) if t == "own" => Some(BanTeam::Own),
+                    Some(serde_json::Value::String(t)) if t == "enemy" => Some(BanTeam::Enemy),
+                    Some(_) => {
+                        return Err(format!(
+                            "bans_picks.bans[{i}].team must be \"own\", \"enemy\" or null"
+                        ));
+                    }
+                };
+                HeroBan { hero, team }
+            }
+            _ => return Err(format!("bans_picks.bans[{i}] must be an object")),
+        };
+        bans.push(ban);
+    }
+    let mut picks = Vec::new();
+    for (i, item) in bans_picks_array(obj, "picks", BANS_PICKS_MAX_PICKS)?
+        .iter()
+        .enumerate()
+    {
+        picks.push(bans_picks_choice(item, &format!("bans_picks.picks[{i}]"))?);
+    }
+    let mut ban_vote = Vec::new();
+    for (i, item) in bans_picks_array(obj, "ban_vote", BANS_PICKS_MAX_BAN_VOTE)?
+        .iter()
+        .enumerate()
+    {
+        ban_vote.push(bans_picks_choice(
+            item,
+            &format!("bans_picks.ban_vote[{i}]"),
+        )?);
+    }
+    let lobby_ban = bans_picks_hero(obj.get("lobby_ban"), "bans_picks.lobby_ban")?;
+    let recognizer = match obj.get("recognizer") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(id)) if is_recognizer_id(id) => Some(id.clone()),
+        Some(_) => return Err(BANS_PICKS_RECOGNIZER_ERROR.to_string()),
+    };
+    Ok(Some(BansPicks {
+        bans,
+        lobby_ban,
+        picks,
+        ban_vote,
+        recognizer,
+    }))
+}
+
+/// Read a stored `bans_picks` object back.
+///
+/// Tolerant: a field of the wrong type reads as null / empty instead of
+/// failing the whole match row. Only values written by [`resolve_bans_picks`]
+/// are expected here.
+pub fn bans_picks_from_stored(value: &serde_json::Value) -> Option<BansPicks> {
+    let obj = value.as_object()?;
+    let key = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_str()).map(str::to_string);
+    let bans = obj
+        .get("bans")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| HeroBan {
+                    hero: key(item.get("hero")),
+                    team: match item.get("team").and_then(|t| t.as_str()) {
+                        Some("own") => Some(BanTeam::Own),
+                        Some("enemy") => Some(BanTeam::Enemy),
+                        _ => None,
+                    },
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let picks = obj
+        .get("picks")
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().map(|item| key(Some(item))).collect())
+        .unwrap_or_default();
+    let ban_vote = obj
+        .get("ban_vote")
+        .and_then(|v| v.as_array())
+        .map(|items| items.iter().map(|item| key(Some(item))).collect())
+        .unwrap_or_default();
+    Some(BansPicks {
+        bans,
+        lobby_ban: key(obj.get("lobby_ban")),
+        picks,
+        ban_vote,
+        recognizer: key(obj.get("recognizer")),
+    })
+}
+
+/// Max characters in each `rank` string value (`role_rank`,
+/// `next_mode_hint`, `queue_title`, each `change_tags` entry).
+pub const RANK_STRING_MAX_CHARS: usize = 64;
+/// Max entries in `rank.change_tags.value`.
+pub const RANK_MAX_CHANGE_TAGS: usize = 8;
+
+/// Queue role on a rank update screen. `Open` is open queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RankRole {
+    Tank,
+    Damage,
+    Support,
+    Open,
+}
+
+/// One rank-v1 field: the value read and how sure the reader was.
+///
+/// Either part is `None` (JSON null) when it was omitted or failed its
+/// check. The tracker's `bbox` is accepted on upload and dropped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RankField<T> {
+    pub value: Option<T>,
+    /// 0..=1.
+    pub confidence: Option<f32>,
+}
+
+impl<T> Default for RankField<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            confidence: None,
+        }
+    }
+}
+
+/// Rank update screen read for one game (`rank` on uploads and match JSON).
+///
+/// Every field is always serialized as `{value, confidence}` so clients see
+/// one fixed shape. `rank_recognizer` is the reader id (`rank-v1`), which
+/// also covers `queue_title`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct MatchRank {
+    #[serde(default)]
+    pub role: RankField<RankRole>,
+    #[serde(default)]
+    pub role_rank: RankField<String>,
+    /// 1..=5.
+    #[serde(default)]
+    pub division: RankField<u8>,
+    #[serde(default)]
+    pub progress_pct: RankField<i32>,
+    #[serde(default)]
+    pub progress_change: RankField<i32>,
+    /// At most [`RANK_MAX_CHANGE_TAGS`] entries.
+    #[serde(default)]
+    pub change_tags: RankField<Vec<String>>,
+    /// 0..=100.
+    #[serde(default)]
+    pub higher_than_pct: RankField<u8>,
+    #[serde(default)]
+    pub hero_sr: RankField<u32>,
+    #[serde(default)]
+    pub hero_sr_change: RankField<i32>,
+    #[serde(default)]
+    pub next_mode_hint: RankField<String>,
+    #[serde(default)]
+    pub queue_title: RankField<String>,
+    #[serde(default)]
+    pub rank_recognizer: Option<String>,
+}
+
+fn rank_string(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|s| s.chars().count() <= RANK_STRING_MAX_CHARS)
+        .map(str::to_string)
+}
+
+fn rank_int<T: TryFrom<i64>>(value: &serde_json::Value) -> Option<T> {
+    value.as_i64().and_then(|n| T::try_from(n).ok())
+}
+
+fn rank_field<T>(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    parse: impl Fn(&serde_json::Value) -> Option<T>,
+) -> RankField<T> {
+    let Some(field) = obj.get(key).and_then(serde_json::Value::as_object) else {
+        return RankField::default();
+    };
+    RankField {
+        value: field.get("value").and_then(&parse),
+        confidence: field
+            .get("confidence")
+            .and_then(serde_json::Value::as_f64)
+            .filter(|c| c.is_finite() && (0.0..=1.0).contains(c))
+            .map(|c| c as f32),
+    }
+}
+
+/// Turn a raw `rank` value (upload or stored) into what is stored and returned.
+///
+/// Never an error: rank data must not cost the game. Omitted, null or a
+/// non-object `rank` is `None`. Inside it, a value or confidence that is the
+/// wrong type or out of range becomes null on its own, and unknown keys
+/// (including each field's `bbox`) are dropped. Checks: `division` 1..=5,
+/// `higher_than_pct` at most 100, `confidence` finite in 0..=1, integers in
+/// their type's range, strings at most [`RANK_STRING_MAX_CHARS`] characters,
+/// `change_tags` at most [`RANK_MAX_CHANGE_TAGS`] strings (otherwise the whole
+/// list is null), `role` one of `Tank`, `Damage`, `Support`, `Open`, and
+/// `rank_recognizer` the same id format as `recognizer`.
+pub fn resolve_rank(value: Option<&serde_json::Value>) -> Option<MatchRank> {
+    let obj = value?.as_object()?;
+    Some(MatchRank {
+        role: rank_field(obj, "role", |v| {
+            serde_json::from_value::<RankRole>(v.clone()).ok()
+        }),
+        role_rank: rank_field(obj, "role_rank", rank_string),
+        division: rank_field(obj, "division", |v| {
+            rank_int::<u8>(v).filter(|d| (1..=5).contains(d))
+        }),
+        progress_pct: rank_field(obj, "progress_pct", rank_int::<i32>),
+        progress_change: rank_field(obj, "progress_change", rank_int::<i32>),
+        change_tags: rank_field(obj, "change_tags", |v| {
+            let items = v.as_array().filter(|a| a.len() <= RANK_MAX_CHANGE_TAGS)?;
+            items.iter().map(rank_string).collect()
+        }),
+        higher_than_pct: rank_field(obj, "higher_than_pct", |v| {
+            rank_int::<u8>(v).filter(|p| *p <= 100)
+        }),
+        hero_sr: rank_field(obj, "hero_sr", rank_int::<u32>),
+        hero_sr_change: rank_field(obj, "hero_sr_change", rank_int::<i32>),
+        next_mode_hint: rank_field(obj, "next_mode_hint", rank_string),
+        queue_title: rank_field(obj, "queue_title", rank_string),
+        rank_recognizer: obj
+            .get("rank_recognizer")
+            .and_then(serde_json::Value::as_str)
+            .filter(|id| is_recognizer_id(id))
+            .map(str::to_string),
+    })
+}
+
 /// Max characters (not bytes) in each string field of one uploaded match
 /// (`session_id`, `hero`, `map_name`, `game_mode`, `role`, `outcome`) and in
 /// each `deleted_sessions` entry. Tracker session ids are 16 hex characters
@@ -402,13 +787,19 @@ pub struct StatsUploadMatch {
     /// found the row.
     pub name_recognizer: RecognizerInput,
     pub suspect_fields: SuspectFieldsInput,
+    /// Raw `bans_picks` value, `None` when omitted. Checked by
+    /// [`resolve_bans_picks`] in the upload route.
+    pub bans_picks: Option<serde_json::Value>,
+    /// Raw `rank` value, `None` when omitted. Read by [`resolve_rank`] in
+    /// the upload route. It never rejects the upload.
+    pub rank: Option<serde_json::Value>,
 }
 
 impl TryFrom<serde_json::Value> for StatsUploadMatch {
     type Error = String;
 
     fn try_from(mut value: serde_json::Value) -> Result<Self, Self::Error> {
-        let (recognizer, name_recognizer, suspect_fields) = {
+        let (recognizer, name_recognizer, suspect_fields, bans_picks, rank) = {
             let Some(obj) = value.as_object_mut() else {
                 return Err("match entry must be a JSON object".into());
             };
@@ -436,7 +827,15 @@ impl TryFrom<serde_json::Value> for StatsUploadMatch {
                 }
                 Some(_) => SuspectFieldsInput::NotAnArray,
             };
-            (recognizer, name_recognizer, suspect_fields)
+            let bans_picks = obj.remove("bans_picks");
+            let rank = obj.remove("rank");
+            (
+                recognizer,
+                name_recognizer,
+                suspect_fields,
+                bans_picks,
+                rank,
+            )
         };
         let entry = serde_json::from_value(value).map_err(|err| err.to_string())?;
         Ok(Self {
@@ -444,6 +843,8 @@ impl TryFrom<serde_json::Value> for StatsUploadMatch {
             recognizer,
             name_recognizer,
             suspect_fields,
+            bans_picks,
+            rank,
         })
     }
 }
@@ -475,22 +876,132 @@ pub struct CreateDaemonTokenResponse {
     pub label: String,
 }
 
+/// Who can see a member's tracker stats.
+///
+/// Stored on `member_settings.stats_visibility`. Missing rows and legacy rows
+/// read as [`StatsVisibility::Public`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatsVisibility {
+    /// Signed-out visitors and every crew member.
+    #[default]
+    Public,
+    /// Active signed-in crew members. Signed-out callers do not see the numbers.
+    Members,
+    /// The member, and officers on the aggregate stat routes (not on the officer
+    /// match routes, see [`StatsVisibility::officer_match_denial`]). Off every
+    /// leaderboard, including for the owner.
+    Private,
+}
+
+impl StatsVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Public => "public",
+            Self::Members => "members",
+            Self::Private => "private",
+        }
+    }
+
+    /// Leaderboards and other multi-member aggregates.
+    ///
+    /// `crew` is true for an active signed-in member. `private` is never
+    /// included. `members` is included only when `crew` is true.
+    pub fn on_leaderboard(self, crew: bool) -> bool {
+        match self {
+            Self::Public => true,
+            Self::Members => crew,
+            Self::Private => false,
+        }
+    }
+
+    /// `None` when this viewer may see the member's own stat routes.
+    ///
+    /// `active_member` means a signed-in crew member who is not suspended.
+    /// `owner` and `officer` are that same viewer. Signed-out and inactive
+    /// callers pass false for all three flags.
+    pub fn denial(self, active_member: bool, owner: bool, officer: bool) -> Option<&'static str> {
+        match self {
+            Self::Public => None,
+            Self::Members if active_member => None,
+            Self::Members => Some("stats_members_only"),
+            Self::Private if owner || officer => None,
+            Self::Private => Some("stats_private"),
+        }
+    }
+
+    /// `None` when an officer may read this member's individual matches on
+    /// `GET /api/stats/member/{id}/matches` and `.../matches/{match_id}`.
+    ///
+    /// `owner` is true when the officer reads their own matches, which is
+    /// always allowed. Otherwise `public` and `members` allow officers and
+    /// `private` answers [`STATS_HIDDEN_BY_MEMBER`]. Decided 2026-11-03:
+    /// officers see a private member's totals on the aggregate routes
+    /// ([`StatsVisibility::denial`]) but not their individual matches.
+    pub fn officer_match_denial(self, owner: bool) -> Option<&'static str> {
+        match self {
+            _ if owner => None,
+            Self::Public | Self::Members => None,
+            Self::Private => Some(STATS_HIDDEN_BY_MEMBER),
+        }
+    }
+}
+
+/// `error` value of [`StatsHiddenError`].
+pub const STATS_HIDDEN_BY_MEMBER: &str = "hidden_by_member";
+
+/// 403 body when a member's `stats_visibility` hides their matches from
+/// officers.
+///
+/// Exactly `{"error":"hidden_by_member","message":"..."}`. It carries no
+/// counts or dates, so a blocked read says nothing about the member's games.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatsHiddenError {
+    pub error: String,
+    pub message: String,
+}
+
+impl StatsHiddenError {
+    pub fn hidden_by_member() -> Self {
+        Self {
+            error: STATS_HIDDEN_BY_MEMBER.to_string(),
+            message: "This member keeps their stats private.".to_string(),
+        }
+    }
+}
+
 /// Per-member settings returned by GET /api/stats/settings (session auth).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemberSettingsResponse {
     pub player_name: Option<String>,
+    pub stats_visibility: StatsVisibility,
 }
 
 /// Body for PUT /api/stats/settings.
+///
+/// Omitting `player_name`, or sending null, clears the stored name. That is
+/// the same as before `stats_visibility` existed. Omitting `stats_visibility`,
+/// or sending null, keeps the stored value. The handler answers 400
+/// `invalid_stats_visibility` for any other JSON value.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateMemberSettingsRequest {
     pub player_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats_visibility: Option<StatsVisibility>,
 }
 
 /// Daemon configuration returned by GET /api/stats/daemon-config (token auth).
+///
+/// `stats_visibility` uses the same `public` | `members` | `private` strings as
+/// GET and PUT /api/stats/settings. The field is optional so a server that
+/// omits it, and a client that ignores it, both keep working.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DaemonConfigResponse {
     pub player_name: Option<String>,
+    /// Stored visibility, or public when the member has no settings row.
+    /// Absent when an older server omits the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats_visibility: Option<StatsVisibility>,
 }
 
 /// `GET /api/stats/token-check` (daemon token auth).
@@ -1182,5 +1693,301 @@ mod tests {
         )
         .unwrap();
         assert_eq!(bare.name_recognizer, None);
+    }
+
+    #[test]
+    fn stats_visibility_serde_and_denial() {
+        assert_eq!(
+            serde_json::to_string(&StatsVisibility::Members).unwrap(),
+            "\"members\""
+        );
+        assert_eq!(
+            serde_json::from_str::<StatsVisibility>("\"private\"").unwrap(),
+            StatsVisibility::Private
+        );
+        assert!(serde_json::from_str::<StatsVisibility>("\"nope\"").is_err());
+
+        let omitted: UpdateMemberSettingsRequest =
+            serde_json::from_str(r#"{"player_name":"Ana"}"#).unwrap();
+        assert_eq!(omitted.stats_visibility, None);
+        let missing_name =
+            serde_json::from_str::<UpdateMemberSettingsRequest>(r#"{"stats_visibility":"public"}"#)
+                .unwrap();
+        assert_eq!(missing_name.player_name, None);
+        assert_eq!(missing_name.stats_visibility, Some(StatsVisibility::Public));
+
+        assert_eq!(
+            StatsVisibility::Members.denial(false, false, false),
+            Some("stats_members_only")
+        );
+        assert_eq!(StatsVisibility::Members.denial(true, false, false), None);
+        assert_eq!(
+            StatsVisibility::Private.denial(true, false, false),
+            Some("stats_private")
+        );
+        assert_eq!(StatsVisibility::Private.denial(true, true, false), None);
+        assert_eq!(StatsVisibility::Private.denial(true, false, true), None);
+        assert!(!StatsVisibility::Private.on_leaderboard(true));
+        assert!(!StatsVisibility::Members.on_leaderboard(false));
+        assert!(StatsVisibility::Members.on_leaderboard(true));
+        assert!(StatsVisibility::Public.on_leaderboard(false));
+    }
+
+    #[test]
+    fn officer_match_denial_blocks_only_private_for_others() {
+        assert_eq!(StatsVisibility::Public.officer_match_denial(false), None);
+        assert_eq!(StatsVisibility::Members.officer_match_denial(false), None);
+        assert_eq!(
+            StatsVisibility::Private.officer_match_denial(false),
+            Some(STATS_HIDDEN_BY_MEMBER)
+        );
+        for vis in [
+            StatsVisibility::Public,
+            StatsVisibility::Members,
+            StatsVisibility::Private,
+        ] {
+            assert_eq!(vis.officer_match_denial(true), None, "{vis:?}");
+        }
+    }
+
+    #[test]
+    fn stats_hidden_error_body_is_stable() {
+        let body = serde_json::to_value(StatsHiddenError::hidden_by_member()).unwrap();
+        let expected = serde_json::json!({
+            "error": "hidden_by_member",
+            "message": "This member keeps their stats private.",
+        });
+        assert_eq!(body, expected);
+    }
+
+    #[test]
+    fn daemon_config_stats_visibility_is_optional() {
+        let bare: DaemonConfigResponse = serde_json::from_str(r#"{"player_name":"Ana"}"#).unwrap();
+        assert_eq!(bare.player_name.as_deref(), Some("Ana"));
+        assert_eq!(bare.stats_visibility, None);
+        let raw = serde_json::to_string(&bare).unwrap();
+        assert!(!raw.contains("stats_visibility"), "{raw}");
+
+        let null_name: DaemonConfigResponse =
+            serde_json::from_str(r#"{"player_name":null}"#).unwrap();
+        assert_eq!(null_name.player_name, None);
+        assert_eq!(null_name.stats_visibility, None);
+
+        for (label, vis) in [
+            ("public", StatsVisibility::Public),
+            ("members", StatsVisibility::Members),
+            ("private", StatsVisibility::Private),
+        ] {
+            let parsed: DaemonConfigResponse = serde_json::from_str(&format!(
+                r#"{{"player_name":null,"stats_visibility":"{label}"}}"#
+            ))
+            .unwrap();
+            assert_eq!(parsed.stats_visibility, Some(vis));
+            let out = serde_json::to_string(&DaemonConfigResponse {
+                player_name: None,
+                stats_visibility: Some(vis),
+            })
+            .unwrap();
+            assert!(
+                out.contains(&format!("\"stats_visibility\":\"{label}\"")),
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn bans_picks_full_object_resolves_to_pack_keys() {
+        let raw = serde_json::json!({
+            "bans": [
+                { "hero": "mauga", "team": "own" },
+                { "hero": "Wrecking Ball", "team": "enemy" },
+                { "hero": null, "team": null },
+                null
+            ],
+            "lobby_ban": "ana",
+            "picks": ["wrecking-ball", null, "soldier-76", "dva", "lucio", "mercy"],
+            "ban_vote": ["ana", "no_preference", null, "dva", "Mercy", "no_preference"],
+            "recognizer": "cv-v1"
+        });
+        let got = resolve_bans_picks(Some(&raw)).unwrap().unwrap();
+        assert_eq!(got.bans.len(), 4);
+        assert_eq!(got.bans[0].hero.as_deref(), Some("mauga"));
+        assert_eq!(got.bans[0].team, Some(BanTeam::Own));
+        assert_eq!(got.bans[1].hero.as_deref(), Some("wrecking-ball"));
+        assert_eq!(got.bans[1].team, Some(BanTeam::Enemy));
+        assert_eq!(
+            got.bans[2],
+            HeroBan {
+                hero: None,
+                team: None
+            }
+        );
+        assert_eq!(
+            got.bans[3],
+            HeroBan {
+                hero: None,
+                team: None
+            }
+        );
+        assert_eq!(got.lobby_ban.as_deref(), Some("ana"));
+        assert_eq!(got.picks[0].as_deref(), Some("wrecking-ball"));
+        assert_eq!(got.picks[1], None);
+        assert_eq!(got.picks.len(), 6);
+        assert_eq!(
+            got.ban_vote,
+            vec![
+                Some("ana".to_string()),
+                Some("no_preference".to_string()),
+                None,
+                Some("dva".to_string()),
+                Some("mercy".to_string()),
+                Some("no_preference".to_string()),
+            ]
+        );
+        assert_eq!(got.recognizer.as_deref(), Some("cv-v1"));
+        let json = serde_json::to_value(&got).unwrap();
+        assert_eq!(
+            json["bans"][0],
+            serde_json::json!({ "hero": "mauga", "team": "own" })
+        );
+        assert_eq!(bans_picks_from_stored(&json), Some(got));
+    }
+
+    #[test]
+    fn stored_object_without_ban_vote_reads_as_empty() {
+        let stored = serde_json::json!({
+            "bans": [],
+            "lobby_ban": null,
+            "picks": ["no_preference", null],
+            "recognizer": "cv-v1"
+        });
+        let got = bans_picks_from_stored(&stored).unwrap();
+        assert!(got.ban_vote.is_empty());
+        assert_eq!(got.picks, vec![Some("no_preference".to_string()), None]);
+    }
+
+    #[test]
+    fn bans_picks_absent_or_null_is_none() {
+        assert_eq!(resolve_bans_picks(None), Ok(None));
+        assert_eq!(resolve_bans_picks(Some(&serde_json::Value::Null)), Ok(None));
+        let empty = resolve_bans_picks(Some(&serde_json::json!({})))
+            .unwrap()
+            .unwrap();
+        assert_eq!(empty, BansPicks::default());
+    }
+
+    #[test]
+    fn bans_picks_unknown_hero_key_is_null() {
+        let raw = serde_json::json!({
+            "bans": [{ "hero": "not-a-hero", "team": "own" }],
+            "lobby_ban": "Unknown",
+            "picks": ["zzz", "placeholder-1"],
+            "ban_vote": ["nobody", "No_Preference", "no-preference", "ana"]
+        });
+        let got = resolve_bans_picks(Some(&raw)).unwrap().unwrap();
+        assert_eq!(got.bans[0].hero, None);
+        assert_eq!(got.bans[0].team, Some(BanTeam::Own));
+        assert_eq!(got.lobby_ban, None);
+        assert_eq!(got.picks, vec![None, None]);
+        // Only the exact literal is kept. Near misses are unknown keys.
+        assert_eq!(got.ban_vote, vec![None, None, None, Some("ana".into())]);
+    }
+
+    #[test]
+    fn bans_picks_no_preference_is_kept_in_picks_and_ban_vote_and_never_null() {
+        let raw = serde_json::json!({
+            "picks": ["no_preference", null, "ana"],
+            "ban_vote": ["no_preference", null, "ana"],
+            "bans": [{ "hero": "no_preference", "team": "own" }],
+            "lobby_ban": "no_preference"
+        });
+        let got = resolve_bans_picks(Some(&raw)).unwrap().unwrap();
+        let expected = vec![Some("no_preference".to_string()), None, Some("ana".into())];
+        assert_eq!(got.picks, expected);
+        assert_eq!(got.ban_vote, expected);
+        // The literal is for teammate choices only. A ban or the lobby ban
+        // cannot be "no preference", so those stay unknown keys (null).
+        assert_eq!(got.bans[0].hero, None);
+        assert_eq!(got.lobby_ban, None);
+        let json = serde_json::to_value(&got).unwrap();
+        assert_eq!(
+            json["picks"],
+            serde_json::json!(["no_preference", null, "ana"])
+        );
+        assert_eq!(
+            json["ban_vote"],
+            serde_json::json!(["no_preference", null, "ana"])
+        );
+        assert_eq!(bans_picks_from_stored(&json), Some(got));
+    }
+
+    #[test]
+    fn bans_picks_rejects_long_lists_bad_shape_and_bad_recognizer() {
+        let five = serde_json::json!({ "bans": [
+            { "hero": "ana" }, { "hero": "ana" }, { "hero": "ana" }, { "hero": "ana" }, { "hero": "ana" }
+        ]});
+        let err = resolve_bans_picks(Some(&five)).unwrap_err();
+        assert!(
+            err.contains("bans_picks.bans must have at most 4 entries"),
+            "{err}"
+        );
+        let seven =
+            serde_json::json!({ "picks": ["ana", "ana", "ana", "ana", "ana", "ana", "ana"] });
+        let err = resolve_bans_picks(Some(&seven)).unwrap_err();
+        assert!(
+            err.contains("bans_picks.picks must have at most 6 entries"),
+            "{err}"
+        );
+        let vote =
+            serde_json::json!({ "ban_vote": ["ana", "ana", "ana", "ana", "ana", "ana", "ana"] });
+        assert_eq!(
+            resolve_bans_picks(Some(&vote)),
+            Err("bans_picks.ban_vote must have at most 6 entries, got 7".to_string())
+        );
+        let six = serde_json::json!({ "ban_vote": ["ana", "ana", "ana", "ana", "ana", "ana"] });
+        assert!(resolve_bans_picks(Some(&six)).is_ok());
+        for bad in [
+            "CV-V1",
+            "",
+            "cv v1",
+            "a234567890123456789012345678901234",
+            "--",
+        ] {
+            let raw = serde_json::json!({ "recognizer": bad });
+            assert_eq!(
+                resolve_bans_picks(Some(&raw)),
+                Err(BANS_PICKS_RECOGNIZER_ERROR.to_string()),
+                "{bad:?}"
+            );
+        }
+        for raw in [
+            serde_json::json!({ "recognizer": 3 }),
+            serde_json::json!("cv-v1"),
+            serde_json::json!({ "bans": "ana" }),
+            serde_json::json!({ "bans": [3] }),
+            serde_json::json!({ "bans": [{ "team": "ally" }] }),
+            serde_json::json!({ "bans": [{ "hero": 7 }] }),
+            serde_json::json!({ "picks": [1] }),
+            serde_json::json!({ "ban_vote": [1] }),
+            serde_json::json!({ "ban_vote": "ana" }),
+            serde_json::json!({ "ban_vote": [{ "hero": "ana" }] }),
+            serde_json::json!({ "lobby_ban": true }),
+        ] {
+            assert!(resolve_bans_picks(Some(&raw)).is_err(), "{raw}");
+        }
+    }
+
+    #[test]
+    fn upload_match_takes_bans_picks_out_of_the_entry() {
+        let mut raw = serde_json::to_value(valid_entry()).unwrap();
+        raw["bans_picks"] = serde_json::json!({ "lobby_ban": "ana" });
+        let m: StatsUploadMatch = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            m.bans_picks,
+            Some(serde_json::json!({ "lobby_ban": "ana" }))
+        );
+        let m: StatsUploadMatch =
+            serde_json::from_value(serde_json::to_value(valid_entry()).unwrap()).unwrap();
+        assert_eq!(m.bans_picks, None);
     }
 }

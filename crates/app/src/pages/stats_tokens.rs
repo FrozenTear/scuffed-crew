@@ -288,7 +288,7 @@ pub fn StatsTokens() -> Element {
 
         div { class: "tokens-page",
             div { class: "admin-toolbar",
-                h1 { "Daemon Tokens" }
+                h1 { "Tracker tokens" }
                 button { class: "btn-add", onclick: open_create, "+ New Token" }
             }
 
@@ -302,9 +302,9 @@ pub fn StatsTokens() -> Element {
                 let data = tokens.data.read();
                 let data = data.as_ref().and_then(|d| d.as_ref());
                 match data {
-                    None => member_pending(&auth(), &tokens, "daemon tokens"),
+                    None => member_pending(&auth(), &tokens, "tracker tokens"),
                     Some(list) if list.is_empty() => rsx! {
-                        p { class: "empty-state", "No daemon tokens yet. Create one to start uploading stats." }
+                        p { class: "empty-state", "No tracker tokens yet. Create one to start uploading stats." }
                     },
                     Some(list) => rsx! {
                         DataTable { headers: vec!["Label", "Status", "Created", "Last Used", "Actions"],
@@ -342,7 +342,7 @@ pub fn StatsTokens() -> Element {
             }
 
             FormModal {
-                title: "Create Daemon Token".to_string(),
+                title: "Create tracker token".to_string(),
                 open: modal.is_open(),
                 submitting: modal.is_submitting(),
                 on_close: on_close,
@@ -485,5 +485,11 @@ mod tests {
         dom.rebuild_in_place();
         let copied = COPIED_TOKEN.with(|slot| slot.borrow().clone());
         assert_eq!(copied.as_deref(), Some(token));
+    }
+
+    #[test]
+    fn copy_says_tracker_tokens() {
+        let src = include_str!("stats_tokens.rs");
+        assert!(!src.contains(&["Daemon", " Token"].concat()));
     }
 }

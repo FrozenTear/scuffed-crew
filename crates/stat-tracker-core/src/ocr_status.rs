@@ -588,6 +588,42 @@ pub struct Status {
     /// asked for, KWin did not answer). Empty otherwise. The app shows it
     /// under the capture method in Settings.
     pub capture_notice: String,
+    /// Why the bans and picks reader (`cv-v1`) read nothing for the last game:
+    /// no pack, a pack that did not load, a read that failed, or a frame that
+    /// was not 2560x1440. The game is recorded all the same. Empty when the
+    /// last read worked or the reader is off. The app shows it in Tracker
+    /// health, next to the OCR line, whatever OCR is set to.
+    pub bans_picks_notice: String,
+    /// What the focus gate (`capture_only_on_screen`) last saw. The app
+    /// shows it in its top bar while a game runs.
+    pub focus_gate: FocusGateStatus,
+    /// Why Tab presses cannot reach the tracker: no keyboard device could be
+    /// opened (most often the user is not in the `input` group). Capture and
+    /// recording go on. Empty while a keyboard is read. The app shows it in
+    /// Tracker health, first among the tracker's own notices (a sync
+    /// problem the app finds itself still comes before it).
+    pub input_notice: String,
+}
+
+/// The focus gate's state in [`Status`]: whether reads go on because
+/// Overwatch is the focused window. Written in snake case; a name a newer
+/// daemon adds reads as `unknown`, so the rest of the file still loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FocusGateStatus {
+    /// `capture_only_on_screen = false`: no focus check, reads always go on.
+    Off,
+    /// Overwatch is the focused window: reads go on.
+    Focused,
+    /// Another window is focused: reads pause until Overwatch is again.
+    NotFocused,
+    /// The focused window cannot be read on this desktop (no source, an
+    /// error or a timeout). Reads go on: a warning state, not a pause.
+    Unreadable,
+    /// No focus read yet, or a name this build does not know.
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 /// One blocked call site in [`Status`].
@@ -623,13 +659,26 @@ impl Status {
         }
     }
 
-    /// The part of [`Self::notice`] that belongs in Tracker health: only
-    /// what is wrong while the tracker runs with OCR off (a pack on hold, a
-    /// read that was stopped). A refused `off` is not a health problem: the
-    /// tracker runs classic OCR and reads everything, so health stays as it
-    /// is and the reason is shown in Settings.
+    /// The keyboard line ([`Self::input_notice`]) first, then the part of
+    /// [`Self::notice`] that is wrong while the tracker runs with OCR off (a
+    /// pack on hold, a read that was stopped), then the bans and picks line
+    /// ([`Self::bans_picks_notice`]), whatever OCR is set to. The keyboard
+    /// line ends with a shell command, so a line break, not a space, comes
+    /// after it. A refused `off` is not a health problem: the tracker runs
+    /// classic OCR and reads everything, so health stays as it is and the
+    /// reason is shown in Settings.
     pub fn health_notice(&self) -> Option<String> {
-        self.effective.is_off().then(|| self.notice()).flatten()
+        let ocr = self.effective.is_off().then(|| self.notice()).flatten();
+        let bans = Some(self.bans_picks_notice.clone()).filter(|n| !n.is_empty());
+        let rest = match (ocr, bans) {
+            (Some(ocr), Some(bans)) => Some(format!("{ocr} {bans}")),
+            (ocr, bans) => ocr.or(bans),
+        };
+        match (self.input_notice.is_empty(), rest) {
+            (true, rest) => rest,
+            (false, None) => Some(self.input_notice.clone()),
+            (false, Some(rest)) => Some(format!("{}\n{rest}", self.input_notice)),
+        }
     }
 }
 
@@ -647,6 +696,10 @@ pub fn read_status(data_dir: &Path) -> Option<Status> {
 static DAEMON_SHARE_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SHARE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static CAPTURE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static BANS_PICKS_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static INPUT_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static FOCUS_GATE: std::sync::Mutex<FocusGateStatus> =
+    std::sync::Mutex::new(FocusGateStatus::Unknown);
 static STATUS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Held around every read-modify-write of the status file, so the switch's
@@ -684,6 +737,66 @@ pub fn publish_capture_notice(data_dir: &Path, notice: &str) {
         return;
     }
     status.capture_notice = notice.to_string();
+    let _ = write_status(data_dir, &status);
+}
+
+pub fn bans_picks_notice() -> String {
+    BANS_PICKS_NOTICE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+/// Write the bans and picks reader's sentence into the status file (empty
+/// clears it), keeping everything else there. Later status writes keep it
+/// too.
+pub fn publish_bans_picks_notice(data_dir: &Path, notice: &str) {
+    let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
+    *BANS_PICKS_NOTICE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = notice.to_string();
+    let mut status = read_status(data_dir).unwrap_or_default();
+    if status.bans_picks_notice == notice {
+        return;
+    }
+    status.bans_picks_notice = notice.to_string();
+    let _ = write_status(data_dir, &status);
+}
+
+pub fn input_notice() -> String {
+    INPUT_NOTICE
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .clone()
+}
+
+/// Write the keyboard input sentence into the status file (empty clears
+/// it), keeping everything else there. Later status writes keep it too.
+pub fn publish_input_notice(data_dir: &Path, notice: &str) {
+    let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
+    *INPUT_NOTICE.lock().unwrap_or_else(|err| err.into_inner()) = notice.to_string();
+    let mut status = read_status(data_dir).unwrap_or_default();
+    if status.input_notice == notice {
+        return;
+    }
+    status.input_notice = notice.to_string();
+    let _ = write_status(data_dir, &status);
+}
+
+pub fn focus_gate() -> FocusGateStatus {
+    *FOCUS_GATE.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Write the focus gate's state into the status file, keeping everything
+/// else there. Later status writes keep it too.
+pub fn publish_focus_gate(data_dir: &Path, gate: FocusGateStatus) {
+    let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
+    *FOCUS_GATE.lock().unwrap_or_else(|err| err.into_inner()) = gate;
+    let mut status = read_status(data_dir).unwrap_or_default();
+    if status.focus_gate == gate {
+        return;
+    }
+    status.focus_gate = gate;
     let _ = write_status(data_dir, &status);
 }
 
@@ -1100,7 +1213,55 @@ mod tests {
             share_open: false,
             share_notice: String::new(),
             capture_notice: String::new(),
+            bans_picks_notice: String::new(),
+            focus_gate: FocusGateStatus::Unknown,
+            input_notice: String::new(),
         }
+    }
+
+    #[test]
+    fn the_bans_picks_line_joins_tracker_health_whatever_ocr_is() {
+        let line = "Bans and picks were not read.";
+        let mut on = status(OcrSetting::On, None, None);
+        assert_eq!(on.health_notice(), None);
+        on.bans_picks_notice = line.into();
+        assert_eq!(on.health_notice().as_deref(), Some(line));
+        // It is no OCR notice: Settings' own line stays empty.
+        assert_eq!(on.notice(), None);
+        // With OCR off and a pack on hold both are told, the OCR line first.
+        let held = PackReadiness {
+            maps: false,
+            ..READY
+        };
+        let mut off = status(OcrSetting::Off, None, Some(held));
+        let ocr = off.health_notice().expect("a hold line");
+        off.bans_picks_notice = line.into();
+        assert_eq!(off.health_notice(), Some(format!("{ocr} {line}")));
+        // An old status file has no such field and reads as empty.
+        let old: Status = serde_json::from_str("{\"pid\": 3}").unwrap();
+        assert_eq!(old.bans_picks_notice, "");
+        assert_eq!(old.health_notice(), None);
+    }
+
+    #[test]
+    fn the_input_line_leads_tracker_health_whatever_ocr_is() {
+        // Like the daemon's notice, it ends with a shell command.
+        let input = "Tab detection is off. Run: sudo usermod -aG input \"$USER\"";
+        let mut on = status(OcrSetting::On, None, None);
+        on.input_notice = input.into();
+        assert_eq!(on.health_notice().as_deref(), Some(input));
+        assert_eq!(on.notice(), None, "it is no OCR notice");
+        on.bans_picks_notice = "Bans and picks were not read.".into();
+        // A line break ends the command: no run-on into the next notice.
+        assert_eq!(
+            on.health_notice().as_deref(),
+            Some(
+                "Tab detection is off. Run: sudo usermod -aG input \"$USER\"\nBans and picks were not read."
+            )
+        );
+        // An old status file has no such field and reads as empty.
+        let old: Status = serde_json::from_str("{\"pid\": 3}").unwrap();
+        assert_eq!(old.input_notice, "");
     }
 
     #[test]

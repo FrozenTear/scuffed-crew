@@ -47,6 +47,7 @@ async fn test_state() -> AppState {
         reports_dir: PathBuf::from("/tmp/scuffed-test-reports"),
         reports_enabled: true,
         packs_dir: None,
+        hero_icons: scuffed_site_server::hero_icons::HeroIconStore::in_temp_dir(),
         notifier: None,
         nostr_challenge_key: *blake3::hash(b"test-nostr-challenge-key").as_bytes(),
         consumed_challenges: scuffed_site_server::challenge_store::ConsumedChallengeStore::new(),
@@ -722,6 +723,42 @@ async fn game_account_name_is_trimmed_and_capped_at_64() {
         body_json(too_long).await["error"],
         "account_name too long (max 64)"
     );
+}
+
+/// An officer may upsert a game account on their own member id. The rank rule
+/// applies only when the caller edits someone else.
+#[tokio::test]
+async fn officer_can_upsert_own_game_account() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    seed_game(&state.db, "ow2", "Overwatch 2").await;
+
+    let app = create_router(state.clone());
+    let resp = app
+        .oneshot(authed_json_request(
+            Method::PUT,
+            "/api/members/officermember/game-accounts",
+            OFFICER_TOKEN,
+            json!({
+                "game_id": "ow2",
+                "account_name": "OfficerOwl"
+            }),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp).await;
+    assert_eq!(json["account_name"], "OfficerOwl");
+    assert_eq!(json["member_id"], "officermember");
+
+    let stored = state
+        .db
+        .list_member_game_accounts("officermember")
+        .await
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].account_name, "OfficerOwl");
 }
 
 /// NS2-5: the profile's team list now comes from one `plays_on` traversal
@@ -6422,6 +6459,8 @@ async fn public_leaderboard_and_hero_scoped_carry_wins_losses_draws() {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             name_recognizer: None,
             suspect_fields: Vec::new(),
+            bans_picks: None,
+            rank: None,
         }
     }
 
@@ -6570,6 +6609,8 @@ async fn public_members_hero_scoped_query() {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             name_recognizer: None,
             suspect_fields: Vec::new(),
+            bans_picks: None,
+            rank: None,
         },
         PersonalMatch {
             id: String::new(),
@@ -6592,6 +6633,8 @@ async fn public_members_hero_scoped_query() {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             name_recognizer: None,
             suspect_fields: Vec::new(),
+            bans_picks: None,
+            rank: None,
         },
         // Different hero must not count toward Ana-scoped games.
         PersonalMatch {
@@ -6615,6 +6658,8 @@ async fn public_members_hero_scoped_query() {
             recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
             name_recognizer: None,
             suspect_fields: Vec::new(),
+            bans_picks: None,
+            rank: None,
         },
     ];
     state
@@ -7404,6 +7449,100 @@ async fn upload_avatar_oversized_dimensions_rejected() {
 
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     // Nothing persisted.
+    assert!(
+        !dir.join("avatars").exists()
+            || std::fs::read_dir(dir.join("avatars"))
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(true),
+        "no file should be written for a rejected bomb"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+/// Real 2x1 AVIF (see `tests/data/README.md`).
+const UPL_AVIF: &[u8] = include_bytes!("data/tiny-2x1.avif");
+
+/// `UPL_AVIF` with its single `ispe` box rewritten to declare `w` x `h`.
+fn upl_avif(w: u32, h: u32) -> Vec<u8> {
+    let mut out = UPL_AVIF.to_vec();
+    let at = out
+        .windows(4)
+        .position(|win| win == b"ispe")
+        .expect("fixture has an ispe box");
+    out[at + 8..at + 12].copy_from_slice(&w.to_be_bytes());
+    out[at + 12..at + 16].copy_from_slice(&h.to_be_bytes());
+    out
+}
+
+#[tokio::test]
+async fn upload_avatar_avif_succeeds_and_is_served_inline() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("avif");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+    let app = create_router(state);
+
+    let resp = app
+        .clone()
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "a.avif",
+            "image/avif",
+            UPL_AVIF,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let url = body_json(resp).await["url"].as_str().unwrap().to_string();
+    assert!(url.starts_with("/uploads/avatars/"), "got {url}");
+    assert!(url.ends_with(".avif"), "got {url}");
+
+    let served = app
+        .oneshot(Request::builder().uri(&url).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(served.status(), StatusCode::OK);
+    let hdr = |name: header::HeaderName| {
+        served
+            .headers()
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+    assert_eq!(hdr(header::CONTENT_TYPE).as_deref(), Some("image/avif"));
+    assert_eq!(hdr(header::CONTENT_DISPOSITION).as_deref(), Some("inline"));
+    assert_eq!(
+        hdr(header::X_CONTENT_TYPE_OPTIONS).as_deref(),
+        Some("nosniff")
+    );
+    assert!(hdr(header::CONTENT_SECURITY_POLICY).is_none());
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[tokio::test]
+async fn upload_avatar_avif_oversized_dimensions_rejected() {
+    let mut state = test_state().await;
+    state.upload_dir = unique_upload_dir("avif-bomb");
+    seed_all_roles(&state.db).await;
+    let dir = state.upload_dir.clone();
+    let app = create_router(state);
+
+    // 311-byte file whose header declares a 50000x50000 canvas.
+    let resp = app
+        .oneshot(upload_request(
+            "/api/upload/avatar",
+            MEMBER_TOKEN,
+            "bomb.avif",
+            "image/avif",
+            &upl_avif(50_000, 50_000),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     assert!(
         !dir.join("avatars").exists()
             || std::fs::read_dir(dir.join("avatars"))
@@ -8352,6 +8491,8 @@ async fn seasons_crud_and_stats_season_filter() {
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
         name_recognizer: None,
         suspect_fields: Vec::new(),
+        bans_picks: None,
+        rank: None,
     };
     // January game inside season 1, July game outside it.
     let matches = vec![
@@ -8668,6 +8809,8 @@ async fn role_stats_endpoints_match_heroes_auth_and_group_stored_role() {
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.into(),
         name_recognizer: None,
         suspect_fields: Vec::new(),
+        bans_picks: None,
+        rank: None,
     };
 
     state
@@ -9329,6 +9472,118 @@ async fn unpublished_article_hidden_from_non_editors() {
     assert_eq!(resp.status(), StatusCode::OK);
     let list = body_json(resp).await;
     assert!(list.as_array().unwrap().is_empty());
+}
+
+const COVER_IMAGE_URL_ERROR: &str =
+    "cover_image_url must be empty, an https URL, or an /uploads/images/ path";
+
+async fn article_create(app: &axum::Router, slug: &str, cover: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::POST,
+            "/api/articles",
+            OFFICER_TOKEN,
+            json!({
+                "slug": slug,
+                "title": "Cover test",
+                "content_markdown": "body",
+                "cover_image_url": cover,
+            }),
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+async fn article_update(app: &axum::Router, slug: &str, body: Value) -> (StatusCode, Value) {
+    let resp = app
+        .clone()
+        .oneshot(authed_json_request(
+            Method::PUT,
+            &format!("/api/articles/{slug}"),
+            OFFICER_TOKEN,
+            body,
+        ))
+        .await
+        .unwrap();
+    let status = resp.status();
+    (status, body_json(resp).await)
+}
+
+/// Create rejects script / odd cover URLs before writing anything, and stores
+/// accepted values trimmed. Blank means no cover.
+#[tokio::test]
+async fn article_create_validates_cover_image_url() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let (status, body) = article_create(&app, "cover-js", json!("javascript:alert(1)")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], COVER_IMAGE_URL_ERROR);
+    let (status, _) = article_get(&app, "cover-js", Some(OFFICER_TOKEN)).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "rejected create wrote nothing"
+    );
+
+    let upload = "/uploads/images/member_officer/cover.png";
+    let (status, body) = article_create(&app, "cover-upload", json!(format!(" {upload} "))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["cover_image_url"], upload);
+
+    let https = "HTTPS://cdn.example.com/cover.png";
+    let (status, body) = article_create(&app, "cover-https", json!(https)).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["cover_image_url"], https);
+    let (_, stored) = article_get(&app, "cover-https", Some(OFFICER_TOKEN)).await;
+    assert_eq!(stored["cover_image_url"], https);
+
+    let (status, body) = article_create(&app, "cover-blank", json!("")).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert!(body["cover_image_url"].is_null(), "{body}");
+}
+
+/// Update rejects a bad cover without touching the row; blank clears it and
+/// omitting the field keeps it.
+#[tokio::test]
+async fn article_update_validates_cover_image_url() {
+    let state = test_state().await;
+    seed_all_roles(&state.db).await;
+    let app = create_router(state);
+
+    let cover = "https://cdn.example.com/cover.png";
+    let (status, _) = article_create(&app, "cover-edit", json!(cover)).await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, body) = article_update(
+        &app,
+        "cover-edit",
+        json!({ "title": "Changed", "cover_image_url": "data:image/png;base64,AAAA" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], COVER_IMAGE_URL_ERROR);
+    let (_, stored) = article_get(&app, "cover-edit", Some(OFFICER_TOKEN)).await;
+    assert_eq!(stored["cover_image_url"], cover);
+    assert_eq!(
+        stored["title"], "Cover test",
+        "rejected update wrote nothing"
+    );
+
+    let (status, body) = article_update(&app, "cover-edit", json!({ "title": "Renamed" })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["cover_image_url"], cover, "omitted field keeps cover");
+
+    let (status, body) =
+        article_update(&app, "cover-edit", json!({ "cover_image_url": "  " })).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body["cover_image_url"].is_null(), "{body}");
+    let (_, stored) = article_get(&app, "cover-edit", Some(OFFICER_TOKEN)).await;
+    assert!(stored["cover_image_url"].is_null(), "{stored}");
 }
 
 /// Clock time is `HH:MM` (what the schedule form's time input sends). Duration

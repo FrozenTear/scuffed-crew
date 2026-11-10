@@ -13,6 +13,9 @@ pub const TONIGHT_EMPTY: &str =
     "No games yet tonight. Press Tab in-game to capture the scoreboard.";
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
+    if app.nav_style == crate::nav::NavStyle::TopTabs {
+        return crate::overview_page::view(app, content_width);
+    }
     let filter = app.header_filter();
     let tonight_all = tonight_games(&app.games, app.clock);
     let tonight: Vec<&Game> = tonight_all

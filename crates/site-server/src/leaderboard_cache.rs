@@ -76,16 +76,15 @@ pub const LIMIT_BUCKETS: [u32; 4] = [10, 25, 50, 100];
 
 /// Who the board was built for.
 ///
-/// The public route only stores [`LeaderboardAudience::Public`]. Anonymous
-/// and logged-in callers share that slot: the query already drops inactive
-/// members, and the handler does not read the session. `Crew` exists so a
-/// later crew-only board cannot be written into a slot an anonymous caller
-/// reads.
+/// Anonymous callers and inactive sessions store [`LeaderboardAudience::Public`].
+/// That scan keeps `stats_visibility = public` only. An active member stores
+/// [`LeaderboardAudience::Crew`], which also keeps `members`. `private` is on
+/// neither board. The two audiences do not share a slot, so a members-only
+/// row cannot be served to an anonymous caller.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Ord, PartialOrd)]
 pub enum LeaderboardAudience {
     Public,
-    /// Not produced by the public handler. See the enum docs.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Active signed-in members. Includes `stats_visibility = members`.
     Crew,
 }
 
@@ -110,6 +109,17 @@ impl LeaderboardKey {
     pub fn public_board(metric: &str, limit: u32, season_id: &str, hero: &str) -> Self {
         Self {
             audience: LeaderboardAudience::Public,
+            metric: metric.to_string(),
+            limit,
+            season_id: season_id.to_string(),
+            hero: hero.to_string(),
+        }
+    }
+
+    /// Signed-in board. Not readable through [`Self::public_board`].
+    pub fn crew_board(metric: &str, limit: u32, season_id: &str, hero: &str) -> Self {
+        Self {
+            audience: LeaderboardAudience::Crew,
             metric: metric.to_string(),
             limit,
             season_id: season_id.to_string(),
@@ -236,6 +246,9 @@ struct Inner {
     inflight: HashMap<LeaderboardKey, watch::Receiver<FlightState>>,
     /// Stale keys waiting for a refresh slot, oldest `stored_at_ms` first.
     refresh_wait: BTreeMap<(u64, LeaderboardKey), QueuedRefresh>,
+    /// Bumped by [`LeaderboardCache::invalidate`]. A scan stores only when
+    /// this still matches the value captured at the start of the scan.
+    generation: u64,
 }
 
 trait CacheClock: Send + Sync {
@@ -362,6 +375,18 @@ impl LeaderboardCache {
             #[cfg(test)]
             followers: Arc::new(AtomicU32::new(0)),
         }
+    }
+
+    /// Drop every stored board. The next read scans again.
+    ///
+    /// A scan that started before this call does not write its result back,
+    /// so a visibility change cannot be cached and served after the switch.
+    pub fn invalidate(&self) {
+        let mut guard = self.lock();
+        guard.generation = guard.generation.wrapping_add(1);
+        guard.entries.clear();
+        guard.order.clear();
+        guard.refresh_wait.clear();
     }
 
     pub async fn get_or_load<F, Fut, T, E>(
@@ -604,6 +629,7 @@ impl LeaderboardCache {
     {
         // Stamp the board when the query starts. A scan that runs for a
         // second must not be labeled as if it finished just now.
+        let generation = self.lock().generation;
         let started_ms = self.clock.now_ms();
         let started = self.clock.wall();
         let fresh_for_ms = fresh_for_ms(self.ttl_ms(), self.jitter_millis());
@@ -611,6 +637,9 @@ impl LeaderboardCache {
         let refresh = permit.as_ref().is_some_and(|held| held.is_refresh());
         let mut guard = self.lock();
         guard.inflight.remove(&key);
+        // Visibility (or any other invalidate) moved during the scan.
+        // Keep the result off the cache. Waiters retry instead of taking it.
+        let discarded = guard.generation != generation;
         let outcome = match result {
             Ok(loaded) => {
                 let loaded = loaded.into_loaded();
@@ -619,18 +648,22 @@ impl LeaderboardCache {
                     cached_at: started,
                     snapshot: loaded.snapshot,
                 });
-                store(
-                    &mut guard,
-                    self.max_entries,
-                    key,
-                    Entry {
-                        board: Arc::clone(&board),
-                        stored_at_ms: started_ms,
-                        fresh_for_ms,
-                        next_refresh_ms: 0,
-                    },
-                );
-                let _ = tx.send(FlightState::Ready(Arc::clone(&board)));
+                if discarded {
+                    let _ = tx.send(FlightState::Skipped);
+                } else {
+                    store(
+                        &mut guard,
+                        self.max_entries,
+                        key,
+                        Entry {
+                            board: Arc::clone(&board),
+                            stored_at_ms: started_ms,
+                            fresh_for_ms,
+                            next_refresh_ms: 0,
+                        },
+                    );
+                    let _ = tx.send(FlightState::Ready(Arc::clone(&board)));
+                }
                 Ok(board.as_ref().clone())
             }
             Err(err) => {

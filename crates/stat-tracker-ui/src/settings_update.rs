@@ -152,6 +152,15 @@ pub struct PageState {
     /// Whether the website refused the saved token, as last read
     /// ([`crate::tracker_status::sync_token_rejected`]).
     pub(crate) token_rejected: bool,
+    /// The focus gate as the top bar shows it, debounced
+    /// ([`crate::focus_status::FocusDisplay`]).
+    pub(crate) focus: crate::focus_status::FocusDisplay,
+    /// The focus row is marked until then, after the top bar's
+    /// unreadable pill opened it ([`Self::show_focus_row`]).
+    focus_row_until: Option<std::time::Instant>,
+    /// The Read bans and picks row mark, after a reader-off or
+    /// pack-failed "Open Settings" ([`Self::show_bans_picks_row`]).
+    bans_picks_row: crate::bans_picks_setting::RowMark,
     /// What the page fetched when it last opened, and its dialog.
     pub opened: crate::settings_open::OpenState,
     /// The last changes waiting count with the baseline and saved config it
@@ -179,6 +188,9 @@ impl PageState {
             update_checking: false,
             config_path: None,
             token_rejected: false,
+            focus: crate::focus_status::FocusDisplay::default(),
+            focus_row_until: None,
+            bans_picks_row: crate::bans_picks_setting::RowMark::default(),
             opened: crate::settings_open::OpenState::default(),
             waiting_memo: RefCell::new(None),
         }
@@ -200,6 +212,49 @@ impl PageState {
 
     pub fn is_open(&self, section: AdvancedSection) -> bool {
         self.advanced_open.is_open(section)
+    }
+
+    /// The top bar's unreadable pill: open Capture and reading (never
+    /// close it) and mark the focus row for
+    /// [`crate::focus_status::HIGHLIGHT_FOR`].
+    pub(crate) fn show_focus_row(&mut self, now: std::time::Instant) {
+        if !self.advanced_open.is_open(AdvancedSection::CaptureReading) {
+            self.advanced_open.toggle(AdvancedSection::CaptureReading);
+        }
+        self.focus_row_until = Some(now + crate::focus_status::HIGHLIGHT_FOR);
+    }
+
+    /// Open an Advanced row, never close it: how another screen sends the
+    /// user to a row.
+    pub(crate) fn show_section(&mut self, section: AdvancedSection) {
+        if !self.advanced_open.is_open(section) {
+            self.advanced_open.toggle(section);
+        }
+    }
+
+    /// Whether the focus row is marked at `now`.
+    pub(crate) fn focus_row_marked(&self, now: std::time::Instant) -> bool {
+        self.focus_row_until.is_some_and(|until| now < until)
+    }
+
+    /// A reader-off or pack-failed "Open Settings": open Capture and
+    /// reading (never close it) and mark the Read bans and picks row for
+    /// [`crate::bans_picks_setting::HIGHLIGHT_FOR`].
+    pub(crate) fn show_bans_picks_row(&mut self, now: std::time::Instant) {
+        if !self.advanced_open.is_open(AdvancedSection::CaptureReading) {
+            self.advanced_open.toggle(AdvancedSection::CaptureReading);
+        }
+        self.bans_picks_row.start(now);
+    }
+
+    /// Whether the Read bans and picks row is marked at `now`.
+    pub(crate) fn bans_picks_row_marked(&self, now: std::time::Instant) -> bool {
+        self.bans_picks_row.is_on(now)
+    }
+
+    /// Drop the Read bans and picks mark at once (timeout, click, or scroll).
+    pub(crate) fn clear_bans_picks_highlight(&mut self) {
+        self.bans_picks_row.clear();
     }
 
     pub fn chip_draft(&self) -> Option<&(ChipList, String)> {
@@ -378,11 +433,12 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             let Some((list, draft)) = app.page_state.chip_draft.take() else {
                 return Task::none();
             };
+            let mut edit = None;
             let changed = match list {
-                // Config holds one name, so a new one replaces it.
+                // The first name fills player_name, the rest player_names.
                 ChipList::Names => match name_chip(&draft) {
                     Some(name) => {
-                        app.settings.set_text(SettingsField::PlayerName, name);
+                        edit = crate::settings_keys::name_added(app, name);
                         true
                     }
                     None => {
@@ -399,20 +455,19 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
                 }
             };
             if changed {
-                return page_save(app, Commit::Control, None);
+                return page_save(app, Commit::Control, edit);
             }
         }
         Msg::ChipRemove(list, index) => {
-            match list {
-                ChipList::Names => app
-                    .settings
-                    .set_text(SettingsField::PlayerName, String::new()),
+            let edit = match list {
+                ChipList::Names => crate::settings_keys::name_removed(app, index),
                 ChipList::Processes => {
                     let next = without_chip(&app.settings.game_process_names, index);
                     app.settings.set_text(SettingsField::ProcessNames, next);
+                    None
                 }
-            }
-            return page_save(app, Commit::Control, None);
+            };
+            return page_save(app, Commit::Control, edit);
         }
         Msg::CompanionDuringGames(on) => {
             // The switch follows what is stored, so it never shows a value

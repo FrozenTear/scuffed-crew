@@ -563,6 +563,21 @@ pub struct PersonalMatch {
     /// existed, read as an empty list. Additive on match-list JSON.
     #[serde(default)]
     pub suspect_fields: Vec<String>,
+    /// Bans and picks the tracker read for this game, or `None` (JSON null).
+    ///
+    /// `None` when the upload omitted the field or sent null, and on rows
+    /// written before the column existed. A later upload of the same session
+    /// replaces it, so a re-upload without the field clears it (same as
+    /// `name_recognizer` and `suspect_fields`). Additive on match-list JSON.
+    #[serde(default)]
+    pub bans_picks: Option<scuffed_types::BansPicks>,
+    /// Rank update screen read for this game, or `None` (JSON null).
+    ///
+    /// Same lifecycle as `bans_picks`: `None` when the upload omitted it or
+    /// sent something other than an object, and on older rows. A re-upload of
+    /// the session replaces it. See [`scuffed_types::MatchRank`] for the shape.
+    #[serde(default)]
+    pub rank: Option<scuffed_types::MatchRank>,
 }
 
 /// Aggregated personal stats for a member.
@@ -932,6 +947,10 @@ pub struct MapStats {
 pub struct MemberSettings {
     pub member_id: String,
     pub player_name: Option<String>,
+    /// Missing on a legacy row. Callers treat that as [`scuffed_types::StatsVisibility::Public`].
+    pub stats_visibility: scuffed_types::StatsVisibility,
+    /// Opted in to contributing hero icons. False when the row predates the field.
+    pub hero_icon_opt_in: bool,
 }
 
 /// A daemon authentication token.
@@ -1039,6 +1058,13 @@ pub enum AuditAction {
     WithdrawnStatReportTraining,
     DownloadedStatReport,
     ReadStatReportManifest,
+    /// An officer read another member's match list (one row per page).
+    ViewedMemberMatches,
+    /// An officer read one of another member's matches. Details: the match id.
+    ViewedMemberMatch,
+    DeletedHeroIcon,
+    DeletedAllHeroIcons,
+    ViewedHeroIcons,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -1627,6 +1653,38 @@ pub struct NewStatReport {
     pub size_bytes: u64,
     pub zip_sha256: String,
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Metadata for one contributed hero icon.
+///
+/// The PNG bytes live on disk under `HERO_ICONS_DIR` as `file_name`. This row
+/// does not store them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HeroIcon {
+    /// 32 lowercase hex characters, made by the server.
+    pub id: String,
+    pub member_id: String,
+    /// Hero display name from `scuffed_types::hero_key_to_name`.
+    pub hero: String,
+    /// `<id>.png`. Never taken from user input.
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Fields written when an icon is accepted.
+#[derive(Debug, Clone)]
+pub struct NewHeroIcon {
+    pub id: String,
+    pub member_id: String,
+    pub hero: String,
+    pub file_name: String,
+    pub size_bytes: u64,
+    pub width: u32,
+    pub height: u32,
+    pub created_at: DateTime<Utc>,
 }
 
 /// Build the deterministic conversation key from a pubkey pair.

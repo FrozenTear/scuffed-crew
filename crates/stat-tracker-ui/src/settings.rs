@@ -204,9 +204,9 @@ pub struct OcrSwitchView {
     /// What the running tracker reports: it kept OCR on, or it runs with
     /// OCR off and holds reads for a missing pack.
     pub notice: Option<String>,
-    /// The running tracker's notice for Tracker health
-    /// ([`daemon_health_notice`]): a hold or a stopped read, never a
-    /// refused off.
+    /// The running tracker's notice for Tracker health: what
+    /// [`daemon_health_notice`] gives (the keyboard line, an OCR hold or a
+    /// stopped read, a failed bans and picks read), never a refused off.
     pub health_notice: Option<String>,
     /// The running tracker decided to run with classic OCR off
     /// ([`daemon_runs_ocr_off`]). The card hides what only classic OCR uses
@@ -218,6 +218,10 @@ pub struct OcrSwitchView {
     /// Why the running tracker is not on the capture method asked for
     /// (KDE direct did not answer). Shown under the capture method.
     pub capture_notice: Option<String>,
+    /// Why Tab presses cannot reach the running tracker (set each tick in
+    /// `focus_status`). Top tabs has no Tracker health panel, so it shows
+    /// this under the page title on every tab.
+    pub input_notice: Option<String>,
 }
 
 /// A click on the classic OCR switch. Turning it on always works. Turning
@@ -291,10 +295,10 @@ pub(crate) fn daemon_runs_ocr_off(
     live_status(status, daemon_pid).is_some_and(|status| status.effective.is_off())
 }
 
-/// The tracker's notice for Tracker health: only what is wrong while it
-/// runs with classic OCR off. A refused off is not a health problem (the
-/// tracker reads everything with classic OCR), so health stays "Ready" and
-/// the reason is shown in Settings ([`daemon_ocr_notice`]).
+/// The tracker's notice for Tracker health: an unread keyboard first, then
+/// what is wrong with classic OCR off, then a failed bans and picks read.
+/// A refused off is not in it: health stays "Ready" and the reason is
+/// shown in Settings ([`daemon_ocr_notice`]).
 pub(crate) fn daemon_health_notice(
     status: Option<&OcrSwitchStatus>,
     daemon_pid: Option<u32>,
@@ -309,11 +313,7 @@ pub(crate) fn daemon_share_notice(
     daemon_pid: Option<u32>,
 ) -> Option<String> {
     let notice = live_status(status, daemon_pid)?.share_notice.trim();
-    if notice.is_empty() {
-        None
-    } else {
-        Some(notice.to_string())
-    }
+    (!notice.is_empty()).then(|| notice.to_string())
 }
 
 /// The running tracker's capture-route sentence ([`OcrSwitchStatus::capture_notice`]).
@@ -1399,7 +1399,7 @@ fn player_fields_row<'a>(
             SettingsField::SessionWindow,
             false,
             demo,
-            Some("Nearby games count as one session."),
+            Some(crate::session_window::hint(session_window_secs)),
         )),
     )
 }
@@ -3228,7 +3228,7 @@ token = \"not-a-real-token\"
             leptess_created: 0,
             share_open: false,
             share_notice: String::new(),
-            capture_notice: String::new(),
+            ..OcrSwitchStatus::default()
         }
     }
 

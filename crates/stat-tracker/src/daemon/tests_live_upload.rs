@@ -46,3 +46,24 @@ fn the_daemon_context_takes_the_gated_client() {
     );
     assert_eq!(run.matches("upload_client(").count(), 1);
 }
+
+/// Uploads off still leaves the install linked: the bans and picks reader
+/// is told about the site client from before the gate, so its missing pack
+/// notice says the pack is on its way, not that no account is linked.
+#[test]
+fn bans_and_picks_see_the_link_before_the_gate() {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let run = norm(fn_source("run"));
+    let linked = run
+        .find("let site_linked = sync_client.is_some();")
+        .expect("the link is read from the ungated client");
+    let gated = run
+        .find("sync_client: upload_client(sync_client, config.live_upload),")
+        .expect("DaemonCtx takes the gated client");
+    assert!(
+        linked < gated,
+        "the link must be read before the client moves into the gate"
+    );
+    assert!(run.contains("&ctx.data_dir, site_linked, );"));
+    assert!(!run.contains("ctx.sync_client.is_some()"));
+}

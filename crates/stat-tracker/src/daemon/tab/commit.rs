@@ -70,6 +70,9 @@ pub(crate) async fn store_held_board(
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
         suspect_fields: Vec::new(),
         name_recognizer: None,
+        bans_picks: None,
+        bans_picks_status: None,
+        queue_title: None,
     };
     storage::append_match_log(data_dir, &row);
     store
@@ -384,7 +387,11 @@ pub(crate) async fn store_best_guess_on_close(
                 "game closed with a stat never read for sure: stored the best guess, marked unsure"
             );
             g.session_created = true;
-            refresh_snapshot(store, data_dir).await;
+            if g.finished() {
+                refresh_snapshot_game_finished(store, data_dir).await;
+            } else {
+                refresh_snapshot(store, data_dir).await;
+            }
             true
         }
         Err(e) => {

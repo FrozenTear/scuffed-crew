@@ -4,6 +4,10 @@ use serde::Deserialize;
 use crate::components::{ConfirmDialog, DataTable, FormModal, Toast, admin_pending, use_toast};
 use crate::hooks::{ModalController, use_api_with};
 use crate::state::use_auth;
+use crate::upload::{
+    IMAGE_UPLOAD_ACCEPT, UploadFailure, clear_file_input, post_file, selected_file,
+    validate_image_upload,
+};
 use scuffed_api_client::ApiClient;
 
 /// Matches audit-log page size. API default is 20 with no total; a full page
@@ -41,6 +45,59 @@ struct UpdateArticleBody {
     cover_image_url: Option<Option<String>>,
 }
 
+/// DOM id for one editor field, built from the article record id (or `new`
+/// for an unsaved article) and the field name. Characters outside
+/// `[A-Za-z0-9_-]` (the `:` in `article:abc`) become `-`.
+fn article_field_id(record_id: Option<&str>, field: &str) -> String {
+    let key = record_id
+        .filter(|id| !id.trim().is_empty())
+        .unwrap_or("new");
+    let clean = |raw: &str| -> String {
+        raw.trim()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    format!("article-{}-{}", clean(key), clean(field))
+}
+
+/// Source for the cover preview: an `/uploads/images/...` path or an
+/// absolute `https://` URL with a host, matching the server's
+/// `normalize_cover_image_url`. Plain `http://`, `https://` with no host,
+/// avatar paths, `..` segments, and other values the server refuses have no
+/// preview.
+fn cover_preview_src(url: &str) -> Option<&str> {
+    let url = url.trim();
+    if crate::upload::is_cover_image_upload_path(url) {
+        // img src needs a rooted path; the no-slash form heals on save only.
+        return url.starts_with('/').then_some(url);
+    }
+    if crate::upload::is_cover_https_url(url) {
+        return Some(url);
+    }
+    None
+}
+
+/// Toast copy when `POST /api/upload/image` answers with an error status.
+fn image_upload_failure_message(status: u16) -> String {
+    match status {
+        400 => {
+            "The server could not read that image. Try a different JPEG, PNG, WebP, GIF, or AVIF."
+                .to_string()
+        }
+        401 => "Your session has ended. Sign in again, then retry the upload.".to_string(),
+        403 => "Only officers and admins can upload images.".to_string(),
+        413 => "The image is too large, or your upload space is full.".to_string(),
+        other => format!("Upload failed: HTTP {other}"),
+    }
+}
+
 #[component]
 pub fn AdminArticles() -> Element {
     let auth = use_auth();
@@ -58,6 +115,16 @@ pub fn AdminArticles() -> Element {
     let mut form_content = use_signal(String::new);
     let mut form_summary = use_signal(String::new);
     let mut form_cover = use_signal(String::new);
+    // Record id of the article being edited (None for a new one). Feeds DOM ids.
+    let mut form_id = use_signal(|| None::<String>);
+    let mut cover_uploading = use_signal(|| false);
+    // Text of the always-rendered cover upload status region.
+    let mut cover_status = use_signal(String::new);
+    // True when cover_status is a client-side reject (unsupported type / over size).
+    let mut cover_status_error = use_signal(|| false);
+    // Bumped whenever the editor opens or closes, so a finished upload from an
+    // earlier session of the editor does not overwrite the current cover field.
+    let mut editor_session = use_signal(|| 0u64);
 
     let mut delete_modal = ModalController::<Article>::new();
 
@@ -67,6 +134,11 @@ pub fn AdminArticles() -> Element {
         form_content.set(String::new());
         form_summary.set(String::new());
         form_cover.set(String::new());
+        form_id.set(None);
+        cover_uploading.set(false);
+        cover_status.set(String::new());
+        cover_status_error.set(false);
+        editor_session += 1;
         modal.show_empty();
     };
 
@@ -76,6 +148,11 @@ pub fn AdminArticles() -> Element {
         form_content.set(a.content_markdown);
         form_summary.set(a.summary.unwrap_or_default());
         form_cover.set(a.cover_image_url.unwrap_or_default());
+        form_id.set(Some(a.id));
+        cover_uploading.set(false);
+        cover_status.set(String::new());
+        cover_status_error.set(false);
+        editor_session += 1;
         modal.show(a.slug);
     };
 
@@ -84,7 +161,54 @@ pub fn AdminArticles() -> Element {
     };
 
     let on_close = move |_| {
+        editor_session += 1;
         modal.close();
+    };
+
+    let cover_file_id = article_field_id(form_id().as_deref(), "cover-file");
+    let cover_url_id = article_field_id(form_id().as_deref(), "cover-url");
+    let cover_hint_id = article_field_id(form_id().as_deref(), "cover-hint");
+
+    let on_cover_file_change = {
+        let input_id = cover_file_id.clone();
+        move |_e: Event<FormData>| {
+            let Some(file) = selected_file(&input_id) else {
+                return;
+            };
+            clear_file_input(&input_id);
+            if let Err(msg) = validate_image_upload(&file.type_(), file.size()) {
+                cover_status.set(msg.to_string());
+                cover_status_error.set(true);
+                return;
+            }
+            let session = editor_session();
+            cover_uploading.set(true);
+            cover_status_error.set(false);
+            cover_status.set("Uploading cover image...".to_string());
+            spawn(async move {
+                let result = post_file("/api/upload/image", &file).await;
+                if editor_session() != session || !modal.is_open() {
+                    return;
+                }
+                cover_uploading.set(false);
+                match result {
+                    Ok(url) => {
+                        form_cover.set(url);
+                        cover_status
+                            .set("Cover image uploaded. Save the article to keep it.".to_string());
+                        toast.show(Toast::success("Cover image uploaded."));
+                    }
+                    Err(failure) => {
+                        let msg = match failure {
+                            UploadFailure::Status(status) => image_upload_failure_message(status),
+                            UploadFailure::Message(msg) => msg.to_string(),
+                        };
+                        cover_status.set(msg.clone());
+                        toast.show(Toast::error(msg));
+                    }
+                }
+            });
+        }
     };
 
     /// URL-safe slug: lowercase, hyphens, no spaces.
@@ -385,12 +509,39 @@ pub fn AdminArticles() -> Element {
                 }
             }
             div { class: "form-field",
-                label { class: "form-label", "Cover Image URL (optional)" }
+                label { class: "form-label", r#for: "{cover_url_id}", "Cover Image URL (optional)" }
                 input {
+                    id: "{cover_url_id}",
                     class: "form-input",
                     r#type: "text",
                     value: "{form_cover}",
                     oninput: move |e| form_cover.set(e.value()),
+                }
+                label { class: "form-label", r#for: "{cover_file_id}", style: "margin-top:0.6rem;",
+                    "Upload cover image"
+                }
+                input {
+                    id: "{cover_file_id}",
+                    r#type: "file",
+                    accept: IMAGE_UPLOAD_ACCEPT,
+                    disabled: cover_uploading(),
+                    aria_describedby: "{cover_hint_id}",
+                    onchange: on_cover_file_change,
+                }
+                p { id: "{cover_hint_id}", class: "form-hint",
+                    "JPEG, PNG, WebP, GIF, or AVIF, up to 5 MB. The uploaded path fills the URL field above."
+                }
+                p {
+                    class: if cover_status_error() { "name-field-error" } else { "form-hint" },
+                    role: "status",
+                    "{cover_status}"
+                }
+                if let Some(src) = cover_preview_src(&form_cover()) {
+                    img {
+                        src: "{src}",
+                        alt: "Cover image preview",
+                        style: "display:block;max-width:100%;max-height:180px;margin-top:0.5rem;border-radius:8px;border:1px solid var(--border);object-fit:cover;",
+                    }
                 }
             }
             div { class: "form-field",
@@ -414,6 +565,106 @@ pub fn AdminArticles() -> Element {
             danger: true,
             on_confirm: on_confirm_delete,
             on_cancel: on_cancel_delete,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn field_id_uses_record_id_and_field() {
+        assert_eq!(
+            article_field_id(Some("article:abc123"), "cover-file"),
+            "article-article-abc123-cover-file"
+        );
+    }
+
+    #[test]
+    fn field_id_for_new_article() {
+        assert_eq!(article_field_id(None, "cover-url"), "article-new-cover-url");
+        assert_eq!(
+            article_field_id(Some("  "), "cover-url"),
+            "article-new-cover-url"
+        );
+    }
+
+    #[test]
+    fn field_ids_differ_per_record() {
+        assert_ne!(
+            article_field_id(Some("a1"), "cover-file"),
+            article_field_id(Some("a2"), "cover-file")
+        );
+    }
+
+    #[test]
+    fn preview_allows_uploads_and_https() {
+        assert_eq!(
+            cover_preview_src(" /uploads/images/m1/x.png "),
+            Some("/uploads/images/m1/x.png")
+        );
+        assert_eq!(
+            cover_preview_src("https://cdn.example.com/c.webp"),
+            Some("https://cdn.example.com/c.webp")
+        );
+        assert_eq!(
+            cover_preview_src("HTTPS://cdn.example.com/c.webp"),
+            Some("HTTPS://cdn.example.com/c.webp")
+        );
+    }
+
+    #[test]
+    fn preview_rejects_http_and_https_without_host() {
+        for bad in [
+            "http://cdn.example.com/c.webp",
+            "HTTP://cdn.example.com/c.webp",
+            "https://",
+            "https:///a.png",
+            "https://?x",
+            "https://#x",
+        ] {
+            assert_eq!(cover_preview_src(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn preview_rejects_dotdot_and_avatar_paths() {
+        for bad in [
+            "/uploads/images/m1/../x.png",
+            "/uploads/images/../avatars/m/x.png",
+            "/uploads/avatars/member_abc/a.png",
+        ] {
+            assert_eq!(cover_preview_src(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn preview_rejects_other_values() {
+        for bad in [
+            "",
+            "/uploads/",
+            "/uploads/images/",
+            "/uploads/images/a.png",
+            "javascript:alert(1)",
+            "data:image/png;base64,AA",
+            "//evil.example/x.png",
+            "/uploads/a b.png",
+            "/uploads/other/m/x.png",
+            "/other/x.png",
+            "uploads/images/m1/x.png",
+        ] {
+            assert_eq!(cover_preview_src(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn upload_failure_copy() {
+        assert!(image_upload_failure_message(403).contains("officers"));
+        assert!(image_upload_failure_message(413).contains("too large"));
+        assert_eq!(image_upload_failure_message(500), "Upload failed: HTTP 500");
+        for status in [400, 401, 403, 413, 500] {
+            assert!(!image_upload_failure_message(status).contains('\u{2014}'));
         }
     }
 }

@@ -2,6 +2,7 @@ use dioxus::prelude::*;
 
 use crate::components::DataTable;
 use crate::components::charts::{BarEntry, HBarChart};
+use crate::components::ui::ChipButton;
 use crate::hooks::ApiResource;
 
 use super::role::hero_row_matches_filter;
@@ -86,30 +87,30 @@ pub(super) fn heroes_tab(
 
             rsx! {
                 div { class: "stats-filters",
-                    div { class: "filter-group",
-                        span { class: "filter-label", "Current role" }
+                    div { class: "filter-group", role: "group", aria_labelledby: "heroes-filter-role",
+                        span { class: "filter-label", id: "heroes-filter-role", "Current role" }
                         {["All", "Tank", "Damage", "Support"].iter().map(|&r| {
-                            let active = role == r;
                             rsx! {
-                                button {
+                                ChipButton {
                                     key: "{r}",
-                                    class: if active { "filter-chip active" } else { "filter-chip" },
+                                    class: "filter-chip".to_string(),
+                                    label: r.to_string(),
+                                    pressed: role == r,
                                     onclick: move |_| role_filter.set(r),
-                                    "{r}"
                                 }
                             }
                         })}
                     }
-                    div { class: "filter-group",
-                        span { class: "filter-label", "Sort" }
+                    div { class: "filter-group", role: "group", aria_labelledby: "heroes-filter-sort",
+                        span { class: "filter-label", id: "heroes-filter-sort", "Sort" }
                         {[["matches", "Matches"], ["wr", "Win %"], ["elims", "Avg Elims"]].iter().map(|&[k, label]| {
-                            let active = sort == k;
                             rsx! {
-                                button {
+                                ChipButton {
                                     key: "{k}",
-                                    class: if active { "filter-chip active" } else { "filter-chip" },
+                                    class: "filter-chip".to_string(),
+                                    label: label.to_string(),
+                                    pressed: sort == k,
                                     onclick: move |_| sort_by.set(k),
-                                    "{label}"
                                 }
                             }
                         })}

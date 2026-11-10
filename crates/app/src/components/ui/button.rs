@@ -44,12 +44,14 @@ pub fn Button(
     #[props(default = BtnVariant::Primary)] variant: BtnVariant,
     #[props(default = BtnSize::Md)] size: BtnSize,
     #[props(default = false)] disabled: bool,
+    #[props(default)] id: Option<String>,
     #[props(default)] onclick: Option<EventHandler<MouseEvent>>,
     children: Element,
 ) -> Element {
     let class = class_for(variant, size);
     rsx! {
         button {
+            id,
             class: "{class}",
             disabled,
             onclick: move |e| {

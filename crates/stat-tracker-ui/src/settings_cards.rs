@@ -1,13 +1,14 @@
 //! The 0.6 Settings page's cards and folds, after spec p6 and p7: the
 //! everyday cards on the left (Player and sessions, Companion, Website
-//! account, Updates) and the bodies of the ADVANCED rows other than
+//! account, Updates), the bodies of the ADVANCED rows other than
 //! Capture and reading (Tracker service, Stored data, Website connection,
-//! Troubleshooting). Rows are divided by hairlines with the control on
+//! Troubleshooting), and the Read bans and picks row Capture and reading
+//! ends its CAPTURE rows with. Rows are divided by hairlines with the control on
 //! the right; switches are On/Off. Every control applies at once
 //! ([`crate::settings_update`]).
 
 use iced::widget::{Row, button, checkbox, column, container, image, row, space, text, text_input};
-use iced::{Alignment, Element, Fill, Padding};
+use iced::{Alignment, Border, Element, Fill, Padding, Theme};
 
 use crate::app::{Message, TrackerApp};
 use crate::form_widgets::{
@@ -17,10 +18,9 @@ use crate::settings::{
     self, DEBUG_IMAGES_HELP, FIELD_SHORT, POLL_INTERVAL_HELP, PRERELEASE_UPDATES_LABEL,
     SHADOW_READER_ENV_NOTE, SHADOW_READER_HINT, SHADOW_READER_LABEL, SettingsField, SettingsToggle,
 };
-use crate::settings_model::{upload_row, url_host};
+use crate::settings_model::{ConfigEdit, url_host};
 use crate::settings_rows::{
-    coming_later_row, divided, link, page_field, row_title, setting_row, sub_heading, switch,
-    title_line,
+    Tag, divided, link, page_field, row_title, setting_row, sub_heading, switch, title_line,
 };
 use crate::settings_save::Commit;
 use crate::settings_update::{Msg, apply, apply_with};
@@ -72,7 +72,7 @@ pub(crate) fn check_icon(size: f32) -> Element<'static, Message> {
 /// Player and sessions.
 pub(crate) fn player(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     divided(vec![
-        crate::settings_rows::names_row(app, demo),
+        crate::settings_keys::names_row(app, demo),
         crate::settings_rows::session_window_row(app),
     ])
 }
@@ -163,6 +163,9 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
                 mark,
                 env_vars.is_some(),
             ));
+            if let Some(line) = crate::account_card::visibility_line(app) {
+                connection = connection.push(line);
+            }
         }
         _ => {
             connection = connection.push(
@@ -171,6 +174,10 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
                     .font(FONT_SEMIBOLD)
                     .color(TEXT),
             );
+            // Where to connect, while the Upload row that says it is hidden.
+            if let Some(note) = crate::settings_keys::not_connected_note(rejected) {
+                connection = connection.push(hint(note));
+            }
         }
     }
     if rejected {
@@ -185,28 +192,24 @@ pub(crate) fn website_account(app: &TrackerApp) -> Element<'_, Message> {
         connection = connection.push(crate::capture_reading::lock_line(vars));
     }
 
-    // One pointer to Website connection: the refusal line names it, else
-    // the Upload row's note does.
-    let upload = upload_row(sync_on);
-    let mut upload_help = vec![hint(UPLOAD_HELP)];
-    if !rejected {
-        upload_help.push(hint(upload.note));
+    // One pointer to Website connection: the refusal line names it; else,
+    // with no website, the note under "Not connected" (while the Upload row
+    // is hidden) or the Upload row's own note does.
+    let demo = app.fixture.is_some();
+    let uploads = crate::settings_keys::upload_row(app, demo, UPLOAD_HELP, !rejected);
+    // The Sharing heading only while a sharing row shows.
+    let shared = crate::settings_keys::sharing_rows(app, demo, RANK_HELP, STAT_PICTURES_HELP);
+    let mut sharing = column![].spacing(12);
+    if !shared.is_empty() {
+        sharing = sharing
+            .push(sub_heading(SHARING_HEADING))
+            .push(divided(shared));
     }
-    let uploads = setting_row(
-        row_title("Upload games after each match"),
-        upload_help,
-        switch(upload.on, None),
-    );
-    let sharing = column![
-        sub_heading(SHARING_HEADING),
-        divided(vec![
-            coming_later_row("Read my rank after Comp games", RANK_HELP, &[], false),
-            coming_later_row("Share stat pictures", STAT_PICTURES_HELP, &[], false),
-        ]),
-        crate::account_card::what_leaves_link(),
-    ]
-    .spacing(12);
-    divided(vec![connection.into(), uploads, sharing.into()])
+    let sharing = sharing.push(crate::account_card::what_leaves_link());
+    let mut rows = vec![connection.into()];
+    rows.extend(uploads);
+    rows.push(sharing.into());
+    divided(rows)
 }
 
 /// Updates: the version and Check now, then the alpha switch.
@@ -440,8 +443,85 @@ pub(crate) fn website_connection(app: &TrackerApp, demo: bool) -> Element<'_, Me
     divided(vec![url, token, footer.into()])
 }
 
-/// Troubleshooting: debug images, the extra number reader, then Report a
-/// problem, About and Uninstall. Demo draws them without actions.
+/// The Troubleshooting switch for `debug_save_pregame_screens`: the
+/// pre-game screens and the screens after each match.
+pub(crate) const PREGAME_SCREENS_LABEL: &str = "Save screens around each game";
+
+/// Help under [`PREGAME_SCREENS_LABEL`]. The size: up to 60 post-game and
+/// about 8 to 13 pre-game frames a game (the roster and the turned-down
+/// frames included), 3 to 5 MB each at 1440p (about 2.25
+/// times that at 4K), 20 games.
+pub(crate) const PREGAME_SCREENS_HELP: &str = "Saves pictures of the map vote, hero bans, ban results, roster, hero select and loading screen of each game and the screens after it in debug/pregame, keeping the newest 20 games (up to about 4 to 7 GB at 1440p, about 9 to 15 GB at 4K). They show other players' names and stay on this PC only. Turning it off keeps the saved pictures. Leave it off unless someone asked for them.";
+
+/// The Capture and reading switch for `bans_picks_reader`, the last row
+/// of CAPTURE ([`crate::capture_reading`]). Game rows that point to it use
+/// this label as it is.
+pub(crate) const BANS_PICKS_LABEL: &str = "Read bans and picks";
+
+/// Help under [`BANS_PICKS_LABEL`] (UX Spec). The pictures are only held in
+/// memory for the read, none are written, and the result stays on this PC.
+pub(crate) const BANS_PICKS_HELP: &str =
+    "Reads the ban and hero select screens to fill in bans and picks. Works at 2560x1440 only.";
+
+/// Read bans and picks. The tracker reads the key once at start: After
+/// restart. STAT_TRACKER_BANS_PICKS_RECOGNIZER set to off turns the reader
+/// off whatever the file says, so the row shows Off and locks.
+pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
+    let (bans_on, bans_env_off) = app.bans_picks_switch();
+    let mut bans_help = vec![hint(BANS_PICKS_HELP)];
+    if bans_env_off {
+        bans_help.push(crate::capture_reading::lock_line(
+            crate::settings_env::BANS_PICKS_ENV,
+        ));
+        bans_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
+    }
+    let row = setting_row(
+        title_line(BANS_PICKS_LABEL, false, &[Tag::AfterRestart]),
+        bans_help,
+        crate::settings_keys::edit_switch(
+            bans_on,
+            demo || bans_env_off,
+            ConfigEdit::BansPicksReader,
+        ),
+    );
+    // A 1 px accent outline while marked, drawn ROW_OUTLINE_PAD outside
+    // the row's content so it frames the row instead of hugging the
+    // label and help. A wrapping container with that padding negated
+    // lets the outline sit in the card padding and the gaps around the
+    // row, so the label and toggle stay lined up with the rows around
+    // it. The padding stays when the mark is off (the border is then
+    // transparent), so the row does not jump. iced 0.14's layout
+    // ignores the 1 px border width; that width is not what keeps the
+    // row still. iced 0.14's toggler is mouse and touch only: it has
+    // no keyboard focus, so Space cannot flip the switch from here.
+    let marked = app
+        .page_state
+        .bans_picks_row_marked(std::time::Instant::now());
+    let outlined = container(row)
+        .id(iced::widget::Id::new(crate::bans_picks_setting::ROW_ID))
+        .width(Fill)
+        .padding(crate::bans_picks_setting::ROW_OUTLINE_PAD)
+        .style(move |_: &Theme| iced::widget::container::Style {
+            border: Border {
+                color: if marked {
+                    crate::theme::ACCENT
+                } else {
+                    iced::Color::TRANSPARENT
+                },
+                width: 1.0,
+                radius: crate::theme::RADIUS_INNER.into(),
+            },
+            ..iced::widget::container::Style::default()
+        });
+    container(outlined)
+        .width(Fill)
+        .padding(-crate::bans_picks_setting::ROW_OUTLINE_PAD)
+        .into()
+}
+
+/// Troubleshooting: debug images, screens around each game, the extra number
+/// reader, then Report a problem, About and Uninstall. Demo draws them
+/// without actions.
 pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Message> {
     // STAT_TRACKER_DEBUG_OCR turns them on whatever the file says, so the
     // row shows On and locks, as OCR workers does.
@@ -461,6 +541,16 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             toggle(!demo && !env_debug, |v| {
                 apply(Message::SettingsToggle(SettingsToggle::DebugOcr, v))
             }),
+        ),
+    );
+    // The tracker reads the key once at start: After restart.
+    let pregame = setting_row(
+        title_line(PREGAME_SCREENS_LABEL, false, &[Tag::AfterRestart]),
+        vec![hint(PREGAME_SCREENS_HELP)],
+        crate::settings_keys::edit_switch(
+            app.saved_config.debug_save_pregame_screens,
+            demo,
+            ConfigEdit::SavePregameScreens,
         ),
     );
     let locked = app.settings.shadow.locked;
@@ -505,7 +595,7 @@ pub(crate) fn troubleshooting(app: &TrackerApp, demo: bool) -> Element<'_, Messa
             .push(uninstall),
     ]
     .spacing(8);
-    divided(vec![debug, shadow, actions.into()])
+    divided(vec![debug, pregame, shadow, actions.into()])
 }
 
 /// Stored data keeps the classic body: its buttons are the same.

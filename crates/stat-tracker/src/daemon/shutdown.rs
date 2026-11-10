@@ -199,7 +199,12 @@ pub(crate) async fn apply_landed_capture_reports(
             std::future::ready(())
         })
         .await;
-        apply_capture_report(st, store, data_dir, &sid, result, Instant::now()).await;
+        let stored_sid = stored_session(&sid, &result);
+        // A stored row marks the snapshot like in the run loop, so the
+        // shutdown write includes a final board that landed while stopping.
+        if apply_capture_report(st, store, data_dir, &sid, result, Instant::now()).await {
+            refresh_snapshot_after_capture(st, store, data_dir, &stored_sid).await;
+        }
     }
 }
 
@@ -259,6 +264,9 @@ pub(crate) async fn shutdown_from_signal(
                     }
                     ShutdownStage::SnapshotExport => {
                         flush_snapshot_if_dirty(store, data_dir).await;
+                        // The query server holds a store handle; it ends here, before
+                        // the store closes. The app then reads that file.
+                        super::query_server::stop(data_dir);
                         // perf.log lines already queued go to disk before the
                         // process ends (the open window is not closed here).
                         // Bounded by what is left of the shutdown deadline,

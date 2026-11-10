@@ -4,7 +4,7 @@
 use surrealdb_types::Datetime as SurrealDatetime;
 
 use super::{
-    LocalStore, MatchEdit, SEGMENT_CONFIRM, SEGMENT_DISMISS, SegmentResolution, apply_match_edit,
+    LocalStore, MatchEdit, SegmentResolution, apply_match_edit, apply_segment_action,
     collect_segment_resolutions, derive_hero_segments, rewrite_match_log_session,
 };
 
@@ -22,6 +22,8 @@ impl LocalStore {
         hero: &str,
         role: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
+        let _rev = self.rev_guard();
         // Write through to the capture rows like set_session_map/outcome do:
         // the GUI and the sync path read personal_match, not match_session, so
         // a session-only update is invisible to both (the 07-18 "Tracer" game).
@@ -38,10 +40,9 @@ impl LocalStore {
             .bind(("role", role.to_string()))
             .bind(("sid", session_id.to_string()))
             .await?;
-        // Keep the append-only log in step too (HW-1a jsonl parity): the GUI's
-        // last-resort fallback reads matches.jsonl, so a hero repair that never
-        // reached it left the fallback showing the stale hero forever, exactly
-        // like the outcome/map back-fills before rewrite_match_log_session.
+        // Keep the append-only log in step too (HW-1a jsonl parity). Nothing
+        // in the app reads matches.jsonl any more; a manual repair is rare,
+        // so the rewrite stays until the log itself is retired.
         let (hero, role) = (hero.to_string(), role.to_string());
         rewrite_match_log_session(
             &self.data_dir,
@@ -67,15 +68,17 @@ impl LocalStore {
     /// other back-fills: it writes a row only when its timeline actually
     /// changed, and re-queues it for sync (`synced = false`) only when the
     /// row's EFFECTIVE (uploaded) hero/role would change — a stable-hero game
-    /// is a no-op after its first snapshot. Persists across the same layers as
-    /// `set_session_*`: the SurrealKV `personal_match` rows and the
-    /// `matches.jsonl` fallback. (`match_session` carries no timeline field,
-    /// and the GUI's `live_snapshot.json` is re-exported by the daemon after
-    /// the capture completes.)
+    /// is a no-op for sync after its first snapshot. The rows themselves are
+    /// rewritten on every capture: a segment's `snapshots` and `last_seen`
+    /// move each time. Only the SurrealKV `personal_match` rows carry the
+    /// timeline; `matches.jsonl` (no reader) and `match_session` do not, and
+    /// the daemon's `live_snapshot.json` picks it up on its next write.
     pub async fn refresh_session_hero_timeline(
         &self,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
+        let _rev = self.rev_guard();
         let snaps = self.get_session_snapshots(session_id).await?;
         if snaps.is_empty() {
             return Ok(());
@@ -85,6 +88,11 @@ impl LocalStore {
         let resolutions = collect_segment_resolutions(&snaps);
         let segments = derive_hero_segments(&snaps, &resolutions);
 
+        if self.timeline_migrated() {
+            return self
+                .store_session_timeline(session_id, &snaps, &segments, &resolutions)
+                .await;
+        }
         for m in &snaps {
             let Some(id) = m.id.clone() else { continue };
             if m.heroes_played == segments {
@@ -119,22 +127,59 @@ impl LocalStore {
                     .await?;
             }
         }
-        // jsonl parity: the GUI's last-resort fallback reads matches.jsonl, so
-        // stamp the derived timeline there too (raw hero/role untouched).
-        let segments_for_log = segments.clone();
-        rewrite_match_log_session(
-            &self.data_dir,
-            session_id,
-            Some(&move |m| {
-                m.heroes_played = segments_for_log.clone();
-            }),
-        );
+        // matches.jsonl is not stamped: nothing reads it, and this runs after
+        // every capture, so a whole-file rewrite here cost a parse of every
+        // logged row per capture.
+        Ok(())
+    }
+
+    /// [`Self::refresh_session_hero_timeline`] on a migrated store: the
+    /// timeline is one `hero_timeline` record, written once when it changed.
+    /// `snaps` are hydrated, so each row's display is the stored timeline's.
+    /// Only rows whose uploaded hero or role changes are written (re-queued
+    /// for sync); no row gets a timeline copy.
+    async fn store_session_timeline(
+        &self,
+        session_id: &str,
+        snaps: &[super::PersonalMatch],
+        segments: &[super::HeroSegment],
+        resolutions: &[SegmentResolution],
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let stored = self.get_timeline(session_id).await?;
+        let current = stored
+            .as_ref()
+            .is_some_and(|t| t.heroes_played == segments && t.segment_resolutions == resolutions);
+        // No list stored and nothing to store: leave the rows' own copies
+        // (an older game keeps showing what it shows today).
+        if current || (stored.is_none() && segments.is_empty() && resolutions.is_empty()) {
+            return Ok(());
+        }
+        self.upsert_timeline(session_id, segments, resolutions)
+            .await?;
+        for m in snaps {
+            let Some(id) = m.id.clone() else { continue };
+            let mut probe = m.clone();
+            probe.heroes_played = segments.to_vec();
+            if m.display_hero() == probe.display_hero() && m.display_role() == probe.display_role()
+            {
+                continue;
+            }
+            self.db
+                .query(
+                    "UPDATE $id SET synced = false, upload_reject = '', \
+                     sync_rev = (sync_rev ?? 0) + 1 RETURN NONE",
+                )
+                .bind(("id", id))
+                .await?;
+        }
         Ok(())
     }
 
     /// MANUAL confirm/dismiss of one derived hero segment (HS-1). Records the
     /// decision in `segment_resolutions` (keyed by segment index; a repeat on
-    /// the same index replaces it, and an unrecognized action clears it) on
+    /// the same index replaces it, and an unrecognized action clears it,
+    /// except that Undo of a Dismiss over a hand confirm restores the
+    /// confirm: [`apply_segment_action`]) on
     /// EVERY snapshot row — uniform, like `heroes_played` — then re-derives the
     /// timeline via [`Self::refresh_session_hero_timeline`] so the flags and
     /// the effective primary update (and any resulting hero change re-queues
@@ -146,20 +191,32 @@ impl LocalStore {
         segment: u32,
         action: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
+        let _rev = self.rev_guard();
         let snaps = self.get_session_snapshots(session_id).await?;
         if snaps.is_empty() {
             return Ok(());
         }
         let mut resolutions = collect_segment_resolutions(&snaps);
-        resolutions.retain(|r| r.segment != segment);
-        if action == SEGMENT_CONFIRM || action == SEGMENT_DISMISS {
-            resolutions.push(SegmentResolution {
-                segment,
-                action: action.to_string(),
-            });
-        }
-        resolutions.sort_by_key(|r| r.segment);
+        apply_segment_action(&mut resolutions, segment, action);
 
+        if self.timeline_migrated() {
+            // One record holds the decisions; the re-derive below writes the
+            // flags and re-queues the rows whose effective hero changed.
+            // The timeline as the game shows it now (no record: the rows'
+            // own list), so the re-derive below compares against it and
+            // re-queues the rows whose uploaded hero changes.
+            let segments = match self.get_timeline(session_id).await? {
+                Some(t) => t.heroes_played,
+                None => snaps
+                    .last()
+                    .map(|m| m.heroes_played.clone())
+                    .unwrap_or_default(),
+            };
+            self.upsert_timeline(session_id, &segments, &resolutions)
+                .await?;
+            return self.refresh_session_hero_timeline(session_id).await;
+        }
         // Persist the resolution set on all rows. This field is never uploaded
         // (only its effect via the derived primary is), so it does NOT flip
         // `synced` here — the re-derive below re-queues exactly the rows whose
@@ -175,14 +232,6 @@ impl LocalStore {
                 .bind(("sr", resolutions.clone()))
                 .await?;
         }
-        let res_for_log = resolutions.clone();
-        rewrite_match_log_session(
-            &self.data_dir,
-            session_id,
-            Some(&move |m| {
-                m.segment_resolutions = res_for_log.clone();
-            }),
-        );
 
         // Re-derive with the updated resolutions and re-stamp heroes_played.
         self.refresh_session_hero_timeline(session_id).await
@@ -196,6 +245,8 @@ impl LocalStore {
         session_id: &str,
         map: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
+        let _rev = self.rev_guard();
         let mode = crate::parse::stored_game_mode(map);
         self.db
             .query(
@@ -240,6 +291,8 @@ impl LocalStore {
         session_id: &str,
         map: &str,
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
+        let _rev = self.rev_guard();
         let snaps = self.get_session_snapshots(session_id).await?;
         let kept = snaps.iter().filter(|m| m.has_member_map_edit()).count();
         if kept == 0 {
@@ -305,6 +358,8 @@ impl LocalStore {
         session_id: &str,
         outcome: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
+        let _rev = self.rev_guard();
         self.db
             .query(
                 "UPDATE match_session SET final_outcome = $outcome WHERE session_id = $sid; \
@@ -357,13 +412,15 @@ impl LocalStore {
     /// re-queues the rows for sync. Editing all snapshots — not just the final
     /// one — means whichever snapshot the server-side per-session upsert lands
     /// last still carries the correction, and mirrors the write-through the
-    /// outcome/map/hero back-fills already use. The `matches.jsonl` fallback is
-    /// rewritten with the same overlay so the GUI's last-resort view agrees.
+    /// outcome/map/hero back-fills already use. The `matches.jsonl` record is
+    /// rewritten with the same overlay so it stays in step.
     pub async fn edit_match(
         &self,
         session_id: &str,
         edit: &MatchEdit,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
+        let _rev = self.rev_guard();
         let now = SurrealDatetime::from(chrono::Utc::now());
         let snaps = self.get_session_snapshots(session_id).await?;
         for mut m in snaps {

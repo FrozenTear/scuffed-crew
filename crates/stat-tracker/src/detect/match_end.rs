@@ -154,7 +154,7 @@ impl Titles {
     }
 
     /// The word of a sure end-title read under `reader = "new"`.
-    fn sure_end_title(&self) -> Option<Outcome> {
+    pub fn sure_end_title(&self) -> Option<Outcome> {
         match self {
             Titles::Words(read) => read.sure(),
             Titles::Ocr | Titles::Held => None,
@@ -448,7 +448,7 @@ pub fn detect_outcome_with(
     titles: &Titles,
     words: &ResultWords,
 ) -> MatchOutcome {
-    let rgb = img.to_rgb8();
+    let rgb = crate::frame::rgb_view(img);
     detect_outcome_signal_inner(img, &rgb, None, p4, titles, words)
         .map(|(outcome, _)| outcome)
         .unwrap_or(MatchOutcome::Unknown)
@@ -467,7 +467,7 @@ pub fn detect_outcome_with(
 /// This entry point is ocr-v1's. The daemon's go through the reader switch:
 /// [`detect_outcome_signal_polled`] and [`detect_outcome_with`].
 pub fn detect_outcome_signal(img: &DynamicImage) -> Option<(MatchOutcome, OutcomeSource)> {
-    let rgb = img.to_rgb8();
+    let rgb = crate::frame::rgb_view(img);
     detect_outcome_signal_with_rgb(img, &rgb)
 }
 
@@ -585,7 +585,7 @@ pub fn detect_outcome_text_with(
     if let Titles::Words(read) = titles {
         return end_title_from_words(read);
     }
-    read_end_title(img, &img.to_rgb8(), None, p4, titles)
+    read_end_title(img, &crate::frame::rgb_view(img), None, p4, titles)
 }
 
 /// Centered italic end-title (theme-colored VICTORY/DEFEAT over the world).
@@ -1129,17 +1129,17 @@ fn letterbox_shoulders_are_content(rgb: &RgbImage, gx: u32, gy: u32, gw: u32, gh
     top < LETTERBOX_SHOULDER_DARK_MAX && bot < LETTERBOX_SHOULDER_DARK_MAX
 }
 
-const LETTERBOX_SHOULDER_TOP_Y_PM: u32 = 150;
-const LETTERBOX_SHOULDER_BOT_Y_PM: u32 = 770;
-const LETTERBOX_SHOULDER_H_PM: u32 = 80;
-const LETTERBOX_SHOULDER_DARK_MAX: f32 = 0.60;
+pub(super) const LETTERBOX_SHOULDER_TOP_Y_PM: u32 = 150;
+pub(super) const LETTERBOX_SHOULDER_BOT_Y_PM: u32 = 770;
+pub(super) const LETTERBOX_SHOULDER_H_PM: u32 = 80;
+pub(super) const LETTERBOX_SHOULDER_DARK_MAX: f32 = 0.60;
 
 /// Reject a uniform loading / transition slab. `ENTERING GAME` is a navy
 /// strip with a few white glyphs — among *lit* mid pixels one 16-wide
 /// RGB bin holds ~90%+. Dark padding around that strip is ignored so a
 /// thin chrome band cannot look like mixed footage. Real highlight
 /// footage spreads across bins.
-fn letterbox_mid_is_footage(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
+pub(super) fn letterbox_mid_is_footage(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> bool {
     mid_dominant_lit_bin_ratio(rgb, x0, y0, cw, ch) < LETTERBOX_FLAT_UI_MAX
 }
 
@@ -1176,7 +1176,7 @@ fn mid_dominant_lit_bin_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32
     best as f32 / total as f32
 }
 
-fn dark_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
+pub(super) fn dark_ratio(rgb: &RgbImage, x0: u32, y0: u32, cw: u32, ch: u32) -> f32 {
     let (w, h) = rgb.dimensions();
     let x1 = (x0 + cw).min(w);
     let y1 = (y0 + ch).min(h);

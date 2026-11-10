@@ -33,15 +33,48 @@ pub enum Icon {
     FoldOpen,
     /// A closed ADVANCED row's chevron.
     FoldClosed,
+    /// The open Games row: Uploaded.
+    Upload,
+    /// The open Games row: Waiting to upload.
+    Clock,
+    /// The open Games row: Edit.
+    Pencil,
+    /// The open Games row: Report misread.
+    Flag,
+    /// The open Games row: Scoreboard picture.
+    Picture,
+    /// The warning sign in the loss colour: Upload rejected.
+    WarnLoss,
+    /// The open Games row: Delete game, in the loss colour.
+    Trash,
+    /// Delete game on the solid loss-colour confirm button, in BG.
+    TrashInk,
+    /// The "Game deleted." line's tick, in TEXT_2.
+    Tick,
+    /// A ban in the Bans and picks block: a circle with a slash.
+    Ban,
+    /// Our own Played chip when it differs from hero select.
+    Swap,
 }
 
 const TABS: usize = Screen::all().len();
-const FIXED: [Icon; 5] = [
+const FIXED: [Icon; 16] = [
     Icon::Warn,
     Icon::Check,
     Icon::Lock,
     Icon::FoldOpen,
     Icon::FoldClosed,
+    Icon::Upload,
+    Icon::Clock,
+    Icon::Pencil,
+    Icon::Flag,
+    Icon::Picture,
+    Icon::WarnLoss,
+    Icon::Trash,
+    Icon::TrashInk,
+    Icon::Tick,
+    Icon::Ban,
+    Icon::Swap,
 ];
 const COUNT: usize = TABS * 2 + FIXED.len();
 
@@ -64,6 +97,17 @@ impl Icon {
             Icon::Lock => TABS * 2 + 2,
             Icon::FoldOpen => TABS * 2 + 3,
             Icon::FoldClosed => TABS * 2 + 4,
+            Icon::Upload => TABS * 2 + 5,
+            Icon::Clock => TABS * 2 + 6,
+            Icon::Pencil => TABS * 2 + 7,
+            Icon::Flag => TABS * 2 + 8,
+            Icon::Picture => TABS * 2 + 9,
+            Icon::WarnLoss => TABS * 2 + 10,
+            Icon::Trash => TABS * 2 + 11,
+            Icon::TrashInk => TABS * 2 + 12,
+            Icon::Tick => TABS * 2 + 13,
+            Icon::Ban => TABS * 2 + 14,
+            Icon::Swap => TABS * 2 + 15,
         }
     }
 
@@ -83,6 +127,17 @@ impl Icon {
             Icon::Lock => include_bytes!("../assets/lock.png"),
             Icon::FoldOpen => include_bytes!("../assets/fold-open.png"),
             Icon::FoldClosed => include_bytes!("../assets/fold-closed.png"),
+            Icon::Upload => include_bytes!("../assets/upload.png"),
+            Icon::Clock => include_bytes!("../assets/clock.png"),
+            Icon::Pencil => include_bytes!("../assets/pencil.png"),
+            Icon::Flag => include_bytes!("../assets/flag.png"),
+            Icon::Picture => include_bytes!("../assets/picture.png"),
+            Icon::WarnLoss => include_bytes!("../assets/warn-loss.png"),
+            Icon::Trash => include_bytes!("../assets/trash.png"),
+            Icon::TrashInk => include_bytes!("../assets/trash-ink.png"),
+            Icon::Tick => include_bytes!("../assets/tick.png"),
+            Icon::Ban => include_bytes!("../assets/ban.png"),
+            Icon::Swap => include_bytes!("../assets/swap.png"),
         }
     }
 
@@ -146,8 +201,17 @@ mod tests {
         for icon in Icon::all() {
             let img = decode(icon).unwrap_or_else(|e| panic!("{icon:?}: {e}"));
             let want = match icon {
-                Icon::Tab(..) => 32,
-                Icon::Warn | Icon::Lock => 24,
+                Icon::Tab(..) | Icon::Trash | Icon::TrashInk | Icon::Tick => 32,
+                Icon::Warn
+                | Icon::Lock
+                | Icon::Upload
+                | Icon::Clock
+                | Icon::Pencil
+                | Icon::Flag
+                | Icon::Picture
+                | Icon::WarnLoss
+                | Icon::Ban
+                | Icon::Swap => 24,
                 Icon::Check | Icon::FoldOpen | Icon::FoldClosed => 28,
             };
             assert_eq!((img.width(), img.height()), (want, want), "{icon:?}");

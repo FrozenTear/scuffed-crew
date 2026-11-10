@@ -9,6 +9,9 @@ use crate::theme::GRID_GAP;
 use crate::widgets;
 
 pub fn view(app: &TrackerApp, content_width: f32) -> Element<'_, Message> {
+    if app.nav_style == crate::nav::NavStyle::TopTabs {
+        return crate::heroes_page::view(app, content_width);
+    }
     let stats = aggregate_filtered(&app.games, &app.header_filter());
     let cols = heroes_columns(content_width);
     let mut col = column![].spacing(GRID_GAP).width(Fill);

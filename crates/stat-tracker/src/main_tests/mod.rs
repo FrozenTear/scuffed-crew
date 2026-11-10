@@ -5,10 +5,8 @@
 //! reach them (`use crate::{main_tests::*, *};`); area files use `use super::*;`.
 
 use super::*;
-
-pub(crate) use std::time::Duration;
-
 pub(crate) use source_text::{daemon_source, fn_source};
+pub(crate) use std::time::Duration;
 
 pub(crate) struct ScriptedWaiter {
     pub(crate) events: Vec<KeyboardWait>,
@@ -320,6 +318,9 @@ pub(crate) fn test_match(session_id: &str, outcome: &str) -> storage::PersonalMa
         recognizer: scuffed_types::RECOGNIZER_OCR_V1.to_string(),
         suspect_fields: Vec::new(),
         name_recognizer: None,
+        bans_picks: None,
+        bans_picks_status: None,
+        queue_title: None,
     }
 }
 
@@ -360,8 +361,7 @@ pub(crate) fn s1_tab_frame_lit(row: usize) -> image::DynamicImage {
     let frame = s1_tab_frame();
     let (w, h) = (frame.width(), frame.height());
     let (bx, by, bw, bh) = ocr::preprocess::crop_scoreboard_rect(w, h);
-    // Where the row is in the crop: `crop_player_row` on an image whose
-    // pixels carry their own y.
+    // Where the row is in the crop: `crop_player_row` on an image whose pixels carry their own y.
     let probe = image::RgbImage::from_fn(bw, bh, |_, y| {
         image::Rgb([(y % 256) as u8, (y / 256) as u8, 0])
     });
@@ -530,7 +530,7 @@ pub(crate) async fn o8_ctx(dir: &std::path::Path, use_new_reader: bool) -> Daemo
         backend: capture::CaptureBackend::None,
         store: storage::LocalStore::open(dir).await.unwrap(),
         sync_client: None,
-        player_name: None,
+        own_names: Vec::new(),
         capture_output: None,
         auto_detect: config::AutoDetectConfig::default(),
         finished_game_close: Duration::from_secs(90),
@@ -539,6 +539,7 @@ pub(crate) async fn o8_ctx(dir: &std::path::Path, use_new_reader: bool) -> Daemo
         collect_portraits: false,
         dump_poll_frames: false,
         debug_ocr: false,
+        save_pregame_screens: false,
         data_dir: dir.to_path_buf(),
         empty_map_reads: std::sync::atomic::AtomicUsize::new(0),
         shadow: None,
@@ -787,8 +788,7 @@ pub(crate) async fn r9_unlatched_game(
     .await;
     assert_eq!(verdict, None);
     assert_eq!(st.active_game.as_ref().unwrap().session_id, "live");
-    // Past it, 39 s after that board (Tab pressed after the result):
-    // the board decides.
+    // Past it, 39 s after that board (Tab after the result): board decides.
     let press = t0 + Duration::from_secs(150);
     assert!(should_start_fresh_session(st.active_game.as_ref(), press));
     assert!(finished_game_tab_probe(st.active_game.as_ref(), press));

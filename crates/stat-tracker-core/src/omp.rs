@@ -158,7 +158,7 @@ fn reexec_self(args: &[OsString]) -> String {
 
 /// How this process handles SIGPIPE right now.
 #[cfg(unix)]
-fn sigpipe_action() -> Option<libc::sigaction> {
+pub(crate) fn sigpipe_action() -> Option<libc::sigaction> {
     let mut current = std::mem::MaybeUninit::<libc::sigaction>::zeroed();
     // SAFETY: with no new action, `sigaction` only writes the current one
     // into `current`.
@@ -170,7 +170,7 @@ fn sigpipe_action() -> Option<libc::sigaction> {
 /// Put back what [`sigpipe_action`] read, or ignore SIGPIPE when it could
 /// not be read (that is what Rust's start-up sets).
 #[cfg(unix)]
-fn restore_sigpipe(action: Option<libc::sigaction>) {
+pub(crate) fn restore_sigpipe(action: Option<libc::sigaction>) {
     match action {
         // SAFETY: `action` is a disposition the kernel handed out for this
         // same signal in this same process.

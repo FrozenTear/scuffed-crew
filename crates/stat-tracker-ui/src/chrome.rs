@@ -74,13 +74,29 @@ fn sidebar(app: &TrackerApp) -> Element<'_, Message> {
 /// screens the season, role and Companion row, then the screen. The bar and
 /// the page share one gutter ([`theme::page_gutter`]).
 ///
-/// The control row is a stopgap: it is the 0.5 header row, not the spec's
-/// filter chips (Season, queues, roles, Crew, Hero, Map; "Filters (n)" at
-/// 1024), which land with the per-screen redesigns.
+/// The control row is the 0.5 header row, kept only on pages that do not
+/// draw the spec's filter chips yet; the redesigned pages draw the chips
+/// themselves (Season, queues, roles, Crew, Hero, Map; "Filters (n)"
+/// below a 1440 px window).
 fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     responsive(move |size| {
         let mut content = column![crate::nav::page_heading(app.screen)];
-        if app.screen != Screen::Settings {
+        // No Tracker health panel here: without a keyboard Tab is never
+        // seen, so the reason and its fix sit under the title on every tab.
+        if let Some(notice) = top_tabs_input_notice(app) {
+            content = content.push(widgets::warn_line(notice));
+        }
+        // Settings has none; Overview, Games, Heroes, Maps and Seasons draw
+        // the spec's filter chips themselves.
+        if !matches!(
+            app.screen,
+            Screen::Settings
+                | Screen::Overview
+                | Screen::Games
+                | Screen::Heroes
+                | Screen::Maps
+                | Screen::Seasons
+        ) {
             content = content.push(widgets::header_controls(app));
         }
         let gutter = theme::page_gutter(size.width);
@@ -106,6 +122,14 @@ fn top_tabs(app: &TrackerApp) -> Element<'_, Message> {
     .width(Fill)
     .height(Fill)
     .into()
+}
+
+/// The keyboard notice the top tabs layout draws under the page title.
+/// The classic layout has it in Tracker health instead.
+fn top_tabs_input_notice(app: &TrackerApp) -> Option<&str> {
+    (app.nav_style == NavStyle::TopTabs)
+        .then_some(app.ocr_switch.input_notice.as_deref())
+        .flatten()
 }
 
 /// Where the toast and the restart bar go.
@@ -182,9 +206,16 @@ fn page_body<'a>(
     content = content.push(
         responsive(move |size| match app.screen {
             Screen::Overview => crate::overview::view(app, size.width),
-            Screen::Games => crate::games::view(app, size.width),
+            Screen::Games => crate::games::view(app, size.width, size.width + 2.0 * pad_x),
             Screen::Heroes => crate::heroes::view(app, size.width),
+            // The 0.6 pages under the top tabs, the 0.5 cards in the sidebar.
+            Screen::Maps if app.nav_style == NavStyle::TopTabs => {
+                crate::maps_tab::view(app, size.width)
+            }
             Screen::Maps => crate::maps::view(app, size.width),
+            Screen::Seasons if app.nav_style == NavStyle::TopTabs => {
+                crate::seasons_tab::view(app, size.width)
+            }
             Screen::Seasons => crate::seasons::view(app, size.width),
             Screen::Settings => settings(app, size.width),
         })
@@ -205,8 +236,31 @@ fn page_body<'a>(
         container(main).width(Fill).height(Fill).into()
     } else {
         iced::widget::scrollable(main)
+            .id(crate::focus_status::PANE_SCROLL_ID)
             .width(Fill)
             .height(Fill)
             .into()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::top_tabs_input_notice;
+    use crate::nav::NavStyle;
+
+    /// The default layout has no Tracker health panel, so it must draw the
+    /// keyboard notice itself; the classic layout keeps it in the panel.
+    #[test]
+    fn the_top_tabs_layout_shows_the_keyboard_notice() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = crate::fixtures::test_cli(dir.path());
+        let mut app = crate::app::TrackerApp::new(cli).0;
+        app.nav_style = NavStyle::TopTabs;
+        assert_eq!(top_tabs_input_notice(&app), None);
+        let notice = "Tab detection is off. Run: sudo usermod -aG input \"$USER\"";
+        app.ocr_switch.input_notice = Some(notice.into());
+        assert_eq!(top_tabs_input_notice(&app), Some(notice));
+        app.nav_style = NavStyle::ClassicSidebar;
+        assert_eq!(top_tabs_input_notice(&app), None);
     }
 }

@@ -6,6 +6,7 @@ use crate::routes::Route;
 use scuffed_api_client::ApiClient;
 
 use super::public_fetch::{PublicFetch, fetch_public};
+use super::{NotFoundLink, NotFoundPanel};
 use crate::sample::{OTHER_HEROES, Tally, fold_small, other_label};
 
 #[derive(Debug, Clone, Deserialize)]
@@ -318,7 +319,16 @@ pub fn MemberProfile(id: String) -> Element {
                 let data = profile.read();
                 match data.as_ref() {
                     None => rsx! { p { class: "profile-loading", "Loading..." } },
-                    Some(PublicFetch::NotFound) => rsx! { p { class: "profile-loading", "Member not found" } },
+                    Some(PublicFetch::NotFound) => rsx! {
+                        NotFoundPanel {
+                            title: "Member not found",
+                            message: "We could not find that member. The link may be wrong, or the profile may be private.",
+                            links: vec![
+                                NotFoundLink { label: "All members", to: Route::Members {} },
+                                NotFoundLink { label: "Back home", to: Route::Home {} },
+                            ],
+                        }
+                    },
                     Some(PublicFetch::Failed) => rsx! {
                         p { class: "profile-loading", "Couldn't load this profile. Check your connection and try again." }
                     },

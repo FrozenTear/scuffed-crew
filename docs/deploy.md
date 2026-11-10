@@ -38,9 +38,9 @@ Never ship with `root`/`root`. Migrations run as root during bootstrap only; the
 
 New daemon tokens expire 180 days after they are created. A token already stored with `expires_at` NONE keeps working. An expired token on upload or daemon-config is `401` `{"code":"token_expired"}`. Token-check and pack downloads still use one shared unauthorized body. These two limits are always on. They do not follow `STATS_UPLOAD_BATCH_CAP`.
 
-`STATS_UPLOAD_BATCH_CAP` is off when unset, empty, or `0` / `false` / `no` / `off` (any case). Any other value rejects one upload with more than 200 matches or more than 500 `deleted_sessions` before any write: `413` `{"code":"batch_too_large","max_matches":200,"max_deleted_sessions":500}`. While the flag is off, oversized batches are stored as they are today.
+`STATS_UPLOAD_BATCH_CAP` is on by default. Compose passes `1` when the variable is blank or unset, and the server also treats an unset variable as on. `0` / `false` / `no` / `off` (any case) or an empty value set directly in the process turns it off. While on, the server rejects one upload with more than 200 matches or more than 500 `deleted_sessions` before any write: `413` `{"code":"batch_too_large","max_matches":200,"max_deleted_sessions":500}`. While the flag is off, oversized batches are stored whole.
 
-Leave the flag off until a tracker release that sends at most 200 matches and 500 deletions, and that handles `413`, `429`, and `token_expired`, is out and most members are on it. Today's tracker puts every unsynced game in one request. Compose passes the variable through as `STATS_UPLOAD_BATCH_CAP` (blank by default). The process reads it on each upload.
+The cap needs a tracker that splits its sync into batches of at most 200 matches and 500 deletions (alpha.3 item 21). A tracker that sends every unsynced game in one request gets `413` once it has more than 200 queued. If older trackers are still in use after a deploy, set `STATS_UPLOAD_BATCH_CAP=0` in the host env and restart the site container. The process reads the variable on each upload.
 
 ### Split migrator vs app (optional multi-container)
 
@@ -735,6 +735,35 @@ and the server is restarted.
 
 `scripts/backup.sh` includes the `reports-data` volume in the restic snapshot,
 the same way it includes uploads.
+
+## Hero icon contributions
+
+Member-contributed hero icon PNGs (opt-in, owner and admins only) stay on
+disk, outside the web root and outside the upload tree. Compose sets
+`HERO_ICONS_DIR` to `/app/data/hero-icons` and mounts the named volume
+`hero-icons-data` there. Without the variable the server uses
+`data/hero-icons` relative to its working directory when `PRODUCTION` is set,
+and `scuffed-hero-icons` under the system temp dir otherwise, so a dev server
+started from the repo root never writes icons into the repo tree.
+
+The entrypoint prepares this directory the same way as `REPORTS_DIR`: it
+creates it, gives it to `scuffed`, and sets mode 0700. Icon files are written
+with mode 0600 and named by a server-made id only.
+
+If the directory is missing, not writable, or overlaps the upload directory,
+`REPORTS_DIR`, `PACKS_DIR` or the web root, hero icons turn themselves off. The log line is
+`hero icons disabled: ...`, the rest of the site keeps serving, and every
+`/api/hero-icons` route except `/api/hero-icons/opt-in` returns 503 with body
+`{"error":"hero_icons_disabled"}` until the directory is fixed and the server
+is restarted.
+
+At startup the server removes icon files older than one hour that have no
+database row, and logs `hero icon orphan sweep done` with the count.
+
+The `hero-icons-data` volume is not in `scripts/backup.sh`, by decision: the
+current server is a temporary dev platform and backups are dropped for it.
+Lost icons can be contributed again. Endpoints,
+caps and the privacy rule are in `docs/api/hero-icons.md`.
 
 ## Recognizer asset packs
 

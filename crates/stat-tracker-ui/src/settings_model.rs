@@ -60,20 +60,52 @@ pub fn page_width(content: f32) -> f32 {
 
 /// Config keys only this app reads, so a change to one never waits for a
 /// tracker restart: the update channel, the setup flag, the session
-/// window (Overview and Companion grouping) and the reader pack address
-/// (not used yet). The waiting count, the After restart tags and the
-/// legend all come from this list.
-pub const APP_ONLY_KEYS: [&str; 4] = [
+/// window (Overview and Companion grouping), the reader pack address
+/// (not used yet) and Report pictures (the app's misread report will read
+/// it; nothing reads it yet, and the tracker never will). The waiting
+/// count, the After restart tags and the legend all come from this list.
+pub const APP_ONLY_KEYS: [&str; 5] = [
     "update_channel",
     "setup_completed",
     "session_window_secs",
     "reader_pack_url",
+    "share_report_pictures",
 ];
+
+/// Config keys whose Settings row is not shown: the upload switch, which
+/// PR 560 wires. The key still loads and saves as before, and a hand-edited
+/// value never shows in a summary, an After restart tag or the waiting count.
+pub const HIDDEN_KEYS: [&str; 1] = ["live_upload"];
+
+/// Shown rows whose key nothing reads yet: the row says so, has no After
+/// restart tag, and a change to it is not counted as waiting.
+pub const NOT_READ_KEYS: [&str; 3] = [
+    "rank_reader",
+    "share_stat_pictures",
+    "share_report_pictures",
+];
+
+/// Whether the Settings row for config key `key` is shown.
+pub fn row_shown(key: &str) -> bool {
+    !HIDDEN_KEYS.contains(&key)
+}
+
+/// `a` and `b` are the same in-game name: the same after the core's name
+/// rule ([`stat_tracker::config::own_name`], which drops a `#1234` tag)
+/// and Unicode lowercasing, as `Config::own_player_names` compares them.
+pub fn same_name(a: &str, b: &str) -> bool {
+    let key = |s: &str| {
+        stat_tracker::config::own_name(s)
+            .unwrap_or(s.trim())
+            .to_lowercase()
+    };
+    key(a) == key(b)
+}
 
 /// True when `key` reaches the tracker only after it restarts: the tracker
 /// reads config.toml once, at start.
 pub fn needs_restart(key: &str) -> bool {
-    !APP_ONLY_KEYS.contains(&key)
+    !APP_ONLY_KEYS.contains(&key) && !NOT_READ_KEYS.contains(&key)
 }
 
 /// Left column, top to bottom.
@@ -146,11 +178,18 @@ impl AdvancedSection {
                 "ocr",
                 "name_reader",
                 "ocr_threads",
+                "share_report_pictures",
+                "capture_only_on_screen",
+                "bans_picks_reader",
             ],
             AdvancedSection::TrackerService => &["auto_detect"],
             AdvancedSection::StoredData => &[],
             AdvancedSection::WebsiteConnection => &["sync"],
-            AdvancedSection::Troubleshooting => &["debug_ocr", "shadow_recognizer"],
+            AdvancedSection::Troubleshooting => &[
+                "debug_ocr",
+                "debug_save_pregame_screens",
+                "shadow_recognizer",
+            ],
         }
     }
 
@@ -159,12 +198,18 @@ impl AdvancedSection {
     /// holds.
     pub fn summary(self, v: &AdvancedValues) -> String {
         match self {
-            AdvancedSection::CaptureReading => format!(
-                "{} capture on {}, {}, report pictures off",
-                v.route,
-                v.monitor,
-                lower_first(v.reader.label())
-            ),
+            AdvancedSection::CaptureReading => {
+                let mut line = format!(
+                    "{} capture on {}, {}",
+                    v.route,
+                    v.monitor,
+                    lower_first(v.reader.label())
+                );
+                if row_shown("share_report_pictures") {
+                    line.push_str(&format!(", report pictures {}", on_off(v.report_pictures)));
+                }
+                line
+            }
             AdvancedSection::TrackerService => {
                 let login = if v.autostart {
                     "Starts on login"
@@ -197,7 +242,10 @@ impl AdvancedSection {
                 None => "Uploads off. Manual server and token, has its own Apply".to_string(),
             },
             AdvancedSection::Troubleshooting => {
-                let mut parts = vec![format!("Debug images {}", on_off(v.debug_images))];
+                let mut parts = vec![
+                    format!("Debug images {}", on_off(v.debug_images)),
+                    format!("screens around each game {}", on_off(v.pregame_screens)),
+                ];
                 if let Some(frames) = v.compare_frames {
                     parts.push(format!("KDE compare frames {}", on_off(frames)));
                 }
@@ -218,7 +266,9 @@ impl AdvancedSection {
     /// tracker reads once at start, and an untagged row there would say its
     /// change applies at once when it does not.
     pub fn after_restart(self) -> bool {
-        self.keys().iter().any(|key| needs_restart(key))
+        self.keys()
+            .iter()
+            .any(|key| needs_restart(key) && row_shown(key))
     }
 
     fn bit(self) -> u8 {
@@ -249,9 +299,13 @@ pub struct AdvancedValues {
     /// The website's host while uploads are on.
     pub sync_host: Option<String>,
     pub debug_images: bool,
+    /// Save screens around each game (`debug_save_pregame_screens`).
+    pub pregame_screens: bool,
     /// KDE compare frames, on KDE only (`None` elsewhere).
     pub compare_frames: Option<bool>,
     pub extra_reader: bool,
+    /// Report pictures (`share_report_pictures`).
+    pub report_pictures: bool,
 }
 
 fn lower_first(s: &str) -> String {
@@ -472,17 +526,23 @@ fn as_form_would_save(config: &Config) -> Config {
 /// How many settings differ between `running` (what the tracker started
 /// with) and `saved` (config.toml now), leaving out [`APP_ONLY_KEYS`]. Each
 /// changed setting counts once: one Reader pick changes `reader` and `ocr`
-/// but counts as one.
+/// but counts as one, and so do the names ([`Config::own_player_names`]).
 pub fn changes_waiting(running: &Config, saved: &Config) -> usize {
     let running = as_form_would_save(running);
     let saved = as_form_would_save(saved);
-    let reader = usize::from(ReaderChoice::of(&running) != ReaderChoice::of(&saved));
+    let reader = usize::from(ReaderChoice::of(&running) != ReaderChoice::of(&saved))
+        + usize::from(running.own_player_names() != saved.own_player_names());
     let (Ok(a), Ok(b)) = (serde_json::to_value(&running), serde_json::to_value(&saved)) else {
         return usize::from(running != saved);
     };
     match (a, b) {
         (serde_json::Value::Object(mut a), serde_json::Value::Object(mut b)) => {
-            for key in APP_ONLY_KEYS.iter().chain(&["reader", "ocr"]) {
+            for key in APP_ONLY_KEYS
+                .iter()
+                .chain(&HIDDEN_KEYS)
+                .chain(&NOT_READ_KEYS)
+                .chain(&["reader", "ocr", "player_name", "player_names"])
+            {
                 a.remove(*key);
                 b.remove(*key);
             }
@@ -525,10 +585,25 @@ pub fn changes_waiting_words(n: usize) -> (String, &'static str) {
 }
 
 /// A setting the 0.6 page applies straight to config.toml. The rest go
-/// through the shared form ([`crate::settings::SettingsForm`]); these
-/// four have no form field, and the classic page keeps them as they are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// through the shared form ([`crate::settings::SettingsForm`]); these have
+/// no form field, and the classic page keeps them as they are.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigEdit {
+    /// Upload games after each match (`live_upload`).
+    LiveUpload(bool),
+    /// Read my rank after Comp games (`rank_reader`).
+    RankReader(bool),
+    /// Share stat pictures (`share_stat_pictures`).
+    ShareStatPictures(bool),
+    /// Report pictures (`share_report_pictures`).
+    ShareReportPictures(bool),
+    /// Only capture while Overwatch is in front: Auto (`true`) or Off.
+    CaptureOnlyOnScreen(bool),
+    /// Another in-game name, kept in `player_names`.
+    AddPlayerName(String),
+    /// Drop these names from `player_names`, every spelling of each
+    /// ([`same_name`]).
+    RemovePlayerNames(Vec<String>),
     /// Stream frame rate. `None` is the default.
     FrameRate(Option<u32>),
     /// Pause between grabs. On leaves the choice to the tracker per desktop.
@@ -536,6 +611,10 @@ pub enum ConfigEdit {
     NameReader(bool),
     /// OCR workers. `None` is Auto.
     OcrWorkers(Option<u32>),
+    /// Save screens around each game (`debug_save_pregame_screens`).
+    SavePregameScreens(bool),
+    /// Read bans and picks (`bans_picks_reader`).
+    BansPicksReader(bool),
 }
 
 impl ConfigEdit {
@@ -556,6 +635,33 @@ impl ConfigEdit {
                 };
             }
             ConfigEdit::NameReader(on) => config.name_reader = on,
+            ConfigEdit::LiveUpload(on) => config.live_upload = on,
+            ConfigEdit::RankReader(on) => config.rank_reader = on,
+            ConfigEdit::ShareStatPictures(on) => config.share_stat_pictures = on,
+            ConfigEdit::ShareReportPictures(on) => config.share_report_pictures = on,
+            ConfigEdit::CaptureOnlyOnScreen(on) => config.capture_only_on_screen = on,
+            ConfigEdit::SavePregameScreens(on) => config.debug_save_pregame_screens = on,
+            ConfigEdit::BansPicksReader(on) => config.bans_picks_reader = on,
+            ConfigEdit::AddPlayerName(name) => {
+                // The core's rule: trimmed, no #1234 tag, at least 3
+                // characters. Anything else is not a name.
+                let Some(name) = stat_tracker::config::own_name(&name) else {
+                    return;
+                };
+                let known = config
+                    .player_name
+                    .iter()
+                    .chain(config.player_names.iter())
+                    .any(|n| same_name(n, name));
+                if !known {
+                    config.player_names.push(name.to_string());
+                }
+            }
+            ConfigEdit::RemovePlayerNames(names) => {
+                config
+                    .player_names
+                    .retain(|n| !names.iter().any(|gone| same_name(n, gone)));
+            }
             ConfigEdit::OcrWorkers(n) => {
                 config.ocr_threads = n.map(|n| n.clamp(1, OCR_WORKERS_MAX));
             }
@@ -706,29 +812,6 @@ pub fn ocr_workers_help(resolved: usize, auto: bool) -> String {
         format!("About {OCR_WORKER_MB} MB each. Auto uses {resolved} on this computer.")
     } else {
         format!("About {OCR_WORKER_MB} MB each.")
-    }
-}
-
-/// What the tracker is still waiting for, on rows the 0.6 spec shows but
-/// the tracker cannot store yet. Each is drawn off and disabled.
-pub const COMING_LATER: &str = "Comes in a later update.";
-
-/// The Upload games row: on while a server and token are saved. It is
-/// read-only here; Website connection sets or clears the token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct UploadRow {
-    pub on: bool,
-    pub note: &'static str,
-}
-
-pub fn upload_row(sync_on: bool) -> UploadRow {
-    UploadRow {
-        on: sync_on,
-        note: if sync_on {
-            "To stop uploads, clear the token under Advanced, Website connection."
-        } else {
-            "Add the website URL and token under Advanced, Website connection."
-        },
     }
 }
 
@@ -903,6 +986,7 @@ mod tests {
         config.ocr_threads = Some(2);
         config.name_reader = false;
         config.shadow_recognizer = true;
+        config.bans_picks_reader = false;
         config.sync = Some(stat_tracker::config::SyncConfig {
             server_url: "https://example.org".into(),
             token: "t".into(),
@@ -913,8 +997,11 @@ mod tests {
         config.update_channel = "prerelease".into();
         config.setup_completed = true;
         config.debug_ocr = true;
+        config.debug_save_pregame_screens = true;
         config.reader = stat_tracker::config::ReaderSetting::OcrV1;
         config.ocr = stat_tracker::config::OcrSetting::Off;
+        config.share_report_pictures = true;
+        config.capture_only_on_screen = false;
         // Keys left out while they hold their default are set above.
         let serde_json::Value::Object(map) = serde_json::to_value(&config).unwrap() else {
             panic!("config is a table");
@@ -969,9 +1056,41 @@ mod tests {
             store_bytes: Some(38_240_000),
             sync_host: Some("ow.example.no".into()),
             debug_images: false,
+            pregame_screens: false,
             compare_frames: None,
             extra_reader: false,
+            report_pictures: false,
         }
+    }
+
+    /// Only the upload switch (PR 560) stays hidden and inert. Report
+    /// pictures is in its summary again; extra names count as waiting (the
+    /// Tab reader reads them at start); keys nothing reads count as none,
+    /// and "öster" after "Öster" is no change.
+    #[test]
+    fn summaries_and_counts_follow_what_is_shown_and_read() {
+        assert_eq!(HIDDEN_KEYS, ["live_upload"]);
+        let mut v = values();
+        v.report_pictures = true;
+        assert!(
+            AdvancedSection::CaptureReading
+                .summary(&v)
+                .ends_with(", report pictures on")
+        );
+        let running = Config::default();
+        let mut saved = running.clone();
+        (saved.live_upload, saved.share_report_pictures) = (false, true);
+        (saved.rank_reader, saved.share_stat_pictures) = (true, true);
+        assert_eq!(changes_waiting(&running, &saved), 0);
+        saved.player_names = vec!["Alt".into()];
+        assert_eq!(changes_waiting(&running, &saved), 1);
+        let mut main = running.clone();
+        main.player_name = Some("Öster".into());
+        let mut same = main.clone();
+        same.player_names = vec!["öster".into()];
+        assert_eq!(changes_waiting(&main, &same), 0, "one name");
+        assert!(needs_restart("player_names") && !needs_restart("rank_reader"));
+        assert!(AdvancedSection::CaptureReading.after_restart());
     }
 
     #[test]
@@ -994,6 +1113,17 @@ mod tests {
             "Uploads to ow.example.no. Manual server and token, has its own Apply"
         );
         assert!(!AdvancedSection::Troubleshooting.summary(&v).contains("KDE"));
+        assert!(
+            AdvancedSection::Troubleshooting
+                .summary(&v)
+                .starts_with("Debug images off, screens around each game off, ")
+        );
+        v.pregame_screens = true;
+        assert!(
+            AdvancedSection::Troubleshooting
+                .summary(&v)
+                .contains("screens around each game on")
+        );
         v.auto_detect = false;
         v.compare_frames = Some(true);
         v.sync_host = None;
@@ -1254,14 +1384,6 @@ mod tests {
     }
 
     #[test]
-    fn upload_row_follows_sync() {
-        assert!(upload_row(true).on);
-        assert!(!upload_row(false).on);
-        assert!(upload_row(true).note.contains("clear the token"));
-        assert_ne!(upload_row(true).note, upload_row(false).note);
-    }
-
-    #[test]
     fn auto_monitor_follows_the_tracker_rule() {
         let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(
@@ -1364,9 +1486,6 @@ mod tests {
             all.push(s.summary(&values()));
         }
         all.extend(ReaderChoice::ALL.iter().map(|c| c.label().to_string()));
-        all.push(COMING_LATER.into());
-        all.push(upload_row(true).note.into());
-        all.push(upload_row(false).note.into());
         for line in all {
             assert!(!line.contains("S11"), "{line}");
         }

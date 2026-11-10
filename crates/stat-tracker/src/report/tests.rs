@@ -1,8 +1,7 @@
 //! Section 9 fixtures for log-only bundles: the log fixture, the manifest
 //! checked against section 2, and the zip rules.
 
-use std::io::Read;
-use std::path::PathBuf;
+use std::{io::Read, path::PathBuf};
 
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -42,8 +41,7 @@ fn ctx() -> ScrubContext {
         account_name: Some(ACCOUNT.into()),
         hostname: Some(HOSTNAME.into()),
         player_name: Some(SELF_NAME.into()),
-        // FIELD_NAME is deliberately not on the list: only the field drop
-        // can keep it out of log.txt.
+        // FIELD_NAME is not on the list on purpose: only the field drop keeps it out of log.txt.
         names: vec![OTHER_1.into(), OTHER_2.into(), MISREAD.into(), SHORT.into()],
     }
 }
@@ -527,7 +525,7 @@ fn system_collects_the_ocr_switch_from_the_daemon_status() {
         leptess_created: 0,
         share_open: false,
         share_notice: String::new(),
-        capture_notice: String::new(),
+        ..Status::default()
     };
     // The daemon refused off (a pack was missing): what ran was on.
     ocr_switch::write_status(dir.path(), &status(1, OcrSetting::On, &[])).unwrap();
@@ -599,7 +597,7 @@ fn the_call_sites_a_report_sends_always_pass_the_site_validator() {
         leptess_created: 0,
         share_open: false,
         share_notice: String::new(),
-        capture_notice: String::new(),
+        ..Status::default()
     };
     // The manifest a report with these sites carries, through the validator.
     let sent = |sites: &[(String, u64)]| -> Value {
@@ -939,10 +937,9 @@ fn server_validator_accepts_log_only_manifest() {
 
 const HOST_LINE: &str = "host desktop=KDE session=wayland drm=card0:amdgpu[eDP-1:disconnected];card1:nvidia[DP-1:connected] drm_output_cards=card1 nvidia_drm_modeset=Y";
 
-/// The host line (desktop, GPU topology) is the first line of `log.txt` in
-/// every log-only report, and the manifest's `system` keys do not change,
-/// so the site's validator (unknown `system` keys are invalid) still takes
-/// it.
+/// The host line (desktop, GPU topology) leads `log.txt` in every log-only
+/// report, and the manifest's `system` keys do not change, so the site's
+/// validator (unknown `system` keys are invalid) still takes it.
 #[test]
 fn the_host_line_leads_log_txt_and_leaves_the_manifest_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -1443,8 +1440,11 @@ mod game {
                 recognizer: "cv-v7".into(),
                 suspect_fields: Vec::new(),
                 name_recognizer: None,
+                bans_picks: None,
+                bans_picks_status: None,
+                queue_title: None,
             }],
-            sessions: Vec::new(),
+            ..crate::storage::Snapshot::default()
         };
         std::fs::write(
             tmp.path().join("live_snapshot.json"),

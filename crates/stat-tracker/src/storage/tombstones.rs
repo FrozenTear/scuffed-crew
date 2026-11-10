@@ -8,17 +8,20 @@ use super::{LocalStore, rewrite_match_log_session};
 impl LocalStore {
     /// Delete a session and all its capture snapshots (manual cleanup of a
     /// junk/misdetected game). Records a tombstone so the next sync deletes
-    /// the game server-side too, and drops the session from `matches.jsonl`
-    /// so the GUI's log fallback stops showing it.
+    /// the game server-side too, and drops the session from the append-only
+    /// `matches.jsonl` record.
     ///
-    /// The three writes run in one transaction and every statement is
-    /// checked. Unchecked, a failed tombstone write still returned Ok after
-    /// the local rows were gone: the game vanished from the app but nothing
-    /// was left to delete it from the site.
+    /// The writes (the game's hero timeline record too) run in one
+    /// transaction and every statement is checked. Unchecked, a failed
+    /// tombstone write still returned Ok after the local rows were gone: the
+    /// game vanished from the app but nothing was left to delete it from the
+    /// site.
     pub async fn delete_session(
         &self,
         session_id: &str,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        super::require_session_id(session_id)?;
+        let _rev = self.rev_guard();
         // Marked before the delete, so a capture insert cannot land between
         // the delete and the mark. A failed delete (the query or any checked
         // statement) unmarks it, or every later row of that game would be
@@ -35,9 +38,11 @@ impl LocalStore {
                  DELETE match_session WHERE session_id = $sid; \
                  DELETE personal_match WHERE session_id = $sid; \
                  CREATE deleted_session SET session_id = $sid, deleted_at = time::now(); \
+                 DELETE $tid; \
                  COMMIT TRANSACTION;",
             )
             .bind(("sid", session_id.to_string()))
+            .bind(("tid", super::timeline::timeline_id(session_id)))
             .await
         {
             Ok(response) => response.check().map(|_| ()),
@@ -65,6 +70,7 @@ impl LocalStore {
         &self,
         session_ids: &[String],
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         let mut sids: Vec<String> = session_ids
             .iter()
             .filter(|sid| !sid.is_empty())
@@ -104,6 +110,7 @@ impl LocalStore {
         &self,
         session_ids: Vec<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let _rev = self.rev_guard();
         if session_ids.is_empty() {
             return Ok(());
         }

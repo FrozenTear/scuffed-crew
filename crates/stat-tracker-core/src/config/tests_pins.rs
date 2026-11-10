@@ -103,6 +103,7 @@ fn every_field_set() -> Config {
         finished_game_close_secs: 240,
         game_process_names: vec!["Overwatch.exe".to_string(), "wine64".to_string()],
         debug_ocr: true,
+        debug_save_pregame_screens: true,
         report_kit_max_games: Some(80),
         report_kit_max_mb: Some(1000),
         ocr_threads: Some(2),
@@ -113,6 +114,7 @@ fn every_field_set() -> Config {
         reader: ReaderSetting::OcrV1,
         ocr: OcrSetting::Off,
         name_reader: false,
+        bans_picks_reader: false,
         player_names: vec!["FrozenAlt".to_string(), "TearSmurf".to_string()],
         live_upload: false,
         rank_reader: true,
@@ -150,6 +152,7 @@ game_process_names = [
     \"wine64\",
 ]
 debug_ocr = true
+debug_save_pregame_screens = true
 report_kit_max_games = 80
 report_kit_max_mb = 1000
 ocr_threads = 2
@@ -160,6 +163,7 @@ reader_pack_url = \"https://crew.example/packs/reader.zip\"
 reader = \"ocr-v1\"
 ocr = \"off\"
 name_reader = false
+bans_picks_reader = false
 player_names = [
     \"FrozenAlt\",
     \"TearSmurf\",
@@ -261,6 +265,7 @@ fn pin_key_order() {
             "finished_game_close_secs",
             "game_process_names",
             "debug_ocr",
+            "debug_save_pregame_screens",
             "report_kit_max_games",
             "report_kit_max_mb",
             "ocr_threads",
@@ -271,6 +276,7 @@ fn pin_key_order() {
             "reader",
             "ocr",
             "name_reader",
+            "bans_picks_reader",
             "player_names",
             "live_upload",
             "rank_reader",
@@ -324,6 +330,7 @@ fn pin_minimal_file_field_values() {
     assert_eq!(c.finished_game_close_secs, 180);
     assert_eq!(c.game_process_names, ["Overwatch.exe"]);
     assert!(!c.debug_ocr);
+    assert!(!c.debug_save_pregame_screens);
     assert_eq!(c.report_kit_max_games, None);
     assert_eq!(c.report_kit_max_mb, None);
     assert_eq!(c.ocr_threads, None);
@@ -334,6 +341,7 @@ fn pin_minimal_file_field_values() {
     assert_eq!(c.reader.as_str(), "new");
     assert_eq!(c.ocr.as_str(), "on");
     assert!(c.name_reader);
+    assert!(c.bans_picks_reader);
 }
 
 #[test]
