@@ -320,19 +320,24 @@ impl Tracked {
 }
 
 /// The queue title warning for the map line: the sentence when the game has
-/// no confident queue, `None` when it has one or was never read (reader
-/// off). A chip and the warning never show together.
+/// a queue title with no confident value (`QueueTitle::confident_value`,
+/// the same gate as the upload), `None` when it has one or was never read
+/// (reader off). A chip and the warning never show together.
 pub fn queue_warning(g: &Game) -> Option<&'static str> {
-    if queue_value(g).is_some() {
-        return None;
-    }
-    g.queue_title.as_ref().and_then(|t| t.warning())
+    g.queue_title
+        .as_ref()
+        .filter(|t| t.confident_value().is_none())
+        .map(|_| stat_tracker::model::QUEUE_TITLE_WARNING)
 }
 
-/// The confident queue ("OPEN QUEUE") for the map line's chip, if any.
+/// The confident queue ("OPEN QUEUE") for the map line's chip, if any:
+/// `QueueTitle::confident_value`, so the chip shows exactly what the upload
+/// sends.
 pub fn queue_value(g: &Game) -> Option<String> {
-    let value = g.queue_title.as_ref()?.value.as_deref()?.trim();
-    (!value.is_empty()).then(|| value.to_string())
+    g.queue_title
+        .as_ref()?
+        .confident_value()
+        .map(str::to_string)
 }
 
 /// One bar segment of the hero timeline, in time order.
@@ -1070,5 +1075,38 @@ mod tests {
         });
         assert_eq!(queue_warning(&g), None);
         assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
+    }
+
+    /// The chip uses the upload's gate (`QueueTitle::confident_value`): a
+    /// stored value under the bar, at NaN, past 1 or blank shows the
+    /// warning and no chip; exactly at the bar shows the chip.
+    #[test]
+    fn a_stored_value_below_the_bar_shows_the_warning_not_a_chip() {
+        use stat_tracker::model::{QUEUE_TITLE_MIN_SCORE, QUEUE_TITLE_WARNING, QueueTitle};
+        let mut g = game("a", "Ana", 1, 1, at(20, 0, 0));
+        let stored = |value: &str, confidence: f32| QueueTitle {
+            value: Some(value.into()),
+            confidence,
+            ..QueueTitle::default()
+        };
+        for (value, confidence) in [
+            ("OPEN QUEUE", 0.79),
+            ("OPEN QUEUE", 0.5),
+            ("OPEN QUEUE", 0.0),
+            ("OPEN QUEUE", f32::NAN),
+            ("OPEN QUEUE", 1.5),
+            ("  ", 0.93),
+        ] {
+            g.queue_title = Some(stored(value, confidence));
+            assert_eq!(queue_value(&g), None, "{value:?} at {confidence}");
+            assert_eq!(
+                queue_warning(&g),
+                Some(QUEUE_TITLE_WARNING),
+                "{value:?} at {confidence}"
+            );
+        }
+        g.queue_title = Some(stored(" OPEN QUEUE ", QUEUE_TITLE_MIN_SCORE));
+        assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
+        assert_eq!(queue_warning(&g), None);
     }
 }

@@ -27,6 +27,7 @@ fn hint(text: &str, source: &str) -> Option<PendingHint> {
         text: text.to_string(),
         source: source.to_string(),
         at: t0(),
+        target: None,
     })
 }
 
@@ -246,4 +247,40 @@ fn only_the_policy_frames_are_held() {
     ] {
         assert_eq!(policy_slot(other), None, "{other}");
     }
+}
+
+#[test]
+fn a_hint_tied_to_a_game_never_read_expires_on_a_later_game() {
+    // Frames were held for g2 after the hint: the hint is g2's.
+    let tied = |target: &str| {
+        hint("open", "g1").map(|h| PendingHint {
+            target: Some(target.to_string()),
+            ..h
+        })
+    };
+    // g2 was never read; g3, a confident agreeing read, does not get it.
+    let mut pending = tied("g2");
+    let (t, outcome) = apply_read(
+        &field(Some("OPEN QUEUE"), 0.93),
+        &mut pending,
+        game("g3", 4, 5),
+    );
+    assert_eq!(outcome, HintOutcome::Expired("open".into()));
+    assert_eq!((t.mode_hint, pending), (None, None));
+    // g2 itself still settles it.
+    let mut pending = tied("g2");
+    let (t, outcome) = apply_read(
+        &field(Some("OPEN QUEUE"), 0.93),
+        &mut pending,
+        game("g2", 2, 3),
+    );
+    assert_eq!(outcome, HintOutcome::Confirmed("open".into()));
+    assert_eq!(t.mode_hint.as_deref(), Some("open"));
+    // The source and an older game still leave it waiting.
+    let mut pending = tied("g2");
+    let (_, outcome) = apply_read(&Field::none(), &mut pending, game("g1", -10, 1));
+    assert_eq!(outcome, HintOutcome::Pending("open".into()));
+    let (_, outcome) = apply_read(&Field::none(), &mut pending, game("g0", -20, 1));
+    assert_eq!(outcome, HintOutcome::Pending("open".into()));
+    assert!(pending.is_some());
 }

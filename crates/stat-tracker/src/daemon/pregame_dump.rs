@@ -386,7 +386,8 @@ pub(crate) struct PregameTracker<F> {
     last_seen: Seen,
     /// Rate limits for the turned-down candidates' lines and frames.
     rejects: RejectLimiter,
-    /// The open session, if any, for the log lines only.
+    /// The open session, if any, for the log lines and the game the queue
+    /// title reader's frames are held for.
     session: Option<String>,
     /// The last phase frame skip logged, so it is logged once per screen.
     skip_logged: Option<(PregamePhase, &'static str)>,
@@ -1108,21 +1109,15 @@ impl PregameDump {
         poll: Duration,
     ) -> Option<Self> {
         let root = pregame_dir(data_dir);
-        let examples_dir = super::pregame_ban_title::ban_title_dir(data_dir);
-        let examples = super::pregame_ban_title::BanTitleExamples::load_dir(&examples_dir);
-        if examples.len() == 0 {
-            tracing::info!(
-                target: "scuffed_stat_tracker",
-                dir = %examples_dir.display(),
-                "pre-game screens: no ban-results examples, the ban-results title is told by its shape"
-            );
+        // A saver for the queue title reader alone runs no ban-results
+        // check ([`Self::want`]): it loads no examples and logs nothing
+        // about them.
+        let queue_only = !on && bans.is_none();
+        let examples = if queue_only {
+            super::pregame_ban_title::BanTitleExamples::default()
         } else {
-            tracing::info!(
-                target: "scuffed_stat_tracker",
-                examples = examples.len(),
-                "pre-game screens: ban-results examples loaded"
-            );
-        }
+            Self::load_examples(data_dir)
+        };
         let writer = if on {
             PregameWriter::start(root.clone())
         } else {
@@ -1151,6 +1146,27 @@ impl PregameDump {
                 None
             }
         }
+    }
+
+    /// The ban-results title examples under `data_dir`, with one log line
+    /// saying whether there are any.
+    fn load_examples(data_dir: &std::path::Path) -> super::pregame_ban_title::BanTitleExamples {
+        let examples_dir = super::pregame_ban_title::ban_title_dir(data_dir);
+        let examples = super::pregame_ban_title::BanTitleExamples::load_dir(&examples_dir);
+        if examples.len() == 0 {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                dir = %examples_dir.display(),
+                "pre-game screens: no ban-results examples, the ban-results title is told by its shape"
+            );
+        } else {
+            tracing::info!(
+                target: "scuffed_stat_tracker",
+                examples = examples.len(),
+                "pre-game screens: ban-results examples loaded"
+            );
+        }
+        examples
     }
 
     /// A saver writing through `writer` with no examples (tests).
@@ -1233,7 +1249,9 @@ impl PregameDump {
         self.send(shots);
     }
 
-    /// The open session, for the log lines.
+    /// The open session, for the log lines and for the queue title reader,
+    /// which ties the frames it holds to it
+    /// ([`super::queue_title::QueueTitleFeed::held_for`]).
     pub(crate) fn set_session(&mut self, session: Option<&str>) {
         self.tracker.set_session(session);
     }
@@ -1273,7 +1291,7 @@ impl PregameDump {
             bans.observe(&shots);
         }
         if let Some(queue) = self.queue.as_mut() {
-            queue.observe(&shots);
+            queue.observe(&shots, self.tracker.session.as_deref());
         }
         self.trail.shots(&shots);
         let saves: Vec<(String, &'static str)> = shots

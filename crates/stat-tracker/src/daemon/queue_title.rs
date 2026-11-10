@@ -25,6 +25,19 @@
 //! the read (a late `heroselect_last`) is ignored, so it cannot give the
 //! next game, which may open no folder of its own, this game's queue.
 //!
+//! The held frames are tied to the open game when they were held
+//! ([`QueueTitleFeed::held_for`]). A game that is never read (no Tab, or
+//! first stored as a best guess on close or at shutdown) leaves its frames
+//! behind; the next game's read finds them tied to another game that was
+//! never read and drops them unread, so they cannot give it that game's
+//! queue. Frames held while the open game was one read already are the
+//! next game's (its start screen opened it after they were held) and are
+//! read as before.
+//!
+//! A read whose store write fails is kept ([`QueueTitleFeed::unsaved`]) and
+//! written on the game's next capture, so a store error does not turn a
+//! confident read into the warning.
+//!
 //! Nothing here can stop, delay past one read or drop a game: every
 //! failure is a warning on the game and a log line.
 //!
@@ -34,8 +47,8 @@
 //! names the queue of the game that comes next, so it waits here as the
 //! pending [`PendingHint`], set through
 //! [`super::pregame_dump::PregameDump::set_next_mode_hint`] with the session
-//! it was read on and the time. It belongs to the next game only
-//! ([`settle_hint`]):
+//! it was read on and the time the rank screen showed. It belongs to the
+//! next game only ([`settle_hint`]):
 //!
 //! * the first read of a different game that started after the hint was
 //!   read settles it, whatever the strength of that read: a confident read
@@ -43,6 +56,9 @@
 //!   a confident read that disagrees drops it, and a weak read expires it;
 //! * it is never settled on the game it was read on, nor on a game that
 //!   started before it was read: those leave it waiting;
+//! * once pre-game frames are held for a game other than its source, it is
+//!   that game's ([`PendingHint::target`]): a read of any other game
+//!   expires it, so a game that is never read does not pass it on;
 //! * it expires once it is older than the game window the frames use
 //!   ([`super::bans_picks::frames_fit`]), so it never lands on a much later
 //!   game.
@@ -70,8 +86,12 @@ pub(crate) struct PendingHint {
     /// The session whose rank screen showed it: the hint names the game
     /// after this one, so this one never settles it.
     pub(crate) source: String,
-    /// When it was read.
+    /// When the rank screen it was read on showed (the frame's time, not
+    /// the time it was handed over).
     pub(crate) at: DateTime<Utc>,
+    /// The first game other than `source` that pre-game frames were held
+    /// for after the hint was set: the next game. `None` until then.
+    pub(crate) target: Option<String>,
 }
 
 /// What a read did to the pending next mode hint.
@@ -83,7 +103,8 @@ pub(crate) enum HintOutcome {
     Confirmed(String),
     /// A confident read disagreed: the hint is gone.
     Dropped(String),
-    /// The read was weak, or the hint was older than the game window: the
+    /// The read was weak, the hint was older than the game window, or it
+    /// was another game's (its [`PendingHint::target`], never read): the
     /// hint is gone, stored nowhere.
     Expired(String),
     /// Not this game's hint (its source game, or a game that started before
@@ -110,8 +131,14 @@ pub(crate) struct QueueTitleFeed {
     frames: Vec<(Screen, &'static str, Arc<DynamicImage>)>,
     /// When the last frame was held, for [`frames_fit`].
     fed_at: Option<DateTime<Utc>>,
+    /// The open game when the last frame was held, `None` with no open
+    /// game or nothing held.
+    held_for: Option<String>,
     /// The game read last, so a later capture of it is not read again.
     read_for: Option<String>,
+    /// A game's read that the store did not take: written on that game's
+    /// next capture instead of a read.
+    pub(crate) unsaved: Option<(String, QueueTitle)>,
     /// The next mode hint waiting for the next game's read.
     pub(crate) pending_hint: Option<PendingHint>,
 }
@@ -134,15 +161,19 @@ impl QueueTitleFeed {
             done: false,
             frames: Vec::new(),
             fed_at: None,
+            held_for: None,
             read_for: None,
+            unsaved: None,
             pending_hint: None,
         }
     }
 
-    /// One batch the saver sends. A shot of a new game folder drops the old
-    /// game's frames and the read-once mark; a frame of a folder read
-    /// already is not held.
-    pub(crate) fn observe(&mut self, ops: &[PregameOp<Arc<DynamicImage>>]) {
+    /// One batch the saver sends while `open` is the open game. A shot of a
+    /// new game folder drops the old game's frames and the read-once mark;
+    /// a frame of a folder read already is not held. A frame held ties the
+    /// frames to `open` ([`Self::held_for`]) and, when `open` is not the
+    /// pending hint's source, the hint to `open` ([`PendingHint::target`]).
+    pub(crate) fn observe(&mut self, ops: &[PregameOp<Arc<DynamicImage>>], open: Option<&str>) {
         for op in ops {
             let PregameOp::Save(shot) = op else {
                 continue;
@@ -151,6 +182,7 @@ impl QueueTitleFeed {
                 self.folder = Some(shot.folder.clone());
                 self.frames.clear();
                 self.fed_at = None;
+                self.held_for = None;
                 self.done = false;
             }
             let Some((screen, which)) = policy_slot(shot.name) else {
@@ -163,7 +195,31 @@ impl QueueTitleFeed {
             self.frames.retain(|(s, w, _)| (*s, *w) != (screen, which));
             self.frames.push((screen, which, Arc::clone(&shot.frame)));
             self.fed_at = Some(Utc::now());
+            self.held_for = open.map(str::to_string);
+            if let (Some(hint), Some(open)) = (self.pending_hint.as_mut(), open)
+                && hint.target.is_none()
+                && hint.source != open
+            {
+                hint.target = Some(open.to_string());
+            }
         }
+    }
+
+    /// The open game when the last frame was held: the game the frames are
+    /// for, unless it had been read already (then its start screen came
+    /// late and they are the next game's).
+    pub(crate) fn held_for(&self) -> Option<&str> {
+        self.held_for.as_deref()
+    }
+
+    /// Drop the held frames unread and mark the folder read, so nothing
+    /// held later in it is read either: they are a game's that was never
+    /// read.
+    pub(crate) fn drop_frames(&mut self) {
+        self.frames.clear();
+        self.fed_at = None;
+        self.held_for = None;
+        self.done = true;
     }
 
     pub(crate) fn was_read_for(&self, session_id: &str) -> bool {
@@ -201,6 +257,7 @@ impl QueueTitleFeed {
         let frames = std::mem::take(&mut self.frames);
         self.done = true;
         self.fed_at = None;
+        self.held_for = None;
         let read = Arc::clone(&self.read);
         tokio::task::spawn_blocking(move || {
             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_frames(&read, &frames)))
@@ -310,6 +367,12 @@ pub(crate) fn settle_hint(
         // Started more than the window after the hint. The age check above
         // already covers this unless the game's start is later than `now`
         // (a clock that moved back): kept so the rule does not lean on that.
+        *pending = None;
+        return HintOutcome::Expired(text);
+    }
+    if hint.target.as_deref().is_some_and(|t| t != game.session) {
+        // The next game had frames held and was never read: its hint is
+        // not this later game's.
         *pending = None;
         return HintOutcome::Expired(text);
     }

@@ -767,7 +767,8 @@ pub(crate) async fn run_loop(
                             dump.note_match_end(Instant::now());
                         }
                         if let (Some(dump), Some((seen, frame))) = (pregame_dump.as_mut(), pregame) {
-                            // The session id is for the log lines only.
+                            // The open game: for the log lines, and the game
+                            // the queue title reader's frames are held for.
                             dump.set_session(st.active_game.as_ref().map(|g| g.session_id.as_str()));
                             dump.observe(Instant::now(), seen, frame);
                         }
