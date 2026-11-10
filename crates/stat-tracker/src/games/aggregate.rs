@@ -153,6 +153,24 @@ pub fn secs_delta(secs: u64) -> chrono::TimeDelta {
         .unwrap_or(chrono::TimeDelta::MAX)
 }
 
+/// The Session window setting as the gap that splits sittings. 0 turns the
+/// window off: each game is its own session.
+pub fn session_window_gap(window_secs: u64) -> chrono::TimeDelta {
+    if window_secs == 0 {
+        chrono::TimeDelta::MIN
+    } else {
+        secs_delta(window_secs)
+    }
+}
+
+/// The one sitting rule the Games and Overview tabs share: `older` is in
+/// `newer`'s sitting when no more than `gap` passes from `older`'s end
+/// (its last Tab read) to `newer`'s start (its first Tab read). A row with
+/// no Tab reads kept counts as one moment, `played_at`.
+pub fn same_sitting(newer: &Game, older: &Game, gap: chrono::TimeDelta) -> bool {
+    newer.started_at() - older.ended_at() <= gap
+}
+
 /// Filter + aggregate. `window = None` is all time. `role = None` keeps every role.
 pub fn aggregate(games: &[Game], window: Option<SeasonWindow>, role: Option<Role>) -> Aggregates {
     aggregate_filtered(
@@ -186,7 +204,7 @@ pub fn filter_games<'a>(games: &'a [Game], filter: &GameFilter) -> Vec<&'a Game>
                 .as_ref()
                 .is_none_or(|h| hero_key(&g.hero) == hero_key(h))
         })
-        .filter(|g| filter.map.as_ref().is_none_or(|m| &g.map_name == m))
+        .filter(|g| filter.map.as_ref().is_none_or(|m| map_matches(g, m)))
         .filter(|g| filter.outcome.is_none_or(|o| g.outcome == o))
         .collect()
 }
@@ -232,28 +250,60 @@ pub fn distinct_heroes(games: &[&Game]) -> Vec<String> {
     out
 }
 
+/// The Map dropdown's one choice for every game with no known map: empty,
+/// or a raw read that is not a map ("Ilio5"). The rows show those as "No
+/// map", so the choice says that and finds them all ([`map_matches`]).
+pub const NO_MAP: &str = "No map";
+
+/// Whether `name` is a map the rows show by name: not empty, and a known
+/// map. Any other read shows as [`NO_MAP`].
+pub fn map_is_shown(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty() && crate::parse::map_is_known(name)
+}
+
+/// Whether game `g` matches the Map filter `map`: [`NO_MAP`] matches every
+/// game whose map is not shown by name, any other choice its own map.
+pub fn map_matches(g: &Game, map: &str) -> bool {
+    if map == NO_MAP {
+        !map_is_shown(&g.map_name)
+    } else {
+        g.map_name == map
+    }
+}
+
+/// The Map dropdown's choices: each known map once, A to Z, then
+/// [`NO_MAP`] when any game has no known map. A raw read that is not a map
+/// is never offered as if it were one.
 pub fn distinct_maps(games: &[&Game]) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
+    let mut no_map = false;
     for g in games {
-        if !g.map_name.is_empty() && !out.iter().any(|m| m == &g.map_name) {
+        if !map_is_shown(&g.map_name) {
+            no_map = true;
+        } else if !out.iter().any(|m| m == &g.map_name) {
             out.push(g.map_name.clone());
         }
     }
     out.sort();
+    if no_map {
+        out.push(NO_MAP.to_string());
+    }
     out
 }
 
-/// Group newest-first games by the daemon sitting gap: a game continues the
-/// current sitting when it is within `gap` of the oldest game already in that
-/// sitting (same rule as `session_window_secs` between captures). Midnight
-/// does not split a sitting. Header date is the oldest game's local day.
+/// Group newest-first games into sittings: a game continues the current
+/// sitting when it ended within `gap` of the start of the oldest game
+/// already in that sitting ([`same_sitting`], the Games tab's rule too).
+/// Midnight does not split a sitting. Header date is the oldest game's
+/// local day.
 pub fn group_by_session_gap(games: &[&Game], gap: chrono::TimeDelta) -> Vec<SessionGroup> {
     let mut groups: Vec<SessionGroup> = Vec::new();
     for g in games {
         let continues = groups
             .last()
             .and_then(|grp| grp.games.last())
-            .is_some_and(|prev| prev.played_at.signed_duration_since(g.played_at) <= gap);
+            .is_some_and(|prev| same_sitting(prev, g, gap));
         if continues {
             if let Some(grp) = groups.last_mut() {
                 bump_outcome(&mut grp.record, g.outcome);
@@ -836,5 +886,81 @@ mod tests {
         assert_eq!(heroes, vec!["Ana".to_string(), "Junker Queen".to_string()]);
         let maps = distinct_maps(&filtered);
         assert_eq!(maps, vec!["King's Row".to_string()]);
+    }
+
+    /// The Map dropdown offers known maps by name and one "No map" for
+    /// every game the rows show as "No map" (empty, or a raw read like
+    /// "Ilio5"), and that choice finds those games.
+    #[test]
+    fn unknown_map_reads_are_one_no_map_choice() {
+        let at = ts(2026, 9, 2);
+        let rows = vec![
+            game_on("Ilio5", "Ana", Role::Support, Outcome::Win, at),
+            game_on("", "Ana", Role::Support, Outcome::Loss, at),
+            game_on("Ilios", "Ana", Role::Support, Outcome::Win, at),
+            game_on("Busan", "Ana", Role::Support, Outcome::Win, at),
+        ];
+        let all: Vec<&Game> = rows.iter().collect();
+        assert_eq!(distinct_maps(&all), ["Busan", "Ilios", NO_MAP]);
+        let pick = |map: &str| {
+            filter_games(
+                &rows,
+                &GameFilter {
+                    map: Some(map.into()),
+                    ..GameFilter::default()
+                },
+            )
+            .iter()
+            .map(|g| g.map_name.clone())
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(pick(NO_MAP), ["Ilio5", ""]);
+        assert_eq!(pick("Ilios"), ["Ilios"]);
+        let known: Vec<&Game> = rows[2..].iter().collect();
+        assert_eq!(distinct_maps(&known), ["Busan", "Ilios"]);
+    }
+
+    /// A game with one hero run from `start` to `end` (its Tab reads).
+    fn timed(hero: &str, start: DateTime<Utc>, end: DateTime<Utc>) -> Game {
+        let mut g = game(hero, Role::Tank, Outcome::Win, end);
+        g.segments = vec![crate::games::model::SegmentView {
+            index: 0,
+            hero: hero.into(),
+            role: Role::Tank,
+            snapshots: 4,
+            confirmed: true,
+            dismissed: false,
+            resolution: None,
+            first_seen: start,
+            last_seen: end,
+        }];
+        g
+    }
+
+    /// The Overview's sittings use the Games tab's rule, end of one game
+    /// to start of the next: at 30 minutes, a 27 minute game that starts
+    /// 5 minutes after the one before ends is the same sitting, though its
+    /// last Tab read is 32 minutes after the earlier game's.
+    #[test]
+    fn sittings_split_on_the_gap_from_end_to_start() {
+        let t = |h: u32, m: u32| Utc.with_ymd_and_hms(2026, 9, 2, h, m, 0).unwrap();
+        let older = timed("Ana", t(20, 0), t(20, 20));
+        let newer = timed("Mei", t(20, 25), t(20, 52));
+        let gap = chrono::TimeDelta::minutes(30);
+        assert!(same_sitting(&newer, &older, gap));
+        assert_eq!(group_by_session_gap(&[&newer, &older], gap).len(), 1);
+        let later = timed("Mei", t(20, 51), t(21, 0));
+        assert!(
+            !same_sitting(&later, &older, gap),
+            "31 min from end to start"
+        );
+        assert_eq!(group_by_session_gap(&[&later, &older], gap).len(), 2);
+        // A window of 0 is off: each game is its own sitting.
+        assert_eq!(session_window_gap(0), chrono::TimeDelta::MIN);
+        assert_eq!(
+            group_by_session_gap(&[&newer, &older], session_window_gap(0)).len(),
+            2
+        );
+        assert_eq!(session_window_gap(1800), gap);
     }
 }

@@ -172,12 +172,15 @@ pub fn save_edit(
         map_changed,
         hero_fixed,
         role_changed,
+        game.outcome,
     ))
 }
 
 /// What a queued Edit says, from whether the game is still held, was held,
-/// and which kinds of field changed. A role-only change reads "Role
-/// corrected" and offers no training report, as there is no role category.
+/// which kinds of field changed, and the game's result. A role-only change
+/// reads "Role corrected" and offers no training report, as there is no
+/// role category. A release with no result yet says the game uploads once
+/// the result is set, as the picker does.
 fn saved(
     held: bool,
     was_held: bool,
@@ -185,6 +188,7 @@ fn saved(
     map_changed: bool,
     hero_fixed: bool,
     role_changed: bool,
+    outcome: Outcome,
 ) -> Saved {
     let hero_changed = hero_fixed || role_changed;
     let role_only = !hero_fixed && role_changed;
@@ -207,6 +211,8 @@ fn saved(
         "Saved. A map or hero is still missing, so this game stays on this computer."
     } else if stats_changed {
         "Stats corrected"
+    } else if was_held && outcome == Outcome::Unknown {
+        RELEASED_NO_RESULT
     } else if was_held {
         RELEASED
     } else {
@@ -241,6 +247,10 @@ pub(crate) fn show_saved(app: &mut crate::app::TrackerApp, sid: &str, saved: &Sa
 
 /// A save that set the missing map or hero and changed no stat.
 pub const RELEASED: &str = "Saved. Nothing is missing now.";
+
+/// [`RELEASED`] on a game with no result yet: it still does not upload,
+/// in the picker's words ("it uploads once you set the result").
+pub const RELEASED_NO_RESULT: &str = "Saved. It uploads once you set the result.";
 
 /// The stored name of the hero a typed name means. Case, punctuation and
 /// accents fold the way the reader's keys do
@@ -388,6 +398,45 @@ mod tests {
         let mut after = g.clone();
         after.map_name = edit.map_name.unwrap();
         assert!(!after.needs_review());
+    }
+
+    /// Setting the missing map or hero on an ended game with no result
+    /// does not say nothing is missing: the game still waits for its
+    /// result, as the picker says.
+    #[test]
+    fn a_release_with_no_result_says_the_result_is_still_needed() {
+        let sets: [&dyn Fn(&mut EditForm); 2] = [&|f| f.map_name = "Ilios".into(), &|f| {
+            f.hero = "Mercy".into()
+        }];
+        for set in sets {
+            let dir = tmp();
+            let mut g = sample_game();
+            g.outcome = Outcome::Unknown;
+            g.map_name.clear();
+            g.hero.clear();
+            let mut form = EditForm::from_game(&g);
+            form.map_name = "Ilios".into();
+            form.hero = "Mercy".into();
+            let saved = save_edit(&dir, &g, &form).unwrap();
+            assert_eq!(saved.toast, RELEASED_NO_RESULT);
+            assert_eq!(saved.toast, "Saved. It uploads once you set the result.");
+            // One field only: still held.
+            let mut form = EditForm::from_game(&g);
+            set(&mut form);
+            let saved = save_edit(&tmp(), &g, &form).unwrap();
+            assert!(saved.toast.contains("stays on this computer"));
+        }
+        let dir = tmp();
+        let mut g = held_game();
+        g.outcome = Outcome::Unknown;
+        let mut form = EditForm::from_game(&g);
+        form.map_name = "Ilios".into();
+        assert_eq!(
+            save_edit(&dir, &g, &form).unwrap().toast,
+            RELEASED_NO_RESULT
+        );
+        g.outcome = Outcome::Loss;
+        assert_eq!(save_edit(&tmp(), &g, &form).unwrap().toast, RELEASED);
     }
 
     /// Releasing a hold with a stat fixed too still says the stats were
@@ -596,12 +645,18 @@ mod tests {
     /// edit, "No changes to save", which offers none either.)
     #[test]
     fn an_unchanged_save_offers_no_report() {
-        let unchanged = saved(false, false, false, false, false, false);
+        let unchanged = saved(false, false, false, false, false, false, Outcome::Win);
         assert_eq!(unchanged.toast, "Saved");
         assert_eq!(unchanged.category, None);
         assert!(!offers_report(unchanged));
         assert!(offers_report(saved(
-            false, false, false, true, false, false
+            false,
+            false,
+            false,
+            true,
+            false,
+            false,
+            Outcome::Win
         )));
         let app_save = |set: &dyn Fn(&mut EditForm)| {
             let (_dir, mut app) = crate::fixtures::test_app();
@@ -628,11 +683,11 @@ mod tests {
     #[test]
     fn an_unchanged_save_on_a_held_game_offers_no_report() {
         let held = "Saved. A map or hero is still missing, so this game stays on this computer.";
-        let unchanged = saved(true, true, false, false, false, false);
+        let unchanged = saved(true, true, false, false, false, false, Outcome::Win);
         assert_eq!(unchanged.toast, held);
         assert_eq!(unchanged.category, None);
         assert!(!offers_report(unchanged));
-        let fixed = saved(true, true, true, false, false, false);
+        let fixed = saved(true, true, true, false, false, false, Outcome::Win);
         assert_eq!(fixed.category, Some(GameCategory::WrongStats));
         assert!(offers_report(fixed));
     }

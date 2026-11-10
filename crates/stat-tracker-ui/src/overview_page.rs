@@ -177,14 +177,13 @@ fn fold_chip(count: usize, open: bool, toggle: Message) -> Element<'static, Mess
 }
 
 /// The gap that splits sessions: the Session window setting, as the spec's
-/// Games footnote says ("Sessions split after 3 hours without a game").
-/// The 0.5 Games page still splits at a fixed 30 minutes. A value too big
-/// for a duration (the field takes any number) is no limit at all.
+/// Games footnote says ("Sessions split after 3 hours without a game"),
+/// the same gap the Games tab splits on
+/// ([`crate::aggregate::session_window_gap`]). The 0.5 Games page still
+/// splits at a fixed 30 minutes. A value too big for a duration (the field
+/// takes any number) is no limit at all; 0 is off.
 pub fn session_gap(window_secs: u64) -> chrono::TimeDelta {
-    i64::try_from(window_secs)
-        .ok()
-        .and_then(chrono::TimeDelta::try_seconds)
-        .unwrap_or(chrono::TimeDelta::MAX)
+    crate::aggregate::session_window_gap(window_secs)
 }
 
 /// `games` less the one still being played: its result is not in, so the
@@ -323,6 +322,45 @@ mod tests {
         let (_dir, mut app) = crate::fixtures::test_app();
         app.saved_config.session_window_secs = u64::MAX;
         let _ = view(&app, 1300.0);
+    }
+
+    /// The Overview's latest session and the Games tab's sitting follow one
+    /// rule: at a 30 minute window, a 27 minute game that starts 5 minutes
+    /// after the one before ends is one session on both.
+    #[test]
+    fn overview_and_games_split_sessions_alike() {
+        use crate::model::SegmentView;
+        let (_dir, mut app) = crate::fixtures::test_app();
+        app.saved_config.session_window_secs = 1800;
+        let mut games = crate::snapshot::games_from_snapshot(&crate::fixtures::snapshot(
+            crate::cli::FixtureKind::Sample,
+        ));
+        games.truncate(2);
+        let t = |m: i64| {
+            chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 9, 2, 20, 0, 0).unwrap()
+                + chrono::TimeDelta::minutes(m)
+        };
+        for (g, (start, end)) in games.iter_mut().zip([(25, 52), (0, 20)]) {
+            g.played_at = t(end);
+            g.segments = vec![SegmentView {
+                index: 0,
+                hero: g.hero.clone(),
+                role: g.role,
+                snapshots: 4,
+                confirmed: true,
+                dismissed: false,
+                resolution: None,
+                first_seen: t(start),
+                last_seen: t(end),
+            }];
+        }
+        let refs: Vec<&Game> = games.iter().collect();
+        let overview = latest_session(&app, &refs).unwrap();
+        assert_eq!(overview.games.len(), 2);
+        let gap = session_gap(app.saved_config.session_window_secs);
+        let sittings = crate::games_rows::sittings(&games, gap);
+        assert_eq!(sittings.len(), 1);
+        assert_eq!(sittings[0].len(), 2);
     }
 
     #[test]

@@ -1,6 +1,8 @@
-//! The `--fixture games` snapshot: the Games tab's three open-row states
-//! from UX Spec v2 (normal, unsure, undecided), with Wrecking Ball history
-//! so the "vs avg" deltas have 20 games to average. Example data only.
+//! The `--fixture games` snapshot: the Games tab's five open-row states,
+//! the three from UX Spec v2 (normal, unsure, undecided) plus a game held
+//! for its map and hero (the picker's) and a second rejected upload, with
+//! Wrecking Ball history so the "vs avg" deltas have 20 games to average,
+//! and history games with more bans and picks states. Example data only.
 
 use chrono::{TimeZone, Utc};
 use stat_tracker::storage::{HeroSegment, PersonalMatch, Snapshot};
@@ -18,7 +20,10 @@ pub const UNDECIDED: &str = "sess-g-undecided";
 /// Held: the map read as "Ilio5" and the hero as Unknown, so both are
 /// missing and the game stays on this computer (the picker's game).
 pub const HELD: &str = "sess-g-held";
-/// A second rejected upload, so the tab offers Retry all.
+/// A second rejected upload: a rejected game with a result and a map and
+/// hero (the undecided one has none), so "2 games couldn't upload" shows
+/// and Retry all has more than one game to queue. The line itself shows
+/// for one rejected game too.
 pub const REJECTED_2: &str = "sess-g-rejected2";
 
 /// History games that carry the extra bans and picks states.

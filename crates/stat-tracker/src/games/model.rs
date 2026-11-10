@@ -295,8 +295,9 @@ impl Game {
     /// A field the reader was unsure of that no hand edit has fixed since.
     /// `field` is a flat name (`e`, `dmg`) or an edit name (`elims`,
     /// `damage`); both map through `crate::suspect`, the rules the
-    /// store and uploader apply. The names are flat already: `Game::from`
-    /// keeps only flat names (`r3.dmg` is stored as `dmg`).
+    /// store and uploader apply. The names are flat already:
+    /// [`Game::from_match`] keeps only flat names (`r3.dmg` is stored as
+    /// `dmg`).
     pub fn unsure_now(&self, field: &str) -> bool {
         let flats: &[&str] = match crate::suspect::suspect_names_for_edit(field) {
             [] => &[field],
