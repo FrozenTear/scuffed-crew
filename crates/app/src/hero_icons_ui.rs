@@ -66,18 +66,9 @@ pub fn icons_phrase(n: u32) -> String {
     }
 }
 
-pub const SECTION_INTRO: &str = "Hero icons you send are private training data for the tracker's icon matching. Officers see only how many you have sent. Admins can open your icons while sharing is on. When sharing is off, nobody but you can open them. Admins can still delete them.";
-
 pub const STORE_DISABLED: &str = "Hero icon sharing is not switched on for this server.";
 
-pub const LOADING: &str = "Loading hero icon settings...";
-
-pub const SWITCH_LABEL: &str = "Share hero icons for tracker training";
-
-pub const SWITCH_HINT_ON: &str =
-    "Sharing is on. Turn it off at any time. You choose what happens to icons already sent.";
-
-pub const SWITCH_HINT_OFF: &str = "Sharing is off. No icons are accepted from you.";
+pub const LOADING: &str = "Loading your hero icons...";
 
 pub const KEPT_HIDDEN_NOTE: &str = "Your icons are kept on the server and hidden while sharing is off. Admins can delete them but cannot open them.";
 
@@ -100,34 +91,21 @@ pub fn delete_all_title(icon_count: u32) -> String {
 pub const DELETE_ALL_BODY: &str =
     "This removes them from the server for good. Your sharing choice stays as it is.";
 
-/// Text for the live region after a successful opt-in change.
-pub fn status_opted_in() -> String {
-    "Sharing is on.".to_string()
-}
-
-pub fn status_opted_out(choice: OptOutChoice, kept_or_deleted: u32) -> String {
+/// What happened to stored icons when hero icon sharing was turned off.
+/// Nothing to say when none were stored.
+pub fn opt_out_detail(choice: OptOutChoice, kept_or_deleted: u32) -> Option<String> {
     match choice {
-        OptOutChoice::Keep if kept_or_deleted == 0 => "Sharing is off.".to_string(),
-        OptOutChoice::Keep => format!(
-            "Sharing is off. {} kept and hidden.",
-            capitalize_first(&icons_phrase(kept_or_deleted))
-        ),
-        OptOutChoice::Delete => {
-            format!("Sharing is off. Deleted {}.", icons_phrase(kept_or_deleted))
-        }
+        _ if kept_or_deleted == 0 => None,
+        OptOutChoice::Keep => Some(format!(
+            "{} kept and hidden.",
+            icons_phrase(kept_or_deleted)
+        )),
+        OptOutChoice::Delete => Some(format!("Deleted {}.", icons_phrase(kept_or_deleted))),
     }
 }
 
 pub fn status_deleted_all(deleted: u32) -> String {
     format!("Deleted {}.", icons_phrase(deleted))
-}
-
-fn capitalize_first(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
 }
 
 /// True when the server answered that the icon store is switched off.
@@ -158,14 +136,6 @@ pub fn icon_alt(hero: &str, uploaded_at: &DateTime<Utc>) -> String {
 
 pub fn section_id(member_id: &str) -> String {
     format!("hero-icons-{member_id}")
-}
-
-pub fn switch_id(member_id: &str) -> String {
-    format!("hero-icons-{member_id}-opt-in")
-}
-
-pub fn switch_hint_id(member_id: &str) -> String {
-    format!("hero-icons-{member_id}-opt-in-hint")
 }
 
 pub fn status_id(member_id: &str) -> String {
@@ -307,24 +277,24 @@ mod tests {
     }
 
     #[test]
-    fn opt_out_status_says_what_happened_to_the_icons() {
-        assert_eq!(status_opted_out(OptOutChoice::Keep, 0), "Sharing is off.");
+    fn opt_out_detail_says_what_happened_to_the_icons() {
+        assert_eq!(opt_out_detail(OptOutChoice::Keep, 0), None);
+        assert_eq!(opt_out_detail(OptOutChoice::Delete, 0), None);
         assert_eq!(
-            status_opted_out(OptOutChoice::Keep, 3),
-            "Sharing is off. 3 icons kept and hidden."
+            opt_out_detail(OptOutChoice::Keep, 3).as_deref(),
+            Some("3 icons kept and hidden.")
         );
         assert_eq!(
-            status_opted_out(OptOutChoice::Delete, 1),
-            "Sharing is off. Deleted 1 icon."
+            opt_out_detail(OptOutChoice::Delete, 1).as_deref(),
+            Some("Deleted 1 icon.")
         );
         assert_eq!(status_deleted_all(0), "Deleted 0 icons.");
     }
 
     #[test]
     fn ids_come_from_record_ids_and_field_names() {
-        assert_eq!(switch_id("m1"), "hero-icons-m1-opt-in");
-        assert_eq!(switch_id("m1"), switch_id("m1"));
-        assert_ne!(switch_id("m1"), switch_id("m2"));
+        assert_eq!(status_id("m1"), "hero-icons-m1-status");
+        assert_ne!(status_id("m1"), status_id("m2"));
         assert_eq!(
             choice_id("m1", OptOutChoice::Delete),
             "hero-icons-m1-opt-out-delete"
@@ -379,12 +349,8 @@ mod tests {
     #[test]
     fn copy_has_no_long_dashes() {
         let all = [
-            SECTION_INTRO,
             STORE_DISABLED,
             LOADING,
-            SWITCH_LABEL,
-            SWITCH_HINT_ON,
-            SWITCH_HINT_OFF,
             KEPT_HIDDEN_NOTE,
             NONE_SENT,
             KEEP_LABEL,
@@ -406,7 +372,7 @@ mod tests {
         for text in [
             opt_out_question(3),
             delete_all_title(2),
-            status_opted_out(OptOutChoice::Keep, 2),
+            opt_out_detail(OptOutChoice::Keep, 2).unwrap(),
             admin_delete_title("FrozenTear", 2),
             admin_loaded(2, 1),
         ] {
@@ -433,10 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn member_intro_names_who_can_see_icons() {
-        assert!(SECTION_INTRO.contains("Officers see only how many"));
-        assert!(SECTION_INTRO.contains("Admins can open your icons while sharing is on"));
-        assert!(SECTION_INTRO.contains("Admins can still delete them"));
+    fn keep_copy_names_who_can_open_icons() {
         assert!(KEEP_LABEL.contains("Admins can still delete them"));
         assert!(KEPT_HIDDEN_NOTE.contains("delete them but cannot open them"));
     }
