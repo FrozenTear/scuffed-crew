@@ -21,6 +21,10 @@
 //! template pack under `<data_dir>/templates/queue-title-v1/` and returns
 //! `None` for any title the pack does not know.
 //!
+//! The rank update reader ([`rank`], `rank-v1`) reads the competitive rank
+//! screen after a game. It is off by default; `STAT_TRACKER_RANK_RECOGNIZER=on`
+//! turns it on, and it needs its own pack under `<data_dir>/templates/rank-v1/`.
+//!
 //! [`reader`] is the single entry point for the main-reader switch
 //! ([`read_board`]: every field with value, confidence and suspect flag). It
 //! adds the map banner ([`banner`]) and result word ([`result`]) readers, whose
@@ -34,6 +38,7 @@ pub mod heroes;
 pub mod log;
 mod ncc;
 pub mod queue_title;
+pub mod rank;
 pub mod reader;
 pub mod result;
 pub mod worker;
