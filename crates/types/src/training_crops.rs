@@ -98,8 +98,9 @@ pub const STAT_DIGITS_MAX_PER_MEMBER: u32 = 1000;
 pub const MAP_NAME_MAX_PER_MEMBER: u32 = 200;
 
 /// Widest accepted `map_name` crop, in pixels. Map name banners are wide
-/// and the tracker sends them unscaled.
-pub const MAP_NAME_MAX_WIDTH: u32 = 1024;
+/// and the tracker sends them unscaled: a native 4K banner is 1036 px wide,
+/// so this leaves room above that.
+pub const MAP_NAME_MAX_WIDTH: u32 = 1536;
 
 /// Tallest accepted `map_name` crop, in pixels.
 pub const MAP_NAME_MAX_HEIGHT: u32 = 256;
@@ -171,7 +172,7 @@ mod tests {
 
     #[test]
     fn only_map_name_gets_the_wide_bound() {
-        assert_eq!(CropKind::MapName.max_edges(), (1024, 256));
+        assert_eq!(CropKind::MapName.max_edges(), (1536, 256));
         assert_eq!(CropKind::MapName.max_crop_bytes(), 256 * 1024);
         for kind in [CropKind::HeroIcon, CropKind::StatDigits] {
             assert_eq!(kind.max_edges(), (HERO_ICON_MAX_EDGE, HERO_ICON_MAX_EDGE));

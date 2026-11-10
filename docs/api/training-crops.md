@@ -40,10 +40,11 @@ consent shapes have no `full_screen` field, a `PUT` naming it is 400
 | Kind | Edges (width x height) | Bytes per `crop` part | Constants |
 |------|------------------------|-----------------------|-----------|
 | `hero_icon`, `stat_digits` | 8 to 256 each | 64 KiB | `HERO_ICON_MAX_EDGE`, `HERO_ICON_MAX_BYTES` |
-| `map_name` | 8 to 1024 wide, 8 to 256 tall | 256 KiB | `MAP_NAME_MAX_WIDTH`, `MAP_NAME_MAX_HEIGHT`, `MAP_NAME_MAX_BYTES` |
+| `map_name` | 8 to 1536 wide, 8 to 256 tall | 256 KiB | `MAP_NAME_MAX_WIDTH`, `MAP_NAME_MAX_HEIGHT`, `MAP_NAME_MAX_BYTES` |
 
-Map name banners are wide and the tracker sends them unscaled, so
-`map_name` has the wider bound and a byte limit to match. The whole request
+Map name banners are wide and the tracker sends them unscaled (a native 4K
+banner is 1036 px wide), so `map_name` has the wider bound and a byte limit
+to match. The whole request
 stays capped at 2 MiB (`HERO_ICON_MAX_REQUEST_BYTES`) for every kind, so a
 request of large banners holds fewer than 20 of them. The bounds live on
 `CropKind::max_edges` and `CropKind::max_crop_bytes`.
@@ -66,7 +67,7 @@ or banned). It is accepted, besides a session, on exactly these routes:
 | `GET /api/training-crops/{id}/image` | yes | no (401) |
 | `GET /api/training-crops` (admin list) | admin | no (401) |
 | `GET /api/training-crops/members` (counts) | officer or admin | no (401) |
-| `GET /api/training-crops/resolutions` (totals) | officer or admin | no (401) |
+| `GET /api/training-crops/resolutions` (totals) | admin | no (401) |
 | every `/api/hero-icons` route | as before | no (401) |
 
 Setting consent is session only, so a leaked or misused sync token can never
@@ -76,9 +77,14 @@ to change it.
 The four routes that take the sync token share one per-IP limit: burst 40
 requests, then one every 2 s (`STATS_UPLOAD_IP_BURST`,
 `STATS_UPLOAD_IP_REPLENISH_SECS`, the same numbers as the stats sync IP
-limit), in their own bucket. It runs before the credential is checked; a
-refused request is the shared 429 `rate_limited`. The upload also keeps its
-per-member, per-kind limiter (below).
+limit), in their own bucket. It runs before the credential is checked, so
+logged-in requests to those four routes share the per-IP limit too, admin
+deletes included; a refused request is the shared 429 `rate_limited`. The
+upload also keeps its per-member, per-kind limiter (below).
+
+There is no admin route to delete all of one member's training crops: an
+admin removes them one id at a time, inside that limit. An admin
+delete-all is a Site/API follow-up.
 
 A sync token never acts as staff. On `DELETE /api/training-crops/{id}` an
 admin's or officer's sync token reaches only that member's own crops; any
@@ -111,14 +117,15 @@ all three as stored.
 { "stat_digits": true, "map_name": false }
 ```
 
-Unknown kinds (`full_screen` included) or non-bool values are 400
-`invalid_consent` and change nothing. Both routes work while the store is
+A kind sent as `null` (`{"map_name": null}`) counts as left out and keeps
+its value. Unknown kinds (`full_screen` included) or other non-bool values
+(`"yes"`, `1`) are 400 `invalid_consent` and change nothing. Both routes work while the store is
 disabled.
 
 Turning a kind off works like the hero icon opt-out: stored crops of that kind
 are kept and hidden. New uploads of the kind are refused (403
-`crop_consent_required`). Admins can no longer list or read them, and they
-leave officer counts. The owner can still list and delete them. An admin
+`crop_consent_required`). Admins can no longer read them or see their
+metadata, and they leave officer counts. The owner can still list and delete them. An admin
 still finds their ids in the admin list (marked `hidden`, without metadata)
 and can delete them while the owner is active. Turning the kind on again
 makes them visible again.
@@ -186,7 +193,7 @@ Every field is optional unless noted. Unknown fields are refused (400
 
 | Field | Type | Rule |
 |-------|------|------|
-| `hero` | string | Hero key or display name (`ana`, `lucio`, `soldier-76`, `Soldier: 76`), checked against the known heroes (`HERO_NAMES`). **Required for `hero_icon`.** Optional for other kinds. Unknown hero: 400 `unknown_hero`. Stored and answered as the hero key, the pack file stem (`soldier-76`, `scuffed_types::hero_key`). `/api/hero-icons` still answers with the display name |
+| `hero` | string | Hero key or display name (`ana`, `lucio`, `soldier-76`, `Soldier: 76`), checked against the known heroes (`HERO_NAMES`). **Required for `hero_icon`.** Optional for other kinds. Unknown hero: 400 `unknown_hero`. Answered as the hero key, the pack file stem (`soldier-76`, `scuffed_types::hero_key`). `hero_icon` rows store the display name, as before; other kinds store the key. `/api/hero-icons` still answers with the display name |
 | `screen` | string | 1 to 32 chars of `A-Z a-z 0-9 _ - .` |
 | `slot_type` | string | Same as `screen` |
 | `slot_index` | int | 0 to 63 |
@@ -295,20 +302,25 @@ required`. Everyone else: 404 `crop_not_found`.
 ## Staff
 
 `GET /api/training-crops?kind=&cursor=&limit=` (admin). Every stored crop of
-active members, of every kind or of one kind with `?kind=`, newest first, so
-an admin can find the id of any crop and delete it. Each item is a
+active members, of every kind or of one kind with `?kind=`, so an admin can
+find the id of any crop and delete it. Sorted by the upload hour (newest
+first), then `game_token`, then id: stable, crops of one game stay
+together, and nothing shows the order within an hour. Each item is a
 `TrainingCropEntry` plus `member_id`, `display_name` and `hidden`:
 
 - `hidden: false`: the owner consents to this kind right now. Every field is
   sent and the image can be read.
 - `hidden: true`: consent for this kind is off. Only `id`, `kind`,
-  `size_bytes`, `width`, `height`, `uploaded_at` and `thumbnail_url` are
-  sent (`meta` is `{}`, no `hero` or `tracker_version`), and the image
-  answers 404. The id is there so the crop can be deleted.
+  `uploaded_at` and `thumbnail_url` carry values. `size_bytes`, `width` and
+  `height` are 0, since a crop's size can give away the game resolution
+  (map banners are sent unscaled). `meta` is `{}`, there is no `hero` or
+  `tracker_version`, and the image answers 404. The id is there so the crop
+  can be deleted.
 
-`uploaded_at` in this list is cut down to the start of its UTC hour, so a
-crop cannot be matched to a game by its upload time. The owner's own list
-keeps the exact time.
+`uploaded_at` in this list is cut down to the start of its UTC hour, so the
+times are rough. That does not make a crop unlinkable to a game: admins
+still see exact upload times of hero icons on `/api/hero-icons`, and stat
+digit values may match a game. The owner's own list keeps the exact time.
 
 One audit entry per request, target `all`: `viewed_hero_icons` when the list
 is filtered to `hero_icon`, `viewed_training_crops` otherwise, details
@@ -341,11 +353,10 @@ name, then member id:
 - There is no per-member breakdown by game resolution, for officers or
   admins: it would show each member's setup.
 
-`GET /api/training-crops/resolutions` (officer or admin). Stored crops by
-kind and game resolution, summed across active members, counting only the
-kinds each member consents to. Officers and admins get the same answer.
-Largest count first; crops sent without a resolution are one row with no
-`screen_width`/`screen_height`:
+`GET /api/training-crops/resolutions` (admin). Stored crops by kind and game
+resolution, summed across active members, counting only the kinds each
+member consents to. Largest count first; crops sent without a resolution
+are one row with no `screen_width`/`screen_height`:
 
 ```json
 {
@@ -357,8 +368,21 @@ Largest count first; crops sent without a resolution are one row with no
 }
 ```
 
-With a single contributor of a kind the totals are that member's setup, as
-with any total over few people.
+Officers get 403 `Admin access required`. Matched against the exact
+per-member counts of `/members`, these totals would give each member's
+resolution (two members, 40 and 7 crops, and totals of 40 at 1080p and 7 at
+1440p). Admins lose nothing by this: they already see each consented crop's
+game resolution in the admin list.
+
+## Release order
+
+1. The API (this contract) ships first.
+2. Then Site's consent page, so members can turn kinds on.
+3. The first tracker build that sends `stat_digits` or `map_name` also ships
+   a delete button that calls `DELETE /api/training-crops/mine`, in the same
+   release. Site's "delete my contributions" calls `DELETE /api/hero-icons/mine`,
+   which removes hero icons only, so without that button a member could not
+   remove what the build sends.
 
 ## Errors
 
@@ -378,12 +402,12 @@ Every error body is `{"error": "<code>"}`, except the shared 429 body
 | 400 | `unexpected_field` | Part named other than `meta`/`crop`, or pairs out of order |
 | 400 | `no_crops` | No `meta`/`crop` pair |
 | 400 | `invalid_multipart` | Body is not readable multipart |
-| 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1024 wide, 8 to 256 tall) |
+| 400 | `icon_bad_dimensions` | PNG width or height outside the kind's bound (8 to 256; `map_name` 8 to 1536 wide, 8 to 256 tall) |
 | 400 | `invalid_png` | PNG signature present but the image does not decode |
 | 400 | `invalid_consent` | Consent body not JSON, unknown kind (`full_screen` included), or not a bool |
 | 401 | session error (as for every member route) | `PUT /consent` without a session; a sync token is not a session there |
-| 403 | `Admin access required` | Officer session on another member's image or delete; non-admin on the admin list |
-| 403 | `Officer access required` | Member session on `/members` or `/resolutions` |
+| 403 | `Admin access required` | Officer session on another member's image or delete; non-admin on the admin list or `/resolutions` |
+| 403 | `Officer access required` | Member session on `/members` |
 | 404 | `crop_not_found` | Unknown id, malformed id, or a crop the caller may not see |
 | 409 | `crop_limit_reached` | The upload would pass the kind's cap |
 | 413 | `icon_too_large` | A `crop` part over the kind's limit (64 KiB; `map_name` 256 KiB), or the body over 2 MiB |
@@ -400,9 +424,10 @@ Additive only (`crates/db/src/migrations.rs`):
   `hero_icon`, `stat_digits` or `map_name`. A fatal startup step
   (`hero_icon kind backfill`) writes `kind = 'hero_icon'` on rows that have
   none, so existing rows become hero icons. A no-op after the first boot.
-- `hero` keeps its type. Rows written from this change on hold the hero key
-  (`soldier-76`); older rows hold the display name and read as the key. The
-  hero icon routes answer with the display name either way.
+- `hero` keeps its type. `hero_icon` rows keep holding the display name
+  (`Soldier: 76`), as before this change; rows of the other kinds hold the
+  hero key (`soldier-76`). Reads map both spellings to the key, and the hero
+  icon routes answer with the display name either way.
 - New optional `hero_icon` columns: `screen`, `slot_type`, `slot_index`,
   `game_token`, `score`, `runner_up`, `margin`, `icon_set_version`,
   `spot_version`, `vote_card_filled`, `locked_in`, `screen_width`,
@@ -416,8 +441,10 @@ Additive only (`crates/db/src/migrations.rs`):
   `hero_icon` consent. There is no `full_screen_opt_in`: that consent is
   never stored.
 
-Take a database snapshot before deploying this change, so the schema and the
-`hero_icon` kind backfill can be undone from it if needed.
+Take a database snapshot before deploying this change. Restoring it is only
+for a rollback right after the deploy: it rolls back every table, so once
+members have used the site it loses their new data (members, applications,
+stats). Later, roll back with the steps below instead.
 
 Rollback to the build before this change:
 
@@ -429,11 +456,7 @@ Rollback to the build before this change:
    filter and would otherwise show them as hero icons with an empty hero.
    (Files left behind are also removed by the old build's orphan sweep after
    one hour once their rows are gone.)
-2. Hero icons stored by this build hold the hero key in `hero`, which the
-   old build shows as written (`soldier-76`, not `Soldier: 76`). Restoring the
-   pre-deploy snapshot avoids that; otherwise rewrite those rows to display
-   names before deploying the old build.
-3. Deploy the old build. Its migrations redefine only the old fields; the new
+2. Deploy the old build. Its migrations redefine only the old fields; the new
    columns, the index and the consent fields stay defined and unused, and
    hero icon rows keep working: the old build reads rows with its own row
    struct, which picks its fields by name and ignores the others, so a row
@@ -441,7 +464,7 @@ Rollback to the build before this change:
    test `old_build_row_shape_reads_rows_with_kind_and_metadata`, which reads
    such a row with a copy of the old struct). Hero icons the old build
    writes get `kind = 'hero_icon'` from the field default.
-4. Optional cleanup:
+3. Optional cleanup:
    `REMOVE INDEX hero_icon_member_kind_idx ON hero_icon;` and
    `REMOVE FIELD <name> ON hero_icon;` / `ON member_settings` for each new
    field. Not needed for the old build to run.
