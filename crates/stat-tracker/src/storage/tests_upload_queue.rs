@@ -409,3 +409,114 @@ async fn set_aside_games_go_back_on_the_queue_once_per_tracker_version() {
     );
     assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
 }
+
+/// Two snapshots of one game: the older is set aside and the newer is already
+/// synced (already on the site). A version retry must not put the older
+/// snapshot back on the queue, or the next pass would last-write older
+/// stats over the site's row. A different set-aside game is still retried.
+#[tokio::test]
+async fn a_version_retry_does_not_send_an_older_snapshot_when_a_newer_one_is_synced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    let mut older = snap("g1", 5);
+    older.played_at = SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(30));
+    store.insert_match(older).await.unwrap();
+    quarantine(&store, "g1").await;
+
+    let mut newer = snap("g1", 10);
+    newer.played_at = SurrealDatetime::from(Utc::now());
+    store.insert_match(newer).await.unwrap();
+    let newer_row = store
+        .get_all_matches()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.session_id == "g1" && row.elims == 10)
+        .expect("newer row");
+    store
+        .mark_synced(&SyncClaim::capture(std::slice::from_ref(&newer_row)))
+        .await
+        .unwrap();
+
+    store.insert_match(snap("g2", 1)).await.unwrap();
+    quarantine(&store, "g2").await;
+    assert!(
+        store.get_unsynced().await.unwrap().is_empty(),
+        "both games are set aside, so nothing is queued yet"
+    );
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap()
+    );
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["g2"],
+        "the older g1 snapshot must not be sent; g2 is still retried"
+    );
+    let stored = store.get_all_matches().await.unwrap();
+    let older = stored
+        .iter()
+        .find(|row| row.session_id == "g1" && row.elims == 5)
+        .expect("older row");
+    assert!(
+        older.upload_rejection().is_some() && !older.upload_retry_pending(),
+        "the older snapshot stays set aside, not marked for retry"
+    );
+}
+
+/// Retry all must not put an older set-aside snapshot back on the queue
+/// when a newer snapshot of the same game is already synced.
+#[tokio::test]
+async fn retry_all_does_not_send_an_older_snapshot_when_a_newer_one_is_synced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    let mut older = snap("g1", 5);
+    older.played_at = SurrealDatetime::from(Utc::now() - chrono::Duration::seconds(30));
+    store.insert_match(older).await.unwrap();
+    quarantine(&store, "g1").await;
+
+    let mut newer = snap("g1", 10);
+    newer.played_at = SurrealDatetime::from(Utc::now());
+    store.insert_match(newer).await.unwrap();
+    let newer_row = store
+        .get_all_matches()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|row| row.session_id == "g1" && row.elims == 10)
+        .expect("newer row");
+    store
+        .mark_synced(&SyncClaim::capture(std::slice::from_ref(&newer_row)))
+        .await
+        .unwrap();
+
+    store.insert_match(snap("g2", 1)).await.unwrap();
+    quarantine(&store, "g2").await;
+
+    store.clear_rejected_uploads().await.unwrap();
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(
+        queued
+            .iter()
+            .map(|row| row.session_id.as_str())
+            .collect::<Vec<_>>(),
+        ["g2"],
+        "the older g1 snapshot must not be sent; g2 is still retried"
+    );
+    let stored = store.get_all_matches().await.unwrap();
+    let older = stored
+        .iter()
+        .find(|row| row.session_id == "g1" && row.elims == 5)
+        .expect("older row");
+    assert!(
+        older.upload_rejection().is_some(),
+        "the older snapshot stays set aside"
+    );
+}

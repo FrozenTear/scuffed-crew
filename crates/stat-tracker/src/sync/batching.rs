@@ -121,13 +121,15 @@ pub struct UploadIsolation {
 
 /// How long a row the server accepted proves that it takes uploads. Inside
 /// this window a row the server refuses on its own and by name is
-/// quarantined even when its chunk and pass accept no row. Ten minutes
-/// covers the passes that follow a 429 or a 5xx (a minute or two apart,
-/// failure backoff at most 5 minutes). The cost is bounded by the window: a
-/// server-wide refusal that starts inside it (a PC clock pushed more than 24
-/// hours ahead, or a site deploy with a bug) can set aside the rows queued
-/// then. They keep the site's reason and a Retry button, and the next
-/// tracker version puts them back on the queue.
+/// quarantined even when its chunk and pass accept no row. A short 429 or
+/// 5xx stays inside the window (passes a minute or two apart; a brief
+/// failure backoff is at most 5 minutes). An outage of about 6 minutes or
+/// more, or more refused games than the passes in the window can isolate,
+/// falls outside it, and the old rule stands. The cost is bounded by the
+/// window: a server-wide refusal that starts inside it (a PC clock pushed
+/// more than 24 hours ahead, or a site deploy with a bug) can set aside the
+/// rows queued then. They keep the site's reason and a Retry button, and
+/// the next tracker version puts them back on the queue.
 pub const ACCEPT_PROOF_WINDOW: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
 /// Rows the server refused on their own with no proof the refusal is about
