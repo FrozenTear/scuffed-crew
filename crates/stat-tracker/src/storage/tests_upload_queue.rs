@@ -334,3 +334,72 @@ async fn legacy_row_without_sync_rev_marks_at_revision_zero() {
     let after = store.get_all_matches().await.unwrap();
     assert!(after[0].synced);
 }
+
+async fn quarantine(store: &LocalStore, session_id: &str) {
+    let rows = store.get_unsynced().await.unwrap();
+    let bad: Vec<_> = rows
+        .iter()
+        .filter(|row| row.session_id == session_id)
+        .cloned()
+        .collect();
+    assert!(!bad.is_empty(), "{session_id} is queued");
+    store
+        .quarantine_upload(
+            &SyncClaim::capture(&bad),
+            None,
+            "matches[0]: hero must be a known hero or Unknown",
+        )
+        .await
+        .unwrap();
+}
+
+/// A new tracker version puts set-aside games back on the queue once. The
+/// same version does not do it again, also after a restart, so a game the
+/// site still refuses stays set aside until the next update or a Retry.
+#[tokio::test]
+async fn set_aside_games_go_back_on_the_queue_once_per_tracker_version() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.unwrap();
+    store.insert_match(snap("bad", 1)).await.unwrap();
+    quarantine(&store, "bad").await;
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap()
+    );
+    let queued = store.get_unsynced().await.unwrap();
+    assert_eq!(queued.len(), 1);
+    assert!(queued[0].upload_rejection().is_none());
+
+    quarantine(&store, "bad").await;
+    assert!(
+        !store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap(),
+        "the same version runs it once"
+    );
+    drop(store);
+    let store = reopen_store(dir.path()).await;
+    assert!(
+        !store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.3")
+            .await
+            .unwrap(),
+        "a restart on the same version does not run it again"
+    );
+    assert!(store.get_unsynced().await.unwrap().is_empty());
+    let stored = store.get_all_matches().await.unwrap();
+    assert!(stored[0].upload_rejection().is_some(), "still set aside");
+
+    assert!(
+        store
+            .retry_rejected_uploads_once_per_version("0.6.0-alpha.4")
+            .await
+            .unwrap()
+    );
+    assert_eq!(store.get_unsynced().await.unwrap().len(), 1);
+}

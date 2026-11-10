@@ -51,6 +51,7 @@ pub(crate) async fn try_sync(
     settle_session: Option<String>,
 ) -> sync::SyncAttempt {
     let mut caps = client.batch_caps();
+    let ran_with = client.credentials();
     let mut refused = client.refused_rows();
     let outcome = try_sync_with_state(store, data_dir, settle_session, &mut caps, &mut refused, {
         let client = client.clone();
@@ -61,7 +62,7 @@ pub(crate) async fn try_sync(
     })
     .await;
     client.remember_batch_caps(caps);
-    client.remember_refused_rows(refused);
+    client.remember_refused_rows(refused, &ran_with);
     let creds = client.credentials();
     if outcome == sync::SyncAttempt::StatsDeletePending {
         let scheduled_at = client.take_delete_scheduled_at();
@@ -561,6 +562,9 @@ where
             Output = Result<scuffed_types::api::StatsUploadResponse, sync::SyncUploadError>,
         >,
 {
+    // The proof from the last pass is for this pass only, whether or not
+    // this one reaches the server.
+    let carried_proof = refused.take_accepted_then_cut();
     // Errors are stringified immediately: `Box<dyn Error>` isn't `Send`, and
     // this future runs on a spawned task.
     //
@@ -737,6 +741,7 @@ where
         tombstones,
         caps,
         refused,
+        carried_proof,
         &mut upload,
     )
     .await
@@ -855,22 +860,27 @@ pub(crate) fn split_local_only(rows: Vec<storage::PersonalMatch>) -> LocalOnlySp
 /// [`sync::SYNC_UPLOAD_MAX_DELETES`] tombstones go out together, or the
 /// lower caps already learned by this process. HTTP 400 and 422 split
 /// inside the chunk until a single bad row is found. That row is
-/// quarantined only when some other row in the pass (this chunk or an
-/// earlier one) was accepted. If the pass has accepted nothing yet and the
-/// chunk accepts nothing, nothing is quarantined, the rows stay queued, and
-/// the pass backs off. The rows refused on their own are put in `refused`,
-/// and the next pass sends them after the other queued rows, so they cannot
-/// use up every pass ahead of good games. A 400 or 422 that does not name a
-/// row blames only the probed row and retries the rest. HTTP 413 `batch_too_large` lowers
-/// those caps (never below 1, never raised later) and resends immediately;
-/// that request wrote nothing. A 413 that repeats the same caps, or sends
-/// none, stops the pass and counts as a failure. HTTP 429, 401, 403, 409,
-/// and other errors stop the pass. 429 keeps `Retry-After`. 409
-/// `stats_delete_pending` keeps every row queued and does not quarantine.
-/// Tombstones ride on the chunk they were sent with, including 400 splits
-/// of that chunk, and are cleared only after a 2xx. A deletes-only 400
-/// still backs off like a 5xx: there are no match rows to isolate, so one
-/// bad id keeps that delete chunk retrying.
+/// quarantined when some other row in the same chunk was accepted. When the
+/// chunk accepts nothing, it is still quarantined if the server named the
+/// row (`matches[n]:`) and either an earlier chunk of this pass had a row
+/// accepted, or `carried_proof` is set and the row is in `refused` (the
+/// last pass held it, then had a row accepted and stopped on a 429 or the
+/// request cap). Otherwise nothing is quarantined, the rows stay queued,
+/// and the pass backs off. Rows refused on their own without that proof
+/// are put in `refused`, and the next pass sends them after the other
+/// queued rows, so they cannot use up every pass ahead of good games. A
+/// 400 or 422 that does not name a row blames only the probed row and
+/// retries the rest. HTTP 413 `batch_too_large` lowers those caps (never
+/// below 1, never raised later) and resends immediately; that request wrote
+/// nothing. A 413 that repeats the same caps, or sends none, stops the pass
+/// and counts as a failure. HTTP 429, 401, 403, 409, and other errors stop
+/// the pass. 429 keeps `Retry-After`. 409 `stats_delete_pending` keeps
+/// every row queued and does not quarantine. Tombstones ride on the chunk
+/// they were sent with, including 400 splits of that chunk, and are cleared
+/// only after a 2xx. A deletes-only 400 still backs off like a 5xx: there
+/// are no match rows to isolate, so one bad id keeps that delete chunk
+/// retrying. At the end, `refused` records whether this pass had a row
+/// accepted and then stopped on a 429 or the request cap.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_chunked<F, Fut>(
     store: &storage::LocalStore,
@@ -880,6 +890,7 @@ pub(crate) async fn upload_chunked<F, Fut>(
     mut tombstones: Vec<String>,
     caps: &mut sync::BatchCaps,
     refused: &mut sync::RefusedRows,
+    carried_proof: bool,
     upload: &mut F,
 ) -> sync::SyncAttempt
 where
@@ -896,6 +907,9 @@ where
     let mut requests = 0usize;
     let mut progress = false;
     let mut stop: Option<sync::SyncAttempt> = None;
+    // The pass stopped on a 429 or the request cap, so rows it never
+    // reached may still be queued.
+    let mut cut_short = false;
 
     loop {
         if remaining.is_empty() && tombstones.is_empty() {
@@ -939,6 +953,7 @@ where
                     );
                 }
                 Err(err) => {
+                    cut_short = err.status == Some(429);
                     stop = Some(sync_attempt_from_error(&err));
                     break;
                 }
@@ -947,12 +962,24 @@ where
         }
 
         // A row accepted by an earlier chunk proves the server takes
-        // uploads, so this chunk's refused rows are quarantined even when
-        // the chunk accepts none.
-        let isolation = sync::isolate_rejected_in_pass(&chunk_rows, uploaded > 0, |batch| {
-            upload(batch.to_vec(), chunk_deletes.clone())
-        })
-        .await;
+        // uploads, so this chunk's rows refused by name are quarantined even
+        // when the chunk accepts none. So are the rows the last pass held,
+        // when that pass had a row accepted and was then cut short.
+        let carried: Vec<usize> = if carried_proof {
+            chunk_rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| upload_row_key(row).is_some_and(|key| refused.contains(&key)))
+                .map(|(local, _)| local)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let isolation =
+            sync::isolate_rejected_in_pass(&chunk_rows, uploaded > 0, &carried, |batch| {
+                upload(batch.to_vec(), chunk_deletes.clone())
+            })
+            .await;
         requests += isolation.requests;
 
         for &local in &isolation.held {
@@ -960,7 +987,11 @@ where
                 refused.insert(key);
             }
         }
-        for &local in &isolation.accepted {
+        let settled = isolation
+            .accepted
+            .iter()
+            .chain(isolation.rejected.iter().map(|row| &row.index));
+        for &local in settled {
             if let Some(key) = chunk_rows.get(local).and_then(upload_row_key) {
                 refused.remove(&key);
             }
@@ -1052,11 +1083,13 @@ where
                 );
                 continue;
             }
+            cut_short = err.status == Some(429);
             stop = Some(sync_attempt_from_error(&err));
             break;
         }
 
         if !isolation.deferred.is_empty() {
+            cut_short = true;
             tracing::warn!(
                 target: "scuffed_stat_tracker",
                 deferred = isolation.deferred.len(),
@@ -1067,6 +1100,7 @@ where
         }
     }
 
+    refused.set_accepted_then_cut(uploaded > 0 && cut_short);
     if progress {
         refresh_snapshot_force(store, data_dir).await;
     }

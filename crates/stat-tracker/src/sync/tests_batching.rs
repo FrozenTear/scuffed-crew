@@ -688,3 +688,153 @@ fn replace_credentials_resets_learned_caps_when_the_server_url_changes() {
     assert_eq!(c.batch_caps().matches, SYNC_UPLOAD_MAX_MATCHES);
     assert_eq!(c.batch_caps().deletes, SYNC_UPLOAD_MAX_DELETES);
 }
+
+fn refused_with(keys: &[&str], accepted_then_cut: bool) -> RefusedRows {
+    let mut rows = RefusedRows::default();
+    for key in keys {
+        rows.insert((*key).to_string());
+    }
+    rows.set_accepted_then_cut(accepted_then_cut);
+    rows
+}
+
+#[test]
+fn replace_credentials_resets_refused_rows_when_the_server_url_changes() {
+    let c = client("https://crew.example");
+    c.remember_refused_rows(refused_with(&["s1"], true), &c.credentials());
+    assert_eq!(c.refused_rows(), refused_with(&["s1"], true));
+    assert_eq!(
+        c.clone().refused_rows(),
+        refused_with(&["s1"], true),
+        "clones share the set"
+    );
+    c.replace_credentials(SyncConfig {
+        server_url: "https://crew.example".into(),
+        token: "other-token".into(),
+    });
+    assert_eq!(
+        c.refused_rows(),
+        refused_with(&["s1"], false),
+        "a new token on the same server keeps the rows to send last, not the proof"
+    );
+    c.remember_refused_rows(refused_with(&["s1"], true), &c.credentials());
+    c.replace_credentials(SyncConfig {
+        server_url: "https://other.example".into(),
+        token: "other-token".into(),
+    });
+    assert_eq!(c.refused_rows(), RefusedRows::default());
+}
+
+#[test]
+fn a_pass_that_ran_with_other_credentials_is_not_remembered() {
+    let c = client("https://crew.example");
+    let ran_with = c.credentials();
+    c.replace_credentials(SyncConfig {
+        server_url: "https://other.example".into(),
+        token: ran_with.token.clone(),
+    });
+    c.remember_refused_rows(refused_with(&["s1"], true), &ran_with);
+    assert_eq!(
+        c.refused_rows(),
+        RefusedRows::default(),
+        "rows refused by the old server are not kept for the new one"
+    );
+
+    let ran_with = c.credentials();
+    c.replace_credentials(SyncConfig {
+        server_url: ran_with.server_url.clone(),
+        token: "new-token".into(),
+    });
+    c.remember_refused_rows(refused_with(&["s2"], true), &ran_with);
+    assert_eq!(
+        c.refused_rows(),
+        refused_with(&["s2"], false),
+        "a proof earned with the old token is dropped"
+    );
+}
+
+#[test]
+fn the_proof_is_taken_once() {
+    let mut rows = refused_with(&["s1"], true);
+    assert!(rows.accepted_then_cut());
+    assert!(rows.take_accepted_then_cut());
+    assert!(!rows.take_accepted_then_cut());
+    assert!(rows.contains("s1"), "taking the proof keeps the rows");
+}
+
+fn ok_response() -> scuffed_types::api::StatsUploadResponse {
+    scuffed_types::api::StatsUploadResponse {
+        inserted: 1,
+        skipped: 0,
+        deleted: 0,
+    }
+}
+
+/// A carried proof covers only the rows it lists, and only a refusal that
+/// names the row. The rest are held and the chunk backs off.
+#[tokio::test]
+async fn a_carried_proof_quarantines_only_the_listed_rows() {
+    let rows = [0usize, 1];
+    let isolation = isolate_rejected_in_pass(&rows, false, &[0], |_batch| async move {
+        Err::<scuffed_types::api::StatsUploadResponse, _>(payload_reject(400))
+    })
+    .await;
+    assert!(isolation.accepted.is_empty());
+    assert_eq!(
+        isolation
+            .rejected
+            .iter()
+            .map(|row| row.index)
+            .collect::<Vec<_>>(),
+        vec![0]
+    );
+    assert_eq!(isolation.held, vec![1]);
+    assert_eq!(isolation.deferred, vec![1]);
+    let stopped = isolation.stopped.expect("the held row backs off");
+    assert!(stopped.message.starts_with(SERVER_REFUSING_UPLOADS));
+}
+
+/// A refusal of the request as a whole (here a bad delete id that rides on
+/// this chunk only) says nothing about the probed row. Neither a row
+/// accepted earlier in the pass nor a carried proof sets it aside.
+#[tokio::test]
+async fn a_whole_request_refusal_is_never_proof_against_a_row() {
+    let rows: Vec<usize> = (0..6).collect();
+    let whole = || SyncUploadError {
+        message: "deleted_sessions[0]: session id must be at most 64 characters".into(),
+        status: Some(400),
+        ..SyncUploadError::plain("")
+    };
+    let isolation = isolate_rejected_in_pass(&rows, true, &[0, 1, 2], |_batch| {
+        let err = whole();
+        async move { Err::<scuffed_types::api::StatsUploadResponse, _>(err) }
+    })
+    .await;
+    assert!(isolation.accepted.is_empty());
+    assert!(isolation.rejected.is_empty(), "no row is quarantined");
+    assert!(!isolation.held.is_empty());
+    let mut queued = isolation.deferred.clone();
+    queued.sort_unstable();
+    assert_eq!(queued, rows, "every row stays queued");
+    let stopped = isolation.stopped.expect("the chunk backs off");
+    assert!(stopped.message.starts_with(SERVER_REFUSING_UPLOADS));
+    assert!(isolation.requests <= isolation_request_budget(rows.len()));
+
+    // A row accepted in the same chunk still proves the server takes rows:
+    // that is unchanged.
+    let isolation = isolate_rejected_in_pass(&rows, false, &[], |batch| {
+        let bad = batch.contains(&2);
+        let err = payload_reject(400);
+        async move { if bad { Err(err) } else { Ok(ok_response()) } }
+    })
+    .await;
+    assert_eq!(
+        isolation
+            .rejected
+            .iter()
+            .map(|row| row.index)
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert!(isolation.held.is_empty());
+}

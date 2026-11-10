@@ -1108,6 +1108,21 @@ pub(crate) async fn open_store(data_dir: &std::path::Path) -> anyhow::Result<sto
         .await
         .map_err(anyhow::Error::from_boxed)?;
     tracing::info!(target: "scuffed_stat_tracker", stored_matches = count, "local store ready");
+    // A site fix or this update may let a set-aside game upload now.
+    match store
+        .retry_rejected_uploads_once_per_version(package_version())
+        .await
+    {
+        Ok(true) => tracing::info!(
+            target: "scuffed_stat_tracker",
+            version = package_version(),
+            "put games the site refused back on the upload queue for this tracker version"
+        ),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::warn!(target: "scuffed_stat_tracker", error = %e, "could not put refused games back on the upload queue")
+        }
+    }
 
     // Initial snapshot so a GUI has current data from the moment the daemon
     // takes the store lock. From here on it is written while a GUI runs,

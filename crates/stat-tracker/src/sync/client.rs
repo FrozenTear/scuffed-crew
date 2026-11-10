@@ -94,8 +94,19 @@ impl SyncClient {
             .clone()
     }
 
-    /// Keep the set a pass ended with.
-    pub fn remember_refused_rows(&self, rows: RefusedRows) {
+    /// Keep the set a pass ended with. `ran_with` is the URL and token the
+    /// pass started with. When Settings changed the server URL during the
+    /// pass, the set is dropped ([`Self::replace_credentials`] already reset
+    /// it). When only the token changed, the rows are kept but the proof that
+    /// the server accepted a row is not: it was earned with the old token.
+    pub fn remember_refused_rows(&self, mut rows: RefusedRows, ran_with: &SyncConfig) {
+        let config = self.config.lock().unwrap_or_else(|e| e.into_inner());
+        if config.server_url != ran_with.server_url {
+            return;
+        }
+        if config.token != ran_with.token {
+            rows.set_accepted_then_cut(false);
+        }
         *self.refused_rows.lock().unwrap_or_else(|e| e.into_inner()) = rows;
     }
 
@@ -108,16 +119,23 @@ impl SyncClient {
 
     /// Swap the URL and token after Settings saved a different pair.
     /// The HTTP client (timeout, redirect policy) stays. A different server
-    /// URL drops caps learned from the previous host. A token-only change
-    /// keeps them.
+    /// URL drops caps and refused rows learned from the previous host. A
+    /// token-only change keeps them, but drops the proof that the server
+    /// accepted a row ([`RefusedRows`]), which was earned with the old token.
     pub fn replace_credentials(&self, config: SyncConfig) {
         let mut slot = self.config.lock().unwrap_or_else(|e| e.into_inner());
         let url_changed = slot.server_url != config.server_url;
+        let token_changed = slot.token != config.token;
         *slot = config;
         drop(slot);
         if url_changed {
             *self.batch_caps.lock().unwrap_or_else(|e| e.into_inner()) = BatchCaps::default();
             *self.refused_rows.lock().unwrap_or_else(|e| e.into_inner()) = RefusedRows::default();
+        } else if token_changed {
+            self.refused_rows
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_accepted_then_cut(false);
         }
     }
 
@@ -194,12 +212,12 @@ impl SyncClient {
     /// POST `/api/stats/upload`.
     ///
     /// HTTP 400 and 422 are returned as [`SyncUploadError`]. The sync pass
-    /// ([`isolate_rejected`], called from `try_sync_with`) bisects those
-    /// batches. This function sends one request. 413, 401, 403, 409, and 429
+    /// ([`isolate_rejected_in_pass`], called from `upload_chunked`) bisects
+    /// those batches. This function sends one request. 413, 401, 403, 409, and 429
     /// are not payload rejects. 429 and 503 keep `Retry-After`. 409
     /// `stats_delete_pending` stops the pass without a split.
     ///
-    /// [`isolate_rejected`]: super::isolate_rejected
+    /// [`isolate_rejected_in_pass`]: super::isolate_rejected_in_pass
     pub async fn upload_matches(
         &self,
         matches: &[PersonalMatch],

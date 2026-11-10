@@ -126,28 +126,57 @@ pub struct UploadIsolation {
 /// Keys are session ids (or the store id for a row without one). Kept for
 /// the life of the [`SyncClient`], like [`BatchCaps`].
 ///
+/// It also carries one pass of proof. When a pass had a row accepted and
+/// then stopped on a 429 or the request cap, the held rows it never reached
+/// may be the only ones left. The next pass then quarantines a held row the
+/// server refuses on its own again and names in its message, even when that
+/// pass accepts no row, so a refused game left alone after the good games
+/// went up is set aside instead of retried on every pass. The proof is for
+/// one pass only, and for the URL and token it was earned with.
+///
 /// [`SyncClient`]: super::SyncClient
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RefusedRows(std::collections::HashSet<String>);
+pub struct RefusedRows {
+    keys: std::collections::HashSet<String>,
+    accepted_then_cut: bool,
+}
 
 impl RefusedRows {
     pub fn contains(&self, key: &str) -> bool {
-        self.0.contains(key)
+        self.keys.contains(key)
     }
 
     pub fn insert(&mut self, key: String) {
-        self.0.insert(key);
+        self.keys.insert(key);
     }
 
     pub fn remove(&mut self, key: &str) {
-        self.0.remove(key);
+        self.keys.remove(key);
     }
 
     /// Forget rows that are no longer queued (uploaded, quarantined, or
     /// deleted), so the set never outgrows the queue.
     pub fn retain_queued<'a>(&mut self, queued: impl IntoIterator<Item = &'a str>) {
         let queued: std::collections::HashSet<&str> = queued.into_iter().collect();
-        self.0.retain(|key| queued.contains(key.as_str()));
+        self.keys.retain(|key| queued.contains(key.as_str()));
+    }
+
+    /// Record how a pass ended: true when it had a row accepted and then
+    /// stopped on a 429 or the request cap.
+    pub fn set_accepted_then_cut(&mut self, value: bool) {
+        self.accepted_then_cut = value;
+    }
+
+    /// Whether the last pass had a row accepted and then stopped on a 429
+    /// or the request cap.
+    pub fn accepted_then_cut(&self) -> bool {
+        self.accepted_then_cut
+    }
+
+    /// Read and clear the proof from the last pass. Each pass takes it once,
+    /// so it never reaches a pass after the next one.
+    pub fn take_accepted_then_cut(&mut self) -> bool {
+        std::mem::take(&mut self.accepted_then_cut)
     }
 }
 
@@ -183,17 +212,24 @@ where
     F: FnMut(&[T]) -> Fut,
     Fut: std::future::Future<Output = Result<StatsUploadResponse, SyncUploadError>>,
 {
-    isolate_rejected_in_pass(rows, false, upload).await
+    isolate_rejected_in_pass(rows, false, &[], upload).await
 }
 
 /// [`isolate_rejected`] for one chunk of a sync pass. `pass_accepted` is
 /// true when an earlier chunk of the same pass already had a row accepted.
-/// That proves the server takes uploads, so the end guard does not apply:
-/// rows refused on their own are quarantined even when this chunk accepted
-/// none, instead of staying at the head of the queue.
+/// `carried` lists the rows of `rows` that the previous pass held, when that
+/// pass then had a row accepted and stopped on a 429 or the request cap
+/// ([`RefusedRows`]). Either one proves the server takes uploads, so when
+/// this chunk accepts no row, a covered row refused on its own is still
+/// quarantined instead of staying queued. That proof is used only when the
+/// refusal names the row (`matches[n]:`, see [`payload_names_a_row`]). A
+/// refusal of the request as a whole, such as a bad id in `deleted_sessions`
+/// that rides only on this chunk, says nothing about the probed row, so that
+/// row is held and the pass backs off.
 pub async fn isolate_rejected_in_pass<T, F, Fut>(
     rows: &[T],
     pass_accepted: bool,
+    carried: &[usize],
     mut upload: F,
 ) -> UploadIsolation
 where
@@ -271,24 +307,30 @@ where
         }
     }
     // No accepted row means the 400/422s were not single bad payloads
-    // among good ones. A server-wide refusal (unknown recognizer id, for
-    // example) refuses every subset. Keep the batch queued and back off.
-    // A 429 that stops the walk is the same refusal: the per-token limit
-    // ran out while every row was still being refused. Count that as a
-    // failure and keep Retry-After as a floor. 401, 403, 409, and 413 stay.
-    // A row accepted earlier in the same pass already rules that out.
-    if accepted.is_empty() && !pass_accepted && !rejected.is_empty() {
-        held = rejected.iter().map(|row| row.index).collect();
-        let mut queued = held.clone();
-        queued.append(&mut deferred);
-        queued.sort_unstable();
-        deferred = queued;
-        let rate_limited = stopped.as_ref().is_some_and(|err| err.status == Some(429));
-        if stopped.is_none() || rate_limited {
-            let retry_after = stopped.as_ref().and_then(|err| err.retry_after);
-            stopped = Some(server_wide_refusal(&rejected[0].message, retry_after));
+    // among good ones. A server-wide refusal (a PC clock more than 24 hours
+    // fast, or a site bug) refuses every subset. Keep the batch queued and
+    // back off. A 429 that stops the walk is the same refusal: the per-token
+    // limit ran out while every row was still being refused. Count that as
+    // a failure and keep Retry-After as a floor. 401, 403, 409, and 413
+    // stay. A row accepted earlier in the same pass, or a carried proof for
+    // this row, rules that out, but only for a refusal that names the row.
+    if accepted.is_empty() && !rejected.is_empty() {
+        let (proven, unproven): (Vec<_>, Vec<_>) = rejected.into_iter().partition(|row| {
+            payload_names_a_row(&row.message) && (pass_accepted || carried.contains(&row.index))
+        });
+        rejected = proven;
+        if let Some(first) = unproven.first() {
+            held = unproven.iter().map(|row| row.index).collect();
+            let mut queued = held.clone();
+            queued.append(&mut deferred);
+            queued.sort_unstable();
+            deferred = queued;
+            let rate_limited = stopped.as_ref().is_some_and(|err| err.status == Some(429));
+            if stopped.is_none() || rate_limited {
+                let retry_after = stopped.as_ref().and_then(|err| err.retry_after);
+                stopped = Some(server_wide_refusal(&first.message, retry_after));
+            }
         }
-        rejected.clear();
     }
     UploadIsolation {
         accepted,

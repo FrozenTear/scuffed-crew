@@ -5,6 +5,8 @@
 //! (`synced = false, upload_reject = '', sync_rev = (sync_rev ?? 0) + 1`);
 //! the CAS here relies on that.
 
+use surrealdb_types::SurrealValue;
+
 use super::tombstones::DeletedSession;
 use super::{LocalStore, PersonalMatch, rewrite_match_log_session};
 
@@ -278,6 +280,51 @@ impl LocalStore {
             );
         }
         Ok(())
+    }
+}
+
+/// `store_meta` record holding the tracker version that last put the
+/// set-aside games back on the upload queue.
+fn upload_retry_marker() -> surrealdb_types::RecordId {
+    surrealdb_types::RecordId::new("store_meta", "upload_retry")
+}
+
+#[derive(Debug, serde::Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+struct UploadRetryMarker {
+    #[surreal(default)]
+    version: String,
+}
+
+impl LocalStore {
+    /// Put every set-aside game back on the upload queue once for each
+    /// tracker version, the first time that version opens the store. A game
+    /// the site refused may upload after a site fix or a tracker update; one
+    /// it still refuses is set aside again with the new reason. Returns true
+    /// when this version had not run it yet. The version is written only
+    /// after the games are back on the queue, so a failure tries again on
+    /// the next start.
+    pub async fn retry_rejected_uploads_once_per_version(
+        &self,
+        version: &str,
+    ) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+        let marker: Option<UploadRetryMarker> = self
+            .db
+            .query("SELECT version FROM $rid")
+            .bind(("rid", upload_retry_marker()))
+            .await?
+            .take(0)?;
+        if marker.is_some_and(|m| m.version == version) {
+            return Ok(false);
+        }
+        self.clear_rejected_uploads().await?;
+        self.db
+            .query("UPSERT $rid SET version = $v RETURN NONE")
+            .bind(("rid", upload_retry_marker()))
+            .bind(("v", version.to_string()))
+            .await?
+            .check()?;
+        Ok(true)
     }
 }
 
