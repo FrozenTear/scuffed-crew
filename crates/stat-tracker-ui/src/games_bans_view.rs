@@ -194,9 +194,11 @@ fn block_row(r: &BlockRow) -> Element<'static, Message> {
 /// always starts with a group, never with a divider. Every line is at least
 /// a chip high, with its parts centred in it.
 fn row_body(parts: &[Part]) -> Element<'static, Message> {
-    let line = || -> Row<'static, Message> {
-        row![space().width(0).height(CHIP_H)].align_y(Alignment::Center)
-    };
+    // The spacer keeps its default Shrink width: iced skips a child that is
+    // `.width(0)`, which would leave a line of quiet text only as tall as
+    // its words and above its label.
+    let line =
+        || -> Row<'static, Message> { row![space().height(CHIP_H)].align_y(Alignment::Center) };
     let mut body: Row<'static, Message> = row![].align_y(Alignment::Center);
     let mut unit = line();
     let mut prev: Option<&Part> = None;
@@ -559,5 +561,122 @@ mod tests {
                 AdvancedSection::WebsiteConnection
             ))
         ));
+    }
+
+    fn headless() -> iced::Renderer {
+        use iced::advanced::renderer::Headless;
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            crate::theme::FONT_MEDIUM,
+            iced::Pixels(crate::theme::SIZE_BODY),
+            Some("tiny-skia"),
+        ))
+        .expect("the tiny-skia renderer needs no display");
+        for bytes in [
+            crate::theme::FONT_BYTES_MEDIUM,
+            crate::theme::FONT_BYTES_SEMIBOLD,
+            crate::theme::FONT_BYTES_BOLD,
+            crate::theme::FONT_BYTES_EXTRABOLD,
+        ] {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .expect("font system lock")
+                .load_font(std::borrow::Cow::Borrowed(bytes));
+        }
+        renderer
+    }
+
+    /// Lay one block row out at `width` px wide.
+    fn lay_out_row(r: &BlockRow, width: f32) -> iced::advanced::layout::Node {
+        use iced::advanced::layout::Limits;
+        use iced::advanced::widget::Tree;
+        let renderer = headless();
+        let mut element = block_row(r);
+        let mut tree = Tree::new(&element);
+        element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &Limits::new(iced::Size::ZERO, iced::Size::new(width, 400.0)),
+        )
+    }
+
+    /// Every leaf under `node` as (top, height), with `top` from the row's
+    /// top edge.
+    fn leaves(node: &iced::advanced::layout::Node, y: f32, out: &mut Vec<(f32, f32)>) {
+        let b = node.bounds();
+        let top = y + b.y;
+        if node.children().is_empty() {
+            out.push((top, b.height));
+        }
+        for c in node.children() {
+            leaves(c, top, out);
+        }
+    }
+
+    /// The middle of the one text leaf (shorter than a chip) under `node`.
+    fn text_middle(node: &iced::advanced::layout::Node, y: f32) -> f32 {
+        let mut out = Vec::new();
+        leaves(node, y, &mut out);
+        let words: Vec<_> = out.into_iter().filter(|(_, h)| *h < CHIP_H - 1.0).collect();
+        assert_eq!(words.len(), 1, "one text leaf: {words:?}");
+        words[0].0 + words[0].1 / 2.0
+    }
+
+    /// A row that is only a quiet line keeps its words level with its
+    /// label, like a row of chips.
+    #[test]
+    fn a_quiet_only_row_is_level_with_its_label() {
+        let r = BlockRow {
+            label: "Bans",
+            parts: vec![Part::Quiet {
+                text: "No ban screen seen",
+                tip: None,
+            }],
+        };
+        let node = lay_out_row(&r, 1200.0);
+        let [label, body] = node.children() else {
+            panic!("a label and a body");
+        };
+        assert!(
+            (body.bounds().height - CHIP_H).abs() < 0.5,
+            "the body is a chip high: {:?}",
+            body.bounds()
+        );
+        let at = node.bounds().y;
+        let (label_mid, quiet_mid) = (text_middle(label, at), text_middle(body, at));
+        assert!(
+            (label_mid - quiet_mid).abs() < 1.0,
+            "label middle {label_mid}, quiet middle {quiet_mid}"
+        );
+    }
+
+    /// The mixed Bans row wraps onto two lines in the panel at 1024 (934px
+    /// wide), and nothing in it passes the panel edge.
+    #[test]
+    fn the_mixed_bans_row_wraps_inside_the_panel_at_1024() {
+        let games = games_from_snapshot(&crate::fixtures_games::snapshot());
+        let g = games.iter().find(|g| g.session_id == MIXED).expect("mixed");
+        let BansPicks::Block(b) = crate::games_bans::bans_picks(g) else {
+            panic!("mixed: no block");
+        };
+        let r = b.rows.iter().find(|r| r.label == "Bans").expect("Bans row");
+        let width = 934.0;
+        let node = lay_out_row(r, width);
+        let [_, body] = node.children() else {
+            panic!("a label and a body");
+        };
+        let left = body.bounds().x;
+        let mut tops: Vec<i32> = Vec::new();
+        for unit in body.children() {
+            let u = unit.bounds();
+            assert!(
+                left + u.x + u.width <= width + 0.5,
+                "a group passes the edge: {u:?} in a body at {left}"
+            );
+            let top = u.y.round() as i32;
+            if !tops.contains(&top) {
+                tops.push(top);
+            }
+        }
+        assert_eq!(tops.len(), 2, "two lines: {tops:?}");
     }
 }

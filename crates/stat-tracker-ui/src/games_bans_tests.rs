@@ -1172,7 +1172,7 @@ fn the_mixed_fixture_has_every_ban_group() {
         shape(r),
         [
             "Your team",
-            "[Wrecking Ball, Junker Queen]",
+            "[Lifeweaver, Junker Queen]",
             "|",
             "Their team",
             "[Soldier: 76]",
@@ -1188,7 +1188,7 @@ fn the_mixed_fixture_has_every_ban_group() {
     assert_eq!(
         tips,
         [
-            "Banned by your team: Wrecking Ball",
+            "Banned by your team: Lifeweaver",
             "Banned by your team: Junker Queen",
             "Banned by their team: Soldier: 76",
             "Banned: Widowmaker, team not read",

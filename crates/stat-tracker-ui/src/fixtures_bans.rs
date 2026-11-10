@@ -289,7 +289,7 @@ pub fn mixed(m: &mut PersonalMatch) {
     m.bans_picks = Some(stored(
         Results::Lobby(
             vec![
-                ban(Some("wrecking-ball"), Some("own")),
+                ban(Some("lifeweaver"), Some("own")),
                 ban(Some("junker-queen"), Some("own")),
                 ban(Some("soldier-76"), Some("enemy")),
                 ban(Some("widowmaker"), None),
