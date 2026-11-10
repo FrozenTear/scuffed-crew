@@ -861,3 +861,43 @@ fn only_an_empty_tab_game_closes_after_twenty_minutes() {
     });
     assert_eq!(quiet_close_reason(&idle(hinted), now, quiet), None);
 }
+
+/// Item 22: an edit queued for an imported game (no session id) used to
+/// rewrite every imported game. The store now refuses it, and the daemon
+/// drops the command file instead of retrying it on every tick.
+#[tokio::test]
+async fn an_edit_queued_with_an_empty_session_id_is_dropped_and_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = storage::LocalStore::open(dir.path()).await.unwrap();
+    for secs in [0, 60] {
+        store.insert_match(tracked_row("", secs)).await.unwrap();
+    }
+    let claims = storage::SyncClaim::capture(&store.get_unsynced().await.unwrap());
+    store.mark_synced(&claims).await.unwrap();
+    storage::queue_command(
+        dir.path(),
+        &storage::StoreCommand::EditMatch {
+            session_id: String::new(),
+            edit: storage::MatchEdit {
+                elims: Some(99),
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    let backoff = std::sync::Arc::new(std::sync::Mutex::new(sync::SyncBackoff::default()));
+    let mut sync_task = None;
+    let mut st = session(None, test_now());
+    apply_queued_commands(&mut st, &store, dir.path(), &mut sync_task, &backoff, None).await;
+    let rows = store.get_all_matches().await.unwrap();
+    assert_eq!(rows.len(), 2);
+    let edited = rows.iter().filter(|m| m.is_edited() || !m.synced).count();
+    assert_eq!(
+        edited, 0,
+        "the empty-id edit changed {edited} imported games"
+    );
+    assert!(
+        storage::read_commands(dir.path()).is_empty(),
+        "a refused command is dropped, not retried"
+    );
+}
