@@ -7,7 +7,7 @@ use surrealdb_types::SurrealValue;
 
 use crate::types::{HeroIcon, NewHeroIcon, NewTrainingCrop, TrainingCrop, TrainingCropCountRow};
 use crate::{with_timeout, Database, DbResult};
-use scuffed_types::{CropKind, CropSpot, TrainingCropMeta};
+use scuffed_types::{hero_key, hero_key_to_name, CropKind, CropSpot, TrainingCropMeta};
 
 /// One `hero_icon` row. Every column added for training crops is optional,
 /// so rows from before them still read: `kind` absent means `hero_icon`.
@@ -104,6 +104,16 @@ fn to_u32(value: Option<i64>) -> Option<u32> {
     value.and_then(|v| u32::try_from(v).ok())
 }
 
+/// The hero key for a stored `hero` value. Rows written before keys were
+/// stored hold the display name; both map to the key. An unknown value is
+/// kept as written.
+fn stored_hero_key(raw: String) -> String {
+    match hero_key(&raw) {
+        Some(key) => key.to_string(),
+        None => raw,
+    }
+}
+
 fn record_key(id: Option<RecordId>) -> String {
     id.map(|r| crate::record_id_key_to_string(r.key))
         .unwrap_or_else(|| "unknown".to_string())
@@ -143,7 +153,7 @@ fn db_to_crop(db: DbHeroIcon) -> Option<TrainingCrop> {
         id: record_key(db.id),
         member_id: db.member_id,
         kind,
-        hero: (!db.hero.is_empty()).then_some(db.hero),
+        hero: (!db.hero.is_empty()).then(|| stored_hero_key(db.hero)),
         file_name: db.file_name,
         size_bytes: u64::try_from(db.size_bytes).unwrap_or(0),
         width: u32::try_from(db.width).unwrap_or(0),
@@ -158,15 +168,23 @@ fn crops_from(rows: Vec<DbHeroIcon>) -> Vec<TrainingCrop> {
     rows.into_iter().filter_map(db_to_crop).collect()
 }
 
-/// The hero icon view of a crop. `None` for any other kind.
+/// The hero icon view of a crop. `None` for any other kind. The hero icon
+/// API keeps answering with the display name, whatever the row stores.
 fn crop_to_icon(crop: TrainingCrop) -> Option<HeroIcon> {
     if crop.kind != CropKind::HeroIcon {
         return None;
     }
+    let hero = crop
+        .hero
+        .map(|raw| match hero_key_to_name(&raw) {
+            Some(name) => name.to_string(),
+            None => raw,
+        })
+        .unwrap_or_default();
     Some(HeroIcon {
         id: crop.id,
         member_id: crop.member_id,
-        hero: crop.hero.unwrap_or_default(),
+        hero,
         file_name: crop.file_name,
         size_bytes: crop.size_bytes,
         width: crop.width,
@@ -194,8 +212,9 @@ fn crop_to_db(crop: &NewTrainingCrop) -> Result<DbHeroIcon, crate::DbError> {
     Ok(DbHeroIcon {
         id: None,
         member_id: crop.member_id.clone(),
-        // The column predates kinds and is a plain string: empty means no hero.
-        hero: crop.hero.clone().unwrap_or_default(),
+        // The column predates kinds and is a plain string: empty means no
+        // hero. Stored as the hero key, whatever spelling the caller passed.
+        hero: crop.hero.clone().map(stored_hero_key).unwrap_or_default(),
         file_name: crop.file_name.clone(),
         size_bytes,
         width: i64::from(crop.width),
@@ -341,11 +360,23 @@ impl Database {
         .await
     }
 
-    /// Remove one row of any kind and return it as a hero icon, or `None`
-    /// when it did not exist or was another kind. Callers pass ids from the
-    /// hero icon lookups.
+    /// Remove one `hero_icon` row and return it, or `None` when no hero icon
+    /// has this id. A crop of another kind is never removed here; use
+    /// [`Self::delete_training_crop`] for those.
     pub async fn delete_hero_icon(&self, id: &str) -> DbResult<Option<HeroIcon>> {
-        Ok(self.delete_training_crop(id).await?.and_then(crop_to_icon))
+        let rid = RecordId::new("hero_icon", id);
+        with_timeout(async {
+            let mut result = self
+                .client
+                .query(format!(
+                    "DELETE hero_icon WHERE id = $rid AND {HERO_KIND} RETURN BEFORE"
+                ))
+                .bind(("rid", rid))
+                .await?;
+            let rows: Vec<DbHeroIcon> = result.take(0)?;
+            Ok(icons_from(rows).into_iter().next())
+        })
+        .await
     }
 
     /// The ids among `ids` that have a `hero_icon` row of any kind. Used by
@@ -732,9 +763,12 @@ mod tests {
         assert_eq!(stored, expected);
         let read = db.get_training_crop(id).await.unwrap().expect("row");
         assert_eq!(read, stored);
-        // Not a hero icon: the hero icon view does not see it.
+        // Not a hero icon: the hero icon view does not see it, and the hero
+        // icon delete leaves it alone.
         assert!(db.get_hero_icon(id).await.unwrap().is_none());
         assert!(db.delete_hero_icon(id).await.unwrap().is_none());
+        assert_eq!(db.get_training_crop(id).await.unwrap(), Some(stored));
+        assert!(db.delete_training_crop(id).await.unwrap().is_some());
         assert!(db.get_training_crop(id).await.unwrap().is_none());
     }
 
@@ -779,7 +813,9 @@ mod tests {
         let ids: Vec<&str> = all.iter().map(|c| c.id.as_str()).collect();
         assert_eq!(ids, vec![map, digits, icon]);
         assert_eq!(all[2].kind, CropKind::HeroIcon);
-        assert_eq!(all[2].hero.as_deref(), Some("Ana"));
+        // The crop view gives the hero key, the hero icon view the name.
+        assert_eq!(all[2].hero.as_deref(), Some("ana"));
+        assert_eq!(icons[0].hero, "Ana");
         let only_map = db
             .list_training_crops_for_member("m1", Some(CropKind::MapName), None)
             .await
@@ -942,6 +978,9 @@ mod tests {
         let icons = db.list_hero_icons_for_member("m1").await.unwrap();
         assert_eq!(icons.len(), 1);
         assert_eq!(icons[0].hero, "Ana");
+        // The legacy display name reads as the hero key in the crop view.
+        let crop = db.get_training_crop(legacy).await.unwrap().expect("row");
+        assert_eq!(crop.hero.as_deref(), Some("ana"));
         assert_eq!(
             db.count_training_crops_for_member("m1", CropKind::HeroIcon)
                 .await
@@ -951,5 +990,69 @@ mod tests {
         // A second boot is a no-op.
         run_migrations(&db.client).await.unwrap();
         assert_eq!(db.list_hero_icons_for_member("m1").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn delete_hero_icon_only_removes_hero_icons() {
+        let db = test_db().await;
+        let icon = "7777777777777777777777777777777a";
+        let digits = "7777777777777777777777777777777b";
+        let map = "7777777777777777777777777777777c";
+        db.insert_hero_icon(&new_icon(icon, "m1", 3)).await.unwrap();
+        db.insert_training_crop(&new_crop(digits, "m1", CropKind::StatDigits, 2))
+            .await
+            .unwrap();
+        db.insert_training_crop(&new_crop(map, "m1", CropKind::MapName, 1))
+            .await
+            .unwrap();
+
+        for other in [digits, map] {
+            assert!(db.delete_hero_icon(other).await.unwrap().is_none());
+            assert!(db.get_training_crop(other).await.unwrap().is_some());
+        }
+        assert!(db.delete_hero_icon("nope").await.unwrap().is_none());
+        let removed = db.delete_hero_icon(icon).await.unwrap().expect("icon");
+        assert_eq!(removed.id, icon);
+        assert_eq!(removed.hero, "Ana");
+        assert!(db.get_training_crop(icon).await.unwrap().is_none());
+        assert_eq!(
+            db.list_training_crops_for_member("m1", None, None)
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn hero_is_stored_as_the_hero_key() {
+        let db = test_db().await;
+        let icon = "8888888888888888888888888888888a";
+        let crop = "8888888888888888888888888888888b";
+        let mut legacy_spelling = new_icon(icon, "m1", 2);
+        legacy_spelling.hero = "Soldier: 76".into();
+        db.insert_hero_icon(&legacy_spelling).await.unwrap();
+        let mut digits = new_crop(crop, "m1", CropKind::StatDigits, 1);
+        digits.hero = Some("Lúcio".into());
+        db.insert_training_crop(&digits).await.unwrap();
+
+        #[derive(Deserialize, SurrealValue)]
+        struct HeroRow {
+            hero: String,
+        }
+        for (id, key) in [(icon, "soldier-76"), (crop, "lucio")] {
+            let mut result = db
+                .client
+                .query(format!("SELECT hero FROM hero_icon:{id}"))
+                .await
+                .unwrap();
+            let rows: Vec<HeroRow> = result.take(0).unwrap();
+            assert_eq!(rows[0].hero, key, "{id}");
+        }
+        // The hero icon view still answers with the display name.
+        let icons = db.list_hero_icons_for_member("m1").await.unwrap();
+        assert_eq!(icons[0].hero, "Soldier: 76");
+        let stored = db.get_training_crop(crop).await.unwrap().expect("row");
+        assert_eq!(stored.hero.as_deref(), Some("lucio"));
     }
 }

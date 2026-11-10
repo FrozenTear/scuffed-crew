@@ -545,7 +545,8 @@ impl FromRequestParts<AppState> for ReportCreator {
 }
 
 /// Auth for the training crop routes the tracker calls itself: upload, own
-/// consent (read and set), own delete-all and own single delete.
+/// consent read, own delete-all and own single delete. Setting consent is
+/// session only ([`OrgMember`]).
 ///
 /// Same credential rules as [`ReportCreator`]: a session with the
 /// [`OrgMember`] checks, or on a session 401 with `Authorization: Bearer`, the

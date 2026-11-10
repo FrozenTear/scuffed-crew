@@ -9,10 +9,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::training_crops::{
-    CropKind, TRAINING_CROP_GAME_TOKEN_MAX_LEN, TRAINING_CROP_GAME_TOKEN_MIN_LEN,
-    TRAINING_CROP_LABEL_MAX_LEN, TRAINING_CROP_SCORE_ABS_MAX, TRAINING_CROP_SCREEN_MAX_EDGE,
-    TRAINING_CROP_SCREEN_MIN_EDGE, TRAINING_CROP_SLOT_INDEX_MAX, TRAINING_CROP_UI_SCALE_MAX,
-    TRAINING_CROP_VERSION_MAX_LEN,
+    CropKind, TRAINING_CROP_GAME_TOKEN_LEN, TRAINING_CROP_LABEL_MAX_LEN,
+    TRAINING_CROP_SCORE_ABS_MAX, TRAINING_CROP_SCREEN_MAX_EDGE, TRAINING_CROP_SCREEN_MIN_EDGE,
+    TRAINING_CROP_SLOT_INDEX_MAX, TRAINING_CROP_UI_SCALE_MAX, TRAINING_CROP_VERSION_MAX_LEN,
 };
 
 /// `?kind=` is missing or not one of the four kinds. 400.
@@ -31,7 +30,9 @@ pub const TRAINING_CROP_ERR_NO_CROPS: &str = "no_crops";
 pub const TRAINING_CROP_ERR_TOO_MANY_IN_REQUEST: &str = "too_many_crops_in_request";
 /// The upload would take the caller over the cap of this kind. 409.
 pub const TRAINING_CROP_ERR_LIMIT_REACHED: &str = "crop_limit_reached";
-/// The consent body is not JSON or names an unknown kind. 400.
+/// The consent body is not JSON, names an unknown kind (including
+/// `full_screen`, whose consent cannot be stored), or a value is not a
+/// bool. 400.
 pub const TRAINING_CROP_ERR_INVALID_CONSENT: &str = "invalid_consent";
 /// Unknown id, malformed id, or a crop the caller may not see. 404.
 pub const TRAINING_CROP_ERR_NOT_FOUND: &str = "crop_not_found";
@@ -48,8 +49,9 @@ pub struct CropSpot {
 
 /// Per-crop details, as stored and as sent back. Every field is optional.
 ///
-/// `game_token` is an opaque random string the tracker makes per game so
-/// crops of one game can be grouped. The server never links it to a match.
+/// `game_token` is 32 lowercase hex characters the tracker draws at random per
+/// game so crops of one game can be grouped. The server never links it to a
+/// match.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TrainingCropMeta {
     /// Which screen the crop came from, for example `scoreboard`.
@@ -102,7 +104,8 @@ pub struct TrainingCropMeta {
 #[serde(deny_unknown_fields)]
 pub struct TrainingCropUploadMeta {
     /// Hero key or display name. Required for `hero_icon`, optional for the
-    /// other kinds. Checked by the server against the hero list.
+    /// other kinds. Checked by the server against the hero list and stored
+    /// as the hero key (`soldier-76`, see `scuffed_types::hero_key`).
     #[serde(default)]
     pub hero: Option<String>,
     #[serde(default)]
@@ -157,11 +160,12 @@ fn version_ok(value: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b'+'))
 }
 
+/// Exactly 32 lowercase hex characters.
 fn game_token_ok(value: &str) -> bool {
-    (TRAINING_CROP_GAME_TOKEN_MIN_LEN..=TRAINING_CROP_GAME_TOKEN_MAX_LEN).contains(&value.len())
+    value.len() == TRAINING_CROP_GAME_TOKEN_LEN
         && value
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn score_ok(value: f64) -> bool {
@@ -272,22 +276,23 @@ impl TrainingCropUploadMeta {
 /// Per-kind consent. Every kind is off until the member turns it on.
 ///
 /// `hero_icon` is the same flag as `icon_contribution_opt_in` on
-/// `/api/hero-icons/opt-in`.
+/// `/api/hero-icons/opt-in`. There is no `full_screen` field: whole screens
+/// are not accepted, so their consent cannot be stored or reported.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrainingCropConsent {
     pub hero_icon: bool,
     pub stat_digits: bool,
     pub map_name: bool,
-    pub full_screen: bool,
 }
 
 impl TrainingCropConsent {
+    /// Consent for `kind`. Always false for `full_screen`.
     pub fn get(&self, kind: CropKind) -> bool {
         match kind {
             CropKind::HeroIcon => self.hero_icon,
             CropKind::StatDigits => self.stat_digits,
             CropKind::MapName => self.map_name,
-            CropKind::FullScreen => self.full_screen,
+            CropKind::FullScreen => false,
         }
     }
 
@@ -296,8 +301,9 @@ impl TrainingCropConsent {
     }
 }
 
-/// `PUT /api/training-crops/consent`. Only the kinds given change. Unknown
-/// fields are refused (400 `invalid_consent`).
+/// `PUT /api/training-crops/consent` (session only). Only the kinds given
+/// change. Unknown fields, `full_screen` among them, are refused (400
+/// `invalid_consent`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TrainingCropConsentUpdate {
@@ -307,8 +313,6 @@ pub struct TrainingCropConsentUpdate {
     pub stat_digits: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub map_name: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub full_screen: Option<bool>,
 }
 
 /// One stored crop.
@@ -317,7 +321,8 @@ pub struct TrainingCropEntry {
     /// 32 lowercase hex characters, made by the server.
     pub id: String,
     pub kind: CropKind,
-    /// Hero display name. Always set for `hero_icon`.
+    /// Hero key (`soldier-76`, see `scuffed_types::hero_key`). Always set
+    /// for `hero_icon`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hero: Option<String>,
     /// Stored PNG size after the server re-encoded it.
@@ -384,12 +389,23 @@ pub struct MyTrainingCrops {
     pub next_cursor: Option<String>,
 }
 
-/// One crop in the admin list.
+/// One crop in the admin list (`GET /api/training-crops`).
+///
+/// `uploaded_at` is cut down to the start of its UTC hour here, so a crop
+/// cannot be matched to a game by its upload time.
+///
+/// Every stored kind of every active member is listed, so an admin can find
+/// any crop's id to delete it. A crop whose kind the owner does not consent
+/// to right now is `hidden`: only its id, kind, size, dimensions and hour are
+/// sent (no `hero`, `tracker_version` or `meta` fields), and its image answers
+/// 404.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StaffTrainingCrop {
     pub member_id: String,
     /// Empty when the member record has no name.
     pub display_name: String,
+    /// True when the owner's consent for this kind is off.
+    pub hidden: bool,
     #[serde(flatten)]
     pub crop: TrainingCropEntry,
 }
@@ -422,7 +438,7 @@ mod tests {
             screen: Some("scoreboard".into()),
             slot_type: Some("ally".into()),
             slot_index: Some(4),
-            game_token: Some("g-0123456789abcdef".into()),
+            game_token: Some("0123456789abcdef0123456789abcdef".into()),
             score: Some(0.93),
             runner_up: Some(0.41),
             margin: Some(0.52),
@@ -471,17 +487,30 @@ mod tests {
     }
 
     #[test]
-    fn slot_index_and_game_token_bounds() {
+    fn slot_index_bound() {
         assert_eq!(bad(|m| m.slot_index = Some(64)), "slot_index");
-        assert_eq!(bad(|m| m.game_token = Some("short".into())), "game_token");
-        assert_eq!(bad(|m| m.game_token = Some("x".repeat(65))), "game_token");
-        assert_eq!(
-            bad(|m| m.game_token = Some("abcd/efgh".into())),
-            "game_token"
-        );
         let mut ok = full();
         ok.slot_index = Some(63);
-        ok.game_token = Some("x".repeat(64));
+        ok.validate().unwrap();
+    }
+
+    #[test]
+    fn game_token_is_exactly_32_lowercase_hex() {
+        for token in [
+            "short",
+            "0123456789abcdef0123456789abcde",   // 31
+            "0123456789abcdef0123456789abcdef0", // 33
+            "0123456789ABCDEF0123456789ABCDEF",  // upper case
+            "0123456789abcdef0123456789abcdeg",  // not hex
+            // A UUID with dashes and an RFC 3339 timestamp.
+            "3f2a9c0e-6b1d-4e8f-9a7c-5b3d1e0f",
+            "2026-11-10T18:04:05.123456Z00000",
+            "17312592451234567890123456789012x",
+        ] {
+            assert_eq!(bad(|m| m.game_token = Some(token.into())), "game_token");
+        }
+        let mut ok = full();
+        ok.game_token = Some("ffffffffffffffffffffffffffffffff".into());
         ok.validate().unwrap();
     }
 
@@ -601,9 +630,29 @@ mod tests {
     fn consent_update_refuses_unknown_kinds() {
         let parsed = serde_json::from_str::<TrainingCropConsentUpdate>(r#"{"replays":true}"#);
         assert!(parsed.is_err());
+        // full_screen consent cannot be stored.
+        let parsed = serde_json::from_str::<TrainingCropConsentUpdate>(r#"{"full_screen":true}"#);
+        assert!(parsed.is_err());
+        let parsed = serde_json::from_str::<TrainingCropConsentUpdate>(r#"{"full_screen":false}"#);
+        assert!(parsed.is_err());
         let parsed: TrainingCropConsentUpdate =
             serde_json::from_str(r#"{"map_name":true}"#).unwrap();
         assert_eq!(parsed.map_name, Some(true));
         assert_eq!(parsed.hero_icon, None);
+    }
+
+    #[test]
+    fn consent_has_no_full_screen_field() {
+        let all = TrainingCropConsent {
+            hero_icon: true,
+            stat_digits: true,
+            map_name: true,
+        };
+        assert!(!all.get(CropKind::FullScreen));
+        let json = serde_json::to_value(all).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "hero_icon": true, "stat_digits": true, "map_name": true })
+        );
     }
 }

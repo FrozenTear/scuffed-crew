@@ -1,8 +1,9 @@
 //! Opt-in training crops from the tracker (`/api/training-crops`, alpha.3
-//! item 14): sync token auth on exactly upload, own consent and own deletes,
-//! per-kind consent, `full_screen` refusal, metadata, caps, the per-kind
-//! limiter, officer counts, admin reads, and the hero icon routes still
-//! seeing only hero icons.
+//! item 14): sync token auth on exactly upload, own consent read and own
+//! deletes (setting consent is session only), per-kind consent, `full_screen`
+//! refusal (upload and consent), metadata, per-kind PNG bounds, caps, the
+//! per-kind and per-IP limiters, officer counts, admin reads, and the hero
+//! icon routes still seeing only hero icons.
 //!
 //! Members: an owner who contributes, another member, an officer and an
 //! admin, each with a session and a tracker sync token. Crops are written to
@@ -12,6 +13,7 @@ use std::io::Cursor;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use axum::body::Body;
 use axum::extract::ConnectInfo;
@@ -31,8 +33,8 @@ use scuffed_site_server::create_router;
 use scuffed_site_server::hero_icons::HeroIconStore;
 use scuffed_site_server::state::{AppState, OAuthConfig};
 use scuffed_types::{
-    CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, HERO_ICON_RATE_BURST, MAP_NAME_MAX_PER_MEMBER,
-    TrainingCropMeta,
+    CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, HERO_ICON_MAX_REQUEST_BYTES, HERO_ICON_RATE_BURST,
+    MAP_NAME_MAX_BYTES, MAP_NAME_MAX_PER_MEMBER, STATS_UPLOAD_IP_BURST, TrainingCropMeta,
 };
 
 const OWNER: &str = "cropowner";
@@ -203,6 +205,22 @@ fn png(width: u32, height: u32) -> Vec<u8> {
     out.into_inner()
 }
 
+/// A PNG of random pixels, so it does not compress: about `width * height * 4`
+/// bytes.
+fn noise_png(width: u32, height: u32, seed: u32) -> Vec<u8> {
+    let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(1);
+    let canvas = RgbaImage::from_fn(width, height, |_, _| {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        let [a, b, c, d] = state.to_le_bytes();
+        Rgba([a, b, c, d | 1])
+    });
+    let mut out = Cursor::new(Vec::new());
+    canvas.write_to(&mut out, ImageFormat::Png).unwrap();
+    out.into_inner()
+}
+
 /// One multipart part: name and bytes.
 type Part = (&'static str, Vec<u8>);
 
@@ -247,15 +265,29 @@ fn multipart_body(parts: &[Part]) -> Vec<u8> {
     body
 }
 
+/// A fresh client address per request, so the per-IP training crop limit
+/// only trips in the test that is about it.
+fn next_ip() -> IpAddr {
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    // 198.18.0.0/15, the benchmarking range.
+    let n = NEXT.fetch_add(1, Ordering::Relaxed) % (1 << 17);
+    IpAddr::V4(Ipv4Addr::from(0xC612_0000u32 + n))
+}
+
 fn base_request(method: Method, uri: &str, token: Option<&str>) -> axum::http::request::Builder {
+    base_request_from(next_ip(), method, uri, token)
+}
+
+fn base_request_from(
+    ip: IpAddr,
+    method: Method,
+    uri: &str,
+    token: Option<&str>,
+) -> axum::http::request::Builder {
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
-        .extension(ConnectInfo(SocketAddr::new(
-            IpAddr::V4(Ipv4Addr::new(203, 0, 113, 60)),
-            9,
-        )))
-        .header("x-forwarded-for", "203.0.113.60")
+        .extension(ConnectInfo(SocketAddr::new(ip, 9)))
         .header(header::USER_AGENT, TRACKER_UA);
     if let Some(token) = token {
         builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
@@ -352,7 +384,7 @@ fn full_meta() -> Value {
         "screen": "scoreboard",
         "slot_type": "ally",
         "slot_index": 3,
-        "game_token": "g-4f2a9c1e7b",
+        "game_token": "4f2a9c1e7b0d3e5f6a7b8c9d0e1f2a3b",
         "score": 0.93,
         "runner_up": 0.41,
         "margin": 0.52,
@@ -393,10 +425,10 @@ async fn seed_rows(db: &Database, member: &str, kind: CropKind, count: u32, pref
 #[tokio::test]
 async fn sync_token_upload_with_consent_stores_every_field() {
     let w = world().await;
-    let consent = set_consent(&w.app, OWNER_TOKEN, json!({ "stat_digits": true })).await;
+    let consent = set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
     assert_eq!(
         consent,
-        json!({ "hero_icon": false, "stat_digits": true, "map_name": false, "full_screen": false })
+        json!({ "hero_icon": false, "stat_digits": true, "map_name": false })
     );
     let (status, read) = get(&w.app, "/api/training-crops/consent", OWNER_TOKEN).await;
     assert_eq!(status, StatusCode::OK);
@@ -429,7 +461,10 @@ async fn sync_token_upload_with_consent_stores_every_field() {
     assert_eq!(stored.len(), 2);
     let row = stored.iter().find(|c| c.id == ids[0]).expect("row");
     assert_eq!(row.kind, CropKind::StatDigits);
-    assert_eq!(row.meta.game_token.as_deref(), Some("g-4f2a9c1e7b"));
+    assert_eq!(
+        row.meta.game_token.as_deref(),
+        Some("4f2a9c1e7b0d3e5f6a7b8c9d0e1f2a3b")
+    );
     assert_eq!(row.meta.found_spot.map(|s| s.w), Some(40));
     assert_eq!(row.meta.screen_width, Some(2560));
     let mut expected: Vec<String> = ids.iter().map(|id| format!("{id}.png")).collect();
@@ -466,7 +501,7 @@ async fn sync_token_upload_with_consent_stores_every_field() {
 #[tokio::test]
 async fn no_tracker_user_agent_stores_no_version() {
     let w = world().await;
-    set_consent(&w.app, OWNER_TOKEN, json!({ "map_name": true })).await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "map_name": true })).await;
     let request = Request::builder()
         .method(Method::POST)
         .uri("/api/training-crops?kind=map_name")
@@ -543,7 +578,7 @@ async fn sync_token_is_refused_on_session_only_routes() {
 async fn upload_without_consent_is_403_and_stores_nothing() {
     let w = world().await;
     // Consent to stat digits only, then forge map name and hero icon uploads.
-    set_consent(&w.app, OWNER_TOKEN, json!({ "stat_digits": true })).await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
     let got = upload(&w.app, OWNER_TOKEN, "map_name", &pairs(2, json!({}))).await;
     assert_error(&got, StatusCode::FORBIDDEN, "crop_consent_required");
     let hero = pairs(1, json!({ "hero": "ana" }));
@@ -561,8 +596,31 @@ async fn upload_without_consent_is_403_and_stores_nothing() {
 #[tokio::test]
 async fn full_screen_is_refused_and_stored_nowhere() {
     let w = world().await;
-    let consent = set_consent(&w.app, OWNER_TOKEN, json!({ "full_screen": true })).await;
-    assert_eq!(consent["full_screen"], json!(true));
+    // Its consent cannot be stored: the field is unknown, so the body is
+    // refused like any other unknown kind and nothing changes.
+    for body in [
+        json!({ "full_screen": true }),
+        json!({ "full_screen": false }),
+        json!({ "map_name": true, "full_screen": true }),
+    ] {
+        let got = call(
+            &w.app,
+            Method::PUT,
+            "/api/training-crops/consent",
+            Some(OWNER_SESSION),
+            Some(body),
+        )
+        .await;
+        assert_error(&got, StatusCode::BAD_REQUEST, "invalid_consent");
+    }
+    let (_, consent) = get(&w.app, "/api/training-crops/consent", OWNER_SESSION).await;
+    assert_eq!(
+        consent,
+        json!({ "hero_icon": false, "stat_digits": false, "map_name": false })
+    );
+    assert!(consent.get("full_screen").is_none());
+    let (_, mine) = get(&w.app, "/api/training-crops/mine", OWNER_SESSION).await;
+    assert!(mine["consent"].get("full_screen").is_none());
     for token in [OWNER_TOKEN, OWNER_SESSION, OTHER_SESSION] {
         let got = upload(&w.app, token, "full_screen", &pairs(1, json!({}))).await;
         assert_error(
@@ -582,13 +640,13 @@ async fn own_deletes_via_sync_token_remove_rows_and_files() {
     let w = world().await;
     set_consent(
         &w.app,
-        OWNER_TOKEN,
+        OWNER_SESSION,
         json!({ "stat_digits": true, "map_name": true }),
     )
     .await;
     let digits = crop_ids(&upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(3, json!({}))).await);
     let maps = crop_ids(&upload(&w.app, OWNER_TOKEN, "map_name", &pairs(2, json!({}))).await);
-    set_consent(&w.app, OTHER_TOKEN, json!({ "map_name": true })).await;
+    set_consent(&w.app, OTHER_SESSION, json!({ "map_name": true })).await;
     let theirs = crop_ids(&upload(&w.app, OTHER_TOKEN, "map_name", &pairs(1, json!({}))).await);
     assert_eq!(files_on_disk(w.dir()).len(), 6);
 
@@ -734,9 +792,9 @@ async fn body_shape_and_meta_errors() {
     let w = world().await;
     // Cases rotate over four members so the per-kind limiter is not hit.
     let tokens = [OWNER_TOKEN, OTHER_TOKEN, OFFICER_TOKEN, ADMIN_TOKEN];
-    for token in tokens {
+    for session in [OWNER_SESSION, OTHER_SESSION, OFFICER_SESSION, ADMIN_SESSION] {
         let both = json!({ "stat_digits": true, "hero_icon": true });
-        set_consent(&w.app, token, both).await;
+        set_consent(&w.app, session, both).await;
     }
     let bad = StatusCode::BAD_REQUEST;
     let cases: Vec<(&str, Vec<Part>, StatusCode, &str)> = vec![
@@ -834,7 +892,7 @@ async fn body_shape_and_meta_errors() {
         &w.app,
         Method::PUT,
         uri,
-        Some(OWNER_TOKEN),
+        Some(OWNER_SESSION),
         Some(json!({ "replays": true })),
     )
     .await;
@@ -843,7 +901,7 @@ async fn body_shape_and_meta_errors() {
         &w.app,
         Method::PUT,
         uri,
-        Some(OWNER_TOKEN),
+        Some(OWNER_SESSION),
         Some(json!({ "map_name": "yes" })),
     )
     .await;
@@ -870,9 +928,9 @@ async fn hero_icon_kind_is_the_hero_icon_store() {
     let (_, consent) = get(&w.app, "/api/training-crops/consent", OWNER_TOKEN).await;
     assert_eq!(
         consent,
-        json!({ "hero_icon": true, "stat_digits": false, "map_name": false, "full_screen": false })
+        json!({ "hero_icon": true, "stat_digits": false, "map_name": false })
     );
-    set_consent(&w.app, OWNER_TOKEN, json!({ "stat_digits": true })).await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
 
     let hero = upload(
         &w.app,
@@ -882,7 +940,9 @@ async fn hero_icon_kind_is_the_hero_icon_store() {
     )
     .await;
     let hero_ids = crop_ids(&hero);
-    assert_eq!(hero.1["crops"][0]["hero"], json!("Lúcio"));
+    // Stored and answered as the hero key; the hero icon routes still give
+    // the display name.
+    assert_eq!(hero.1["crops"][0]["hero"], json!("lucio"));
     let digits = crop_ids(&upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(1, json!({}))).await);
 
     // The hero icon routes see the hero icon and nothing else.
@@ -911,7 +971,7 @@ async fn hero_icon_kind_is_the_hero_icon_store() {
     assert_eq!(files_on_disk(w.dir()), vec![format!("{}.png", digits[0])]);
 
     // Withdrawing hero_icon consent is the old opt-out.
-    set_consent(&w.app, OWNER_TOKEN, json!({ "hero_icon": false })).await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "hero_icon": false })).await;
     let (_, old) = get(&w.app, "/api/hero-icons/opt-in", OWNER_SESSION).await;
     assert_eq!(old, json!({ "icon_contribution_opt_in": false }));
     w.cleanup();
@@ -927,7 +987,6 @@ async fn legacy_opt_in_rows_become_hero_icon_consent_only() {
             r#"
             REMOVE FIELD IF EXISTS stat_digits_opt_in ON member_settings;
             REMOVE FIELD IF EXISTS map_name_opt_in ON member_settings;
-            REMOVE FIELD IF EXISTS full_screen_opt_in ON member_settings;
             CREATE member_settings SET member_id = '{OWNER}', player_name = 'Old',
                 stats_visibility = 'public', hero_icon_opt_in = true;
             CREATE member_settings SET member_id = '{OTHER}', player_name = 'Old',
@@ -943,12 +1002,12 @@ async fn legacy_opt_in_rows_become_hero_icon_consent_only() {
     let (_, owner) = get(&w.app, "/api/training-crops/consent", OWNER_TOKEN).await;
     assert_eq!(
         owner,
-        json!({ "hero_icon": true, "stat_digits": false, "map_name": false, "full_screen": false })
+        json!({ "hero_icon": true, "stat_digits": false, "map_name": false })
     );
     let (_, other) = get(&w.app, "/api/training-crops/consent", OTHER_TOKEN).await;
     assert_eq!(
         other,
-        json!({ "hero_icon": false, "stat_digits": false, "map_name": false, "full_screen": false })
+        json!({ "hero_icon": false, "stat_digits": false, "map_name": false })
     );
     // The migrated opt-in allows hero icons and nothing else.
     let got = upload(
@@ -969,7 +1028,7 @@ async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
     let w = world().await;
     set_consent(
         &w.app,
-        OWNER_TOKEN,
+        OWNER_SESSION,
         json!({ "stat_digits": true, "map_name": true }),
     )
     .await;
@@ -979,9 +1038,9 @@ async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
     upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(1, qhd)).await;
     upload(&w.app, OWNER_TOKEN, "map_name", &pairs(1, json!({}))).await;
     // Then map_name consent goes off: its crop is hidden from officers.
-    set_consent(&w.app, OWNER_TOKEN, json!({ "map_name": false })).await;
-    // OTHER consents to full_screen only: listed with nothing stored.
-    set_consent(&w.app, OTHER_TOKEN, json!({ "full_screen": true })).await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "map_name": false })).await;
+    // OTHER consents to map_name only: listed with nothing stored.
+    set_consent(&w.app, OTHER_SESSION, json!({ "map_name": true })).await;
 
     let (status, page) = get(&w.app, "/api/training-crops/members", OFFICER_SESSION).await;
     assert_eq!(status, StatusCode::OK, "{page}");
@@ -1006,7 +1065,7 @@ async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
     assert_eq!(other["member_id"], json!(OTHER));
     assert_eq!(
         other["kinds"],
-        json!([{ "kind": "full_screen", "count": 0, "consented": true, "max": 0 }])
+        json!([{ "kind": "map_name", "count": 0, "consented": true, "max": 200 }])
     );
     assert_eq!(other["resolutions"], json!([]));
 
@@ -1034,7 +1093,7 @@ async fn officer_counts_by_kind_and_resolution_admin_sees_hidden_kinds() {
 #[tokio::test]
 async fn admin_reads_follow_consent_and_officers_get_no_images() {
     let w = world().await;
-    set_consent(&w.app, OWNER_TOKEN, json!({ "stat_digits": true })).await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
     let ids = crop_ids(&upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(1, full_meta())).await);
     let image = format!("/api/training-crops/{}/image", ids[0]);
 
@@ -1060,10 +1119,16 @@ async fn admin_reads_follow_consent_and_officers_get_no_images() {
     let got = get(&w.app, "/api/training-crops", OFFICER_SESSION).await;
     assert_eq!(got.0, StatusCode::FORBIDDEN, "{}", got.1);
 
-    // Consent off: hidden from admin reads, kept for the owner.
-    set_consent(&w.app, OWNER_TOKEN, json!({ "stat_digits": false })).await;
+    // Consent off: the admin list still gives the id (so it can be deleted)
+    // but marks it hidden and drops the metadata; the image is 404.
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": false })).await;
     let (_, page) = get(&w.app, "/api/training-crops", ADMIN_SESSION).await;
-    assert_eq!(page["data"], json!([]));
+    let items = page["data"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], json!(ids[0]));
+    assert_eq!(items[0]["hidden"], json!(true));
+    assert_eq!(items[0]["meta"], json!({}));
+    assert!(items[0].get("tracker_version").is_none());
     let got = get(&w.app, &image, ADMIN_SESSION).await;
     assert_error(&got, StatusCode::NOT_FOUND, "crop_not_found");
     let request = base_request(Method::GET, &image, Some(OWNER_SESSION))
@@ -1086,8 +1151,9 @@ async fn admin_reads_follow_consent_and_officers_get_no_images() {
     assert!(
         audits
             .iter()
-            .any(|e| e.action == "deleted_hero_icon" && e.target_id == OWNER)
+            .any(|e| e.action == "deleted_training_crop" && e.target_id == OWNER)
     );
+    assert!(!audits.iter().any(|e| e.action == "deleted_hero_icon"));
     w.cleanup();
 }
 
@@ -1095,11 +1161,441 @@ async fn admin_reads_follow_consent_and_officers_get_no_images() {
 async fn disabled_store_keeps_consent_working() {
     let dir = std::env::temp_dir().join("scuffed-crops-disabled-never-created");
     let w = world_with(HeroIconStore::new(dir, false)).await;
-    let consent = set_consent(&w.app, OWNER_TOKEN, json!({ "map_name": true })).await;
+    let consent = set_consent(&w.app, OWNER_SESSION, json!({ "map_name": true })).await;
     assert_eq!(consent["map_name"], json!(true));
     let got = upload(&w.app, OWNER_TOKEN, "map_name", &pairs(1, json!({}))).await;
     assert_error(&got, StatusCode::SERVICE_UNAVAILABLE, "hero_icons_disabled");
     let got = delete(&w.app, "/api/training-crops/mine", OWNER_TOKEN).await;
     assert_error(&got, StatusCode::SERVICE_UNAVAILABLE, "hero_icons_disabled");
     assert!(!w.dir().exists());
+}
+
+async fn call_from(
+    app: &axum::Router,
+    ip: IpAddr,
+    method: Method,
+    uri: &str,
+    token: &str,
+    body: Option<Value>,
+) -> Got {
+    let mut builder = base_request_from(ip, method, uri, Some(token));
+    let body = match body {
+        Some(value) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(&value).unwrap())
+        }
+        None => Body::empty(),
+    };
+    read_json(
+        app.clone()
+            .oneshot(builder.body(body).unwrap())
+            .await
+            .unwrap(),
+    )
+    .await
+}
+
+async fn upload_from(app: &axum::Router, ip: IpAddr, token: &str, kind: &str) -> Got {
+    let uri = format!("/api/training-crops?kind={kind}");
+    let request = base_request_from(ip, Method::POST, &uri, Some(token))
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(multipart_body(&pairs(1, json!({})))))
+        .unwrap();
+    read_json(app.clone().oneshot(request).await.unwrap()).await
+}
+
+#[tokio::test]
+async fn sync_token_cannot_set_consent() {
+    let w = world().await;
+    let uri = "/api/training-crops/consent";
+    for token in [OWNER_TOKEN, ADMIN_TOKEN] {
+        let got = call(
+            &w.app,
+            Method::PUT,
+            uri,
+            Some(token),
+            Some(json!({ "stat_digits": true, "map_name": true })),
+        )
+        .await;
+        assert_eq!(got.0, StatusCode::UNAUTHORIZED, "{token}: {}", got.1);
+    }
+    // Nothing changed, and the token may still read its own consent.
+    let (status, consent) = get(&w.app, uri, OWNER_TOKEN).await;
+    assert_eq!(status, StatusCode::OK, "{consent}");
+    assert_eq!(
+        consent,
+        json!({ "hero_icon": false, "stat_digits": false, "map_name": false })
+    );
+    // A session sets it, and the token sees the change.
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
+    let (_, consent) = get(&w.app, uri, OWNER_TOKEN).await;
+    assert_eq!(consent["stat_digits"], json!(true));
+    // A token still turning consent off is refused too.
+    let got = call(
+        &w.app,
+        Method::PUT,
+        uri,
+        Some(OWNER_TOKEN),
+        Some(json!({ "stat_digits": false })),
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::UNAUTHORIZED, "{}", got.1);
+    let (_, consent) = get(&w.app, uri, OWNER_TOKEN).await;
+    assert_eq!(consent["stat_digits"], json!(true));
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn overlong_tracker_version_is_not_stored() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
+    let long = format!("scuffed-stat-tracker/1.0.0-{}", "a".repeat(80));
+    let mut request = base_request(
+        Method::POST,
+        "/api/training-crops?kind=stat_digits",
+        Some(OWNER_TOKEN),
+    )
+    .header(
+        header::CONTENT_TYPE,
+        format!("multipart/form-data; boundary={BOUNDARY}"),
+    )
+    .body(Body::from(multipart_body(&pairs(1, json!({})))))
+    .unwrap();
+    // Replace the default tracker User-Agent rather than adding a second one.
+    request
+        .headers_mut()
+        .insert(header::USER_AGENT, long.parse().unwrap());
+    let got = read_json(w.app.clone().oneshot(request).await.unwrap()).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    assert!(got.1["crops"][0].get("tracker_version").is_none());
+    assert_eq!(w.rows_of(OWNER).await[0].tracker_version, None);
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn crop_bounds_are_per_kind_and_map_names_may_be_wide() {
+    let w = world().await;
+    let all = json!({ "stat_digits": true, "map_name": true, "hero_icon": true });
+    for session in [OWNER_SESSION, OTHER_SESSION, OFFICER_SESSION, ADMIN_SESSION] {
+        set_consent(&w.app, session, all.clone()).await;
+    }
+    let bad = StatusCode::BAD_REQUEST;
+    let too_large = StatusCode::PAYLOAD_TOO_LARGE;
+    // A noise crop just over the map_name byte limit, inside its edges.
+    let big_map = noise_png(300, 256, 1);
+    assert!(big_map.len() > MAP_NAME_MAX_BYTES, "{}", big_map.len());
+    // A noise crop over the 64 KiB limit of the other kinds.
+    let big_digits = noise_png(130, 130, 2);
+    assert!(big_digits.len() > 64 * 1024, "{}", big_digits.len());
+    let hero = || meta(json!({ "hero": "ana" }));
+    let cases: Vec<(&str, Vec<Part>, StatusCode, &str)> = vec![
+        (
+            "map_name",
+            vec![meta(json!({})), crop(1025, 16)],
+            bad,
+            "icon_bad_dimensions",
+        ),
+        (
+            "map_name",
+            vec![meta(json!({})), crop(64, 257)],
+            bad,
+            "icon_bad_dimensions",
+        ),
+        (
+            "map_name",
+            vec![meta(json!({})), crop(7, 16)],
+            bad,
+            "icon_bad_dimensions",
+        ),
+        (
+            "map_name",
+            vec![meta(json!({})), ("crop", big_map)],
+            too_large,
+            "icon_too_large",
+        ),
+        (
+            "stat_digits",
+            vec![meta(json!({})), crop(257, 16)],
+            bad,
+            "icon_bad_dimensions",
+        ),
+        (
+            "stat_digits",
+            vec![meta(json!({})), ("crop", big_digits)],
+            too_large,
+            "icon_too_large",
+        ),
+        (
+            "hero_icon",
+            vec![hero(), crop(300, 64)],
+            bad,
+            "icon_bad_dimensions",
+        ),
+    ];
+    let tokens = [OWNER_TOKEN, OTHER_TOKEN, OFFICER_TOKEN, ADMIN_TOKEN];
+    for (index, (kind, parts, status, code)) in cases.into_iter().enumerate() {
+        let got = upload(&w.app, tokens[index % tokens.len()], kind, &parts).await;
+        assert_eq!(got.0, status, "case {index} {kind} {code}: {}", got.1);
+        assert_eq!(got.1["error"], json!(code), "case {index}: {}", got.1);
+    }
+    assert!(files_on_disk(w.dir()).is_empty());
+
+    // The largest map name banner and a noise one just under its byte limit
+    // are both accepted.
+    let wide = vec![
+        meta(json!({})),
+        crop(1024, 256),
+        meta(json!({})),
+        ("crop", noise_png(250, 256, 3)),
+    ];
+    let got = upload(&w.app, OWNER_TOKEN, "map_name", &wide).await;
+    assert_eq!(got.0, StatusCode::CREATED, "{}", got.1);
+    assert_eq!(got.1["crops"][0]["width"], json!(1024));
+    assert_eq!(got.1["crops"][0]["height"], json!(256));
+    assert_eq!(files_on_disk(w.dir()).len(), 2);
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn bad_png_errors_on_the_training_crop_route() {
+    let w = world().await;
+    let all = json!({ "stat_digits": true, "map_name": true });
+    for session in [OWNER_SESSION, OTHER_SESSION, OFFICER_SESSION, ADMIN_SESSION] {
+        set_consent(&w.app, session, all.clone()).await;
+    }
+    let signature = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut garbage = signature.clone();
+    garbage.extend_from_slice(&[0u8; 200]);
+    let truncated = png(40, 16)[..40].to_vec();
+    let cases: Vec<(&str, Vec<u8>, StatusCode, &str)> = vec![
+        (
+            "stat_digits",
+            b"GIF89a-not-a-png".to_vec(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "not_png",
+        ),
+        (
+            "map_name",
+            b"\xff\xd8\xff\xe0 jpeg".to_vec(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "not_png",
+        ),
+        (
+            "map_name",
+            b"PNG".to_vec(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "not_png",
+        ),
+        (
+            "stat_digits",
+            signature,
+            StatusCode::BAD_REQUEST,
+            "invalid_png",
+        ),
+        ("map_name", garbage, StatusCode::BAD_REQUEST, "invalid_png"),
+        (
+            "stat_digits",
+            truncated,
+            StatusCode::BAD_REQUEST,
+            "invalid_png",
+        ),
+    ];
+    let tokens = [OWNER_TOKEN, OTHER_TOKEN, OFFICER_TOKEN, ADMIN_TOKEN];
+    for (index, (kind, bytes, status, code)) in cases.into_iter().enumerate() {
+        // A good pair first: a later bad crop still stores nothing.
+        let parts = vec![
+            meta(json!({})),
+            crop(40, 16),
+            meta(json!({})),
+            ("crop", bytes),
+        ];
+        let got = upload(&w.app, tokens[index % tokens.len()], kind, &parts).await;
+        assert_eq!(got.0, status, "case {index} {kind} {code}: {}", got.1);
+        assert_eq!(got.1["error"], json!(code), "case {index}: {}", got.1);
+    }
+    assert!(files_on_disk(w.dir()).is_empty());
+    for member in [OWNER, OTHER, OFFICER, ADMIN] {
+        assert!(w.rows_of(member).await.is_empty());
+    }
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn request_over_2_mib_is_413_and_stores_nothing() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "map_name": true })).await;
+    set_consent(&w.app, OTHER_SESSION, json!({ "map_name": true })).await;
+    // Each banner fits the map_name crop limit; eleven of them pass 2 MiB.
+    let banners: Vec<Vec<u8>> = (0..11).map(|i| noise_png(200, 256, 10 + i)).collect();
+    let mut parts = Vec::new();
+    for banner in &banners {
+        assert!(banner.len() <= MAP_NAME_MAX_BYTES);
+        parts.push(meta(json!({})));
+        parts.push(("crop", banner.clone()));
+    }
+    assert!(multipart_body(&parts).len() > HERO_ICON_MAX_REQUEST_BYTES);
+    let got = upload(&w.app, OWNER_TOKEN, "map_name", &parts).await;
+    assert_error(&got, StatusCode::PAYLOAD_TOO_LARGE, "icon_too_large");
+    assert!(w.rows_of(OWNER).await.is_empty());
+    assert!(files_on_disk(w.dir()).is_empty());
+
+    // Nine of the same banners stay under 2 MiB and are stored.
+    let under: Vec<Part> = parts[..18].to_vec();
+    assert!(multipart_body(&under).len() < HERO_ICON_MAX_REQUEST_BYTES);
+    let got = upload(&w.app, OTHER_TOKEN, "map_name", &under).await;
+    assert_eq!(crop_ids(&got).len(), 9);
+    assert_eq!(files_on_disk(w.dir()).len(), 9);
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn per_ip_limit_covers_the_sync_token_routes() {
+    let w = world().await;
+    set_consent(&w.app, OWNER_SESSION, json!({ "stat_digits": true })).await;
+    let ids = crop_ids(&upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(1, json!({}))).await);
+    let hot = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 77));
+    let consent = "/api/training-crops/consent";
+    for i in 0..STATS_UPLOAD_IP_BURST {
+        let got = call_from(&w.app, hot, Method::GET, consent, OWNER_TOKEN, None).await;
+        assert_eq!(got.0, StatusCode::OK, "request {i}: {}", got.1);
+    }
+    let limited = StatusCode::TOO_MANY_REQUESTS;
+    let got = call_from(&w.app, hot, Method::GET, consent, OWNER_TOKEN, None).await;
+    assert_eq!(got.0, limited, "{}", got.1);
+    // Upload and both deletes share the bucket, and are refused before the
+    // credential is looked at.
+    let got = upload_from(&w.app, hot, OWNER_TOKEN, "stat_digits").await;
+    assert_eq!(got.0, limited, "{}", got.1);
+    let got = call_from(
+        &w.app,
+        hot,
+        Method::DELETE,
+        "/api/training-crops/mine",
+        OWNER_TOKEN,
+        None,
+    )
+    .await;
+    assert_eq!(got.0, limited, "{}", got.1);
+    let one = format!("/api/training-crops/{}", ids[0]);
+    let got = call_from(&w.app, hot, Method::DELETE, &one, "not-a-token", None).await;
+    assert_eq!(got.0, limited, "{}", got.1);
+    assert_eq!(w.rows_of(OWNER).await.len(), 1);
+    // Session-only routes on the same IP are not in this bucket.
+    let got = call_from(
+        &w.app,
+        hot,
+        Method::GET,
+        "/api/training-crops/mine",
+        OWNER_SESSION,
+        None,
+    )
+    .await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    let body = Some(json!({ "map_name": true }));
+    let got = call_from(&w.app, hot, Method::PUT, consent, OWNER_SESSION, body).await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    // Another address has its own bucket.
+    let got = call_from(&w.app, next_ip(), Method::GET, consent, OWNER_TOKEN, None).await;
+    assert_eq!(got.0, StatusCode::OK, "{}", got.1);
+    w.cleanup();
+}
+
+#[tokio::test]
+async fn admin_list_gives_ids_of_every_kind_to_delete() {
+    let w = world().await;
+    let all = json!({ "stat_digits": true, "map_name": true, "hero_icon": true });
+    set_consent(&w.app, OWNER_SESSION, all).await;
+    let mut hero_meta = full_meta();
+    hero_meta["hero"] = json!("Soldier: 76");
+    let hero = crop_ids(&upload(&w.app, OWNER_TOKEN, "hero_icon", &pairs(1, hero_meta)).await);
+    let digits =
+        crop_ids(&upload(&w.app, OWNER_TOKEN, "stat_digits", &pairs(1, full_meta())).await);
+    let map = crop_ids(&upload(&w.app, OWNER_TOKEN, "map_name", &pairs(1, full_meta())).await);
+    // map_name consent off: still listed for the admin, hidden.
+    set_consent(&w.app, OWNER_SESSION, json!({ "map_name": false })).await;
+
+    let (status, page) = get(&w.app, "/api/training-crops", ADMIN_SESSION).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    let items = page["data"].as_array().unwrap();
+    let listed: Vec<&str> = items.iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        listed,
+        vec![map[0].as_str(), digits[0].as_str(), hero[0].as_str()]
+    );
+    for item in items {
+        assert_eq!(item["member_id"], json!(OWNER));
+        // Upload times are cut to the hour, so they cannot be matched to a game.
+        let at = item["uploaded_at"].as_str().unwrap();
+        let parsed = chrono::DateTime::parse_from_rfc3339(at).expect("rfc3339");
+        assert_eq!(parsed.timestamp() % 3600, 0, "{at}");
+        assert_eq!(parsed.timestamp_subsec_nanos(), 0, "{at}");
+    }
+    let by_kind = |kind: &str| {
+        items
+            .iter()
+            .find(|c| c["kind"] == json!(kind))
+            .cloned()
+            .unwrap()
+    };
+    let map_item = by_kind("map_name");
+    assert_eq!(map_item["hidden"], json!(true));
+    assert_eq!(map_item["meta"], json!({}));
+    let digit_item = by_kind("stat_digits");
+    assert_eq!(digit_item["hidden"], json!(false));
+    assert_eq!(digit_item["meta"]["slot_index"], json!(3));
+    let hero_item = by_kind("hero_icon");
+    assert_eq!(hero_item["hero"], json!("soldier-76"));
+
+    // The kind filter works for every kind, hidden ones too.
+    for (kind, id) in [
+        ("hero_icon", &hero[0]),
+        ("stat_digits", &digits[0]),
+        ("map_name", &map[0]),
+    ] {
+        let uri = format!("/api/training-crops?kind={kind}");
+        let (status, page) = get(&w.app, &uri, ADMIN_SESSION).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        assert_eq!(page["data"].as_array().unwrap().len(), 1, "{kind}");
+        assert_eq!(page["data"][0]["id"], json!(id));
+    }
+    let got = get(
+        &w.app,
+        "/api/training-crops?kind=full_screen",
+        ADMIN_SESSION,
+    )
+    .await;
+    assert_eq!(got.1["data"], json!([]));
+    let got = get(&w.app, "/api/training-crops?kind=bogus", ADMIN_SESSION).await;
+    assert_error(&got, StatusCode::BAD_REQUEST, "unknown_crop_kind");
+
+    // Each listed id can be deleted by the admin, whatever its kind.
+    for id in [&hero[0], &digits[0], &map[0]] {
+        let got = delete(&w.app, &format!("/api/training-crops/{id}"), ADMIN_SESSION).await;
+        assert_eq!(got.1, json!({ "deleted": 1 }), "{id}");
+    }
+    assert!(w.rows_of(OWNER).await.is_empty());
+    assert!(files_on_disk(w.dir()).is_empty());
+
+    // Audit names: hero icons keep theirs, the other kinds get their own.
+    let audits = w.db().list_audit_log(100, 0).await.expect("audit");
+    let count = |action: &str| audits.iter().filter(|e| e.action == action).count();
+    assert_eq!(count("deleted_hero_icon"), 1);
+    assert_eq!(count("deleted_training_crop"), 2);
+    assert_eq!(count("viewed_hero_icons"), 1, "the hero_icon filtered read");
+    assert_eq!(
+        count("viewed_training_crops"),
+        4,
+        "unfiltered plus three filters"
+    );
+    for kind in ["stat_digits", "map_name"] {
+        assert!(
+            audits.iter().any(|e| e.action == "deleted_training_crop"
+                && e.details.as_deref().is_some_and(|d| d.contains(kind))),
+            "{kind}"
+        );
+    }
+    w.cleanup();
 }

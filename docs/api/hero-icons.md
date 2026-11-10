@@ -480,5 +480,7 @@ sweep; its thumbnail answers 404 and the owner or an admin can delete it.
   `created_at` is `uploaded_at` in the API.
 - Since alpha.3 item 14 the table also has `kind` (existing rows are
   `hero_icon`) and optional training crop metadata columns. The routes on this
-  page read and write `kind = 'hero_icon'` only. See
+  page read and write `kind = 'hero_icon'` only. New rows store the hero key
+  (`soldier-76`) in `hero`, older rows the display name; the routes on this
+  page answer with the display name either way. See
   `docs/api/training-crops.md`.

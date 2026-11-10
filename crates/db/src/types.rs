@@ -1065,6 +1065,11 @@ pub enum AuditAction {
     DeletedHeroIcon,
     DeletedAllHeroIcons,
     ViewedHeroIcons,
+    /// An admin deleted another member's training crop of a kind other than
+    /// `hero_icon` (those keep `deleted_hero_icon`). Details: id and kind.
+    DeletedTrainingCrop,
+    /// An admin read the training crop list. Details: count and kind filter.
+    ViewedTrainingCrops,
 }
 
 impl std::fmt::Display for AuditAction {
@@ -1697,7 +1702,9 @@ pub struct TrainingCrop {
     pub id: String,
     pub member_id: String,
     pub kind: scuffed_types::CropKind,
-    /// Hero display name. Always set for `hero_icon`.
+    /// Hero key (`soldier-76`, see `scuffed_types::hero_key`). Always set
+    /// for `hero_icon`. Older rows that stored the display name read as the
+    /// key too.
     pub hero: Option<String>,
     /// `<id>.png`. Never taken from user input.
     pub file_name: String,

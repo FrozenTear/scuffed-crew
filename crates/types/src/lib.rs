@@ -22,8 +22,8 @@ pub use hero_icons::{
 };
 pub use heroes::{
     HERO_NAMES, HERO_PACK_FILES, HERO_PACK_PLACEHOLDERS, HEROES, HeroName, canonical_hero,
-    find_hero, hero_for_pack_file, hero_key_to_name, is_placeholder_hero, match_hero_in_text,
-    pack_file_stem, resolve_hero_query, role_for_hero_name,
+    find_hero, hero_for_pack_file, hero_key, hero_key_to_name, is_placeholder_hero,
+    match_hero_in_text, pack_file_stem, resolve_hero_query, role_for_hero_name,
 };
 pub use nostr::*;
 pub use org::*;
@@ -39,9 +39,9 @@ pub use stats_upload_limits::{
 };
 pub use strategy::*;
 pub use training_crops::{
-    CropKind, MAP_NAME_MAX_PER_MEMBER, STAT_DIGITS_MAX_PER_MEMBER,
-    TRAINING_CROP_GAME_TOKEN_MAX_LEN, TRAINING_CROP_GAME_TOKEN_MIN_LEN,
-    TRAINING_CROP_LABEL_MAX_LEN, TRAINING_CROP_META_MAX_BYTES, TRAINING_CROP_SCORE_ABS_MAX,
-    TRAINING_CROP_SCREEN_MAX_EDGE, TRAINING_CROP_SCREEN_MIN_EDGE, TRAINING_CROP_SLOT_INDEX_MAX,
-    TRAINING_CROP_UI_SCALE_MAX, TRAINING_CROP_VERSION_MAX_LEN,
+    CropKind, MAP_NAME_MAX_BYTES, MAP_NAME_MAX_HEIGHT, MAP_NAME_MAX_PER_MEMBER, MAP_NAME_MAX_WIDTH,
+    STAT_DIGITS_MAX_PER_MEMBER, TRAINING_CROP_GAME_TOKEN_LEN, TRAINING_CROP_LABEL_MAX_LEN,
+    TRAINING_CROP_META_MAX_BYTES, TRAINING_CROP_SCORE_ABS_MAX, TRAINING_CROP_SCREEN_MAX_EDGE,
+    TRAINING_CROP_SCREEN_MIN_EDGE, TRAINING_CROP_SLOT_INDEX_MAX, TRAINING_CROP_UI_SCALE_MAX,
+    TRAINING_CROP_VERSION_MAX_LEN,
 };

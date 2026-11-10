@@ -30,9 +30,6 @@ struct DbMemberSettings {
     #[serde(default)]
     #[surreal(default)]
     map_name_opt_in: Option<bool>,
-    #[serde(default)]
-    #[surreal(default)]
-    full_screen_opt_in: Option<bool>,
 }
 
 fn db_to_consent(db: &DbMemberSettings) -> TrainingCropConsent {
@@ -40,7 +37,6 @@ fn db_to_consent(db: &DbMemberSettings) -> TrainingCropConsent {
         hero_icon: db.hero_icon_opt_in.unwrap_or(false),
         stat_digits: db.stat_digits_opt_in.unwrap_or(false),
         map_name: db.map_name_opt_in.unwrap_or(false),
-        full_screen: db.full_screen_opt_in.unwrap_or(false),
     }
 }
 
@@ -172,7 +168,6 @@ impl Database {
                         hero_icon_opt_in: Some(false),
                         stat_digits_opt_in: Some(false),
                         map_name_opt_in: Some(false),
-                        full_screen_opt_in: Some(false),
                     })
                     .await?;
                 Ok(db_to_settings(created.ok_or_else(|| {
@@ -287,7 +282,6 @@ impl Database {
                  hero_icon_opt_in = $hero ?? hero_icon_opt_in ?? false, \
                  stat_digits_opt_in = $digits ?? stat_digits_opt_in ?? false, \
                  map_name_opt_in = $map ?? map_name_opt_in ?? false, \
-                 full_screen_opt_in = $full ?? full_screen_opt_in ?? false, \
                  stats_visibility = stats_visibility ?? 'public' \
                  WHERE member_id = $mid",
             )
@@ -295,7 +289,6 @@ impl Database {
             .bind(("hero", update.hero_icon))
             .bind(("digits", update.stat_digits))
             .bind(("map", update.map_name))
-            .bind(("full", update.full_screen))
             .await?;
         let rows: Vec<DbMemberSettings> = result.take(0)?;
         match rows.first() {
@@ -311,8 +304,7 @@ impl Database {
                 .client
                 .query(
                     "SELECT * FROM member_settings WHERE hero_icon_opt_in = true \
-                     OR stat_digits_opt_in = true OR map_name_opt_in = true \
-                     OR full_screen_opt_in = true",
+                     OR stat_digits_opt_in = true OR map_name_opt_in = true",
                 )
                 .await?;
             let rows: Vec<DbMemberSettings> = result.take(0)?;
@@ -558,13 +550,12 @@ mod tests {
                 "c1",
                 TrainingCropConsentUpdate {
                     hero_icon: Some(true),
-                    full_screen: Some(true),
                     ..Default::default()
                 },
             )
             .await
             .unwrap();
-        assert!(set.map_name && set.hero_icon && set.full_screen && !set.stat_digits);
+        assert!(set.map_name && set.hero_icon && !set.stat_digits);
         // hero_icon consent is the hero icon opt-in.
         assert!(db.get_hero_icon_opt_in("c1").await.unwrap());
         assert!(!db.set_hero_icon_opt_in("c1", false).await.unwrap());
@@ -578,12 +569,7 @@ mod tests {
         db.upsert_member_settings("c1", Some("Kiriko"), Some(StatsVisibility::Members))
             .await
             .unwrap();
-        assert!(
-            db.get_training_crop_consent("c1")
-                .await
-                .unwrap()
-                .full_screen
-        );
+        assert!(db.get_training_crop_consent("c1").await.unwrap().map_name);
         let row = db.get_member_settings("c1").await.unwrap().expect("row");
         assert_eq!(row.stats_visibility, StatsVisibility::Members);
     }
@@ -596,7 +582,6 @@ mod tests {
                 r#"
                 REMOVE FIELD IF EXISTS stat_digits_opt_in ON member_settings;
                 REMOVE FIELD IF EXISTS map_name_opt_in ON member_settings;
-                REMOVE FIELD IF EXISTS full_screen_opt_in ON member_settings;
                 CREATE member_settings SET member_id = 'old-in', player_name = 'Old',
                     stats_visibility = 'public', hero_icon_opt_in = true;
                 CREATE member_settings SET member_id = 'old-out', player_name = 'Old',
@@ -652,5 +637,26 @@ mod tests {
         let settings = db.get_member_settings("race2").await.unwrap().expect("row");
         assert_eq!(settings.stats_visibility, StatsVisibility::Public);
         assert!(!settings.hero_icon_opt_in);
+    }
+
+    #[tokio::test]
+    async fn full_screen_consent_has_no_field() {
+        let db = test_db().await;
+        let mut result = db
+            .client
+            .query("INFO FOR TABLE member_settings")
+            .await
+            .unwrap();
+        let info: Option<serde_json::Value> = result.take(0).unwrap();
+        let info = info.expect("table info");
+        let names: Vec<&String> = info["fields"].as_object().expect("fields").keys().collect();
+        assert!(
+            names.iter().any(|n| n.as_str() == "map_name_opt_in"),
+            "{names:?}"
+        );
+        assert!(
+            !names.iter().any(|n| n.as_str() == "full_screen_opt_in"),
+            "{names:?}"
+        );
     }
 }

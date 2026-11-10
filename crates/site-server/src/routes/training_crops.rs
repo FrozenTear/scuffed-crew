@@ -9,20 +9,25 @@
 //! Access rules:
 //!
 //! - The tracker's sync token is accepted, besides a session, on exactly:
-//!   upload, own consent read and set, own delete-all and own single delete
-//!   ([`CropUploader`]). A sync token never acts as staff: on the single
-//!   delete it reaches the caller's own crops only. Every other route needs
-//!   a session.
+//!   upload, own consent read, own delete-all and own single delete
+//!   ([`CropUploader`]). Those routes also share a per-IP limit (see
+//!   `create_router_with_dist`). A sync token never acts as staff: on the
+//!   single delete it reaches the caller's own crops only. Every other route,
+//!   setting consent included, needs a session, so consent is only ever
+//!   given on the site.
 //! - Consent is per kind and off by default. `hero_icon` consent is the hero
 //!   icon opt-in. An upload of a kind the caller does not consent to is 403
 //!   `crop_consent_required` and stores nothing.
 //! - `full_screen` uploads are refused (422 `full_screen_not_accepted`)
-//!   before the body is read, whatever the consent. Nothing is stored.
+//!   before the body is read. Its consent cannot be stored either: the
+//!   consent shapes have no `full_screen` field.
 //! - Turning a kind's consent off keeps its crops and hides them from staff,
 //!   the same rule as the hero icon opt-out. The owner can still delete them,
 //!   and so can an admin while the owner is active.
-//! - Admin reads (list, image) cover active members, for the kinds they
-//!   consent to right now. Officers get per-member counts only, for
+//! - The admin list covers every stored crop of active members so an admin
+//!   can find any id to delete; crops of a kind without consent come back
+//!   `hidden`, without hero or metadata, and their image stays 404. Times in
+//!   that list are cut to the hour. Officers get per-member counts only, for
 //!   consented kinds only.
 //! - Consent `GET` and `PUT` work while the store is disabled. Every other
 //!   route answers 503 then.
@@ -52,7 +57,8 @@ use scuffed_types::api::{
     TrainingCropUploadResponse, TrainingCropsDeleted,
 };
 use scuffed_types::{
-    CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, TRAINING_CROP_META_MAX_BYTES, hero_key_to_name,
+    CropKind, HERO_ICON_MAX_FILES_PER_UPLOAD, TRAINING_CROP_META_MAX_BYTES,
+    TRAINING_CROP_VERSION_MAX_LEN, hero_key,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -61,8 +67,8 @@ use crate::extractors::{AdminUser, CropUploader, OfficerUser, OrgMember};
 use crate::hero_icons::{ensure_hero_icons_dir, is_icon_id};
 use crate::routes::audit_log::audit;
 use crate::routes::hero_icons::{
-    ADMIN_REQUIRED, CleanIcon, Reject, UploadReject, clean_png, configured, db_error,
-    discard_icon_file, internal, member_active, multipart_reject, read_icon_part, reject,
+    ADMIN_REQUIRED, CleanIcon, Reject, UploadReject, clean_png_within, configured, db_error,
+    discard_icon_file, internal, member_active, multipart_reject, read_png_part, reject,
     remove_icon_file, write_private,
 };
 use crate::state::AppState;
@@ -112,6 +118,61 @@ fn entry(crop: &TrainingCrop) -> TrainingCropEntry {
         tracker_version: crop.tracker_version.clone(),
         meta: crop.meta.clone(),
         thumbnail_url: thumbnail_url(&crop.id),
+    }
+}
+
+/// The tracker version to store, from a `scuffed-stat-tracker/<semver>`
+/// User-Agent. `None` when there is none, or when the version is longer than
+/// `TRAINING_CROP_VERSION_MAX_LEN` (64) characters or holds a control
+/// character, so a crafted User-Agent cannot fill the column.
+fn stored_tracker_version(headers: &HeaderMap) -> Option<String> {
+    let version = crate::routes::stats::tracker_version(headers)?.to_string();
+    let fits =
+        version.len() <= TRAINING_CROP_VERSION_MAX_LEN && !version.chars().any(char::is_control);
+    fits.then_some(version)
+}
+
+/// Audit action for an admin act on one crop. `hero_icon` keeps the hero
+/// icon names, so the hero icon audit trail reads the same whichever route
+/// was used. Every other kind gets the training crop names.
+fn delete_action(kind: CropKind) -> AuditAction {
+    match kind {
+        CropKind::HeroIcon => AuditAction::DeletedHeroIcon,
+        _ => AuditAction::DeletedTrainingCrop,
+    }
+}
+
+/// Audit action for an admin read of the list: `viewed_hero_icons` when the
+/// list is filtered to `hero_icon`, `viewed_training_crops` otherwise.
+fn list_action(filter: Option<CropKind>) -> AuditAction {
+    match filter {
+        Some(CropKind::HeroIcon) => AuditAction::ViewedHeroIcons,
+        _ => AuditAction::ViewedTrainingCrops,
+    }
+}
+
+/// `at` cut down to the start of its UTC hour. Used in the admin list so an
+/// upload time cannot be matched to a game.
+fn to_the_hour(at: DateTime<Utc>) -> DateTime<Utc> {
+    use chrono::DurationRound;
+    at.duration_trunc(chrono::TimeDelta::hours(1)).unwrap_or(at)
+}
+
+/// The admin list item for `crop`. A hidden crop (no consent for its kind)
+/// carries no hero, tracker version or metadata.
+fn staff_item(crop: &TrainingCrop, display_name: String, hidden: bool) -> StaffTrainingCrop {
+    let mut item = entry(crop);
+    item.uploaded_at = to_the_hour(item.uploaded_at);
+    if hidden {
+        item.hero = None;
+        item.tracker_version = None;
+        item.meta = TrainingCropMeta::default();
+    }
+    StaffTrainingCrop {
+        member_id: crop.member_id.clone(),
+        display_name,
+        hidden,
+        crop: item,
     }
 }
 
@@ -232,8 +293,8 @@ async fn read_meta_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
 ///
 /// 400 `invalid_crop_meta` for bad JSON, an unknown field or a value out of
 /// bounds. 400 `unknown_hero` for a hero that is not on the list, or a
-/// missing hero on a `hero_icon` crop. Returns the hero display name and the
-/// metadata to store.
+/// missing hero on a `hero_icon` crop. Returns the hero key (`soldier-76`,
+/// see [`hero_key`]) and the metadata to store.
 pub(crate) fn parse_meta(
     kind: CropKind,
     bytes: &[u8],
@@ -249,8 +310,8 @@ pub(crate) fn parse_meta(
     }
     let (hero_raw, stored) = meta.split();
     let hero = match hero_raw.as_deref() {
-        Some(raw) => match hero_key_to_name(raw) {
-            Some(name) => Some(name),
+        Some(raw) => match hero_key(raw) {
+            Some(key) => Some(key),
             None => return Err(reject(StatusCode::BAD_REQUEST, HERO_ICON_ERR_UNKNOWN_HERO)),
         },
         None => None,
@@ -278,9 +339,11 @@ struct PendingCrop {
 /// per-member per-kind limiter (429), consent (403), the stored cap (409),
 /// then the body: part names and order (400 `unexpected_field`), count (413),
 /// each `meta` (400), each `crop` (signature 415, size 413, dimensions and
-/// decode 400), at least one pair (400 `no_crops`), the cap again (409).
-/// Nothing is stored unless every part passes. The tracker version comes from
-/// a `scuffed-stat-tracker/<semver>` User-Agent, like stats sync.
+/// decode 400; bounds per kind, see `CropKind::max_edges` and
+/// `CropKind::max_crop_bytes`), at least one pair (400 `no_crops`), the cap
+/// again (409). Nothing is stored unless every part passes. The tracker
+/// version comes from a `scuffed-stat-tracker/<semver>` User-Agent, like
+/// stats sync, and is dropped when too long ([`stored_tracker_version`]).
 pub async fn upload_training_crops(
     State(state): State<AppState>,
     uploader: CropUploader,
@@ -322,6 +385,7 @@ pub async fn upload_training_crops(
     };
 
     let unexpected = || reject(StatusCode::BAD_REQUEST, HERO_ICON_ERR_UNEXPECTED_FIELD);
+    let (max_width, max_height) = kind.max_edges();
     let mut accepted: Vec<PendingCrop> = Vec::new();
     let mut pending: Option<(Option<&'static str>, TrainingCropMeta)> = None;
     while let Some(mut field) = multipart.next_field().await.map_err(multipart_reject)? {
@@ -341,13 +405,15 @@ pub async fn upload_training_crops(
                 let Some((hero, meta)) = pending.take() else {
                     return Err(unexpected().into());
                 };
-                let data = read_icon_part(&mut field).await?;
-                let cleaned = tokio::task::spawn_blocking(move || clean_png(&data))
-                    .await
-                    .map_err(|error| {
-                        tracing::error!(%error, "training crop decode task failed");
-                        internal()
-                    })?;
+                let data = read_png_part(&mut field, kind.max_crop_bytes()).await?;
+                let cleaned = tokio::task::spawn_blocking(move || {
+                    clean_png_within(&data, max_width, max_height)
+                })
+                .await
+                .map_err(|error| {
+                    tracing::error!(%error, "training crop decode task failed");
+                    internal()
+                })?;
                 match cleaned {
                     Ok(image) => accepted.push(PendingCrop { hero, meta, image }),
                     Err(code) => return Err(reject(StatusCode::BAD_REQUEST, code).into()),
@@ -373,8 +439,7 @@ pub async fn upload_training_crops(
             internal()
         })?;
     }
-    let tracker_version =
-        crate::routes::stats::tracker_version(&headers).map(|version| version.to_string());
+    let tracker_version = stored_tracker_version(&headers);
     // One microsecond apart, as for hero icons, so lists are stable.
     let base = Utc::now();
     let mut stored: Vec<TrainingCrop> = Vec::with_capacity(accepted.len());
@@ -428,13 +493,15 @@ pub async fn get_consent(
 
 /// PUT /api/training-crops/consent
 ///
-/// Session or sync token. Only the kinds in the body change. Turning a kind
-/// off keeps its crops and hides them from staff. Works while the store is
-/// disabled. 400 `invalid_consent` for a body that is not JSON or names an
-/// unknown kind.
+/// Session only ([`OrgMember`]): a sync token is 401, so consent is only
+/// given on the site and the tracker shows it read-only. Only the kinds in
+/// the body change. Turning a kind off keeps its crops and hides them from
+/// staff. Works while the store is disabled. 400 `invalid_consent` for a
+/// body that is not JSON, names an unknown kind (`full_screen` included, its
+/// consent cannot be stored) or has a value that is not a bool.
 pub async fn put_consent(
     State(state): State<AppState>,
-    uploader: CropUploader,
+    member: OrgMember,
     body: Result<Json<TrainingCropConsentUpdate>, JsonRejection>,
 ) -> Result<Json<TrainingCropConsent>, Reject> {
     let Ok(Json(update)) = body else {
@@ -445,7 +512,7 @@ pub async fn put_consent(
     };
     let consent = state
         .db
-        .set_training_crop_consent(&uploader.member.id, update)
+        .set_training_crop_consent(&member.member.id, update)
         .await
         .map_err(db_error)?;
     Ok(Json(consent))
@@ -666,7 +733,8 @@ pub async fn crop_image(
 /// DELETE /api/training-crops/{id}
 ///
 /// Session or sync token. The owner, or with a session an admin while the
-/// owner is active (consent or not; audited). With a sync token another
+/// owner is active (consent or not; audited as `deleted_hero_icon` for a hero
+/// icon, `deleted_training_crop` for any other kind). With a sync token another
 /// member's crop is 404 `crop_not_found` whatever the role. The file goes
 /// first, so a failed file delete keeps the row for a retry.
 pub async fn delete_crop(
@@ -699,7 +767,7 @@ pub async fn delete_crop(
         audit(
             &state.db,
             &uploader.member.id,
-            AuditAction::DeletedHeroIcon,
+            delete_action(crop.kind),
             AuditTargetType::Member,
             &crop.member_id,
             Some(details.as_str()),
@@ -711,31 +779,17 @@ pub async fn delete_crop(
     }))
 }
 
-/// Active members with their consent, among those who consent to anything.
-/// A visibility filter: a failed lookup is a 500, never an unfiltered list.
-async fn active_consents(
-    state: &AppState,
-) -> Result<
-    (
-        HashMap<String, TrainingCropConsent>,
-        HashMap<String, String>,
-    ),
-    Reject,
-> {
-    let consents = state.db.training_crop_consents().await.map_err(db_error)?;
-    let ids: Vec<String> = consents.keys().cloned().collect();
-    let names = state
-        .db
-        .active_member_display_names(&ids)
-        .await
-        .map_err(db_error)?;
-    Ok((consents, names))
-}
-
 /// GET /api/training-crops?kind=&cursor=&limit= (admin)
 ///
-/// Crops of active members, for the kinds they consent to right now, newest
-/// first. One audit entry `viewed_hero_icons` per request, target `all`.
+/// Every stored crop of active members, of every kind or of one kind with
+/// `?kind=`, newest first, so an admin can find any crop's id and delete it
+/// with `DELETE /api/training-crops/{id}`. A crop of a kind the owner does
+/// not consent to right now is `hidden`: no hero, tracker version or
+/// metadata, and its image stays 404. `uploaded_at` is cut to the hour.
+///
+/// One audit entry per request, target `all`: `viewed_hero_icons` when the
+/// list is filtered to `hero_icon`, `viewed_training_crops` otherwise, with
+/// the count and the filter in the details.
 pub async fn list_training_crops(
     State(state): State<AppState>,
     admin: AdminUser,
@@ -745,37 +799,45 @@ pub async fn list_training_crops(
     configured(&state)?;
     let only = parse_kind_filter(filter.kind.as_deref())?;
     let (limit, offset) = pagination.resolve();
-    let (consents, names) = active_consents(&state).await?;
-    let visible: Vec<(CropKind, Vec<String>)> = stored_kinds()
+    // Members with stored crops, cut down to active ones. A visibility
+    // filter: a failed lookup is a 500, never an unfiltered list.
+    let counts = state.db.training_crop_counts().await.map_err(db_error)?;
+    let mut with_crops: Vec<String> = counts.into_iter().map(|row| row.member_id).collect();
+    with_crops.sort();
+    with_crops.dedup();
+    let names = state
+        .db
+        .active_member_display_names(&with_crops)
+        .await
+        .map_err(db_error)?;
+    let consents = state.db.training_crop_consents().await.map_err(db_error)?;
+    let active: Vec<String> = names.keys().cloned().collect();
+    let groups: Vec<(CropKind, Vec<String>)> = stored_kinds()
         .filter(|kind| only.is_none_or(|only| only == *kind))
-        .map(|kind| {
-            let ids = names
-                .keys()
-                .filter(|id| consents.get(*id).is_some_and(|c| c.get(kind)))
-                .cloned()
-                .collect();
-            (kind, ids)
-        })
+        .map(|kind| (kind, active.clone()))
         .collect();
     let rows = state
         .db
-        .list_training_crops_visible(&visible, limit, offset)
+        .list_training_crops_visible(&groups, limit, offset)
         .await
         .map_err(db_error)?;
     let items: Vec<StaffTrainingCrop> = rows
         .iter()
-        .map(|crop| StaffTrainingCrop {
-            member_id: crop.member_id.clone(),
-            display_name: names.get(&crop.member_id).cloned().unwrap_or_default(),
-            crop: entry(crop),
+        .map(|crop| {
+            let consented = consents
+                .get(&crop.member_id)
+                .is_some_and(|consent| consent.get(crop.kind));
+            let name = names.get(&crop.member_id).cloned().unwrap_or_default();
+            staff_item(crop, name, !consented)
         })
         .collect();
     let page = CursorResponse::from_oversized(items, limit, offset);
-    let details = format!("{} training crops", page.data.len());
+    let scope = only.map_or("all kinds", CropKind::as_str);
+    let details = format!("{} training crops, {scope}", page.data.len());
     audit(
         &state.db,
         &admin.member.id,
-        AuditAction::ViewedHeroIcons,
+        list_action(only),
         AuditTargetType::Member,
         "all",
         Some(details.as_str()),
@@ -842,7 +904,7 @@ pub async fn member_counts(
         let by_kind = stored.get(&member_id).unwrap_or(&empty);
         let mut kinds = Vec::new();
         let mut resolutions = Vec::new();
-        for kind in CropKind::ALL {
+        for kind in stored_kinds() {
             let consented = consent.get(kind);
             let per_resolution = by_kind.get(&kind);
             let count: u64 = per_resolution.map(|r| r.values().sum()).unwrap_or(0);
@@ -931,7 +993,17 @@ mod tests {
             parse_meta(CropKind::HeroIcon, br#"{"hero":"soldier-76"}"#),
             "hero",
         );
-        assert_eq!(ok.0, Some("Soldier: 76"));
+        assert_eq!(ok.0, Some("soldier-76"), "stored as the hero key");
+        let ok = must_ok(
+            parse_meta(CropKind::HeroIcon, br#"{"hero":"Soldier: 76"}"#),
+            "display name",
+        );
+        assert_eq!(ok.0, Some("soldier-76"));
+        let ok = must_ok(
+            parse_meta(CropKind::StatDigits, r#"{"hero":"Lúcio"}"#.as_bytes()),
+            "accented name",
+        );
+        assert_eq!(ok.0, Some("lucio"));
         assert_eq!(code(parse_meta(CropKind::StatDigits, b"{}")), "ok");
         assert_eq!(
             code(parse_meta(CropKind::MapName, br#"{"hero":"nobody"}"#)),
@@ -961,7 +1033,7 @@ mod tests {
     #[test]
     fn meta_fields_are_kept() {
         let body = br#"{"screen":"scoreboard","slot_type":"enemy","slot_index":2,
-            "game_token":"abcdefgh12","score":0.9,"runner_up":0.3,"margin":0.6,
+            "game_token":"0123456789abcdef0123456789abcdef","score":0.9,"runner_up":0.3,"margin":0.6,
             "icon_set_version":"7","spot_version":"s1","vote_card_filled":false,
             "locked_in":true,"screen_width":1920,"screen_height":1080,"ui_scale":90,
             "colorblind_filter":"off","found_spot":{"x":1,"y":2,"w":3,"h":4},
@@ -972,5 +1044,265 @@ mod tests {
         assert_eq!(meta.locked_in, Some(true));
         assert_eq!(meta.found_spot.map(|s| s.h), Some(4));
         assert_eq!(meta.colorblind_filter.as_deref(), Some("off"));
+    }
+
+    #[test]
+    fn bad_game_tokens_are_invalid_meta() {
+        for token in [
+            "abcdefgh12",
+            "3f2a9c0e-6b1d-4e8f-9a7c-5b3d1e0f2a4c",
+            "2026-11-10T18:04:05Z",
+            "0123456789ABCDEF0123456789ABCDEF",
+        ] {
+            let body = format!(r#"{{"game_token":"{token}"}}"#);
+            assert_eq!(
+                code(parse_meta(CropKind::StatDigits, body.as_bytes())),
+                "400 invalid_crop_meta",
+                "{token}"
+            );
+        }
+    }
+
+    fn ua(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::USER_AGENT, value.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn tracker_version_is_capped_for_storage() {
+        assert_eq!(
+            stored_tracker_version(&ua("scuffed-stat-tracker/0.6.0-alpha.3")).as_deref(),
+            Some("0.6.0-alpha.3")
+        );
+        assert_eq!(stored_tracker_version(&HeaderMap::new()), None);
+        assert_eq!(stored_tracker_version(&ua("curl/8.0")), None);
+        // Exactly 64 characters is kept, 65 is dropped.
+        let pre = "a".repeat(64 - "1.0.0-".len());
+        let at_limit = format!("1.0.0-{pre}");
+        assert_eq!(at_limit.len(), 64);
+        assert_eq!(
+            stored_tracker_version(&ua(&format!("scuffed-stat-tracker/{at_limit}"))),
+            Some(at_limit.clone())
+        );
+        let over = format!("{at_limit}a");
+        assert_eq!(
+            stored_tracker_version(&ua(&format!("scuffed-stat-tracker/{over}"))),
+            None
+        );
+        let long_build = format!("scuffed-stat-tracker/1.0.0+{}", "b".repeat(500));
+        assert_eq!(stored_tracker_version(&ua(&long_build)), None);
+        // A tab ends the version token; header values cannot hold other
+        // control characters, and the check refuses them anyway.
+        assert_eq!(
+            stored_tracker_version(&ua("scuffed-stat-tracker/1.2.3\textra")).as_deref(),
+            Some("1.2.3")
+        );
+    }
+
+    #[test]
+    fn admin_list_times_are_cut_to_the_hour() {
+        let at = DateTime::parse_from_rfc3339("2026-11-10T18:04:05.123456Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let cut = to_the_hour(at);
+        assert_eq!(cut.to_rfc3339(), "2026-11-10T18:00:00+00:00");
+        assert_eq!(to_the_hour(cut), cut);
+    }
+
+    #[test]
+    fn hero_icon_audit_names_are_kept_and_other_kinds_get_their_own() {
+        assert_eq!(
+            delete_action(CropKind::HeroIcon).to_string(),
+            "deleted_hero_icon"
+        );
+        for kind in [CropKind::StatDigits, CropKind::MapName] {
+            assert_eq!(delete_action(kind).to_string(), "deleted_training_crop");
+            assert_eq!(list_action(Some(kind)).to_string(), "viewed_training_crops");
+        }
+        assert_eq!(
+            list_action(Some(CropKind::HeroIcon)).to_string(),
+            "viewed_hero_icons"
+        );
+        assert_eq!(list_action(None).to_string(), "viewed_training_crops");
+    }
+
+    fn clean(width: u32, height: u32) -> CleanIcon {
+        let canvas = image::RgbaImage::from_pixel(width, height, image::Rgba([9, 9, 9, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        canvas
+            .write_to(&mut out, image::ImageFormat::Png)
+            .expect("png");
+        clean_png_within(&out.into_inner(), 1024, 256).expect("clean")
+    }
+
+    fn new_row(member: &str, kind: CropKind) -> NewTrainingCrop {
+        NewTrainingCrop {
+            id: String::new(),
+            member_id: member.to_string(),
+            kind,
+            hero: None,
+            file_name: String::new(),
+            size_bytes: 0,
+            width: 0,
+            height: 0,
+            created_at: Utc::now(),
+            tracker_version: None,
+            meta: TrainingCropMeta::default(),
+        }
+    }
+
+    /// Store `count` crops for one simulated request: file and row each.
+    async fn store_request(
+        state: &AppState,
+        member: &str,
+        kind: CropKind,
+        count: usize,
+    ) -> Vec<TrainingCrop> {
+        let mut stored = Vec::new();
+        for _ in 0..count {
+            let row = new_row(member, kind);
+            stored.push(must_ok(
+                store_crop(state, row, clean(40, 16)).await,
+                "store",
+            ));
+        }
+        stored
+    }
+
+    async fn rows(state: &AppState, member: &str) -> Vec<String> {
+        let mut ids: Vec<String> = state
+            .db
+            .list_training_crops_for_member(member, None, None)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|crop| crop.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    fn file_exists(state: &AppState, id: &str) -> bool {
+        state.hero_icons.icon_path(id).exists()
+    }
+
+    /// Two uploads both passed the first count at cap - 1 and both stored a
+    /// crop, so the member is one over the cap. The first to recheck loses:
+    /// its row and file go, the other request keeps its crop, and the
+    /// member ends exactly at the cap.
+    #[tokio::test]
+    async fn racing_uploads_past_the_cap_clean_up_the_loser() {
+        let state = crate::test_support::test_state().await;
+        ensure_hero_icons_dir(state.hero_icons.dir()).await.unwrap();
+        let member = "racer";
+        let kind = CropKind::MapName;
+        state
+            .db
+            .set_training_crop_consent(
+                member,
+                TrainingCropConsentUpdate {
+                    map_name: Some(true),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let earlier =
+            store_request(&state, member, kind, (kind.max_per_member() - 1) as usize).await;
+        let first = store_request(&state, member, kind, 1).await;
+        let second = store_request(&state, member, kind, 1).await;
+        let cap = u64::from(kind.max_per_member());
+        let count = state
+            .db
+            .count_training_crops_for_member(member, kind)
+            .await
+            .unwrap();
+        assert_eq!(count, cap + 1, "both requests got past the first count");
+
+        let (status, body) = must_err(
+            recheck_crops_after_store(&state, member, kind, &first).await,
+            "loser",
+        );
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body.error, TRAINING_CROP_ERR_LIMIT_REACHED);
+        assert!(
+            state
+                .db
+                .get_training_crop(&first[0].id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(!file_exists(&state, &first[0].id));
+
+        must_ok(
+            recheck_crops_after_store(&state, member, kind, &second).await,
+            "winner",
+        );
+        assert!(file_exists(&state, &second[0].id));
+        let stored = rows(&state, member).await;
+        assert_eq!(stored.len() as u64, cap);
+        assert!(stored.contains(&second[0].id));
+        for crop in &earlier {
+            assert!(file_exists(&state, &crop.id), "earlier crops are kept");
+        }
+        let _ = std::fs::remove_dir_all(state.hero_icons.dir());
+    }
+
+    /// Consent goes off while a request is storing its crops: the recheck
+    /// removes this request's rows and files and answers 403. Crops stored
+    /// by an earlier request stay (hidden, like any opt-out).
+    #[tokio::test]
+    async fn consent_withdrawn_mid_upload_removes_this_requests_crops() {
+        let state = crate::test_support::test_state().await;
+        ensure_hero_icons_dir(state.hero_icons.dir()).await.unwrap();
+        let member = "withdrawer";
+        let kind = CropKind::StatDigits;
+        let on = TrainingCropConsentUpdate {
+            stat_digits: Some(true),
+            ..Default::default()
+        };
+        state
+            .db
+            .set_training_crop_consent(member, on)
+            .await
+            .unwrap();
+        let earlier = store_request(&state, member, kind, 1).await;
+        must_ok(
+            recheck_crops_after_store(&state, member, kind, &earlier).await,
+            "consented",
+        );
+
+        let in_flight = store_request(&state, member, kind, 3).await;
+        let off = TrainingCropConsentUpdate {
+            stat_digits: Some(false),
+            ..Default::default()
+        };
+        state
+            .db
+            .set_training_crop_consent(member, off)
+            .await
+            .unwrap();
+        let (status, body) = must_err(
+            recheck_crops_after_store(&state, member, kind, &in_flight).await,
+            "withdrawn",
+        );
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body.error, TRAINING_CROP_ERR_CONSENT_REQUIRED);
+        for crop in &in_flight {
+            assert!(
+                state
+                    .db
+                    .get_training_crop(&crop.id)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert!(!file_exists(&state, &crop.id));
+        }
+        assert_eq!(rows(&state, member).await, vec![earlier[0].id.clone()]);
+        assert!(file_exists(&state, &earlier[0].id));
+        let _ = std::fs::remove_dir_all(state.hero_icons.dir());
     }
 }

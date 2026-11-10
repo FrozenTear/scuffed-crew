@@ -8,7 +8,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::hero_icons::HERO_ICON_MAX_PER_MEMBER;
+use crate::hero_icons::{HERO_ICON_MAX_BYTES, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_PER_MEMBER};
 
 /// What a crop shows. Consent, caps and the upload limiter are per kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -20,7 +20,8 @@ pub enum CropKind {
     StatDigits,
     /// The map name banner.
     MapName,
-    /// A whole screen. Consent can be stored, uploads are refused for now.
+    /// A whole screen. Uploads are refused for now and consent for it cannot
+    /// be stored: the consent shapes have no `full_screen` field.
     FullScreen,
 }
 
@@ -63,6 +64,31 @@ impl CropKind {
             CropKind::FullScreen => 0,
         }
     }
+
+    /// Largest accepted crop `(width, height)` in pixels. Every edge is at
+    /// least `HERO_ICON_MIN_EDGE`.
+    ///
+    /// `map_name` banners are wide and the tracker does not shrink them, so
+    /// that kind takes up to [`MAP_NAME_MAX_WIDTH`] by
+    /// [`MAP_NAME_MAX_HEIGHT`]. Every other kind keeps the hero icon bound of
+    /// `HERO_ICON_MAX_EDGE` on each edge.
+    pub fn max_edges(self) -> (u32, u32) {
+        match self {
+            CropKind::MapName => (MAP_NAME_MAX_WIDTH, MAP_NAME_MAX_HEIGHT),
+            _ => (HERO_ICON_MAX_EDGE, HERO_ICON_MAX_EDGE),
+        }
+    }
+
+    /// Largest accepted `crop` part in bytes. [`MAP_NAME_MAX_BYTES`] for
+    /// `map_name` (its larger pixel bound needs it), `HERO_ICON_MAX_BYTES`
+    /// otherwise. The whole request stays capped at
+    /// `HERO_ICON_MAX_REQUEST_BYTES` (2 MiB) for every kind.
+    pub fn max_crop_bytes(self) -> usize {
+        match self {
+            CropKind::MapName => MAP_NAME_MAX_BYTES,
+            _ => HERO_ICON_MAX_BYTES,
+        }
+    }
 }
 
 /// Most `stat_digits` crops one member may have stored at the same time.
@@ -70,6 +96,18 @@ pub const STAT_DIGITS_MAX_PER_MEMBER: u32 = 1000;
 
 /// Most `map_name` crops one member may have stored at the same time.
 pub const MAP_NAME_MAX_PER_MEMBER: u32 = 200;
+
+/// Widest accepted `map_name` crop, in pixels. Map name banners are wide
+/// and the tracker sends them unscaled.
+pub const MAP_NAME_MAX_WIDTH: u32 = 1024;
+
+/// Tallest accepted `map_name` crop, in pixels.
+pub const MAP_NAME_MAX_HEIGHT: u32 = 256;
+
+/// Largest accepted `map_name` crop part, in bytes (256 KiB). The request
+/// limit of 2 MiB still applies, so a request holds fewer of the largest
+/// banners than the 20-pair maximum.
+pub const MAP_NAME_MAX_BYTES: usize = 256 * 1024;
 
 /// Largest accepted `meta` part, in bytes (4 KiB).
 pub const TRAINING_CROP_META_MAX_BYTES: usize = 4 * 1024;
@@ -80,11 +118,10 @@ pub const TRAINING_CROP_LABEL_MAX_LEN: usize = 32;
 /// Longest accepted version string (`icon_set_version`, `spot_version`).
 pub const TRAINING_CROP_VERSION_MAX_LEN: usize = 64;
 
-/// Shortest accepted `game_token`.
-pub const TRAINING_CROP_GAME_TOKEN_MIN_LEN: usize = 8;
-
-/// Longest accepted `game_token`.
-pub const TRAINING_CROP_GAME_TOKEN_MAX_LEN: usize = 64;
+/// Exact length of a `game_token`: 32 lowercase hex characters (128 random
+/// bits made by the tracker per game). Timestamps, UUIDs with dashes and
+/// other shapes are refused, so the token cannot carry when or which game.
+pub const TRAINING_CROP_GAME_TOKEN_LEN: usize = 32;
 
 /// Highest accepted `slot_index`.
 pub const TRAINING_CROP_SLOT_INDEX_MAX: u32 = 63;
@@ -130,5 +167,15 @@ mod tests {
             CropKind::HeroIcon.max_per_member(),
             HERO_ICON_MAX_PER_MEMBER
         );
+    }
+
+    #[test]
+    fn only_map_name_gets_the_wide_bound() {
+        assert_eq!(CropKind::MapName.max_edges(), (1024, 256));
+        assert_eq!(CropKind::MapName.max_crop_bytes(), 256 * 1024);
+        for kind in [CropKind::HeroIcon, CropKind::StatDigits] {
+            assert_eq!(kind.max_edges(), (HERO_ICON_MAX_EDGE, HERO_ICON_MAX_EDGE));
+            assert_eq!(kind.max_crop_bytes(), HERO_ICON_MAX_BYTES);
+        }
     }
 }

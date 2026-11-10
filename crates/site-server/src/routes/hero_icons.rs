@@ -366,20 +366,28 @@ pub(crate) struct CleanIcon {
     pub(crate) height: u32,
 }
 
-fn edge_ok(edge: u32) -> bool {
-    (HERO_ICON_MIN_EDGE..=HERO_ICON_MAX_EDGE).contains(&edge)
-}
-
 /// Check the header size, decode, and re-encode one PNG. Runs on a blocking thread.
 ///
 /// The stored file is the re-encoded image, so text chunks and other metadata
 /// in the upload are dropped. `Err` is the 400 error code.
 pub(crate) fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
+    clean_png_within(data, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_EDGE)
+}
+
+/// [`clean_png`] with its own largest width and height. Each edge is still
+/// at least `HERO_ICON_MIN_EDGE`. Training crops use it for the wider
+/// `map_name` bound.
+pub(crate) fn clean_png_within(
+    data: &[u8],
+    max_width: u32,
+    max_height: u32,
+) -> Result<CleanIcon, &'static str> {
     let reader = image::ImageReader::with_format(Cursor::new(data), ImageFormat::Png);
     let Ok((width, height)) = reader.into_dimensions() else {
         return Err(HERO_ICON_ERR_INVALID_PNG);
     };
-    if !edge_ok(width) || !edge_ok(height) {
+    let edge_ok = |edge: u32, max: u32| (HERO_ICON_MIN_EDGE..=max).contains(&edge);
+    if !edge_ok(width, max_width) || !edge_ok(height, max_height) {
         return Err(HERO_ICON_ERR_BAD_DIMENSIONS);
     }
     let Ok(decoded) = image::load_from_memory_with_format(data, ImageFormat::Png) else {
@@ -407,6 +415,15 @@ pub(crate) fn multipart_reject(error: MultipartError) -> Reject {
 /// Read one `icon` part. The signature is checked as soon as 8 bytes are in,
 /// and reading stops as soon as the part passes [`HERO_ICON_MAX_BYTES`].
 pub(crate) async fn read_icon_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
+    read_png_part(field, HERO_ICON_MAX_BYTES).await
+}
+
+/// [`read_icon_part`] with its own byte limit (413 `icon_too_large` past
+/// `max_bytes`). Training crops use it for the larger `map_name` limit.
+pub(crate) async fn read_png_part(
+    field: &mut Field<'_>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, Reject> {
     let mut data: Vec<u8> = Vec::new();
     while let Some(chunk) = field.chunk().await.map_err(multipart_reject)? {
         data.extend_from_slice(&chunk);
@@ -416,7 +433,7 @@ pub(crate) async fn read_icon_part(field: &mut Field<'_>) -> Result<Vec<u8>, Rej
                 HERO_ICON_ERR_NOT_PNG,
             ));
         }
-        if data.len() > HERO_ICON_MAX_BYTES {
+        if data.len() > max_bytes {
             return Err(reject(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 HERO_ICON_ERR_TOO_LARGE,

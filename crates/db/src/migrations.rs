@@ -1002,7 +1002,10 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         -- row is one crop of one kind. Rows from before `kind` existed are
         -- hero icons; backfill_training_crop_kind writes 'hero_icon' on them.
         -- Everything else is optional per-crop metadata from the tracker.
-        -- full_screen is refused by the server and never stored.
+        -- full_screen is refused by the server and never stored. `hero`
+        -- keeps its type: rows written from now on hold the hero key (pack
+        -- stem, e.g. 'soldier-76'), older rows the display name; reads take
+        -- both.
         -- Additive only. Rollback: see docs/api/training-crops.md.
         -- ================================================
         DEFINE FIELD OVERWRITE kind ON hero_icon TYPE string DEFAULT 'hero_icon'
@@ -1010,7 +1013,8 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
         DEFINE FIELD OVERWRITE screen ON hero_icon TYPE option<string>;
         DEFINE FIELD OVERWRITE slot_type ON hero_icon TYPE option<string>;
         DEFINE FIELD OVERWRITE slot_index ON hero_icon TYPE option<int>;
-        -- Opaque random per-game token from the tracker. Never linked to a match.
+        -- Random per-game token from the tracker (32 lowercase hex). Never
+        -- linked to a match.
         DEFINE FIELD OVERWRITE game_token ON hero_icon TYPE option<string>;
         DEFINE FIELD OVERWRITE score ON hero_icon TYPE option<float>;
         DEFINE FIELD OVERWRITE runner_up ON hero_icon TYPE option<float>;
@@ -1033,10 +1037,11 @@ pub async fn run_migrations(client: &Surreal<Any>) -> DbResult<()> {
 
         -- Per-kind training crop consent. hero_icon consent is the existing
         -- hero_icon_opt_in, so today's opt-ins carry over unchanged. The other
-        -- kinds are off by default; legacy rows read false.
+        -- kinds are off by default; legacy rows read false. There is no
+        -- full_screen consent field: whole screens are not accepted, so their
+        -- consent is never stored.
         DEFINE FIELD OVERWRITE stat_digits_opt_in ON member_settings TYPE bool DEFAULT false;
         DEFINE FIELD OVERWRITE map_name_opt_in ON member_settings TYPE bool DEFAULT false;
-        DEFINE FIELD OVERWRITE full_screen_opt_in ON member_settings TYPE bool DEFAULT false;
     "#,
             )
             .await?
