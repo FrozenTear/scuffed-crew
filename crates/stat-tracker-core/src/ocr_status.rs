@@ -660,13 +660,13 @@ impl Status {
     }
 
     /// The keyboard line ([`Self::input_notice`]) first, then the part of
-    /// [`Self::notice`] that belongs in Tracker health, then the
-    /// bans and picks line ([`Self::bans_picks_notice`]), which has nothing
-    /// to do with the OCR switch: only
-    /// what is wrong while the tracker runs with OCR off (a pack on hold, a
-    /// read that was stopped). A refused `off` is not a health problem: the
-    /// tracker runs classic OCR and reads everything, so health stays as it
-    /// is and the reason is shown in Settings.
+    /// [`Self::notice`] that is wrong while the tracker runs with OCR off (a
+    /// pack on hold, a read that was stopped), then the bans and picks line
+    /// ([`Self::bans_picks_notice`]), whatever OCR is set to. The keyboard
+    /// line ends with a shell command, so a line break, not a space, comes
+    /// after it. A refused `off` is not a health problem: the tracker runs
+    /// classic OCR and reads everything, so health stays as it is and the
+    /// reason is shown in Settings.
     pub fn health_notice(&self) -> Option<String> {
         let ocr = self.effective.is_off().then(|| self.notice()).flatten();
         let bans = Some(self.bans_picks_notice.clone()).filter(|n| !n.is_empty());
@@ -677,7 +677,7 @@ impl Status {
         match (self.input_notice.is_empty(), rest) {
             (true, rest) => rest,
             (false, None) => Some(self.input_notice.clone()),
-            (false, Some(rest)) => Some(format!("{} {rest}", self.input_notice)),
+            (false, Some(rest)) => Some(format!("{}\n{rest}", self.input_notice)),
         }
     }
 }
@@ -1245,16 +1245,18 @@ mod tests {
 
     #[test]
     fn the_input_line_leads_tracker_health_whatever_ocr_is() {
-        let input = "The tracker cannot read the keyboard, so Tab detection is off.";
+        // Like the daemon's notice, it ends with a shell command.
+        let input = "Tab detection is off. Run: sudo usermod -aG input \"$USER\"";
         let mut on = status(OcrSetting::On, None, None);
         on.input_notice = input.into();
         assert_eq!(on.health_notice().as_deref(), Some(input));
         assert_eq!(on.notice(), None, "it is no OCR notice");
         on.bans_picks_notice = "Bans and picks were not read.".into();
+        // A line break ends the command: no run-on into the next notice.
         assert_eq!(
             on.health_notice().as_deref(),
             Some(
-                "The tracker cannot read the keyboard, so Tab detection is off. Bans and picks were not read."
+                "Tab detection is off. Run: sudo usermod -aG input \"$USER\"\nBans and picks were not read."
             )
         );
         // An old status file has no such field and reads as empty.

@@ -2733,15 +2733,15 @@ pub use crate::hero_pack_hint::hero_pack_hint;
 const HEALTH_READY: &str = "Ready";
 const HEALTH_WAITING: &str = "Waiting for a capture";
 
-/// Tracker health with the tracker's own notice: an unread keyboard, then
-/// the classic OCR notice, then a failed bans and picks read
-/// (`settings::daemon_health_notice`). It takes the place of the two idle
-/// lines and follows a sync problem.
+/// Tracker health with a notice: the tracker's own (`settings::daemon_health_notice`)
+/// or a declined screen share. It takes the place of the two idle lines;
+/// after a sync problem or an earlier notice it starts a new line, as the
+/// keyboard notice ends with a shell command.
 fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
     match notice {
         None => base,
         Some(notice) if base == HEALTH_READY || base == HEALTH_WAITING => notice.to_string(),
-        Some(notice) => format!("{base} {notice}"),
+        Some(notice) => format!("{base}\n{notice}"),
     }
 }
 
@@ -3427,7 +3427,7 @@ mod tests {
         assert_eq!(super::health_with_ocr_notice(paused.into(), None), paused);
         assert_eq!(
             super::health_with_ocr_notice(paused.into(), Some(notice)),
-            format!("{paused} {notice}")
+            format!("{paused}\n{notice}")
         );
         let declined = "Screen share was declined: no captures until Overwatch is restarted";
         let idle = super::health_with_ocr_notice(super::HEALTH_READY.into(), None);

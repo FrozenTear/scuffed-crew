@@ -444,7 +444,10 @@ async fn permission_denied_keyboard_runs_on_and_warns_once() {
     let warnings = || {
         let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
         text.lines()
-            .filter(|l| l.contains("WARN") && l.contains(NO_KEYBOARD_NOTICE))
+            .filter(|l| {
+                // The error is in the line, and the command ends it.
+                l.contains("WARN") && l.contains(DENIED) && l.ends_with(NO_KEYBOARD_NOTICE)
+            })
             .count()
     };
     let dir = tempfile::tempdir().expect("tempdir");
@@ -571,9 +574,10 @@ async fn keyboard_reopen_deadline_survives_frequent_select_cancels() {
     assert!(!input.available());
 }
 
-/// The NO_KEYBOARD notice ends with the command, nothing after it, so a
-/// copy of the tail pastes into a shell as is. A trailing comma after
-/// `$USER` made usermod look for a user named "name,".
+/// The NO_KEYBOARD notice ends with the command, with no punctuation after
+/// it. A trailing comma after `$USER` made usermod look for a user named
+/// "name,". Tracker health breaks the line after it (`ocr_status` and the
+/// app's `health_with_ocr_notice` tests).
 #[test]
 fn no_keyboard_notice_ends_with_the_command_exactly() {
     const COMMAND: &str = "sudo usermod -aG input \"$USER\"";
@@ -605,6 +609,8 @@ async fn an_ended_keyboard_stream_reopens_at_the_deadline_not_at_once() {
     let open = {
         let opens = opens.clone();
         move || -> Result<EndedKeys, String> {
+            // Fail, not hang: a spin never yields, so the clock never moves.
+            assert!(opens.get() < 10, "reopen spins without yielding");
             opens.set(opens.get() + 1);
             Ok(EndedKeys)
         }

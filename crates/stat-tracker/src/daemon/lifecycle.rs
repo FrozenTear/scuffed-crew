@@ -16,8 +16,10 @@ pub(crate) const KEYBOARD_OPEN_ATTEMPTS: u32 = 3;
 pub(crate) const KEYBOARD_REOPEN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Tracker health while no keyboard can be read (`ocr_status::input_notice`).
-/// The command is last with nothing after it, so a copy of the tail pastes
-/// as is (a trailing comma made usermod look for user "name,").
+/// The notice ends with the command, with no punctuation after it (a
+/// trailing comma made usermod look for user "name,"). Tracker health puts
+/// a line break before anything that follows it, and the WARN log line ends
+/// with it.
 pub(crate) const NO_KEYBOARD_NOTICE: &str = "The tracker cannot read the keyboard, so Tab detection is off. Add yourself to the input group, then log out and back in: sudo usermod -aG input \"$USER\"";
 
 /// Gap between [`KEYBOARD_OPEN_ATTEMPTS`]. This wait also polls SIGTERM
@@ -209,10 +211,11 @@ where
             Err(e) if !self.warned => {
                 self.warned = true;
                 stat_tracker::ocr_status::publish_input_notice(&self.data_dir, NO_KEYBOARD_NOTICE);
+                // The error is in the message, not a field: fields print
+                // after the message, and the line should end with the command.
                 tracing::warn!(
                     target: "scuffed_stat_tracker",
-                    error = %e,
-                    "Capture and recording go on without Tab; retrying quietly. {NO_KEYBOARD_NOTICE}"
+                    "Keyboard open failed ({e}). Capture and recording go on without Tab; retrying quietly. {NO_KEYBOARD_NOTICE}"
                 );
                 self.schedule_reopen();
             }
@@ -236,7 +239,13 @@ where
                 {
                     Ok(key) => return Ok(key),
                     Err(e) => {
-                        tracing::info!(target: "scuffed_stat_tracker", error = %e, "keyboard devices lost: attempting to reopen");
+                        tracing::info!(
+                            target: "scuffed_stat_tracker",
+                            error = %e,
+                            retry_secs = self.retry.as_secs(),
+                            "keyboard devices lost: reopening in {} s",
+                            self.retry.as_secs()
+                        );
                         self.stream = None;
                         // Reopen at the quiet deadline, not at once: a stream
                         // that ended again right after opening would
