@@ -8,7 +8,7 @@
 //! ([`crate::settings_update`]).
 
 use iced::widget::{Row, button, checkbox, column, container, image, row, space, text, text_input};
-use iced::{Alignment, Element, Fill, Padding};
+use iced::{Alignment, Border, Element, Fill, Padding, Theme};
 
 use crate::app::{Message, TrackerApp};
 use crate::form_widgets::{
@@ -475,7 +475,7 @@ pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Messag
         ));
         bans_help.push(hint(crate::capture_reading::SERVICE_MAY_DIFFER));
     }
-    setting_row(
+    let row = setting_row(
         title_line(BANS_PICKS_LABEL, false, &[Tag::AfterRestart]),
         bans_help,
         crate::settings_keys::edit_switch(
@@ -483,7 +483,30 @@ pub(crate) fn bans_picks_row(app: &TrackerApp, demo: bool) -> Element<'_, Messag
             demo || bans_env_off,
             ConfigEdit::BansPicksReader,
         ),
-    )
+    );
+    // A 1 px accent outline while marked. The border width stays 1 px
+    // when it is off (transparent), so the row does not jump. iced 0.14's
+    // toggler is mouse and touch only: it has no keyboard focus, so Space
+    // cannot flip the switch from here.
+    let marked = app
+        .page_state
+        .bans_picks_row_marked(std::time::Instant::now());
+    container(row)
+        .id(iced::widget::Id::new(crate::bans_picks_setting::ROW_ID))
+        .width(Fill)
+        .style(move |_: &Theme| iced::widget::container::Style {
+            border: Border {
+                color: if marked {
+                    crate::theme::ACCENT
+                } else {
+                    iced::Color::TRANSPARENT
+                },
+                width: 1.0,
+                radius: crate::theme::RADIUS_INNER.into(),
+            },
+            ..iced::widget::container::Style::default()
+        })
+        .into()
 }
 
 /// Troubleshooting: debug images, screens around each game, the extra number

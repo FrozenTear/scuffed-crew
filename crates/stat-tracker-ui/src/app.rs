@@ -788,6 +788,12 @@ impl TrackerApp {
         } else if self.screen == Screen::Games && crate::games_panel::listens(self) {
             subs.push(iced::event::listen_with(crate::games_panel::close_keys));
         }
+        if self
+            .page_state
+            .bans_picks_row_marked(std::time::Instant::now())
+        {
+            subs.push(iced::event::listen_with(clear_bans_picks_highlight));
+        }
         Subscription::batch(subs)
     }
 
@@ -2743,6 +2749,15 @@ fn health_with_ocr_notice(base: String, notice: Option<&str>) -> String {
         Some(notice) if base == HEALTH_READY || base == HEALTH_WAITING => notice.to_string(),
         Some(notice) => format!("{base}\n{notice}"),
     }
+}
+
+fn clear_bans_picks_highlight(
+    event: iced::Event,
+    _status: iced::event::Status,
+    _window: iced::window::Id,
+) -> Option<Message> {
+    crate::bans_picks_setting::is_click_or_scroll(&event)
+        .then_some(Message::Nav(crate::nav::Msg::ClearBansPicksHighlight))
 }
 
 fn report_dialog_escape(

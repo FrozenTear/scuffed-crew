@@ -118,6 +118,12 @@ pub enum Msg {
     /// A button elsewhere that points at one Advanced row in Settings: open
     /// Settings, open the row (never close it) and scroll to it.
     ShowAdvancedSection(crate::settings_model::AdvancedSection),
+    /// "Open Settings" on a game whose reader was off: open Capture and
+    /// reading, jump to the Read bans and picks row if it is not already
+    /// in view, and mark it for two seconds.
+    ShowBansPicksSetting,
+    /// Drop the Read bans and picks mark: timeout, a click, or a scroll.
+    ClearBansPicksHighlight,
 }
 
 /// What the chip sends. A later "Review games" button sends the same.
@@ -166,6 +172,26 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             })
             .then(move |()| crate::focus_status::scroll_to(row_id));
             Task::batch([open, scroll])
+        }
+        Msg::ShowBansPicksSetting => {
+            let now = std::time::Instant::now();
+            app.page_state
+                .show_section(crate::settings_model::AdvancedSection::CaptureReading);
+            app.page_state.show_bans_picks_row(now);
+            let open = app.update(Message::Navigate(Screen::Settings));
+            let scroll = Task::future(async {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+            })
+            .then(|()| crate::bans_picks_setting::scroll_to_row());
+            let expire = Task::future(async {
+                tokio::time::sleep(crate::bans_picks_setting::HIGHLIGHT_FOR).await;
+                Message::Nav(Msg::ClearBansPicksHighlight)
+            });
+            Task::batch([open, scroll, expire])
+        }
+        Msg::ClearBansPicksHighlight => {
+            app.page_state.clear_bans_picks_highlight();
+            Task::none()
         }
     }
 }
@@ -1002,6 +1028,42 @@ mod tests {
         );
         assert!(app.page_state.is_open(AdvancedSection::Troubleshooting));
         assert!(!app.page_state.is_open(AdvancedSection::CaptureReading));
+    }
+
+    #[test]
+    fn a_reader_off_open_settings_marks_the_bans_picks_row() {
+        use crate::settings_model::AdvancedSection;
+        let (_dir, mut app) = app();
+        app.screen = Screen::Games;
+        let now = std::time::Instant::now();
+        let _ = update(&mut app, Msg::ShowBansPicksSetting);
+        assert_eq!(app.screen, Screen::Settings);
+        assert!(app.page_state.is_open(AdvancedSection::CaptureReading));
+        assert!(app.page_state.bans_picks_row_marked(now));
+        // Other reasons keep today's behaviour: the section opens, the
+        // switch is not marked.
+        let (_dir, mut other) = app();
+        other.screen = Screen::Games;
+        let _ = update(
+            &mut other,
+            Msg::ShowAdvancedSection(AdvancedSection::CaptureReading),
+        );
+        assert!(other.page_state.is_open(AdvancedSection::CaptureReading));
+        assert!(
+            !other
+                .page_state
+                .bans_picks_row_marked(std::time::Instant::now())
+        );
+        // The Settings tab itself stays at the top and does not mark it.
+        let (_dir, mut tab) = app();
+        tab.screen = Screen::Games;
+        let _ = tab.update(Message::Navigate(Screen::Settings));
+        assert_eq!(tab.screen, Screen::Settings);
+        assert!(!tab.page_state.is_open(AdvancedSection::CaptureReading));
+        assert!(
+            !tab.page_state
+                .bans_picks_row_marked(std::time::Instant::now())
+        );
     }
 
     #[test]

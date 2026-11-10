@@ -250,6 +250,8 @@ pub struct SettingsLink {
     pub tip: &'static str,
     /// The Advanced row the button opens.
     pub open: AdvancedSection,
+    /// Only a reader-off game jumps to the Read bans and picks row.
+    pub reveal_row: bool,
 }
 
 /// What the open row shows for bans and picks.
@@ -367,10 +369,17 @@ fn settings_link(status: Option<&BansPicksStatus>) -> SettingsLink {
         Some(BansPicksStatus::PackMissing { .. }) => SettingsLink {
             tip: "Settings, website connection. Linking an account lets the tracker download the pack.",
             open: AdvancedSection::WebsiteConnection,
+            reveal_row: false,
+        },
+        Some(BansPicksStatus::ReaderOff) => SettingsLink {
+            tip: "Settings, Capture and reading, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
+            open: AdvancedSection::CaptureReading,
+            reveal_row: true,
         },
         _ => SettingsLink {
             tip: "Settings, Capture and reading, Read bans and picks. It takes effect after a restart. Games already played stay unread.",
             open: AdvancedSection::CaptureReading,
+            reveal_row: false,
         },
     }
 }

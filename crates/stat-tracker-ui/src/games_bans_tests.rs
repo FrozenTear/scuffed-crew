@@ -2,7 +2,7 @@
 
 use super::*;
 use crate::fixtures_games::{
-    HELD, LOBBY_ONLY, MIXED, NORMAL, NO_BAN, REJECTED_2, SIDE, SKIP, UNDECIDED, UNSURE,
+    HELD, LOBBY_ONLY, MIXED, NO_BAN, NORMAL, REJECTED_2, SIDE, SKIP, UNDECIDED, UNSURE,
 };
 use crate::snapshot::games_from_snapshot;
 
@@ -542,9 +542,11 @@ fn a_missing_or_null_ban_votes_is_not_read() {
         r#"{"ban_vote":[{"value":"mei"}]}"#,
         Some(BansPicksStatus::Ok),
     );
-    assert!(!parse(g.bans_picks.as_deref().unwrap())
-        .unwrap()
-        .read_something());
+    assert!(
+        !parse(g.bans_picks.as_deref().unwrap())
+            .unwrap()
+            .read_something()
+    );
 }
 
 #[test]
@@ -774,9 +776,11 @@ fn a_below_bar_read_is_a_not_read_chip() {
     }
     assert!(b.legend().outline);
     // The partial fixture's ban below the bar too.
-    assert!(chips(&block_of(&game(UNSURE)).rows, LABEL_BANS)
-        .iter()
-        .any(|c| c.name() == "Not read"));
+    assert!(
+        chips(&block_of(&game(UNSURE)).rows, LABEL_BANS)
+            .iter()
+            .any(|c| c.name() == "Not read")
+    );
 }
 
 #[test]
@@ -796,6 +800,7 @@ fn nothing_read_shows_the_reason_and_never_hides_the_game() {
     assert!(link.tip.contains("Capture and reading"), "{}", link.tip);
     assert!(line.contains(crate::settings_cards::BANS_PICKS_LABEL));
     assert_eq!(link.open, AdvancedSection::CaptureReading);
+    assert!(link.reveal_row);
 
     let BansPicks::Reason {
         line,
@@ -880,6 +885,26 @@ fn open_settings_opens_the_row_that_holds_the_fix() {
         Some(AdvancedSection::WebsiteConnection)
     );
     assert_eq!(open(BansPicksStatus::NoFrames), None);
+}
+
+#[test]
+fn only_reader_off_open_settings_reveals_the_switch() {
+    let reveal = |s: BansPicksStatus| {
+        let mut g = game(HELD);
+        g.bans_picks = None;
+        g.bans_picks_status = Some(s);
+        match bans_picks(&g) {
+            BansPicks::Reason { settings, .. } => settings.map(|l| l.reveal_row),
+            other => panic!("{other:?}"),
+        }
+    };
+    assert_eq!(reveal(BansPicksStatus::ReaderOff), Some(true));
+    assert_eq!(reveal(BansPicksStatus::PackFailed), Some(false));
+    assert_eq!(
+        reveal(BansPicksStatus::PackMissing { linked: false }),
+        Some(false)
+    );
+    assert_eq!(reveal(BansPicksStatus::NoFrames), None);
 }
 
 #[test]
