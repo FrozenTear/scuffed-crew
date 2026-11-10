@@ -82,6 +82,7 @@ bans_picks_reader = false
 
 [auto_detect]
 enabled = true
+cooldown_secs = 120
 ";
 
 /// The tracker keeps an alpha.2.3 file's reader off, and

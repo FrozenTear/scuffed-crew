@@ -366,6 +366,7 @@ bans_picks_reader = false
 
 [auto_detect]
 enabled = true
+cooldown_secs = 120
 ";
 
 /// The key name did not change with the move, so an alpha.2.3 file with
