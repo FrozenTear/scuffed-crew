@@ -763,7 +763,41 @@ database row, and logs `hero icon orphan sweep done` with the count.
 The `hero-icons-data` volume is not in `scripts/backup.sh`, by decision: the
 current server is a temporary dev platform and backups are dropped for it.
 Lost icons can be contributed again. Endpoints,
-caps and the privacy rule are in `docs/api/hero-icons.md`.
+caps and the privacy rule are in `docs/api/hero-icons.md`. The same directory
+also holds opt-in training crops from the tracker (`/api/training-crops`, see
+`docs/api/training-crops.md`).
+
+### Removing a deactivated or banned member's crops
+
+The API cannot delete the crops of an inactive member (a deactivated or
+banned member, since a ban deactivates): the owner can no longer sign in and
+admin deletes answer 404 for them, the same rule as for hero icons. When the
+crops must go anyway (for example the member asks by another channel), an
+operator removes them by hand. This deletes the member's contributions of
+every kind for good, so get FrozenTear's yes first and write it in the fleet
+log; it is not in the audit log. Nothing here runs on its own.
+
+1. Check the member is the right one and inactive (read only):
+   ```surql
+   SELECT id, display_name, is_active FROM member WHERE record::id(id) = '<member_id>';
+   ```
+2. List the crops and note the count (read only):
+   ```surql
+   SELECT id, kind, file_name FROM hero_icon WHERE member_id = '<member_id>';
+   ```
+3. Delete each listed `file_name` (`<id>.png`) from the `hero-icons-data`
+   volume (`HERO_ICONS_DIR`). Files go first, as in the API.
+4. Delete the rows:
+   ```surql
+   DELETE hero_icon WHERE member_id = '<member_id>';
+   ```
+   Add `AND kind = '<kind>'` to steps 2 and 4 to remove one kind only.
+5. Run step 2 again and expect no rows. A file left behind by mistake is
+   removed by the orphan sweep at the next start, once it is an hour old.
+
+The consent flags on `member_settings` are left as they are. They hide
+nothing once the crops are gone, and a member who is reactivated keeps the
+choice they made.
 
 ## Recognizer asset packs
 

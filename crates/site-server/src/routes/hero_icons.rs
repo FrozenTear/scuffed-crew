@@ -60,7 +60,7 @@ use scuffed_types::api::{
     PaginationParams,
 };
 use scuffed_types::{
-    HERO_ICON_MAX_BYTES, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_FILES_PER_UPLOAD,
+    CropKind, HERO_ICON_MAX_BYTES, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_FILES_PER_UPLOAD,
     HERO_ICON_MAX_PER_MEMBER, HERO_ICON_MIN_EDGE, hero_key_to_name,
 };
 use serde::Deserialize;
@@ -74,13 +74,13 @@ use crate::state::AppState;
 /// The 8-byte PNG file signature.
 const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
 
-type Reject = (StatusCode, Json<ErrorResponse>);
+pub(crate) type Reject = (StatusCode, Json<ErrorResponse>);
 
 /// The 403 body of the `AdminUser` extractor. The per-icon routes give it to
 /// officers so Site handles one string for every admin-only refusal.
-const ADMIN_REQUIRED: &str = "Admin access required";
+pub(crate) const ADMIN_REQUIRED: &str = "Admin access required";
 
-fn reject(status: StatusCode, error_code: &str) -> Reject {
+pub(crate) fn reject(status: StatusCode, error_code: &str) -> Reject {
     (
         status,
         Json(ErrorResponse {
@@ -89,7 +89,7 @@ fn reject(status: StatusCode, error_code: &str) -> Reject {
     )
 }
 
-fn internal() -> Reject {
+pub(crate) fn internal() -> Reject {
     reject(StatusCode::INTERNAL_SERVER_ERROR, "Internal error")
 }
 
@@ -97,13 +97,13 @@ fn not_found() -> Reject {
     reject(StatusCode::NOT_FOUND, HERO_ICON_ERR_NOT_FOUND)
 }
 
-fn db_error(error: DbError) -> Reject {
+pub(crate) fn db_error(error: DbError) -> Reject {
     tracing::error!(%error, "hero icon database call failed");
     internal()
 }
 
 /// 503 `hero_icons_disabled` when `HERO_ICONS_DIR` could not be used at startup.
-fn configured(state: &AppState) -> Result<(), Reject> {
+pub(crate) fn configured(state: &AppState) -> Result<(), Reject> {
     if !state.hero_icons.enabled() {
         return Err(reject(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -199,7 +199,7 @@ enum AdminAccess {
 }
 
 /// True when `member_id` is an active member.
-async fn member_active(state: &AppState, member_id: &str) -> Result<bool, Reject> {
+pub(crate) async fn member_active(state: &AppState, member_id: &str) -> Result<bool, Reject> {
     let active = state
         .db
         .active_member_display_names(&[member_id.to_string()])
@@ -258,7 +258,7 @@ async fn admin_target(
 }
 
 /// Remove one icon file. A file that is already gone is fine.
-async fn remove_icon_file(state: &AppState, id: &str) -> std::io::Result<()> {
+pub(crate) async fn remove_icon_file(state: &AppState, id: &str) -> std::io::Result<()> {
     if !is_icon_id(id) {
         return Ok(());
     }
@@ -270,7 +270,7 @@ async fn remove_icon_file(state: &AppState, id: &str) -> std::io::Result<()> {
 }
 
 /// [`remove_icon_file`] for cleanup paths: a failure is logged, not returned.
-async fn discard_icon_file(state: &AppState, id: &str) {
+pub(crate) async fn discard_icon_file(state: &AppState, id: &str) {
     if let Err(error) = remove_icon_file(state, id).await {
         tracing::error!(%error, "hero icon file cleanup failed");
     }
@@ -303,23 +303,25 @@ impl DeleteAllOutcome {
 /// A database error stops the loop and is carried the same way. Opt-in is not
 /// checked: the owner and admins delete hidden icons too.
 async fn delete_all_icons(state: &AppState, member_id: &str) -> Result<DeleteAllOutcome, Reject> {
-    let rows = state
+    // Ids of hero_icon rows only, so a row that fails to parse is deleted
+    // too and other kinds are left alone.
+    let ids = state
         .db
-        .list_hero_icons_for_member(member_id)
+        .training_crop_ids_for_member(member_id, Some(CropKind::HeroIcon))
         .await
         .map_err(db_error)?;
     let mut deleted: u32 = 0;
     let mut file_failed = false;
     let mut failure = None;
-    for icon in &rows {
-        if let Err(error) = remove_icon_file(state, &icon.id).await {
+    for id in &ids {
+        if let Err(error) = remove_icon_file(state, id).await {
             tracing::error!(%error, "hero icon file delete failed");
             file_failed = true;
             continue;
         }
-        match state.db.delete_hero_icon(&icon.id).await {
-            Ok(Some(_)) => deleted += 1,
-            Ok(None) => {}
+        match state.db.delete_training_crop(id).await {
+            Ok(true) => deleted += 1,
+            Ok(false) => {}
             Err(error) => {
                 failure = Some(db_error(error));
                 break;
@@ -343,7 +345,7 @@ async fn remove_stored(state: &AppState, icons: &[HeroIcon]) {
 }
 
 /// Create the icon file with mode 0600. Never overwrites.
-async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+pub(crate) async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let mut options = tokio::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -360,26 +362,34 @@ async fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 /// One icon after the server decoded and re-encoded it.
-struct CleanIcon {
-    bytes: Vec<u8>,
-    width: u32,
-    height: u32,
-}
-
-fn edge_ok(edge: u32) -> bool {
-    (HERO_ICON_MIN_EDGE..=HERO_ICON_MAX_EDGE).contains(&edge)
+pub(crate) struct CleanIcon {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
 }
 
 /// Check the header size, decode, and re-encode one PNG. Runs on a blocking thread.
 ///
 /// The stored file is the re-encoded image, so text chunks and other metadata
 /// in the upload are dropped. `Err` is the 400 error code.
-fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
+pub(crate) fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
+    clean_png_within(data, HERO_ICON_MAX_EDGE, HERO_ICON_MAX_EDGE)
+}
+
+/// [`clean_png`] with its own largest width and height. Each edge is still
+/// at least `HERO_ICON_MIN_EDGE`. Training crops use it for the wider
+/// `map_name` bound.
+pub(crate) fn clean_png_within(
+    data: &[u8],
+    max_width: u32,
+    max_height: u32,
+) -> Result<CleanIcon, &'static str> {
     let reader = image::ImageReader::with_format(Cursor::new(data), ImageFormat::Png);
     let Ok((width, height)) = reader.into_dimensions() else {
         return Err(HERO_ICON_ERR_INVALID_PNG);
     };
-    if !edge_ok(width) || !edge_ok(height) {
+    let edge_ok = |edge: u32, max: u32| (HERO_ICON_MIN_EDGE..=max).contains(&edge);
+    if !edge_ok(width, max_width) || !edge_ok(height, max_height) {
         return Err(HERO_ICON_ERR_BAD_DIMENSIONS);
     }
     let Ok(decoded) = image::load_from_memory_with_format(data, ImageFormat::Png) else {
@@ -396,7 +406,7 @@ fn clean_png(data: &[u8]) -> Result<CleanIcon, &'static str> {
     })
 }
 
-fn multipart_reject(error: MultipartError) -> Reject {
+pub(crate) fn multipart_reject(error: MultipartError) -> Reject {
     if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
         return reject(StatusCode::PAYLOAD_TOO_LARGE, HERO_ICON_ERR_TOO_LARGE);
     }
@@ -406,7 +416,16 @@ fn multipart_reject(error: MultipartError) -> Reject {
 
 /// Read one `icon` part. The signature is checked as soon as 8 bytes are in,
 /// and reading stops as soon as the part passes [`HERO_ICON_MAX_BYTES`].
-async fn read_icon_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
+pub(crate) async fn read_icon_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
+    read_png_part(field, HERO_ICON_MAX_BYTES).await
+}
+
+/// [`read_icon_part`] with its own byte limit (413 `icon_too_large` past
+/// `max_bytes`). Training crops use it for the larger `map_name` limit.
+pub(crate) async fn read_png_part(
+    field: &mut Field<'_>,
+    max_bytes: usize,
+) -> Result<Vec<u8>, Reject> {
     let mut data: Vec<u8> = Vec::new();
     while let Some(chunk) = field.chunk().await.map_err(multipart_reject)? {
         data.extend_from_slice(&chunk);
@@ -416,7 +435,7 @@ async fn read_icon_part(field: &mut Field<'_>) -> Result<Vec<u8>, Reject> {
                 HERO_ICON_ERR_NOT_PNG,
             ));
         }
-        if data.len() > HERO_ICON_MAX_BYTES {
+        if data.len() > max_bytes {
             return Err(reject(
                 StatusCode::PAYLOAD_TOO_LARGE,
                 HERO_ICON_ERR_TOO_LARGE,

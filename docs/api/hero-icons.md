@@ -6,6 +6,15 @@ default, and every route needs a signed-in session. JSON types live in
 `crates/types/src/api/hero_icons.rs`; the numeric caps live in
 `crates/types/src/hero_icons.rs`.
 
+Since alpha.3 item 14, hero icons are the `hero_icon` kind of the general
+training crop store: the tracker can also send hero icons, stat digits and map
+name crops with its sync token through `/api/training-crops`. The full
+contract, per-kind consent, the auth table, migration and rollback are in
+`docs/api/training-crops.md`. Every route on this page works as before, still
+needs a session, and only sees `hero_icon` rows: an id of another kind is 404
+`icon_not_found` here, and `DELETE /api/hero-icons/mine` removes hero icons
+only. The opt-in below is the same flag as `hero_icon` consent there.
+
 ## Who can do what
 
 Decisions of 2026-11-03: only admins may delete another member's hero icons,
@@ -469,3 +478,9 @@ sweep; its thumbnail answers 404 and the owner or an admin can delete it.
 - Table `hero_icon`: `member_id`, `hero`, `file_name`, `size_bytes`, `width`,
   `height`, `created_at`, indexed on `member_id`. The record id is the icon id.
   `created_at` is `uploaded_at` in the API.
+- Since alpha.3 item 14 the table also has `kind` (existing rows are
+  `hero_icon`) and optional training crop metadata columns. The routes on this
+  page read and write `kind = 'hero_icon'` only. `hero` still holds the
+  display name, as before; the routes on this page answer with the display
+  name. See
+  `docs/api/training-crops.md`.

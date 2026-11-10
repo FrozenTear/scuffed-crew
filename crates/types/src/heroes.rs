@@ -645,6 +645,20 @@ pub fn hero_key_to_name(raw: &str) -> Option<&'static str> {
         .map(|hero| hero.display)
 }
 
+/// Map a reader pack key, portrait stem, alias or display name to the hero
+/// key: the pack file stem (`soldier-76`, `wrecking-ball`, `dva`, `lucio`).
+///
+/// Same matching as [`hero_key_to_name`], so the accepted inputs are the
+/// known heroes in [`HERO_NAMES`] and nothing else. `None` for an unknown
+/// hero or a placeholder icon.
+pub fn hero_key(raw: &str) -> Option<&'static str> {
+    let display = hero_key_to_name(raw)?;
+    HERO_NAMES
+        .iter()
+        .find(|hero| hero.display == display)
+        .map(|hero| pack_file_stem(hero.file))
+}
+
 /// Canonicalize a hero identifier to its display name.
 ///
 /// A pack key (`wrecking-ball`), a portrait stem (`wrecking_ball`), and the
@@ -786,6 +800,22 @@ mod tests {
             match_hero_in_text("Mercy\naccuracy 42%").as_deref(),
             Some("Mercy")
         );
+    }
+
+    #[test]
+    fn hero_key_is_the_pack_stem_for_every_spelling() {
+        assert_eq!(hero_key("Soldier: 76"), Some("soldier-76"));
+        assert_eq!(hero_key("soldier_76"), Some("soldier-76"));
+        assert_eq!(hero_key("Lúcio"), Some("lucio"));
+        assert_eq!(hero_key("D.Va"), Some("dva"));
+        assert_eq!(hero_key("wrecking-ball.png"), Some("wrecking-ball"));
+        assert_eq!(hero_key("nobody"), None);
+        assert_eq!(hero_key("special/placeholder_01.png"), None);
+        for hero in HERO_NAMES {
+            let key = hero_key(hero.display).expect("every hero has a key");
+            assert_eq!(key, pack_file_stem(hero.file));
+            assert_eq!(hero_key(key), Some(key));
+        }
     }
 
     #[test]

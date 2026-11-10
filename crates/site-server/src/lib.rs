@@ -193,6 +193,24 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
             .finish()
             .expect("valid stats upload ip governor config"),
     );
+    // Per-IP budget for the training crop routes that take the tracker sync
+    // token (upload, consent read, own deletes). Same numbers as the stats
+    // sync IP limit (`STATS_UPLOAD_IP_BURST`, then one every
+    // `STATS_UPLOAD_IP_REPLENISH_SECS`), in its own bucket shared by those
+    // routes. It runs before the credential is checked, so a hot IP is
+    // refused before any token lookup. The upload also keeps its per-member,
+    // per-kind limiter in the handler.
+    let training_crop_ip_config = std::sync::Arc::new(
+        GovernorConfigBuilder::default()
+            .key_extractor(key_extractor.clone())
+            .per_second(scuffed_types::STATS_UPLOAD_IP_REPLENISH_SECS)
+            .burst_size(scuffed_types::STATS_UPLOAD_IP_BURST)
+            .finish()
+            .expect("valid training crop ip governor config"),
+    );
+    let training_crop_ip_limit = GovernorLayer::new(training_crop_ip_config)
+        .error_handler(rate_limit::governor_error_response);
+
     #[cfg(test)]
     let stats_token_governor = stats_upload_limits::take_stats_upload_governor_override()
         .unwrap_or_else(stats_upload_limits::StatsUploadGovernor::new);
@@ -671,6 +689,48 @@ pub fn create_router_with_dist(state: AppState, dist_dir: impl Into<PathBuf>) ->
         .route(
             "/api/hero-icons/{id}",
             delete(routes::hero_icons::delete_hero_icon),
+        )
+        // Opt-in training crops from the tracker. Same private store as hero
+        // icons. Upload, own consent read and own deletes also take the sync
+        // token, and sit behind the per-IP training crop limit (each
+        // `.layer` wraps only the methods added before it). Setting consent
+        // is session only. See routes::training_crops for the access rules.
+        .route(
+            "/api/training-crops",
+            post(routes::training_crops::upload_training_crops)
+                .layer::<_, std::convert::Infallible>(hero_icon_body_limit)
+                // Outer layer: a hot IP is refused before the body is read.
+                .layer::<_, std::convert::Infallible>(training_crop_ip_limit.clone())
+                .get(routes::training_crops::list_training_crops),
+        )
+        .route(
+            "/api/training-crops/consent",
+            get(routes::training_crops::get_consent)
+                .layer::<_, std::convert::Infallible>(training_crop_ip_limit.clone())
+                .put(routes::training_crops::put_consent),
+        )
+        .route(
+            "/api/training-crops/mine",
+            delete(routes::training_crops::delete_mine)
+                .layer::<_, std::convert::Infallible>(training_crop_ip_limit.clone())
+                .get(routes::training_crops::list_mine),
+        )
+        .route(
+            "/api/training-crops/members",
+            get(routes::training_crops::member_counts),
+        )
+        .route(
+            "/api/training-crops/resolutions",
+            get(routes::training_crops::resolution_totals),
+        )
+        .route(
+            "/api/training-crops/{id}/image",
+            get(routes::training_crops::crop_image),
+        )
+        .route(
+            "/api/training-crops/{id}",
+            delete(routes::training_crops::delete_crop)
+                .layer::<_, std::convert::Infallible>(training_crop_ip_limit),
         )
         // Calendar ICS feeds moved into `public_routes` (NS2-6) — they are
         // unauthenticated and now share the public per-IP governor.

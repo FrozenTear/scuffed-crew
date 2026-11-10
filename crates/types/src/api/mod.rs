@@ -14,6 +14,7 @@ pub mod settings;
 pub mod stats;
 pub mod teams;
 pub mod tournaments;
+pub mod training_crops;
 
 pub use announcements::*;
 pub use applications::*;
@@ -31,6 +32,7 @@ pub use settings::*;
 pub use stats::*;
 pub use teams::*;
 pub use tournaments::*;
+pub use training_crops::*;
 
 use serde::{Deserialize, Serialize};
 
