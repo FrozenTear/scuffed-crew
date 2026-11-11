@@ -382,7 +382,8 @@ fn debug_crops_of(dir: &std::path::Path, session: &str) -> usize {
         .unwrap_or(0)
 }
 
-/// Only a Tab whose row is stored offers its map crop for training. A Tab
+/// Only a Tab the tracker keeps for its game (`prepare_capture_row` returns
+/// Store) offers its map crop for training. A Tab
 /// `prepare_capture_row` drops (an untracked map with no open game, a PvE
 /// Adlersbrunn board) keeps its local map crop and queues nothing.
 #[tokio::test]
@@ -419,12 +420,12 @@ async fn only_a_stored_tab_offers_its_map_crop_for_training() {
     assert_eq!(debug_crops_of(dir.path(), "sess-p"), 1, "kept locally");
     assert_eq!(queued(), 0, "a PvE Adlersbrunn board");
 
-    // A stored Tab still offers it.
+    // A Tab kept for its game still offers it.
     let (mut staged, mut parsed) = staged_row("sess-s", "Busan", Some(boundary::MapSource::TopBar));
     let row = prepare_capture_row(&mut parsed, &mut staged, None, None, "", true);
     assert_eq!(row, PreparedRow::Store);
     tab_map_crop(dir.path(), "sess-s", row).await;
-    assert_eq!(queued(), 1, "a stored Tab");
+    assert_eq!(queued(), 1, "a Tab kept for its game");
 }
 
 /// The kept crop is the native map-label box at each screen size: 518x43

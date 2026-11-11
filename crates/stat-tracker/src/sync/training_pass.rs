@@ -28,9 +28,9 @@ use super::client::SyncClient;
 use super::training::UploadKind;
 use super::training_client::TrainingCallError;
 use super::training_store::{
-    adopt_training_owner, drop_kind, next_batch, pending_deletes, remove_crops, training_delete_at,
-    training_in_use, while_owner, write_cached_consent, write_pending_deletes,
-    write_training_warning,
+    adopt_training_owner, drop_kind, next_batch, pending_deletes, read_training_status,
+    remove_crops, training_delete_at, training_in_use, while_owner, write_cached_consent,
+    write_pending_deletes, write_training_warning,
 };
 
 /// When the next pass may run, as the pass sees it.
@@ -62,6 +62,11 @@ const WAITING_NOTE: &str = "They stay on this PC and are tried again later.";
 
 /// Shown while crops the website stored during a delete are still there.
 pub(super) const TRAINING_DELETE_OWED: &str = "Training crops: some crops sent while you deleted your training crops are still on the website. The tracker keeps trying to remove them.";
+
+/// Shown when a send got no answer while the member deleted: the website
+/// may have stored those crops after the delete, and the tracker has no ids
+/// to remove. Stays until the member deletes again.
+pub(super) const TRAINING_DELETE_AGAIN: &str = "Training crops: the website did not answer a send that ran while you deleted your training crops, so some of those crops may still be on the website. Press Delete my training crops again to remove them.";
 
 fn retry_for(error: &TrainingCallError) -> TrainingRetry {
     match error {
@@ -151,6 +156,11 @@ struct PassEnd {
     pending: Vec<String>,
     /// There were ids to delete when the pass started.
     had_pending: bool,
+    /// The delete marker under which a send got no answer: ask the member
+    /// to delete again ([`TRAINING_DELETE_AGAIN`]).
+    delete_again: Option<i64>,
+    /// An earlier ask to delete again is answered: the marker changed.
+    deleted_again: bool,
 }
 
 /// One pass. See the module doc.
@@ -165,19 +175,27 @@ pub async fn run_training_pass(client: &SyncClient, data_dir: &Path) -> Training
     // before anything is sent.
     let owner = client.credentials();
     let (url, token) = (owner.server_url.clone(), owner.token.clone());
-    let (changed, pending) = on_disk(data_dir, move |dir| {
+    let (changed, pending, asked_at, marker) = on_disk(data_dir, move |dir| {
+        let changed = adopt_training_owner(dir, &url, &token);
+        let asked_at = read_training_status(dir).and_then(|status| status.delete_again_at);
         (
-            adopt_training_owner(dir, &url, &token),
+            changed,
             pending_deletes(dir),
+            asked_at,
+            training_delete_at(dir),
         )
     })
     .await;
     if changed {
         tracing::info!("training crops: website or token changed, waiting crops dropped");
     }
+    // An ask to delete again stays until the member deletes again.
+    let delete_again = asked_at.filter(|at| marker == Some(*at));
     let mut end = PassEnd {
         had_pending: !pending.is_empty(),
         pending,
+        delete_again,
+        deleted_again: asked_at.is_some() && delete_again.is_none(),
         ..PassEnd::default()
     };
     // Crops an earlier delete left on the website go first, before any
@@ -282,7 +300,22 @@ pub async fn run_training_pass(client: &SyncClient, data_dir: &Path) -> Training
                 _ => {
                     let (text, retry) = call_warning("send them", &error);
                     tracing::warn!(?error, kind = kind.as_str(), "training crop upload failed");
-                    end.warnings.push(text);
+                    // No answer (a timeout or a dropped connection) may
+                    // still have stored the batch. When a delete ran
+                    // meanwhile, the ids are unknown, and the next pass
+                    // drops the local copies as kept before the delete: ask
+                    // the member to delete again.
+                    let now = match error {
+                        TrainingCallError::Transport(_) => {
+                            on_disk(data_dir, training_delete_at).await
+                        }
+                        TrainingCallError::Status { .. } => seen,
+                    };
+                    if now.is_some() && now != seen {
+                        end.delete_again = now;
+                    } else {
+                        end.warnings.push(text);
+                    }
                     report.retry = worse(report.retry, retry);
                     // A down or limiting site gets no more calls this pass.
                     break;
@@ -309,20 +342,26 @@ async fn finish(
         sticky,
         pending,
         had_pending,
+        delete_again,
+        deleted_again,
     } = end;
     let owed = !pending.is_empty();
     if owed {
         warnings.insert(0, TRAINING_DELETE_OWED.to_string());
+    }
+    if delete_again.is_some() {
+        warnings.insert(0, TRAINING_DELETE_AGAIN.to_string());
     }
     report.warning = (!warnings.is_empty()).then(|| warnings.join(" "));
     if client.credentials() != *owner {
         tracing::info!("training crops: website or token changed during the pass, nothing kept");
         return report;
     }
-    // A warning about dropped crops stays until a send works, and one
-    // about crops still on the website until they are gone.
-    let sticky = sticky || owed;
-    let clear_sticky = report.sent > 0 || (had_pending && !owed);
+    // A warning about dropped crops stays until a send works, one about
+    // crops still on the website until they are gone, and an ask to delete
+    // again until the member does.
+    let sticky = sticky || owed || delete_again.is_some();
+    let clear_sticky = report.sent > 0 || (had_pending && !owed) || deleted_again;
     let warning = report.warning.clone();
     let (url, token) = (owner.server_url.clone(), owner.token.clone());
     let written = on_disk(data_dir, move |dir| {
@@ -333,7 +372,7 @@ async fn finish(
             {
                 tracing::warn!(%error, "could not cache the training crop consent");
             }
-            write_training_warning(dir, warning.as_deref(), sticky, clear_sticky);
+            write_training_warning(dir, warning.as_deref(), sticky, clear_sticky, delete_again);
         })
     })
     .await;
