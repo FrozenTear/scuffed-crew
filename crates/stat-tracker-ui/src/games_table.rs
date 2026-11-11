@@ -556,8 +556,8 @@ fn game_row(
                 let mut m = row![text(name).size(SIZE_META).font(font).color(color)]
                     .spacing(8)
                     .align_y(Alignment::Center);
-                if let Some(mode) = games_rows::mode_chip(&g.map_name) {
-                    m = m.push(small_chip(mode, TEXT_2, BORDER));
+                for chip in crate::games_detail::map_chips(g) {
+                    m = m.push(small_chip_owned(chip, TEXT_2, BORDER));
                 }
                 with_warn(m.into(), doubt)
             }

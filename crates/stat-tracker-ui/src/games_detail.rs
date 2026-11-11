@@ -427,6 +427,19 @@ pub fn queue_value(g: &Game) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The chips after the map name, in order: the map's mode, then the
+/// confident queue ([`queue_value`]). The Games list row and the open
+/// game's map line both draw these, so a closed row shows the queue too.
+/// An unsure or unread queue adds no chip; the open game's map line says
+/// so in words ([`queue_warning`]).
+pub fn map_chips(g: &Game) -> Vec<String> {
+    crate::games_rows::mode_chip(&g.map_name)
+        .map(str::to_string)
+        .into_iter()
+        .chain(queue_value(g))
+        .collect()
+}
+
 /// One bar segment of the hero timeline, in time order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BarPart {
@@ -1297,5 +1310,46 @@ mod tests {
         g.queue_title = Some(stored(" OPEN QUEUE ", QUEUE_TITLE_MIN_SCORE));
         assert_eq!(queue_value(&g).as_deref(), Some("OPEN QUEUE"));
         assert_eq!(queue_warning(&g), None);
+    }
+
+    /// The Games list row draws [`map_chips`]: a confident queue shows
+    /// there after the mode, so a closed row names it. An unsure or unread
+    /// title adds no queue name, and the game is still a row in the list.
+    #[test]
+    fn the_list_row_shows_a_confident_queue_and_keeps_an_unsure_game() {
+        use crate::games_rows::{Grid, TabState, layout, mode_chip};
+        use stat_tracker::model::QueueTitle;
+        let mode = mode_chip("Ilios").map(str::to_string);
+        assert!(mode.is_some());
+        let mut sure = game("sure", "Ana", 1, 1, at(20, 0, 0));
+        sure.queue_title = Some(QueueTitle {
+            value: Some("OPEN QUEUE".into()),
+            confidence: 0.93,
+            ..QueueTitle::default()
+        });
+        let mut weak = game("weak", "Ana", 1, 1, at(20, 30, 0));
+        weak.queue_title = Some(QueueTitle {
+            value: Some("OPEN QUEUE".into()),
+            confidence: 0.4,
+            unsure: true,
+            ..QueueTitle::default()
+        });
+        let unread = game("unread", "Ana", 1, 1, at(21, 0, 0));
+        let mut want_sure: Vec<String> = mode.clone().into_iter().collect();
+        want_sure.push("OPEN QUEUE".into());
+        assert_eq!(map_chips(&sure), want_sure);
+        let mode_only: Vec<String> = mode.into_iter().collect();
+        assert_eq!(map_chips(&weak), mode_only);
+        assert_eq!(map_chips(&unread), mode_only);
+        let all = vec![sure, weak, unread];
+        let shown: Vec<&Game> = all.iter().collect();
+        let list = layout(&all, &shown, TabState::default(), Grid::Wide, 0, None);
+        let mut rows: Vec<&str> = list
+            .sections
+            .iter()
+            .flat_map(|s| s.rows.iter().map(|g| g.session_id.as_str()))
+            .collect();
+        rows.sort_unstable();
+        assert_eq!(rows, ["sure", "unread", "weak"]);
     }
 }

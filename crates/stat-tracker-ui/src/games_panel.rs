@@ -231,11 +231,8 @@ fn map_line(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Mes
     if edited(g, Field::Map) {
         r = r.push(games_picker::edited_badge());
     }
-    if let Some(mode) = games_rows::mode_chip(&g.map_name) {
-        r = r.push(small_chip(mode, TEXT_2, BORDER));
-    }
-    if let Some(queue) = detail::queue_value(g) {
-        r = r.push(small_chip_owned(queue, TEXT_2, BORDER));
+    for chip in detail::map_chips(g) {
+        r = r.push(small_chip_owned(chip, TEXT_2, BORDER));
     }
     r = with_set(r, g, Field::Map, ctx.editing);
     let line = with_correction(r.into(), detail::read_vs_set_name(g, "map_name"));
