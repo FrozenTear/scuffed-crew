@@ -32,8 +32,8 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     (
         "Training crops, only the kinds you turn on at the website",
         &[
-            "Small pictures of what the tracker read. In this version only the map name banner from the Tab screen, at its own size.",
-            "With each: a random number for the game, the screen size and which screen it came from. No names, chat or whole screens.",
+            "Small pictures of what the tracker read from a Tab screen it kept, at their own size: the map name banner, your hero portrait from the career panel, and the number cells of your own row.",
+            "With each: a random number for the game, the screen size and which screen it came from. With a hero portrait, the hero and how sure the reader was. With a number cell, its column and your hero. No names, chat, other players' rows or whole screens.",
             "Sent with your token while Upload games is on. Delete my training crops, under Website account, removes them from the website.",
         ],
     ),

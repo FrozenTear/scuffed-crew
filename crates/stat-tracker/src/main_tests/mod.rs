@@ -452,8 +452,7 @@ pub(crate) fn o8_rows() -> Vec<ocr::RowOcrResult> {
         .collect()
 }
 
-/// One Tab: the full-board OCR text names Ana (an OCR-text hero), the
-/// career panel (if any) and the heroes-v2 own-row read as given.
+/// One Tab: OCR text names Ana, career title and heroes-v2 hero as given.
 pub(crate) fn o8_analysis(career: Option<&str>, pack: Option<&str>) -> FrameAnalysis {
     let frame = image::DynamicImage::new_rgb8(64, 64);
     FrameAnalysis {
@@ -467,6 +466,7 @@ pub(crate) fn o8_analysis(career: Option<&str>, pack: Option<&str>) -> FrameAnal
         portrait_hero: None,
         career_hero: career.map(str::to_string),
         pack_hero: pack.map(str::to_string),
+        career_portrait: None,
         board: None,
         map_from_panel: Some("Busan".into()),
         map_panel_raw: Some("BUSAN".into()),

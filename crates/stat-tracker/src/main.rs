@@ -437,6 +437,11 @@ struct FrameAnalysis {
     /// has the career-panel title's authority
     /// ([`hero_auth::resolve_hero_new_reader`]). Always `None` under ocr-v1.
     pack_hero: Option<String>,
+    /// `reader = "new"`: the career panel's portrait read (box in frame px
+    /// and its scores), for a `hero_icon` training crop once the Tab is
+    /// accepted and its game known. `None` under ocr-v1, with no hero pack,
+    /// or when no box was read.
+    career_portrait: Option<shadow::heroes::PanelRead>,
     /// Top-bar map label OCR, already canonicalized.
     map_from_panel: Option<String>,
     /// The top bar's raw label ([`top_bar_raw_label`]): the OCR text before

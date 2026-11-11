@@ -358,6 +358,7 @@ fn the_app_has_no_consent_put() {
         ("training_client.rs", include_str!("training_client.rs")),
         ("training_pass.rs", include_str!("training_pass.rs")),
         ("training_store.rs", include_str!("training_store.rs")),
+        ("training_collect.rs", include_str!("training_collect.rs")),
         ("training.rs", include_str!("training.rs")),
     ] {
         assert!(!source.contains(".put("), "{name}");

@@ -194,16 +194,38 @@ pub fn keep_training_crop(
     meta: TrainingCropUploadMeta,
     png: Vec<u8>,
 ) -> bool {
+    keep_crop(data_dir, kind, meta, png) == Kept::Yes
+}
+
+/// What [`keep_crop`] did with one crop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kept {
+    Yes,
+    /// The cached consent for the kind is off. Nothing was written.
+    NoConsent,
+    /// Over a cap or a `meta` bound ([`check_crop`]): skipped, not shrunk.
+    Refused,
+    /// No crop id or a write error: a consented crop was lost.
+    Failed,
+}
+
+/// [`keep_training_crop`], telling a refusal from an error.
+pub(super) fn keep_crop(
+    data_dir: &Path,
+    kind: UploadKind,
+    meta: TrainingCropUploadMeta,
+    png: Vec<u8>,
+) -> Kept {
     if !kind.consented(&cached_training_consent(data_dir)) {
-        return false;
+        return Kept::NoConsent;
     }
     let Some(id) = new_crop_id() else {
-        return false;
+        return Kept::Failed;
     };
     let crop = QueuedCrop { id, meta, png };
     if let Err(refusal) = check_crop(kind, &crop) {
         tracing::debug!(kind = kind.as_str(), ?refusal, "training crop not kept");
-        return false;
+        return Kept::Refused;
     }
     let dir = kind_dir(data_dir, kind);
     let meta = serde_json::to_vec(&crop.meta).unwrap_or_default();
@@ -212,7 +234,7 @@ pub fn keep_training_crop(
     if let Err(error) = written {
         tracing::warn!(%error, "could not keep a training crop");
         remove_crop(&dir, &crop.id);
-        return false;
+        return Kept::Failed;
     }
     let ids = crop_ids(&dir);
     for old in ids
@@ -221,7 +243,7 @@ pub fn keep_training_crop(
     {
         remove_crop(&dir, old);
     }
-    true
+    Kept::Yes
 }
 
 /// A `map_name` crop for training, from the map-label PNG the tracker just

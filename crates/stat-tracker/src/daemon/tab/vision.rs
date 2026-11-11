@@ -381,6 +381,9 @@ pub(crate) fn analyze_frame(
         },
         || ocr::recognize(&img),
     );
+    // The career panel's portrait box, kept for a training crop before the
+    // board read takes the icon read.
+    let career_portrait = tab_heroes.as_ref().and_then(|heroes| heroes.panel.clone());
     // The board the trust gate and the stats come from under the new reader,
     // with the banner and the hero icons this pass already read, so the
     // frame is read once per Tab (F251-3, O8).
@@ -412,6 +415,7 @@ pub(crate) fn analyze_frame(
         portrait_hero: portrait_match,
         career_hero,
         pack_hero,
+        career_portrait,
         map_from_panel,
         map_panel_raw,
         map_from_banner: top_bar.from_banner,

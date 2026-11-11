@@ -462,6 +462,7 @@ pub(crate) async fn handle_capture(
         portrait_hero,
         career_hero,
         pack_hero,
+        career_portrait,
         map_from_panel,
         map_panel_raw,
         map_from_banner,
@@ -1272,6 +1273,16 @@ pub(crate) async fn handle_capture(
             }
             let created_this_capture =
                 commit_capture_rows(store, data_dir, &staged, &parsed, now).await?;
+            // Hero icon and stat digit training crops, only from a stored Tab.
+            let source = TabCropSource {
+                panel: career_portrait.as_ref(),
+                pack_hero: pack_hero.as_deref(),
+                own_row: player_row_idx,
+                own_row_suspect,
+                team_size,
+                hero: &parsed.hero,
+            };
+            archive_tab_training_crops(data_dir, &target_session, &frame_img, source);
 
             tracing::info!(
                 target: "scuffed_stat_tracker",
