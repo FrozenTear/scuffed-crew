@@ -79,7 +79,7 @@ const TEAM2_START_RATIO: f64 = 0.565;
 /// (mic icon + highlighted-hero overlay art) merges into a ~0.37-wide pseudo
 /// group, so a generous 2x margin over the widest real label separates them
 /// cleanly (CG-4).
-pub(crate) const HEADER_LABEL_MAX_W: f64 = 0.05;
+pub const HEADER_LABEL_MAX_W: f64 = 0.05;
 
 /// Plausible spacing between adjacent header label centers. Measured gaps on
 /// the 2026-07-20/23 fixtures (identical for 5v5 and 6v6): 0.034–0.065.
