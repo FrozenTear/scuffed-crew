@@ -603,9 +603,9 @@ pub struct Status {
     /// Tracker health, first among the tracker's own notices (a sync
     /// problem the app finds itself still comes before it).
     pub input_notice: String,
-    /// A game capture size the hero icon reader has no icon spots for, seen
-    /// in this run. The app shows a one-time ask on Overview, or a warning
-    /// when `unreadable`. Games record all the same. `None` otherwise.
+    /// A game capture size no installed hero icon pack declares, seen in
+    /// this run with no no on file. The app shows an ask on Overview, or a
+    /// warning when `unreadable`. Games record all the same. `None` otherwise.
     pub vision_size: Option<VisionSizeStatus>,
 }
 
@@ -615,7 +615,7 @@ pub struct Status {
 pub struct VisionSizeStatus {
     pub width: u32,
     pub height: u32,
-    /// The tracker could not tell whether the reader supports this size (a
+    /// The tracker could not tell whether a pack declares this size (the
     /// pack record or the answers file did not read). Nothing is asked.
     pub unreadable: bool,
 }

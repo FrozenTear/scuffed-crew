@@ -134,14 +134,12 @@ fn top_tabs_input_notice(app: &TrackerApp) -> Option<&str> {
 }
 
 /// The capture size notice ([`crate::vision_size_notice`]) under the
-/// Overview title, in both layouts. Never on Games or in a game row.
+/// Overview title, in both layouts. Never on Games or in a game row:
+/// [`crate::vision_size_notice::view`] draws nothing off Overview.
 fn with_vision_notice<'a>(
     app: &'a TrackerApp,
     content: Column<'a, Message>,
 ) -> Column<'a, Message> {
-    if app.screen != Screen::Overview {
-        return content;
-    }
     match crate::vision_size_notice::view(app) {
         Some(notice) => content.push(notice),
         None => content,

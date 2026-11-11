@@ -42,7 +42,7 @@ pub use client::{
     off_site_redirect_message, token_safe_redirects,
 };
 pub use errors::{SyncUploadError, server_error_text};
-pub use visibility::{StatsVisibility, parse_stats_visibility};
+pub use visibility::{StatsVisibility, parse_hero_icon_consent, parse_stats_visibility};
 pub use wire::{UploadEntry, UploadRequest, row_needs_review, upload_request};
 
 // Names the test files saw through `use super::*` before the split: two of

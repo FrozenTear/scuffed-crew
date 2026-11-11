@@ -12,7 +12,9 @@ use scuffed_types::api::{DaemonConfigResponse, StatsUploadResponse};
 use super::backoff::parse_retry_after;
 use super::batching::{BatchCaps, RefusedRows};
 use super::errors::{SyncUploadError, parse_upload_error_body, server_error_text};
-use super::visibility::{MAX_BODY_BYTES, StatsVisibility, parse_stats_visibility};
+use super::visibility::{
+    MAX_BODY_BYTES, StatsVisibility, parse_hero_icon_consent, parse_stats_visibility,
+};
 use super::wire::upload_request;
 
 /// Daemon-token route for the member's config. It carries `player_name` and,
@@ -218,12 +220,9 @@ impl SyncClient {
     /// `/api/training-crops/consent` with the saved token. Members change it
     /// on the website, never here. Any failure (unsafe URL, network, a non
     /// 2xx answer, a body that is too large or not the consent shape) is
-    /// `None`, which callers take as no consent.
+    /// `None`, which callers take as no consent
+    /// ([`parse_hero_icon_consent`]).
     pub async fn fetch_hero_icon_consent(&self) -> Option<bool> {
-        #[derive(serde::Deserialize)]
-        struct Consent {
-            hero_icon: bool,
-        }
         self.refuse_unsafe_transport().ok()?;
         let creds = self.credentials();
         let url = format!("{}{CROP_CONSENT_PATH}", creds.server_url);
@@ -234,6 +233,7 @@ impl SyncClient {
             .send()
             .await
             .ok()?;
+        let status = resp.status().as_u16();
         if !resp.status().is_success() {
             return None;
         }
@@ -241,9 +241,7 @@ impl SyncClient {
         if bytes.len() > MAX_BODY_BYTES {
             return None;
         }
-        serde_json::from_slice::<Consent>(&bytes)
-            .ok()
-            .map(|c| c.hero_icon)
+        parse_hero_icon_consent(status, &bytes)
     }
 
     /// POST `/api/stats/upload`.

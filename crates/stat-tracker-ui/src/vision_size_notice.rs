@@ -1,62 +1,94 @@
-//! The one-time notice for a game capture size the hero icon reader has no
-//! icon spots for, drawn under the Overview title (never in a game row).
+//! The notice for a game capture size no installed hero icon pack
+//! declares, drawn under the Overview title (never in a game row, never on
+//! another screen).
 //!
 //! The running tracker writes the size into its status file
-//! ([`stat_tracker::ocr_status::Status::vision_size`]) the first time it
-//! sees it and has not asked about it before. The app reads that once a
-//! second (the same pid guard as the keyboard notice), records that the ask
-//! was shown, and offers three actions:
+//! ([`stat_tracker::ocr_status::Status::vision_size`]) when it sees a size
+//! the installed packs do not declare and the member has not said no. The
+//! app reads that once a second (the same pid guard as the keyboard notice)
+//! and, only when a sync server is set, shows the ask with four actions:
 //!
 //! * "Open website profile": hero icon sharing is the training crop opt-in,
 //!   and members change it on the website at `/profile/edit`. The app only
-//!   reads consent; it never sets it.
-//! * "No thanks" and "Don't ask again": both are a no for that size, kept
-//!   in the answers file
-//!   ([`stat_tracker::packs::layout::vision_sizes::Asks`]), so nothing is
-//!   cut or sent at that size and the ask does not come back after a
-//!   restart.
+//!   reads consent; it never sets it. Opening it records nothing.
+//! * "No thanks": a no for that size.
+//! * "Don't ask again": a no for every size.
+//! * "Close": hides the ask for this run and records nothing, so it can
+//!   come back after a restart until the member says no.
 //!
-//! When the tracker could not tell whether the size is supported, the app
-//! shows a warning line instead, with no actions. Games record either way.
+//! A no is kept in the answers file
+//! ([`stat_tracker::packs::layout::vision_sizes::Asks`]). Seeing the ask
+//! records nothing. The notice is hidden only after the no is on disk; a
+//! write that fails keeps it up with a line saying the answer was not saved.
+//!
+//! When the tracker could not tell, a warning shows instead, with or
+//! without a sync server: the pack record did not read, or the answers
+//! file did not read. For the answers file the member can reset it: the
+//! old bytes are kept in a copy next to it, and the new file holds a "No
+//! thanks" for the size. Games record either way.
 
 use std::path::Path;
 
-use iced::widget::{button, column, container, row, text};
+use iced::widget::{Column, button, column, container, row, text};
 use iced::{Border, Element, Padding, Task, Theme};
 
 use crate::app::{Message, TrackerApp};
+use crate::model::Screen;
 use crate::theme::{self, BORDER, FONT_MEDIUM, FONT_SEMIBOLD, SIZE_BODY, SIZE_META, TEXT, TEXT_2};
 use stat_tracker::ocr_status::{Status as OcrSwitchStatus, VisionSizeStatus};
-use stat_tracker::packs::layout::vision_sizes::{Answer, Asks, ScreenSize, record_answer};
+use stat_tracker::packs::layout::vision_sizes::{
+    ASKS_FILE, Answer, Asks, ScreenSize, record_answer, reset_unreadable, supported_sizes,
+};
 
 /// Where members turn hero icon sharing on or off, under the site URL.
 pub const PROFILE_PATH: &str = "/profile/edit";
 
 /// The ask's second line.
-pub const ASK_BODY: &str = "Heroes are read with OCR at this size and may be marked unsure. Your games still record. You can help: share hero icons from a few games by turning on hero icon sharing in your profile on the website. Nothing is cut or sent at this size unless it is on.";
+pub const ASK_BODY: &str = "At this size the hero icon reader may misread heroes or mark them unsure. Your games still record. You can help: share hero icons from a few games by turning on hero icon sharing in your profile on the website. Nothing is cut or sent at this size unless it is on.";
 
 pub const OPEN_PROFILE: &str = "Open website profile";
 pub const NO_THANKS: &str = "No thanks";
 pub const NEVER: &str = "Don't ask again";
+pub const CLOSE: &str = "Close";
+pub const RESET: &str = "Reset, keep a copy";
+
+/// Under the answers file warning: what the reset does.
+pub const RESET_HINT: &str =
+    "Reset keeps a copy of the old file next to it and saves a No thanks for this size.";
+
+/// A no that did not reach the disk.
+pub const ANSWER_NOT_SAVED: &str = "Your answer was not saved, so the tracker may ask again. Check that the tracker's data folder can be written, then try again.";
+
+/// A reset that did not happen.
+pub const RESET_FAILED: &str = "The file was not reset and is left as it was. Check that the tracker's data folder can be written, then try again.";
 
 /// The ask's first line.
 pub fn ask_title(size: ScreenSize) -> String {
-    format!("The hero icon reader does not support {size} yet.")
+    format!("No hero icon pack for {size} is installed yet.")
 }
 
-/// The warning when the tracker could not tell.
-pub fn warn_text(size: ScreenSize) -> String {
+/// The warning when the pack record did not read.
+pub fn pack_unreadable_text(size: ScreenSize) -> String {
     format!(
-        "Can't tell if the hero icon reader supports {size}. Your games still record. Nothing is cut or sent at this size."
+        "Can't tell if {size} is covered: the tracker's pack record could not be read. Your games still record. Nothing is cut or sent at this size."
     )
 }
 
-/// A message from the notice. Each carries the size it answers.
-#[derive(Debug, Clone)]
+/// The warning when the answers file did not read.
+pub fn answers_unreadable_text(size: ScreenSize) -> String {
+    format!(
+        "The file {ASKS_FILE} in the tracker's data folder could not be read. Your games still record. Nothing is cut or sent at {size} because the file could not be read, and the tracker will not overwrite it."
+    )
+}
+
+/// A message from the notice. Each answer carries the size it answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
     OpenProfile(String),
     NoThanks(ScreenSize),
     Never(ScreenSize),
+    Close(ScreenSize),
+    Reset(ScreenSize),
 }
 
 /// What the notice shows.
@@ -65,7 +97,17 @@ pub enum Shown {
     #[default]
     Nothing,
     Ask(ScreenSize),
-    Warn(ScreenSize),
+    /// The pack record did not read.
+    PackUnreadable(ScreenSize),
+    /// The answers file did not read.
+    AnswersUnreadable(ScreenSize),
+}
+
+/// The last click that did not reach the disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Failure {
+    Answer,
+    Reset,
 }
 
 /// What the Overview keeps for the notice.
@@ -75,114 +117,220 @@ pub struct VisionNotice {
     /// when it changes.
     seen: Option<VisionSizeStatus>,
     pub shown: Shown,
+    pub failed: Option<Failure>,
+}
+
+/// What to show for the tracker's value. Reads the answers file, and the
+/// pack record for a warning. Writes nothing.
+fn shown_for(data_dir: &Path, live: Option<VisionSizeStatus>, sync_configured: bool) -> Shown {
+    let Some(status) = live else {
+        return Shown::Nothing;
+    };
+    let size = ScreenSize::new(status.width, status.height);
+    match Asks::load(data_dir) {
+        Err(e) => {
+            tracing::warn!(error = %e, "capture size answers did not read");
+            Shown::AnswersUnreadable(size)
+        }
+        // The tracker's warning, with the answers file fine: the pack
+        // record. If that reads now too, the tracker looks again.
+        Ok(_) if status.unreadable => match supported_sizes(data_dir) {
+            Err(_) => Shown::PackUnreadable(size),
+            Ok(_) => Shown::Nothing,
+        },
+        Ok(asks) if asks.declined(size) || !sync_configured => Shown::Nothing,
+        Ok(_) => Shown::Ask(size),
+    }
 }
 
 /// Feed the running tracker's value. A new ask is shown unless the member
-/// already said no to that size, and is then recorded as shown.
-pub fn observe_in(notice: &mut VisionNotice, data_dir: &Path, live: Option<VisionSizeStatus>) {
+/// already said no to that size or no sync server is set. Nothing is
+/// written.
+pub fn observe_in(
+    notice: &mut VisionNotice,
+    data_dir: &Path,
+    live: Option<VisionSizeStatus>,
+    sync_configured: bool,
+) {
     if live == notice.seen {
         return;
     }
     notice.seen = live;
-    notice.shown = match live {
-        None => Shown::Nothing,
-        Some(status) => {
-            let size = ScreenSize::new(status.width, status.height);
-            if status.unreadable {
-                Shown::Warn(size)
-            } else {
-                match Asks::load(data_dir) {
-                    Ok(asks) if asks.declined(size) => Shown::Nothing,
-                    Ok(_) => {
-                        if let Err(e) = record_answer(data_dir, size, Answer::Asked) {
-                            tracing::warn!(error = %e, "failed to record the capture size ask");
-                        }
-                        Shown::Ask(size)
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "capture size answers did not read");
-                        Shown::Warn(size)
-                    }
-                }
-            }
-        }
-    };
+    notice.failed = None;
+    notice.shown = shown_for(data_dir, live, sync_configured);
+}
+
+/// The running tracker's value: `None` unless the status file is from the
+/// tracker that runs now (`daemon_pid`).
+pub(crate) fn live_vision_size(
+    status: Option<&OcrSwitchStatus>,
+    daemon_pid: Option<u32>,
+) -> Option<VisionSizeStatus> {
+    status
+        .filter(|status| daemon_pid == Some(status.pid))
+        .and_then(|status| status.vision_size)
 }
 
 /// The tick's read of the status file, only from the running tracker.
 pub(crate) fn observe(app: &mut TrackerApp, status: Option<&OcrSwitchStatus>) {
-    let pid = app.daemon.pid;
-    let live = status
-        .filter(|status| pid == Some(status.pid))
-        .and_then(|status| status.vision_size);
-    observe_in(&mut app.overview_page.vision, &app.data_dir, live);
+    let live = live_vision_size(status, app.daemon.pid);
+    let sync_configured = app.saved_config.sync.is_some();
+    observe_in(
+        &mut app.overview_page.vision,
+        &app.data_dir,
+        live,
+        sync_configured,
+    );
 }
 
-/// Keep the member's no for `size` and hide the notice.
+/// Keep the member's no for `size`. The ask is hidden only once the no is
+/// on disk, and only when it is the ask for `size` (or any ask, for "Don't
+/// ask again"), so a late click for an older size leaves a newer ask up.
+/// A failed write keeps the notice and says the answer was not saved.
 pub fn answer_in(notice: &mut VisionNotice, data_dir: &Path, size: ScreenSize, answer: Answer) {
     if let Err(e) = record_answer(data_dir, size, answer) {
         tracing::warn!(error = %e, "failed to record the capture size answer");
+        notice.failed = Some(Failure::Answer);
+        return;
     }
-    notice.shown = Shown::Nothing;
+    notice.failed = None;
+    let hides = match notice.shown {
+        Shown::Ask(shown) => shown == size || answer == Answer::Never,
+        _ => false,
+    };
+    if hides {
+        notice.shown = Shown::Nothing;
+    }
+}
+
+/// Hide the ask for `size` for this run. Records nothing.
+pub fn close_in(notice: &mut VisionNotice, size: ScreenSize) {
+    if notice.shown == Shown::Ask(size) {
+        notice.shown = Shown::Nothing;
+        notice.failed = None;
+    }
+}
+
+/// Reset the answers file that did not read, keeping a copy of it and a
+/// no for `size`. A failed reset keeps the warning and says so.
+pub fn reset_in(notice: &mut VisionNotice, data_dir: &Path, size: ScreenSize) {
+    match reset_unreadable(data_dir, size) {
+        Ok(copy) => {
+            if let Some(copy) = copy {
+                tracing::info!(copy = %copy.display(), "capture size answers reset; the old file was kept");
+            }
+            notice.failed = None;
+            if notice.shown == Shown::AnswersUnreadable(size) {
+                notice.shown = Shown::Nothing;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to reset the capture size answers");
+            notice.failed = Some(Failure::Reset);
+        }
+    }
 }
 
 pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
-    match msg {
-        Msg::OpenProfile(url) => crate::update::open_release_page(&url),
-        Msg::NoThanks(size) => answer_in(
-            &mut app.overview_page.vision,
-            &app.data_dir,
-            size,
-            Answer::Dismissed,
-        ),
-        Msg::Never(size) => answer_in(
-            &mut app.overview_page.vision,
-            &app.data_dir,
-            size,
-            Answer::Never,
-        ),
-    }
+    update_with(app, msg, crate::update::open_release_page);
     Task::none()
 }
 
-/// The profile page on the site the tracker syncs with, if one is set.
-pub fn profile_url(server_url: &str) -> Option<String> {
-    let base = server_url.trim().trim_end_matches('/');
-    (!base.is_empty()).then(|| format!("{base}{PROFILE_PATH}"))
+/// [`update`] with the link opener given, so tests open no browser.
+pub(crate) fn update_with(app: &mut TrackerApp, msg: Msg, open: impl FnOnce(&str)) {
+    let notice = &mut app.overview_page.vision;
+    let data_dir = &app.data_dir;
+    match msg {
+        Msg::OpenProfile(url) => open(&url),
+        Msg::NoThanks(size) => answer_in(notice, data_dir, size, Answer::Dismissed),
+        Msg::Never(size) => answer_in(notice, data_dir, size, Answer::Never),
+        Msg::Close(size) => close_in(notice, size),
+        Msg::Reset(size) => reset_in(notice, data_dir, size),
+    }
 }
 
-/// The notice, when there is one to show.
+/// The profile page on the site the tracker syncs with, if one is set: the
+/// site's origin with the path `/profile/edit`, no query, no fragment.
+/// `None` for an empty or invalid URL, or one that is not http(s).
+pub fn profile_url(server_url: &str) -> Option<String> {
+    let raw = server_url.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let mut url = url::Url::parse(raw).ok()?;
+    if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+        return None;
+    }
+    url.set_path(PROFILE_PATH);
+    url.set_query(None);
+    url.set_fragment(None);
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    Some(url.into())
+}
+
+/// What the notice shows on the current screen: nothing off Overview, and
+/// no ask without a sync server.
+pub(crate) fn shown_on(app: &TrackerApp) -> Shown {
+    if app.screen != Screen::Overview {
+        return Shown::Nothing;
+    }
+    match app.overview_page.vision.shown {
+        Shown::Ask(_) if app.saved_config.sync.is_none() => Shown::Nothing,
+        shown => shown,
+    }
+}
+
+/// The notice, when there is one to show on this screen.
 pub fn view(app: &TrackerApp) -> Option<Element<'static, Message>> {
     let profile = app
         .saved_config
         .sync
         .as_ref()
         .and_then(|sync| profile_url(&sync.server_url));
-    view_for(app.overview_page.vision.shown, profile)
+    view_for(shown_on(app), app.overview_page.vision.failed, profile)
 }
 
-fn view_for(shown: Shown, profile: Option<String>) -> Option<Element<'static, Message>> {
-    let size = match shown {
+fn view_for(
+    shown: Shown,
+    failed: Option<Failure>,
+    profile: Option<String>,
+) -> Option<Element<'static, Message>> {
+    let mut body: Column<'static, Message> = match shown {
         Shown::Nothing => return None,
-        Shown::Warn(size) => return Some(crate::widgets::warn_line(&warn_text(size))),
-        Shown::Ask(size) => size,
-    };
-    let mut actions = row![].spacing(8);
-    if let Some(url) = profile {
-        actions = actions.push(action(OPEN_PROFILE, Msg::OpenProfile(url)));
+        Shown::PackUnreadable(size) => {
+            column![crate::widgets::warn_line(&pack_unreadable_text(size))]
+        }
+        Shown::AnswersUnreadable(size) => column![
+            crate::widgets::warn_line(&answers_unreadable_text(size)),
+            text(RESET_HINT).size(SIZE_META).color(TEXT_2),
+            row![action(RESET, Msg::Reset(size))].spacing(8),
+        ],
+        Shown::Ask(size) => {
+            let mut actions = row![].spacing(8);
+            if let Some(url) = profile {
+                actions = actions.push(action(OPEN_PROFILE, Msg::OpenProfile(url)));
+            }
+            actions = actions
+                .push(action(NO_THANKS, Msg::NoThanks(size)))
+                .push(action(NEVER, Msg::Never(size)))
+                .push(action(CLOSE, Msg::Close(size)));
+            column![
+                text(ask_title(size))
+                    .size(SIZE_BODY)
+                    .font(FONT_MEDIUM)
+                    .color(TEXT),
+                text(ASK_BODY).size(SIZE_META).color(TEXT_2),
+                actions,
+            ]
+        }
     }
-    actions = actions
-        .push(action(NO_THANKS, Msg::NoThanks(size)))
-        .push(action(NEVER, Msg::Never(size)));
-    let body = column![
-        text(ask_title(size))
-            .size(SIZE_BODY)
-            .font(FONT_MEDIUM)
-            .color(TEXT),
-        text(ASK_BODY).size(SIZE_META).color(TEXT_2),
-        actions,
-    ]
     .spacing(8);
+    match failed {
+        Some(Failure::Answer) => body = body.push(crate::widgets::warn_line(ANSWER_NOT_SAVED)),
+        Some(Failure::Reset) => body = body.push(crate::widgets::warn_line(RESET_FAILED)),
+        None => {}
+    }
     Some(
         container(body)
             .padding(12)
@@ -212,106 +360,5 @@ fn action(label: &'static str, msg: Msg) -> Element<'static, Message> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const UW: ScreenSize = ScreenSize::new(3440, 1440);
-    const WIDE_16_10: ScreenSize = ScreenSize::new(2560, 1600);
-
-    fn live(size: ScreenSize, unreadable: bool) -> Option<VisionSizeStatus> {
-        Some(VisionSizeStatus {
-            width: size.width,
-            height: size.height,
-            unreadable,
-        })
-    }
-
-    #[test]
-    fn a_new_size_is_shown_once_and_recorded_as_asked() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut notice = VisionNotice::default();
-        observe_in(&mut notice, dir.path(), None);
-        assert_eq!(notice.shown, Shown::Nothing);
-        observe_in(&mut notice, dir.path(), live(UW, false));
-        assert_eq!(notice.shown, Shown::Ask(UW));
-        assert!(Asks::load(dir.path()).unwrap().was_asked(UW));
-        assert!(view_for(notice.shown, None).is_some());
-    }
-
-    #[test]
-    fn no_thanks_and_dont_ask_again_hide_it_and_survive_a_restart() {
-        for (msg_answer, size) in [(Answer::Dismissed, UW), (Answer::Never, WIDE_16_10)] {
-            let dir = tempfile::tempdir().unwrap();
-            let mut notice = VisionNotice::default();
-            observe_in(&mut notice, dir.path(), live(size, false));
-            answer_in(&mut notice, dir.path(), size, msg_answer);
-            assert_eq!(notice.shown, Shown::Nothing);
-            // The same value on the next tick does not bring it back.
-            observe_in(&mut notice, dir.path(), live(size, false));
-            assert_eq!(notice.shown, Shown::Nothing);
-            // A restarted app reads the answer from disk.
-            let mut reopened = VisionNotice::default();
-            observe_in(&mut reopened, dir.path(), live(size, false));
-            assert_eq!(reopened.shown, Shown::Nothing, "{msg_answer:?}");
-            assert!(Asks::load(dir.path()).unwrap().declined(size));
-        }
-    }
-
-    #[test]
-    fn an_unreadable_size_is_a_warning_with_no_actions() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut notice = VisionNotice::default();
-        observe_in(&mut notice, dir.path(), live(UW, true));
-        assert_eq!(notice.shown, Shown::Warn(UW));
-        assert!(
-            !dir.path()
-                .join(stat_tracker::packs::layout::vision_sizes::ASKS_FILE)
-                .exists()
-        );
-        // An answers file that does not read: a warning, not an ask.
-        std::fs::write(
-            dir.path()
-                .join(stat_tracker::packs::layout::vision_sizes::ASKS_FILE),
-            b"[",
-        )
-        .unwrap();
-        let mut notice = VisionNotice::default();
-        observe_in(&mut notice, dir.path(), live(UW, false));
-        assert_eq!(notice.shown, Shown::Warn(UW));
-    }
-
-    #[test]
-    fn the_tracker_clearing_it_hides_it() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut notice = VisionNotice::default();
-        observe_in(&mut notice, dir.path(), live(UW, false));
-        observe_in(&mut notice, dir.path(), None);
-        assert_eq!(notice.shown, Shown::Nothing);
-    }
-
-    #[test]
-    fn the_profile_link_is_the_sites_profile_page() {
-        assert_eq!(
-            profile_url("https://crew.example/").as_deref(),
-            Some("https://crew.example/profile/edit")
-        );
-        assert_eq!(profile_url("  "), None);
-    }
-
-    #[test]
-    fn the_copy_is_short_plain_and_has_no_em_dash() {
-        for line in [
-            ask_title(UW),
-            warn_text(UW),
-            ASK_BODY.to_string(),
-            OPEN_PROFILE.to_string(),
-            NO_THANKS.to_string(),
-            NEVER.to_string(),
-        ] {
-            assert!(!line.contains('\u{2014}'), "{line}");
-            assert!(!line.trim().is_empty());
-        }
-        assert!(ask_title(UW).contains("3440x1440"));
-        assert!(warn_text(UW).contains("still record"));
-    }
-}
+#[path = "tests_vision_size_notice.rs"]
+mod tests;
