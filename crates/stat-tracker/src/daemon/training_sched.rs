@@ -94,13 +94,16 @@ pub(crate) struct TrainingSched {
 }
 
 impl TrainingSched {
-    /// One look on the command tick. Returns at once.
+    /// One look on the command tick. Returns at once and reads no file:
+    /// all file work runs on the spawned task, on blocking threads.
     ///
     /// - No sync client (uploads off): drop every waiting crop and the
     ///   cached consent once, since nothing may be sent.
     /// - `sync_paused`: stats sync is paused on a refused token or a
     ///   stats delete. Wait.
-    /// - Otherwise start a pass when one is due and none runs.
+    /// - Otherwise, when no task runs, start one. It drops crops and
+    ///   consent kept for another website or token, then runs a pass when
+    ///   one is due.
     pub(crate) fn tick(
         &mut self,
         client: Option<&sync::SyncClient>,
@@ -108,37 +111,50 @@ impl TrainingSched {
         data_dir: &std::path::Path,
         now: Instant,
     ) {
+        if self.task.as_ref().is_some_and(|t| !t.is_finished()) {
+            return;
+        }
         let Some(client) = client else {
             if !self.forgot_without_sync {
-                sync::forget_training_crops(data_dir);
+                let data_dir = data_dir.to_path_buf();
+                self.task = Some(tokio::task::spawn_blocking(move || {
+                    sync::forget_training_crops(&data_dir);
+                }));
                 self.forgot_without_sync = true;
             }
             return;
         };
         self.forgot_without_sync = false;
-        // Crops and consent kept for another website or token are dropped
-        // at once, and the new site's consent is read on the next pass.
-        let creds = client.credentials();
-        if sync::adopt_training_owner(data_dir, &creds.server_url, &creds.token) {
-            let mut clock = self.clock.lock().unwrap_or_else(|e| e.into_inner());
-            clock.consent_read_at = None;
-            clock.next_at = None;
-        }
-        if sync_paused || self.task.as_ref().is_some_and(|t| !t.is_finished()) {
+        if sync_paused {
             return;
-        }
-        let has_queued = sync::has_queued_crops(data_dir);
-        {
-            let mut clock = self.clock.lock().unwrap_or_else(|e| e.into_inner());
-            if !clock.due(now, has_queued) {
-                return;
-            }
-            clock.started(now);
         }
         let client = client.clone();
         let data_dir = data_dir.to_path_buf();
         let clock = Arc::clone(&self.clock);
         self.task = Some(tokio::spawn(async move {
+            let creds = client.credentials();
+            let dir = data_dir.clone();
+            let looked = tokio::task::spawn_blocking(move || {
+                // Crops and consent kept for another website or token are
+                // dropped at once, and the new site's consent is read now.
+                let changed = sync::adopt_training_owner(&dir, &creds.server_url, &creds.token);
+                (changed, sync::has_queued_crops(&dir))
+            })
+            .await;
+            let Ok((changed, has_queued)) = looked else {
+                return;
+            };
+            {
+                let mut clock = clock.lock().unwrap_or_else(|e| e.into_inner());
+                if changed {
+                    clock.consent_read_at = None;
+                    clock.next_at = None;
+                }
+                if !clock.due(now, has_queued) {
+                    return;
+                }
+                clock.started(now);
+            }
             let report = sync::run_training_pass(&client, &data_dir).await;
             if report.sent > 0 {
                 tracing::info!(target: "scuffed_stat_tracker", sent = report.sent, "training crops sent");

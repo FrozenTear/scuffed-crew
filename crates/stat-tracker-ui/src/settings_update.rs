@@ -652,6 +652,32 @@ mod tests {
         assert_eq!(app.settings.sync_url, "https://typed.example");
     }
 
+    /// Signing in with Apply while Settings is open starts a training crop
+    /// consent read for the new website and token, so "Reading your
+    /// choices from the website" never stays with no read running.
+    #[test]
+    fn a_sync_save_reads_the_training_crop_consent() {
+        let (dir, mut app) = live_app();
+        assert_eq!(crate::settings_open::sync_key(&app), None);
+        let _ = app.update(Message::SettingsText(
+            SettingsField::SyncUrl,
+            "https://crew.example".into(),
+        ));
+        let _ = app.update(Message::SettingsText(
+            SettingsField::SyncToken,
+            "tok-new".into(),
+        ));
+        let _ = app.update(page(Msg::Commit(Commit::Sync)));
+        assert!(on_disk(&dir).sync.is_some(), "{:?}", app.toast);
+        let key = crate::settings_open::sync_key(&app).expect("signed in");
+        assert_eq!(key.1, "tok-new");
+        assert_eq!(
+            app.page_state.opened.training.reading_for(),
+            Some(&key),
+            "a read runs for the saved pair"
+        );
+    }
+
     #[test]
     fn a_config_edit_is_written_and_counted() {
         let (dir, mut app) = live_app();

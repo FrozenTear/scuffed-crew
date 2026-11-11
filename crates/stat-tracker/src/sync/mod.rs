@@ -8,8 +8,8 @@
 //! - `visibility`: the member's stats visibility, parsed from the site.
 //! - `client`: [`SyncClient`] and its redirect policy (reqwest).
 //! - `training`, `training_store`, `training_client`, `training_pass`:
-//!   opt-in training crops (kinds and caps, the outbox, the three routes,
-//!   one send pass). `training_client` is the other reqwest file.
+//!   opt-in training crops (kinds and caps, the outbox, the routes, one
+//!   send pass). `training_client` is the other reqwest file.
 //!
 //! Every public item is re-exported here, so `crate::sync::X` paths are
 //! unchanged.

@@ -227,7 +227,17 @@ async fn no_pass_while_stats_sync_is_paused_and_sync_off_forgets_the_crops() {
     let status = dir.path().join("training_crops").join("status.json");
     std::fs::write(&status, r#"{"warning":"old"}"#).unwrap();
     training.tick(None, false, dir.path(), Instant::now());
-    assert!(training.take_task().is_none());
+    // The files go on a blocking thread, never on the daemon's loop.
+    training
+        .take_task()
+        .expect("the files are dropped off the loop")
+        .await
+        .unwrap();
+    training.tick(None, false, dir.path(), Instant::now());
+    assert!(
+        training.take_task().is_none(),
+        "only once while sync is off"
+    );
     assert!(
         !sync::has_queued_crops(dir.path()),
         "sync off: nothing kept"
@@ -324,5 +334,156 @@ async fn an_accepted_tab_offers_its_map_crop_only_with_consent() {
     assert_eq!(
         sync::queued_crops(dir.path(), sync::UploadKind::MapName).len(),
         1
+    );
+}
+
+/// Cache map_name consent only.
+fn map_name_consent_on(dir: &std::path::Path) {
+    let consent = TrainingCropConsent {
+        map_name: true,
+        ..TrainingCropConsent::default()
+    };
+    let path = dir.join("training_crops").join("consent.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, serde_json::to_vec(&consent).unwrap()).unwrap();
+}
+
+/// A black frame of `width` by `height` with a little white text in its
+/// map-label box.
+fn labelled_frame_at(width: u32, height: u32) -> image::DynamicImage {
+    let mut img = image::RgbImage::from_pixel(width, height, image::Rgb([0, 0, 0]));
+    let rect = stat_tracker::ocr::preprocess::map_name_rect(width, height).expect("map rect");
+    for y in rect.y..rect.y + 8.min(rect.h) {
+        for x in rect.x..rect.x + 16.min(rect.w) {
+            img.put_pixel(x, y, image::Rgb([230, 230, 230]));
+        }
+    }
+    image::DynamicImage::ImageRgb8(img)
+}
+
+/// The Tab's map crop, written the way the Tab capture writes it once
+/// `prepare_capture_row` decided the row.
+async fn tab_map_crop(dir: &std::path::Path, session: &str, row: PreparedRow) {
+    let crop = prepare_map_label_crop(dir, session, &labelled_frame());
+    commit_tab_map_label_crop(crop, row)
+        .expect("a map crop to write")
+        .await
+        .unwrap();
+}
+
+fn debug_crops_of(dir: &std::path::Path, session: &str) -> usize {
+    std::fs::read_dir(dir.join("debug").join("mapcrops"))
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.file_name().to_string_lossy().starts_with(session))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+/// Only a Tab whose row is stored offers its map crop for training. A Tab
+/// `prepare_capture_row` drops (an untracked map with no open game, a PvE
+/// Adlersbrunn board) keeps its local map crop and queues nothing.
+#[tokio::test]
+async fn only_a_stored_tab_offers_its_map_crop_for_training() {
+    let dir = tempfile::tempdir().unwrap();
+    map_name_consent_on(dir.path());
+    let queued = || sync::queued_crops(dir.path(), sync::UploadKind::MapName).len();
+
+    // An untracked map read with no open game.
+    let (mut staged, mut parsed) = staged_row(
+        "sess-u",
+        "Château Guillard",
+        Some(boundary::MapSource::TextFallback),
+    );
+    let row = prepare_capture_row(&mut parsed, &mut staged, None, None, "", true);
+    assert_eq!(row, PreparedRow::Drop);
+    tab_map_crop(dir.path(), "sess-u", row).await;
+    assert_eq!(debug_crops_of(dir.path(), "sess-u"), 1, "kept locally");
+    assert_eq!(queued(), 0, "an untracked map with no open game");
+
+    // A PvE Adlersbrunn board: stats on one team only.
+    let (mut staged, mut parsed) =
+        staged_row("sess-p", "Eichenwalde", Some(boundary::MapSource::TopBar));
+    let row = prepare_capture_row(
+        &mut parsed,
+        &mut staged,
+        None,
+        Some("ADLERSBRUNN"),
+        "",
+        false,
+    );
+    assert_eq!(row, PreparedRow::Drop);
+    tab_map_crop(dir.path(), "sess-p", row).await;
+    assert_eq!(debug_crops_of(dir.path(), "sess-p"), 1, "kept locally");
+    assert_eq!(queued(), 0, "a PvE Adlersbrunn board");
+
+    // A stored Tab still offers it.
+    let (mut staged, mut parsed) = staged_row("sess-s", "Busan", Some(boundary::MapSource::TopBar));
+    let row = prepare_capture_row(&mut parsed, &mut staged, None, None, "", true);
+    assert_eq!(row, PreparedRow::Store);
+    tab_map_crop(dir.path(), "sess-s", row).await;
+    assert_eq!(queued(), 1, "a stored Tab");
+}
+
+/// The kept crop is the native map-label box at each screen size: 518x43
+/// at 1920x1080, 691x57 at 2560x1440 and 1036x86 at 3840x2160.
+#[tokio::test]
+async fn the_kept_map_crop_has_the_native_size_at_1080p_1440p_and_4k() {
+    for (width, height, want) in [
+        (1920, 1080, (518, 43)),
+        (2560, 1440, (691, 57)),
+        (3840, 2160, (1036, 86)),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        map_name_consent_on(dir.path());
+        archive_map_label_crop(dir.path(), "sess-k", &labelled_frame_at(width, height))
+            .expect("saves the crop")
+            .await
+            .unwrap();
+        let queued = sync::queued_crops(dir.path(), sync::UploadKind::MapName);
+        assert_eq!(queued.len(), 1, "{width}x{height}");
+        assert_eq!(
+            sync::png_size(&queued[0].png),
+            Some(want),
+            "{width}x{height}"
+        );
+        assert_eq!(
+            (queued[0].meta.screen_width, queued[0].meta.screen_height),
+            (Some(width), Some(height))
+        );
+        assert_eq!(
+            sync::check_crop(sync::UploadKind::MapName, &queued[0]),
+            Ok(())
+        );
+    }
+}
+
+/// The tick reads no file on the daemon's loop: the owner check and the
+/// look at the outbox run on the spawned task. On this one-thread runtime
+/// the task cannot run before the test awaits it, so crops kept for
+/// another website are still on disk right after the tick.
+#[tokio::test]
+async fn the_tick_leaves_the_files_to_its_task() {
+    let dir = tempfile::tempdir().unwrap();
+    queue_map_crop(dir.path());
+    sync::adopt_training_owner(dir.path(), "https://old.example", "old-token");
+    let client = sync::SyncClient::new(config::SyncConfig {
+        server_url: "http://127.0.0.1:9".into(),
+        token: "tok".into(),
+    });
+    let mut training = TrainingSched::default();
+    // After its look the task runs a pass, which fails at once on this
+    // closed loopback port.
+    training.tick(Some(&client), false, dir.path(), Instant::now());
+    assert!(
+        sync::has_queued_crops(dir.path()),
+        "the tick itself touched no file"
+    );
+    training.take_task().expect("a look started").await.unwrap();
+    assert!(
+        !sync::has_queued_crops(dir.path()),
+        "the task dropped the crops kept for the other website"
     );
 }

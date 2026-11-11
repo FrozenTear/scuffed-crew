@@ -288,56 +288,86 @@ pub(crate) fn stale_board_debug_dirs(
         .collect()
 }
 
-/// Keep the full top-bar map-label box from a Tab whose label is not a flat bar.
-/// The first such Tab writes `<session_id>-<width>x<height>-1.png`. A later
-/// Tab at least 60 seconds after that writes the matching `-2.png`. Width and
-/// height are the capture size. The PNG is the raw box from this frame, with
-/// no timer trim and no brightness stretch. The map-label OCR retry does not
-/// supply these pixels. A flat bar does not take a slot. Local files under
-/// `debug/mapcrops` only.
+/// The map-label crop of one Tab, cut from the frame, waiting for
+/// [`commit_tab_map_label_crop`].
+pub(crate) struct MapLabelCrop {
+    job: mapcrops::MapcropJob,
+    data_dir: std::path::PathBuf,
+    session_id: String,
+    /// The capture size.
+    size: (u32, u32),
+}
+
+/// Cut the full top-bar map-label box from a Tab whose label is not a flat
+/// bar. The first such Tab writes `<session_id>-<width>x<height>-1.png`. A
+/// later Tab at least 60 seconds after that writes the matching `-2.png`.
+/// Width and height are the capture size. The PNG is the raw box from this
+/// frame, with no timer trim and no brightness stretch. The map-label OCR
+/// retry does not supply these pixels. A flat bar does not take a slot.
+/// Local files under `debug/mapcrops` only.
 /// Not part of the rolling debug rings and not included in report bundles.
 /// From an accepted capture it is not gated on `debug_ocr`; a rejected
-/// capture goes through [`archive_rejected_map_label_crop`]. The handle is
-/// for tests.
+/// capture goes through [`archive_rejected_map_label_crop`]. `None` when
+/// this Tab adds no crop.
+pub(crate) fn prepare_map_label_crop(
+    data_dir: &std::path::Path,
+    session_id: &str,
+    frame: &image::DynamicImage,
+) -> Option<MapLabelCrop> {
+    Some(MapLabelCrop {
+        job: mapcrops::prepare_mapcrop(data_dir, session_id, frame)?,
+        data_dir: data_dir.to_path_buf(),
+        session_id: session_id.to_string(),
+        size: (frame.width(), frame.height()),
+    })
+}
+
+/// Write a Tab's map-label crop on a blocking thread, once
+/// [`prepare_capture_row`] decided its `row`. The handle is for tests.
 ///
-/// A crop this call writes is also offered to the training crop outbox
-/// (`sync::keep_map_name_crop`), which keeps a copy only while the site's
-/// last answer has `map_name` consent on.
+/// The crop is kept either way. Only for [`PreparedRow::Store`] is it also
+/// offered to the training crop outbox (`sync::keep_map_name_crop`), which
+/// keeps a copy only while the site's last answer has `map_name` consent
+/// on. A Tab whose row is dropped (an untracked map with no open game, a
+/// PvE Adlersbrunn board) is a game the tracker does not record, so its
+/// crop is never offered.
+pub(crate) fn commit_tab_map_label_crop(
+    crop: Option<MapLabelCrop>,
+    row: PreparedRow,
+) -> Option<tokio::task::JoinHandle<()>> {
+    write_map_label_crop(crop, row == PreparedRow::Store)
+}
+
+/// Write `crop` on a blocking thread, and offer it for training only with
+/// `for_training`. A rejected capture never is: it may show the kill feed
+/// there.
+fn write_map_label_crop(
+    crop: Option<MapLabelCrop>,
+    for_training: bool,
+) -> Option<tokio::task::JoinHandle<()>> {
+    let crop = crop?;
+    Some(tokio::task::spawn_blocking(move || {
+        let path = crop.job.path();
+        if mapcrops::commit_mapcrop(crop.job) && for_training {
+            let (width, height) = crop.size;
+            sync::keep_map_name_crop(&crop.data_dir, &crop.session_id, &path, width, height);
+        }
+    }))
+}
+
+/// [`prepare_map_label_crop`] then [`commit_tab_map_label_crop`] for a Tab
+/// whose row is stored.
+#[cfg(test)]
 pub(crate) fn archive_map_label_crop(
     data_dir: &std::path::Path,
     session_id: &str,
     frame: &image::DynamicImage,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    archive_map_label_crop_as(data_dir, session_id, frame, true)
+    let crop = prepare_map_label_crop(data_dir, session_id, frame);
+    commit_tab_map_label_crop(crop, PreparedRow::Store)
 }
 
-/// Write the map-label crop on a blocking thread. `for_training` only for
-/// an accepted Tab: a rejected frame may show the kill feed there.
-fn archive_map_label_crop_as(
-    data_dir: &std::path::Path,
-    session_id: &str,
-    frame: &image::DynamicImage,
-    for_training: bool,
-) -> Option<tokio::task::JoinHandle<()>> {
-    let job = mapcrops::prepare_mapcrop(data_dir, session_id, frame)?;
-    let training = for_training.then(|| {
-        (
-            data_dir.to_path_buf(),
-            session_id.to_string(),
-            job.path(),
-            (frame.width(), frame.height()),
-        )
-    });
-    Some(tokio::task::spawn_blocking(move || {
-        if mapcrops::commit_mapcrop(job)
-            && let Some((dir, session, path, (width, height))) = training
-        {
-            sync::keep_map_name_crop(&dir, &session, &path, width, height);
-        }
-    }))
-}
-
-/// [`archive_map_label_crop`] for a capture a trust gate rejected: only with
+/// The map-label crop for a capture a trust gate rejected: only with
 /// `debug_ocr` on, and never for `preflight` (a menu has no top bar). A
 /// rejected frame may be gameplay rather than a Tab board, and there the
 /// map-label rectangle covers the kill feed, which shows player names.
@@ -351,5 +381,5 @@ pub(crate) fn archive_rejected_map_label_crop(
     if !debug || reason == "preflight" {
         return None;
     }
-    archive_map_label_crop_as(data_dir, session_id, frame, false)
+    write_map_label_crop(prepare_map_label_crop(data_dir, session_id, frame), false)
 }

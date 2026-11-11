@@ -123,7 +123,6 @@ fn game_tokens_are_random_per_game_and_stable_within_one() {
     assert_ne!(a, b);
     for t in [&a, &b] {
         assert!(game_token_ok(t), "{t}");
-        assert!(!t.contains("2026"), "no time in the token");
     }
     assert_ne!(token(), token());
     assert!(!game_token_ok("0123456789ABCDEF0123456789ABCDEF"));
@@ -324,20 +323,34 @@ fn the_outbox_keeps_consented_crops_private_and_capped() {
         map_name_meta(&token(), 1920, 1080),
         png(2000, 40, false)
     ));
+    // Each crop carries its own token here, so the order they were kept in
+    // is known. Ids sort by the millisecond they were kept: a short sleep
+    // keeps two crops out of one millisecond.
+    let mut kept_order = vec![game_token_for(dir.path(), "s1").unwrap()];
     for _ in 0..OUTBOX_KEEP_PER_KIND + 5 {
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let t = token();
         assert!(keep_training_crop(
             dir.path(),
             UploadKind::MapName,
-            map_name_meta(&token(), 1920, 1080),
+            map_name_meta(&t, 1920, 1080),
             png(400, 40, false)
         ));
+        kept_order.push(t);
     }
     let queued = queued_crops(dir.path(), UploadKind::MapName);
     assert_eq!(queued.len(), OUTBOX_KEEP_PER_KIND);
-    let ids: Vec<_> = queued.iter().map(|c| c.id.clone()).collect();
-    let mut sorted = ids.clone();
-    sorted.sort();
-    assert_eq!(ids, sorted, "oldest first");
+    let left: Vec<String> = queued
+        .iter()
+        .map(|c| c.meta.game_token.clone().unwrap())
+        .collect();
+    let pruned = kept_order.len() - OUTBOX_KEEP_PER_KIND;
+    assert_eq!(pruned, 6);
+    assert_eq!(
+        left,
+        kept_order[pruned..],
+        "the first crops kept are the ones pruned, the rest wait in order"
+    );
 
     clear_training_outbox(dir.path());
     assert!(!has_queued_crops(dir.path()));

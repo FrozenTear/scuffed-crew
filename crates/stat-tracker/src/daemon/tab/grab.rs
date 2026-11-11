@@ -947,8 +947,9 @@ pub(crate) async fn handle_capture(
             parsed.outcome = outcome_label.clone();
             let target_session = staged.target_session.clone();
             // This board's session, including a split's new game. The first
-            // Tab that still has the map label wins; later Tabs no-op.
-            archive_map_label_crop(data_dir, &target_session, &frame_img);
+            // Tab that still has the map label wins; later Tabs no-op. It is
+            // written once the row is decided, below.
+            let map_label_crop = prepare_map_label_crop(data_dir, &target_session, &frame_img);
             if split {
                 tracing::info!(
                     target: "scuffed_stat_tracker",
@@ -1082,7 +1083,7 @@ pub(crate) async fn handle_capture(
             // Unknown. Adlersbrunn with stats on only one team is not stored
             // as Eichenwalde. The current row is inserted before the carried
             // board, so a failed insert leaves the hold for the next Tab.
-            if prepare_capture_row(
+            let prepared = prepare_capture_row(
                 &mut parsed,
                 &mut staged,
                 req.session_map.as_deref(),
@@ -1092,8 +1093,11 @@ pub(crate) async fn handle_capture(
                     Some(board) => reader_apply::both_teams_have_stats(board, team_size),
                     None => parse::both_teams_have_stats(&rows, team_size),
                 },
-            ) == PreparedRow::Drop
-            {
+            );
+            // The map crop is kept either way; only a stored row offers it
+            // for training.
+            commit_tab_map_label_crop(map_label_crop, prepared);
+            if prepared == PreparedRow::Drop {
                 return Ok(CaptureReport {
                     finished_game_tab,
                     ..blank_rejected_report(outcome, session_id, hero_auth, &req)
