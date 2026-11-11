@@ -43,7 +43,9 @@ pub fn find_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Opti
 /// Each row scores as its best read over every name window (5v5 reads one
 /// per table layout). The first row, in board order, with a whole-word hit
 /// in any window wins outright, then the first row with a substring hit;
-/// otherwise the best fuzzy row at or above 0.55.
+/// otherwise the best fuzzy row at or above 0.55. This ranking holds with
+/// one saved name too: a board reading FROZENTEAR on row 0 and FROZEN on
+/// row 1 is row 1 for "Frozen", where the first substring row used to win.
 pub fn match_player_row_by_name(rows: &[RowOcrResult], player_name: &str) -> Option<NameMatch> {
     scored_match(rows, &player_name.to_lowercase()).map(|(found, _)| found)
 }
@@ -97,6 +99,8 @@ pub fn best_name_for_row<'a>(
 
 /// [`best_name_for_row`] as a match: `row` is row `row_idx` of its board,
 /// and the match also carries the window and the saved name's index.
+/// See [`any_name_reads_row`] to tell "no saved name reads here" from
+/// "saved names read here but none wins".
 pub fn match_row_by_names(
     row: &RowOcrResult,
     row_idx: usize,
@@ -108,6 +112,18 @@ pub fn match_row_by_names(
     })
 }
 
+/// Some saved name of `names` reads on `row` at or above the name-match
+/// floor: a whole word, a substring, or a fuzzy score of at least 0.55.
+/// Blank names are skipped. True also when [`match_row_by_names`] names
+/// none of them (two close reads, or a tie): the row is then unresolved,
+/// not a stranger's.
+pub fn any_name_reads_row(row: &RowOcrResult, names: &(impl NameList + ?Sized)) -> bool {
+    names.each_name().any(|name| {
+        let lower = name.to_lowercase();
+        !name.trim().is_empty() && scored_match(std::slice::from_ref(row), &lower).is_some()
+    })
+}
+
 /// How far the best fuzzy score has to lead every other saved name's
 /// before one row is named by a fuzzy read alone. "MAlN" scores Main 0.75
 /// and Alt 0.67: no name.
@@ -116,10 +132,10 @@ pub const ROW_NAME_FUZZY_MARGIN: f64 = 0.15;
 /// How one saved name was found on the rows, best first.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Hit {
-    /// The name is a whole word of a read ("SPOCLE" in "[TAG] SPOCLE").
+    /// The name is a whole word of a read ("ALPHA" in "[TAG] ALPHA").
     Word,
     /// The name is inside a read but runs into other letters or digits
-    /// ("spocle" in "SPOCLE2").
+    /// ("alpha" in "ALPHA2").
     Substring,
     /// No substring anywhere: the best fuzzy score, at or above the floor.
     Fuzzy(f64),
@@ -133,11 +149,15 @@ type NameHit<'a> = (NameMatch, &'a str, String, Hit);
 ///
 /// 1. A whole-word hit beats a substring hit, which beats any fuzzy read.
 /// 2. Among the hits of that kind on one row, a name that sits inside a
-///    longer saved name that also hit gives way to it (Spocle to Spocle2
-///    on "SPOCLE2").
+///    longer saved name that also hit gives way to it (Alpha to Alpha2
+///    on "ALPHA2").
 /// 3. Two hits still left (two names on different rows, or two unrelated
 ///    names on one row) are a tie: `None`.
-/// 4. Fuzzy only: the best score, when it leads every other saved name's
+/// 4. A substring hit (never a whole word) names nothing when a longer
+///    saved name holding it also reads on that row at or above the floor,
+///    even fuzzily: "ALPHAZ" may be Alpha2 misread, so it names neither
+///    Alpha nor Alpha2. "ALPHA" and "[TAG] ALPHA" stay Alpha's.
+/// 5. Fuzzy only: the best score, when it leads every other saved name's
 ///    by more than nothing and by at least `fuzzy_margin`; else `None`.
 ///
 /// Blank names, and a name equal to an earlier one ignoring case, are
@@ -170,7 +190,19 @@ fn pick_name<'a>(
             })
         };
         let specific: Vec<&&NameHit<'a>> = same.iter().filter(|h| !inside_longer(h)).collect();
+        let longer_reads_row = |h: &NameHit<'a>| {
+            seen.iter().any(|other| {
+                other.len() > h.2.len()
+                    && other.contains(&h.2)
+                    && rows.get(h.0.row).is_some_and(|row| {
+                        row_window_scores(row, other)
+                            .iter()
+                            .any(|(_, read)| read.passes(NAME_MATCH_MIN))
+                    })
+            })
+        };
         return match specific.as_slice() {
+            [only] if kind == Hit::Substring && longer_reads_row(only) => None,
             [only] => Some((only.0, only.1)),
             _ => None,
         };
@@ -195,7 +227,9 @@ fn pick_name<'a>(
 
 /// The match for one lowercased name, and how it was found: the first row
 /// with a whole-word hit, else the first row with a substring hit, else the
-/// best fuzzy row at or above the floor.
+/// best fuzzy row at or above the floor. Every matcher here ranks through
+/// this, the one-name matchers included, so a whole-word row beats an
+/// earlier substring row for one saved name as well as for several.
 fn scored_match(rows: &[RowOcrResult], name_lower: &str) -> Option<(NameMatch, Hit)> {
     let mut best: Option<(usize, f64)> = None;
 
@@ -281,8 +315,8 @@ enum NameRead {
     /// The read holds the name as a whole word, no letter or digit right
     /// before or after it (handles "FROZEN" inside "L7 mRoE FROZEN").
     WholeWord,
-    /// The read holds the name inside a longer word ("spocle" in
-    /// "spocle2").
+    /// The read holds the name inside a longer word ("alpha" in
+    /// "alpha2").
     Substring,
     /// Best fuzzy score of the read against the name.
     Fuzzy(f64),

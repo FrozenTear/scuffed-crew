@@ -163,28 +163,30 @@ fn best_name_for_row_names_one_saved_name() {
     );
 }
 
-/// Site's probe: "Spocle" sits inside "Spocle2". A row reading SPOCLE2 is
-/// Spocle2's and a row reading SPOCLE is Spocle's, whichever name is saved
+/// Site's probe: "Alpha" sits inside "Alpha2". A row reading ALPHA2 is
+/// Alpha2's and a row reading ALPHA is Alpha's, whichever name is saved
 /// first. The old rule (first substring hit in list order) named the
-/// SPOCLE2 row "Spocle" when Spocle was listed first.
+/// ALPHA2 row "Alpha" when Alpha was listed first.
 #[test]
 fn best_name_for_row_prefers_the_longer_saved_name_in_either_order() {
-    let main_first = ["Spocle".to_string(), "Spocle2".to_string()];
-    let alt_first = ["Spocle2".to_string(), "Spocle".to_string()];
+    let main_first = ["Alpha".to_string(), "Alpha2".to_string()];
+    let alt_first = ["Alpha2".to_string(), "Alpha".to_string()];
     for names in [&main_first, &alt_first] {
         assert_eq!(
-            best_name_for_row(&valid_row("SPOCLE2"), &names[..]),
-            Some("Spocle2"),
+            best_name_for_row(&valid_row("ALPHA2"), &names[..]),
+            Some("Alpha2"),
+            "{names:?}"
+        );
+        // A whole word of the shorter name stays its own, even though
+        // Alpha2 fuzzy-scores ALPHA at 0.83.
+        assert_eq!(
+            best_name_for_row(&valid_row("[TAG] ALPHA"), &names[..]),
+            Some("Alpha"),
             "{names:?}"
         );
         assert_eq!(
-            best_name_for_row(&valid_row("[TAG] SPOCLE"), &names[..]),
-            Some("Spocle"),
-            "{names:?}"
-        );
-        assert_eq!(
-            best_name_for_row(&valid_row("SPOCLE"), &names[..]),
-            Some("Spocle"),
+            best_name_for_row(&valid_row("ALPHA"), &names[..]),
+            Some("Alpha"),
             "{names:?}"
         );
     }
@@ -226,20 +228,81 @@ fn best_name_for_row_names_nothing_on_a_tie() {
     );
 }
 
-/// The board matcher ranks the same way. SPOCLE2 alone on the board is
-/// Spocle2's row in either order. With both accounts on the board, each a
+/// Site's nit on the re-review: a substring hit of the shorter name does
+/// not beat a fuzzy read of the longer one on the same row. "ALPHAZ" may
+/// be Alpha2 with the 2 misread, so it names neither name, in either
+/// order; so does the board matcher with that row alone on the board. A
+/// substring hit with no longer saved name reading the row still names
+/// the shorter name.
+#[test]
+fn a_shorter_names_substring_does_not_beat_the_longer_names_fuzzy_read() {
+    let main_first = ["Alpha".to_string(), "Alpha2".to_string()];
+    let alt_first = ["Alpha2".to_string(), "Alpha".to_string()];
+    for names in [&main_first, &alt_first] {
+        assert_eq!(
+            best_name_for_row(&valid_row("ALPHAZ"), &names[..]),
+            None,
+            "{names:?}"
+        );
+        assert_eq!(
+            match_row_by_names(&valid_row("ALPHAZ"), 4, &names[..]),
+            None,
+            "{names:?}"
+        );
+        assert!(any_name_reads_row(&valid_row("ALPHAZ"), &names[..]));
+        let board = vec![valid_row("Stranger"), valid_row("ALPHAZ")];
+        assert_eq!(
+            match_player_row_by_names(&board, &names[..]),
+            None,
+            "{names:?}"
+        );
+    }
+    let alpha_only = ["Alpha".to_string(), "Main".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("ALPHAZ"), &alpha_only[..]),
+        Some("Alpha")
+    );
+}
+
+/// A row is unresolved, not a stranger's, when some saved name reads on
+/// it at or above the floor but none wins: "ALPHE2" (Alpha2 0.83, Alpha
+/// 0.80) and "MAlN" (Main 0.75, Alt 0.67). A stranger, a blank read, and
+/// blank saved names read as nothing.
+#[test]
+fn any_name_reads_row_tells_an_unresolved_row_from_a_stranger() {
+    let alphas = ["Alpha".to_string(), "Alpha2".to_string()];
+    let main_alt = ["Main".to_string(), "Alt".to_string()];
+    for (read, names) in [("ALPHE2", &alphas), ("ALPHE", &alphas), ("MAlN", &main_alt)] {
+        assert_eq!(
+            best_name_for_row(&valid_row(read), &names[..]),
+            None,
+            "{read}"
+        );
+        assert!(any_name_reads_row(&valid_row(read), &names[..]), "{read}");
+    }
+    assert!(any_name_reads_row(&valid_row("ALT"), &main_alt[..]));
+    assert!(!any_name_reads_row(&valid_row("Stranger"), &main_alt[..]));
+    assert!(!any_name_reads_row(&valid_row("Stranger"), &alphas[..]));
+    assert!(!any_name_reads_row(&garbage_row(), &main_alt[..]));
+    let blank = ["  ".to_string(), String::new()];
+    assert!(!any_name_reads_row(&valid_row("MAIN"), &blank[..]));
+}
+
+/// The board matcher ranks the same way. ALPHA2 alone on the board is
+/// Alpha2's row in either order. With both accounts on the board, each a
 /// whole word on its own row, no row is named (the caller falls back to
 /// the highlight). Inside one name, a whole-word row beats an earlier row
-/// that only holds it inside a longer word.
+/// that only holds it inside a longer word; this holds for one saved name
+/// as well (FROZENTEAR then FROZEN is row 1 for "Frozen").
 #[test]
 fn the_board_matcher_ranks_saved_names_without_list_order() {
-    let main_first = ["Spocle".to_string(), "Spocle2".to_string()];
-    let alt_first = ["Spocle2".to_string(), "Spocle".to_string()];
-    let one = vec![valid_row("SPOCLE2"), valid_row("Stranger")];
+    let main_first = ["Alpha".to_string(), "Alpha2".to_string()];
+    let alt_first = ["Alpha2".to_string(), "Alpha".to_string()];
+    let one = vec![valid_row("ALPHA2"), valid_row("Stranger")];
     let both = vec![
-        valid_row("SPOCLE2"),
+        valid_row("ALPHA2"),
         valid_row("Stranger"),
-        valid_row("SPOCLE"),
+        valid_row("ALPHA"),
     ];
     for (names, alt_idx) in [(&main_first, 1), (&alt_first, 0)] {
         let found = match_player_row_by_names(&one, &names[..]).unwrap();

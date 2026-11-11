@@ -647,8 +647,10 @@ pub(crate) async fn handle_capture(
     };
     match scoreboard_read {
         Ok((mut parsed, trusted_cells, held_cols)) => {
-            // The own-row name reader for this Tab. Absent when the row
-            // came from a highlight, a seed, or the career hero.
+            // The own-row name reader for this Tab: "ocr-v1" also when the
+            // highlighted row's own read named a saved name. Absent when no
+            // name named the row (a highlight alone, a seed, or the career
+            // hero).
             parsed.name_recognizer = name_recognizer.map(|id| id.as_str().to_string());
             // R9-2: a Tab past the grace window of a finished game. This
             // board decides whether it continues that game (then the capture
