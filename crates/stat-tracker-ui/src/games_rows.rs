@@ -243,10 +243,17 @@ pub struct GamesTab {
     pub view: TabState,
     pub focus: Focus,
     pub deleted_note: Option<crate::games_delete::Deleted>,
+    /// The filters the "Game deleted." line was put up under
+    /// ([`crate::games_delete::note_shows`]).
+    pub deleted_filters: Option<crate::games_delete::Filters>,
     /// The last snapshot's deletes still waiting for the server; `None`
     /// until a snapshot is read after a delete.
     pub pending_deletes: Option<Vec<String>>,
-    /// The held-game picker, when one is open.
+    /// Set by the delete that left the filters no row to show, so its
+    /// "Game deleted." stands over the empty state and a later non-empty
+    /// list does not show that note at row 0.
+    pub deleted_empty_shown: bool,
+    /// The Set map or Set hero picker, when one is open.
     pub picker: Option<crate::games_picker::Picker>,
     /// The grid last drawn (the view sets it), so a delete from the keys
     /// finds the next row in the order the player sees.
@@ -550,8 +557,11 @@ where
     Tz: TimeZone,
     Tz::Offset: std::fmt::Display,
 {
-    let first = games.iter().map(|g| g.started_at()).min();
-    let last = games.iter().map(|g| g.ended_at()).max();
+    // To the minute, as the title prints them, so "23:31 to 00:52" and
+    // its span agree.
+    let minute = |t: DateTime<Utc>| t.with_second(0).and_then(|t| t.with_nanosecond(0));
+    let first = games.iter().map(|g| g.started_at()).min().and_then(minute);
+    let last = games.iter().map(|g| g.ended_at()).max().and_then(minute);
     let (Some(first), Some(last)) = (first, last) else {
         return SessionHead {
             title: String::new(),
@@ -601,8 +611,9 @@ where
 }
 
 /// Sittings, newest first: a new one starts when more than `gap` passes
-/// between one game's end and the next game's start. Inside each, newest
-/// first.
+/// between one game's end and the next game's start
+/// ([`crate::aggregate::same_sitting`], the Overview's rule too). Inside
+/// each, newest first.
 pub fn sittings(games: &[Game], gap: chrono::TimeDelta) -> Vec<Vec<&Game>> {
     let mut newest: Vec<&Game> = games.iter().collect();
     newest.sort_by_key(|g| std::cmp::Reverse(g.started_at()));
@@ -612,7 +623,7 @@ pub fn sittings(games: &[Game], gap: chrono::TimeDelta) -> Vec<Vec<&Game>> {
             Some(cur)
                 if cur
                     .last()
-                    .is_some_and(|newer| newer.started_at() - g.ended_at() <= gap) =>
+                    .is_some_and(|newer| crate::aggregate::same_sitting(newer, g, gap)) =>
             {
                 cur.push(g);
             }
@@ -679,14 +690,9 @@ where
             });
         }
         Grouping::Sessions => {
-            let ids: HashSet<&str> = shown.iter().map(|g| g.session_id.as_str()).collect();
+            let shown_at: HashSet<*const Game> = shown.iter().map(|g| *g as *const Game).collect();
             // A window of 0 is off: each game is its own session.
-            let gap = if gap_secs == 0 {
-                chrono::TimeDelta::MIN
-            } else {
-                crate::aggregate::secs_delta(gap_secs)
-            };
-            let mut groups = sittings(all, gap);
+            let mut groups = sittings(all, crate::aggregate::session_window_gap(gap_secs));
             if sort.oldest_first() {
                 groups.reverse();
             }
@@ -694,7 +700,7 @@ where
                 let mut rows: Vec<&Game> = group
                     .iter()
                     .copied()
-                    .filter(|g| ids.contains(g.session_id.as_str()))
+                    .filter(|g| shown_at.contains(&(*g as *const Game)))
                     .collect();
                 if rows.is_empty() {
                     continue;
@@ -979,7 +985,8 @@ mod tests {
         assert_eq!(unsure_items(&g, false), [UnsureItem::Map]);
     }
 
-    /// `Game::from` keeps flat names only, so the app never sees `r3.dmg`.
+    /// `Game::from_match` keeps flat names only, so the app never sees
+    /// `r3.dmg`.
     #[test]
     fn stored_row_names_reach_the_app_flat() {
         let stored = vec![
@@ -1064,6 +1071,21 @@ mod tests {
         );
     }
 
+    /// The span is taken from the times the title prints, to the minute:
+    /// 23:31:40 to 00:52:10 reads "23:31 to 00:52" and "1 h 21 min", not
+    /// "1 h 20 min".
+    #[test]
+    fn the_span_agrees_with_the_title_to_the_minute() {
+        let games = [
+            timed(Outcome::Win, "2026-10-19T00:40:00Z", "2026-10-19T00:52:10Z"),
+            timed(Outcome::Win, "2026-10-18T23:31:40Z", "2026-10-18T23:50:00Z"),
+        ];
+        let groups = sittings(&games, TimeDelta::hours(3));
+        let head = session_head_in(&groups[0], 2, None, &utc());
+        assert_eq!(head.title, "Sunday night · Oct 18, 23:31 to 00:52");
+        assert_eq!(head.summary, "2 games · 2-0 · 1 h 21 min");
+    }
+
     /// A sitting that starts after midnight is dated by the night it
     /// belongs to, so the title never reads "Sunday night · Oct 19".
     #[test]
@@ -1104,8 +1126,10 @@ mod tests {
     }
 
     /// The gap runs from one game's end to the next game's start, so a
-    /// 20-minute game and a 10-minute queue stay one sitting under a 30
-    /// minute window, and the span covers the last game's length.
+    /// 20-minute game and a 10-minute queue stay one sitting under a 15
+    /// minute window, and the span covers the last game's length. Only
+    /// that rule passes at 15 minutes: start to start is 30 minutes, and
+    /// last Tab read to last Tab read is 30 too.
     #[test]
     fn sittings_split_on_the_gap_between_games_not_their_starts() {
         let games = [
@@ -1117,16 +1141,15 @@ mod tests {
             ),
             timed(Outcome::Win, "2026-10-18T18:00:00Z", "2026-10-18T18:15:00Z"),
         ];
-        let groups = sittings(&games, TimeDelta::minutes(30));
+        let groups = sittings(&games, TimeDelta::minutes(15));
         assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
         let head = session_head_in(&groups[0], 2, None, &utc());
         assert_eq!(head.title, "Sunday evening · Oct 18, 20:00 to 20:50");
         assert_eq!(head.summary, "2 games · 1-1 · 50 min");
     }
 
-    /// Item 19: Delete game takes the game out of the list every header is
-    /// built from, so the sitting's span and count follow the delete (no
-    /// stale end time), as PR 556 left it.
+    /// Delete game takes the game out of every header, so the sitting's
+    /// span and count follow (no stale end time).
     #[test]
     fn a_deleted_game_leaves_the_session_span() {
         let mut games = vec![
@@ -1182,6 +1205,17 @@ mod tests {
         assert_eq!(head.summary, "3 games · 2-1 · 1 h 0 min · 2 shown");
         assert_eq!(s.ticks.len(), 3);
         assert_eq!(l.hidden, 0);
+        // Imported games share an empty session id: keep only the shown ones.
+        let mut imported = all;
+        for g in &mut imported {
+            g.session_id.clear();
+        }
+        let shown = vec![&imported[0], &imported[2]];
+        let state = TabState::default();
+        let l = layout_in(&imported, &shown, state, Grid::Wide, 1800, None, &utc());
+        assert_eq!(l.sections[0].rows.len(), 2);
+        assert!(std::ptr::eq(l.sections[0].rows[0], shown[0]));
+        assert!(std::ptr::eq(l.sections[0].rows[1], shown[1]));
     }
 
     #[test]

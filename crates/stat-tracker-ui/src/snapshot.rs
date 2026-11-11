@@ -14,20 +14,33 @@ use crate::model::Game;
 /// stopped, and the GUI never applies commands itself). The tracker
 /// removes the rows when it applies the delete. A pending tombstone alone
 /// hides nothing (the store keeps some for games it keeps); it only feeds
-/// the "next sync" line, as does a queued delete.
+/// the "next sync" line, as does a queued delete. A queued Edit (from the
+/// edit form or a Set map or Set hero pick) and a queued upload retry
+/// show the same way ([`overlay_queued`]), so a reload brings back
+/// neither Needs a look nor Upload rejected while they wait.
 pub fn load_snapshot(data_dir: &Path) -> Snapshot {
     let mut snap = storage::read_snapshot(data_dir).unwrap_or_default();
-    let queued = queued_deletes(data_dir);
+    let cmds = queued_commands(data_dir);
+    let queued: Vec<String> = cmds
+        .iter()
+        .filter_map(|c| match c {
+            storage::StoreCommand::DeleteSession { session_id } => Some(session_id.clone()),
+            _ => None,
+        })
+        .collect();
     for sid in &queued {
         if !snap.pending_deletes.contains(sid) {
             snap.pending_deletes.push(sid.clone());
         }
     }
     drop_sessions(&mut snap, &queued);
+    overlay_queued(&mut snap, &cmds);
     snap
 }
 
-pub use stat_tracker::games::rows::{drop_sessions, queued_deletes};
+pub use stat_tracker::games::rows::{
+    drop_sessions, overlay_queued, queued_commands, queued_deletes,
+};
 
 pub fn snapshot_mtime(data_dir: &Path) -> Option<SystemTime> {
     std::fs::metadata(data_dir.join("live_snapshot.json"))
@@ -144,6 +157,55 @@ mod tests {
             "still queued for the tracker to apply and upload"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A map or hero pick and an upload retry made while the tracker has
+    /// not applied them yet survive a reload: the held game keeps its
+    /// picks (no Needs a look) and a retried game reads not rejected.
+    #[test]
+    fn queued_picks_and_retries_survive_a_reload() {
+        use crate::fixtures_games::{HELD, REJECTED_2, UNDECIDED};
+        let dir = tempfile::tempdir().unwrap();
+        install_fixture(dir.path(), FixtureKind::Games).expect("install");
+        let game = |snap: &Snapshot, sid: &str| -> Game {
+            games_from_snapshot(snap)
+                .into_iter()
+                .find(|g| g.session_id == sid)
+                .unwrap()
+        };
+        let before = load_snapshot(dir.path());
+        assert!(game(&before, HELD).needs_review());
+        assert!(game(&before, UNDECIDED).upload_reject.is_some());
+        crate::commands::pick_map(dir.path(), HELD, "Busan").unwrap();
+        crate::commands::pick_map(dir.path(), HELD, "Ilios").unwrap();
+        crate::commands::pick_hero(dir.path(), HELD, "Mei").unwrap();
+        crate::commands::retry_upload(dir.path(), UNDECIDED).unwrap();
+
+        let reloaded = load_snapshot(dir.path());
+        let held = game(&reloaded, HELD);
+        assert_eq!(
+            (held.map_name.as_str(), held.hero.as_str()),
+            ("Ilios", "Mei")
+        );
+        assert!(!held.needs_review(), "no Needs a look");
+        for f in ["map_name", "hero"] {
+            assert!(held.edited_fields.iter().any(|e| e == f), "{f}");
+        }
+        assert_eq!(held.role, crate::model::Role::Damage);
+        assert!(game(&reloaded, UNDECIDED).upload_reject.is_none());
+        assert!(
+            game(&reloaded, REJECTED_2).upload_reject.is_some(),
+            "only the retried game"
+        );
+
+        crate::commands::retry_rejected_uploads(dir.path()).unwrap();
+        let reloaded = load_snapshot(dir.path());
+        assert!(game(&reloaded, REJECTED_2).upload_reject.is_none());
+        assert_eq!(
+            crate::commands::queued(dir.path()).len(),
+            5,
+            "all still queued"
+        );
     }
 
     /// A pending tombstone alone is not a delete: the store keeps them

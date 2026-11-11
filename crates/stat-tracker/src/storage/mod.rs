@@ -44,7 +44,8 @@ pub use migrate_timeline::{
 pub use upload_queue::{SyncClaim, UPLOAD_REJECTED_BY_SERVER, format_upload_rejection};
 
 use files::{rewrite_match_log_session, snapshot_path};
-use rules::{apply_match_edit, name_recognizer_absent, outcome_is_decided};
+pub(crate) use rules::apply_match_edit;
+use rules::{name_recognizer_absent, outcome_is_decided};
 
 /// A command the store will never apply, such as one keyed by an empty
 /// session id. The daemon drops its file instead of retrying it forever.
