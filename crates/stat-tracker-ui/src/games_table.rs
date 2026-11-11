@@ -67,8 +67,10 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
     {
         app.games_tab.picker = None;
     }
-    drop_hidden_open_row(app);
-    if key_on_undrawn_row(app, &msg) {
+    // The one hidden-row check for a tab message (`before_message` skips
+    // these). An open row left undrawn now is one in Edit: no key acts on it.
+    let undrawn_edit = drop_hidden_open_row(app);
+    if undrawn_edit && is_key(&msg) {
         return iced::Task::none();
     }
     match msg {
@@ -165,11 +167,14 @@ pub fn clear_focus(app: &mut TrackerApp) {
 }
 
 /// Run before each app message: take a stale "Game deleted." down and,
-/// on any message but the 1 s tick, close a row the filters hid. A tick
-/// changes no filter, so it skips that check and the list it reads.
+/// on any message but the 1 s tick, run the undrawn-row check
+/// ([`drop_hidden_open_row`]: a row the filters hid, one past the first
+/// 500 rows, or a game that left the list). A tick changes no filter, so
+/// it skips that check and the list it reads. A Games tab message skips
+/// it too, as [`update`] runs it once for that message.
 pub(crate) fn before_message(app: &mut TrackerApp, message: &Message) {
     crate::games_delete::drop_stale_note(app);
-    if !matches!(message, Message::Tick) {
+    if !matches!(message, Message::Tick | Message::Games(_)) {
         drop_hidden_open_row(app);
     }
 }
@@ -177,23 +182,26 @@ pub(crate) fn before_message(app: &mut TrackerApp, message: &Message) {
 /// Drop a row focus that is not drawn now, and close an open row that is
 /// not drawn, so a key never acts on a row the player can't see. Only the
 /// top tabs take these keys, so the classic Games page keeps its open
-/// card. Drawn is [`row_order`]: a row the filters hid and a row past the
-/// first 500 are both off screen. An open Edit stays up on an undrawn row
-/// so the typed text comes back with the row, but its delete strip and
-/// the delete focus go, and [`update`] gives it no key.
-pub(crate) fn drop_hidden_open_row(app: &mut TrackerApp) {
+/// card. Drawn is [`row_order`]: a row the filters hid, a row past the
+/// first 500 and a game that left the list (an untracked map after a
+/// reload) are all off screen. An open Edit stays up on an undrawn row so
+/// the typed text comes back with the row (or a save can say the game is
+/// gone), but its delete strip, picker and delete focus go. Returns
+/// whether that is the case: an Edit left open on an undrawn row, which
+/// [`update`] gives no key. The row list is built only when a row is open
+/// or focused.
+pub(crate) fn drop_hidden_open_row(app: &mut TrackerApp) -> bool {
     let focused_row = matches!(app.games_tab.focus, Focus::Row(_));
     if app.nav_style != crate::nav::NavStyle::TopTabs || (app.expanded.is_none() && !focused_row) {
-        return;
+        return false;
     }
     let drawn = row_order(app);
     let hidden = |sid: &str| !drawn.iter().any(|s| s == sid);
-    let drop_focus = matches!(&app.games_tab.focus, Focus::Row(sid) if hidden(sid));
-    if drop_focus {
+    if matches!(&app.games_tab.focus, Focus::Row(sid) if hidden(sid)) {
         app.games_tab.focus = Focus::None;
     }
-    if !open_row_undrawn(app, &drawn) {
-        return;
+    if !app.expanded.as_deref().is_some_and(hidden) {
+        return false;
     }
     if !app.editing {
         app.expanded = None;
@@ -206,27 +214,17 @@ pub(crate) fn drop_hidden_open_row(app: &mut TrackerApp) {
     ) {
         app.games_tab.focus = Focus::None;
     }
+    app.editing
 }
 
-/// Whether the open row is a game in the list that `drawn` (the
-/// [`row_order`]) leaves out. A game that left the list does not count:
-/// it stays open so a pending Edit can still say it is gone.
-fn open_row_undrawn(app: &TrackerApp, drawn: &[String]) -> bool {
-    app.expanded.as_deref().is_some_and(|sid| {
-        !drawn.iter().any(|s| s == sid) && app.games.iter().any(|g| g.session_id == sid)
-    })
-}
-
-/// The keys no widget took. On the top tabs they do nothing while the
-/// open row is not drawn (an Edit kept on a row a filter hid), so Esc
-/// can't drop its form and Tab, Enter, Space and Delete can't reach it.
-fn key_on_undrawn_row(app: &TrackerApp, msg: &Msg) -> bool {
+/// The keys no widget took, which [`update`] refuses while an Edit is
+/// left open on an undrawn row: Esc can't drop its form, and Tab, Enter,
+/// Space and Delete can't reach it.
+fn is_key(msg: &Msg) -> bool {
     matches!(
         msg,
         Msg::Escape | Msg::Enter | Msg::Tab | Msg::Space | Msg::DeleteKey
-    ) && app.nav_style == crate::nav::NavStyle::TopTabs
-        && app.expanded.is_some()
-        && open_row_undrawn(app, &row_order(app))
+    )
 }
 
 /// Enter or Space on the focused button or row. False when nothing that
@@ -1182,6 +1180,40 @@ mod tests {
             send(&mut app, Msg::Escape);
             assert!(!app.editing, "{keys:?}");
         }
+    }
+
+    /// A game that left the list (an untracked map, then a reload) is not
+    /// drawn, so its open row closes and Delete, Tab then Enter delete
+    /// nothing. In Edit it stays open with the typed text, but takes no
+    /// key, as a hidden row does.
+    #[test]
+    fn a_game_that_left_the_list_takes_no_keys() {
+        let (_d1, mut a) = app();
+        a.expanded = Some(UNSURE.into());
+        a.games.retain(|g| g.session_id != UNSURE);
+        for key in [Msg::DeleteKey, Msg::Tab, Msg::Enter] {
+            let _ = a.update(Message::Games(key));
+        }
+        assert_eq!(a.expanded, None);
+        assert_eq!(a.confirm_delete, None);
+        assert!(a.games_tab.deleted_note.is_none(), "nothing deleted");
+        // In Edit: the form and its text stay, and no key reaches it.
+        let (_dir, mut app) = app();
+        app.expanded = Some(UNSURE.into());
+        let _ = app.update(Message::ToggleEdit);
+        let _ = app.update(Message::EditField(
+            crate::model::EditField::Elims,
+            "42".into(),
+        ));
+        app.games.retain(|g| g.session_id != UNSURE);
+        for key in [Msg::DeleteKey, Msg::Tab, Msg::Enter, Msg::Escape] {
+            let _ = app.update(Message::Games(key));
+        }
+        assert!(app.editing);
+        assert_eq!(app.expanded.as_deref(), Some(UNSURE));
+        assert_eq!(app.edit.elims, "42");
+        assert_eq!(app.confirm_delete, None);
+        assert!(app.games_tab.deleted_note.is_none(), "nothing deleted");
     }
 
     /// The tick never runs the hidden-row check, so it neither closes an
