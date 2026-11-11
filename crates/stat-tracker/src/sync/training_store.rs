@@ -18,14 +18,21 @@
 //!   under one site's consent never go to another.
 //! - `deleted_at`: when the desktop app last asked the website to delete
 //!   every own training crop (Unix milliseconds). A pass drops crops kept
-//!   before it, and removes again by id what it sent while that delete ran.
+//!   before it. When the file changed while an upload ran, the pass removes
+//!   again by id what that upload stored.
+//! - `pending_deletes.json`: ids of crops the site stored that such a
+//!   removal could not delete yet. Each pass tries them again before it
+//!   sends anything, and warns until they are gone.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use scuffed_types::api::training_crops::{TrainingCropConsent, TrainingCropUploadMeta};
 use serde::{Deserialize, Serialize};
 
-use super::training::{QueuedCrop, UploadKind, check_crop, hex, map_name_meta, random_token};
+use super::training::{
+    QueuedCrop, UploadKind, batch_len, check_crop, hex, map_name_meta, random_token,
+};
 
 const DIR: &str = "training_crops";
 const OUTBOX: &str = "outbox";
@@ -34,6 +41,12 @@ const STATUS_FILE: &str = "status.json";
 const TOKENS_FILE: &str = "game_tokens.json";
 const OWNER_FILE: &str = "owner.json";
 const DELETED_AT_FILE: &str = "deleted_at";
+const PENDING_DELETES_FILE: &str = "pending_deletes.json";
+
+/// Held while the owner is changed, and while a send pass writes what it
+/// learned, so a pass that ran for the old website or token never writes
+/// under the new one.
+static OWNER_LOCK: Mutex<()> = Mutex::new(());
 
 /// Most crops kept per kind while they wait. About 20 games of map names.
 pub const OUTBOX_KEEP_PER_KIND: usize = 40;
@@ -108,8 +121,10 @@ pub struct TrainingStatus {
     /// RFC 3339 time of the pass that set the warning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<String>,
-    /// Crops were dropped. Such a warning stays until a pass sends
-    /// something, so a later pass with nothing to send does not hide it.
+    /// Crops were dropped, or crops a delete left on the website are still
+    /// there. Such a warning stays until a pass sends something or those
+    /// crops are gone, so a later pass with nothing to send does not hide
+    /// it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sticky: bool,
 }
@@ -126,16 +141,17 @@ pub fn training_warning(data_dir: &Path) -> Option<String> {
 }
 
 /// Leave `warning` for the desktop app, or clear the last one (`None`).
-/// A clear keeps a sticky warning unless `sent_some`.
+/// A clear keeps a sticky warning unless `clear_sticky` (a send worked, or
+/// the crops a delete left on the website are gone).
 pub(super) fn write_training_warning(
     data_dir: &Path,
     warning: Option<&str>,
     sticky: bool,
-    sent_some: bool,
+    clear_sticky: bool,
 ) {
     let path = root(data_dir).join(STATUS_FILE);
     let Some(warning) = warning else {
-        let keep = !sent_some && read_training_status(data_dir).is_some_and(|s| s.sticky);
+        let keep = !clear_sticky && read_training_status(data_dir).is_some_and(|s| s.sticky);
         if !keep {
             let _ = std::fs::remove_file(path);
         }
@@ -247,9 +263,9 @@ pub(super) fn keep_crop(
 }
 
 /// A `map_name` crop for training, from the map-label PNG the tracker just
-/// saved for `session_id` from an accepted Tab. `width` and `height` are the
-/// capture size. Nothing is read or kept while the site's last answer has
-/// `map_name` consent off.
+/// saved for `session_id` from a Tab whose row is stored. `width` and
+/// `height` are the capture size. Nothing is read or kept while the site's
+/// last answer has `map_name` consent off.
 pub fn keep_map_name_crop(
     data_dir: &Path,
     session_id: &str,
@@ -270,22 +286,73 @@ pub fn keep_map_name_crop(
     keep_training_crop(data_dir, UploadKind::MapName, meta, png)
 }
 
+/// One waiting crop, or `None` when its files do not parse.
+fn read_crop(dir: &Path, id: &str) -> Option<QueuedCrop> {
+    let meta = std::fs::read(dir.join(format!("{id}.json")))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())?;
+    let png = std::fs::read(dir.join(format!("{id}.png"))).ok()?;
+    Some(QueuedCrop {
+        id: id.to_string(),
+        meta,
+        png,
+    })
+}
+
 /// The waiting crops of `kind`, oldest first. A crop whose files do not
 /// parse is removed.
 pub fn queued_crops(data_dir: &Path, kind: UploadKind) -> Vec<QueuedCrop> {
     let dir = kind_dir(data_dir, kind);
     let mut out = Vec::new();
     for id in crop_ids(&dir) {
-        let meta = std::fs::read(dir.join(format!("{id}.json")))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
-        let png = std::fs::read(dir.join(format!("{id}.png"))).ok();
-        match (meta, png) {
-            (Some(meta), Some(png)) => out.push(QueuedCrop { id, meta, png }),
-            _ => remove_crop(&dir, &id),
+        match read_crop(&dir, &id) {
+            Some(crop) => out.push(crop),
+            None => remove_crop(&dir, &id),
         }
     }
     out
+}
+
+/// The next request's worth of `kind`, oldest first ([`batch_len`]). Only
+/// the crops in it are read from disk. On the way, crops kept at or before
+/// `deleted_at` (the delete marker the caller read), crops whose files do
+/// not parse and crops over the kind's caps are removed, never sent.
+pub(super) fn next_batch(
+    data_dir: &Path,
+    kind: UploadKind,
+    deleted_at: Option<i64>,
+) -> Vec<QueuedCrop> {
+    let dir = kind_dir(data_dir, kind);
+    let mut batch = Vec::new();
+    for id in crop_ids(&dir) {
+        let before_delete = deleted_at
+            .zip(crop_kept_at(&id))
+            .is_some_and(|(at, kept)| kept <= at);
+        if before_delete {
+            remove_crop(&dir, &id);
+            continue;
+        }
+        let Some(crop) = read_crop(&dir, &id) else {
+            remove_crop(&dir, &id);
+            continue;
+        };
+        if let Err(refusal) = check_crop(kind, &crop) {
+            tracing::info!(
+                kind = kind.as_str(),
+                ?refusal,
+                "training crop over a cap: dropped, not sent"
+            );
+            remove_crop(&dir, &id);
+            continue;
+        }
+        batch.push(crop);
+        if batch_len(&batch) < batch.len() {
+            // Full: this one waits for the next request.
+            batch.pop();
+            break;
+        }
+    }
+    batch
 }
 
 /// True when any kind has a crop waiting.
@@ -315,14 +382,62 @@ pub fn clear_training_outbox(data_dir: &Path) {
     let _ = std::fs::remove_file(root(data_dir).join(TOKENS_FILE));
 }
 
-/// [`clear_training_outbox`], plus the cached consent, the owner and the
-/// warning: sync is off or the website changed, so no crop is kept until
-/// the site is read again, and there is no send to warn about.
+/// [`clear_training_outbox`], plus the cached consent, the owner, the
+/// warning and the ids still to delete: sync is off or the website
+/// changed, so no crop is kept until the site is read again, and there is
+/// no send to warn about. The ids to delete belong to the old website and
+/// token and cannot be removed with another.
 pub fn forget_training_crops(data_dir: &Path) {
     clear_training_outbox(data_dir);
     let _ = std::fs::remove_file(root(data_dir).join(CONSENT_FILE));
     let _ = std::fs::remove_file(root(data_dir).join(STATUS_FILE));
     let _ = std::fs::remove_file(root(data_dir).join(OWNER_FILE));
+    let _ = std::fs::remove_file(root(data_dir).join(PENDING_DELETES_FILE));
+}
+
+/// True when a failed send is worth a warning: a kind's cached consent is
+/// on, a crop waits, or a crop still has to be deleted from the website.
+/// A member who never turned a kind on sees nothing.
+pub(super) fn training_in_use(data_dir: &Path) -> bool {
+    let consent = cached_training_consent(data_dir);
+    UploadKind::ALL
+        .into_iter()
+        .any(|kind| kind.consented(&consent))
+        || has_queued_crops(data_dir)
+        || !pending_deletes(data_dir).is_empty()
+}
+
+// ---------------------------------------------------------- pending deletes
+
+/// Ids of crops the website stored during a delete that are still to be
+/// removed by id.
+pub(super) fn pending_deletes(data_dir: &Path) -> Vec<String> {
+    std::fs::read(root(data_dir).join(PENDING_DELETES_FILE))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Vec<String>>(&bytes).ok())
+        .unwrap_or_default()
+}
+
+/// Save the ids still to delete; none removes the file. Only hex ids are
+/// kept, the shape the website gives and the delete call takes.
+pub(super) fn write_pending_deletes(data_dir: &Path, ids: &[String]) {
+    let path = root(data_dir).join(PENDING_DELETES_FILE);
+    let mut keep: Vec<&String> = ids
+        .iter()
+        .filter(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_hexdigit()))
+        .collect();
+    keep.sort();
+    keep.dedup();
+    if keep.is_empty() {
+        let _ = std::fs::remove_file(path);
+        return;
+    }
+    let written = serde_json::to_vec(&keep)
+        .map_err(std::io::Error::other)
+        .and_then(|bytes| write_private(&path, &bytes));
+    if let Err(error) = written {
+        tracing::warn!(%error, "could not save the training crops still to delete");
+    }
 }
 
 // -------------------------------------------------------------------- owner
@@ -346,11 +461,10 @@ fn owner_of(server_url: &str, token: &str) -> Owner {
 /// pair is only recorded: consent is cached only by a send pass, which
 /// records its owner before it reads the consent.
 pub fn adopt_training_owner(data_dir: &Path, server_url: &str, token: &str) -> bool {
+    let _owner = OWNER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let want = owner_of(server_url, token);
     let path = root(data_dir).join(OWNER_FILE);
-    let have: Option<Owner> = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    let have = recorded_owner(&path);
     if have.as_ref() == Some(&want) {
         return false;
     }
@@ -369,6 +483,27 @@ pub fn adopt_training_owner(data_dir: &Path, server_url: &str, token: &str) -> b
     changed
 }
 
+fn recorded_owner(path: &Path) -> Option<Owner> {
+    std::fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+/// Run `write` only while the training crop files still belong to this
+/// website and token, and hold off an owner change until it is done.
+/// `None` when they belong to another (or to none: sync went off), so a
+/// send pass that ran for the old pair writes nothing under the new one.
+pub(super) fn while_owner<T>(
+    data_dir: &Path,
+    server_url: &str,
+    token: &str,
+    write: impl FnOnce() -> T,
+) -> Option<T> {
+    let _owner = OWNER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let path = root(data_dir).join(OWNER_FILE);
+    (recorded_owner(&path) == Some(owner_of(server_url, token))).then(write)
+}
+
 // ------------------------------------------------------------ delete marker
 
 /// Record that the member asked the website to delete every own training
@@ -381,7 +516,11 @@ pub fn mark_training_delete(data_dir: &Path) -> std::io::Result<()> {
     )
 }
 
-/// When the last delete was asked for, in Unix milliseconds.
+/// When the last delete was asked for, in Unix milliseconds. A send pass
+/// reads it before it picks a batch, and again after the upload: any
+/// change means a delete ran meanwhile. The two values are only compared
+/// for equality, never as times, since the desktop app wrote this with its
+/// own clock.
 pub(super) fn training_delete_at(data_dir: &Path) -> Option<i64> {
     std::fs::read_to_string(root(data_dir).join(DELETED_AT_FILE))
         .ok()?

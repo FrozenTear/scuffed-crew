@@ -1,6 +1,10 @@
-//! The three training crop routes the tracker uses, with the sync token:
-//! `GET /api/training-crops/consent`, `POST /api/training-crops?kind=` and
-//! `DELETE /api/training-crops/mine`.
+//! The training crop routes the tracker uses, with the sync token:
+//! `GET /api/training-crops/consent`, `POST /api/training-crops?kind=`,
+//! `DELETE /api/training-crops/{id}` and `DELETE /api/training-crops/mine`.
+//!
+//! A send pass passes the website and token it started with to each call,
+//! so a Settings change in the middle of a pass never sends that pass's
+//! crops, or its by-id deletes, to the new website or with the new token.
 //!
 //! There is no method for `PUT /api/training-crops/consent`: consent is set
 //! on the site with a session only, and a token `PUT` is 401. None of these
@@ -12,6 +16,8 @@ use std::time::Duration;
 use scuffed_types::api::training_crops::{
     TrainingCropConsent, TrainingCropUploadResponse, TrainingCropsDeleted,
 };
+
+use crate::config::{SyncConfig, validate_sync_server_url};
 
 use super::client::{SyncClient, retry_after_from_response, send_error_text};
 use super::training::{QueuedCrop, UploadKind, multipart_body};
@@ -100,43 +106,55 @@ async fn read_json<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|e| TrainingCallError::Transport(e.to_string()))
 }
 
+/// The route's URL on `creds`' website. Refuses what stats sync refuses
+/// (cleartext off loopback, a bad URL), before the token is attached.
+fn training_url(creds: &SyncConfig, path: &str) -> Result<String, TrainingCallError> {
+    validate_sync_server_url(&creds.server_url)
+        .map_err(|e| TrainingCallError::Transport(e.to_string()))?;
+    Ok(format!("{}{path}", creds.server_url))
+}
+
 impl SyncClient {
-    fn training_url(&self, path: &str) -> Result<(String, String), TrainingCallError> {
-        self.refuse_unsafe_transport()
-            .map_err(|e| TrainingCallError::Transport(e.to_string()))?;
-        let creds = self.credentials();
-        Ok((format!("{}{path}", creds.server_url), creds.token))
+    /// `GET /api/training-crops/consent` with the saved website and token:
+    /// the member's consent per kind.
+    pub async fn fetch_training_consent(&self) -> Result<TrainingCropConsent, TrainingCallError> {
+        self.fetch_training_consent_as(&self.credentials()).await
     }
 
-    /// `GET /api/training-crops/consent`: the member's consent per kind.
-    pub async fn fetch_training_consent(&self) -> Result<TrainingCropConsent, TrainingCallError> {
-        let (url, token) = self.training_url(CONSENT_PATH)?;
+    /// [`Self::fetch_training_consent`] on `creds`, the website and token a
+    /// send pass started with.
+    pub async fn fetch_training_consent_as(
+        &self,
+        creds: &SyncConfig,
+    ) -> Result<TrainingCropConsent, TrainingCallError> {
+        let url = training_url(creds, CONSENT_PATH)?;
         let resp = self
             .http
             .get(&url)
-            .bearer_auth(&token)
+            .bearer_auth(&creds.token)
             .send()
             .await
             .map_err(|e| TrainingCallError::Transport(send_error_text(&e)))?;
         read_json(resp).await
     }
 
-    /// `POST /api/training-crops?kind=<kind>` with `crops` as meta and crop
-    /// pairs. The caller has checked every crop and sized the batch
-    /// ([`super::training::check_crop`], [`super::training::batch_len`]).
+    /// `POST /api/training-crops?kind=<kind>` on `creds` with `crops` as
+    /// meta and crop pairs. The caller has checked every crop and sized the
+    /// batch ([`super::training::check_crop`], [`super::training::batch_len`]).
     pub async fn upload_training_crops(
         &self,
+        creds: &SyncConfig,
         kind: UploadKind,
         crops: &[QueuedCrop],
     ) -> Result<TrainingCropUploadResponse, TrainingCallError> {
-        let (url, token) = self.training_url(UPLOAD_PATH)?;
+        let url = training_url(creds, UPLOAD_PATH)?;
         let boundary = new_boundary();
         let body = multipart_body(&boundary, crops);
         let resp = self
             .http
             .post(&url)
             .query(&[("kind", kind.as_str())])
-            .bearer_auth(&token)
+            .bearer_auth(&creds.token)
             .header(
                 reqwest::header::CONTENT_TYPE,
                 format!("multipart/form-data; boundary={boundary}"),
@@ -148,17 +166,21 @@ impl SyncClient {
         read_json(resp).await
     }
 
-    /// `DELETE /api/training-crops/{id}`: one own crop. A crop already gone
-    /// is 404 `crop_not_found`.
-    pub async fn delete_training_crop(&self, id: &str) -> Result<u32, TrainingCallError> {
+    /// `DELETE /api/training-crops/{id}` on `creds`: one own crop. A crop
+    /// already gone is 404 `crop_not_found`.
+    pub async fn delete_training_crop(
+        &self,
+        creds: &SyncConfig,
+        id: &str,
+    ) -> Result<u32, TrainingCallError> {
         if id.is_empty() || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(TrainingCallError::Transport("bad crop id".into()));
         }
-        let (url, token) = self.training_url(&format!("{UPLOAD_PATH}/{id}"))?;
+        let url = training_url(creds, &format!("{UPLOAD_PATH}/{id}"))?;
         let resp = self
             .http
             .delete(&url)
-            .bearer_auth(&token)
+            .bearer_auth(&creds.token)
             .send()
             .await
             .map_err(|e| TrainingCallError::Transport(send_error_text(&e)))?;
@@ -167,14 +189,15 @@ impl SyncClient {
             .map(|answer| answer.deleted)
     }
 
-    /// `DELETE /api/training-crops/mine`: every own training crop of every
-    /// kind. The count the server removed.
+    /// `DELETE /api/training-crops/mine` with the saved website and token:
+    /// every own training crop of every kind. The count the server removed.
     pub async fn delete_own_training_crops(&self) -> Result<u32, TrainingCallError> {
-        let (url, token) = self.training_url(DELETE_MINE_PATH)?;
+        let creds = self.credentials();
+        let url = training_url(&creds, DELETE_MINE_PATH)?;
         let resp = self
             .http
             .delete(&url)
-            .bearer_auth(&token)
+            .bearer_auth(&creds.token)
             .send()
             .await
             .map_err(|e| TrainingCallError::Transport(send_error_text(&e)))?;

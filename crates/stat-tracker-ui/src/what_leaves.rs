@@ -32,15 +32,16 @@ pub(crate) const SECTIONS: [(&str, &[&str]); 6] = [
     (
         "Training crops, only the kinds you turn on at the website",
         &[
-            "Small pictures of what the tracker read from a Tab screen it accepted, at their own size: the map name banner, your hero portrait from the career panel, and the number cells of your own row.",
-            "With each: a random number for the game, the screen size and which screen it came from. With a hero portrait, the hero, the name of the hero picture pack it was matched with, and how sure the reader was. With a number cell, its column and your hero. No names, chat, other players' rows or whole screens.",
+            "Small pictures of what the tracker read from a Tab whose row it stores, at their own size: the map name banner, your hero portrait from the career panel, and the number cells of your own row.",
+            "With each: a random number for the game, the screen size and which screen it came from. The website also keeps the tracker version (its User-Agent) with each one. With a hero portrait, the hero, the name of the hero picture pack it was matched with, and how sure the reader was. With a number cell, its column and your hero. No names, chat, other players' rows or whole screens.",
             "Sent with your token while Upload games is on. Delete my training crops, under Website account, removes them from the website.",
+            "While Upload games is on, the tracker itself asks the website which kinds you allow, with your token, when it starts and every 10 minutes, even with every kind off, and before each send. That question sends no pictures and no games.",
         ],
     ),
     (
         "Website account",
         &[
-            "Opening Settings asks the website which account the saved token belongs to and which training crops you allow. The app also reads the website's season list. None of these sends your games.",
+            "Opening Settings asks the website which account the saved token belongs to and which training crops you allow. Saving a website or token while Settings is open asks again which training crops you allow. The app also reads the website's season list. None of these sends your games.",
         ],
     ),
     (
@@ -151,6 +152,30 @@ mod tests {
             "played",
         ] {
             assert!(upload.contains(field), "{field}");
+        }
+    }
+
+    /// The training crop lines say what goes with each crop, and that the
+    /// tracker reads the consent on its own, not only when Settings opens.
+    #[test]
+    fn the_training_lines_name_the_trackers_own_consent_read_and_version() {
+        let training = SECTIONS[1].1.join(" ");
+        assert!(SECTIONS[1].0.starts_with("Training crops"));
+        for said in [
+            "User-Agent",
+            "tracker version",
+            "when it starts and every 10 minutes",
+            "even with every kind off",
+        ] {
+            assert!(training.contains(said), "{said}");
+        }
+        for (_, lines) in SECTIONS {
+            for line in lines {
+                assert!(
+                    !line.contains('\u{2014}') && !line.contains('\u{2013}'),
+                    "{line}"
+                );
+            }
         }
     }
 }

@@ -151,9 +151,7 @@ impl SyncClient {
 
     /// Last line before `bearer_auth`. `try_new` already rejected unsafe
     /// configs; this still runs so a client built with `new` cannot send.
-    pub(super) fn refuse_unsafe_transport(
-        &self,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    fn refuse_unsafe_transport(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         validate_sync_server_url(&self.credentials().server_url)?;
         Ok(())
     }

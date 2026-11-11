@@ -4,7 +4,9 @@
 //! calls `DELETE /api/training-crops/mine` after a confirm step.
 //!
 //! The consent is read again each time Settings opens, like the stats
-//! visibility line. The app never sets consent: there is no call for it.
+//! visibility line, and after a save while Settings is open when the saved
+//! website and token have no read yet. The app never sets consent: there
+//! is no call for it.
 
 use iced::Task;
 use iced::widget::{Column, button, column, row, text};
@@ -83,6 +85,12 @@ impl TrainingState {
     pub(crate) fn forget(&mut self) {
         *self = TrainingState::default();
     }
+
+    /// The URL and token a consent read is running for.
+    #[cfg(test)]
+    pub(crate) fn reading_for(&self) -> Option<&(String, String)> {
+        self.asking.as_ref()
+    }
 }
 
 fn page(msg: TrainingMsg) -> Message {
@@ -125,6 +133,18 @@ pub(crate) fn ask_consent(app: &mut TrackerApp) -> Option<Task<Message>> {
             })
         },
     ))
+}
+
+/// A settings save worked while Settings is open: when the saved website
+/// and token have no consent read yet (signed in, a new token, Upload
+/// games turned on), read it now, so "Reading your choices" never stays
+/// with no read running. A key already read is not asked again.
+pub(crate) fn ask_consent_if_unread(app: &mut TrackerApp) -> Option<Task<Message>> {
+    let key = sync_key(app)?;
+    if app.page_state.opened.training.consent(&key).is_some() {
+        return None;
+    }
+    ask_consent(app)
 }
 
 /// Delete every own training crop on the website, then the crops waiting
@@ -525,16 +545,35 @@ mod tests {
         assert!(!stat_tracker::sync::has_queued_crops(dir.path()));
     }
 
+    /// A failed delete says why. The app leaves the waiting crops alone,
+    /// but the delete marker is already written, so the tracker's next
+    /// pass drops every crop kept before it and sends none of them (see
+    /// `crops_kept_before_a_delete_are_dropped_not_sent` in the tracker).
     #[tokio::test]
-    async fn a_failed_delete_keeps_the_local_outbox_and_says_why() {
+    async fn a_failed_delete_says_why_and_marks_the_waiting_crops_for_the_next_pass_to_drop() {
         let dir = tempfile::tempdir().unwrap();
         queue_one(dir.path());
+        std::thread::sleep(std::time::Duration::from_millis(5));
         let (url, server) = answer_once(http(503, r#"{"error":"hero_icons_disabled"}"#));
         let client = client_for(&(url, "tok".into())).unwrap();
         let got = delete_everywhere(client, dir.path().to_path_buf()).await;
         server.join().unwrap();
         let reason = got.unwrap_err();
         assert!(reason.contains("not taking training crops"), "{reason}");
-        assert!(stat_tracker::sync::has_queued_crops(dir.path()));
+        assert!(
+            stat_tracker::sync::has_queued_crops(dir.path()),
+            "still on disk until the next pass"
+        );
+        let marker: i64 = std::fs::read_to_string(dir.path().join("training_crops/deleted_at"))
+            .expect("the delete marker")
+            .trim()
+            .parse()
+            .unwrap();
+        let outbox = dir.path().join("training_crops/outbox/map_name");
+        for entry in std::fs::read_dir(outbox).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            let kept: i64 = name.split('-').next().unwrap().parse().unwrap();
+            assert!(kept < marker, "{name} was kept before the delete");
+        }
     }
 }

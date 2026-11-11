@@ -572,6 +572,11 @@ impl TrackerApp {
             ));
             self.last_update_check = Some(std::time::Instant::now());
         }
+        // A page save happens with Settings open: a new website or token
+        // reads its training crop consent now, not at the next open.
+        if !classic && let Some(task) = crate::training_card::ask_consent_if_unread(self) {
+            tasks.push(task);
+        }
         Task::batch(tasks)
     }
 }

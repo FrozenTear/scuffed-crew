@@ -25,6 +25,8 @@ use crate::theme::{
     SIZE_LABEL, SIZE_META, SIZE_TITLE, TEXT, TEXT_2, TEXT_3,
 };
 
+pub(crate) use crate::uninstall_names::is_tracker_data_name;
+
 /// Shell source of the install path list. Parsed, not executed.
 pub const INSTALL_PATHS_SH: &str = include_str!("../../stat-tracker/dist/install-paths.sh");
 
@@ -1002,37 +1004,6 @@ fn remove_exact_file(path: &Path, home: &Path, prefix: &Path) -> Result<RemoveOu
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(RemoveOutcome::Absent),
         Err(err) => Err(format!("could not read {}: {err}", unlink.display())),
     }
-}
-
-/// Files and folders the tracker writes in its saved-games folder (`stats.surrealkv.pre-*`:
-/// store backups). Anything else stays, also in `~/.config`, `~/Documents` or `~/Games`.
-pub(crate) fn is_tracker_data_name(name: &str) -> bool {
-    matches!(
-        name,
-        "stats.surrealkv"
-            | "vacuum.tmp"
-            | "live_snapshot.json"
-            | "live_snapshot.json.tmp"
-            | "matches.jsonl"
-            | "commands"
-            | "daemon.pid"
-            | "daemon.log"
-            | "daemon.log.1"
-            | "debug"
-            | "shadow"
-            | "tessdata"
-            | "active_game.json"
-            | "sync_auth.json"
-            | "portraits"
-            | "ui_state.json"
-            | "report-kit"
-            | "run.marker"
-            | "last_crash.marker"
-            | "ocr_switch.json"
-            | "ocr_switch.json.tmp"
-            | "update-install.log"
-            | "tracker.sock"
-    ) || name.starts_with("stats.surrealkv.pre-")
 }
 
 fn is_broad_saved_folder(dir: &Path, home: &Path) -> bool {
