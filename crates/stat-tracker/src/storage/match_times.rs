@@ -1,10 +1,10 @@
 //! A game's real start and end ([`LocalStore::attach_match_times`]) and the
 //! carry that keeps them on every snapshot of the match. Same shape as the
-//! bans and picks status (`storage::bans_picks`).
+//! bans and picks status (`storage::bans_picks`), without its log rewrite.
 
 use crate::model::MatchTimes;
 
-use super::{LocalStore, rewrite_match_log_session};
+use super::LocalStore;
 
 impl LocalStore {
     /// Store `times` (`PersonalMatch::match_times`) on every snapshot of
@@ -15,6 +15,10 @@ impl LocalStore {
     /// shows was wrong clears the end it set ([`MatchTimes::ended_at`]
     /// back to `None`). Local only: the upload never sends them, so this
     /// leaves the upload queue as it is.
+    ///
+    /// `matches.jsonl` is not rewritten: nothing reads it, and this runs on
+    /// the event loop after every stored capture. The store and
+    /// `active_game.json` keep the times across a restart.
     pub async fn attach_match_times(
         &self,
         session_id: &str,
@@ -32,12 +36,6 @@ impl LocalStore {
             .bind(("sid", session_id.to_string()))
             .await?
             .check()?;
-        let times = times.clone();
-        rewrite_match_log_session(
-            &self.data_dir,
-            session_id,
-            Some(&|m| m.match_times = Some(times.clone())),
-        );
         Ok(true)
     }
 }

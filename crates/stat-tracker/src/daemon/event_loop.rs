@@ -352,13 +352,7 @@ pub(crate) async fn run_loop(
                         tracing::warn!(target: "scuffed_stat_tracker", error = %e, "bans and picks: status not stored");
                     }
                     // The open game's real start and end, on its rows.
-                    if let Some(g) = st
-                        .active_game
-                        .as_ref()
-                        .filter(|g| g.session_id == stored_sid)
-                    {
-                        store_match_times(store, g).await;
-                    }
+                    store_open_game_times(&st, store, &stored_sid).await;
                     refresh_snapshot_after_capture(&st, store, data_dir, &stored_sid).await;
                 }
                 // A Tab pressed while that capture ran runs now, unless the

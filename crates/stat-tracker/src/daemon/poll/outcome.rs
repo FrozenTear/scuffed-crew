@@ -92,6 +92,9 @@ pub(crate) async fn apply_poll_decision(
         if pregame {
             g.note_match_start(now);
         }
+        // A game that opens decided (a different-map end screen) read its
+        // result now: its end.
+        g.note_match_end(g.outcome, now, 0);
         // A different-map end screen is an accolade read. That is the new
         // session's map, and it is trusted for a later board-case split.
         if g.map.is_some() {
@@ -119,7 +122,9 @@ pub(crate) async fn apply_poll_decision(
     g.apply_boundary_state(&state);
     if let Some(outcome) = commit.recorded_outcome {
         g.touch_at(now);
-        g.note_match_end(outcome, now);
+        // The progressed boards since the mark are read from `before`: the
+        // confirm replaces the mark and resets the count.
+        g.note_match_end(outcome, now, before.progressed_boards);
         tracing::info!(
             target: "scuffed_stat_tracker",
             ?outcome,
@@ -368,6 +373,9 @@ pub(crate) async fn apply_poll_tick(
     let opened = matches!(decision, Some(boundary::PollDecision::Open(_)));
     if let Some(decision) = decision {
         apply_poll_decision(st, store, data_dir, decision, now, use_new_reader).await;
+        if !opened {
+            note_locked_game_end(st, store, data_dir, tick, now).await;
+        }
     } else if tick.signal_confirmed
         && let Some(outcome) = tick.signal
     {
@@ -383,6 +391,37 @@ pub(crate) async fn apply_poll_tick(
     {
         open_detected_game(st, data_dir, screen, now, debounce);
     }
+}
+
+/// A result that cannot be cleared by a read ([`ActiveGame::outcome_locked`]:
+/// set in the app, or restored) records no read, so a confirmed read of the
+/// same result is still taken as the game's end, when it has none. The
+/// result itself stays as it is. A read of another result is not taken: it
+/// can be the next game's end screen.
+async fn note_locked_game_end(
+    st: &mut SessionState,
+    store: &storage::LocalStore,
+    data_dir: &std::path::Path,
+    tick: &ResolvedWordTick,
+    now: Instant,
+) {
+    let Some(g) = st.active_game.as_mut() else {
+        return;
+    };
+    let Some(outcome) = tick.signal.filter(|_| tick.signal_confirmed) else {
+        return;
+    };
+    if !g.outcome_locked || g.outcome != outcome || g.match_times.ended_at.is_some() {
+        return;
+    }
+    g.note_match_end(outcome, now, g.progressed_boards);
+    if g.match_times.ended_at.is_none() {
+        return;
+    }
+    if store_match_times(store, g).await {
+        refresh_snapshot(store, data_dir).await;
+    }
+    persist_active_game(data_dir, Some(g));
 }
 
 /// Under `reader = "new"`, the accolade map was read with OCR because no

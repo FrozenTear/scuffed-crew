@@ -568,6 +568,9 @@ pub(crate) async fn apply_capture_report(
                 && !g.finished()
             {
                 g.record_outcome_at(report.outcome, now);
+                // The frame was taken at the press: the end, unless a fresh
+                // mark of this result came first.
+                g.note_match_end(report.outcome, pressed, g.progressed_boards);
                 g.note_result(report.outcome, true);
                 // Adopting the frame's outcome closes the armed boundary.
                 // The hint is now the recorded result.
@@ -585,6 +588,7 @@ pub(crate) async fn apply_capture_report(
                     {
                         tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to back-fill session outcome");
                     }
+                    store_match_times(store, g).await;
                     refresh_snapshot_game_finished(store, data_dir).await;
                 }
                 persist_active_game(data_dir, Some(g));
@@ -609,6 +613,10 @@ pub(crate) async fn apply_capture_report(
                 );
                 g.map_source = report.map_source;
                 g.baseline_row = report.baseline_row;
+                // Its board was taken at the press. A result on that frame
+                // (a gap split) is a read of this game's end.
+                g.last_board_pressed_at = Some(pressed);
+                g.note_match_end(report.outcome, pressed, 0);
                 // A pending board (`reader = "new"`, a column not read yet)
                 // opened the game without a row: the session row is made by
                 // the first capture that stores one.
@@ -729,6 +737,7 @@ pub(crate) async fn apply_capture_report(
                 }
                 if !g.finished() && !matches!(report.outcome, detect::MatchOutcome::Unknown) {
                     g.record_outcome_at(report.outcome, now);
+                    g.note_match_end(report.outcome, pressed, g.progressed_boards);
                     g.note_result(report.outcome, true);
                     g.pending_boundary = false;
                     tracing::info!(
@@ -744,6 +753,7 @@ pub(crate) async fn apply_capture_report(
                         {
                             tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to back-fill session outcome");
                         }
+                        store_match_times(store, g).await;
                         refresh_snapshot_game_finished(store, data_dir).await;
                     }
                 } else if recorded

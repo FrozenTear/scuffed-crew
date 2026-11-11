@@ -313,9 +313,11 @@ pub struct PersonalMatch {
 
 /// A game's real start and end ([`PersonalMatch::match_times`]). Either is
 /// `None` when the tracker did not see it: the start is a pre-game screen
-/// (map vote, hero select or ban) that opened the game, the end is the
-/// result the tracker read itself. A game opened by its first Tab, or one
-/// whose result was set by hand, has no start or no end, and its length
+/// (map vote, hero select or ban) that opened the game, the end is when the
+/// tracker read the result itself (when it was first seen, if that read is
+/// fresh). A result set by hand is no end: a game with no end read stays
+/// without one, and a hand-corrected result keeps the end the tracker read.
+/// A game opened by its first Tab has no start. Either missing, the length
 /// falls back to the first to last Tab read.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, SurrealValue)]
 #[surreal(crate = "::surrealdb_types")]

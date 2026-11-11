@@ -278,6 +278,7 @@ pub(crate) fn begin_retire(
         let outcome = boundary::outcome_sealed_on_close(g.outcome, seal);
         if let Some(outcome) = outcome {
             g.record_outcome(outcome);
+            g.note_sealed_end(outcome);
             tracing::info!(
                 target: "scuffed_stat_tracker",
                 outcome = %outcome,
@@ -299,15 +300,22 @@ pub(crate) async fn commit_retired_game(
     reason: &str,
 ) {
     store_best_guess_on_close(store, data_dir, &mut g).await;
-    store_match_times(store, &g).await;
-    if g.session_created && g.finished() && !had_outcome {
-        if let Err(e) = store
+    // The sealed outcome first, then the times, then one snapshot mark for
+    // both: a game that already had its outcome still marks the snapshot
+    // when its times changed, so the shutdown write carries them.
+    let sealed = g.session_created && g.finished() && !had_outcome;
+    if sealed
+        && let Err(e) = store
             .set_session_outcome(&g.session_id, &g.outcome.to_string())
             .await
-        {
-            tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to seal session outcome");
-        }
+    {
+        tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to seal session outcome");
+    }
+    let times_changed = store_match_times(store, &g).await;
+    if sealed {
         refresh_snapshot_game_finished(store, data_dir).await;
+    } else if times_changed {
+        refresh_snapshot(store, data_dir).await;
     }
     // No result ever arrived. The server cannot store that. The command
     // tick marks the rows synced locally and does not send them.

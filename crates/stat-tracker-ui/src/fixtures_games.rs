@@ -3,6 +3,7 @@
 //! so the "vs avg" deltas have 20 games to average. Example data only.
 
 use chrono::{TimeZone, Utc};
+use stat_tracker::model::MatchTimes;
 use stat_tracker::storage::{HeroSegment, PersonalMatch, Snapshot};
 use surrealdb_types::Datetime as SurrealDatetime;
 
@@ -209,6 +210,20 @@ pub fn snapshot() -> Snapshot {
     crate::fixtures_bans::reader_off(&mut undecided);
     crate::fixtures_bans::frame_size(&mut rejected_2);
 
+    // The Time block's Length states: a real length (12:10 against a
+    // 9:14 Tab span), a start not seen, an end not seen with one read, and
+    // neither seen with no read kept. The history games are older rows.
+    let both = |start, end| {
+        Some(MatchTimes {
+            started_at: start,
+            ended_at: end,
+        })
+    };
+    normal.match_times = both(Some(dts(18, 22, 14, 30)), Some(dts(18, 22, 26, 40)));
+    unsure.match_times = both(None, Some(dts(18, 22, 41, 0)));
+    undecided.match_times = both(Some(dts(17, 21, 9, 0)), None);
+    rejected_2.match_times = both(None, None);
+
     // Five more states on the newest history games: the team of each ban
     // not read with hero select not seen, no ban screen seen, skipped and
     // not seen ban votes, a lobby ban read with no team ban read, and the
@@ -395,6 +410,27 @@ mod tests {
         assert_eq!(games_detail::tracked(d), Tracked::OneRead);
         assert!(games_detail::averages(d, &all).means.is_none());
         assert!(games_detail::upload(d, false, true).rejected());
+    }
+
+    /// The stored times reach the Game ([`crate::model::Game::from_match`])
+    /// and give each Length state the panel draws.
+    #[test]
+    fn the_fixture_games_carry_each_length_state() {
+        let all = games();
+        let real = games_detail::game_length(game(&all, NORMAL));
+        assert_eq!(real.length_line(), "Length: 12:10");
+        assert_eq!(real.warning(false), None);
+        let warn = |sid| games_detail::game_length(game(&all, sid)).warning(false);
+        assert_eq!(
+            warn(UNSURE).as_deref(),
+            Some("Game start not seen, so this is not the real length")
+        );
+        assert_eq!(warn(UNDECIDED).as_deref(), Some(games_detail::END_NOT_SEEN));
+        assert_eq!(
+            warn(REJECTED_2).as_deref(),
+            Some(games_detail::START_END_NOT_SEEN)
+        );
+        assert_eq!(warn("sess-g-h06"), None, "an older row");
     }
 
     #[test]
