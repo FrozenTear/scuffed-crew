@@ -6,8 +6,10 @@
 //! Heroes, [`chips_fold`]). The 0.5 sidebar
 //! layout keeps its own Overview ([`crate::overview`]).
 //!
-//! Rank, queue, length and crew are spec example data for fields the
-//! tracker does not store yet, so they are not drawn.
+//! Rank, queue, length and crew are spec example data and are not drawn
+//! here. Rank and crew are not stored yet. Queue (`queue_title`, only
+//! with the queue title reader on) and length (`match_times`) are stored
+//! now and shown on the Games tab, not on this page yet.
 
 use iced::widget::{Column, Row, button, column, row, text};
 use iced::{Alignment, Background, Border, Padding, Theme};

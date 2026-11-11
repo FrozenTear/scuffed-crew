@@ -1,7 +1,8 @@
 //! Pure logic for the expanded Games row (UX Spec games-expanded-v2): the
 //! per-stat "vs avg" deltas, the tracked span, the hero split, read vs
-//! corrected values and the upload and reader status. No iced here; the
-//! panel module draws it.
+//! corrected values and the upload and reader status. Also the map chips
+//! and the Map cell order the Games list row draws ([`map_cell_parts`]).
+//! No iced here; the panel and table modules draw it.
 
 use crate::model::{Game, Outcome, SegmentView};
 
@@ -334,9 +335,10 @@ pub fn queue_warning(g: &Game) -> Option<&'static str> {
         .map(|_| stat_tracker::model::QUEUE_TITLE_WARNING)
 }
 
-/// The confident queue ("OPEN QUEUE") for the map line's chip, if any:
+/// The confident queue ("OPEN QUEUE") for the queue chip, if any:
 /// `QueueTitle::confident_value`, so the chip shows exactly what the upload
-/// sends.
+/// sends. The chip is drawn in the Games list row and on the open game's
+/// map line ([`map_chips`]).
 pub fn queue_value(g: &Game) -> Option<String> {
     g.queue_title
         .as_ref()?
@@ -347,14 +349,39 @@ pub fn queue_value(g: &Game) -> Option<String> {
 /// The chips after the map name, in order: the map's mode, then the
 /// confident queue ([`queue_value`]). The Games list row and the open
 /// game's map line both draw these, so a closed row shows the queue too.
-/// An unsure or unread queue adds no chip; the open game's map line says
-/// so in words ([`queue_warning`]).
+/// A weak or failed read adds no chip, and the open game's map line says
+/// the queue is not known ([`queue_warning`]). With the queue title reader
+/// off there is no read at all: no chip and no warning.
 pub fn map_chips(g: &Game) -> Vec<String> {
     crate::games_rows::mode_chip(&g.map_name)
         .map(str::to_string)
         .into_iter()
         .chain(queue_value(g))
         .collect()
+}
+
+/// One piece of the Games list row's Map cell ([`map_cell_parts`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MapPart {
+    /// The map's name.
+    Name,
+    /// The amber warning sign for an unsure map read.
+    Warn,
+    /// One of [`map_chips`]: the mode, then the confident queue.
+    Chip(String),
+}
+
+/// The Games list row's Map cell in draw order: the name, the warning sign
+/// when the map read is unsure (`doubt`), then [`map_chips`]. The sign
+/// comes before the chips, so in a narrow Map column the chips are clipped
+/// first and the sign stays in view.
+pub fn map_cell_parts(g: &Game, doubt: bool) -> Vec<MapPart> {
+    let mut parts = vec![MapPart::Name];
+    if doubt {
+        parts.push(MapPart::Warn);
+    }
+    parts.extend(map_chips(g).into_iter().map(MapPart::Chip));
+    parts
 }
 
 /// One bar segment of the hero timeline, in time order.
@@ -1128,12 +1155,14 @@ pub(crate) mod tests {
         assert_eq!(queue_warning(&g), None);
     }
 
-    /// The Games list row draws [`map_chips`]: a confident queue shows
-    /// there after the mode, so a closed row names it. An unsure or unread
-    /// title adds no queue name, and the game is still a row in the list.
+    /// The Games list row draws [`map_cell_parts`]: a confident queue shows
+    /// there as a chip after the mode, so a closed row names it. A weak read
+    /// or no read adds no queue chip, and the game still passes the Games
+    /// filters and is a row in the list.
     #[test]
     fn the_list_row_shows_a_confident_queue_and_keeps_an_unsure_game() {
-        use crate::games_rows::{Grid, TabState, layout, mode_chip};
+        use crate::aggregate::{GameFilter, filter_games};
+        use crate::games_rows::{Grid, TabState, UnsureItem, layout, mode_chip, unsure_items};
         use stat_tracker::model::QueueTitle;
         let mode = mode_chip("Ilios").map(str::to_string);
         assert!(mode.is_some());
@@ -1158,14 +1187,65 @@ pub(crate) mod tests {
         assert_eq!(map_chips(&weak), mode_only);
         assert_eq!(map_chips(&unread), mode_only);
         let all = vec![sure, weak, unread];
-        let shown: Vec<&Game> = all.iter().collect();
+        let shown = filter_games(&all, &GameFilter::default());
         let list = layout(&all, &shown, TabState::default(), Grid::Wide, 0, None);
-        let mut rows: Vec<&str> = list
+        let rows: Vec<&Game> = list
             .sections
             .iter()
-            .flat_map(|s| s.rows.iter().map(|g| g.session_id.as_str()))
+            .flat_map(|s| s.rows.iter().copied())
             .collect();
-        rows.sort_unstable();
-        assert_eq!(rows, ["sure", "unread", "weak"]);
+        let mut ids: Vec<&str> = rows.iter().map(|g| g.session_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["sure", "unread", "weak"]);
+        // The Map cell each listed row draws: the queue chip on the
+        // confident game only, with nothing in its place on the others.
+        let mode = MapPart::Chip(mode_chip("Ilios").unwrap().to_string());
+        for g in rows {
+            let doubt = unsure_items(g, false).contains(&UnsureItem::Map);
+            let mut want = vec![MapPart::Name, mode.clone()];
+            if g.session_id == "sure" {
+                want.push(MapPart::Chip("OPEN QUEUE".into()));
+            }
+            assert_eq!(map_cell_parts(g, doubt), want, "{}", g.session_id);
+        }
+    }
+
+    /// The unsure map's warning sign is drawn right after the name, before
+    /// any chip, so a narrow Map column clips the chips and not the sign.
+    #[test]
+    fn the_map_warning_comes_before_the_chips() {
+        use stat_tracker::model::QueueTitle;
+        let mut g = game("long", "Ana", 1, 1, at(20, 0, 0));
+        g.map_name = "Watchpoint: Gibraltar".into();
+        g.queue_title = Some(QueueTitle {
+            value: Some("OPEN QUEUE".into()),
+            confidence: 0.93,
+            ..QueueTitle::default()
+        });
+        let parts = map_cell_parts(&g, true);
+        assert_eq!(
+            parts,
+            [
+                MapPart::Name,
+                MapPart::Warn,
+                MapPart::Chip("Escort".into()),
+                MapPart::Chip("OPEN QUEUE".into()),
+            ]
+        );
+        let warn = parts.iter().position(|p| *p == MapPart::Warn).unwrap();
+        let first_chip = parts
+            .iter()
+            .position(|p| matches!(p, MapPart::Chip(_)))
+            .unwrap();
+        assert!(warn < first_chip, "{parts:?}");
+        // A sure map read has no sign; the chips follow the name.
+        assert_eq!(
+            map_cell_parts(&g, false),
+            [
+                MapPart::Name,
+                MapPart::Chip("Escort".into()),
+                MapPart::Chip("OPEN QUEUE".into()),
+            ]
+        );
     }
 }

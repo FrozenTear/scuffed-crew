@@ -3,7 +3,7 @@
 //! so the "vs avg" deltas have 20 games to average. Example data only.
 
 use chrono::{TimeZone, Utc};
-use stat_tracker::model::MatchTimes;
+use stat_tracker::model::{MatchTimes, QueueTitle};
 use stat_tracker::storage::{HeroSegment, PersonalMatch, Snapshot};
 use surrealdb_types::Datetime as SurrealDatetime;
 
@@ -34,6 +34,14 @@ pub const LOBBY_ONLY: &str = "sess-g-h04";
 /// King's Row: a mixed Bans row with long names (both teams, a ban with no
 /// team read and the lobby ban), the widest row the block draws.
 pub const MIXED: &str = "sess-g-h05";
+
+/// A confident `OPEN QUEUE` on a long map name (Watchpoint: Gibraltar)
+/// with an unsure map read: the list row's name, warning sign, mode chip
+/// and queue chip, the widest Map cell the table draws.
+pub const QUEUE_SURE: &str = "sess-g-h09";
+/// A queue title read that was weak or failed: no queue chip, and the open
+/// game says the queue is not known.
+pub const QUEUE_UNSURE: &str = "sess-g-h07";
 
 /// The server message on the rejected sample upload.
 pub const REJECT: &str =
@@ -254,6 +262,31 @@ pub fn snapshot() -> Snapshot {
     );
     crate::fixtures_bans::mixed(&mut mixed);
 
+    // The queue states (with the queue title reader on): a confident queue
+    // on a long map name read unsure, and a weak read with no value.
+    let mut queue_sure = wb(
+        QUEUE_SURE.into(),
+        "Watchpoint: Gibraltar",
+        "defeat",
+        dt(2026, 10, 17, 20, 33),
+    );
+    queue_sure.suspect_fields = vec!["map".into()];
+    queue_sure.queue_title = Some(QueueTitle {
+        value: Some("OPEN QUEUE".into()),
+        confidence: 0.93,
+        ..QueueTitle::default()
+    });
+    let mut queue_unsure = wb(
+        QUEUE_UNSURE.into(),
+        "Colosseo",
+        "defeat",
+        dt(2026, 10, 17, 21, 2),
+    );
+    queue_unsure.queue_title = Some(QueueTitle {
+        unsure: true,
+        ..QueueTitle::default()
+    });
+
     let mut matches = vec![
         held,
         rejected_2,
@@ -271,24 +304,14 @@ pub fn snapshot() -> Snapshot {
             dt(2026, 10, 17, 21, 31),
         ),
         undecided,
-        wb(
-            "sess-g-h07".into(),
-            "Colosseo",
-            "defeat",
-            dt(2026, 10, 17, 21, 2),
-        ),
+        queue_unsure,
         wb(
             "sess-g-h08".into(),
             "Busan",
             "victory",
             dt(2026, 10, 17, 20, 41),
         ),
-        wb(
-            "sess-g-h09".into(),
-            "Dorado",
-            "defeat",
-            dt(2026, 10, 17, 20, 33),
-        ),
+        queue_sure,
     ];
     // Older nights: more Wrecking Ball, and Junker Queen's other three games.
     let maps = [

@@ -7,8 +7,10 @@
 //! it shows the dropdowns too. The messages are the app's own, so any tab
 //! can use the chips.
 //!
-//! "All queues" and "Crew: anyone" are drawn disabled until the tracker
-//! stores a queue and a crew for each game.
+//! "All queues" is drawn disabled: a game has a stored queue only when the
+//! queue title reader (off by default) recognized its title, so there is
+//! no queue filter yet. "Crew: anyone" is drawn disabled until the tracker
+//! stores a crew for each game.
 
 use iced::widget::{Row, button, container, pick_list, row, text};
 use iced::{Alignment, Background, Border, Element, Padding, Theme};
@@ -144,7 +146,8 @@ pub fn bar<'a>(
     chips.wrap().into()
 }
 
-/// A filter the tracker has no data for yet: greyed, does nothing. The
+/// A filter not offered yet (no data, or too little to filter on): greyed,
+/// does nothing. The
 /// arrow is the icon font's, as the page font has no "▾".
 fn disabled_chip(label: &'static str) -> Element<'static, Message> {
     container(

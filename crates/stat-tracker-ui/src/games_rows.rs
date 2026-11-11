@@ -750,7 +750,7 @@ where
 }
 
 /// Under the last table (spec p2), after the split rule.
-const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length runs from the game's start screen to its result. When either was not seen, it is your first to last Tab press, so the game ran at least that long. The queue shows by the map when its title was read. Rank and crew are not recorded yet.";
+const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length runs from the game's start screen to its result. When either was not seen, it is your first to last Tab press, so the game ran at least that long. The queue shows by the map when its title was recognized. Rank and crew are not recorded yet.";
 /// No games stored at all.
 pub const EMPTY_NONE: &str = "No games yet. A game shows here once the tracker saves it.";
 /// Games stored, none left by the filters.
@@ -1430,7 +1430,7 @@ mod tests {
         }
         assert!(SORT_NOTE.contains("Rank and crew are not recorded yet"));
         assert!(!SORT_NOTE.contains("queue and crew are not recorded"));
-        assert!(SORT_NOTE.contains("The queue shows by the map"));
+        assert!(SORT_NOTE.contains("The queue shows by the map when its title was recognized."));
         assert!(SORT_NOTE.contains("Length runs from the game's start screen to its result"));
         assert!(SORT_NOTE.contains("at least that long"));
     }

@@ -213,8 +213,12 @@ fn section_label(label: &'static str) -> Element<'static, Message> {
         .into()
 }
 
-/// The map, its mode chip, EDITED when set by hand, and "Set map" (or
-/// the open picker) while the game is held for it.
+/// The map, EDITED when set by hand, then its chips ([`detail::map_chips`]:
+/// the mode, then the confident queue), and "Set map" (or the open picker)
+/// while the game is held for it. Under the line: the read vs set note for
+/// a hand fix, then the queue warning ([`detail::queue_warning`]) when the
+/// game has a queue title with no confident value. With the reader off
+/// there is neither the queue chip nor the warning.
 fn map_line(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, Message> {
     if let Some(p) = picker.filter(|p| p.field == Field::Map) {
         return games_picker::view(g, p, ctx.in_progress, ctx.sync_on);
@@ -1000,11 +1004,25 @@ mod tests {
                 .contains(crate::fixtures_games::NORMAL)
         );
         let games = app.games.clone();
+        let find = |sid: &str| games.iter().find(|g| g.session_id == sid).unwrap();
+        // The queue states the panel and the list row draw: a confident
+        // queue chip on a long map name with an unsure map read, and an
+        // unsure queue with its warning and no chip.
+        let sure = find(crate::fixtures_games::QUEUE_SURE);
+        assert!(detail::map_chips(sure).contains(&"OPEN QUEUE".to_string()));
+        assert_eq!(detail::queue_warning(sure), None);
+        let sure_items = games_rows::unsure_items(sure, false);
+        assert!(sure_items.contains(&games_rows::UnsureItem::Map));
+        let unsure_queue = find(crate::fixtures_games::QUEUE_UNSURE);
+        assert_eq!(detail::queue_value(unsure_queue), None);
+        assert!(detail::queue_warning(unsure_queue).is_some());
         for sid in [
             crate::fixtures_games::NORMAL,
             crate::fixtures_games::UNSURE,
             crate::fixtures_games::UNDECIDED,
             crate::fixtures_games::REJECTED_2,
+            crate::fixtures_games::QUEUE_SURE,
+            crate::fixtures_games::QUEUE_UNSURE,
         ] {
             let g = games.iter().find(|g| g.session_id == sid).unwrap();
             for narrow in [false, true] {
@@ -1016,6 +1034,14 @@ mod tests {
                     let _ = panel(&app, g, narrow, in_progress);
                 }
             }
+        }
+        // The list rows of the top tabs table, chips and signs included,
+        // at each grid's window width. This builds the rows; it does not
+        // lay them out, so clipping is not measured here.
+        app.confirm_delete = None;
+        app.nav_style = crate::nav::NavStyle::TopTabs;
+        for width in [780.0, 1100.0, 1280.0, 1440.0] {
+            let _ = crate::games::view(&app, width, width);
         }
     }
 }

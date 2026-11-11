@@ -5,12 +5,14 @@
 //! headers and the row cells (amber E/D/A, portrait and role letter,
 //! Playing, the marks). The filter chips live in [`crate::filter_chips`].
 
+use iced::widget::text::Wrapping;
 use iced::widget::{button, column, container, image, mouse_area, row, rule, space, text};
 use iced::{
     Alignment, Background, Border, Color, Element, Fill, FillPortion, Length, Padding, Theme,
 };
 
 use crate::app::{Message, TrackerApp};
+use crate::games_detail::MapPart;
 use crate::games_rows::{self, Col, Focus, Grid, Mark, TabState, Tick, UnsureItem, Width};
 use crate::icons::{self, Icon};
 use crate::model::{Game, Outcome, Role, Screen, game_card_in_progress};
@@ -553,13 +555,22 @@ fn game_row(
                 } else {
                     iced::Font::DEFAULT
                 };
-                let mut m = row![text(name).size(SIZE_META).font(font).color(color)]
-                    .spacing(8)
-                    .align_y(Alignment::Center);
-                for chip in crate::games_detail::map_chips(g) {
-                    m = m.push(small_chip_owned(chip, TEXT_2, BORDER));
+                // The sign before the chips, so a narrow column clips the
+                // chips and keeps the sign (games_detail::map_cell_parts).
+                let mut m = row![].spacing(8).align_y(Alignment::Center);
+                for part in crate::games_detail::map_cell_parts(g, doubt) {
+                    let part: Element<'static, Message> = match part {
+                        MapPart::Name => text(name.clone())
+                            .size(SIZE_META)
+                            .font(font)
+                            .color(color)
+                            .into(),
+                        MapPart::Warn => warn_sign(),
+                        MapPart::Chip(chip) => small_chip_owned(chip, TEXT_2, BORDER),
+                    };
+                    m = m.push(part);
                 }
-                with_warn(m.into(), doubt)
+                m.into()
             }
             Col::Hero => hero_cell(g, unsure(UnsureItem::Hero)),
             Col::Eda => text(games_rows::eda(g))
@@ -649,10 +660,15 @@ fn with_warn(cell: Element<'static, Message>, unsure: bool) -> Element<'static, 
     if !unsure {
         return cell;
     }
-    row![cell, image(icons::handle(Icon::Warn)).width(12).height(12)]
+    row![cell, warn_sign()]
         .spacing(6)
         .align_y(Alignment::Center)
         .into()
+}
+
+/// The 12 px amber warning sign of an unsure read.
+fn warn_sign() -> Element<'static, Message> {
+    image(icons::handle(Icon::Warn)).width(12).height(12).into()
 }
 
 /// A grey silhouette for the portrait (no Blizzard art is shipped), the
@@ -781,11 +797,13 @@ pub(crate) fn small_chip_owned(
     color: Color,
     border: Color,
 ) -> Element<'static, Message> {
+    // One line: a squeezed chip clips instead of wrapping past the row.
     container(
         text(label)
             .size(SIZE_LABEL)
             .font(FONT_SEMIBOLD)
-            .color(color),
+            .color(color)
+            .wrapping(Wrapping::None),
     )
     .padding(Padding::from([1, 8]))
     .style(move |_: &Theme| container::Style {
