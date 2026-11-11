@@ -603,6 +603,21 @@ pub struct Status {
     /// Tracker health, first among the tracker's own notices (a sync
     /// problem the app finds itself still comes before it).
     pub input_notice: String,
+    /// A game capture size the hero icon reader has no icon spots for, seen
+    /// in this run. The app shows a one-time ask on Overview, or a warning
+    /// when `unreadable`. Games record all the same. `None` otherwise.
+    pub vision_size: Option<VisionSizeStatus>,
+}
+
+/// The capture size in [`Status::vision_size`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VisionSizeStatus {
+    pub width: u32,
+    pub height: u32,
+    /// The tracker could not tell whether the reader supports this size (a
+    /// pack record or the answers file did not read). Nothing is asked.
+    pub unreadable: bool,
 }
 
 /// The focus gate's state in [`Status`]: whether reads go on because
@@ -698,6 +713,7 @@ static SHARE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::ne
 static CAPTURE_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static BANS_PICKS_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
 static INPUT_NOTICE: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+static VISION_SIZE: std::sync::Mutex<Option<VisionSizeStatus>> = std::sync::Mutex::new(None);
 static FOCUS_GATE: std::sync::Mutex<FocusGateStatus> =
     std::sync::Mutex::new(FocusGateStatus::Unknown);
 static STATUS_WRITE: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -780,6 +796,24 @@ pub fn publish_input_notice(data_dir: &Path, notice: &str) {
         return;
     }
     status.input_notice = notice.to_string();
+    let _ = write_status(data_dir, &status);
+}
+
+pub fn vision_size() -> Option<VisionSizeStatus> {
+    *VISION_SIZE.lock().unwrap_or_else(|err| err.into_inner())
+}
+
+/// Write the capture size ask or warning into the status file (`None`
+/// clears it), keeping everything else there. Later status writes keep it
+/// too.
+pub fn publish_vision_size(data_dir: &Path, size: Option<VisionSizeStatus>) {
+    let _guard = STATUS_WRITE.lock().unwrap_or_else(|err| err.into_inner());
+    *VISION_SIZE.lock().unwrap_or_else(|err| err.into_inner()) = size;
+    let mut status = read_status(data_dir).unwrap_or_default();
+    if status.vision_size == size {
+        return;
+    }
+    status.vision_size = size;
     let _ = write_status(data_dir, &status);
 }
 
@@ -1216,7 +1250,24 @@ mod tests {
             bans_picks_notice: String::new(),
             focus_gate: FocusGateStatus::Unknown,
             input_notice: String::new(),
+            vision_size: None,
         }
+    }
+
+    #[test]
+    fn an_old_status_file_has_no_vision_size_and_a_new_one_round_trips() {
+        let old: Status = serde_json::from_str("{\"pid\": 3}").unwrap();
+        assert_eq!(old.vision_size, None);
+        let mut new = status(OcrSetting::On, None, None);
+        new.vision_size = Some(VisionSizeStatus {
+            width: 3440,
+            height: 1440,
+            unreadable: false,
+        });
+        let text = serde_json::to_string(&new).unwrap();
+        assert_eq!(serde_json::from_str::<Status>(&text).unwrap(), new);
+        // It is no health line: the app draws it on Overview.
+        assert_eq!(new.health_notice(), None);
     }
 
     #[test]

@@ -19,6 +19,9 @@ use super::wire::upload_request;
 /// on servers that send it, `stats_visibility`.
 const DAEMON_CONFIG_PATH: &str = "/api/stats/daemon-config";
 
+/// Sync-token route for the member's training crop consent. Read only.
+const CROP_CONSENT_PATH: &str = "/api/training-crops/consent";
+
 #[derive(Clone)]
 pub struct SyncClient {
     config: Arc<Mutex<SyncConfig>>,
@@ -209,6 +212,38 @@ impl SyncClient {
             return None;
         }
         parse_stats_visibility(status, std::str::from_utf8(&bytes).ok()?)
+    }
+
+    /// The member's `hero_icon` training crop consent, read only: one GET of
+    /// `/api/training-crops/consent` with the saved token. Members change it
+    /// on the website, never here. Any failure (unsafe URL, network, a non
+    /// 2xx answer, a body that is too large or not the consent shape) is
+    /// `None`, which callers take as no consent.
+    pub async fn fetch_hero_icon_consent(&self) -> Option<bool> {
+        #[derive(serde::Deserialize)]
+        struct Consent {
+            hero_icon: bool,
+        }
+        self.refuse_unsafe_transport().ok()?;
+        let creds = self.credentials();
+        let url = format!("{}{CROP_CONSENT_PATH}", creds.server_url);
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&creds.token)
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let bytes = resp.bytes().await.ok()?;
+        if bytes.len() > MAX_BODY_BYTES {
+            return None;
+        }
+        serde_json::from_slice::<Consent>(&bytes)
+            .ok()
+            .map(|c| c.hero_icon)
     }
 
     /// POST `/api/stats/upload`.

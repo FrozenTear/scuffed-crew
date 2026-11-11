@@ -419,6 +419,8 @@ pub(crate) async fn start_tab_capture(
                 .await
                 // `{:#}` keeps anyhow's context chain in the string.
                 .map_err(|e| format!("{e:#}"));
+            // After the capture: the size check never holds up or drops a game.
+            daemon::vision_size::after_capture(&ctx_task.data_dir);
             let _ = tx.send((sid, result));
         }),
     ));
