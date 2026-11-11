@@ -68,6 +68,9 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
         app.games_tab.picker = None;
     }
     drop_hidden_open_row(app);
+    if key_on_undrawn_row(app, &msg) {
+        return iced::Task::none();
+    }
     match msg {
         Msg::SetGrouping(g) => app.games_tab.view.grouping = g,
         // The click acts on the sort the header shows: under 1100 px a Hero
@@ -171,43 +174,59 @@ pub(crate) fn before_message(app: &mut TrackerApp, message: &Message) {
     }
 }
 
-/// Drop a row focus the filters hid since, and close an open row they hid,
-/// so a key never acts on a row the player can't see. Only the top tabs
-/// take these keys, so the classic Games page keeps its open card. Hidden
-/// is the filters' call ([`crate::games::shown_games`]), not the row cap,
-/// so a game past the first 500 is not closed for it. An open Edit stays
-/// up even under a filter that hides its row: the keys do nothing to a
-/// row in Edit, and the typed text comes back with the row.
+/// Drop a row focus that is not drawn now, and close an open row that is
+/// not drawn, so a key never acts on a row the player can't see. Only the
+/// top tabs take these keys, so the classic Games page keeps its open
+/// card. Drawn is [`row_order`]: a row the filters hid and a row past the
+/// first 500 are both off screen. An open Edit stays up on an undrawn row
+/// so the typed text comes back with the row, but its delete strip and
+/// the delete focus go, and [`update`] gives it no key.
 pub(crate) fn drop_hidden_open_row(app: &mut TrackerApp) {
     let focused_row = matches!(app.games_tab.focus, Focus::Row(_));
     if app.nav_style != crate::nav::NavStyle::TopTabs || (app.expanded.is_none() && !focused_row) {
         return;
     }
-    let shown = crate::games::shown_games(app);
-    let hidden = |sid: &str| !shown.iter().any(|g| g.session_id == sid);
+    let drawn = row_order(app);
+    let hidden = |sid: &str| !drawn.iter().any(|s| s == sid);
     let drop_focus = matches!(&app.games_tab.focus, Focus::Row(sid) if hidden(sid));
-    // Only a row the filters hid: a game that left the list stays open so
-    // a pending Edit can still say it is gone.
-    let close = !app.editing
-        && app
-            .expanded
-            .as_deref()
-            .is_some_and(|sid| hidden(sid) && app.games.iter().any(|g| g.session_id == sid));
     if drop_focus {
         app.games_tab.focus = Focus::None;
     }
-    if close {
-        app.expanded = None;
-        app.editing = false;
-        app.confirm_delete = None;
-        app.games_tab.picker = None;
-        if matches!(
-            app.games_tab.focus,
-            Focus::DeleteButton | Focus::Cancel | Focus::ConfirmDelete
-        ) {
-            app.games_tab.focus = Focus::None;
-        }
+    if !open_row_undrawn(app, &drawn) {
+        return;
     }
+    if !app.editing {
+        app.expanded = None;
+    }
+    app.confirm_delete = None;
+    app.games_tab.picker = None;
+    if matches!(
+        app.games_tab.focus,
+        Focus::DeleteButton | Focus::Cancel | Focus::ConfirmDelete
+    ) {
+        app.games_tab.focus = Focus::None;
+    }
+}
+
+/// Whether the open row is a game in the list that `drawn` (the
+/// [`row_order`]) leaves out. A game that left the list does not count:
+/// it stays open so a pending Edit can still say it is gone.
+fn open_row_undrawn(app: &TrackerApp, drawn: &[String]) -> bool {
+    app.expanded.as_deref().is_some_and(|sid| {
+        !drawn.iter().any(|s| s == sid) && app.games.iter().any(|g| g.session_id == sid)
+    })
+}
+
+/// The keys no widget took. On the top tabs they do nothing while the
+/// open row is not drawn (an Edit kept on a row a filter hid), so Esc
+/// can't drop its form and Tab, Enter, Space and Delete can't reach it.
+fn key_on_undrawn_row(app: &TrackerApp, msg: &Msg) -> bool {
+    matches!(
+        msg,
+        Msg::Escape | Msg::Enter | Msg::Tab | Msg::Space | Msg::DeleteKey
+    ) && app.nav_style == crate::nav::NavStyle::TopTabs
+        && app.expanded.is_some()
+        && open_row_undrawn(app, &row_order(app))
 }
 
 /// Enter or Space on the focused button or row. False when nothing that
@@ -1089,19 +1108,80 @@ mod tests {
         assert_eq!(app.edit.elims, "40");
     }
 
-    /// On the top tabs too, the row cap alone hides nothing: an open row
-    /// past the first 500 that the filters still show keeps its confirm.
+    /// On the top tabs a row past the first 500 is not drawn, so it takes
+    /// no key: an armed confirm on it goes, the row closes and the game is
+    /// never deleted, and a focus on it never opens it.
     #[test]
-    fn the_top_tabs_keep_an_open_row_past_the_row_cap() {
-        let (_dir, mut app) = app();
-        let old = with_many_games(&mut app, games_rows::ROW_CAP + 20);
-        assert!(!row_order(&app).contains(&old), "past the cap");
-        app.expanded = Some(old.clone());
-        app.confirm_delete = Some(old.clone());
-        let _ = app.update(Message::Tick);
-        let _ = app.update(Message::Navigate(Screen::Games));
-        assert_eq!(app.expanded.as_deref(), Some(old.as_str()));
-        assert_eq!(app.confirm_delete.as_deref(), Some(old.as_str()));
+    fn the_top_tabs_refuse_keys_on_a_row_past_the_row_cap() {
+        for key in [
+            Msg::Tab,
+            Msg::Enter,
+            Msg::Space,
+            Msg::DeleteKey,
+            Msg::Escape,
+        ] {
+            let (_dir, mut app) = app();
+            let old = with_many_games(&mut app, games_rows::ROW_CAP + 20);
+            assert!(!row_order(&app).contains(&old), "past the cap");
+            app.expanded = Some(old.clone());
+            app.confirm_delete = Some(old.clone());
+            app.games_tab.focus = Focus::ConfirmDelete;
+            send(&mut app, key.clone());
+            assert!(app.games.iter().any(|g| g.session_id == old), "{key:?}");
+            assert_eq!(app.confirm_delete, None, "{key:?}");
+            assert_eq!(app.expanded, None, "{key:?}");
+            assert_eq!(app.games_tab.focus, Focus::None, "{key:?}");
+            // A focus on the undrawn row is dropped, not opened.
+            app.games_tab.focus = Focus::Row(old.clone());
+            send(&mut app, key.clone());
+            assert_eq!(app.expanded, None, "{key:?}");
+            assert_eq!(app.confirm_delete, None, "{key:?}");
+            assert_eq!(app.games_tab.focus, Focus::None, "{key:?}");
+        }
+    }
+
+    /// A row a filter hid while Edit is open keeps the form and its typed
+    /// text, but its delete strip goes and it takes no key: Tab then Enter
+    /// or Space can't delete the game, and Esc can't drop the form. Once
+    /// the row is back, the form is there and Esc works again.
+    #[test]
+    fn a_row_hidden_mid_edit_takes_no_keys() {
+        for keys in [
+            vec![Msg::Tab, Msg::Enter],
+            vec![Msg::Tab, Msg::Space],
+            vec![Msg::Enter],
+            vec![Msg::Space],
+            vec![Msg::Escape],
+            vec![Msg::DeleteKey],
+        ] {
+            let (_dir, mut app) = app();
+            app.expanded = Some(UNSURE.into());
+            let _ = app.update(Message::ToggleEdit);
+            let _ = app.update(Message::EditField(
+                crate::model::EditField::Elims,
+                "41".into(),
+            ));
+            // Delete game is still drawn under the form: its strip is up.
+            send(&mut app, Msg::AskDelete(UNSURE.into()));
+            assert_eq!(app.confirm_delete.as_deref(), Some(UNSURE));
+            let _ = app.update(Message::FilterOutcome(Some(Outcome::Loss)));
+            assert!(!row_order(&app).iter().any(|s| s == UNSURE));
+            // The check runs before each message, so the next key finds
+            // the strip gone.
+            for key in &keys {
+                let _ = app.update(Message::Games(key.clone()));
+            }
+            assert!(app.games.iter().any(|g| g.session_id == UNSURE), "{keys:?}");
+            assert_eq!(app.confirm_delete, None, "{keys:?}");
+            assert!(app.editing, "{keys:?}");
+            assert_eq!(app.expanded.as_deref(), Some(UNSURE), "{keys:?}");
+            assert_eq!(app.edit.elims, "41", "{keys:?}");
+            let _ = app.update(Message::FilterOutcome(None));
+            assert!(app.editing, "{keys:?}");
+            assert_eq!(app.edit.elims, "41", "{keys:?}");
+            send(&mut app, Msg::Escape);
+            assert!(!app.editing, "{keys:?}");
+        }
     }
 
     /// The tick never runs the hidden-row check, so it neither closes an

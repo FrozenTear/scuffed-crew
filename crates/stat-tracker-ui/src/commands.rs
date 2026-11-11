@@ -210,8 +210,9 @@ pub fn save_edit_for(
     )
 }
 
-/// What a queued Edit says, from whether the game is still held, was held,
-/// which kinds of field changed, and the game after the save. A role-only
+/// What a queued Edit says, from whether the game is still held, which
+/// kinds of field changed, and the release line when the save lifted a
+/// hold (`None` when the game was not held). A role-only
 /// change reads "Role corrected" and offers no training report, as there
 /// is no role category. A release takes its line from [`upload`], as the
 /// picker does: a live game uploads once it ends, and with no website
@@ -559,17 +560,19 @@ mod tests {
             .find(|g| g.session_id == HELD)
             .unwrap()
             .clone();
-        let picker = release_line(&g, Field::Map, Some("Ilios"), false, true);
-        assert_eq!(
-            release_line(
-                &g,
-                Field::Map,
-                Some("Ilios"),
-                false,
-                crate::games_panel::sync_on(&app)
-            ),
-            picker
+        // The held game misses both its map and its hero, so the picker
+        // line reaches the sync check only on the last one: the hero, once
+        // the map is set.
+        let mut map_set = g.clone();
+        map_set.map_name = "Ilios".into();
+        let picker = release_line(
+            &map_set,
+            Field::Hero,
+            Some("Ana"),
+            false,
+            crate::games_panel::sync_on(&app),
         );
+        assert!(picker.starts_with("Saving releases this game"), "{picker}");
         assert!(!picker.contains("no website is linked"), "{picker}");
         app.expanded = Some(HELD.into());
         let _ = app.update(Message::ToggleEdit);
