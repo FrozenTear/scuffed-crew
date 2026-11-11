@@ -1,9 +1,11 @@
 //! Tests for the capture size notice: what is shown for the tracker's value,
-//! the pid and screen filters, each action and what it writes, a failed
-//! write, the answers file reset, and the copy.
+//! the pid, sync and screen filters, the tick hook and the Overview route,
+//! each action and what it writes, a failed write, the answers file reset,
+//! and the copy.
 
 use std::cell::RefCell;
 use std::path::Path;
+use std::time::Instant;
 
 use super::*;
 use stat_tracker::config::SyncConfig;
@@ -53,57 +55,90 @@ fn status_from(pid: u32, vision: Option<VisionSizeStatus>) -> OcrSwitchStatus {
     }
 }
 
+/// The smallest app on Overview, with the running tracker's pid 7.
+fn app_on_overview(sync_server: Option<SyncConfig>) -> (tempfile::TempDir, crate::app::TrackerApp) {
+    let (dir, mut app) = crate::fixtures::test_app();
+    app.saved_config.sync = sync_server;
+    app.screen = Screen::Overview;
+    app.daemon.pid = Some(7);
+    (dir, app)
+}
+
 #[test]
 fn a_new_size_is_shown_and_nothing_is_written() {
     let dir = tempfile::tempdir().unwrap();
     let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), None, true);
+    observe_in(&mut notice, dir.path(), None);
     assert_eq!(notice.shown, Shown::Nothing);
-    observe_in(&mut notice, dir.path(), live(UW, false), true);
+    observe_in(&mut notice, dir.path(), live(UW, false));
     assert_eq!(notice.shown, Shown::Ask(UW));
     assert!(!asks_path(dir.path()).exists(), "seeing it records nothing");
     assert!(view_for(notice.shown, None, None).is_some());
     // An unanswered ask is shown again by a restarted app.
     let mut reopened = VisionNotice::default();
-    observe_in(&mut reopened, dir.path(), live(UW, false), true);
+    observe_in(&mut reopened, dir.path(), live(UW, false));
     assert_eq!(reopened.shown, Shown::Ask(UW));
 }
 
 #[test]
 fn without_a_sync_server_there_is_no_ask_but_warnings_still_show() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), live(UW, false), false);
-    assert_eq!(notice.shown, Shown::Nothing);
-    assert!(!asks_path(dir.path()).exists(), "no answer recorded");
+    let (_dir, mut app) = app_on_overview(None);
+    let dir = app.data_dir.clone();
+    observe(&mut app, Some(&status_from(7, live(UW, false))));
+    assert_eq!(shown_on(&app), Shown::Nothing);
+    assert!(view(&app).is_none());
+    assert!(!asks_path(&dir).exists(), "no answer recorded");
     // The pack record warning.
-    unreadable_pack_record(dir.path());
-    observe_in(&mut notice, dir.path(), live(UW, true), false);
-    assert_eq!(notice.shown, Shown::PackUnreadable(UW));
+    unreadable_pack_record(&dir);
+    observe(&mut app, Some(&status_from(7, live(UW, true))));
+    assert_eq!(shown_on(&app), Shown::PackUnreadable(UW));
+    assert!(view(&app).is_some());
     // The answers file warning.
-    std::fs::write(asks_path(dir.path()), b"[").unwrap();
-    let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), live(UW, false), false);
-    assert_eq!(notice.shown, Shown::AnswersUnreadable(UW));
+    std::fs::write(asks_path(&dir), b"[").unwrap();
+    observe(&mut app, Some(&status_from(7, live(WIDE_16_10, false))));
+    assert_eq!(shown_on(&app), Shown::AnswersUnreadable(WIDE_16_10));
+    assert!(view(&app).is_some());
+}
+
+/// A sync server set in Settings while an ask waits shows the ask in the
+/// same run, with no new value from the tracker. Put back the sync check
+/// in `shown_for` and this fails: the value is unchanged, so the cached
+/// "nothing" stays.
+#[test]
+fn a_sync_server_set_later_shows_the_waiting_ask() {
+    let (_dir, mut app) = app_on_overview(None);
+    let status = status_from(7, live(UW, false));
+    observe(&mut app, Some(&status));
+    assert_eq!(shown_on(&app), Shown::Nothing);
+    assert!(view(&app).is_none());
+    app.saved_config.sync = Some(sync());
+    // The next tick reads the same value from the tracker.
+    observe(&mut app, Some(&status));
+    assert_eq!(shown_on(&app), Shown::Ask(UW));
+    assert!(view(&app).is_some());
+    assert!(
+        !asks_path(&app.data_dir).exists(),
+        "seeing it records nothing"
+    );
 }
 
 #[test]
 fn no_thanks_hides_it_for_that_size_only_and_survives_a_restart() {
     let dir = tempfile::tempdir().unwrap();
     let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), live(UW, false), true);
+    observe_in(&mut notice, dir.path(), live(UW, false));
     answer_in(&mut notice, dir.path(), UW, Answer::Dismissed);
     assert_eq!(notice.shown, Shown::Nothing);
     assert_eq!(notice.failed, None);
     // The same value on the next tick does not bring it back.
-    observe_in(&mut notice, dir.path(), live(UW, false), true);
+    observe_in(&mut notice, dir.path(), live(UW, false));
     assert_eq!(notice.shown, Shown::Nothing);
     // A restarted app reads the answer from disk.
     let mut reopened = VisionNotice::default();
-    observe_in(&mut reopened, dir.path(), live(UW, false), true);
+    observe_in(&mut reopened, dir.path(), live(UW, false));
     assert_eq!(reopened.shown, Shown::Nothing);
     // Another size is still asked.
-    observe_in(&mut reopened, dir.path(), live(WIDE_16_10, false), true);
+    observe_in(&mut reopened, dir.path(), live(WIDE_16_10, false));
     assert_eq!(reopened.shown, Shown::Ask(WIDE_16_10));
 }
 
@@ -111,14 +146,14 @@ fn no_thanks_hides_it_for_that_size_only_and_survives_a_restart() {
 fn dont_ask_again_covers_every_size_after_a_reload() {
     let dir = tempfile::tempdir().unwrap();
     let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), live(UW, false), true);
+    observe_in(&mut notice, dir.path(), live(UW, false));
     answer_in(&mut notice, dir.path(), UW, Answer::Never);
     assert_eq!(notice.shown, Shown::Nothing);
     assert!(declined(dir.path(), WIDE_16_10));
-    observe_in(&mut notice, dir.path(), live(WIDE_16_10, false), true);
+    observe_in(&mut notice, dir.path(), live(WIDE_16_10, false));
     assert_eq!(notice.shown, Shown::Nothing);
     let mut reopened = VisionNotice::default();
-    observe_in(&mut reopened, dir.path(), live(WIDE_16_10, false), true);
+    observe_in(&mut reopened, dir.path(), live(WIDE_16_10, false));
     assert_eq!(reopened.shown, Shown::Nothing);
 }
 
@@ -133,7 +168,16 @@ fn a_failed_answer_write_keeps_the_notice_and_shows_an_error() {
     // over.
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir(asks_path(dir.path())).unwrap();
-    for data_dir in [file.path(), dir.path()] {
+    // No answers file, so the load works; the temporary file `Asks::save`
+    // writes first (`.vision-size-asks.json.<pid>`) is a directory, so the
+    // write itself fails.
+    let unwritable = tempfile::tempdir().unwrap();
+    let temp = unwritable
+        .path()
+        .join(format!(".{ASKS_FILE}.{}", std::process::id()));
+    std::fs::create_dir(&temp).unwrap();
+    assert!(Asks::load(unwritable.path()).is_ok());
+    for data_dir in [file.path(), dir.path(), unwritable.path()] {
         for answer in [Answer::Dismissed, Answer::Never] {
             let mut notice = asked(UW);
             answer_in(&mut notice, data_dir, UW, answer);
@@ -143,6 +187,7 @@ fn a_failed_answer_write_keeps_the_notice_and_shows_an_error() {
         }
     }
     assert!(asks_path(dir.path()).is_dir());
+    assert!(!asks_path(unwritable.path()).exists(), "nothing saved");
     // A write that works hides it and clears the error.
     let good = tempfile::tempdir().unwrap();
     let mut notice = asked(UW);
@@ -170,16 +215,16 @@ fn a_late_no_for_an_older_size_leaves_the_newer_ask_up() {
 fn close_hides_it_and_records_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), live(UW, false), true);
+    observe_in(&mut notice, dir.path(), live(UW, false));
     close_in(&mut notice, UW);
     assert_eq!(notice.shown, Shown::Nothing);
     assert!(!asks_path(dir.path()).exists());
     // This run: the same value keeps it hidden.
-    observe_in(&mut notice, dir.path(), live(UW, false), true);
+    observe_in(&mut notice, dir.path(), live(UW, false));
     assert_eq!(notice.shown, Shown::Nothing);
     // After a restart it can come back.
     let mut reopened = VisionNotice::default();
-    observe_in(&mut reopened, dir.path(), live(UW, false), true);
+    observe_in(&mut reopened, dir.path(), live(UW, false));
     assert_eq!(reopened.shown, Shown::Ask(UW));
 }
 
@@ -188,7 +233,7 @@ fn an_unreadable_pack_record_is_a_warning_with_no_actions() {
     let dir = tempfile::tempdir().unwrap();
     unreadable_pack_record(dir.path());
     let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), live(UW, true), true);
+    observe_in(&mut notice, dir.path(), live(UW, true));
     assert_eq!(notice.shown, Shown::PackUnreadable(UW));
     assert!(!asks_path(dir.path()).exists());
 }
@@ -199,7 +244,7 @@ fn a_reset_keeps_the_old_bytes_and_a_no_and_hides_the_warning() {
     let corrupt: &[u8] = b"{\"dismissed\": [";
     std::fs::write(asks_path(dir.path()), corrupt).unwrap();
     let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), live(UW, true), true);
+    observe_in(&mut notice, dir.path(), live(UW, true));
     assert_eq!(notice.shown, Shown::AnswersUnreadable(UW));
     reset_in(&mut notice, dir.path(), UW);
     assert_eq!(notice.shown, Shown::Nothing);
@@ -226,7 +271,7 @@ fn a_failed_reset_keeps_the_warning_and_the_unreadable_file() {
     // cannot copy it.
     std::fs::create_dir(asks_path(dir.path())).unwrap();
     let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), live(UW, false), true);
+    observe_in(&mut notice, dir.path(), live(UW, false));
     assert_eq!(notice.shown, Shown::AnswersUnreadable(UW));
     reset_in(&mut notice, dir.path(), UW);
     assert_eq!(notice.shown, Shown::AnswersUnreadable(UW));
@@ -239,8 +284,8 @@ fn a_failed_reset_keeps_the_warning_and_the_unreadable_file() {
 fn the_tracker_clearing_it_hides_it() {
     let dir = tempfile::tempdir().unwrap();
     let mut notice = VisionNotice::default();
-    observe_in(&mut notice, dir.path(), live(UW, false), true);
-    observe_in(&mut notice, dir.path(), None, true);
+    observe_in(&mut notice, dir.path(), live(UW, false));
+    observe_in(&mut notice, dir.path(), None);
     assert_eq!(notice.shown, Shown::Nothing);
 }
 
@@ -268,12 +313,47 @@ fn only_the_running_trackers_value_counts() {
 
 #[test]
 fn observe_without_a_sync_server_asks_nothing() {
-    let (_dir, mut app) = crate::fixtures::test_app();
-    app.saved_config.sync = None;
-    app.daemon.pid = Some(7);
+    let (_dir, mut app) = app_on_overview(None);
     observe(&mut app, Some(&status_from(7, live(UW, false))));
-    assert_eq!(app.overview_page.vision.shown, Shown::Nothing);
+    assert_eq!(shown_on(&app), Shown::Nothing);
+    assert!(view(&app).is_none());
     assert!(!asks_path(&app.data_dir).exists());
+}
+
+/// The tick hook: the app's once-a-second read of the status file reaches
+/// the notice. Remove the `vision_size_notice::observe` call from
+/// `observe_capture_and_focus` and this fails: nothing is shown.
+#[test]
+fn the_tick_feeds_the_notice_on_overview() {
+    let (_dir, mut app) = app_on_overview(Some(sync()));
+    let dir = app.data_dir.clone();
+    app.observe_capture_and_focus(Some(&status_from(7, live(UW, false))), Instant::now());
+    assert_eq!(shown_on(&app), Shown::Ask(UW));
+    assert!(view(&app).is_some());
+    unreadable_pack_record(&dir);
+    app.observe_capture_and_focus(Some(&status_from(7, live(UW, true))), Instant::now());
+    assert_eq!(shown_on(&app), Shown::PackUnreadable(UW));
+    // Another run's status file is not the running tracker's.
+    app.observe_capture_and_focus(Some(&status_from(8, live(UW, false))), Instant::now());
+    assert_eq!(shown_on(&app), Shown::Nothing);
+}
+
+/// The Overview routes the notice's buttons. Drop the `Msg::VisionSize`
+/// route in `overview_page::update` and this fails: the no is never
+/// written and the ask stays up.
+#[test]
+fn the_overview_routes_the_notice_buttons() {
+    use crate::overview_page::{Msg as PageMsg, update as page_update};
+    let (_dir, mut app) = app_on_overview(Some(sync()));
+    let dir = app.data_dir.clone();
+    app.overview_page.vision = asked(UW);
+    let _ = page_update(&mut app, PageMsg::VisionSize(Msg::NoThanks(UW)));
+    assert_eq!(app.overview_page.vision.shown, Shown::Nothing);
+    assert!(declined(&dir, UW) && !declined(&dir, WIDE_16_10));
+    app.overview_page.vision = asked(WIDE_16_10);
+    let _ = page_update(&mut app, PageMsg::VisionSize(Msg::Close(WIDE_16_10)));
+    assert_eq!(app.overview_page.vision.shown, Shown::Nothing);
+    assert!(!declined(&dir, WIDE_16_10), "Close records nothing");
 }
 
 #[test]

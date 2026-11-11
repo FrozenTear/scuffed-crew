@@ -437,6 +437,95 @@ fn a_reset_keeps_the_old_bytes_and_writes_a_no() {
     assert!(asks.declined(UW) && asks.declined(WIDE_16_10));
 }
 
+/// A reset keeps every answer the old bytes still hold. Put back the fresh
+/// `Asks::default()` in `reset_unreadable` and this fails: `never_again`
+/// is lost, and 2560x1600 is no longer declined.
+#[test]
+fn a_reset_carries_over_the_answers_that_still_read() {
+    let dir = tempfile::tempdir().unwrap();
+    // A JSON object that does not load as `Asks`: `dismissed` is not a list.
+    let old: &[u8] = br#"{"never_again":true,"dismissed":"x"}"#;
+    std::fs::write(asks_path(dir.path()), old).unwrap();
+    assert!(Asks::load(dir.path()).is_err());
+    let backup = reset_unreadable(dir.path(), UW).unwrap().expect("a copy");
+    assert_eq!(std::fs::read(&backup).unwrap(), old);
+    let asks = Asks::load(dir.path()).unwrap();
+    assert!(asks.never_again, "Don't ask again is kept");
+    assert!(
+        asks.dismissed.contains("3440x1440"),
+        "the No thanks is added"
+    );
+    assert!(asks.declined(WIDE_16_10) && asks.declined(P1080));
+
+    // Each field on its own: the good entries stay, the bad ones go.
+    let dir = tempfile::tempdir().unwrap();
+    let old: &[u8] = br#"{"dismissed":["2560x1600",5,"big","1920X1080"],"never_again":"yes","later":{"a":1},"asked":7}"#;
+    std::fs::write(asks_path(dir.path()), old).unwrap();
+    assert!(Asks::load(dir.path()).is_err());
+    reset_unreadable(dir.path(), UW).unwrap().expect("a copy");
+    let asks = Asks::load(dir.path()).unwrap();
+    let want: std::collections::BTreeSet<String> = ["1920x1080", "2560x1600", "3440x1440"]
+        .map(String::from)
+        .into();
+    assert_eq!(asks.dismissed, want);
+    assert!(!asks.never_again, "a never_again that is not true is no no");
+    assert!(!asks.declined(ScreenSize::new(3840, 2160)));
+    assert_eq!(asks.other["later"], serde_json::json!({"a": 1}));
+
+    // A size under `never` is a "Don't ask again", as a click writes it.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        asks_path(dir.path()),
+        br#"{"never":["2560x1600"],"never_again":null}"#,
+    )
+    .unwrap();
+    assert!(Asks::load(dir.path()).is_err());
+    reset_unreadable(dir.path(), UW).unwrap().expect("a copy");
+    let asks = Asks::load(dir.path()).unwrap();
+    assert!(asks.never_again && asks.declined(P1080));
+}
+
+/// Bytes that are JSON but not an object, or not JSON at all, give no
+/// answers: the copy keeps them, and the new file holds only the No thanks.
+#[test]
+fn a_reset_of_bytes_that_are_not_an_object_invents_no_answers() {
+    for old in [
+        &br#"["2560x1600"]"#[..],
+        b"\"never_again\"",
+        b"{\"never_again\":true, oops",
+        b"[[[",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(asks_path(dir.path()), old).unwrap();
+        let backup = reset_unreadable(dir.path(), UW).unwrap().expect("a copy");
+        assert_eq!(std::fs::read(&backup).unwrap(), old);
+        let asks = Asks::load(dir.path()).unwrap();
+        let shown = String::from_utf8_lossy(old);
+        assert!(asks.declined(UW), "{shown}");
+        assert!(!asks.never_again && !asks.declined(WIDE_16_10), "{shown}");
+        assert_eq!(asks.dismissed.len(), 1, "{shown}");
+        assert!(asks.never.is_empty() && asks.other.is_empty(), "{shown}");
+    }
+}
+
+/// A save that fails on its own, after a load that worked: no answers file
+/// yet, and the temporary file `Asks::save` writes first is a directory.
+/// Make `record_answer` swallow the save's error and this fails.
+#[test]
+fn record_answer_reports_a_failed_save() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(Asks::load(dir.path()).is_ok(), "the load works");
+    std::fs::create_dir(temp_path(dir.path())).unwrap();
+    for answer in [Answer::Dismissed, Answer::Never] {
+        assert!(record_answer(dir.path(), UW, answer).is_err(), "{answer:?}");
+        assert!(
+            !asks_path(dir.path()).exists(),
+            "{answer:?}: no answers file"
+        );
+    }
+    assert!(temp_path(dir.path()).is_dir());
+}
+
 #[test]
 fn a_failed_reset_leaves_the_unreadable_bytes_in_place() {
     let dir = tempfile::tempdir().unwrap();

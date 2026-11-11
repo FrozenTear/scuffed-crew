@@ -24,8 +24,9 @@
 //! When the tracker could not tell, a warning shows instead, with or
 //! without a sync server: the pack record did not read, or the answers
 //! file did not read. For the answers file the member can reset it: the
-//! old bytes are kept in a copy next to it, and the new file holds a "No
-//! thanks" for the size. Games record either way.
+//! old bytes are kept in a copy next to it, and the new file holds the
+//! answers that still read in them plus a "No thanks" for the size. Games
+//! record either way.
 
 use std::path::Path;
 
@@ -121,8 +122,10 @@ pub struct VisionNotice {
 }
 
 /// What to show for the tracker's value. Reads the answers file, and the
-/// pack record for a warning. Writes nothing.
-fn shown_for(data_dir: &Path, live: Option<VisionSizeStatus>, sync_configured: bool) -> Shown {
+/// pack record for a warning. Writes nothing. An ask is kept even with no
+/// sync server set: [`shown_on`] hides it until one is, so a server set
+/// later in the same run shows the waiting ask.
+fn shown_for(data_dir: &Path, live: Option<VisionSizeStatus>) -> Shown {
     let Some(status) = live else {
         return Shown::Nothing;
     };
@@ -138,26 +141,21 @@ fn shown_for(data_dir: &Path, live: Option<VisionSizeStatus>, sync_configured: b
             Err(_) => Shown::PackUnreadable(size),
             Ok(_) => Shown::Nothing,
         },
-        Ok(asks) if asks.declined(size) || !sync_configured => Shown::Nothing,
+        Ok(asks) if asks.declined(size) => Shown::Nothing,
         Ok(_) => Shown::Ask(size),
     }
 }
 
-/// Feed the running tracker's value. A new ask is shown unless the member
-/// already said no to that size or no sync server is set. Nothing is
-/// written.
-pub fn observe_in(
-    notice: &mut VisionNotice,
-    data_dir: &Path,
-    live: Option<VisionSizeStatus>,
-    sync_configured: bool,
-) {
+/// Feed the running tracker's value. A new ask is kept unless the member
+/// already said no to that size; [`shown_on`] draws it only when a sync
+/// server is set. Nothing is written.
+pub fn observe_in(notice: &mut VisionNotice, data_dir: &Path, live: Option<VisionSizeStatus>) {
     if live == notice.seen {
         return;
     }
     notice.seen = live;
     notice.failed = None;
-    notice.shown = shown_for(data_dir, live, sync_configured);
+    notice.shown = shown_for(data_dir, live);
 }
 
 /// The running tracker's value: `None` unless the status file is from the
@@ -174,13 +172,7 @@ pub(crate) fn live_vision_size(
 /// The tick's read of the status file, only from the running tracker.
 pub(crate) fn observe(app: &mut TrackerApp, status: Option<&OcrSwitchStatus>) {
     let live = live_vision_size(status, app.daemon.pid);
-    let sync_configured = app.saved_config.sync.is_some();
-    observe_in(
-        &mut app.overview_page.vision,
-        &app.data_dir,
-        live,
-        sync_configured,
-    );
+    observe_in(&mut app.overview_page.vision, &app.data_dir, live);
 }
 
 /// Keep the member's no for `size`. The ask is hidden only once the no is

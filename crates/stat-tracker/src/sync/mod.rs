@@ -82,3 +82,6 @@ mod tests_batching;
 
 #[cfg(test)]
 mod tests_visibility;
+
+#[cfg(test)]
+mod tests_consent_fetch;

@@ -38,6 +38,12 @@
 //! is [`Support::NotYetKnown`]: packs may still be downloading, so nothing
 //! is said and the next Tab looks again.
 //!
+//! A record with only some hero packs in it is read as it is. The daemon
+//! records `heroes-v1` at startup and the other packs later, so a member
+//! playing at 1920x1080 can be asked about 1920x1080 until
+//! `heroes-v2-1080` is recorded. The next Tab after that takes the ask
+//! down ([`Decision::Clear`]).
+//!
 //! # Answers
 //!
 //! `<data_dir>/vision-size-asks.json` ([`Asks`]) keeps the member's nos:
@@ -46,7 +52,9 @@
 //! restart. The app writes it; the daemon reads it. A file that does not
 //! read is never written over: [`record_answer`] refuses, and only
 //! [`reset_unreadable`] (the member's own click) replaces it, after keeping
-//! a copy of its bytes.
+//! a copy of its bytes. The new file keeps every answer the old bytes still
+//! hold, a "Don't ask again" included, and adds a "No thanks" for the size
+//! the warning was about.
 //!
 //! [`may_collect_hero_icons`] checks only the member's `hero_icon` consent
 //! at an undeclared size: a no on file sends no request at all, and
@@ -284,8 +292,10 @@ pub fn record_answer(data_dir: &Path, size: ScreenSize, answer: Answer) -> std::
 /// first to `vision-size-asks.json.unreadable-<unix seconds>` (never over an
 /// existing copy), then the new file is renamed over the old one. If either
 /// step fails, the unreadable file is left in place and the error returned.
-/// A file that reads is not replaced: the no is added to it. Returns the
-/// copy's path when one was made.
+/// The new file keeps every answer the old bytes still hold
+/// ([`salvage_answers`]), so a "Don't ask again" is not lost. A file that
+/// reads is not replaced: the no is added to it. Returns the copy's path
+/// when one was made.
 pub fn reset_unreadable(data_dir: &Path, size: ScreenSize) -> std::io::Result<Option<PathBuf>> {
     if Asks::load(data_dir).is_ok() {
         record_answer(data_dir, size, Answer::Dismissed)?;
@@ -298,10 +308,47 @@ pub fn reset_unreadable(data_dir: &Path, size: ScreenSize) -> std::io::Result<Op
         .unwrap_or(0);
     let backup = data_dir.join(format!("{ASKS_FILE}.unreadable-{stamp}"));
     write_synced(&backup, &old, true)?;
-    let mut asks = Asks::default();
+    let mut asks = salvage_answers(&old);
     asks.mark(size, Answer::Dismissed);
     asks.save(data_dir)?;
     Ok(Some(backup))
+}
+
+/// The answers still in bytes that do not load as [`Asks`]. When they are
+/// a JSON object, each field is taken on its own: `never_again` when it is
+/// `true`, and from the `dismissed` and `never` lists every entry that is a
+/// size. A field of the wrong shape, or a list entry that is not a size, is
+/// skipped, not the whole object. A size under `never` also sets
+/// `never_again`, as [`Asks::mark`] does. Other fields are kept as they
+/// are. Bytes that are not a JSON object hold nothing that can be trusted
+/// and give no answers.
+fn salvage_answers(old: &[u8]) -> Asks {
+    let Ok(serde_json::Value::Object(mut fields)) = serde_json::from_slice(old) else {
+        return Asks::default();
+    };
+    let mut sizes = |key: &str| -> BTreeSet<String> {
+        match fields.remove(key) {
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .filter_map(ScreenSize::parse)
+                .map(|size| size.to_string())
+                .collect(),
+            _ => BTreeSet::new(),
+        }
+    };
+    let dismissed = sizes("dismissed");
+    let never = sizes("never");
+    let never_again = matches!(
+        fields.remove("never_again"),
+        Some(serde_json::Value::Bool(true))
+    ) || !never.is_empty();
+    Asks {
+        dismissed,
+        never,
+        never_again,
+        other: fields,
+    }
 }
 
 /// What to show for the size of a Tab frame.

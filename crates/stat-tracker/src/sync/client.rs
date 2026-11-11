@@ -237,10 +237,7 @@ impl SyncClient {
         if !resp.status().is_success() {
             return None;
         }
-        let bytes = resp.bytes().await.ok()?;
-        if bytes.len() > MAX_BODY_BYTES {
-            return None;
-        }
+        let bytes = read_body_capped(resp, MAX_BODY_BYTES).await?;
         parse_hero_icon_consent(status, &bytes)
     }
 
@@ -291,6 +288,25 @@ impl SyncClient {
         );
         Ok(result)
     }
+}
+
+/// A response body of at most `max` bytes, read chunk by chunk. A declared
+/// `Content-Length` over `max` is refused before any body is read, and a
+/// body that passes `max` (no length, or a wrong one) is refused at the
+/// chunk that passes it, so no more than `max` bytes are kept. `None` for
+/// either, or for a read that fails.
+pub(super) async fn read_body_capped(mut resp: reqwest::Response, max: usize) -> Option<Vec<u8>> {
+    if resp.content_length().is_some_and(|len| len > max as u64) {
+        return None;
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = resp.chunk().await.ok()? {
+        if body.len().saturating_add(chunk.len()) > max {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Some(body)
 }
 
 /// Honor `Retry-After` only on 429 and 503, the statuses the API uses for

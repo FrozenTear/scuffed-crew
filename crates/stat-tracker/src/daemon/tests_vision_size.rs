@@ -1,6 +1,7 @@
 //! Tests for the capture size notice in the daemon: the debug-build fake
 //! size through `after_capture`, a game recorded at an undeclared or
-//! uncheckable size (by hand and through the real capture task), and no
+//! uncheckable size (by hand and through the real capture task), source
+//! pins for the grab's size note and the send-then-check order, and no
 //! consent or crop request to a loopback server after a no.
 //!
 //! The tests that note a frame hold `INJECTED_CAPTURE_SERIAL`: the noted
@@ -14,7 +15,7 @@ use super::vision_size::{
     FAKE_SIZE_ENV, after_capture_with, check_size, checked_size, fake_size_from, note_frame,
 };
 use crate::main_tests::{
-    NIGHT_CLEAN, Night, game, night_counters, o8_ctx, r9_counters, r9_frame, session,
+    NIGHT_CLEAN, Night, fn_source, game, night_counters, o8_ctx, r9_counters, r9_frame, session,
 };
 use crate::{INJECTED_CAPTURE, INJECTED_CAPTURE_SERIAL, start_tab_capture};
 use stat_tracker::ocr_status::{VisionSizeStatus, publish_vision_size, read_status};
@@ -153,9 +154,44 @@ async fn an_unreadable_signal_still_records_the_game_and_warns() {
     publish_vision_size(night.dir.path(), None);
 }
 
+/// The grab notes each grabbed frame's size, in `handle_capture` right
+/// after the grab and before the analysis. Delete that call and this
+/// fails: nothing else notes a size, so no Tab would ever be checked.
+#[test]
+fn handle_capture_notes_the_grabbed_frame_size() {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = norm(fn_source("handle_capture"));
+    let note = "daemon::vision_size::note_frame(img.width(), img.height());";
+    assert_eq!(body.matches(note).count(), 1, "{note}");
+    let grabbed = body.find("let img = match grabbed {").expect("the grab");
+    let noted = body.find(note).expect("the note");
+    let analysed = body
+        .find("tokio::task::spawn_blocking(move || {")
+        .expect("the analysis");
+    assert!(grabbed < noted && noted < analysed, "noted after the grab");
+}
+
+/// The capture task sends the Tab's result before the size check, so the
+/// check cannot hold up or drop the Tab. Swap them and this fails.
+#[test]
+fn start_tab_capture_sends_the_tab_before_the_size_check() {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = norm(fn_source("start_tab_capture"));
+    let send = "let _ = tx.send((sid, result));";
+    let check = "daemon::vision_size::after_capture(&ctx_task.data_dir);";
+    assert_eq!(body.matches(send).count(), 1, "{send}");
+    assert_eq!(body.matches(check).count(), 1, "{check}");
+    assert!(
+        body.find(send) < body.find(check),
+        "the send comes first: {body}"
+    );
+}
+
 /// The real capture task (`start_tab_capture`, through `handle_capture`)
-/// with a 3440x1440 frame noted the way the grab notes it: the Tab's
-/// report reaches `capture_tx`, and the ask is published after it.
+/// with a prepared Tab analysis and the 3440x1440 size noted the way the
+/// grab notes it (the injected analysis skips the grab, so
+/// `handle_capture_notes_the_grabbed_frame_size` pins the grab's call): the
+/// Tab's report reaches `capture_tx`, and the ask is published after it.
 #[tokio::test]
 async fn the_capture_task_sends_the_tab_at_an_unsupported_size() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;

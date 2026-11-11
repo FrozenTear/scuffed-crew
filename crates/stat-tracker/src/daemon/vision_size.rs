@@ -11,7 +11,8 @@
 //!
 //! Debug builds only: `SCUFFED_DEV_FAKE_RESOLUTION=3440x1440` makes the
 //! check use that size instead of the real frame's, to test the notice.
-//! Release builds never read the variable ([`fake_size`] is `None` there).
+//! Release builds never read the variable ([`fake_size`] is `None` there,
+//! and the variable's name and parser are not built in).
 //! Capture, the frames and the readers are not changed by it, and nothing
 //! is written to the config. A member's "No thanks" for the fake size is
 //! written to the data dir like any answer, so use a scratch data dir.
@@ -24,7 +25,9 @@ use stat_tracker::ocr_status::{VisionSizeStatus, publish_vision_size, read_statu
 use stat_tracker::packs::layout::vision_sizes::{self, Asker, Decision, ScreenSize};
 
 /// Debug-build environment variable: the capture size the notice check
-/// uses in place of the real one. Not a setting, never stored.
+/// uses in place of the real one. Not a setting, never stored. Not in
+/// release builds, which never read it.
+#[cfg(any(debug_assertions, test))]
 pub(crate) const FAKE_SIZE_ENV: &str = "SCUFFED_DEV_FAKE_RESOLUTION";
 
 /// The size of the last Tab frame grabbed, taken by [`after_capture`].
@@ -37,7 +40,9 @@ pub(crate) fn note_frame(width: u32, height: u32) {
     *LAST_FRAME.lock().unwrap_or_else(|e| e.into_inner()) = Some(ScreenSize::new(width, height));
 }
 
-/// The fake size from the variable's value, if it is a size.
+/// The fake size from the variable's value, if it is a size. Not in
+/// release builds.
+#[cfg(any(debug_assertions, test))]
 pub(crate) fn fake_size_from(raw: Option<&str>) -> Option<ScreenSize> {
     raw.and_then(ScreenSize::parse)
 }
@@ -55,7 +60,7 @@ fn fake_size() -> Option<ScreenSize> {
     })
 }
 
-/// Release builds never read [`FAKE_SIZE_ENV`].
+/// Release builds never read `SCUFFED_DEV_FAKE_RESOLUTION`.
 #[cfg(not(debug_assertions))]
 fn fake_size() -> Option<ScreenSize> {
     None
