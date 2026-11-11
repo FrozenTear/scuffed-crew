@@ -1279,7 +1279,7 @@ pub(crate) async fn handle_capture(
                 commit_capture_rows(store, data_dir, &staged, &parsed, now).await?;
             // Hero icon and stat digit training crops, only from a stored Tab.
             // Stat digits only from the new reader's own row verdict when it
-            // names this row and is not suspect, and with this Tab's own hero
+            // names this row and is confirmed (Trust::Sure), and with this Tab's own hero
             // read: a held hero can be the last game's.
             let crop_source = TabCropSource {
                 panel: career_portrait.as_ref(),

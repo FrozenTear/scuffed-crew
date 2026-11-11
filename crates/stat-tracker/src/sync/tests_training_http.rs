@@ -1026,3 +1026,40 @@ async fn a_failed_consent_read_warns_only_when_training_crops_are_in_use() {
     assert!(report.warning.is_some());
     assert!(training_warning(dir.path()).is_some());
 }
+
+/// A crop a Tab could not keep leaves its own warning, but never drops an
+/// open ask to delete again: the next pass still shows that ask.
+#[tokio::test]
+async fn a_lost_tab_crop_keeps_the_ask_to_delete_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = new_listener();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    adopt_training_owner(dir.path(), &url, "super-secret-token");
+    mark_training_delete(dir.path()).unwrap();
+    let marker = super::training_store::training_delete_at(dir.path());
+    super::training_store::write_training_warning(
+        dir.path(),
+        Some(TRAINING_DELETE_AGAIN),
+        true,
+        false,
+        marker,
+    );
+    warn_crop_lost(dir.path(), UploadKind::StatDigits);
+    let status = read_training_status(dir.path()).expect("a warning");
+    assert!(
+        status
+            .warning
+            .as_deref()
+            .unwrap()
+            .contains("could not be kept")
+    );
+    assert_eq!(status.delete_again_at, marker, "the ask is kept");
+
+    let (_, server) = serve_on(
+        listener,
+        vec![http(200, "", &consent_body(TrainingCropConsent::default()))],
+    );
+    let report = run_training_pass(&client(&url), dir.path()).await;
+    server.join().unwrap();
+    assert_eq!(report.warning.as_deref(), Some(TRAINING_DELETE_AGAIN));
+}

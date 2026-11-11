@@ -13,7 +13,8 @@
 //! * `stat_digits`: the own row's six stat cells, each on its own window
 //!   under the header labels ([`training_stat_columns`]), never the name
 //!   column and never another row. Only under the new reader, when its own
-//!   row verdict names the Tab's row and is not suspect, and only when the
+//!   row verdict names the Tab's row and is confirmed ([`Trust::Sure`]: two
+//!   voices agree on it, such as the seed and the highlight), and only when the
 //!   chat stack walk and the reach rule show no chat line can reach the row.
 //!   ocr-v1 has no own row verdict (its row is a name match or the brightest
 //!   row, which a hover or a party tint can light on another player's row),
@@ -32,7 +33,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::*;
-use stat_tracker::detect::own_row::OwnRow;
+use stat_tracker::detect::own_row::{OwnRow, Trust};
 use stat_tracker::ocr::preprocess::StatColumns;
 use stat_tracker::report::blank::{Chat, chat_over_board};
 use stat_tracker::shadow::heroes::PanelRead;
@@ -132,13 +133,18 @@ pub(crate) fn archive_tab_training_crops(
 }
 
 /// The row stat digit crops may come from: `row`, only when the new
-/// reader's own row verdict names that same row and is not suspect. `None`
-/// under ocr-v1 (no verdict), where `row` is a name match or the brightest
-/// row and nothing tells a hover or a party tint on another row apart.
+/// reader's own row verdict names that same row and is confirmed
+/// ([`Trust::Sure`]: seed and highlight, or one of them and the career
+/// hero, agree on it). An unconfirmed row (a strong highlight before any
+/// seed exists, or a name fallback) is stored unmarked, but nothing has
+/// checked it is the member's, so it gives no digit crop; nor does a
+/// suspect one. `None` under ocr-v1 (no verdict), where `row` is a name
+/// match or the brightest row and nothing tells a hover or a party tint on
+/// another row apart.
 pub(crate) fn stat_digit_row(row: Option<usize>, own_row: Option<OwnRow>) -> Option<usize> {
     let row = row?;
     own_row
-        .is_some_and(|own| own.row == Some(row) && !own.suspect())
+        .is_some_and(|own| own.row == Some(row) && own.trust == Trust::Sure)
         .then_some(row)
 }
 

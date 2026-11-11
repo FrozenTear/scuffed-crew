@@ -401,8 +401,8 @@ async fn no_stat_digit_crops_without_consent_a_sure_own_row_or_a_clear_row() {
     set_consent(dir.path(), true, false);
     assert!(!run(dir.path(), "tc-nodigits-0", &frame, source(None, None)).await);
     set_consent(dir.path(), false, true);
-    // A confirmed but suspect own row, one that names another row than the
-    // Tab's, or a verdict with no row: another player's cells could be cut.
+    // A suspect own row, one that names another row than the Tab's, or a
+    // verdict with no row: another player's cells could be cut.
     let mut suspect = source(None, None);
     suspect.own_row = Some(own(1, Trust::Suspect));
     assert!(!run(dir.path(), "tc-nodigits-1", &frame, suspect).await);
@@ -415,11 +415,23 @@ async fn no_stat_digit_crops_without_consent_a_sure_own_row_or_a_clear_row() {
         ..own(1, Trust::Sure)
     });
     assert!(!run(dir.path(), "tc-nodigits-3", &frame, no_row).await);
-    // An unconfirmed own row with nothing against it is not suspect.
-    assert_eq!(
-        stat_digit_row(Some(1), Some(own(1, Trust::Unconfirmed))),
-        Some(1)
-    );
+    // An unconfirmed own row (a strong highlight before any seed, or a
+    // name fallback) is not suspect, but nothing confirmed it: none.
+    for (n, voice) in [OwnRowSource::HighlightOnly, OwnRowSource::NameFallback]
+        .into_iter()
+        .enumerate()
+    {
+        let unconfirmed = OwnRow {
+            source: voice,
+            ..own(1, Trust::Unconfirmed)
+        };
+        assert!(!unconfirmed.suspect());
+        assert_eq!(stat_digit_row(Some(1), Some(unconfirmed)), None);
+        let mut tab = source(None, None);
+        tab.own_row = Some(unconfirmed);
+        let session = format!("tc-nodigits-unconfirmed-{n}");
+        assert!(!run(dir.path(), &session, &frame, tab).await);
+    }
     // Chat lines stacked up over the board: the row may hold a chat line.
     let mut chat = frame.to_rgb8();
     for y in 150..1010 {
@@ -661,6 +673,39 @@ async fn a_held_hero_is_never_written_into_stat_digit_meta() {
     assert!(wait_for(digits).await);
     for crop in sync::queued_crops(dir.path(), UploadKind::StatDigits) {
         assert_eq!(crop.meta.hero, None, "not this Tab's read");
+    }
+}
+
+/// The regression for an unconfirmed own row: the new reader stores the
+/// Tab on a strong highlight that no seed has confirmed yet (and on a name
+/// fallback), unmarked, but that row is not known to be the member's, so
+/// it gives no stat digit crop. The same Tab with a sure verdict keeps six
+/// ([`an_over_cap_panel_box_still_records_the_tab_and_its_digits`]).
+#[tokio::test]
+async fn an_accepted_tab_with_an_unconfirmed_own_row_keeps_no_stat_digit_crops() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    for (n, voice) in [OwnRowSource::HighlightOnly, OwnRowSource::NameFallback]
+        .into_iter()
+        .enumerate()
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = o8_ctx(dir.path(), true).await;
+        set_consent(dir.path(), false, true);
+        let mut analysis = sure_tab(Some("ana"));
+        analysis.own_row = Some(OwnRow {
+            source: voice,
+            ..own(0, Trust::Unconfirmed)
+        });
+        let session = format!("tc-unconfirmed-{n}");
+        let (recorded, rows) = record_tab(&ctx, &session, analysis, sure_board()).await;
+        assert!(recorded, "an unconfirmed own row still records the Tab");
+        assert_eq!(rows, 1);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            sync::queued_crops(dir.path(), UploadKind::StatDigits).is_empty(),
+            "{voice:?}"
+        );
+        assert_eq!(sync::training_warning(dir.path()), None);
     }
 }
 
