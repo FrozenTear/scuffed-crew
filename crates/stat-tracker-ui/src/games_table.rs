@@ -169,8 +169,10 @@ pub fn clear_focus(app: &mut TrackerApp) {
 /// Run before each app message: take a stale "Game deleted." down and,
 /// on any message but the 1 s tick, run the undrawn-row check
 /// ([`drop_hidden_open_row`]: a row the filters hid, one past the first
-/// 500 rows, or a game that left the list). A tick changes no filter, so
-/// it skips that check and the list it reads. A Games tab message skips
+/// 500 rows, or a game that left the list). A tick can reload the list,
+/// so a game may leave it or go past the cap on one, but no key comes
+/// with a tick and the next message runs the check first, so skipping it
+/// there is safe and saves building the list. A Games tab message skips
 /// it too, as [`update`] runs it once for that message.
 pub(crate) fn before_message(app: &mut TrackerApp, message: &Message) {
     crate::games_delete::drop_stale_note(app);
@@ -1126,6 +1128,7 @@ mod tests {
             app.games_tab.focus = Focus::ConfirmDelete;
             send(&mut app, key.clone());
             assert!(app.games.iter().any(|g| g.session_id == old), "{key:?}");
+            assert!(crate::commands::queued(&app.data_dir).is_empty(), "{key:?}");
             assert_eq!(app.confirm_delete, None, "{key:?}");
             assert_eq!(app.expanded, None, "{key:?}");
             assert_eq!(app.games_tab.focus, Focus::None, "{key:?}");
@@ -1170,6 +1173,10 @@ mod tests {
                 let _ = app.update(Message::Games(key.clone()));
             }
             assert!(app.games.iter().any(|g| g.session_id == UNSURE), "{keys:?}");
+            assert!(
+                crate::commands::queued(&app.data_dir).is_empty(),
+                "{keys:?}"
+            );
             assert_eq!(app.confirm_delete, None, "{keys:?}");
             assert!(app.editing, "{keys:?}");
             assert_eq!(app.expanded.as_deref(), Some(UNSURE), "{keys:?}");
@@ -1197,6 +1204,7 @@ mod tests {
         assert_eq!(a.expanded, None);
         assert_eq!(a.confirm_delete, None);
         assert!(a.games_tab.deleted_note.is_none(), "nothing deleted");
+        assert!(crate::commands::queued(&a.data_dir).is_empty());
         // In Edit: the form and its text stay, and no key reaches it.
         let (_dir, mut app) = app();
         app.expanded = Some(UNSURE.into());
@@ -1214,6 +1222,7 @@ mod tests {
         assert_eq!(app.edit.elims, "42");
         assert_eq!(app.confirm_delete, None);
         assert!(app.games_tab.deleted_note.is_none(), "nothing deleted");
+        assert!(crate::commands::queued(&app.data_dir).is_empty());
     }
 
     /// The tick never runs the hidden-row check, so it neither closes an
