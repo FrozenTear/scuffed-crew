@@ -10,6 +10,7 @@ pub mod maintain;
 mod migrate;
 mod migrate_timeline;
 mod queue_title;
+mod rank_update;
 mod rows;
 mod rules;
 mod timeline;
@@ -337,6 +338,9 @@ mod tests_bans_picks;
 
 #[cfg(test)]
 mod tests_queue_title;
+
+#[cfg(test)]
+mod tests_rank_update;
 
 #[cfg(test)]
 mod tests_rows;

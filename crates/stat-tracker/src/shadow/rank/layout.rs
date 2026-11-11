@@ -2,9 +2,10 @@
 //! Positions were measured on saved rank screens at 2560x1440; at 1080p
 //! every box and most pixel thresholds are scaled by [`Scale`]
 //! (`width/2560`, `height/1440`). A few small thresholds are fixed pixel
-//! counts ([`ink::split_two`]'s width, [`ink::strip_minus`]'s bar size, the
-//! hero line brightness), which is one reason [`Scale`] takes only the two
-//! sizes the reader is tested at. The colour tests are in [`super::ink`].
+//! counts ([`ink::split_two`]'s width, [`ink::strip_minus`]'s bar size),
+//! which is one reason [`Scale`] takes only the two sizes the reader is
+//! tested at; the hero line brightness is scaled by height like the boxes.
+//! The colour tests are in [`super::ink`].
 
 use image::RgbImage;
 
@@ -211,7 +212,9 @@ fn hero_lines(img: &RgbImage, s: Scale) -> Vec<(u32, u32)> {
 }
 
 /// The first hero entry: a name line (11 to 20 rows) over a taller SR line
-/// (19 to 34 rows, at least 3 taller), 4 to 22 rows below it.
+/// (19 to 34 rows, at least 3 taller), 4 to 22 rows below it. `None` when
+/// a line above that name line is SR tall: the top hero's own pair failed
+/// the shape test, and the pair found is a later hero's.
 pub fn first_entry(img: &RgbImage) -> Option<Entry> {
     let s = Scale::from_img(img)?;
     let ls = hero_lines(img, s);
@@ -219,7 +222,7 @@ pub fn first_entry(img: &RgbImage) -> Option<Entry> {
     let (hs0, hs1) = (s.n(19), s.n(34));
     let taller = s.n(3);
     let (gap0, gap1) = (s.n(4), s.n(22));
-    let (name, sr) = ls.windows(2).find_map(|w| {
+    let (k, name, sr) = ls.windows(2).enumerate().find_map(|(k, w)| {
         let (n, sr) = (w[0], w[1]);
         let (hn, hs) = (n.1 - n.0, sr.1 - sr.0);
         let gap = sr.0 - n.1;
@@ -227,8 +230,11 @@ pub fn first_entry(img: &RgbImage) -> Option<Entry> {
             && (hs0..=hs1).contains(&hs)
             && hs >= hn + taller
             && (gap0..=gap1).contains(&gap))
-        .then_some((n, sr))
+        .then_some((k, n, sr))
     })?;
+    if ls[..k].iter().any(|l| (hs0..=hs1).contains(&(l.1 - l.0))) {
+        return None;
+    }
     Some(Entry {
         name,
         sr,
@@ -255,6 +261,27 @@ fn name_right(img: &RgbImage, s: Scale, name: (u32, u32)) -> u32 {
     );
     first_cluster(&runs(&ink.col_sums(), 0.5, 1), s.n(14) as usize)
         .map_or(hx1, |(_, b)| hx0 + b as u32)
+}
+
+/// Whether the SR window ([`sr_glyphs`], which ends at the name's right
+/// edge) may cut the SR short: the SR band has ink in the few columns just
+/// right of it. That happens when the name ends early (a two word name
+/// whose gap is wider than the name's word gap test), so the window would
+/// end inside the digits and a 4 digit SR read as its first 3.
+pub fn sr_cut_short(img: &RgbImage, e: &Entry) -> bool {
+    let Some(s) = Scale::from_img(img) else {
+        return false;
+    };
+    let (hx0, _, hx1, _) = hero_box(s);
+    let x1 = hx1.min(e.right + s.n(3));
+    let xr = hx1.min(x1 + s.n(14));
+    if xr <= x1 {
+        return false;
+    }
+    let y0 = e.sr.0.saturating_sub(s.n(2));
+    let ink = band_ink(img, s, y0, e.sr.1 + s.n(2), xr);
+    let cols = ink.col_sums();
+    cols[(x1 - hx0) as usize..].iter().any(|c| *c >= s.f(2.0))
 }
 
 /// The hero SR glyphs. A rank icon left of the digits that is taller or

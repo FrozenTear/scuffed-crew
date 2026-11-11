@@ -46,9 +46,8 @@ impl PregameDump {
     /// confirms it, one that disagrees drops it, and a weak read or none
     /// expires it. `source_session` itself never settles it. A blank hint
     /// clears it, a new one replaces the one pending (a log line says so).
-    /// Nothing happens with the reader off. The rank reader's wiring calls
-    /// this; until it lands only tests do.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Nothing happens with the reader off. The rank reader's wiring
+    /// (`daemon::rank::tick`) calls this with the banner word it settled.
     pub(crate) fn set_next_mode_hint(
         &mut self,
         hint: Option<&str>,
@@ -72,6 +71,14 @@ impl PregameDump {
             tracing::info!(target: "scuffed_stat_tracker", hint = %old.text, source = %old.source, "queue title: next mode hint replaced before a game settled it");
         }
         feed.pending_hint = hint;
+    }
+
+    /// The pending next mode hint's text and source game (tests of other
+    /// wiring that hands one over).
+    #[cfg(test)]
+    pub(crate) fn pending_hint(&self) -> Option<(String, String)> {
+        let hint = self.queue.as_ref()?.pending_hint.as_ref()?;
+        Some((hint.text.clone(), hint.source.clone()))
     }
 
     /// A game was just recorded as `session_id`: read its queue title once

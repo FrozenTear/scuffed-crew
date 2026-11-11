@@ -6,13 +6,44 @@
 //! frame goes in; each field comes out as a value with a confidence, and a
 //! value the screen does not show clearly is `None`, never a guess.
 //!
-//! Off by default, and not wired yet: nothing outside the tests calls
-//! [`RankSetting::from_env`] or [`Reader::read`], so setting [`ENV`] changes
-//! nothing until the capture wiring lands. That wiring will run the reader
-//! only when [`ENV`] (or the setting it feeds) is switched on
-//! ([`RankSetting::parse`]) and a template pack is installed ([`templates`]).
-//! The capture wiring (which frame to keep) and any upload field are not part
-//! of this module; see "What a caller must do" below.
+//! Off by default. The tracker's capture wiring (`daemon::rank` in the
+//! binary, through [`game::read_for_game`]) runs the reader only when
+//! [`ENV`] is switched on ([`RankSetting::parse`]) and a template pack is
+//! installed ([`templates`]); it then reads the rank screen's frames after a
+//! game, stores the result on that game and uploads it in the `rank` object.
+//! Which frames to read and how reads are combined are the wiring's; see
+//! "What a caller must do" below.
+//!
+//! # Spellings
+//!
+//! The strings are the pack's class names, which come from the bench labels:
+//!
+//! * `role`: [`Role`], spelled as the site's `scuffed_types::api::RankRole`
+//!   (`Tank`, `Damage`, `Support`, `Open`; [`game::rank_role`] pins it);
+//! * `role_rank`: the tier word, capitalised (`Master`, `Diamond`);
+//! * `change_tags`: the tag words as the game writes them, one class per tag
+//!   (`Calibration Up` and `Calibration Down` among them; there are no
+//!   streak tags). The reader has no cap; the site keeps at most 8 and nulls
+//!   a longer list, so the wiring sends no list above 8
+//!   ([`crate::model::RANK_MAX_CHANGE_TAGS`]);
+//! * `next_mode_hint`: the banner word as its class is named. A pack should
+//!   name it as the queue title pack spells titles (`OPEN QUEUE`,
+//!   `ROLE QUEUE`): the hint names the next game's queue and only agrees
+//!   with that game's queue title when both reduce to the same key
+//!   (`model::queue_key`); a spelling that does not is dropped, never
+//!   confirmed.
+//!
+//! `hero_sr` and `hero_sr_change` are the first hero listed. After a hero
+//! swap that need not be the hero of the game.
+//!
+//! # Confidence
+//!
+//! A field's confidence blends its weakest glyph's score and lead
+//! ([`MIN_SCORE`], [`MIN_MARGIN`]): an accepted glyph field is at least about
+//! 0.53, an accepted word field about 0.42, and [`Role::Open`] is fixed at
+//! [`OPEN_CONFIDENCE`]. The queue title reader instead reports its raw score
+//! (bar 0.80). The two scales are not comparable; a caller that wants a bar
+//! sets one per field.
 //!
 //! # How it reads
 //!
@@ -63,6 +94,7 @@
 //! A supported frame that does not show the "RANK PROGRESS:" label (another
 //! screen, the placement screen) is [`ReadError::NotRankScreen`].
 
+pub mod game;
 pub mod ink;
 pub mod layout;
 pub mod templates;
@@ -80,8 +112,10 @@ pub use templates::{
     CHEV_LEFT, CHEV_RIGHT, Family, Learner, SR_ICON, TEMPLATE_DIR, TemplateError, TemplateSet,
 };
 
-/// The recognizer id written next to the values.
-pub const RECOGNIZER_ID: &str = "rank-v1";
+/// The recognizer id written next to the values: the one id the upload
+/// sends as `rank.rank_recognizer` for this reader and the queue title
+/// reader alike, defined once in `model`.
+pub use crate::model::RANK_RECOGNIZER_ID as RECOGNIZER_ID;
 /// Environment switch: `rank-v1`, `on`, `1`, `true` or `yes` turns it on.
 pub const ENV: &str = "STAT_TRACKER_RANK_RECOGNIZER";
 /// Lowest glyph score a read may have.
@@ -104,8 +138,8 @@ pub const FRAME_W: u32 = 2560;
 /// Reference frame height the layout was measured at.
 pub const FRAME_H: u32 = 1440;
 
-/// Whether rank-v1 runs. Off unless switched on. Not read by the tracker
-/// yet (see the module docs): the capture wiring will.
+/// Whether rank-v1 runs. Off unless switched on; the capture wiring reads
+/// it from [`ENV`] (see the module docs).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum RankSetting {
     #[default]
@@ -206,7 +240,9 @@ pub struct RankRead {
     /// Tags under the bar, left to right.
     pub change_tags: Field<Vec<String>>,
     pub higher_than_pct: Field<u8>,
-    /// SR of the first hero listed.
+    /// SR of the first hero listed (not always the game's hero, after a
+    /// swap). `None` when the entry found may not be the first one or its
+    /// SR may be cut short ([`layout::first_entry`], [`layout::sr_cut_short`]).
     pub hero_sr: Field<u32>,
     /// That hero's SR change, signed by its colour.
     pub hero_sr_change: Field<i32>,
@@ -364,8 +400,9 @@ impl Reader {
             return Err(ReadError::Unsupported { width, height });
         }
         let gate = layout::gate_word(img).ok_or(ReadError::NotRankScreen)?;
+        // only the label's own class: a pack may hold other gate words
         match self.templates.best(Family::Gate, &gate.ink, None) {
-            Some(m) if m.score >= MIN_WORD_SCORE => Ok(r3(m.score)),
+            Some(m) if m.class == GATE_CLASS && m.score >= MIN_WORD_SCORE => Ok(r3(m.score)),
             _ => Err(ReadError::NotRankScreen),
         }
     }
@@ -411,8 +448,10 @@ impl Reader {
             None => Field::none(),
         };
 
+        // a window that may end inside the digits reads no SR, and the
+        // change under it is right aligned to the same wrong edge
         let (hero_sr, hero_sr_change) = match layout::first_entry(img) {
-            Some(e) => {
+            Some(e) if !layout::sr_cut_short(img, &e) => {
                 // a rank icon taller than the digits is left out by shape
                 // (layout::sr_glyphs); one of digit height is matched as
                 // the SR_ICON class and stripped, at the start only.
@@ -433,7 +472,7 @@ impl Reader {
                 };
                 (sr, change)
             }
-            None => (Field::none(), Field::none()),
+            _ => (Field::none(), Field::none()),
         };
 
         let words = layout::tag_words(img);

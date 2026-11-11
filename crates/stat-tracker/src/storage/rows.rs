@@ -303,6 +303,7 @@ fn lacks_game_fields(m: &PersonalMatch) -> bool {
         || m.bans_picks.is_none()
         || m.bans_picks_status.is_none()
         || m.queue_title.is_none()
+        || m.rank_update.is_none()
 }
 
 /// Fill the fields that belong to the whole game, and that a later snapshot
@@ -311,7 +312,8 @@ fn lacks_game_fields(m: &PersonalMatch) -> bool {
 ///
 /// * the name recognizer (a resend that omits it clears the server's copy);
 /// * the bans and picks result and its status;
-/// * the queue title.
+/// * the queue title;
+/// * the rank update.
 fn carry_game_fields(m: &mut PersonalMatch, snaps: &[PersonalMatch]) {
     let newest = || snaps.iter().rev();
     if name_recognizer_absent(&m.name_recognizer)
@@ -332,6 +334,9 @@ fn carry_game_fields(m: &mut PersonalMatch, snaps: &[PersonalMatch]) {
     }
     if m.queue_title.is_none() {
         m.queue_title = newest().find_map(|row| row.queue_title.clone());
+    }
+    if m.rank_update.is_none() {
+        m.rank_update = newest().find_map(|row| row.rank_update.clone());
     }
 }
 

@@ -18,6 +18,10 @@ use super::layout;
 use super::templates::{Family, Learner, TemplateError, TemplateSet};
 use super::*;
 
+/// The game record wiring ([`super::game`]) on the same synthetic frames.
+#[path = "tests_game.rs"]
+mod game_wiring;
+
 // ---- 5x7 dot font ----
 
 fn rows_of(c: char) -> [&'static str; 7] {
@@ -739,6 +743,28 @@ fn the_gate_alone_gives_its_score() {
     assert!(r.read(&img).is_ok());
 }
 
+/// Every field of `r`: a `None` value has confidence 0 and no box, and a
+/// value has a confidence in (0, 1].
+fn field_invariants(r: &RankRead, at: &str) {
+    fn check<T>(name: &str, f: &Field<T>, at: &str) {
+        let c = f.confidence;
+        match &f.value {
+            None => assert!(c == 0.0 && f.bbox.is_none(), "{at} {name}: {c}"),
+            Some(_) => assert!(c > 0.0 && c <= 1.0, "{at} {name}: {c}"),
+        }
+    }
+    check("role", &r.role, at);
+    check("role_rank", &r.role_rank, at);
+    check("division", &r.division, at);
+    check("progress_pct", &r.progress_pct, at);
+    check("progress_change", &r.progress_change, at);
+    check("change_tags", &r.change_tags, at);
+    check("higher_than_pct", &r.higher_than_pct, at);
+    check("hero_sr", &r.hero_sr, at);
+    check("hero_sr_change", &r.hero_sr_change, at);
+    check("next_mode_hint", &r.next_mode_hint, at);
+}
+
 /// Every size near the supported ones and the common unsupported ones, blank
 /// and painted: nothing panics, and only the supported sizes get past the
 /// size check.
@@ -788,6 +814,9 @@ fn odd_sizes_never_panic() {
                 "{w}x{h}"
             );
             assert_eq!(gate.is_ok(), read.is_ok(), "{w}x{h}");
+            if let Ok(read) = &read {
+                field_invariants(read, &format!("{w}x{h}"));
+            }
             Learner::new().add_frame(&img, &labels(&Scene::default()));
         }
     }

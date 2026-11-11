@@ -5,7 +5,7 @@ use std::ops::{Deref, DerefMut};
 
 use crate::storage::PersonalMatch;
 
-use scuffed_types::api::StatsUploadEntry;
+use scuffed_types::api::{RankRole, StatsUploadEntry};
 use serde::Serialize;
 
 use super::bans_picks::{UploadBansPicks, upload_bans_picks};
@@ -47,6 +47,27 @@ pub struct UploadRankField<T> {
 /// one's fields on the site. Each field is left out when it was not read.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UploadRank {
+    /// The rank update screen's fields ([`crate::model::RankUpdate`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<UploadRankField<RankRole>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role_rank: Option<UploadRankField<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub division: Option<UploadRankField<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_pct: Option<UploadRankField<i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress_change: Option<UploadRankField<i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub change_tags: Option<UploadRankField<Vec<String>>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub higher_than_pct: Option<UploadRankField<u8>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hero_sr: Option<UploadRankField<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hero_sr_change: Option<UploadRankField<i32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_mode_hint: Option<UploadRankField<String>>,
     /// The queue read on the pre-game screens.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queue_title: Option<UploadRankField<String>>,
@@ -54,19 +75,21 @@ pub struct UploadRank {
     pub rank_recognizer: &'static str,
 }
 
-/// The reader id sent as `rank.rank_recognizer`: the queue title reader's
-/// `RECOGNIZER_ID` (`shadow::queue_title`, defined in `model`).
-pub const RANK_RECOGNIZER_ID: &str = crate::model::QUEUE_TITLE_RECOGNIZER_ID;
+/// The reader id sent as `rank.rank_recognizer`, for the queue title and
+/// the rank update alike (`model::RANK_RECOGNIZER_ID`, which both readers
+/// re-export as their `RECOGNIZER_ID`).
+pub const RANK_RECOGNIZER_ID: &str = crate::model::RANK_RECOGNIZER_ID;
 
 /// The game's `rank` object as the upload sends it: each field only when
-/// the reader was confident, and `None` (no key, the old body) when no
-/// field is set.
+/// the reader read it, and `None` (no key, the old body) when no field is
+/// set.
 ///
 /// The local `QueueTitle::mode_hint` is not sent as `rank.next_mode_hint`:
 /// that site field belongs to the game whose rank screen was read (the
 /// banner names the game after it), while the hint is stored on the game
-/// after, once its read confirmed it. The rank reader's wiring sends the
-/// banner word on its own game.
+/// after, once its read confirmed it. `rank.next_mode_hint` is the banner
+/// word read on this game's own rank screen
+/// (`PersonalMatch::rank_update`).
 pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
     let queue_title = m.queue_title.as_ref().and_then(|t| {
         Some(UploadRankField {
@@ -74,11 +97,121 @@ pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
             confidence: t.confidence,
         })
     });
-    queue_title.as_ref()?;
-    Some(UploadRank {
+    let open_queue = m.queue_title.as_ref().is_some_and(|t| t.is_open_queue());
+    let r = m.rank_update.clone().unwrap_or_default();
+    let rank = UploadRank {
+        role: field(&r.role, |v| rank_role(v, open_queue)),
+        role_rank: field(&r.role_rank, |v| text(v)),
+        division: field(&r.division, |v| {
+            u8::try_from(*v).ok().filter(|d| (1..=5).contains(d))
+        }),
+        progress_pct: field(&r.progress_pct, |v| i32::try_from(*v).ok()),
+        progress_change: field(&r.progress_change, |v| i32::try_from(*v).ok()),
+        change_tags: r.change_tags.as_ref().and_then(|t| {
+            let ok = t.value.len() <= crate::model::RANK_MAX_CHANGE_TAGS
+                && t.value.iter().all(|s| text(s).is_some());
+            sure(t.confidence)
+                .filter(|_| ok)
+                .map(|confidence| UploadRankField {
+                    value: t.value.clone(),
+                    confidence,
+                })
+        }),
+        higher_than_pct: field(&r.higher_than_pct, |v| {
+            u8::try_from(*v).ok().filter(|p| *p <= 100)
+        }),
+        hero_sr: field(&r.hero_sr, |v| u32::try_from(*v).ok()),
+        hero_sr_change: field(&r.hero_sr_change, |v| i32::try_from(*v).ok()),
+        next_mode_hint: field(&r.next_mode_hint, |v| text(v)),
         queue_title,
         rank_recognizer: RANK_RECOGNIZER_ID,
+    };
+    (rank != UploadRank::none()).then_some(rank)
+}
+
+impl UploadRank {
+    /// No field read: what [`upload_rank`] never sends.
+    pub(super) fn none() -> Self {
+        Self {
+            role: None,
+            role_rank: None,
+            division: None,
+            progress_pct: None,
+            progress_change: None,
+            change_tags: None,
+            higher_than_pct: None,
+            hero_sr: None,
+            hero_sr_change: None,
+            next_mode_hint: None,
+            queue_title: None,
+            rank_recognizer: RANK_RECOGNIZER_ID,
+        }
+    }
+}
+
+/// A stored rank value with a confidence the site keeps (finite, above 0,
+/// at most 1), mapped by `map`; `None` drops the field.
+fn field<V: RankValue, T>(
+    stored: &Option<V>,
+    map: impl Fn(&V::Value) -> Option<T>,
+) -> Option<UploadRankField<T>> {
+    let s = stored.as_ref()?;
+    Some(UploadRankField {
+        confidence: sure(s.confidence())?,
+        value: map(s.value())?,
     })
+}
+
+fn sure(confidence: f32) -> Option<f32> {
+    (confidence.is_finite() && confidence > 0.0 && confidence <= 1.0).then_some(confidence)
+}
+
+/// Text the site keeps: trimmed, not empty, at most
+/// `scuffed_types::api::RANK_STRING_MAX_CHARS` characters.
+fn text(v: &str) -> Option<String> {
+    let v = v.trim();
+    (!v.is_empty() && v.chars().count() <= scuffed_types::api::RANK_STRING_MAX_CHARS)
+        .then(|| v.to_string())
+}
+
+/// The stored role as the site's [`RankRole`]. `Open` only when the game's
+/// queue title names open queue: the reader reads it from a missing role
+/// line, which another screen state can show too.
+fn rank_role(v: &str, open_queue: bool) -> Option<RankRole> {
+    match v {
+        "Tank" => Some(RankRole::Tank),
+        "Damage" => Some(RankRole::Damage),
+        "Support" => Some(RankRole::Support),
+        "Open" if open_queue => Some(RankRole::Open),
+        _ => None,
+    }
+}
+
+/// A stored rank field: its value and confidence.
+trait RankValue {
+    type Value: ?Sized;
+    fn value(&self) -> &Self::Value;
+    fn confidence(&self) -> f32;
+}
+
+impl RankValue for crate::model::RankText {
+    type Value = String;
+    fn value(&self) -> &String {
+        &self.value
+    }
+    fn confidence(&self) -> f32 {
+        self.confidence
+    }
+}
+
+impl RankValue for crate::model::RankNumber {
+    type Value = i64;
+    fn value(&self) -> &i64 {
+        &self.value
+    }
+    fn confidence(&self) -> f32 {
+        self.confidence
+    }
 }
 
 impl Deref for UploadEntry {
