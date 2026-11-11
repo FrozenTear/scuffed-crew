@@ -298,7 +298,7 @@ fn key(g: &Game, col: Col) -> Option<Key> {
         // row last; an unsure D or A still reads amber in the cell.
         Col::Eda => (!g.unsure_now("e")).then_some(Key::Num(i64::from(g.elims))),
         Col::Time => Some(Key::Num(g.started_at().timestamp())),
-        Col::Length => crate::games_detail::tracked(g).span_secs().map(Key::Num),
+        Col::Length => crate::games_detail::game_length(g).secs().map(Key::Num),
         Col::Stripe | Col::Rank | Col::Crew | Col::Unsure => None,
     }
 }
@@ -750,7 +750,7 @@ where
 }
 
 /// Under the last table (spec p2), after the split rule.
-const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length is your first to last Tab press, so the game ran at least that long. Rank, queue and crew are not recorded yet.";
+const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length runs from the game's start screen to its result. When either was not seen, it is your first to last Tab press, so the game ran at least that long. Rank, queue and crew are not recorded yet.";
 /// No games stored at all.
 pub const EMPTY_NONE: &str = "No games yet. A game shows here once the tracker saves it.";
 /// Games stored, none left by the filters.
@@ -821,6 +821,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         }
     }
 
@@ -1403,8 +1404,15 @@ mod tests {
         let short = timed(Outcome::Win, "2026-09-02T20:00:00Z", "2026-09-02T20:04:00Z");
         let long = timed(Outcome::Win, "2026-09-02T21:00:00Z", "2026-09-02T21:09:00Z");
         let none = game(Outcome::Win, "2026-09-02T22:00:00Z", &[]);
+        // A real length (6 min) sorts by itself, not by its 1 min Tab span.
+        let mut real = timed(Outcome::Win, "2026-09-02T23:00:00Z", "2026-09-02T23:01:00Z");
+        let start = real.segments[0].first_seen;
+        real.match_times = Some(crate::model::GameTimes {
+            started_at: Some(start),
+            ended_at: Some(start + chrono::Duration::minutes(6)),
+        });
         for desc in [true, false] {
-            let mut v = vec![&none, &short, &long];
+            let mut v = vec![&none, &short, &real, &long];
             sort_games(
                 &mut v,
                 Sort {
@@ -1414,14 +1422,15 @@ mod tests {
             );
             let order: Vec<&Game> = v.into_iter().collect();
             let want = if desc {
-                [&long, &short, &none]
+                [&long, &real, &short, &none]
             } else {
-                [&short, &long, &none]
+                [&short, &real, &long, &none]
             };
             assert_eq!(order, want);
         }
         assert!(SORT_NOTE.contains("Rank, queue and crew are not recorded yet"));
-        assert!(SORT_NOTE.contains("Length"));
+        assert!(SORT_NOTE.contains("Length runs from the game's start screen to its result"));
+        assert!(SORT_NOTE.contains("at least that long"));
     }
 
     #[test]

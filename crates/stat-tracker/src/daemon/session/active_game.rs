@@ -54,6 +54,7 @@ impl ActiveGame {
             rejoin_carry: None,
             outcome_locked: false,
             last_board_pressed_at: None,
+            match_times: Default::default(),
         }
     }
 
@@ -121,18 +122,45 @@ impl ActiveGame {
         self.record_outcome_at(outcome, Instant::now());
     }
 
+    /// A result the tracker read itself (a poll, a Tab frame, a seal at the
+    /// next game's start). Also the game's end ([`Self::note_match_end`]).
     pub(crate) fn record_outcome_at(&mut self, outcome: detect::MatchOutcome, now: Instant) {
         self.outcome = outcome;
         self.outcome_recorded_at = Some(now);
         self.last_activity = now;
         self.outcome_locked = false;
+        self.note_match_end(outcome, now);
     }
 
     /// A result the member set in the app (SetOutcome, EditMatch). A Tab
-    /// never clears it (R9-2).
+    /// never clears it (R9-2). It is not a read of the game's end, so the
+    /// end stays as it was.
     pub(crate) fn record_member_outcome(&mut self, outcome: detect::MatchOutcome) {
+        let ended_at = self.match_times.ended_at;
         self.record_outcome(outcome);
+        self.match_times.ended_at = ended_at;
         self.outcome_locked = outcome.is_decided();
+    }
+
+    /// A pre-game screen (map vote, hero select or ban) opened this game at
+    /// `now`: its real start.
+    pub(crate) fn note_match_start(&mut self, now: Instant) {
+        self.match_times.started_at = Some(SurrealDatetime::from(wall_clock(now)));
+    }
+
+    /// The tracker read this game's result itself: the game ended when that
+    /// result was first seen on screen ([`Self::result_mark`] for the same
+    /// result), else at `now`. The first end stays; an undecided result is
+    /// no end.
+    pub(crate) fn note_match_end(&mut self, outcome: detect::MatchOutcome, now: Instant) {
+        if !outcome.is_decided() || self.match_times.ended_at.is_some() {
+            return;
+        }
+        let seen = self
+            .result_mark
+            .filter(|m| m.outcome == outcome)
+            .map_or(now, |m| m.seen_at);
+        self.match_times.ended_at = Some(SurrealDatetime::from(wall_clock(seen)));
     }
 
     pub(crate) fn touch_at(&mut self, now: Instant) {
@@ -161,6 +189,39 @@ impl ActiveGame {
             confirmed,
             seen_at,
         });
+    }
+}
+
+/// `at` on the wall clock, measured from now. An `Instant` after now (tests
+/// run ahead of the clock) maps after now too.
+pub(crate) fn wall_clock(at: Instant) -> chrono::DateTime<Utc> {
+    let (now_i, now_w) = (Instant::now(), Utc::now());
+    let span = |d: std::time::Duration| chrono::Duration::from_std(d).unwrap_or_default();
+    if at <= now_i {
+        now_w - span(now_i - at)
+    } else {
+        now_w + span(at - now_i)
+    }
+}
+
+/// Store the game's real start and end on its rows
+/// ([`storage::LocalStore::attach_match_times`]). Only a game with a stored
+/// row. A failed write is logged and nothing else: the game stays recorded,
+/// and its length falls back to the Tab span.
+pub(crate) async fn store_match_times(store: &storage::LocalStore, g: &ActiveGame) {
+    if !g.session_created {
+        return;
+    }
+    if let Err(e) = store
+        .attach_match_times(&g.session_id, &g.match_times)
+        .await
+    {
+        tracing::warn!(
+            target: "scuffed_stat_tracker",
+            error = %e,
+            session_id = %g.session_id,
+            "game start and end not stored: its length falls back to the Tab span"
+        );
     }
 }
 
@@ -210,6 +271,7 @@ pub(crate) fn persist_active_game(data_dir: &std::path::Path, game: Option<&Acti
         replaced_text_fallback_map: g.replaced_text_fallback_map.clone(),
         best_guess: g.best_guess.clone(),
         rejoin_carry: g.rejoin_carry,
+        match_times: g.match_times.clone(),
     };
     let write = || -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
@@ -370,6 +432,7 @@ pub(crate) fn active_game_from_persisted(
         // The source of a restored result is not saved: never un-latched.
         outcome_locked: p.outcome.is_decided(),
         last_board_pressed_at: None,
+        match_times: p.match_times,
     })
 }
 

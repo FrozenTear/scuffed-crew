@@ -562,15 +562,20 @@ fn result(g: &Game, in_progress: bool) -> Element<'static, Message> {
     .into()
 }
 
-/// "Tracked 9:14", the Length line, and the note.
+/// "Tracked 9:14", the Length line, a warning when the game's start or end
+/// was not seen, and the note.
 fn time(g: &Game) -> Element<'static, Message> {
     let t = detail::tracked(g);
+    let len = detail::game_length(g);
     let mut col = column![
         text(t.line()).size(SIZE_BODY).font(FONT_BOLD).color(TEXT),
-        text(t.length_line()).size(SIZE_BODY).color(TEXT_2),
+        text(len.length_line()).size(SIZE_BODY).color(TEXT_2),
     ]
     .spacing(4);
-    if let Some(note) = t.note() {
+    if let Some(warning) = len.warning() {
+        col = col.push(text(warning).size(SMALL).color(theme::WARN));
+    }
+    if let Some(note) = len.note() {
         col = col.push(text(note).size(SMALL).color(TEXT_3));
     }
     col.into()

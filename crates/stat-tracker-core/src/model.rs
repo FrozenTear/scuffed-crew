@@ -301,6 +301,31 @@ pub struct PersonalMatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[surreal(default)]
     pub queue_title: Option<QueueTitle>,
+    /// When the game itself started and ended, as far as the tracker saw
+    /// ([`MatchTimes`]). Kept on every snapshot of the match. `None` on games
+    /// recorded before the field existed; those time their length from the
+    /// first to the last Tab read. Local only: never uploaded. Omitted from
+    /// JSON when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub match_times: Option<MatchTimes>,
+}
+
+/// A game's real start and end ([`PersonalMatch::match_times`]). Either is
+/// `None` when the tracker did not see it: the start is a pre-game screen
+/// (map vote, hero select or ban) that opened the game, the end is the
+/// result the tracker read itself. A game opened by its first Tab, or one
+/// whose result was set by hand, has no start or no end, and its length
+/// falls back to the first to last Tab read.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, SurrealValue)]
+#[surreal(crate = "::surrealdb_types")]
+pub struct MatchTimes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub started_at: Option<SurrealDatetime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[surreal(default)]
+    pub ended_at: Option<SurrealDatetime>,
 }
 
 /// The game's queue ([`PersonalMatch::queue_title`]): the confident read,

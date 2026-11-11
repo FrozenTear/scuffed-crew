@@ -233,6 +233,27 @@ pub struct Game {
     /// read was weak ([`crate::model::QueueTitle::warning`]). `None` with
     /// the queue title reader off.
     pub queue_title: Option<crate::model::QueueTitle>,
+    /// The game's real start and end ([`crate::model::MatchTimes`]). `None`
+    /// on a game recorded before the tracker stored them.
+    #[serde(default)]
+    pub match_times: Option<GameTimes>,
+}
+
+/// [`crate::model::MatchTimes`] for display. Either edge is `None` when the
+/// tracker did not see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct GameTimes {
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+impl GameTimes {
+    pub fn from_stored(t: &crate::model::MatchTimes) -> Self {
+        Self {
+            started_at: t.started_at.map(Into::into),
+            ended_at: t.ended_at.map(Into::into),
+        }
+    }
 }
 
 /// The six stats a "N stats unsure" count covers, as flat names.
@@ -283,6 +304,7 @@ impl Game {
             bans_picks: m.bans_picks.clone(),
             bans_picks_status: m.bans_picks_status.clone(),
             queue_title: m.queue_title.clone(),
+            match_times: m.match_times.as_ref().map(GameTimes::from_stored),
         }
     }
 
@@ -601,6 +623,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         };
         assert!(game.field_unsure("dmg"));
         assert!(game.field_unsure("hero"));
@@ -637,6 +660,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         };
         for field in [
             "hero", "result", "map", "mode", "e", "a", "d", "dmg", "h", "mit",
@@ -676,6 +700,7 @@ mod review_tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         }
     }
 

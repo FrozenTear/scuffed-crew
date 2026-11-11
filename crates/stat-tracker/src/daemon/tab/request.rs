@@ -279,6 +279,8 @@ pub(crate) async fn unlatch_false_outcome(
     g.outcome = detect::MatchOutcome::Unknown;
     g.outcome_recorded_at = None;
     g.result_mark = None;
+    // The game did not end then.
+    g.match_times.ended_at = None;
     // Cleared with the hint ([`ActiveGame::text_fallback_locked`]).
     g.text_fallback_locked = false;
     g.result_evidence = Default::default();
@@ -297,6 +299,7 @@ pub(crate) async fn unlatch_false_outcome(
     {
         tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to clear the session outcome");
     }
+    store_match_times(store, g).await;
     persist_active_game(data_dir, Some(g));
     refresh_snapshot(store, data_dir).await;
 }

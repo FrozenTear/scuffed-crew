@@ -1403,7 +1403,6 @@ mod game {
             "the kit still holds the Tab read"
         );
 
-        let played = surrealdb_types::Datetime::from(t("2026-10-09T12:05:00Z"));
         let snapshot = crate::storage::Snapshot {
             matches: vec![crate::storage::PersonalMatch {
                 id: None,
@@ -1418,7 +1417,7 @@ mod game {
                 damage: 1000,
                 healing: 2000,
                 mitigation: 0,
-                played_at: played,
+                played_at: surrealdb_types::Datetime::from(t("2026-10-09T12:05:00Z")),
                 synced: false,
                 sync_rev: 0,
                 upload_reject: None,
@@ -1443,6 +1442,7 @@ mod game {
                 bans_picks: None,
                 bans_picks_status: None,
                 queue_title: None,
+                match_times: None,
             }],
             ..crate::storage::Snapshot::default()
         };

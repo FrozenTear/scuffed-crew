@@ -299,6 +299,7 @@ pub(crate) async fn commit_retired_game(
     reason: &str,
 ) {
     store_best_guess_on_close(store, data_dir, &mut g).await;
+    store_match_times(store, &g).await;
     if g.session_created && g.finished() && !had_outcome {
         if let Err(e) = store
             .set_session_outcome(&g.session_id, &g.outcome.to_string())
@@ -701,6 +702,7 @@ pub(crate) fn open_detected_game(
     }
     let mut g = ActiveGame::open_at(sid, detect::MatchOutcome::Unknown, candidates, now);
     g.awaiting_first_board = true;
+    g.note_match_start(now);
     st.active_game = Some(g);
     st.last_game_open = Some(now);
     clear_cadence_wakes(st);

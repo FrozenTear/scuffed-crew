@@ -81,9 +81,17 @@ pub(crate) async fn apply_poll_decision(
                 tracing::info!(target: "scuffed_stat_tracker", reason = other.log(), session_id = %new_id, "auto-detect: new game boundary");
             }
         }
+        let pregame = matches!(
+            closed.reason,
+            boundary::CloseReason::MapVote | boundary::CloseReason::HeroSelectOrBan
+        );
         retire_active_game(st, store, data_dir, closed.seal, closed.reason.log()).await;
         let mut g = ActiveGame::open_at(new_id, state.outcome, candidates, now);
         g.apply_boundary_state(&state);
+        // A pre-game screen opened the next game: its real start.
+        if pregame {
+            g.note_match_start(now);
+        }
         // A different-map end screen is an accolade read. That is the new
         // session's map, and it is trusted for a later board-case split.
         if g.map.is_some() {
@@ -111,6 +119,7 @@ pub(crate) async fn apply_poll_decision(
     g.apply_boundary_state(&state);
     if let Some(outcome) = commit.recorded_outcome {
         g.touch_at(now);
+        g.note_match_end(outcome, now);
         tracing::info!(
             target: "scuffed_stat_tracker",
             ?outcome,
@@ -124,6 +133,7 @@ pub(crate) async fn apply_poll_decision(
             {
                 tracing::warn!(target: "scuffed_stat_tracker", error = %e, "failed to back-fill session outcome");
             }
+            store_match_times(store, g).await;
             refresh_snapshot_game_finished(store, data_dir).await;
         }
     }

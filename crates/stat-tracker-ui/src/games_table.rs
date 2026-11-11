@@ -570,7 +570,7 @@ fn game_row(
                     TEXT_2
                 })
                 .into(),
-            Col::Length => match crate::games_detail::tracked(g).length_cell() {
+            Col::Length => match crate::games_detail::game_length(g).length_cell() {
                 Some(len) => text(len).size(SIZE_META).color(TEXT_2).into(),
                 None => text("-").size(SIZE_META).color(TEXT_3).into(),
             },
