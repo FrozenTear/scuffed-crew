@@ -68,9 +68,19 @@ impl PregameDump {
                 target_folder: None,
             });
         if let Some(old) = feed.pending_hint.take() {
-            tracing::info!(target: "scuffed_stat_tracker", hint = %old.text, source = %old.source, "queue title: next mode hint replaced before a game settled it");
+            if hint.is_some() {
+                tracing::info!(target: "scuffed_stat_tracker", hint = %old.text, source = %old.source, "queue title: next mode hint replaced before a game settled it");
+            } else {
+                tracing::info!(target: "scuffed_stat_tracker", hint = %old.text, source = %old.source, "queue title: next mode hint cleared before a game settled it");
+            }
         }
         feed.pending_hint = hint;
+    }
+
+    /// Whether the queue title reader is on (its feed came in): without it
+    /// no hint is kept and no game gets a queue title.
+    pub(crate) fn has_queue_reader(&self) -> bool {
+        self.queue.is_some()
     }
 
     /// The pending next mode hint's text and source game (tests of other
@@ -79,6 +89,12 @@ impl PregameDump {
     pub(crate) fn pending_hint(&self) -> Option<(String, String)> {
         let hint = self.queue.as_ref()?.pending_hint.as_ref()?;
         Some((hint.text.clone(), hint.source.clone()))
+    }
+
+    /// When the pending next mode hint's rank screen showed (`shown_at`).
+    #[cfg(test)]
+    pub(crate) fn pending_hint_at(&self) -> Option<DateTime<Utc>> {
+        Some(self.queue.as_ref()?.pending_hint.as_ref()?.at)
     }
 
     /// A game was just recorded as `session_id`: read its queue title once

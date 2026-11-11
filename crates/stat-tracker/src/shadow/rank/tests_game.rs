@@ -226,3 +226,20 @@ fn an_sr_with_ink_right_of_its_window_gives_no_hero_sr() {
     let e = layout::first_entry(&plain).expect("an entry");
     assert!(!layout::sr_cut_short(&plain, &e));
 }
+
+#[test]
+fn a_pack_on_disk_loads_as_the_wirings_frame_read() {
+    // the trained pack written where the tracker looks for it
+    let dir = tempfile::tempdir().unwrap();
+    trained().save_dir(&dir.path().join(TEMPLATE_DIR)).unwrap();
+    let read = crate::shadow::rank::game::load_for_game(dir.path()).expect("the pack loads");
+    let img = paint(&Scene {
+        role: Some(Role::Support),
+        ..Scene::default()
+    });
+    let got = read(&img).expect("a rank update");
+    assert_eq!(Some(got), read_for_game(reader(), &img));
+    // another size reads nothing; no pack is an error
+    assert_eq!(read(&RgbImage::new(1920, 1080)), None);
+    assert!(crate::shadow::rank::game::load_for_game(&dir.path().join("none")).is_err());
+}

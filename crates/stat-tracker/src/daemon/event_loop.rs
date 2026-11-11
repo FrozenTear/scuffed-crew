@@ -157,6 +157,15 @@ pub(crate) async fn run_loop(
     // The rank update reader: `None` (nothing read, saved or sent) unless
     // its env switch is on and the pack loads (`daemon::rank`).
     let mut rank_feed = daemon::rank::RankFeed::from_env(data_dir);
+    if rank_feed.is_some()
+        && !pregame_dump
+            .as_ref()
+            .is_some_and(daemon::pregame_dump::PregameDump::has_queue_reader)
+    {
+        // Open needs a confident queue title, and the banner hint is handed
+        // on through the queue title wiring: both need its own switch.
+        tracing::info!(target: "scuffed_stat_tracker", "rank update: the queue title reader is off (STAT_TRACKER_QUEUE_TITLE_RECOGNIZER), so no Open role is sent and no next mode hint is handed on");
+    }
 
     let mut poll_timer = tokio::time::interval(poll_interval);
     poll_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -428,9 +437,10 @@ pub(crate) async fn run_loop(
                     st.ocr_stability.reset();
                     poll_failures.game_stopped();
                     // A rank screen still held when the game closed settles now.
-                    if let Some(feed) = rank_feed.as_mut() {
-                        let game = st.active_game.as_ref().map(|g| g.session_id.as_str());
-                        daemon::rank::tick(feed, None, game, store, pregame_dump.as_mut()).await;
+                    if let Some(feed) = rank_feed.as_mut()
+                        && daemon::rank::close(feed, store, pregame_dump.as_mut()).await
+                    {
+                        refresh_snapshot(store, data_dir).await;
                     }
                     continue;
                 }
@@ -676,17 +686,23 @@ pub(crate) async fn run_loop(
                                 signal.map(|(_, source)| source),
                                 &img,
                             );
+                            stat_tracker::perf::record(
+                                stat_tracker::perf::Stage::PollAnalyze,
+                                analyze_started.elapsed(),
+                            );
                             // The rank update reader, when on: the same rank
                             // screen frames, read once each (`daemon::rank`).
+                            // Timed on its own, after the poll analysis
+                            // sample, so perf summaries do not mix it in.
+                            let rank_started = Instant::now();
                             let rank_seen = daemon::rank::read_rank_screen(
                                 rank_read.as_ref(),
                                 signal.map(|(_, source)| source),
                                 &rgb,
                             );
-                            stat_tracker::perf::record(
-                                stat_tracker::perf::Stage::PollAnalyze,
-                                analyze_started.elapsed(),
-                            );
+                            if rank_seen.is_some() {
+                                tracing::debug!(target: "scuffed_stat_tracker", ms = rank_started.elapsed().as_millis() as u64, "rank update: frame read");
+                            }
                             // The frame moves into the tick's result, no copy,
                             // one `Arc` for both saves.
                             let (pregame, postgame) = daemon::postgame_dump::kept_frames(
@@ -713,6 +729,10 @@ pub(crate) async fn run_loop(
                         if let Some(seen) = kept_frame {
                             seen_stream = Some(seen);
                         }
+                        // A tick whose analysis failed (a join error) says
+                        // nothing about the rank screen: the rank wiring
+                        // skips it, so it is neither a read nor a miss.
+                        let analysis_ok = matches!(&analyzed, Ok(Ok(_)));
                         let (signal, phase, accolade_map, end_reel, end_title_seen, stability, result_read, rank_outcome_png, rank_seen, pregame, postgame) = match analyzed {
                             Err(()) => {
                                 shutdown_from_signal(
@@ -762,13 +782,25 @@ pub(crate) async fn run_loop(
                         // Reader on: hold this tick's rank screen read for the
                         // open game (same idle rule as the outcome crop), or
                         // settle and store the held ones once the screen is gone.
-                        if let Some(feed) = rank_feed.as_mut() {
-                            let game = st
-                                .active_game
-                                .as_ref()
-                                .filter(|g| g.last_activity.elapsed() <= RANK_OUTCOME_MAX_IDLE)
-                                .map(|g| g.session_id.as_str());
-                            daemon::rank::tick(feed, rank_seen, game, store, pregame_dump.as_mut()).await;
+                        // Runs before `apply_poll_tick`, so the game is the one
+                        // open while the screen showed. A game quiet for over
+                        // the idle limit gets no read on the first rank ticks
+                        // (the accolade screen was missed, so its confirm has
+                        // not touched the game yet): no rank, the safe way.
+                        if analysis_ok
+                            && let Some(feed) = rank_feed.as_mut()
+                            && daemon::rank::tick(
+                                feed,
+                                rank_seen,
+                                daemon::rank::rank_game(st.active_game.as_ref()),
+                                store,
+                                pregame_dump.as_mut(),
+                            )
+                            .await
+                        {
+                            // the stored rank re-queued the game: the Games
+                            // tab sees it on its next snapshot
+                            refresh_snapshot(store, data_dir).await;
                         }
                         st.ocr_stability = stability;
                         if let Some(dump) = pregame_dump.as_mut()

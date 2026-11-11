@@ -221,7 +221,9 @@ pub struct Config {
     /// change and its label from the next game. Off (also when missing) and
     /// not written while off.
     ///
-    /// TODO(0.6): no rank reader exists yet; nothing reads this.
+    /// TODO(0.6): nothing reads this key yet. The rank update reader that
+    /// exists is switched by the `STAT_TRACKER_RANK_RECOGNIZER` env var
+    /// only; this key and its Settings toggle do not turn it on.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rank_reader: bool,
     /// Opt-in "Share stat pictures": upload the grayscale stat area after

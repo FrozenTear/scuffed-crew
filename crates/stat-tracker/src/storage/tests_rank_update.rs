@@ -67,6 +67,31 @@ async fn attaching_a_rank_puts_a_synced_game_back_in_the_upload_queue() {
 }
 
 #[tokio::test]
+async fn a_rank_the_upload_drops_is_stored_but_leaves_the_queue_alone() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    store.insert_match(snap("g1", 1)).await.unwrap();
+    let rows = store.get_unsynced().await.unwrap();
+    store.mark_synced(&SyncClaim::capture(&rows)).await.unwrap();
+    // an Open role with no open queue title is not sent
+    let open = RankUpdate {
+        role: Some(RankText {
+            value: "Open".into(),
+            confidence: 0.5,
+        }),
+        ..RankUpdate::default()
+    };
+    assert!(store.attach_rank_update("g1", &open).await.unwrap());
+    assert!(
+        store.get_unsynced().await.unwrap().is_empty(),
+        "no uploaded byte changed: still synced"
+    );
+    let stored = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(stored[0].rank_update, Some(open));
+    assert_eq!(stored[0].sync_rev, rows[0].sync_rev);
+}
+
+#[tokio::test]
 async fn a_row_from_before_the_field_reads_as_none() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = LocalStore::open(dir.path()).await.expect("open store");

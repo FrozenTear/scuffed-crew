@@ -108,14 +108,12 @@ pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
         progress_pct: field(&r.progress_pct, |v| i32::try_from(*v).ok()),
         progress_change: field(&r.progress_change, |v| i32::try_from(*v).ok()),
         change_tags: r.change_tags.as_ref().and_then(|t| {
-            let ok = t.value.len() <= crate::model::RANK_MAX_CHANGE_TAGS
-                && t.value.iter().all(|s| text(s).is_some());
+            // each tag as the site keeps it (trimmed), checked as sent
+            let value: Vec<String> = t.value.iter().map(|s| text(s)).collect::<Option<_>>()?;
+            let ok = value.len() <= crate::model::RANK_MAX_CHANGE_TAGS;
             sure(t.confidence)
                 .filter(|_| ok)
-                .map(|confidence| UploadRankField {
-                    value: t.value.clone(),
-                    confidence,
-                })
+                .map(|confidence| UploadRankField { value, confidence })
         }),
         higher_than_pct: field(&r.higher_than_pct, |v| {
             u8::try_from(*v).ok().filter(|p| *p <= 100)
@@ -127,6 +125,19 @@ pub(super) fn upload_rank(m: &PersonalMatch) -> Option<UploadRank> {
         rank_recognizer: RANK_RECOGNIZER_ID,
     };
     (rank != UploadRank::none()).then_some(rank)
+}
+
+/// Whether storing `rank` on `m` changes the `rank` object the upload
+/// sends for it. A rank whose fields the upload drops (an Open role with no
+/// open queue title, values the site would null) changes no uploaded byte,
+/// so the store leaves the game's upload state as it is.
+pub(crate) fn rank_update_changes_upload(
+    m: &PersonalMatch,
+    rank: &crate::model::RankUpdate,
+) -> bool {
+    let mut with = m.clone();
+    with.rank_update = Some(rank.clone());
+    upload_rank(&with) != upload_rank(m)
 }
 
 impl UploadRank {
@@ -174,17 +185,19 @@ fn text(v: &str) -> Option<String> {
         .then(|| v.to_string())
 }
 
-/// The stored role as the site's [`RankRole`]. `Open` only when the game's
-/// queue title names open queue: the reader reads it from a missing role
-/// line, which another screen state can show too.
+/// The stored role as the site's [`RankRole`], parsed with its own serde
+/// spelling (a spelling it does not know is not sent). `Open` only when the
+/// game's queue title names open queue: the reader reads it from a missing
+/// role line, which another screen state can show too. An icon role (Tank,
+/// Damage, Support) never with an open queue title: open queue screens have
+/// no role line, so an icon read there is a misread.
 fn rank_role(v: &str, open_queue: bool) -> Option<RankRole> {
-    match v {
-        "Tank" => Some(RankRole::Tank),
-        "Damage" => Some(RankRole::Damage),
-        "Support" => Some(RankRole::Support),
-        "Open" if open_queue => Some(RankRole::Open),
-        _ => None,
-    }
+    let role: RankRole = serde_json::from_value(serde_json::Value::String(v.to_string())).ok()?;
+    let sent = match role {
+        RankRole::Tank | RankRole::Damage | RankRole::Support => !open_queue,
+        RankRole::Open => open_queue,
+    };
+    sent.then_some(role)
 }
 
 /// A stored rank field: its value and confidence.

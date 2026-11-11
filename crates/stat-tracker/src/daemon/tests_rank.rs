@@ -159,13 +159,22 @@ fn a_field_is_kept_only_where_two_reads_in_a_row_agree() {
     let r = settle(&counting_up);
     assert_eq!(r.progress_pct, None);
     assert_eq!(r.division, n(3, 0.9));
-    // a frame with no read breaks the pair; a fading last frame does not
-    // undo the agreed pair before it
+    // a frame with no read breaks the pair
     let r = settle(&[Some(full(40)), None, Some(full(40))]);
     assert!(r.is_empty());
+    // a last frame that reads a different value (a fade misread as another
+    // number) is a newer read that disagrees: the field is dropped
     let mut fading = full(40);
     fading.hero_sr = n(341, 0.6);
     let r = settle(&[Some(full(40)), Some(full(40)), Some(fading)]);
+    assert_eq!(r.hero_sr, None);
+    assert_eq!(r.division, n(3, 0.9));
+    // a fade to no read is no value: the newest pair stands
+    let r = settle(&[Some(full(40)), Some(full(40)), None]);
+    assert_eq!(r, full(40));
+    let mut faded = full(40);
+    faded.hero_sr = None;
+    let r = settle(&[Some(full(40)), Some(full(40)), Some(faded)]);
     assert_eq!(r.hero_sr, n(3412, 0.85));
 }
 
@@ -183,11 +192,31 @@ fn reads_are_held_for_their_game_and_settle_when_the_screen_is_gone() {
     let now = Utc::now();
     assert_eq!(feed.observe(Some(Some(full(40))), Some("g1"), now), None);
     assert_eq!(feed.observe(Some(Some(full(40))), Some("g1"), now), None);
+    // one missed tick is not the end of the screen
+    assert_eq!(feed.observe(None, Some("g1"), now), None);
+    assert_eq!(RANK_SETTLE_MISSES, 2);
     let s = feed.observe(None, Some("g1"), now).expect("settled");
     assert_eq!(s.session, "g1");
     assert_eq!(s.rank, full(40));
     // nothing held any more
     assert_eq!(feed.observe(None, Some("g1"), now), None);
+    assert_eq!(feed.observe(None, Some("g1"), now), None);
+    // a missed tick between two reads breaks the pair
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(None, Some("g1"), now);
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(None, Some("g1"), now);
+    assert_eq!(feed.observe(None, Some("g1"), now), None, "no pair");
+    // the open game closing (no game any more) settles at once
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    let s = feed.observe(None, None, now).expect("settled on close");
+    assert_eq!(s.session, "g1");
+    // as does the game process stopping
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    feed.observe(Some(Some(full(40))), Some("g1"), now);
+    assert_eq!(feed.close().map(|s| s.session).as_deref(), Some("g1"));
+    assert_eq!(feed.close(), None);
     // another game's screen settles the first game's reads
     feed.observe(Some(Some(full(40))), Some("g1"), now);
     feed.observe(Some(Some(full(40))), Some("g1"), now);
@@ -209,9 +238,13 @@ async fn a_settled_read_is_stored_on_its_game_and_uploaded() {
     assert!(!before.contains("\"rank\""), "{before}");
     let mut feed = RankFeed::with_read(Arc::new(|_| None));
     for _ in 0..2 {
-        tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+        assert!(!tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await);
     }
-    tick(&mut feed, None, Some("g1"), &store, None).await;
+    assert!(!tick(&mut feed, None, Some("g1"), &store, None).await);
+    assert!(
+        tick(&mut feed, None, Some("g1"), &store, None).await,
+        "stored: the caller refreshes the live snapshot"
+    );
     let (rows, body) = rows_and_body(&store, "g1").await;
     assert!(rows.iter().all(|r| r.rank_update == Some(full(40))));
     assert!(!rows[0].synced, "queued for upload");
@@ -235,7 +268,7 @@ async fn an_unreadable_rank_screen_leaves_the_game_and_its_upload_as_they_were()
     let mut feed = RankFeed::with_read(Arc::new(|_| None));
     // frames read as the rank screen that the reader could not read (wrong
     // size, a reader error or panic), then a single read alone
-    for seen in [Some(None), Some(None), Some(Some(full(40))), None] {
+    for seen in [Some(None), Some(None), Some(Some(full(40))), None, None] {
         tick(&mut feed, seen, Some("g1"), &store, None).await;
     }
     assert_eq!(rows_and_body(&store, "g1").await, before);
@@ -251,18 +284,20 @@ async fn a_store_error_is_retried_then_dropped_and_never_costs_the_game() {
         fail: Mutex::new(true),
     };
     let mut feed = RankFeed::with_read(Arc::new(|_| None));
-    for seen in [Some(Some(full(40))), Some(Some(full(40))), None] {
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
         tick(&mut feed, seen, Some("g1"), &failing, None).await;
     }
     assert!(feed.unsaved.is_some(), "kept for the next tick");
-    // still failing: tried on the next ticks, then dropped
-    for _ in 1..RANK_STORE_TRIES {
-        tick(&mut feed, None, Some("g1"), &failing, None).await;
-    }
+    // still failing: tried on the next ticks, then dropped; tried on
+    // RANK_STORE_TRIES ticks in all, the settle tick among them
+    assert_eq!(RANK_STORE_TRIES, 3);
+    tick(&mut feed, None, Some("g1"), &failing, None).await;
+    assert!(feed.unsaved.is_some(), "still kept after one retry");
+    tick(&mut feed, None, Some("g1"), &failing, None).await;
     assert!(feed.unsaved.is_none(), "dropped after its tries");
     assert_eq!(rows_and_body(&store, "g1").await, before);
     // a write that works on a retry stores it
-    for seen in [Some(Some(full(40))), Some(Some(full(40))), None] {
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
         tick(&mut feed, seen, Some("g1"), &failing, None).await;
     }
     *failing.fail.lock().unwrap() = false;
@@ -275,7 +310,7 @@ async fn a_store_error_is_retried_then_dropped_and_never_costs_the_game() {
 async fn an_unknown_game_gets_nothing_and_the_feed_goes_on() {
     let (_dir, store) = store_with("g1").await;
     let mut feed = RankFeed::with_read(Arc::new(|_| None));
-    for seen in [Some(Some(full(40))), Some(Some(full(40))), None] {
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
         tick(&mut feed, seen, Some("nope"), &store, None).await;
     }
     assert!(feed.unsaved.is_none());
@@ -286,6 +321,10 @@ async fn an_unknown_game_gets_nothing_and_the_feed_goes_on() {
 #[tokio::test]
 async fn the_banner_word_becomes_the_next_games_pending_hint() {
     let (dir, store) = store_with("g1").await;
+    store
+        .insert_match(crate::main_tests::test_match("g2", "victory"))
+        .await
+        .unwrap();
     let queue = QueueTitleFeed::with_read(Arc::new(|_, _| Field::none()));
     let mut dump = PregameDump::with_readers(
         false,
@@ -295,29 +334,220 @@ async fn the_banner_word_becomes_the_next_games_pending_hint() {
         std::time::Duration::from_millis(1_500),
     )
     .expect("a saver for the queue title reader");
+    assert!(dump.has_queue_reader());
     let mut feed = RankFeed::with_read(Arc::new(|_| None));
-    for seen in [Some(Some(full(40))), Some(Some(full(40))), None] {
-        tick(&mut feed, seen, Some("g1"), &store, Some(&mut dump)).await;
+    // the hint's time is the newest rank read's, not the settle tick's
+    let t0 = Utc::now() - chrono::Duration::seconds(10);
+    let seq = [
+        (Some(Some(full(40))), t0),
+        (Some(Some(full(40))), t0 + chrono::Duration::seconds(2)),
+        (None, t0 + chrono::Duration::seconds(4)),
+        (None, t0 + chrono::Duration::seconds(6)),
+    ];
+    for (seen, at) in seq {
+        tick_at(&mut feed, seen, Some("g1"), &store, Some(&mut dump), at).await;
     }
     assert_eq!(
         dump.pending_hint(),
         Some(("OPEN QUEUE".to_string(), "g1".to_string()))
     );
-    // a settled read with no banner word leaves no hint
-    let (dir, store) = store_with("g2").await;
-    let queue = QueueTitleFeed::with_read(Arc::new(|_, _| Field::none()));
-    let mut dump = PregameDump::with_readers(
-        false,
-        None,
-        Some(queue),
-        dir.path(),
-        std::time::Duration::from_millis(1_500),
-    )
-    .expect("a saver");
+    assert_eq!(
+        dump.pending_hint_at(),
+        Some(t0 + chrono::Duration::seconds(2))
+    );
+    // a later rank screen with no banner word clears the older hint: a game
+    // came after the hint's source, so it no longer names the next queue
     let mut no_banner = full(40);
     no_banner.next_mode_hint = None;
-    for seen in [Some(Some(no_banner.clone())), Some(Some(no_banner)), None] {
+    for seen in [
+        Some(Some(no_banner.clone())),
+        Some(Some(no_banner)),
+        None,
+        None,
+    ] {
         tick(&mut feed, seen, Some("g2"), &store, Some(&mut dump)).await;
     }
     assert_eq!(dump.pending_hint(), None);
+}
+
+#[tokio::test]
+async fn an_update_waiting_for_the_store_is_tried_before_a_newer_one() {
+    let (_dir, store) = store_with("g1").await;
+    store
+        .insert_match(crate::main_tests::test_match("g2", "victory"))
+        .await
+        .unwrap();
+    let failing = Failing {
+        store: &store,
+        fail: Mutex::new(true),
+    };
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &failing, None).await;
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &failing, None).await;
+    // g2's screen settles g1's at once; the store refuses it
+    tick(&mut feed, Some(Some(full(50))), Some("g2"), &failing, None).await;
+    assert_eq!(
+        feed.unsaved.as_ref().map(|(s, _)| s.session.as_str()),
+        Some("g1")
+    );
+    *failing.fail.lock().unwrap() = false;
+    // g1 is tried first, then g2 settles (the game closed) on the same tick
+    tick(&mut feed, Some(Some(full(50))), Some("g2"), &failing, None).await;
+    assert!(tick(&mut feed, None, None, &failing, None).await);
+    assert!(feed.unsaved.is_none());
+    let g1 = store.get_session_snapshots("g1").await.unwrap();
+    let g2 = store.get_session_snapshots("g2").await.unwrap();
+    assert_eq!(g1[0].rank_update, Some(full(40)));
+    assert_eq!(g2[0].rank_update, Some(full(50)));
+}
+
+#[tokio::test]
+async fn the_game_process_stopping_stores_the_held_screen() {
+    let (_dir, store) = store_with("g1").await;
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    tick(&mut feed, Some(Some(full(40))), Some("g1"), &store, None).await;
+    assert!(close(&mut feed, &store, None).await);
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].rank_update, Some(full(40)));
+    assert!(!close(&mut feed, &store, None).await, "nothing held");
+}
+
+// ---- the live feed and the event loop ----
+
+#[test]
+fn a_feed_with_a_pack_on_disk_is_on_and_reads_frames() {
+    use stat_tracker::shadow::rank::templates::ClassTemplate;
+    use stat_tracker::shadow::rank::{
+        Family, GATE_CLASS, RECOGNIZER_ID, TEMPLATE_DIR, TemplateSet,
+    };
+    // the smallest pack that loads: the gate template alone
+    let (w, h, _) = Family::Gate.shape();
+    let mut set = TemplateSet {
+        recognizer: RECOGNIZER_ID.to_string(),
+        ..TemplateSet::default()
+    };
+    set.families.insert(
+        Family::Gate,
+        vec![ClassTemplate {
+            class: GATE_CLASS.to_string(),
+            aspect: 1.0,
+            n: 1,
+            vector: vec![0.5; w * h],
+        }],
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    set.save_dir(&dir.path().join(TEMPLATE_DIR)).unwrap();
+    let feed = RankFeed::for_setting(RankSetting::RankV1, dir.path()).expect("the feed is on");
+    // a frame flagged as the rank screen goes through the pack's reader:
+    // a blank frame is no rank screen, so no read, and no panic
+    let read = feed.reader();
+    let seen = read_rank_screen(Some(&read), Some(OutcomeSource::RankScreen), &frame());
+    assert_eq!(seen, Some(None));
+    // another size is no read either (logged once per run)
+    let small = RgbImage::new(1920, 1080);
+    assert_eq!(read(&small), None);
+    assert_eq!(read(&small), None);
+    // switched off with the same pack: no feed
+    assert!(RankFeed::for_setting(RankSetting::Off, dir.path()).is_none());
+}
+
+#[test]
+fn the_rank_screen_belongs_to_the_open_game_while_it_is_recent() {
+    use crate::ActiveGame;
+    use std::time::{Duration, Instant};
+    let open = |idle: Duration| {
+        ActiveGame::open_at(
+            "g1".to_string(),
+            stat_tracker::detect::MatchOutcome::Unknown,
+            Vec::new(),
+            Instant::now().checked_sub(idle).expect("a past instant"),
+        )
+    };
+    assert_eq!(rank_game(None), None);
+    let recent = open(Duration::from_secs(5));
+    assert_eq!(rank_game(Some(&recent)), Some("g1"));
+    let quiet = open(crate::daemon::RANK_OUTCOME_MAX_IDLE + Duration::from_secs(60));
+    assert_eq!(rank_game(Some(&quiet)), None);
+}
+
+#[test]
+fn the_poll_loop_wires_the_feed_in_order() {
+    let run_loop = crate::main_tests::source_text::fn_source("run_loop");
+    let at = |needle: &str| {
+        run_loop
+            .find(needle)
+            .unwrap_or_else(|| panic!("run_loop must contain {needle:?}"))
+    };
+    // built once from the env switch; off is `None`
+    let feed = at("daemon::rank::RankFeed::from_env(data_dir)");
+    // the game process stopping settles a held screen at once
+    let stopped = at("if !running {");
+    let close = at("daemon::rank::close(feed, store, pregame_dump.as_mut())");
+    assert!(feed < stopped && stopped < close);
+    // read in the analysis thread, after the poll analysis perf sample
+    let perf = at("stat_tracker::perf::Stage::PollAnalyze");
+    let read = at("daemon::rank::read_rank_screen(");
+    assert!(
+        perf < read,
+        "the rank read is not in the poll analysis time"
+    );
+    // a failed analysis is skipped, and the tick runs before the session
+    // machine moves the open game on
+    let ok = at("let analysis_ok = matches!(&analyzed, Ok(Ok(_)));");
+    let tick = at("daemon::rank::tick(");
+    let apply = at("apply_poll_tick(");
+    assert!(read < ok && ok < tick && tick < apply);
+    assert!(run_loop[ok..tick].contains("if analysis_ok"));
+    assert!(run_loop[tick..apply].contains("refresh_snapshot(store, data_dir)"));
+    let game = at("daemon::rank::rank_game(st.active_game.as_ref())");
+    assert!(ok < game && game < apply);
+}
+
+// ---- review regressions: the newest pair only, and a missed tick ----
+
+#[test]
+fn a_newer_read_that_disagrees_keeps_no_older_pair() {
+    // [A, A, B]: the screen moved on from A, so A is not kept
+    let r = settle(&[Some(full(72)), Some(full(72)), Some(full(10))]);
+    assert_eq!(r.progress_pct, None);
+    // the fields the newest two reads agree on are kept
+    assert_eq!(r.hero_sr, n(3412, 0.85));
+    assert_eq!(r.division, n(3, 0.9));
+}
+
+#[test]
+fn a_rank_up_seen_once_before_the_screen_goes_keeps_no_old_division() {
+    // division 3 at 95%, then the rank-up to division 2 shows on the last
+    // read before the screen goes: neither division is kept
+    let mut up = full(5);
+    up.division = n(2, 0.9);
+    let r = settle(&[Some(full(95)), Some(full(95)), Some(up)]);
+    assert_eq!(r.division, None);
+    assert_eq!(r.progress_pct, None);
+    assert_eq!(r.role_rank, t("Diamond", 0.8));
+}
+
+#[tokio::test]
+async fn one_missed_tick_does_not_settle_the_screen_and_the_final_reads_are_stored() {
+    let (_dir, store) = store_with("g1").await;
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    // [10, 10, gap, 40, 40, gone]: the gap is one tick that missed the screen
+    for seen in [
+        Some(Some(full(10))),
+        Some(Some(full(10))),
+        None,
+        Some(Some(full(40))),
+        Some(Some(full(40))),
+        None,
+        None,
+    ] {
+        tick(&mut feed, seen, Some("g1"), &store, None).await;
+    }
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    let pct = rows[0]
+        .rank_update
+        .as_ref()
+        .and_then(|r| r.progress_pct.clone());
+    assert_eq!(pct, n(40, 0.9), "the final reads, not the first ones");
 }

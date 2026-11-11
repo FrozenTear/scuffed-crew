@@ -6,7 +6,8 @@
 //! Stricter than [`Reader::read`]:
 //!
 //! * only a 2560x1440 frame is read (the size the pack was measured at); any
-//!   other size is `None`, with no error and no log line;
+//!   other size is `None`, with no error (the wiring logs the size once per
+//!   run);
 //! * a frame that is not a rank update screen (another screen, or the
 //!   placement screen, which has no "RANK PROGRESS:" label) is `None`;
 //! * the role is kept only when the pack holds all three role icons
@@ -16,12 +17,14 @@
 //!   list at all, as the site would null it;
 //! * a value is kept only with a confidence in (0, 1].
 
+use std::path::Path;
+
 use image::RgbImage;
 use scuffed_types::api::RankRole;
 
 use crate::model::{RANK_MAX_CHANGE_TAGS, RankNumber, RankTags, RankText, RankUpdate};
 
-use super::{FRAME_H, FRAME_W, Family, Field, RankRead, Reader, Role};
+use super::{FRAME_H, FRAME_W, Family, Field, RankRead, Reader, Role, TemplateError};
 
 /// The site's spelling of a role ([`RankRole`]): the reader's [`Role`] maps
 /// onto it one to one, so the stored string is the one the site parses.
@@ -50,6 +53,16 @@ pub fn read_for_game(reader: &Reader, img: &RgbImage) -> Option<RankUpdate> {
     let read = reader.read(img).ok()?;
     let rank = to_rank_update(&read, roles_complete(reader));
     (!rank.is_empty()).then_some(rank)
+}
+
+/// The pack in `data_dir` loaded as the frame read the wiring calls on each
+/// rank screen frame: [`read_for_game`] with that pack. An error when the
+/// pack is missing or bad, so the reader stays off.
+pub fn load_for_game(
+    data_dir: &Path,
+) -> Result<impl Fn(&RgbImage) -> Option<RankUpdate> + Send + Sync + 'static, TemplateError> {
+    let reader = Reader::load(data_dir)?;
+    Ok(move |img: &RgbImage| read_for_game(&reader, img))
 }
 
 /// `read` as the core type. `roles` is [`roles_complete`] for the pack

@@ -12,7 +12,7 @@
 //! installed ([`templates`]); it then reads the rank screen's frames after a
 //! game, stores the result on that game and uploads it in the `rank` object.
 //! Which frames to read and how reads are combined are the wiring's; see
-//! "What a caller must do" below.
+//! "What a caller must do" below, which also says what the wiring does.
 //!
 //! # Spellings
 //!
@@ -79,17 +79,29 @@
 //!   fixed place in the full frame. Any other size (a crop, 16:10, 21:9,
 //!   720p, 4K) is [`ReadError::Unsupported`], so a wiring mistake shows up
 //!   as such and not as "no rank screen".
-//! * Check frames with [`Reader::is_rank_screen`] (the "RANK PROGRESS:"
-//!   label only, cheap) and call [`Reader::read`] once, on the **last**
-//!   frame of the rank update, when the pill and the hero SR have settled.
-//!   Nothing here detects the animation. What is caught: text that is not
+//! * Nothing here detects the animation. What is caught: text that is not
 //!   drawn yet reads `None`, and a glyph caught mid-fade that matches no
 //!   class well makes its field `None`. What is not caught: a frame taken
 //!   while the pill or the SR is still counting shows clean digits of a
 //!   value that is not final yet, and reads as that value with full
-//!   confidence.
+//!   confidence. One read of one frame is never enough to trust a value.
 //! * Install a pack ([`templates::TemplateSet::load`]); without it
 //!   [`Reader::load`] fails and the reader is off.
+//!
+//! The tracker's wiring (`daemon::rank` in the binary) does this: it reads
+//! every frame the end detector flags as the rank screen, 2560x1440 only,
+//! through [`game::read_for_game`], and holds the reads for the open game.
+//! A single tick that misses the screen is a break between reads; two in a
+//! row, another game, or the game closing end the screen. Then each field
+//! is kept only when the newest read that has it agrees with the read right
+//! before it, at the lower confidence, so a value still counting up or one
+//! the screen replaced on its newest read is dropped. What that does not
+//! catch: two frames in a row that both show the same value that is not
+//! final yet (the count paused on one value for two ticks), and a field
+//! whose last agreed pair is followed only by frames that no longer read
+//! it (a fade, or a final value the reader cannot read).
+//! [`Reader::is_rank_screen`] (the "RANK PROGRESS:" label only, cheap) is
+//! there for a caller that wants to check frames before a full read.
 //!
 //! A supported frame that does not show the "RANK PROGRESS:" label (another
 //! screen, the placement screen) is [`ReadError::NotRankScreen`].

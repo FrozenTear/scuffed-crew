@@ -43,6 +43,7 @@ pub use client::{
 };
 pub use errors::{SyncUploadError, server_error_text};
 pub use visibility::{StatsVisibility, parse_stats_visibility};
+pub(crate) use wire::rank_update_changes_upload;
 pub use wire::{UploadEntry, UploadRequest, row_needs_review, upload_request};
 
 // Names the test files saw through `use super::*` before the split: two of

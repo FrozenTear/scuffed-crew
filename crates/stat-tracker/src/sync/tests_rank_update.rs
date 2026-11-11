@@ -183,12 +183,30 @@ fn open_is_sent_only_when_the_queue_title_says_open_queue() {
         let rank = sent(Some(open.clone()), Some(queue(title)));
         assert_eq!(rank["role"], f(json!("Open"), 0.5), "{title}");
     }
-    // a role from an icon goes whatever the queue
+    // a role from an icon goes with no title or a role queue title
     let tank = RankUpdate {
         role: t("Tank", 0.9),
+        hero_sr: n(3412, 0.85),
         ..RankUpdate::default()
     };
-    assert_eq!(sent(Some(tank), None)["role"], f(json!("Tank"), 0.9));
+    assert_eq!(
+        sent(Some(tank.clone()), None)["role"],
+        f(json!("Tank"), 0.9)
+    );
+    assert_eq!(
+        sent(Some(tank.clone()), Some(queue("ROLE QUEUE")))["role"],
+        f(json!("Tank"), 0.9)
+    );
+    // never with an open queue title: open queue screens have no role line
+    for role in ["Tank", "Damage", "Support"] {
+        let icon = RankUpdate {
+            role: t(role, 0.9),
+            ..tank.clone()
+        };
+        let rank = sent(Some(icon), Some(queue("OPEN QUEUE")));
+        assert!(rank.get("role").is_none(), "{role}: {rank}");
+        assert_eq!(rank["hero_sr"]["value"], 3412, "{role}: the rest is sent");
+    }
     // a spelling the site does not know is not sent
     let odd = RankUpdate {
         role: t("Healer", 0.9),
@@ -237,4 +255,57 @@ fn the_upload_names_the_one_rank_recognizer() {
         crate::model::RANK_MAX_CHANGE_TAGS,
         scuffed_types::api::RANK_MAX_CHANGE_TAGS
     );
+}
+
+#[test]
+fn change_tags_are_sent_trimmed_and_checked_as_sent() {
+    let long = "y".repeat(scuffed_types::api::RANK_STRING_MAX_CHARS);
+    let rank = RankUpdate {
+        change_tags: Some(RankTags {
+            value: vec!["  Uphill Battle ".to_string(), format!(" {long} ")],
+            confidence: 0.7,
+        }),
+        ..RankUpdate::default()
+    };
+    let sent = sent(Some(rank), None);
+    assert_eq!(
+        sent["change_tags"],
+        f(json!(["Uphill Battle", long]), 0.7),
+        "{sent}"
+    );
+}
+
+#[test]
+fn a_games_own_banner_word_is_never_its_queue() {
+    // the game's own rank screen banner says OPEN QUEUE: that names the
+    // next game's queue, so it neither fills this game's queue title nor
+    // lets an Open role through
+    let rank = RankUpdate {
+        role: t("Open", 0.5),
+        next_mode_hint: t("OPEN QUEUE", 0.75),
+        ..RankUpdate::default()
+    };
+    let none = sent(Some(rank.clone()), None);
+    assert!(none.get("queue_title").is_none(), "{none}");
+    assert!(none.get("role").is_none(), "{none}");
+    assert_eq!(none["next_mode_hint"], f(json!("OPEN QUEUE"), 0.75));
+    let role = sent(Some(rank), Some(queue("ROLE QUEUE")));
+    assert_eq!(role["queue_title"], f(json!("ROLE QUEUE"), 0.93), "{role}");
+    assert!(role.get("role").is_none(), "{role}");
+}
+
+#[test]
+fn a_rank_changes_the_upload_only_when_a_field_is_sent() {
+    let plain = game(None, None);
+    assert!(super::rank_update_changes_upload(&plain, &full()));
+    // an Open role with no open queue title, and a value the site would
+    // null: nothing the upload sends changes
+    let dropped = RankUpdate {
+        role: t("Open", 0.5),
+        division: n(6, 0.9),
+        ..RankUpdate::default()
+    };
+    assert!(!super::rank_update_changes_upload(&plain, &dropped));
+    let open = game(None, Some(queue("OPEN QUEUE")));
+    assert!(super::rank_update_changes_upload(&open, &dropped));
 }
