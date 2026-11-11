@@ -136,8 +136,8 @@ fn any_saved_name_finds_the_row() {
 }
 
 /// The saved name one row's name read belongs to: one name only, a whole
-/// name hit first, else the best fuzzy read. A row with no name read, or a
-/// read that names none of the saved names, names nothing.
+/// name hit first, else a fuzzy read that clearly leads. A row with no name
+/// read, or a read that names none of the saved names, names nothing.
 #[test]
 fn best_name_for_row_names_one_saved_name() {
     let names = ["Main".to_string(), "Alt".to_string()];
@@ -149,8 +149,9 @@ fn best_name_for_row_names_one_saved_name() {
         best_name_for_row(&valid_row("MAIN"), &names[..]),
         Some("Main")
     );
+    // Main 0.75, Alt below the floor: a clear fuzzy lead.
     assert_eq!(
-        best_name_for_row(&valid_row("MAlN"), &names[..]),
+        best_name_for_row(&valid_row("MAIM"), &names[..]),
         Some("Main")
     );
     assert_eq!(best_name_for_row(&valid_row("Stranger"), &names[..]), None);
@@ -160,6 +161,98 @@ fn best_name_for_row_names_one_saved_name() {
         best_name_for_row(&valid_row("ALT"), &blank[..]),
         Some("Alt")
     );
+}
+
+/// Site's probe: "Spocle" sits inside "Spocle2". A row reading SPOCLE2 is
+/// Spocle2's and a row reading SPOCLE is Spocle's, whichever name is saved
+/// first. The old rule (first substring hit in list order) named the
+/// SPOCLE2 row "Spocle" when Spocle was listed first.
+#[test]
+fn best_name_for_row_prefers_the_longer_saved_name_in_either_order() {
+    let main_first = ["Spocle".to_string(), "Spocle2".to_string()];
+    let alt_first = ["Spocle2".to_string(), "Spocle".to_string()];
+    for names in [&main_first, &alt_first] {
+        assert_eq!(
+            best_name_for_row(&valid_row("SPOCLE2"), &names[..]),
+            Some("Spocle2"),
+            "{names:?}"
+        );
+        assert_eq!(
+            best_name_for_row(&valid_row("[TAG] SPOCLE"), &names[..]),
+            Some("Spocle"),
+            "{names:?}"
+        );
+        assert_eq!(
+            best_name_for_row(&valid_row("SPOCLE"), &names[..]),
+            Some("Spocle"),
+            "{names:?}"
+        );
+    }
+    // Unicode folds the same way: "ÖSTERS" is Östers, "ÖSTER" is Öster.
+    let names = ["Öster".to_string(), "Östers".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("ÖSTERS"), &names[..]),
+        Some("Östers")
+    );
+    assert_eq!(
+        best_name_for_row(&valid_row("ÖSTER"), &names[..]),
+        Some("Öster")
+    );
+}
+
+/// A tie the rule cannot break names nothing, never the earlier entry:
+/// two unrelated names on one read, a fuzzy read with no clear lead
+/// ("MAlN": Main 0.75, Alt 0.67), and a name saved twice is one name.
+#[test]
+fn best_name_for_row_names_nothing_on_a_tie() {
+    let names = ["Main".to_string(), "Alt".to_string()];
+    let swapped = ["Alt".to_string(), "Main".to_string()];
+    for names in [&names, &swapped] {
+        assert_eq!(
+            best_name_for_row(&valid_row("MAIN ALT"), &names[..]),
+            None,
+            "{names:?}"
+        );
+        assert_eq!(
+            best_name_for_row(&valid_row("MAlN"), &names[..]),
+            None,
+            "{names:?}"
+        );
+    }
+    let twice = ["Main".to_string(), "MAIN".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("MAIN"), &twice[..]),
+        Some("Main")
+    );
+}
+
+/// The board matcher ranks the same way. SPOCLE2 alone on the board is
+/// Spocle2's row in either order. With both accounts on the board, each a
+/// whole word on its own row, no row is named (the caller falls back to
+/// the highlight). Inside one name, a whole-word row beats an earlier row
+/// that only holds it inside a longer word.
+#[test]
+fn the_board_matcher_ranks_saved_names_without_list_order() {
+    let main_first = ["Spocle".to_string(), "Spocle2".to_string()];
+    let alt_first = ["Spocle2".to_string(), "Spocle".to_string()];
+    let one = vec![valid_row("SPOCLE2"), valid_row("Stranger")];
+    let both = vec![
+        valid_row("SPOCLE2"),
+        valid_row("Stranger"),
+        valid_row("SPOCLE"),
+    ];
+    for (names, alt_idx) in [(&main_first, 1), (&alt_first, 0)] {
+        let found = match_player_row_by_names(&one, &names[..]).unwrap();
+        assert_eq!((found.row, found.name), (0, alt_idx), "{names:?}");
+        assert_eq!(
+            match_player_row_by_names(&both, &names[..]),
+            None,
+            "{names:?}"
+        );
+    }
+    let rows = vec![valid_row("FROZENTEAR"), valid_row("FROZEN")];
+    assert_eq!(find_player_row_by_name(&rows, "Frozen"), Some(1));
+    assert_eq!(find_player_row_by_name(&rows[..1], "Frozen"), Some(0));
 }
 
 /// A whole-name hit for any saved name beats a fuzzy hit for another,

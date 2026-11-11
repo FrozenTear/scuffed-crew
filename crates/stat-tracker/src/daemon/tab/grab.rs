@@ -632,6 +632,7 @@ pub(crate) async fn handle_capture(
         None => read_scoreboard_named(
             &rows,
             player_row_idx,
+            name_match,
             &ocr_result.raw_text,
             &outcome_label,
             text_fallback_names(board_reader, player_row_idx, own_names),

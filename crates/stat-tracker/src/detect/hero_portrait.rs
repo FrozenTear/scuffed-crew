@@ -809,9 +809,9 @@ mod seed_layout_tests {
 
     fn m(window: usize, sole_window: bool) -> NameMatch {
         NameMatch {
-            row: 0,
             window,
             sole_window,
+            ..NameMatch::default()
         }
     }
 

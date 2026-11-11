@@ -30,7 +30,7 @@ pub use map_text::{
 };
 pub use names::{
     NameList, NameMatch, best_name_for_row, find_player_row_by_name, match_player_row_by_name,
-    match_player_row_by_names,
+    match_player_row_by_names, match_row_by_names,
 };
 
 #[cfg(test)]

@@ -78,8 +78,8 @@ fn find_own_row_reads_only_the_switched_source() {
     let found = |row| {
         Some(parse::NameMatch {
             row,
-            window: 0,
             sole_window: true,
+            ..parse::NameMatch::default()
         })
     };
     let seeds = |seed: Option<usize>, lit| OwnRowRead {
@@ -411,8 +411,8 @@ fn with_ocr_off_the_career_hero_names_the_own_row_and_without_it_the_tab_is_held
         asked.set(asked.get() + 1);
         Some(parse::NameMatch {
             row: 6,
-            window: 0,
             sole_window: true,
+            ..parse::NameMatch::default()
         })
     };
     let named = find(&no_pack, &name_read);
@@ -448,11 +448,11 @@ fn the_text_fallback_gets_no_name_when_the_new_reader_has_no_own_row() {
 fn the_text_fallback_reads_an_alt_names_line() {
     let raw = "Ana\nBusan\nÖSTER 10 4 2 3,000 800 400";
     let names = ["FrozenTear".to_string(), "öster".to_string()];
-    let read = read_scoreboard_named(&[], None, raw, "victory", &names).unwrap();
+    let read = read_scoreboard_named(&[], None, None, raw, "victory", &names).unwrap();
     assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
     let main_only = ["FrozenTear".to_string()];
     assert!(matches!(
-        read_scoreboard_named(&[], None, raw, "victory", &main_only),
+        read_scoreboard_named(&[], None, None, raw, "victory", &main_only),
         Err(parse::ScoreboardMiss::PlayerRowNotFound)
     ));
 }
@@ -467,19 +467,19 @@ fn a_main_name_in_chat_does_not_hide_the_alts_line() {
     let raw = "[Team] FrozenTear: 1 2 3 4 5 6\nÖSTER 10 4 2 3,000 800 400";
     let names = ["FrozenTear".to_string(), "öster".to_string()];
     let chat_only = "[Team] FrozenTear: 1 2 3 4 5 6";
-    let read = read_scoreboard_named(&[], None, raw, "victory", &names).unwrap();
+    let read = read_scoreboard_named(&[], None, None, raw, "victory", &names).unwrap();
     assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
     assert!(!read.trusted_cells);
     assert!(matches!(
-        read_scoreboard_named(&[], None, chat_only, "victory", &names),
+        read_scoreboard_named(&[], None, None, chat_only, "victory", &names),
         Err(parse::ScoreboardMiss::CellsUnreadable)
     ));
     let alt_row = [two_account_row(Some("ÖSTER"), false)];
-    let read = read_scoreboard_named(&alt_row, Some(0), raw, "victory", &names).unwrap();
+    let read = read_scoreboard_named(&alt_row, Some(0), None, raw, "victory", &names).unwrap();
     assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
     assert!(!read.trusted_cells);
     assert!(matches!(
-        read_scoreboard_named(&alt_row, Some(0), chat_only, "victory", &names),
+        read_scoreboard_named(&alt_row, Some(0), None, chat_only, "victory", &names),
         Err(parse::ScoreboardMiss::CellsUnreadable)
     ));
 }
@@ -487,52 +487,55 @@ fn a_main_name_in_chat_does_not_hide_the_alts_line() {
 /// One OCR row for the two-account tests: `name` as its name read, and
 /// stat cells that parse (`readable`) or are blank.
 fn two_account_row(name: Option<&str>, readable: bool) -> ocr::RowOcrResult {
+    let stats = ["5", "3", "2", "4,316", "1,200", "899"];
+    lobby_row(name, readable.then_some(stats))
+}
+
+/// One OCR row of a lobby: `name` as its name read, and `stats` as its six
+/// stat cells (`None`: blank cells that do not parse).
+fn lobby_row(name: Option<&str>, stats: Option<[&str; 6]>) -> ocr::RowOcrResult {
     let cell = |value: &str| ocr::CellOcrResult {
         value: value.into(),
         confidence: 80,
         suspect: false,
     };
-    let values = if readable {
-        ["5", "3", "2", "4,316", "1,200", "899"]
-    } else {
-        [""; 6]
-    };
     ocr::RowOcrResult {
         name: name.map(cell),
         name_alternates: Vec::new(),
-        stats: values.iter().map(|v| cell(v)).collect(),
+        stats: stats.unwrap_or([""; 6]).iter().map(|v| cell(v)).collect(),
         mean_confidence: 80,
     }
 }
 
 /// Alpha.3 item 15. A highlighted own row whose cells do not parse, on a
 /// board with two of the member's saved names: the raw text holds a
-/// readable line for the OTHER saved name. That line is never read for
-/// this row, whether the row's name reads as the main name, reads as no
-/// saved name, or was not read at all. The read is "unreadable".
+/// readable line for the OTHER saved name only. The row reads as the main
+/// name, as no saved name, or was not read at all: none of these reads the
+/// other account's line. The read is "unreadable".
 #[test]
-fn a_highlighted_row_never_reads_the_other_saved_accounts_line() {
+fn an_unreadable_own_row_does_not_read_the_other_saved_accounts_line() {
     let names = ["Main".to_string(), "Alt".to_string()];
     let raw = "Ana\nBusan\nALT 10 4 2 3,000 800 400";
     for name in [Some("MAIN"), Some("Stranger"), None] {
         let rows = [two_account_row(name, false)];
         assert!(
             matches!(
-                read_scoreboard_named(&rows, Some(0), raw, "victory", &names),
+                read_scoreboard_named(&rows, Some(0), None, raw, "victory", &names),
                 Err(parse::ScoreboardMiss::CellsUnreadable)
             ),
             "row name {name:?}"
         );
     }
-    // No OCR rows at all: the row's name was never read.
+    // No OCR rows at all: the row's name was never read. This used to read
+    // Alt's line; it is now unreadable on purpose.
     assert!(matches!(
-        read_scoreboard_named(&[], Some(0), raw, "victory", &names),
+        read_scoreboard_named(&[], Some(0), None, raw, "victory", &names),
         Err(parse::ScoreboardMiss::CellsUnreadable)
     ));
 }
 
 /// The same board, with that row's own name on a readable text line: the
-/// row's own line is read (low trust), never the other account's. Cells
+/// row's own line is read (low trust), not the other account's. Cells
 /// that parse still win over any line. One saved name reads its line
 /// beside the row as before, whatever the row's name read says.
 #[test]
@@ -541,49 +544,215 @@ fn a_highlighted_row_reads_its_own_line_when_its_cells_do_not_parse() {
     let raw = "[Team] Alt: 1 2 3 4 5 6\nMAIN 3 1 4 1,500 900 260\nALT 10 4 2 3,000 800 400";
     for (name, want) in [("ALT", (10, 3000)), ("MAIN", (3, 1500))] {
         let rows = [two_account_row(Some(name), false)];
-        let read = read_scoreboard_named(&rows, Some(0), raw, "victory", &names).unwrap();
+        let read = read_scoreboard_named(&rows, Some(0), None, raw, "victory", &names).unwrap();
         assert_eq!((read.matched.elims, read.matched.damage), want, "{name}");
         assert!(!read.trusted_cells, "{name}");
     }
     let rows = [two_account_row(Some("MAIN"), true)];
-    let read = read_scoreboard_named(&rows, Some(0), raw, "victory", &names).unwrap();
+    let read = read_scoreboard_named(&rows, Some(0), None, raw, "victory", &names).unwrap();
     assert_eq!((read.matched.elims, read.matched.damage), (5, 4316));
     assert!(read.trusted_cells);
     let main_only = ["Main".to_string()];
     let rows = [two_account_row(None, false)];
-    let read = read_scoreboard_named(&rows, Some(0), raw, "victory", &main_only).unwrap();
+    let read = read_scoreboard_named(&rows, Some(0), None, raw, "victory", &main_only).unwrap();
     assert_eq!((read.matched.elims, read.matched.damage), (3, 1500));
 }
 
-#[derive(Clone, Default)]
-struct CaptureLog(Arc<std::sync::Mutex<Vec<u8>>>);
-
-impl std::io::Write for CaptureLog {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
+/// Site's probe on PR review (ocr-v1): "Spocle" sits inside "Spocle2". The
+/// highlighted row reads SPOCLE2 and its cells do not parse; the text holds
+/// both accounts' lines. The own line (3, 1500) is read in either saved
+/// order. The old first-substring rule named the row "Spocle" with Spocle
+/// listed first and read the other account's line (10, 3000).
+#[test]
+fn an_overlapping_saved_name_reads_the_highlighted_rows_own_line() {
+    let raw = "Ana\nBusan\nSPOCLE 10 4 2 3,000 800 400\nSPOCLE2 3 1 4 1,500 900 260";
+    let rows = [two_account_row(Some("SPOCLE2"), false)];
+    let main_first = ["Spocle".to_string(), "Spocle2".to_string()];
+    let alt_first = ["Spocle2".to_string(), "Spocle".to_string()];
+    for names in [&main_first, &alt_first] {
+        assert_eq!(
+            parse::best_name_for_row(&rows[0], &names[..]),
+            Some("Spocle2"),
+            "{names:?}"
+        );
+        let read = read_scoreboard_named(&rows, Some(0), None, raw, "victory", names).unwrap();
+        assert_eq!(
+            (read.matched.elims, read.matched.damage),
+            (3, 1500),
+            "{names:?}"
+        );
+        assert!(!read.trusted_cells, "{names:?}");
     }
 }
 
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureLog {
-    type Writer = CaptureLog;
-    fn make_writer(&'a self) -> CaptureLog {
-        self.clone()
+/// A lobby of ten rows for the ocr-v1 own-row tests: Spocle readable on row
+/// 7, `own` on the highlighted row 2 with `own_stats`, strangers elsewhere.
+fn two_account_lobby(own: &str, own_stats: Option<[&str; 6]>) -> Vec<ocr::RowOcrResult> {
+    let spocle = ["10", "4", "2", "3,000", "800", "400"];
+    let stranger = ["1", "1", "1", "100", "100", "100"];
+    (0..10)
+        .map(|i| match i {
+            2 => lobby_row(Some(own), own_stats),
+            7 => lobby_row(Some("SPOCLE"), Some(spocle)),
+            _ => lobby_row(Some(&format!("Stranger{i}")), Some(stranger)),
+        })
+        .collect()
+}
+
+/// The ocr-v1 own row as the daemon chooses it (`analyze_frame`'s name
+/// match, the names switch off): the highlighted row's own name first,
+/// then the whole board, then the highlight.
+fn ocr_v1_own_row(
+    rows: &[ocr::RowOcrResult],
+    highlight: usize,
+    names: &[String],
+) -> (Option<usize>, Option<parse::NameMatch>) {
+    let choice = find_own_row(
+        false,
+        || {
+            highlighted_own_name(rows, Some(highlight), names)
+                .or_else(|| names::match_named_rows(rows, names, 5, names::BoardMatch::Cells))
+        },
+        || panic!("seeds read under ocr-v1"),
+        || panic!("name fallback under ocr-v1"),
+        o9_lit(highlight, 1.5),
+        None,
+        false,
+    );
+    (choice.row_idx, choice.name_match)
+}
+
+/// Site's blocking finding 1, cells readable: FrozenTear plays on Sinmic
+/// (highlighted, row 2) while Spocle, another saved name, sits readable on
+/// row 7. The highlighted row wins and its own cells are stored, whatever
+/// the saved order, and also when the row's name read is fuzzy ("SINMlC")
+/// while Spocle is an exact hit (the old board match took row 7).
+#[test]
+fn ocr_v1_takes_the_highlighted_row_over_another_saved_name_on_the_board() {
+    let main_first = ["Spocle".to_string(), "Sinmic".to_string()];
+    let alt_first = ["Sinmic".to_string(), "Spocle".to_string()];
+    let own_stats = ["7", "2", "1", "2,100", "300", "50"];
+    for names in [&main_first, &alt_first] {
+        let sinmic = names.iter().position(|n| n == "Sinmic").unwrap();
+        for read_as in ["SINMIC", "SINMlC"] {
+            let rows = two_account_lobby(read_as, Some(own_stats));
+            let (row, found) = ocr_v1_own_row(&rows, 2, names);
+            assert_eq!(row, Some(2), "{names:?} {read_as}");
+            assert_eq!(found.map(|m| m.name), Some(sinmic), "{names:?} {read_as}");
+            let read = read_scoreboard_named(&rows, row, found, "", "victory", names).unwrap();
+            assert_eq!((read.matched.elims, read.matched.damage), (7, 2100));
+            assert!(read.trusted_cells);
+        }
     }
+    // A highlighted row that names no saved name leaves the board match
+    // as before: Spocle's row. One saved name never asks the highlight.
+    let rows = two_account_lobby("Stranger", Some(own_stats));
+    assert_eq!(ocr_v1_own_row(&rows, 2, &main_first).0, Some(7));
+    let spocle_only = ["Spocle".to_string()];
+    assert_eq!(highlighted_own_name(&rows, Some(2), &spocle_only), None);
+}
+
+/// Site's blocking finding 1, cells unreadable: the same lobby with the
+/// highlighted Sinmic row's cells blank. The text fallback reads Sinmic's
+/// own line, or, with no Sinmic line, nothing; never Spocle's line.
+#[test]
+fn ocr_v1_reads_the_highlighted_rows_line_not_another_saved_names_row() {
+    let main_first = ["Spocle".to_string(), "Sinmic".to_string()];
+    let alt_first = ["Sinmic".to_string(), "Spocle".to_string()];
+    let both = "Ana\nBusan\nSPOCLE 10 4 2 3,000 800 400\nSINMIC 3 1 4 1,500 900 260";
+    let spocle_only = "Ana\nBusan\nSPOCLE 10 4 2 3,000 800 400";
+    for names in [&main_first, &alt_first] {
+        let rows = two_account_lobby("SINMIC", None);
+        let (row, found) = ocr_v1_own_row(&rows, 2, names);
+        assert_eq!(row, Some(2), "{names:?}");
+        let read = read_scoreboard_named(&rows, row, found, both, "victory", names).unwrap();
+        assert_eq!((read.matched.elims, read.matched.damage), (3, 1500));
+        assert!(!read.trusted_cells);
+        assert!(
+            matches!(
+                read_scoreboard_named(&rows, row, found, spocle_only, "victory", names),
+                Err(parse::ScoreboardMiss::CellsUnreadable)
+            ),
+            "{names:?}"
+        );
+    }
+}
+
+/// The highlighted row's name can sit in another name window (5v5 perk
+/// and centred layouts): the match reports that window.
+#[test]
+fn the_highlighted_rows_name_is_read_in_any_name_window() {
+    let names = ["Spocle".to_string(), "Sinmic".to_string()];
+    let mut rows = two_account_lobby("0 3", None);
+    rows[2].name_alternates = vec![
+        Some(ocr::CellOcrResult {
+            value: "SINMIC".into(),
+            confidence: 80,
+            suspect: false,
+        }),
+        None,
+    ];
+    let found = highlighted_own_name(&rows, Some(2), &names).expect("named");
+    assert_eq!((found.row, found.window, found.name), (2, 1, 1));
+}
+
+/// Nit 4 of the review: when the names pack (or the highlight's own read)
+/// matched the row, the text fallback searches for that saved name, not
+/// for what Tesseract's per-cell name read of the row says. A match for
+/// another row, or a name index past the list, falls back to the row's
+/// own read.
+#[test]
+fn a_pack_matched_row_reads_the_matched_names_line() {
+    let names = ["Main".to_string(), "Alt".to_string()];
+    let raw = "Ana\nBusan\nMAIN 3 1 4 1,500 900 260\nALT 10 4 2 3,000 800 400";
+    let rows = [two_account_row(Some("MAIN"), false)];
+    let pack = |row, name| {
+        Some(parse::NameMatch {
+            row,
+            name,
+            ..parse::NameMatch::default()
+        })
+    };
+    for (found, want) in [
+        (pack(0, 1), (10, 3000)),
+        (pack(0, 0), (3, 1500)),
+        (pack(3, 1), (3, 1500)),
+        (pack(0, 9), (3, 1500)),
+        (None, (3, 1500)),
+    ] {
+        let read = read_scoreboard_named(&rows, Some(0), found, raw, "victory", &names).unwrap();
+        assert_eq!((read.matched.elims, read.matched.damage), want, "{found:?}");
+    }
+    // A pack match on a row whose Tesseract read names no saved name.
+    let rows = [two_account_row(Some("Stranger"), false)];
+    let read = read_scoreboard_named(&rows, Some(0), pack(0, 1), raw, "victory", &names).unwrap();
+    assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
+}
+
+/// The daemon asks the highlighted row's own name before the board match,
+/// and passes the match on to the text fallback.
+#[test]
+fn the_ocr_v1_name_match_asks_the_highlighted_row_first() {
+    let norm = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let body = norm(fn_source("analyze_frame"));
+    let first = body.find("highlighted_own_name(").expect("highlight first");
+    assert_eq!(body.matches("highlighted_own_name(").count(), 1);
+    assert!(first < body.find("names::match_player_row(").unwrap());
+    let hc_body = norm(fn_source("handle_capture"));
+    assert!(hc_body.contains("read_scoreboard_named( &rows, player_row_idx, name_match,"));
 }
 
 /// Fail safe for alpha.3 item 15, through `handle_capture` (ocr-v1, two
 /// saved names). A Tab whose highlighted row (named Main) has no readable
 /// cells, while the text holds Alt's stat line, stores nothing and logs a
-/// WARN. The game stays open, and the next Tab with readable cells is
-/// recorded on it. Alt's numbers are never stored.
+/// WARN. A row that names no saved name does the same and also logs why at
+/// INFO; a readable Tab logs no such line. The game stays open, and the
+/// next Tab with readable cells is recorded on it. Alt's numbers are not
+/// stored.
 #[tokio::test]
 async fn an_unreadable_highlighted_row_warns_and_the_game_keeps_recording() {
     let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
-    let log = CaptureLog::default();
+    let log = test_log::TestLog::default();
     let sub = tracing_subscriber::fmt()
         .with_writer(log.clone())
         .with_ansi(false)
@@ -591,9 +760,9 @@ async fn an_unreadable_highlighted_row_warns_and_the_game_keeps_recording() {
         .finish();
     let _sub = tracing::subscriber::set_default(sub);
     tracing::callsite::rebuild_interest_cache();
-    let main_row = |readable: bool| {
+    let own_row = |name: &str, readable: bool| {
         let mut analysis = o8_analysis(None, Some("zenyatta"));
-        analysis.rows[0] = two_account_row(Some("MAIN"), readable);
+        analysis.rows[0] = two_account_row(Some(name), readable);
         analysis.ocr = Ok(ocr::OcrResult {
             raw_text: "Ana\nBusan\nALT 25 5 1 9,000 100 200".into(),
             confidence: 80,
@@ -611,9 +780,10 @@ async fn an_unreadable_highlighted_row_warns_and_the_game_keeps_recording() {
     active.session_created = false;
     let mut st = session(Some(active), now);
 
-    for (tab, readable) in [false, true].into_iter().enumerate() {
+    let tabs = [("MAIN", false), ("STRANGER", false), ("MAIN", true)];
+    for (tab, (name, readable)) in tabs.into_iter().enumerate() {
         *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
-            analysis: main_row(readable),
+            analysis: own_row(name, readable),
             board: None,
         });
         let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
@@ -633,7 +803,12 @@ async fn an_unreadable_highlighted_row_warns_and_the_game_keeps_recording() {
         .lines()
         .filter(|l| l.contains("WARN") && l.contains("capture rejected: stat cells unreadable"))
         .count();
-    assert_eq!(warned, 1, "{text}");
+    assert_eq!(warned, 2, "{text}");
+    let why = text
+        .lines()
+        .filter(|l| l.contains("INFO") && l.contains("names none of the saved names"))
+        .count();
+    assert_eq!(why, 1, "{text}");
     let rows = ctx.store.get_session_snapshots("two").await.unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!((rows[0].elims, rows[0].damage), (5, 4316));
