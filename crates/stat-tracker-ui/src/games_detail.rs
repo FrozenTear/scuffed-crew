@@ -374,7 +374,8 @@ pub enum MapPart {
 /// The Games list row's Map cell in draw order: the name, the warning sign
 /// when the map read is unsure (`doubt`), then [`map_chips`]. The sign
 /// comes before the chips, so in a narrow Map column the chips are clipped
-/// first and the sign stays in view.
+/// first. The name is capped ([`map_name_max_width`]) so it cannot squeeze
+/// the sign either.
 pub fn map_cell_parts(g: &Game, doubt: bool) -> Vec<MapPart> {
     let mut parts = vec![MapPart::Name];
     if doubt {
@@ -382,6 +383,28 @@ pub fn map_cell_parts(g: &Game, doubt: bool) -> Vec<MapPart> {
     }
     parts.extend(map_chips(g).into_iter().map(MapPart::Chip));
     parts
+}
+
+/// The gap between the Map cell's parts, in px.
+pub const MAP_CELL_GAP: f32 = 8.0;
+/// The warning sign's fixed width in the Map cell, in px.
+pub const MAP_WARN_W: f32 = 12.0;
+
+/// The widest the map name may draw in a Map cell `cell` px wide that holds
+/// `parts`, or `None` for no cap when there is no warning sign.
+///
+/// Iced takes every gap off a row first, then gives each child, in order,
+/// only the width the earlier ones left. An uncapped name that nearly fills
+/// the cell would leave the sign less than its 12 px. So with the sign in
+/// `parts`, the name gets the cell less every gap and the sign, and is cut
+/// on one line instead. The sign always keeps [`MAP_WARN_W`]; the chips get
+/// what is left and are clipped first.
+pub fn map_name_max_width(cell: f32, parts: &[MapPart]) -> Option<f32> {
+    if !parts.contains(&MapPart::Warn) {
+        return None;
+    }
+    let gaps = MAP_CELL_GAP * parts.len().saturating_sub(1) as f32;
+    Some((cell - gaps - MAP_WARN_W).max(0.0))
 }
 
 /// One bar segment of the hero timeline, in time order.
@@ -1211,7 +1234,8 @@ pub(crate) mod tests {
     }
 
     /// The unsure map's warning sign is drawn right after the name, before
-    /// any chip, so a narrow Map column clips the chips and not the sign.
+    /// any chip, so a narrow Map column clips the chips first. The name's
+    /// cap keeps it from squeezing the sign (the next test).
     #[test]
     fn the_map_warning_comes_before_the_chips() {
         use stat_tracker::model::QueueTitle;
@@ -1247,5 +1271,40 @@ pub(crate) mod tests {
                 MapPart::Chip("OPEN QUEUE".into()),
             ]
         );
+    }
+
+    /// With the sign in the Map cell, the name is capped so that, after
+    /// every gap, the sign keeps its full 12 px at every cell width the
+    /// grids use (Mid at 1100 and 1280, Wide at 1440, Narrow at 780), and a
+    /// name at the cap leaves no room the sign has to give up. With no sign
+    /// the name is not capped.
+    #[test]
+    fn the_unsure_map_name_leaves_the_sign_its_full_width() {
+        let chip = |s: &str| MapPart::Chip(s.into());
+        let both = [
+            MapPart::Name,
+            MapPart::Warn,
+            chip("Escort"),
+            chip("OPEN QUEUE"),
+        ];
+        let mode_only = [MapPart::Name, MapPart::Warn, chip("Escort")];
+        let bare = [MapPart::Name, MapPart::Warn];
+        for parts in [&both[..], &mode_only[..], &bare[..]] {
+            let gaps = MAP_CELL_GAP * (parts.len() - 1) as f32;
+            for cell in [176.0, 262.0, 304.0, 322.0] {
+                let name = map_name_max_width(cell, parts).unwrap();
+                assert!(name > 0.0, "{cell} {parts:?}");
+                // What iced leaves the sign after the gaps and a name at
+                // its cap: exactly the sign's width.
+                assert_eq!(cell - gaps - name, MAP_WARN_W, "{cell} {parts:?}");
+            }
+        }
+        assert_eq!(map_name_max_width(176.0, &both), Some(176.0 - 24.0 - 12.0));
+        // A cell too small for the gaps and the sign gives the name nothing.
+        assert_eq!(map_name_max_width(20.0, &both), Some(0.0));
+        // A sure map read has no sign and no cap.
+        let sure = [MapPart::Name, chip("Escort"), chip("OPEN QUEUE")];
+        assert_eq!(map_name_max_width(176.0, &sure), None);
+        assert_eq!(map_name_max_width(176.0, &[MapPart::Name]), None);
     }
 }

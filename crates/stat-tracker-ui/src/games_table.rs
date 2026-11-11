@@ -6,7 +6,9 @@
 //! Playing, the marks). The filter chips live in [`crate::filter_chips`].
 
 use iced::widget::text::Wrapping;
-use iced::widget::{button, column, container, image, mouse_area, row, rule, space, text};
+use iced::widget::{
+    button, column, container, image, mouse_area, responsive, row, rule, space, text,
+};
 use iced::{
     Alignment, Background, Border, Color, Element, Fill, FillPortion, Length, Padding, Theme,
 };
@@ -555,22 +557,23 @@ fn game_row(
                 } else {
                     iced::Font::DEFAULT
                 };
-                // The sign before the chips, so a narrow column clips the
-                // chips and keeps the sign (games_detail::map_cell_parts).
-                let mut m = row![].spacing(8).align_y(Alignment::Center);
-                for part in crate::games_detail::map_cell_parts(g, doubt) {
-                    let part: Element<'static, Message> = match part {
-                        MapPart::Name => text(name.clone())
-                            .size(SIZE_META)
-                            .font(font)
-                            .color(color)
-                            .into(),
-                        MapPart::Warn => warn_sign(),
-                        MapPart::Chip(chip) => small_chip_owned(chip, TEXT_2, BORDER),
-                    };
-                    m = m.push(part);
+                // The sign right after the name and before the chips, so a
+                // narrow column clips the chips first. The Map column is a
+                // share, so with the sign the cell reads its width to cap the
+                // name and keep the sign's 12 px (map_name_max_width).
+                let parts = crate::games_detail::map_cell_parts(g, doubt);
+                if parts.contains(&MapPart::Warn) {
+                    responsive(move |size| {
+                        let max = crate::games_detail::map_name_max_width(size.width, &parts);
+                        let m = map_cell(&name, color, font, &parts, max);
+                        container(m).center_y(Fill).into()
+                    })
+                    .width(Fill)
+                    .height(Length::Fixed(h))
+                    .into()
+                } else {
+                    map_cell(&name, color, font, &parts, None)
                 }
-                m.into()
             }
             Col::Hero => hero_cell(g, unsure(UnsureItem::Hero)),
             Col::Eda => text(games_rows::eda(g))
@@ -669,6 +672,43 @@ fn with_warn(cell: Element<'static, Message>, unsure: bool) -> Element<'static, 
 /// The 12 px amber warning sign of an unsure read.
 fn warn_sign() -> Element<'static, Message> {
     image(icons::handle(Icon::Warn)).width(12).height(12).into()
+}
+
+/// The list row's Map cell from `parts` in order. With `name_max` the name
+/// stays on one line, capped and clipped, so the sign after it keeps its
+/// width; without it the name draws as before. In the list row a squeezed
+/// chip clips on one line instead of becoming a two-line pill.
+fn map_cell(
+    name: &str,
+    color: Color,
+    font: iced::Font,
+    parts: &[MapPart],
+    name_max: Option<f32>,
+) -> Element<'static, Message> {
+    let mut m = row![]
+        .spacing(crate::games_detail::MAP_CELL_GAP)
+        .align_y(Alignment::Center);
+    for part in parts {
+        let part: Element<'static, Message> = match part {
+            MapPart::Name => {
+                let t = text(name.to_string())
+                    .size(SIZE_META)
+                    .font(font)
+                    .color(color);
+                match name_max {
+                    Some(max) => container(t.wrapping(Wrapping::None))
+                        .max_width(max)
+                        .clip(true)
+                        .into(),
+                    None => t.into(),
+                }
+            }
+            MapPart::Warn => warn_sign(),
+            MapPart::Chip(chip) => chip_box(chip.clone(), TEXT_2, BORDER, Wrapping::None),
+        };
+        m = m.push(part);
+    }
+    m.into()
 }
 
 /// A grey silhouette for the portrait (no Blizzard art is shipped), the
@@ -792,18 +832,33 @@ pub(crate) fn small_chip(
     small_chip_owned(label.to_string(), color, border)
 }
 
+/// A small outline chip whose label wraps inside the pill when squeezed,
+/// as text does by default. The open game's map line, the picker and the
+/// STATS heading use it. The open game's left column does not clip, so a
+/// one-line label there could run into the tile column.
 pub(crate) fn small_chip_owned(
     label: String,
     color: Color,
     border: Color,
 ) -> Element<'static, Message> {
-    // One line: a squeezed chip clips instead of wrapping past the row.
+    chip_box(label, color, border, Wrapping::default())
+}
+
+/// A small outline chip with its label wrapped as `wrapping` says. The list
+/// row's Map cell passes `Wrapping::None`: its cell clips, so a squeezed
+/// chip there clips on one line.
+fn chip_box(
+    label: String,
+    color: Color,
+    border: Color,
+    wrapping: Wrapping,
+) -> Element<'static, Message> {
     container(
         text(label)
             .size(SIZE_LABEL)
             .font(FONT_SEMIBOLD)
             .color(color)
-            .wrapping(Wrapping::None),
+            .wrapping(wrapping),
     )
     .padding(Padding::from([1, 8]))
     .style(move |_: &Theme| container::Style {
