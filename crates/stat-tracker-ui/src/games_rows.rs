@@ -1397,10 +1397,10 @@ mod tests {
         assert!(Col::Hero.sortable() && Col::Length.sortable());
     }
 
-    /// LENGTH sorts by the Tab span; a game with no span goes last both
-    /// ways. The note says what the span is and what is not recorded.
+    /// LENGTH sorts by the real length, else the Tab span; a game with
+    /// neither goes last both ways. The note says what Length is.
     #[test]
-    fn length_sorts_by_the_tab_span_and_the_note_says_what_it_is() {
+    fn length_sorts_by_the_real_length_or_the_tab_span_and_the_note_says_so() {
         let short = timed(Outcome::Win, "2026-09-02T20:00:00Z", "2026-09-02T20:04:00Z");
         let long = timed(Outcome::Win, "2026-09-02T21:00:00Z", "2026-09-02T21:09:00Z");
         let none = game(Outcome::Win, "2026-09-02T22:00:00Z", &[]);

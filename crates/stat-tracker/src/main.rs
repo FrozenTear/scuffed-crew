@@ -299,9 +299,11 @@ struct ActiveGame {
     /// ([`store_match_times`]). The start is set when a pre-game screen (map
     /// vote, hero select or ban) opens the game; a game a Tab or a stat split
     /// opened has none. The end is when the result the tracker read itself
-    /// was first seen ([`ActiveGame::note_match_end`]); a result set in the
-    /// app, or none, leaves it `None`. Either missing makes the app fall back
-    /// to the first to last Tab span, with a warning.
+    /// was first seen, if that mark is fresh, else when the read recorded it
+    /// ([`ActiveGame::note_match_end`], [`ActiveGame::note_sealed_end`]); an
+    /// end before the last tracked board is none. A result set in the app
+    /// is no end, and keeps an end already read. Either missing makes the
+    /// app fall back to the first to last Tab span, with a warning.
     match_times: stat_tracker::model::MatchTimes,
 }
 

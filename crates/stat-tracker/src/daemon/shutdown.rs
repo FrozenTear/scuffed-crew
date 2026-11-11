@@ -203,6 +203,8 @@ pub(crate) async fn apply_landed_capture_reports(
         // A stored row marks the snapshot like in the run loop, so the
         // shutdown write includes a final board that landed while stopping.
         if apply_capture_report(st, store, data_dir, &sid, result, Instant::now()).await {
+            // The open game's times, as the run loop stores them.
+            store_open_game_times(st, store, &stored_sid).await;
             refresh_snapshot_after_capture(st, store, data_dir, &stored_sid).await;
         }
     }

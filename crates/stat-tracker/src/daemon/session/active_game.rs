@@ -122,23 +122,22 @@ impl ActiveGame {
         self.record_outcome_at(outcome, Instant::now());
     }
 
-    /// A result the tracker read itself (a poll, a Tab frame, a seal at the
-    /// next game's start). Also the game's end ([`Self::note_match_end`]).
+    /// Record a result. It is not the game's end by itself: a result the
+    /// tracker read notes the end with [`Self::note_match_end`] or
+    /// [`Self::note_sealed_end`], and a result set in the app notes none.
     pub(crate) fn record_outcome_at(&mut self, outcome: detect::MatchOutcome, now: Instant) {
         self.outcome = outcome;
         self.outcome_recorded_at = Some(now);
         self.last_activity = now;
         self.outcome_locked = false;
-        self.note_match_end(outcome, now);
     }
 
     /// A result the member set in the app (SetOutcome, EditMatch). A Tab
     /// never clears it (R9-2). It is not a read of the game's end, so the
-    /// end stays as it was.
+    /// end stays as it was: none stays none, and an end the tracker read is
+    /// kept.
     pub(crate) fn record_member_outcome(&mut self, outcome: detect::MatchOutcome) {
-        let ended_at = self.match_times.ended_at;
         self.record_outcome(outcome);
-        self.match_times.ended_at = ended_at;
         self.outcome_locked = outcome.is_decided();
     }
 
@@ -148,19 +147,61 @@ impl ActiveGame {
         self.match_times.started_at = Some(SurrealDatetime::from(wall_clock(now)));
     }
 
-    /// The tracker read this game's result itself: the game ended when that
-    /// result was first seen on screen ([`Self::result_mark`] for the same
-    /// result), else at `now`. The first end stays; an undecided result is
-    /// no end.
-    pub(crate) fn note_match_end(&mut self, outcome: detect::MatchOutcome, now: Instant) {
+    /// When the board this game tracked last was taken: its Tab press, else
+    /// (after a restart, or on a game a stat split opened) the report that
+    /// stored it. `None` before the first board.
+    pub(crate) fn last_tracked_frame(&self) -> Option<Instant> {
+        self.last_board_pressed_at.or(self.last_stats_at)
+    }
+
+    /// The tracker read this game's result itself at `now` (a poll confirm,
+    /// a Tab frame, a game that opened already decided). The end is when
+    /// that result was first seen ([`Self::result_mark`] for the same
+    /// result) only when the mark is fresh: no progressed board after it
+    /// (`progressed_after_mark`), at most [`MATCH_END_MARK_MAX_AGE`] before
+    /// `now`, and not before [`Self::last_tracked_frame`]. Else the end is
+    /// `now`, when that is not before the last tracked frame either. Else
+    /// there is no end, and the length falls back to the Tab span with a
+    /// warning. The first end stays; an undecided result is no end.
+    pub(crate) fn note_match_end(
+        &mut self,
+        outcome: detect::MatchOutcome,
+        now: Instant,
+        progressed_after_mark: u8,
+    ) {
         if !outcome.is_decided() || self.match_times.ended_at.is_some() {
             return;
         }
-        let seen = self
+        let last = self.last_tracked_frame();
+        let after_last = |at: Instant| last.is_none_or(|last| at >= last);
+        let mark = self
             .result_mark
             .filter(|m| m.outcome == outcome)
-            .map_or(now, |m| m.seen_at);
-        self.match_times.ended_at = Some(SurrealDatetime::from(wall_clock(seen)));
+            .map(|m| m.seen_at)
+            .filter(|&seen| {
+                progressed_after_mark == 0
+                    && now.saturating_duration_since(seen) <= MATCH_END_MARK_MAX_AGE
+                    && after_last(seen)
+            });
+        let end = mark.or_else(|| Some(now).filter(|&now| after_last(now)));
+        self.match_times.ended_at = end.map(|at| SurrealDatetime::from(wall_clock(at)));
+    }
+
+    /// The hint `outcome` was sealed when the next game started. The end is
+    /// when that hint was first seen, whatever its age (the next game's
+    /// start screen is no read of this game's end), and only when it is not
+    /// before [`Self::last_tracked_frame`]. Else there is no end.
+    pub(crate) fn note_sealed_end(&mut self, outcome: detect::MatchOutcome) {
+        if !outcome.is_decided() || self.match_times.ended_at.is_some() {
+            return;
+        }
+        let last = self.last_tracked_frame();
+        self.match_times.ended_at = self
+            .result_mark
+            .filter(|m| m.outcome == outcome)
+            .map(|m| m.seen_at)
+            .filter(|&seen| last.is_none_or(|last| seen >= last))
+            .map(|at| SurrealDatetime::from(wall_clock(at)));
     }
 
     pub(crate) fn touch_at(&mut self, now: Instant) {
@@ -192,6 +233,12 @@ impl ActiveGame {
     }
 }
 
+/// Oldest a result mark may be, at the read that records the result, and
+/// still be the game's end ([`ActiveGame::note_match_end`]): two confirm
+/// windows. An older mark is a stale hint, often a misread.
+pub(crate) const MATCH_END_MARK_MAX_AGE: std::time::Duration =
+    std::time::Duration::from_secs(2 * OUTCOME_CONFIRM_WINDOW.as_secs());
+
 /// `at` on the wall clock, measured from now. An `Instant` after now (tests
 /// run ahead of the clock) maps after now too.
 pub(crate) fn wall_clock(at: Instant) -> chrono::DateTime<Utc> {
@@ -206,22 +253,45 @@ pub(crate) fn wall_clock(at: Instant) -> chrono::DateTime<Utc> {
 
 /// Store the game's real start and end on its rows
 /// ([`storage::LocalStore::attach_match_times`]). Only a game with a stored
-/// row. A failed write is logged and nothing else: the game stays recorded,
-/// and its length falls back to the Tab span.
-pub(crate) async fn store_match_times(store: &storage::LocalStore, g: &ActiveGame) {
+/// row. `true` when rows changed, so the caller marks the snapshot. A failed
+/// write is logged and nothing else: the game stays recorded, and the next
+/// write for this game (each stored capture, the result, the close) tries
+/// again.
+pub(crate) async fn store_match_times(store: &storage::LocalStore, g: &ActiveGame) -> bool {
     if !g.session_created {
-        return;
+        return false;
     }
-    if let Err(e) = store
+    match store
         .attach_match_times(&g.session_id, &g.match_times)
         .await
     {
-        tracing::warn!(
-            target: "scuffed_stat_tracker",
-            error = %e,
-            session_id = %g.session_id,
-            "game start and end not stored: its length falls back to the Tab span"
-        );
+        Ok(changed) => changed,
+        Err(e) => {
+            tracing::warn!(
+                target: "scuffed_stat_tracker",
+                error = %e,
+                session_id = %g.session_id,
+                "game start and end not stored: its length falls back to the Tab span"
+            );
+            false
+        }
+    }
+}
+
+/// After a stored capture: the open game's times on its rows, when the
+/// capture landed on the open game. The run loop and the shutdown drain
+/// both call this.
+pub(crate) async fn store_open_game_times(
+    st: &SessionState,
+    store: &storage::LocalStore,
+    stored_sid: &str,
+) {
+    if let Some(g) = st
+        .active_game
+        .as_ref()
+        .filter(|g| g.session_id == stored_sid)
+    {
+        store_match_times(store, g).await;
     }
 }
 
@@ -302,6 +372,10 @@ pub(crate) struct ArchivedHold {
     pub(crate) map: String,
     pub(crate) outcome: String,
     pub(crate) at: chrono::DateTime<Utc>,
+    /// Times to store on a fresh hold's own session: none seen, so its
+    /// length warns. `None` on an imported hold, whose rows carry the
+    /// session's times.
+    pub(crate) times: Option<stat_tracker::model::MatchTimes>,
 }
 
 /// A skeleton [`retire_stale_skeleton`] removed, plus a hold to keep.
@@ -769,17 +843,19 @@ pub(crate) fn retire_stale_skeleton(data_dir: &std::path::Path) -> Option<StaleD
                 // A fresh hold belongs to the next game. The skeleton map is
                 // the previous game, so keeping it would archive that board
                 // as Busan and a later GUI result would upload it as Busan.
-                let (session_id, map, outcome) = if hold.imported {
+                let (session_id, map, outcome, times) = if hold.imported {
                     (
                         session_id.clone(),
                         hold.map.unwrap_or_default(),
                         hold.outcome.to_string(),
+                        None,
                     )
                 } else {
                     (
                         format!("{:016x}", rand_id()),
                         String::new(),
                         "unknown".into(),
+                        Some(stat_tracker::model::MatchTimes::default()),
                     )
                 };
                 tracing::warn!(
@@ -795,6 +871,7 @@ pub(crate) fn retire_stale_skeleton(data_dir: &std::path::Path) -> Option<StaleD
                     map,
                     outcome,
                     at: hold.at.unwrap_or_else(Utc::now),
+                    times,
                 }
             });
             persist_active_game(data_dir, None);
@@ -814,15 +891,17 @@ pub(crate) fn retire_stale_skeleton(data_dir: &std::path::Path) -> Option<StaleD
 
 /// Write a stale hold into local history. An imported hold keeps the
 /// persisted map and outcome. A fresh hold is an unknown session with an
-/// empty map. Unknown rows are not uploaded. A Deathmatch map stays local
-/// even if a later edit sets a result.
+/// empty map, and with empty times ([`ArchivedHold::times`]), so its length
+/// warns instead of reading as a row from before the times were stored.
+/// Unknown rows are not uploaded. A Deathmatch map stays local even if a
+/// later edit sets a result.
 pub(crate) async fn archive_stale_hold(
     store: &storage::LocalStore,
     data_dir: &std::path::Path,
     archive: &ArchivedHold,
 ) {
     let hero = archive.hero.clone().unwrap_or_default();
-    if let Err(e) = store_held_board(
+    let mut written = store_held_board(
         store,
         data_dir,
         &archive.session_id,
@@ -832,8 +911,17 @@ pub(crate) async fn archive_stale_hold(
         archive.counters,
         archive.at,
     )
-    .await
+    .await;
+    if written.is_ok()
+        && let Some(times) = &archive.times
     {
+        written = store
+            .attach_match_times(&archive.session_id, times)
+            .await
+            .map(|_| ())
+            .map_err(anyhow::Error::from_boxed);
+    }
+    if let Err(e) = written {
         tracing::warn!(
             target: "scuffed_stat_tracker",
             error = %e,

@@ -185,7 +185,7 @@ fn left_column(g: &Game, ctx: Ctx, picker: Option<&Picker>) -> Element<'static, 
             heroes(g, ctx, open(Field::Hero))
         ),
         block("RESULT", unsure(UnsureItem::Result), result(g, in_progress)),
-        block("TIME", false, time(g)),
+        block("TIME", false, time(g, in_progress)),
     ]
     .spacing(14)
     .into()
@@ -562,17 +562,26 @@ fn result(g: &Game, in_progress: bool) -> Element<'static, Message> {
     .into()
 }
 
-/// "Tracked 9:14", the Length line, a warning when the game's start or end
-/// was not seen, and the note.
-fn time(g: &Game) -> Element<'static, Message> {
+/// "Tracked 9:14", the Length line, a warning when the real length is not
+/// known (a live game does not warn that its end is not seen yet), and the
+/// note. A real length is bold like Tracked; the Tab span floor stays grey.
+fn time(g: &Game, in_progress: bool) -> Element<'static, Message> {
     let t = detail::tracked(g);
     let len = detail::game_length(g);
+    let length = if len.is_real() {
+        text(len.length_line())
+            .size(SIZE_BODY)
+            .font(FONT_BOLD)
+            .color(TEXT)
+    } else {
+        text(len.length_line()).size(SIZE_BODY).color(TEXT_2)
+    };
     let mut col = column![
         text(t.line()).size(SIZE_BODY).font(FONT_BOLD).color(TEXT),
-        text(len.length_line()).size(SIZE_BODY).color(TEXT_2),
+        length,
     ]
     .spacing(4);
-    if let Some(warning) = len.warning() {
+    if let Some(warning) = len.warning(in_progress) {
         col = col.push(text(warning).size(SMALL).color(theme::WARN));
     }
     if let Some(note) = len.note() {

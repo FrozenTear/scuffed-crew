@@ -102,3 +102,38 @@ fn none_is_not_written_to_json_and_an_old_line_still_reads() {
     let v = serde_json::to_value(MatchTimes::default()).unwrap();
     assert_eq!(v, serde_json::json!({}));
 }
+
+/// Times with sub-second parts read back equal, so the open game's times
+/// written again after every capture are a no-op, not a rewrite.
+#[tokio::test]
+async fn sub_second_times_attached_again_write_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    store.insert_match(snap("g1", 1)).await.unwrap();
+    let start = chrono::Utc::now();
+    let times = MatchTimes {
+        started_at: Some(SurrealDatetime::from(start)),
+        ended_at: Some(SurrealDatetime::from(
+            start + chrono::Duration::milliseconds(754_321),
+        )),
+    };
+    assert!(store.attach_match_times("g1", &times).await.unwrap());
+    assert!(!store.attach_match_times("g1", &times).await.unwrap());
+    let rows = store.get_session_snapshots("g1").await.unwrap();
+    assert_eq!(rows[0].match_times, Some(times));
+}
+
+/// Attaching times leaves `matches.jsonl` alone: nothing reads it, and
+/// the attach runs on the event loop after every stored capture.
+#[tokio::test]
+async fn attaching_times_does_not_rewrite_the_match_log() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = LocalStore::open(dir.path()).await.expect("open store");
+    let row = snap("g1", 1);
+    append_match_log(dir.path(), &row);
+    store.insert_match(row).await.unwrap();
+    let log = dir.path().join("matches.jsonl");
+    let before = std::fs::read(&log).unwrap();
+    assert!(store.attach_match_times("g1", &both()).await.unwrap());
+    assert_eq!(std::fs::read(&log).unwrap(), before);
+}

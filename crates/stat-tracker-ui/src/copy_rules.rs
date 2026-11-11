@@ -20,6 +20,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("form_widgets.rs", include_str!("form_widgets.rs")),
     ("games_delete.rs", include_str!("games_delete.rs")),
     ("games_detail.rs", include_str!("games_detail.rs")),
+    ("games_length.rs", include_str!("games_length.rs")),
     ("games_panel.rs", include_str!("games_panel.rs")),
     ("games_picker.rs", include_str!("games_picker.rs")),
     ("games_retry.rs", include_str!("games_retry.rs")),

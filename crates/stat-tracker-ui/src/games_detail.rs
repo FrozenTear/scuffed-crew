@@ -250,8 +250,10 @@ pub fn format_delta(stat: Stat, d: f64) -> String {
 }
 
 /// The Time block's Tracked line: the span from the first to the last Tab
-/// press. It is also the Length when the game's real start or end was not
-/// seen ([`GameLength::Floor`]): the game ran at least that long.
+/// press. It is also the Length, as a floor, when the game's real length is
+/// not known ([`GameLength::Floor`]): a start or end not seen, stored times
+/// that do not fit, or an older row recorded before the times were stored.
+/// The game ran at least that long.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Tracked {
     /// First to last Tab read, in seconds.
@@ -319,92 +321,7 @@ impl Tracked {
     }
 }
 
-/// Warning on a game whose real start was not seen (a Tab opened it).
-pub const START_NOT_SEEN: &str = "Game start not seen, so this is not the real length";
-/// Warning on a game whose real end was not seen (no result read).
-pub const END_NOT_SEEN: &str = "Game end not seen, so this is not the real length";
-/// Warning on a game with neither its real start nor its end seen.
-pub const START_END_NOT_SEEN: &str = "Game start and end not seen, so this is not the real length";
-
-/// The Length line, the LENGTH cell and their sort key. The real length
-/// (end minus start) when the tracker stored both edges of the game, else
-/// the Tab span ([`Tracked`]) as a floor.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GameLength {
-    /// End minus start, in seconds.
-    Real(i64),
-    /// The Tab span, the game ran at least that long. `missed` warns which
-    /// real edge was not seen; `None` on a game recorded before the
-    /// tracker stored start and end, which keeps the Tab span quietly.
-    Floor {
-        tracked: Tracked,
-        missed: Option<&'static str>,
-    },
-}
-
-pub fn game_length(g: &Game) -> GameLength {
-    let tracked = tracked(g);
-    let Some(times) = g.match_times else {
-        return GameLength::Floor {
-            tracked,
-            missed: None,
-        };
-    };
-    let missed = match (times.started_at, times.ended_at) {
-        (Some(start), Some(end)) if end > start => {
-            return GameLength::Real((end - start).num_seconds());
-        }
-        (Some(_), _) => END_NOT_SEEN,
-        (None, Some(_)) => START_NOT_SEEN,
-        (None, None) => START_END_NOT_SEEN,
-    };
-    GameLength::Floor {
-        tracked,
-        missed: Some(missed),
-    }
-}
-
-impl GameLength {
-    /// The length in seconds the LENGTH column sorts by.
-    pub fn secs(&self) -> Option<i64> {
-        match self {
-            GameLength::Real(s) => Some(*s),
-            GameLength::Floor { tracked, .. } => tracked.span_secs(),
-        }
-    }
-
-    /// "Length: 12:34", or the floor: "Length: at least 9:14" or
-    /// "Length: not recorded".
-    pub fn length_line(&self) -> String {
-        match self {
-            GameLength::Real(s) => format!("Length: {}", mm_ss(*s)),
-            GameLength::Floor { tracked, .. } => tracked.length_line(),
-        }
-    }
-
-    /// The LENGTH cell: "12:34", "9:14+" (at least), or `None` (drawn "-").
-    pub fn length_cell(&self) -> Option<String> {
-        match self {
-            GameLength::Real(s) => Some(mm_ss(*s)),
-            GameLength::Floor { tracked, .. } => tracked.length_cell(),
-        }
-    }
-
-    /// Which real edge was not seen, shown as a warning under the Length.
-    pub fn warning(&self) -> Option<&'static str> {
-        match self {
-            GameLength::Real(_) => None,
-            GameLength::Floor { missed, .. } => *missed,
-        }
-    }
-
-    pub fn note(&self) -> Option<&'static str> {
-        match self {
-            GameLength::Real(_) => Some("From the game's start screen to its result"),
-            GameLength::Floor { tracked, .. } => tracked.note(),
-        }
-    }
-}
+pub use crate::games_length::*;
 
 /// The queue title warning for the map line: the sentence when the game has
 /// a queue title with no confident value (`QueueTitle::confident_value`,
@@ -698,16 +615,16 @@ impl Upload {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::model::{GameOcr, GameTimes, Outcome, Role};
+    use crate::model::{GameOcr, Outcome, Role};
     use chrono::{DateTime, TimeZone, Utc};
 
-    fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
+    pub(crate) fn at(h: u32, m: u32, s: u32) -> DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 9, 2, h, m, s).unwrap()
     }
 
-    fn seg(
+    pub(crate) fn seg(
         i: u32,
         hero: &str,
         snaps: u32,
@@ -728,7 +645,7 @@ mod tests {
         }
     }
 
-    fn game(id: &str, hero: &str, e: u32, dmg: u32, when: DateTime<Utc>) -> Game {
+    pub(crate) fn game(id: &str, hero: &str, e: u32, dmg: u32, when: DateTime<Utc>) -> Game {
         Game {
             session_id: id.into(),
             hero: hero.into(),
@@ -915,9 +832,9 @@ mod tests {
         assert_eq!(tracked(&g).line(), "Tracked: one scoreboard read");
     }
 
-    /// Item 19: the Length line and the LENGTH cell show the one length the
-    /// tracker has, the Tab span, as a floor ("at least"), and say "not
-    /// recorded" (the cell "-") when there is no span.
+    /// Item 19: the Tab span's own Length line and LENGTH cell, the floor a
+    /// game shows when its real length is not known ([`game_length`]): "at
+    /// least", or "not recorded" (the cell "-") when there is no span.
     #[test]
     fn length_is_the_tab_span_as_a_floor_or_not_recorded() {
         let mut g = game("g", "Mei", 24, 1, at(20, 0, 0));
@@ -930,107 +847,6 @@ mod tests {
         assert_eq!(tracked(&g).length_line(), "Length: at least 9:14");
         assert_eq!(tracked(&g).length_cell().as_deref(), Some("9:14+"));
         assert_eq!(tracked(&g).span_secs(), Some(554));
-    }
-
-    fn times(start: Option<DateTime<Utc>>, end: Option<DateTime<Utc>>) -> Option<GameTimes> {
-        Some(GameTimes {
-            started_at: start,
-            ended_at: end,
-        })
-    }
-
-    /// Item 12: with the game's real start and end stored, the Length line
-    /// and the LENGTH cell are the real length, not a floor. Tracked stays
-    /// the Tab span.
-    #[test]
-    fn a_stored_start_and_end_show_the_real_length() {
-        let mut g = game("g", "Mei", 24, 1, at(20, 12, 0));
-        g.segments = vec![seg(0, "Mei", 4, true, at(20, 2, 10), at(20, 11, 24))];
-        g.match_times = times(Some(at(20, 0, 0)), Some(at(20, 12, 34)));
-        let len = game_length(&g);
-        assert_eq!(len, GameLength::Real(754));
-        assert_eq!(len.length_line(), "Length: 12:34");
-        assert_eq!(len.length_cell().as_deref(), Some("12:34"));
-        assert_eq!(len.secs(), Some(754));
-        assert_eq!(len.warning(), None);
-        assert_eq!(
-            len.note(),
-            Some("From the game's start screen to its result")
-        );
-        for shown in [len.length_line(), len.length_cell().unwrap()] {
-            assert!(
-                !shown.contains("at least") && !shown.contains('+'),
-                "{shown}"
-            );
-        }
-        assert_eq!(tracked(&g).line(), "Tracked 9:14");
-    }
-
-    /// A game a Tab opened (start not seen) still shows the Tab span as a
-    /// floor, and says the start was not seen.
-    #[test]
-    fn a_missed_start_falls_back_to_at_least_and_warns() {
-        let mut g = game("g", "Mei", 24, 1, at(20, 12, 0));
-        g.segments = vec![seg(0, "Mei", 4, true, at(20, 0, 10), at(20, 9, 24))];
-        g.match_times = times(None, Some(at(20, 12, 34)));
-        let len = game_length(&g);
-        assert_eq!(len.length_line(), "Length: at least 9:14");
-        assert_eq!(len.length_cell().as_deref(), Some("9:14+"));
-        assert_eq!(len.secs(), Some(554));
-        assert_eq!(len.warning(), Some(START_NOT_SEEN));
-        assert!(START_NOT_SEEN.contains("start not seen"));
-        assert_eq!(
-            len.note(),
-            Some("From your first to last Tab press, shorter than the game")
-        );
-    }
-
-    /// No result read (still open, or closed without one): the floor, and
-    /// a warning that the end was not seen. Neither edge seen says both.
-    #[test]
-    fn a_missed_end_falls_back_to_at_least_and_warns() {
-        let mut g = game("g", "Mei", 24, 1, at(20, 12, 0));
-        g.segments = vec![seg(0, "Mei", 4, true, at(20, 0, 10), at(20, 9, 24))];
-        g.match_times = times(Some(at(20, 0, 0)), None);
-        let len = game_length(&g);
-        assert_eq!(len.length_line(), "Length: at least 9:14");
-        assert_eq!(len.length_cell().as_deref(), Some("9:14+"));
-        assert_eq!(len.warning(), Some(END_NOT_SEEN));
-        assert!(END_NOT_SEEN.contains("end not seen"));
-        // An end at or before the start is no end.
-        g.match_times = times(Some(at(20, 0, 0)), Some(at(20, 0, 0)));
-        assert_eq!(game_length(&g).warning(), Some(END_NOT_SEEN));
-        g.match_times = times(None, None);
-        assert_eq!(game_length(&g).warning(), Some(START_END_NOT_SEEN));
-        assert_eq!(game_length(&g).length_line(), "Length: at least 9:14");
-        // One Tab with no end: not recorded, and still the warning.
-        g.segments = vec![seg(0, "Mei", 1, true, at(20, 0, 0), at(20, 0, 0))];
-        g.match_times = times(Some(at(20, 0, 0)), None);
-        assert_eq!(game_length(&g).length_line(), "Length: not recorded");
-        assert_eq!(game_length(&g).length_cell(), None);
-        assert_eq!(game_length(&g).warning(), Some(END_NOT_SEEN));
-        for w in [START_NOT_SEEN, END_NOT_SEEN, START_END_NOT_SEEN] {
-            assert!(!w.contains('\u{2014}') && !w.contains('\u{2013}'), "{w}");
-        }
-    }
-
-    /// A game recorded before start and end were stored keeps today's
-    /// length: the Tab span floor, or not recorded, and no warning.
-    #[test]
-    fn an_older_row_keeps_the_tab_span_and_no_warning() {
-        let mut g = game("g", "Mei", 24, 1, at(20, 0, 0));
-        assert_eq!(g.match_times, None);
-        assert_eq!(game_length(&g).length_line(), "Length: not recorded");
-        assert_eq!(game_length(&g).length_cell(), None);
-        assert_eq!(game_length(&g).warning(), None);
-        g.segments = vec![seg(0, "Mei", 1, true, at(20, 0, 0), at(20, 0, 0))];
-        assert_eq!(game_length(&g).length_line(), "Length: not recorded");
-        assert_eq!(game_length(&g).length_cell(), None);
-        assert_eq!(game_length(&g).warning(), None);
-        g.segments = vec![seg(0, "Mei", 4, true, at(20, 0, 10), at(20, 9, 24))];
-        assert_eq!(game_length(&g).length_line(), "Length: at least 9:14");
-        assert_eq!(game_length(&g).length_cell().as_deref(), Some("9:14+"));
-        assert_eq!(game_length(&g).warning(), None);
     }
 
     #[test]
