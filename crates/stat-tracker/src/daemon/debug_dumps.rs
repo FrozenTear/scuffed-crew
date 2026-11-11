@@ -356,7 +356,7 @@ fn write_map_label_crop(
 }
 
 /// [`prepare_map_label_crop`] then [`commit_tab_map_label_crop`] for a Tab
-/// whose row is stored.
+/// the tracker keeps for its game (`prepare_capture_row` returns Store).
 #[cfg(test)]
 pub(crate) fn archive_map_label_crop(
     data_dir: &std::path::Path,

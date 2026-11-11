@@ -9,20 +9,25 @@
 //! - `consent.json`: the last consent the site gave ([`TrainingCropConsent`]),
 //!   so the daemon knows which crops to keep before the next read. Absent
 //!   or unreadable is all off.
-//! - `status.json`: the warning of the last send pass, for the desktop app.
+//! - `status.json`: the warning of the last send pass, for the desktop app,
+//!   and the delete marker a "press Delete my training crops again" warning
+//!   was left under.
 //! - `game_tokens.json`: the random `game_token` of recent games, by local
 //!   session id. The session id never leaves the machine.
 //! - `owner.json`: the website URL and a fingerprint of the token the
 //!   outbox and cached consent belong to. When the saved website or token
-//!   changes, everything above is dropped before any send, so crops kept
-//!   under one site's consent never go to another.
+//!   changes, the outbox, the cached consent and the game tokens are dropped
+//!   before any send, so crops kept under one site's consent never go to
+//!   another. A website change also drops the status and the ids still to
+//!   delete; a new token for the same website keeps them.
 //! - `deleted_at`: when the desktop app last asked the website to delete
 //!   every own training crop (Unix milliseconds). A pass drops crops kept
 //!   before it. When the file changed while an upload ran, the pass removes
 //!   again by id what that upload stored.
 //! - `pending_deletes.json`: ids of crops the site stored that such a
 //!   removal could not delete yet. Each pass tries them again before it
-//!   sends anything, and warns until they are gone.
+//!   sends anything, and warns until they are gone, the website changes or
+//!   Upload games goes off.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -127,6 +132,11 @@ pub struct TrainingStatus {
     /// it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sticky: bool,
+    /// The delete marker (see [`mark_training_delete`]) under which a send
+    /// got no answer while the member deleted. The warning asks the member
+    /// to delete again, and stays until the marker changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_again_at: Option<i64>,
 }
 
 /// The status file, or `None` when there is none or it does not parse.
@@ -141,13 +151,16 @@ pub fn training_warning(data_dir: &Path) -> Option<String> {
 }
 
 /// Leave `warning` for the desktop app, or clear the last one (`None`).
-/// A clear keeps a sticky warning unless `clear_sticky` (a send worked, or
-/// the crops a delete left on the website are gone).
+/// A clear keeps a sticky warning unless `clear_sticky` (a send worked, the
+/// crops a delete left on the website are gone, or the member deleted
+/// again). `delete_again_at` is saved with the warning (see
+/// [`TrainingStatus::delete_again_at`]).
 pub(super) fn write_training_warning(
     data_dir: &Path,
     warning: Option<&str>,
     sticky: bool,
     clear_sticky: bool,
+    delete_again_at: Option<i64>,
 ) {
     let path = root(data_dir).join(STATUS_FILE);
     let Some(warning) = warning else {
@@ -161,6 +174,7 @@ pub(super) fn write_training_warning(
         warning: Some(warning.to_string()),
         at: Some(chrono::Utc::now().to_rfc3339()),
         sticky,
+        delete_again_at,
     };
     let written = serde_json::to_vec(&status)
         .map_err(std::io::Error::other)
@@ -241,7 +255,8 @@ pub fn keep_training_crop(
 }
 
 /// A `map_name` crop for training, from the map-label PNG the tracker just
-/// saved for `session_id` from a Tab whose row is stored. `width` and
+/// saved for `session_id` from a Tab the tracker keeps for its game
+/// (`prepare_capture_row` returns Store). `width` and
 /// `height` are the capture size. Nothing is read or kept while the site's
 /// last answer has `map_name` consent off.
 pub fn keep_map_name_crop(
@@ -352,19 +367,22 @@ pub fn drop_kind(data_dir: &Path, kind: UploadKind) {
     let _ = std::fs::remove_dir_all(kind_dir(data_dir, kind));
 }
 
-/// Drop every waiting crop, the cached consent and the game tokens: sync
-/// is off, or the member deleted their training crops. The status file
-/// stays, so a warning is not lost.
+/// Drop every waiting crop and the game tokens: the member deleted their
+/// training crops, or the token changed. The cached consent and the status
+/// file stay, so a warning is not lost.
 pub fn clear_training_outbox(data_dir: &Path) {
     let _ = std::fs::remove_dir_all(root(data_dir).join(OUTBOX));
     let _ = std::fs::remove_file(root(data_dir).join(TOKENS_FILE));
 }
 
 /// [`clear_training_outbox`], plus the cached consent, the owner, the
-/// warning and the ids still to delete: sync is off or the website
-/// changed, so no crop is kept until the site is read again, and there is
-/// no send to warn about. The ids to delete belong to the old website and
-/// token and cannot be removed with another.
+/// warning and the ids still to delete: Upload games is off (sign out) or
+/// the website changed, so no crop is kept until the site is read again,
+/// and there is no send to warn about. The ids to delete go too: with no
+/// token, or on another website, the tracker cannot remove them, so a crop
+/// the old website kept stays there until the member deletes it there. A
+/// new token for the same website does not come here (see
+/// [`adopt_training_owner`]).
 pub fn forget_training_crops(data_dir: &Path) {
     clear_training_outbox(data_dir);
     let _ = std::fs::remove_file(root(data_dir).join(CONSENT_FILE));
@@ -435,9 +453,14 @@ fn owner_of(server_url: &str, token: &str) -> Owner {
 
 /// Bind the training crop files to this website and token. When they
 /// belonged to another, every waiting crop, the cached consent and the game
-/// tokens are dropped first; `true` then. With no owner recorded yet the
-/// pair is only recorded: consent is cached only by a send pass, which
-/// records its owner before it reads the consent.
+/// tokens are dropped first; `true` then. On another website the status
+/// and the ids still to delete go too ([`forget_training_crops`]). With
+/// only a new token for the same website they stay: the website lets any
+/// sync token of the member who owns a crop delete it by id, and answers
+/// 404 `crop_not_found` for another member's crop, which a pass counts as
+/// done. With no owner recorded yet the pair is only recorded: consent is
+/// cached only by a send pass, which records its owner before it reads the
+/// consent.
 pub fn adopt_training_owner(data_dir: &Path, server_url: &str, token: &str) -> bool {
     let _owner = OWNER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let want = owner_of(server_url, token);
@@ -447,7 +470,11 @@ pub fn adopt_training_owner(data_dir: &Path, server_url: &str, token: &str) -> b
         return false;
     }
     let changed = path.exists();
-    if changed {
+    let same_site = have.is_some_and(|have| have.server_url == want.server_url);
+    if changed && same_site {
+        clear_training_outbox(data_dir);
+        let _ = std::fs::remove_file(root(data_dir).join(CONSENT_FILE));
+    } else if changed {
         forget_training_crops(data_dir);
     }
     match serde_json::to_vec(&want) {

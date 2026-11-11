@@ -15,8 +15,9 @@
 //! Training crops (opt-in): while the member's `map_name` consent on the
 //! site is on, the daemon copies a crop it just wrote into the training
 //! crop outbox (`sync::keep_map_name_crop`), which sends it to the site,
-//! but only from a Tab whose row the tracker stores. A crop from a rejected
-//! capture, or from a Tab whose row is dropped (an untracked map with no
+//! but only from a Tab the tracker keeps for its game (`prepare_capture_row`
+//! returns Store). A crop from a rejected capture, or from a Tab
+//! `prepare_capture_row` drops (an untracked map with no
 //! open game, a PvE Adlersbrunn board), is kept here and never copied. With
 //! that consent off nothing is copied and nothing here leaves the machine.
 

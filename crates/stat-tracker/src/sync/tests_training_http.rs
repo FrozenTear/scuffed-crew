@@ -7,8 +7,8 @@ use crate::config::SyncConfig;
 
 use super::tests::client;
 use super::tests_training::{all_consent, consent, part_names, png, token};
-use super::training_pass::TRAINING_DELETE_OWED;
-use super::training_store::{pending_deletes, write_pending_deletes};
+use super::training_pass::{TRAINING_DELETE_AGAIN, TRAINING_DELETE_OWED};
+use super::training_store::{pending_deletes, write_pending_deletes, write_training_warning};
 use super::*;
 
 /// One request as the server saw it.
@@ -854,6 +854,132 @@ async fn a_credential_change_mid_pass_sends_nothing_to_the_new_site() {
     );
     assert_eq!(read_training_status(dir.path()), None);
     assert!(pending_deletes(dir.path()).is_empty());
+}
+
+/// The member's delete is marked after the pass picked its batch, and the
+/// upload then gets no answer (the connection drops). The site may have
+/// stored the batch after the delete, and the tracker has no ids for it: a
+/// sticky warning asks the member to delete again, no id is made up, and
+/// the warning stays, even after a later send works, until the member
+/// deletes again.
+#[tokio::test]
+async fn no_answer_to_a_send_during_a_delete_asks_to_delete_again() {
+    let dir = tempfile::tempdir().unwrap();
+    consent(dir.path(), all_consent());
+    queue(dir.path(), UploadKind::MapName, 1);
+    let listener = new_listener();
+    let second = listener.try_clone().unwrap();
+    let third = listener.try_clone().unwrap();
+    let marker_dir = dir.path().to_path_buf();
+    let (url, server) = serve_hooked(
+        listener,
+        vec![
+            http(200, "", &consent_body(all_consent())),
+            // Nothing comes back: the connection closes unanswered.
+            String::new(),
+        ],
+        move |seen| {
+            if seen.line().starts_with("POST") {
+                mark_training_delete(&marker_dir).unwrap();
+            }
+        },
+    );
+    let c = client(&url);
+    let report = run_training_pass(&c, dir.path()).await;
+    let seen = lines(&server.join().unwrap());
+    assert_eq!(seen.len(), 2, "no delete by id: {seen:?}");
+    assert_eq!(report.sent, 0);
+    assert_eq!(report.retry, TrainingRetry::Backoff);
+    assert_eq!(report.warning.as_deref(), Some(TRAINING_DELETE_AGAIN));
+    assert!(pending_deletes(dir.path()).is_empty(), "no invented ids");
+    let status = read_training_status(dir.path()).expect("a warning");
+    assert!(status.sticky);
+    assert_eq!(status.warning.as_deref(), Some(TRAINING_DELETE_AGAIN));
+    assert!(status.delete_again_at.is_some());
+
+    // A later send that works does not hide it.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    queue(dir.path(), UploadKind::MapName, 1);
+    let (_, server) = serve_on(
+        second,
+        vec![
+            http(200, "", &consent_body(all_consent())),
+            http(201, "", &stored_ids("map_name", &[ID_A])),
+        ],
+    );
+    let report = run_training_pass(&c, dir.path()).await;
+    server.join().unwrap();
+    assert_eq!(report.sent, 1);
+    assert_eq!(
+        training_warning(dir.path()).as_deref(),
+        Some(TRAINING_DELETE_AGAIN)
+    );
+
+    // The member deletes again: the next pass clears it.
+    mark_training_delete(dir.path()).unwrap();
+    let (_, server) = serve_on(third, vec![http(200, "", &consent_body(all_consent()))]);
+    let report = run_training_pass(&c, dir.path()).await;
+    server.join().unwrap();
+    assert_eq!(report.warning, None);
+    assert_eq!(read_training_status(dir.path()), None);
+}
+
+/// A new token for the same website keeps the ids still to delete and
+/// their warning, since the site lets any token of the member delete by
+/// id; it still drops waiting crops and the cached consent. Another
+/// website drops them all.
+#[tokio::test]
+async fn a_new_token_keeps_crops_still_to_delete_another_website_does_not() {
+    let dir = tempfile::tempdir().unwrap();
+    let listener = new_listener();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    assert!(!adopt_training_owner(dir.path(), &url, "token-a"));
+    consent(dir.path(), all_consent());
+    queue(dir.path(), UploadKind::MapName, 1);
+    write_pending_deletes(dir.path(), &[ID_A.to_string()]);
+    write_training_warning(dir.path(), Some(TRAINING_DELETE_OWED), true, false, None);
+
+    assert!(adopt_training_owner(dir.path(), &url, "token-b"));
+    assert!(!has_queued_crops(dir.path()));
+    assert_eq!(
+        cached_training_consent(dir.path()),
+        TrainingCropConsent::default()
+    );
+    assert_eq!(pending_deletes(dir.path()), [ID_A]);
+    assert_eq!(
+        training_warning(dir.path()).as_deref(),
+        Some(TRAINING_DELETE_OWED)
+    );
+
+    // A pass with yet another token removes it, then clears the warning.
+    let (_, server) = serve_on(
+        listener,
+        vec![
+            http(200, "", r#"{"deleted":1}"#),
+            http(200, "", &consent_body(TrainingCropConsent::default())),
+        ],
+    );
+    let report = run_training_pass(&client(&url), dir.path()).await;
+    let seen = server.join().unwrap();
+    assert_eq!(seen[0].line(), delete_line(ID_A));
+    assert_eq!(
+        seen[0].header("authorization").as_deref(),
+        Some("Bearer super-secret-token")
+    );
+    assert_eq!(report.warning, None);
+    assert!(pending_deletes(dir.path()).is_empty());
+    assert_eq!(read_training_status(dir.path()), None);
+
+    // Another website drops the ids and the warning.
+    write_pending_deletes(dir.path(), &[ID_B.to_string()]);
+    write_training_warning(dir.path(), Some(TRAINING_DELETE_OWED), true, false, None);
+    assert!(adopt_training_owner(
+        dir.path(),
+        "https://site-b.example",
+        "super-secret-token"
+    ));
+    assert!(pending_deletes(dir.path()).is_empty());
+    assert_eq!(read_training_status(dir.path()), None);
 }
 
 /// A consent read that fails (offline, 5xx, a site without these routes)
