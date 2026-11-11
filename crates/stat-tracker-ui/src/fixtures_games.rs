@@ -20,8 +20,8 @@ pub const UNDECIDED: &str = "sess-g-undecided";
 /// Held: the map read as "Ilio5" and the hero as Unknown, so both are
 /// missing and the game stays on this computer (the picker's game).
 pub const HELD: &str = "sess-g-held";
-/// A second rejected upload: a rejected game with a result and a map and
-/// hero (the undecided one has none), so "2 games couldn't upload" shows
+/// A second rejected upload: a rejected game with a result, a map and a
+/// hero (the undecided one has a map and hero but no result), so "2 games couldn't upload" shows
 /// and Retry all has more than one game to queue. The line itself shows
 /// for one rejected game too.
 pub const REJECTED_2: &str = "sess-g-rejected2";
