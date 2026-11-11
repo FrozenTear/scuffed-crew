@@ -740,11 +740,18 @@ pub(crate) fn text_fallback_names(
 }
 
 /// [`parse::read_scoreboard`] with each of `names` in turn until one reads,
-/// so an alt's line on the board is read too. A name found but unreadable
-/// passes to the next as well: the main name can sit in a chat line, which
-/// the text fallback skips, while the member plays on an alt (the own row
-/// set or not). When no name reads, an unreadable miss wins over "row not
-/// found". No names is one read with none.
+/// so an alt's line on the board is read too.
+///
+/// With no own row, every name is tried. A name found but unreadable passes
+/// to the next as well: the main name can sit in a chat line, which the
+/// text fallback skips, while the member plays on an alt. When no name
+/// reads, an unreadable miss wins over "row not found".
+///
+/// With an own row, only that row's name is tried ([`own_row_names`]), so
+/// when its cells do not parse the text fallback reads that row's line or
+/// nothing. On a board with two of the member's accounts it never takes
+/// the other account's line. No names is one read with none: the cells, or
+/// an unreadable miss.
 pub(crate) fn read_scoreboard_named(
     rows: &[ocr::RowOcrResult],
     player_row_idx: Option<usize>,
@@ -752,11 +759,15 @@ pub(crate) fn read_scoreboard_named(
     outcome: &str,
     names: &[String],
 ) -> Result<parse::ScoreboardRead, parse::ScoreboardMiss> {
+    let names: Vec<&str> = match player_row_idx {
+        Some(idx) => own_row_names(rows, idx, names),
+        None => names.iter().map(String::as_str).collect(),
+    };
     let read =
         |name: Option<&str>| parse::read_scoreboard(rows, player_row_idx, raw_text, outcome, name);
-    let mut result = read(names.first().map(String::as_str));
+    let mut result = read(names.first().copied());
     let mut unreadable = false;
-    for name in names.iter().skip(1) {
+    for name in names.iter().copied().skip(1) {
         match result {
             Ok(_) => break,
             Err(miss) => unreadable |= miss == parse::ScoreboardMiss::CellsUnreadable,
@@ -767,6 +778,33 @@ pub(crate) fn read_scoreboard_named(
         return Err(parse::ScoreboardMiss::CellsUnreadable);
     }
     result
+}
+
+/// The saved names the text fallback may search for beside the own row at
+/// `idx`. One saved name (or none) is kept as it is: there is no other
+/// account to mix it up with. With two or more, only the one name that
+/// row's name read matches ([`parse::best_name_for_row`]). A row whose name
+/// was not read, or reads as none of them, gets no name, so another saved
+/// account's line is never read in its place.
+pub(crate) fn own_row_names<'a>(
+    rows: &[ocr::RowOcrResult],
+    idx: usize,
+    names: &'a [String],
+) -> Vec<&'a str> {
+    if names.len() <= 1 {
+        return names.iter().map(String::as_str).collect();
+    }
+    let named = rows
+        .get(idx)
+        .and_then(|row| parse::best_name_for_row(row, names));
+    if named.is_none() {
+        tracing::debug!(
+            target: "scuffed_stat_tracker",
+            row = idx,
+            "own row's name read names no saved name: no text fallback for it"
+        );
+    }
+    named.into_iter().collect()
 }
 
 /// Row id passed into [`boundary::plan_capture`]. `None` when the player

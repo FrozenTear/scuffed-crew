@@ -135,6 +135,33 @@ fn any_saved_name_finds_the_row() {
     );
 }
 
+/// The saved name one row's name read belongs to: one name only, a whole
+/// name hit first, else the best fuzzy read. A row with no name read, or a
+/// read that names none of the saved names, names nothing.
+#[test]
+fn best_name_for_row_names_one_saved_name() {
+    let names = ["Main".to_string(), "Alt".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("ALT"), &names[..]),
+        Some("Alt")
+    );
+    assert_eq!(
+        best_name_for_row(&valid_row("MAIN"), &names[..]),
+        Some("Main")
+    );
+    assert_eq!(
+        best_name_for_row(&valid_row("MAlN"), &names[..]),
+        Some("Main")
+    );
+    assert_eq!(best_name_for_row(&valid_row("Stranger"), &names[..]), None);
+    assert_eq!(best_name_for_row(&garbage_row(), &names[..]), None);
+    let blank = ["  ".to_string(), "Alt".to_string()];
+    assert_eq!(
+        best_name_for_row(&valid_row("ALT"), &blank[..]),
+        Some("Alt")
+    );
+}
+
 /// A whole-name hit for any saved name beats a fuzzy hit for another,
 /// whatever the order; between two fuzzy hits the better score wins.
 #[test]

@@ -458,24 +458,185 @@ fn the_text_fallback_reads_an_alt_names_line() {
 }
 
 /// The main name in a chat line makes that name "found but unreadable"
-/// (the text fallback skips chat). The next saved name is still tried, so
-/// an alt's stat line is read, with no own row and with a highlighted row
-/// whose cells did not parse (`Some(0)` with no OCR rows). With no alt
-/// line the miss stays "unreadable", not "row not found".
+/// (the text fallback skips chat). With no own row the next saved name is
+/// still tried, so an alt's stat line is read. With no alt line the miss
+/// stays "unreadable", not "row not found". A highlighted row whose name
+/// reads as the alt reads the alt's line past the chat line too.
 #[test]
 fn a_main_name_in_chat_does_not_hide_the_alts_line() {
     let raw = "[Team] FrozenTear: 1 2 3 4 5 6\nÖSTER 10 4 2 3,000 800 400";
     let names = ["FrozenTear".to_string(), "öster".to_string()];
     let chat_only = "[Team] FrozenTear: 1 2 3 4 5 6";
-    for row in [None, Some(0)] {
-        let read = read_scoreboard_named(&[], row, raw, "victory", &names).unwrap();
-        assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
-        assert!(!read.trusted_cells);
-        assert!(matches!(
-            read_scoreboard_named(&[], row, chat_only, "victory", &names),
-            Err(parse::ScoreboardMiss::CellsUnreadable)
-        ));
+    let read = read_scoreboard_named(&[], None, raw, "victory", &names).unwrap();
+    assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
+    assert!(!read.trusted_cells);
+    assert!(matches!(
+        read_scoreboard_named(&[], None, chat_only, "victory", &names),
+        Err(parse::ScoreboardMiss::CellsUnreadable)
+    ));
+    let alt_row = [two_account_row(Some("ÖSTER"), false)];
+    let read = read_scoreboard_named(&alt_row, Some(0), raw, "victory", &names).unwrap();
+    assert_eq!((read.matched.elims, read.matched.damage), (10, 3000));
+    assert!(!read.trusted_cells);
+    assert!(matches!(
+        read_scoreboard_named(&alt_row, Some(0), chat_only, "victory", &names),
+        Err(parse::ScoreboardMiss::CellsUnreadable)
+    ));
+}
+
+/// One OCR row for the two-account tests: `name` as its name read, and
+/// stat cells that parse (`readable`) or are blank.
+fn two_account_row(name: Option<&str>, readable: bool) -> ocr::RowOcrResult {
+    let cell = |value: &str| ocr::CellOcrResult {
+        value: value.into(),
+        confidence: 80,
+        suspect: false,
+    };
+    let values = if readable {
+        ["5", "3", "2", "4,316", "1,200", "899"]
+    } else {
+        [""; 6]
+    };
+    ocr::RowOcrResult {
+        name: name.map(cell),
+        name_alternates: Vec::new(),
+        stats: values.iter().map(|v| cell(v)).collect(),
+        mean_confidence: 80,
     }
+}
+
+/// Alpha.3 item 15. A highlighted own row whose cells do not parse, on a
+/// board with two of the member's saved names: the raw text holds a
+/// readable line for the OTHER saved name. That line is never read for
+/// this row, whether the row's name reads as the main name, reads as no
+/// saved name, or was not read at all. The read is "unreadable".
+#[test]
+fn a_highlighted_row_never_reads_the_other_saved_accounts_line() {
+    let names = ["Main".to_string(), "Alt".to_string()];
+    let raw = "Ana\nBusan\nALT 10 4 2 3,000 800 400";
+    for name in [Some("MAIN"), Some("Stranger"), None] {
+        let rows = [two_account_row(name, false)];
+        assert!(
+            matches!(
+                read_scoreboard_named(&rows, Some(0), raw, "victory", &names),
+                Err(parse::ScoreboardMiss::CellsUnreadable)
+            ),
+            "row name {name:?}"
+        );
+    }
+    // No OCR rows at all: the row's name was never read.
+    assert!(matches!(
+        read_scoreboard_named(&[], Some(0), raw, "victory", &names),
+        Err(parse::ScoreboardMiss::CellsUnreadable)
+    ));
+}
+
+/// The same board, with that row's own name on a readable text line: the
+/// row's own line is read (low trust), never the other account's. Cells
+/// that parse still win over any line. One saved name reads its line
+/// beside the row as before, whatever the row's name read says.
+#[test]
+fn a_highlighted_row_reads_its_own_line_when_its_cells_do_not_parse() {
+    let names = ["Main".to_string(), "Alt".to_string()];
+    let raw = "[Team] Alt: 1 2 3 4 5 6\nMAIN 3 1 4 1,500 900 260\nALT 10 4 2 3,000 800 400";
+    for (name, want) in [("ALT", (10, 3000)), ("MAIN", (3, 1500))] {
+        let rows = [two_account_row(Some(name), false)];
+        let read = read_scoreboard_named(&rows, Some(0), raw, "victory", &names).unwrap();
+        assert_eq!((read.matched.elims, read.matched.damage), want, "{name}");
+        assert!(!read.trusted_cells, "{name}");
+    }
+    let rows = [two_account_row(Some("MAIN"), true)];
+    let read = read_scoreboard_named(&rows, Some(0), raw, "victory", &names).unwrap();
+    assert_eq!((read.matched.elims, read.matched.damage), (5, 4316));
+    assert!(read.trusted_cells);
+    let main_only = ["Main".to_string()];
+    let rows = [two_account_row(None, false)];
+    let read = read_scoreboard_named(&rows, Some(0), raw, "victory", &main_only).unwrap();
+    assert_eq!((read.matched.elims, read.matched.damage), (3, 1500));
+}
+
+#[derive(Clone, Default)]
+struct CaptureLog(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CaptureLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureLog {
+    type Writer = CaptureLog;
+    fn make_writer(&'a self) -> CaptureLog {
+        self.clone()
+    }
+}
+
+/// Fail safe for alpha.3 item 15, through `handle_capture` (ocr-v1, two
+/// saved names). A Tab whose highlighted row (named Main) has no readable
+/// cells, while the text holds Alt's stat line, stores nothing and logs a
+/// WARN. The game stays open, and the next Tab with readable cells is
+/// recorded on it. Alt's numbers are never stored.
+#[tokio::test]
+async fn an_unreadable_highlighted_row_warns_and_the_game_keeps_recording() {
+    let _serial = INJECTED_CAPTURE_SERIAL.lock().await;
+    let log = CaptureLog::default();
+    let sub = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::INFO)
+        .finish();
+    let _sub = tracing::subscriber::set_default(sub);
+    tracing::callsite::rebuild_interest_cache();
+    let main_row = |readable: bool| {
+        let mut analysis = o8_analysis(None, Some("zenyatta"));
+        analysis.rows[0] = two_account_row(Some("MAIN"), readable);
+        analysis.ocr = Ok(ocr::OcrResult {
+            raw_text: "Ana\nBusan\nALT 25 5 1 9,000 100 200".into(),
+            confidence: 80,
+        });
+        analysis
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let mut ctx = o8_ctx(dir.path(), false).await;
+    ctx.own_names = vec!["Main".into(), "Alt".into()];
+    let mut now = test_now();
+    let mut active = game(detect::MatchOutcome::Unknown, None, now);
+    active.session_id = "two".into();
+    active.map = Some("Busan".into());
+    active.map_source = Some(boundary::MapSource::TopBar);
+    active.session_created = false;
+    let mut st = session(Some(active), now);
+
+    for (tab, readable) in [false, true].into_iter().enumerate() {
+        *INJECTED_CAPTURE.lock().unwrap() = Some(InjectedCapture {
+            analysis: main_row(readable),
+            board: None,
+        });
+        let req = build_capture_request(st.active_game.as_ref().unwrap(), false, now);
+        let report = handle_capture(&ctx, req).await.unwrap();
+        assert_eq!(report.recorded, readable, "tab {tab}");
+        if !readable {
+            assert!(report.ignore_row, "tab {tab}");
+        }
+        apply_capture_report(&mut st, &ctx.store, &ctx.data_dir, "two", Ok(report), now).await;
+        let open = st.active_game.as_ref().expect("the game stays open");
+        assert_eq!(open.session_id, "two", "tab {tab}");
+        now += Duration::from_secs(20);
+    }
+
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let warned = text
+        .lines()
+        .filter(|l| l.contains("WARN") && l.contains("capture rejected: stat cells unreadable"))
+        .count();
+    assert_eq!(warned, 1, "{text}");
+    let rows = ctx.store.get_session_snapshots("two").await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0].elims, rows[0].damage), (5, 4316));
 }
 
 /// T4 (O9): the vision pass reads names in the per-cell pass only under

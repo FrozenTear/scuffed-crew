@@ -88,6 +88,32 @@ pub fn match_player_row_by_names(
     fuzzy.map(|(found, _)| found)
 }
 
+/// The one name of `names` that `row`'s name reads match best, with the
+/// same scoring as [`match_player_row_by_names`]: a substring hit wins (the
+/// first such name in list order), else the best fuzzy score at or above
+/// the match floor (the earlier name on a tie). `None` when the row has no
+/// name read or no name matches it. Blank names are skipped.
+pub fn best_name_for_row<'a>(
+    row: &RowOcrResult,
+    names: &'a (impl NameList + ?Sized),
+) -> Option<&'a str> {
+    let rows = std::slice::from_ref(row);
+    let mut fuzzy: Option<(&'a str, f64)> = None;
+    for name in names.each_name() {
+        if name.trim().is_empty() {
+            continue;
+        }
+        match scored_match(rows, &name.to_lowercase()) {
+            Some((_, None)) => return Some(name),
+            Some((_, Some(score))) if fuzzy.is_none_or(|(_, best)| score > best) => {
+                fuzzy = Some((name, score));
+            }
+            _ => {}
+        }
+    }
+    fuzzy.map(|(name, _)| name)
+}
+
 /// The match for one lowercased name, and its fuzzy score (`None` for a
 /// substring hit).
 fn scored_match(rows: &[RowOcrResult], name_lower: &str) -> Option<(NameMatch, Option<f64>)> {
