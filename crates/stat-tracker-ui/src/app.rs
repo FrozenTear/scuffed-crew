@@ -845,15 +845,13 @@ impl TrackerApp {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        crate::games_table::before_message(self, &message);
         match message {
             Message::Tick => self.on_tick(),
             Message::Navigate(screen) => {
                 self.screen = screen;
                 if screen != Screen::Games {
-                    self.expanded = None;
-                    self.editing = false;
-                    self.confirm_delete = None;
-                    self.games_tab.deleted_note = None;
+                    crate::games_table::leave(self);
                 }
                 if screen != Screen::Settings {
                     self.confirm_clear = false;
@@ -976,6 +974,8 @@ impl TrackerApp {
                 Task::none()
             }
             Message::ToggleEdit => {
+                // Enter over the form must not open the delete strip.
+                crate::games_table::clear_focus(self);
                 if self.editing {
                     self.editing = false;
                 } else if let Some(sid) = &self.expanded
@@ -996,7 +996,7 @@ impl TrackerApp {
                     self.games
                         .iter()
                         .find(|g| &g.session_id == sid)
-                        .map(|g| crate::commands::save_edit(&self.data_dir, g, &self.edit))
+                        .map(|g| crate::commands::save_edit_for(self, g, &self.edit))
                 });
                 if let Some(sid) = sid {
                     match &saved {

@@ -317,8 +317,9 @@ impl Game {
     /// A field the reader was unsure of that no hand edit has fixed since.
     /// `field` is a flat name (`e`, `dmg`) or an edit name (`elims`,
     /// `damage`); both map through `crate::suspect`, the rules the
-    /// store and uploader apply. The names are flat already: `Game::from`
-    /// keeps only flat names (`r3.dmg` is stored as `dmg`).
+    /// store and uploader apply. The names are flat already:
+    /// [`Game::from_match`] keeps only flat names (`r3.dmg` is stored as
+    /// `dmg`).
     pub fn unsure_now(&self, field: &str) -> bool {
         let flats: &[&str] = match crate::suspect::suspect_names_for_edit(field) {
             [] => &[field],
@@ -376,14 +377,14 @@ impl Game {
         display_hero_name(&self.hero)
     }
 
-    /// Title for a missing map. The stored string stays empty so a blank
-    /// read is not shown as a map name.
+    /// Title for the map as the rows and cards show it: the known map
+    /// name, or "No map" for an empty or unknown read such as "Ilio5".
     pub fn display_map(&self) -> String {
         let trimmed = self.map_name.trim();
-        if trimmed.is_empty() {
-            "Map needed".into()
+        if crate::parse::map_is_known(trimmed) {
+            trimmed.to_string()
         } else {
-            self.map_name.clone()
+            "No map".into()
         }
     }
 
@@ -707,7 +708,8 @@ mod review_tests {
     #[test]
     fn blank_map_and_unknown_hero_need_a_pick() {
         let blank = game("Ana", "");
-        assert_eq!(blank.display_map(), "Map needed");
+        assert_eq!(blank.display_map(), "No map");
+        assert_eq!(game("Ana", "Ilio5").display_map(), "No map");
         assert_eq!(blank.review_fields(), vec!["map", "mode"]);
         assert!(blank.needs_review());
 

@@ -6,9 +6,10 @@ use stat_tracker::config::Config;
 pub enum FixtureKind {
     Empty,
     Sample,
-    /// The Games tab's open-row states (UX Spec v2): a corrected game, an
-    /// unsure one with a swap, and an undecided one, with Wrecking Ball
-    /// history for the averages.
+    /// The Games tab's five open-row states: from UX Spec v2 a corrected
+    /// game, an unsure one with a swap and an undecided one, plus a game
+    /// held for its map and hero and a second rejected upload, with
+    /// Wrecking Ball history for the averages.
     Games,
     /// 857 games over three seasons (the 0.6 Maps and Seasons spec numbers).
     Full,
