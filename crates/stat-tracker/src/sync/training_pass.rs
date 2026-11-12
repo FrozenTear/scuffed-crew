@@ -151,8 +151,13 @@ struct PassEnd {
     /// The consent as read, less kinds the upload found off.
     cached: Option<TrainingCropConsent>,
     warnings: Vec<String>,
-    /// Crops were dropped: the warning stays until a send works.
-    sticky: bool,
+    /// Crops were dropped in this pass.
+    dropped: Vec<String>,
+    /// The dropped crops warning an earlier pass left
+    /// ([`TrainingStatus::dropped`]).
+    ///
+    /// [`TrainingStatus::dropped`]: super::training_store::TrainingStatus::dropped
+    earlier_dropped: Option<String>,
     /// Ids still to delete on the website.
     pending: Vec<String>,
     /// There were ids to delete when the pass started.
@@ -160,7 +165,8 @@ struct PassEnd {
     /// The delete marker under which a send got no answer: ask the member
     /// to delete again ([`TRAINING_DELETE_AGAIN`]).
     delete_again: Option<i64>,
-    /// An earlier ask to delete again is answered: the marker changed.
+    /// An earlier ask to delete again is met: a delete the member pressed
+    /// after it was answered with success (`deleted_again_since`).
     deleted_again: bool,
 }
 
@@ -176,17 +182,14 @@ pub async fn run_training_pass(client: &SyncClient, data_dir: &Path) -> Training
     // before anything is sent.
     let owner = client.credentials();
     let (url, token) = (owner.server_url.clone(), owner.token.clone());
-    let (changed, pending, asked_at, deleted_again) = on_disk(data_dir, move |dir| {
+    let (changed, pending, earlier, deleted_again) = on_disk(data_dir, move |dir| {
         let changed = adopt_training_owner(dir, &url, &token);
-        let asked_at = read_training_status(dir).and_then(|status| status.delete_again_at);
-        (
-            changed,
-            pending_deletes(dir),
-            asked_at,
-            deleted_again_since(dir, asked_at),
-        )
+        let earlier = read_training_status(dir).unwrap_or_default();
+        let deleted_again = deleted_again_since(dir, earlier.delete_again_at);
+        (changed, pending_deletes(dir), earlier, deleted_again)
     })
     .await;
+    let asked_at = earlier.delete_again_at;
     if changed {
         tracing::info!("training crops: website or token changed, waiting crops dropped");
     }
@@ -198,6 +201,7 @@ pub async fn run_training_pass(client: &SyncClient, data_dir: &Path) -> Training
         pending,
         delete_again,
         deleted_again,
+        earlier_dropped: earlier.dropped,
         ..PassEnd::default()
     };
     // Crops an earlier delete left on the website go first, before any
@@ -282,8 +286,7 @@ pub async fn run_training_pass(client: &SyncClient, data_dir: &Path) -> Training
                 }
                 (Some(409), Some(TRAINING_CROP_ERR_LIMIT_REACHED)) => {
                     on_disk(data_dir, move |dir| drop_kind(dir, kind)).await;
-                    end.sticky = true;
-                    end.warnings.push(format!(
+                    end.dropped.push(format!(
                         "Training crops: the website already keeps as many {} as it takes from you. Waiting ones were dropped.",
                         kind.label().to_lowercase()
                     ));
@@ -296,8 +299,7 @@ pub async fn run_training_pass(client: &SyncClient, data_dir: &Path) -> Training
                         code.unwrap_or("no reason given")
                     );
                     on_disk(data_dir, move |dir| remove_crops(dir, kind, &ids)).await;
-                    end.sticky = true;
-                    end.warnings.push(text);
+                    end.dropped.push(text);
                 }
                 _ => {
                     let (text, retry) = call_warning("send them", &error);
@@ -341,12 +343,30 @@ async fn finish(
     let PassEnd {
         cached,
         mut warnings,
-        sticky,
+        dropped,
+        earlier_dropped,
         pending,
         had_pending,
         delete_again,
         deleted_again,
     } = end;
+    // A warning about dropped crops stays until a send works: carried into
+    // this pass's warning, whatever else this pass warns about.
+    let mut kept = earlier_dropped.filter(|_| report.sent == 0);
+    for part in dropped {
+        match kept.as_mut() {
+            Some(text) if text.contains(&part) => {}
+            Some(text) => {
+                text.push(' ');
+                text.push_str(&part);
+            }
+            None => kept = Some(part),
+        }
+    }
+    let dropped = kept;
+    if let Some(text) = &dropped {
+        warnings.insert(0, text.clone());
+    }
     let owed = !pending.is_empty();
     if owed {
         warnings.insert(0, TRAINING_DELETE_OWED.to_string());
@@ -359,10 +379,10 @@ async fn finish(
         tracing::info!("training crops: website or token changed during the pass, nothing kept");
         return report;
     }
-    // A warning about dropped crops stays until a send works, one about
-    // crops still on the website until they are gone, and an ask to delete
-    // again until the member does.
-    let sticky = sticky || owed || delete_again.is_some();
+    // A warning about crops still on the website stays until they are gone,
+    // and an ask to delete again until a delete the member pressed after it
+    // is answered with success. Both are worked out again on every pass.
+    let sticky = dropped.is_some() || owed || delete_again.is_some();
     let clear_sticky = report.sent > 0 || (had_pending && !owed) || deleted_again;
     let warning = report.warning.clone();
     let (url, token) = (owner.server_url.clone(), owner.token.clone());
@@ -374,7 +394,14 @@ async fn finish(
             {
                 tracing::warn!(%error, "could not cache the training crop consent");
             }
-            write_training_warning(dir, warning.as_deref(), sticky, clear_sticky, delete_again);
+            write_training_warning(
+                dir,
+                warning.as_deref(),
+                sticky,
+                clear_sticky,
+                dropped.as_deref(),
+                delete_again,
+            );
         })
     })
     .await;
