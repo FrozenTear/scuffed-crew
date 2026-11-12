@@ -99,7 +99,11 @@
 //! catch: two frames in a row that both show the same value that is not
 //! final yet (the count paused on one value for two ticks), and a field
 //! whose last agreed pair is followed only by frames that no longer read
-//! it (a fade, or a final value the reader cannot read).
+//! it (a fade, or a final value the reader cannot read). A field that
+//! stops reading while others go on keeps that older pair, so the settled
+//! record can mix fields from different moments: reads of division 3 at
+//! 95%, division 3 at 95%, then no division at 5% twice settle to
+//! division 3 at 5%, a record the screen never showed.
 //! [`Reader::is_rank_screen`] (the "RANK PROGRESS:" label only, cheap) is
 //! there for a caller that wants to check frames before a full read.
 //!

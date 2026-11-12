@@ -222,9 +222,9 @@ impl RankFeed {
         if rank.is_empty() {
             let read = reads.iter().filter(|r| r.is_some()).count();
             if read == 0 {
-                tracing::info!(target: "scuffed_stat_tracker", session = %held.session, frames = reads.len(), "rank update: the reader read none of the rank screen frames (a frame size other than 2560x1440, not a rank update screen, or unreadable), no rank for the game");
+                tracing::info!(target: "scuffed_stat_tracker", session = %held.session, entries = reads.len(), "rank update: the reader read none of the rank screen frames (a frame size other than 2560x1440, not a rank update screen, or unreadable), no rank for the game");
             } else {
-                tracing::info!(target: "scuffed_stat_tracker", session = %held.session, frames = reads.len(), read, "rank update: no field read the same on its newest two reads in a row, no rank for the game");
+                tracing::info!(target: "scuffed_stat_tracker", session = %held.session, entries = reads.len(), read, "rank update: no field read the same on its newest two reads in a row, no rank for the game");
             }
             return None;
         }
@@ -286,7 +286,9 @@ pub(crate) fn read_rank_screen(
 /// disagrees: after the newest pair it changes nothing, so a screen that
 /// fades to nothing keeps its last agreed pair (`[A, A, no read]` keeps
 /// `A`). Before the newest read that has the field it breaks the pair
-/// (`[A, no read, A]` keeps nothing).
+/// (`[A, no read, A]` keeps nothing). Each field settles on its own, so a
+/// field that stops reading while others go on keeps its older pair and
+/// the record can mix moments the screen never showed together.
 pub(crate) fn settle(reads: &[Option<RankUpdate>]) -> RankUpdate {
     RankUpdate {
         role: agreed(reads, |r| &r.role),
@@ -404,7 +406,8 @@ async fn apply(
         if let Some(dump) = dump {
             // A newer rank screen means a game came after the source of any
             // pending hint: a screen with no banner clears that hint, as it
-            // no longer names the next game's queue.
+            // no longer names the next game's queue. A second settle of the
+            // hint's own game leaves it (`set_next_mode_hint` checks).
             let hint = s.rank.next_mode_hint.as_ref().map(|h| h.value.as_str());
             dump.set_next_mode_hint(hint, &s.session, s.at);
         }

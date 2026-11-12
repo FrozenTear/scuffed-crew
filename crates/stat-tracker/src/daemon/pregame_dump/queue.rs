@@ -46,6 +46,9 @@ impl PregameDump {
     /// confirms it, one that disagrees drops it, and a weak read or none
     /// expires it. `source_session` itself never settles it. A blank hint
     /// clears it, a new one replaces the one pending (a log line says so).
+    /// A call from the pending hint's own source game does neither: that
+    /// game's rank screen came back and settled again, no game came after
+    /// it, and the store keeps its first rank, so its first hint stays.
     /// Nothing happens with the reader off. The rank reader's wiring
     /// (`daemon::rank::tick`) calls this with the banner word it settled.
     pub(crate) fn set_next_mode_hint(
@@ -67,6 +70,13 @@ impl PregameDump {
                 target: None,
                 target_folder: None,
             });
+        if feed
+            .pending_hint
+            .as_ref()
+            .is_some_and(|old| old.source == source_session)
+        {
+            return;
+        }
         if let Some(old) = feed.pending_hint.take() {
             if hint.is_some() {
                 tracing::info!(target: "scuffed_stat_tracker", hint = %old.text, source = %old.source, "queue title: next mode hint replaced before a game settled it");

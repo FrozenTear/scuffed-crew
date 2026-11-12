@@ -390,9 +390,17 @@ async fn an_update_waiting_for_the_store_is_tried_before_a_newer_one() {
         feed.unsaved.as_ref().map(|(s, _)| s.session.as_str()),
         Some("g1")
     );
-    *failing.fail.lock().unwrap() = false;
-    // g1 is tried first, then g2 settles (the game closed) on the same tick
+    // keep the store failing through g2's second read so g1 still waits;
+    // the two updates have not met on one tick yet
     tick(&mut feed, Some(Some(full(50))), Some("g2"), &failing, None).await;
+    assert_eq!(
+        feed.unsaved.as_ref().map(|(s, _)| s.session.as_str()),
+        Some("g1")
+    );
+    *failing.fail.lock().unwrap() = false;
+    // g1 is tried first, then g2 settles (the game closed) on the same
+    // tick: both are stored and nothing waits (were g1 tried only on a tick
+    // with nothing settling, it would still wait here)
     assert!(tick(&mut feed, None, None, &failing, None).await);
     assert!(feed.unsaved.is_none());
     let g1 = store.get_session_snapshots("g1").await.unwrap();
@@ -481,10 +489,27 @@ fn the_poll_loop_wires_the_feed_in_order() {
     };
     // built once from the env switch; off is `None`
     let feed = at("daemon::rank::RankFeed::from_env(data_dir)");
-    // the game process stopping settles a held screen at once
-    let stopped = at("if !running {");
+    // the game process stopping settles a held screen at once (the poll
+    // arm, not the keyboard arm's earlier `if !running`)
+    let poll = at("poll_timer.tick()");
+    let stopped = poll
+        + run_loop[poll..]
+            .find("if !running {")
+            .unwrap_or_else(|| panic!("the poll arm must contain if !running {{"));
     let close = at("daemon::rank::close(feed, store, pregame_dump.as_mut())");
-    assert!(feed < stopped && stopped < close);
+    let pregame = at("daemon::focus::note_pregame(");
+    assert!(feed < poll && poll < stopped && stopped < close && close < pregame);
+    let branch = &run_loop[stopped..pregame];
+    let close_at = branch
+        .find("daemon::rank::close(feed, store, pregame_dump.as_mut())")
+        .expect("close sits in the poll-arm process-stop branch");
+    let refresh_at = branch
+        .find("refresh_snapshot(store, data_dir)")
+        .expect("the close's snapshot refresh sits in that branch");
+    assert!(
+        close_at < refresh_at,
+        "refresh_snapshot follows close in the process-stop branch"
+    );
     // read in the analysis thread, after the poll analysis perf sample
     let perf = at("stat_tracker::perf::Stage::PollAnalyze");
     let read = at("daemon::rank::read_rank_screen(");
@@ -550,4 +575,44 @@ async fn one_missed_tick_does_not_settle_the_screen_and_the_final_reads_are_stor
         .as_ref()
         .and_then(|r| r.progress_pct.clone());
     assert_eq!(pct, n(40, 0.9), "the final reads, not the first ones");
+}
+
+#[tokio::test]
+async fn a_second_settle_of_the_same_game_keeps_the_hint_its_first_settle_handed_on() {
+    let (dir, store) = store_with("g1").await;
+    let queue = QueueTitleFeed::with_read(Arc::new(|_, _| Field::none()));
+    let mut dump = PregameDump::with_readers(
+        false,
+        None,
+        Some(queue),
+        dir.path(),
+        std::time::Duration::from_millis(1_500),
+    )
+    .expect("a saver for the queue title reader");
+    let mut feed = RankFeed::with_read(Arc::new(|_| None));
+    // [A, A, miss, miss]: the first part agrees on the banner and settles
+    for seen in [Some(Some(full(40))), Some(Some(full(40))), None, None] {
+        tick(&mut feed, seen, Some("g1"), &store, Some(&mut dump)).await;
+    }
+    assert_eq!(
+        dump.pending_hint(),
+        Some(("OPEN QUEUE".to_string(), "g1".to_string()))
+    );
+    // the screen comes back after two misses with no agreed banner and
+    // settles again: the store refuses the second rank, and the hint the
+    // first settle handed on stays (no later game came)
+    let mut no_banner = full(40);
+    no_banner.next_mode_hint = None;
+    for seen in [
+        Some(Some(no_banner.clone())),
+        Some(Some(no_banner)),
+        None,
+        None,
+    ] {
+        tick(&mut feed, seen, Some("g1"), &store, Some(&mut dump)).await;
+    }
+    assert_eq!(
+        dump.pending_hint(),
+        Some(("OPEN QUEUE".to_string(), "g1".to_string()))
+    );
 }

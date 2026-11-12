@@ -798,7 +798,7 @@ pub(crate) async fn run_loop(
                             )
                             .await
                         {
-                            // the stored rank re-queued the game: the Games
+                            // a rank was stored on the game: the Games
                             // tab sees it on its next snapshot
                             refresh_snapshot(store, data_dir).await;
                         }
