@@ -8,6 +8,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+pub mod vision_sizes;
+
 /// Template directory under the data dir (heroes-v1).
 pub const TEMPLATE_SUBDIR: &str = "templates/heroes";
 /// heroes-v2 pack directory under the data dir (1440p-scale cuts).

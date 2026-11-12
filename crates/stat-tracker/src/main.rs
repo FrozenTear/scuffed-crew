@@ -470,9 +470,9 @@ struct FrameAnalysis {
     /// and the career hero's row ([`find_own_row`]); by a name read only
     /// when none of them names a row.
     player_row_idx: Option<usize>,
-    /// The name match behind `player_row_idx`, with the name window that
-    /// matched. `None` when the row came from the highlight, a seed, or
-    /// the career hero, and no name was read.
+    /// The name match behind `player_row_idx`, with the name window and the
+    /// saved name (its index in `own_names`) that matched; the text fallback
+    /// searches for that name. `None` when no saved name named the row.
     name_match: Option<parse::NameMatch>,
     /// Which reader produced `name_match`. `None` when this Tab did not
     /// read a name. `names-v1` is the pack. `ocr-v1` is Tesseract.

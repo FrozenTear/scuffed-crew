@@ -90,7 +90,8 @@ fn the_cell_ocr_sites_go_through_the_reader_switch() {
     ));
     assert_eq!(hc_body.matches("read_scoreboard_named(").count(), 1);
     assert_eq!(hc_body.matches("parse::read_scoreboard(").count(), 0);
-    // The one raw-text read, once per saved name (`read_scoreboard_named`).
+    // The one raw-text read, once per name `read_scoreboard_named` tries:
+    // every saved name with no own row, the own row's one name beside it.
     assert_eq!(
         fn_source("read_scoreboard_named")
             .matches("parse::read_scoreboard(")

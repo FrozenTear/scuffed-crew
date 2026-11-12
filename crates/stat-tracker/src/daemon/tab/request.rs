@@ -430,6 +430,8 @@ pub(crate) async fn start_tab_capture(
                 // `{:#}` keeps anyhow's context chain in the string.
                 .map_err(|e| format!("{e:#}"));
             let _ = tx.send((sid, result));
+            // After the send, so the size check cannot hold up or drop the Tab.
+            daemon::vision_size::after_capture(&ctx_task.data_dir);
         }),
     ));
     (task, flight)

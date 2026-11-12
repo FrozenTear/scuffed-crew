@@ -167,3 +167,50 @@ async fn fetch_refuses_cleartext_to_another_host_without_sending() {
     assert_eq!(got, None);
     assert!(started.elapsed() < std::time::Duration::from_secs(2));
 }
+
+#[test]
+fn hero_icon_consent_parses_only_a_2xx_boolean() {
+    assert_eq!(
+        parse_hero_icon_consent(200, br#"{"hero_icon":true,"stat_digits":false}"#),
+        Some(true)
+    );
+    assert_eq!(
+        parse_hero_icon_consent(204, br#"{"hero_icon":false}"#),
+        Some(false)
+    );
+    for status in [199, 301, 401, 404, 500] {
+        assert_eq!(
+            parse_hero_icon_consent(status, br#"{"hero_icon":true}"#),
+            None,
+            "{status}"
+        );
+    }
+    for body in [
+        &b"{}"[..],
+        b"null",
+        b"",
+        b"[",
+        br#"{"hero_icon":null}"#,
+        br#"{"hero_icon":"true"}"#,
+        br#"{"hero_icon":1}"#,
+        br#"{"hero_icon":[true]}"#,
+        br#"[{"hero_icon":true}]"#,
+    ] {
+        assert_eq!(
+            parse_hero_icon_consent(200, body),
+            None,
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+    }
+}
+
+#[test]
+fn an_oversized_consent_body_is_no_answer() {
+    // Valid JSON padded with trailing spaces: only the size refuses it.
+    let mut body = br#"{"hero_icon":true}"#.to_vec();
+    body.resize(super::visibility::MAX_BODY_BYTES, b' ');
+    assert_eq!(parse_hero_icon_consent(200, &body), Some(true));
+    body.push(b' ');
+    assert_eq!(parse_hero_icon_consent(200, &body), None);
+}

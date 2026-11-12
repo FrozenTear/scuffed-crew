@@ -35,12 +35,16 @@ pub enum Msg {
     ToggleFilters,
     /// Open this game on Games ("Check", a row of Earlier tonight).
     OpenGame(String),
+    /// The capture size notice under the title.
+    VisionSize(crate::vision_size_notice::Msg),
 }
 
 /// What the Overview keeps between frames.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct OverviewPage {
     pub filters_open: bool,
+    /// The capture size notice ([`crate::vision_size_notice`]).
+    pub vision: crate::vision_size_notice::VisionNotice,
 }
 
 pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
@@ -54,6 +58,7 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> Task<Message> {
             app.expanded = Some(id);
             return task;
         }
+        Msg::VisionSize(msg) => return crate::vision_size_notice::update(app, msg),
     }
     Task::none()
 }
