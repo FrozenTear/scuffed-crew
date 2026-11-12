@@ -50,8 +50,11 @@ pub(crate) async fn close_session_on_shutdown(
                 clear_imported_hold(game);
                 // The hold is the game's first row, so nothing else writes
                 // its times when the game is not finished, or at a later
-                // stale restart.
-                store_match_times(store, game).await;
+                // stale restart. A finished game's close then finds its
+                // times already stored, so this write marks the snapshot.
+                if store_match_times(store, game).await {
+                    refresh_snapshot(store, data_dir).await;
+                }
             }
         }
         Some(Err(e)) => {
