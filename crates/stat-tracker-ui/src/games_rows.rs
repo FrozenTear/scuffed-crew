@@ -7,9 +7,11 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use chrono::{DateTime, Local, NaiveDate, TimeZone, Timelike, Utc};
+use chrono::{DateTime, Local, TimeZone, Utc};
 
-use crate::model::{Game, Outcome, game_card_in_progress};
+use crate::model::{Game, Outcome};
+
+pub use crate::games_sessions::{SessionHead, Tick, form_ticks, session_head_in, sittings};
 
 /// Window width from which the wide grid applies (spec: 1440 px).
 pub const WIDE_FROM: f32 = 1440.0;
@@ -243,10 +245,17 @@ pub struct GamesTab {
     pub view: TabState,
     pub focus: Focus,
     pub deleted_note: Option<crate::games_delete::Deleted>,
+    /// The filters the "Game deleted." line was put up under
+    /// ([`crate::games_delete::note_shows`]).
+    pub deleted_filters: Option<crate::games_delete::Filters>,
     /// The last snapshot's deletes still waiting for the server; `None`
     /// until a snapshot is read after a delete.
     pub pending_deletes: Option<Vec<String>>,
-    /// The held-game picker, when one is open.
+    /// Set by the delete that left the filters no row to show, so its
+    /// "Game deleted." stands over the empty state and a later non-empty
+    /// list does not show that note at row 0.
+    pub deleted_empty_shown: bool,
+    /// The Set map or Set hero picker, when one is open.
     pub picker: Option<crate::games_picker::Picker>,
     /// The grid last drawn (the view sets it), so a delete from the keys
     /// finds the next row in the order the player sees.
@@ -298,7 +307,7 @@ fn key(g: &Game, col: Col) -> Option<Key> {
         // row last; an unsure D or A still reads amber in the cell.
         Col::Eda => (!g.unsure_now("e")).then_some(Key::Num(i64::from(g.elims))),
         Col::Time => Some(Key::Num(g.started_at().timestamp())),
-        Col::Length => crate::games_detail::tracked(g).span_secs().map(Key::Num),
+        Col::Length => crate::games_detail::game_length(g).secs().map(Key::Num),
         Col::Stripe | Col::Rank | Col::Crew | Col::Unsure => None,
     }
 }
@@ -469,159 +478,6 @@ pub fn mode_chip(map_name: &str) -> Option<&'static str> {
     stat_tracker::parse::map_mode(map_name)
 }
 
-/// One form-strip tick.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Tick {
-    /// 10 px above the midline.
-    Up,
-    /// 10 px below the midline.
-    Down,
-    /// 4 px on the midline (draw or undecided).
-    Mid,
-}
-
-/// Form strip of a session, oldest game first.
-pub fn form_ticks(games: &[&Game]) -> Vec<Tick> {
-    let mut ticks: Vec<(DateTime<Utc>, Tick)> = games
-        .iter()
-        .map(|g| {
-            let t = match g.outcome {
-                Outcome::Win => Tick::Up,
-                Outcome::Loss => Tick::Down,
-                Outcome::Draw | Outcome::Unknown => Tick::Mid,
-            };
-            (g.started_at(), t)
-        })
-        .collect();
-    ticks.sort_by_key(|(at, _)| *at);
-    ticks.into_iter().map(|(_, t)| t).collect()
-}
-
-/// "1 h 21 min", "48 min", "0 min".
-pub fn duration_label(minutes: i64) -> String {
-    let minutes = minutes.max(0);
-    let (h, m) = (minutes / 60, minutes % 60);
-    if h == 0 {
-        format!("{m} min")
-    } else {
-        format!("{h} h {m} min")
-    }
-}
-
-/// The day and part of it a local start time belongs to: "Sunday night"
-/// with Sunday's date. Night runs 21:00 to 04:59 and belongs to the day it
-/// started on, or to the day before for a start after midnight.
-pub fn day_part<Tz: TimeZone>(start: DateTime<Tz>) -> (NaiveDate, String) {
-    let today = start.date_naive();
-    let (day, part) = match start.hour() {
-        5..=11 => (today, "morning"),
-        12..=16 => (today, "afternoon"),
-        17..=20 => (today, "evening"),
-        21..=23 => (today, "night"),
-        _ => (today.pred_opt().unwrap_or(today), "night"),
-    };
-    (day, format!("{} {part}", day.format("%A")))
-}
-
-/// Session title and summary, in `tz`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SessionHead {
-    /// "Sunday night · Oct 18, 23:31 to 00:52".
-    pub title: String,
-    /// "5 games · 4-1 · 1 h 21 min".
-    pub summary: String,
-}
-
-/// The header for one sitting in `tz`. It spans from the first game's
-/// start to the last game's end (first and last Tab read; a row with no
-/// reads kept counts as one moment). The date is the day the title names,
-/// so a sitting that starts after midnight reads "Sunday night · Oct 18".
-/// The record is wins-losses, with draws as a third number when there are
-/// any, and undecided games after it ("1 undecided"), like Seasons. The
-/// game still being played is not undecided yet. `shown` is how many of
-/// the games the filters leave, said when it is fewer.
-pub fn session_head_in<Tz>(
-    games: &[&Game],
-    shown: usize,
-    live: Option<&str>,
-    tz: &Tz,
-) -> SessionHead
-where
-    Tz: TimeZone,
-    Tz::Offset: std::fmt::Display,
-{
-    let first = games.iter().map(|g| g.started_at()).min();
-    let last = games.iter().map(|g| g.ended_at()).max();
-    let (Some(first), Some(last)) = (first, last) else {
-        return SessionHead {
-            title: String::new(),
-            summary: "0 games".into(),
-        };
-    };
-    let a = first.with_timezone(tz);
-    let b = last.with_timezone(tz);
-    let (day, part) = day_part(a.clone());
-    let title = format!(
-        "{part} · {}, {} to {}",
-        day.format("%b %-d"),
-        a.format("%H:%M"),
-        b.format("%H:%M"),
-    );
-    let count = |o: Outcome| games.iter().filter(|g| g.outcome == o).count();
-    let (wins, losses, draws) = (
-        count(Outcome::Win),
-        count(Outcome::Loss),
-        count(Outcome::Draw),
-    );
-    let undecided = games
-        .iter()
-        .filter(|g| g.outcome == Outcome::Unknown)
-        .filter(|g| !game_card_in_progress(&g.session_id, g.outcome, live))
-        .count();
-    let mut parts = vec![match games.len() {
-        1 => "1 game".to_string(),
-        n => format!("{n} games"),
-    }];
-    parts.push(if draws > 0 {
-        format!("{wins}-{losses}-{draws}")
-    } else {
-        format!("{wins}-{losses}")
-    });
-    if undecided > 0 {
-        parts.push(format!("{undecided} undecided"));
-    }
-    parts.push(duration_label((last - first).num_minutes()));
-    if shown < games.len() {
-        parts.push(format!("{shown} shown"));
-    }
-    SessionHead {
-        title,
-        summary: parts.join(" · "),
-    }
-}
-
-/// Sittings, newest first: a new one starts when more than `gap` passes
-/// between one game's end and the next game's start. Inside each, newest
-/// first.
-pub fn sittings(games: &[Game], gap: chrono::TimeDelta) -> Vec<Vec<&Game>> {
-    let mut newest: Vec<&Game> = games.iter().collect();
-    newest.sort_by_key(|g| std::cmp::Reverse(g.started_at()));
-    let mut out: Vec<Vec<&Game>> = Vec::new();
-    for g in newest {
-        match out.last_mut() {
-            Some(cur)
-                if cur
-                    .last()
-                    .is_some_and(|newer| newer.started_at() - g.ended_at() <= gap) =>
-            {
-                cur.push(g);
-            }
-            _ => out.push(vec![g]),
-        }
-    }
-    out
-}
-
 /// One block of the list: a session header (none in the flat list) and
 /// its rows in sort order.
 #[derive(Debug, Clone, PartialEq)]
@@ -679,14 +535,9 @@ where
             });
         }
         Grouping::Sessions => {
-            let ids: HashSet<&str> = shown.iter().map(|g| g.session_id.as_str()).collect();
+            let shown_at: HashSet<*const Game> = shown.iter().map(|g| *g as *const Game).collect();
             // A window of 0 is off: each game is its own session.
-            let gap = if gap_secs == 0 {
-                chrono::TimeDelta::MIN
-            } else {
-                crate::aggregate::secs_delta(gap_secs)
-            };
-            let mut groups = sittings(all, gap);
+            let mut groups = sittings(all, crate::aggregate::session_window_gap(gap_secs));
             if sort.oldest_first() {
                 groups.reverse();
             }
@@ -694,7 +545,7 @@ where
                 let mut rows: Vec<&Game> = group
                     .iter()
                     .copied()
-                    .filter(|g| ids.contains(g.session_id.as_str()))
+                    .filter(|g| shown_at.contains(&(*g as *const Game)))
                     .collect();
                 if rows.is_empty() {
                     continue;
@@ -750,7 +601,7 @@ where
 }
 
 /// Under the last table (spec p2), after the split rule.
-const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length is your first to last Tab press, so the game ran at least that long. Rank, queue and crew are not recorded yet.";
+const SORT_NOTE: &str = "Columns sort; unsure and empty values always sort last. Length runs from the game's start screen to its result. When either was not seen, it is your first to last Tab press, so the game ran at least that long. Rank, queue and crew are not recorded yet.";
 /// No games stored at all.
 pub const EMPTY_NONE: &str = "No games yet. A game shows here once the tracker saves it.";
 /// Games stored, none left by the filters.
@@ -788,12 +639,12 @@ pub fn list_note(grouping: Grouping, window_secs: u64) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::model::{Role, SegmentView};
     use chrono::{FixedOffset, TimeDelta};
 
-    fn game(outcome: Outcome, at: &str, suspect: &[&str]) -> Game {
+    pub(crate) fn game(outcome: Outcome, at: &str, suspect: &[&str]) -> Game {
         let played_at = DateTime::parse_from_rfc3339(at)
             .unwrap()
             .with_timezone(&Utc);
@@ -821,11 +672,12 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         }
     }
 
     /// A game with one hero run from `start` to `end` (its Tab reads).
-    fn timed(outcome: Outcome, start: &str, end: &str) -> Game {
+    pub(crate) fn timed(outcome: Outcome, start: &str, end: &str) -> Game {
         let mut g = game(outcome, end, &[]);
         let at = |t: &str| DateTime::parse_from_rfc3339(t).unwrap().with_timezone(&Utc);
         g.segments = vec![SegmentView {
@@ -842,7 +694,7 @@ mod tests {
         g
     }
 
-    fn utc() -> FixedOffset {
+    pub(crate) fn utc() -> FixedOffset {
         FixedOffset::east_opt(0).unwrap()
     }
 
@@ -979,7 +831,8 @@ mod tests {
         assert_eq!(unsure_items(&g, false), [UnsureItem::Map]);
     }
 
-    /// `Game::from` keeps flat names only, so the app never sees `r3.dmg`.
+    /// `Game::from_match` keeps flat names only, so the app never sees
+    /// `r3.dmg`.
     #[test]
     fn stored_row_names_reach_the_app_flat() {
         let stored = vec![
@@ -1021,112 +874,8 @@ mod tests {
         assert_eq!(mode_chip("Not A Map"), None);
     }
 
-    #[test]
-    fn duration_labels() {
-        assert_eq!(duration_label(81), "1 h 21 min");
-        assert_eq!(duration_label(48), "48 min");
-        assert_eq!(duration_label(0), "0 min");
-        assert_eq!(duration_label(-5), "0 min");
-        assert_eq!(duration_label(120), "2 h 0 min");
-    }
-
-    #[test]
-    fn day_part_after_midnight_is_the_night_before() {
-        let tz = utc();
-        let sun_2331 = tz.with_ymd_and_hms(2026, 10, 18, 23, 31, 0).unwrap();
-        assert_eq!(day_part(sun_2331).1, "Sunday night");
-        let mon_0040 = tz.with_ymd_and_hms(2026, 10, 19, 0, 40, 0).unwrap();
-        let (day, part) = day_part(mon_0040);
-        assert_eq!(part, "Sunday night");
-        assert_eq!(day.format("%b %-d").to_string(), "Oct 18");
-        let mon_1300 = tz.with_ymd_and_hms(2026, 10, 19, 13, 0, 0).unwrap();
-        assert_eq!(day_part(mon_1300).1, "Monday afternoon");
-    }
-
-    #[test]
-    fn session_head_matches_the_spec_sample() {
-        // Spec S1: Sunday night, Oct 18, 23:31 to 00:52, 5 games, 4-1.
-        let games = [
-            game(Outcome::Win, "2026-10-19T00:52:00Z", &[]),
-            game(Outcome::Win, "2026-10-19T00:25:00Z", &[]),
-            game(Outcome::Loss, "2026-10-19T00:05:00Z", &[]),
-            game(Outcome::Win, "2026-10-18T23:42:00Z", &[]),
-            game(Outcome::Win, "2026-10-18T23:31:00Z", &[]),
-        ];
-        let groups = sittings(&games, TimeDelta::hours(3));
-        assert_eq!(groups.len(), 1);
-        let head = session_head_in(&groups[0], 5, None, &utc());
-        assert_eq!(head.title, "Sunday night · Oct 18, 23:31 to 00:52");
-        assert_eq!(head.summary, "5 games · 4-1 · 1 h 21 min");
-        assert_eq!(
-            form_ticks(&groups[0]),
-            [Tick::Up, Tick::Up, Tick::Down, Tick::Up, Tick::Up]
-        );
-    }
-
-    /// A sitting that starts after midnight is dated by the night it
-    /// belongs to, so the title never reads "Sunday night · Oct 19".
-    #[test]
-    fn an_after_midnight_title_dates_the_night_it_names() {
-        let games = [
-            game(Outcome::Win, "2026-10-19T01:30:00Z", &[]),
-            game(Outcome::Win, "2026-10-19T00:40:00Z", &[]),
-        ];
-        let groups = sittings(&games, TimeDelta::hours(3));
-        let head = session_head_in(&groups[0], 2, None, &utc());
-        assert_eq!(head.title, "Sunday night · Oct 18, 00:40 to 01:30");
-    }
-
-    /// Undecided games are their own tail, like Seasons; draws are the
-    /// third number; the game still being played is not undecided.
-    #[test]
-    fn undecided_games_follow_the_record() {
-        let games = [
-            game(Outcome::Unknown, "2026-10-18T00:30:00Z", &[]),
-            game(Outcome::Win, "2026-10-18T00:14:00Z", &[]),
-            game(Outcome::Unknown, "2026-10-17T23:11:00Z", &[]),
-            game(Outcome::Loss, "2026-10-17T22:33:00Z", &[]),
-        ];
-        let groups = sittings(&games, TimeDelta::hours(3));
-        let live = Some("2026-10-18T00:30:00Z");
-        let head = session_head_in(&groups[0], 4, live, &utc());
-        assert_eq!(head.summary, "4 games · 1-1 · 1 undecided · 1 h 57 min");
-        let head = session_head_in(&groups[0], 4, None, &utc());
-        assert_eq!(head.summary, "4 games · 1-1 · 2 undecided · 1 h 57 min");
-        let draws = [
-            game(Outcome::Draw, "2026-10-18T00:14:00Z", &[]),
-            game(Outcome::Win, "2026-10-17T23:50:00Z", &[]),
-        ];
-        let groups = sittings(&draws, TimeDelta::hours(3));
-        let head = session_head_in(&groups[0], 1, None, &utc());
-        assert_eq!(head.summary, "2 games · 1-0-1 · 24 min · 1 shown");
-        assert_eq!(form_ticks(&groups[0]), [Tick::Up, Tick::Mid]);
-    }
-
-    /// The gap runs from one game's end to the next game's start, so a
-    /// 20-minute game and a 10-minute queue stay one sitting under a 30
-    /// minute window, and the span covers the last game's length.
-    #[test]
-    fn sittings_split_on_the_gap_between_games_not_their_starts() {
-        let games = [
-            timed(Outcome::Win, "2026-10-18T20:30:00Z", "2026-10-18T20:50:00Z"),
-            timed(
-                Outcome::Loss,
-                "2026-10-18T20:00:00Z",
-                "2026-10-18T20:20:00Z",
-            ),
-            timed(Outcome::Win, "2026-10-18T18:00:00Z", "2026-10-18T18:15:00Z"),
-        ];
-        let groups = sittings(&games, TimeDelta::minutes(30));
-        assert_eq!(groups.iter().map(Vec::len).collect::<Vec<_>>(), [2, 1]);
-        let head = session_head_in(&groups[0], 2, None, &utc());
-        assert_eq!(head.title, "Sunday evening · Oct 18, 20:00 to 20:50");
-        assert_eq!(head.summary, "2 games · 1-1 · 50 min");
-    }
-
-    /// Item 19: Delete game takes the game out of the list every header is
-    /// built from, so the sitting's span and count follow the delete (no
-    /// stale end time), as PR 556 left it.
+    /// Delete game takes the game out of every header, so the sitting's
+    /// span and count follow (no stale end time).
     #[test]
     fn a_deleted_game_leaves_the_session_span() {
         let mut games = vec![
@@ -1182,6 +931,17 @@ mod tests {
         assert_eq!(head.summary, "3 games · 2-1 · 1 h 0 min · 2 shown");
         assert_eq!(s.ticks.len(), 3);
         assert_eq!(l.hidden, 0);
+        // Imported games share an empty session id: keep only the shown ones.
+        let mut imported = all;
+        for g in &mut imported {
+            g.session_id.clear();
+        }
+        let shown = vec![&imported[0], &imported[2]];
+        let state = TabState::default();
+        let l = layout_in(&imported, &shown, state, Grid::Wide, 1800, None, &utc());
+        assert_eq!(l.sections[0].rows.len(), 2);
+        assert!(std::ptr::eq(l.sections[0].rows[0], shown[0]));
+        assert!(std::ptr::eq(l.sections[0].rows[1], shown[1]));
     }
 
     #[test]
@@ -1396,15 +1156,22 @@ mod tests {
         assert!(Col::Hero.sortable() && Col::Length.sortable());
     }
 
-    /// LENGTH sorts by the Tab span; a game with no span goes last both
-    /// ways. The note says what the span is and what is not recorded.
+    /// LENGTH sorts by the real length, else the Tab span; a game with
+    /// neither goes last both ways. The note says what Length is.
     #[test]
-    fn length_sorts_by_the_tab_span_and_the_note_says_what_it_is() {
+    fn length_sorts_by_the_real_length_or_the_tab_span_and_the_note_says_so() {
         let short = timed(Outcome::Win, "2026-09-02T20:00:00Z", "2026-09-02T20:04:00Z");
         let long = timed(Outcome::Win, "2026-09-02T21:00:00Z", "2026-09-02T21:09:00Z");
         let none = game(Outcome::Win, "2026-09-02T22:00:00Z", &[]);
+        // A real length (6 min) sorts by itself, not by its 1 min Tab span.
+        let mut real = timed(Outcome::Win, "2026-09-02T23:00:00Z", "2026-09-02T23:01:00Z");
+        let start = real.segments[0].first_seen;
+        real.match_times = Some(crate::model::GameTimes {
+            started_at: Some(start),
+            ended_at: Some(start + chrono::Duration::minutes(6)),
+        });
         for desc in [true, false] {
-            let mut v = vec![&none, &short, &long];
+            let mut v = vec![&none, &short, &real, &long];
             sort_games(
                 &mut v,
                 Sort {
@@ -1414,14 +1181,15 @@ mod tests {
             );
             let order: Vec<&Game> = v.into_iter().collect();
             let want = if desc {
-                [&long, &short, &none]
+                [&long, &real, &short, &none]
             } else {
-                [&short, &long, &none]
+                [&short, &real, &long, &none]
             };
             assert_eq!(order, want);
         }
         assert!(SORT_NOTE.contains("Rank, queue and crew are not recorded yet"));
-        assert!(SORT_NOTE.contains("Length"));
+        assert!(SORT_NOTE.contains("Length runs from the game's start screen to its result"));
+        assert!(SORT_NOTE.contains("at least that long"));
     }
 
     #[test]

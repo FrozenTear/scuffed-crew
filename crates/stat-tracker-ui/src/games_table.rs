@@ -55,7 +55,7 @@ pub enum Msg {
     RetryAll,
     /// Delete no widget took: the open or focused row's delete confirm.
     DeleteKey,
-    /// The held-game picker.
+    /// The Set map or Set hero picker.
     Picker(crate::games_picker::Msg),
 }
 
@@ -67,9 +67,20 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
     {
         app.games_tab.picker = None;
     }
+    // The one hidden-row check for a tab message (`before_message` skips
+    // these). An open row left undrawn now is one in Edit: no key acts on it.
+    let undrawn_edit = drop_hidden_open_row(app);
+    if undrawn_edit && is_key(&msg) {
+        return iced::Task::none();
+    }
     match msg {
         Msg::SetGrouping(g) => app.games_tab.view.grouping = g,
-        Msg::SortBy(col) => app.games_tab.view.sort = app.games_tab.view.sort.clicked(col),
+        // The click acts on the sort the header shows: under 1100 px a Hero
+        // or E/D/A sort reads as TIME, so a TIME click flips that.
+        Msg::SortBy(col) => {
+            let shown = app.games_tab.view.sort.visible_in(app.games_tab.grid.get());
+            app.games_tab.view.sort = shown.clicked(col);
+        }
         Msg::ToggleCompact => app.games_tab.view.compact = !app.games_tab.view.compact,
         Msg::ToggleFilters => app.games_tab.view.filters_open = !app.games_tab.view.filters_open,
         Msg::Open(sid) => {
@@ -137,6 +148,87 @@ pub fn update(app: &mut TrackerApp, msg: Msg) -> iced::Task<Message> {
     iced::Task::none()
 }
 
+/// Leaving the Games tab: close the open row, its edit and delete strip,
+/// and take down the "Game deleted." line, the ring after a delete and an
+/// open picker, so none of them comes back with the tab.
+pub fn leave(app: &mut TrackerApp) {
+    app.expanded = None;
+    app.editing = false;
+    app.confirm_delete = None;
+    app.games_tab.deleted_note = None;
+    clear_focus(app);
+}
+
+/// Drop the tab's focus and picker. Edit calls it too: a Delete game
+/// focus kept into the form would let Enter open the delete strip over it.
+pub fn clear_focus(app: &mut TrackerApp) {
+    app.games_tab.focus = Focus::None;
+    app.games_tab.picker = None;
+}
+
+/// Run before each app message: take a stale "Game deleted." down and,
+/// on any message but the 1 s tick, run the undrawn-row check
+/// ([`drop_hidden_open_row`]: a row the filters hid, one past the first
+/// 500 rows, or a game that left the list). A tick can reload the list,
+/// so a game may leave it or go past the cap on one, but no key comes
+/// with a tick and the next message runs the check first, so skipping it
+/// there is safe and saves building the list. A Games tab message skips
+/// it too, as [`update`] runs it once for that message.
+pub(crate) fn before_message(app: &mut TrackerApp, message: &Message) {
+    crate::games_delete::drop_stale_note(app);
+    if !matches!(message, Message::Tick | Message::Games(_)) {
+        drop_hidden_open_row(app);
+    }
+}
+
+/// Drop a row focus that is not drawn now, and close an open row that is
+/// not drawn, so a key never acts on a row the player can't see. Only the
+/// top tabs take these keys, so the classic Games page keeps its open
+/// card. Drawn is [`row_order`]: a row the filters hid, a row past the
+/// first 500 and a game that left the list (an untracked map after a
+/// reload) are all off screen. An open Edit stays up on an undrawn row so
+/// the typed text comes back with the row (or a save can say the game is
+/// gone), but its delete strip, picker and delete focus go. Returns
+/// whether that is the case: an Edit left open on an undrawn row, which
+/// [`update`] gives no key. The row list is built only when a row is open
+/// or focused.
+pub(crate) fn drop_hidden_open_row(app: &mut TrackerApp) -> bool {
+    let focused_row = matches!(app.games_tab.focus, Focus::Row(_));
+    if app.nav_style != crate::nav::NavStyle::TopTabs || (app.expanded.is_none() && !focused_row) {
+        return false;
+    }
+    let drawn = row_order(app);
+    let hidden = |sid: &str| !drawn.iter().any(|s| s == sid);
+    if matches!(&app.games_tab.focus, Focus::Row(sid) if hidden(sid)) {
+        app.games_tab.focus = Focus::None;
+    }
+    if !app.expanded.as_deref().is_some_and(hidden) {
+        return false;
+    }
+    if !app.editing {
+        app.expanded = None;
+    }
+    app.confirm_delete = None;
+    app.games_tab.picker = None;
+    if matches!(
+        app.games_tab.focus,
+        Focus::DeleteButton | Focus::Cancel | Focus::ConfirmDelete
+    ) {
+        app.games_tab.focus = Focus::None;
+    }
+    app.editing
+}
+
+/// The keys no widget took, which [`update`] refuses while an Edit is
+/// left open on an undrawn row: Esc can't drop its form, and Tab, Enter,
+/// Space and Delete can't reach it.
+fn is_key(msg: &Msg) -> bool {
+    matches!(
+        msg,
+        Msg::Escape | Msg::Enter | Msg::Tab | Msg::Space | Msg::DeleteKey
+    )
+}
+
 /// Enter or Space on the focused button or row. False when nothing that
 /// takes them has the focus.
 fn press_focused(app: &mut TrackerApp) -> bool {
@@ -192,11 +284,15 @@ fn cancel_delete(app: &mut TrackerApp) {
 
 /// Queue the delete (its tombstone goes on the next sync), drop the row,
 /// and move the focus to the row after it, or before it when it was last.
+/// The line says the site copy goes when the strip did: both come from
+/// [`crate::games_delete::reach`].
 fn delete(app: &mut TrackerApp, sid: &str) {
     let next = games_rows::neighbour(&row_order(app), sid);
+    let live = app.live_game_session.as_deref();
     let uploaded = app.games.iter().any(|g| {
         g.session_id == sid
-            && crate::games_detail::upload(g, false, true) == crate::games_detail::Upload::Uploaded
+            && crate::games_delete::reach(g, game_card_in_progress(&g.session_id, g.outcome, live))
+                == crate::games_delete::Reach::Site
     });
     match crate::commands::delete_session(&app.data_dir, sid) {
         Ok(()) => {
@@ -210,10 +306,29 @@ fn delete(app: &mut TrackerApp, sid: &str) {
                 sid: sid.to_string(),
                 uploaded,
             });
+            app.games_tab.deleted_filters = Some(crate::games_delete::filters_now(app));
+            // The line goes over the empty state when no row is left.
+            app.games_tab.deleted_empty_shown = crate::games::shown_games(app).is_empty();
             app.games_tab.pending_deletes = None;
+            // A "Send this fix to help training" for the deleted game would
+            // open a report on a game that is gone.
+            if toast_targets(app, sid) {
+                app.toast_action = None;
+            }
         }
         Err(e) => app.replace_toast(format!("Could not delete game: {e}")),
     }
+}
+
+/// Whether the toast's action opens a report on game `sid`.
+fn toast_targets(app: &TrackerApp, sid: &str) -> bool {
+    matches!(
+        &app.toast_action,
+        Some(Message::Report(crate::report::ReportMessage::OpenGame {
+            session_id: Some(s),
+            ..
+        })) if s == sid
+    )
 }
 
 /// The shown rows' session ids in the order they are drawn.
@@ -265,6 +380,10 @@ pub fn view<'a>(
         col = col.push(retry_all);
     }
     if shown.is_empty() {
+        // Deleting the last row the filters leave still says so.
+        if let Some(note) = crate::games_delete::empty_note(app) {
+            col = col.push(crate::games_delete::deleted_line(note));
+        }
         let copy = if app.games.is_empty() {
             games_rows::EMPTY_NONE
         } else {
@@ -282,12 +401,18 @@ pub fn view<'a>(
         .flat_map(|sec| sec.rows.iter().map(|g| g.session_id.as_str()))
         .collect();
     // "Game deleted." tops the table of the row the focus moved to.
-    let deleted = app.games_tab.deleted_note.is_some();
-    let note_at = match &app.games_tab.focus {
-        Focus::Row(sid) if deleted => order.iter().position(|s| *s == sid.as_str()),
-        _ => None,
-    }
-    .or(deleted.then_some(0));
+    let deleted = crate::games_delete::note_shows(app);
+    // A note already drawn over the empty state must not land on row 0
+    // when games come back under the same filters.
+    let note_at = if app.games_tab.deleted_empty_shown {
+        None
+    } else {
+        match &app.games_tab.focus {
+            Focus::Row(sid) if deleted => order.iter().position(|s| *s == sid.as_str()),
+            _ => None,
+        }
+        .or(deleted.then_some(0))
+    };
     let copy = crate::games_delete::deleted_copy(app);
     let mut seen = 0;
     for section in layout.sections {
@@ -570,7 +695,7 @@ fn game_row(
                     TEXT_2
                 })
                 .into(),
-            Col::Length => match crate::games_detail::tracked(g).length_cell() {
+            Col::Length => match crate::games_detail::game_length(g).length_cell() {
                 Some(len) => text(len).size(SIZE_META).color(TEXT_2).into(),
                 None => text("-").size(SIZE_META).color(TEXT_3).into(),
             },
@@ -797,4 +922,360 @@ pub(crate) fn small_chip_owned(
         ..container::Style::default()
     })
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixtures_games::{NORMAL, UNSURE};
+    use crate::games_rows::{Col, Sort};
+
+    fn app() -> (tempfile::TempDir, TrackerApp) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = crate::fixtures::test_cli(dir.path());
+        cli.fixture = Some(crate::cli::FixtureKind::Games);
+        let mut app = TrackerApp::new(cli).0;
+        app.nav_style = crate::nav::NavStyle::TopTabs;
+        (dir, app)
+    }
+
+    fn send(app: &mut TrackerApp, msg: Msg) {
+        let _ = update(app, msg);
+    }
+
+    /// Under 1100 px a Hero sort reads as TIME ▼, so the first TIME click
+    /// flips it to TIME ▲ instead of doing nothing.
+    #[test]
+    fn a_header_click_acts_on_the_sort_the_header_shows() {
+        let (_dir, mut app) = app();
+        app.games_tab.grid.set(Grid::Narrow);
+        for hidden in [Col::Hero, Col::Eda, Col::Length] {
+            app.games_tab.view.sort = Sort::default().clicked(hidden);
+            assert_eq!(
+                app.games_tab.view.sort.visible_in(Grid::Narrow),
+                Sort::default()
+            );
+            send(&mut app, Msg::SortBy(Col::Time));
+            assert_eq!(
+                app.games_tab.view.sort,
+                Sort {
+                    col: Col::Time,
+                    desc: false
+                },
+                "{hidden:?}"
+            );
+        }
+        // Wide: the Hero sort is shown, so a TIME click starts TIME ▼.
+        app.games_tab.grid.set(Grid::Wide);
+        app.games_tab.view.sort = Sort::default().clicked(Col::Hero);
+        send(&mut app, Msg::SortBy(Col::Time));
+        assert_eq!(app.games_tab.view.sort, Sort::default());
+    }
+
+    /// A delete drops the toast's training report offer for that game; an
+    /// offer for another game stays.
+    #[test]
+    fn a_delete_drops_the_report_offer_for_the_deleted_game() {
+        let (_dir, mut app) = app();
+        app.replace_toast("Stats corrected");
+        app.arm_training_toast(NORMAL, crate::report::GameCategory::WrongStats);
+        assert!(toast_targets(&app, NORMAL));
+        send(&mut app, Msg::Delete(UNSURE.into()));
+        assert!(toast_targets(&app, NORMAL), "another game's offer stays");
+        send(&mut app, Msg::Delete(NORMAL.into()));
+        assert!(app.toast_action.is_none());
+    }
+
+    /// Leaving the tab takes the ring after a delete and an open picker
+    /// with it; coming back shows neither.
+    #[test]
+    fn leaving_the_tab_clears_the_focus_and_the_picker() {
+        let (_dir, mut app) = app();
+        app.expanded = Some(crate::fixtures_games::HELD.into());
+        send(
+            &mut app,
+            Msg::Picker(crate::games_picker::Msg::Open(
+                crate::fixtures_games::HELD.into(),
+                crate::games_picker::Field::Map,
+            )),
+        );
+        assert!(app.games_tab.picker.is_some());
+        // As after a delete: the ring on a row.
+        app.games_tab.focus = Focus::Row(UNSURE.into());
+        let _ = app.update(Message::Navigate(Screen::Overview));
+        let _ = app.update(Message::Navigate(Screen::Games));
+        assert_eq!(app.games_tab.focus, Focus::None);
+        assert!(app.games_tab.picker.is_none());
+    }
+
+    /// Edit takes the focus off Delete game, so Enter over the form never
+    /// opens the delete strip.
+    #[test]
+    fn opening_edit_clears_the_delete_focus() {
+        let (_dir, mut app) = app();
+        app.expanded = Some(NORMAL.into());
+        send(&mut app, Msg::Tab);
+        assert_eq!(app.games_tab.focus, Focus::DeleteButton);
+        let _ = app.update(Message::ToggleEdit);
+        assert!(app.editing);
+        assert_eq!(app.games_tab.focus, Focus::None);
+        send(&mut app, Msg::Enter);
+        assert_eq!(app.confirm_delete, None);
+        assert!(app.editing);
+    }
+
+    /// A focused row a filter hid is dropped: Enter and Delete never open
+    /// a row the player can't see.
+    #[test]
+    fn a_focused_row_the_filters_hide_takes_no_keys() {
+        for key in [Msg::Enter, Msg::Space, Msg::DeleteKey] {
+            let (_dir, mut app) = app();
+            app.games_tab.focus = Focus::Row(UNSURE.into());
+            app.filter_outcome = Some(Outcome::Loss);
+            send(&mut app, key.clone());
+            assert_eq!(app.expanded, None, "{key:?}");
+            assert_eq!(app.confirm_delete, None, "{key:?}");
+            assert_eq!(app.games_tab.focus, Focus::None, "{key:?}");
+        }
+        // Still shown: Enter opens it.
+        {
+            let (_dir, mut app) = app();
+            app.games_tab.focus = Focus::Row(UNSURE.into());
+            send(&mut app, Msg::Enter);
+            assert_eq!(app.expanded.as_deref(), Some(UNSURE));
+        }
+        // An open row a filter hid later is closed: Delete, Tab and Enter
+        // never act on a row the player can't see.
+        for key in [Msg::Enter, Msg::Tab, Msg::DeleteKey] {
+            let (_dir, mut app) = app();
+            app.expanded = Some(UNSURE.into());
+            app.filter_outcome = Some(Outcome::Loss);
+            send(&mut app, key.clone());
+            assert_eq!(app.expanded, None, "{key:?}");
+            assert_eq!(app.confirm_delete, None, "{key:?}");
+            assert_ne!(app.games_tab.focus, Focus::DeleteButton, "{key:?}");
+            assert_ne!(app.games_tab.focus, Focus::Cancel, "{key:?}");
+        }
+    }
+
+    /// `n` older copies of the normal game, so the list runs past the
+    /// top tabs' row cap. Returns the oldest one's session id.
+    fn with_many_games(app: &mut TrackerApp, n: usize) -> String {
+        let base = app
+            .games
+            .iter()
+            .find(|g| g.session_id == NORMAL)
+            .unwrap()
+            .clone();
+        for i in 0..n {
+            let mut g = base.clone();
+            g.session_id = format!("sess-old-{i}");
+            g.played_at = base.played_at - chrono::TimeDelta::hours(1 + i as i64);
+            app.games.push(g);
+        }
+        format!("sess-old-{}", n - 1)
+    }
+
+    /// The classic layout lists every game, so an old card past the top
+    /// tabs' 500 rows keeps its delete confirm and its Edit, with the
+    /// typed text, across ticks and other messages.
+    #[test]
+    fn the_classic_layout_keeps_an_old_open_card_past_the_row_cap() {
+        let (_dir, mut app) = app();
+        app.nav_style = crate::nav::NavStyle::ClassicSidebar;
+        let old = with_many_games(&mut app, games_rows::ROW_CAP + 20);
+        assert!(!row_order(&app).contains(&old), "past the top tabs' cap");
+        app.expanded = Some(old.clone());
+        app.confirm_delete = Some(old.clone());
+        for _ in 0..3 {
+            let _ = app.update(Message::Tick);
+        }
+        let _ = app.update(Message::Navigate(Screen::Games));
+        assert_eq!(app.expanded.as_deref(), Some(old.as_str()));
+        assert_eq!(app.confirm_delete.as_deref(), Some(old.as_str()));
+        app.confirm_delete = None;
+        let _ = app.update(Message::ToggleEdit);
+        let _ = app.update(Message::EditField(
+            crate::model::EditField::Elims,
+            "40".into(),
+        ));
+        for _ in 0..3 {
+            let _ = app.update(Message::Tick);
+        }
+        let _ = app.update(Message::Navigate(Screen::Games));
+        assert!(app.editing);
+        assert_eq!(app.expanded.as_deref(), Some(old.as_str()));
+        assert_eq!(app.edit.elims, "40");
+    }
+
+    /// On the top tabs a row past the first 500 is not drawn, so it takes
+    /// no key: an armed confirm on it goes, the row closes and the game is
+    /// never deleted, and a focus on it never opens it.
+    #[test]
+    fn the_top_tabs_refuse_keys_on_a_row_past_the_row_cap() {
+        for key in [
+            Msg::Tab,
+            Msg::Enter,
+            Msg::Space,
+            Msg::DeleteKey,
+            Msg::Escape,
+        ] {
+            let (_dir, mut app) = app();
+            let old = with_many_games(&mut app, games_rows::ROW_CAP + 20);
+            assert!(!row_order(&app).contains(&old), "past the cap");
+            app.expanded = Some(old.clone());
+            app.confirm_delete = Some(old.clone());
+            app.games_tab.focus = Focus::ConfirmDelete;
+            send(&mut app, key.clone());
+            assert!(app.games.iter().any(|g| g.session_id == old), "{key:?}");
+            assert!(crate::commands::queued(&app.data_dir).is_empty(), "{key:?}");
+            assert_eq!(app.confirm_delete, None, "{key:?}");
+            assert_eq!(app.expanded, None, "{key:?}");
+            assert_eq!(app.games_tab.focus, Focus::None, "{key:?}");
+            // A focus on the undrawn row is dropped, not opened.
+            app.games_tab.focus = Focus::Row(old.clone());
+            send(&mut app, key.clone());
+            assert_eq!(app.expanded, None, "{key:?}");
+            assert_eq!(app.confirm_delete, None, "{key:?}");
+            assert_eq!(app.games_tab.focus, Focus::None, "{key:?}");
+        }
+    }
+
+    /// A row a filter hid while Edit is open keeps the form and its typed
+    /// text, but its delete strip goes and it takes no key: Tab then Enter
+    /// or Space can't delete the game, and Esc can't drop the form. Once
+    /// the row is back, the form is there and Esc works again.
+    #[test]
+    fn a_row_hidden_mid_edit_takes_no_keys() {
+        for keys in [
+            vec![Msg::Tab, Msg::Enter],
+            vec![Msg::Tab, Msg::Space],
+            vec![Msg::Enter],
+            vec![Msg::Space],
+            vec![Msg::Escape],
+            vec![Msg::DeleteKey],
+        ] {
+            let (_dir, mut app) = app();
+            app.expanded = Some(UNSURE.into());
+            let _ = app.update(Message::ToggleEdit);
+            let _ = app.update(Message::EditField(
+                crate::model::EditField::Elims,
+                "41".into(),
+            ));
+            // Delete game is still drawn under the form: its strip is up.
+            send(&mut app, Msg::AskDelete(UNSURE.into()));
+            assert_eq!(app.confirm_delete.as_deref(), Some(UNSURE));
+            let _ = app.update(Message::FilterOutcome(Some(Outcome::Loss)));
+            assert!(!row_order(&app).iter().any(|s| s == UNSURE));
+            // The check runs before each message, so the next key finds
+            // the strip gone.
+            for key in &keys {
+                let _ = app.update(Message::Games(key.clone()));
+            }
+            assert!(app.games.iter().any(|g| g.session_id == UNSURE), "{keys:?}");
+            assert!(
+                crate::commands::queued(&app.data_dir).is_empty(),
+                "{keys:?}"
+            );
+            assert_eq!(app.confirm_delete, None, "{keys:?}");
+            assert!(app.editing, "{keys:?}");
+            assert_eq!(app.expanded.as_deref(), Some(UNSURE), "{keys:?}");
+            assert_eq!(app.edit.elims, "41", "{keys:?}");
+            let _ = app.update(Message::FilterOutcome(None));
+            assert!(app.editing, "{keys:?}");
+            assert_eq!(app.edit.elims, "41", "{keys:?}");
+            send(&mut app, Msg::Escape);
+            assert!(!app.editing, "{keys:?}");
+        }
+    }
+
+    /// A game that left the list (an untracked map, then a reload) is not
+    /// drawn, so its open row closes and Delete, Tab then Enter delete
+    /// nothing. In Edit it stays open with the typed text, but takes no
+    /// key, as a hidden row does.
+    #[test]
+    fn a_game_that_left_the_list_takes_no_keys() {
+        let (_d1, mut a) = app();
+        a.expanded = Some(UNSURE.into());
+        a.games.retain(|g| g.session_id != UNSURE);
+        for key in [Msg::DeleteKey, Msg::Tab, Msg::Enter] {
+            let _ = a.update(Message::Games(key));
+        }
+        assert_eq!(a.expanded, None);
+        assert_eq!(a.confirm_delete, None);
+        assert!(a.games_tab.deleted_note.is_none(), "nothing deleted");
+        assert!(crate::commands::queued(&a.data_dir).is_empty());
+        // In Edit: the form and its text stay, and no key reaches it.
+        let (_dir, mut app) = app();
+        app.expanded = Some(UNSURE.into());
+        let _ = app.update(Message::ToggleEdit);
+        let _ = app.update(Message::EditField(
+            crate::model::EditField::Elims,
+            "42".into(),
+        ));
+        app.games.retain(|g| g.session_id != UNSURE);
+        for key in [Msg::DeleteKey, Msg::Tab, Msg::Enter, Msg::Escape] {
+            let _ = app.update(Message::Games(key));
+        }
+        assert!(app.editing);
+        assert_eq!(app.expanded.as_deref(), Some(UNSURE));
+        assert_eq!(app.edit.elims, "42");
+        assert_eq!(app.confirm_delete, None);
+        assert!(app.games_tab.deleted_note.is_none(), "nothing deleted");
+        assert!(crate::commands::queued(&app.data_dir).is_empty());
+    }
+
+    /// The tick never runs the hidden-row check, so it neither closes an
+    /// open row nor builds the list: a row a filter hid stays open until
+    /// the next message from the player.
+    #[test]
+    fn the_tick_does_not_run_the_hidden_row_check() {
+        let (_dir, mut app) = app();
+        app.expanded = Some(UNSURE.into());
+        app.games_tab.focus = Focus::Row(UNSURE.into());
+        app.filter_outcome = Some(Outcome::Loss);
+        for _ in 0..3 {
+            let _ = app.update(Message::Tick);
+        }
+        assert_eq!(app.expanded.as_deref(), Some(UNSURE));
+        assert_eq!(app.games_tab.focus, Focus::Row(UNSURE.into()));
+        let _ = app.update(Message::Navigate(Screen::Games));
+        assert_eq!(app.expanded, None);
+        assert_eq!(app.games_tab.focus, Focus::None);
+    }
+
+    /// A filter change mid-Edit keeps the form and its typed text: under a
+    /// filter that still shows the row, and under one that hides it until
+    /// the row is back.
+    #[test]
+    fn a_filter_change_mid_edit_keeps_the_typed_text() {
+        let (_dir, mut app) = app();
+        app.expanded = Some(UNSURE.into());
+        let _ = app.update(Message::ToggleEdit);
+        assert!(app.editing);
+        let _ = app.update(Message::EditField(
+            crate::model::EditField::Elims,
+            "41".into(),
+        ));
+        for f in [Some(Outcome::Win), Some(Outcome::Loss), None] {
+            let _ = app.update(Message::FilterOutcome(f));
+            let _ = app.update(Message::Tick);
+            assert!(app.editing, "{f:?}");
+            assert_eq!(app.expanded.as_deref(), Some(UNSURE), "{f:?}");
+            assert_eq!(app.edit.elims, "41", "{f:?}");
+        }
+    }
+
+    /// The delete marks whether it left the filters no row, so the view
+    /// only reads it.
+    #[test]
+    fn the_delete_marks_an_empty_list() {
+        let (_dir, mut app) = app();
+        send(&mut app, Msg::Delete(UNSURE.into()));
+        assert!(!app.games_tab.deleted_empty_shown, "rows are left");
+        app.filter_map = Some("Circuit Royal".into());
+        send(&mut app, Msg::Delete(NORMAL.into()));
+        assert!(crate::games::shown_games(&app).is_empty());
+        assert!(app.games_tab.deleted_empty_shown);
+    }
 }

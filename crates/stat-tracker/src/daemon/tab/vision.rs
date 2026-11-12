@@ -235,10 +235,15 @@ pub(crate) fn analyze_frame(
     let read_cells = || ocr::recognize_scoreboard_cells_pre_cropped(&scoreboard, team_size);
     let mut rows = read_tab_rows(use_new_reader, read_cells, || ocr::unread_rows(team_size));
 
-    // Player row. ocr-v1: if a player name is configured, scan ALL rows (both
-    // teams) for a name match, this handles replays and post-match screens
-    // where the player may be on team 2. Fall back to brightness-detected row
-    // otherwise. `reader = "new"`: the seed match combined with the
+    // Player row. ocr-v1: with two or more saved names and a strong
+    // highlight, that row's own name read decides first: it is the row
+    // when it names one saved name, and it stays the row with no name when
+    // saved names read on it but none wins (no board scan then). With no
+    // highlight, a weak one, fewer than two names, or a row no saved name
+    // reads on, a configured name is matched over ALL rows (both teams),
+    // for replays and post-match screens where the player may be on team
+    // 2. Fall back to the brightness-detected row otherwise.
+    // `reader = "new"`: the seed match combined with the
     // highlight, and where both are silent the row the career panel's hero
     // is read on (alpha.7 O9b). Only when none of them names a row are this
     // board's name windows read, to match the configured name as main does.
@@ -267,16 +272,22 @@ pub(crate) fn analyze_frame(
             if own_names.is_empty() {
                 return None;
             }
-            let hit = names::match_player_row(
-                &scoreboard,
-                team_size,
-                own_names.as_slice(),
-                names,
-                names::BoardMatch::Cells,
-                || rows.iter().map(names::name_only).collect(),
-            )?;
-            name_recognizer_slot.set(Some(hit.recognizer));
-            Some(hit.name)
+            // Runs only when the highlighted row's own read leaves the
+            // choice to the board (see `highlighted_own_name`).
+            let board = || {
+                let hit = names::match_player_row(
+                    &scoreboard,
+                    team_size,
+                    own_names.as_slice(),
+                    names,
+                    names::BoardMatch::Cells,
+                    || rows.iter().map(names::name_only).collect(),
+                )?;
+                Some((hit.name, hit.recognizer))
+            };
+            let (found, recognizer) = ocr_v1_name_match(&rows, highlight, &own_names, board)?;
+            name_recognizer_slot.set(Some(recognizer));
+            Some(found)
         },
         || {
             detect::own_row::read_own_row(
@@ -497,8 +508,10 @@ pub(crate) fn read_tab_board(
 /// The own row of one Tab (OCR site T4).
 pub(crate) struct OwnRowChoice {
     pub(crate) row_idx: Option<usize>,
-    /// The name match behind `row_idx`: ocr-v1's, or the new reader's name
-    /// fallback. `None` when the row came from seeds or the highlight.
+    /// The name match behind `row_idx`: ocr-v1's (the highlighted row's own
+    /// read when it names one saved name, else the board match), or the new
+    /// reader's name fallback. `None` when the row came from seeds, the
+    /// career hero, or a highlight with no named read.
     pub(crate) name_match: Option<parse::NameMatch>,
     /// New reader: how the row was found. `None` under ocr-v1.
     pub(crate) own_row: Option<detect::own_row::OwnRow>,
@@ -536,18 +549,15 @@ pub(crate) fn own_row_name_fallback(
     if ocr::gate::is_off() {
         return None;
     }
-    let own_names: Vec<String> = own_names
-        .iter()
-        .filter(|name| !name.trim().is_empty())
-        .cloned()
-        .collect();
-    if own_names.is_empty() {
+    // Blank names are skipped by the matcher. The list is passed whole, so
+    // the match's name index is an index into `own_names`.
+    if own_names.iter().all(|name| name.trim().is_empty()) {
         return None;
     }
     names::match_player_row(
         scoreboard,
         team_size,
-        own_names.as_slice(),
+        own_names,
         names,
         names::BoardMatch::FullBoard,
         || ocr::recognize_scoreboard_names_pre_cropped(scoreboard, team_size),
@@ -576,9 +586,13 @@ pub(crate) fn name_on_a_full_board(
 
 /// Find the member's own row with the daemon's reader switch.
 ///
-/// * `reader = "ocr-v1"`: `name_match` (the name OCR over every row) runs,
-///   and the row is that match, else the highlighted row, exactly as before.
-///   The seeds are not read.
+/// * `reader = "ocr-v1"`: `name_match` runs, and the row is that match,
+///   else the highlighted row. The daemon's `name_match` is
+///   [`ocr_v1_name_match`]: with two or more saved names and a strong
+///   highlight, that row's own name read decides first; an unresolved read
+///   there keeps the highlight with no name. The name OCR over every row
+///   runs only with no highlight, a weak one, fewer than two names, or a
+///   highlighted row no saved name reads on. The seeds are not read.
 /// * `reader = "new"`: `seed_read` (the own-name seeds matched on every row,
 ///   combined with the highlight in [`detect::own_row::combine`]) gives the
 ///   row. A seed against a strong highlight is no row: the capture is held.
@@ -722,12 +736,14 @@ pub(crate) fn read_own_hero(
     }
 }
 
-/// The names the raw-text stats fallback (OCR site T7) may search for.
+/// The saved names the raw-text stats fallback (OCR site T7) chooses from.
+/// [`read_scoreboard_named`] then narrows them: beside an own row, with two
+/// or more names, only that row's name is searched for.
 ///
-/// ocr-v1: every saved name. `reader = "new"`: the saved names only when
-/// the own row was found. With no own row (seed and highlight disagree, or
-/// neither fired) there is no name, so the full-board text cannot name a
-/// row in its place and the capture is held.
+/// ocr-v1: the saved names, with or without an own row. `reader = "new"`:
+/// the saved names only when the own row was found. With no own row (seed
+/// and highlight disagree, or neither fired) there is no name, so the
+/// full-board text cannot name a row in its place and the capture is held.
 pub(crate) fn text_fallback_names(
     use_new_reader: bool,
     player_row_idx: Option<usize>,
@@ -740,23 +756,38 @@ pub(crate) fn text_fallback_names(
 }
 
 /// [`parse::read_scoreboard`] with each of `names` in turn until one reads,
-/// so an alt's line on the board is read too. A name found but unreadable
-/// passes to the next as well: the main name can sit in a chat line, which
-/// the text fallback skips, while the member plays on an alt (the own row
-/// set or not). When no name reads, an unreadable miss wins over "row not
-/// found". No names is one read with none.
+/// so an alt's line on the board is read too.
+///
+/// With no own row, every name is tried. A name found but unreadable passes
+/// to the next as well: the main name can sit in a chat line, which the
+/// text fallback skips, while the member plays on an alt. When no name
+/// reads, an unreadable miss wins over "row not found".
+///
+/// With an own row and two or more saved names, only the one name that
+/// belongs to that row is tried ([`own_row_names`]), so when its cells do
+/// not parse the text fallback reads that row's line or nothing; it does
+/// not fall through to another saved account's line. A row no saved name
+/// belongs to gets one read with no name: the cells, or an unreadable
+/// miss, logged at INFO with the reason. With one saved name (or none)
+/// that name is tried, as before.
 pub(crate) fn read_scoreboard_named(
     rows: &[ocr::RowOcrResult],
     player_row_idx: Option<usize>,
+    name_match: Option<parse::NameMatch>,
     raw_text: &str,
     outcome: &str,
     names: &[String],
 ) -> Result<parse::ScoreboardRead, parse::ScoreboardMiss> {
+    let saved = names;
+    let names: Vec<&str> = match player_row_idx {
+        Some(idx) => own_row_names(rows, idx, name_match, saved),
+        None => saved.iter().map(String::as_str).collect(),
+    };
     let read =
         |name: Option<&str>| parse::read_scoreboard(rows, player_row_idx, raw_text, outcome, name);
-    let mut result = read(names.first().map(String::as_str));
+    let mut result = read(names.first().copied());
     let mut unreadable = false;
-    for name in names.iter().skip(1) {
+    for name in names.iter().copied().skip(1) {
         match result {
             Ok(_) => break,
             Err(miss) => unreadable |= miss == parse::ScoreboardMiss::CellsUnreadable,
@@ -766,7 +797,120 @@ pub(crate) fn read_scoreboard_named(
     if unreadable && matches!(result, Err(parse::ScoreboardMiss::PlayerRowNotFound)) {
         return Err(parse::ScoreboardMiss::CellsUnreadable);
     }
+    if player_row_idx.is_some()
+        && names.is_empty()
+        && !saved.is_empty()
+        && matches!(result, Err(parse::ScoreboardMiss::CellsUnreadable))
+    {
+        // Only when this is why the Tab is skipped: cells that parse never
+        // get here.
+        tracing::info!(
+            target: "scuffed_stat_tracker",
+            row = ?player_row_idx,
+            "own row's stat cells are unreadable and its name read names none of the saved names: \
+             no text fallback, so this Tab is skipped"
+        );
+    }
     result
+}
+
+/// The saved names the text fallback may search for beside the own row at
+/// `idx`. One saved name (or none) is kept as it is: there is no other
+/// account to mix it up with. With two or more, only the one name that
+/// belongs to the row: the name `name_match` matched it with (the
+/// highlighted row's own read, or the whole-board match, which is the
+/// names pack's read where the pack is sure of a row and the per-cell OCR
+/// read otherwise), else, for a row the highlight alone gave, the name its
+/// OCR name read names ([`parse::best_name_for_row`]). A row whose name was
+/// not read, reads as none of them, or reads close to two of them gets no
+/// name, so another saved account's line is not read in its place.
+pub(crate) fn own_row_names<'a>(
+    rows: &[ocr::RowOcrResult],
+    idx: usize,
+    name_match: Option<parse::NameMatch>,
+    names: &'a [String],
+) -> Vec<&'a str> {
+    if names.len() <= 1 {
+        return names.iter().map(String::as_str).collect();
+    }
+    let matched = name_match
+        .filter(|found| found.row == idx)
+        .and_then(|found| names.get(found.name))
+        .map(String::as_str);
+    let named = matched.or_else(|| {
+        rows.get(idx)
+            .and_then(|row| parse::best_name_for_row(row, names))
+    });
+    named.into_iter().collect()
+}
+
+/// What the highlighted row's own name read says about the own row, under
+/// ocr-v1 ([`highlighted_own_name`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HighlightedName {
+    /// The read names one saved name: that row is the own row, by that name.
+    Named(parse::NameMatch),
+    /// Some saved name reads on the row at or above the name-match floor,
+    /// but none wins (two close fuzzy reads, a tie, or a shorter name's
+    /// substring under a longer name's read). The highlight stays the own
+    /// row with no name; the board match does not run.
+    Unresolved,
+    /// No saved name reads on the row, there is no highlight (or no OCR row
+    /// for it), the highlight is not strong, or fewer than two names are
+    /// saved: the board match decides.
+    Board,
+}
+
+/// ocr-v1, two or more saved names, a strong highlight
+/// ([`detect::own_row::Highlight::strong`]): the highlighted row's own name
+/// read against the saved names ([`parse::match_row_by_names`]). A weak
+/// highlight (on the alpha.7 boards every wrong one, a cursor hover or a
+/// party tint, led by under 1.30) is not asked, so a tint on another
+/// account's row does not name that row. A row that
+/// names one saved name is the own row before any match over the whole
+/// board, so another of the member's accounts readable elsewhere on the
+/// board does not take its place. A row some saved name reads on but none
+/// wins is [`HighlightedName::Unresolved`]: such a read is likely one of
+/// the member's accounts misread, and the board match could pick the other
+/// account's row at full trust. Only a row no saved name reads on
+/// ([`parse::any_name_reads_row`]), fewer than two names, or no strong
+/// highlight leaves the decision to the board match.
+pub(crate) fn highlighted_own_name(
+    rows: &[ocr::RowOcrResult],
+    highlight: Option<detect::own_row::Highlight>,
+    names: &[String],
+) -> HighlightedName {
+    if names.len() < 2 {
+        return HighlightedName::Board;
+    }
+    let lit = highlight.filter(detect::own_row::Highlight::strong);
+    let Some((idx, row)) = lit.and_then(|h| Some((h.row, rows.get(h.row)?))) else {
+        return HighlightedName::Board;
+    };
+    match parse::match_row_by_names(row, idx, names) {
+        Some(found) => HighlightedName::Named(found),
+        None if parse::any_name_reads_row(row, names) => HighlightedName::Unresolved,
+        None => HighlightedName::Board,
+    }
+}
+
+/// ocr-v1's own-row name match, the one `analyze_frame` runs: the
+/// highlighted row's own read first ([`highlighted_own_name`]), and the
+/// whole-board match `board` only when that read leaves the choice to it.
+/// An unresolved highlighted read gives no match at all, so
+/// [`find_own_row`] keeps the highlight and the text fallback gets no
+/// name. A named highlighted row comes back with the ocr-v1 recognizer.
+pub(crate) fn ocr_v1_name_match(
+    rows: &[ocr::RowOcrResult],
+    highlight: Option<detect::own_row::Highlight>,
+    saved: &[String],
+    board: impl FnOnce() -> Option<(parse::NameMatch, names::NameRecognizer)>,
+) -> Option<(parse::NameMatch, names::NameRecognizer)> {
+    match highlighted_own_name(rows, highlight, saved) {
+        HighlightedName::Named(found) => Some((found, names::NameRecognizer::OcrV1)),
+        HighlightedName::Unresolved => None,
+        HighlightedName::Board => board(),
+    }
 }
 
 /// Row id passed into [`boundary::plan_capture`]. `None` when the player

@@ -233,6 +233,27 @@ pub struct Game {
     /// read was weak ([`crate::model::QueueTitle::warning`]). `None` with
     /// the queue title reader off.
     pub queue_title: Option<crate::model::QueueTitle>,
+    /// The game's real start and end ([`crate::model::MatchTimes`]). `None`
+    /// on a game recorded before the tracker stored them.
+    #[serde(default)]
+    pub match_times: Option<GameTimes>,
+}
+
+/// [`crate::model::MatchTimes`] for display. Either edge is `None` when the
+/// tracker did not see it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub struct GameTimes {
+    pub started_at: Option<DateTime<Utc>>,
+    pub ended_at: Option<DateTime<Utc>>,
+}
+
+impl GameTimes {
+    pub fn from_stored(t: &crate::model::MatchTimes) -> Self {
+        Self {
+            started_at: t.started_at.map(Into::into),
+            ended_at: t.ended_at.map(Into::into),
+        }
+    }
 }
 
 /// The six stats a "N stats unsure" count covers, as flat names.
@@ -283,6 +304,7 @@ impl Game {
             bans_picks: m.bans_picks.clone(),
             bans_picks_status: m.bans_picks_status.clone(),
             queue_title: m.queue_title.clone(),
+            match_times: m.match_times.as_ref().map(GameTimes::from_stored),
         }
     }
 
@@ -295,8 +317,9 @@ impl Game {
     /// A field the reader was unsure of that no hand edit has fixed since.
     /// `field` is a flat name (`e`, `dmg`) or an edit name (`elims`,
     /// `damage`); both map through `crate::suspect`, the rules the
-    /// store and uploader apply. The names are flat already: `Game::from`
-    /// keeps only flat names (`r3.dmg` is stored as `dmg`).
+    /// store and uploader apply. The names are flat already:
+    /// [`Game::from_match`] keeps only flat names (`r3.dmg` is stored as
+    /// `dmg`).
     pub fn unsure_now(&self, field: &str) -> bool {
         let flats: &[&str] = match crate::suspect::suspect_names_for_edit(field) {
             [] => &[field],
@@ -354,14 +377,14 @@ impl Game {
         display_hero_name(&self.hero)
     }
 
-    /// Title for a missing map. The stored string stays empty so a blank
-    /// read is not shown as a map name.
+    /// Title for the map as the rows and cards show it: the known map
+    /// name, or "No map" for an empty or unknown read such as "Ilio5".
     pub fn display_map(&self) -> String {
         let trimmed = self.map_name.trim();
-        if trimmed.is_empty() {
-            "Map needed".into()
+        if crate::parse::map_is_known(trimmed) {
+            trimmed.to_string()
         } else {
-            self.map_name.clone()
+            "No map".into()
         }
     }
 
@@ -601,6 +624,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         };
         assert!(game.field_unsure("dmg"));
         assert!(game.field_unsure("hero"));
@@ -637,6 +661,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         };
         for field in [
             "hero", "result", "map", "mode", "e", "a", "d", "dmg", "h", "mit",
@@ -676,13 +701,15 @@ mod review_tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         }
     }
 
     #[test]
     fn blank_map_and_unknown_hero_need_a_pick() {
         let blank = game("Ana", "");
-        assert_eq!(blank.display_map(), "Map needed");
+        assert_eq!(blank.display_map(), "No map");
+        assert_eq!(game("Ana", "Ilio5").display_map(), "No map");
         assert_eq!(blank.review_fields(), vec!["map", "mode"]);
         assert!(blank.needs_review());
 

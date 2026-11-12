@@ -48,6 +48,17 @@ pub(crate) async fn close_session_on_shutdown(
         Some(Ok(())) => {
             if let Some(game) = st.active_game.as_mut() {
                 clear_imported_hold(game);
+                // The hold is the game's first row, so nothing else writes
+                // its times when the game is not finished, or at a later
+                // stale restart. A finished game's close then finds its
+                // times already stored, so this write marks the snapshot.
+                // It only marks it: an export here runs before the skeleton
+                // and the close are saved, and a deadline hit inside it would
+                // leave the hold pending, so the next start stores the board
+                // again. The snapshot export stage writes it last.
+                if store_match_times(store, game).await {
+                    mark_snapshot(&SNAPSHOT_STATE, false);
+                }
             }
         }
         Some(Err(e)) => {
@@ -203,6 +214,8 @@ pub(crate) async fn apply_landed_capture_reports(
         // A stored row marks the snapshot like in the run loop, so the
         // shutdown write includes a final board that landed while stopping.
         if apply_capture_report(st, store, data_dir, &sid, result, Instant::now()).await {
+            // The open game's times, as the run loop stores them.
+            store_open_game_times(st, store, &stored_sid).await;
             refresh_snapshot_after_capture(st, store, data_dir, &stored_sid).await;
         }
     }

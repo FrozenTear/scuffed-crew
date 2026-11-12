@@ -129,11 +129,14 @@ pub fn resolve_segment(
 /// Row) and must be a known map, and a typed hero must be on the hero list
 /// in any case, so the store holds the names the reader and the website
 /// use. A game held back for a missing map or hero uploads once both are
-/// set; the message says when one is still missing.
+/// set; the message says when one is still missing. `in_progress` and
+/// `sync_on` pick the release toast the way the picker does.
 pub fn save_edit(
     data_dir: &Path,
     game: &Game,
     form: &crate::model::EditForm,
+    in_progress: bool,
+    sync_on: bool,
 ) -> Result<Saved, String> {
     let mut edit = form.diff(game);
     if let Some(typed) = edit.map_name.take() {
@@ -164,27 +167,63 @@ pub fn save_edit(
     let map_changed = edit.map_name.is_some();
     let hero_fixed = edit.hero.is_some();
     let role_changed = edit.role.is_some();
+    let map_after = edit.map_name.clone();
+    let hero_after = edit.hero.clone();
     edit_match(data_dir, &game.session_id, edit)?;
+    let mut after = game.clone();
+    if let Some(map) = map_after {
+        after.map_name = map;
+    }
+    if let Some(hero) = hero_after {
+        after.hero = hero;
+    }
+    let release = was_held.then(|| release_toast(&after, in_progress, sync_on));
     Ok(saved(
         held,
-        was_held,
         stats_changed,
         map_changed,
         hero_fixed,
         role_changed,
+        release,
     ))
 }
 
-/// What a queued Edit says, from whether the game is still held, was held,
-/// and which kinds of field changed. A role-only change reads "Role
-/// corrected" and offers no training report, as there is no role category.
+/// [`save_edit`] for the open Edit form: the toast follows whether this
+/// game is still being played and whether a website is linked, read as
+/// the panel reads it ([`crate::games_panel::sync_on`]), so the toast and
+/// the picker's line never disagree.
+pub fn save_edit_for(
+    app: &crate::app::TrackerApp,
+    game: &Game,
+    form: &crate::model::EditForm,
+) -> Result<Saved, String> {
+    save_edit(
+        &app.data_dir,
+        game,
+        form,
+        crate::model::game_card_in_progress(
+            &game.session_id,
+            game.outcome,
+            app.live_game_session.as_deref(),
+        ),
+        crate::games_panel::sync_on(app),
+    )
+}
+
+/// What a queued Edit says, from whether the game is still held, which
+/// kinds of field changed, and the release line when the save lifted a
+/// hold (`None` when the game was not held). A role-only
+/// change reads "Role corrected" and offers no training report, as there
+/// is no role category. A release takes its line from [`upload`], as the
+/// picker does: a live game uploads once it ends, and with no website
+/// linked it stays on this computer.
 fn saved(
     held: bool,
-    was_held: bool,
     stats_changed: bool,
     map_changed: bool,
     hero_fixed: bool,
     role_changed: bool,
+    release: Option<&'static str>,
 ) -> Saved {
     let hero_changed = hero_fixed || role_changed;
     let role_only = !hero_fixed && role_changed;
@@ -207,8 +246,8 @@ fn saved(
         "Saved. A map or hero is still missing, so this game stays on this computer."
     } else if stats_changed {
         "Stats corrected"
-    } else if was_held {
-        RELEASED
+    } else if let Some(line) = release {
+        line
     } else {
         match (map_changed, hero_changed, role_only) {
             (true, true, false) => "Map and hero corrected",
@@ -241,6 +280,27 @@ pub(crate) fn show_saved(app: &mut crate::app::TrackerApp, sid: &str, saved: &Sa
 
 /// A save that set the missing map or hero and changed no stat.
 pub const RELEASED: &str = "Saved. Nothing is missing now.";
+
+/// [`RELEASED`] on a game with no result yet: it still does not upload,
+/// in the picker's words ("it uploads once you set the result").
+pub const RELEASED_NO_RESULT: &str = "Saved. It uploads once you set the result.";
+
+/// [`RELEASED`] on a game still being played.
+pub const RELEASED_LIVE: &str = "Saved. It uploads once it ends.";
+
+/// [`RELEASED`] with no website linked: the picker says so too.
+pub const RELEASED_SYNC_OFF: &str = "Saved. It stays on this computer: no website is linked.";
+
+/// The release toast for the game after the save, from [`upload`].
+fn release_toast(after: &Game, in_progress: bool, sync_on: bool) -> &'static str {
+    use crate::games_detail::{Upload, upload};
+    match upload(after, in_progress, sync_on) {
+        Upload::InProgress => RELEASED_LIVE,
+        Upload::SyncOff => RELEASED_SYNC_OFF,
+        Upload::Undecided => RELEASED_NO_RESULT,
+        Upload::Held(_) | Upload::Waiting | Upload::Uploaded | Upload::Rejected(_) => RELEASED,
+    }
+}
 
 /// The stored name of the hero a typed name means. Case, punctuation and
 /// accents fold the way the reader's keys do
@@ -316,6 +376,28 @@ mod tests {
     use crate::model::{EditForm, Game, GameOcr, Outcome, Role};
     use chrono::Utc;
 
+    /// A finished game with a website linked: the existing cases.
+    fn save(dir: &Path, game: &Game, form: &EditForm) -> Result<Saved, String> {
+        save_edit(dir, game, form, false, true)
+    }
+
+    fn toast_saved(
+        held: bool,
+        stats_changed: bool,
+        map_changed: bool,
+        hero_fixed: bool,
+        role_changed: bool,
+    ) -> Saved {
+        saved(
+            held,
+            stats_changed,
+            map_changed,
+            hero_fixed,
+            role_changed,
+            None,
+        )
+    }
+
     fn tmp() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "sst-ui-cmd-{}",
@@ -353,6 +435,7 @@ mod tests {
             bans_picks: None,
             bans_picks_status: None,
             queue_title: None,
+            match_times: None,
         }
     }
 
@@ -380,7 +463,7 @@ mod tests {
         form.map_name = "kings row".into();
         // No stat changed, so no "Stats corrected", and the report is for
         // the map.
-        let saved = save_edit(&dir, &g, &form).unwrap();
+        let saved = save(&dir, &g, &form).unwrap();
         assert_eq!(saved.toast, RELEASED);
         assert_eq!(saved.category, Some(GameCategory::WrongMap));
         let edit = queued_edit(&dir);
@@ -388,6 +471,118 @@ mod tests {
         let mut after = g.clone();
         after.map_name = edit.map_name.unwrap();
         assert!(!after.needs_review());
+    }
+
+    /// Setting the missing map or hero on an ended game with no result
+    /// does not say nothing is missing: the game still waits for its
+    /// result, as the picker says.
+    #[test]
+    fn a_release_with_no_result_says_the_result_is_still_needed() {
+        let sets: [&dyn Fn(&mut EditForm); 2] = [&|f| f.map_name = "Ilios".into(), &|f| {
+            f.hero = "Mercy".into()
+        }];
+        for set in sets {
+            let dir = tmp();
+            let mut g = sample_game();
+            g.outcome = Outcome::Unknown;
+            g.map_name.clear();
+            g.hero.clear();
+            let mut form = EditForm::from_game(&g);
+            form.map_name = "Ilios".into();
+            form.hero = "Mercy".into();
+            let saved = save(&dir, &g, &form).unwrap();
+            assert_eq!(saved.toast, RELEASED_NO_RESULT);
+            assert_eq!(saved.toast, "Saved. It uploads once you set the result.");
+            // One field only: still held.
+            let mut form = EditForm::from_game(&g);
+            set(&mut form);
+            let saved = save(&tmp(), &g, &form).unwrap();
+            assert!(saved.toast.contains("stays on this computer"));
+        }
+        let dir = tmp();
+        let mut g = held_game();
+        g.outcome = Outcome::Unknown;
+        let mut form = EditForm::from_game(&g);
+        form.map_name = "Ilios".into();
+        assert_eq!(save(&dir, &g, &form).unwrap().toast, RELEASED_NO_RESULT);
+        g.outcome = Outcome::Loss;
+        assert_eq!(save(&tmp(), &g, &form).unwrap().toast, RELEASED);
+    }
+
+    /// Releasing a held live game, or one with sync off, uses the picker's
+    /// upload line, not the no-result one.
+    #[test]
+    fn a_release_on_a_live_or_sync_off_game_does_not_promise_a_result_upload() {
+        let mut g = held_game();
+        g.outcome = Outcome::Unknown;
+        let mut form = EditForm::from_game(&g);
+        form.map_name = "Ilios".into();
+        assert_eq!(
+            save_edit(&tmp(), &g, &form, true, true).unwrap().toast,
+            RELEASED_LIVE
+        );
+        assert_eq!(
+            save_edit(&tmp(), &g, &form, true, true).unwrap().toast,
+            "Saved. It uploads once it ends."
+        );
+        assert_eq!(
+            save_edit(&tmp(), &g, &form, false, false).unwrap().toast,
+            RELEASED_SYNC_OFF
+        );
+        assert_eq!(
+            save_edit(&tmp(), &g, &form, true, false).unwrap().toast,
+            RELEASED_SYNC_OFF
+        );
+        g.outcome = Outcome::Win;
+        assert_eq!(
+            save_edit(&tmp(), &g, &form, false, false).unwrap().toast,
+            RELEASED_SYNC_OFF
+        );
+    }
+
+    /// Under `--fixture games` the panel reads as with a website linked, so
+    /// releasing the held game from the Edit form toasts what the picker
+    /// line says, never "no website is linked". The app's SaveEdit and the
+    /// panel read one value ([`crate::games_panel::sync_on`]).
+    #[test]
+    fn an_edit_release_under_the_games_fixture_matches_the_picker() {
+        use crate::app::Message;
+        use crate::fixtures_games::HELD;
+        use crate::games_picker::{Field, release_line};
+        let dir = tempfile::tempdir().unwrap();
+        let mut cli = crate::fixtures::test_cli(dir.path());
+        cli.fixture = Some(crate::cli::FixtureKind::Games);
+        let mut app = crate::app::TrackerApp::new(cli).0;
+        assert!(!app.sync_on(), "the fixture links no website");
+        assert!(crate::games_panel::sync_on(&app));
+        let g = app
+            .games
+            .iter()
+            .find(|g| g.session_id == HELD)
+            .unwrap()
+            .clone();
+        // The held game misses both its map and its hero, so the picker
+        // line reaches the sync check only on the last one: the hero, once
+        // the map is set.
+        let mut map_set = g.clone();
+        map_set.map_name = "Ilios".into();
+        let picker = release_line(
+            &map_set,
+            Field::Hero,
+            Some("Ana"),
+            false,
+            crate::games_panel::sync_on(&app),
+        );
+        assert!(picker.starts_with("Saving releases this game"), "{picker}");
+        assert!(!picker.contains("no website is linked"), "{picker}");
+        app.expanded = Some(HELD.into());
+        let _ = app.update(Message::ToggleEdit);
+        assert!(app.editing);
+        app.edit.map_name = "Ilios".into();
+        app.edit.hero = "Ana".into();
+        let _ = app.update(Message::SaveEdit);
+        assert_eq!(app.toast.as_deref(), Some(RELEASED));
+        assert_ne!(app.toast.as_deref(), Some(RELEASED_SYNC_OFF));
     }
 
     /// Releasing a hold with a stat fixed too still says the stats were
@@ -399,7 +594,7 @@ mod tests {
         let mut form = EditForm::from_game(&g);
         form.map_name = "Ilios".into();
         form.elims = "15".into();
-        let saved = save_edit(&dir, &g, &form).unwrap();
+        let saved = save(&dir, &g, &form).unwrap();
         assert_eq!(saved.toast, "Stats corrected");
         assert_eq!(saved.category, Some(GameCategory::WrongStats));
     }
@@ -414,7 +609,7 @@ mod tests {
         assert!(g.needs_review());
         let mut form = EditForm::from_game(&g);
         form.hero = "Mercy".into();
-        let saved = save_edit(&dir, &g, &form).unwrap();
+        let saved = save(&dir, &g, &form).unwrap();
         assert_eq!(saved.toast, RELEASED);
         assert_eq!(saved.category, Some(GameCategory::WrongHero));
     }
@@ -429,7 +624,7 @@ mod tests {
         let save = |set: &dyn Fn(&mut EditForm)| {
             let mut form = EditForm::from_game(&g);
             set(&mut form);
-            save_edit(&tmp(), &g, &form).unwrap()
+            save(&tmp(), &g, &form).unwrap()
         };
         let map = save(&|f| f.map_name = "Havana".into());
         assert_eq!(map.toast, "Map corrected");
@@ -466,7 +661,7 @@ mod tests {
         let mut form = EditForm::from_game(&g);
         form.hero = "Reinhardt".into();
         form.role = "Tank".into();
-        let saved = save_edit(&dir, &g, &form).unwrap();
+        let saved = save(&dir, &g, &form).unwrap();
         assert_eq!(saved.toast, "Hero corrected");
         assert_eq!(saved.category, Some(GameCategory::WrongHero));
         let edit = queued_edit(&dir);
@@ -483,7 +678,7 @@ mod tests {
         let mut form = EditForm::from_game(&g);
         form.hero = "ana".into();
         form.role = "Tank".into();
-        let saved = save_edit(&dir, &g, &form).unwrap();
+        let saved = save(&dir, &g, &form).unwrap();
         assert_eq!(saved.toast, "Role corrected");
         assert_eq!(saved.category, None);
         let edit = queued_edit(&dir);
@@ -514,7 +709,7 @@ mod tests {
         let g = held_game();
         let mut form = EditForm::from_game(&g);
         form.role = "Tank".into();
-        let saved = save_edit(&dir, &g, &form).unwrap();
+        let saved = save(&dir, &g, &form).unwrap();
         assert!(
             saved.toast.contains("stays on this computer"),
             "{}",
@@ -530,7 +725,7 @@ mod tests {
         let g = held_game();
         let mut form = EditForm::from_game(&g);
         form.map_name = "Not A Real Place".into();
-        let err = save_edit(&dir, &g, &form).unwrap_err();
+        let err = save(&dir, &g, &form).unwrap_err();
         assert_eq!(
             err,
             "Map not found: Not A Real Place. Type a map name like King's Row"
@@ -544,11 +739,11 @@ mod tests {
         let g = sample_game();
         let mut form = EditForm::from_game(&g);
         form.hero = "kiriko".into();
-        save_edit(&dir, &g, &form).unwrap();
+        save(&dir, &g, &form).unwrap();
         assert_eq!(queued_edit(&dir).hero.as_deref(), Some("Kiriko"));
         form.hero = "Nobody".into();
         assert!(
-            save_edit(&dir, &g, &form)
+            save(&dir, &g, &form)
                 .unwrap_err()
                 .starts_with("Hero not found")
         );
@@ -596,13 +791,11 @@ mod tests {
     /// edit, "No changes to save", which offers none either.)
     #[test]
     fn an_unchanged_save_offers_no_report() {
-        let unchanged = saved(false, false, false, false, false, false);
+        let unchanged = toast_saved(false, false, false, false, false);
         assert_eq!(unchanged.toast, "Saved");
         assert_eq!(unchanged.category, None);
         assert!(!offers_report(unchanged));
-        assert!(offers_report(saved(
-            false, false, false, true, false, false
-        )));
+        assert!(offers_report(toast_saved(false, false, true, false, false)));
         let app_save = |set: &dyn Fn(&mut EditForm)| {
             let (_dir, mut app) = crate::fixtures::test_app();
             let g = sample_game();
@@ -628,11 +821,11 @@ mod tests {
     #[test]
     fn an_unchanged_save_on_a_held_game_offers_no_report() {
         let held = "Saved. A map or hero is still missing, so this game stays on this computer.";
-        let unchanged = saved(true, true, false, false, false, false);
+        let unchanged = toast_saved(true, false, false, false, false);
         assert_eq!(unchanged.toast, held);
         assert_eq!(unchanged.category, None);
         assert!(!offers_report(unchanged));
-        let fixed = saved(true, true, true, false, false, false);
+        let fixed = toast_saved(true, true, false, false, false);
         assert_eq!(fixed.category, Some(GameCategory::WrongStats));
         assert!(offers_report(fixed));
     }
@@ -692,7 +885,7 @@ mod tests {
         let g = held_game();
         let mut form = EditForm::from_game(&g);
         form.elims = "20".into();
-        let msg = save_edit(&dir, &g, &form).unwrap().toast;
+        let msg = save(&dir, &g, &form).unwrap().toast;
         assert!(msg.contains("stays on this computer"), "{msg}");
         assert_eq!(queued_edit(&dir).elims, Some(20));
     }
@@ -790,7 +983,7 @@ mod tests {
         let dir = tmp();
         let g = sample_game();
         let form = EditForm::from_game(&g);
-        let err = save_edit(&dir, &g, &form).unwrap_err();
+        let err = save(&dir, &g, &form).unwrap_err();
         assert!(err.contains("No changes"));
         assert!(queued(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
