@@ -1,3 +1,6 @@
+// Rust 1.100 flags Routable derive output (Infallible segment errors) as unreachable; an enum-level allow misses derive output.
+#![allow(unreachable_code)]
+
 use dioxus::prelude::*;
 
 use crate::head::HeadLayout;

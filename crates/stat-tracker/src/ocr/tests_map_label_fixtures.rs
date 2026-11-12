@@ -66,10 +66,10 @@ pub(crate) fn draw_label(text: &str, ink: u8) -> DynamicImage {
                 }
                 let dest = img.get_pixel_mut(x as u32, y as u32);
                 let cov = cov.clamp(0.0, 1.0);
-                for channel in 0..3 {
-                    let from = f32::from(dest.0[channel]);
+                for channel in &mut dest.0 {
+                    let from = f32::from(*channel);
                     let to = f32::from(ink);
-                    dest.0[channel] = (from + (to - from) * cov).round() as u8;
+                    *channel = (from + (to - from) * cov).round() as u8;
                 }
             });
         }
